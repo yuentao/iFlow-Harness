@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+webview/dist/
+*.vsix
+
+# VS Code extension test artifacts
+.vscode-test/
+
+# Test fixtures (generated recordings)
+test/fixtures/*.ndjson
+test/fixtures/*.json
+
+# Editor & OS files
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs & caches
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+.vite/
+coverage/
+
+# Environment
+.env
+.env.local
+.env.*.local
