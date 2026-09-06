@@ -6,7 +6,7 @@
 import * as vscode from "vscode";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
@@ -36,6 +36,8 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private store: SessionStore;
   private connecting: Promise<void> | null = null;
   private disposed = false;
+  /** cwd the current ACP session was created with (base for relative paths). */
+  private sessionCwd: string | null = null;
   /** Awaiting user answers for `session/request_permission`, keyed by approval id. */
   private readonly pendingApprovals = new Map<
     string,
@@ -221,22 +223,187 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       .getState()
       .blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
     if (!block || block.kind !== "tool" || !block.diff) return;
-    const { path: rawPath, oldText } = block.diff;
+    const { path: rawPath, oldText, newText } = block.diff;
     if (oldText === null) {
       vscode.window.showWarningMessage("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）");
       return;
     }
-    // The CLI may send workspace-relative paths; the Extension Host's own
-    // process.cwd() is NOT the workspace, so resolve relative paths against it.
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
-    const filePath = path.isAbsolute(rawPath) ? rawPath : path.join(workspaceRoot, rawPath);
+    // The CLI may send workspace-relative paths; resolve them against the cwd
+    // the session was created with (the Extension Host's process.cwd() is not
+    // necessarily the workspace).
+    const sessionBase = this.sessionCwd
+      ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+      ?? this.context.extensionUri.fsPath;
+    const toAbsolute = (p: string) => (path.isAbsolute(p) ? p : path.join(sessionBase, p));
+
+    // diff.path is what the tool was invoked with and may NOT be anchored to
+    // the session root (observed: "Home.vue" for src/views/Home.vue). The
+    // tool_call locations usually carry the real path — try all candidates,
+    // preferring the one whose disk content matches the diff's newText.
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    const addCandidate = (p?: string | null) => {
+      if (!p) return;
+      const abs = toAbsolute(p);
+      const key = abs.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(abs);
+      }
+    };
+    addCandidate(rawPath);
+    for (const loc of block.locations ?? []) addCandidate(loc.path);
+
+    let chosen: string | null = null;
+    for (const candidate of candidates) {
+      const decisive = await this.probeRevertCandidate(candidate, newText);
+      if (decisive) {
+        chosen = candidate; // disk content === diff newText: the edited file
+        break;
+      }
+    }
+
+    if (!chosen) {
+      // All direct candidates failed (CLI sent a tool-relative path without a
+      // usable locations entry). Fall back to a bounded basename search under
+      // the session root and workspace folders.
+      const basename = path.basename(rawPath.replace(/\\/g, "/"));
+      const roots = new Set<string>();
+      if (sessionBase) roots.add(sessionBase);
+      for (const folder of vscode.workspace.workspaceFolders ?? []) roots.add(folder.uri.fsPath);
+      const matches: string[] = [];
+      for (const root of roots) {
+        matches.push(...(await this.findFileByBasename(root, basename)));
+        if (matches.length > 1) break; // enough for a picker
+      }
+      // Prefer the match whose content equals the diff's newText.
+      for (const match of matches) {
+        if (newText !== null && (await this.fileContentEquals(match, newText))) {
+          chosen = match;
+          break;
+        }
+      }
+      if (!chosen && matches.length === 1) chosen = matches[0]!;
+      if (!chosen && matches.length > 1) {
+        const pick = await vscode.window.showQuickPick(matches, {
+          placeHolder: `找到多个 "${basename}"，选择要回退的文件`,
+        });
+        if (!pick) return;
+        chosen = pick;
+      }
+      if (!chosen) {
+        // Last resort: let the user point at the file.
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFiles: true,
+          canSelectFolders: false,
+          canSelectMany: false,
+          openLabel: "选择要回退的文件",
+          defaultUri: sessionBase ? vscode.Uri.file(sessionBase) : undefined,
+        });
+        if (!picked?.[0]) return;
+        chosen = picked[0].fsPath;
+      }
+    }
+
+    const fileUri = vscode.Uri.file(chosen);
+    let currentText: string | null = null;
     try {
-      await writeFile(filePath, oldText, "utf8");
+      currentText = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString("utf8");
+    } catch {
+      // File missing on disk — writing oldText will (re)create it; that is the
+      // best-possible revert for a deleted file.
+    }
+    try {
+      const openDoc = vscode.workspace.textDocuments.find(
+        (d) => d.uri.fsPath.toLowerCase() === fileUri.fsPath.toLowerCase(),
+      );
+      if (openDoc?.isDirty) {
+        const pick = await vscode.window.showWarningMessage(
+          "该文件在编辑器中有未保存的修改。回退将从磁盘重新加载并丢弃这些修改。",
+          { modal: true },
+          "丢弃并回退",
+        );
+        if (pick !== "丢弃并回退") return;
+      }
+
+      if (newText !== null && currentText === oldText) {
+        // Already reverted (e.g. the CLI undid it, or a previous retry landed).
+        this.store.toolReverted(toolCallId);
+        void vscode.window.showInformationMessage(`已是原始内容，无需回退: ${chosen}`);
+        return;
+      }
+      if (newText !== null && currentText !== null && currentText !== newText) {
+        const pick = await vscode.window.showWarningMessage(
+          "文件内容与 diff 记录不一致（可能已被继续修改）。仍按 diff 原始内容回退？",
+          { modal: true },
+          "仍然回退",
+        );
+        if (pick !== "仍然回退") return;
+      }
+
+      // Write through the VSCode file service so watchers stay consistent
+      // (raw fs.writeFile bypasses them).
+      await vscode.workspace.fs.writeFile(fileUri, Buffer.from(oldText, "utf8"));
+      // Reveal + reload the document so the user immediately sees the revert.
+      const doc = openDoc ?? (await vscode.workspace.openTextDocument(fileUri));
+      await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true });
+      if (doc.isDirty) {
+        // Reload the editor from disk, discarding the stale unsaved buffer.
+        await vscode.commands.executeCommand("workbench.action.files.revert");
+      }
       this.store.toolReverted(toolCallId);
-      void vscode.window.showInformationMessage(`已回退: ${filePath}`);
+      void vscode.window.showInformationMessage(`已回退: ${chosen}`);
     } catch (error) {
       vscode.window.showErrorMessage(`回退失败: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /** True when disk content === diff newText (decisive "this is the edited file"). */
+  private async probeRevertCandidate(candidate: string, newText: string | null): Promise<boolean> {
+    if (newText === null) return false;
+    try {
+      const buf = await vscode.workspace.fs.readFile(vscode.Uri.file(candidate));
+      return Buffer.from(buf).toString("utf8") === newText;
+    } catch {
+      return false;
+    }
+  }
+
+  private async fileContentEquals(file: string, expected: string): Promise<boolean> {
+    try {
+      const buf = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
+      return Buffer.from(buf).toString("utf8") === expected;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Bounded case-insensitive basename search; skips heavy dirs, capped. */
+  private async findFileByBasename(root: string, basename: string, maxDepth = 6): Promise<string[]> {
+    const results: string[] = [];
+    const target = basename.toLowerCase();
+    const skip = new Set(["node_modules", ".git", "dist", "out", "build", "coverage", ".iflow", ".vscode"]);
+    let visited = 0;
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > maxDepth || visited > 20_000 || results.length >= 10) return;
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return; // unreadable / not a dir
+      }
+      for (const entry of entries) {
+        if (visited++ > 20_000 || results.length >= 10) return;
+        const full = path.join(dir, entry.name);
+        if (entry.isFile() && entry.name.toLowerCase() === target) {
+          results.push(full);
+        } else if (entry.isDirectory() && !skip.has(entry.name.toLowerCase())) {
+          await walk(full, depth + 1);
+        }
+      }
+    };
+    await walk(root, 0);
+    return results;
   }
 
   // --- Agent lifecycle ----------------------------------------------------------
@@ -344,6 +511,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private async startNewSession(): Promise<void> {
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    this.sessionCwd = workspaceRoot;
     const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
