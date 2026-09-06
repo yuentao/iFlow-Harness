@@ -154,17 +154,32 @@ function createMockHost(): HostApi {
             },
           });
         }
+        // Answer received → agent keeps working (still streaming) until done.
         broadcast({
           type: "snapshot",
           state: {
             blocks: [...demoBlocks],
-            status: "idle",
+            status: "streaming",
             errorMessage: null,
-            stopReason: "end_turn",
-            pendingApproval: activeApproval,
+            stopReason: null,
             ...demoMeta,
+            pendingApproval: null,
           },
         });
+        window.setTimeout(() => {
+          demoBlocks.push({ kind: "text", text: "工具执行完成（mock host）" });
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: [...demoBlocks],
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              pendingApproval: null,
+            },
+          });
+        }, 600);
         return;
       }
       if (m.type === "revertTool") {
@@ -222,32 +237,7 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "sendPrompt") {
-        demoBlocks.push({ kind: "user", text: m.text });
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "streaming",
-            errorMessage: null,
-            stopReason: null,
-            ...demoMeta,
-            pendingApproval: activeApproval,
-          },
-        });
-        window.setTimeout(() => {
-          demoBlocks.push({ kind: "text", text: `Echo（mock host）: ${m.text}` });
-          broadcast({
-            type: "snapshot",
-            state: {
-              blocks: [...demoBlocks],
-              status: "idle",
-              errorMessage: null,
-              stopReason: "end_turn",
-              ...demoMeta,
-              pendingApproval: activeApproval,
-            },
-          });
-        }, 500);
+        sendPromptFlow(m.text);
       }
     },
   };
