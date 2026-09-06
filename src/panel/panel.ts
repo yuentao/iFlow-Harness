@@ -6,7 +6,7 @@
 import * as vscode from "vscode";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
@@ -35,6 +35,7 @@ import {
   beginReplay,
   endReplay,
   newSessionState,
+  parseTranscriptJsonl,
   setSessions,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
@@ -62,6 +63,8 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private store: SessionStore;
   private connecting: Promise<void> | null = null;
   private disposed = false;
+  /** Diagnostics trail visible in the Output panel (helps locate connect issues). */
+  private readonly log: vscode.LogOutputChannel;
   /** cwd the current ACP session was created with (base for relative paths). */
   private sessionCwd: string | null = null;
   /** Awaiting user answers for `session/request_permission`, keyed by approval id. */
@@ -80,6 +83,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     private readonly context: vscode.ExtensionContext,
     private readonly services: PanelServices = {},
   ) {
+    this.log = vscode.window.createOutputChannel("iFlow Agent", { log: true });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m) });
   }
 
@@ -88,17 +92,25 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     this.cancelAllApprovals("扩展已停用");
     void this.client?.dispose();
     this.client = null;
+    this.log.dispose();
   }
 
   // --- WebviewViewProvider ---------------------------------------------------
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.log.info("webview resolved — pushing initial snapshot");
     view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
     view.webview.html = this.buildHtml(view.webview);
     view.webview.onDidReceiveMessage((msg: WebviewToHost) => void this.handleWebviewMessage(msg));
+    // The webview may finish loading BEFORE this registration exists, losing
+    // its `ready` — push a snapshot now so the panel never stays on the
+    // loading screen, and again when `ready` arrives.
+    this.postSnapshot();
     // Connect eagerly so the panel is usable immediately (errors surface via store).
-    void this.ensureClient().catch(() => {});
+    void this.ensureClient().catch((error) => {
+      this.log.error("initial connect failed", error instanceof Error ? error : String(error));
+    });
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -130,6 +142,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   // --- WebView message routing -------------------------------------------------
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
+    this.log.trace(`webview → host: ${msg.type}`);
     switch (msg.type) {
       case "ready":
         this.store.pushSnapshot();
@@ -640,38 +653,91 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   /**
-   * Restore a persisted session via `session/load`: the agent replays the
-   * transcript through `session/update`, which we render into a fresh state.
+   * Restore a persisted session via `session/load`. Wire behavior (CLI
+   * 0.5.19): load succeeds (sessionId + modes returned) but the CLI does NOT
+   * replay history through `session/update` — the transcript is rebuilt from
+   * the CLI's own session file instead.
    */
   private async restoreSession(sessionId: string): Promise<boolean> {
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     const init = client.getInitializeResult();
     if (init && !init.agentCapabilities.loadSession) {
+      this.log.warn("loadSession capability not declared by CLI");
       void vscode.window.showWarningMessage("当前 iFlow CLI 不支持会话恢复（loadSession 能力未声明）");
       return false;
     }
 
+    this.log.info(`restoring session ${sessionId} …`);
     this.restoring = true;
     this.replayTitle = null;
+    this.sessionCwd = workspaceRoot;
     const fresh = newSessionState(this.store.getState());
     beginReplay(fresh);
     fresh.activeSessionId = sessionId;
     this.store.replaceState(fresh);
     try {
+      // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
+      // carries ONLY {sessionId} — no modes, no _meta. A prior session/new does
+      // return the full meta, so fetch it first (also warms up the CLI).
+      const probe = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+      const probeMeta: NewSessionMeta | undefined = probe._meta;
       const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
-      const meta: NewSessionMeta | undefined = session._meta;
+      const meta: NewSessionMeta | undefined = probeMeta ?? session._meta;
+      const modes = session.modes ?? probe.modes;
       endReplay(this.store.getState());
+
+      // Rebuild the transcript from the CLI's session file (NDJSON).
+      const loadedId = session.sessionId;
+      const restored = await this.loadPersistedTranscript(loadedId);
+      if (restored.blocks.length === 0) {
+        restored.blocks.push({
+          kind: "text",
+          text: "已恢复会话上下文（CLI 未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。",
+        });
+      }
+      this.store.replaceTranscript(restored.blocks);
+
+      // Model list: same logic as a fresh session, otherwise the model
+      // dropdown would vanish after a restore.
+      const models: SessionState["models"] = [...this.store.getState().models];
+      const catalogModels = (meta?.models?.availableModels ?? []).map((m) => ({
+        id: m.id,
+        name: m.name,
+        thinking: m.capabilities?.thinking,
+      }));
+      if (catalogModels.length > 0) models.splice(0, models.length, ...catalogModels);
+      const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
+      if (endpoint) {
+        try {
+          const ids = await queryModelIds(endpoint);
+          if (ids.length > 0) {
+            models.length = 0;
+            for (const id of ids) models.push({ id, name: id });
+          }
+        } catch {
+          // Endpoint unreachable: keep the catalog/current fallback.
+        }
+      }
+      const currentModelId = this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? models[0]?.id ?? null;
+      if (currentModelId && !models.some((m) => m.id === currentModelId)) {
+        models.unshift({ id: currentModelId, name: currentModelId });
+      }
+
       this.store.sessionStarted({
-        sessionId: session.sessionId,
-        modes: session.modes,
+        sessionId: loadedId,
+        modes,
         commands: meta?.availableCommands ?? [],
+        models,
+        currentModelId,
       });
-      await this.recordSession(session.sessionId, this.replayTitle);
+      this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
+      await this.recordSession(loadedId, restored.firstUserText);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       endReplay(this.store.getState());
+      this.log.error(`session restore failed: ${message}`);
       this.store.markError(`会话恢复失败：${message}`);
       await this.forgetSession(sessionId);
       return false;
@@ -681,6 +747,47 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     }
   }
 
+  /**
+   * Read the CLI's persisted transcript for a session id. The CLI stores one
+   * NDJSON file per project dir: `~/.iflow/projects/<cwd-as-slug>/session-<id>.jsonl`.
+   */
+  private async loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }> {
+    const fileBase = sessionId.startsWith("session-") ? sessionId : `session-${sessionId}`;
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+    const base = path.join(home, ".iflow", "projects");
+    const cwdSlug = (this.sessionCwd ?? "").replace(/[^A-Za-z0-9-]/g, "-");
+    const candidates = cwdSlug
+      ? [path.join(base, cwdSlug, `${fileBase}.jsonl`)]
+      : [];
+    for (const file of candidates) {
+      try {
+        const text = await readFile(file, "utf8");
+        this.log.info(`transcript source: ${file}`);
+        return parseTranscriptJsonl(text);
+      } catch {
+        // try the project-dir scan below
+      }
+    }
+    // Fallback: session ids are globally unique — scan every project dir.
+    try {
+      const dirs = await readdir(base);
+      for (const dir of dirs) {
+        const file = path.join(base, dir, `${fileBase}.jsonl`);
+        try {
+          const text = await readFile(file, "utf8");
+          this.log.info(`transcript source (searched): ${file}`);
+          return parseTranscriptJsonl(text);
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      // projects dir missing
+    }
+    this.log.warn(`no persisted transcript found for ${fileBase}`);
+    return { blocks: [], firstUserText: null };
+  }
+
   // --- Agent lifecycle ----------------------------------------------------------
 
   private async ensureClient(): Promise<AcpClient> {
@@ -688,13 +795,26 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (this.connecting) return this.connecting.then(() => this.client!);
 
     this.connecting = (async () => {
-      const entry = this.resolveEntry();
+      let entry: string;
+      try {
+        entry = this.resolveEntry();
+      } catch (error) {
+        // CLI not found: surface it in the panel instead of leaving it on the
+        // loading screen (this used to throw before the try/catch below).
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.error(message);
+        this.store.markError(message);
+        throw error;
+      }
       const node = vscode.workspace.getConfiguration("iflow").get<string>("nodePath") || process.execPath;
       const { command, args } = buildAcpCommand(entry);
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+      this.log.info(`spawning CLI: ${command} ${args.join(" ")} (cwd=${workspaceRoot})`);
 
       const client = new AcpClient(
-        { command: node, args, cwd: workspaceRoot },
+        // Generous control-plane timeout: a CLI with many MCP servers can take
+        // 30-60s+ before its first initialize response.
+        { command: node, args, cwd: workspaceRoot, requestTimeoutMs: 120_000 },
         {
           onSessionUpdate: (n) => this.onSessionUpdate(n),
           onStderr: () => {},
@@ -712,6 +832,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       this.client = client;
       try {
         const init = await client.connect();
+        this.log.info(
+          `initialize ok: authenticated=${init.isAuthenticated ?? false}, loadSession=${init.agentCapabilities.loadSession ?? false}`,
+        );
         // Explicit credentials from a profile switch take priority; otherwise
         // fall back to the persisted active slot.
         const storedCreds = this.pendingHandshakeCredentials ?? (await loadCredentials(this.context.secrets));
@@ -729,9 +852,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
                   modelName: storedCreds.modelName,
                 },
               });
+              this.log.info("authenticate ok (openai-compatible)");
               this.store.setAuth(await this.buildAuthState(true, false));
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
+              this.log.error(`authenticate failed: ${message}`);
               this.store.setAuth(await this.buildAuthState(false, true));
               this.store.markError(`认证失败：${message}`);
               this.store.markConnected();
@@ -755,7 +880,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       } catch (error) {
         this.client = null;
         this.store.setAuth(await this.buildAuthState(false, true));
-        this.store.markError(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.error(`connect failed: ${message}`);
+        this.store.markError(message);
         throw error;
       } finally {
         this.connecting = null;
@@ -876,6 +1003,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       models,
       currentModelId,
     });
+    this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
   }
 

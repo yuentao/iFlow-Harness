@@ -10,7 +10,7 @@ export function App() {
   const send = useChat((s) => s.send);
   const [configOpen, setConfigOpen] = useState(false);
 
-  if (!state) return <div className="loading">连接中…</div>;
+  if (!state) return <div className="loading">连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）</div>;
 
   const showAuthCard = state.auth.needsSetup || configOpen;
 

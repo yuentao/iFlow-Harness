@@ -207,8 +207,10 @@ export function setSessions(state: SessionState, sessions: SessionSummaryUi[]): 
 }
 
 /**
- * Begin history replay after `session/load`: the transcript is cleared and
+ * Begin history restore after `session/load`: the transcript is cleared and
  * incoming updates re-populate it; `endReplay` flips the flag back.
+ * A placeholder block makes the (potentially ~60s) wait visible — CLI startup
+ * plus session/load have both been measured at tens of seconds.
  */
 export function beginReplay(state: SessionState): void {
   state.blocks = [];
@@ -217,6 +219,10 @@ export function beginReplay(state: SessionState): void {
   state.status = "streaming";
   state.errorMessage = null;
   state.stopReason = null;
+  state.blocks.push({
+    kind: "text",
+    text: "⏳ 正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）",
+  });
 }
 
 export function endReplay(state: SessionState): void {
@@ -228,6 +234,78 @@ export function markToolCancelled(state: SessionState): void {
   // A cancelled prompt leaves its last assistant turn without stopReason;
   // no-op for now — visual hint handled via status.
   void state;
+}
+
+// --- transcript restore (M4: CLI does not replay history on session/load) ----
+
+/**
+ * Rebuild UI blocks from the CLI's persisted session file (NDJSON, one entry
+ * per line: `{type:"user"|"assistant", message:{content}, isSidechain}`).
+ * Tool results on user entries are noise; assistant `tool_use` becomes a
+ * completed tool card. Returns the first user text for the switcher label.
+ */
+export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUserText: string | null } {
+  const blocks: Block[] = [];
+  let firstUserText: string | null = null;
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry: {
+      type?: string;
+      isSidechain?: boolean;
+      message?: { content?: unknown };
+    };
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue; // torn write / partial line
+    }
+    if (entry.isSidechain) continue;
+    const content = entry.message?.content;
+
+    if (entry.type === "user") {
+      const texts: string[] = [];
+      if (typeof content === "string") {
+        texts.push(content);
+      } else if (Array.isArray(content)) {
+        for (const block of content as Array<{ type?: string; text?: string }>) {
+          if (block?.type === "text" && typeof block.text === "string") texts.push(block.text);
+          // tool_result entries are dropped: the tool card carries the output.
+        }
+      }
+      const text = texts.join("\n").trim();
+      if (!text) continue;
+      if (firstUserText === null) firstUserText = text;
+      blocks.push({ kind: "user", text });
+      continue;
+    }
+
+    if (entry.type === "assistant" && Array.isArray(content)) {
+      for (const block of content as Array<{
+        type?: string;
+        text?: string;
+        id?: string;
+        name?: string;
+      }>) {
+        if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+          blocks.push({ kind: "text", text: block.text });
+        } else if (block?.type === "tool_use" && typeof block.id === "string") {
+          blocks.push({
+            kind: "tool",
+            toolCallId: block.id,
+            toolName: block.name ?? "",
+            title: block.name ?? "",
+            toolKind: "other",
+            status: "completed",
+            output: "",
+            locations: [],
+            diff: null,
+          });
+        }
+      }
+    }
+  }
+  return { blocks, firstUserText };
 }
 
 // --- approval (session/request_permission) ----------------------------------

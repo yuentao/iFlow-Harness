@@ -323,7 +323,9 @@ describe("session replay (M4)", () => {
     beginUserPrompt(state, "旧内容");
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "旧回答" } }));
     beginReplay(state);
-    expect(state.blocks).toHaveLength(0);
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({ kind: "text" });
+    expect((state.blocks[0] as { text: string }).text).toContain("正在恢复会话历史");
     expect(state.replaying).toBe(true);
     expect(state.status).toBe("streaming");
     expect(state.pendingApproval).toBeNull();

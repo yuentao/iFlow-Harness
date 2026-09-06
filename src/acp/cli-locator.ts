@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 export interface IflowCommand {
@@ -49,10 +49,14 @@ function locateFromWindowsPath(): string | null {
 
 function locateFromUnixPath(): string | null {
   try {
-    const whichOut = execFileSync("which", ["iflow"], { encoding: "utf8" });
-    const found = whichOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0];
-    if (!found || !existsSync(found)) return null;
-    return entryFromUnixShim(found);
+    const whichOut = execFileSync("which", ["-a", "iflow"], { encoding: "utf8" });
+    // The first hit may be a native dispatcher (nvmd) rather than a real shim;
+    // try every PATH match before falling through to other strategies.
+    for (const found of whichOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+      if (!existsSync(found)) continue;
+      const entry = entryFromUnixShim(found);
+      if (entry) return entry;
+    }
   } catch {
     // which unavailable or no match
   }
@@ -61,23 +65,41 @@ function locateFromUnixPath(): string | null {
 
 /**
  * Resolve a Unix `iflow` on PATH to the bundle entry. nvmd/nvm/pnpm style
- * shims are symlinks straight to entry.js; a wrapper script (if any) is
- * scanned for an entry.js reference as a fallback.
+ * shims are symlinks straight to entry.js — but multi-version managers like
+ * nvmd may point at a NATIVE dispatcher binary instead. Reading that as text
+ * and regex-scanning it blocked the extension host for seconds (profiled,
+ * 100% CPU), so only small text scripts are ever scanned.
  */
 function entryFromUnixShim(found: string): string | null {
   try {
     const real = realpathSync(found);
     if (path.basename(real) === "entry.js") return real;
+
+    // Guard: never scan binaries / large files (native dispatchers, etc.).
+    const MAX_SCRIPT_BYTES = 256 * 1024;
+    const stat = statSync(real);
+    if (!stat.isFile() || stat.size > MAX_SCRIPT_BYTES) return null;
+    // NUL byte in the first KB → binary (nvmd-style native dispatcher).
+    const head = Buffer.alloc(1024);
+    const fd = openSync(real, "r");
+    try {
+      readSync(fd, head, 0, 1024, 0);
+    } finally {
+      closeSync(fd);
+    }
+    if (head.includes(0)) return null;
+
     // Wrapper script: look for an entry.js path inside it.
-    const content = readFileSync(real, "utf8");
-    const match = content.match(/([^\s"'`]*entry\.js)/);
+    const text = readFileSync(real, "utf8");
+    const match = text.match(/([^\s"'`]*entry\.js)/);
     if (match?.[1]) {
       const candidate = path.resolve(path.dirname(real), match[1].replace(/^\$dirname\/?/, ""));
       if (existsSync(candidate)) return candidate;
     }
-    // Sibling layout: shim next to node_modules/
+    // Sibling layout: shim next to lib/node_modules (version-manager layout).
     const sibling = path.join(path.dirname(real), "lib", "node_modules", "@iflow-ai", "iflow-cli", "bundle", "entry.js");
     if (existsSync(sibling)) return sibling;
+    return null;
   } catch {
     // unreadable shim
   }

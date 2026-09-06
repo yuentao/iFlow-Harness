@@ -13,6 +13,7 @@ import {
   completePrompt,
   clearPendingApproval,
   markToolReverted,
+  parseTranscriptJsonl,
   setMeta,
   setPendingApproval,
   setSessions,
@@ -76,6 +77,12 @@ export class SessionStore {
   /** Replace the recent-session switcher list (M4). */
   setSessions(sessions: SessionState["sessions"]): void {
     setSessions(this.state, sessions);
+    this.flush();
+  }
+
+  /** Swap in a restored transcript (M4: rebuilt from the CLI session file). */
+  replaceTranscript(blocks: SessionState["blocks"]): void {
+    this.state.blocks = blocks;
     this.flush();
   }
 
