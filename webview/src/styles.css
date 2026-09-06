@@ -321,6 +321,17 @@ body {
   color: var(--vscode-charts-red, #f85149);
 }
 
+.diff-row.hunk {
+  justify-content: center;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+  user-select: none;
+}
+
+.diff-row.hunk .diff-gutter {
+  background: transparent;
+}
+
 /* --- approval card --- */
 
 .approval-card {
