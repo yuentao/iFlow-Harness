@@ -63,6 +63,39 @@ function createMockHost(): HostApi {
   // Mirrors real host semantics: the approval card is consumed once answered;
   // mode/model switches must NOT clear it.
   let activeApproval: SessionState["pendingApproval"] = demoApproval;
+  /**
+   * Reproduces the real wire timeline: sendPrompt → streaming → permission
+   * request arrives mid-flight → user answers → response continues → idle.
+   */
+  function sendPromptFlow(text: string): void {
+    demoBlocks.push({ kind: "user", text });
+    broadcast({
+      type: "snapshot",
+      state: {
+        blocks: [...demoBlocks],
+        status: "streaming",
+        errorMessage: null,
+        stopReason: null,
+        ...demoMeta,
+        pendingApproval: null,
+      },
+    });
+    // Mid-stream permission request (agent blocks waiting for the answer).
+    window.setTimeout(() => {
+      activeApproval = demoApproval;
+      broadcast({
+        type: "snapshot",
+        state: {
+          blocks: [...demoBlocks],
+          status: "streaming",
+          errorMessage: null,
+          stopReason: null,
+          ...demoMeta,
+          pendingApproval: activeApproval,
+        },
+      });
+    }, 400);
+  }
   const demoMeta = {
     sessionId: "mock-session",
     modes: { currentModeId: "smart", availableModes: [
