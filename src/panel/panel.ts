@@ -448,10 +448,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
    * configs). The active profile name drives the `active` flag.
    */
   private async buildProfileList(): Promise<AuthUiState["profiles"]> {
-    const [extProfiles, activeName] = await Promise.all([
-      loadProfiles(this.context.secrets),
-      getActiveProfileName(this.context.secrets),
-    ]);
+    const extProfiles = await loadProfiles(this.context.secrets);
+    const cli = readCliSettings();
+    // No explicit choice yet → highlight the CLI's own active profile, so the
+    // dropdown reflects what the CLI would use on a fresh start.
+    const activeName =
+      (await getActiveProfileName(this.context.secrets)) ?? cli?.currentApiProfile ?? null;
     const list: AuthUiState["profiles"] = [];
     const push = (name: string, source: "extension" | "cli", p: OpenAiCompatCredentials) => {
       list.push({
@@ -466,7 +468,6 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     for (const [name, p] of Object.entries(extProfiles)) {
       push(name, "extension", p);
     }
-    const cli = readCliSettings();
     for (const [name, p] of Object.entries(cli?.apiProfiles ?? {})) {
       // CLI profiles whose name collides with an extension profile are shadowed
       // (the extension one is what authenticate will use).

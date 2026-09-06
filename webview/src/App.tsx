@@ -18,6 +18,20 @@ export function App() {
     <div className="app">
       <div className="topbar">
         <span className={`status-dot ${state.status}`} title={state.status} />
+        {state.auth.profiles.length > 1 && (
+          <select
+            className="profile-select"
+            value={state.auth.profiles.find((p) => p.active)?.name ?? ""}
+            onChange={(e) => send({ type: "activateProfile", name: e.target.value })}
+            title="API 配置（点击切换后重新认证）"
+          >
+            {state.auth.profiles.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
         {state.modes && (
           <select
             className="mode-select"

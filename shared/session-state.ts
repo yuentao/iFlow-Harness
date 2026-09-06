@@ -180,6 +180,9 @@ export function newSessionState(state: SessionState): SessionState {
   // may change the status. Resetting it here would flash the panel back to
   // "connecting" right after a successful connect.
   fresh.status = state.status;
+  // Auth state (incl. the profile list) is connection-scoped too; clearing it
+  // here would make the topbar profile dropdown vanish mid-session.
+  fresh.auth = state.auth;
   fresh.modes = state.modes;
   fresh.commands = state.commands;
   fresh.models = state.models;

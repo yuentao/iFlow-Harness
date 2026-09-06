@@ -59,7 +59,8 @@ export function AuthCard({
         <span className="approval-title">
           {auth.authenticated ? "API 配置" : "连接 iFlow 需要配置 API 凭据"}
         </span>
-        {!editable && (
+        {/* The setup banner is not dismissible while unauthenticated. */}
+        {!auth.needsSetup && (
           <button className="approval-dismiss" title="收起" onClick={onDismiss}>
             ✕
           </button>

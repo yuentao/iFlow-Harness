@@ -131,6 +131,18 @@ describe("host-level transitions", () => {
     expect(fresh.status).toBe("idle");
     expect(fresh.pendingApproval).toBeNull();
   });
+
+  it("newSessionState preserves auth state incl. profile list", () => {
+    const state = initialSessionState();
+    state.auth = {
+      authenticated: true,
+      needsSetup: false,
+      saved: { baseUrl: "https://x", modelName: "m", keyTail: "…1234" },
+      profiles: [{ name: "BUZZ", source: "cli", baseUrl: "https://x", modelName: "m", keyTail: "…1234", active: true }],
+    };
+    const fresh = newSessionState(state);
+    expect(fresh.auth).toEqual(state.auth);
+  });
 });
 
 describe("tool diffs (M2)", () => {

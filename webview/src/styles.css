@@ -65,7 +65,8 @@ body {
 }
 
 .mode-select,
-.model-select {
+.model-select,
+.profile-select {
   background: var(--vscode-dropdown-background);
   color: var(--vscode-dropdown-foreground);
   border: 1px solid var(--vscode-dropdown-border, transparent);
@@ -73,6 +74,10 @@ body {
   font-size: 12px;
   padding: 2px 4px;
   max-width: 150px;
+}
+
+.profile-select {
+  max-width: 130px;
 }
 
 .btn {
