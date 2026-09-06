@@ -4,6 +4,11 @@ import {
   saveCredentials,
   clearCredentials,
   validateCredentials,
+  loadProfiles,
+  saveProfiles,
+  getActiveProfileName,
+  setActiveProfileName,
+  maskKey,
   type SecretStore,
 } from "../src/acp/auth";
 
@@ -60,5 +65,33 @@ describe("validateCredentials", () => {
     expect(validateCredentials({ baseUrl: "", apiKey: "k", modelName: "m" }).ok).toBe(false);
     expect(validateCredentials({ baseUrl: "https://x", apiKey: "", modelName: "m" }).ok).toBe(false);
     expect(validateCredentials({ baseUrl: "https://x", apiKey: "k", modelName: "" }).ok).toBe(false);
+  });
+});
+
+describe("api profiles (multi-config)", () => {
+  it("round-trips profiles and drops malformed entries", async () => {
+    const store = memoryStore();
+    expect(await loadProfiles(store)).toEqual({});
+    await saveProfiles(store, {
+      A: { baseUrl: "https://a.com/v1", apiKey: "sk-a", modelName: "m-a" },
+      B: { baseUrl: "https://b.com/v1", apiKey: "sk-b", modelName: "m-b" },
+      "": { baseUrl: "https://c.com/v1", apiKey: "sk-c", modelName: "m-c" },
+      Broken: { baseUrl: "https://d.com/v1" },
+    });
+    const profiles = await loadProfiles(store);
+    expect(Object.keys(profiles).sort()).toEqual(["A", "B"]);
+    expect(profiles.A).toEqual({ baseUrl: "https://a.com/v1", apiKey: "sk-a", modelName: "m-a" });
+  });
+
+  it("tracks the active profile name", async () => {
+    const store = memoryStore();
+    expect(await getActiveProfileName(store)).toBeNull();
+    await setActiveProfileName(store, "A");
+    expect(await getActiveProfileName(store)).toBe("A");
+  });
+
+  it("masks keys to their last 4 characters", () => {
+    expect(maskKey("sk-12345678")).toBe("…5678");
+    expect(maskKey("abc")).toBe("…");
   });
 });

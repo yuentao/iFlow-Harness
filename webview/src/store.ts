@@ -181,11 +181,20 @@ function createMockHost(): HostApi {
             ? `…${m.apiKey.slice(-4)}`
             : "…"
           : authState.saved?.keyTail ?? "…";
+        const name = m.profileName?.trim() || m.modelName;
         authState = {
           authenticated: true,
           needsSetup: false,
           saved: { baseUrl: m.baseUrl, modelName: m.modelName, keyTail },
+          profiles: [
+            { name, source: "extension", baseUrl: m.baseUrl, modelName: m.modelName, keyTail, active: true },
+            ...authState.profiles
+              .filter((p) => p.name !== name)
+              .map((p) => ({ ...p, active: false })),
+          ],
         };
+        // The new profile's model becomes the session's current model.
+        demoMeta.currentModelId = m.modelName;
         broadcast({
           type: "snapshot",
           state: {
@@ -201,7 +210,54 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "clearAuth") {
-        authState = { authenticated: false, needsSetup: true, saved: null };
+        authState = {
+          authenticated: false,
+          needsSetup: true,
+          saved: null,
+          profiles: authState.profiles.map((p) => ({ ...p, active: false })),
+        };
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "activateProfile") {
+        authState = {
+          ...authState,
+          authenticated: true,
+          needsSetup: false,
+          profiles: authState.profiles.map((p) => ({ ...p, active: p.name === m.name })),
+        };
+        demoMeta.currentModelId =
+          authState.profiles.find((p) => p.active)?.modelName ?? demoMeta.currentModelId;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "deleteProfile") {
+        authState = {
+          ...authState,
+          profiles: authState.profiles.filter((p) => p.name !== m.name),
+        };
         broadcast({
           type: "snapshot",
           state: {
