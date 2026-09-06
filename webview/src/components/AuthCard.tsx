@@ -21,10 +21,11 @@ export function AuthCard({
   onDismiss: () => void;
 }) {
   const send = useChat((s) => s.send);
+  const activeProfile = auth.profiles.find((p) => p.active && p.source === "extension");
   const [baseUrl, setBaseUrl] = useState(auth.saved?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
   const [modelName, setModelName] = useState(auth.saved?.modelName ?? "");
-  const [profileName, setProfileName] = useState("");
+  const [profileName, setProfileName] = useState(activeProfile?.name ?? "");
   const [formError, setFormError] = useState<string | null>(null);
 
   const hasStored = auth.saved !== null;

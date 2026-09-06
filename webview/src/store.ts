@@ -193,7 +193,12 @@ function createMockHost(): HostApi {
               .map((p) => ({ ...p, active: false })),
           ],
         };
-        // The new profile's model becomes the session's current model.
+        // The new profile's model becomes the session's current model; the
+        // model list refreshes like a live /models query on the new endpoint.
+        demoMeta.models = [
+          { id: m.modelName, name: m.modelName },
+          ...demoMeta.models.filter((x) => x.id !== m.modelName),
+        ];
         demoMeta.currentModelId = m.modelName;
         broadcast({
           type: "snapshot",
@@ -231,14 +236,21 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "activateProfile") {
+        const activated = authState.profiles.find((p) => p.name === m.name);
         authState = {
           ...authState,
           authenticated: true,
           needsSetup: false,
           profiles: authState.profiles.map((p) => ({ ...p, active: p.name === m.name })),
         };
-        demoMeta.currentModelId =
-          authState.profiles.find((p) => p.active)?.modelName ?? demoMeta.currentModelId;
+        if (activated) {
+          // Switching profiles re-queries /models on the new endpoint.
+          demoMeta.models = [
+            { id: activated.modelName, name: activated.modelName },
+            ...demoMeta.models.filter((x) => x.id !== activated.modelName),
+          ];
+          demoMeta.currentModelId = activated.modelName;
+        }
         broadcast({
           type: "snapshot",
           state: {
