@@ -5,6 +5,10 @@ import {
   completePrompt,
   newSessionState,
   extractTextOutput,
+  extractDiff,
+  setPendingApproval,
+  clearPendingApproval,
+  markToolReverted,
 } from "../shared/session-state";
 import { initialSessionState, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
@@ -118,6 +122,134 @@ describe("host-level transitions", () => {
     expect(fresh.models).toEqual([{ id: "m1", name: "M1" }]);
     expect(fresh.currentModelId).toBe("m1");
     expect(fresh.commands).toEqual([{ name: "init" }]);
+  });
+
+  it("newSessionState preserves connection status (no connecting flash)", () => {
+    const state = initialSessionState();
+    state.status = "idle"; // connected, then user clicks 新会话
+    const fresh = newSessionState(state);
+    expect(fresh.status).toBe("idle");
+    expect(fresh.pendingApproval).toBeNull();
+  });
+});
+
+describe("tool diffs (M2)", () => {
+  it("attaches a structured diff from tool_call_update content", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "edit_file", kind: "edit", status: "pending" }));
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        content: [
+          { type: "diff", path: "src/a.ts", oldText: "const a = 1;", newText: "const a = 2;" },
+        ],
+      }),
+    );
+    const tool = state.blocks[0]!;
+    expect(tool.kind).toBe("tool");
+    expect(tool.kind === "tool" && tool.diff).toEqual({ path: "src/a.ts", oldText: "const a = 1;", newText: "const a = 2;" });
+  });
+
+  it("keeps the previous diff when a later update carries none", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        toolName: "edit_file",
+        kind: "edit",
+        status: "pending",
+        content: [{ type: "diff", path: "src/a.ts", oldText: "old", newText: "new" }],
+      }),
+    );
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: "done" } }],
+      }),
+    );
+    const tool = state.blocks[0]!;
+    expect(tool.kind === "tool" && tool.diff).toMatchObject({ path: "src/a.ts" });
+  });
+
+  it("extractDiff ignores malformed items and non-arrays", () => {
+    expect(extractDiff(null)).toBeNull();
+    expect(extractDiff([{ type: "content", content: { type: "text", text: "x" } }])).toBeNull();
+    expect(extractDiff([{ type: "diff", oldText: "a", newText: "b" }])).toBeNull();
+    expect(extractDiff([{ type: "diff", path: "p", oldText: null, newText: "new file" }])).toEqual({
+      path: "p",
+      oldText: null,
+      newText: "new file",
+    });
+  });
+});
+
+describe("approval flow (M2)", () => {
+  it("initial state has no pending approval", () => {
+    expect(initialSessionState().pendingApproval).toBeNull();
+  });
+
+  it("set/clear pending approval round-trips", () => {
+    const state = initialSessionState();
+    setPendingApproval(state, {
+      id: "ap-1",
+      toolName: "write_file",
+      title: "Write x",
+      toolKind: "edit",
+      locations: [],
+      options: [{ optionId: "o1", name: "Allow", kind: "allow_once" }],
+    });
+    expect(state.pendingApproval?.id).toBe("ap-1");
+    expect(clearPendingApproval(state, "wrong-id")).toBe(false);
+    expect(state.pendingApproval?.id).toBe("ap-1");
+    expect(clearPendingApproval(state, "ap-1")).toBe(true);
+    expect(state.pendingApproval).toBeNull();
+  });
+
+  it("newSessionState starts with no pending approval", () => {
+    const state = initialSessionState();
+    setPendingApproval(state, {
+      id: "ap-1",
+      toolName: "x",
+      title: null as unknown as string,
+      toolKind: "edit",
+      locations: [],
+      options: [],
+    });
+    expect(newSessionState(state).pendingApproval).toBeNull();
+  });
+});
+
+describe("markToolReverted (M2)", () => {
+  it("marks the matching tool block as reverted", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "edit_file",
+        kind: "edit",
+        status: "completed",
+        content: [{ type: "diff", path: "a.ts", oldText: "old", newText: "new" }],
+      }),
+    );
+    expect(markToolReverted(state, "t1")).toBe(true);
+    const tool = state.blocks[0]!;
+    expect(tool.kind === "tool" && tool.status).toBe("failed");
+    expect(tool.kind === "tool" && tool.output).toContain("已回退");
+  });
+
+  it("returns false for unknown toolCallId", () => {
+    const state = initialSessionState();
+    expect(markToolReverted(state, "nope")).toBe(false);
   });
 });
 

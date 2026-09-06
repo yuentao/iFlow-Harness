@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Block, SessionState, ThoughtBlock, ToolBlock } from "../../../shared/messages";
 import { useChat } from "../store";
 import { Markdown } from "./Markdown";
+import { DiffView } from "./DiffView";
 
 const KIND_ICON: Record<string, string> = {
   read: "👁",
@@ -25,23 +26,48 @@ const STATUS_ICON: Record<string, string> = {
 function ToolLine({ block }: { block: ToolBlock }) {
   const send = useChat((s) => s.send);
   const primary = block.locations[0];
+  const [showDiff, setShowDiff] = useState(true);
+  const hasDiff = block.diff !== null;
   return (
-    <div className={`tool-line status-${block.status}`}>
-      <span className="tool-icon">{STATUS_ICON[block.status] ?? KIND_ICON[block.toolKind] ?? "🔧"}</span>
-      <span className="tool-title" title={block.toolName}>
-        {block.title || block.toolName || block.toolKind}
-      </span>
-      {primary && (
-        <a
-          className="tool-loc"
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            send({ type: "openLocation", path: primary.path, line: primary.line });
-          }}
-        >
-          {primary.path.split(/[\\/]/).pop()}
-        </a>
+    <div className={`tool-block status-${block.status}`}>
+      <div className="tool-line">
+        <span className="tool-icon">{STATUS_ICON[block.status] ?? KIND_ICON[block.toolKind] ?? "🔧"}</span>
+        <span className="tool-title" title={block.toolName}>
+          {block.title || block.toolName || block.toolKind}
+        </span>
+        {primary && (
+          <a
+            className="tool-loc"
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              send({ type: "openLocation", path: primary.path, line: primary.line });
+            }}
+          >
+            {primary.path.split(/[\\/]/).pop()}
+          </a>
+        )}
+        {block.status === "completed" && hasDiff && block.diff!.oldText !== null && (
+          <button
+            className="btn tool-revert"
+            title="将该文件恢复为编辑前内容"
+            onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
+          >
+            ↩ Revert
+          </button>
+        )}
+        {hasDiff && (
+          <button className="tool-diff-toggle" onClick={() => setShowDiff((v) => !v)}>
+            {showDiff ? "▾ diff" : "▸ diff"}
+          </button>
+        )}
+      </div>
+      {hasDiff && showDiff && <DiffView diff={block.diff!} />}
+      {block.output && (
+        <details className="tool-output">
+          <summary>输出</summary>
+          <pre>{block.output}</pre>
+        </details>
       )}
     </div>
   );

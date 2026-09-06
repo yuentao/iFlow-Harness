@@ -14,8 +14,10 @@ import {
   initialSessionState,
   type Block,
   type ModelInfoUi,
+  type PendingApprovalUi,
   type SessionState,
   type ToolBlock,
+  type ToolDiffUi,
 } from "./messages.js";
 
 // --- merging helpers -------------------------------------------------------
@@ -37,7 +39,13 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === patch.toolCallId) {
-      blocks[i] = { ...block, ...patch, output: patch.output || block.output };
+      blocks[i] = {
+        ...block,
+        ...patch,
+        output: patch.output || block.output,
+        // A new update without a diff must not erase the previous diff.
+        diff: patch.diff ?? block.diff,
+      };
       return;
     }
   }
@@ -76,6 +84,7 @@ export function applySessionUpdate(state: SessionState, notification: SessionNot
         status: update.status ?? "pending",
         output: "",
         locations: update.locations ?? [],
+        diff: extractDiff(update.content),
       });
       break;
     case "tool_call_update":
@@ -88,6 +97,7 @@ export function applySessionUpdate(state: SessionState, notification: SessionNot
         status: update.status ?? "pending",
         output: extractTextOutput(update.content),
         locations: update.locations ?? [],
+        diff: extractDiff(update.content),
       });
       break;
     case "plan":
@@ -116,6 +126,21 @@ export function extractTextOutput(content: unknown): string {
     }
   }
   return text;
+}
+
+/** First structured diff block (`{type:"diff", path, oldText, newText}`), if any. */
+export function extractDiff(content: unknown): ToolDiffUi | null {
+  if (!Array.isArray(content)) return null;
+  for (const item of content as Array<{ type?: string; path?: unknown; oldText?: unknown; newText?: unknown }>) {
+    if (item?.type === "diff" && typeof item.path === "string") {
+      return {
+        path: item.path,
+        oldText: typeof item.oldText === "string" ? item.oldText : null,
+        newText: typeof item.newText === "string" ? item.newText : null,
+      };
+    }
+  }
+  return null;
 }
 
 // --- host-level transitions -------------------------------------------------
@@ -151,10 +176,15 @@ export function setMeta(
 
 export function newSessionState(state: SessionState): SessionState {
   const fresh = initialSessionState();
+  // The connection survives a transcript reset — only markConnected/markError
+  // may change the status. Resetting it here would flash the panel back to
+  // "connecting" right after a successful connect.
+  fresh.status = state.status;
   fresh.modes = state.modes;
   fresh.commands = state.commands;
   fresh.models = state.models;
   fresh.currentModelId = state.currentModelId;
+  // Approval requests are session-scoped; a new session has none pending.
   return fresh;
 }
 
@@ -163,5 +193,43 @@ export function markToolCancelled(state: SessionState): void {
   // no-op for now — visual hint handled via status.
   void state;
 }
+
+// --- approval (session/request_permission) ----------------------------------
+
+/** Show an approval card. The WebView answers via `respondApproval`. */
+export function setPendingApproval(state: SessionState, approval: PendingApprovalUi): void {
+  state.pendingApproval = approval;
+}
+
+/** Clear the card once answered (or timed out / cancelled host-side). */
+export function clearPendingApproval(state: SessionState, id: string): boolean {
+  if (state.pendingApproval?.id !== id) return false;
+  state.pendingApproval = null;
+  return true;
+}
+
+/**
+ * Append a resolution note below the approval so the transcript records what
+ * the user chose (the card itself is transient).
+ */
+export function appendApprovalResolution(state: SessionState, toolName: string, resolution: string): void {
+  const label = toolName || "tool";
+  state.blocks.push({ kind: "text", text: `*${label} — ${resolution}*` });
+}
+
+/** Mark a tool's diff as reverted (visual only; the file write happens host-side). */
+export function markToolReverted(state: SessionState, toolCallId: string): boolean {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const block = state.blocks[i]!;
+    if (block.kind === "tool" && block.toolCallId === toolCallId) {
+      block.status = "failed";
+      block.output = block.output ? `${block.output}\n[已回退]` : "[已回退]";
+      return true;
+    }
+  }
+  return false;
+}
+
+export type { ToolDiffUi };
 
 export type { ToolCallStatus };

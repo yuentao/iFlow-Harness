@@ -1,6 +1,7 @@
 import { useChat } from "./store";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
+import { ApprovalCard } from "./components/ApprovalCard";
 
 export function App() {
   const state = useChat((s) => s.state);
@@ -48,6 +49,7 @@ export function App() {
       {state.errorMessage && <div className="error-banner">{state.errorMessage}</div>}
 
       <MessageList />
+      {state.pendingApproval && <ApprovalCard approval={state.pendingApproval} />}
       <Composer />
     </div>
   );

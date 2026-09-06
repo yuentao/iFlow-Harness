@@ -24,6 +24,7 @@ const root = path.resolve(__dirname, "..");
 
 const args = process.argv.slice(2);
 const record = args.includes("--record");
+const probe = args.includes("--probe");
 const promptText = args.find((a, i) => i > 0 && args[i - 1] === "--prompt") ?? "Reply with exactly: OK";
 
 const entry = process.env.IFLOW_CLI_ENTRY ?? locateIflowEntry();
@@ -100,6 +101,50 @@ try {
   console.log(`[harness] session OK: ${session.sessionId}`);
   console.log(`[harness] modes: ${session.modes?.availableModes?.map((m) => m.id).join("/") ?? "?"} (current=${session.modes?.currentModeId})`);
   console.log(`[harness] models=${summary.modelsCount} slashCommands=${summary.commandsCount}`);
+
+  if (probe) {
+    // Wire-behavior probe for methods M0 marked "verify on wire".
+    // No prompt is sent, so no tokens are consumed.
+    console.log("\n[harness] === probe: set_mode ===");
+    for (const modeId of ["smart", "default", "plan", "yolo"]) {
+      try {
+        const r = await client.setMode(session.sessionId, modeId);
+        console.log(`[probe] set_mode(${modeId}) → ${JSON.stringify(r)}`);
+      } catch (error) {
+        console.log(`[probe] set_mode(${modeId}) → ERROR ${JSON.stringify(error)}`);
+      }
+    }
+    console.log("\n[harness] === probe: set_model ===");
+    const currentModel = session._meta?.models?.currentModelId;
+    for (const modelId of [currentModel, "test-probe-nonexistent-model"].filter(Boolean)) {
+      try {
+        const r = await client.setModel(session.sessionId, modelId);
+        console.log(`[probe] set_model(${modelId}) → ${JSON.stringify(r)}`);
+      } catch (error) {
+        console.log(`[probe] set_model(${modelId}) → ERROR ${JSON.stringify(error)}`);
+      }
+    }
+    const firstCatalogModel = session._meta?.models?.availableModels?.[0]?.id;
+    if (firstCatalogModel) {
+      try {
+        const r = await client.setModel(session.sessionId, firstCatalogModel);
+        console.log(`[probe] set_model(${firstCatalogModel}) → ${JSON.stringify(r)}`);
+      } catch (error) {
+        console.log(`[probe] set_model(${firstCatalogModel}) → ERROR ${JSON.stringify(error)}`);
+      }
+    }
+    console.log("\n[harness] === probe: set_think ===");
+    try {
+      const r = await client.setThink(session.sessionId, true, "think");
+      console.log(`[probe] set_think(true) → ${JSON.stringify(r)}`);
+    } catch (error) {
+      console.log(`[probe] set_think(true) → ERROR ${JSON.stringify(error)}`);
+    }
+    summary.finishedAt = new Date().toISOString();
+    console.log("\n[harness] probe complete");
+    await client.dispose();
+    process.exit(0);
+  }
 
   console.log(`\n[harness] prompt: "${promptText}"\n--- agent output ---`);
   const result = await client.prompt({

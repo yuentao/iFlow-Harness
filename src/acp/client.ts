@@ -144,6 +144,11 @@ export class AcpClient {
     return await this.peer!.request(AcpMethods.setModel, { sessionId, modelId });
   }
 
+  /** iFlow extension: toggle thinking mode (verified in bundle, probed on wire). */
+  async setThink(sessionId: string, thinkEnabled: boolean, thinkConfig?: "think" | "megathink" | "ultrathink"): Promise<unknown> {
+    return await this.peer!.request(AcpMethods.setThink, { sessionId, thinkEnabled, ...(thinkConfig ? { thinkConfig } : {}) });
+  }
+
   /** Kill the agent process. Pending requests are rejected. */
   async dispose(): Promise<void> {
     this.stopped = true;

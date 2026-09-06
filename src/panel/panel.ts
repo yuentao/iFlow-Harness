@@ -5,15 +5,23 @@
 
 import * as vscode from "vscode";
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFile } from "node:fs";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
-import type { NewSessionMeta, RequestPermissionRequest, RequestPermissionResponse } from "../acp/protocol.js";
-import type { SessionState, WebviewToHost } from "../../shared/messages.js";
+import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
+import type {
+  NewSessionMeta,
+  PermissionOption,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from "../acp/protocol.js";
+import type { PendingApprovalUi, SessionState, WebviewToHost } from "../../shared/messages.js";
 import { newSessionState } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
+/** User answer window for a tool-approval card. */
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 
 interface PanelServices {
   entryOverride?: string | undefined;
@@ -27,6 +35,17 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private store: SessionStore;
   private connecting: Promise<void> | null = null;
   private disposed = false;
+  /** Awaiting user answers for `session/request_permission`, keyed by approval id. */
+  private readonly pendingApprovals = new Map<
+    string,
+    {
+      options: PermissionOption[];
+      toolName: string;
+      resolve: (response: RequestPermissionResponse) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  private approvalSeq = 0;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -37,6 +56,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   dispose(): void {
     this.disposed = true;
+    this.cancelAllApprovals("扩展已停用");
     void this.client?.dispose();
     this.client = null;
   }
@@ -95,11 +115,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         await this.startNewSession();
         break;
       case "setMode":
-        await this.client?.setMode(this.store.getState().sessionId ?? "", msg.modeId);
+        await this.setMode(msg.modeId);
         break;
       case "setModel":
-        await this.client?.setModel(this.store.getState().sessionId ?? "", msg.modelId);
-        this.store.sessionMeta({ currentModelId: msg.modelId });
+        await this.setModel(msg.modelId);
         break;
       case "openLocation": {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.path));
@@ -115,6 +134,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       case "revealOutput":
         void msg;
         break;
+      case "respondApproval":
+        this.handleApprovalResponse(msg.id, msg.optionId);
+        break;
+      case "revertTool":
+        await this.revertToolDiff(msg.toolCallId);
+        break;
     }
   }
 
@@ -124,6 +149,90 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   private postSnapshot(): void {
     this.postToWebview({ type: "snapshot", state: structuredClone(this.store.getState()) satisfies SessionState as unknown });
+  }
+
+  // --- Tool approval flow (session/request_permission) --------------------------
+
+  private async requestPermissionFromUser(req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    const id = `ap-${++this.approvalSeq}`;
+    const toolCall = req.toolCall;
+    const approval: PendingApprovalUi = {
+      id,
+      toolName: toolCall.toolName ?? "",
+      title: toolCall.title ?? "",
+      toolKind: toolCall.kind ?? "other",
+      locations: toolCall.locations ?? [],
+      options: req.options,
+    };
+
+    return await new Promise<RequestPermissionResponse>((resolve) => {
+      const timer = setTimeout(() => {
+        // Safety: an unanswered card must not block the agent forever.
+        this.pendingApprovals.delete(id);
+        this.store.clearApproval(id);
+        this.store.approvalResolutionNote(approval.toolName, "审批超时，已自动拒绝");
+        resolve({ outcome: { outcome: "cancelled" } });
+      }, APPROVAL_TIMEOUT_MS);
+
+      this.pendingApprovals.set(id, {
+        options: req.options,
+        toolName: approval.toolName,
+        resolve,
+        timer,
+      });
+      this.store.showApproval(approval);
+    });
+  }
+
+  private handleApprovalResponse(id: string, optionId: string | null): void {
+    const pending = this.pendingApprovals.get(id);
+    if (!pending) return;
+    this.pendingApprovals.delete(id);
+    clearTimeout(pending.timer);
+    this.store.clearApproval(id);
+
+    if (optionId === null) {
+      // User dismissed the card — treat as cancel (agent decides what that means).
+      this.store.approvalResolutionNote(pending.toolName, "已取消");
+      pending.resolve({ outcome: { outcome: "cancelled" } });
+      return;
+    }
+    const option = pending.options.find((o) => o.optionId === optionId);
+    const isReject = option?.kind.startsWith("reject") ?? false;
+    this.store.approvalResolutionNote(pending.toolName, isReject ? "已拒绝" : `已允许（${option?.name ?? optionId}）`);
+    pending.resolve({ outcome: { outcome: "selected", optionId } });
+  }
+
+  private cancelAllApprovals(reason: string): void {
+    for (const [id, pending] of this.pendingApprovals) {
+      clearTimeout(pending.timer);
+      this.store.clearApproval(id);
+      this.store.approvalResolutionNote(pending.toolName, reason);
+      pending.resolve({ outcome: { outcome: "cancelled" } });
+    }
+    this.pendingApprovals.clear();
+  }
+
+  // --- Diff revert ----------------------------------------------------------------
+
+  private async revertToolDiff(toolCallId: string): Promise<void> {
+    const block = this.store
+      .getState()
+      .blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
+    if (!block || block.kind !== "tool" || !block.diff) return;
+    const { path: filePath, oldText } = block.diff;
+    if (oldText === null) {
+      vscode.window.showWarningMessage("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）");
+      return;
+    }
+    try {
+      await new Promise<void>((resolve, reject) =>
+        writeFile(filePath, oldText, "utf8", (err) => (err ? reject(err) : resolve())),
+      );
+      this.store.toolReverted(toolCallId);
+    } catch (error) {
+      vscode.window.showErrorMessage(`回退失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   // --- Agent lifecycle ----------------------------------------------------------
@@ -146,11 +255,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
           onExit: () => {
             if (!this.disposed) {
               this.client = null;
+              this.cancelAllApprovals("CLI 进程已退出");
               this.store.markError("iFlow CLI 进程已退出，重新打开面板可重试");
             }
           },
-          onRequestPermission: async (req: RequestPermissionRequest) =>
-            this.defaultPermission(req),
+          onRequestPermission: (req: RequestPermissionRequest) =>
+            this.requestPermissionFromUser(req),
         },
       );
       this.client = client;
@@ -186,9 +296,45 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     return entry;
   }
 
-  private async defaultPermission(_req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    // M1: no approval UI yet — reject everything (matches harness safe mode).
-    return { outcome: { outcome: "cancelled" } };
+  // --- Mode / model switching ---------------------------------------------------
+  // Wire behavior (probed, CLI 0.5.19): both return `{success, currentModeId |
+  // currentModelId}` and the agent does NOT emit `current_mode_update`, so the
+  // response must be written back into the store or the dropdown snaps back.
+
+  private async setMode(modeId: string): Promise<void> {
+    const sessionId = this.store.getState().sessionId;
+    try {
+      const resp = (await this.client?.setMode(sessionId ?? "", modeId)) as
+        | { success?: boolean; currentModeId?: string }
+        | undefined;
+      if (resp?.success && resp.currentModeId) {
+        const modes = this.store.getState().modes;
+        if (modes) this.store.sessionMeta({ modes: { ...modes, currentModeId: resp.currentModeId } });
+        return;
+      }
+      vscode.window.showWarningMessage(`切换模式失败：${JSON.stringify(resp ?? "无响应")}`);
+    } catch (error) {
+      vscode.window.showWarningMessage(`切换模式失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async setModel(modelId: string): Promise<void> {
+    const sessionId = this.store.getState().sessionId;
+    try {
+      const resp = (await this.client?.setModel(sessionId ?? "", modelId)) as
+        | { success?: boolean; currentModelId?: string }
+        | undefined;
+      if (resp?.success && resp.currentModelId) {
+        this.store.sessionMeta({ currentModelId: resp.currentModelId });
+        return;
+      }
+      vscode.window.showWarningMessage(`切换模型失败：${JSON.stringify(resp ?? "无响应")}`);
+      // Keep the dropdown consistent with the agent's actual model.
+      this.store.pushSnapshot();
+    } catch (error) {
+      vscode.window.showWarningMessage(`切换模型失败：${error instanceof Error ? error.message : String(error)}`);
+      this.store.pushSnapshot();
+    }
   }
 
   private async startNewSession(): Promise<void> {
@@ -197,17 +343,42 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
+    // A new session invalidates any approvals from the old one.
+    this.cancelAllApprovals("会话已重置");
     store.replaceState(newSessionState(store.getState()));
+    // Model dropdown: query the active endpoint's live `/models` — the CLI's
+    // `_meta` catalog is hardcoded official models and not truthful for
+    // user-supplied (openai-compatible) endpoints. Falls back to the catalog
+    // when the endpoint query fails or yields nothing.
+    const models: SessionState["models"] = (meta?.models?.availableModels ?? []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      thinking: m.capabilities?.thinking,
+    }));
+    const currentModelId = meta?.models?.currentModelId ?? null;
+    const endpoint = readActiveEndpoint();
+    if (endpoint) {
+      try {
+        const ids = await queryModelIds(endpoint);
+        if (ids.length > 0) {
+          models.length = 0;
+          for (const id of ids) models.push({ id, name: id });
+        }
+      } catch {
+        // Endpoint unreachable / bad response: keep the CLI catalog fallback.
+      }
+    }
+    // The CLI's current model may be absent from the list; add it so the
+    // controlled <select> doesn't render blank.
+    if (currentModelId && !models.some((m) => m.id === currentModelId)) {
+      models.unshift({ id: currentModelId, name: currentModelId });
+    }
     store.sessionStarted({
       sessionId: session.sessionId,
       modes: session.modes,
       commands: meta?.availableCommands ?? [],
-      models: (meta?.models?.availableModels ?? []).map((m) => ({
-        id: m.id,
-        name: m.name,
-        thinking: m.capabilities?.thinking,
-      })),
-      currentModelId: meta?.models?.currentModelId ?? null,
+      models,
+      currentModelId,
     });
   }
 

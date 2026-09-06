@@ -28,10 +28,41 @@ function createMockHost(): HostApi {
       status: "completed",
       output: "docs\niflow.js.original",
       locations: [{ path: "J:\\git\\iFlow-chat", line: null }],
+      diff: null,
+    },
+    {
+      kind: "tool",
+      toolCallId: "demo-2",
+      toolName: "edit_file",
+      title: "Edit src/demo.ts",
+      toolKind: "edit",
+      status: "completed",
+      output: "",
+      locations: [{ path: "J:\\git\\iFlow-chat\\src\\demo.ts", line: 3 }],
+      diff: {
+        path: "J:\\git\\iFlow-chat\\src\\demo.ts",
+        oldText: "const greeting = \"hello\";\nconst version = 1;\nexport function greet() {\n  return greeting;\n}\n",
+        newText: "const greeting = \"hello, world\";\nconst version = 2;\nconst scope = \"demo\";\nexport function greet() {\n  return `${greeting} (v${version}, ${scope})`;\n}\n",
+      },
     },
     { kind: "text", text: "这是 **iFlow-chat** 仓库，包含 `docs/` 方案文档与 iFlow CLI 内核文件。\n\n- 需要我深入看某个部分吗？" },
-    { kind: "plan", entries: [{ content: "M1 最小面板", status: "in_progress" }, { content: "M2 工具可视化", status: "pending" }] },
+    { kind: "plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
+  const demoApproval: SessionState["pendingApproval"] = {
+    id: "perm-demo-1",
+    toolName: "write_file",
+    title: "Write config/settings.json",
+    toolKind: "edit",
+    locations: [{ path: "J:\\git\\iFlow-chat\\config\\settings.json", line: null }],
+    options: [
+      { optionId: "allow-once", name: "允许一次", kind: "allow_once" },
+      { optionId: "allow-always", name: "本次会话始终允许", kind: "allow_always" },
+      { optionId: "reject-once", name: "拒绝", kind: "reject_once" },
+    ],
+  };
+  // Mirrors real host semantics: the approval card is consumed once answered;
+  // mode/model switches must NOT clear it.
+  let activeApproval: SessionState["pendingApproval"] = demoApproval;
   const demoMeta = {
     sessionId: "mock-session",
     modes: { currentModeId: "smart", availableModes: [
@@ -42,9 +73,13 @@ function createMockHost(): HostApi {
       { name: "init", description: "分析项目并创建或更新定制的 IFLOW.md 文件" },
       { name: "commit", description: "分析您的更改并创建有意义的提交消息" },
     ],
+    // Mirrors a live GET {baseUrl}/models response (ids only).
     models: [
-      { id: "glm-5.3-flash-free", name: "GLM-5.3 Flash", thinking: true },
-      { id: "deepseek-v3.2-chat", name: "DeepSeek-V3.2" },
+      { id: "glm-5.3-flash-free", name: "glm-5.3-flash-free" },
+      { id: "glm-5", name: "glm-5" },
+      { id: "deepseek-v3.2-chat", name: "deepseek-v3.2-chat" },
+      { id: "kimi-k2.5", name: "kimi-k2.5" },
+      { id: "claude-opus-5", name: "claude-opus-5" },
     ],
     currentModelId: "glm-5.3-flash-free",
   };
@@ -60,6 +95,95 @@ function createMockHost(): HostApi {
             errorMessage: null,
             stopReason: "end_turn",
             ...demoMeta,
+            pendingApproval: demoApproval,
+          },
+        });
+        return;
+      }
+      if (m.type === "respondApproval") {
+        activeApproval = null;
+        const approved = m.optionId !== null && m.optionId.startsWith("allow");
+        demoBlocks.push({ kind: "text", text: `*write_file — ${approved ? "已允许" : m.optionId === null ? "已取消" : "已拒绝"}（mock）*` });
+        if (approved) {
+          demoBlocks.push({
+            kind: "tool",
+            toolCallId: "demo-3",
+            toolName: "write_file",
+            title: "Write config/settings.json",
+            toolKind: "edit",
+            status: "completed",
+            output: "",
+            locations: [{ path: "J:\\git\\iFlow-chat\\config\\settings.json", line: null }],
+            diff: {
+              path: "J:\\git\\iFlow-chat\\config\\settings.json",
+              oldText: "{\n  \"theme\": \"light\"\n}\n",
+              newText: "{\n  \"theme\": \"dark\",\n  \"telemetry\": false\n}\n",
+            },
+          });
+        }
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            pendingApproval: activeApproval,
+            ...demoMeta,
+          },
+        });
+        return;
+      }
+      if (m.type === "revertTool") {
+        for (const block of demoBlocks) {
+          if (block.kind === "tool" && block.toolCallId === m.toolCallId) {
+            block.status = "failed";
+            block.output = "[已回退（mock）]";
+          }
+        }
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            pendingApproval: activeApproval,
+            ...demoMeta,
+          },
+        });
+        return;
+      }
+      if (m.type === "setMode") {
+        // Mirrors real CLI behavior: respond with the new current mode.
+        demoMeta.modes = {
+          ...demoMeta.modes,
+          currentModeId: m.modeId,
+        };
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+          },
+        });
+        return;
+      }
+      if (m.type === "setModel") {
+        demoMeta.currentModelId = m.modelId;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
           },
         });
         return;
@@ -74,6 +198,7 @@ function createMockHost(): HostApi {
             errorMessage: null,
             stopReason: null,
             ...demoMeta,
+            pendingApproval: activeApproval,
           },
         });
         window.setTimeout(() => {
@@ -86,6 +211,7 @@ function createMockHost(): HostApi {
               errorMessage: null,
               stopReason: "end_turn",
               ...demoMeta,
+              pendingApproval: activeApproval,
             },
           });
         }, 500);

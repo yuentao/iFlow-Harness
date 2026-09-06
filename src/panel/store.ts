@@ -5,25 +5,21 @@
 
 import type { SessionNotification, StopReason } from "../acp/protocol.js";
 import type { HostToWebview, SessionState } from "../../shared/messages.js";
+import { initialSessionState } from "../../shared/messages.js";
 import {
+  appendApprovalResolution,
   applySessionUpdate,
   beginUserPrompt,
   completePrompt,
+  clearPendingApproval,
+  markToolReverted,
   setMeta,
+  setPendingApproval,
 } from "../../shared/session-state.js";
+import type { PendingApprovalUi } from "../../shared/messages.js";
 
 export class SessionStore {
-  private state: SessionState = {
-    blocks: [],
-    status: "connecting",
-    errorMessage: null,
-    stopReason: null,
-    sessionId: null,
-    modes: null,
-    commands: [],
-    models: [],
-    currentModelId: null,
-  };
+  private state: SessionState = initialSessionState();
 
   private post: (message: HostToWebview) => void;
   private flushTimer: NodeJS.Timeout | null = null;
@@ -79,6 +75,31 @@ export class SessionStore {
   promptCompleted(stopReason: StopReason): void {
     completePrompt(this.state, stopReason);
     this.flush();
+  }
+
+  /** Surface an approval request to the WebView (immediate flush, no throttle). */
+  showApproval(approval: PendingApprovalUi): void {
+    setPendingApproval(this.state, approval);
+    this.flush();
+  }
+
+  /** Answer whether the named approval card was still pending. */
+  clearApproval(id: string): boolean {
+    const cleared = clearPendingApproval(this.state, id);
+    if (cleared) this.flush();
+    return cleared;
+  }
+
+  approvalResolutionNote(toolName: string, resolution: string): void {
+    appendApprovalResolution(this.state, toolName, resolution);
+    this.flush();
+  }
+
+  /** Visual marker for a reverted tool diff. */
+  toolReverted(toolCallId: string): boolean {
+    const ok = markToolReverted(this.state, toolCallId);
+    if (ok) this.flush();
+    return ok;
   }
 
   private scheduleFlush(): void {

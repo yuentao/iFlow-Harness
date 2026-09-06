@@ -18,6 +18,13 @@ import type {
 // Transcript blocks (rendered in order)
 // ---------------------------------------------------------------------------
 
+/** Structured diff carried by `tool_call_update` content blocks. */
+export interface ToolDiffUi {
+  path: string;
+  oldText: string | null;
+  newText: string | null;
+}
+
 export interface TextBlock {
   kind: "text";
   text: string;
@@ -42,6 +49,8 @@ export interface ToolBlock {
   status: ToolCallStatus;
   output: string;
   locations: ToolLocation[];
+  /** Present when the update carried a structured diff (`type: "diff"`). */
+  diff: ToolDiffUi | null;
 }
 
 export interface PlanBlock {
@@ -69,6 +78,23 @@ export interface ModelInfoUi {
 
 export type AgentStatus = "connecting" | "idle" | "streaming" | "error";
 
+/** One option of a pending `session/request_permission` call, as offered by the agent. */
+export interface PermissionOptionUi {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string;
+}
+
+/** A tool-execution approval the user must answer before the agent continues. */
+export interface PendingApprovalUi {
+  id: string;
+  toolName: string;
+  title: string;
+  toolKind: ToolKind;
+  locations: ToolLocation[];
+  options: PermissionOptionUi[];
+}
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -79,6 +105,8 @@ export interface SessionState {
   commands: SlashCommand[];
   models: ModelInfoUi[];
   currentModelId: string | null;
+  /** Non-null while the host awaits the user's answer for a tool approval. */
+  pendingApproval: PendingApprovalUi | null;
 }
 
 export function initialSessionState(): SessionState {
@@ -92,6 +120,7 @@ export function initialSessionState(): SessionState {
     commands: [],
     models: [],
     currentModelId: null,
+    pendingApproval: null,
   };
 }
 
@@ -116,4 +145,8 @@ export type WebviewToHost =
   | { type: "setModel"; modelId: string }
   | { type: "openLocation"; path: string; line?: number | null }
   | { type: "openExternal"; uri: string }
-  | { type: "revealOutput"; toolCallId: string };
+  | { type: "revealOutput"; toolCallId: string }
+  /** Answer a pending approval; `optionId: null` cancels the request. */
+  | { type: "respondApproval"; id: string; optionId: string | null }
+  /** Revert a completed tool call that carried a structured diff. */
+  | { type: "revertTool"; toolCallId: string };
