@@ -52,6 +52,15 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
 const DEFAULT_SESSION_LABEL = "（无标题会话）";
+/** workspaceState key: extension-owned transcripts (M4) — the CLI's ACP mode
+ * does not persist session files, so the extension keeps its own copies. */
+const TRANSCRIPTS_KEY = "iflow.transcripts";
+
+/** Persisted transcript payload for one session. */
+interface PersistedTranscript {
+  label: string;
+  blocks: SessionState["blocks"];
+}
 
 interface PanelServices {
   entryOverride?: string | undefined;
@@ -744,6 +753,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       });
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.recordSession(loadedId, restored.firstUserText);
+      void this.persistActiveTranscript(); // seed the extension-owned copy
       void vscode.window.showInformationMessage("已恢复会话");
       return true;
     } catch (error) {
@@ -784,11 +794,14 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     return null;
   }
 
-  private hasPersistedTranscript(sessionId: string): boolean {
-    return this.transcriptFilePath(sessionId) !== null;
-  }
-
   private async loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }> {
+    // Source 1: the extension's own persisted copy (ACP mode writes no files).
+    const own = this.readTranscripts()[sessionId];
+    if (own) {
+      this.log.info(`transcript source: extension store (${own.blocks.length} blocks)`);
+      return { blocks: structuredClone(own.blocks), firstUserText: own.label !== DEFAULT_SESSION_LABEL ? own.label : null };
+    }
+    // Source 2: the CLI's interactive-mode jsonl (only exists for terminal sessions).
     const file = this.transcriptFilePath(sessionId);
     if (!file) {
       this.log.warn(`no persisted transcript found for ${sessionId}`);
@@ -964,6 +977,37 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     }
   }
 
+  // --- Extension-owned transcripts (M4) ------------------------------------------
+
+  /**
+   * The CLI's ACP mode does NOT write session files (verified: interactive
+   * mode does, `--experimental-acp` doesn't). For "restart VSCode → get the
+   * conversation back" the extension therefore persists transcripts itself.
+   */
+  private readTranscripts(): Record<string, PersistedTranscript> {
+    return this.context.workspaceState.get<Record<string, PersistedTranscript>>(TRANSCRIPTS_KEY, {});
+  }
+
+  private async writeTranscript(sessionId: string, label: string, blocks: SessionState["blocks"]): Promise<void> {
+    if (!sessionId || blocks.length === 0) return;
+    const all = this.readTranscripts();
+    all[sessionId] = { label, blocks: structuredClone(blocks) };
+    await this.context.workspaceState.update(TRANSCRIPTS_KEY, all);
+  }
+
+  private async clearTranscript(sessionId: string): Promise<void> {
+    const all = this.readTranscripts();
+    if (!all[sessionId]) return;
+    delete all[sessionId];
+    await this.context.workspaceState.update(TRANSCRIPTS_KEY, all);
+  }
+
+  /** Restorable = the extension holds a transcript OR the CLI wrote a file. */
+  private hasPersistedTranscript(sessionId: string): boolean {
+    if (this.readTranscripts()[sessionId]) return true;
+    return this.transcriptFilePath(sessionId) !== null;
+  }
+
   /**
    * Drop persisted sessions the CLI has no transcript for (auto-created but
    * never used). Returns the surviving list (already persisted).
@@ -1059,8 +1103,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       if (!sessionId) throw new Error("会话未就绪");
       this.store.userPrompt(trimmed);
       void this.labelSessionWithPrompt(trimmed);
+      void this.persistActiveTranscript(); // user turn lands even on a crash
       const result = await client.prompt({ sessionId, prompt: [{ type: "text", text: trimmed }] });
       this.store.promptCompleted(result.stopReason);
+      void this.persistActiveTranscript();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/timed out/i.test(message)) {
@@ -1069,6 +1115,15 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         this.store.markError(message);
       }
     }
+  }
+
+  /** Snapshot the active session's transcript into workspaceState (M4). */
+  private async persistActiveTranscript(): Promise<void> {
+    const state = this.store.getState();
+    const id = state.activeSessionId ?? state.sessionId;
+    if (!id) return;
+    const label = state.sessions.find((s) => s.id === id)?.label ?? DEFAULT_SESSION_LABEL;
+    await this.writeTranscript(id, label, state.blocks);
   }
 
   /**
