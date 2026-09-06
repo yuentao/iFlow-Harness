@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
@@ -50,6 +50,8 @@ const SESSIONS_KEY = "iflow.recentSessions";
 const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
+/** Label until the first user prompt names the session. */
+const DEFAULT_SESSION_LABEL = "（无标题会话）";
 
 interface PanelServices {
   entryOverride?: string | undefined;
@@ -637,10 +639,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     const existing = this.readPersistedSessions();
     const prior = existing.find((s) => s.id === id);
     const sessions = [
-      { id, label: label ?? prior?.label ?? "（无标题会话）", updatedAt: Date.now() },
+      { id, label: label ?? prior?.label ?? DEFAULT_SESSION_LABEL, updatedAt: Date.now() },
       ...existing.filter((s) => s.id !== id),
     ];
-    this.store.setSessions(sessions);
+    this.store.setSessions(sessions, id);
     await this.persistSessions(sessions, id);
   }
 
@@ -648,7 +650,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private async forgetSession(id: string): Promise<void> {
     const sessions = this.readPersistedSessions().filter((s) => s.id !== id);
     const activeId = sessions[0]?.id ?? null;
-    this.store.setSessions(sessions);
+    this.store.setSessions(sessions, activeId);
     await this.persistSessions(sessions, activeId);
   }
 
@@ -659,8 +661,17 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
    * the CLI's own session file instead.
    */
   private async restoreSession(sessionId: string): Promise<boolean> {
+    // Fast path: the CLI only persists jsonl transcripts for sessions that
+    // actually had a conversation. A "dead" session (auto-created on panel
+    // open, never used) would burn 60s+ on new+load for nothing.
+    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    if (!this.hasPersistedTranscript(sessionId)) {
+      this.log.warn(`skip restore: no persisted transcript for ${sessionId}`);
+      return false;
+    }
+
     const client = await this.ensureClient();
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    const workspaceRoot = this.sessionCwd;
     const init = client.getInitializeResult();
     if (init && !init.agentCapabilities.loadSession) {
       this.log.warn("loadSession capability not declared by CLI");
@@ -733,6 +744,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       });
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.recordSession(loadedId, restored.firstUserText);
+      void vscode.window.showInformationMessage("已恢复会话");
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -748,44 +760,48 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   /**
-   * Read the CLI's persisted transcript for a session id. The CLI stores one
-   * NDJSON file per project dir: `~/.iflow/projects/<cwd-as-slug>/session-<id>.jsonl`.
+   * Locate the CLI's NDJSON transcript file for a session id. The CLI stores
+   * one file per project dir: `~/.iflow/projects/<cwd-as-slug>/session-<id>.jsonl`.
    */
-  private async loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }> {
+  private transcriptFilePath(sessionId: string): string | null {
     const fileBase = sessionId.startsWith("session-") ? sessionId : `session-${sessionId}`;
     const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
     const base = path.join(home, ".iflow", "projects");
     const cwdSlug = (this.sessionCwd ?? "").replace(/[^A-Za-z0-9-]/g, "-");
-    const candidates = cwdSlug
-      ? [path.join(base, cwdSlug, `${fileBase}.jsonl`)]
-      : [];
-    for (const file of candidates) {
-      try {
-        const text = await readFile(file, "utf8");
-        this.log.info(`transcript source: ${file}`);
-        return parseTranscriptJsonl(text);
-      } catch {
-        // try the project-dir scan below
-      }
+    if (cwdSlug) {
+      const candidate = path.join(base, cwdSlug, `${fileBase}.jsonl`);
+      if (existsSync(candidate)) return candidate;
     }
     // Fallback: session ids are globally unique — scan every project dir.
     try {
-      const dirs = await readdir(base);
-      for (const dir of dirs) {
-        const file = path.join(base, dir, `${fileBase}.jsonl`);
-        try {
-          const text = await readFile(file, "utf8");
-          this.log.info(`transcript source (searched): ${file}`);
-          return parseTranscriptJsonl(text);
-        } catch {
-          continue;
-        }
+      for (const dir of readdirSync(base)) {
+        const candidate = path.join(base, dir, `${fileBase}.jsonl`);
+        if (existsSync(candidate)) return candidate;
       }
     } catch {
       // projects dir missing
     }
-    this.log.warn(`no persisted transcript found for ${fileBase}`);
-    return { blocks: [], firstUserText: null };
+    return null;
+  }
+
+  private hasPersistedTranscript(sessionId: string): boolean {
+    return this.transcriptFilePath(sessionId) !== null;
+  }
+
+  private async loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }> {
+    const file = this.transcriptFilePath(sessionId);
+    if (!file) {
+      this.log.warn(`no persisted transcript found for ${sessionId}`);
+      return { blocks: [], firstUserText: null };
+    }
+    try {
+      const text = await readFile(file, "utf8");
+      this.log.info(`transcript source: ${file}`);
+      return parseTranscriptJsonl(text);
+    } catch (error) {
+      this.log.warn(`transcript read failed: ${error instanceof Error ? error.message : String(error)}`);
+      return { blocks: [], firstUserText: null };
+    }
   }
 
   // --- Agent lifecycle ----------------------------------------------------------
@@ -872,8 +888,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         }
         this.store.markConnected();
         // Surface the persisted session list before the session starts so the
-        // switcher renders as soon as the panel opens.
-        this.store.setSessions(this.readPersistedSessions());
+        // switcher renders as soon as the panel opens. Sessions the CLI never
+        // persisted (created but unused) are pruned: nothing to restore.
+        const restorable = await this.pruneUnrestorableSessions();
+        this.store.setSessions(restorable, restorable[0]?.id ?? null);
         if (!await this.tryRestoreLastSession()) {
           await this.startNewSession();
         }
@@ -947,15 +965,36 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   /**
-   * Try to restore the last active session for this workspace. Returns false
-   * when there is nothing to restore or the restore failed (fresh session).
+   * Drop persisted sessions the CLI has no transcript for (auto-created but
+   * never used). Returns the surviving list (already persisted).
+   */
+  private async pruneUnrestorableSessions(): Promise<SessionSummaryUi[]> {
+    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    const kept = this.readPersistedSessions().filter((s) => this.hasPersistedTranscript(s.id));
+    if (kept.length !== this.readPersistedSessions().length) {
+      this.log.info(`pruned ${this.readPersistedSessions().length - kept.length} unrestorable session(s)`);
+    }
+    const activeId = (await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null)) ?? kept[0]?.id ?? null;
+    await this.persistSessions(kept, kept.some((s) => s.id === activeId) ? activeId : kept[0]?.id ?? null);
+    return kept;
+  }
+
+  /**
+   * Try to restore the last usable session for this workspace. Returns false
+   * when there is nothing restorable (fresh session follows).
    */
   private async tryRestoreLastSession(): Promise<boolean> {
-    const lastId = this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null);
-    if (!lastId) return false;
-    const ok = await this.restoreSession(lastId);
-    if (ok) void vscode.window.showInformationMessage("已恢复上次会话");
-    return ok;
+    const lastId = await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null);
+    if (lastId && this.hasPersistedTranscript(lastId)) {
+      return await this.restoreSession(lastId);
+    }
+    // The recorded active session is dead — fall back to the most recent
+    // restorable one from the switcher list.
+    const fallback = this.readPersistedSessions().find((s) => this.hasPersistedTranscript(s.id));
+    if (fallback) {
+      return await this.restoreSession(fallback.id);
+    }
+    return false;
   }
 
   private async startNewSession(): Promise<void> {
@@ -996,6 +1035,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
       models.unshift({ id: currentModelId, name: currentModelId });
     }
+    // A failed restore leaves an error banner behind — clear it for the fresh
+    // session so the stale message doesn't follow the user around.
+    store.getState().errorMessage = null;
+    if (store.getState().status === "error") store.getState().status = "idle";
     store.sessionStarted({
       sessionId: session.sessionId,
       modes: session.modes,
@@ -1015,6 +1058,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       const sessionId = this.store.getState().sessionId;
       if (!sessionId) throw new Error("会话未就绪");
       this.store.userPrompt(trimmed);
+      void this.labelSessionWithPrompt(trimmed);
       const result = await client.prompt({ sessionId, prompt: [{ type: "text", text: trimmed }] });
       this.store.promptCompleted(result.stopReason);
     } catch (error) {
@@ -1025,5 +1069,21 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         this.store.markError(message);
       }
     }
+  }
+
+  /**
+   * Name the active session after its first user prompt (switcher label).
+   * No-op once the session has a real title.
+   */
+  private async labelSessionWithPrompt(text: string): Promise<void> {
+    const state = this.store.getState();
+    const id = state.activeSessionId;
+    if (!id) return;
+    const target = state.sessions.find((s) => s.id === id);
+    if (!target || target.label !== DEFAULT_SESSION_LABEL) return;
+    const label = text.trim().slice(0, 60) || target.label;
+    const sessions = state.sessions.map((s) => (s.id === id ? { ...s, label } : s));
+    this.store.setSessions(sessions);
+    await this.persistSessions(sessions, id);
   }
 }

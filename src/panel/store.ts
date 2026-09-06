@@ -75,8 +75,9 @@ export class SessionStore {
   }
 
   /** Replace the recent-session switcher list (M4). */
-  setSessions(sessions: SessionState["sessions"]): void {
+  setSessions(sessions: SessionState["sessions"], activeSessionId?: string | null): void {
     setSessions(this.state, sessions);
+    if (activeSessionId !== undefined) this.state.activeSessionId = activeSessionId;
     this.flush();
   }
 
