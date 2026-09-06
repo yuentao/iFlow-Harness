@@ -27,7 +27,7 @@ interface ProfileShape {
   modelName?: string;
 }
 
-interface SettingsShape {
+export interface CliSettingsShape {
   selectedAuthType?: string;
   baseUrl?: string;
   apiKey?: string;
@@ -36,16 +36,20 @@ interface SettingsShape {
   apiProfiles?: Record<string, ProfileShape>;
 }
 
-/** Active openai-compatible endpoint from the CLI settings, or null. */
-export function readActiveEndpoint(settingsPath?: string): ActiveEndpoint | null {
+/** Raw CLI settings.json (apiProfiles are the user's named API configs). */
+export function readCliSettings(settingsPath?: string): CliSettingsShape | null {
   const file = settingsPath ?? path.join(homedir(), ".iflow", "settings.json");
-  let settings: SettingsShape;
   try {
-    settings = JSON.parse(readFileSync(file, "utf8")) as SettingsShape;
+    return JSON.parse(readFileSync(file, "utf8")) as CliSettingsShape;
   } catch {
     return null;
   }
-  if (settings.selectedAuthType !== "openai-compatible") return null;
+}
+
+/** Active openai-compatible endpoint from the CLI settings, or null. */
+export function readActiveEndpoint(settingsPath?: string): ActiveEndpoint | null {
+  const settings = readCliSettings(settingsPath);
+  if (!settings || settings.selectedAuthType !== "openai-compatible") return null;
 
   const active = settings.currentApiProfile
     ? settings.apiProfiles?.[settings.currentApiProfile]

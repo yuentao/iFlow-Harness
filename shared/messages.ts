@@ -107,6 +107,28 @@ export interface SessionState {
   currentModelId: string | null;
   /** Non-null while the host awaits the user's answer for a tool approval. */
   pendingApproval: PendingApprovalUi | null;
+  /** Auth config state (M3): drives the setup banner / form. */
+  auth: AuthUiState;
+}
+
+export interface AuthUiState {
+  /** CLI initialized successfully and reported a usable persisted credential. */
+  authenticated: boolean;
+  /** True once the CLI handshake itself failed (auth form is the remedy). */
+  needsSetup: boolean;
+  /** Masked info of stored credentials (never the raw key). */
+  saved: { baseUrl: string; modelName: string; keyTail: string } | null;
+  /** All known API profiles (extension-owned + read-only CLI ones), masked. */
+  profiles: AuthProfileUi[];
+}
+
+export interface AuthProfileUi {
+  name: string;
+  source: "extension" | "cli";
+  baseUrl: string;
+  modelName: string;
+  keyTail: string;
+  active: boolean;
 }
 
 export function initialSessionState(): SessionState {
@@ -121,6 +143,7 @@ export function initialSessionState(): SessionState {
     models: [],
     currentModelId: null,
     pendingApproval: null,
+    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [] },
   };
 }
 
@@ -149,4 +172,12 @@ export type WebviewToHost =
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
   /** Revert a completed tool call that carried a structured diff. */
-  | { type: "revertTool"; toolCallId: string };
+  | { type: "revertTool"; toolCallId: string }
+  /** M3: store openai-compatible credentials and authenticate a fresh session. */
+  | { type: "saveAuth"; baseUrl: string; apiKey: string | null; modelName: string; profileName?: string | null }
+  /** M3: forget stored credentials (CLI keeps its own). */
+  | { type: "clearAuth" }
+  /** M3: switch the active API profile and re-authenticate. */
+  | { type: "activateProfile"; name: string }
+  /** M3: delete an extension-owned profile. */
+  | { type: "deleteProfile"; name: string };

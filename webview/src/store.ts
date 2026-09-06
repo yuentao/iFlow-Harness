@@ -105,6 +105,7 @@ function createMockHost(): HostApi {
         stopReason: null,
         ...demoMeta,
         pendingApproval: null,
+        auth: authState,
       },
     });
     // Mid-stream permission request (agent blocks waiting for the answer).
@@ -119,6 +120,7 @@ function createMockHost(): HostApi {
           stopReason: null,
           ...demoMeta,
           pendingApproval: activeApproval,
+          auth: authState,
         },
       });
     }, 400);
@@ -143,6 +145,17 @@ function createMockHost(): HostApi {
     ],
     currentModelId: "glm-5.3-flash-free",
   };
+  // M3 demo: start unauthenticated so the setup banner shows; saved state
+  // mirrors what the real host stores (masked, never the raw key).
+  let authState: SessionState["auth"] = {
+    authenticated: false,
+    needsSetup: true,
+    saved: null,
+    profiles: [
+      { name: "BUZZ", source: "cli", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
+      { name: "工作密钥", source: "extension", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
+    ],
+  };
   return {
     postMessage(msg) {
       const m = msg as WebviewToHost;
@@ -155,7 +168,50 @@ function createMockHost(): HostApi {
             errorMessage: null,
             stopReason: "end_turn",
             ...demoMeta,
-            pendingApproval: demoApproval,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "saveAuth") {
+        // P3: empty apiKey means "keep the stored one" — preserve its masked tail.
+        const keyTail = m.apiKey
+          ? m.apiKey.length > 4
+            ? `…${m.apiKey.slice(-4)}`
+            : "…"
+          : authState.saved?.keyTail ?? "…";
+        authState = {
+          authenticated: true,
+          needsSetup: false,
+          saved: { baseUrl: m.baseUrl, modelName: m.modelName, keyTail },
+        };
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "clearAuth") {
+        authState = { authenticated: false, needsSetup: true, saved: null };
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
           },
         });
         return;
@@ -191,6 +247,7 @@ function createMockHost(): HostApi {
             stopReason: null,
             ...demoMeta,
             pendingApproval: null,
+            auth: authState,
           },
         });
         window.setTimeout(() => {
@@ -204,6 +261,7 @@ function createMockHost(): HostApi {
               stopReason: "end_turn",
               ...demoMeta,
               pendingApproval: null,
+              auth: authState,
             },
           });
         }, 600);
@@ -223,8 +281,9 @@ function createMockHost(): HostApi {
             status: "idle",
             errorMessage: null,
             stopReason: "end_turn",
-            pendingApproval: activeApproval,
             ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
           },
         });
         return;
@@ -244,6 +303,7 @@ function createMockHost(): HostApi {
             stopReason: "end_turn",
             ...demoMeta,
             pendingApproval: activeApproval,
+            auth: authState,
           },
         });
         return;
@@ -259,6 +319,7 @@ function createMockHost(): HostApi {
             stopReason: "end_turn",
             ...demoMeta,
             pendingApproval: activeApproval,
+            auth: authState,
           },
         });
         return;

@@ -10,6 +10,20 @@ import { readdir } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
+import {
+  clearCredentials,
+  getActiveProfileName,
+  loadCredentials,
+  loadProfiles,
+  maskKey,
+  saveCredentials,
+  saveProfiles,
+  setActiveProfileName,
+  validateCredentials,
+  type OpenAiCompatCredentials,
+} from "../acp/auth.js";
+import { readCliSettings } from "../acp/models-query.js";
+import type { AuthUiState } from "../../shared/messages.js";
 import type {
   NewSessionMeta,
   PermissionOption,
@@ -142,6 +156,19 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
+        break;
+      case "saveAuth":
+        await this.saveAuthAndReconnect(msg.baseUrl, msg.apiKey, msg.modelName, msg.profileName ?? null);
+        break;
+      case "clearAuth":
+        await clearCredentials(this.context.secrets);
+        this.store.setAuth(await this.buildAuthState(false, true));
+        break;
+      case "activateProfile":
+        await this.activateProfile(msg.name);
+        break;
+      case "deleteProfile":
+        await this.deleteProfile(msg.name);
         break;
     }
   }
@@ -406,6 +433,149 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     return results;
   }
 
+  // --- Auth (M3: openai-compatible credentials in SecretStorage) ----------------
+
+  /** Masked summary for snapshots — never includes the raw API key. */
+  private authMaskCache: AuthUiState["saved"] = null;
+
+  private maskOf(creds: OpenAiCompatCredentials): AuthUiState["saved"] {
+    return { baseUrl: creds.baseUrl, modelName: creds.modelName, keyTail: maskKey(creds.apiKey) };
+  }
+
+  /**
+   * All known API profiles: extension-owned (SecretStorage, editable) merged
+   * with the CLI settings.json ones (read-only source, the user's existing
+   * configs). The active profile name drives the `active` flag.
+   */
+  private async buildProfileList(): Promise<AuthUiState["profiles"]> {
+    const [extProfiles, activeName] = await Promise.all([
+      loadProfiles(this.context.secrets),
+      getActiveProfileName(this.context.secrets),
+    ]);
+    const list: AuthUiState["profiles"] = [];
+    const push = (name: string, source: "extension" | "cli", p: OpenAiCompatCredentials) => {
+      list.push({
+        name,
+        source,
+        baseUrl: p.baseUrl,
+        modelName: p.modelName,
+        keyTail: maskKey(p.apiKey),
+        active: name === activeName,
+      });
+    };
+    for (const [name, p] of Object.entries(extProfiles)) {
+      push(name, "extension", p);
+    }
+    const cli = readCliSettings();
+    for (const [name, p] of Object.entries(cli?.apiProfiles ?? {})) {
+      // CLI profiles whose name collides with an extension profile are shadowed
+      // (the extension one is what authenticate will use).
+      if (!extProfiles[name] && p.baseUrl && p.apiKey && p.modelName) {
+        push(name, "cli", { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName });
+      }
+    }
+    return list;
+  }
+
+  private async buildAuthState(authenticated: boolean, needsSetup: boolean): Promise<AuthUiState> {
+    return {
+      authenticated,
+      needsSetup,
+      saved: this.authMaskCache,
+      profiles: await this.buildProfileList(),
+    };
+  }
+
+  private async saveAuthAndReconnect(
+    baseUrl: string,
+    apiKey: string | null,
+    modelName: string,
+    profileName: string | null,
+  ): Promise<void> {
+    const stored = await loadCredentials(this.context.secrets);
+    const validation = validateCredentials({
+      baseUrl,
+      apiKey: apiKey ?? stored?.apiKey ?? null,
+      modelName,
+    });
+    if (!validation.ok) {
+      this.store.markError(validation.error);
+      return;
+    }
+    const creds = validation.value;
+
+    // Upsert as a named profile. Default name: the model (distinct enough for
+    // most setups; users can rename by re-saving under a custom name).
+    const name = profileName?.trim() || creds.modelName;
+    const profiles = await loadProfiles(this.context.secrets);
+    profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+    await saveProfiles(this.context.secrets, profiles);
+    await setActiveProfileName(this.context.secrets, name);
+    await saveCredentials(this.context.secrets, creds); // active-slot for the next handshake
+    this.authMaskCache = this.maskOf(creds);
+
+    await this.reconnectWithCredentials(creds);
+  }
+
+  /** Switch the active API profile and re-authenticate the session. */
+  private async activateProfile(name: string): Promise<void> {
+    const profiles = await loadProfiles(this.context.secrets);
+    let creds: OpenAiCompatCredentials | null = profiles[name]
+      ? { ...profiles[name] }
+      : this.cliProfileCredentials(name);
+    if (!creds) {
+      vscode.window.showWarningMessage(`未找到 API 配置: ${name}`);
+      return;
+    }
+    await setActiveProfileName(this.context.secrets, name);
+    await saveCredentials(this.context.secrets, creds);
+    this.authMaskCache = this.maskOf(creds);
+    await this.reconnectWithCredentials(creds);
+  }
+
+  /** Read a profile from CLI settings.json (read-only source). */
+  private cliProfileCredentials(name: string): OpenAiCompatCredentials | null {
+    const cli = readCliSettings();
+    const p = cli?.apiProfiles?.[name];
+    if (!p?.baseUrl || !p?.apiKey || !p?.modelName) return null;
+    return { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName };
+  }
+
+  private async deleteProfile(name: string): Promise<void> {
+    const profiles = await loadProfiles(this.context.secrets);
+    if (!profiles[name]) return; // CLI-sourced profiles are read-only
+    delete profiles[name];
+    await saveProfiles(this.context.secrets, profiles);
+    const activeName = await getActiveProfileName(this.context.secrets);
+    if (activeName === name) {
+      await clearCredentials(this.context.secrets);
+      this.authMaskCache = null;
+      this.store.setAuth(await this.buildAuthState(false, true));
+      return; // active profile deleted → user must pick/configure again
+    }
+    this.store.setAuth(await this.buildAuthState(this.store.getState().auth.authenticated, false));
+  }
+
+  /** Tear down the current CLI connection and start fresh with new credentials. */
+  private async reconnectWithCredentials(creds: OpenAiCompatCredentials): Promise<void> {
+    this.cancelAllApprovals("重新认证");
+    await this.client?.dispose();
+    this.client = null;
+    this.store.replaceState(newSessionState(this.store.getState()));
+    // Remember for the next handshake (ensureClient reads these).
+    this.pendingHandshakeCredentials = creds;
+    try {
+      await this.ensureClient();
+      this.store.setAuth(await this.buildAuthState(true, false));
+      void vscode.window.showInformationMessage(`已切换 API 配置: ${await getActiveProfileName(this.context.secrets)}`);
+    } catch {
+      // ensureClient already marked the error in the store; nothing to add.
+    }
+  }
+
+  /** Credentials to push via authenticate on the next handshake, if any. */
+  private pendingHandshakeCredentials: OpenAiCompatCredentials | null = null;
+
   // --- Agent lifecycle ----------------------------------------------------------
 
   private async ensureClient(): Promise<AcpClient> {
@@ -437,13 +607,44 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       this.client = client;
       try {
         const init = await client.connect();
+        // Explicit credentials from a profile switch take priority; otherwise
+        // fall back to the persisted active slot.
+        const storedCreds = this.pendingHandshakeCredentials ?? (await loadCredentials(this.context.secrets));
+        this.pendingHandshakeCredentials = null;
+        this.authMaskCache = storedCreds ? this.maskOf(storedCreds) : null;
         if (!init.isAuthenticated) {
-          this.store.markError("CLI 未认证：请配置 OpenAI Compatible 凭据（见扩展设置）");
+          // M3 flow: push stored openai-compatible credentials to the agent.
+          if (storedCreds) {
+            try {
+              await client.authenticate({
+                methodId: "openai-compatible",
+                methodInfo: {
+                  apiKey: storedCreds.apiKey,
+                  baseUrl: storedCreds.baseUrl,
+                  modelName: storedCreds.modelName,
+                },
+              });
+              this.store.setAuth(await this.buildAuthState(true, false));
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.store.setAuth(await this.buildAuthState(false, true));
+              this.store.markError(`认证失败：${message}`);
+              this.store.markConnected();
+              return; // session cannot start; setup banner is the remedy
+            }
+          } else {
+            this.store.setAuth(await this.buildAuthState(false, true));
+            this.store.markConnected();
+            return; // no credentials yet — setup banner guides the user
+          }
+        } else {
+          this.store.setAuth(await this.buildAuthState(true, false));
         }
         this.store.markConnected();
         await this.startNewSession();
       } catch (error) {
         this.client = null;
+        this.store.setAuth(await this.buildAuthState(false, true));
         this.store.markError(error instanceof Error ? error.message : String(error));
         throw error;
       } finally {
@@ -520,15 +721,16 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     store.replaceState(newSessionState(store.getState()));
     // Model dropdown: query the active endpoint's live `/models` — the CLI's
     // `_meta` catalog is hardcoded official models and not truthful for
-    // user-supplied (openai-compatible) endpoints. Falls back to the catalog
-    // when the endpoint query fails or yields nothing.
+    // user-supplied (openai-compatible) endpoints. The endpoint follows the
+    // extension's active profile (SecretStorage) when present. Falls back to
+    // the catalog when the endpoint query fails or yields nothing.
     const models: SessionState["models"] = (meta?.models?.availableModels ?? []).map((m) => ({
       id: m.id,
       name: m.name,
       thinking: m.capabilities?.thinking,
     }));
     const currentModelId = meta?.models?.currentModelId ?? null;
-    const endpoint = readActiveEndpoint();
+    const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
     if (endpoint) {
       try {
         const ids = await queryModelIds(endpoint);

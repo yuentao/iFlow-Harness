@@ -4,7 +4,7 @@
  */
 
 import type { SessionNotification, StopReason } from "../acp/protocol.js";
-import type { HostToWebview, SessionState } from "../../shared/messages.js";
+import type { AuthUiState, HostToWebview, SessionState } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
@@ -100,6 +100,12 @@ export class SessionStore {
     const ok = markToolReverted(this.state, toolCallId);
     if (ok) this.flush();
     return ok;
+  }
+
+  /** Update the auth setup banner / form state (M3). */
+  setAuth(auth: AuthUiState): void {
+    this.state.auth = auth;
+    this.flush();
   }
 
   private scheduleFlush(): void {

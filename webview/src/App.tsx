@@ -1,13 +1,18 @@
+import { useState } from "react";
 import { useChat } from "./store";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { AuthCard } from "./components/AuthCard";
 
 export function App() {
   const state = useChat((s) => s.state);
   const send = useChat((s) => s.send);
+  const [configOpen, setConfigOpen] = useState(false);
 
   if (!state) return <div className="loading">连接中…</div>;
+
+  const showAuthCard = state.auth.needsSetup || configOpen;
 
   return (
     <div className="app">
@@ -44,11 +49,21 @@ export function App() {
         <button className="btn new-session" title="新会话" onClick={() => send({ type: "newSession" })}>
           ＋
         </button>
+        <button
+          className={`btn auth-gear${state.auth.authenticated ? "" : " attention"}`}
+          title="API 凭据配置"
+          onClick={() => setConfigOpen((v) => !v)}
+        >
+          ⚙
+        </button>
       </div>
 
       {state.errorMessage && <div className="error-banner">{state.errorMessage}</div>}
 
       <MessageList />
+      {showAuthCard && (
+        <AuthCard auth={state.auth} editable={configOpen} onDismiss={() => setConfigOpen(false)} />
+      )}
       {state.pendingApproval && <ApprovalCard approval={state.pendingApproval} />}
       <Composer />
     </div>
