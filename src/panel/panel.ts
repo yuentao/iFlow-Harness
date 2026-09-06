@@ -5,7 +5,8 @@
 
 import * as vscode from "vscode";
 import path from "node:path";
-import { existsSync, readFileSync, writeFile } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
@@ -220,16 +221,19 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       .getState()
       .blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
     if (!block || block.kind !== "tool" || !block.diff) return;
-    const { path: filePath, oldText } = block.diff;
+    const { path: rawPath, oldText } = block.diff;
     if (oldText === null) {
       vscode.window.showWarningMessage("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）");
       return;
     }
+    // The CLI may send workspace-relative paths; the Extension Host's own
+    // process.cwd() is NOT the workspace, so resolve relative paths against it.
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    const filePath = path.isAbsolute(rawPath) ? rawPath : path.join(workspaceRoot, rawPath);
     try {
-      await new Promise<void>((resolve, reject) =>
-        writeFile(filePath, oldText, "utf8", (err) => (err ? reject(err) : resolve())),
-      );
+      await writeFile(filePath, oldText, "utf8");
       this.store.toolReverted(toolCallId);
+      void vscode.window.showInformationMessage(`已回退: ${filePath}`);
     } catch (error) {
       vscode.window.showErrorMessage(`回退失败: ${error instanceof Error ? error.message : String(error)}`);
     }

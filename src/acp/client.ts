@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import path from "node:path";
 import {
   AcpMethods,
   InitializeRequest,
@@ -162,6 +162,11 @@ export class AcpClient {
     await exited;
   }
 
+  /** Resolve agent-supplied paths: relative ones are session-cwd relative. */
+  private resolveAgentPath(rawPath: string): string {
+    return path.isAbsolute(rawPath) ? rawPath : path.join(this.options.cwd, rawPath);
+  }
+
   private registerServerRequests(): void {
     const peer = this.peer!;
 
@@ -178,14 +183,15 @@ export class AcpClient {
 
     peer.onRequest(AcpMethods.readTextFile, async (params) => {
       const request = params as ReadTextFileRequest;
-      const content = await readFile(request.path, "utf8");
+      const content = await readFile(this.resolveAgentPath(request.path), "utf8");
       return { content } satisfies ReadTextFileResponse;
     });
 
     peer.onRequest(AcpMethods.writeTextFile, async (params) => {
       const request = params as WriteTextFileRequest;
-      await mkdir(dirname(request.path), { recursive: true });
-      await writeFile(request.path, request.content, "utf8");
+      const filePath = this.resolveAgentPath(request.path);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, request.content, "utf8");
       return {};
     });
   }
