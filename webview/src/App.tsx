@@ -18,6 +18,23 @@ export function App() {
     <div className="app">
       <div className="topbar">
         <span className={`status-dot ${state.status}`} title={state.status} />
+        {state.sessions.length > 0 && (
+          <select
+            className="session-select"
+            value={state.activeSessionId ?? ""}
+            onChange={(e) => send({ type: "loadSession", sessionId: e.target.value })}
+            title="历史会话（选择后恢复该会话上下文）"
+          >
+            {state.activeSessionId && !state.sessions.some((s) => s.id === state.activeSessionId) && (
+              <option value={state.activeSessionId}>当前会话</option>
+            )}
+            {state.sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        )}
         {state.auth.profiles.length > 1 && (
           <select
             className="profile-select"

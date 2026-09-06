@@ -30,13 +30,25 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, SessionState, WebviewToHost } from "../../shared/messages.js";
-import { newSessionState } from "../../shared/session-state.js";
+import type { PendingApprovalUi, SessionState, SessionSummaryUi, WebviewToHost } from "../../shared/messages.js";
+import {
+  beginReplay,
+  endReplay,
+  newSessionState,
+  setSessions,
+} from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+
+/** workspaceState key: recent sessions for this workspace (M4). */
+const SESSIONS_KEY = "iflow.recentSessions";
+/** workspaceState key: session id to restore on panel open (M4). */
+const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
+/** Cap on the per-workspace recent-session list. */
+const MAX_RECENT_SESSIONS = 20;
 
 interface PanelServices {
   entryOverride?: string | undefined;
@@ -169,6 +181,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         break;
       case "deleteProfile":
         await this.deleteProfile(msg.name);
+        break;
+      case "loadSession":
+        await this.restoreSession(msg.sessionId);
         break;
     }
   }
@@ -577,6 +592,95 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   /** Credentials to push via authenticate on the next handshake, if any. */
   private pendingHandshakeCredentials: OpenAiCompatCredentials | null = null;
 
+  /** Replay-title extraction state for the session currently being loaded. */
+  private replayTitle: string | null = null;
+  /** True while a `session/load` restore is in flight. */
+  private restoring = false;
+
+  private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
+    // During restore, the first user turn names the session in the switcher.
+    if (this.restoring && this.replayTitle === null && n.update.sessionUpdate === "user_message_chunk") {
+      if (n.update.content.type === "text" && n.update.content.text.trim()) {
+        this.replayTitle = n.update.content.text.trim().slice(0, 60);
+      }
+    }
+    this.store.onSessionUpdate(n, { replaying: this.restoring });
+  }
+
+  // --- Session persistence (M4) --------------------------------------------------
+
+  private readPersistedSessions(): SessionSummaryUi[] {
+    return this.context.workspaceState.get<SessionSummaryUi[]>(SESSIONS_KEY, []);
+  }
+
+  private async persistSessions(sessions: SessionSummaryUi[], activeId: string | null): Promise<void> {
+    await this.context.workspaceState.update(SESSIONS_KEY, sessions.slice(0, MAX_RECENT_SESSIONS));
+    await this.context.workspaceState.update(ACTIVE_SESSION_KEY, activeId);
+  }
+
+  /** Upsert a session into the recent list (newest first) and persist it. */
+  private async recordSession(id: string, label: string | null): Promise<void> {
+    if (!id) return;
+    const existing = this.readPersistedSessions();
+    const prior = existing.find((s) => s.id === id);
+    const sessions = [
+      { id, label: label ?? prior?.label ?? "（无标题会话）", updatedAt: Date.now() },
+      ...existing.filter((s) => s.id !== id),
+    ];
+    this.store.setSessions(sessions);
+    await this.persistSessions(sessions, id);
+  }
+
+  /** Forgetter: drop one session from the persisted list (e.g. load failed). */
+  private async forgetSession(id: string): Promise<void> {
+    const sessions = this.readPersistedSessions().filter((s) => s.id !== id);
+    const activeId = sessions[0]?.id ?? null;
+    this.store.setSessions(sessions);
+    await this.persistSessions(sessions, activeId);
+  }
+
+  /**
+   * Restore a persisted session via `session/load`: the agent replays the
+   * transcript through `session/update`, which we render into a fresh state.
+   */
+  private async restoreSession(sessionId: string): Promise<boolean> {
+    const client = await this.ensureClient();
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    const init = client.getInitializeResult();
+    if (init && !init.agentCapabilities.loadSession) {
+      void vscode.window.showWarningMessage("当前 iFlow CLI 不支持会话恢复（loadSession 能力未声明）");
+      return false;
+    }
+
+    this.restoring = true;
+    this.replayTitle = null;
+    const fresh = newSessionState(this.store.getState());
+    beginReplay(fresh);
+    fresh.activeSessionId = sessionId;
+    this.store.replaceState(fresh);
+    try {
+      const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
+      const meta: NewSessionMeta | undefined = session._meta;
+      endReplay(this.store.getState());
+      this.store.sessionStarted({
+        sessionId: session.sessionId,
+        modes: session.modes,
+        commands: meta?.availableCommands ?? [],
+      });
+      await this.recordSession(session.sessionId, this.replayTitle);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      endReplay(this.store.getState());
+      this.store.markError(`会话恢复失败：${message}`);
+      await this.forgetSession(sessionId);
+      return false;
+    } finally {
+      this.restoring = false;
+      this.replayTitle = null;
+    }
+  }
+
   // --- Agent lifecycle ----------------------------------------------------------
 
   private async ensureClient(): Promise<AcpClient> {
@@ -592,7 +696,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       const client = new AcpClient(
         { command: node, args, cwd: workspaceRoot },
         {
-          onSessionUpdate: (n) => this.store.onSessionUpdate(n),
+          onSessionUpdate: (n) => this.onSessionUpdate(n),
           onStderr: () => {},
           onExit: () => {
             if (!this.disposed) {
@@ -642,7 +746,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
           this.store.setAuth(await this.buildAuthState(true, false));
         }
         this.store.markConnected();
-        await this.startNewSession();
+        // Surface the persisted session list before the session starts so the
+        // switcher renders as soon as the panel opens.
+        this.store.setSessions(this.readPersistedSessions());
+        if (!await this.tryRestoreLastSession()) {
+          await this.startNewSession();
+        }
       } catch (error) {
         this.client = null;
         this.store.setAuth(await this.buildAuthState(false, true));
@@ -710,6 +819,18 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     }
   }
 
+  /**
+   * Try to restore the last active session for this workspace. Returns false
+   * when there is nothing to restore or the restore failed (fresh session).
+   */
+  private async tryRestoreLastSession(): Promise<boolean> {
+    const lastId = this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null);
+    if (!lastId) return false;
+    const ok = await this.restoreSession(lastId);
+    if (ok) void vscode.window.showInformationMessage("已恢复上次会话");
+    return ok;
+  }
+
   private async startNewSession(): Promise<void> {
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
@@ -755,6 +876,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       models,
       currentModelId,
     });
+    await this.recordSession(session.sessionId, null);
   }
 
   private async sendPrompt(text: string): Promise<void> {

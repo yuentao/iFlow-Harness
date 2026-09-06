@@ -37,3 +37,4 @@ coverage/
 .env.local
 .env.*.local
 *.js.original
+session-*.md

@@ -9,6 +9,9 @@ import {
   setPendingApproval,
   clearPendingApproval,
   markToolReverted,
+  setSessions,
+  beginReplay,
+  endReplay,
 } from "../shared/session-state";
 import { initialSessionState, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
@@ -276,5 +279,85 @@ describe("extractTextOutput", () => {
     expect(extractTextOutput([{ type: "diff", path: "x" }])).toBe("");
     expect(extractTextOutput(null)).toBe("");
     expect(extractTextOutput("nope")).toBe("");
+  });
+});
+
+describe("session replay (M4)", () => {
+  it("renders user_message_chunk as a user block while replaying", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "历史提问" } }),
+      { replaying: true },
+    );
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "历史回答" } }),
+      { replaying: true },
+    );
+    expect(state.blocks.map((b) => b.kind)).toEqual(["user", "text"]);
+    expect(state.blocks[0]).toMatchObject({ kind: "user", text: "历史提问" });
+  });
+
+  it("ignores user_message_chunk in live mode once the transcript has content", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "真实提问");
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "agent 回显" } }),
+    );
+    expect(state.blocks.filter((b) => b.kind === "user")).toHaveLength(1);
+  });
+
+  it("still renders user_message_chunk live when the transcript is empty", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "首条" } }),
+    );
+    expect(state.blocks[0]).toMatchObject({ kind: "user", text: "首条" });
+  });
+
+  it("beginReplay clears the transcript and endReplay returns to idle", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "旧内容");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "旧回答" } }));
+    beginReplay(state);
+    expect(state.blocks).toHaveLength(0);
+    expect(state.replaying).toBe(true);
+    expect(state.status).toBe("streaming");
+    expect(state.pendingApproval).toBeNull();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "新内容" } }),
+      { replaying: true },
+    );
+    endReplay(state);
+    expect(state.replaying).toBe(false);
+    expect(state.status).toBe("idle");
+    expect(state.blocks).toHaveLength(1);
+  });
+});
+
+describe("session switcher (M4)", () => {
+  it("setSessions replaces the list", () => {
+    const state = initialSessionState();
+    setSessions(state, [{ id: "s1", label: "会话一", updatedAt: 1 }]);
+    expect(state.sessions).toHaveLength(1);
+    expect(state.sessions[0]!.label).toBe("会话一");
+  });
+
+  it("newSessionState preserves workspace-scoped session list and flags", () => {
+    const state = initialSessionState();
+    setSessions(state, [{ id: "s1", label: "会话一", updatedAt: 1 }]);
+    state.activeSessionId = "s1";
+    state.replaying = true;
+    const fresh = newSessionState(state);
+    expect(fresh.sessions).toHaveLength(1);
+    expect(fresh.activeSessionId).toBe("s1");
+    expect(fresh.replaying).toBe(true);
+    // Session-scoped state still resets.
+    expect(fresh.blocks).toHaveLength(0);
+    expect(fresh.sessionId).toBeNull();
   });
 });

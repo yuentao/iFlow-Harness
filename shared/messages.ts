@@ -95,6 +95,13 @@ export interface PendingApprovalUi {
   options: PermissionOptionUi[];
 }
 
+/** One entry of the per-workspace recent-session list (M4). */
+export interface SessionSummaryUi {
+  id: string;
+  label: string;
+  updatedAt: number;
+}
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -109,6 +116,11 @@ export interface SessionState {
   pendingApproval: PendingApprovalUi | null;
   /** Auth config state (M3): drives the setup banner / form. */
   auth: AuthUiState;
+  /** Recent sessions (per-workspace, persisted host-side) for the switcher. */
+  sessions: SessionSummaryUi[];
+  activeSessionId: string | null;
+  /** True while history is being replayed after `session/load` (M4). */
+  replaying: boolean;
 }
 
 export interface AuthUiState {
@@ -144,6 +156,9 @@ export function initialSessionState(): SessionState {
     currentModelId: null,
     pendingApproval: null,
     auth: { authenticated: false, needsSetup: false, saved: null, profiles: [] },
+    sessions: [],
+    activeSessionId: null,
+    replaying: false,
   };
 }
 
@@ -180,4 +195,6 @@ export type WebviewToHost =
   /** M3: switch the active API profile and re-authenticate. */
   | { type: "activateProfile"; name: string }
   /** M3: delete an extension-owned profile. */
-  | { type: "deleteProfile"; name: string };
+  | { type: "deleteProfile"; name: string }
+  /** M4: load a persisted session by id (history replays into the transcript). */
+  | { type: "loadSession"; sessionId: string };

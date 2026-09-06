@@ -15,6 +15,7 @@ import {
   markToolReverted,
   setMeta,
   setPendingApproval,
+  setSessions,
 } from "../../shared/session-state.js";
 import type { PendingApprovalUi } from "../../shared/messages.js";
 
@@ -66,10 +67,16 @@ export class SessionStore {
     this.flush();
   }
 
-  onSessionUpdate(notification: SessionNotification): void {
-    applySessionUpdate(this.state, notification);
+  onSessionUpdate(notification: SessionNotification, options: { replaying?: boolean } = {}): void {
+    applySessionUpdate(this.state, notification, options);
     // Streaming chunks arrive at high frequency; coalesce into one snapshot.
     this.scheduleFlush();
+  }
+
+  /** Replace the recent-session switcher list (M4). */
+  setSessions(sessions: SessionState["sessions"]): void {
+    setSessions(this.state, sessions);
+    this.flush();
   }
 
   promptCompleted(stopReason: StopReason): void {

@@ -16,6 +16,7 @@ import {
   type ModelInfoUi,
   type PendingApprovalUi,
   type SessionState,
+  type SessionSummaryUi,
   type ToolBlock,
   type ToolDiffUi,
 } from "./messages.js";
@@ -58,7 +59,11 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
  * Apply one `session/update` notification to the state (mutates `state`,
  * which the store owns between snapshots).
  */
-export function applySessionUpdate(state: SessionState, notification: SessionNotification): void {
+export function applySessionUpdate(
+  state: SessionState,
+  notification: SessionNotification,
+  options: { replaying?: boolean } = {},
+): void {
   const update = notification.update;
   switch (update.sessionUpdate) {
     case "agent_message_chunk":
@@ -68,9 +73,10 @@ export function applySessionUpdate(state: SessionState, notification: SessionNot
       if (update.content.type === "text") appendTextToLast(state.blocks, "thought", update.content.text);
       break;
     case "user_message_chunk":
-      // The host appends user blocks itself when a prompt is sent; agent echo
-      // is only relevant for loadSession replay (M4).
-      if (state.blocks.length === 0 && update.content.type === "text") {
+      // Live prompts: the host appends user blocks itself, so agent echo is
+      // ignored. During `session/load` replay (M4) user turns arrive through
+      // this notification and must be rendered.
+      if ((options.replaying || state.blocks.length === 0) && update.content.type === "text") {
         appendTextToLast(state.blocks, "user", update.content.text);
       }
       break;
@@ -187,8 +193,35 @@ export function newSessionState(state: SessionState): SessionState {
   fresh.commands = state.commands;
   fresh.models = state.models;
   fresh.currentModelId = state.currentModelId;
+  // The recent-session list is workspace-scoped and must survive resets.
+  fresh.sessions = state.sessions;
+  fresh.activeSessionId = state.activeSessionId;
+  fresh.replaying = state.replaying;
   // Approval requests are session-scoped; a new session has none pending.
   return fresh;
+}
+
+/** Replace the recent-session list (M4 switcher, ordered newest-first). */
+export function setSessions(state: SessionState, sessions: SessionSummaryUi[]): void {
+  state.sessions = sessions;
+}
+
+/**
+ * Begin history replay after `session/load`: the transcript is cleared and
+ * incoming updates re-populate it; `endReplay` flips the flag back.
+ */
+export function beginReplay(state: SessionState): void {
+  state.blocks = [];
+  state.pendingApproval = null;
+  state.replaying = true;
+  state.status = "streaming";
+  state.errorMessage = null;
+  state.stopReason = null;
+}
+
+export function endReplay(state: SessionState): void {
+  state.replaying = false;
+  state.status = "idle";
 }
 
 export function markToolCancelled(state: SessionState): void {

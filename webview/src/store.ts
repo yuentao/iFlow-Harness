@@ -96,6 +96,14 @@ function createMockHost(): HostApi {
    */
   function sendPromptFlow(text: string): void {
     demoBlocks.push({ kind: "user", text });
+    // Real host behavior: the newest session gets labeled by its first prompt.
+    const current = demoMeta.sessions.find((s) => s.id === demoMeta.activeSessionId);
+    if (current && (current.label === "（无标题会话）" || demoMeta.sessions[0] === current)) {
+      demoMeta.sessions = [
+        { ...current, label: text.slice(0, 60) },
+        ...demoMeta.sessions.filter((s) => s.id !== current.id),
+      ];
+    }
     broadcast({
       type: "snapshot",
       state: {
@@ -144,6 +152,12 @@ function createMockHost(): HostApi {
       { id: "claude-opus-5", name: "claude-opus-5" },
     ],
     currentModelId: "glm-5.3-flash-free",
+    // M4 demo: two persisted sessions; switching restores a short transcript.
+    sessions: [
+      { id: "mock-session", label: "帮我看看这个仓库结构", updatedAt: Date.now() },
+      { id: "mock-session-old", label: "上次的重构讨论", updatedAt: Date.now() - 86_400_000 },
+    ],
+    activeSessionId: "mock-session",
   };
   // M3 demo: start unauthenticated so the setup banner shows; saved state
   // mirrors what the real host stores (masked, never the raw key).
@@ -378,6 +392,47 @@ function createMockHost(): HostApi {
       }
       if (m.type === "setModel") {
         demoMeta.currentModelId = m.modelId;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "newSession") {
+        demoBlocks.length = 0;
+        const id = `mock-session-${Date.now()}`;
+        demoMeta.sessions = [{ id, label: "（无标题会话）", updatedAt: Date.now() }, ...demoMeta.sessions];
+        demoMeta.activeSessionId = id;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [],
+            status: "idle",
+            errorMessage: null,
+            stopReason: null,
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "loadSession") {
+        // Mock restore: swap in a short "recovered" transcript for the pick.
+        demoBlocks.length = 0;
+        demoBlocks.push(
+          { kind: "user", text: "（mock 恢复）上次讨论到哪里了？" },
+          { kind: "text", text: "这是通过 `session/load` 恢复的历史会话内容。" },
+        );
+        demoMeta.activeSessionId = m.sessionId;
         broadcast({
           type: "snapshot",
           state: {
