@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Block, SessionState, ThoughtBlock, ToolBlock } from "../../../shared/messages";
 import { useChat } from "../store";
+import { t } from "../i18n";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
 
@@ -51,14 +52,14 @@ function ToolLine({ block }: { block: ToolBlock }) {
           <>
             <button
               className="btn tool-revert"
-              title="在 VSCode diff 视图中查看该变更"
+              title={t("在 VSCode diff 视图中查看该变更")}
               onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
             >
               ⤢ Diff
             </button>
             <button
               className="btn tool-revert"
-              title="将该文件恢复为编辑前内容"
+              title={t("将该文件恢复为编辑前内容")}
               onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
             >
               ↩ Revert
@@ -74,7 +75,7 @@ function ToolLine({ block }: { block: ToolBlock }) {
       {hasDiff && showDiff && <DiffView diff={block.diff!} />}
       {block.output && (
         <details className="tool-output">
-          <summary>输出</summary>
+          <summary>{t("输出")}</summary>
           <pre>{block.output}</pre>
         </details>
       )}
@@ -85,7 +86,7 @@ function ToolLine({ block }: { block: ToolBlock }) {
 function ThoughtLine({ block }: { block: ThoughtBlock }) {
   return (
     <details className="thought">
-      <summary>思考过程</summary>
+      <summary>{t("思考过程")}</summary>
       <Markdown text={block.text} />
     </details>
   );
@@ -105,8 +106,8 @@ function BlockView({ block }: { block: Block }) {
                   key={i}
                   className="msg-image"
                   src={src}
-                  alt={`附件图片 ${i + 1}`}
-                  title="在 VSCode 中打开"
+                  alt={t("附件图片 {0}", i + 1)}
+                  title={t("在 VSCode 中打开")}
                   onClick={() => send({ type: "openImage", dataUrl: src })}
                 />
               ))}
@@ -161,7 +162,7 @@ function MessageListInner({ state }: { state: SessionState }) {
   return (
     <div className="message-list-wrap">
       <div className="message-list" ref={scrollRef} onScroll={onScroll}>
-        {state.blocks.length === 0 && <div className="empty-hint">向 iFlow 发送第一条消息开始</div>}
+        {state.blocks.length === 0 && <div className="empty-hint">{t("向 iFlow 发送第一条消息开始")}</div>}
         {state.blocks.map((block, i) => (
           <BlockView key={i} block={block} />
         ))}
@@ -177,7 +178,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             setShowJump(false);
           }}
         >
-          回到最新 ↓
+          {t("回到最新 ↓")}
         </button>
       )}
     </div>

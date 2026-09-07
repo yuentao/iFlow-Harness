@@ -14,7 +14,10 @@ interface HostApi {
  */
 function createMockHost(): HostApi {
   const broadcast = (msg: HostToWebview) => {
-    window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 60);
+    window.setTimeout(
+      () => window.dispatchEvent(new MessageEvent("message", { data: { ...msg, locale: "zh-cn" } })),
+      60,
+    );
   };
   const demoBlocks: SessionState["blocks"] = [
     {
@@ -494,13 +497,18 @@ interface ChatStore {
   send: (msg: WebviewToHost) => void;
 }
 
+import { setLocale } from "./i18n";
+
 export const useChat = create<ChatStore>((set) => ({
   state: null,
   applyHostMessage: (msg) => {
     // Only the snapshot updates the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
     // registers those itself, so no re-dispatch happens here.
-    if (msg.type === "snapshot") set({ state: msg.state });
+    if (msg.type === "snapshot") {
+      setLocale(msg.locale);
+      set({ state: msg.state });
+    }
   },
   send: (msg) => vscode.postMessage(msg),
 }));

@@ -1,0 +1,82 @@
+/**
+ * Webview i18n: Chinese is the source language; an English dictionary is
+ * provided for en locales. `t()` falls back to the key itself for any other
+ * locale, so nothing breaks when a new language hasn't been translated yet.
+ * The locale arrives with every host snapshot (`vscode.env.language`); the
+ * mock host fixes it to zh-cn.
+ */
+
+export type Locale = string | undefined;
+
+let current: Locale = undefined;
+
+export function setLocale(locale: Locale): void {
+  current = locale;
+}
+
+function isEnglish(): boolean {
+  return (current ?? "zh-cn").toLowerCase().startsWith("en");
+}
+
+const en: Record<string, string> = {
+  // loading / topbar
+  "连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）":
+    "Connecting… (iFlow CLI startup can take 10+ seconds, longer with multiple MCP servers)",
+  "历史会话（选择后恢复该会话上下文）": "Recent sessions (pick one to restore its context)",
+  "当前会话": "Current session",
+  "API 配置（点击切换后重新认证）": "API profile (click to switch, re-authenticates)",
+  "权限模式": "Permission mode",
+  "模型": "Model",
+  "新会话": "New session",
+  "API 凭据配置": "API credentials",
+  // approval card
+  "工具执行审批": "Tool execution approval",
+  "iFlow 请求执行工具": "iFlow requests to run a tool",
+  "取消": "Cancel",
+  // auth card
+  "已保存（{0}）— 留空保持不变": "saved (…{0}) — leave empty to keep",
+  "Base URL 必须以 http:// 或 https:// 开头": "Base URL must start with http:// or https://",
+  "模型名称不能为空": "Model name is required",
+  "API 配置": "API profiles",
+  "连接 iFlow 需要配置 API 凭据": "Connect to iFlow by configuring API credentials",
+  "收起": "Collapse",
+  "API 配置（点击切换，切换后重新认证会话）": "API profiles (click to switch; switching re-authenticates the session)",
+  "扩展": "Extension",
+  "CLI": "CLI",
+  "删除 {0}": "Delete {0}",
+  "新增 / 更新配置": "Add / update profile",
+  "配置名称（可选，默认为模型名）": "Profile name (optional, defaults to the model name)",
+  "如 BUZZ、工作密钥…": "e.g. BUZZ, work key…",
+  "Base URL（OpenAI 兼容）": "Base URL (OpenAI-compatible)",
+  "模型名称": "Model name",
+  "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
+  "保存并激活": "Save & activate",
+  "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。":
+    "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving/switching re-authenticates the session via openai-compatible. Profiles imported from the iFlow CLI are read-only: you can switch to them but not delete them here.",
+  // composer
+  "（见附图）": "(see attached image)",
+  "移除": "Remove",
+  "Tab 补全": "Tab to complete",
+  "无匹配文件": "No matching files",
+  "向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴/拖入图片）": "Ask iFlow… (/ commands · @ files · paste/drop images)",
+  "停止生成": "Stop generating",
+  "发送 (Enter)": "Send (Enter)",
+  // message list
+  "在 VSCode diff 视图中查看该变更": "Open this change in the VSCode diff view",
+  "将该文件恢复为编辑前内容": "Revert this file to its pre-edit content",
+  "输出": "Output",
+  "思考过程": "Thinking",
+  "附件图片 {0}": "Attached image {0}",
+  "在 VSCode 中打开": "Open in VSCode",
+  "向 iFlow 发送第一条消息开始": "Send your first message to iFlow to get started",
+  "回到最新 ↓": "Jump to latest ↓",
+  "diff": "diff",
+};
+
+export function t(message: string, ...args: Array<string | number>): string {
+  let out = isEnglish() ? (en[message] ?? message) : message;
+  for (let i = 0; i < args.length; i++) {
+    out = out.replaceAll(`{${i}}`, String(args[i]));
+  }
+  return out;
+}

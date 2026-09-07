@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { AuthUiState } from "../../../shared/messages";
 import { useChat } from "../store";
+import { t } from "../i18n";
 
 /**
  * M3 auth card: API profile management + credential form.
@@ -29,16 +30,16 @@ export function AuthCard({
   const [formError, setFormError] = useState<string | null>(null);
 
   const hasStored = auth.saved !== null;
-  const keyPlaceholder = auth.saved ? `已保存（${auth.saved.keyTail}）— 留空保持不变` : "sk-…";
+  const keyPlaceholder = auth.saved ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…";
 
   function submit() {
     const b = baseUrl.trim();
     if (!/^https?:\/\//i.test(b)) {
-      setFormError("Base URL 必须以 http:// 或 https:// 开头");
+      setFormError(t("Base URL 必须以 http:// 或 https:// 开头"));
       return;
     }
     if (!modelName.trim()) {
-      setFormError("模型名称不能为空");
+      setFormError(t("模型名称不能为空"));
       return;
     }
     setFormError(null);
@@ -53,15 +54,15 @@ export function AuthCard({
   }
 
   return (
-    <div className="approval-card auth-card" role="dialog" aria-label="API 凭据配置">
+    <div className="approval-card auth-card" role="dialog" aria-label={t("API 凭据配置")}>
       <div className="approval-head">
         <span className="approval-icon">🔑</span>
         <span className="approval-title">
-          {auth.authenticated ? "API 配置" : "连接 iFlow 需要配置 API 凭据"}
+          {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}
         </span>
         {/* The setup banner is not dismissible while unauthenticated. */}
         {!auth.needsSetup && (
-          <button className="approval-dismiss" title="收起" onClick={onDismiss}>
+          <button className="approval-dismiss" title={t("收起")} onClick={onDismiss}>
             ✕
           </button>
         )}
@@ -69,7 +70,7 @@ export function AuthCard({
 
       {auth.profiles.length > 0 && (
         <div className="profile-list">
-          <div className="auth-label">API 配置（点击切换，切换后重新认证会话）</div>
+          <div className="auth-label">{t("API 配置（点击切换，切换后重新认证会话）")}</div>
           {auth.profiles.map((p) => (
             <div key={p.name} className={`profile-row${p.active ? " active" : ""}`}>
               <button
@@ -83,11 +84,11 @@ export function AuthCard({
                 <span className="profile-name">{p.name}</span>
                 <span className="profile-meta">{p.modelName}</span>
               </button>
-              <span className={`profile-source ${p.source}`}>{p.source === "extension" ? "扩展" : "CLI"}</span>
+              <span className={`profile-source ${p.source}`}>{p.source === "extension" ? t("扩展") : t("CLI")}</span>
               {p.source === "extension" && (
                 <button
                   className="profile-delete"
-                  title={`删除 ${p.name}`}
+                  title={t("删除 {0}", p.name)}
                   onClick={() => send({ type: "deleteProfile", name: p.name })}
                 >
                   🗑
@@ -99,18 +100,18 @@ export function AuthCard({
       )}
 
       <div className="auth-form">
-        <div className="auth-label">新增 / 更新配置</div>
+        <div className="auth-label">{t("新增 / 更新配置")}</div>
         <label className="auth-field">
-          <span className="auth-label">配置名称（可选，默认为模型名）</span>
+          <span className="auth-label">{t("配置名称（可选，默认为模型名）")}</span>
           <input
             type="text"
             value={profileName}
-            placeholder="如 BUZZ、工作密钥…"
+            placeholder={t("如 BUZZ、工作密钥…")}
             onChange={(e) => setProfileName(e.target.value)}
           />
         </label>
         <label className="auth-field">
-          <span className="auth-label">Base URL（OpenAI 兼容）</span>
+          <span className="auth-label">{t("Base URL（OpenAI 兼容）")}</span>
           <input
             type="text"
             value={baseUrl}
@@ -128,23 +129,24 @@ export function AuthCard({
           />
         </label>
         <label className="auth-field">
-          <span className="auth-label">模型名称</span>
+          <span className="auth-label">{t("模型名称")}</span>
           <input
             type="text"
             value={modelName}
-            placeholder="如 glm-5.3-flash-free"
+            placeholder={t("如 glm-5.3-flash-free")}
             onChange={(e) => setModelName(e.target.value)}
           />
         </label>
         <div className="approval-actions">
           <button className="btn approval-btn allow" onClick={submit}>
-            保存并激活
+            {t("保存并激活")}
           </button>
         </div>
         {formError && <div className="auth-error">{formError}</div>}
         <div className="auth-note">
-          凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible
-          方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。
+          {t(
+            "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。",
+          )}
         </div>
       </div>
     </div>

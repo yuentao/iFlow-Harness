@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FileHitUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
+import { t } from "../i18n";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -138,7 +139,7 @@ export function Composer() {
     if ((!value && images.length === 0) || streaming) return;
     send({
       type: "sendPrompt",
-      text: value || "（见附图）",
+      text: value || t("（见附图）"),
       images: images.length > 0 ? images.filter((img) => img.data) : undefined,
     });
     setText("");
@@ -169,7 +170,7 @@ export function Composer() {
               ) : (
                 <span className="attachment-loading">…</span>
               )}
-              <button className="attachment-remove" title="移除" onClick={() => removeImage(i)}>
+              <button className="attachment-remove" title={t("移除")} onClick={() => removeImage(i)}>
                 ×
               </button>
             </span>
@@ -180,12 +181,12 @@ export function Composer() {
         <div className="cmd-hint">
           <span className="cmd-name">/{suggestion.name}</span>
           <span className="cmd-desc">{suggestion.description}</span>
-          <span className="cmd-key">Tab 补全</span>
+          <span className="cmd-key">{t("Tab 补全")}</span>
         </div>
       )}
       {mentionQuery !== null && (
         <div className="mention-pop">
-          {mentionHits.length === 0 && <div className="mention-empty">无匹配文件</div>}
+          {mentionHits.length === 0 && <div className="mention-empty">{t("无匹配文件")}</div>}
           {mentionHits.map((hit, i) => (
             <div
               key={hit.path}
@@ -207,7 +208,7 @@ export function Composer() {
         <textarea
           ref={taRef}
           value={text}
-          placeholder="向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴/拖入图片）"
+          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴/拖入图片）")}
           rows={Math.min(6, text.split("\n").length)}
           onChange={(e) => {
             setText(e.target.value);
@@ -255,13 +256,13 @@ export function Composer() {
           }}
         />
         {streaming ? (
-          <button className="btn stop" title="停止生成" onClick={() => send({ type: "cancel" })}>
+          <button className="btn stop" title={t("停止生成")} onClick={() => send({ type: "cancel" })}>
             ■
           </button>
         ) : (
           <button
             className="btn send"
-            title="发送 (Enter)"
+            title={t("发送 (Enter)")}
             disabled={!text.trim() && images.length === 0}
             onClick={submit}
           >

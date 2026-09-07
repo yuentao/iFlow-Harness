@@ -178,7 +178,7 @@ export interface FileHitUi {
 // ---------------------------------------------------------------------------
 
 export type HostToWebview =
-  | { type: "snapshot"; state: SessionState }
+  | { type: "snapshot"; state: SessionState; locale?: string }
   | { type: "toast"; level: "info" | "warning" | "error"; message: string }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
   | { type: "fileList"; requestId: number; hits: FileHitUi[] };

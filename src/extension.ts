@@ -36,13 +36,15 @@ export function activate(context: vscode.ExtensionContext): void {
       const prompt = request.prompt;
       if (!prompt.trim()) return;
       const stream = new vscode.MarkdownString();
-      response.progress("正在通过 iFlow 处理…");
+      response.progress(vscode.l10n.t("正在通过 iFlow 处理…"));
       try {
         const answer = await panel.chatForward(prompt, token);
         stream.appendMarkdown(answer);
         response.markdown(stream);
       } catch (error) {
-        response.markdown(`iFlow 出错：${error instanceof Error ? error.message : String(error)}`);
+        response.markdown(
+          vscode.l10n.t("iFlow 出错：{0}", error instanceof Error ? error.message : String(error)),
+        );
       }
     },
   );
@@ -54,7 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
 function readActiveSelection(): { path: string; range: string; text: string } | null {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
-    void vscode.window.showInformationMessage("请先选中一段代码");
+    void vscode.window.showInformationMessage(vscode.l10n.t("请先选中一段代码"));
     return null;
   }
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;

@@ -1,0 +1,18 @@
+{
+  "iflow.displayName": "iFlow Harness",
+  "iflow.description": "iFlow CLI graphical agent for VSCode (ACP-based)",
+  "iflow.viewContainer.title": "iFlow Harness",
+  "iflow.view.name": "Chat",
+  "command.openPanel.title": "iFlow: Open Chat Panel",
+  "command.newSession.title": "iFlow: New Session",
+  "command.askSelection.title": "Ask iFlow",
+  "command.addSelectionToContext.title": "Add to iFlow Context",
+  "iflow.configuration.title": "iFlow Harness",
+  "iflow.configuration.cliPath.description": "Path to the iFlow CLI bundle entry.js (leave empty for auto-detection)",
+  "iflow.configuration.defaultMode.description": "Default permission mode for new sessions",
+  "iflow.configuration.nodePath.description": "Custom Node.js executable used to spawn the CLI",
+  "iflow.configuration.idleTimeoutMinutes.description": "Recycle the CLI process after this many idle minutes",
+  "participant.description": "Ask the iFlow session (text-only; rich interactions live in the side panel)",
+  "iflow.outputChannel.name": "iFlow Harness",
+  "iflow.statusbar.tooltip": "iFlow Harness — click to open the chat panel"
+}

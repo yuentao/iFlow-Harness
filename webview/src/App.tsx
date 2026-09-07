@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useChat } from "./store";
+import { t } from "./i18n";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -10,7 +11,7 @@ export function App() {
   const send = useChat((s) => s.send);
   const [configOpen, setConfigOpen] = useState(false);
 
-  if (!state) return <div className="loading">连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）</div>;
+  if (!state) return <div className="loading">{t("连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）")}</div>;
 
   const showAuthCard = state.auth.needsSetup || configOpen;
 
@@ -23,10 +24,10 @@ export function App() {
             className="session-select"
             value={state.activeSessionId ?? ""}
             onChange={(e) => send({ type: "loadSession", sessionId: e.target.value })}
-            title="历史会话（选择后恢复该会话上下文）"
+            title={t("历史会话（选择后恢复该会话上下文）")}
           >
             {state.activeSessionId && !state.sessions.some((s) => s.id === state.activeSessionId) && (
-              <option value={state.activeSessionId}>当前会话</option>
+              <option value={state.activeSessionId}>{t("当前会话")}</option>
             )}
             {state.sessions.map((s) => (
               <option key={s.id} value={s.id}>
@@ -40,7 +41,7 @@ export function App() {
             className="profile-select"
             value={state.auth.profiles.find((p) => p.active)?.name ?? ""}
             onChange={(e) => send({ type: "activateProfile", name: e.target.value })}
-            title="API 配置（点击切换后重新认证）"
+            title={t("API 配置（点击切换后重新认证）")}
           >
             {state.auth.profiles.map((p) => (
               <option key={p.name} value={p.name}>
@@ -54,7 +55,7 @@ export function App() {
             className="mode-select"
             value={state.modes.currentModeId}
             onChange={(e) => send({ type: "setMode", modeId: e.target.value })}
-            title="权限模式"
+            title={t("权限模式")}
           >
             {state.modes.availableModes.map((m) => (
               <option key={m.id} value={m.id}>
@@ -68,7 +69,7 @@ export function App() {
             className="model-select"
             value={state.currentModelId ?? ""}
             onChange={(e) => send({ type: "setModel", modelId: e.target.value })}
-            title="模型"
+            title={t("模型")}
           >
             {state.models.map((m) => (
               <option key={m.id} value={m.id}>
@@ -77,12 +78,12 @@ export function App() {
             ))}
           </select>
         )}
-        <button className="btn new-session" title="新会话" onClick={() => send({ type: "newSession" })}>
+        <button className="btn new-session" title={t("新会话")} onClick={() => send({ type: "newSession" })}>
           ＋
         </button>
         <button
           className={`btn auth-gear${state.auth.authenticated ? "" : " attention"}`}
-          title="API 凭据配置"
+          title={t("API 凭据配置")}
           onClick={() => setConfigOpen((v) => !v)}
         >
           ⚙

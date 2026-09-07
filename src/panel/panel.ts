@@ -53,7 +53,7 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
-const DEFAULT_SESSION_LABEL = "（无标题会话）";
+const DEFAULT_SESSION_LABEL = vscode.l10n.t("（无标题会话）");
 /** workspaceState key: extension-owned transcripts (M4) — the CLI's ACP mode
  * does not persist session files, so the extension keeps its own copies. */
 const TRANSCRIPTS_KEY = "iflow.transcripts";
@@ -98,12 +98,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     private readonly context: vscode.ExtensionContext,
     private readonly services: PanelServices = {},
   ) {
-    this.log = vscode.window.createOutputChannel("iFlow Harness（心流·驭光）", { log: true });
-    this.store = new SessionStore({ post: (m) => this.postToWebview(m) });
+    this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
+    this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
     this.store.onStateChange = (state) => this.updateStatusBar(state);
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = "iflow.openPanel";
-    this.statusBar.tooltip = "iFlow Harness（心流·驭光）— 点击打开聊天面板";
+    this.statusBar.tooltip = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
   }
 
   private updateStatusBar(state: SessionState): void {
@@ -116,15 +116,15 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         text = `$(sync~spin) iFlow${model}`;
         break;
       case "streaming":
-        text = `$(sync~spin) iFlow: 生成中${model}`;
+        text = `$(sync~spin) iFlow: ${vscode.l10n.t("生成中")}${model}`;
         break;
       case "error":
-        text = `$(error) iFlow: 出错${model}`;
+        text = `$(error) iFlow: ${vscode.l10n.t("出错")}${model}`;
         background = new vscode.ThemeColor("statusBarItem.errorBackground");
         break;
       default:
         text = state.pendingApproval
-          ? `$(bell) iFlow: 等待审批${model}`
+          ? `$(bell) iFlow: ${vscode.l10n.t("等待审批")}${model}`
           : `$(check) iFlow${mode}${model}`;
         background = state.pendingApproval
           ? new vscode.ThemeColor("statusBarItem.warningBackground")
@@ -138,7 +138,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   dispose(): void {
     this.disposed = true;
-    this.cancelAllApprovals("扩展已停用");
+    this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
     void this.client?.dispose();
     this.client = null;
     this.statusBar.dispose();
@@ -212,7 +212,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     });
     const blocks = this.store.getState().blocks;
     const newTexts = blocks.filter((b) => b.kind === "text").slice(textCountBefore);
-    return newTexts.map((b) => (b.kind === "text" ? b.text : "")).join("\n").trim() || "（本轮无文本输出）";
+    return newTexts.map((b) => (b.kind === "text" ? b.text : "")).join("\n").trim() || vscode.l10n.t("（本轮无文本输出）");
   }
 
   // --- Editor selection entry points (M5) ---------------------------------------
@@ -221,7 +221,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   async askSelection(relPath: string, range: string, code: string): Promise<void> {
     await vscode.commands.executeCommand("iflow.chatPanel.focus");
     const prompt = [
-      `请解释/处理这段代码（\`${relPath}:${range}\`）：`,
+      vscode.l10n.t("请解释/处理这段代码（`{0}:{1}`）：", relPath, range),
       "",
       "```",
       code,
@@ -234,7 +234,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   addToContext(relPath: string, range: string, code: string): void {
     void vscode.commands.executeCommand("iflow.chatPanel.focus");
     const draft = [
-      `关于 \`${relPath}:${range}\`：`,
+      vscode.l10n.t("关于 `{0}:{1}`：", relPath, range),
       "",
       "```",
       code,
@@ -320,7 +320,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   private postSnapshot(): void {
-    this.postToWebview({ type: "snapshot", state: structuredClone(this.store.getState()) satisfies SessionState as unknown });
+    this.postToWebview({
+      type: "snapshot",
+      state: structuredClone(this.store.getState()) satisfies SessionState as unknown,
+      locale: vscode.env.language,
+    });
   }
 
   // --- Tool approval flow (session/request_permission) --------------------------
@@ -342,7 +346,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         // Safety: an unanswered card must not block the agent forever.
         this.pendingApprovals.delete(id);
         this.store.clearApproval(id);
-        this.store.approvalResolutionNote(approval.toolName, "审批超时，已自动拒绝");
+        this.store.approvalResolutionNote(approval.toolName, vscode.l10n.t("审批超时，已自动拒绝"));
         resolve({ outcome: { outcome: "cancelled" } });
       }, APPROVAL_TIMEOUT_MS);
 
@@ -365,13 +369,16 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
     if (optionId === null) {
       // User dismissed the card — treat as cancel (agent decides what that means).
-      this.store.approvalResolutionNote(pending.toolName, "已取消");
+      this.store.approvalResolutionNote(pending.toolName, vscode.l10n.t("已取消"));
       pending.resolve({ outcome: { outcome: "cancelled" } });
       return;
     }
     const option = pending.options.find((o) => o.optionId === optionId);
     const isReject = option?.kind.startsWith("reject") ?? false;
-    this.store.approvalResolutionNote(pending.toolName, isReject ? "已拒绝" : `已允许（${option?.name ?? optionId}）`);
+    this.store.approvalResolutionNote(
+      pending.toolName,
+      isReject ? vscode.l10n.t("已拒绝") : vscode.l10n.t("已允许（{0}）", option?.name ?? optionId),
+    );
     pending.resolve({ outcome: { outcome: "selected", optionId } });
   }
 
@@ -396,7 +403,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private openImageAttachment(dataUrl: string): void {
     const match = /^data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl);
     if (!match) {
-      void vscode.window.showWarningMessage("无法打开该图片附件（数据格式异常）");
+      void vscode.window.showWarningMessage(vscode.l10n.t("无法打开该图片附件（数据格式异常）"));
       return;
     }
     const ext = match[1]!.toLowerCase().replace("jpeg", "jpg");
@@ -406,7 +413,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      void vscode.window.showWarningMessage(`打开图片失败: ${message}`);
+      void vscode.window.showWarningMessage(vscode.l10n.t("打开图片失败: {0}", message));
     }
   }
 
@@ -465,7 +472,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (!block || block.kind !== "tool" || !block.diff) return;
     const { oldText, newText } = block.diff;
     if (oldText === null) {
-      void vscode.window.showWarningMessage("无法打开 diff：缺少编辑前内容");
+      void vscode.window.showWarningMessage(vscode.l10n.t("无法打开 diff：缺少编辑前内容"));
       return;
     }
     const chosen = await this.locateDiffFile(block);
@@ -479,7 +486,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     try {
       await vscode.workspace.fs.writeFile(tmpUri, Buffer.from(oldText, "utf8"));
     } catch (error) {
-      void vscode.window.showErrorMessage(`打开 diff 失败: ${error instanceof Error ? error.message : String(error)}`);
+      void vscode.window.showErrorMessage(
+        vscode.l10n.t("打开 diff 失败: {0}", error instanceof Error ? error.message : String(error)),
+      );
       return;
     }
     const title = `${path.basename(chosen)} (${block.toolName || "edit"})`;
@@ -541,7 +550,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (matches.length === 1) return matches[0]!;
     if (matches.length > 1) {
       const pick = await vscode.window.showQuickPick(matches, {
-        placeHolder: `找到多个 "${basename}"，选择目标文件`,
+        placeHolder: vscode.l10n.t('找到多个 "{0}"，选择目标文件', basename),
       });
       return pick ?? null;
     }
@@ -550,7 +559,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       canSelectFiles: true,
       canSelectFolders: false,
       canSelectMany: false,
-      openLabel: "选择目标文件",
+      openLabel: vscode.l10n.t("选择目标文件"),
       defaultUri: sessionBase ? vscode.Uri.file(sessionBase) : undefined,
     });
     return picked?.[0]?.fsPath ?? null;
@@ -563,7 +572,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (!block || block.kind !== "tool" || !block.diff) return;
     const { oldText, newText } = block.diff;
     if (oldText === null) {
-      vscode.window.showWarningMessage("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）");
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）"),
+      );
       return;
     }
     const chosen = await this.locateDiffFile(block);
@@ -583,26 +594,26 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       );
       if (openDoc?.isDirty) {
         const pick = await vscode.window.showWarningMessage(
-          "该文件在编辑器中有未保存的修改。回退将从磁盘重新加载并丢弃这些修改。",
+          vscode.l10n.t("该文件在编辑器中有未保存的修改。回退将从磁盘重新加载并丢弃这些修改。"),
           { modal: true },
-          "丢弃并回退",
+          vscode.l10n.t("丢弃并回退"),
         );
-        if (pick !== "丢弃并回退") return;
+        if (pick !== vscode.l10n.t("丢弃并回退")) return;
       }
 
       if (newText !== null && currentText === oldText) {
         // Already reverted (e.g. the CLI undid it, or a previous retry landed).
         this.store.toolReverted(toolCallId);
-        void vscode.window.showInformationMessage(`已是原始内容，无需回退: ${chosen}`);
+        void vscode.window.showInformationMessage(vscode.l10n.t("已是原始内容，无需回退: {0}", chosen));
         return;
       }
       if (newText !== null && currentText !== null && currentText !== newText) {
         const pick = await vscode.window.showWarningMessage(
-          "文件内容与 diff 记录不一致（可能已被继续修改）。仍按 diff 原始内容回退？",
+          vscode.l10n.t("文件内容与 diff 记录不一致（可能已被继续修改）。仍按 diff 原始内容回退？"),
           { modal: true },
-          "仍然回退",
+          vscode.l10n.t("仍然回退"),
         );
-        if (pick !== "仍然回退") return;
+        if (pick !== vscode.l10n.t("仍然回退")) return;
       }
 
       // Write through the VSCode file service so watchers stay consistent
@@ -616,9 +627,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         await vscode.commands.executeCommand("workbench.action.files.revert");
       }
       this.store.toolReverted(toolCallId);
-      void vscode.window.showInformationMessage(`已回退: ${chosen}`);
+      void vscode.window.showInformationMessage(vscode.l10n.t("已回退: {0}", chosen));
     } catch (error) {
-      vscode.window.showErrorMessage(`回退失败: ${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showErrorMessage(
+        vscode.l10n.t("回退失败: {0}", error instanceof Error ? error.message : String(error)),
+      );
     }
   }
 
@@ -762,7 +775,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       ? { ...profiles[name] }
       : this.cliProfileCredentials(name);
     if (!creds) {
-      vscode.window.showWarningMessage(`未找到 API 配置: ${name}`);
+      vscode.window.showWarningMessage(vscode.l10n.t("未找到 API 配置: {0}", name));
       return;
     }
     await setActiveProfileName(this.context.secrets, name);
@@ -796,7 +809,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   /** Tear down the current CLI connection and start fresh with new credentials. */
   private async reconnectWithCredentials(creds: OpenAiCompatCredentials): Promise<void> {
-    this.cancelAllApprovals("重新认证");
+    this.cancelAllApprovals(vscode.l10n.t("重新认证"));
     await this.client?.dispose();
     this.client = null;
     this.store.replaceState(newSessionState(this.store.getState()));
@@ -805,7 +818,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     try {
       await this.ensureClient();
       this.store.setAuth(await this.buildAuthState(true, false));
-      void vscode.window.showInformationMessage(`已切换 API 配置: ${await getActiveProfileName(this.context.secrets)}`);
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
+      );
     } catch {
       // ensureClient already marked the error in the store; nothing to add.
     }
@@ -882,7 +897,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     const init = client.getInitializeResult();
     if (init && !init.agentCapabilities.loadSession) {
       this.log.warn("loadSession capability not declared by CLI");
-      void vscode.window.showWarningMessage("当前 iFlow CLI 不支持会话恢复（loadSession 能力未声明）");
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("当前 iFlow CLI 不支持会话恢复（loadSession 能力未声明）"),
+      );
       return false;
     }
 
@@ -911,7 +928,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       if (restored.blocks.length === 0) {
         restored.blocks.push({
           kind: "text",
-          text: "已恢复会话上下文（CLI 未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。",
+          text: vscode.l10n.t("已恢复会话上下文（CLI 未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。"),
         });
       }
       this.store.replaceTranscript(restored.blocks);
@@ -934,13 +951,13 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.recordSession(loadedId, restored.firstUserText);
       void this.persistActiveTranscript(); // seed the extension-owned copy
-      void vscode.window.showInformationMessage("已恢复会话");
+      void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       endReplay(this.store.getState());
       this.log.error(`session restore failed: ${message}`);
-      this.store.markError(`会话恢复失败：${message}`);
+      this.store.markError(vscode.l10n.t("会话恢复失败：{0}", message));
       await this.forgetSession(sessionId);
       return false;
     } finally {
@@ -1030,8 +1047,8 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
           onExit: () => {
             if (!this.disposed) {
               this.client = null;
-              this.cancelAllApprovals("CLI 进程已退出");
-              this.store.markError("iFlow CLI 进程已退出，重新打开面板可重试");
+              this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
+              this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
             }
           },
           onRequestPermission: (req: RequestPermissionRequest) =>
@@ -1067,7 +1084,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
               const message = error instanceof Error ? error.message : String(error);
               this.log.error(`authenticate failed: ${message}`);
               this.store.setAuth(await this.buildAuthState(false, true));
-              this.store.markError(`认证失败：${message}`);
+              this.store.markError(vscode.l10n.t("认证失败：{0}", message));
               this.store.markConnected();
               return; // session cannot start; setup banner is the remedy
             }
@@ -1109,10 +1126,15 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (configured) {
       const resolved = path.resolve(configured);
       if (existsSync(resolved)) return resolved;
-      vscode.window.showWarningMessage(`iflow.cliPath 不存在，回退自动探测: ${configured}`);
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("iflow.cliPath 不存在，回退自动探测: {0}", configured),
+      );
     }
     const entry = locateIflowEntry();
-    if (!entry) throw new Error("未找到 iFlow CLI（entry.js）。请安装 @iflow-ai/iflow-cli 或设置 iflow.cliPath。");
+    if (!entry)
+      throw new Error(
+        vscode.l10n.t("未找到 iFlow CLI（entry.js）。请安装 @iflow-ai/iflow-cli 或设置 iflow.cliPath。"),
+      );
     return entry;
   }
 
@@ -1132,9 +1154,13 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         if (modes) this.store.sessionMeta({ modes: { ...modes, currentModeId: resp.currentModeId } });
         return;
       }
-      vscode.window.showWarningMessage(`切换模式失败：${JSON.stringify(resp ?? "无响应")}`);
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("切换模式失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
+      );
     } catch (error) {
-      vscode.window.showWarningMessage(`切换模式失败：${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("切换模式失败：{0}", error instanceof Error ? error.message : String(error)),
+      );
     }
   }
 
@@ -1148,11 +1174,15 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         this.store.sessionMeta({ currentModelId: resp.currentModelId });
         return;
       }
-      vscode.window.showWarningMessage(`切换模型失败：${JSON.stringify(resp ?? "无响应")}`);
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("切换模型失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
+      );
       // Keep the dropdown consistent with the agent's actual model.
       this.store.pushSnapshot();
     } catch (error) {
-      vscode.window.showWarningMessage(`切换模型失败：${error instanceof Error ? error.message : String(error)}`);
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("切换模型失败：{0}", error instanceof Error ? error.message : String(error)),
+      );
       this.store.pushSnapshot();
     }
   }
@@ -1234,7 +1264,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.log.warn(`模型列表查询失败（不回退 CLI 内置目录）: ${message}`);
+      this.log.warn(
+        vscode.l10n.t("模型列表查询失败（不回退 CLI 内置目录）: {0}", message),
+      );
       return [];
     }
   }
@@ -1247,7 +1279,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
     // A new session invalidates any approvals from the old one.
-    this.cancelAllApprovals("会话已重置");
+    this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
     store.replaceState(newSessionState(store.getState()));
     // Model dropdown: live query of the active endpoint's `/models`. The CLI's
     // `_meta` catalog is hardcoded and not truthful for user-supplied
@@ -1280,7 +1312,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     try {
       const client = await this.ensureClient();
       const sessionId = this.store.getState().sessionId;
-      if (!sessionId) throw new Error("会话未就绪");
+      if (!sessionId) throw new Error(vscode.l10n.t("会话未就绪"));
       this.store.userPrompt(
         trimmed,
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
@@ -1297,7 +1329,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/timed out/i.test(message)) {
-        this.store.markError(`请求超时：${message}`);
+        this.store.markError(vscode.l10n.t("请求超时：{0}", message));
       } else {
         this.store.markError(message);
       }

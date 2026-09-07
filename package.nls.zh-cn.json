@@ -1,0 +1,18 @@
+{
+  "iflow.displayName": "心流·驭光",
+  "iflow.description": "iFlow CLI 的 VSCode 图形智能体（基于 ACP）",
+  "iflow.viewContainer.title": "心流·驭光",
+  "iflow.view.name": "聊天",
+  "command.openPanel.title": "iFlow：打开聊天面板",
+  "command.newSession.title": "iFlow：新建会话",
+  "command.askSelection.title": "Ask iFlow（询问 iFlow）",
+  "command.addSelectionToContext.title": "Add to iFlow Context（加入 iFlow 上下文）",
+  "iflow.configuration.title": "心流·驭光",
+  "iflow.configuration.cliPath.description": "iFlow CLI bundle entry.js 的路径（留空自动探测）",
+  "iflow.configuration.defaultMode.description": "新会话的默认权限模式",
+  "iflow.configuration.nodePath.description": "用于启动 CLI 的自定义 Node.js 可执行文件",
+  "iflow.configuration.idleTimeoutMinutes.description": "CLI 进程空闲多少分钟后回收",
+  "participant.description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",
+  "iflow.outputChannel.name": "心流·驭光",
+  "iflow.statusbar.tooltip": "心流·驭光 — 点击打开聊天面板"
+}

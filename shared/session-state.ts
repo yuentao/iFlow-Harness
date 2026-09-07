@@ -10,6 +10,7 @@ import type {
   StopReason,
   ToolCallStatus,
 } from "../src/acp/protocol.js";
+import { l10n } from "vscode";
 import {
   initialSessionState,
   type Block,
@@ -221,7 +222,7 @@ export function beginReplay(state: SessionState): void {
   state.stopReason = null;
   state.blocks.push({
     kind: "text",
-    text: "⏳ 正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）",
+    text: l10n.t("⏳ 正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）"),
   });
 }
 
@@ -337,7 +338,8 @@ export function markToolReverted(state: SessionState, toolCallId: string): boole
     const block = state.blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === toolCallId) {
       block.status = "failed";
-      block.output = block.output ? `${block.output}\n[已回退]` : "[已回退]";
+      const reverted = l10n.t("[已回退]");
+      block.output = block.output ? `${block.output}\n${reverted}` : reverted;
       return true;
     }
   }

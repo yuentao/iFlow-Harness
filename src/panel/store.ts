@@ -29,10 +29,18 @@ export class SessionStore {
   /** Fired whenever the state changed materially (status bar, M5). */
   onStateChange: ((state: SessionState) => void) | null = null;
 
-  constructor(options: { post: (message: HostToWebview) => void; flushIntervalMs?: number }) {
+  constructor(options: {
+    post: (message: HostToWebview) => void;
+    flushIntervalMs?: number;
+    /** vscode.env.language, forwarded with snapshots for webview i18n. */
+    language?: string;
+  }) {
     this.post = options.post;
     this.flushIntervalMs = options.flushIntervalMs ?? 80;
+    this.language = options.language;
   }
+
+  private readonly language: string | undefined;
 
   getState(): SessionState {
     return this.state;
@@ -140,8 +148,7 @@ export class SessionStore {
       this.flushTimer = null;
     }
     this.onStateChange?.(this.state);
-    this.post({ type: "snapshot", state: structuredClone(this.state) });
-  }
+          this.post({ type: "snapshot", state: structuredClone(this.state), locale: this.language });  }
 
   private flush(): void {
     this.pushSnapshot();

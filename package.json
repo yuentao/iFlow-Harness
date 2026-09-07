@@ -1,7 +1,7 @@
 {
   "name": "iflow-harness",
-  "displayName": "iFlow Harness（心流·驭光）",
-  "description": "iFlow CLI graphical agent for VSCode (ACP-based)",
+  "displayName": "%iflow.displayName%",
+  "description": "%iflow.description%",
   "version": "0.1.0",
   "type": "module",
   "publisher": "iflow",
@@ -28,12 +28,13 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.cjs",
+  "l10n": "./l10n",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
           "id": "iflow-chat",
-          "title": "iFlow Harness（心流·驭光）",
+          "title": "%iflow.viewContainer.title%",
           "icon": "media/iflow.svg"
         }
       ]
@@ -43,7 +44,7 @@
         {
           "type": "webview",
           "id": "iflow.chatPanel",
-          "name": "Chat"
+          "name": "%iflow.view.name%"
         }
       ]
     },
@@ -52,7 +53,7 @@
         "id": "iflow.agent",
         "name": "iflow",
         "fullName": "iFlow",
-        "description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",
+        "description": "%participant.description%",
         "isSticky": true,
         "commands": []
       }
@@ -60,22 +61,22 @@
     "commands": [
       {
         "command": "iflow.openPanel",
-        "title": "iFlow: Open Chat Panel",
+        "title": "%command.openPanel.title%",
         "category": "iFlow"
       },
       {
         "command": "iflow.newSession",
-        "title": "iFlow: New Session",
+        "title": "%command.newSession.title%",
         "category": "iFlow"
       },
       {
         "command": "iflow.askSelection",
-        "title": "Ask iFlow",
+        "title": "%command.askSelection.title%",
         "category": "iFlow"
       },
       {
         "command": "iflow.addSelectionToContext",
-        "title": "Add to iFlow Context",
+        "title": "%command.addSelectionToContext.title%",
         "category": "iFlow"
       }
     ],
@@ -94,12 +95,12 @@
       ]
     },
     "configuration": {
-      "title": "iFlow Harness（心流·驭光）",
+      "title": "%iflow.configuration.title%",
       "properties": {
         "iflow.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the iFlow CLI bundle entry.js (leave empty for auto-detection)"
+          "description": "%iflow.configuration.cliPath.description%"
         },
         "iflow.defaultMode": {
           "type": "string",
@@ -110,17 +111,17 @@
             "plan"
           ],
           "default": "smart",
-          "description": "Default permission mode for new sessions"
+          "description": "%iflow.configuration.defaultMode.description%"
         },
         "iflow.nodePath": {
           "type": "string",
           "default": "",
-          "description": "Custom Node.js executable used to spawn the CLI"
+          "description": "%iflow.configuration.nodePath.description%"
         },
         "iflow.idleTimeoutMinutes": {
           "type": "number",
           "default": 30,
-          "description": "Recycle the CLI process after this many idle minutes"
+          "description": "%iflow.configuration.idleTimeoutMinutes.description%"
         }
       }
     }

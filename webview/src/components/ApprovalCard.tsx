@@ -1,5 +1,6 @@
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
+import { t } from "../i18n";
 
 const KIND_ORDER: Record<string, number> = {
   allow_once: 0,
@@ -32,10 +33,10 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   const primary = approval.locations[0];
 
   return (
-    <div className="approval-card" role="alertdialog" aria-label="工具执行审批">
+    <div className="approval-card" role="alertdialog" aria-label={t("工具执行审批")}>
       <div className="approval-head">
         <span className="approval-icon">🛡</span>
-        <span className="approval-title">iFlow 请求执行工具</span>
+        <span className="approval-title">{t("iFlow 请求执行工具")}</span>
       </div>
       <div className="approval-body">
         {approval.toolName && <code className="approval-tool">{approval.toolName}</code>}
@@ -67,7 +68,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           className="btn approval-btn neutral"
           onClick={() => send({ type: "respondApproval", id: approval.id, optionId: null })}
         >
-          取消
+          {t("取消")}
         </button>
       </div>
     </div>
