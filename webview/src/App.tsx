@@ -61,15 +61,19 @@ const BTN_ICON =
 
 export function App() {
   const state = useChat((s) => s.state);
+  const editorTheme = useChat((s) => s.editorTheme);
   const send = useChat((s) => s.send);
   const [configOpen, setConfigOpen] = useState(false);
-  // Theme toggle: light by default, remembered across reloads. The `.dark`
-  // class lives on <html> so body-level tokens follow the theme too.
-  const [dark, setDark] = useState(() => localStorage.getItem("iflow-theme") === "dark");
+  // Theme priority: the user's explicit toggle wins (persisted); otherwise
+  // follow the editor color theme pushed by the host; default light.
+  const [manual, setManual] = useState<"light" | "dark" | null>(
+    () => (localStorage.getItem("iflow-theme") as "light" | "dark" | null) ?? null,
+  );
+  const dark = manual ? manual === "dark" : editorTheme !== null ? editorTheme === "dark" : false;
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem("iflow-theme", dark ? "dark" : "light");
-  }, [dark]);
+    if (manual) localStorage.setItem("iflow-theme", manual);
+  }, [dark, manual]);
 
   if (!state) {
     return (
@@ -106,7 +110,7 @@ export function App() {
               className={BTN_ICON}
               title={dark ? t("切换到浅色主题") : t("切换到深色主题")}
               aria-label={dark ? t("切换到浅色主题") : t("切换到深色主题")}
-              onClick={() => setDark((v) => !v)}
+              onClick={() => setManual((prev) => ((prev ?? (dark ? "dark" : "light")) === "dark" ? "light" : "dark"))}
             >
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             </button>

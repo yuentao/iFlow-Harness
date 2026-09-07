@@ -19,6 +19,11 @@ function createMockHost(): HostApi {
       60,
     );
   };
+  // Mock editor theme: read the OS preference so browser verification can
+  // exercise both paths.
+  const mockTheme: "dark" | "light" = window.matchMedia?.("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
   const demoBlocks: SessionState["blocks"] = [
     {
       kind: "user",
@@ -187,6 +192,7 @@ function createMockHost(): HostApi {
     postMessage(msg) {
       const m = msg as WebviewToHost;
       if (m.type === "ready") {
+        broadcast({ type: "theme", kind: mockTheme });
         broadcast({
           type: "snapshot",
           state: {
@@ -493,6 +499,8 @@ const vscode: HostApi = typeof acquireVsCodeApi === "function" ? acquireVsCodeAp
 
 interface ChatStore {
   state: SessionState | null;
+  /** Latest editor theme from the host; null until the first `theme` message. */
+  editorTheme: "light" | "dark" | null;
   applyHostMessage: (msg: HostToWebview) => void;
   send: (msg: WebviewToHost) => void;
 }
@@ -501,6 +509,7 @@ import { setLocale } from "./i18n";
 
 export const useChat = create<ChatStore>((set) => ({
   state: null,
+  editorTheme: null,
   applyHostMessage: (msg) => {
     // Only the snapshot updates the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
@@ -508,6 +517,10 @@ export const useChat = create<ChatStore>((set) => ({
     if (msg.type === "snapshot") {
       setLocale(msg.locale);
       set({ state: msg.state });
+      return;
+    }
+    if (msg.type === "theme") {
+      set({ editorTheme: msg.kind });
     }
   },
   send: (msg) => vscode.postMessage(msg),

@@ -104,6 +104,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = "iflow.openPanel";
     this.statusBar.tooltip = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
+    // Let the panel follow the editor color theme (the webview ignores this
+    // once the user picked a theme manually).
+    this.context.subscriptions.push(
+      vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
+    );
   }
 
   private updateStatusBar(state: SessionState): void {
@@ -158,6 +163,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     // its `ready` — push a snapshot now so the panel never stays on the
     // loading screen, and again when `ready` arrives.
     this.postSnapshot();
+    this.postTheme();
     // Connect eagerly so the panel is usable immediately (errors surface via store).
     void this.ensureClient().catch((error) => {
       this.log.error("initial connect failed", error instanceof Error ? error : String(error));
@@ -325,6 +331,13 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       state: structuredClone(this.store.getState()) satisfies SessionState as unknown,
       locale: vscode.env.language,
     });
+  }
+
+  /** Forward the editor color theme so the panel can follow it by default. */
+  private postTheme(): void {
+    const kind = vscode.window.activeColorTheme.kind;
+    const light = kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight;
+    this.postToWebview({ type: "theme", kind: light ? "light" : "dark" });
   }
 
   // --- Tool approval flow (session/request_permission) --------------------------

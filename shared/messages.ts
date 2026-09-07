@@ -181,7 +181,10 @@ export type HostToWebview =
   | { type: "snapshot"; state: SessionState; locale?: string }
   | { type: "toast"; level: "info" | "warning" | "error"; message: string }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
-  | { type: "fileList"; requestId: number; hits: FileHitUi[] };
+  | { type: "fileList"; requestId: number; hits: FileHitUi[] }
+  /** Editor color theme changed ("dark" | "light"); the webview follows it
+   * unless the user picked a theme manually in the panel. */
+  | { type: "theme"; kind: "dark" | "light" };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
