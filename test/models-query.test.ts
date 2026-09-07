@@ -28,6 +28,15 @@ describe("normalizeModelsUrl", () => {
   it("is idempotent when baseUrl already ends with /models", () => {
     expect(normalizeModelsUrl("https://api.example.com/v1/models")).toBe("https://api.example.com/v1/models");
   });
+
+  it("defaults to https when the user-typed baseUrl omits the scheme", () => {
+    expect(normalizeModelsUrl("api.example.com/v1")).toBe("https://api.example.com/v1/models");
+    expect(normalizeModelsUrl("  api.example.com/v1  ")).toBe("https://api.example.com/v1/models");
+  });
+
+  it("keeps an explicit http:// scheme (local endpoints)", () => {
+    expect(normalizeModelsUrl("http://127.0.0.1:11434/v1")).toBe("http://127.0.0.1:11434/v1/models");
+  });
 });
 
 describe("parseModelsResponse", () => {

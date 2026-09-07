@@ -61,9 +61,14 @@ export function readActiveEndpoint(settingsPath?: string): ActiveEndpoint | null
   return { baseUrl, apiKey, modelName };
 }
 
-/** `https://host/v1` → `https://host/v1/models` (idempotent, trims slashes). */
+/**
+ * `https://host/v1` → `https://host/v1/models` (idempotent, trims slashes).
+ * User-typed profiles often omit the scheme (`api.host.com/v1`); default to
+ * https in that case — fetch would otherwise throw "Invalid URL protocol".
+ */
 export function normalizeModelsUrl(baseUrl: string): string {
-  const trimmed = baseUrl.replace(/\/+$/, "");
+  let trimmed = baseUrl.trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(trimmed)) trimmed = `https://${trimmed}`;
   return /\/models$/.test(trimmed) ? trimmed : `${trimmed}/models`;
 }
 

@@ -63,23 +63,26 @@ export function Composer() {
   }, [text, commands]);
 
   function addImages(files: ArrayLike<File>): void {
-    const pending: Array<{ file: File; index: number }> = [];
+    const incoming = Array.from(files).filter(
+      (f) => f.type.startsWith("image/") && f.size <= MAX_IMAGE_BYTES,
+    );
+    // Updaters must stay side-effect free: React may run them lazily and, in
+    // StrictMode, more than once. Slots are pure placeholders; the actual
+    // data lands by scanning for the first empty slot below.
     setImages((prev) => {
-      const room = MAX_IMAGES - prev.length;
-      const list = Array.from(files).filter((f) => f.type.startsWith("image/") && f.size <= MAX_IMAGE_BYTES);
-      const accepted = list.slice(0, Math.max(0, room));
-      accepted.forEach((file, i) => pending.push({ file, index: prev.length + i }));
-      return [...prev, ...accepted.map(() => ({ data: "", mimeType: "image/*" }))];
+      const room = Math.max(0, MAX_IMAGES - prev.length);
+      return [...prev, ...incoming.slice(0, room).map(() => ({ data: "", mimeType: "image/*" }))];
     });
-    // Read each accepted file and fill its slot asynchronously.
-    for (const { file, index } of pending) {
+    for (const file of incoming) {
       const reader = new FileReader();
       reader.onload = () => {
         const result = String(reader.result ?? "");
         const base64 = result.includes(",") ? result.slice(result.indexOf(",") + 1) : result;
         setImages((prev) => {
+          const idx = prev.findIndex((img) => img.data === "");
+          if (idx < 0) return prev; // over the limit or the slot was removed
           const next = [...prev];
-          if (next[index]) next[index] = { data: base64, mimeType: file.type };
+          next[idx] = { data: base64, mimeType: file.type };
           return next;
         });
       };
