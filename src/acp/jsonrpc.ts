@@ -41,6 +41,31 @@ export const JsonRpcErrorCode = {
 } as const;
 
 /**
+ * Extract a human-readable message from an unknown thrown value.
+ *
+ * JSON-RPC rejections are plain objects (`{code, message, data}`), not
+ * `Error` instances, so naive `String(error)` renders "[object Object]"
+ * (observed in the chat panel's error banner when the CLI rejects a prompt).
+ * Preference order: `Error.message` → string `message` property →
+ * JSON serialization (guarded against circular structures) → `String()`.
+ */
+export function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+    try {
+      const json = JSON.stringify(error);
+      if (json && json !== "{}") return json;
+    } catch {
+      // circular or otherwise unserializable — fall through to String()
+    }
+  }
+  return String(error);
+}
+
+/**
  * Incremental NDJSON parser: accepts arbitrary chunk boundaries, emits one
  * parsed JSON value per non-empty line.
  */
@@ -144,7 +169,7 @@ export class JsonRpcPeer {
               id: request.id,
               error: {
                 code: JsonRpcErrorCode.InternalError,
-                message: error instanceof Error ? error.message : String(error),
+                message: errorMessage(error),
               },
             }),
         );

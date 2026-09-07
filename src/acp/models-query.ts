@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
+import { errorMessage } from "./jsonrpc.js";
 
 /**
  * Live model list for the model dropdown.
@@ -138,7 +139,7 @@ export async function queryModelIds(endpoint: ActiveEndpoint, timeoutMs = 10_000
   try {
     response = await directGet(url, { Authorization: `Bearer ${endpoint.apiKey}` }, timeoutMs);
   } catch (error) {
-    const cause = error instanceof Error ? error.message : String(error);
+    const cause = errorMessage(error);
     throw new Error(`请求 ${url.host} 失败: ${cause}`);
   }
   if (response.status !== 200) throw new Error(`模型列表查询失败: HTTP ${response.status}`);

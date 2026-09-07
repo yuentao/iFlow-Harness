@@ -4,7 +4,11 @@
   "description": "%iflow.description%",
   "version": "0.1.0",
   "type": "module",
-  "publisher": "iflow",
+  "publisher": "yuantao",
+  "author": {
+    "name": "yuantao",
+    "email": "work@pandorastudio.cn"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

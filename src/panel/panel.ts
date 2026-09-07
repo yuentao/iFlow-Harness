@@ -9,6 +9,7 @@ import path from "node:path";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
+import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
 import {
@@ -189,7 +190,7 @@ export class ChatPanel implements vscode.Disposable {
     this.postSnapshot();
     this.postTheme();
     void this.ensureClient().catch((error) => {
-      this.log.error("initial connect failed", error instanceof Error ? error : String(error));
+      this.log.error("initial connect failed", errorMessage(error));
     });
   }
 
@@ -459,7 +460,7 @@ export class ChatPanel implements vscode.Disposable {
       writeFileSync(file, Buffer.from(match[2]!, "base64"));
       void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       void vscode.window.showWarningMessage(vscode.l10n.t("打开图片失败: {0}", message));
     }
   }
@@ -504,7 +505,7 @@ export class ChatPanel implements vscode.Disposable {
         .slice(0, 12);
       this.postToWebview({ type: "fileList", requestId, hits: scored.map((s) => ({ path: s.rel })) });
     } catch (error) {
-      this.log.warn(`file search failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.log.warn(`file search failed: ${errorMessage(error)}`);
       this.postToWebview({ type: "fileList", requestId, hits: [] });
     }
   }
@@ -534,7 +535,7 @@ export class ChatPanel implements vscode.Disposable {
       await vscode.workspace.fs.writeFile(tmpUri, Buffer.from(oldText, "utf8"));
     } catch (error) {
       void vscode.window.showErrorMessage(
-        vscode.l10n.t("打开 diff 失败: {0}", error instanceof Error ? error.message : String(error)),
+        vscode.l10n.t("打开 diff 失败: {0}", errorMessage(error)),
       );
       return;
     }
@@ -677,7 +678,7 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showInformationMessage(vscode.l10n.t("已回退: {0}", chosen));
     } catch (error) {
       vscode.window.showErrorMessage(
-        vscode.l10n.t("回退失败: {0}", error instanceof Error ? error.message : String(error)),
+        vscode.l10n.t("回退失败: {0}", errorMessage(error)),
       );
     }
   }
@@ -1007,7 +1008,7 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       endReplay(this.store.getState());
       this.log.error(`session restore failed: ${message}`);
       this.store.markError(vscode.l10n.t("会话恢复失败：{0}", message));
@@ -1062,7 +1063,7 @@ export class ChatPanel implements vscode.Disposable {
       this.log.info(`transcript source: ${file}`);
       return parseTranscriptJsonl(text);
     } catch (error) {
-      this.log.warn(`transcript read failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.log.warn(`transcript read failed: ${errorMessage(error)}`);
       return { blocks: [], firstUserText: null };
     }
   }
@@ -1080,7 +1081,7 @@ export class ChatPanel implements vscode.Disposable {
       } catch (error) {
         // CLI not found: surface it in the panel instead of leaving it on the
         // loading screen (this used to throw before the try/catch below).
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         this.log.error(message);
         this.store.markError(message);
         throw error;
@@ -1134,7 +1135,7 @@ export class ChatPanel implements vscode.Disposable {
               this.log.info("authenticate ok (openai-compatible)");
               this.store.setAuth(await this.buildAuthState(true, false));
             } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
+              const message = errorMessage(error);
               this.log.error(`authenticate failed: ${message}`);
               this.store.setAuth(await this.buildAuthState(false, true));
               this.store.markError(vscode.l10n.t("认证失败：{0}", message));
@@ -1161,7 +1162,7 @@ export class ChatPanel implements vscode.Disposable {
       } catch (error) {
         this.client = null;
         this.store.setAuth(await this.buildAuthState(false, true));
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         this.log.error(`connect failed: ${message}`);
         this.store.markError(message);
         throw error;
@@ -1212,7 +1213,7 @@ export class ChatPanel implements vscode.Disposable {
       );
     } catch (error) {
       vscode.window.showWarningMessage(
-        vscode.l10n.t("切换模式失败：{0}", error instanceof Error ? error.message : String(error)),
+        vscode.l10n.t("切换模式失败：{0}", errorMessage(error)),
       );
     }
   }
@@ -1234,7 +1235,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.pushSnapshot();
     } catch (error) {
       vscode.window.showWarningMessage(
-        vscode.l10n.t("切换模型失败：{0}", error instanceof Error ? error.message : String(error)),
+        vscode.l10n.t("切换模型失败：{0}", errorMessage(error)),
       );
       this.store.pushSnapshot();
     }
@@ -1316,7 +1317,7 @@ export class ChatPanel implements vscode.Disposable {
     try {
       return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       this.log.warn(
         vscode.l10n.t("模型列表查询失败（不回退 CLI 内置目录）: {0}", message),
       );
@@ -1387,7 +1388,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.promptCompleted(result.stopReason);
       void this.persistActiveTranscript();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (/timed out/i.test(message)) {
         this.store.markError(vscode.l10n.t("请求超时：{0}", message));
       } else {

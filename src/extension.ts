@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { ChatPanel } from "./panel/panel.js";
+import { errorMessage } from "./acp/jsonrpc.js";
 
 export function activate(context: vscode.ExtensionContext): void {
   const panel = new ChatPanel(context);
@@ -39,7 +40,7 @@ export function activate(context: vscode.ExtensionContext): void {
         response.markdown(stream);
       } catch (error) {
         response.markdown(
-          vscode.l10n.t("iFlow 出错：{0}", error instanceof Error ? error.message : String(error)),
+          vscode.l10n.t("iFlow 出错：{0}", errorMessage(error)),
         );
       }
     },

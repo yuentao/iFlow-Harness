@@ -1,5 +1,29 @@
 import { describe, it, expect } from "vitest";
-import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode } from "../src/acp/jsonrpc.js";
+import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage } from "../src/acp/jsonrpc.js";
+
+describe("errorMessage", () => {
+  it("prefers Error.message", () => {
+    expect(errorMessage(new Error("boom"))).toBe("boom");
+  });
+
+  it("extracts message from JsonRpcError-shaped plain objects", () => {
+    // Wire behavior (probed, CLI 0.5.19): peer rejects with {code, message, data},
+    // NOT an Error — String(error) used to render "[object Object]".
+    expect(errorMessage({ code: -32000, message: "会话不存在" })).toBe("会话不存在");
+  });
+
+  it("passes strings through", () => {
+    expect(errorMessage("plain")).toBe("plain");
+  });
+
+  it("falls back to JSON for message-less objects", () => {
+    expect(errorMessage({ code: 42 })).toBe('{"code":42}');
+  });
+
+  it("never renders [object Object]", () => {
+    expect(errorMessage({ nested: { deep: 1 } })).not.toContain("[object");
+  });
+});
 
 describe("NdjsonParser", () => {
   it("emits one message per line", () => {
