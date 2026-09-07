@@ -262,13 +262,6 @@ function MessageListInner({ state }: { state: SessionState }) {
   return (
     <div className="relative min-h-0 flex-1">
       <div className="message-scroll h-full space-y-3 overflow-y-auto px-3 py-3" ref={scrollRef} onScroll={onScroll}>
-        {state.replaying && (
-          <div className="flex justify-center">
-            <Chip tone="info">
-              <Loader2 className="size-2.5 animate-spin" /> {t("正在恢复历史会话…")}
-            </Chip>
-          </div>
-        )}
         {state.blocks.length === 0 && !state.replaying && (
           <div className="mt-10 text-center text-[12px] text-muted-foreground">
             {t("向 iFlow 发送第一条消息开始")}
