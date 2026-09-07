@@ -154,6 +154,20 @@ function localizeStepTitle(title: string): string {
   return title;
 }
 
+/** Deterministic accent color per SubAgent type (hash of the type name). */
+function agentAccent(type: string | null): { border: string; icon: string; chip: string } {
+  const palette = [
+    { border: "border-info/40", icon: "text-info", chip: "bg-info/15 text-info" },
+    { border: "border-success/40", icon: "text-success", chip: "bg-success/15 text-success" },
+    { border: "border-warning/40", icon: "text-warning", chip: "bg-warning/15 text-warning" },
+    { border: "border-primary/40", icon: "text-primary", chip: "bg-primary/15 text-primary" },
+  ];
+  if (!type) return palette[0]!;
+  let hash = 0;
+  for (let i = 0; i < type.length; i++) hash = (hash * 31 + type.charCodeAt(i)) >>> 0;
+  return palette[hash % palette.length]!;
+}
+
 function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const [open, setOpen] = useState(false);
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
@@ -202,11 +216,16 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     .filter(Boolean)
     .join("\n");
 
+  const accent = agentAccent(block.agentType);
+
   return (
-    <div className="stream-in overflow-hidden rounded-lg border border-info/40 bg-card">
+    <div className={`stream-in overflow-hidden rounded-lg border bg-card ${accent.border}`}>
       <div className="flex items-center gap-2 px-3 py-2">
-        <Bot className="size-3.5 shrink-0 text-info" />
+        <Bot className={`size-3.5 shrink-0 ${accent.icon}`} />
         <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
+        {block.agentType && (
+          <Chip tone="muted">{block.agentType}</Chip>
+        )}
         <span className="ml-auto">{statusChip}</span>
       </div>
       {nested.length > 0 && (
