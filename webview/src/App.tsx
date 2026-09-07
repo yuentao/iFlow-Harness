@@ -75,10 +75,17 @@ export function App() {
     if (manual) localStorage.setItem("iflow-theme", manual);
   }, [dark, manual]);
 
-  if (!state) {
+  if (!state || state.status === "connecting") {
+    // Full-screen brand splash until the session is fully initialized.
     return (
-      <div className="flex h-screen items-center justify-center bg-panel px-6 text-center text-[12px] leading-relaxed text-muted-foreground">
-        {t("连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）")}
+      <div className="splash">
+        <img src={logo} alt="" className="splash-logo" />
+        <div className="splash-title">{t("心流·驭光")}</div>
+        {!isEnglishLocale() && <div className="splash-sub">iFlow Harness</div>}
+        <div className="splash-bar" />
+        <div className="splash-hint">
+          {t("正在启动 iFlow CLI…（首次启动或配置了多个 MCP server 时较久）")}
+        </div>
       </div>
     );
   }
@@ -230,7 +237,13 @@ export function App() {
               <span className="truncate">{t("会话历史")}</span>
             </div>
           )}
-          {statusChip(state.status)}
+          {state.replaying ? (
+            <Chip tone="info">
+              <Loader2 className="size-2.5 animate-spin" /> {t("正在恢复历史会话…")}
+            </Chip>
+          ) : (
+            statusChip(state.status)
+          )}
         </div>
       </header>
 

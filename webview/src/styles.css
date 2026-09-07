@@ -11,7 +11,10 @@
   --radius-md: calc(var(--radius) - 1px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --font-sans: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* Latin glyphs resolve to Helvetica; CJK falls through to Source Han Sans
+     (思源黑体), then platform fallbacks (PingFang/YaHei). */
+  --font-sans: "Helvetica Neue", Helvetica, "Source Han Sans SC", "Noto Sans SC",
+    "Source Han Sans CN", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -180,9 +183,31 @@
     border: 3px solid transparent;
     background-clip: content-box;
   }
-  ::-webkit-scrollbar-track {
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--foreground) 28%, transparent);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:active {
+    background: color-mix(in oklab, var(--primary) 55%, transparent);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
     background: transparent;
   }
+
+  /* Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 20%, transparent) transparent;
+  }
+}
+
+/* App-level scroll surfaces (message list / diff body / popups). */
+.message-scroll,
+.diff-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--foreground) 20%, transparent) transparent;
 }
 
 @utility aurora {
@@ -358,5 +383,120 @@
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* --- splash screen (pre-init full-screen brand cover) --- */
+
+.splash {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--color-background);
+}
+
+.splash-logo {
+  width: 64px;
+  height: 64px;
+  animation: splash-pulse 1.6s ease-in-out infinite;
+}
+
+.splash-title {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.splash-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+.splash-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--color-muted-foreground);
+}
+
+.splash-bar {
+  width: 180px;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--foreground) 10%, transparent);
+}
+
+.splash-bar::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: var(--color-primary);
+  animation: splash-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes splash-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.85;
+  }
+}
+
+@keyframes splash-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+/* --- auth modal (centered dialog over a dimmed backdrop) --- */
+
+.auth-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--background) 62%, transparent);
+  backdrop-filter: blur(2px);
+  animation: fade-in 0.16s ease-out;
+}
+
+.auth-modal {
+  width: min(400px, calc(100vw - 32px));
+  max-height: 78vh;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-panel);
+  animation: modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
   }
 }

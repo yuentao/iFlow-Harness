@@ -238,6 +238,19 @@ function MessageListInner({ state }: { state: SessionState }) {
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [state.blocks.length, last?.kind, (last && "text" in last ? last.text.length : 0)]);
 
+  // Session switch / history restore: jump to the end of the recovered
+  // transcript and re-enable stick-to-bottom (the user may have been
+  // scrolled up in the previous session).
+  useEffect(() => {
+    stickToBottom.current = true;
+    setShowJump(false);
+    const raf = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [state.activeSessionId, state.replaying]);
+
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
@@ -248,7 +261,7 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div className="h-full space-y-3 overflow-y-auto px-3 py-3" ref={scrollRef} onScroll={onScroll}>
+      <div className="message-scroll h-full space-y-3 overflow-y-auto px-3 py-3" ref={scrollRef} onScroll={onScroll}>
         {state.replaying && (
           <div className="flex justify-center">
             <Chip tone="info">

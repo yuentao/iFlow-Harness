@@ -58,28 +58,40 @@ export function AuthCard({
 
   return (
     <div
-      className="stream-in mx-3 mb-2 max-h-[46vh] shrink-0 overflow-y-auto rounded-lg border border-border bg-card"
+      className="auth-backdrop"
       role="dialog"
+      aria-modal="true"
       aria-label={t("API 凭据配置")}
+      tabIndex={-1}
+      ref={(el) => el?.focus()}
+      onMouseDown={(e) => {
+        // Backdrop click / Escape dismiss (not while unauthenticated — the
+        // setup banner is mandatory).
+        if (e.target === e.currentTarget && !auth.needsSetup) onDismiss();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && !auth.needsSetup) onDismiss();
+      }}
     >
-      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/60 bg-card px-3 py-2">
-        <KeyRound className="size-3.5 text-primary" />
-        <span className="text-[12px] font-semibold">
-          {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}
-        </span>
-        {/* The setup banner is not dismissible while unauthenticated. */}
-        {!auth.needsSetup && (
-          <button
-            className="ml-auto text-[12px] text-muted-foreground hover:text-foreground"
-            title={t("收起")}
-            onClick={onDismiss}
-          >
-            ✕
-          </button>
-        )}
-      </div>
+      <div className="auth-modal">
+        <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/60 bg-card px-3 py-2">
+          <KeyRound className="size-3.5 text-primary" />
+          <span className="text-[12px] font-semibold">
+            {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}
+          </span>
+          {/* The setup banner is not dismissible while unauthenticated. */}
+          {!auth.needsSetup && (
+            <button
+              className="ml-auto text-[12px] text-muted-foreground hover:text-foreground"
+              title={t("收起")}
+              onClick={onDismiss}
+            >
+              ✕
+            </button>
+          )}
+        </div>
 
-      <div className="space-y-2.5 px-3 py-2.5">
+        <div className="space-y-2.5 px-3 py-2.5">
         {auth.profiles.length > 0 && (
           <div className="space-y-1.5">
             <div className="text-[11.5px] text-muted-foreground">
@@ -178,6 +190,7 @@ export function AuthCard({
               "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。",
             )}
           </p>
+          </div>
         </div>
       </div>
     </div>
