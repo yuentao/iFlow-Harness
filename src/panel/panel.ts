@@ -864,6 +864,12 @@ export class ChatPanel implements vscode.Disposable {
     this.client = null;
     await oldClient?.dispose();
     this.store.replaceState(newSessionState(this.store.getState()));
+    // The stale currentModelId belongs to the previous endpoint — keep it out
+    // of restoreSession's fallback chain.
+    this.store.getState().currentModelId = null;
+    // Next session start defaults to the FIRST model of the new endpoint's
+    // live list (user directive) and pushes it to the CLI via set_model.
+    this.pendingModelReset = true;
     // Splash + "连接中" chip while the new CLI boots (can take 10-60s).
     this.store.markConnecting();
     // Remember for the next handshake (ensureClient reads these).
@@ -881,6 +887,12 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Credentials to push via authenticate on the next handshake, if any. */
   private pendingHandshakeCredentials: OpenAiCompatCredentials | null = null;
+  /**
+   * Set by a profile switch; consumed by the next session start. The default
+   * model becomes the FIRST entry of the new endpoint's live list (the CLI's
+   * own current model may still point at the previous profile's endpoint).
+   */
+  private pendingModelReset = false;
 
   /** Replay-title extraction state for the session currently being loaded. */
   private replayTitle: string | null = null;
@@ -995,7 +1007,13 @@ export class ChatPanel implements vscode.Disposable {
       // Model list: same live-endpoint-only source as a fresh session,
       // otherwise the model dropdown would vanish after a restore.
       const models = await this.queryLiveModels();
-      const currentModelId = this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? models[0]?.id ?? null;
+      // After a profile switch the stored currentModelId belongs to the
+      // previous endpoint — default to the new list's first entry instead.
+      const modelReset = this.pendingModelReset;
+      this.pendingModelReset = false;
+      const currentModelId = modelReset
+        ? models[0]?.id ?? null
+        : this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? models[0]?.id ?? null;
       if (currentModelId && !models.some((m) => m.id === currentModelId)) {
         models.unshift({ id: currentModelId, name: currentModelId });
       }
@@ -1007,6 +1025,10 @@ export class ChatPanel implements vscode.Disposable {
         models,
         currentModelId,
       });
+      // Keep the restored session's actual model in sync with the selection.
+      if (modelReset && currentModelId && currentModelId !== (meta?.models?.currentModelId ?? null)) {
+        await this.setModel(currentModelId);
+      }
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.recordSession(loadedId, restored.firstUserText);
       void this.persistActiveTranscript(); // seed the extension-owned copy
@@ -1125,10 +1147,15 @@ export class ChatPanel implements vscode.Disposable {
         );
         // Explicit credentials from a profile switch take priority; otherwise
         // fall back to the persisted active slot.
+        const explicitSwitch = this.pendingHandshakeCredentials !== null;
         const storedCreds = this.pendingHandshakeCredentials ?? (await loadCredentials(this.context.secrets));
         this.pendingHandshakeCredentials = null;
         this.authMaskCache = storedCreds ? this.maskOf(storedCreds) : null;
-        if (!init.isAuthenticated) {
+        // A profile switch must ALWAYS re-push authenticate: the CLI caches
+        // auth across spawns and reports isAuthenticated=true for the PREVIOUS
+        // profile's endpoint (observed: BUZZ→商汤 switch skipped authenticate,
+        // prompts hit the BUZZ gateway with SenseTime models → model_not_found).
+        if (!init.isAuthenticated || explicitSwitch) {
           // M3 flow: push stored openai-compatible credentials to the agent.
           if (storedCreds) {
             try {
@@ -1351,7 +1378,13 @@ export class ChatPanel implements vscode.Disposable {
     // `_meta` catalog is hardcoded and not truthful for user-supplied
     // endpoints — per user directive, never fall back to it.
     const models = await this.queryLiveModels();
-    const currentModelId = meta?.models?.currentModelId ?? null;
+    const cliModelId = meta?.models?.currentModelId ?? null;
+    // After a profile switch the CLI's current model belongs to the previous
+    // endpoint — default to the FIRST model of the freshly queried list
+    // (user directive) and push it to the CLI so prompts actually use it.
+    const modelReset = this.pendingModelReset;
+    this.pendingModelReset = false;
+    let currentModelId = modelReset ? models[0]?.id ?? null : cliModelId;
     // The CLI's current model may be absent from the list; add it so the
     // controlled <select> doesn't render blank.
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
@@ -1368,6 +1401,9 @@ export class ChatPanel implements vscode.Disposable {
       models,
       currentModelId,
     });
+    if (modelReset && currentModelId && currentModelId !== cliModelId) {
+      await this.setModel(currentModelId);
+    }
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
     } finally {
