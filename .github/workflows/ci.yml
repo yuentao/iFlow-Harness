@@ -1,12 +1,13 @@
 name: CI
 
-# Quality gate on master pushes and PRs. Packaging/publishing runs only on
-# the release branch — see release.yml.
+# Quality gate: runs ONLY on the release branch (pushes and PRs targeting it).
+# Packaging/publishing runs in release.yml, also release-branch-only.
 
 on:
   push:
-    branches: [master]
+    branches: [release]
   pull_request:
+    branches: [release]
 
 jobs:
   build:

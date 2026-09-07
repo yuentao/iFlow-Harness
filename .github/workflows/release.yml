@@ -60,15 +60,8 @@ jobs:
       - name: Build & package (.vsix)
         run: npm run package
 
-      - name: Upload .vsix artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: iflow-vscode-vsix-${{ steps.changelog.outputs.version }}
-          path: "*.vsix"
-
-      # Create/update the git tag and a GitHub-style release with the notes.
-      # On non-GitHub remotes the release step may be a no-op; the artifact
-      # above is always produced.
+      # Create/update the git tag and a GitHub-style release with the notes,
+      # attaching the packaged .vsix as a downloadable asset.
       - name: Create release with notes
         uses: softprops/action-gh-release@v2
         with:
@@ -76,3 +69,4 @@ jobs:
           name: v${{ steps.changelog.outputs.version }}
           body: ${{ steps.changelog.outputs.notes }}
           make_latest: true
+          files: iflow-harness-*.vsix
