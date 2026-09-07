@@ -2,10 +2,25 @@
   "name": "iflow-vscode",
   "displayName": "iFlow Agent",
   "description": "iFlow CLI graphical agent for VSCode (ACP-based)",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "publisher": "iflow",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://git.pandorastudio.cn/product/iFlow-harness.git"
+  },
+  "keywords": [
+    "iflow",
+    "ai",
+    "agent",
+    "acp",
+    "chat"
+  ],
+  "categories": [
+    "AI",
+    "Chat"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -115,15 +130,17 @@
     "webview:dev": "vite build webview --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "harness": "node scripts/harness.mjs"
+    "harness": "node scripts/harness.mjs",
+    "package": "npm run build && vsce package --no-dependencies --baseContentUrl https://git.pandorastudio.cn/product/iFlow-harness/raw/branch/master/ --baseImagesUrl https://git.pandorastudio.cn/product/iFlow-harness/raw/branch/master/"
   },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
-    "@types/vscode": "^1.136.0",
+    "@types/vscode": "1.90.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",

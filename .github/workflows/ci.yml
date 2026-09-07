@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build (host + webview)
+        run: npm run build
+
+      - name: Package (.vsix)
+        if: runner.os == 'Linux'
+        run: npx vsce package --no-dependencies
+
+      # macOS/Linux only: extension host is bundled cross-platform, one artifact suffices.
+      - name: Upload .vsix artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: iflow-vscode-vsix
+          path: "*.vsix"

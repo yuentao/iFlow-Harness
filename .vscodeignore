@@ -1,0 +1,26 @@
+# Everything needed at runtime is bundled: dist/extension.cjs (esbuild),
+# webview/dist/** (vite), media/, plus package.json / README / LICENSE.
+.vscode/**
+.github/**
+src/**
+test/**
+docs/**
+scripts/**
+shared/**
+webview/src/**
+webview/index.html
+webview/vite.config.ts
+webview/tsconfig.json
+tsconfig.json
+tsconfig.test.json
+vitest.config.ts
+esbuild.mjs
+.gitignore
+# tsc emits intermediate output here; the host bundle is dist/extension.cjs.
+dist/src/**
+dist/shared/**
+node_modules/**
+*.vsix
+m4-initial.jpg
+iflow.js.original
+session-*.md
