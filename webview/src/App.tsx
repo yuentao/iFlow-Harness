@@ -34,12 +34,6 @@ function statusChip(status: AgentStatus) {
           <span className="size-1.5 rounded-full bg-success" /> {t("就绪")}
         </Chip>
       );
-    case "streaming":
-      return (
-        <Chip tone="primary">
-          <Loader2 className="size-2.5 animate-spin" /> {t("正在生成")}
-        </Chip>
-      );
     case "error":
       return (
         <Chip tone="danger">
