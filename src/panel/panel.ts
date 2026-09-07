@@ -146,6 +146,8 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
     void this.client?.dispose();
     this.client = null;
+    this.editorPanel?.dispose();
+    this.editorPanel = undefined;
     this.statusBar.dispose();
     this.log.dispose();
   }
@@ -168,6 +170,60 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     void this.ensureClient().catch((error) => {
       this.log.error("initial connect failed", error instanceof Error ? error : String(error));
     });
+  }
+
+  // --- Editor-tab mode (WebviewPanel) -----------------------------------------
+  // Opens the same UI in a wide, resizable editor tab. Both containers share
+  // one ChatPanel: single ACP client / store, messages route identically.
+
+  private editorPanel: vscode.WebviewPanel | undefined;
+
+  /** Open (or reveal) the chat as an editor tab with a generous width. */
+  openEditorTab(): void {
+    if (this.editorPanel) {
+      void this.editorPanel.reveal(undefined, true);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      "iflow.chatEditor",
+      vscode.l10n.t("心流·驭光"),
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      {
+        enableScripts: true,
+        localResourceRoots: [this.context.extensionUri],
+        retainContextWhenHidden: true,
+      },
+    );
+    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "media", "iflow.svg");
+    this.editorPanel = panel;
+    this.wireWebview(panel.webview);
+    // Track the active container so status pushes go to the visible one.
+    panel.onDidChangeViewState(
+      () => {
+        if (panel.visible) this.view = undefined;
+      },
+      null,
+      this.context.subscriptions,
+    );
+    panel.onDidDispose(
+      () => {
+        if (this.editorPanel === panel) this.editorPanel = undefined;
+      },
+      null,
+      this.context.subscriptions,
+    );
+    this.postSnapshot();
+    this.postTheme();
+    void this.ensureClient().catch((error) => {
+      this.log.error("initial connect failed", error instanceof Error ? error : String(error));
+    });
+  }
+
+  /** Shared webview setup for both the sidebar view and the editor tab. */
+  private wireWebview(webview: vscode.Webview): void {
+    webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
+    webview.html = this.buildHtml(webview);
+    webview.onDidReceiveMessage((msg: WebviewToHost) => void this.handleWebviewMessage(msg));
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -322,7 +378,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   private postToWebview(message: unknown): void {
+    // Broadcast to every alive container (sidebar view and/or editor tab) —
+    // they share one store, so each stays a consistent projection.
     if (this.view) void this.view.webview.postMessage(message);
+    if (this.editorPanel) void this.editorPanel.webview.postMessage(message);
   }
 
   private postSnapshot(): void {

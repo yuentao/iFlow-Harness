@@ -13,7 +13,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("iflow.openPanel", async () => {
-      await vscode.commands.executeCommand("iflow.chatPanel.focus");
+      // Open as a wide, resizable editor tab (falls back to the sidebar view
+      // via the activity bar icon when a narrow panel is preferred).
+      panel.openEditorTab();
     }),
     vscode.commands.registerCommand("iflow.newSession", () => {
       void panel["handleWebviewMessage"]({ type: "newSession" } as never);
