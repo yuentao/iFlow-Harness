@@ -63,6 +63,12 @@ export class SessionStore {
     this.flush();
   }
 
+  /** Back to the splash state (profile-switch reconnect: old CLI is down, new one booting). */
+  markConnecting(): void {
+    this.state.status = "connecting";
+    this.flush();
+  }
+
   userPrompt(text: string, images?: string[]): void {
     beginUserPrompt(this.state, text, images);
     this.flush();

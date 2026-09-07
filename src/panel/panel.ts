@@ -858,9 +858,14 @@ export class ChatPanel implements vscode.Disposable {
   /** Tear down the current CLI connection and start fresh with new credentials. */
   private async reconnectWithCredentials(creds: OpenAiCompatCredentials): Promise<void> {
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
-    await this.client?.dispose();
+    // Detach the old client FIRST: dispose() kills its child process, and the
+    // resulting exit event must not be mistaken for a crashed session.
+    const oldClient = this.client;
     this.client = null;
+    await oldClient?.dispose();
     this.store.replaceState(newSessionState(this.store.getState()));
+    // Splash + "连接中" chip while the new CLI boots (can take 10-60s).
+    this.store.markConnecting();
     // Remember for the next handshake (ensureClient reads these).
     this.pendingHandshakeCredentials = creds;
     try {
@@ -1099,11 +1104,14 @@ export class ChatPanel implements vscode.Disposable {
           onSessionUpdate: (n) => this.onSessionUpdate(n),
           onStderr: () => {},
           onExit: () => {
-            if (!this.disposed) {
-              this.client = null;
-              this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
-              this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
-            }
+            // Ignore exits of clients that were replaced on purpose (profile
+            // switch / reconnect): their exit is expected, and marking an error
+            // here would flash a global "错误" while the new CLI is connecting.
+            // A stale instance exiting late must also not clobber this.client.
+            if (this.disposed || this.client !== client) return;
+            this.client = null;
+            this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
+            this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
           },
           onRequestPermission: (req: RequestPermissionRequest) =>
             this.requestPermissionFromUser(req),
