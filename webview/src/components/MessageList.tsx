@@ -92,6 +92,7 @@ function ThoughtLine({ block }: { block: ThoughtBlock }) {
 }
 
 function BlockView({ block }: { block: Block }) {
+  const send = useChat((s) => s.send);
   switch (block.kind) {
     case "user":
       return (
@@ -105,7 +106,8 @@ function BlockView({ block }: { block: Block }) {
                   className="msg-image"
                   src={src}
                   alt={`附件图片 ${i + 1}`}
-                  onClick={() => window.open(src, "_blank")}
+                  title="在 VSCode 中打开"
+                  onClick={() => send({ type: "openImage", dataUrl: src })}
                 />
               ))}
             </div>

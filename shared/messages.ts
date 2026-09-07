@@ -208,6 +208,8 @@ export type WebviewToHost =
   | { type: "searchFiles"; requestId: number; query: string }
   /** M5: prefill the composer (right-click "Add to iFlow Context"). */
   | { type: "setDraft"; text: string }
+  /** Open a user-attached image (data URL) in VSCode's image preview. */
+  | { type: "openImage"; dataUrl: string }
   /** M3: store openai-compatible credentials and authenticate a fresh session. */
   | { type: "saveAuth"; baseUrl: string; apiKey: string | null; modelName: string; profileName?: string | null }
   /** M3: forget stored credentials (CLI keeps its own). */

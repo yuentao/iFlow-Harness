@@ -93,10 +93,25 @@ export function parseModelsResponse(payload: unknown): string[] {
 }
 
 export async function queryModelIds(endpoint: ActiveEndpoint, timeoutMs = 10_000): Promise<string[]> {
-  const response = await fetch(normalizeModelsUrl(endpoint.baseUrl), {
-    headers: { Authorization: `Bearer ${endpoint.apiKey}` },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  // Resolve explicitly so failures carry the actual URL (user-typed profiles
+  // can hide typos; proxies/schemes surface here instead of an opaque error).
+  let url: URL;
+  const target = normalizeModelsUrl(endpoint.baseUrl);
+  try {
+    url = new URL(target);
+  } catch {
+    throw new Error(`模型地址无效: ${target}`);
+  }
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { Authorization: `Bearer ${endpoint.apiKey}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(`请求 ${url.host} 失败（地址 ${target}）: ${cause}`);
+  }
   if (!response.ok) throw new Error(`模型列表查询失败: HTTP ${response.status}`);
   return parseModelsResponse(await response.json());
 }

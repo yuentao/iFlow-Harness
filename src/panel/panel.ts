@@ -6,7 +6,7 @@
 import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
@@ -293,6 +293,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       case "searchFiles":
         void this.searchWorkspaceFiles(msg.requestId, msg.query);
         break;
+      case "openImage":
+        this.openImageAttachment(msg.dataUrl);
+        break;
       case "saveAuth":
         await this.saveAuthAndReconnect(msg.baseUrl, msg.apiKey, msg.modelName, msg.profileName ?? null);
         break;
@@ -383,6 +386,29 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   // --- Diff revert ----------------------------------------------------------------
+
+  /**
+   * Open an attached image (data URL) in VSCode's built-in image preview.
+   * The webview iframe is sandboxed without allow-popups, so window.open is
+   * blocked by the browser — the host materializes the data URL into a temp
+   * file and opens that instead.
+   */
+  private openImageAttachment(dataUrl: string): void {
+    const match = /^data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl);
+    if (!match) {
+      void vscode.window.showWarningMessage("无法打开该图片附件（数据格式异常）");
+      return;
+    }
+    const ext = match[1]!.toLowerCase().replace("jpeg", "jpg");
+    try {
+      const file = path.join(os.tmpdir(), `iflow-image-${Date.now()}.${ext}`);
+      writeFileSync(file, Buffer.from(match[2]!, "base64"));
+      void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      void vscode.window.showWarningMessage(`打开图片失败: ${message}`);
+    }
+  }
 
   /**
    * M5: fuzzy workspace file search for the @-mention popup. Plain
