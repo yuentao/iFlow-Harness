@@ -1,6 +1,6 @@
 {
-  "name": "iflow-vscode",
-  "displayName": "iFlow Agent",
+  "name": "iflow-harness",
+  "displayName": "iFlow Harness（心流·驭光）",
   "description": "iFlow CLI graphical agent for VSCode (ACP-based)",
   "version": "0.1.0",
   "type": "module",
@@ -33,7 +33,7 @@
       "activitybar": [
         {
           "id": "iflow-chat",
-          "title": "iFlow Agent",
+          "title": "iFlow Harness（心流·驭光）",
           "icon": "media/iflow.svg"
         }
       ]
@@ -94,7 +94,7 @@
       ]
     },
     "configuration": {
-      "title": "iFlow Agent",
+      "title": "iFlow Harness（心流·驭光）",
       "properties": {
         "iflow.cliPath": {
           "type": "string",

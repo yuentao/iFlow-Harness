@@ -98,12 +98,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     private readonly context: vscode.ExtensionContext,
     private readonly services: PanelServices = {},
   ) {
-    this.log = vscode.window.createOutputChannel("iFlow Agent", { log: true });
+    this.log = vscode.window.createOutputChannel("iFlow Harness（心流·驭光）", { log: true });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m) });
     this.store.onStateChange = (state) => this.updateStatusBar(state);
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = "iflow.openPanel";
-    this.statusBar.tooltip = "iFlow Agent — 点击打开聊天面板";
+    this.statusBar.tooltip = "iFlow Harness（心流·驭光）— 点击打开聊天面板";
   }
 
   private updateStatusBar(state: SessionState): void {
@@ -170,7 +170,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     try {
       raw = readFileSync(absIndex, "utf8");
     } catch {
-      return `<html><body><h3>webview assets missing</h3><p>Run <code>npm run build</code> in iflow-vscode/</p></body></html>`;
+      return `<html><body><h3>webview assets missing</h3><p>Run <code>npm run build</code> in iflow-harness/</p></body></html>`;
     }
     const nonce = Array.from({ length: 24 }, () => Math.random().toString(36).slice(2)).join("");
     // Rewrite relative asset refs (./assets/...) to webview URIs, then nonce scripts.

@@ -1,6 +1,6 @@
-# iFlow Agent for VSCode
+# iFlow Harness for VSCode
 
-iFlow CLI 的 VSCode 图形前端：通过 [ACP（Agent Client Protocol）](https://agentclientprotocol.com) 驱动本地 iFlow CLI，在侧边栏完成对话、工具审批、代码评审与文件修改的完整 agent 工作流。
+**心流·驭光** — iFlow CLI 的 VSCode 图形前端：通过 [ACP（Agent Client Protocol）](https://agentclientprotocol.com) 驱动本地 iFlow CLI，在侧边栏完成对话、工具审批、代码评审与文件修改的完整 agent 工作流。
 
 ## 功能
 
@@ -22,7 +22,7 @@ iFlow CLI 的 VSCode 图形前端：通过 [ACP（Agent Client Protocol）](http
 
 ## 使用
 
-1. 安装扩展后打开侧边栏 iFlow Agent 面板
+1. 安装扩展后打开侧边栏 iFlow Harness 面板
 2. 首次使用按提示配置 API 凭据（或使用 CLI 已有配置）
 3. 输入消息开始对话；工具调用会在面板中请求审批
 
