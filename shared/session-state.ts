@@ -490,12 +490,14 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           taskToolCallId: null,
           title: l10n.t("子智能体"),
           status: "in_progress",
+          agentType: null,
           entries: [],
         };
         blocks.push(sidechain);
       }
+      const current = sidechain;
       if (entry.type === "user" && typeof content === "string" && content.trim()) {
-        sidechain.entries.push({ kind: "text", text: content.trim() });
+        current.entries.push({ kind: "text", text: content.trim() });
       }
       if (entry.type === "assistant" && Array.isArray(content)) {
         for (const block of content as Array<{
@@ -506,9 +508,9 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           input?: { description?: string; prompt?: string };
         }>) {
           if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
-            sidechain.entries.push({ kind: "text", text: block.text });
+            current.entries.push({ kind: "text", text: block.text });
           } else if (block?.type === "tool_use" && typeof block.id === "string") {
-            sidechain.entries.push({
+            current.entries.push({
               kind: "tool",
               toolCallId: block.id,
               toolName: block.name ?? "",
@@ -559,12 +561,14 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           // The SubAgent-spawning `task` call renders as a SubAgent card and
           // adopts the sidechain run that follows it, if any.
           if (block.name === "task") {
+            const desc = block.input?.description || block.name || l10n.t("子智能体");
             const nextSidechain: SubAgentBlock = {
               kind: "subagent",
               agentId: block.id,
               taskToolCallId: block.id,
-              title: block.input?.description || block.name || l10n.t("子智能体"),
+              title: desc,
               status: "completed",
+              agentType: extractAgentType(desc),
               entries: [],
             };
             blocks.push(nextSidechain);
