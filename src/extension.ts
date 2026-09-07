@@ -13,7 +13,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("iflow.openPanel", async () => {
-      await vscode.commands.executeCommand("iflow-chat.Chat.focus");
+      await vscode.commands.executeCommand("iflow.chatPanel.focus");
     }),
     vscode.commands.registerCommand("iflow.newSession", () => {
       void panel["handleWebviewMessage"]({ type: "newSession" } as never);

@@ -55,8 +55,8 @@ export class SessionStore {
     this.flush();
   }
 
-  userPrompt(text: string): void {
-    beginUserPrompt(this.state, text);
+  userPrompt(text: string, images?: string[]): void {
+    beginUserPrompt(this.state, text, images);
     this.flush();
   }
 

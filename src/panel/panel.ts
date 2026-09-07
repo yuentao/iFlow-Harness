@@ -219,7 +219,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   /** Right-click "Ask iFlow": send the selection as a prompt immediately. */
   async askSelection(relPath: string, range: string, code: string): Promise<void> {
-    await vscode.commands.executeCommand("iflow-chat.Chat.focus");
+    await vscode.commands.executeCommand("iflow.chatPanel.focus");
     const prompt = [
       `请解释/处理这段代码（\`${relPath}:${range}\`）：`,
       "",
@@ -232,7 +232,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   /** Right-click "Add to iFlow Context": prefill the composer for editing. */
   addToContext(relPath: string, range: string, code: string): void {
-    void vscode.commands.executeCommand("iflow-chat.Chat.focus");
+    void vscode.commands.executeCommand("iflow.chatPanel.focus");
     const draft = [
       `关于 \`${relPath}:${range}\`：`,
       "",
@@ -890,27 +890,9 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       }
       this.store.replaceTranscript(restored.blocks);
 
-      // Model list: same logic as a fresh session, otherwise the model
-      // dropdown would vanish after a restore.
-      const models: SessionState["models"] = [...this.store.getState().models];
-      const catalogModels = (meta?.models?.availableModels ?? []).map((m) => ({
-        id: m.id,
-        name: m.name,
-        thinking: m.capabilities?.thinking,
-      }));
-      if (catalogModels.length > 0) models.splice(0, models.length, ...catalogModels);
-      const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
-      if (endpoint) {
-        try {
-          const ids = await queryModelIds(endpoint);
-          if (ids.length > 0) {
-            models.length = 0;
-            for (const id of ids) models.push({ id, name: id });
-          }
-        } catch {
-          // Endpoint unreachable: keep the catalog/current fallback.
-        }
-      }
+      // Model list: same live-endpoint-only source as a fresh session,
+      // otherwise the model dropdown would vanish after a restore.
+      const models = await this.queryLiveModels();
       const currentModelId = this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? models[0]?.id ?? null;
       if (currentModelId && !models.some((m) => m.id === currentModelId)) {
         models.unshift({ id: currentModelId, name: currentModelId });
@@ -1213,6 +1195,24 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     return false;
   }
 
+  /**
+   * Live model list from the active endpoint (`GET {baseUrl}/models`).
+   * Per user directive the CLI's hardcoded `_meta` catalog is NEVER used as a
+   * fallback: an unreachable or empty endpoint yields an empty list (the CLI's
+   * current model stays selectable so the dropdown isn't blank).
+   */
+  private async queryLiveModels(): Promise<SessionState["models"]> {
+    const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
+    if (!endpoint) return [];
+    try {
+      return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log.warn(`模型列表查询失败（不回退 CLI 内置目录）: ${message}`);
+      return [];
+    }
+  }
+
   private async startNewSession(): Promise<void> {
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
@@ -1223,29 +1223,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     // A new session invalidates any approvals from the old one.
     this.cancelAllApprovals("会话已重置");
     store.replaceState(newSessionState(store.getState()));
-    // Model dropdown: query the active endpoint's live `/models` — the CLI's
-    // `_meta` catalog is hardcoded official models and not truthful for
-    // user-supplied (openai-compatible) endpoints. The endpoint follows the
-    // extension's active profile (SecretStorage) when present. Falls back to
-    // the catalog when the endpoint query fails or yields nothing.
-    const models: SessionState["models"] = (meta?.models?.availableModels ?? []).map((m) => ({
-      id: m.id,
-      name: m.name,
-      thinking: m.capabilities?.thinking,
-    }));
+    // Model dropdown: live query of the active endpoint's `/models`. The CLI's
+    // `_meta` catalog is hardcoded and not truthful for user-supplied
+    // endpoints — per user directive, never fall back to it.
+    const models = await this.queryLiveModels();
     const currentModelId = meta?.models?.currentModelId ?? null;
-    const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
-    if (endpoint) {
-      try {
-        const ids = await queryModelIds(endpoint);
-        if (ids.length > 0) {
-          models.length = 0;
-          for (const id of ids) models.push({ id, name: id });
-        }
-      } catch {
-        // Endpoint unreachable / bad response: keep the CLI catalog fallback.
-      }
-    }
     // The CLI's current model may be absent from the list; add it so the
     // controlled <select> doesn't render blank.
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
@@ -1273,7 +1255,10 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       const client = await this.ensureClient();
       const sessionId = this.store.getState().sessionId;
       if (!sessionId) throw new Error("会话未就绪");
-      this.store.userPrompt(trimmed);
+      this.store.userPrompt(
+        trimmed,
+        (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
+      );
       void this.labelSessionWithPrompt(trimmed);
       void this.persistActiveTranscript(); // user turn lands even on a crash
       const prompt: ContentBlock[] = [{ type: "text", text: trimmed }];

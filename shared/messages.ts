@@ -42,6 +42,8 @@ export interface ThoughtBlock {
 export interface UserBlock {
   kind: "user";
   text: string;
+  /** Attached images as data URLs (M5 image input), absent for text-only prompts. */
+  images?: string[];
 }
 
 export interface ToolBlock {

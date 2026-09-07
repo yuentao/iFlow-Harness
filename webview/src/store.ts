@@ -17,7 +17,16 @@ function createMockHost(): HostApi {
     window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 60);
   };
   const demoBlocks: SessionState["blocks"] = [
-    { kind: "user", text: "帮我看看这个仓库结构" },
+    {
+      kind: "user",
+      text: "帮我看看这个仓库结构",
+      images: [
+        "data:image/svg+xml;base64," +
+          btoa(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs><rect width="64" height="64" rx="12" fill="url(#g)"/></svg>',
+          ),
+      ],
+    },
     { kind: "thought", text: "用户想了解仓库结构，先列出目录。" },
     {
       kind: "tool",

@@ -172,6 +172,28 @@ body {
   margin-left: 32px;
 }
 
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.msg-image {
+  height: 72px;
+  max-width: 180px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  cursor: zoom-in;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.msg-image:hover {
+  transform: translateY(-1px) scale(1.02);
+  border-color: var(--vscode-focusBorder, rgba(90, 140, 255, 0.6));
+}
+
 .thought {
   margin: 6px 0;
   font-size: 12px;

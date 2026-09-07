@@ -97,6 +97,19 @@ function BlockView({ block }: { block: Block }) {
       return (
         <div className="msg user">
           <Markdown text={block.text} />
+          {block.images && block.images.length > 0 && (
+            <div className="msg-images">
+              {block.images.map((src, i) => (
+                <img
+                  key={i}
+                  className="msg-image"
+                  src={src}
+                  alt={`附件图片 ${i + 1}`}
+                  onClick={() => window.open(src, "_blank")}
+                />
+              ))}
+            </div>
+          )}
         </div>
       );
     case "text":

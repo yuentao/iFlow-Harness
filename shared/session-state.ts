@@ -151,8 +151,8 @@ export function extractDiff(content: unknown): ToolDiffUi | null {
 
 // --- host-level transitions -------------------------------------------------
 
-export function beginUserPrompt(state: SessionState, text: string): void {
-  state.blocks.push({ kind: "user", text });
+export function beginUserPrompt(state: SessionState, text: string, images?: string[]): void {
+  state.blocks.push(images && images.length > 0 ? { kind: "user", text, images } : { kind: "user", text });
   state.status = "streaming";
   state.stopReason = null;
   state.errorMessage = null;

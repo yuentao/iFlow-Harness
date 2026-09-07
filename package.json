@@ -32,6 +32,16 @@
         }
       ]
     },
+    "chatParticipants": [
+      {
+        "id": "iflow.agent",
+        "name": "iflow",
+        "fullName": "iFlow",
+        "description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",
+        "isSticky": true,
+        "commands": []
+      }
+    ],
     "commands": [
       {
         "command": "iflow.openPanel",
