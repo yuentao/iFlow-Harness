@@ -29,7 +29,7 @@ export function AuthCard({
   const [formError, setFormError] = useState<string | null>(null);
 
   const hasStored = auth.saved !== null;
-  const keyPlaceholder = hasStored ? `已保存（${auth.saved.keyTail}）— 留空保持不变` : "sk-…";
+  const keyPlaceholder = auth.saved ? `已保存（${auth.saved.keyTail}）— 留空保持不变` : "sk-…";
 
   function submit() {
     const b = baseUrl.trim();

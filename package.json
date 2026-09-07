@@ -42,8 +42,32 @@
         "command": "iflow.newSession",
         "title": "iFlow: New Session",
         "category": "iFlow"
+      },
+      {
+        "command": "iflow.askSelection",
+        "title": "Ask iFlow",
+        "category": "iFlow"
+      },
+      {
+        "command": "iflow.addSelectionToContext",
+        "title": "Add to iFlow Context",
+        "category": "iFlow"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "iflow.askSelection",
+          "when": "editorHasSelection",
+          "group": "9_iflow"
+        },
+        {
+          "command": "iflow.addSelectionToContext",
+          "when": "editorHasSelection",
+          "group": "9_iflow"
+        }
+      ]
+    },
     "configuration": {
       "title": "iFlow Agent",
       "properties": {

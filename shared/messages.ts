@@ -14,6 +14,10 @@ import type {
   StopReason,
 } from "../src/acp/protocol.js";
 
+// Webview components import wire types from this module — re-export the
+// protocol types they need.
+export type { SlashCommand };
+
 // ---------------------------------------------------------------------------
 // Transcript blocks (rendered in order)
 // ---------------------------------------------------------------------------
@@ -162,13 +166,20 @@ export function initialSessionState(): SessionState {
   };
 }
 
+/** One fuzzy-search file hit for the @-mention popup (M5). */
+export interface FileHitUi {
+  path: string;
+}
+
 // ---------------------------------------------------------------------------
 // Host → WebView messages
 // ---------------------------------------------------------------------------
 
 export type HostToWebview =
   | { type: "snapshot"; state: SessionState }
-  | { type: "toast"; level: "info" | "warning" | "error"; message: string };
+  | { type: "toast"; level: "info" | "warning" | "error"; message: string }
+  /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
+  | { type: "fileList"; requestId: number; hits: FileHitUi[] };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -176,7 +187,8 @@ export type HostToWebview =
 
 export type WebviewToHost =
   | { type: "ready" }
-  | { type: "sendPrompt"; text: string }
+  /** `images`: base64 (no data: prefix) screenshots/pasted images. */
+  | { type: "sendPrompt"; text: string; images?: { data: string; mimeType: string }[] }
   | { type: "cancel" }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
@@ -188,6 +200,12 @@ export type WebviewToHost =
   | { type: "respondApproval"; id: string; optionId: string | null }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
+  /** M5: open the tool's change in VSCode's native diff editor. */
+  | { type: "openDiff"; toolCallId: string }
+  /** M5: fuzzy-search workspace files for the @-mention popup. */
+  | { type: "searchFiles"; requestId: number; query: string }
+  /** M5: prefill the composer (right-click "Add to iFlow Context"). */
+  | { type: "setDraft"; text: string }
   /** M3: store openai-compatible credentials and authenticate a fresh session. */
   | { type: "saveAuth"; baseUrl: string; apiKey: string | null; modelName: string; profileName?: string | null }
   /** M3: forget stored credentials (CLI keeps its own). */

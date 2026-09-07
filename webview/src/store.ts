@@ -158,6 +158,7 @@ function createMockHost(): HostApi {
       { id: "mock-session-old", label: "上次的重构讨论", updatedAt: Date.now() - 86_400_000 },
     ],
     activeSessionId: "mock-session",
+    replaying: false,
   };
   // M3 demo: start unauthenticated so the setup banner shows; saved state
   // mirrors what the real host stores (masked, never the raw key).
@@ -447,6 +448,28 @@ function createMockHost(): HostApi {
         });
         return;
       }
+      if (m.type === "searchFiles") {
+        // Demo workspace listing for the @-mention popup.
+        const demo = [
+          "src/App.tsx",
+          "src/components/Composer.tsx",
+          "src/components/MessageList.tsx",
+          "src/store.ts",
+          "src/main.tsx",
+          "shared/messages.ts",
+          "shared/session-state.ts",
+          "package.json",
+          "docs/plan.md",
+          "README.md",
+        ];
+        const q = m.query.trim().toLowerCase();
+        const hits = demo.filter((p) => p.toLowerCase().includes(q)).slice(0, 12).map((path) => ({ path }));
+        window.setTimeout(
+          () => window.dispatchEvent(new MessageEvent("message", { data: { type: "fileList", requestId: m.requestId, hits } })),
+          50,
+        );
+        return;
+      }
       if (m.type === "sendPrompt") {
         sendPromptFlow(m.text);
       }
@@ -465,6 +488,9 @@ interface ChatStore {
 export const useChat = create<ChatStore>((set) => ({
   state: null,
   applyHostMessage: (msg) => {
+    // Only the snapshot updates the store. Other message kinds (fileList,
+    // setDraft) are consumed by their own window-level listeners — Composer
+    // registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") set({ state: msg.state });
   },
   send: (msg) => vscode.postMessage(msg),

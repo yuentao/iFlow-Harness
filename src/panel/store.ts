@@ -26,6 +26,8 @@ export class SessionStore {
   private post: (message: HostToWebview) => void;
   private flushTimer: NodeJS.Timeout | null = null;
   private readonly flushIntervalMs: number;
+  /** Fired whenever the state changed materially (status bar, M5). */
+  onStateChange: ((state: SessionState) => void) | null = null;
 
   constructor(options: { post: (message: HostToWebview) => void; flushIntervalMs?: number }) {
     this.post = options.post;
@@ -137,6 +139,7 @@ export class SessionStore {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    this.onStateChange?.(this.state);
     this.post({ type: "snapshot", state: structuredClone(this.state) });
   }
 

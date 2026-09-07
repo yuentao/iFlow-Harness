@@ -48,13 +48,22 @@ function ToolLine({ block }: { block: ToolBlock }) {
           </a>
         )}
         {block.status === "completed" && hasDiff && block.diff!.oldText !== null && (
-          <button
-            className="btn tool-revert"
-            title="将该文件恢复为编辑前内容"
-            onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
-          >
-            ↩ Revert
-          </button>
+          <>
+            <button
+              className="btn tool-revert"
+              title="在 VSCode diff 视图中查看该变更"
+              onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
+            >
+              ⤢ Diff
+            </button>
+            <button
+              className="btn tool-revert"
+              title="将该文件恢复为编辑前内容"
+              onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
+            >
+              ↩ Revert
+            </button>
+          </>
         )}
         {hasDiff && (
           <button className="tool-diff-toggle" onClick={() => setShowDiff((v) => !v)}>

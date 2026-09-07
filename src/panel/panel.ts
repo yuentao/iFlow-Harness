@@ -4,6 +4,7 @@
  */
 
 import * as vscode from "vscode";
+import os from "node:os";
 import path from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
@@ -25,12 +26,13 @@ import {
 import { readCliSettings } from "../acp/models-query.js";
 import type { AuthUiState } from "../../shared/messages.js";
 import type {
+  ContentBlock,
   NewSessionMeta,
   PermissionOption,
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, SessionState, SessionSummaryUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import {
   beginReplay,
   endReplay,
@@ -76,6 +78,8 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private disposed = false;
   /** Diagnostics trail visible in the Output panel (helps locate connect issues). */
   private readonly log: vscode.LogOutputChannel;
+  /** M5: agent status at a glance (idle / streaming / approval / error + model). */
+  private readonly statusBar: vscode.StatusBarItem;
   /** cwd the current ACP session was created with (base for relative paths). */
   private sessionCwd: string | null = null;
   /** Awaiting user answers for `session/request_permission`, keyed by approval id. */
@@ -96,6 +100,40 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   ) {
     this.log = vscode.window.createOutputChannel("iFlow Agent", { log: true });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m) });
+    this.store.onStateChange = (state) => this.updateStatusBar(state);
+    this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    this.statusBar.command = "iflow.openPanel";
+    this.statusBar.tooltip = "iFlow Agent — 点击打开聊天面板";
+  }
+
+  private updateStatusBar(state: SessionState): void {
+    const model = state.currentModelId ? ` · ${state.currentModelId}` : "";
+    const mode = state.modes ? ` · ${state.modes.currentModeId}` : "";
+    let text: string;
+    let background: vscode.ThemeColor | undefined;
+    switch (state.status) {
+      case "connecting":
+        text = `$(sync~spin) iFlow${model}`;
+        break;
+      case "streaming":
+        text = `$(sync~spin) iFlow: 生成中${model}`;
+        break;
+      case "error":
+        text = `$(error) iFlow: 出错${model}`;
+        background = new vscode.ThemeColor("statusBarItem.errorBackground");
+        break;
+      default:
+        text = state.pendingApproval
+          ? `$(bell) iFlow: 等待审批${model}`
+          : `$(check) iFlow${mode}${model}`;
+        background = state.pendingApproval
+          ? new vscode.ThemeColor("statusBarItem.warningBackground")
+          : undefined;
+    }
+    if (this.statusBar.text !== text || this.statusBar.backgroundColor !== background) {
+      this.statusBar.text = text;
+      this.statusBar.backgroundColor = background;
+    }
   }
 
   dispose(): void {
@@ -103,6 +141,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     this.cancelAllApprovals("扩展已停用");
     void this.client?.dispose();
     this.client = null;
+    this.statusBar.dispose();
     this.log.dispose();
   }
 
@@ -110,6 +149,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.statusBar.show();
     this.log.info("webview resolved — pushing initial snapshot");
     view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
     view.webview.html = this.buildHtml(view.webview);
@@ -150,6 +190,60 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     return withNonce.replace("<head>", `<head>\n<meta http-equiv="Content-Security-Policy" content="${csp}">`);
   }
 
+  /**
+   * M5: @iflow chat participant — run a prompt through the shared session and
+   * return the assistant text produced this turn (text-only fallback).
+   */
+  async chatForward(prompt: string, token: vscode.CancellationToken): Promise<string> {
+    const stateBefore = this.store.getState();
+    const textCountBefore = stateBefore.blocks.filter((b) => b.kind === "text").length;
+    void this.sendPrompt(prompt);
+    // Wait for completion (idle) or cancellation, polling the small store.
+    await new Promise<void>((resolve) => {
+      const timer = setInterval(() => {
+        if (token.isCancellationRequested) {
+          this.client?.cancel(this.store.getState().sessionId ?? "");
+        }
+        if (token.isCancellationRequested || this.store.getState().status === "idle") {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 200);
+    });
+    const blocks = this.store.getState().blocks;
+    const newTexts = blocks.filter((b) => b.kind === "text").slice(textCountBefore);
+    return newTexts.map((b) => (b.kind === "text" ? b.text : "")).join("\n").trim() || "（本轮无文本输出）";
+  }
+
+  // --- Editor selection entry points (M5) ---------------------------------------
+
+  /** Right-click "Ask iFlow": send the selection as a prompt immediately. */
+  async askSelection(relPath: string, range: string, code: string): Promise<void> {
+    await vscode.commands.executeCommand("iflow-chat.Chat.focus");
+    const prompt = [
+      `请解释/处理这段代码（\`${relPath}:${range}\`）：`,
+      "",
+      "```",
+      code,
+      "```",
+    ].join("\n");
+    await this.sendPrompt(prompt);
+  }
+
+  /** Right-click "Add to iFlow Context": prefill the composer for editing. */
+  addToContext(relPath: string, range: string, code: string): void {
+    void vscode.commands.executeCommand("iflow-chat.Chat.focus");
+    const draft = [
+      `关于 \`${relPath}:${range}\`：`,
+      "",
+      "```",
+      code,
+      "```",
+      "",
+    ].join("\n");
+    this.postToWebview({ type: "setDraft", text: draft });
+  }
+
   // --- WebView message routing -------------------------------------------------
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
@@ -159,7 +253,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         this.store.pushSnapshot();
         break;
       case "sendPrompt":
-        await this.sendPrompt(msg.text);
+        await this.sendPrompt(msg.text, msg.images);
         break;
       case "cancel":
         this.client?.cancel(this.store.getState().sessionId ?? "");
@@ -192,6 +286,12 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
         break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
+        break;
+      case "openDiff":
+        await this.openToolDiff(msg.toolCallId);
+        break;
+      case "searchFiles":
+        void this.searchWorkspaceFiles(msg.requestId, msg.query);
         break;
       case "saveAuth":
         await this.saveAuthAndReconnect(msg.baseUrl, msg.apiKey, msg.modelName, msg.profileName ?? null);
@@ -284,16 +384,85 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
 
   // --- Diff revert ----------------------------------------------------------------
 
-  private async revertToolDiff(toolCallId: string): Promise<void> {
-    const block = this.store
-      .getState()
-      .blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
+  /**
+   * M5: fuzzy workspace file search for the @-mention popup. Plain
+   * `findFiles` (glob-excludes) + a simple relevance score is plenty at this
+   * scale and avoids pulling in a fuzzy-matching dependency.
+   */
+  private async searchWorkspaceFiles(requestId: number, query: string): Promise<void> {
+    const exclude = "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/coverage/**,**/.iflow/**}";
+    try {
+      const uris = await vscode.workspace.findFiles("**/*", exclude, 500);
+      const q = query.trim().toLowerCase();
+      const scored = uris.map((uri) => {
+        const rel = path.relative(
+          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+          uri.fsPath,
+        ).replace(/\\/g, "/");
+        let score = 0;
+        if (q) {
+          const lower = rel.toLowerCase();
+          const idx = lower.indexOf(q);
+          if (idx >= 0) score += 100 - Math.min(50, idx); // earlier match = better
+          else {
+            // subsequence match (fuzzy) — weaker signal
+            let qi = 0;
+            for (const ch of lower) {
+              if (ch === q[qi]) qi++;
+              if (qi >= q.length) break;
+            }
+            if (qi >= q.length) score += 20;
+            else score = -1;
+          }
+          // Prefer shallower paths and source files.
+          score += Math.max(0, 10 - rel.split("/").length);
+        }
+        return { rel, score };
+      })
+        .filter((s) => s.score >= 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 12);
+      this.postToWebview({ type: "fileList", requestId, hits: scored.map((s) => ({ path: s.rel })) });
+    } catch (error) {
+      this.log.warn(`file search failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.postToWebview({ type: "fileList", requestId, hits: [] });
+    }
+  }
+
+  /**
+   * M5: open the tool's change in VSCode's native diff editor
+   * (left: temp file with the pre-edit content, right: current disk file).
+   */
+  private async openToolDiff(toolCallId: string): Promise<void> {
+    const state = this.store.getState();
+    const block = state.blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
     if (!block || block.kind !== "tool" || !block.diff) return;
-    const { path: rawPath, oldText, newText } = block.diff;
+    const { oldText, newText } = block.diff;
     if (oldText === null) {
-      vscode.window.showWarningMessage("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）");
+      void vscode.window.showWarningMessage("无法打开 diff：缺少编辑前内容");
       return;
     }
+    const chosen = await this.locateDiffFile(block);
+    if (!chosen) return;
+
+    // Left side: a temp file holding the pre-edit content. Files live in the
+    // OS temp dir (cleaned by the system); the .ts suffix gives highlighting.
+    const suffix = path.extname(chosen) || ".txt";
+    const tmpOld = path.join(os.tmpdir(), `iflow-old-${Date.now()}-${path.basename(chosen)}`);
+    const tmpUri = vscode.Uri.file(tmpOld + (suffix ? "" : suffix));
+    try {
+      await vscode.workspace.fs.writeFile(tmpUri, Buffer.from(oldText, "utf8"));
+    } catch (error) {
+      void vscode.window.showErrorMessage(`打开 diff 失败: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const title = `${path.basename(chosen)} (${block.toolName || "edit"})`;
+    await vscode.commands.executeCommand("vscode.diff", tmpUri, vscode.Uri.file(chosen), title);
+  }
+
+  /** Resolve which file on disk a tool diff refers to (shared by diff/revert). */
+  private async locateDiffFile(block: ToolBlock): Promise<string | null> {
+    const { path: rawPath, newText } = block.diff!;
     // The CLI may send workspace-relative paths; resolve them against the cwd
     // the session was created with (the Extension Host's process.cwd() is not
     // necessarily the workspace).
@@ -320,56 +489,59 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     addCandidate(rawPath);
     for (const loc of block.locations ?? []) addCandidate(loc.path);
 
-    let chosen: string | null = null;
     for (const candidate of candidates) {
       const decisive = await this.probeRevertCandidate(candidate, newText);
-      if (decisive) {
-        chosen = candidate; // disk content === diff newText: the edited file
-        break;
-      }
+      if (decisive) return candidate; // disk content === diff newText: the edited file
     }
 
-    if (!chosen) {
-      // All direct candidates failed (CLI sent a tool-relative path without a
-      // usable locations entry). Fall back to a bounded basename search under
-      // the session root and workspace folders.
-      const basename = path.basename(rawPath.replace(/\\/g, "/"));
-      const roots = new Set<string>();
-      if (sessionBase) roots.add(sessionBase);
-      for (const folder of vscode.workspace.workspaceFolders ?? []) roots.add(folder.uri.fsPath);
-      const matches: string[] = [];
-      for (const root of roots) {
-        matches.push(...(await this.findFileByBasename(root, basename)));
-        if (matches.length > 1) break; // enough for a picker
-      }
-      // Prefer the match whose content equals the diff's newText.
-      for (const match of matches) {
-        if (newText !== null && (await this.fileContentEquals(match, newText))) {
-          chosen = match;
-          break;
-        }
-      }
-      if (!chosen && matches.length === 1) chosen = matches[0]!;
-      if (!chosen && matches.length > 1) {
-        const pick = await vscode.window.showQuickPick(matches, {
-          placeHolder: `找到多个 "${basename}"，选择要回退的文件`,
-        });
-        if (!pick) return;
-        chosen = pick;
-      }
-      if (!chosen) {
-        // Last resort: let the user point at the file.
-        const picked = await vscode.window.showOpenDialog({
-          canSelectFiles: true,
-          canSelectFolders: false,
-          canSelectMany: false,
-          openLabel: "选择要回退的文件",
-          defaultUri: sessionBase ? vscode.Uri.file(sessionBase) : undefined,
-        });
-        if (!picked?.[0]) return;
-        chosen = picked[0].fsPath;
+    // All direct candidates failed (CLI sent a tool-relative path without a
+    // usable locations entry). Fall back to a bounded basename search under
+    // the session root and workspace folders.
+    const basename = path.basename(rawPath.replace(/\\/g, "/"));
+    const roots = new Set<string>();
+    if (sessionBase) roots.add(sessionBase);
+    for (const folder of vscode.workspace.workspaceFolders ?? []) roots.add(folder.uri.fsPath);
+    const matches: string[] = [];
+    for (const root of roots) {
+      matches.push(...(await this.findFileByBasename(root, basename)));
+      if (matches.length > 1) break; // enough for a picker
+    }
+    // Prefer the match whose content equals the diff's newText.
+    for (const match of matches) {
+      if (newText !== null && (await this.fileContentEquals(match, newText))) {
+        return match;
       }
     }
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length > 1) {
+      const pick = await vscode.window.showQuickPick(matches, {
+        placeHolder: `找到多个 "${basename}"，选择目标文件`,
+      });
+      return pick ?? null;
+    }
+    // Last resort: let the user point at the file.
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      openLabel: "选择目标文件",
+      defaultUri: sessionBase ? vscode.Uri.file(sessionBase) : undefined,
+    });
+    return picked?.[0]?.fsPath ?? null;
+  }
+
+  private async revertToolDiff(toolCallId: string): Promise<void> {
+    const block = this.store
+      .getState()
+      .blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
+    if (!block || block.kind !== "tool" || !block.diff) return;
+    const { oldText, newText } = block.diff;
+    if (oldText === null) {
+      vscode.window.showWarningMessage("无法回退：该 diff 缺少原始内容（可能是新建文件以外的信息缺失）");
+      return;
+    }
+    const chosen = await this.locateDiffFile(block);
+    if (!chosen) return;
 
     const fileUri = vscode.Uri.file(chosen);
     let currentText: string | null = null;
@@ -1094,7 +1266,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     await this.recordSession(session.sessionId, null);
   }
 
-  private async sendPrompt(text: string): Promise<void> {
+  private async sendPrompt(text: string, images?: { data: string; mimeType: string }[]): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
     try {
@@ -1104,7 +1276,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
       this.store.userPrompt(trimmed);
       void this.labelSessionWithPrompt(trimmed);
       void this.persistActiveTranscript(); // user turn lands even on a crash
-      const result = await client.prompt({ sessionId, prompt: [{ type: "text", text: trimmed }] });
+      const prompt: ContentBlock[] = [{ type: "text", text: trimmed }];
+      for (const img of images ?? []) {
+        prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
+      }
+      const result = await client.prompt({ sessionId, prompt });
       this.store.promptCompleted(result.stopReason);
       void this.persistActiveTranscript();
     } catch (error) {
