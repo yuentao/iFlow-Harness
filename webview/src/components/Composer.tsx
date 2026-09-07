@@ -85,7 +85,8 @@ export function Composer() {
   // Streaming, history replay, and new-session init all lock the composer's
   // switches (the agent / host is mid-operation; mode/model changes and
   // prompts would desync it). Stop stays available while streaming.
-  const busy = (state?.status === "streaming" || state?.replaying || state?.initializing) ?? false;
+  const streaming = state?.status === "streaming";
+  const busy = (streaming || state?.replaying || state?.initializing) ?? false;
   const commands: SlashCommand[] = state?.commands ?? [];
   const modes = state?.modes ?? null;
   const models = state?.models ?? [];
