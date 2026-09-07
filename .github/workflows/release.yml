@@ -33,11 +33,13 @@ jobs:
         run: npm test
 
       # Read version + notes from the first "## [x.y.z] - date" section of
-      # CHANGELOG.md. Exposed as steps.changelog.outputs.*.
+      # CHANGELOG.md. Exposed as steps.changelog.outputs.*. The script writes
+      # GITHUB_OUTPUT itself; nothing else may land on its stdout.
       - name: Read version & notes from CHANGELOG.md
         id: changelog
-        run: |
-          node scripts/read-changelog.mjs >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_OUTPUT: ${{ github.output }}
+        run: node scripts/read-changelog.mjs
 
       - name: Show resolved version
         run: |

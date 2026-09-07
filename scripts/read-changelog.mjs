@@ -29,9 +29,11 @@ if (!notes) {
 
 const out = process.env.GITHUB_OUTPUT;
 if (out) {
+  // GITHUB_OUTPUT only accepts `key=value` / heredoc records — any stray
+  // stdout (the run step redirects the whole script there) breaks parsing,
+  // so diagnostics go to stderr.
   appendFileSync(out, `version=${version}\n`);
-  // Multiline output via heredoc delimiter.
   appendFileSync(out, `notes<<CHANGELOG_NOTES_EOF\n${notes}\nCHANGELOG_NOTES_EOF\n`);
 }
-console.log(`version=${version}`);
-console.log(`notes: ${notes.split("\n").length} line(s)`);
+console.error(`version=${version}`);
+console.error(`notes: ${notes.split("\n").length} line(s)`);
