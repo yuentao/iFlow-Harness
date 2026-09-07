@@ -264,7 +264,7 @@ export function App() {
       )}
 
       {showAuthCard && (
-        <AuthCard auth={state.auth} editable={configOpen} onDismiss={() => setConfigOpen(false)} />
+        <AuthCard auth={state.auth} editable={configOpen} busy={busy} onDismiss={() => setConfigOpen(false)} />
       )}
 
       <MessageList />

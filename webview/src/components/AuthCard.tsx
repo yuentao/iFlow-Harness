@@ -5,21 +5,27 @@ import { useChat } from "../store";
 import { t } from "../i18n";
 
 /**
- * M3 auth card: API profile management + credential form.
+ * M3 auth card: API profile management + credential form, rendered as a
+ * centered modal.
  *
  * - Profile list: every known API config (extension-owned editable ones and
  *   read-only ones imported from the CLI's settings.json). One click switches
  *   the active profile (host re-authenticates the session with it).
  * - Form: saves credentials as a (new or updated) named profile and activates
  *   it. Empty API key keeps the stored one (shown masked).
+ * - While the agent is streaming, profile switching / deletion / saving would
+ *   re-authenticate the in-flight session — those actions are disabled
+ *   (viewing stays possible).
  */
 export function AuthCard({
   auth,
   editable,
+  busy,
   onDismiss,
 }: {
   auth: AuthUiState;
   editable: boolean;
+  busy: boolean;
   onDismiss: () => void;
 }) {
   const send = useChat((s) => s.send);
@@ -105,8 +111,9 @@ export function AuthCard({
                 }`}
               >
                 <button
-                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left disabled:pointer-events-none disabled:opacity-40"
                   title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
+                  disabled={busy}
                   onClick={() => {
                     if (!p.active) send({ type: "activateProfile", name: p.name });
                   }}
@@ -122,8 +129,9 @@ export function AuthCard({
                 </span>
                 {p.source === "extension" && (
                   <button
-                    className="shrink-0 text-[11px] text-muted-foreground opacity-70 hover:opacity-100 hover:text-destructive"
+                    className="shrink-0 text-[11px] text-muted-foreground opacity-70 hover:opacity-100 hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
                     title={t("删除 {0}", p.name)}
+                    disabled={busy}
                     onClick={() => send({ type: "deleteProfile", name: p.name })}
                   >
                     🗑
@@ -178,7 +186,8 @@ export function AuthCard({
           </label>
           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
             <button
-              className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+              className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+              disabled={busy}
               onClick={submit}
             >
               {t("保存并激活")}
