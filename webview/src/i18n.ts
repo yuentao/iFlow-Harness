@@ -64,6 +64,8 @@ const en: Record<string, string> = {
   "文件对比": "File diff",
   "任务清单": "Task list",
   "正在恢复历史会话…": "Restoring session…",
+  "正在创建新会话…": "Creating new session…",
+  "删除会话 {0}": "Delete session {0}",
   // composer
   "发送": "Send",
   "停止": "Stop",

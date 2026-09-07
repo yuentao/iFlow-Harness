@@ -348,6 +348,9 @@ export class ChatPanel implements vscode.Disposable {
       case "loadSession":
         await this.restoreSession(msg.sessionId);
         break;
+      case "deleteSession":
+        await this.deleteSession(msg.sessionId);
+        break;
     }
   }
 
@@ -920,6 +923,12 @@ export class ChatPanel implements vscode.Disposable {
     await this.persistSessions(sessions, activeId);
   }
 
+  /** User-invoked delete from the session switcher: forget + drop transcript. */
+  private async deleteSession(sessionId: string): Promise<void> {
+    await this.forgetSession(sessionId);
+    await this.clearTranscript(sessionId);
+  }
+
   /**
    * Restore a persisted session via `session/load`. Wire behavior (CLI
    * 0.5.19): load succeeds (sessionId + modes returned) but the CLI does NOT
@@ -1316,6 +1325,10 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async startNewSession(): Promise<void> {
+    // Lock the UI while the CLI spins up the new session (sessions/mode/model
+    // switches must not race the in-flight `session/new`).
+    this.store.setInitializing(true);
+    try {
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     this.sessionCwd = workspaceRoot;
@@ -1348,6 +1361,9 @@ export class ChatPanel implements vscode.Disposable {
     });
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
+    } finally {
+      this.store.setInitializing(false);
+    }
   }
 
   private async sendPrompt(text: string, images?: { data: string; mimeType: string }[]): Promise<void> {

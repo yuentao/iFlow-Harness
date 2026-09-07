@@ -82,7 +82,10 @@ export function Composer() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  const streaming = state?.status === "streaming";
+  // Streaming, history replay, and new-session init all lock the composer's
+  // switches (the agent / host is mid-operation; mode/model changes and
+  // prompts would desync it). Stop stays available while streaming.
+  const busy = (state?.status === "streaming" || state?.replaying || state?.initializing) ?? false;
   const commands: SlashCommand[] = state?.commands ?? [];
   const modes = state?.modes ?? null;
   const models = state?.models ?? [];
@@ -173,7 +176,7 @@ export function Composer() {
 
   function submit() {
     const value = text.trim();
-    if ((!value && images.length === 0) || streaming) return;
+    if ((!value && images.length === 0) || busy) return;
     send({
       type: "sendPrompt",
       text: value || t("（见附图）"),
@@ -356,7 +359,7 @@ export function Composer() {
                 <button
                   className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
                   title={t("权限模式")}
-                  disabled={streaming}
+                  disabled={busy}
                 >
                   <Zap className="size-3 shrink-0 text-primary" />
                   {currentMode ? modeDisplay(currentMode).label : ""}
@@ -401,7 +404,7 @@ export function Composer() {
                 <button
                   className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}
                   title={t("模型")}
-                  disabled={streaming}
+                  disabled={busy}
                 >
                   <span className="max-w-[130px] truncate">{state?.currentModelId ?? models[0]!.id}</span>
                   <ChevronDown className="size-3 shrink-0 opacity-60" />
@@ -436,10 +439,11 @@ export function Composer() {
           )}
 
           <div className="ml-auto flex items-center gap-1.5">
-            {streaming ? (
+            {busy ? (
               <button
                 className={`${CANVAS_BTN} text-muted-foreground hover:text-foreground`}
                 title={t("停止生成")}
+                disabled={!streaming}
                 onClick={() => send({ type: "cancel" })}
               >
                 <Square className="size-3" /> {t("停止")}

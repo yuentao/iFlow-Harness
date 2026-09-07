@@ -127,6 +127,12 @@ export class SessionStore {
     return ok;
   }
 
+  /** True while `session/new` is in flight; the webview locks switches. */
+  setInitializing(initializing: boolean): void {
+    this.state.initializing = initializing;
+    this.flush();
+  }
+
   /** Update the auth setup banner / form state (M3). */
   setAuth(auth: AuthUiState): void {
     this.state.auth = auth;

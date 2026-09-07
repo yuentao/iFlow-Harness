@@ -277,10 +277,10 @@ function MessageListInner({ state }: { state: SessionState }) {
         {state.blocks.map((block, i) => (
           <BlockView key={i} block={block} />
         ))}
-        {state.status === "streaming" && !state.pendingApproval && (
+        {(state.status === "streaming" || state.initializing) && !state.pendingApproval && state.blocks.length > 0 && (
           <div className="stream-in inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
             <Loader2 className="size-3 animate-spin" />
-            {t("正在生成")}
+            {state.initializing ? t("正在创建新会话…") : t("正在生成")}
             <span className="caret-blink inline-block h-3 w-[5px] bg-primary" />
           </div>
         )}

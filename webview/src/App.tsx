@@ -8,6 +8,7 @@ import {
   Plus,
   Settings2,
   Sun,
+  Trash2,
 } from "lucide-react";
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
@@ -91,9 +92,10 @@ export function App() {
   }
 
   const showAuthCard = state.auth.needsSetup || configOpen;
-  // While the agent is streaming (or an approval blocks it), switching the
-  // session / mode / model / profile would desync the in-flight ACP request.
-  const busy = state.status === "streaming";
+  // While the agent is streaming (or an approval blocks it), or while a new
+  // session / history restore is initializing, switching the session / mode /
+  // model / profile would desync the in-flight ACP request.
+  const busy = state.status === "streaming" || state.replaying || state.initializing;
   const activeSession = state.sessions.find((s) => s.id === state.activeSessionId);
   const sessionLabel =
     activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
@@ -218,26 +220,45 @@ export function App() {
                         {t("当前会话")}
                       </button>
                     )}
-                  {state.sessions.map((s) => (
-                    <button
-                      key={s.id}
-                      onClick={() => {
-                        send({ type: "loadSession", sessionId: s.id });
-                        close();
-                      }}
-                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
-                    >
-                      <span className="flex w-full items-center gap-2 text-[12px] text-foreground">
-                        <span className="truncate">{s.label}</span>
-                        {s.id === state.activeSessionId && (
-                          <Check className="ml-auto size-3 shrink-0 text-primary" />
+                  {state.sessions.map((s) => {
+                    const deletable = s.id !== state.activeSessionId && !busy;
+                    return (
+                      <div
+                        key={s.id}
+                        className="flex w-full items-center px-3 py-1.5 hover:bg-accent"
+                      >
+                        <button
+                          className="flex min-w-0 flex-1 flex-col items-start text-left"
+                          onClick={() => {
+                            send({ type: "loadSession", sessionId: s.id });
+                            close();
+                          }}
+                        >
+                          <span className="flex w-full items-center gap-2 text-[12px] text-foreground">
+                            <span className="truncate">{s.label}</span>
+                            {s.id === state.activeSessionId && (
+                              <Check className="ml-auto size-3 shrink-0 text-primary" />
+                            )}
+                          </span>
+                          <span className="font-mono text-[10px] text-muted-foreground">
+                            {formatSessionTime(s.updatedAt)}
+                          </span>
+                        </button>
+                        {deletable && (
+                          <button
+                            className="shrink-0 rounded p-0.5 text-[11px] text-muted-foreground opacity-60 hover:opacity-100 hover:text-destructive"
+                            title={t("删除会话 {0}", s.label)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              send({ type: "deleteSession", sessionId: s.id });
+                            }}
+                          >
+                            <Trash2 className="size-3" />
+                          </button>
                         )}
-                      </span>
-                      <span className="font-mono text-[10px] text-muted-foreground">
-                        {formatSessionTime(s.updatedAt)}
-                      </span>
-                    </button>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </Dropdown>

@@ -127,6 +127,8 @@ export interface SessionState {
   activeSessionId: string | null;
   /** True while history is being replayed after `session/load` (M4). */
   replaying: boolean;
+  /** True while a new session is being created (host busy; UI locks switches). */
+  initializing: boolean;
 }
 
 export interface AuthUiState {
@@ -165,6 +167,7 @@ export function initialSessionState(): SessionState {
     sessions: [],
     activeSessionId: null,
     replaying: false,
+    initializing: false,
   };
 }
 
@@ -222,4 +225,6 @@ export type WebviewToHost =
   /** M3: delete an extension-owned profile. */
   | { type: "deleteProfile"; name: string }
   /** M4: load a persisted session by id (history replays into the transcript). */
-  | { type: "loadSession"; sessionId: string };
+  | { type: "loadSession"; sessionId: string }
+  /** M4: forget a persisted session (switcher entry + transcript). */
+  | { type: "deleteSession"; sessionId: string };

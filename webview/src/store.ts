@@ -176,6 +176,7 @@ function createMockHost(): HostApi {
     ],
     activeSessionId: "mock-session",
     replaying: false,
+    initializing: false,
   };
   // M3 demo: start unauthenticated so the setup banner shows; saved state
   // mirrors what the real host stores (masked, never the raw key).
@@ -450,8 +451,49 @@ function createMockHost(): HostApi {
         demoBlocks.push(
           { kind: "user", text: "（mock 恢复）上次讨论到哪里了？" },
           { kind: "text", text: "这是通过 `session/load` 恢复的历史会话内容。" },
+          ...Array.from({ length: 12 }, (_, i) => ({
+            kind: "text" as const,
+            text: `第 ${i + 1} 条历史消息，用于验证恢复后自动滚动到底部。`,
+          })),
         );
         demoMeta.activeSessionId = m.sessionId;
+        demoMeta.replaying = true;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        window.setTimeout(() => {
+          demoMeta.replaying = false;
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: [...demoBlocks],
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              pendingApproval: activeApproval,
+              auth: authState,
+            },
+          });
+        }, 700);
+        return;
+      }
+      if (m.type === "deleteSession") {
+        demoMeta.sessions = demoMeta.sessions.filter((s) => s.id !== m.sessionId);
+        if (demoMeta.activeSessionId === m.sessionId) {
+          demoMeta.activeSessionId = demoMeta.sessions[0]?.id ?? null;
+          demoBlocks.length = 0;
+          demoBlocks.push({ kind: "text", text: "已删除该会话（mock）" });
+        }
         broadcast({
           type: "snapshot",
           state: {
