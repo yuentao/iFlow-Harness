@@ -2,16 +2,21 @@
 
 **心流·驭光** — iFlow CLI 的 VSCode 图形前端：通过 [ACP（Agent Client Protocol）](https://agentclientprotocol.com) 驱动本地 iFlow CLI，在编辑器标签页里完成对话、工具审批、代码评审与文件修改的完整 agent 工作流。
 
+![面板总览](docs/images/panel-light.png)
+
 ## 功能
 
 **对话与生成**
 
 - 流式对话：思考过程折叠、Markdown 渲染、一键中断
 - 粘性「正在生成」指示器，生成期间切换类操作全量防呆禁用，操作消息防抖
-- 子智能体卡片：按类型着色、步骤进度、本地化标题与嵌套日志面板
-- 权限模式切换：智能 / 免确认 / 标准 / 规划
+- 子智能体卡片：按类型着色、步骤进度、本地化标题与日志面板
+
+![子智能体卡片](docs/images/subagent-card.png)
 
 **工具与审批**
+
+![审批卡片](docs/images/approval-dark.png)
 
 - 工具调用卡片：类型、状态、位置、输出结构化展示
 - 行号 Diff 视图，支持一键 Revert 与 VSCode 原生并排对比（Open Diff）
@@ -32,6 +37,8 @@
 - 模型列表实时查询当前 endpoint 的 `/models`，不使用 CLI 内置硬编码目录
 - 主题：深 / 浅色切换，默认跟随编辑器主题
 - 状态栏：agent 状态（连接中 / 就绪 / 生成中 / 等待审批 / 出错）与当前模型一目了然，点击打开面板
+
+![深色主题与审批卡片](docs/images/panel-dark.png)
 
 ## 前置要求
 
