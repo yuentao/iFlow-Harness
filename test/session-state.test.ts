@@ -12,6 +12,7 @@ import {
   setSessions,
   beginReplay,
   endReplay,
+  parseTranscriptJsonl,
 } from "../shared/session-state";
 import { initialSessionState, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
@@ -21,6 +22,75 @@ function notify(update: SessionNotification["update"], sessionId = "s1"): Sessio
 }
 
 describe("SubAgent grouping (agentId)", () => {
+  it("groups flat nested activity by the task interval (live wire shape, no agentId)", () => {
+    const state: SessionState = initialSessionState();
+    // Live 0.5.19 wire timeline (captured via ACP probe): task opens the
+    // interval, nested read_file + "Agent started" text are flat top-level
+    // updates, the task completed update closes it.
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "call_task", toolName: "task", title: "Launch agent(general-purpose): 读取 package.json 的 name", kind: "other", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "call_task", toolName: "task", title: "Launch agent(general-purpose): 读取 package.json 的 name", kind: "other", status: "in_progress" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "\n>️ general-purpose Agent started\n" } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "call_read", toolName: "read_file", title: "Reading package.json", kind: "read", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "call_read", toolName: "read_file", title: "Reading package.json", kind: "read", status: "completed" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "call_task", toolName: "task", kind: "other", status: "completed" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "子代理已调用 read_file" } }));
+
+    // Exactly one top-level subagent card + one post-interval text block.
+    expect(state.blocks.map((b) => b.kind)).toEqual(["subagent", "text"]);
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.taskToolCallId).toBe("call_task");
+    expect(sub.status).toBe("completed");
+    // task 自身的 call/update 也在区间内 → entries: [task(tool), text, read_file(tool)]。
+    // task 的 tool_call 与 tool_call_update 按 toolCallId 合并为一个 entry。
+    expect(sub.entries.map((e) => e.kind)).toEqual(["tool", "text", "tool"]);
+    expect(sub.entries[0]).toMatchObject({ kind: "tool", toolName: "task" });
+    expect(sub.entries[1]).toMatchObject({ kind: "text" });
+    expect(sub.entries[2]).toMatchObject({ kind: "tool", toolName: "read_file", status: "completed" });
+  });
+
+  it("reads agentId from update._meta as a fallback", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "n1",
+        toolName: "read_file",
+        title: "读取",
+        kind: "read",
+        status: "completed",
+        _meta: { agentId: "meta-agent" },
+      } as SessionNotification["update"]),
+    );
+    expect(state.blocks).toHaveLength(1);
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.agentId).toBe("meta-agent");
+    expect(sub.entries).toHaveLength(1);
+  });
+
+  it("groups sidechain JSONL lines into a SubAgent block on restore", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "修复限流器" } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "tk1", name: "task", input: { description: "测试编写" } }] } }),
+      JSON.stringify({ type: "user", isSidechain: true, message: { content: "为限流器写测试" } }),
+      JSON.stringify({ type: "assistant", isSidechain: true, message: { content: [{ type: "tool_use", id: "s1", name: "write_file", input: { description: "写用例" } }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "已完成" }] } }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "subagent", "text"]);
+    const sub = blocks[1]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.title).toBe("测试编写");
+    expect(sub.status).toBe("completed");
+    expect(sub.entries).toHaveLength(2);
+    expect(sub.entries[0]).toMatchObject({ kind: "text", text: "为限流器写测试" });
+    expect(sub.entries[1]).toMatchObject({ kind: "tool", toolName: "write_file", title: "写用例" });
+  });
+});
+
+describe("applySessionUpdate", () => {
   it("groups a task tool_call + nested agentId updates into one subagent block", () => {
     const state: SessionState = initialSessionState();
     // Spawning task tool_call arrives WITHOUT an agentId.

@@ -137,6 +137,22 @@ function ToolCard({ block }: { block: ToolBlock }) {
   );
 }
 
+/**
+ * CLI-generated step titles follow fixed English patterns; localize the known
+ * prefixes (Launch agent / Reading / Running / Updating todos), keep the rest
+ * verbatim.
+ */
+function localizeStepTitle(title: string): string {
+  let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
+  if (m) return t("启动子代理（{0}）：{1}", m[1], m[2]);
+  m = /^Reading\s+([\s\S]+)$/.exec(title);
+  if (m) return t("读取 {0}", m[1]);
+  m = /^Running:\s*([\s\S]*)$/.exec(title);
+  if (m) return t("运行：{0}", m[1]);
+  if (/^Updating todos$/i.test(title.trim())) return t("更新任务清单");
+  return title;
+}
+
 function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const [open, setOpen] = useState(false);
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
@@ -175,7 +191,8 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     .map((e) => {
       if (e.kind === "tool") {
         const s = e.status === "completed" ? t("已完成") : e.status === "failed" ? t("失败") : t("运行中");
-        return `> tool: ${e.toolName}${e.title && e.title !== e.toolName ? ` — ${e.title}` : ""} · ${s}`;
+        const title = localizeStepTitle(e.title && e.title !== e.toolName ? e.title : e.toolName);
+        return `> tool: ${e.toolName} — ${title} · ${s}`;
       }
       if (e.kind === "text") return e.text;
       if (e.kind === "thought") return `> ${e.text}`;
@@ -188,7 +205,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     <div className="stream-in overflow-hidden rounded-lg border border-info/40 bg-card">
       <div className="flex items-center gap-2 px-3 py-2">
         <Bot className="size-3.5 shrink-0 text-info" />
-        <span className="min-w-0 truncate text-[12px] font-semibold">{block.title}</span>
+        <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
         <span className="ml-auto">{statusChip}</span>
       </div>
       {nested.length > 0 && (
@@ -198,7 +215,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
               <li key={t2.toolCallId} className="flex items-center gap-2 text-[12px]">
                 {stepIcon(t2.status)}
                 <span className={`min-w-0 truncate ${t2.status === "completed" ? "text-muted-foreground" : "text-foreground"}`}>
-                  {t2.title || t2.toolName}
+                  {localizeStepTitle(t2.title || t2.toolName)}
                 </span>
               </li>
             ))}

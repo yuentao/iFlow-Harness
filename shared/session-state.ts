@@ -58,6 +58,17 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
 
 // --- SubAgent grouping (iFlow: nested updates carry `agentId`) --------------
 
+/**
+ * Where the agentId may live on the wire: top-level `agentId` (documented) or
+ * inside the update's `_meta` (defensive fallback).
+ */
+function extractAgentId(notification: SessionNotification): string | undefined {
+  if (notification.agentId) return notification.agentId;
+  const meta = (notification.update as { _meta?: { agentId?: unknown } })._meta;
+  if (meta && typeof meta.agentId === "string" && meta.agentId) return meta.agentId;
+  return undefined;
+}
+
 function findSubAgent(blocks: Block[], agentId: string): SubAgentBlock | undefined {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
@@ -105,6 +116,33 @@ function isNestedUpdate(update: SessionUpdate): boolean {
     kind === "agent_thought_chunk" ||
     kind === "plan"
   );
+}
+
+/** Wire check (0.5.19, verified live): the SubAgent's spawning tool_call.
+ * Lowercased — CLI versions differ in casing ("task" vs "Task"). */
+function isTaskToolCall(update: SessionUpdate): boolean {
+  return (
+    (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
+    typeof update.toolName === "string" &&
+    update.toolName.toLowerCase() === "task"
+  );
+}
+
+/**
+ * The SubAgent interval currently open, i.e. the newest subagent card whose
+ * spawning `task` call has not reached a terminal status. Verified on live
+ * wire 0.5.19: events carry NO agentId — the flat nested activity between
+ * `tool_call task` (pending/in_progress) and `tool_call_update task`
+ * (completed/failed) belongs to that SubAgent.
+ */
+function findActiveSubAgent(blocks: Block[]): SubAgentBlock | undefined {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i]!;
+    if (block.kind === "subagent" && (block.status === "pending" || block.status === "in_progress")) {
+      return block;
+    }
+  }
+  return undefined;
 }
 
 /** Apply one session update to a block list (top-level transcript or a
@@ -166,8 +204,13 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
  * Apply one `session/update` notification to the state (mutates `state`,
  * which the store owns between snapshots).
  *
- * iFlow SubAgent (`task` tool): nested updates carry `agentId` and are
- * grouped into one SubAgentBlock per agent instead of top-level blocks.
+ * SubAgent grouping, two strategies (both verified against iFlow CLI 0.5.19):
+ * 1. If the notification carries an `agentId` (documented extension), nested
+ *    updates are grouped into the agent's SubAgentBlock.
+ * 2. Otherwise a state machine keyed on the `task` tool_call delimits the
+ *    SubAgent interval: events between `tool_call task` (pending/in_progress)
+ *    and `tool_call_update task` (completed/failed) are flat top-level
+ *    updates that actually belong to the SubAgent.
  */
 export function applySessionUpdate(
   state: SessionState,
@@ -176,13 +219,11 @@ export function applySessionUpdate(
 ): void {
   const update = notification.update;
 
-  // SubAgent grouping: everything nested under an agentId lands in that
-  // agent's block (or in the `task` tool_call's block, matched by id).
-  if (notification.agentId) {
-    const agentId = notification.agentId;
+  // Strategy 1: documented `agentId` grouping.
+  const agentId = extractAgentId(notification);
+  if (agentId) {
     let sub = findSubAgent(state.blocks, agentId) ?? adoptUnboundSubAgent(state.blocks, agentId);
     if (!sub) {
-      // No spawning `task` tool_call seen — synthesize the card from context.
       const title =
         (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
           ? update.title || update.toolName
@@ -191,7 +232,6 @@ export function applySessionUpdate(
       state.blocks.push(sub);
     }
     if (isNestedUpdate(update)) applyUpdateToBlocks(sub.entries, update);
-    // Terminal status for the card comes from the spawning tool_call's update.
     if (
       (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
       update.toolCallId === sub.taskToolCallId &&
@@ -204,26 +244,45 @@ export function applySessionUpdate(
     return;
   }
 
-  // The spawning `task` tool_call itself (no agentId yet): a SubAgent card is
-  // born here; nested updates bind to it once they carry the agentId.
-  if (
-    (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
-    update.toolName === "task"
-  ) {
-    const existing = findSubAgent(state.blocks, update.toolCallId);
-    if (existing) {
-      if (update.status) existing.status = update.status;
-    } else {
-      state.blocks.push({
-        kind: "subagent",
-        agentId: update.toolCallId,
-        taskToolCallId: update.toolCallId,
-        title: update.title || update.toolName || l10n.t("子智能体"),
-        status: update.status ?? "pending",
-        entries: [],
-      });
+  // Strategy 2: `task` tool_call interval state machine.
+  const active = findActiveSubAgent(state.blocks);
+  const isTask = isTaskToolCall(update);
+
+  if (isTask) {
+    const taskUpdate = update as {
+      status?: ToolCallStatus;
+      title?: string;
+      toolCallId?: string;
+      toolName?: string;
+    };
+    if (active) {
+      // Interval bookkeeping: the spawning call's status drives the card.
+      if (taskUpdate.status) active.status = taskUpdate.status;
+      // Keep the update in the log so the 日志 pane shows the full trail.
+      if (isNestedUpdate(update)) applyUpdateToBlocks(active.entries, update);
+      return;
     }
+    // Interval opens: a SubAgent card is born.
+    const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子智能体");
+    state.blocks.push({
+      kind: "subagent",
+      agentId: taskUpdate.toolCallId ?? "",
+      taskToolCallId: taskUpdate.toolCallId ?? null,
+      title,
+      status: taskUpdate.status ?? "in_progress",
+      entries: [],
+    });
     return;
+  }
+
+  if (active) {
+    // Flat nested activity inside the open interval → into the card.
+    if (isNestedUpdate(update)) {
+      applyUpdateToBlocks(active.entries, update);
+      refreshSubAgentStatus(active);
+      return;
+    }
+    // Non-nested updates (mode/commands) still apply top-level: fall through.
   }
 
   const replaying = options.replaying;
@@ -373,11 +432,25 @@ export function markToolCancelled(state: SessionState): void {
  * Rebuild UI blocks from the CLI's persisted session file (NDJSON, one entry
  * per line: `{type:"user"|"assistant", message:{content}, isSidechain}`).
  * Tool results on user entries are noise; assistant `tool_use` becomes a
- * completed tool card. Returns the first user text for the switcher label.
+ * completed tool card. Sidechain entries (`isSidechain: true`, the SubAgent's
+ * `task` turns) are grouped into one SubAgentBlock per sidechain run instead
+ * of being dropped. Returns the first user text for the switcher label.
  */
 export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUserText: string | null } {
   const blocks: Block[] = [];
   let firstUserText: string | null = null;
+  // Current sidechain grouping state: entries arrive in run order, so all
+  // consecutive isSidechain lines belong to one SubAgent execution.
+  let sidechain: SubAgentBlock | null = null;
+  const flushSidechain = (): void => {
+    if (sidechain) {
+      if (sidechain.status === "in_progress" || sidechain.status === "pending") {
+        sidechain.status = "completed";
+      }
+      sidechain = null;
+    }
+  };
+
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -391,8 +464,54 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
     } catch {
       continue; // torn write / partial line
     }
-    if (entry.isSidechain) continue;
+
     const content = entry.message?.content;
+
+    if (entry.isSidechain) {
+      if (!sidechain) {
+        sidechain = {
+          kind: "subagent",
+          agentId: `sidechain-${blocks.length}`,
+          taskToolCallId: null,
+          title: l10n.t("子智能体"),
+          status: "in_progress",
+          entries: [],
+        };
+        blocks.push(sidechain);
+      }
+      if (entry.type === "user" && typeof content === "string" && content.trim()) {
+        sidechain.entries.push({ kind: "text", text: content.trim() });
+      }
+      if (entry.type === "assistant" && Array.isArray(content)) {
+        for (const block of content as Array<{
+          type?: string;
+          text?: string;
+          id?: string;
+          name?: string;
+          input?: { description?: string; prompt?: string };
+        }>) {
+          if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+            sidechain.entries.push({ kind: "text", text: block.text });
+          } else if (block?.type === "tool_use" && typeof block.id === "string") {
+            sidechain.entries.push({
+              kind: "tool",
+              toolCallId: block.id,
+              toolName: block.name ?? "",
+              title: (block.input?.description as string) || block.name || "",
+              toolKind: "other",
+              status: "completed",
+              output: "",
+              locations: [],
+              diff: null,
+            });
+          }
+        }
+      }
+      continue;
+    }
+
+    // A main-chain entry ends the current sidechain run.
+    flushSidechain();
 
     if (entry.type === "user") {
       const texts: string[] = [];
@@ -417,15 +536,31 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
         text?: string;
         id?: string;
         name?: string;
+        input?: { description?: string; prompt?: string };
       }>) {
         if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
           blocks.push({ kind: "text", text: block.text });
         } else if (block?.type === "tool_use" && typeof block.id === "string") {
+          // The SubAgent-spawning `task` call renders as a SubAgent card and
+          // adopts the sidechain run that follows it, if any.
+          if (block.name === "task") {
+            const nextSidechain: SubAgentBlock = {
+              kind: "subagent",
+              agentId: block.id,
+              taskToolCallId: block.id,
+              title: block.input?.description || block.name || l10n.t("子智能体"),
+              status: "completed",
+              entries: [],
+            };
+            blocks.push(nextSidechain);
+            sidechain = nextSidechain; // subsequent isSidechain lines merge in
+            continue;
+          }
           blocks.push({
             kind: "tool",
             toolCallId: block.id,
             toolName: block.name ?? "",
-            title: block.name ?? "",
+            title: (block.input?.description as string) || block.name || "",
             toolKind: "other",
             status: "completed",
             output: "",
@@ -436,6 +571,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
       }
     }
   }
+  flushSidechain();
   return { blocks, firstUserText };
 }
 
