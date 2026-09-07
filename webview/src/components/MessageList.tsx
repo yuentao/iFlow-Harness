@@ -19,6 +19,7 @@ import {
   Undo2,
   Wrench,
   X,
+  XCircle,
   Zap,
 } from "lucide-react";
 import type {
@@ -140,10 +141,12 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const [open, setOpen] = useState(false);
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
   const done = nested.filter((b) => b.status === "completed" || b.status === "failed").length;
+  const progress = nested.length > 0 ? ` ${done}/${nested.length}` : "";
   const statusChip =
     block.status === "completed" ? (
       <Chip tone="success">
-        <Check className="size-2.5" /> {t("已完成")} {nested.length > 0 ? `${done}/${nested.length}` : ""}
+        <Check className="size-2.5" /> {t("已完成")}
+        {progress}
       </Chip>
     ) : block.status === "failed" ? (
       <Chip tone="danger">
@@ -151,20 +154,57 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
       </Chip>
     ) : (
       <Chip tone="info">
-        <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}{" "}
-        {nested.length > 0 ? `${done}/${nested.length}` : ""}
+        <Loader2 className="size-2.5 animate-spin" /> {t("运行中")}
+        {progress}
       </Chip>
     );
+
+  const stepIcon = (s: ToolBlock["status"]) =>
+    s === "completed" ? (
+      <CheckCircle2 className="size-3.5 shrink-0 text-success" />
+    ) : s === "failed" ? (
+      <XCircle className="size-3.5 shrink-0 text-destructive" />
+    ) : s === "in_progress" ? (
+      <Loader2 className="size-3.5 shrink-0 animate-spin text-info" />
+    ) : (
+      <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
+    );
+
+  // Compact mono log over the nested entries (reference-design "日志" pane).
+  const log = block.entries
+    .map((e) => {
+      if (e.kind === "tool") {
+        const s = e.status === "completed" ? t("已完成") : e.status === "failed" ? t("失败") : t("运行中");
+        return `> tool: ${e.toolName}${e.title && e.title !== e.toolName ? ` — ${e.title}` : ""} · ${s}`;
+      }
+      if (e.kind === "text") return e.text;
+      if (e.kind === "thought") return `> ${e.text}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
 
   return (
     <div className="stream-in overflow-hidden rounded-lg border border-info/40 bg-card">
       <div className="flex items-center gap-2 px-3 py-2">
         <Bot className="size-3.5 shrink-0 text-info" />
         <span className="min-w-0 truncate text-[12px] font-semibold">{block.title}</span>
-        <span className="ml-auto">
-          {statusChip}
-        </span>
+        <span className="ml-auto">{statusChip}</span>
       </div>
+      {nested.length > 0 && (
+        <div className="border-t border-border/60 px-3 py-2">
+          <ul className="space-y-1.5">
+            {nested.map((t2) => (
+              <li key={t2.toolCallId} className="flex items-center gap-2 text-[12px]">
+                {stepIcon(t2.status)}
+                <span className={`min-w-0 truncate ${t2.status === "completed" ? "text-muted-foreground" : "text-foreground"}`}>
+                  {t2.title || t2.toolName}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {block.entries.length > 0 && (
         <>
           <button
@@ -172,17 +212,12 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
           >
             {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            {t("操作输出")}
-            <span className="ml-auto font-mono text-[10px] opacity-60">
-              {block.entries.length}
-            </span>
+            {t("子智能体日志")}
           </button>
           {open && (
-            <div className="space-y-2 border-t border-border/60 px-3 py-2">
-              {block.entries.map((entry, i) => (
-                <BlockView key={i} block={entry} />
-              ))}
-            </div>
+            <pre className="whitespace-pre-wrap border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {log}
+            </pre>
           )}
         </>
       )}

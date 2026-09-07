@@ -63,6 +63,8 @@ const en: Record<string, string> = {
   "回退此改动": "Revert this change",
   "文件对比": "File diff",
   "任务清单": "Task list",
+  "运行中": "Running",
+  "子智能体日志": "SubAgent log",
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
   "删除会话 {0}": "Delete session {0}",
