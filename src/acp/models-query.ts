@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { get as httpGet } from "node:http";
+import { get as httpsGet } from "node:https";
 
 /**
  * Live model list for the model dropdown.
@@ -92,26 +94,57 @@ export function parseModelsResponse(payload: unknown): string[] {
   return ids;
 }
 
+/**
+ * Minimal direct GET over node:http(s).
+ *
+ * Deliberately bypasses the global `fetch`: the VSCode extension host patches
+ * it with its proxy agent, whose undici ProxyAgent throws
+ * "Invalid URL protocol: the URL must start with `http:` or `https:`" when
+ * the macOS system proxy is a SOCKS / scheme-less entry — even for perfectly
+ * valid target URLs. A plain socket request behaves like the CLI does.
+ */
+function directGet(
+  url: URL,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<{ status: number; body: string }> {
+  const send = url.protocol === "http:" ? httpGet : httpsGet;
+  return new Promise((resolve, reject) => {
+    const req = send(url, { headers, timeout: timeoutMs }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+      });
+      res.on("error", reject);
+    });
+    req.on("timeout", () => req.destroy(new Error(`连接超时（${timeoutMs}ms 无响应）`)));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 export async function queryModelIds(endpoint: ActiveEndpoint, timeoutMs = 10_000): Promise<string[]> {
   // Resolve explicitly so failures carry the actual URL (user-typed profiles
-  // can hide typos; proxies/schemes surface here instead of an opaque error).
-  let url: URL;
+  // can hide typos; they surface here instead of an opaque error).
   const target = normalizeModelsUrl(endpoint.baseUrl);
+  let url: URL;
   try {
     url = new URL(target);
   } catch {
     throw new Error(`模型地址无效: ${target}`);
   }
-  let response: Response;
+  let response: { status: number; body: string };
   try {
-    response = await fetch(url, {
-      headers: { Authorization: `Bearer ${endpoint.apiKey}` },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    response = await directGet(url, { Authorization: `Bearer ${endpoint.apiKey}` }, timeoutMs);
   } catch (error) {
     const cause = error instanceof Error ? error.message : String(error);
-    throw new Error(`请求 ${url.host} 失败（地址 ${target}）: ${cause}`);
+    throw new Error(`请求 ${url.host} 失败: ${cause}`);
   }
-  if (!response.ok) throw new Error(`模型列表查询失败: HTTP ${response.status}`);
-  return parseModelsResponse(await response.json());
+  if (response.status !== 200) throw new Error(`模型列表查询失败: HTTP ${response.status}`);
+  try {
+    return parseModelsResponse(JSON.parse(response.body));
+  } catch {
+    throw new Error(`模型列表响应解析失败（HTTP ${response.status}）`);
+  }
 }
