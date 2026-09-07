@@ -45,7 +45,7 @@
         "command": "iflow.openPanel",
         "title": "%command.openPanel.title%",
         "category": "iFlow",
-        "icon": "media/iflow.svg"
+        "icon": "media/iflow-title.svg"
       },
       {
         "command": "iflow.newSession",
