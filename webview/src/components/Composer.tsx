@@ -42,6 +42,8 @@ function modeDisplay(mode: { id: string; name: string }): { label: string; desc:
 
 export function Composer() {
   const state = useChat((s) => s.state);
+  const pending = useChat((s) => s.pending);
+  const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -84,9 +86,10 @@ export function Composer() {
 
   // Streaming, history replay, and new-session init all lock the composer's
   // switches (the agent / host is mid-operation; mode/model changes and
-  // prompts would desync it). Stop stays available while streaming.
+  // prompts would desync it). Stop stays available while streaming. An
+  // in-flight profile/model/mode switch (pending) locks the other switchers.
   const streaming = state?.status === "streaming";
-  const busy = (streaming || state?.replaying || state?.initializing) ?? false;
+  const busy = (streaming || state?.replaying || state?.initializing || pending !== null) ?? false;
   const commands: SlashCommand[] = state?.commands ?? [];
   const modes = state?.modes ?? null;
   const models = state?.models ?? [];
@@ -376,7 +379,10 @@ export function Composer() {
                       <button
                         key={m.id}
                         onClick={() => {
-                          send({ type: "setMode", modeId: m.id });
+                          if (m.id !== modes.currentModeId) {
+                            beginPending("mode", m.id);
+                            send({ type: "setMode", modeId: m.id });
+                          }
                           close();
                         }}
                         className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
@@ -421,7 +427,10 @@ export function Composer() {
                     <button
                       key={m.id}
                       onClick={() => {
-                        send({ type: "setModel", modelId: m.id });
+                        if (m.id !== state?.currentModelId) {
+                          beginPending("model", m.id);
+                          send({ type: "setModel", modelId: m.id });
+                        }
                         close();
                       }}
                       className="flex w-full items-center px-3 py-1.5 text-left font-mono text-[11px] hover:bg-accent"

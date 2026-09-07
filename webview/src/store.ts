@@ -539,25 +539,68 @@ function createMockHost(): HostApi {
 
 const vscode: HostApi = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : createMockHost();
 
+/**
+ * An optimistic switch lock: set the moment the user clicks profile / model /
+ * mode switch, cleared when the host's snapshot confirms the new value (or
+ * after a failsafe timeout). While a lock is held every switch control is
+ * disabled, so overlapping switches can't race the in-flight one.
+ */
+export type PendingOpKind = "profile" | "model" | "mode";
+
+interface PendingOp {
+  kind: PendingOpKind;
+  target: string;
+}
+
+/** Debounce window for identical outgoing messages (double-click guard). */
+const SEND_DEBOUNCE_MS = 400;
+/** Failsafe: drop the switch lock even if the host never confirms. */
+const PENDING_TIMEOUT_MS = 10_000;
+
+let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSentKey = "";
+let lastSentAt = 0;
+
 interface ChatStore {
   state: SessionState | null;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
+  /** Optimistic switch lock, null when idle (see PendingOp). */
+  pending: PendingOp | null;
   applyHostMessage: (msg: HostToWebview) => void;
+  beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
 }
 
 import { setLocale } from "./i18n";
 
-export const useChat = create<ChatStore>((set) => ({
+export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
+  pending: null,
   applyHostMessage: (msg) => {
     // Only the snapshot updates the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
     // registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") {
       setLocale(msg.locale);
+      // A pending switch is cleared as soon as the host confirms the value.
+      const pending = get().pending;
+      if (pending) {
+        const confirmed =
+          (pending.kind === "profile" &&
+            msg.state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
+          (pending.kind === "model" && msg.state.currentModelId === pending.target) ||
+          (pending.kind === "mode" && msg.state.modes?.currentModeId === pending.target);
+        if (confirmed) {
+          if (pendingTimer) {
+            clearTimeout(pendingTimer);
+            pendingTimer = null;
+          }
+          set({ pending: null, state: msg.state });
+          return;
+        }
+      }
       set({ state: msg.state });
       return;
     }
@@ -565,7 +608,24 @@ export const useChat = create<ChatStore>((set) => ({
       set({ editorTheme: msg.kind });
     }
   },
-  send: (msg) => vscode.postMessage(msg),
+  beginPending: (kind, target) => {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    set({ pending: { kind, target } });
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      set({ pending: null });
+    }, PENDING_TIMEOUT_MS);
+  },
+  send: (msg) => {
+    // Debounce: identical messages fired within the window (double-clicks on
+    // send / revert / switch buttons) are dropped.
+    const key = JSON.stringify(msg);
+    const now = Date.now();
+    if (key === lastSentKey && now - lastSentAt < SEND_DEBOUNCE_MS) return;
+    lastSentKey = key;
+    lastSentAt = now;
+    vscode.postMessage(msg);
+  },
 }));
 
 export function setupHostListener(): void {

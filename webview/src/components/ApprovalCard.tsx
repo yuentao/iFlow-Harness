@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -28,6 +29,16 @@ function optionClass(kind: PermissionOptionUi["kind"]): string {
  */
 export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   const send = useChat((s) => s.send);
+  // Optimistic lock: the first click answers the request; every button is
+  // disabled until the host's next snapshot removes the card. Prevents
+  // double-fire on rapid clicks.
+  const [answered, setAnswered] = useState(false);
+
+  const answer = (optionId: string | null) => {
+    if (answered) return;
+    setAnswered(true);
+    send({ type: "respondApproval", id: approval.id, optionId });
+  };
 
   const options = [...approval.options].sort(
     (a, b) => (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9),
@@ -64,15 +75,17 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         {options.map((opt) => (
           <button
             key={opt.optionId}
-            className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${optionClass(opt.kind)}`}
-            onClick={() => send({ type: "respondApproval", id: approval.id, optionId: opt.optionId })}
+            disabled={answered}
+            className={`rounded-md px-2.5 py-1 text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
+            onClick={() => answer(opt.optionId)}
           >
             {opt.name}
           </button>
         ))}
         <button
-          className="rounded-md px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() => send({ type: "respondApproval", id: approval.id, optionId: null })}
+          disabled={answered}
+          className="rounded-md px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          onClick={() => answer(null)}
         >
           {t("取消")}
         </button>

@@ -63,6 +63,8 @@ const BTN_ICON =
 export function App() {
   const state = useChat((s) => s.state);
   const editorTheme = useChat((s) => s.editorTheme);
+  const pending = useChat((s) => s.pending);
+  const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
   const [configOpen, setConfigOpen] = useState(false);
   // Theme priority: the user's explicit toggle wins (persisted); otherwise
@@ -96,6 +98,9 @@ export function App() {
   // session / history restore is initializing, switching the session / mode /
   // model / profile would desync the in-flight ACP request.
   const busy = state.status === "streaming" || state.replaying || state.initializing;
+  // A profile switch is in flight (optimistic lock): disable every switcher.
+  const switching = pending !== null;
+  const locked = busy || switching;
   const activeSession = state.sessions.find((s) => s.id === state.activeSessionId);
   const sessionLabel =
     activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
@@ -118,7 +123,7 @@ export function App() {
             <button
               className={BTN_ICON}
               title={t("新会话")}
-              disabled={busy}
+              disabled={locked}
               onClick={() => send({ type: "newSession" })}
             >
               <Plus className="size-4" />
@@ -155,9 +160,12 @@ export function App() {
                   {state.auth.profiles.map((p) => (
                     <button
                       key={p.name}
-                      disabled={busy}
+                      disabled={locked}
                       onClick={() => {
-                        if (!p.active) send({ type: "activateProfile", name: p.name });
+                        if (!p.active) {
+                          beginPending("profile", p.name);
+                          send({ type: "activateProfile", name: p.name });
+                        }
                         close();
                       }}
                       className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
@@ -198,7 +206,7 @@ export function App() {
                     open ? "bg-surface-2" : ""
                   }`}
                   title={t("历史会话（选择后恢复该会话上下文）")}
-                  disabled={busy}
+                  disabled={locked}
                 >
                   <History className="size-3 shrink-0 text-primary" />
                   <span className="truncate text-foreground">{sessionLabel}</span>
@@ -221,7 +229,7 @@ export function App() {
                       </button>
                     )}
                   {state.sessions.map((s) => {
-                    const deletable = s.id !== state.activeSessionId && !busy;
+                    const deletable = s.id !== state.activeSessionId && !locked;
                     return (
                       <div
                         key={s.id}
@@ -285,7 +293,7 @@ export function App() {
       )}
 
       {showAuthCard && (
-        <AuthCard auth={state.auth} editable={configOpen} busy={busy} onDismiss={() => setConfigOpen(false)} />
+        <AuthCard auth={state.auth} editable={configOpen} busy={locked} onDismiss={() => setConfigOpen(false)} />
       )}
 
       <MessageList />
