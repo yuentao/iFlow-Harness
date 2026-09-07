@@ -86,9 +86,12 @@ export function Composer() {
 
   // Streaming, history replay, and new-session init all lock the composer's
   // switches (the agent / host is mid-operation; mode/model changes and
-  // prompts would desync it). Stop stays available while streaming. An
-  // in-flight profile/model/mode switch (pending) locks the other switchers.
+  // prompts would desync it). An in-flight profile/model/mode switch (pending)
+  // locks the other switchers too. Stop is only meaningful for a real
+  // generation: beginReplay() also reports status "streaming", so replaying
+  // and initializing must be excluded here.
   const streaming = state?.status === "streaming";
+  const canStop = Boolean(streaming && !state?.replaying && !state?.initializing);
   const busy = (streaming || state?.replaying || state?.initializing || pending !== null) ?? false;
   const commands: SlashCommand[] = state?.commands ?? [];
   const modes = state?.modes ?? null;
@@ -453,7 +456,7 @@ export function Composer() {
               <button
                 className={`${CANVAS_BTN} text-muted-foreground hover:text-foreground`}
                 title={t("停止生成")}
-                disabled={!streaming}
+                disabled={!canStop}
                 onClick={() => send({ type: "cancel" })}
               >
                 <Square className="size-3" /> {t("停止")}

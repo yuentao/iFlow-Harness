@@ -473,9 +473,11 @@ function createMockHost(): HostApi {
           type: "snapshot",
           state: {
             blocks: [...demoBlocks],
-            status: "idle",
+            // Real host behavior: beginReplay() reports status "streaming"
+            // while the session loads.
+            status: "streaming",
             errorMessage: null,
-            stopReason: "end_turn",
+            stopReason: null,
             ...demoMeta,
             pendingApproval: activeApproval,
             auth: authState,
