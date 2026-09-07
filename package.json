@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://git.pandorastudio.cn/product/iFlow-harness.git"
+    "url": "https://github.com/yuentao/iFlow-Harness.git"
   },
   "keywords": [
     "iflow",
@@ -121,7 +121,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "harness": "node scripts/harness.mjs",
-    "package": "npm run build && vsce package --no-dependencies --baseContentUrl https://git.pandorastudio.cn/product/iFlow-harness/raw/branch/master/ --baseImagesUrl https://git.pandorastudio.cn/product/iFlow-harness/raw/branch/master/"
+    "package": "npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
