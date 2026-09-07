@@ -30,24 +30,6 @@
   "main": "./dist/extension.cjs",
   "l10n": "./l10n",
   "contributes": {
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "iflow-chat",
-          "title": "%iflow.viewContainer.title%",
-          "icon": "media/iflow.svg"
-        }
-      ]
-    },
-    "views": {
-      "iflow-chat": [
-        {
-          "type": "webview",
-          "id": "iflow.chatPanel",
-          "name": "%iflow.view.name%"
-        }
-      ]
-    },
     "chatParticipants": [
       {
         "id": "iflow.agent",
@@ -62,7 +44,8 @@
       {
         "command": "iflow.openPanel",
         "title": "%command.openPanel.title%",
-        "category": "iFlow"
+        "category": "iFlow",
+        "icon": "media/iflow.svg"
       },
       {
         "command": "iflow.newSession",
@@ -81,6 +64,12 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "iflow.openPanel",
+          "group": "navigation"
+        }
+      ],
       "editor/context": [
         {
           "command": "iflow.askSelection",

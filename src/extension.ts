@@ -6,12 +6,6 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(panel);
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ChatPanel.viewId, panel, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("iflow.openPanel", async () => {
       // Open as a wide, resizable editor tab (falls back to the sidebar view
       // via the activity bar icon when a narrow panel is preferred).

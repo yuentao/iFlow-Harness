@@ -68,10 +68,10 @@ interface PanelServices {
   entryOverride?: string | undefined;
 }
 
-export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider {
+export class ChatPanel implements vscode.Disposable {
   public static readonly viewId = "iflow.chatPanel";
 
-  private view: vscode.WebviewView | undefined;
+  private editorPanel: vscode.WebviewPanel | undefined;
   private client: AcpClient | null = null;
   private store: SessionStore;
   private connecting: Promise<void> | null = null;
@@ -109,6 +109,8 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     this.context.subscriptions.push(
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
     );
+    // Status bar entry is the always-visible launcher (no sidebar view anymore).
+    this.statusBar.show();
   }
 
   private updateStatusBar(state: SessionState): void {
@@ -152,31 +154,11 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     this.log.dispose();
   }
 
-  // --- WebviewViewProvider ---------------------------------------------------
-
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
-    this.statusBar.show();
-    this.log.info("webview resolved — pushing initial snapshot");
-    view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
-    view.webview.html = this.buildHtml(view.webview);
-    view.webview.onDidReceiveMessage((msg: WebviewToHost) => void this.handleWebviewMessage(msg));
-    // The webview may finish loading BEFORE this registration exists, losing
-    // its `ready` — push a snapshot now so the panel never stays on the
-    // loading screen, and again when `ready` arrives.
-    this.postSnapshot();
-    this.postTheme();
-    // Connect eagerly so the panel is usable immediately (errors surface via store).
-    void this.ensureClient().catch((error) => {
-      this.log.error("initial connect failed", error instanceof Error ? error : String(error));
-    });
-  }
-
-  // --- Editor-tab mode (WebviewPanel) -----------------------------------------
-  // Opens the same UI in a wide, resizable editor tab. Both containers share
-  // one ChatPanel: single ACP client / store, messages route identically.
-
-  private editorPanel: vscode.WebviewPanel | undefined;
+  // --- Editor-tab container (WebviewPanel) ------------------------------------
+  // The chat lives in a wide, resizable editor tab opened via `openEditorTab`
+  // (command palette / status bar / editor title icon). There is no sidebar
+  // view: VSCode always opens a view in the sidebar, which is too narrow as
+  // the primary surface.
 
   /** Open (or reveal) the chat as an editor tab with a generous width. */
   openEditorTab(): void {
@@ -197,14 +179,6 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "media", "iflow.svg");
     this.editorPanel = panel;
     this.wireWebview(panel.webview);
-    // Track the active container so status pushes go to the visible one.
-    panel.onDidChangeViewState(
-      () => {
-        if (panel.visible) this.view = undefined;
-      },
-      null,
-      this.context.subscriptions,
-    );
     panel.onDidDispose(
       () => {
         if (this.editorPanel === panel) this.editorPanel = undefined;
@@ -219,7 +193,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     });
   }
 
-  /** Shared webview setup for both the sidebar view and the editor tab. */
+  /** Shared webview setup. */
   private wireWebview(webview: vscode.Webview): void {
     webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
     webview.html = this.buildHtml(webview);
@@ -378,9 +352,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   private postToWebview(message: unknown): void {
-    // Broadcast to every alive container (sidebar view and/or editor tab) —
-    // they share one store, so each stays a consistent projection.
-    if (this.view) void this.view.webview.postMessage(message);
+    // Single container: the editor tab. Snapshots/theme/etc. all go here.
     if (this.editorPanel) void this.editorPanel.webview.postMessage(message);
   }
 
