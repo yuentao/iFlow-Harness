@@ -185,7 +185,7 @@ export function Composer() {
   }
 
   const CANVAS_BTN =
-    "inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-foreground hover:bg-surface-2 transition-colors";
+    "inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-foreground hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
 
   return (
     <div
@@ -356,6 +356,7 @@ export function Composer() {
                 <button
                   className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
                   title={t("权限模式")}
+                  disabled={streaming}
                 >
                   <Zap className="size-3 shrink-0 text-primary" />
                   {currentMode ? modeDisplay(currentMode).label : ""}
@@ -400,6 +401,7 @@ export function Composer() {
                 <button
                   className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}
                   title={t("模型")}
+                  disabled={streaming}
                 >
                   <span className="max-w-[130px] truncate">{state?.currentModelId ?? models[0]!.id}</span>
                   <ChevronDown className="size-3 shrink-0 opacity-60" />

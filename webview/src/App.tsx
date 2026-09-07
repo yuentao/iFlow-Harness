@@ -57,7 +57,7 @@ function formatSessionTime(ts: number): string {
 }
 
 const BTN_ICON =
-  "rounded p-1 text-muted-foreground hover:bg-surface hover:text-foreground transition-colors";
+  "rounded p-1 text-muted-foreground hover:bg-surface hover:text-foreground transition-colors disabled:pointer-events-none disabled:opacity-40";
 
 export function App() {
   const state = useChat((s) => s.state);
@@ -91,6 +91,9 @@ export function App() {
   }
 
   const showAuthCard = state.auth.needsSetup || configOpen;
+  // While the agent is streaming (or an approval blocks it), switching the
+  // session / mode / model / profile would desync the in-flight ACP request.
+  const busy = state.status === "streaming";
   const activeSession = state.sessions.find((s) => s.id === state.activeSessionId);
   const sessionLabel =
     activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
@@ -110,7 +113,12 @@ export function App() {
             )}
           </div>
           <div className="ml-auto flex items-center gap-0.5">
-            <button className={BTN_ICON} title={t("新会话")} onClick={() => send({ type: "newSession" })}>
+            <button
+              className={BTN_ICON}
+              title={t("新会话")}
+              disabled={busy}
+              onClick={() => send({ type: "newSession" })}
+            >
               <Plus className="size-4" />
             </button>
             <button
@@ -145,11 +153,12 @@ export function App() {
                   {state.auth.profiles.map((p) => (
                     <button
                       key={p.name}
+                      disabled={busy}
                       onClick={() => {
                         if (!p.active) send({ type: "activateProfile", name: p.name });
                         close();
                       }}
-                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
+                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
                     >
                       <span className="flex w-full items-center text-[12px] text-foreground">
                         {p.name}
@@ -183,10 +192,11 @@ export function App() {
               menuClass="w-72 max-h-64 overflow-y-auto"
               trigger={(open) => (
                 <button
-                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-left text-[11px] hover:bg-surface-2 ${
+                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-left text-[11px] hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
                     open ? "bg-surface-2" : ""
                   }`}
                   title={t("历史会话（选择后恢复该会话上下文）")}
+                  disabled={busy}
                 >
                   <History className="size-3 shrink-0 text-primary" />
                   <span className="truncate text-foreground">{sessionLabel}</span>
