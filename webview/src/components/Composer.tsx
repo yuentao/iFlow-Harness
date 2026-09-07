@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  ChevronDown,
+  SendHorizontal,
+  Square,
+  Zap,
+} from "lucide-react";
 import type { FileHitUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { Dropdown } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -56,12 +64,21 @@ export function Composer() {
 
   const streaming = state?.status === "streaming";
   const commands: SlashCommand[] = state?.commands ?? [];
+  const modes = state?.modes ?? null;
+  const models = state?.models ?? [];
+  const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
 
-  const suggestion = useMemo(() => {
-    if (!text.startsWith("/") || text.includes(" ")) return null;
+  // Slash-command popup: every command matching the typed prefix. While the
+  // popup is open, Enter/Tab complete the selected command instead of sending.
+  const cmdMatches = useMemo(() => {
+    if (!text.startsWith("/") || text.includes(" ")) return [];
     const input = text.slice(1).toLowerCase();
-    return commands.find((c) => c.name.toLowerCase().startsWith(input)) ?? null;
+    return commands.filter((c) => c.name.toLowerCase().startsWith(input));
   }, [text, commands]);
+  const [cmdIndex, setCmdIndex] = useState(0);
+  useEffect(() => {
+    setCmdIndex(0);
+  }, [cmdMatches.length]);
 
   function addImages(files: ArrayLike<File>): void {
     const incoming = Array.from(files).filter(
@@ -147,9 +164,12 @@ export function Composer() {
     setMentionQuery(null);
   }
 
+  const CANVAS_BTN =
+    "inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-foreground hover:bg-surface-2 transition-colors";
+
   return (
     <div
-      className={`composer${dragOver ? " drag-over" : ""}`}
+      className={`relative shrink-0 border-t border-border bg-panel px-2.5 pb-2.5 pt-2${dragOver ? " composer-drag" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
         setDragOver(true);
@@ -161,55 +181,94 @@ export function Composer() {
         if (e.dataTransfer?.files?.length) addImages(e.dataTransfer.files);
       }}
     >
+      {/* attached images */}
       {images.length > 0 && (
-        <div className="attachments">
+        <div className="mb-1.5 flex flex-wrap gap-1.5">
           {images.map((img, i) => (
-            <span key={i} className={`attachment${img.data ? "" : " pending"}`} title={img.mimeType}>
+            <span
+              key={i}
+              className="relative inline-flex size-[52px] items-center justify-center overflow-hidden rounded-md border border-border"
+              title={img.mimeType}
+            >
               {img.data ? (
-                <img src={`data:${img.mimeType};base64,${img.data}`} alt="" />
+                <img src={`data:${img.mimeType};base64,${img.data}`} alt="" className="size-full object-cover" />
               ) : (
-                <span className="attachment-loading">…</span>
+                <span className="text-[16px] text-muted-foreground">…</span>
               )}
-              <button className="attachment-remove" title={t("移除")} onClick={() => removeImage(i)}>
+              <button
+                className="absolute right-0 top-0 size-4 rounded-bl-[4px] bg-black/55 text-[11px] leading-[15px] text-white hover:bg-black/75"
+                title={t("移除")}
+                onClick={() => removeImage(i)}
+              >
                 ×
               </button>
             </span>
           ))}
         </div>
       )}
-      {suggestion && (
-        <div className="cmd-hint">
-          <span className="cmd-name">/{suggestion.name}</span>
-          <span className="cmd-desc">{suggestion.description}</span>
-          <span className="cmd-key">{t("Tab 补全")}</span>
+
+      {/* slash-command popup: all prefix matches, keyboard navigable */}
+      {cmdMatches.length > 0 && (
+        <div className="absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-popover panel-shadow">
+          {cmdMatches.map((c, i) => (
+            <button
+              key={c.name}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${
+                i === cmdIndex ? "bg-accent" : "hover:bg-accent/60"
+              }`}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setText(`/${c.name} `);
+                taRef.current?.focus();
+              }}
+            >
+              <span className="font-mono text-primary">/{c.name}</span>
+              <span className="truncate text-[11px] text-muted-foreground">{c.description}</span>
+              {i === cmdIndex && (
+                <kbd className="ml-auto rounded border border-border px-1 font-mono text-[9px] text-muted-foreground">
+                  {t("Tab 补全")}
+                </kbd>
+              )}
+            </button>
+          ))}
         </div>
       )}
+
+      {/* @-mention popup */}
       {mentionQuery !== null && (
-        <div className="mention-pop">
-          {mentionHits.length === 0 && <div className="mention-empty">{t("无匹配文件")}</div>}
+        <div className="absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-popover panel-shadow">
+          {mentionHits.length === 0 && (
+            <div className="px-3 py-1.5 text-[12px] text-muted-foreground">{t("无匹配文件")}</div>
+          )}
           {mentionHits.map((hit, i) => (
-            <div
+            <button
               key={hit.path}
-              className={`mention-item${i === mentionIndex ? " active" : ""}`}
+              className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-[12px] ${
+                i === mentionIndex ? "bg-accent" : "hover:bg-accent/60"
+              }`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 insertMention(hit.path);
               }}
             >
               {hit.path.split("/").slice(0, -1).join("/") && (
-                <span className="mention-dir">{hit.path.split("/").slice(0, -1).join("/")}/</span>
+                <span className="truncate text-[11px] text-muted-foreground">
+                  {hit.path.split("/").slice(0, -1).join("/")}/
+                </span>
               )}
-              <span className="mention-name">{hit.path.split("/").pop()}</span>
-            </div>
+              <span className="font-medium">{hit.path.split("/").pop()}</span>
+            </button>
           ))}
         </div>
       )}
-      <div className="composer-row">
+
+      <div className="rounded-lg border border-border bg-editor transition-colors focus-within:border-primary/60">
         <textarea
           ref={taRef}
           value={text}
           placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴/拖入图片）")}
-          rows={Math.min(6, text.split("\n").length)}
+          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+          className="w-full resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(e) => {
             setText(e.target.value);
             updateMentionFromCaret(e.target.value);
@@ -222,10 +281,22 @@ export function Composer() {
             }
           }}
           onKeyDown={(e) => {
-            if (e.key === "Tab" && suggestion) {
-              e.preventDefault();
-              setText(`/${suggestion.name} `);
-              return;
+            if (cmdMatches.length > 0) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setCmdIndex((i) => Math.min(cmdMatches.length - 1, i + 1));
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setCmdIndex((i) => Math.max(0, i - 1));
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                setText(`/${cmdMatches[cmdIndex]!.name} `);
+                return;
+              }
             }
             if (mentionQuery !== null && mentionHits.length > 0) {
               if (e.key === "ArrowDown") {
@@ -255,20 +326,110 @@ export function Composer() {
             }
           }}
         />
-        {streaming ? (
-          <button className="btn stop" title={t("停止生成")} onClick={() => send({ type: "cancel" })}>
-            ■
-          </button>
-        ) : (
-          <button
-            className="btn send"
-            title={t("发送 (Enter)")}
-            disabled={!text.trim() && images.length === 0}
-            onClick={submit}
-          >
-            ➤
-          </button>
-        )}
+        <div className="flex items-center gap-1.5 px-2 pb-2">
+          {/* permission mode dropdown */}
+          {modes && currentMode && (
+            <Dropdown
+              direction="up"
+              menuClass="w-56"
+              trigger={(open) => (
+                <button
+                  className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
+                  title={t("权限模式")}
+                >
+                  <Zap className="size-3 text-primary" />
+                  {currentMode.name}
+                  <ChevronDown className="size-3 opacity-60" />
+                </button>
+              )}
+            >
+              {(close) => (
+                <>
+                  {modes.availableModes.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => {
+                        send({ type: "setMode", modeId: m.id });
+                        close();
+                      }}
+                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
+                    >
+                      <span className="text-[12px] text-foreground">
+                        {m.name}
+                        {m.id === modes.currentModeId && (
+                          <Check className="ml-1 inline size-3 text-primary" />
+                        )}
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )}
+            </Dropdown>
+          )}
+
+          {/* model dropdown */}
+          {models.length > 0 && (
+            <Dropdown
+              direction="up"
+              menuClass="w-56 max-h-64 overflow-y-auto"
+              trigger={(open) => (
+                <button
+                  className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}
+                  title={t("模型")}
+                >
+                  <span className="max-w-[130px] truncate">{state?.currentModelId ?? models[0]!.id}</span>
+                  <ChevronDown className="size-3 shrink-0 opacity-60" />
+                </button>
+              )}
+            >
+              {(close) => (
+                <>
+                  <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                    {t("模型")}
+                  </div>
+                  {models.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => {
+                        send({ type: "setModel", modelId: m.id });
+                        close();
+                      }}
+                      className="flex w-full items-center px-3 py-1.5 text-left font-mono text-[11px] hover:bg-accent"
+                    >
+                      <span className="truncate" title={m.name}>
+                        {m.name}
+                      </span>
+                      {m.id === state?.currentModelId && (
+                        <Check className="ml-auto size-3 shrink-0 text-primary" />
+                      )}
+                    </button>
+                  ))}
+                </>
+              )}
+            </Dropdown>
+          )}
+
+          <div className="ml-auto flex items-center gap-1.5">
+            {streaming ? (
+              <button
+                className={`${CANVAS_BTN} text-muted-foreground hover:text-foreground`}
+                title={t("停止生成")}
+                onClick={() => send({ type: "cancel" })}
+              >
+                <Square className="size-3" /> {t("停止")}
+              </button>
+            ) : (
+              <button
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
+                title={t("发送 (Enter)")}
+                disabled={!text.trim() && images.length === 0}
+                onClick={submit}
+              >
+                <SendHorizontal className="size-3" /> {t("发送")}
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

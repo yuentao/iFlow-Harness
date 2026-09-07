@@ -1,141 +1,228 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  Brain,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  CircleDot,
+  Columns2,
+  Eye,
+  FilePen,
+  FolderInput,
+  Globe,
+  Loader2,
+  Search,
+  SquareTerminal,
+  Trash2,
+  Undo2,
+  Wrench,
+  X,
+  Zap,
+} from "lucide-react";
 import type { Block, SessionState, ThoughtBlock, ToolBlock } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
+import { Chip, FileRef } from "./ui";
 
-const KIND_ICON: Record<string, string> = {
-  read: "👁",
-  edit: "✏",
-  delete: "🗑",
-  move: "📁",
-  search: "🔍",
-  execute: "⚡",
-  think: "🧠",
-  fetch: "🌐",
-  other: "🔧",
+const KIND_ICON: Record<string, typeof Eye> = {
+  read: Eye,
+  edit: FilePen,
+  delete: Trash2,
+  move: FolderInput,
+  search: Search,
+  execute: Zap,
+  think: Brain,
+  fetch: Globe,
+  other: Wrench,
 };
 
-const STATUS_ICON: Record<string, string> = {
-  pending: "…",
-  in_progress: "…",
-  completed: "✓",
-  failed: "✗",
-};
+function StatusChip({ status }: { status: ToolBlock["status"] }) {
+  if (status === "completed")
+    return (
+      <Chip tone="success">
+        <Check className="size-2.5" /> {t("已完成")}
+      </Chip>
+    );
+  if (status === "failed")
+    return (
+      <Chip tone="danger">
+        <X className="size-2.5" /> {t("失败")}
+      </Chip>
+    );
+  return (
+    <Chip tone="primary">
+      <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}
+    </Chip>
+  );
+}
 
-function ToolLine({ block }: { block: ToolBlock }) {
+function OutputDetails({ output }: { output: string }) {
+  const [open, setOpen] = useState(false);
+  if (!output) return null;
+  return (
+    <>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        {t("操作输出")}
+      </button>
+      {open && (
+        <pre className="overflow-x-auto border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {output}
+        </pre>
+      )}
+    </>
+  );
+}
+
+function ToolCard({ block }: { block: ToolBlock }) {
   const send = useChat((s) => s.send);
   const primary = block.locations[0];
-  const [showDiff, setShowDiff] = useState(true);
   const hasDiff = block.diff !== null;
+  const Icon = KIND_ICON[block.toolKind] ?? Wrench;
+  const completedWithDiff = block.status === "completed" && hasDiff && block.diff!.oldText !== null;
+
   return (
-    <div className={`tool-block status-${block.status}`}>
-      <div className="tool-line">
-        <span className="tool-icon">{STATUS_ICON[block.status] ?? KIND_ICON[block.toolKind] ?? "🔧"}</span>
-        <span className="tool-title" title={block.toolName}>
-          {block.title || block.toolName || block.toolKind}
+    <div className={`stream-in overflow-hidden rounded-lg border border-border bg-card status-${block.status}`}>
+      <div className="flex items-center gap-2 px-3 py-2">
+        <Icon className="size-3.5 shrink-0 text-primary" />
+        <span className="shrink-0 text-[12px] font-semibold">{block.title || block.toolName || block.toolKind}</span>
+        {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} />}
+        <span className="ml-auto">
+          <StatusChip status={block.status} />
         </span>
-        {primary && (
-          <a
-            className="tool-loc"
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              send({ type: "openLocation", path: primary.path, line: primary.line });
-            }}
-          >
-            {primary.path.split(/[\\/]/).pop()}
-          </a>
-        )}
-        {block.status === "completed" && hasDiff && block.diff!.oldText !== null && (
-          <>
-            <button
-              className="btn tool-revert"
-              title={t("在 VSCode diff 视图中查看该变更")}
-              onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
-            >
-              ⤢ Diff
-            </button>
-            <button
-              className="btn tool-revert"
-              title={t("将该文件恢复为编辑前内容")}
-              onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
-            >
-              ↩ Revert
-            </button>
-          </>
-        )}
-        {hasDiff && (
-          <button className="tool-diff-toggle" onClick={() => setShowDiff((v) => !v)}>
-            {showDiff ? "▾ diff" : "▸ diff"}
-          </button>
-        )}
       </div>
-      {hasDiff && showDiff && <DiffView diff={block.diff!} />}
-      {block.output && (
-        <details className="tool-output">
-          <summary>{t("输出")}</summary>
-          <pre>{block.output}</pre>
-        </details>
+      {hasDiff && (
+        <DiffView
+          diff={block.diff!}
+          actions={
+            <>
+              {completedWithDiff && (
+                <>
+                  <button
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-surface-2"
+                    title={t("将该文件恢复为编辑前内容")}
+                    onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
+                  >
+                    <Undo2 className="size-3" /> {t("回退此改动")}
+                  </button>
+                  <button
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-surface-2"
+                    title={t("在 VSCode diff 视图中查看该变更")}
+                    onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
+                  >
+                    <Columns2 className="size-3" /> {t("文件对比")}
+                  </button>
+                </>
+              )}
+            </>
+          }
+        />
+      )}
+      <OutputDetails output={block.output} />
+    </div>
+  );
+}
+
+function ThoughtCard({ block }: { block: ThoughtBlock }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="stream-in rounded-lg border border-border/70 bg-panel/60">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
+      >
+        {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+        <Brain className="size-3.5 text-primary" />
+        {t("思考过程")}
+      </button>
+      {open && (
+        <div className="border-t border-border/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
+          <Markdown text={block.text} />
+        </div>
       )}
     </div>
   );
 }
 
-function ThoughtLine({ block }: { block: ThoughtBlock }) {
+function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
+  const total = block.entries.length;
+  const done = block.entries.filter((e) => e.status === "completed").length;
   return (
-    <details className="thought">
-      <summary>{t("思考过程")}</summary>
-      <Markdown text={block.text} />
-    </details>
+    <div className="stream-in rounded-lg border border-border bg-card px-3 py-2.5">
+      <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
+        <CircleDot className="size-3.5 text-primary" />
+        {t("任务清单")}
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+          {done} / {total}
+        </span>
+      </div>
+      <ul className="space-y-1.5">
+        {block.entries.map((entry, i) => (
+          <li key={i} className={`flex items-start gap-2 text-[12px] status-${entry.status ?? "pending"}`}>
+            {entry.status === "completed" ? (
+              <CheckCircle2 className="size-3.5 shrink-0 translate-y-[1px] text-success" />
+            ) : entry.status === "in_progress" ? (
+              <Loader2 className="size-3.5 shrink-0 translate-y-[1px] animate-spin text-primary" />
+            ) : (
+              <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
+            )}
+            <span className={entry.status === "completed" ? "text-muted-foreground line-through" : "text-foreground"}>
+              {entry.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
+  const send = useChat((s) => s.send);
+  return (
+    <div className="stream-in flex justify-end">
+      <div className="max-w-[85%] rounded-xl rounded-br-sm bg-surface-2 px-3 py-2 text-[13px] leading-relaxed text-foreground">
+        <Markdown text={block.text} />
+        {block.images && block.images.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {block.images.map((src, i) => (
+              <img
+                key={i}
+                className="h-16 max-w-[160px] cursor-zoom-in rounded-md border border-border object-cover transition-transform hover:-translate-y-px"
+                src={src}
+                alt={t("附件图片 {0}", i + 1)}
+                title={t("在 VSCode 中打开")}
+                onClick={() => send({ type: "openImage", dataUrl: src })}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
 function BlockView({ block }: { block: Block }) {
-  const send = useChat((s) => s.send);
   switch (block.kind) {
     case "user":
-      return (
-        <div className="msg user">
-          <Markdown text={block.text} />
-          {block.images && block.images.length > 0 && (
-            <div className="msg-images">
-              {block.images.map((src, i) => (
-                <img
-                  key={i}
-                  className="msg-image"
-                  src={src}
-                  alt={t("附件图片 {0}", i + 1)}
-                  title={t("在 VSCode 中打开")}
-                  onClick={() => send({ type: "openImage", dataUrl: src })}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      );
+      return <UserMessage block={block} />;
     case "text":
       return (
-        <div className="msg assistant">
+        <div className="stream-in text-[13px] leading-relaxed text-foreground/90">
           <Markdown text={block.text} />
         </div>
       );
     case "thought":
-      return <ThoughtLine block={block} />;
+      return <ThoughtCard block={block} />;
     case "tool":
-      return <ToolLine block={block} />;
+      return <ToolCard block={block} />;
     case "plan":
-      return (
-        <div className="plan">
-          {block.entries.map((entry, i) => (
-            <div key={i} className={`plan-entry status-${entry.status ?? "pending"}`}>
-              <span className="plan-check">{entry.status === "completed" ? "☑" : entry.status === "in_progress" ? "◐" : "☐"}</span>
-              {entry.content}
-            </div>
-          ))}
-        </div>
-      );
+      return <TaskList block={block} />;
   }
 }
 
@@ -160,17 +247,30 @@ function MessageListInner({ state }: { state: SessionState }) {
   }
 
   return (
-    <div className="message-list-wrap">
-      <div className="message-list" ref={scrollRef} onScroll={onScroll}>
-        {state.blocks.length === 0 && <div className="empty-hint">{t("向 iFlow 发送第一条消息开始")}</div>}
+    <div className="relative min-h-0 flex-1">
+      <div className="h-full space-y-3 overflow-y-auto px-3 py-3" ref={scrollRef} onScroll={onScroll}>
+        {state.replaying && (
+          <div className="flex justify-center">
+            <Chip tone="info">
+              <Loader2 className="size-2.5 animate-spin" /> {t("正在恢复历史会话…")}
+            </Chip>
+          </div>
+        )}
+        {state.blocks.length === 0 && !state.replaying && (
+          <div className="mt-10 text-center text-[12px] text-muted-foreground">
+            {t("向 iFlow 发送第一条消息开始")}
+          </div>
+        )}
         {state.blocks.map((block, i) => (
           <BlockView key={i} block={block} />
         ))}
-        {state.status === "streaming" && <div className="cursor">▍</div>}
+        {state.status === "streaming" && (
+          <span className="caret-blink ml-1 inline-block h-3.5 w-[6px] translate-y-[1px] bg-primary" />
+        )}
       </div>
       {showJump && (
         <button
-          className="jump-bottom"
+          className="absolute bottom-3 right-4 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-md transition-opacity hover:opacity-90"
           onClick={() => {
             const el = scrollRef.current;
             if (el) el.scrollTop = el.scrollHeight;

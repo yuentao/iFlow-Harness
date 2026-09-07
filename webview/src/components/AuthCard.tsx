@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { KeyRound } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
@@ -29,7 +30,6 @@ export function AuthCard({
   const [profileName, setProfileName] = useState(activeProfile?.name ?? "");
   const [formError, setFormError] = useState<string | null>(null);
 
-  const hasStored = auth.saved !== null;
   const keyPlaceholder = auth.saved ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…";
 
   function submit() {
@@ -53,100 +53,131 @@ export function AuthCard({
     onDismiss();
   }
 
+  const INPUT =
+    "rounded-md border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60";
+
   return (
-    <div className="approval-card auth-card" role="dialog" aria-label={t("API 凭据配置")}>
-      <div className="approval-head">
-        <span className="approval-icon">🔑</span>
-        <span className="approval-title">
+    <div
+      className="stream-in mx-3 mb-2 max-h-[46vh] shrink-0 overflow-y-auto rounded-lg border border-border bg-card"
+      role="dialog"
+      aria-label={t("API 凭据配置")}
+    >
+      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/60 bg-card px-3 py-2">
+        <KeyRound className="size-3.5 text-primary" />
+        <span className="text-[12px] font-semibold">
           {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}
         </span>
         {/* The setup banner is not dismissible while unauthenticated. */}
         {!auth.needsSetup && (
-          <button className="approval-dismiss" title={t("收起")} onClick={onDismiss}>
+          <button
+            className="ml-auto text-[12px] text-muted-foreground hover:text-foreground"
+            title={t("收起")}
+            onClick={onDismiss}
+          >
             ✕
           </button>
         )}
       </div>
 
-      {auth.profiles.length > 0 && (
-        <div className="profile-list">
-          <div className="auth-label">{t("API 配置（点击切换，切换后重新认证会话）")}</div>
-          {auth.profiles.map((p) => (
-            <div key={p.name} className={`profile-row${p.active ? " active" : ""}`}>
-              <button
-                className="profile-main"
-                title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
-                onClick={() => {
-                  if (!p.active) send({ type: "activateProfile", name: p.name });
-                }}
-              >
-                <span className="profile-active-mark">{p.active ? "●" : "○"}</span>
-                <span className="profile-name">{p.name}</span>
-                <span className="profile-meta">{p.modelName}</span>
-              </button>
-              <span className={`profile-source ${p.source}`}>{p.source === "extension" ? t("扩展") : t("CLI")}</span>
-              {p.source === "extension" && (
-                <button
-                  className="profile-delete"
-                  title={t("删除 {0}", p.name)}
-                  onClick={() => send({ type: "deleteProfile", name: p.name })}
-                >
-                  🗑
-                </button>
-              )}
+      <div className="space-y-2.5 px-3 py-2.5">
+        {auth.profiles.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[11.5px] text-muted-foreground">
+              {t("API 配置（点击切换，切换后重新认证会话）")}
             </div>
-          ))}
-        </div>
-      )}
+            {auth.profiles.map((p) => (
+              <div
+                key={p.name}
+                className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] ${
+                  p.active ? "border-primary/50 bg-primary/10" : "border-border"
+                }`}
+              >
+                <button
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
+                  onClick={() => {
+                    if (!p.active) send({ type: "activateProfile", name: p.name });
+                  }}
+                >
+                  <span className={p.active ? "text-primary" : "text-muted-foreground"}>
+                    {p.active ? "●" : "○"}
+                  </span>
+                  <span className="truncate font-semibold text-foreground">{p.name}</span>
+                  <span className="truncate font-mono text-[10px] text-muted-foreground">{p.modelName}</span>
+                </button>
+                <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] text-muted-foreground">
+                  {p.source === "extension" ? t("扩展") : t("CLI")}
+                </span>
+                {p.source === "extension" && (
+                  <button
+                    className="shrink-0 text-[11px] text-muted-foreground opacity-70 hover:opacity-100 hover:text-destructive"
+                    title={t("删除 {0}", p.name)}
+                    onClick={() => send({ type: "deleteProfile", name: p.name })}
+                  >
+                    🗑
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
-      <div className="auth-form">
-        <div className="auth-label">{t("新增 / 更新配置")}</div>
-        <label className="auth-field">
-          <span className="auth-label">{t("配置名称（可选，默认为模型名）")}</span>
-          <input
-            type="text"
-            value={profileName}
-            placeholder={t("如 BUZZ、工作密钥…")}
-            onChange={(e) => setProfileName(e.target.value)}
-          />
-        </label>
-        <label className="auth-field">
-          <span className="auth-label">{t("Base URL（OpenAI 兼容）")}</span>
-          <input
-            type="text"
-            value={baseUrl}
-            placeholder="https://api.example.com/v1"
-            onChange={(e) => setBaseUrl(e.target.value)}
-          />
-        </label>
-        <label className="auth-field">
-          <span className="auth-label">API Key</span>
-          <input
-            type="password"
-            value={apiKey}
-            placeholder={keyPlaceholder}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-        </label>
-        <label className="auth-field">
-          <span className="auth-label">{t("模型名称")}</span>
-          <input
-            type="text"
-            value={modelName}
-            placeholder={t("如 glm-5.3-flash-free")}
-            onChange={(e) => setModelName(e.target.value)}
-          />
-        </label>
-        <div className="approval-actions">
-          <button className="btn approval-btn allow" onClick={submit}>
-            {t("保存并激活")}
-          </button>
-        </div>
-        {formError && <div className="auth-error">{formError}</div>}
-        <div className="auth-note">
-          {t(
-            "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。",
-          )}
+        <div className="space-y-2">
+          <div className="text-[11.5px] text-muted-foreground">{t("新增 / 更新配置")}</div>
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[11.5px] text-muted-foreground">{t("配置名称（可选，默认为模型名）")}</span>
+            <input
+              type="text"
+              className={INPUT}
+              value={profileName}
+              placeholder={t("如 BUZZ、工作密钥…")}
+              onChange={(e) => setProfileName(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[11.5px] text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
+            <input
+              type="text"
+              className={INPUT}
+              value={baseUrl}
+              placeholder="https://api.example.com/v1"
+              onChange={(e) => setBaseUrl(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[11.5px] text-muted-foreground">API Key</span>
+            <input
+              type="password"
+              className={INPUT}
+              value={apiKey}
+              placeholder={keyPlaceholder}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[11.5px] text-muted-foreground">{t("模型名称")}</span>
+            <input
+              type="text"
+              className={INPUT}
+              value={modelName}
+              placeholder={t("如 glm-5.3-flash-free")}
+              onChange={(e) => setModelName(e.target.value)}
+            />
+          </label>
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            <button
+              className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+              onClick={submit}
+            >
+              {t("保存并激活")}
+            </button>
+            {formError && <span className="text-[12px] text-destructive">{formError}</span>}
+          </div>
+          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+            {t(
+              "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。",
+            )}
+          </p>
         </div>
       </div>
     </div>

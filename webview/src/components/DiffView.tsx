@@ -1,8 +1,13 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
+import { FileCode2 } from "lucide-react";
 import type { ToolDiffUi } from "../../../shared/messages";
+import { t } from "../i18n";
+import { FileRef } from "./ui";
 
 interface DiffRow {
   type: "add" | "del" | "same" | "hunk";
+  /** Display line number (old numbering for del/same, new for add). */
+  n: string;
   text: string;
 }
 
@@ -16,34 +21,46 @@ const CONTEXT_LINES = 3;
  * folded git-style: each change keeps CONTEXT_LINES of context, the rest of
  * an unchanged file collapses into "⋯" hunks.
  */
-export function DiffView({ diff }: { diff: ToolDiffUi }) {
+export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactNode }) {
   const rows = useMemo(() => buildRows(diff), [diff]);
+  const addCount = rows.filter((r) => r.type === "add").length;
+  const delCount = rows.filter((r) => r.type === "del").length;
 
   return (
-    <div className="diff-view">
-      <div className="diff-head">
-        <span className="diff-path" title={diff.path}>
-          {diff.path}
-        </span>
-        <span className="diff-stats">
-          {rows.filter((r) => r.type === "add").length > 0 && (
-            <span className="diff-add-count">+{rows.filter((r) => r.type === "add").length}</span>
-          )}
-          {rows.filter((r) => r.type === "del").length > 0 && (
-            <span className="diff-del-count">-{rows.filter((r) => r.type === "del").length}</span>
-          )}
+    <div className="overflow-hidden bg-card">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <FileCode2 className="size-3.5 shrink-0 text-primary" />
+        <FileRef path={diff.path} />
+        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10px]">
+          {addCount > 0 && <span className="text-diff-add-fg">+{addCount}</span>}
+          {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}
         </span>
       </div>
-      <div className="diff-body">
+      <div className="max-h-60 overflow-auto border-y border-border/60 bg-editor font-mono text-[11px] leading-[1.7]">
         {rows.map((row, i) => (
-          <div key={i} className={`diff-row ${row.type}`}>
-            <span className="diff-gutter">
-              {row.type === "add" ? "+" : row.type === "del" ? "-" : row.type === "hunk" ? "" : " "}
+          <div
+            key={i}
+            className={`flex gap-3 px-3 ${
+              row.type === "add" ? "bg-diff-add" : row.type === "del" ? "bg-diff-del" : ""
+            }`}
+          >
+            <span className="w-7 shrink-0 select-none text-right text-syn-com">{row.n}</span>
+            <span
+              className={`w-2 shrink-0 select-none ${
+                row.type === "add"
+                  ? "text-diff-add-fg"
+                  : row.type === "del"
+                    ? "text-diff-del-fg"
+                    : "text-syn-com"
+              }`}
+            >
+              {row.type === "add" ? "+" : row.type === "del" ? "−" : " "}
             </span>
-            <span className="diff-text">{row.text === "" ? " " : row.text}</span>
+            <span className="whitespace-pre text-foreground/90">{row.text === "" ? " " : row.text}</span>
           </div>
         ))}
       </div>
+      {actions && <div className="flex flex-wrap items-center gap-2 px-3 py-2">{actions}</div>}
     </div>
   );
 }
@@ -53,9 +70,13 @@ function buildRows(diff: ToolDiffUi): DiffRow[] {
   const newLines = diff.newText === null ? [] : diff.newText.split("\n");
 
   // File creation: no old content, show everything as additions.
-  if (diff.oldText === null) return newLines.map((text) => ({ type: "add" as const, text }));
+  if (diff.oldText === null) {
+    return newLines.map((text, j) => ({ type: "add" as const, n: String(j + 1), text }));
+  }
   // File deletion: no new content, show everything as removals.
-  if (diff.newText === null) return oldLines.map((text) => ({ type: "del" as const, text }));
+  if (diff.newText === null) {
+    return oldLines.map((text, i) => ({ type: "del" as const, n: String(i + 1), text }));
+  }
 
   return collapseAroundChanges(lcsRows(oldLines, newLines));
 }
@@ -89,13 +110,13 @@ function collapseAroundChanges(rows: DiffRow[]): DiffRow[] {
   const out: DiffRow[] = [];
   let prevEnd = -1;
   for (const [s, e] of windows) {
-    if (s > prevEnd + 1) out.push({ type: "hunk", text: "⋯" });
+    if (s > prevEnd + 1) out.push({ type: "hunk", n: "", text: "⋯" });
     for (let i = Math.max(prevEnd + 1, s); i <= e; i++) out.push(rows[i]!);
     prevEnd = e;
   }
   // Trailing unchanged stretch after the last window: mark as folded too,
   // so the reader can tell the diff was truncated (not that the file ends).
-  if (prevEnd < rows.length - 1) out.push({ type: "hunk", text: "⋯" });
+  if (prevEnd < rows.length - 1) out.push({ type: "hunk", n: "", text: "⋯" });
   return out;
 }
 
@@ -106,8 +127,8 @@ function lcsRows(oldLines: string[], newLines: string[]): DiffRow[] {
   // Guard against pathological inputs (whole-file rewrites of huge files).
   if (n * m > 4_000_000) {
     return [
-      ...oldLines.map((text) => ({ type: "del" as const, text })),
-      ...newLines.map((text) => ({ type: "add" as const, text })),
+      ...oldLines.map((text, i) => ({ type: "del" as const, n: String(i + 1), text })),
+      ...newLines.map((text, j) => ({ type: "add" as const, n: String(j + 1), text })),
     ];
   }
 
@@ -121,20 +142,26 @@ function lcsRows(oldLines: string[], newLines: string[]): DiffRow[] {
   const rows: DiffRow[] = [];
   let i = 0;
   let j = 0;
+  let oldNo = 1;
+  let newNo = 1;
   while (i < n && j < m) {
     if (oldLines[i] === newLines[j]) {
-      rows.push({ type: "same", text: oldLines[i]! });
+      rows.push({ type: "same", n: String(oldNo), text: oldLines[i]! });
       i++;
       j++;
+      oldNo++;
+      newNo++;
     } else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) {
-      rows.push({ type: "del", text: oldLines[i]! });
+      rows.push({ type: "del", n: String(oldNo), text: oldLines[i]! });
       i++;
+      oldNo++;
     } else {
-      rows.push({ type: "add", text: newLines[j]! });
+      rows.push({ type: "add", n: String(newNo), text: newLines[j]! });
       j++;
+      newNo++;
     }
   }
-  while (i < n) rows.push({ type: "del", text: oldLines[i++]! });
-  while (j < m) rows.push({ type: "add", text: newLines[j++]! });
+  while (i < n) rows.push({ type: "del", n: String(oldNo++), text: oldLines[i++]! });
+  while (j < m) rows.push({ type: "add", n: String(newNo++), text: newLines[j++]! });
   return rows;
 }

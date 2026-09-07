@@ -18,6 +18,11 @@ function isEnglish(): boolean {
   return (current ?? "zh-cn").toLowerCase().startsWith("en");
 }
 
+/** True when the current locale is English (used for brand-name display). */
+export function isEnglishLocale(): boolean {
+  return isEnglish();
+}
+
 const en: Record<string, string> = {
   // loading / topbar
   "连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）":
@@ -29,10 +34,31 @@ const en: Record<string, string> = {
   "模型": "Model",
   "新会话": "New session",
   "API 凭据配置": "API credentials",
+  "切换到浅色主题": "Switch to light theme",
+  "切换到深色主题": "Switch to dark theme",
+  "心流·驭光": "iFlow Harness",
+  "连接中": "Connecting",
+  "就绪": "Ready",
+  "正在生成": "Generating",
+  "错误": "Error",
+  "管理配置与凭据…": "Manage profiles & credentials…",
+  "会话历史": "Session history",
   // approval card
   "工具执行审批": "Tool execution approval",
   "iFlow 请求执行工具": "iFlow requests to run a tool",
   "取消": "Cancel",
+  // tool cards / message list
+  "已完成": "Completed",
+  "失败": "Failed",
+  "执行中": "Running",
+  "操作输出": "Output",
+  "回退此改动": "Revert this change",
+  "文件对比": "File diff",
+  "任务清单": "Task list",
+  "正在恢复历史会话…": "Restoring session…",
+  // composer
+  "发送": "Send",
+  "停止": "Stop",
   // auth card
   "已保存（{0}）— 留空保持不变": "saved (…{0}) — leave empty to keep",
   "Base URL 必须以 http:// 或 https:// 开头": "Base URL must start with http:// or https://",
