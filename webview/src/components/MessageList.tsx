@@ -143,6 +143,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
  * verbatim.
  */
 function localizeStepTitle(title: string): string {
+  if (/^task$/i.test(title.trim())) return t("子智能体");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
   if (m) return t("启动子代理（{0}）：{1}", m[1], m[2]);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
