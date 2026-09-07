@@ -396,7 +396,7 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div className="message-scroll h-full space-y-3 overflow-y-auto px-3 py-3" ref={scrollRef} onScroll={onScroll}>
+      <div className="message-scroll h-full space-y-3 overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
         {state.blocks.length === 0 && !state.replaying && (
           <div className="mt-10 text-center text-[12px] text-muted-foreground">
             {t("向 iFlow 发送第一条消息开始")}
@@ -406,9 +406,13 @@ function MessageListInner({ state }: { state: SessionState }) {
           <BlockView key={i} block={block} />
         ))}
         {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
-          <div className="stream-in inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary">
-            <Loader2 className="size-3 animate-spin" />
-            {state.initializing ? t("正在创建新会话…") : t("正在生成")}
+          // Sticky to the bottom of the scroll viewport so the indicator stays
+          // visible even while new content streams in above it.
+          <div className="sticky bottom-1 z-10 flex justify-center">
+            <div className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md">
+              <Loader2 className="size-3 animate-spin" />
+              {state.initializing ? t("正在创建新会话…") : t("正在生成")}
+            </div>
           </div>
         )}
       </div>
