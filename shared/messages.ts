@@ -72,6 +72,8 @@ export interface SubAgentBlock {
   taskToolCallId: string | null;
   title: string;
   status: ToolCallStatus;
+  /** SubAgent type parsed from the task title, e.g. "general-purpose" — drives the card accent color. */
+  agentType: string | null;
   entries: Block[];
 }
 

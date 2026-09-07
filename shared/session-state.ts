@@ -106,6 +106,12 @@ function refreshSubAgentStatus(sub: SubAgentBlock): void {
   else if (sub.taskToolCallId === null && nested.length > 0) sub.status = "completed";
 }
 
+/** Extract the SubAgent type from a task title ("Launch agent(X): ..." or "X Agent started"). */
+function extractAgentType(title: string): string | null {
+  const m = /Launch agent\(([^)]*)\)/.exec(title) ?? /(?:^|\s)([A-Za-z0-9_-]+) Agent started/.exec(title);
+  return m ? m[1] || null : null;
+}
+
 /** Whether this update belongs inside a SubAgent (nested) rather than top-level. */
 function isNestedUpdate(update: SessionUpdate): boolean {
   const kind = update.sessionUpdate;
@@ -228,7 +234,7 @@ export function applySessionUpdate(
         (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
           ? update.title || update.toolName
           : undefined) ?? l10n.t("子智能体");
-      sub = { kind: "subagent", agentId, taskToolCallId: null, title, status: "in_progress", entries: [] };
+      sub = { kind: "subagent", agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] };
       state.blocks.push(sub);
     }
     if (isNestedUpdate(update)) applyUpdateToBlocks(sub.entries, update);
@@ -258,6 +264,14 @@ export function applySessionUpdate(
     if (active) {
       // Interval bookkeeping: the spawning call's status drives the card.
       if (taskUpdate.status) active.status = taskUpdate.status;
+      // A richer title (Launch agent(type): …) upgrades the card type.
+      if (taskUpdate.title && !active.agentType) {
+        const type = extractAgentType(taskUpdate.title);
+        if (type) {
+          active.agentType = type;
+          active.title = taskUpdate.title;
+        }
+      }
       // Keep the update in the log so the 日志 pane shows the full trail.
       if (isNestedUpdate(update)) applyUpdateToBlocks(active.entries, update);
       return;
@@ -270,6 +284,7 @@ export function applySessionUpdate(
       taskToolCallId: taskUpdate.toolCallId ?? null,
       title,
       status: taskUpdate.status ?? "in_progress",
+      agentType: extractAgentType(title),
       entries: [],
     });
     return;
