@@ -1,5 +1,8 @@
 name: CI
 
+# Quality gate on master pushes and PRs. Packaging/publishing runs only on
+# the release branch — see release.yml.
+
 on:
   push:
     branches: [master]
@@ -30,18 +33,3 @@ jobs:
 
       - name: Build (host + webview)
         run: npm run build
-
-      - name: Package (.vsix)
-        if: runner.os == 'Linux'
-        # npm run package carries the --baseContentUrl/--baseImagesUrl options
-        # required because the repo is not on GitHub/GitLab (vsce can't
-        # auto-detect it), keeping CI output identical to local packaging.
-        run: npm run package
-
-      # macOS/Linux only: extension host is bundled cross-platform, one artifact suffices.
-      - name: Upload .vsix artifact
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: iflow-vscode-vsix
-          path: "*.vsix"

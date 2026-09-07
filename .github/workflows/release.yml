@@ -1,0 +1,76 @@
+name: Release
+
+# Packaging/publishing happens ONLY on the release branch. The version number
+# and release notes come from the topmost section of CHANGELOG.md (single
+# source of truth); the version is written into package.json before packaging.
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # Read version + notes from the first "## [x.y.z] - date" section of
+      # CHANGELOG.md. Exposed as steps.changelog.outputs.*.
+      - name: Read version & notes from CHANGELOG.md
+        id: changelog
+        run: |
+          node scripts/read-changelog.mjs >> "$GITHUB_OUTPUT"
+
+      - name: Show resolved version
+        run: |
+          echo "version=${{ steps.changelog.outputs.version }}"
+          echo "----- notes -----"
+          echo "${{ steps.changelog.outputs.notes }}"
+
+      # Stamp the CHANGELOG version into package.json (no manual sync needed).
+      - name: Write version into package.json
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '${{ steps.changelog.outputs.version }}';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Build & package (.vsix)
+        run: npm run package
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iflow-vscode-vsix-${{ steps.changelog.outputs.version }}
+          path: "*.vsix"
+
+      # Create/update the git tag and a GitHub-style release with the notes.
+      # On non-GitHub remotes the release step may be a no-op; the artifact
+      # above is always produced.
+      - name: Create release with notes
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.changelog.outputs.version }}
+          name: v${{ steps.changelog.outputs.version }}
+          body: ${{ steps.changelog.outputs.notes }}
+          make_latest: true
