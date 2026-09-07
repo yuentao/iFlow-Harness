@@ -59,6 +59,22 @@ export interface ToolBlock {
   diff: ToolDiffUi | null;
 }
 
+/**
+ * iFlow SubAgent (`task` tool): its lifecycle events and all nested updates
+ * carry an `agentId` on the wire. One block per SubAgent; nested tool calls
+ * and message chunks are grouped into `entries`.
+ */
+export interface SubAgentBlock {
+  kind: "subagent";
+  /** Wire grouping key (the real agentId; a task tool_call without one uses its toolCallId until bound). */
+  agentId: string;
+  /** toolCallId of the spawning `task` tool_call, when seen. */
+  taskToolCallId: string | null;
+  title: string;
+  status: ToolCallStatus;
+  entries: Block[];
+}
+
 export interface PlanBlock {
   kind: "plan";
   entries: PlanEntryUi[];
@@ -70,7 +86,7 @@ export interface PlanEntryUi {
   priority?: "high" | "medium" | "low";
 }
 
-export type Block = TextBlock | ThoughtBlock | UserBlock | ToolBlock | PlanBlock;
+export type Block = TextBlock | ThoughtBlock | UserBlock | ToolBlock | SubAgentBlock | PlanBlock;
 
 // ---------------------------------------------------------------------------
 // Full session state (owned by Extension Host store)

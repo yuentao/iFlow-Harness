@@ -89,6 +89,17 @@ function createMockHost(): HostApi {
         ].join("\n"),
       },
     },
+    {
+      kind: "subagent",
+      agentId: "demo-agent-1",
+      taskToolCallId: "demo-task-1",
+      title: "子智能体 · 测试编写",
+      status: "in_progress",
+      entries: [
+        { kind: "tool", toolCallId: "sa-1", toolName: "read_file", title: "读取 rate-limiter.test.ts", toolKind: "read", status: "completed", output: "", locations: [], diff: null },
+        { kind: "tool", toolCallId: "sa-2", toolName: "write_file", title: "生成并发窗口边界用例", toolKind: "edit", status: "in_progress", output: "", locations: [], diff: null },
+      ],
+    },
     { kind: "text", text: "这是 **iFlow-chat** 仓库，包含 `docs/` 方案文档与 iFlow CLI 内核文件。\n\n- 需要我深入看某个部分吗？" },
     { kind: "plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];

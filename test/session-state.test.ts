@@ -20,6 +20,66 @@ function notify(update: SessionNotification["update"], sessionId = "s1"): Sessio
   return { sessionId, update };
 }
 
+describe("SubAgent grouping (agentId)", () => {
+  it("groups a task tool_call + nested agentId updates into one subagent block", () => {
+    const state: SessionState = initialSessionState();
+    // Spawning task tool_call arrives WITHOUT an agentId.
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call", toolCallId: "task-1", toolName: "task", title: "测试编写", kind: "other", status: "in_progress" }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({ kind: "subagent", taskToolCallId: "task-1", title: "测试编写", status: "in_progress", agentId: "task-1" });
+    // Nested updates carry the real agentId and must land inside the card.
+    applySessionUpdate(
+      state,
+      { sessionId: "s1", agentId: "agent-9", update: { sessionUpdate: "tool_call", toolCallId: "n1", toolName: "read_file", title: "读取文件", kind: "read", status: "completed" } },
+    );
+    applySessionUpdate(
+      state,
+      { sessionId: "s1", agentId: "agent-9", update: { sessionUpdate: "tool_call", toolCallId: "n2", toolName: "write_file", title: "写测试", kind: "edit", status: "in_progress" } },
+    );
+    expect(state.blocks).toHaveLength(1); // no top-level leakage
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.agentId).toBe("agent-9"); // rebound from toolCallId key
+    expect(sub.entries).toHaveLength(2);
+    expect(sub.entries[0]).toMatchObject({ kind: "tool", toolName: "read_file", status: "completed" });
+  });
+
+  it("marks the subagent completed when the spawning tool_call completes", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task-2", toolName: "task", title: "重构", kind: "other", status: "in_progress" }));
+    applySessionUpdate(
+      state,
+      { sessionId: "s1", agentId: "agent-a", update: { sessionUpdate: "tool_call", toolCallId: "task-2", toolName: "task", kind: "other", status: "completed" } },
+    );
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("completed");
+  });
+
+  it("synthesizes a subagent card for agentId events without a task tool_call", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      { sessionId: "s1", agentId: "agent-x", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "子任务进行中" } } },
+    );
+    expect(state.blocks).toHaveLength(1);
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.agentId).toBe("agent-x");
+    expect(sub.entries).toHaveLength(1);
+    expect(sub.entries[0]).toMatchObject({ kind: "text", text: "子任务进行中" });
+  });
+
+  it("keeps top-level tool blocks unaffected when no agentId is present", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "read_file", title: "x", kind: "read", status: "completed" }));
+    expect(state.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1" });
+  });
+});
+
 describe("applySessionUpdate", () => {
   it("merges consecutive agent_message_chunks into one text block", () => {
     const state: SessionState = initialSessionState();

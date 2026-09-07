@@ -12,6 +12,7 @@ import {
   FolderInput,
   Globe,
   Loader2,
+  Bot,
   Search,
   SquareTerminal,
   Trash2,
@@ -20,7 +21,13 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type { Block, SessionState, ThoughtBlock, ToolBlock } from "../../../shared/messages";
+import type {
+  Block,
+  SessionState,
+  SubAgentBlock,
+  ThoughtBlock,
+  ToolBlock,
+} from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { Markdown } from "./Markdown";
@@ -129,6 +136,60 @@ function ToolCard({ block }: { block: ToolBlock }) {
   );
 }
 
+function SubAgentCard({ block }: { block: SubAgentBlock }) {
+  const [open, setOpen] = useState(false);
+  const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
+  const done = nested.filter((b) => b.status === "completed" || b.status === "failed").length;
+  const statusChip =
+    block.status === "completed" ? (
+      <Chip tone="success">
+        <Check className="size-2.5" /> {t("已完成")} {nested.length > 0 ? `${done}/${nested.length}` : ""}
+      </Chip>
+    ) : block.status === "failed" ? (
+      <Chip tone="danger">
+        <X className="size-2.5" /> {t("失败")}
+      </Chip>
+    ) : (
+      <Chip tone="info">
+        <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}{" "}
+        {nested.length > 0 ? `${done}/${nested.length}` : ""}
+      </Chip>
+    );
+
+  return (
+    <div className="stream-in overflow-hidden rounded-lg border border-info/40 bg-card">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <Bot className="size-3.5 shrink-0 text-info" />
+        <span className="min-w-0 truncate text-[12px] font-semibold">{block.title}</span>
+        <span className="ml-auto">
+          {statusChip}
+        </span>
+      </div>
+      {block.entries.length > 0 && (
+        <>
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            {t("操作输出")}
+            <span className="ml-auto font-mono text-[10px] opacity-60">
+              {block.entries.length}
+            </span>
+          </button>
+          {open && (
+            <div className="space-y-2 border-t border-border/60 px-3 py-2">
+              {block.entries.map((entry, i) => (
+                <BlockView key={i} block={entry} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function ThoughtCard({ block }: { block: ThoughtBlock }) {
   const [open, setOpen] = useState(false);
   return (
@@ -221,6 +282,8 @@ function BlockView({ block }: { block: Block }) {
       return <ThoughtCard block={block} />;
     case "tool":
       return <ToolCard block={block} />;
+    case "subagent":
+      return <SubAgentCard block={block} />;
     case "plan":
       return <TaskList block={block} />;
   }

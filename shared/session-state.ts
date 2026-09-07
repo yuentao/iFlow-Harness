@@ -6,6 +6,7 @@
 
 import type {
   SessionNotification,
+  SessionUpdate,
   SlashCommand,
   StopReason,
   ToolCallStatus,
@@ -18,6 +19,7 @@ import {
   type PendingApprovalUi,
   type SessionState,
   type SessionSummaryUi,
+  type SubAgentBlock,
   type ToolBlock,
   type ToolDiffUi,
 } from "./messages.js";
@@ -54,35 +56,75 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
   blocks.push(patch);
 }
 
-// --- protocol update application -------------------------------------------
+// --- SubAgent grouping (iFlow: nested updates carry `agentId`) --------------
 
-/**
- * Apply one `session/update` notification to the state (mutates `state`,
- * which the store owns between snapshots).
- */
-export function applySessionUpdate(
-  state: SessionState,
-  notification: SessionNotification,
-  options: { replaying?: boolean } = {},
-): void {
-  const update = notification.update;
+function findSubAgent(blocks: Block[], agentId: string): SubAgentBlock | undefined {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i]!;
+    if (block.kind === "subagent" && (block.agentId === agentId || block.taskToolCallId === agentId)) {
+      return block;
+    }
+  }
+  return undefined;
+}
+
+/** Fallback binding: a `task` tool_call arrived without an agentId — adopt the
+ * newest unfinished such block once the real agentId shows up. */
+function adoptUnboundSubAgent(blocks: Block[], agentId: string): SubAgentBlock | undefined {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i]!;
+    if (
+      block.kind === "subagent" &&
+      block.agentId === block.taskToolCallId &&
+      block.taskToolCallId !== null &&
+      (block.status === "pending" || block.status === "in_progress")
+    ) {
+      block.agentId = agentId;
+      return block;
+    }
+  }
+  return undefined;
+}
+
+/** Aggregate SubAgent status from its spawning tool_call + nested entries. */
+function refreshSubAgentStatus(sub: SubAgentBlock): void {
+  if (sub.status === "completed" || sub.status === "failed") return; // terminal wins
+  const nested = sub.entries.filter((b): b is ToolBlock => b.kind === "tool");
+  if (nested.some((b) => b.status === "failed")) sub.status = "failed";
+  else if (nested.some((b) => b.status === "pending" || b.status === "in_progress")) sub.status = "in_progress";
+  else if (sub.taskToolCallId === null && nested.length > 0) sub.status = "completed";
+}
+
+/** Whether this update belongs inside a SubAgent (nested) rather than top-level. */
+function isNestedUpdate(update: SessionUpdate): boolean {
+  const kind = update.sessionUpdate;
+  return (
+    kind === "tool_call" ||
+    kind === "tool_call_update" ||
+    kind === "agent_message_chunk" ||
+    kind === "agent_thought_chunk" ||
+    kind === "plan"
+  );
+}
+
+/** Apply one session update to a block list (top-level transcript or a
+ * SubAgent's entries). Mutates the list. */
+function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
   switch (update.sessionUpdate) {
     case "agent_message_chunk":
-      if (update.content.type === "text") appendTextToLast(state.blocks, "text", update.content.text);
+      if (update.content.type === "text") appendTextToLast(blocks, "text", update.content.text);
       break;
     case "agent_thought_chunk":
-      if (update.content.type === "text") appendTextToLast(state.blocks, "thought", update.content.text);
+      if (update.content.type === "text") appendTextToLast(blocks, "thought", update.content.text);
       break;
     case "user_message_chunk":
       // Live prompts: the host appends user blocks itself, so agent echo is
       // ignored. During `session/load` replay (M4) user turns arrive through
       // this notification and must be rendered.
-      if ((options.replaying || state.blocks.length === 0) && update.content.type === "text") {
-        appendTextToLast(state.blocks, "user", update.content.text);
-      }
+      if (update.content.type === "text") appendTextToLast(blocks, "user", update.content.text);
       break;
     case "tool_call":
-      upsertToolBlock(state.blocks, {
+      upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
         toolName: update.toolName ?? "",
@@ -95,7 +137,7 @@ export function applySessionUpdate(
       });
       break;
     case "tool_call_update":
-      upsertToolBlock(state.blocks, {
+      upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
         toolName: update.toolName ?? "",
@@ -108,10 +150,98 @@ export function applySessionUpdate(
       });
       break;
     case "plan":
-      state.blocks.push({
+      blocks.push({
         kind: "plan",
         entries: update.entries.map((e) => ({ content: e.content, status: e.status, priority: e.priority })),
       });
+      break;
+    default:
+      break;
+  }
+}
+
+// --- protocol update application -------------------------------------------
+
+/**
+ * Apply one `session/update` notification to the state (mutates `state`,
+ * which the store owns between snapshots).
+ *
+ * iFlow SubAgent (`task` tool): nested updates carry `agentId` and are
+ * grouped into one SubAgentBlock per agent instead of top-level blocks.
+ */
+export function applySessionUpdate(
+  state: SessionState,
+  notification: SessionNotification,
+  options: { replaying?: boolean } = {},
+): void {
+  const update = notification.update;
+
+  // SubAgent grouping: everything nested under an agentId lands in that
+  // agent's block (or in the `task` tool_call's block, matched by id).
+  if (notification.agentId) {
+    const agentId = notification.agentId;
+    let sub = findSubAgent(state.blocks, agentId) ?? adoptUnboundSubAgent(state.blocks, agentId);
+    if (!sub) {
+      // No spawning `task` tool_call seen — synthesize the card from context.
+      const title =
+        (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
+          ? update.title || update.toolName
+          : undefined) ?? l10n.t("子智能体");
+      sub = { kind: "subagent", agentId, taskToolCallId: null, title, status: "in_progress", entries: [] };
+      state.blocks.push(sub);
+    }
+    if (isNestedUpdate(update)) applyUpdateToBlocks(sub.entries, update);
+    // Terminal status for the card comes from the spawning tool_call's update.
+    if (
+      (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
+      update.toolCallId === sub.taskToolCallId &&
+      update.status
+    ) {
+      sub.status = update.status;
+    } else {
+      refreshSubAgentStatus(sub);
+    }
+    return;
+  }
+
+  // The spawning `task` tool_call itself (no agentId yet): a SubAgent card is
+  // born here; nested updates bind to it once they carry the agentId.
+  if (
+    (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
+    update.toolName === "task"
+  ) {
+    const existing = findSubAgent(state.blocks, update.toolCallId);
+    if (existing) {
+      if (update.status) existing.status = update.status;
+    } else {
+      state.blocks.push({
+        kind: "subagent",
+        agentId: update.toolCallId,
+        taskToolCallId: update.toolCallId,
+        title: update.title || update.toolName || l10n.t("子智能体"),
+        status: update.status ?? "pending",
+        entries: [],
+      });
+    }
+    return;
+  }
+
+  const replaying = options.replaying;
+  switch (update.sessionUpdate) {
+    case "user_message_chunk":
+      // Live prompts: the host appends user blocks itself, so agent echo is
+      // ignored. During `session/load` replay (M4) user turns arrive through
+      // this notification and must be rendered.
+      if ((replaying || state.blocks.length === 0) && update.content.type === "text") {
+        appendTextToLast(state.blocks, "user", update.content.text);
+      }
+      break;
+    case "agent_message_chunk":
+    case "agent_thought_chunk":
+    case "tool_call":
+    case "tool_call_update":
+    case "plan":
+      applyUpdateToBlocks(state.blocks, update);
       break;
     case "available_commands_update":
       state.commands = update.availableCommands;
