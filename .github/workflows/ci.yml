@@ -33,7 +33,10 @@ jobs:
 
       - name: Package (.vsix)
         if: runner.os == 'Linux'
-        run: npx vsce package --no-dependencies
+        # npm run package carries the --baseContentUrl/--baseImagesUrl options
+        # required because the repo is not on GitHub/GitLab (vsce can't
+        # auto-detect it), keeping CI output identical to local packaging.
+        run: npm run package
 
       # macOS/Linux only: extension host is bundled cross-platform, one artifact suffices.
       - name: Upload .vsix artifact

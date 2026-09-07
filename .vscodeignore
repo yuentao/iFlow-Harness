@@ -7,6 +7,7 @@ test/**
 docs/**
 scripts/**
 shared/**
+UI/**
 webview/src/**
 webview/index.html
 webview/vite.config.ts
@@ -19,6 +20,7 @@ esbuild.mjs
 # tsc emits intermediate output here; the host bundle is dist/extension.cjs.
 dist/src/**
 dist/shared/**
+dist/acp/**
 node_modules/**
 *.vsix
 m4-initial.jpg
