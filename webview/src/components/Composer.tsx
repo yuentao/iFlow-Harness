@@ -20,6 +20,26 @@ export interface ImageAttachment {
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Localized display for the CLI's permission modes (ids come from the agent,
+ * names may be English) — label + one-line description per the design spec.
+ * Unknown ids fall back to the agent-provided name.
+ */
+function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
+  switch (mode.id) {
+    case "smart":
+      return { label: t("智能"), desc: t("AI 评估风险后决定是否确认") };
+    case "yolo":
+      return { label: t("免确认"), desc: t("所有工具直接执行") };
+    case "default":
+      return { label: t("标准"), desc: t("执行前均需确认") };
+    case "plan":
+      return { label: t("规划"), desc: t("只读，仅分析与规划") };
+    default:
+      return { label: mode.name || mode.id, desc: "" };
+  }
+}
+
 export function Composer() {
   const state = useChat((s) => s.state);
   const send = useChat((s) => s.send);
@@ -337,31 +357,35 @@ export function Composer() {
                   className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
                   title={t("权限模式")}
                 >
-                  <Zap className="size-3 text-primary" />
-                  {currentMode.name}
+                  <Zap className="size-3 shrink-0 text-primary" />
+                  {currentMode ? modeDisplay(currentMode).label : ""}
                   <ChevronDown className="size-3 opacity-60" />
                 </button>
               )}
             >
               {(close) => (
                 <>
-                  {modes.availableModes.map((m) => (
-                    <button
-                      key={m.id}
-                      onClick={() => {
-                        send({ type: "setMode", modeId: m.id });
-                        close();
-                      }}
-                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
-                    >
-                      <span className="text-[12px] text-foreground">
-                        {m.name}
-                        {m.id === modes.currentModeId && (
-                          <Check className="ml-1 inline size-3 text-primary" />
-                        )}
-                      </span>
-                    </button>
-                  ))}
+                  {modes.availableModes.map((m) => {
+                    const view = modeDisplay(m);
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => {
+                          send({ type: "setMode", modeId: m.id });
+                          close();
+                        }}
+                        className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
+                      >
+                        <span className="text-[12px] text-foreground">
+                          {view.label}
+                          {m.id === modes.currentModeId && (
+                            <Check className="ml-1 inline size-3 text-primary" />
+                          )}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{view.desc}</span>
+                      </button>
+                    );
+                  })}
                 </>
               )}
             </Dropdown>
