@@ -416,6 +416,12 @@ export class ChatPanel implements vscode.Disposable {
       case "deleteSession":
         await this.deleteSession(msg.sessionId);
         break;
+      default:
+        // C10: version-mismatch tripwire — a webview built from a different
+        // commit can send message kinds this host does not know; without a
+        // default they would be dropped silently.
+        this.log.warn(`webview → host: unknown message type "${(msg as { type?: string }).type}"`);
+        break;
     }
   }
 
@@ -812,17 +818,21 @@ export class ChatPanel implements vscode.Disposable {
     const results: string[] = [];
     const target = basename.toLowerCase();
     const skip = new Set(["node_modules", ".git", "dist", "out", "build", "coverage", ".iflow", ".vscode"]);
-    let visited = 0;
+    // C8: budget by directories walked, not entries seen — readdir cost is
+    // dominated by the directory count, and per-entry counting exhausted the
+    // old 20k budget prematurely in wide directories.
+    let dirsVisited = 0;
     const walk = async (dir: string, depth: number): Promise<void> => {
-      if (depth > maxDepth || visited > 20_000 || results.length >= 10) return;
+      if (depth > maxDepth || dirsVisited > 2_000 || results.length >= 10) return;
       let entries;
       try {
         entries = await readdir(dir, { withFileTypes: true });
       } catch {
         return; // unreadable / not a dir
       }
+      dirsVisited++;
       for (const entry of entries) {
-        if (visited++ > 20_000 || results.length >= 10) return;
+        if (results.length >= 10) return;
         const full = path.join(dir, entry.name);
         if (entry.isFile() && entry.name.toLowerCase() === target) {
           results.push(full);

@@ -515,6 +515,11 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
     const content = entry.message?.content;
 
     if (entry.isSidechain) {
+      // C6 known limitation: consecutive isSidechain lines are treated as ONE
+      // SubAgent run because the CLI (0.5.19) writes sidechain turns
+      // sequentially. If a future CLI ever interleaves concurrent sidechains,
+      // their entries would merge into one card — revisit with a proper
+      // per-agent grouping key when that becomes observable.
       if (!sidechain) {
         sidechain = {
           kind: "subagent",

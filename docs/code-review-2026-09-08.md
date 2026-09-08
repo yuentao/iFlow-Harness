@@ -232,13 +232,19 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `shared/session-state.ts:454+`：连续 `isSidechain` 行归一个 SubAgent。若 CLI 并发跑多个 task 导致 sidechain 行交错，会被错误合并成一张卡。0.5.19 观测为顺序写入，暂无实害；记录为已知限制。
 
+> **修复记录（2026-09-08）**：按报告建议记录为已知限制——`parseTranscriptJsonl` 的 sidechain 分支补注释（交错写入会把并发 SubAgent 合并成一张卡；重访条件：CLI 未来交错写入时引入真正的 per-agent 分组键）。行为不变。验证：typecheck + 全量测试 99/99 通过。
+
 ### [MINOR] C7 — `readActiveSelection` 相对路径剥离用字符串 replace
 
 `src/extension.ts:61`：`abs.replace(workspaceRoot + "\\", "")` 大小写敏感，且 VSCode 在 Windows 上常返回小写盘符而 `workspaceFolders` 是用户输入大小写——两者不一致时剥离失败，fallback 为绝对路径（仅影响提示词美观）。用 `path.relative(workspaceRoot, abs)` 顺带修复。
 
+> **修复记录（2026-09-08）**：已在 `src/extension.ts` 落地。剥离改为 `path.relative(workspaceRoot, abs).replace(/\\/g, "/")`——Windows 盘符大小写漂移不再导致剥离失败，反斜杠顺带归一为正斜杠保持 wire 展示风格。验证：typecheck + 全量测试 99/99 通过。
+
 ### [MINOR] C8 — `findFileByBasename` 的 visited 计数按 entry 而非按目录
 
 `panel.ts:707-719`：`visited++` 在每个 entry 上自增，20000 上限在大目录会提前耗尽（结果已 capped 10，实害有限）。按目录计数或直接删掉 `depth > maxDepth` 之外的一层防御更清晰。
+
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。预算改为按「已访问目录」计数（2000 上限）——readdir 成本的主导项是目录数而非 entry 数，宽目录下旧按 entry 计数的 20k 预算会提前耗尽；结果 cap 10 与 `maxDepth` 上限不变。验证：typecheck + 全量测试 99/99 通过。
 
 ### [MINOR] C9 — prompt 与会话切换的并发防护缺失
 
@@ -249,6 +255,8 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 ### [MINOR] C10 — `handleWebviewMessage` 无未知类型兜底
 
 `panel.ts:286-355`：消息按 switch 分发，无 default。类型由 TS 编译期保证，但 webview 与 host 版本错位（扩展更新后 webview 缓存旧 bundle）时会静默丢消息。加 default 分支 log 一条即可定位这类问题。
+
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。switch 加 default 分支 `log.warn` 未知消息 type——与 webview 侧 `store.ts` 已有的 unknown-message warn 呼应，host→webview 与 webview→host 两个方向都有版本错位 tripwire。验证：typecheck + 全量测试 99/99 通过。
 
 ### 附注（正确性核实为无问题的点）
 

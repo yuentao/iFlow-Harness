@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import path from "node:path";
 import { ChatPanel } from "./panel/panel.js";
 import { errorMessage } from "./acp/jsonrpc.js";
 
@@ -58,7 +59,11 @@ function readActiveSelection(): { path: string; range: string; text: string } | 
   }
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const abs = editor.document.uri.fsPath;
-  const rel = workspaceRoot ? abs.replace(workspaceRoot + "\\", "").replace(workspaceRoot + "/", "") : abs;
+  // C7: path.relative handles Windows drive-letter case drift (VSCode often
+  // returns a lowercase drive while workspaceFolders keeps the user's casing
+  // — a case-sensitive string replace would silently fail) and yields the
+  // native separator; normalize to "/" for the wire display.
+  const rel = workspaceRoot ? path.relative(workspaceRoot, abs).replace(/\\/g, "/") : abs;
   const start = editor.selection.start.line + 1;
   const end = editor.selection.end.line + 1;
   const range = start === end ? `L${start}` : `L${start}-L${end}`;
