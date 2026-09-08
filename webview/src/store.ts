@@ -682,6 +682,13 @@ export const useChat = create<ChatStore>((set, get) => ({
       set({ editorTheme: msg.kind });
       return;
     }
+    // Consumed by their own window-level listeners (Composer registers those
+    // itself) — reaching here is normal, not an unknown-message tripwire.
+    // (setDraft is also Composer-consumed but only exists on the wire, not in
+    // the HostToWebview union.)
+    if (msg.type === "fileList" || msg.type === "stagedFiles") {
+      return;
+    }
     // Version-mismatch tripwire: a host/webview pair built from different
     // commits silently drops unknown message kinds (e.g. a pre-P-1 webview
     // ignoring blockPatch) — the exact "blocks disappear" bug. Surface it.
