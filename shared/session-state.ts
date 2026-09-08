@@ -112,12 +112,20 @@ function adoptUnboundSubAgent(blocks: Block[], agentId: string): SubAgentBlock |
   return undefined;
 }
 
-/** Aggregate SubAgent status from its spawning tool_call + nested entries. */
+/**
+ * Aggregate SubAgent status from its spawning tool_call + nested entries.
+ * A nested tool failure must NOT flip the card to terminal "failed": the
+ * subagent may recover and keep running, and a terminal status would close
+ * the strategy-2 interval (`findActiveSubAgent` only matches
+ * pending/in_progress), leaking subsequent nested events to the top level
+ * and making the later `task` completed update spawn a duplicate card.
+ * Card-level failure comes only from the spawning `task` call's own status;
+ * failed nested steps stay visible per-step (red icon + log line).
+ */
 function refreshSubAgentStatus(sub: SubAgentBlock): void {
   if (sub.status === "completed" || sub.status === "failed") return; // terminal wins
   const nested = sub.entries.filter((b): b is ToolBlock => b.kind === "tool");
-  if (nested.some((b) => b.status === "failed")) sub.status = "failed";
-  else if (nested.some((b) => b.status === "pending" || b.status === "in_progress")) sub.status = "in_progress";
+  if (nested.some((b) => b.status === "pending" || b.status === "in_progress")) sub.status = "in_progress";
   else if (sub.taskToolCallId === null && nested.length > 0) sub.status = "completed";
 }
 

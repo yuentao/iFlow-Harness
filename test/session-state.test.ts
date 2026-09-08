@@ -184,6 +184,36 @@ describe("applySessionUpdate", () => {
     expect(sub.status).toBe("completed");
   });
 
+  it("keeps the interval open after a nested tool failure (flat strategy)", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "call_task", toolName: "task", title: "Launch agent(x): 修复", kind: "other", status: "in_progress" }));
+    // Nested tool fails...
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "call_bad", toolName: "run_command", title: "Running cmd", kind: "execute", status: "in_progress" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "call_bad", toolName: "run_command", kind: "execute", status: "failed" }));
+    // ...but the subagent keeps running: later events must stay inside the card.
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "call_retry", toolName: "run_command", title: "Retrying", kind: "execute", status: "in_progress" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "重试中" } }));
+    expect(state.blocks).toHaveLength(1);
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("in_progress"); // not "failed" — the subagent may recover
+    expect(sub.entries.map((e) => e.kind)).toEqual(["tool", "tool", "text"]);
+    // Spawning task call closes the interval normally — no duplicate card.
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "call_task", toolName: "task", kind: "other", status: "completed" }));
+    expect(state.blocks).toHaveLength(1);
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("completed");
+  });
+
+  it("keeps the card in_progress after a nested tool failure (agentId strategy)", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task-3", toolName: "task", title: "测试", kind: "other", status: "in_progress" }));
+    applySessionUpdate(state, { sessionId: "s1", agentId: "agent-b", update: { sessionUpdate: "tool_call", toolCallId: "n3", toolName: "edit_file", title: "改", kind: "edit", status: "failed" } });
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("in_progress");
+  });
+
   it("synthesizes a subagent card for agentId events without a task tool_call", () => {
     const state: SessionState = initialSessionState();
     applySessionUpdate(
@@ -444,8 +474,9 @@ describe("markToolReverted (M2)", () => {
     expect(markToolReverted(state, "t1")).toBe(true);
     const tool = state.blocks[0]!;
     // C4: the tool SUCCEEDED — its change was undone. `reverted` is the
-    // marker; `status` stays "completed" so SubAgent aggregation (which
-    // treats failed entries as card failures) is no longer polluted.
+    // marker; `status` stays "completed" so it never reads as a failure in
+    // SubAgent cards (whose terminal status is driven only by the spawning
+    // task call).
     expect(tool.kind === "tool" && tool.status).toBe("completed");
     expect(tool.kind === "tool" && tool.reverted).toBe(true);
     expect(tool.kind === "tool" && tool.output).toContain("已回退");
