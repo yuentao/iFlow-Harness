@@ -4,6 +4,8 @@
  * and reusable by any IDE integration (see docs/iflow-vscode-extension-plan.md M0).
  */
 
+import { inspect } from "node:util";
+
 export interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: number | string;
@@ -50,33 +52,55 @@ export const JsonRpcErrorCode = {
  * JSON serialization (guarded against circular structures) → `String()`.
  */
 export function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) {
+    // An Error whose message is empty or literally "[object Object]" was
+    // constructed from a non-Error value upstream (`new Error(obj)`); the
+    // message is beyond repair, so surface the construction-site stack frames
+    // instead — they point at where the wrapping happened.
+    if (error.message && error.message !== "[object Object]") return error.message;
+    const frames = (error.stack ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("at "))
+      .slice(0, 2)
+      .join(" ← ");
+    return frames ? `${error.name}: no message (${frames})` : error.name;
+  }
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null) {
     const obj = error as { message?: unknown; data?: unknown; code?: unknown };
-    const message = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : null;
+    const rawMessage = typeof obj.message === "string" ? obj.message.trim() : "";
+    // A message that is literally "[object Object]" was stringified by
+    // whoever built the error (CLI-side) — as useless as none. Treat it as
+    // absent so the whole envelope (code + data) is rendered instead.
+    const usable = rawMessage && rawMessage !== "[object Object]" ? rawMessage : null;
     // R7: JSON-RPC rejections often carry the useful detail (stack, inner
     // error text) in `data` — surface it (capped) instead of dropping it.
     let dataSuffix = "";
     if ("data" in error && obj.data !== null && obj.data !== undefined) {
       try {
-        let dataText = typeof obj.data === "string" ? obj.data : JSON.stringify(obj.data);
-        if (dataText && dataText !== "{}" && dataText !== message) {
+        const dataText = typeof obj.data === "string" ? obj.data : JSON.stringify(obj.data);
+        if (dataText && dataText !== "{}" && dataText !== rawMessage) {
           dataSuffix = ` · ${dataText.slice(0, 500)}`;
         }
       } catch {
         // circular data — skip the suffix
       }
     }
-    if (message) return message + dataSuffix;
+    if (usable) return usable + dataSuffix;
+    // No usable message: serialize the whole envelope so at least the
+    // JSON-RPC code stays visible.
     try {
       const json = JSON.stringify(error);
       if (json && json !== "{}") return json;
     } catch {
-      // circular or otherwise unserializable — fall through to String()
+      // circular or otherwise unserializable — fall through to inspect
     }
   }
-  return String(error);
+  // Last resort: Node's inspect shows shapes String() would flatten to
+  // "[object Object]" (nested envelopes, null prototypes, symbols, circular
+  // references).
+  return inspect(error, { depth: 3, maxArrayLength: 20, breakLength: Infinity });
 }
 
 /**

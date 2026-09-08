@@ -6,6 +6,7 @@
 import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
+import { inspect } from "node:util";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
@@ -1813,8 +1814,27 @@ export class ChatPanel implements vscode.Disposable {
       // R1 (final): prompts run without a timeout — failures here are real
       // errors (CLI died, connection closed), not slow turns. Long turns are
       // stopped by the user via Stop (`session/cancel`).
+      // The banner shows the extracted message; the log gets the full
+      // envelope + recent CLI stderr so "[object Object]-shaped" failures
+      // remain diagnosable from the Output panel.
+      this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
     }
+  }
+
+  /** Full error detail for the Output log: inspect() keeps JSON-RPC envelope
+   * shapes (code/data) readable, plus the recent CLI stderr tail if any. */
+  private formatErrorForLog(error: unknown): string {
+    let text: string;
+    try {
+      text = inspect(error, { depth: 5, maxArrayLength: 50, breakLength: Infinity });
+    } catch {
+      text = String(error);
+    }
+    if (this.stderrTail.length > 0) {
+      text += `\nCLI stderr tail:\n${this.stderrTail.join("\n")}`;
+    }
+    return text;
   }
 
   /**

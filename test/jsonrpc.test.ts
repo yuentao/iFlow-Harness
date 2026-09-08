@@ -23,6 +23,50 @@ describe("errorMessage", () => {
   it("never renders [object Object]", () => {
     expect(errorMessage({ nested: { deep: 1 } })).not.toContain("[object");
   });
+
+  it("repairs an Error whose message is literally [object Object]", () => {
+    // Upstream wrapped a non-Error value: new Error(someObj). The message is
+    // beyond repair — surface the construction-site frames instead.
+    const err = new Error("[object Object]");
+    const out = errorMessage(err);
+    expect(out).not.toBe("[object Object]");
+    expect(out).toContain("no message");
+    expect(out).toContain("at ");
+  });
+
+  it("repairs an Error with an empty message", () => {
+    const err = new Error("");
+    const out = errorMessage(err);
+    expect(out).toContain("no message");
+  });
+
+  it("renders the full envelope when the CLI-side message is [object Object]", () => {
+    // The CLI stringified an object into its own error message — treat the
+    // message as absent and show code+data instead.
+    const out = errorMessage({ code: -32000, message: "[object Object]", data: { detail: "真实原因" } });
+    expect(out).not.toBe("[object Object]");
+    expect(out).toContain("-32000");
+    expect(out).toContain("真实原因");
+  });
+
+  it("appends data as a capped suffix after a usable message", () => {
+    const out = errorMessage({ code: -32000, message: "请求失败", data: "堆栈细节" });
+    expect(out).toBe("请求失败 · 堆栈细节");
+  });
+
+  it("handles circular references without throwing", () => {
+    const a: Record<string, unknown> = { code: 1 };
+    a.self = a;
+    const out = errorMessage(a);
+    expect(out).not.toContain("[object");
+    expect(out).toContain("code");
+  });
+
+  it("inspects nested shapes with field names visible", () => {
+    const out = errorMessage({ wrapper: { innerCode: 7 } });
+    expect(out).toContain("wrapper");
+    expect(out).toContain("innerCode");
+  });
 });
 
 describe("NdjsonParser", () => {
