@@ -1,9 +1,15 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { errorMessage } from "./jsonrpc.js";
+
+/** settings.json location — mirrors the CLI loaders' IFLOW_HOME support. */
+export function settingsFilePath(): string {
+  const home = process.env.IFLOW_HOME ?? path.join(homedir(), ".iflow");
+  return path.join(home, "settings.json");
+}
 
 /**
  * Live model list for the model dropdown.
@@ -41,11 +47,56 @@ export interface CliSettingsShape {
 
 /** Raw CLI settings.json (apiProfiles are the user's named API configs). */
 export function readCliSettings(settingsPath?: string): CliSettingsShape | null {
-  const file = settingsPath ?? path.join(homedir(), ".iflow", "settings.json");
+  const file = settingsPath ?? settingsFilePath();
   try {
     return JSON.parse(readFileSync(file, "utf8")) as CliSettingsShape;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Active profile name, CLI-first. `~/.iflow/settings.json` is what the CLI
+ * actually loads on startup AND is rewritten by external tools (iFlow's
+ * profile manager / cloud sync — verified: 0.5.19's bundle contains no
+ * apiProfiles handling, the fields come and go externally). When
+ * `currentApiProfile` is present it therefore wins over the extension's own
+ * record; the extension value is only a fallback for fresh installs.
+ */
+export function resolveActiveProfileName(
+  cli: CliSettingsShape | null,
+  extensionActive: string | null,
+): string | null {
+  const fromCli = cli?.currentApiProfile?.trim();
+  return fromCli || extensionActive || null;
+}
+
+/**
+ * Point `currentApiProfile` at `name` without touching anything else.
+ * Read-modify-write through a temp file + rename (atomic on Windows and
+ * POSIX), so a concurrent external writer (cloud sync) can at worst lose our
+ * pointer update — never its own profile content. Returns false (caller
+ * logs) when the file is missing/unreadable.
+ */
+export function updateCurrentApiProfile(name: string, settingsPath?: string): boolean {
+  const file = settingsPath ?? settingsFilePath();
+  try {
+    const settings = readCliSettings(file);
+    if (!settings) return false;
+    settings.currentApiProfile = name;
+    const tmp = `${file}.iflow-harness-tmp`;
+    writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
+    if (existsSync(file)) unlinkSync(file);
+    renameSync(tmp, file);
+    return true;
+  } catch {
+    try {
+      const tmp = `${file}.iflow-harness-tmp`;
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      // nothing to clean up
+    }
+    return false;
   }
 }
 

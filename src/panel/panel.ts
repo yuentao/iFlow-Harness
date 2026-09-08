@@ -12,7 +12,7 @@ import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promise
 import { AcpClient } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
-import { queryModelIds, readActiveEndpoint } from "../acp/models-query.js";
+import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
   getActiveProfileName,
@@ -157,6 +157,19 @@ export class ChatPanel implements vscode.Disposable {
     fileWatcher.onDidCreate(invalidateFileCache);
     fileWatcher.onDidDelete(invalidateFileCache);
     this.context.subscriptions.push(fileWatcher);
+    // External settings.json writes (iFlow profile manager, cloud sync —
+    // verified: the 0.5.19 bundle holds no apiProfiles handling, the fields
+    // are maintained outside the CLI) can repoint currentApiProfile behind
+    // our back. Re-push the merged auth state so the profile list shows the
+    // externally-activated profile instead of drifting from reality.
+    const settingsDir = vscode.Uri.file(path.dirname(settingsFilePath()));
+    const settingsWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(settingsDir, "settings.json"),
+    );
+    const syncAuth = () => this.syncAuthAfterExternalChange();
+    settingsWatcher.onDidChange(syncAuth);
+    settingsWatcher.onDidCreate(syncAuth);
+    this.context.subscriptions.push(settingsWatcher);
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
   }
@@ -961,6 +974,41 @@ export class ChatPanel implements vscode.Disposable {
     return { baseUrl: creds.baseUrl, modelName: creds.modelName, keyTail: maskKey(creds.apiKey) };
   }
 
+  /** Debounce for external settings.json change events (writers rewrite the
+   * file in bursts; mid-write reads can also yield broken JSON). */
+  private settingsSyncTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * A watcher fired on settings.json: re-merge the CLI profile list so the
+   * panel reflects an externally-repointed currentApiProfile instead of
+   * drifting. Deliberately does NOT reconnect — the running session is bound
+   * to the credentials it authenticated with; switching is a user action.
+   */
+  private syncAuthAfterExternalChange(): void {
+    if (this.settingsSyncTimer) clearTimeout(this.settingsSyncTimer);
+    this.settingsSyncTimer = setTimeout(() => {
+      void (async () => {
+        try {
+          const cli = readCliSettings();
+          if (!cli) return; // mid-write or removed — wait for the next event
+          const extActive = await getActiveProfileName(this.context.secrets);
+          const cliActive = cli.currentApiProfile?.trim() ?? null;
+          const state = this.store.getState();
+          const shownActive = state.auth.profiles.find((p) => p.active)?.name ?? null;
+          if (cliActive === shownActive) return; // already in sync
+          this.log.info(
+            `settings.json changed externally: currentApiProfile ${shownActive ?? "∅"} → ${cliActive ?? "∅"}`,
+          );
+          this.store.setAuth(
+            await this.buildAuthState(state.auth.authenticated, state.auth.needsSetup),
+          );
+        } catch (error) {
+          this.log.warn(`settings.json resync failed: ${errorMessage(error)}`);
+        }
+      })();
+    }, 500);
+  }
+
   /**
    * All known API profiles: extension-owned (SecretStorage, editable) merged
    * with the CLI settings.json ones (read-only source, the user's existing
@@ -969,10 +1017,14 @@ export class ChatPanel implements vscode.Disposable {
   private async buildProfileList(): Promise<AuthUiState["profiles"]> {
     const extProfiles = await loadProfiles(this.context.secrets);
     const cli = readCliSettings();
-    // No explicit choice yet → highlight the CLI's own active profile, so the
-    // dropdown reflects what the CLI would use on a fresh start.
-    const activeName =
-      (await getActiveProfileName(this.context.secrets)) ?? cli?.currentApiProfile ?? null;
+    // Active-name resolution is CLI-first: settings.json is what the CLI
+    // loads on startup and what external tools (profile manager / cloud sync)
+    // rewrite behind our back. The extension's own record only fills in for
+    // fresh installs where currentApiProfile isn't set yet.
+    const activeName = resolveActiveProfileName(
+      cli,
+      await getActiveProfileName(this.context.secrets),
+    );
     const list: AuthUiState["profiles"] = [];
     const push = (name: string, source: "extension" | "cli", p: OpenAiCompatCredentials) => {
       list.push({
@@ -1035,6 +1087,14 @@ export class ChatPanel implements vscode.Disposable {
     await saveProfiles(this.context.secrets, profiles);
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds); // active-slot for the next handshake
+    // Keep the CLI's own pointer in sync: settings.json is what the CLI loads
+    // when it starts OUTSIDE this panel (crash-restart, user-opened CLI). If
+    // currentApiProfile still names the old profile, that standalone start
+    // silently reverts to stale credentials. Failure is non-fatal — the
+    // in-panel session already re-authenticates with the pushed creds.
+    if (!updateCurrentApiProfile(name)) {
+      this.log.warn(`could not update currentApiProfile in settings.json (target: ${name})`);
+    }
 
     await this.reconnectWithCredentials(creds);
   }
@@ -1051,6 +1111,10 @@ export class ChatPanel implements vscode.Disposable {
     }
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds);
+    // Same pointer sync as saveAuthAndReconnect — see the rationale there.
+    if (!updateCurrentApiProfile(name)) {
+      this.log.warn(`could not update currentApiProfile in settings.json (target: ${name})`);
+    }
     await this.reconnectWithCredentials(creds);
   }
 
@@ -1695,7 +1759,10 @@ export class ChatPanel implements vscode.Disposable {
    * current model stays selectable so the dropdown isn't blank).
    */
   private async queryLiveModels(): Promise<SessionState["models"]> {
-    const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
+    // CLI-first again: external tools rewrite currentApiProfile behind our
+    // back, so the model list must reflect the endpoint the CLI will actually
+    // use (settings.json), not the extension's possibly-stale record.
+    const endpoint = readActiveEndpoint() ?? (await loadCredentials(this.context.secrets));
     if (!endpoint) return [];
     try {
       return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
