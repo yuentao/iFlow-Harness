@@ -53,11 +53,6 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const CHAT_FORWARD_TIMEOUT_MS = 10 * 60_000;
 /** R3: stderr lines kept for crash/hang diagnostics. */
 const STDERR_TAIL_LINES = 200;
-/** R1: grace window after a timed-out prompt's cancel — long enough for the
- * CLI to process the cancellation, short enough that the user is not
- * dead-ended (a new prompt after the grace races the zombie turn only when
- * the CLI is already unresponsive, in which case it fails fast next turn). */
-const PROMPT_LOCK_GRACE_MS = 5_000;
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -123,9 +118,6 @@ export class ChatPanel implements vscode.Disposable {
   private fileSearchInFlight: Promise<string[]> | null = null;
   /** R3: last N stderr lines from the CLI (diagnostics for crashes/hangs). */
   private readonly stderrTail: string[] = [];
-  /** R1: set when a prompt times out (the CLI may still be executing the
-   * zombie turn) — blocks sendPrompt until a fresh session is started. */
-  private promptLocked = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -1284,8 +1276,6 @@ export class ChatPanel implements vscode.Disposable {
               this.log.warn(`CLI stderr tail (${this.stderrTail.length} lines):\n${this.stderrTail.join("\n")}`);
             }
             this.client = null;
-            // R1: the lock targeted the dead CLI; a fresh spawn starts clean.
-            this.promptLocked = false;
             this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
             this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
           },
@@ -1666,8 +1656,6 @@ export class ChatPanel implements vscode.Disposable {
       await this.setModel(currentModelId);
     }
     this.log.info(`session started: ${session.sessionId}`);
-    // R1: a fresh session is clean — release the post-timeout send lock.
-    this.promptLocked = false;
     await this.recordSession(session.sessionId, null);
     } finally {
       this.store.setInitializing(false);
@@ -1683,13 +1671,10 @@ export class ChatPanel implements vscode.Disposable {
     // prompts interleave in the transcript. The webview already disables its
     // composer in both states — this gate closes the side doors.
     const state = this.store.getState();
-    if (this.promptLocked || state.initializing || state.status === "streaming") {
+    if (state.initializing || state.status === "streaming") {
       this.log.info(
-        `sendPrompt rejected: locked=${this.promptLocked}, initializing=${state.initializing}, status=${state.status}`,
+        `sendPrompt rejected: initializing=${state.initializing}, status=${state.status}`,
       );
-      if (this.promptLocked) {
-        void vscode.window.showWarningMessage(vscode.l10n.t("上一请求超时，取消正在生效，请稍候重试"));
-      }
       return;
     }
     try {
@@ -1710,30 +1695,10 @@ export class ChatPanel implements vscode.Disposable {
       this.store.promptCompleted(result.stopReason);
       void this.persistActiveTranscript();
     } catch (error) {
-      const message = errorMessage(error);
-      if (/timed out/i.test(message)) {
-        // R1: the CLI may still be executing the timed-out turn. Cancel it
-        // and hold further prompts for a short grace window (the CLI needs a
-        // moment to process the cancellation), then release — the session is
-        // usually still usable and the user must not be dead-ended.
-        this.promptLocked = true;
-        const zombieSession = this.store.getState().sessionId;
-        if (zombieSession) {
-          try {
-            (await this.ensureClient()).cancel(zombieSession);
-          } catch (cancelError) {
-            this.log.warn(`cancel after prompt timeout failed: ${errorMessage(cancelError)}`);
-          }
-        }
-        setTimeout(() => {
-          this.promptLocked = false;
-        }, PROMPT_LOCK_GRACE_MS);
-        this.store.markError(
-          vscode.l10n.t("请求超时（{0}），已发送取消请求——稍后可重试，若持续无响应请新建会话", message),
-        );
-      } else {
-        this.store.markError(message);
-      }
+      // R1 (final): prompts run without a timeout — failures here are real
+      // errors (CLI died, connection closed), not slow turns. Long turns are
+      // stopped by the user via Stop (`session/cancel`).
+      this.store.markError(errorMessage(error));
     }
   }
 

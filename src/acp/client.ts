@@ -29,7 +29,9 @@ export interface AcpClientOptions {
   env?: NodeJS.ProcessEnv;
   /** Protocol version to advertise in initialize (ACP v1). */
   protocolVersion?: number;
-  /** Timeout for long-lived requests like prompt (default 30 min). */
+  /** Timeout for long-lived requests like prompt. 0 = wait indefinitely
+   * (default — real agent tasks can run for hours; cancellation is user-
+   * driven via `session/cancel`). A positive value re-enables the guard. */
   promptTimeoutMs?: number;
   /** Timeout for control-plane requests (default 60s). */
   requestTimeoutMs?: number;
@@ -139,10 +141,13 @@ export class AcpClient {
   }
 
   async prompt(request: PromptRequest): Promise<PromptResponse> {
+    // R1 (final): no timeout by default — agent tasks can legitimately run
+    // for hours. Cancellation is user-driven (`session/cancel`); a positive
+    // `promptTimeoutMs` opt-in re-enables the guard.
     return (await this.peer!.request(
       AcpMethods.prompt,
       request,
-      this.options.promptTimeoutMs ?? 30 * 60_000,
+      this.options.promptTimeoutMs ?? 0,
     )) as PromptResponse;
   }
 

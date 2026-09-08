@@ -34,11 +34,14 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   // double-fire on rapid clicks.
   const [answered, setAnswered] = useState(false);
   // W4: keyboard users should land on the action buttons, not tab through the
-  // whole Composer. The first button in DOM order is the highest-priority
-  // option (options are pre-sorted by KIND_ORDER — allow variants first).
+  // whole Composer. Scope the focus to the actions row — the card body may
+  // contain other <button>s (FileRef file chips) that precede it. The first
+  // button in the row is the highest-priority option (options are pre-sorted
+  // by KIND_ORDER — allow variants first).
   const cardRef = useRef<HTMLDivElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    cardRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, []);
 
   const answer = (optionId: string | null) => {
@@ -84,7 +87,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           </p>
         )}
       </div>
-      <div className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
+      <div ref={actionsRef} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => (
           <button
             key={opt.optionId}

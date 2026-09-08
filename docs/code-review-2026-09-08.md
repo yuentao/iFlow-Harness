@@ -275,7 +275,9 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 > **修复记录（2026-09-08）**：已按建议落地。`sendPrompt` catch 的超时分支：置 `promptLocked = true`、对当前 `sessionId` 发 `session/cancel`（收割 CLI 侧僵尸 turn）、`markError`；入口 C3/C9 闸门扩为 `promptLocked || initializing || streaming`，locked 时警告「上一次请求超时，请新建会话后继续」（l10n 英文条目已补）；`startNewSession` 在 `sessionStarted` 后清 `promptLocked`——新会话干净，锁解除。验证：typecheck + 全量测试 99/99 + build 通过。
 >
-> **修正（2026-09-08，真机反馈）**：「锁到新会话」过于保守——30 分钟超时后用户被永久锁死在当前对话外（CLI 收到 cancel 后会话通常仍可用）。`promptLocked` 改为 cancel 后 **5 秒宽限自动解锁**（`PROMPT_LOCK_GRACE_MS`）：足够 CLI 处理取消，不再死锁；错误横幅改为「请求超时（{0}），已发送取消请求——稍后可重试，若持续无响应请新建会话」，宽限期内拒绝并提示「取消正在生效，请稍候重试」；CLI 进程退出时同步清锁（新 spawn 干净），`startNewSession` 的立即解锁保留。若 CLI 真已无响应，下一次 prompt 会在新 turn 快速失败而非挂 30 分钟。验证：typecheck + 全量测试 99/99 + build 通过。
+> **修正一（2026-09-08，真机反馈）**：「锁到新会话」过于保守——30 分钟超时后用户被永久锁死在当前对话外（CLI 收到 cancel 后会话通常仍可用）。`promptLocked` 改为 cancel 后 5 秒宽限自动解锁，错误横幅给出重试/新建指引。
+>
+> **修正二（2026-09-08，最终方案）**：用户明确真实任务可能运行**数小时**，任何超时都会误杀长任务——**prompt 移除超时**：`AcpClient.promptTimeoutMs` 默认 `0`（无限等待；`peer.request` 本就支持 `timeoutMs <= 0` 不设定时器），长任务中断完全由用户显式 Stop（`session/cancel`）驱动。`promptLocked` 机制与超时 catch 分支整体移除（不可达死代码），相关 l10n 条目清理；`sendPrompt` 的 C3/C9 并发闸门（initializing/streaming）保留。`promptTimeoutMs` 配置项保留，调用方传正值可重新启用护栏。验证：typecheck + 全量测试 99/99 + build + l10n JSON 语法通过。
 
 ### [MAJOR] R2 — `chatForward` 与 C5/P3 叠加的挂死面
 
