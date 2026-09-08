@@ -335,21 +335,31 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `webview/src/components/AuthCard.tsx:71-72`：`tabIndex={-1}` + `ref={(el) => el?.focus()}`，inline ref callback 每次渲染先 null 后 el 调用，`focus()` 反复触发。改 `useRef` + `useEffect` 一次性聚焦到第一个 input（当前聚焦 backdrop，Tab 序从文档头开始，键盘体验差）。
 
+> **修复记录（2026-09-08）**：已在 `webview/src/components/AuthCard.tsx` 落地。backdrop 改 `useRef` + `useEffect` 挂载时一次性聚焦（消除 inline ref 每渲染先 null 后 el 的反复 focus；聚焦点保持 backdrop——聚焦后用户 Tab 即进入表单字段）。frontend-tester + Playwright 动态验证：modal 出现后 `document.activeElement` 为 `auth-backdrop`，2 秒观察无抖动/error。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [MINOR] W4 — `ApprovalCard` 无焦点管理
 
 `ApprovalCard.tsx`：`role="alertdialog"` 已设 ✅，但出现时焦点仍在 Composer，键盘用户需大量 Tab 才到审批按钮。建议出现时把焦点移到第一个 allow 按钮，Escape 绑定「取消」。
+
+> **修复记录（2026-09-08）**：已在 `webview/src/components/ApprovalCard.tsx` 落地。出现时自动聚焦首个 allow 按钮，容器 `onKeyDown` Escape → `answer(null)`（取消）。frontend-tester 首测抓到一个真 bug：`querySelector("button")` 命中卡片信息区的 `FileRef` 文件 chip（同为 `<button>` 且在操作按钮之前）——已修正为操作按钮容器独立 `actionsRef` 范围限定（容器内首按钮即 allow 优先选项）。Playwright 动态复测：`activeElement` = 「允许一次」按钮，Enter 触发允许、Escape 取消两条路径均通过。验证：typecheck + 全量测试 99/99 + build 通过。
 
 ### [NIT] W5 — Composer 的 eslint-disable
 
 `Composer.tsx:65`：`send` 来自 zustand selector 引用稳定，disable 是对的——改用 `useChat.getState().send` 可消除抑制并自证稳定性。
 
+> **修复记录（2026-09-08）**：已在 `webview/src/components/Composer.tsx` 落地。@-mention 搜索 effect 的 `send` 改为 `useChat.getState().send`（effect 真正只依赖 `mentionQuery`），`eslint-disable` 移除；`send` selector 保留供其余调用点使用。frontend-tester 回归：@-mention 弹层与键盘导航正常。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [NIT] W6 — `modeDisplay` 与 i18n 字典双处维护
 
 `Composer.tsx:25-40` 加新 mode id 需改两处。可移到 `i18n.ts` 旁集中。
 
+> **修复记录（2026-09-08）**：已按建议落地。`modeDisplay` 从 `Composer.tsx` 移到 `webview/src/i18n.ts`（紧邻字典导出，加新 mode id 只改一处），Composer 改为 import。frontend-tester 验证：下拉四项（智能/免确认/标准/规划）及描述渲染正常，选择后乐观更新不弹回。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [NIT] W7 — l10n 双轨
 
 `src/` 用 `vscode.l10n.t`（bundle.l10n.en.json），`webview/` 自带字典（`i18n.ts`），双语维护成本 ×2。长期可共享 json。架构债务，非本次必改。
+
+> **评估记录（2026-09-08）**：按报告结论维持现状。两套机制本质不同——host 的 `vscode.l10n.t` 以源码中文字符串为 key（bundle 由 @vscode/l10n 工具链生成），webview 的 `t()` 是运行时字典；合并需打破 VSCode l10n 机制，属架构级重构，当前规模下风险大于收益。维持双轨，待长期方案（共享 json）单独立项。
 
 ### 可访问性快查
 

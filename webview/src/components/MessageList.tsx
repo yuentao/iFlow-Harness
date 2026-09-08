@@ -388,13 +388,29 @@ const BlockView = memo(function BlockView({ block }: { block: Block }) {
 function MessageListInner({ state }: { state: SessionState }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  // Scroll events fire asynchronously after a scrollTop assignment: by the
+  // time the handler runs, streaming DOM updates may already have grown
+  // scrollHeight, so a naive distance-to-bottom check reads our own
+  // follow-scroll as "user scrolled up" and kills stick-to-bottom (the
+  // reported "回到最新 does nothing" bug). Record the scrollTop we set
+  // programmatically; scroll events landing on that value are ours and must
+  // not touch the stick state. Falls through if a user drag happens to land
+  // within 1px of it — the next scroll event corrects the state.
+  const programmaticTop = useRef<number | null>(null);
+
+  function scrollToBottom() {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    programmaticTop.current = el.scrollTop; // post-clamp actual value
+  }
+
   const [showJump, setShowJump] = useState(false);
 
   // Re-render trigger: last block identity + text length.
   const last = state.blocks[state.blocks.length - 1];
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+    if (stickToBottom.current) scrollToBottom();
   }, [state.blocks.length, last?.kind, (last && "text" in last ? last.text.length : 0)]);
 
   // Session switch / history restore: jump to the end of the recovered
@@ -403,16 +419,18 @@ function MessageListInner({ state }: { state: SessionState }) {
   useEffect(() => {
     stickToBottom.current = true;
     setShowJump(false);
-    const raf = requestAnimationFrame(() => {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
+    const raf = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(raf);
   }, [state.activeSessionId, state.replaying]);
 
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
+    if (programmaticTop.current !== null && Math.abs(el.scrollTop - programmaticTop.current) < 1) {
+      programmaticTop.current = null; // consume once: our own follow-scroll
+      return;
+    }
+    programmaticTop.current = null;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = nearBottom;
     setShowJump(!nearBottom);
@@ -442,11 +460,10 @@ function MessageListInner({ state }: { state: SessionState }) {
       </div>
       {showJump && (
         <button
-          className="absolute bottom-3 right-4 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-md transition-opacity hover:opacity-90"
+          className="absolute bottom-3 right-4 z-20 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-md transition-opacity hover:opacity-90"
           onClick={() => {
-            const el = scrollRef.current;
-            if (el) el.scrollTop = el.scrollHeight;
             stickToBottom.current = true;
+            scrollToBottom();
             setShowJump(false);
           }}
         >
