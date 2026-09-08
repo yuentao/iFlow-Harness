@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applySessionUpdate,
+  backfillBlockIds,
   beginUserPrompt,
   completePrompt,
   newSessionState,
@@ -14,7 +15,7 @@ import {
   endReplay,
   parseTranscriptJsonl,
 } from "../shared/session-state";
-import { initialSessionState, type SessionState } from "../shared/messages";
+import { initialSessionState, type Block, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 
 function notify(update: SessionNotification["update"], sessionId = "s1"): SessionNotification {
@@ -87,6 +88,59 @@ describe("SubAgent grouping (agentId)", () => {
     expect(sub.entries).toHaveLength(2);
     expect(sub.entries[0]).toMatchObject({ kind: "text", text: "为限流器写测试" });
     expect(sub.entries[1]).toMatchObject({ kind: "tool", toolName: "write_file", title: "写用例" });
+  });
+});
+
+describe("stable block ids (P4)", () => {
+  it("assigns unique non-empty ids to every live block", () => {
+    const state: SessionState = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "read_file", title: "读", kind: "read", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "plan", entries: [{ content: "步骤" }] }));
+    const ids = state.blocks.map((b) => b.id);
+    expect(ids).toHaveLength(state.blocks.length);
+    for (const id of ids) expect(id).toBeTruthy();
+    expect(new Set(ids).size).toBe(ids.length); // all distinct
+  });
+
+  it("keeps the same id across tool_call_update upserts and reverts", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "edit_file", title: "改", kind: "edit", status: "pending" }));
+    const before = state.blocks[0]!;
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "edit_file", title: "改", kind: "edit", status: "completed" }));
+    const after = state.blocks[0]!;
+    // Upsert replaces the block object in place — the id must survive so the
+    // React key (and memo anchor) stays stable across updates.
+    expect(after.id).toBeTruthy();
+    expect(after.id).toBe(before.id);
+    markToolReverted(state, "t1");
+    expect(state.blocks[0]!.id).toBe(before.id);
+  });
+
+  it("backfillBlockIds fills missing ids and keeps existing ones (recursing into subagents)", () => {
+    const blocks: Block[] = [
+      { kind: "text", text: "无 id 的旧块" },
+      { kind: "tool", toolCallId: "t1", toolName: "x", title: "", toolKind: "read", status: "completed", output: "", locations: [], diff: null, id: "keep-me" },
+      { kind: "subagent", agentId: "a", taskToolCallId: null, title: "子", status: "completed", agentType: null, entries: [{ kind: "text", text: "嵌套旧块" }] },
+    ];
+    backfillBlockIds(blocks);
+    expect(blocks[0]!.id).toBeTruthy();
+    expect(blocks[1]!.id).toBe("keep-me");
+    const sub = blocks[2]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.id).toBeTruthy();
+    expect(sub.entries[0]!.id).toBeTruthy();
+  });
+
+  it("parseTranscriptJsonl output carries ids", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "hi" } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hello" }] } }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.id)).toEqual([expect.any(String), expect.any(String)]);
+    expect(blocks[0]!.id).not.toBe(blocks[1]!.id);
   });
 });
 

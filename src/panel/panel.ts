@@ -35,6 +35,7 @@ import type {
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import {
+  backfillBlockIds,
   beginReplay,
   endReplay,
   newSessionState,
@@ -1126,6 +1127,8 @@ export class ChatPanel implements vscode.Disposable {
     // Source 1: the extension's own persisted copy (ACP mode writes no files).
     const own = await this.readTranscript(sessionId);
     if (own) {
+      // P4: files written before block ids existed lack stable keys.
+      backfillBlockIds(own.blocks);
       this.log.info(`transcript source: extension store (${own.blocks.length} blocks)`);
       return { blocks: own.blocks, firstUserText: own.label !== DEFAULT_SESSION_LABEL ? own.label : null };
     }

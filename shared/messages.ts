@@ -29,24 +29,36 @@ export interface ToolDiffUi {
   newText: string | null;
 }
 
-export interface TextBlock {
+/**
+ * Fields shared by every transcript block. `id` is assigned by the reducer at
+ * creation and backfilled on restore (P4): it anchors the block list's React
+ * keys and memo, so in-place middle-list updates (`upsertToolBlock`,
+ * `adoptUnboundSubAgent`) can no longer misalign component instances. It is
+ * optional only for transcripts persisted before P4 — the host backfills
+ * those on load.
+ */
+export interface BlockBase {
+  id?: string;
+}
+
+export interface TextBlock extends BlockBase {
   kind: "text";
   text: string;
 }
 
-export interface ThoughtBlock {
+export interface ThoughtBlock extends BlockBase {
   kind: "thought";
   text: string;
 }
 
-export interface UserBlock {
+export interface UserBlock extends BlockBase {
   kind: "user";
   text: string;
   /** Attached images as data URLs (M5 image input), absent for text-only prompts. */
   images?: string[];
 }
 
-export interface ToolBlock {
+export interface ToolBlock extends BlockBase {
   kind: "tool";
   toolCallId: string;
   toolName: string;
@@ -64,7 +76,7 @@ export interface ToolBlock {
  * carry an `agentId` on the wire. One block per SubAgent; nested tool calls
  * and message chunks are grouped into `entries`.
  */
-export interface SubAgentBlock {
+export interface SubAgentBlock extends BlockBase {
   kind: "subagent";
   /** Wire grouping key (the real agentId; a task tool_call without one uses its toolCallId until bound). */
   agentId: string;
@@ -77,7 +89,7 @@ export interface SubAgentBlock {
   entries: Block[];
 }
 
-export interface PlanBlock {
+export interface PlanBlock extends BlockBase {
   kind: "plan";
   entries: PlanEntryUi[];
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   Brain,
   Check,
@@ -340,7 +340,13 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
   );
 }
 
-function BlockView({ block }: { block: Block }) {
+/**
+ * Memoized per-block renderer (P4): the default shallow compare anchors on
+ * the block reference. With P-1 block patches the unchanged prefix keeps its
+ * references (`applyBlockPatch` reuses `blocks.slice(0, tailStart)`), so
+ * streaming re-renders only the re-sent tail instead of the whole list.
+ */
+const BlockView = memo(function BlockView({ block }: { block: Block }) {
   switch (block.kind) {
     case "user":
       return <UserMessage block={block} />;
@@ -359,7 +365,7 @@ function BlockView({ block }: { block: Block }) {
     case "plan":
       return <TaskList block={block} />;
   }
-}
+});
 
 function MessageListInner({ state }: { state: SessionState }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -403,7 +409,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           </div>
         )}
         {state.blocks.map((block, i) => (
-          <BlockView key={i} block={block} />
+          <BlockView key={block.id ?? `idx-${i}`} block={block} />
         ))}
         {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
           // Sticky to the bottom of the scroll viewport so the indicator stays

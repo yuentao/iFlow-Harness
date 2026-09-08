@@ -26,6 +26,16 @@ import {
 
 // --- merging helpers -------------------------------------------------------
 
+/**
+ * Stable block-id generator (P4): monotonically increasing across sessions
+ * and restores, so ids stay unique within any live blocks array. The React
+ * key falls back to the index only for legacy data (host backfills those).
+ */
+let blockSeq = 0;
+export function nextBlockId(): string {
+  return `b${(++blockSeq).toString(36)}`;
+}
+
 function lastBlock(blocks: Block[]): Block | undefined {
   return blocks[blocks.length - 1];
 }
@@ -36,13 +46,15 @@ function appendTextToLast(blocks: Block[], kind: "text" | "thought" | "user", te
     last.text += text;
     return;
   }
-  blocks.push({ kind, text } as Block);
+  blocks.push({ kind, text, id: nextBlockId() } as Block);
 }
 
 function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === patch.toolCallId) {
+      // `patch` carries no `id` key (creation sites below omit it), so the
+      // spread keeps the existing block's id stable across updates.
       blocks[i] = {
         ...block,
         ...patch,
@@ -53,7 +65,7 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
       return;
     }
   }
-  blocks.push(patch);
+  blocks.push({ ...patch, id: nextBlockId() });
 }
 
 // --- SubAgent grouping (iFlow: nested updates carry `agentId`) --------------
@@ -196,6 +208,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
     case "plan":
       blocks.push({
         kind: "plan",
+        id: nextBlockId(),
         entries: update.entries.map((e) => ({ content: e.content, status: e.status, priority: e.priority })),
       });
       break;
@@ -234,7 +247,7 @@ export function applySessionUpdate(
         (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
           ? update.title || update.toolName
           : undefined) ?? l10n.t("子智能体");
-      sub = { kind: "subagent", agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] };
+      sub = { kind: "subagent", id: nextBlockId(), agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] };
       state.blocks.push(sub);
     }
     if (isNestedUpdate(update)) applyUpdateToBlocks(sub.entries, update);
@@ -280,6 +293,7 @@ export function applySessionUpdate(
     const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子智能体");
     state.blocks.push({
       kind: "subagent",
+      id: nextBlockId(),
       agentId: taskUpdate.toolCallId ?? "",
       taskToolCallId: taskUpdate.toolCallId ?? null,
       title,
@@ -357,7 +371,9 @@ export function extractDiff(content: unknown): ToolDiffUi | null {
 // --- host-level transitions -------------------------------------------------
 
 export function beginUserPrompt(state: SessionState, text: string, images?: string[]): void {
-  state.blocks.push(images && images.length > 0 ? { kind: "user", text, images } : { kind: "user", text });
+  state.blocks.push(
+    images && images.length > 0 ? { kind: "user", text, images, id: nextBlockId() } : { kind: "user", text, id: nextBlockId() },
+  );
   state.status = "streaming";
   state.stopReason = null;
   state.errorMessage = null;
@@ -426,6 +442,7 @@ export function beginReplay(state: SessionState): void {
   state.stopReason = null;
   state.blocks.push({
     kind: "text",
+    id: nextBlockId(),
     text: l10n.t("⏳ 正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）"),
   });
 }
@@ -442,6 +459,18 @@ export function markToolCancelled(state: SessionState): void {
 }
 
 // --- transcript restore (M4: CLI does not replay history on session/load) ----
+
+/**
+ * P4: assign stable ids to blocks that lack them — transcripts persisted
+ * before block ids existed (legacy workspaceState map, files written by
+ * earlier versions). Recurses into SubAgent entries. Mutates in place.
+ */
+export function backfillBlockIds(blocks: Block[]): void {
+  for (const block of blocks) {
+    if (!block.id) block.id = nextBlockId();
+    if (block.kind === "subagent") backfillBlockIds(block.entries);
+  }
+}
 
 /**
  * Rebuild UI blocks from the CLI's persisted session file (NDJSON, one entry
@@ -591,6 +620,10 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
     }
   }
   flushSidechain();
+  // P4: parsed blocks (user/text/tool/subagent across both chains) get their
+  // stable ids here — one call instead of threading nextBlockId() through
+  // every creation site above.
+  backfillBlockIds(blocks);
   return { blocks, firstUserText };
 }
 
@@ -614,7 +647,7 @@ export function clearPendingApproval(state: SessionState, id: string): boolean {
  */
 export function appendApprovalResolution(state: SessionState, toolName: string, resolution: string): void {
   const label = toolName || "tool";
-  state.blocks.push({ kind: "text", text: `*${label} — ${resolution}*` });
+  state.blocks.push({ kind: "text", id: nextBlockId(), text: `*${label} — ${resolution}*` });
 }
 
 /** Mark a tool's diff as reverted (visual only; the file write happens host-side). */

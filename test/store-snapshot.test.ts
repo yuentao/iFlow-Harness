@@ -79,7 +79,7 @@ describe("SessionStore snapshot paths (P-1)", () => {
     // Anchor: the previous push (the second patch) — patches chain.
     expect(patch.baseVersion).toBe(3);
     expect(patch.tailStart).toBe(1);
-    expect(patch.blocks).toEqual([textBlock("你好，世界")]);
+    expect(patch.blocks).toEqual([{ ...textBlock("你好，世界"), id: expect.any(String) }]);
     expect(patch.tail.status).toBe("streaming");
     // Patch carries no blocks field pollution: tail is metadata only.
     expect("blocks" in patch.tail).toBe(false);
@@ -159,7 +159,7 @@ describe("SessionStore snapshot paths (P-1)", () => {
     expect(patch?.type).toBe("blockPatch");
     if (patch?.type !== "blockPatch") throw new Error("unreachable");
     expect(patch.tailStart).toBe(0);
-    expect(patch.blocks).toEqual([textBlock("新会话")]);
+    expect(patch.blocks).toEqual([{ ...textBlock("新会话"), id: expect.any(String) }]);
   });
 
   it("resync() forces the next push to be a full snapshot", () => {
