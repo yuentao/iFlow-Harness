@@ -198,6 +198,8 @@ case "openLocation": {
 
 ① `msg.path` 来自 webview 的 `FileRef`（locations 里的 wire 路径，可能是会话相对路径，见 AGENTS.md 陷阱 #8），直接 `Uri.file("src/app.ts")` 会解析到盘根而打不开——需要与 `locateDiffFile` 相同的 sessionCwd 拼接逻辑。② `msg.line` 超过文件行数时 selection 行为异常，建议 `Math.min(line, doc.lineCount - 1)`。
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。① 新增共享工具 `resolveAgentPathToAbsolute`（`sessionCwd` → workspace 根 → `extensionUri` 兜底，绝对路径原样返回），`openLocation` 改用它解析 `msg.path`——不再落到盘根；`locateDiffFile` 的专用多候选定位（diff.path + locations + basename 搜索 + QuickPick）未动。② 行号 `clamp` 到 `[0, doc.lineCount - 1]`。验证：typecheck + 全量测试 98/98 通过。
+
 ### [MAJOR] C2 — `setMode`/`setModel` 用 `sessionId ?? ""` 空串调用
 
 `src/panel/panel.ts:1239, 1260`：会话未就绪时带着 `sessionId: ""` 发给 CLI，CLI 可能返回 success（乱绑定）或报错，响应里的 `currentModeId` 还会被乐观写回 store。入口判空：
@@ -206,9 +208,13 @@ case "openLocation": {
 if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪")); return; }
 ```
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。`setMode`/`setModel` 入口均判空 `sessionId`，未就绪时警告（「会话未就绪」文案与 `sendPrompt` 同款，l10n 条目已存在）直接返回——空串不再发出，CLI 乱绑定→响应值被乐观写回 store 的路径闭合。验证：typecheck + 全量测试 98/98 通过。
+
 ### [MAJOR] C3 — 流式期间 `newSession` 的竞态窗口
 
 `startNewSession`（`panel.ts:1364-1414`）在 `setInitializing(true)` 后 `await ensureClient()`，但**没有阻止 inflight 的 prompt**：webview 侧已禁用发送，但 `iflow.askSelection` 命令、`@iflow` participant（`chatForward`）绕过 webview 直接 `sendPrompt`，拿到的是 `replaceState` 之前的旧 sessionId，prompt 会打到已被放弃的旧会话。建议 `sendPrompt` 入口检查 `state.initializing` 直接拒绝。
+
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。`sendPrompt` 入口加状态闸门：`state.initializing || state.status === "streaming"` 直接拒绝并 `log.info` 记录拒绝原因——webview 的 busy 锁管不住的命令通道（`iflow.askSelection`、`@iflow` participant）侧门闭合，C9 与此为同一道闸门。webview 正常路径不受影响（composer 在这两个状态下已禁用）。验证：typecheck + 全量测试 98/98 通过。
 
 ### [MAJOR] C4 — `markToolReverted` 把 status 强改为 "failed" 语义污染
 
@@ -233,6 +239,8 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 ### [MINOR] C9 — prompt 与会话切换的并发防护缺失
 
 `sendPrompt`（`panel.ts:1415`）无 status 检查：`askSelection`/participant 路径可在 streaming 中再发一个 prompt，两个 inflight prompt 交错污染 transcript。webview 的 busy 锁管不住命令通道。入口加 `if (state.status === "streaming") return` 即可。
+
+> **修复记录（2026-09-08）**：已随 C3 闭合——`sendPrompt` 入口的 `initializing`/`streaming` 闸门同时覆盖本条。详见 C3 修复记录。
 
 ### [MINOR] C10 — `handleWebviewMessage` 无未知类型兜底
 

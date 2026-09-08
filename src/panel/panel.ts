@@ -362,8 +362,15 @@ export class ChatPanel implements vscode.Disposable {
         await this.setModel(msg.modelId);
         break;
       case "openLocation": {
-        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.path));
-        const line = Math.max(0, (msg.line ?? 1) - 1);
+        // C1: webview FileRefs may carry session-relative paths — resolve
+        // against the session cwd instead of the drive root.
+        const doc = await vscode.workspace.openTextDocument(
+          vscode.Uri.file(this.resolveAgentPathToAbsolute(msg.path)),
+        );
+        const line = Math.min(
+          Math.max(0, (msg.line ?? 1) - 1),
+          Math.max(0, doc.lineCount - 1),
+        );
         await vscode.window.showTextDocument(doc, { selection: new vscode.Range(line, 0, line, 0) });
         break;
       }
@@ -624,6 +631,20 @@ export class ChatPanel implements vscode.Disposable {
     }
     const title = `${path.basename(chosen)} (${block.toolName || "edit"})`;
     await vscode.commands.executeCommand("vscode.diff", tmpUri, vscode.Uri.file(chosen), title);
+  }
+
+  /**
+   * Resolve a wire-relative path against the cwd the session was created
+   * with (AGENTS.md pitfall #8 — the Extension Host's process.cwd() is not
+   * necessarily the workspace). Absolute paths pass through unchanged.
+   */
+  private resolveAgentPathToAbsolute(p: string): string {
+    if (path.isAbsolute(p)) return p;
+    const base =
+      this.sessionCwd
+      ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+      ?? this.context.extensionUri.fsPath;
+    return path.join(base, p);
   }
 
   /** Resolve which file on disk a tool diff refers to (shared by diff/revert). */
@@ -1316,8 +1337,14 @@ export class ChatPanel implements vscode.Disposable {
 
   private async setMode(modeId: string): Promise<void> {
     const sessionId = this.store.getState().sessionId;
+    // C2: an empty sessionId would make the CLI bind the mode to a bogus
+    // session — refuse until a session actually exists.
+    if (!sessionId) {
+      vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪"));
+      return;
+    }
     try {
-      const resp = (await this.client?.setMode(sessionId ?? "", modeId)) as
+      const resp = (await this.client?.setMode(sessionId, modeId)) as
         | { success?: boolean; currentModeId?: string }
         | undefined;
       if (resp?.success && resp.currentModeId) {
@@ -1337,8 +1364,13 @@ export class ChatPanel implements vscode.Disposable {
 
   private async setModel(modelId: string): Promise<void> {
     const sessionId = this.store.getState().sessionId;
+    // C2: same empty-sessionId guard as setMode.
+    if (!sessionId) {
+      vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪"));
+      return;
+    }
     try {
-      const resp = (await this.client?.setModel(sessionId ?? "", modelId)) as
+      const resp = (await this.client?.setModel(sessionId, modelId)) as
         | { success?: boolean; currentModelId?: string }
         | undefined;
       if (resp?.success && resp.currentModelId) {
@@ -1588,6 +1620,16 @@ export class ChatPanel implements vscode.Disposable {
   private async sendPrompt(text: string, images?: { data: string; mimeType: string }[]): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // C3/C9: the webview's busy lock cannot guard the command channels
+    // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
+    // reset would hit the about-to-be-discarded sessionId; two overlapping
+    // prompts interleave in the transcript. The webview already disables its
+    // composer in both states — this gate closes the side doors.
+    const state = this.store.getState();
+    if (state.initializing || state.status === "streaming") {
+      this.log.info(`sendPrompt rejected: initializing=${state.initializing}, status=${state.status}`);
+      return;
+    }
     try {
       const client = await this.ensureClient();
       const sessionId = this.store.getState().sessionId;
