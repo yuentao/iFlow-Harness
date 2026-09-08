@@ -101,7 +101,11 @@ const en: Record<string, string> = {
   "移除": "Remove",
   "Tab 补全": "Tab to complete",
   "无匹配文件": "No matching files",
-  "向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴/拖入图片）": "Ask iFlow… (/ commands · @ files · paste/drop images)",
+  "向 iFlow 提问…（/ 命令 · @ 文件 · 拖入/粘贴图片或文件）":
+    "Ask iFlow… (/ commands · @ files · drop/paste images or files)",
+  "{0} 张图片超过大小上限（5MB），已跳过": "Skipped {0} image(s) over the 5 MB limit",
+  "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",
+  "{0} 个文件暂存失败，已跳过": "Failed to stage {0} file(s) — skipped",
   "停止生成": "Stop generating",
   "发送 (Enter)": "Send (Enter)",
   // message list

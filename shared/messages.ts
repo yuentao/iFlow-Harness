@@ -272,6 +272,10 @@ export type HostToWebview =
   | { type: "toast"; level: "info" | "warning" | "error"; message: string }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
   | { type: "fileList"; requestId: number; hits: FileHitUi[] }
+  /** Reply to `stageFiles`: absolute temp paths aligned with the request's
+   * `files` array (`null` = that file failed to stage). The webview inserts
+   * the paths into the composer so the agent can read them with its tools. */
+  | { type: "stagedFiles"; requestId: number; paths: Array<string | null> }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. */
   | { type: "theme"; kind: "dark" | "light" };
@@ -301,6 +305,10 @@ export type WebviewToHost =
   | { type: "searchFiles"; requestId: number; query: string }
   /** M5: prefill the composer (right-click "Add to iFlow Context"). */
   | { type: "setDraft"; text: string }
+  /** Non-image files dropped/pasted into the composer: the webview only has
+   * File objects it cannot persist, so the host writes them into a session
+   * temp dir and replies `stagedFiles` with absolute paths. */
+  | { type: "stageFiles"; requestId: number; files: { name: string; data: string }[] }
   /** Open a user-attached image (data URL) in VSCode's image preview. */
   | { type: "openImage"; dataUrl: string }
   /** M3: store openai-compatible credentials and authenticate a fresh session. */

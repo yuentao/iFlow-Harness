@@ -347,6 +347,48 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "setDraft", text: draft });
   }
 
+  /**
+   * Persist non-image files dropped/pasted into the composer. The webview only
+   * holds File objects (no real filesystem path), so the host writes the bytes
+   * into a session temp dir and replies with absolute paths — the agent then
+   * reads them with its own file tools. Names are sanitized (basename only,
+   * separators/controls stripped) so a renderer-supplied name can never escape
+   * the attachment dir; writes go through vscode.workspace.fs.
+   */
+  private async stageDroppedFiles(
+    msg: Extract<WebviewToHost, { type: "stageFiles" }>,
+  ): Promise<void> {
+    const MAX_BASE64_LEN = 50 * 1024 * 1024 * 1.34; // ~50MB decoded + base64 slack
+    const sessionId = this.store.getState().sessionId ?? "adhoc";
+    const dirUri = vscode.Uri.file(
+      path.join(os.tmpdir(), "iflow-harness-attachments", sessionId.replace(/[^\w.-]/g, "_")),
+    );
+    await vscode.workspace.fs.createDirectory(dirUri);
+    const dir = dirUri.fsPath;
+    const paths: Array<string | null> = [];
+    for (const file of msg.files) {
+      try {
+        if (file.data.length > MAX_BASE64_LEN) throw new Error("attachment too large");
+        const safeName =
+          path
+            .basename(file.name)
+            .replace(/[\\/:*?"<>|\x00-\x1f]/g, "_")
+            .trim() || "attachment";
+        const ext = path.extname(safeName);
+        const stem = safeName.slice(0, safeName.length - ext.length);
+        let target = path.join(dir, safeName);
+        let n = 2;
+        while (existsSync(target)) target = path.join(dir, `${stem}-${n++}${ext}`);
+        await vscode.workspace.fs.writeFile(vscode.Uri.file(target), Buffer.from(file.data, "base64"));
+        paths.push(target);
+      } catch (error) {
+        this.log.warn(`staging dropped file failed: ${errorMessage(error)}`);
+        paths.push(null);
+      }
+    }
+    this.postToWebview({ type: "stagedFiles", requestId: msg.requestId, paths });
+  }
+
   // --- WebView message routing -------------------------------------------------
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
@@ -406,6 +448,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "searchFiles":
         void this.searchWorkspaceFiles(msg.requestId, msg.query);
+        break;
+      case "stageFiles":
+        void this.stageDroppedFiles(msg);
         break;
       case "openImage":
         void this.openImageAttachment(msg.dataUrl);

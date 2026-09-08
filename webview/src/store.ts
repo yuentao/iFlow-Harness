@@ -550,6 +550,18 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "stageFiles") {
+        // Mock staging: pretend the bytes landed in a temp dir.
+        const paths = m.files.map((f) => `C:\\mock\\attachments\\${f.name}`);
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", { data: { type: "stagedFiles", requestId: m.requestId, paths } }),
+            ),
+          80,
+        );
+        return;
+      }
       if (m.type === "sendPrompt") {
         sendPromptFlow(m.text);
       }
