@@ -123,3 +123,24 @@ export function t(message: string, ...args: Array<string | number>): string {
   }
   return out;
 }
+
+/**
+ * W6: localized display for the CLI's permission modes (ids come from the
+ * agent, names may be English) — label + one-line description per the design
+ * spec. Lives next to the dictionary so a new mode id is added in ONE place.
+ * Unknown ids fall back to the agent-provided name.
+ */
+export function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
+  switch (mode.id) {
+    case "smart":
+      return { label: t("智能"), desc: t("AI 评估风险后决定是否确认") };
+    case "yolo":
+      return { label: t("免确认"), desc: t("所有工具直接执行") };
+    case "default":
+      return { label: t("标准"), desc: t("执行前均需确认") };
+    case "plan":
+      return { label: t("规划"), desc: t("只读，仅分析与规划") };
+    default:
+      return { label: mode.name || mode.id, desc: "" };
+  }
+}

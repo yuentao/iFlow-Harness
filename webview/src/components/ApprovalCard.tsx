@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -33,6 +33,13 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   // disabled until the host's next snapshot removes the card. Prevents
   // double-fire on rapid clicks.
   const [answered, setAnswered] = useState(false);
+  // W4: keyboard users should land on the action buttons, not tab through the
+  // whole Composer. The first button in DOM order is the highest-priority
+  // option (options are pre-sorted by KIND_ORDER — allow variants first).
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    cardRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, []);
 
   const answer = (optionId: string | null) => {
     if (answered) return;
@@ -48,9 +55,15 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
 
   return (
     <div
+      ref={cardRef}
       className="stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40 bg-card"
       role="alertdialog"
       aria-label={t("工具执行审批")}
+      onKeyDown={(e) => {
+        // W4: Escape means "cancel" — consistent with the card's dismissal
+        // semantics (the host treats a missing answer as cancelled too).
+        if (e.key === "Escape") answer(null);
+      }}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <ShieldCheck className="size-3.5 text-primary" />

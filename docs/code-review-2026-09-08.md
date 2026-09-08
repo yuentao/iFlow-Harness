@@ -274,6 +274,8 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 `sendPrompt`（`panel.ts:1415-1444`）：prompt 30 分钟超时后 `markError`，但 CLI 可能仍在执行。此后用户再发 prompt 会与上一个 inflight prompt 并发打到同一 session，CLI 侧行为未定义。建议超时后自动发 `session/cancel` + 锁发送直到新会话。
 
 > **修复记录（2026-09-08）**：已按建议落地。`sendPrompt` catch 的超时分支：置 `promptLocked = true`、对当前 `sessionId` 发 `session/cancel`（收割 CLI 侧僵尸 turn）、`markError`；入口 C3/C9 闸门扩为 `promptLocked || initializing || streaming`，locked 时警告「上一次请求超时，请新建会话后继续」（l10n 英文条目已补）；`startNewSession` 在 `sessionStarted` 后清 `promptLocked`——新会话干净，锁解除。验证：typecheck + 全量测试 99/99 + build 通过。
+>
+> **修正（2026-09-08，真机反馈）**：「锁到新会话」过于保守——30 分钟超时后用户被永久锁死在当前对话外（CLI 收到 cancel 后会话通常仍可用）。`promptLocked` 改为 cancel 后 **5 秒宽限自动解锁**（`PROMPT_LOCK_GRACE_MS`）：足够 CLI 处理取消，不再死锁；错误横幅改为「请求超时（{0}），已发送取消请求——稍后可重试，若持续无响应请新建会话」，宽限期内拒绝并提示「取消正在生效，请稍候重试」；CLI 进程退出时同步清锁（新 spawn 干净），`startNewSession` 的立即解锁保留。若 CLI 真已无响应，下一次 prompt 会在新 turn 快速失败而非挂 30 分钟。验证：typecheck + 全量测试 99/99 + build 通过。
 
 ### [MAJOR] R2 — `chatForward` 与 C5/P3 叠加的挂死面
 
@@ -319,9 +321,13 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `webview/src/components/Markdown.tsx:13-18`：链接点击被 onClick 拦截走 `openExternal`，`target` 属性从未生效，白增攻击面；顺带显式 `FORBID_TAGS: ["iframe", "form"]`（DOMPurify 默认已禁，显式化防上游默认变更）。
 
+> **修复记录（2026-09-08）**：已在 `webview/src/components/Markdown.tsx` 落地。`ADD_ATTR: ["target"]` 移除，改为模块级常量 `SANITIZE_CONFIG`：`FORBID_TAGS: ["iframe", "form"]` + `FORBID_ATTR: ["style", "target"]`——`target` 从未生效（点击被拦截走 openExternal），`style` 属性对 markdown 渲染非必需，style 注入面不再完全依赖 DOMPurify 默认属性表，且显式禁用可抵御上游默认变更。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [MINOR] W2 — `t()` 每次调用 `replaceAll`
 
 `webview/src/i18n.ts:96-101`：每个 chip 每次渲染都做字符串替换。量小（NIT 级），在 Chip/StatusChip 层包 `useMemo` 即可，仅记录。
+
+> **修复记录（2026-09-08）**：已落地两处 memo（较建议更进一步）。`StatusChip` 包 `useMemo([status])`——本地化 chip 文本仅 status 变化时重建；`SubAgentCard` 的 `done` 计数包 `useMemo([block.entries])`——`progress` 与 statusChip 的 `t()` 随 entries 变更才重算。其余 chip 处于 P4 `React.memo(BlockView)` 的保护下（引用不变即不渲染），无需逐个包。验证：typecheck + 全量测试 99/99 + build 通过。
 
 ### [MINOR] W3 — AuthCard 的 inline ref 每次渲染触发 focus
 

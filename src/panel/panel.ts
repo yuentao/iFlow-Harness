@@ -53,6 +53,11 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const CHAT_FORWARD_TIMEOUT_MS = 10 * 60_000;
 /** R3: stderr lines kept for crash/hang diagnostics. */
 const STDERR_TAIL_LINES = 200;
+/** R1: grace window after a timed-out prompt's cancel — long enough for the
+ * CLI to process the cancellation, short enough that the user is not
+ * dead-ended (a new prompt after the grace races the zombie turn only when
+ * the CLI is already unresponsive, in which case it fails fast next turn). */
+const PROMPT_LOCK_GRACE_MS = 5_000;
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -1279,6 +1284,8 @@ export class ChatPanel implements vscode.Disposable {
               this.log.warn(`CLI stderr tail (${this.stderrTail.length} lines):\n${this.stderrTail.join("\n")}`);
             }
             this.client = null;
+            // R1: the lock targeted the dead CLI; a fresh spawn starts clean.
+            this.promptLocked = false;
             this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
             this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
           },
@@ -1681,7 +1688,7 @@ export class ChatPanel implements vscode.Disposable {
         `sendPrompt rejected: locked=${this.promptLocked}, initializing=${state.initializing}, status=${state.status}`,
       );
       if (this.promptLocked) {
-        void vscode.window.showWarningMessage(vscode.l10n.t("上一次请求超时，请新建会话后继续"));
+        void vscode.window.showWarningMessage(vscode.l10n.t("上一请求超时，取消正在生效，请稍候重试"));
       }
       return;
     }
@@ -1706,8 +1713,9 @@ export class ChatPanel implements vscode.Disposable {
       const message = errorMessage(error);
       if (/timed out/i.test(message)) {
         // R1: the CLI may still be executing the timed-out turn. Cancel it
-        // and block further prompts until a fresh session replaces this one —
-        // otherwise the next prompt races the zombie turn in the CLI.
+        // and hold further prompts for a short grace window (the CLI needs a
+        // moment to process the cancellation), then release — the session is
+        // usually still usable and the user must not be dead-ended.
         this.promptLocked = true;
         const zombieSession = this.store.getState().sessionId;
         if (zombieSession) {
@@ -1717,7 +1725,12 @@ export class ChatPanel implements vscode.Disposable {
             this.log.warn(`cancel after prompt timeout failed: ${errorMessage(cancelError)}`);
           }
         }
-        this.store.markError(vscode.l10n.t("请求超时：{0}", message));
+        setTimeout(() => {
+          this.promptLocked = false;
+        }, PROMPT_LOCK_GRACE_MS);
+        this.store.markError(
+          vscode.l10n.t("请求超时（{0}），已发送取消请求——稍后可重试，若持续无响应请新建会话", message),
+        );
       } else {
         this.store.markError(message);
       }

@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import type { FileHitUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
-import { t } from "../i18n";
+import { modeDisplay, t } from "../i18n";
 import { Dropdown } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
@@ -19,26 +19,6 @@ export interface ImageAttachment {
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-
-/**
- * Localized display for the CLI's permission modes (ids come from the agent,
- * names may be English) — label + one-line description per the design spec.
- * Unknown ids fall back to the agent-provided name.
- */
-function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
-  switch (mode.id) {
-    case "smart":
-      return { label: t("智能"), desc: t("AI 评估风险后决定是否确认") };
-    case "yolo":
-      return { label: t("免确认"), desc: t("所有工具直接执行") };
-    case "default":
-      return { label: t("标准"), desc: t("执行前均需确认") };
-    case "plan":
-      return { label: t("规划"), desc: t("只读，仅分析与规划") };
-    default:
-      return { label: mode.name || mode.id, desc: "" };
-  }
-}
 
 export function Composer() {
   const state = useChat((s) => s.state);
@@ -60,9 +40,14 @@ export function Composer() {
     if (mentionQuery === null) return;
     const q = mentionQuery.trim();
     const requestId = ++searchSeq.current;
-    const timer = setTimeout(() => send({ type: "searchFiles", requestId, query: q }), 120);
+    // W5: read `send` from the store imperatively — its reference is stable,
+    // so the effect legitimately depends only on `mentionQuery` (no eslint
+    // suppression needed).
+    const timer = setTimeout(
+      () => useChat.getState().send({ type: "searchFiles", requestId, query: q }),
+      120,
+    );
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mentionQuery]);
 
   useEffect(() => {

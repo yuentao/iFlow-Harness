@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -37,6 +37,13 @@ export function AuthCard({
   const [formError, setFormError] = useState<string | null>(null);
 
   const keyPlaceholder = auth.saved ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…";
+  // W3: focus the dialog once on mount. The inline `ref={(el) => el?.focus()}`
+  // re-fired on every render (null → el), and a stable effect gives the Tab
+  // order a fixed starting point (the dialog, then the form fields).
+  const backdropRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    backdropRef.current?.focus();
+  }, []);
 
   function submit() {
     const b = baseUrl.trim();
@@ -69,7 +76,7 @@ export function AuthCard({
       aria-modal="true"
       aria-label={t("API 凭据配置")}
       tabIndex={-1}
-      ref={(el) => el?.focus()}
+      ref={backdropRef}
       onMouseDown={(e) => {
         // Backdrop click / Escape dismiss (not while unauthenticated — the
         // setup banner is mandatory).
