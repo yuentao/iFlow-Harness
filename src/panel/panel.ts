@@ -1299,6 +1299,11 @@ export class ChatPanel implements vscode.Disposable {
         }
       } catch (error) {
         this.client = null;
+        // C5: second safety net — connect() kills the child when initialize
+        // itself fails, but a failure in the post-handshake steps (restore,
+        // prune, new session) leaves a healthy child with no owner. dispose()
+        // is idempotent, so this is safe even after connect()'s own cleanup.
+        void client.dispose().catch(() => {});
         this.store.setAuth(await this.buildAuthState(false, true));
         const message = errorMessage(error);
         this.log.error(`connect failed: ${message}`);

@@ -101,7 +101,12 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <Icon className="size-3.5 shrink-0 text-primary" />
         <span className="shrink-0 text-[12px] font-semibold">{block.title || block.toolName || block.toolKind}</span>
         {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} />}
-        <span className="ml-auto">
+        <span className="ml-auto flex items-center gap-1.5">
+          {block.reverted && (
+            <Chip tone="muted">
+              <Undo2 className="size-2.5" /> {t("已回退")}
+            </Chip>
+          )}
           <StatusChip status={block.status} />
         </span>
       </div>

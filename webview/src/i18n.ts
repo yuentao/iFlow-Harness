@@ -61,6 +61,7 @@ const en: Record<string, string> = {
   "执行中": "Running",
   "操作输出": "Output",
   "回退此改动": "Revert this change",
+  "已回退": "Reverted",
   "文件对比": "File diff",
   "任务清单": "Task list",
   "运行中": "Running",

@@ -69,6 +69,12 @@ export interface ToolBlock extends BlockBase {
   locations: ToolLocation[];
   /** Present when the update carried a structured diff (`type: "diff"`). */
   diff: ToolDiffUi | null;
+  /**
+   * C4: the tool succeeded but its change was reverted (UI-only marker).
+   * Orthogonal to `status` — marking reverted tools as `failed` leaked the
+   * "failed" aggregate into SubAgent cards nesting successful tools.
+   */
+  reverted?: boolean;
 }
 
 /**

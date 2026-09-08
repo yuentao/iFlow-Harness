@@ -427,7 +427,7 @@ describe("approval flow (M2)", () => {
 });
 
 describe("markToolReverted (M2)", () => {
-  it("marks the matching tool block as reverted", () => {
+  it("marks the matching tool block as reverted without faking a failure (C4)", () => {
     const state = initialSessionState();
     applySessionUpdate(
       state,
@@ -442,8 +442,42 @@ describe("markToolReverted (M2)", () => {
     );
     expect(markToolReverted(state, "t1")).toBe(true);
     const tool = state.blocks[0]!;
-    expect(tool.kind === "tool" && tool.status).toBe("failed");
+    // C4: the tool SUCCEEDED — its change was undone. `reverted` is the
+    // marker; `status` stays "completed" so SubAgent aggregation (which
+    // treats failed entries as card failures) is no longer polluted.
+    expect(tool.kind === "tool" && tool.status).toBe("completed");
+    expect(tool.kind === "tool" && tool.reverted).toBe(true);
     expect(tool.kind === "tool" && tool.output).toContain("已回退");
+  });
+
+  it("clears the reverted marker when a new diff arrives for the same tool", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "edit_file",
+        kind: "edit",
+        status: "completed",
+        content: [{ type: "diff", path: "a.ts", oldText: "old", newText: "new" }],
+      }),
+    );
+    expect(markToolReverted(state, "t1")).toBe(true);
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "edit_file",
+        kind: "edit",
+        status: "completed",
+        content: [{ type: "diff", path: "a.ts", oldText: "new", newText: "newer" }],
+      }),
+    );
+    const tool = state.blocks[0]!;
+    expect(tool.kind === "tool" && tool.reverted).toBe(false);
+    expect(tool.kind === "tool" && tool.diff?.newText).toBe("newer");
   });
 
   it("returns false for unknown toolCallId", () => {

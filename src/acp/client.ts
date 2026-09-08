@@ -99,12 +99,21 @@ export class AcpClient {
       protocolVersion: this.options.protocolVersion ?? ACP_PROTOCOL_VERSION,
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
     };
-    this.initializeResult = (await this.peer.request(
-      AcpMethods.initialize,
-      request,
-      this.options.requestTimeoutMs ?? 60_000,
-    )) as InitializeResponse;
-    return this.initializeResult;
+    try {
+      this.initializeResult = (await this.peer.request(
+        AcpMethods.initialize,
+        request,
+        this.options.requestTimeoutMs ?? 60_000,
+      )) as InitializeResponse;
+      return this.initializeResult;
+    } catch (error) {
+      // C5: initialize failed (timeout / handshake error) — the spawned child
+      // is still alive with its stdout listeners attached and no owner. Kill
+      // it before propagating, or every retry leaks one node process.
+      this.stopped = true;
+      void this.dispose().catch(() => {});
+      throw error;
+    }
   }
 
   getInitializeResult(): InitializeResponse | null {

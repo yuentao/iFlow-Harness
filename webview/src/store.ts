@@ -389,7 +389,8 @@ function createMockHost(): HostApi {
       if (m.type === "revertTool") {
         for (const block of demoBlocks) {
           if (block.kind === "tool" && block.toolCallId === m.toolCallId) {
-            block.status = "failed";
+            // C4: revert is orthogonal to status — the tool succeeded.
+            block.reverted = true;
             block.output = "[已回退（mock）]";
           }
         }

@@ -54,13 +54,16 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
     const block = blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === patch.toolCallId) {
       // `patch` carries no `id` key (creation sites below omit it), so the
-      // spread keeps the existing block's id stable across updates.
+      // spread keeps the existing block's id stable across updates. A patch
+      // bringing a NEW diff means the file was edited again — the stale
+      // revert marker no longer applies (C4).
       blocks[i] = {
         ...block,
         ...patch,
         output: patch.output || block.output,
         // A new update without a diff must not erase the previous diff.
         diff: patch.diff ?? block.diff,
+        reverted: patch.diff ? false : block.reverted,
       };
       return;
     }
@@ -655,7 +658,10 @@ export function markToolReverted(state: SessionState, toolCallId: string): boole
   for (let i = state.blocks.length - 1; i >= 0; i--) {
     const block = state.blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === toolCallId) {
-      block.status = "failed";
+      // C4: `reverted` is orthogonal to `status` — the tool SUCCEEDED, its
+      // change was undone. The old status="failed" leaked the failure into
+      // SubAgent cards nesting the tool (refreshSubAgentStatus).
+      block.reverted = true;
       const reverted = l10n.t("[已回退]");
       block.output = block.output ? `${block.output}\n${reverted}` : reverted;
       return true;

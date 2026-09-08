@@ -220,9 +220,13 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `shared/session-state.ts:621-631`：回退成功后把工具块 status 置为 `failed`，UI 显示「失败」——但工具实际执行成功了，只是被回退。副产物：`refreshSubAgentStatus`（`session-state.ts:101-108`）会把嵌套该工具的 SubAgent 卡也聚合成 `failed`，即使 SubAgent 整体成功。建议加独立字段 `reverted?: boolean`，UI 据此显示「已回退」chip。
 
+> **修复记录（2026-09-08）**：已按建议落地。① `ToolBlock` 新增 `reverted?: boolean`（与 `status` 正交，optional 兼容旧 transcript）；② `markToolReverted` 置 `reverted=true`，`status` 保持原值——`refreshSubAgentStatus` 的 failed 聚合不再被回退操作污染，`output` 的「[已回退]」后缀保留（旧 transcript 恢复仍可辨识）；③ `upsertToolBlock` 替换路径在 patch 带新 diff 时清 `reverted`（CLI 对同一文件再次编辑 = 新变更，旧回退标记失效）；④ webview `ToolCard` 状态区显示「已回退」muted chip（Undo2 图标，i18n 双语条目），mock host 的 revert 行为同步。测试更新锁定新语义并新增「新 diff 清标记」用例。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [MAJOR] C5 — 连接失败路径不 dispose，泄漏 CLI 子进程
 
 `ensureClient` 的 catch（`panel.ts:1135` 附近）只做 `this.client = null` 后 throw；`AcpClient.connect()`（`client.ts:61-110`）在 initialize 超时/失败时也不 kill 已 spawn 的 child。两者叠加：initialize 超时（120s）或握手失败后，CLI 进程**继续存活**（stdout 监听仍挂着，只是没有宿主引用），每次重试泄漏一个 node 进程。修复：`connect()` 内 try/catch，失败时 kill child 再 rethrow；或 `ensureClient` catch 里 `void client.dispose()`。
+
+> **修复记录（2026-09-08）**：已落地双保险（两个建议都做了）。① `AcpClient.connect()` 内部 try/catch：initialize 请求失败（超时/握手错误）时置 `stopped = true` 并 fire-and-forget `dispose()`（kill 子进程）再 rethrow 原始错误；② `ensureClient` 的 catch 追加 `void client.dispose()`——覆盖 connect 成功但后握手步骤（authenticate 异常传播、restore/prune/newSession 抛错）失败的路径，此时子进程健康但无主。`dispose()` 幂等（`child.exitCode` 非空直接返回），双重调用安全。此前两条泄漏路径（initialize 120s 超时后子进程存活、握手成功后步骤失败子进程无主）均已闭合。验证：typecheck + 全量测试 99/99 + build 通过。
 
 ### [MINOR] C6 — `parseTranscriptJsonl` 的 sidechain 归组依赖行序
 
