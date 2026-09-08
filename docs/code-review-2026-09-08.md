@@ -303,9 +303,13 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `panel.ts:147-154`：`void this.client?.dispose()` 未 await，`deactivate` 可能在 kill/SIGKILL 完成前结束。VSCode 会在宿主退出时收割子进程，实害低；若要严格，dispose 改 async 并在 deactivate 中 await。
 
+> **修复记录（2026-09-08）**：已按建议落地。`ChatPanel.dispose` 改 async（`await client.dispose()`，kill + SIGKILL 兜底至多 3s，try/catch best-effort）；panel 提升为模块级引用，`deactivate` 改 `async function` 并显式 `await panel?.dispose()`——VSCode 会等 deactivate 返回的 Promise，宿主退出前子进程真正收割。subscriptions 的自动 dispose 与显式 dispose 的 double-call 由 `disposed` flag 幂等吸收。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [NIT] R7 — `errorMessage()` 丢弃 `data` 字段
 
 `src/acp/jsonrpc.ts`（`errorMessage`）：JSON-RPC error 的 `data`（CLI 常放详细堆栈）被丢，错误横幅信息量打折。可拼接 `data` 字符串（限长 500）。
+
+> **修复记录（2026-09-08）**：已在 `src/acp/jsonrpc.ts` 落地。`errorMessage` 对带 `data` 的 plain-object rejection（JSON-RPC error 形态）拼接 `" · " + data`（String 或 JSON.stringify，截断至 500 字符）；`data` 与 `message` 内容相同、序列化为空或循环结构时跳过。Error 实例与字符串路径不变。验证：typecheck + 全量测试 99/99 通过。
 
 ---
 

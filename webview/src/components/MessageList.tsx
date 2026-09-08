@@ -48,23 +48,27 @@ const KIND_ICON: Record<string, typeof Eye> = {
 };
 
 function StatusChip({ status }: { status: ToolBlock["status"] }) {
-  if (status === "completed")
+  // W2: the localized chip text is rebuilt only when the status changes.
+  const chip = useMemo(() => {
+    if (status === "completed")
+      return (
+        <Chip tone="success">
+          <Check className="size-2.5" /> {t("已完成")}
+        </Chip>
+      );
+    if (status === "failed")
+      return (
+        <Chip tone="danger">
+          <X className="size-2.5" /> {t("失败")}
+        </Chip>
+      );
     return (
-      <Chip tone="success">
-        <Check className="size-2.5" /> {t("已完成")}
+      <Chip tone="primary">
+        <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}
       </Chip>
     );
-  if (status === "failed")
-    return (
-      <Chip tone="danger">
-        <X className="size-2.5" /> {t("失败")}
-      </Chip>
-    );
-  return (
-    <Chip tone="primary">
-      <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}
-    </Chip>
-  );
+  }, [status]);
+  return chip;
 }
 
 function OutputDetails({ output }: { output: string }) {
@@ -176,7 +180,12 @@ function agentAccent(type: string | null): { border: string; icon: string; chip:
 function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const [open, setOpen] = useState(false);
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
-  const done = nested.filter((b) => b.status === "completed" || b.status === "failed").length;
+  // W2: derived counter + localized chip text — memoized so re-renders that
+  // don't change `entries` skip the t() replaceAll work.
+  const done = useMemo(
+    () => nested.filter((b) => b.status === "completed" || b.status === "failed").length,
+    [block.entries],
+  );
   const progress = nested.length > 0 ? ` ${done}/${nested.length}` : "";
   const statusChip =
     block.status === "completed" ? (

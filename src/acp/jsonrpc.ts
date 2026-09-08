@@ -53,8 +53,22 @@ export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string" && message.length > 0) return message;
+    const obj = error as { message?: unknown; data?: unknown; code?: unknown };
+    const message = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : null;
+    // R7: JSON-RPC rejections often carry the useful detail (stack, inner
+    // error text) in `data` — surface it (capped) instead of dropping it.
+    let dataSuffix = "";
+    if ("data" in error && obj.data !== null && obj.data !== undefined) {
+      try {
+        let dataText = typeof obj.data === "string" ? obj.data : JSON.stringify(obj.data);
+        if (dataText && dataText !== "{}" && dataText !== message) {
+          dataSuffix = ` · ${dataText.slice(0, 500)}`;
+        }
+      } catch {
+        // circular data — skip the suffix
+      }
+    }
+    if (message) return message + dataSuffix;
     try {
       const json = JSON.stringify(error);
       if (json && json !== "{}") return json;

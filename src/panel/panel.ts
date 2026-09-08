@@ -180,10 +180,19 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  dispose(): void {
+  /**
+   * R6: async so callers (notably `deactivate` via subscriptions) can await
+   * the CLI child actually exiting (kill + SIGKILL fallback takes up to 3s)
+   * instead of abandoning it mid-teardown.
+   */
+  async dispose(): Promise<void> {
     this.disposed = true;
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
-    void this.client?.dispose();
+    try {
+      await this.client?.dispose();
+    } catch {
+      // best-effort teardown; nothing to do if the kill itself failed
+    }
     this.client = null;
     this.editorPanel?.dispose();
     this.editorPanel = undefined;
