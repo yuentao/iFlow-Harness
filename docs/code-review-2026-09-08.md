@@ -167,6 +167,8 @@ await new Promise<void>((resolve) => {
 
 `MessageList.tsx:205-219`：`block.entries.map(...).join("\n")` 无 `useMemo`，SubAgent 卡流式期间高频重渲染时线性重建。包 `useMemo([block.entries])`。
 
+> **修复记录（2026-09-08）**：已在 `webview/src/components/MessageList.tsx` 落地。`log` 构建包 `useMemo`（依赖 `[block.entries]`）——流式期间嵌套 entries 每次变更产生新引用时才重建；引用不变的重渲染跳过 O(entries) 的字符串拼接。与 P4 的 `React.memo(BlockView)` 互补：memo 挡住无关块的重渲染，useMemo 挡住 SubAgent 卡自身重渲染时的重复计算。验证：typecheck + 全量测试 98/98 + build 通过。
+
 ### [MINOR] P6 — `searchWorkspaceFiles` 每次 @ 输入全量 `findFiles`
 
 `src/panel/panel.ts:473-509`。`findFiles("**/*", exclude, 500)` 每次按键（120ms debounce 后）都全仓扫描，大仓库单次数秒且结果顺序不稳定。建议缓存首次结果（workspace 文件变更事件失效）。当前 500 cap + debounce 已控制伤害，故 MINOR。
