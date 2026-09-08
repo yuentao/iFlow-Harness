@@ -287,6 +287,10 @@ export class ChatPanel implements vscode.Disposable {
     this.log.trace(`webview → host: ${msg.type}`);
     switch (msg.type) {
       case "ready":
+        // The webview (re)booted and lost its transcript anchor: resync()
+        // forces the next push to be a full snapshot (P-1 blockPatch would
+        // apply on top of a transcript the webview no longer holds).
+        this.store.resync();
         this.store.pushSnapshot();
         break;
       case "sendPrompt":
@@ -361,11 +365,10 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private postSnapshot(): void {
-    this.postToWebview({
-      type: "snapshot",
-      state: structuredClone(this.store.getState()) satisfies SessionState as unknown,
-      locale: vscode.env.language,
-    });
+    // Delegate to the store: it stamps `blockVersion` and maintains the P-1
+    // patch anchors; a snapshot pushed here bypassing those would corrupt the
+    // webview's blockPatch anchoring.
+    this.store.pushSnapshot();
   }
 
   /** Forward the editor color theme so the panel can follow it by default. */

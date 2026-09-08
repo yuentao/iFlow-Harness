@@ -147,6 +147,12 @@ export interface SessionState {
   replaying: boolean;
   /** True while a new session is being created (host busy; UI locks switches). */
   initializing: boolean;
+  /**
+   * Monotonic counter of transcript-block mutations, stamped by the host on
+   * every full snapshot. Anchors `blockPatch` messages (P-1 incremental
+   * snapshots); absent in mock hosts, treated as 0 by the webview.
+   */
+  blockVersion?: number;
 }
 
 export interface AuthUiState {
@@ -198,8 +204,53 @@ export interface FileHitUi {
 // Host → WebView messages
 // ---------------------------------------------------------------------------
 
+/**
+ * P-1 incremental snapshot payload: everything EXCEPT `blocks`. Non-block
+ * fields are tiny but can all change mid-stream (optimistic mode/model
+ * write-back, `available_commands_update`, approval cards), so the patch
+ * piggybacks the whole remainder to stay unconditionally correct.
+ */
+export type SessionSnapshotTail = Omit<SessionState, "blocks">;
+
+/**
+ * Merge a `blockPatch` into the webview's transcript. Returns the new block
+ * array; the current one when the patch carries no blocks (metadata-only
+ * flush); or null when the patch cannot be anchored (no snapshot yet, version
+ * mismatch, `tailStart` out of bounds) — the caller must then request a full
+ * re-sync via `ready`.
+ */
+export function applyBlockPatch(
+  current: SessionState | null,
+  patch: { baseVersion: number; tailStart: number; blocks: Block[] },
+): Block[] | null {
+  if (!current) return null;
+  if ((current.blockVersion ?? 0) !== patch.baseVersion) return null;
+  if (patch.tailStart < 0 || patch.tailStart > current.blocks.length) return null;
+  if (patch.blocks.length === 0) return current.blocks;
+  return [...current.blocks.slice(0, patch.tailStart), ...patch.blocks];
+}
+
 export type HostToWebview =
   | { type: "snapshot"; state: SessionState; locale?: string }
+  /**
+   * P-1 incremental snapshot: the transcript tail range plus the small
+   * metadata fields that commonly change mid-stream. Applied on top of the
+   * last anchored snapshot (see `applyBlockPatch`); anchor mismatch → the
+   * webview re-syncs via `ready`. `blocks` re-sends everything from
+   * `tailStart` to the end — the anchored tail block itself plus any blocks
+   * appended since the last push — and is empty for metadata-only flushes.
+   */
+  | {
+      type: "blockPatch";
+      /** blockVersion the receiver's transcript must currently be anchored at. */
+      baseVersion: number;
+      /** First transcript index being re-sent. */
+      tailStart: number;
+      /** Transcript tail from `tailStart` on; empty = metadata-only flush. */
+      blocks: Block[];
+      /** Current non-blocks metadata (status, approvals, modes, …). */
+      tail: SessionSnapshotTail;
+    }
   | { type: "toast"; level: "info" | "warning" | "error"; message: string }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
   | { type: "fileList"; requestId: number; hits: FileHitUi[] }

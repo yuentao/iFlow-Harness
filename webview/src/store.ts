@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { HostToWebview, SessionState, WebviewToHost } from "../../shared/messages";
+import {
+  applyBlockPatch,
+  type HostToWebview,
+  type SessionState,
+  type WebviewToHost,
+} from "../../shared/messages";
 
 declare const acquireVsCodeApi: () => { postMessage: (msg: unknown) => void };
 
@@ -570,10 +575,21 @@ interface PendingOp {
 const SEND_DEBOUNCE_MS = 400;
 /** Failsafe: drop the switch lock even if the host never confirms. */
 const PENDING_TIMEOUT_MS = 10_000;
+/** Min interval between full re-sync requests (unanchorable blockPatch). */
+const RESYNC_THROTTLE_MS = 1_000;
 
 let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSentKey = "";
 let lastSentAt = 0;
+let lastResyncAt = 0;
+
+/** Ask the host for a full snapshot (P-1: a blockPatch we cannot anchor). */
+function requestResync(): void {
+  const now = Date.now();
+  if (now - lastResyncAt < RESYNC_THROTTLE_MS) return;
+  lastResyncAt = now;
+  vscode.postMessage({ type: "ready" });
+}
 
 interface ChatStore {
   state: SessionState | null;
@@ -593,7 +609,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   editorTheme: null,
   pending: null,
   applyHostMessage: (msg) => {
-    // Only the snapshot updates the store. Other message kinds (fileList,
+    // Snapshot & blockPatch update the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
     // registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") {
@@ -616,6 +632,37 @@ export const useChat = create<ChatStore>((set, get) => ({
         }
       }
       set({ state: msg.state });
+      return;
+    }
+    if (msg.type === "blockPatch") {
+      // P-1 incremental snapshot: merge the tail onto the anchored state, then
+      // apply the piggybacked non-block metadata. An unanchorable patch (webview
+      // booted without a snapshot, missed patch, out-of-bounds tail) triggers a
+      // throttled full re-sync.
+      const current = get().state;
+      const blocks = applyBlockPatch(current, msg);
+      if (!blocks) {
+        requestResync();
+        return;
+      }
+      const state: SessionState = { ...msg.tail, blocks };
+      const pending = get().pending;
+      if (pending) {
+        const confirmed =
+          (pending.kind === "profile" &&
+            state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
+          (pending.kind === "model" && state.currentModelId === pending.target) ||
+          (pending.kind === "mode" && state.modes?.currentModeId === pending.target);
+        if (confirmed) {
+          if (pendingTimer) {
+            clearTimeout(pendingTimer);
+            pendingTimer = null;
+          }
+          set({ pending: null, state });
+          return;
+        }
+      }
+      set({ state });
       return;
     }
     if (msg.type === "theme") {
