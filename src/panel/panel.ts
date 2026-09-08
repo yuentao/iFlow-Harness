@@ -109,6 +109,11 @@ export class ChatPanel implements vscode.Disposable {
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
   private persistChain: Promise<void> = Promise.resolve();
+  /** P6: workspace file list for the @-mention popup — `findFiles` is a full
+   * workspace scan; cache it and invalidate on file-system changes. */
+  private fileSearchCache: { rels: string[] } | null = null;
+  /** P6: coalesce concurrent @-search keystrokes into one findFiles scan. */
+  private fileSearchInFlight: Promise<string[]> | null = null;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -125,6 +130,15 @@ export class ChatPanel implements vscode.Disposable {
     this.context.subscriptions.push(
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
     );
+    // P6: file-system changes invalidate the @-mention file-list cache.
+    const watchRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
+    const fileWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
+    const invalidateFileCache = () => {
+      this.fileSearchCache = null;
+    };
+    fileWatcher.onDidCreate(invalidateFileCache);
+    fileWatcher.onDidDelete(invalidateFileCache);
+    this.context.subscriptions.push(fileWatcher);
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
   }
@@ -521,15 +535,10 @@ export class ChatPanel implements vscode.Disposable {
    * scale and avoids pulling in a fuzzy-matching dependency.
    */
   private async searchWorkspaceFiles(requestId: number, query: string): Promise<void> {
-    const exclude = "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/coverage/**,**/.iflow/**}";
     try {
-      const uris = await vscode.workspace.findFiles("**/*", exclude, 500);
+      const rels = await this.loadWorkspaceFileRels();
       const q = query.trim().toLowerCase();
-      const scored = uris.map((uri) => {
-        const rel = path.relative(
-          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
-          uri.fsPath,
-        ).replace(/\\/g, "/");
+      const scored = rels.map((rel) => {
         let score = 0;
         if (q) {
           const lower = rel.toLowerCase();
@@ -558,6 +567,30 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`file search failed: ${errorMessage(error)}`);
       this.postToWebview({ type: "fileList", requestId, hits: [] });
     }
+  }
+
+  /**
+   * P6: the relative-path list behind the @-mention popup. The first
+   * keystroke pays for one `findFiles` scan; afterwards keystrokes score the
+   * cached list in memory. Invalidated by workspace file-system changes
+   * (watcher registered in the constructor).
+   */
+  private async loadWorkspaceFileRels(): Promise<string[]> {
+    if (this.fileSearchCache) return this.fileSearchCache.rels;
+    if (!this.fileSearchInFlight) {
+      this.fileSearchInFlight = (async () => {
+        const exclude = "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/coverage/**,**/.iflow/**}";
+        const uris = await vscode.workspace.findFiles("**/*", exclude, 500);
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+        return uris.map((uri) => path.relative(root, uri.fsPath).replace(/\\/g, "/"));
+      })();
+      this.fileSearchInFlight.finally(() => {
+        this.fileSearchInFlight = null;
+      });
+    }
+    const rels = await this.fileSearchInFlight;
+    this.fileSearchCache = { rels };
+    return rels;
   }
 
   /**
@@ -783,9 +816,6 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Auth (M3: openai-compatible credentials in SecretStorage) ----------------
 
-  /** Masked summary for snapshots — never includes the raw API key. */
-  private authMaskCache: AuthUiState["saved"] = null;
-
   private maskOf(creds: OpenAiCompatCredentials): AuthUiState["saved"] {
     return { baseUrl: creds.baseUrl, modelName: creds.modelName, keyTail: maskKey(creds.apiKey) };
   }
@@ -827,10 +857,13 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async buildAuthState(authenticated: boolean, needsSetup: boolean): Promise<AuthUiState> {
+    // P7: computed fresh every call — the old cache went stale between write
+    // points (e.g. `saved` outliving a deleted profile until the next save).
+    const creds = await loadCredentials(this.context.secrets);
     return {
       authenticated,
       needsSetup,
-      saved: this.authMaskCache,
+      saved: creds ? this.maskOf(creds) : null,
       profiles: await this.buildProfileList(),
     };
   }
@@ -861,7 +894,6 @@ export class ChatPanel implements vscode.Disposable {
     await saveProfiles(this.context.secrets, profiles);
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds); // active-slot for the next handshake
-    this.authMaskCache = this.maskOf(creds);
 
     await this.reconnectWithCredentials(creds);
   }
@@ -878,7 +910,6 @@ export class ChatPanel implements vscode.Disposable {
     }
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds);
-    this.authMaskCache = this.maskOf(creds);
     await this.reconnectWithCredentials(creds);
   }
 
@@ -898,7 +929,6 @@ export class ChatPanel implements vscode.Disposable {
     const activeName = await getActiveProfileName(this.context.secrets);
     if (activeName === name) {
       await clearCredentials(this.context.secrets);
-      this.authMaskCache = null;
       this.store.setAuth(await this.buildAuthState(false, true));
       return; // active profile deleted → user must pick/configure again
     }
@@ -1203,7 +1233,6 @@ export class ChatPanel implements vscode.Disposable {
         const explicitSwitch = this.pendingHandshakeCredentials !== null;
         const storedCreds = this.pendingHandshakeCredentials ?? (await loadCredentials(this.context.secrets));
         this.pendingHandshakeCredentials = null;
-        this.authMaskCache = storedCreds ? this.maskOf(storedCreds) : null;
         // A profile switch must ALWAYS re-push authenticate: the CLI caches
         // auth across spawns and reports isAuthenticated=true for the PREVIOUS
         // profile's endpoint (observed: BUZZ→商汤 switch skipped authenticate,

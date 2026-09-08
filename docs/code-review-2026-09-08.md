@@ -173,9 +173,13 @@ await new Promise<void>((resolve) => {
 
 `src/panel/panel.ts:473-509`。`findFiles("**/*", exclude, 500)` 每次按键（120ms debounce 后）都全仓扫描，大仓库单次数秒且结果顺序不稳定。建议缓存首次结果（workspace 文件变更事件失效）。当前 500 cap + debounce 已控制伤害，故 MINOR。
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。新增 `loadWorkspaceFileRels`：首次 @ 输入支付一次 `findFiles` 扫描（排除目录与 500 cap 不变），结果转为相对路径数组缓存（`fileSearchCache`），后续按键纯内存评分；并发按键共享同一 in-flight promise（`fileSearchInFlight`）不重复扫描。失效由 constructor 注册的 `FileSystemWatcher`（`**/*`，`onDidCreate`/`onDidDelete`）驱动——注：`vscode.workspace` 并无 `onDidChangeWorkspaceFiles`，文件变更事件在 `FileSystemWatcher` 上（实施时修正过一处 API 误用）。评分逻辑未动。验证：typecheck + 全量测试 98/98 通过。
+
 ### [NIT] P7 — `authMaskCache` 只在 connect/save 时刷新
 
 `panel.ts:737`。多处写入点存在短暂不一致窗口（`deleteProfile` 后 `saved` 残留旧值）。低影响，统一改为每次现算 `loadCredentials + maskOf` 即可。
+
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。`authMaskCache` 字段连同 4 处赋值（`saveAuthAndReconnect`/`activateProfile`/`deleteProfile`/`ensureClient` 连接成功）全部删除，`buildAuthState` 每次调用现算 `loadCredentials + maskOf`（其本身即 async，SecretStorage 读取可接受）——`saved` 不再有残留旧值的不一致窗口。验证：typecheck + 全量测试 98/98 通过。
 
 ---
 
