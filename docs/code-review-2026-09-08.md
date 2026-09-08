@@ -136,6 +136,8 @@ feed(chunk: string): void {
 
 修复建议：transcript 移出 `workspaceState`，改为每会话一个 jsonl 文件放 `context.storageUri`（append-only 写当前会话）；或至少 debounce 写入（500ms 合并）+ 只写当前会话分片。另外 `TRANSCRIPTS_KEY` 的 map 只增不减（`MAX_RECENT_SESSIONS` 只限列表，不清理孤儿 transcript），workspaceState 会无界膨胀——建议 `pruneUnrestorableSessions` 时同步清理无主 transcript。
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 按首选建议落地。transcript 移出 `workspaceState`，改为 `context.storageUri/transcripts/` 下**每会话一个 JSON 文件**（sessionId 经 `[A-Za-z0-9_-]` sanitize 作文件名，防路径穿越）。`persistActiveTranscript` 在调用时刻同步 `JSON.stringify` 单会话快照（reducer 就地改 blocks，序列化必须发生在调用栈内——同时取代了每次 persist 的 `structuredClone`），经 promise 串行链排队写入（`mkdir` + temp 写 + `rename` 原子替换，防崩溃截断半截文件）；每条 prompt 的成本从「读全量 + 深拷贝 + 写全量」降为一次单会话文件写。`pruneUnrestorableSessions` 新增孤儿文件清理（按 sanitize 文件名与保留列表比对，防止含非法字符的 sessionId 误删活会话文件）并**前置一次性迁移**（`migrateLegacyTranscripts`：旧 map 逐会话迁文件后删除 `TRANSCRIPTS_KEY`，无旧数据时零成本跳过；必须在过滤前执行，否则未迁移数据会被误判为不可恢复）。CLI jsonl 定位函数改名 `cliTranscriptFilePath` 以区分。`loadPersistedTranscript` 源 1 改为单文件读（新 parse 对象独立，无需 clone）。验证：typecheck + 全量测试 91/91 + build 通过。
+
 ### [MAJOR] P3 — `chatForward` 200ms 轮询，失败路径下 interval 永不清除
 
 `src/panel/panel.ts:239-249`

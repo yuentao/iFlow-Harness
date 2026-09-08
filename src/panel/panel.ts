@@ -7,7 +7,7 @@ import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
@@ -59,8 +59,11 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
 const DEFAULT_SESSION_LABEL = vscode.l10n.t("（无标题会话）");
-/** workspaceState key: extension-owned transcripts (M4) — the CLI's ACP mode
- * does not persist session files, so the extension keeps its own copies. */
+/** Legacy workspaceState key: transcripts used to live in one monolithic map
+ * here (P2 — every persist meant read-all + structuredClone + write-all, and
+ * the map grew without bound). Transcripts now persist as per-session JSON
+ * files under storageUri; this key survives only as the one-shot migration
+ * source and is deleted after migration. */
 const TRANSCRIPTS_KEY = "iflow.transcripts";
 
 /** Persisted transcript payload for one session. */
@@ -98,6 +101,9 @@ export class ChatPanel implements vscode.Disposable {
     }
   >();
   private approvalSeq = 0;
+  /** Serializes per-session transcript file writes (P2): overlapping persists
+   * must not interleave inside one file's temp+rename sequence. */
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -1067,7 +1073,7 @@ export class ChatPanel implements vscode.Disposable {
    * Locate the CLI's NDJSON transcript file for a session id. The CLI stores
    * one file per project dir: `~/.iflow/projects/<cwd-as-slug>/session-<id>.jsonl`.
    */
-  private transcriptFilePath(sessionId: string): string | null {
+  private cliTranscriptFilePath(sessionId: string): string | null {
     const fileBase = sessionId.startsWith("session-") ? sessionId : `session-${sessionId}`;
     const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
     const base = path.join(home, ".iflow", "projects");
@@ -1090,13 +1096,13 @@ export class ChatPanel implements vscode.Disposable {
 
   private async loadPersistedTranscript(sessionId: string): Promise<{ blocks: SessionState["blocks"]; firstUserText: string | null }> {
     // Source 1: the extension's own persisted copy (ACP mode writes no files).
-    const own = this.readTranscripts()[sessionId];
+    const own = await this.readTranscript(sessionId);
     if (own) {
       this.log.info(`transcript source: extension store (${own.blocks.length} blocks)`);
-      return { blocks: structuredClone(own.blocks), firstUserText: own.label !== DEFAULT_SESSION_LABEL ? own.label : null };
+      return { blocks: own.blocks, firstUserText: own.label !== DEFAULT_SESSION_LABEL ? own.label : null };
     }
     // Source 2: the CLI's interactive-mode jsonl (only exists for terminal sessions).
-    const file = this.transcriptFilePath(sessionId);
+    const file = this.cliTranscriptFilePath(sessionId);
     if (!file) {
       this.log.warn(`no persisted transcript found for ${sessionId}`);
       return { blocks: [], firstUserText: null };
@@ -1297,45 +1303,137 @@ export class ChatPanel implements vscode.Disposable {
   /**
    * The CLI's ACP mode does NOT write session files (verified: interactive
    * mode does, `--experimental-acp` doesn't). For "restart VSCode → get the
-   * conversation back" the extension therefore persists transcripts itself.
+   * conversation back" the extension therefore persists transcripts itself —
+   * one JSON file per session under storageUri (P2: the old workspaceState
+   * map made every persist a read-all + clone + write-all of every session).
    */
-  private readTranscripts(): Record<string, PersistedTranscript> {
-    return this.context.workspaceState.get<Record<string, PersistedTranscript>>(TRANSCRIPTS_KEY, {});
+  private transcriptDir(): string {
+    // workspaceState falls back to global state when no workspace is open;
+    // mirror that fallback for the file store.
+    return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "transcripts");
   }
 
-  private async writeTranscript(sessionId: string, label: string, blocks: SessionState["blocks"]): Promise<void> {
-    if (!sessionId || blocks.length === 0) return;
-    const all = this.readTranscripts();
-    all[sessionId] = { label, blocks: structuredClone(blocks) };
-    await this.context.workspaceState.update(TRANSCRIPTS_KEY, all);
+  private ownTranscriptFileName(sessionId: string): string {
+    // Session ids come from the CLI and webview messages — restrict to a
+    // filesystem-safe charset so a hostile id cannot escape the directory.
+    const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "-");
+    return `${safe}.json`;
+  }
+
+  private ownTranscriptFilePath(sessionId: string): string {
+    return path.join(this.transcriptDir(), this.ownTranscriptFileName(sessionId));
+  }
+
+  /** Read one session's transcript file; null when absent or corrupt. */
+  private async readTranscript(sessionId: string): Promise<PersistedTranscript | null> {
+    try {
+      const raw = await readFile(this.ownTranscriptFilePath(sessionId), "utf8");
+      const parsed = JSON.parse(raw) as PersistedTranscript;
+      if (!Array.isArray(parsed.blocks)) return null;
+      return parsed;
+    } catch {
+      return null; // ENOENT (never persisted) or corrupt (crash mid-write)
+    }
+  }
+
+  /**
+   * Serialize a transcript payload synchronously, at call time. Blocks are
+   * mutated in place by the shared reducer; stringifying here captures a
+   * coherent snapshot even though the actual file write runs later on the
+   * persist chain. (Also replaces the old per-persist structuredClone.)
+   */
+  private serializeTranscript(label: string, blocks: SessionState["blocks"]): string {
+    return JSON.stringify({ label, blocks } satisfies PersistedTranscript);
+  }
+
+  private async writeTranscriptFile(sessionId: string, payload: string): Promise<void> {
+    const target = this.ownTranscriptFilePath(sessionId);
+    const tmp = `${target}.tmp`;
+    await mkdir(this.transcriptDir(), { recursive: true });
+    await writeFile(tmp, payload, "utf8");
+    await rename(tmp, target);
+  }
+
+  /**
+   * Queue a transcript file write on the persist chain: overlapping persists
+   * (e.g. prompt-start seeding and the previous prompt's completion) run
+   * back-to-back instead of interleaving inside one file's write sequence.
+   */
+  private enqueueTranscriptWrite(sessionId: string, payload: string): Promise<void> {
+    const run = this.persistChain.then(() => this.writeTranscriptFile(sessionId, payload));
+    this.persistChain = run.catch(() => {});
+    return run;
   }
 
   private async clearTranscript(sessionId: string): Promise<void> {
-    const all = this.readTranscripts();
-    if (!all[sessionId]) return;
-    delete all[sessionId];
-    await this.context.workspaceState.update(TRANSCRIPTS_KEY, all);
+    await rm(this.ownTranscriptFilePath(sessionId), { force: true });
   }
 
   /** Restorable = the extension holds a transcript OR the CLI wrote a file. */
   private hasPersistedTranscript(sessionId: string): boolean {
-    if (this.readTranscripts()[sessionId]) return true;
-    return this.transcriptFilePath(sessionId) !== null;
+    if (existsSync(this.ownTranscriptFilePath(sessionId))) return true;
+    return this.cliTranscriptFilePath(sessionId) !== null;
   }
 
   /**
    * Drop persisted sessions the CLI has no transcript for (auto-created but
-   * never used). Returns the surviving list (already persisted).
+   * never used). Returns the surviving list (already persisted). Orphaned
+   * transcript files (session forgotten/dead, file left behind) are deleted.
    */
   private async pruneUnrestorableSessions(): Promise<SessionSummaryUi[]> {
     this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
-    const kept = this.readPersistedSessions().filter((s) => this.hasPersistedTranscript(s.id));
-    if (kept.length !== this.readPersistedSessions().length) {
-      this.log.info(`pruned ${this.readPersistedSessions().length - kept.length} unrestorable session(s)`);
+    // Migrate BEFORE filtering: hasPersistedTranscript is file-based now, and
+    // unmigrated transcripts would otherwise look unrestorable.
+    await this.migrateLegacyTranscripts();
+    const before = this.readPersistedSessions();
+    const kept = before.filter((s) => this.hasPersistedTranscript(s.id));
+    if (kept.length !== before.length) {
+      this.log.info(`pruned ${before.length - kept.length} unrestorable session(s)`);
+    }
+    // P2: drop transcript files whose session is no longer in the list —
+    // the old workspaceState map could only grow; the per-session files get
+    // garbage-collected here instead. Filename-based comparison: the on-disk
+    // name is the sanitized id, so kept ids must go through the same mapping.
+    const keptFileNames = new Set(kept.map((s) => this.ownTranscriptFileName(s.id)));
+    for (const name of await this.listOwnTranscriptFileNames()) {
+      if (name.endsWith(".json") && !keptFileNames.has(name)) {
+        await rm(path.join(this.transcriptDir(), name), { force: true });
+      }
     }
     const activeId = (await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null)) ?? kept[0]?.id ?? null;
     await this.persistSessions(kept, kept.some((s) => s.id === activeId) ? activeId : kept[0]?.id ?? null);
     return kept;
+  }
+
+  /**
+   * Transcript file names on disk under the extension's transcript store
+   * (for orphan cleanup). Empty when the store directory doesn't exist yet.
+   */
+  private async listOwnTranscriptFileNames(): Promise<string[]> {
+    try {
+      return await readdir(this.transcriptDir());
+    } catch {
+      return []; // transcripts dir not created yet
+    }
+  }
+
+  /**
+   * P2 migration: move transcripts out of the legacy workspaceState map into
+   * per-session files, then delete the legacy key. One-shot; a no-op when
+   * the key is absent (fresh installs, already-migrated workspaces).
+   */
+  private async migrateLegacyTranscripts(): Promise<void> {
+    const legacy = this.context.workspaceState.get<Record<string, PersistedTranscript>>(TRANSCRIPTS_KEY);
+    if (!legacy) return;
+    for (const [sessionId, transcript] of Object.entries(legacy)) {
+      if (!transcript || !Array.isArray(transcript.blocks) || transcript.blocks.length === 0) continue;
+      await this.enqueueTranscriptWrite(
+        sessionId,
+        this.serializeTranscript(transcript.label ?? DEFAULT_SESSION_LABEL, transcript.blocks),
+      );
+    }
+    await this.context.workspaceState.update(TRANSCRIPTS_KEY, undefined);
+    this.log.info(`migrated ${Object.keys(legacy).length} legacy transcript(s) from workspaceState to files`);
   }
 
   /**
@@ -1457,13 +1555,20 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** Snapshot the active session's transcript into workspaceState (M4). */
-  private async persistActiveTranscript(): Promise<void> {
+  /**
+   * Snapshot the active session's transcript into the extension-owned file
+   * store (M4). P2: the payload is serialized once, synchronously, at call
+   * time and written as this session's own file on the persist chain — the
+   * old workspaceState map made each persist a read-all + clone + write-all
+   * of every session.
+   */
+  private persistActiveTranscript(): Promise<void> {
     const state = this.store.getState();
     const id = state.activeSessionId ?? state.sessionId;
-    if (!id) return;
+    if (!id || state.blocks.length === 0) return Promise.resolve();
     const label = state.sessions.find((s) => s.id === id)?.label ?? DEFAULT_SESSION_LABEL;
-    await this.writeTranscript(id, label, state.blocks);
+    const payload = this.serializeTranscript(label, state.blocks);
+    return this.enqueueTranscriptWrite(id, payload);
   }
 
   /**
