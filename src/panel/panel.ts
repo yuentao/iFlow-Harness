@@ -41,6 +41,7 @@ import {
   newSessionState,
   parseTranscriptJsonl,
   setSessions,
+  toAgentPromptText,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
 
@@ -1773,7 +1774,11 @@ export class ChatPanel implements vscode.Disposable {
             .map((f) => `- ${f.name} → ${f.path}`)
             .join("\n")}`
         : "";
-    const promptText = trimmed + attachmentBlock;
+    // The agent-facing text escapes "/"-leading non-commands (CLI would
+    // otherwise answer "Unknown command" and the model never sees the text);
+    // the transcript keeps the user's verbatim input.
+    const promptText =
+      toAgentPromptText(trimmed, this.store.getState().commands) + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping

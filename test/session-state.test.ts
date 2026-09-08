@@ -14,6 +14,7 @@ import {
   beginReplay,
   endReplay,
   parseTranscriptJsonl,
+  toAgentPromptText,
 } from "../shared/session-state";
 import { initialSessionState, type Block, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
@@ -556,6 +557,55 @@ describe("session replay (M4)", () => {
     expect(state.replaying).toBe(false);
     expect(state.status).toBe("idle");
     expect(state.blocks).toHaveLength(1);
+  });
+});
+
+describe("toAgentPromptText (CLI slash-command disambiguation)", () => {
+  const commands = [
+    { name: "init" },
+    { name: "help" },
+    { name: "commit", _meta: { altName: ["coc"] } },
+  ];
+
+  it("passes plain text through verbatim", () => {
+    expect(toAgentPromptText("hello world", commands)).toBe("hello world");
+    expect(toAgentPromptText("  spaced  ", commands)).toBe("  spaced  ");
+  });
+
+  it("passes known commands through verbatim (name, altName, with args)", () => {
+    expect(toAgentPromptText("/init", commands)).toBe("/init");
+    expect(toAgentPromptText("/init foo", commands)).toBe("/init foo");
+    expect(toAgentPromptText("/coc", commands)).toBe("/coc");
+    expect(toAgentPromptText("  /init", commands)).toBe("  /init");
+  });
+
+  it("escapes unknown /-leading text with U+200B", () => {
+    expect(toAgentPromptText("/foo", commands)).toBe("\u200B/foo");
+    expect(toAgentPromptText("/foo bar", commands)).toBe("\u200B/foo bar");
+    expect(toAgentPromptText(" /unknown", commands)).toBe("\u200B/unknown");
+  });
+
+  it("exempts path-like invocations (CLI T8u mirror)", () => {
+    expect(toAgentPromptText("/usr/bin/node -v", commands)).toBe("/usr/bin/node -v");
+    expect(toAgentPromptText("/Users/outlo/report.md", commands)).toBe("/Users/outlo/report.md");
+    expect(toAgentPromptText("C:/tools/run.exe", commands)).toBe("C:/tools/run.exe");
+    expect(toAgentPromptText("c:/tools/run.exe", commands)).toBe("c:/tools/run.exe");
+    expect(toAgentPromptText("./scripts/build.sh", commands)).toBe("./scripts/build.sh");
+    expect(toAgentPromptText("../parent/dir", commands)).toBe("../parent/dir");
+    expect(toAgentPromptText("~/notes/todo.txt", commands)).toBe("~/notes/todo.txt");
+    expect(toAgentPromptText("\\\\server\\share\\file", commands)).toBe("\\\\server\\share\\file");
+    expect(toAgentPromptText("/Program Files x/app", commands)).toBe("/Program Files x/app");
+  });
+
+  it("still escapes slash text that is neither command nor path", () => {
+    // ".md" is not a separator-led token: /notes.md is a command attempt for
+    // the CLI (no separator after the first token), so it must be escaped.
+    expect(toAgentPromptText("/notes.md", commands)).toBe("\u200B/notes.md");
+    expect(toAgentPromptText("/初始化 项目", commands)).toBe("\u200B/初始化 项目");
+  });
+
+  it("passes everything through when the command list is empty", () => {
+    expect(toAgentPromptText("/anything", [])).toBe("/anything");
   });
 });
 

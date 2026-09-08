@@ -373,6 +373,93 @@ export function extractDiff(content: unknown): ToolDiffUi | null {
 
 // --- host-level transitions -------------------------------------------------
 
+// --- CLI slash-command vs. literal-text disambiguation -----------------------
+// Wire behavior (probed against the iFlow CLI 0.5.19 bundle, ACP prompt
+// handler `I8u` + path heuristic `T8u`): a prompt whose *trimmed* text starts
+// with "/" is parsed as a slash command — an unknown first token is answered
+// with "Unknown command: …" and never reaches the model. Invocations that
+// look like filesystem paths are exempt. We mirror that tokenization here:
+// known commands and path-like text pass through verbatim; anything else
+// gets a zero-width space (U+200B) prepended so the CLI's
+// `trim().startsWith("/")` gate fails and the text is delivered as a plain
+// prompt. U+200B is category Cf — NOT removed by String.prototype.trim().
+
+/** Path-shape regexes mirrored from CLI 0.5.19 (`lIe`). */
+const CLI_PATH_PATTERNS = [
+  /^\/[a-zA-Z0-9._-]+/, // UNIX_ABSOLUTE
+  /^([a-zA-Z]:[/\\]|\\\\[a-zA-Z0-9._-]+[/\\])/, // WINDOWS_ABSOLUTE (drive / UNC)
+  /^~[a-zA-Z0-9._-]*[/\\]/, // HOME_SHORTCUT
+  /^(\.?\/|\.\.\/)/, // UNIX_RELATIVE
+  /^(\.\\|\.\.\\)/, // WINDOWS_RELATIVE
+];
+/** Well-known absolute-path roots exempted by the CLI (`yso`). */
+const CLI_UNIX_DIRS = [
+  "bin", "sbin", "etc", "var", "usr", "opt", "tmp", "home", "root", "lib",
+  "lib64", "dev", "proc", "sys", "run", "snap", "srv", "mnt", "media", "boot",
+  "data", "Users", "Library", "Applications", "System",
+];
+const CLI_WINDOWS_DIRS = [
+  "Windows", "Program Files", "Program Files (x86)", "ProgramData", "Users",
+  "Documents", "Downloads", "Desktop", "Pictures", "Music", "Videos",
+  "AppData", "System32", "SysWOW64", "Temp", "Programs",
+];
+/** Directory names exempted after "name<space>path" (`T8u` n-branch). */
+const CLI_KNOWN_DIRS = [
+  "Program", "Program Files", "Windows", "System32", "Users", "Documents",
+  "Desktop", "Downloads",
+];
+
+function looksLikeCliPath(m: string, d: string): boolean {
+  const sepAfter = d.startsWith("/") || d.startsWith("\\");
+  const spaceSepAfter = d.startsWith(" ") && (d.slice(1).includes("/") || d.slice(1).includes("\\"));
+  if (/^[A-Z]/.test(m) && sepAfter) return true; // Capitalized/dir + "/rest"
+  if (CLI_PATH_PATTERNS.some((re) => re.test(m))) return true;
+  if (spaceSepAfter && (CLI_KNOWN_DIRS.includes(m) || CLI_KNOWN_DIRS.some((u) => m.startsWith(u)))) {
+    return true;
+  }
+  const lower = m.toLowerCase();
+  return (
+    ((CLI_UNIX_DIRS.includes(lower) || CLI_WINDOWS_DIRS.includes(lower)) && sepAfter) ||
+    (/^[a-zA-Z]$/.test(m) && d.startsWith(":")) // "C:/…" — drive letter token
+  );
+}
+
+/**
+ * Text the CLI agent should receive for a user prompt. Known slash commands
+ * and path-like invocations pass through verbatim (the CLI runs / exempts
+ * them); every other "/"-leading text is zero-width-escaped so it cannot be
+ * mistaken for a command. Non-slash text is returned unchanged.
+ */
+export function toAgentPromptText(text: string, commands: readonly SlashCommand[]): string {
+  const s = text.trim();
+  if (!s.startsWith("/") || commands.length === 0) return text;
+  const a = s.slice(1);
+  const sep = a.search(/[/\\]/);
+  const space = a.indexOf(" ");
+  let m: string;
+  let d: string;
+  if (sep !== -1 && (space === -1 || sep < space)) {
+    m = a.slice(0, sep);
+    d = a.slice(sep);
+  } else if (space !== -1) {
+    m = a.slice(0, space);
+    d = a.slice(space);
+  } else {
+    m = a;
+    d = "";
+  }
+  if (looksLikeCliPath(m, d)) return text;
+  // The CLI splits by whitespace and matches the first word against command
+  // names / altNames — mirror that exactly (so "/init foo" runs the command
+  // while "/init/foo" — one whitespace word — does not).
+  const firstWord = a.trim().split(/\s+/)[0] ?? "";
+  const known = commands.some(
+    (c) => c.name === firstWord || (c._meta?.altName ?? []).includes(firstWord),
+  );
+  if (known) return text;
+  return "\u200B" + s;
+}
+
 export function beginUserPrompt(
   state: SessionState,
   text: string,
