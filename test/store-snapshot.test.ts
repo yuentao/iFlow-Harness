@@ -239,3 +239,185 @@ describe("applyBlockPatch (webview merge)", () => {
     expect(applyBlockPatch(current, { baseVersion: 1, tailStart: -1, blocks: [textBlock("x")] })).toBeNull();
   });
 });
+
+describe("P-1 full-chain fidelity (host push → wire → webview merge)", () => {
+  /** Simulate the wire: a JSON round-trip mirrors postMessage's structured clone. */
+  const wire = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+  /**
+   * Webview-side projection, mirroring webview/src/store.ts's
+   * applyHostMessage block-path behavior. Any unanchorable patch throws —
+   * in the real webview it triggers a throttled re-sync, and a dropped
+   * re-sync is exactly the "blocks disappear" symptom this suite guards.
+   */
+  function makeWebview() {
+    let state: SessionState | null = null;
+    return {
+      get state(): SessionState | null {
+        return state;
+      },
+      onMessage(msg: HostToWebview): void {
+        if (msg.type === "snapshot") {
+          state = wire(msg.state);
+          return;
+        }
+        if (msg.type === "blockPatch") {
+          const merged = applyBlockPatch(state, wire(msg));
+          if (!merged) throw new Error(`unanchorable blockPatch (baseVersion=${msg.baseVersion}, tailStart=${msg.tailStart})`);
+          state = { ...wire(msg.tail), blocks: merged };
+        }
+      },
+    };
+  }
+
+  function sync(webview: ReturnType<typeof makeWebview>, messages: HostToWebview[]): void {
+    for (const msg of messages.splice(0)) webview.onMessage(msg);
+  }
+
+  it("timeline A: full SubAgent turn — card and trailing texts survive every push", () => {
+    const { store, messages } = makeStore();
+    const webview = makeWebview();
+    const push = (): void => sync(webview, messages.splice(0));
+
+    store.markConnected();
+    store.pushSnapshot();
+    push();
+
+    store.userPrompt("第一个问题");
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "先想一下" } }));
+    store.pushSnapshot();
+    push();
+
+    // SubAgent interval opens (strategy 2: no agentId on the live 0.5.19 wire).
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call", toolCallId: "call_task", toolName: "task", title: "Launch agent(general-purpose): 读取", kind: "other", status: "pending" }));
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call_update", toolCallId: "call_task", toolName: "task", title: "Launch agent(general-purpose): 读取", kind: "other", status: "in_progress" }));
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "> general-purpose Agent started\n" } }));
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call", toolCallId: "call_read", toolName: "read_file", title: "Reading package.json", kind: "read", status: "pending" }));
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call_update", toolCallId: "call_read", toolName: "read_file", title: "Reading package.json", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "out" } }] }));
+    store.pushSnapshot();
+    push();
+
+    // Interval closes.
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call_update", toolCallId: "call_task", toolName: "task", kind: "other", status: "completed" }));
+    store.pushSnapshot();
+    push();
+
+    // Post-interval chunks: first appends a new text block, then a fresh tool.
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "子代理的结果" } }));
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call", toolCallId: "call_read2", toolName: "read_file", title: "Reading more", kind: "read", status: "pending" }));
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call_update", toolCallId: "call_read2", toolName: "read_file", title: "Reading more", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "out2" } }] }));
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第二条独立消息" } }));
+    store.pushSnapshot();
+    push();
+
+    const hostBlocks = store.getState().blocks;
+    expect(hostBlocks.map((b) => b.kind)).toEqual(["user", "text", "subagent", "text", "tool", "text"]);
+    expect(webview.state).not.toBeNull();
+    expect(wire(webview.state!.blocks)).toEqual(wire(hostBlocks));
+  });
+
+  it("timeline B: mode-switch gap, mid-list revert, and continuation re-anchor correctly", () => {
+    const { store, messages } = makeStore();
+    const webview = makeWebview();
+    const push = (): void => sync(webview, messages.splice(0));
+
+    store.markConnected();
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第一条回答" } }));
+    store.pushSnapshot();
+    push();
+
+    // Metadata-only patch between turns (modes arrive without block changes).
+    store.sessionStarted({ sessionId: "s1", modes: { currentModeId: "smart", availableModes: [] } });
+    store.pushSnapshot();
+    push();
+
+    store.userPrompt("第二个问题");
+    store.pushSnapshot();
+    push();
+
+    // Two tools land in one coalesced window.
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "ls", title: "", kind: "read", status: "pending" }));
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "ls", title: "", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "out1" } }] }));
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call", toolCallId: "t2", toolName: "cat", title: "", kind: "read", status: "pending" }));
+    store.onSessionUpdate(notify({ sessionUpdate: "tool_call_update", toolCallId: "t2", toolName: "cat", title: "", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "out2" } }] }));
+    store.pushSnapshot();
+    push();
+
+    // Revert the NON-tail tool: mid-list mutation → conservative full snapshot.
+    expect(store.toolReverted("t1")).toBe(true);
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回退之后的回答" } }));
+    store.pushSnapshot();
+    push();
+
+    // Tail growth after the full re-anchor is back on the patch path.
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "，继续生成" } }));
+    store.pushSnapshot();
+    push();
+    expect(messages).toHaveLength(0); // everything was consumed
+
+    const hostBlocks = store.getState().blocks;
+    expect(hostBlocks.map((b) => b.kind)).toEqual(["text", "user", "tool", "tool", "text"]);
+    expect(wire(webview.state!.blocks)).toEqual(wire(hostBlocks));
+    const reverted = hostBlocks[2]!;
+    expect(reverted.kind === "tool" && reverted.output).toContain("已回退");
+  });
+
+  it("timeline C: replaceState resets the anchor and the new session chains from scratch", () => {
+    const { store, messages } = makeStore();
+    const webview = makeWebview();
+    const push = (): void => sync(webview, messages.splice(0));
+
+    store.markConnected();
+    store.userPrompt("旧会话");
+    store.pushSnapshot();
+    push();
+
+    const fresh = initialSessionState();
+    fresh.status = "idle";
+    store.replaceState(fresh);
+    store.pushSnapshot();
+    push();
+
+    store.sessionStarted({ sessionId: "s2" });
+    store.pushSnapshot();
+    push();
+
+    store.userPrompt("新会话第一条");
+    store.pushSnapshot();
+    push();
+
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "新会话回答" } }));
+    store.pushSnapshot();
+    push();
+
+    const hostBlocks = store.getState().blocks;
+    expect(hostBlocks.map((b) => b.kind)).toEqual(["user", "text"]);
+    expect(wire(webview.state!.blocks)).toEqual(wire(hostBlocks));
+    // The old session's blocks must not leak into the new webview state.
+    expect(wire(webview.state!.blocks)).not.toContainEqual(expect.objectContaining({ text: "旧会话" }));
+  });
+});

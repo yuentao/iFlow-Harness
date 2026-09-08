@@ -161,6 +161,8 @@ await new Promise<void>((resolve) => {
 
 每次快照（流式期间 80ms 一次）整棵列表重建 vdom：数百 block 的会话中，React 每帧 diff 全部块的树。更隐蔽的是 index key 的错位问题——`upsertToolBlock` 会就地更新中间块、`adoptUnboundSubAgent` 会改已有块的 `agentId`，此时 index key 会让 React 复用错误位置的组件实例，内部 `useState(open)` 的折叠状态会错位到别的卡上（用户展开的 SubAgent 卡可能突然收起）。配套 P-1 的 COW 修复后，给 `BlockView` 包 `React.memo`（按块内容比较）即可大幅缓解；万级 block 再上 `content-visibility: auto` 或虚拟化。
 
+> **修复记录（2026-09-08）**：已落地。① **稳定 key**：`Block` 联合类型引入 `BlockBase`（`id?: string`，optional 兼容旧持久化数据），`shared/session-state.ts` 所有块创建点经模块级单调计数器 `nextBlockId()` 赋 id；`upsertToolBlock` 替换路径创建 patch 时不携带 id 键，spread 自然保留原 id（测试锁定该不变量）。② **回填**：导出 `backfillBlockIds`（递归 SubAgent entries），`loadPersistedTranscript` 源 1（P4 之前落盘的 JSON）恢复时回填，`parseTranscriptJsonl` 返回前统一回填——webview 拿到的块几乎全带 id，无 id 仅在 mock/异常路径回退 `idx-${i}`。③ **MessageList**：key 改为 `block.id ?? \`idx-${i}\``，修复实例复用错位；`BlockView` 包 `React.memo`——默认浅比较以块引用为锚，与 P-1 `blockPatch`「prefix 引用保留」语义天然吻合（比报告设想的按内容比较更便宜），流式期间仅补丁重发的尾部块重渲染，full snapshot（中段变更时）与旧实现持平。④ 虚拟化/`content-visibility` 未上（报告标注为万级 block 再上）。验证：typecheck + 全量测试 95/95（新增 4 个 P4 行为用例：id 唯一性、upsert/revert 保持 id、backfill 递归补齐、jsonl 恢复带 id）+ build 通过；frontend-tester 浏览器实测 mock host 全交互无回归、无 React 警告，并以 DOM 节点标记法实证主题切换强制全列表重渲染时节点复用（key 稳定 + memo 生效）。
+
 ### [MINOR] P5 — `SubAgentCard.log` 每渲染重建大字符串
 
 `MessageList.tsx:205-219`：`block.entries.map(...).join("\n")` 无 `useMemo`，SubAgent 卡流式期间高频重渲染时线性重建。包 `useMemo([block.entries])`。

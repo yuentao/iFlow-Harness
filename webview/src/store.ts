@@ -667,7 +667,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "theme") {
       set({ editorTheme: msg.kind });
+      return;
     }
+    // Version-mismatch tripwire: a host/webview pair built from different
+    // commits silently drops unknown message kinds (e.g. a pre-P-1 webview
+    // ignoring blockPatch) — the exact "blocks disappear" bug. Surface it.
+    console.warn(`[iflow] unknown host message: ${(msg as { type?: string }).type}`);
   },
   beginPending: (kind, target) => {
     if (pendingTimer) clearTimeout(pendingTimer);

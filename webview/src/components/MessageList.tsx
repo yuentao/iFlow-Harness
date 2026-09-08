@@ -202,19 +202,23 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     );
 
   // Compact mono log over the nested entries (reference-design "日志" pane).
-  const log = block.entries
-    .map((e) => {
-      if (e.kind === "tool") {
-        const s = e.status === "completed" ? t("已完成") : e.status === "failed" ? t("失败") : t("运行中");
-        const title = localizeStepTitle(e.title && e.title !== e.toolName ? e.title : e.toolName);
-        return `> tool: ${e.toolName} — ${title} · ${s}`;
-      }
-      if (e.kind === "text") return e.text;
-      if (e.kind === "thought") return `> ${e.text}`;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
+  // P5: memoized on the entries reference — a streaming card re-renders on
+  // every nested chunk, and rebuilding this string each time is O(entries).
+  const log = useMemo(() => {
+    return block.entries
+      .map((e) => {
+        if (e.kind === "tool") {
+          const s = e.status === "completed" ? t("已完成") : e.status === "failed" ? t("失败") : t("运行中");
+          const title = localizeStepTitle(e.title && e.title !== e.toolName ? e.title : e.toolName);
+          return `> tool: ${e.toolName} — ${title} · ${s}`;
+        }
+        if (e.kind === "text") return e.text;
+        if (e.kind === "thought") return `> ${e.text}`;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }, [block.entries]);
 
   const accent = agentAccent(block.agentType);
 
