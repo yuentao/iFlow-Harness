@@ -373,9 +373,23 @@ export function extractDiff(content: unknown): ToolDiffUi | null {
 
 // --- host-level transitions -------------------------------------------------
 
-export function beginUserPrompt(state: SessionState, text: string, images?: string[]): void {
+export function beginUserPrompt(
+  state: SessionState,
+  text: string,
+  images?: string[],
+  files?: { name: string; path: string }[],
+): void {
+  // Mirror the agent-facing attachment list in the transcript so the user
+  // message block shows exactly what the agent was told about the files.
+  const fileNote =
+    files && files.length > 0
+      ? "\n" + files.map((f) => `（文件：${f.name} → ${f.path}）`).join("\n")
+      : "";
+  const full = text + fileNote;
   state.blocks.push(
-    images && images.length > 0 ? { kind: "user", text, images, id: nextBlockId() } : { kind: "user", text, id: nextBlockId() },
+    images && images.length > 0
+      ? { kind: "user", text: full, images, id: nextBlockId() }
+      : { kind: "user", text: full, id: nextBlockId() },
   );
   state.status = "streaming";
   state.stopReason = null;

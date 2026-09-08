@@ -3,6 +3,7 @@ import {
   Check,
   ChevronDown,
   FileText,
+  Paperclip,
   SendHorizontal,
   Square,
   Zap,
@@ -40,20 +41,6 @@ function imageMime(file: File): string {
   return `image/${ext}`;
 }
 
-/** file:// URL → absolute fs path (Windows drive-letter + backslash aware). */
-function fileUriToPath(raw: string): string | null {
-  if (!/^file:/i.test(raw)) return null;
-  try {
-    const url = new URL(raw);
-    let p = decodeURIComponent(url.pathname);
-    if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1); // /C:/x → C:/x
-    if (navigator.userAgent.includes("Windows")) p = p.replace(/\//g, "\\");
-    return url.hostname ? `\\\\${url.hostname}${p}` : p;
-  } catch {
-    return null;
-  }
-}
-
 export function Composer() {
   const state = useChat((s) => s.state);
   const pending = useChat((s) => s.pending);
@@ -61,9 +48,9 @@ export function Composer() {
   const send = useChat((s) => s.send);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
-  const [dragOver, setDragOver] = useState(false);
-  /** Staged non-image files (chips above the composer). */
-  const [stagedNames, setStagedNames] = useState<Array<{ name: string; path: string }>>([]);
+  /** Non-image attachments (chips only — paths ride the sendPrompt message,
+   * they never pollute the draft text the user types). */
+  const [attachments, setAttachments] = useState<Array<{ name: string; path: string }>>([]);
   const stageSeq = useRef(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -96,19 +83,29 @@ export function Composer() {
         return;
       }
       if (msg?.type === "stagedFiles" && msg.requestId === stageSeq.current) {
-        const ok: string[] = [];
         const failed = msg.paths.filter((p: string | null) => p === null).length;
+        const staged: Array<{ name: string; path: string }> = [];
         for (const p of msg.paths) {
           if (p === null) continue;
-          ok.push(p);
-          setStagedNames((prev) => [...prev, { name: p.split(/[\\/]/).pop() ?? p, path: p }]);
+          staged.push({ name: p.split(/[\\/]/).pop() ?? p, path: p });
         }
-        if (ok.length > 0) {
-          const insertion = ok.map((p) => `\n（文件：${p}）`).join("");
-          setText((prev) => (prev ? prev.replace(/\s*$/, "") : "") + insertion + "\n");
-          requestAnimationFrame(() => taRef.current?.focus());
-        }
+        if (staged.length > 0) setAttachments((prev) => [...prev, ...staged]);
         if (failed > 0) showNote(t("{0} 个文件暂存失败，已跳过", failed));
+        return;
+      }
+      if (msg?.type === "filesPicked") {
+        const pickedImages = msg.images.filter(
+          (img: { name: string; data: string; mimeType: string }) => img.data,
+        );
+        if (pickedImages.length > 0) {
+          setImages((prev) => [
+            ...prev,
+            ...pickedImages
+              .slice(0, Math.max(0, MAX_IMAGES - prev.length))
+              .map((img: { data: string; mimeType: string }) => ({ data: img.data, mimeType: img.mimeType })),
+          ]);
+        }
+        if (msg.files.length > 0) setAttachments((prev) => [...prev, ...msg.files]);
         return;
       }
       if (msg?.type === "setDraft" && typeof msg.text === "string") {
@@ -190,72 +187,16 @@ export function Composer() {
     setImages((prev) => prev.filter((_, i) => i !== index));
   }
 
-  /** Remove a staged file chip and its `（文件：path）` reference from the draft. */
-  function removeStaged(path: string): void {
-    setStagedNames((prev) => prev.filter((f) => f.path !== path));
-    setText((prev) => {
-      let next = prev.split(`\n（文件：${path}）`).join("");
-      next = next.split(`（文件：${path}）`).join("");
-      return next.replace(/^\n+/, (m) => (prev.startsWith("\n") ? m : ""));
-    });
+  /** Remove a non-image attachment chip. */
+  function removeAttachment(path: string): void {
+    setAttachments((prev) => prev.filter((f) => f.path !== path));
   }
 
-  // Window-level drag & drop: the whole panel is a drop zone. Registering on
-  // window (a) lets drops land anywhere — VSCode's default would otherwise
-  // open the file and kill the panel, and (b) avoids the per-element
-  // dragleave flicker. From the VSCode Explorer, dataTransfer.files is empty
-  // (internal drag uses custom MIME), so fall back to text/uri-list.
-  const dropHandler = useRef<(files: File[], uriList: string) => void>(() => {});
-  dropHandler.current = (files, uriList) => {
-    const imgs = files.filter(isImageFile);
-    const others = files.filter((f) => !isImageFile(f));
-    if (imgs.length > 0) addImages(imgs);
-    if (others.length > 0) addOtherFiles(others);
-    if (files.length === 0 && uriList) {
-      const paths = uriList
-        .split(/\r?\n/)
-        .map((line) => fileUriToPath(line.trim()))
-        .filter((p): p is string => p !== null);
-      if (paths.length > 0) {
-        setText((prev) => (prev ? prev.replace(/\s*$/, "") : "") + paths.map((p) => `\n（文件：${p}）`).join("") + "\n");
-        requestAnimationFrame(() => taRef.current?.focus());
-      }
-    }
-  };
-  useEffect(() => {
-    const onDragOver = (e: DragEvent) => {
-      e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
-      setDragOver(true);
-    };
-    const onDragLeave = (e: DragEvent) => {
-      // Only when the pointer actually leaves the window (relatedTarget is
-      // null); moving between child elements must not flicker the highlight.
-      if (e.relatedTarget === null) setDragOver(false);
-    };
-    const onDrop = (e: DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      dropHandler.current(
-        Array.from(e.dataTransfer?.files ?? []),
-        e.dataTransfer?.getData("text/uri-list") ?? "",
-      );
-    };
-    window.addEventListener("dragover", onDragOver);
-    window.addEventListener("dragleave", onDragLeave);
-    window.addEventListener("drop", onDrop);
-    return () => {
-      window.removeEventListener("dragover", onDragOver);
-      window.removeEventListener("dragleave", onDragLeave);
-      window.removeEventListener("drop", onDrop);
-    };
-  }, []);
-
   /**
-   * Non-image files: the webview cannot turn a dropped File into a real
-   * filesystem path, so hand the bytes to the host (stageFiles) and insert
-   * the staged absolute paths into the draft — the agent reads them with its
-   * own tools, mirroring the CLI's @file context convention.
+   * Non-image files pasted into the composer: a pasted File has no real
+   * filesystem path, so hand the bytes to the host (stageFiles) and show the
+   * staged file as a chip — the absolute path rides sendPrompt.files at send
+   * time, where the host appends the list to the agent-facing prompt.
    */
   function addOtherFiles(files: ArrayLike<File>): void {
     const incoming = Array.from(files);
@@ -328,15 +269,16 @@ export function Composer() {
 
   function submit() {
     const value = text.trim();
-    if ((!value && images.length === 0) || busy) return;
+    if ((!value && images.length === 0 && attachments.length === 0) || busy) return;
     send({
       type: "sendPrompt",
-      text: value || t("（见附图）"),
+      text: value || (attachments.length > 0 ? t("（见附件）") : t("（见附图）")),
       images: images.length > 0 ? images.filter((img) => img.data) : undefined,
+      files: attachments.length > 0 ? attachments : undefined,
     });
     setText("");
     setImages([]);
-    setStagedNames([]);
+    setAttachments([]);
     setMentionQuery(null);
   }
 
@@ -344,13 +286,11 @@ export function Composer() {
     "inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-foreground hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
 
   return (
-    <div
-      className={`relative shrink-0 border-t border-border bg-panel px-2.5 pb-2.5 pt-2${dragOver ? " composer-drag" : ""}`}
-    >
-      {/* staged non-image files + rejected-file note */}
-      {stagedNames.length > 0 && (
+    <div className="relative shrink-0 border-t border-border bg-panel px-2.5 pb-2.5 pt-2">
+      {/* non-image attachment chips + rejected-file note */}
+      {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
-          {stagedNames.map((f) => (
+          {attachments.map((f) => (
             <span
               key={f.path}
               className="inline-flex max-w-[260px] items-center gap-1 rounded-md border border-border bg-surface px-1.5 py-1 text-[11px] text-foreground"
@@ -361,7 +301,7 @@ export function Composer() {
               <button
                 className="ml-0.5 rounded px-0.5 text-[11px] leading-none text-muted-foreground hover:text-destructive"
                 title={t("移除")}
-                onClick={() => removeStaged(f.path)}
+                onClick={() => removeAttachment(f.path)}
               >
                 ×
               </button>
@@ -454,7 +394,7 @@ export function Composer() {
         <textarea
           ref={taRef}
           value={text}
-          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 拖入/粘贴图片或文件）")}
+          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或 📎 添加图片/文件）")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="w-full resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(e) => {
@@ -612,6 +552,14 @@ export function Composer() {
           )}
 
           <div className="ml-auto flex items-center gap-1.5">
+            <button
+              className={CANVAS_BTN}
+              title={t("添加附件")}
+              disabled={busy}
+              onClick={() => send({ type: "pickAttachments" })}
+            >
+              <Paperclip className="size-3" />
+            </button>
             {busy ? (
               <button
                 className={`${CANVAS_BTN} text-muted-foreground hover:text-foreground`}
@@ -625,7 +573,7 @@ export function Composer() {
               <button
                 className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
                 title={t("发送 (Enter)")}
-                disabled={!text.trim() && images.length === 0}
+                disabled={!text.trim() && images.length === 0 && attachments.length === 0}
                 onClick={submit}
               >
                 <SendHorizontal className="size-3" /> {t("发送")}

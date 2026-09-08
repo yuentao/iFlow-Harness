@@ -562,6 +562,25 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "pickAttachments") {
+        // Mock picker: one image attachment + one real-path file attachment.
+        const png1x1 =
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", {
+                data: {
+                  type: "filesPicked",
+                  images: [{ name: "picked.png", data: png1x1, mimeType: "image/png" }],
+                  files: [{ name: "report.pdf", path: "C:\\mock\\docs\\report.pdf" }],
+                },
+              }),
+            ),
+          80,
+        );
+        return;
+      }
       if (m.type === "sendPrompt") {
         sendPromptFlow(m.text);
       }
@@ -686,7 +705,7 @@ export const useChat = create<ChatStore>((set, get) => ({
     // itself) — reaching here is normal, not an unknown-message tripwire.
     // (setDraft is also Composer-consumed but only exists on the wire, not in
     // the HostToWebview union.)
-    if (msg.type === "fileList" || msg.type === "stagedFiles") {
+    if (msg.type === "fileList" || msg.type === "stagedFiles" || msg.type === "filesPicked") {
       return;
     }
     // Version-mismatch tripwire: a host/webview pair built from different

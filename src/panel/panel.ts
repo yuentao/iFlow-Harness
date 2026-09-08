@@ -57,6 +57,18 @@ const STDERR_TAIL_LINES = 200;
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
 const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+/** Picked images above this size fall back to plain file attachments. */
+const ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** Extension → MIME for picked images (the picker gives no MIME type). */
+const IMAGE_MIME_BY_EXT = new Map<string, string>([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+  [".bmp", "image/bmp"],
+  [".svg", "image/svg+xml"],
+]);
 
 /** workspaceState key: recent sessions for this workspace (M4). */
 const SESSIONS_KEY = "iflow.recentSessions";
@@ -389,6 +401,41 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "stagedFiles", requestId: msg.requestId, paths });
   }
 
+  /**
+   * OS file picker → attachments. Images are read as base64 (the webview has
+   * no fs access); other files keep their real disk paths — no temp-dir
+   * staging needed because the picker guarantees an absolute path.
+   */
+  private async pickAttachments(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      canSelectFolders: false,
+      title: vscode.l10n.t("添加附件"),
+    });
+    if (!picked || picked.length === 0) return;
+    const images: { name: string; data: string; mimeType: string }[] = [];
+    const files: { name: string; path: string }[] = [];
+    for (const uri of picked) {
+      const fsPath = uri.fsPath;
+      const name = path.basename(fsPath);
+      const mime = IMAGE_MIME_BY_EXT.get(path.extname(fsPath).toLowerCase());
+      if (mime) {
+        try {
+          const bytes = await vscode.workspace.fs.readFile(uri);
+          if (bytes.byteLength <= ATTACHMENT_IMAGE_MAX_BYTES) {
+            images.push({ name, data: Buffer.from(bytes).toString("base64"), mimeType: mime });
+            continue;
+          }
+        } catch (error) {
+          this.log.warn(`reading picked image failed: ${errorMessage(error)}`);
+          continue;
+        }
+      }
+      files.push({ name, path: fsPath });
+    }
+    this.postToWebview({ type: "filesPicked", images, files });
+  }
+
   // --- WebView message routing -------------------------------------------------
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
@@ -402,7 +449,7 @@ export class ChatPanel implements vscode.Disposable {
         this.store.pushSnapshot();
         break;
       case "sendPrompt":
-        await this.sendPrompt(msg.text, msg.images);
+        await this.sendPrompt(msg.text, msg.images, msg.files);
         break;
       case "cancel":
         this.client?.cancel(this.store.getState().sessionId ?? "");
@@ -451,6 +498,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "stageFiles":
         void this.stageDroppedFiles(msg);
+        break;
+      case "pickAttachments":
+        void this.pickAttachments();
         break;
       case "openImage":
         void this.openImageAttachment(msg.dataUrl);
@@ -1707,9 +1757,23 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  private async sendPrompt(text: string, images?: { data: string; mimeType: string }[]): Promise<void> {
+  private async sendPrompt(
+    text: string,
+    images?: { data: string; mimeType: string }[],
+    files?: { name: string; path: string }[],
+  ): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // The agent sees the attachment list inline: absolute paths it can read
+    // with its own tools. The transcript block (beginUserPrompt) mirrors the
+    // same list so the UI matches what was actually sent.
+    const attachmentBlock =
+      files && files.length > 0
+        ? `\n\n${vscode.l10n.t("用户附带以下本地文件（可按需读取）：")}\n${files
+            .map((f) => `- ${f.name} → ${f.path}`)
+            .join("\n")}`
+        : "";
+    const promptText = trimmed + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -1729,10 +1793,11 @@ export class ChatPanel implements vscode.Disposable {
       this.store.userPrompt(
         trimmed,
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
+        files,
       );
       void this.labelSessionWithPrompt(trimmed);
       void this.persistActiveTranscript(); // user turn lands even on a crash
-      const prompt: ContentBlock[] = [{ type: "text", text: trimmed }];
+      const prompt: ContentBlock[] = [{ type: "text", text: promptText }];
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }

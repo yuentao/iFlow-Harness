@@ -276,6 +276,9 @@ export type HostToWebview =
    * `files` array (`null` = that file failed to stage). The webview inserts
    * the paths into the composer so the agent can read them with its tools. */
   | { type: "stagedFiles"; requestId: number; paths: Array<string | null> }
+  /** Reply to `pickAttachments`: `images` are base64 attachment payloads,
+   * `files` carry real disk paths (no staging needed). */
+  | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. */
   | { type: "theme"; kind: "dark" | "light" };
@@ -286,8 +289,10 @@ export type HostToWebview =
 
 export type WebviewToHost =
   | { type: "ready" }
-  /** `images`: base64 (no data: prefix) screenshots/pasted images. */
-  | { type: "sendPrompt"; text: string; images?: { data: string; mimeType: string }[] }
+  /** `images`: base64 (no data: prefix) screenshots/pasted images. `files`:
+   * non-image attachments with real paths (picked or staged); the host
+   * appends the list to the agent-facing prompt text. */
+  | { type: "sendPrompt"; text: string; images?: { data: string; mimeType: string }[]; files?: { name: string; path: string }[] }
   | { type: "cancel" }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
@@ -309,6 +314,9 @@ export type WebviewToHost =
    * File objects it cannot persist, so the host writes them into a session
    * temp dir and replies `stagedFiles` with absolute paths. */
   | { type: "stageFiles"; requestId: number; files: { name: string; data: string }[] }
+  /** Open the OS file picker; results arrive as `filesPicked`. Images come
+   * back as base64 attachment slots, other files as real disk paths. */
+  | { type: "pickAttachments" }
   /** Open a user-attached image (data URL) in VSCode's image preview. */
   | { type: "openImage"; dataUrl: string }
   /** M3: store openai-compatible credentials and authenticate a fresh session. */

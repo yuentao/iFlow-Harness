@@ -98,9 +98,9 @@ export class SessionStore {
     this.flush();
   }
 
-  userPrompt(text: string, images?: string[]): void {
+  userPrompt(text: string, images?: string[], files?: { name: string; path: string }[]): void {
     const before = this.captureTail();
-    beginUserPrompt(this.state, text, images);
+    beginUserPrompt(this.state, text, images, files);
     this.noteMutation(before, this.captureTail());
     this.flush();
   }

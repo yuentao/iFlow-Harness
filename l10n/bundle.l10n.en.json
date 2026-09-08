@@ -50,5 +50,7 @@
   "请先选中一段代码": "Select some code first",
   "⏳ 正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）": "⏳ Restoring session history… (CLI startup and session load can take 30–60s, please wait)",
   "[已回退]": "[reverted]",
-  "模型列表查询失败（不回退 CLI 内置目录）: {0}": "Model list query failed (never falling back to the CLI's built-in catalog): {0}"
+  "模型列表查询失败（不回退 CLI 内置目录）: {0}": "Model list query failed (never falling back to the CLI's built-in catalog): {0}",
+  "添加附件": "Add attachments",
+  "用户附带以下本地文件（可按需读取）：": "The user attached these local files (read them as needed):"
 }

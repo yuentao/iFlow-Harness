@@ -372,12 +372,6 @@
   margin: 0.6em 0;
 }
 
-/* composer drag-over highlight */
-.composer-drag {
-  outline: 2px dashed color-mix(in oklab, var(--primary) 60%, transparent);
-  outline-offset: -2px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
