@@ -68,8 +68,24 @@ export function errorMessage(error: unknown): string {
 /**
  * Incremental NDJSON parser: accepts arbitrary chunk boundaries, emits one
  * parsed JSON value per non-empty line.
+ *
+ * Buffer safety: a CLI that floods stdout with one giant line (runaway model
+ * output, crash dump, banner without a newline) used to grow `buffer`
+ * unbounded — every new chunk re-scanned the whole buffer, degrading to O(n²)
+ * copies. Two guards now apply (review finding S2):
+ * - line splitting is substring-based and linear (one scan from the last
+ *   consumed position per feed; each complete line is copied exactly once,
+ *   where the old code re-sliced the whole remainder after every line);
+ * - if no newline has been seen within MAX_BUFFER_BYTES, the partial frame is
+ *   dropped via onError and parsing resumes at the next chunk.
  */
 export class NdjsonParser {
+  /** Upper bound for a single NDJSON frame. CLI messages are JSON-RPC
+   * envelopes — 8MB is far above any legitimate prompt/tool payload. */
+  private static readonly MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+  /** Prefix length kept when an oversized partial frame is discarded. */
+  private static readonly ERROR_SAMPLE_BYTES = 200;
+
   private buffer = "";
 
   constructor(
@@ -79,16 +95,34 @@ export class NdjsonParser {
 
   feed(chunk: string): void {
     this.buffer += chunk;
-    let newlineIdx: number;
-    while ((newlineIdx = this.buffer.indexOf("\n")) >= 0) {
-      const line = this.buffer.slice(0, newlineIdx).replace(/\r$/, "").trim();
-      this.buffer = this.buffer.slice(newlineIdx + 1);
+    let start = 0;
+    // Single scan for all complete lines in this chunk; each line is copied
+    // exactly once via substring (no repeated buffer slicing).
+    for (;;) {
+      const newlineIdx = this.buffer.indexOf("\n", start);
+      if (newlineIdx < 0) break;
+      const line = this.buffer.substring(start, newlineIdx).replace(/\r$/, "").trim();
+      start = newlineIdx + 1;
       if (line.length === 0) continue;
       try {
         this.onMessage(JSON.parse(line));
       } catch (error) {
         this.onError?.(error as Error, line);
       }
+    }
+    if (start > 0) {
+      this.buffer = this.buffer.substring(start);
+    }
+    // Oversized partial frame: no newline anywhere in the buffer. Drop it —
+    // an 8MB+ line cannot be a valid JSON-RPC message, and keeping it would
+    // let a misbehaving CLI pin the host's memory.
+    if (this.buffer.length > NdjsonParser.MAX_BUFFER_BYTES) {
+      const sample = this.buffer.substring(0, NdjsonParser.ERROR_SAMPLE_BYTES);
+      this.buffer = "";
+      this.onError?.(
+        new Error(`ndjson frame exceeds ${NdjsonParser.MAX_BUFFER_BYTES} bytes — dropped`),
+        sample,
+      );
     }
   }
 }

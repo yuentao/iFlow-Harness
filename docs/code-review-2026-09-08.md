@@ -1,0 +1,346 @@
+# iflow-harness 全面代码审查报告
+
+> 审查日期：2026-09-08 ｜ 审查基线：工作区 HEAD `b67a6cd`（v0.1.0）
+> 审查方式：逐文件精读全部源码（`src/acp/*`、`src/panel/*`、`src/extension.ts`、`shared/*`、`webview/src/**`），所有发现均引用实际代码行（行号已对照源文件逐条核实），非静态扫描臆测。
+> 严重级别：**[CRITICAL]** 安全漏洞/数据丢失/崩溃 → 必须修；**[MAJOR]** 功能性 bug/显著性能退化 → 应尽快修；**[MINOR]** 降低维护成本的改进；**[NIT]** 风格建议。
+
+## 目录
+
+- [总览](#总览)
+- [P0 安全](#p0-安全)
+- [P1 性能](#p1-性能)
+- [P2 边界与正确性](#p2-边界与正确性)
+- [P3 鲁棒性](#p3-鲁棒性)
+- [P4 可维护性与可访问性](#p4-可维护性与可访问性)
+- [做对的地方](#做对的地方)
+- [修复优先级建议](#修复优先级建议)
+
+---
+
+## 总览
+
+架构分层纪律执行得很好：状态只在 Extension Host，webview 是投影；`shared/` reducer 纯净可测；`jsonrpc.ts` 零 VSCode 依赖。安全基本面（SecretStorage 存 key、nonce CSP、审批默认拒绝、DOMPurify 清洗 markdown）在同类扩展里属于严谨的。本次审查发现 **3 个 [CRITICAL]、8 个 [MAJOR]**，集中在三个区域：① ACP 客户端 `fs/*` 方法对 agent 传来的路径无约束（路径穿越）；② 长会话下的三个 O(n²)/全量拷贝热点（分帧缓冲、structuredClone 快照、transcript 持久化）；③ 若干竞态与回调泄漏（`chatForward` 轮询、pending 状态、流式期间的状态切换）。
+
+---
+
+## P0 安全
+
+### [CRITICAL] S1 — `fs/read_text_file` / `fs/write_text_file` 无路径约束，agent 可任意读写文件系统
+
+`src/acp/client.ts:184-197`
+
+```ts
+peer.onRequest(AcpMethods.readTextFile, async (params) => {
+  const request = params as ReadTextFileRequest;
+  const content = await readFile(this.resolveAgentPath(request.path), "utf8");
+  return { content } satisfies ReadTextFileResponse;
+});
+
+peer.onRequest(AcpMethods.writeTextFile, async (params) => {
+  const request = params as WriteTextFileRequest;
+  const filePath = this.resolveAgentPath(request.path);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, request.content, "utf8");
+  return {};
+});
+```
+
+`resolveAgentPath`（`client.ts:166-168`）只做相对 → 绝对拼接，对 `..`、盘符、UNC 路径完全无约束。而这是 **agent 侧主动发起** 的请求：一个被提示注入（prompt injection）感染的 agent 可以通过 `fs/write_text_file` 写 `~/.bashrc`、`C:\Users\...\AppData\Roaming\npm\...`，或读出 `.env`/SSH 私钥再通过正文 exfiltrate。`writeTextFile` 还会 `mkdir -p` 父目录，等于可以在任意位置创建文件树。这是本仓库最大的攻击面。
+
+修复建议（最小侵入）：
+
+```ts
+private resolveAgentPath(rawPath: string): string {
+  const abs = path.isAbsolute(rawPath) ? rawPath : path.join(this.options.cwd, rawPath);
+  const normalized = path.normalize(abs);
+  // session cwd 之外一律拒绝（normalize 后做前缀比较，天然拦截 .. 穿越）
+  const root = path.normalize(this.options.cwd);
+  if (!normalized.toLowerCase().startsWith(root.toLowerCase() + path.sep)) {
+    throw new Error(`path escapes session cwd: ${rawPath}`);
+  }
+  return normalized;
+}
+```
+
+同时：`writeTextFile` 单文件加大小上限（如 10MB）；`~`、`/etc`、`AppData` 等敏感前缀直接拒绝；`readTextFile` 尊重协议里的 `line`/`limit` 参数（当前被忽略，见 C-附注）。
+
+### [CRITICAL] S2 — `NdjsonParser` 无缓冲上限：失控输出可直接 OOM 扩展宿主 ✅ 已修复（2026-09-08）
+
+`src/acp/jsonrpc.ts:81-92`（`feed` 方法）
+
+```ts
+feed(chunk: string): void {
+  this.buffer += chunk;
+  while ((newlineIdx = this.buffer.indexOf("\n")) >= 0) { ... }
+}
+```
+
+如果 CLI 在 stdout 打印一行超长内容（模型失控输出、崩溃 dump、无换行 banner），`buffer` 无限增长且无任何上限；且每来一个 chunk 都对整个 buffer 做 `indexOf` + `slice` 拷贝，单帧超长时退化为 O(n²) 字符串拷贝。`handleData` 由 `client.ts:94` 的 `stdout.on("data")` 直接驱动，无背压。这是同时属于安全（DoS）与性能的复合问题，故列 CRITICAL。
+
+修复建议：
+
+```ts
+private static readonly MAX_BUFFER = 8 * 1024 * 1024; // 8MB
+feed(chunk: string): void {
+  this.buffer += chunk;
+  if (this.buffer.length > NdjsonParser.MAX_BUFFER && this.buffer.indexOf("\n") < 0) {
+    this.onError?.(new Error(`ndjson frame exceeds ${NdjsonParser.MAX_BUFFER} bytes`), this.buffer.slice(0, 200));
+    this.buffer = "";
+    return;
+  }
+  ...
+}
+```
+
+> **修复记录（2026-09-08）**：已在 `src/acp/jsonrpc.ts` 落地。实现与建议略有差异：`feed()` 先基于扫描起点线性切分出全部完整行（每个完整行只复制一次，消除旧实现每消费一行就把剩余缓冲整体 slice 复制的 O(n²) 行为），随后检查残余缓冲——无换行的 partial 帧超过 `MAX_BUFFER_BYTES`（8MB）时经 `onError` 报告并丢弃，保留前 200 字节样本供诊断。带换行的合法大帧仍正常解析。测试覆盖三组场景：超长帧丢弃、丢弃后恢复解析、带换行的大行不受影响（`test/jsonrpc.test.ts`，全量 75/75 通过）。
+
+### [CRITICAL] P-1 — 每次快照 `structuredClone` 整个会话状态，流式期间 12.5 次/秒全量深拷贝
+
+`src/panel/store.ts:163`、`src/panel/panel.ts:366`
+
+流式输出时每 80ms 克隆一次完整 transcript（`blocks` 数组含所有历史文本、工具输出、diff 全文）。万级消息、若干大 diff 的会话里，单次克隆数 MB → 80ms 一次 ≈ 持续几十 MB/s 的克隆 + `postMessage` 结构化克隆序列化 + webview 侧解析。这是长会话卡顿的第一嫌疑。列 CRITICAL 是因为它随会话长度**线性恶化**且叠加 P-2 的全列表重渲染，会同时拖慢宿主与渲染进程。
+
+修复建议（渐进式）：
+1. 增量快照：流式期间只发「追加/修改的尾部块」，webview 自己合并（`appendTextToLast` 只改最后一块，天然适合增量）。
+2. 短期低成本方案：clone 时对 `blocks` 做 COW——只有文本实际变化的块才深拷贝，其余引用共享。
+3. 输出类字段（`ToolBlock.output` > 64KB）截断，点击时按 `toolCallId` 拉取。
+
+---
+
+## P0 安全（续）
+
+### [MAJOR] S3 — `openImageAttachment` 从 data URL 写临时文件无大小上限
+
+`src/panel/panel.ts:451-471`。webview 发来的 `openImage` data URL 经正则校验后直接 `writeFileSync` 到 `%TEMP%`。正则没限长度：一个被注入的巨大 data URL 会同步写盘（阻塞扩展宿主）+ 打开预览。建议 `match[2].length` 超 ~8MB base64 直接拒绝，并把 `writeFileSync` 换成 `fs/promises`。
+
+### [MAJOR] S4 — CSP 允许 `'unsafe-inline'` style-src
+
+`src/panel/panel.ts:222`。Tailwind 产物 + React inline style 目前确实需要它，风险可控，但记录在案：style 注入面完全依赖 DOMPurify 默认属性表兜底。可在 DOMPurify 配置里显式 `FORBID_ATTR: ["style"]` 收紧（Markdown 渲染不需要 style 属性）。
+
+### 安全基本面核查结论
+
+- SecretStorage / `maskKey` / key 不进日志：核实无泄漏路径 ✅（错误消息只含 host 与验证错误文本，不含 key）
+- spawn 参数全部走数组形式（`buildAcpCommand`），无 shell 注入 ✅
+- `openExternal` 有 `^https?://` 白名单 ✅（`panel.ts:313-315`）
+- markdown 经 DOMPurify 清洗 ✅（收紧建议见 W1）
+
+---
+
+## P1 性能
+
+### [MAJOR] P2 — transcript 持久化：每条 prompt 两次全量读写 workspaceState
+
+`src/panel/panel.ts:1415-1444`（`sendPrompt` 前后各调一次 `persistActiveTranscript`）→ `writeTranscript`（`panel.ts:1451`）读出**全部历史会话**的 transcript、`structuredClone` 当前 blocks、写回整个 map。20 个会话 × 每个几 MB 时，每条消息触发两次「读全量 + 深拷贝 + 写全量」。同时审批结论、回退等 UI 事件也各自触发全量写。
+
+修复建议：transcript 移出 `workspaceState`，改为每会话一个 jsonl 文件放 `context.storageUri`（append-only 写当前会话）；或至少 debounce 写入（500ms 合并）+ 只写当前会话分片。另外 `TRANSCRIPTS_KEY` 的 map 只增不减（`MAX_RECENT_SESSIONS` 只限列表，不清理孤儿 transcript），workspaceState 会无界膨胀——建议 `pruneUnrestorableSessions` 时同步清理无主 transcript。
+
+### [MAJOR] P3 — `chatForward` 200ms 轮询，失败路径下 interval 永不清除
+
+`src/panel/panel.ts:239-249`
+
+```ts
+await new Promise<void>((resolve) => {
+  const timer = setInterval(() => {
+    if (token.isCancellationRequested) this.client?.cancel(...);
+    if (token.isCancellationRequested || this.store.getState().status === "idle") { clearInterval(timer); resolve(); }
+  }, 200);
+});
+```
+
+问题：① `status` 卡在 `connecting`/`error`（prompt 失败后 `markError`，不会再变 `idle`）时 promise 永不 resolve → **interval 永久泄漏 + participant 挂死**；② 取消时每 200ms 重复发 `cancel` 给 CLI；③ 无总超时兜底。建议：加总超时（如 10 分钟）、`error` 也退出、cancel 用 flag 只发一次。长期改为订阅 `store.onStateChange` 而非轮询。
+
+### [MAJOR] P4 — `MessageList` 无 memo + index key + 无虚拟化
+
+`webview/src/components/MessageList.tsx:405-406`（`key={i}`）、`MessageList.tsx:296-334`（组件无 memo）。
+
+每次快照（流式期间 80ms 一次）整棵列表重建 vdom：数百 block 的会话中，React 每帧 diff 全部块的树。更隐蔽的是 index key 的错位问题——`upsertToolBlock` 会就地更新中间块、`adoptUnboundSubAgent` 会改已有块的 `agentId`，此时 index key 会让 React 复用错误位置的组件实例，内部 `useState(open)` 的折叠状态会错位到别的卡上（用户展开的 SubAgent 卡可能突然收起）。配套 P-1 的 COW 修复后，给 `BlockView` 包 `React.memo`（按块内容比较）即可大幅缓解；万级 block 再上 `content-visibility: auto` 或虚拟化。
+
+### [MINOR] P5 — `SubAgentCard.log` 每渲染重建大字符串
+
+`MessageList.tsx:205-219`：`block.entries.map(...).join("\n")` 无 `useMemo`，SubAgent 卡流式期间高频重渲染时线性重建。包 `useMemo([block.entries])`。
+
+### [MINOR] P6 — `searchWorkspaceFiles` 每次 @ 输入全量 `findFiles`
+
+`src/panel/panel.ts:473-509`。`findFiles("**/*", exclude, 500)` 每次按键（120ms debounce 后）都全仓扫描，大仓库单次数秒且结果顺序不稳定。建议缓存首次结果（workspace 文件变更事件失效）。当前 500 cap + debounce 已控制伤害，故 MINOR。
+
+### [NIT] P7 — `authMaskCache` 只在 connect/save 时刷新
+
+`panel.ts:737`。多处写入点存在短暂不一致窗口（`deleteProfile` 后 `saved` 残留旧值）。低影响，统一改为每次现算 `loadCredentials + maskOf` 即可。
+
+---
+
+## P2 边界与正确性
+
+### [MAJOR] C1 — `openLocation` 未解析相对路径、行号未 clamp
+
+`src/panel/panel.ts:307-312`
+
+```ts
+case "openLocation": {
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.path));
+  const line = Math.max(0, (msg.line ?? 1) - 1);
+  await vscode.window.showTextDocument(doc, { selection: new vscode.Range(line, 0, line, 0) });
+```
+
+① `msg.path` 来自 webview 的 `FileRef`（locations 里的 wire 路径，可能是会话相对路径，见 AGENTS.md 陷阱 #8），直接 `Uri.file("src/app.ts")` 会解析到盘根而打不开——需要与 `locateDiffFile` 相同的 sessionCwd 拼接逻辑。② `msg.line` 超过文件行数时 selection 行为异常，建议 `Math.min(line, doc.lineCount - 1)`。
+
+### [MAJOR] C2 — `setMode`/`setModel` 用 `sessionId ?? ""` 空串调用
+
+`src/panel/panel.ts:1239, 1260`：会话未就绪时带着 `sessionId: ""` 发给 CLI，CLI 可能返回 success（乱绑定）或报错，响应里的 `currentModeId` 还会被乐观写回 store。入口判空：
+
+```ts
+if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪")); return; }
+```
+
+### [MAJOR] C3 — 流式期间 `newSession` 的竞态窗口
+
+`startNewSession`（`panel.ts:1364-1414`）在 `setInitializing(true)` 后 `await ensureClient()`，但**没有阻止 inflight 的 prompt**：webview 侧已禁用发送，但 `iflow.askSelection` 命令、`@iflow` participant（`chatForward`）绕过 webview 直接 `sendPrompt`，拿到的是 `replaceState` 之前的旧 sessionId，prompt 会打到已被放弃的旧会话。建议 `sendPrompt` 入口检查 `state.initializing` 直接拒绝。
+
+### [MAJOR] C4 — `markToolReverted` 把 status 强改为 "failed" 语义污染
+
+`shared/session-state.ts:621-631`：回退成功后把工具块 status 置为 `failed`，UI 显示「失败」——但工具实际执行成功了，只是被回退。副产物：`refreshSubAgentStatus`（`session-state.ts:101-108`）会把嵌套该工具的 SubAgent 卡也聚合成 `failed`，即使 SubAgent 整体成功。建议加独立字段 `reverted?: boolean`，UI 据此显示「已回退」chip。
+
+### [MAJOR] C5 — 连接失败路径不 dispose，泄漏 CLI 子进程
+
+`ensureClient` 的 catch（`panel.ts:1135` 附近）只做 `this.client = null` 后 throw；`AcpClient.connect()`（`client.ts:61-110`）在 initialize 超时/失败时也不 kill 已 spawn 的 child。两者叠加：initialize 超时（120s）或握手失败后，CLI 进程**继续存活**（stdout 监听仍挂着，只是没有宿主引用），每次重试泄漏一个 node 进程。修复：`connect()` 内 try/catch，失败时 kill child 再 rethrow；或 `ensureClient` catch 里 `void client.dispose()`。
+
+### [MINOR] C6 — `parseTranscriptJsonl` 的 sidechain 归组依赖行序
+
+`shared/session-state.ts:454+`：连续 `isSidechain` 行归一个 SubAgent。若 CLI 并发跑多个 task 导致 sidechain 行交错，会被错误合并成一张卡。0.5.19 观测为顺序写入，暂无实害；记录为已知限制。
+
+### [MINOR] C7 — `readActiveSelection` 相对路径剥离用字符串 replace
+
+`src/extension.ts:61`：`abs.replace(workspaceRoot + "\\", "")` 大小写敏感，且 VSCode 在 Windows 上常返回小写盘符而 `workspaceFolders` 是用户输入大小写——两者不一致时剥离失败，fallback 为绝对路径（仅影响提示词美观）。用 `path.relative(workspaceRoot, abs)` 顺带修复。
+
+### [MINOR] C8 — `findFileByBasename` 的 visited 计数按 entry 而非按目录
+
+`panel.ts:707-719`：`visited++` 在每个 entry 上自增，20000 上限在大目录会提前耗尽（结果已 capped 10，实害有限）。按目录计数或直接删掉 `depth > maxDepth` 之外的一层防御更清晰。
+
+### [MINOR] C9 — prompt 与会话切换的并发防护缺失
+
+`sendPrompt`（`panel.ts:1415`）无 status 检查：`askSelection`/participant 路径可在 streaming 中再发一个 prompt，两个 inflight prompt 交错污染 transcript。webview 的 busy 锁管不住命令通道。入口加 `if (state.status === "streaming") return` 即可。
+
+### [MINOR] C10 — `handleWebviewMessage` 无未知类型兜底
+
+`panel.ts:286-355`：消息按 switch 分发，无 default。类型由 TS 编译期保证，但 webview 与 host 版本错位（扩展更新后 webview 缓存旧 bundle）时会静默丢消息。加 default 分支 log 一条即可定位这类问题。
+
+### 附注（正确性核实为无问题的点）
+
+- JSON-RPC `id: 0`：`handleMessage` 用 `!== undefined && !== null` 判断，id 0 正确路由 ✅（`jsonrpc.ts:107`）
+- 帧边界：CRLF、残尾、空行处理正确 ✅
+- `ensureClient` 失败后 `connecting` promise reject 传播原始错误，二次调用拿到同一 reject ✅（已核实无 null 逃逸）
+- `beginUserPrompt` 先于 `client.prompt()` 同步落 store，user echo 判重逻辑（`state.blocks.length === 0`）无竞态 ✅
+
+---
+
+## P3 鲁棒性
+
+### [MAJOR] R1 — prompt 超时后状态不一致
+
+`sendPrompt`（`panel.ts:1415-1444`）：prompt 30 分钟超时后 `markError`，但 CLI 可能仍在执行。此后用户再发 prompt 会与上一个 inflight prompt 并发打到同一 session，CLI 侧行为未定义。建议超时后自动发 `session/cancel` + 锁发送直到新会话。
+
+### [MAJOR] R2 — `chatForward` 与 C5/P3 叠加的挂死面
+
+`panel.ts:239-249`（同 P3）：除了泄漏，`chatForward` 里 `void this.sendPrompt(prompt)` 的错误被完全吞掉——prompt 抛错（如认证失败）时 participant 永远等不到 `idle`。与 P3 合并修复。
+
+### [MINOR] R3 — stderr 洪泛无背压
+
+`src/acp/client.ts:79-84`：`on("data")` 里对每 chunk 做 `split(/\r?\n/)`，而宿主侧 `onStderr: () => {}`（`panel.ts:1128`）为空实现——CLI verbose 崩溃时全部分割开销白付。建议 ring buffer 存最近 200 行供诊断，或 `onStderr` 为 null 时短路。
+
+### [MINOR] R4 — `restoreSession` 的 probe session 无注释交代
+
+`panel.ts:990-991`：为拿 meta 先 `newSession` 再 `loadSession`，probe 出来的会话被丢弃（CLI 侧生命周期自管，重启即清）。代码注释解释了「为什么先 new」，但没说 probe 会话的去向，补一句可避免后续维护者误以为是泄漏。
+
+### [MINOR] R5 — `onUnparseableLine` 静默丢弃 stdout 噪声
+
+`src/acp/jsonrpc.ts`（`onUnparseableLine`）：设计合理（banner 不该回 parse error），但 wireTap 收不到这些行——`--record` 的 harness 日志会缺失 CLI stdout 噪声的踪迹，排查「CLI 卡住」时少一半信息。建议 debug 构建下把原始行也 log 一份。
+
+### [MINOR] R6 — `dispose` 不等 client 完全退出
+
+`panel.ts:147-154`：`void this.client?.dispose()` 未 await，`deactivate` 可能在 kill/SIGKILL 完成前结束。VSCode 会在宿主退出时收割子进程，实害低；若要严格，dispose 改 async 并在 deactivate 中 await。
+
+### [NIT] R7 — `errorMessage()` 丢弃 `data` 字段
+
+`src/acp/jsonrpc.ts`（`errorMessage`）：JSON-RPC error 的 `data`（CLI 常放详细堆栈）被丢，错误横幅信息量打折。可拼接 `data` 字符串（限长 500）。
+
+---
+
+## P4 可维护性与可访问性
+
+### [MINOR] W1 — DOMPurify 的 `ADD_ATTR: ["target"]` 无必要
+
+`webview/src/components/Markdown.tsx:13-18`：链接点击被 onClick 拦截走 `openExternal`，`target` 属性从未生效，白增攻击面；顺带显式 `FORBID_TAGS: ["iframe", "form"]`（DOMPurify 默认已禁，显式化防上游默认变更）。
+
+### [MINOR] W2 — `t()` 每次调用 `replaceAll`
+
+`webview/src/i18n.ts:96-101`：每个 chip 每次渲染都做字符串替换。量小（NIT 级），在 Chip/StatusChip 层包 `useMemo` 即可，仅记录。
+
+### [MINOR] W3 — AuthCard 的 inline ref 每次渲染触发 focus
+
+`webview/src/components/AuthCard.tsx:71-72`：`tabIndex={-1}` + `ref={(el) => el?.focus()}`，inline ref callback 每次渲染先 null 后 el 调用，`focus()` 反复触发。改 `useRef` + `useEffect` 一次性聚焦到第一个 input（当前聚焦 backdrop，Tab 序从文档头开始，键盘体验差）。
+
+### [MINOR] W4 — `ApprovalCard` 无焦点管理
+
+`ApprovalCard.tsx`：`role="alertdialog"` 已设 ✅，但出现时焦点仍在 Composer，键盘用户需大量 Tab 才到审批按钮。建议出现时把焦点移到第一个 allow 按钮，Escape 绑定「取消」。
+
+### [NIT] W5 — Composer 的 eslint-disable
+
+`Composer.tsx:65`：`send` 来自 zustand selector 引用稳定，disable 是对的——改用 `useChat.getState().send` 可消除抑制并自证稳定性。
+
+### [NIT] W6 — `modeDisplay` 与 i18n 字典双处维护
+
+`Composer.tsx:25-40` 加新 mode id 需改两处。可移到 `i18n.ts` 旁集中。
+
+### [NIT] W7 — l10n 双轨
+
+`src/` 用 `vscode.l10n.t`（bundle.l10n.en.json），`webview/` 自带字典（`i18n.ts`），双语维护成本 ×2。长期可共享 json。架构债务，非本次必改。
+
+### 可访问性快查
+
+- 主要交互按钮 `aria-label`/`title` 已覆盖 ✅（App.tsx 新会话/主题/配置）
+- `Dropdown`：Escape 关闭 ✅，但无 `role="menu"`/`aria-expanded`（MINOR）
+- 图片附件 `alt` 已提供 ✅；`prefers-reduced-motion` 已处理 ✅（styles.css 尾部 `animation: none !important`）
+- 拖拽上传无键盘替代路径（桌面场景可接受）
+
+---
+
+## 做对的地方
+
+1. **分帧器设计与测试**：`NdjsonParser` 接受任意 chunk 边界、`\r\n` 兼容、空行跳过、banner 静默——配合 `test/jsonrpc.test.ts`，是同类实现的标准做法（超长帧上限除外，见 S2）。
+2. **审批安全默认**：默认拒绝、5 分钟超时自动拒绝、dispose/profile 切换时 `cancelAllApprovals`——多条路径闭合。
+3. **`errorMessage()` 的细节**：处理了 JSON-RPC 拒绝是 plain object 不是 Error 的真实陷阱，注释写明了观察来源。
+4. **Windows 陷阱规避**：`process.execPath` 直跑 entry.js、`windowsHide: true`、cli-locator 的 NUL 字节/256KB 上限防二进制扫描卡死。
+5. **wire 行为注释纪律**：「验证来源 + 版本 + 实测方式」的注释习惯执行得很一致，直接降低后续维护者误判率。
+6. **DiffView 的工程取舍**：LCS 带 4M 格护栏（`lcsRows` 的 `n*m > 4_000_000` 短路）、git 式 ±3 行折叠——比引 diff 库省 bundle，护栏兜住病态输入。
+
+---
+
+## 修复优先级建议
+
+**立即修（安全护栏，均为小改动）**
+
+1. S1：`resolveAgentPath` 加 session cwd 前缀校验（`client.ts:166`）
+2. S2：`NdjsonParser` 加 8MB 缓冲上限（`jsonrpc.ts:81`）
+3. C2：`setMode`/`setModel` 判空 sessionId（`panel.ts:1239/1260`）
+4. C1：`openLocation` 相对路径拼 sessionCwd + 行号 clamp（`panel.ts:307`）
+5. C5：连接失败路径 dispose 子进程（`client.ts` connect / `panel.ts:1135`）
+
+**下个迭代（性能 + 竞态，涉及协议联动需一起设计）**
+
+6. P-1：快照增量下发（先做 blocks COW，再演进为尾部增量）
+7. P2：transcript 移出 workspaceState + 孤儿清理
+8. P3：`chatForward` 加超时/error 退出、cancel 单次化
+9. C3/C9：`sendPrompt` 拒绝 initializing/streaming 期间的调用
+10. R1：prompt 超时后自动 cancel + 锁发送
+11. P4：Block 稳定 key（加 id 字段，为虚拟化铺路）
+
+**择机（质量债）**
+
+12. C4：`reverted` 独立字段替代 status="failed"
+13. P5/P6：SubAgentCard memo、findFiles 缓存
+14. W1/W3/W4：DOMPurify 收紧、AuthCard 焦点、审批卡焦点管理
+15. R3：stderr ring buffer
+
+---
+
+*审查范围说明：`test/`、`scripts/harness.mjs` 只做架构层面浏览未逐行审查；`dist/`、`webview/dist` 为构建产物未审。行号基于 2026-09-08 工作区状态，后续提交可能使行号漂移，定位时以符号名为准。*

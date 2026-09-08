@@ -66,6 +66,42 @@ describe("NdjsonParser", () => {
     expect(messages).toEqual([{ a: 1 }]);
     expect(errors).toEqual(["not json"]);
   });
+
+  // Buffer safety (review finding S2): a CLI flooding stdout with one giant
+  // line (runaway output / crash dump without a newline) must not pin the
+  // host's memory — the partial frame is dropped and parsing resumes.
+  it("drops an oversized partial frame (no newline) via onError", () => {
+    const messages: unknown[] = [];
+    const errors: string[] = [];
+    const parser = new NdjsonParser(
+      (v) => messages.push(v),
+      (e, raw) => errors.push(`${e.message}|${raw}`),
+    );
+    parser.feed("x".repeat(8 * 1024 * 1024 + 1));
+    expect(messages).toEqual([]);
+    expect(errors).toHaveLength(1);
+    const [entry] = errors;
+    expect(entry).toContain("exceeds");
+    expect(entry!.length).toBeLessThanOrEqual(200 + "ndjson frame exceeds 8388608 bytes — dropped|".length);
+  });
+
+  it("recovers parsing after dropping an oversized partial frame", () => {
+    const messages: unknown[] = [];
+    const parser = new NdjsonParser((v) => messages.push(v));
+    parser.feed("x".repeat(8 * 1024 * 1024 + 1));
+    parser.feed('{"a":1}\n{"b":2}\n');
+    expect(messages).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it("does not drop a complete line that happens to be large", () => {
+    // The guard only covers unterminated frames: a valid (if huge) NDJSON
+    // line with a trailing newline is still parsed.
+    const big = JSON.stringify({ a: "y".repeat(8 * 1024 * 1024 + 1) });
+    const messages: unknown[] = [];
+    const parser = new NdjsonParser((v) => messages.push(v));
+    parser.feed(`${big}\n{"b":2}\n`);
+    expect(messages).toEqual([JSON.parse(big), { b: 2 }]);
+  });
 });
 
 describe("JsonRpcPeer", () => {
