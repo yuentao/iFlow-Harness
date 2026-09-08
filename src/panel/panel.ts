@@ -46,6 +46,10 @@ import { SessionStore } from "./store.js";
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/** Hard cap on how long the @iflow participant waits for a prompt to finish
+ * (P3). The wait loop ends on idle/error/cancel; this timeout is the last
+ * resort if none of those ever fire. */
+const CHAT_FORWARD_TIMEOUT_MS = 10 * 60_000;
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -244,17 +248,41 @@ export class ChatPanel implements vscode.Disposable {
   async chatForward(prompt: string, token: vscode.CancellationToken): Promise<string> {
     const stateBefore = this.store.getState();
     const textCountBefore = stateBefore.blocks.filter((b) => b.kind === "text").length;
+    // sendPrompt never rejects (it catches internally and marks the store
+    // error) — a failure surfaces here as status "error", which ends the
+    // wait below (P3/R2: only "idle" was checked before, so a failed prompt
+    // hung this promise and the participant forever).
     void this.sendPrompt(prompt);
-    // Wait for completion (idle) or cancellation, polling the small store.
+    // Wait for completion (idle), failure (error), cancellation or timeout,
+    // polling the small store.
     await new Promise<void>((resolve) => {
-      const timer = setInterval(() => {
+      let done = false;
+      let cancelSent = false;
+      let pollTimer: NodeJS.Timeout | null = null;
+      let timeoutTimer: NodeJS.Timeout | null = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (pollTimer) clearInterval(pollTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        resolve();
+      };
+      timeoutTimer = setTimeout(finish, CHAT_FORWARD_TIMEOUT_MS);
+      pollTimer = setInterval(() => {
         if (token.isCancellationRequested) {
-          this.client?.cancel(this.store.getState().sessionId ?? "");
+          // P3: send cancel exactly once — the old loop re-sent it on every
+          // 200ms tick. Ending the wait does not kill the prompt in the
+          // panel; cancel here does (the user asked for it).
+          if (!cancelSent) {
+            cancelSent = true;
+            const sessionId = this.store.getState().sessionId;
+            if (sessionId) this.client?.cancel(sessionId);
+          }
+          finish();
+          return;
         }
-        if (token.isCancellationRequested || this.store.getState().status === "idle") {
-          clearInterval(timer);
-          resolve();
-        }
+        const status = this.store.getState().status;
+        if (status === "idle" || status === "error") finish();
       }, 200);
     });
     const blocks = this.store.getState().blocks;

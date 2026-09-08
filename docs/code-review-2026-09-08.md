@@ -153,6 +153,8 @@ await new Promise<void>((resolve) => {
 
 问题：① `status` 卡在 `connecting`/`error`（prompt 失败后 `markError`，不会再变 `idle`）时 promise 永不 resolve → **interval 永久泄漏 + participant 挂死**；② 取消时每 200ms 重复发 `cancel` 给 CLI；③ 无总超时兜底。建议：加总超时（如 10 分钟）、`error` 也退出、cancel 用 flag 只发一次。长期改为订阅 `store.onStateChange` 而非轮询。
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。① 等待退出条件扩为 `idle || error`——prompt 失败 `markError` 后 `status` 永不回 `idle`，旧实现 promise 永不 resolve、interval 永久泄漏、participant 挂死；失败时 participant 现在返回已生成的部分文本，R2 的挂死面随之闭合（`sendPrompt` 内部已 catch 并 `markError`，从不 reject，错误以 `status=error` 的形式终结等待）。② 取消时 `cancel` 经 `cancelSent` flag 只发一次（旧代码每 200ms tick 重复发），且 `sessionId` 判空后才发（旧代码 `sessionId ?? ""` 空串照发）。③ 新增 `CHAT_FORWARD_TIMEOUT_MS`（10 分钟）总超时兜底，`finish()` 用 done flag 幂等防双 resolve。保留轮询、未改 `onStateChange` 订阅（报告标注为长期项；200ms 一次小对象读取成本可忽略）。超时/取消只结束 participant 等待，不影响面板中 prompt 的生成（仅用户主动取消会向 CLI 发 cancel）。验证：typecheck + 全量测试 91/91 通过。
+
 ### [MAJOR] P4 — `MessageList` 无 memo + index key + 无虚拟化
 
 `webview/src/components/MessageList.tsx:405-406`（`key={i}`）、`MessageList.tsx:296-334`（组件无 memo）。
@@ -246,6 +248,8 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 ### [MAJOR] R2 — `chatForward` 与 C5/P3 叠加的挂死面
 
 `panel.ts:239-249`（同 P3）：除了泄漏，`chatForward` 里 `void this.sendPrompt(prompt)` 的错误被完全吞掉——prompt 抛错（如认证失败）时 participant 永远等不到 `idle`。与 P3 合并修复。
+
+> **修复记录（2026-09-08）**：已随 P3 闭合——`chatForward` 的等待循环现在在 `status === "error"` 时退出，而 `sendPrompt` 从不 reject（内部 catch 后 `markError`），prompt 抛错时 participant 返回已生成的部分文本而非挂死。详见 P3 修复记录。
 
 ### [MINOR] R3 — stderr 洪泛无背压
 
