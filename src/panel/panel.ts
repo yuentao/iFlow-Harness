@@ -51,6 +51,8 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000;
  * (P3). The wait loop ends on idle/error/cancel; this timeout is the last
  * resort if none of those ever fire. */
 const CHAT_FORWARD_TIMEOUT_MS = 10 * 60_000;
+/** R3: stderr lines kept for crash/hang diagnostics. */
+const STDERR_TAIL_LINES = 200;
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -114,6 +116,11 @@ export class ChatPanel implements vscode.Disposable {
   private fileSearchCache: { rels: string[] } | null = null;
   /** P6: coalesce concurrent @-search keystrokes into one findFiles scan. */
   private fileSearchInFlight: Promise<string[]> | null = null;
+  /** R3: last N stderr lines from the CLI (diagnostics for crashes/hangs). */
+  private readonly stderrTail: string[] = [];
+  /** R1: set when a prompt times out (the CLI may still be executing the
+   * zombie turn) — blocks sendPrompt until a fresh session is started. */
+  private promptLocked = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -1098,6 +1105,10 @@ export class ChatPanel implements vscode.Disposable {
       // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
       // carries ONLY {sessionId} — no modes, no _meta. A prior session/new does
       // return the full meta, so fetch it first (also warms up the CLI).
+      // R4: the probe session itself is deliberately discarded — only its
+      // meta/modes are used. The CLI owns that session's lifecycle (ACP-mode
+      // sessions are not persisted and die with the CLI process); this is not
+      // a leak.
       const probe = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
       const probeMeta: NewSessionMeta | undefined = probe._meta;
       const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
@@ -1238,13 +1249,26 @@ export class ChatPanel implements vscode.Disposable {
         { command: node, args, cwd: workspaceRoot, requestTimeoutMs: 120_000 },
         {
           onSessionUpdate: (n) => this.onSessionUpdate(n),
-          onStderr: () => {},
+          // R5: banners/noise on stdout — invisible at the default log level,
+          // visible when the Output panel is set to Debug.
+          onUnparseableStdout: (line) => {
+            this.log.debug(`CLI stdout (unparsed): ${line.slice(0, 200)}`);
+          },
+          // R3: keep the last lines for crash/hang diagnostics instead of
+          // discarding everything (the old `() => {}`).
+          onStderr: (line) => {
+            this.stderrTail.push(line);
+            if (this.stderrTail.length > STDERR_TAIL_LINES) this.stderrTail.shift();
+          },
           onExit: () => {
             // Ignore exits of clients that were replaced on purpose (profile
             // switch / reconnect): their exit is expected, and marking an error
             // here would flash a global "错误" while the new CLI is connecting.
             // A stale instance exiting late must also not clobber this.client.
             if (this.disposed || this.client !== client) return;
+            if (this.stderrTail.length > 0) {
+              this.log.warn(`CLI stderr tail (${this.stderrTail.length} lines):\n${this.stderrTail.join("\n")}`);
+            }
             this.client = null;
             this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
             this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
@@ -1626,6 +1650,8 @@ export class ChatPanel implements vscode.Disposable {
       await this.setModel(currentModelId);
     }
     this.log.info(`session started: ${session.sessionId}`);
+    // R1: a fresh session is clean — release the post-timeout send lock.
+    this.promptLocked = false;
     await this.recordSession(session.sessionId, null);
     } finally {
       this.store.setInitializing(false);
@@ -1641,8 +1667,13 @@ export class ChatPanel implements vscode.Disposable {
     // prompts interleave in the transcript. The webview already disables its
     // composer in both states — this gate closes the side doors.
     const state = this.store.getState();
-    if (state.initializing || state.status === "streaming") {
-      this.log.info(`sendPrompt rejected: initializing=${state.initializing}, status=${state.status}`);
+    if (this.promptLocked || state.initializing || state.status === "streaming") {
+      this.log.info(
+        `sendPrompt rejected: locked=${this.promptLocked}, initializing=${state.initializing}, status=${state.status}`,
+      );
+      if (this.promptLocked) {
+        void vscode.window.showWarningMessage(vscode.l10n.t("上一次请求超时，请新建会话后继续"));
+      }
       return;
     }
     try {
@@ -1665,6 +1696,18 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       const message = errorMessage(error);
       if (/timed out/i.test(message)) {
+        // R1: the CLI may still be executing the timed-out turn. Cancel it
+        // and block further prompts until a fresh session replaces this one —
+        // otherwise the next prompt races the zombie turn in the CLI.
+        this.promptLocked = true;
+        const zombieSession = this.store.getState().sessionId;
+        if (zombieSession) {
+          try {
+            (await this.ensureClient()).cancel(zombieSession);
+          } catch (cancelError) {
+            this.log.warn(`cancel after prompt timeout failed: ${errorMessage(cancelError)}`);
+          }
+        }
         this.store.markError(vscode.l10n.t("请求超时：{0}", message));
       } else {
         this.store.markError(message);

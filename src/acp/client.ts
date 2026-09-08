@@ -77,8 +77,11 @@ export class AcpClient {
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
+      // R3: no consumer — skip the per-chunk split entirely.
+      const cb = this.callbacks.onStderr;
+      if (!cb) return;
       for (const line of chunk.split(/\r?\n/)) {
-        if (line.length > 0) this.callbacks.onStderr?.(line);
+        if (line.length > 0) cb(line);
       }
     });
 
@@ -88,6 +91,8 @@ export class AcpClient {
         if (child.stdin?.writable) child.stdin.write(line + "\n");
       },
       this.options.wireTap,
+      // R5: surface unparseable stdout lines (banners, noise) to the host.
+      (error, rawLine) => this.callbacks.onUnparseableStdout?.(rawLine || error.message),
     );
 
     child.stdout?.setEncoding("utf8");

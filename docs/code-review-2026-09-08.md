@@ -273,6 +273,8 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `sendPrompt`（`panel.ts:1415-1444`）：prompt 30 分钟超时后 `markError`，但 CLI 可能仍在执行。此后用户再发 prompt 会与上一个 inflight prompt 并发打到同一 session，CLI 侧行为未定义。建议超时后自动发 `session/cancel` + 锁发送直到新会话。
 
+> **修复记录（2026-09-08）**：已按建议落地。`sendPrompt` catch 的超时分支：置 `promptLocked = true`、对当前 `sessionId` 发 `session/cancel`（收割 CLI 侧僵尸 turn）、`markError`；入口 C3/C9 闸门扩为 `promptLocked || initializing || streaming`，locked 时警告「上一次请求超时，请新建会话后继续」（l10n 英文条目已补）；`startNewSession` 在 `sessionStarted` 后清 `promptLocked`——新会话干净，锁解除。验证：typecheck + 全量测试 99/99 + build 通过。
+
 ### [MAJOR] R2 — `chatForward` 与 C5/P3 叠加的挂死面
 
 `panel.ts:239-249`（同 P3）：除了泄漏，`chatForward` 里 `void this.sendPrompt(prompt)` 的错误被完全吞掉——prompt 抛错（如认证失败）时 participant 永远等不到 `idle`。与 P3 合并修复。
@@ -283,13 +285,19 @@ if (!sessionId) { vscode.window.showWarningMessage(vscode.l10n.t("会话未就�
 
 `src/acp/client.ts:79-84`：`on("data")` 里对每 chunk 做 `split(/\r?\n/)`，而宿主侧 `onStderr: () => {}`（`panel.ts:1128`）为空实现——CLI verbose 崩溃时全部分割开销白付。建议 ring buffer 存最近 200 行供诊断，或 `onStderr` 为 null 时短路。
 
+> **修复记录（2026-09-08）**：已落地两端。① `client.ts`：stderr 处理在 `onStderr` 回调未设置时直接 return，跳过每 chunk 的 `split`（主诉的「空实现白付分割」）；② `panel.ts`：宿主侧 `onStderr` 从空实现改为 200 行 ring buffer（`stderrTail`，`STDERR_TAIL_LINES` 常量），CLI 非预期退出（`onExit` 且该 client 未被替换）时把尾巴 dump 到 `log.warn`，崩溃/卡死有诊断线索。验证：typecheck + 全量测试 99/99 通过。
+
 ### [MINOR] R4 — `restoreSession` 的 probe session 无注释交代
 
 `panel.ts:990-991`：为拿 meta 先 `newSession` 再 `loadSession`，probe 出来的会话被丢弃（CLI 侧生命周期自管，重启即清）。代码注释解释了「为什么先 new」，但没说 probe 会话的去向，补一句可避免后续维护者误以为是泄漏。
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。probe `newSession` 的注释补一句去向说明——probe 会话被有意丢弃（只用其 meta/modes），CLI 侧生命周期自管（ACP 会话不落盘、随 CLI 进程消亡），非泄漏。验证：typecheck + 全量测试 99/99 通过。
+
 ### [MINOR] R5 — `onUnparseableLine` 静默丢弃 stdout 噪声
 
 `src/acp/jsonrpc.ts`（`onUnparseableLine`）：设计合理（banner 不该回 parse error），但 wireTap 收不到这些行——`--record` 的 harness 日志会缺失 CLI stdout 噪声的踪迹，排查「CLI 卡住」时少一半信息。建议 debug 构建下把原始行也 log 一份。
+
+> **修复记录（2026-09-08）**：已在 `src/acp/jsonrpc.ts` + `src/acp/client.ts` 落地。`JsonRpcPeer` 构造函数新增第三可选参数 `onUnparseableLineOverride`（宿主可观察未解析行，默认行为不变），`client.ts` 把声明已久但从未接线的 `callbacks.onUnparseableStdout` 传入；`panel.ts` 侧将未解析 stdout 行（banner/噪声）接到 `log.debug`——VSCode LogOutputChannel 默认 Info 级不显示，调到 Debug 即可看，「CLI 卡住」排查时原始行不再缺失。验证：typecheck + 全量测试 99/99 通过。
 
 ### [MINOR] R6 — `dispose` 不等 client 完全退出
 

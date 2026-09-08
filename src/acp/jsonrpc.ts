@@ -154,19 +154,22 @@ export class JsonRpcPeer {
   constructor(
     private readonly send: (line: string) => void,
     private readonly wireTap?: WireTap,
+    private readonly onUnparseableLineOverride?: (error: Error, rawLine: string) => void,
   ) {
     this.parser = new NdjsonParser(
       (value) => this.handleMessage(value),
-      this.onUnparseableLine?.bind(this),
+      (error, rawLine) => this.onUnparseableLine(error, rawLine),
     );
   }
 
   /**
    * Default: drop unparseable lines silently. Real CLIs occasionally print
    * banners on stdout; replying with a parse error would corrupt the stream.
-   * Override via subclass if strict behavior is needed.
+   * Hosts may observe them via the third constructor argument (R5).
    */
-  protected onUnparseableLine(_error: Error, _rawLine: string): void {}
+  protected onUnparseableLine(error: Error, rawLine: string): void {
+    this.onUnparseableLineOverride?.(error, rawLine);
+  }
 
   /** Feed raw text (any chunk boundary). */
   handleData(chunk: string): void {

@@ -46,6 +46,7 @@
   "会话已重置": "session reset",
   "会话未就绪": "session not ready",
   "请求超时：{0}": "Request timed out: {0}",
+  "上一次请求超时，请新建会话后继续": "The previous request timed out — start a new session to continue",
   "正在通过 iFlow 处理…": "Processing via iFlow…",
   "iFlow 出错：{0}": "iFlow error: {0}",
   "请先选中一段代码": "Select some code first",
