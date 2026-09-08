@@ -14,6 +14,7 @@
   "已拒绝": "rejected",
   "已允许（{0}）": "allowed ({0})",
   "无法打开该图片附件（数据格式异常）": "Cannot open this image attachment (malformed data)",
+  "图片附件过大（超过 {0} MB），已拒绝打开": "Image attachment too large (over {0} MB), refused to open",
   "打开图片失败: {0}": "Failed to open image: {0}",
   "无法打开 diff：缺少编辑前内容": "Cannot open diff: original content missing",
   "打开 diff 失败: {0}": "Failed to open diff: {0}",

@@ -6,8 +6,8 @@
 import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
@@ -46,6 +46,10 @@ import { SessionStore } from "./store.js";
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
+ * webview-supplied data URL is untrusted input; an oversized one must be
+ * rejected before it is materialized to disk. */
+const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 /** workspaceState key: recent sessions for this workspace (M4). */
 const SESSIONS_KEY = "iflow.recentSessions";
@@ -335,7 +339,7 @@ export class ChatPanel implements vscode.Disposable {
         void this.searchWorkspaceFiles(msg.requestId, msg.query);
         break;
       case "openImage":
-        this.openImageAttachment(msg.dataUrl);
+        void this.openImageAttachment(msg.dataUrl);
         break;
       case "saveAuth":
         await this.saveAuthAndReconnect(msg.baseUrl, msg.apiKey, msg.modelName, msg.profileName ?? null);
@@ -449,18 +453,26 @@ export class ChatPanel implements vscode.Disposable {
    * Open an attached image (data URL) in VSCode's built-in image preview.
    * The webview iframe is sandboxed without allow-popups, so window.open is
    * blocked by the browser — the host materializes the data URL into a temp
-   * file and opens that instead.
+   * file and opens that instead. The payload is untrusted webview input:
+   * size is capped before any disk I/O, and the write is async so a large
+   * payload cannot block the extension host's event loop.
    */
-  private openImageAttachment(dataUrl: string): void {
+  private async openImageAttachment(dataUrl: string): Promise<void> {
     const match = /^data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl);
     if (!match) {
       void vscode.window.showWarningMessage(vscode.l10n.t("无法打开该图片附件（数据格式异常）"));
       return;
     }
+    if (match[2]!.length > MAX_IMAGE_ATTACHMENT_BYTES) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("图片附件过大（超过 {0} MB），已拒绝打开", Math.floor(MAX_IMAGE_ATTACHMENT_BYTES / 1024 / 1024)),
+      );
+      return;
+    }
     const ext = match[1]!.toLowerCase().replace("jpeg", "jpg");
     try {
       const file = path.join(os.tmpdir(), `iflow-image-${Date.now()}.${ext}`);
-      writeFileSync(file, Buffer.from(match[2]!, "base64"));
+      await writeFile(file, Buffer.from(match[2]!, "base64"));
       void vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
     } catch (error) {
       const message = errorMessage(error);

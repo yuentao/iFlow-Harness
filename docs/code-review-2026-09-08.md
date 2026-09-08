@@ -113,6 +113,8 @@ feed(chunk: string): void {
 
 `src/panel/panel.ts:451-471`。webview 发来的 `openImage` data URL 经正则校验后直接 `writeFileSync` 到 `%TEMP%`。正则没限长度：一个被注入的巨大 data URL 会同步写盘（阻塞扩展宿主）+ 打开预览。建议 `match[2].length` 超 ~8MB base64 直接拒绝，并把 `writeFileSync` 换成 `fs/promises`。
 
+> **修复记录（2026-09-08）**：已在 `src/panel/panel.ts` 落地。`openImageAttachment` 正则校验后新增 `MAX_IMAGE_ATTACHMENT_BYTES`（8MB base64 ≈ 6MB 原始图）上限，超限警告拒绝，任何磁盘 I/O 之前即拦截；`writeFileSync` 改为 `fs/promises` 的 `writeFile`（异步，不阻塞扩展宿主事件循环），调用点相应改为 `void` fire-and-forget；新增告警文案的 l10n 英文条目（`l10n/bundle.l10n.en.json`）。验证：typecheck 通过，全量测试 91/91 通过。
+
 ### [MAJOR] S4 — CSP 允许 `'unsafe-inline'` style-src
 
 `src/panel/panel.ts:222`。Tailwind 产物 + React inline style 目前确实需要它，风险可控，但记录在案：style 注入面完全依赖 DOMPurify 默认属性表兜底。可在 DOMPurify 配置里显式 `FORBID_ATTR: ["style"]` 收紧（Markdown 渲染不需要 style 属性）。
