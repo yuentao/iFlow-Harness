@@ -10,6 +10,7 @@
     "email": "work@pandorastudio.cn"
   },
   "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/yuentao/iFlow-Harness.git"
@@ -120,7 +121,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node esbuild.mjs && vite build webview",
+    "icon": "node scripts/generate-icon.mjs",
+    "build": "npm run icon && tsc -p tsconfig.json && node esbuild.mjs && vite build webview",
     "webview:dev": "vite build webview --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
@@ -128,6 +130,7 @@
     "package": "npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.3.3",
     "@types/dompurify": "^3.0.5",
     "@types/node": "^26.4.1",
