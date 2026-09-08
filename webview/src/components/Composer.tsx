@@ -49,9 +49,12 @@ export function Composer() {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
-   * they never pollute the draft text the user types). */
-  const [attachments, setAttachments] = useState<Array<{ name: string; path: string }>>([]);
+   * they never pollute the draft text the user types). The id decouples chip
+   * identity from the path: picking the same file twice yields two removable
+   * chips instead of one key collision. */
+  const [attachments, setAttachments] = useState<Array<{ id: number; name: string; path: string }>>([]);
   const stageSeq = useRef(0);
+  const attachSeq = useRef(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // --- @-mention file search (M5) ---
@@ -84,10 +87,10 @@ export function Composer() {
       }
       if (msg?.type === "stagedFiles" && msg.requestId === stageSeq.current) {
         const failed = msg.paths.filter((p: string | null) => p === null).length;
-        const staged: Array<{ name: string; path: string }> = [];
+        const staged: Array<{ id: number; name: string; path: string }> = [];
         for (const p of msg.paths) {
           if (p === null) continue;
-          staged.push({ name: p.split(/[\\/]/).pop() ?? p, path: p });
+          staged.push({ id: ++attachSeq.current, name: p.split(/[\\/]/).pop() ?? p, path: p });
         }
         if (staged.length > 0) setAttachments((prev) => [...prev, ...staged]);
         if (failed > 0) showNote(t("{0} 个文件暂存失败，已跳过", failed));
@@ -105,7 +108,16 @@ export function Composer() {
               .map((img: { data: string; mimeType: string }) => ({ data: img.data, mimeType: img.mimeType })),
           ]);
         }
-        if (msg.files.length > 0) setAttachments((prev) => [...prev, ...msg.files]);
+        if (msg.files.length > 0) {
+          setAttachments((prev) => [
+            ...prev,
+            ...msg.files.map((f: { name: string; path: string }) => ({
+              id: ++attachSeq.current,
+              name: f.name,
+              path: f.path,
+            })),
+          ]);
+        }
         return;
       }
       if (msg?.type === "setDraft" && typeof msg.text === "string") {
@@ -188,8 +200,8 @@ export function Composer() {
   }
 
   /** Remove a non-image attachment chip. */
-  function removeAttachment(path: string): void {
-    setAttachments((prev) => prev.filter((f) => f.path !== path));
+  function removeAttachment(id: number): void {
+    setAttachments((prev) => prev.filter((f) => f.id !== id));
   }
 
   /**
@@ -274,7 +286,7 @@ export function Composer() {
       type: "sendPrompt",
       text: value || (attachments.length > 0 ? t("（见附件）") : t("（见附图）")),
       images: images.length > 0 ? images.filter((img) => img.data) : undefined,
-      files: attachments.length > 0 ? attachments : undefined,
+      files: attachments.length > 0 ? attachments.map(({ name, path }) => ({ name, path })) : undefined,
     });
     setText("");
     setImages([]);
@@ -292,7 +304,7 @@ export function Composer() {
         <div className="mb-1.5 flex flex-wrap gap-1.5">
           {attachments.map((f) => (
             <span
-              key={f.path}
+              key={f.id}
               className="inline-flex max-w-[260px] items-center gap-1 rounded-md border border-border bg-surface px-1.5 py-1 text-[11px] text-foreground"
               title={f.path}
             >
@@ -301,7 +313,7 @@ export function Composer() {
               <button
                 className="ml-0.5 rounded px-0.5 text-[11px] leading-none text-muted-foreground hover:text-destructive"
                 title={t("移除")}
-                onClick={() => removeAttachment(f.path)}
+                onClick={() => removeAttachment(f.id)}
               >
                 ×
               </button>
