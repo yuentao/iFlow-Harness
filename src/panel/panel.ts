@@ -1153,12 +1153,17 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Tear down the current CLI connection and start fresh with new credentials. */
   private async reconnectWithCredentials(creds: OpenAiCompatCredentials): Promise<void> {
+    // A first connect still in flight owns the `connecting` promise —
+    // ensureClient would hand it straight back, skipping the reconnect and
+    // keeping the OLD credentials. Settle it (success or failure) first.
+    if (this.connecting) await this.connecting.catch(() => {});
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
     // Detach the old client FIRST: dispose() kills its child process, and the
     // resulting exit event must not be mistaken for a crashed session.
     const oldClient = this.client;
     this.client = null;
-    await oldClient?.dispose();
+    // Splash + "连接中" chip BEFORE the teardown: the old child's kill can
+    // wait up to 3s and the new CLI boot 10-60s — feedback must be immediate.
     this.store.replaceState(newSessionState(this.store.getState()));
     // The stale currentModelId belongs to the previous endpoint — keep it out
     // of restoreSession's fallback chain.
@@ -1166,10 +1171,16 @@ export class ChatPanel implements vscode.Disposable {
     // Next session start defaults to the NEW profile's configured modelName
     // (user directive) and pushes it to the CLI via set_model.
     this.pendingSwitchModel = creds.modelName;
-    // Splash + "连接中" chip while the new CLI boots (can take 10-60s).
     this.store.markConnecting();
     // Remember for the next handshake (ensureClient reads these).
     this.pendingHandshakeCredentials = creds;
+    // Kill the old CLI in the background while the new one boots: the two
+    // processes are independent, and a stubborn child's 3s graceful-kill
+    // window must not extend the switch path. Late events from the dying
+    // client are filtered by the `this.client !== client` guards in
+    // ensureClient's callbacks; the finally below still waits for the kill,
+    // so a failed reconnect never leaks the old process.
+    const teardown = oldClient?.dispose().catch(() => {}) ?? Promise.resolve();
     try {
       // ensureClient's post-handshake starts a NEW session (user directive:
       // profile switches never restore history — see the block there), and
@@ -1181,6 +1192,8 @@ export class ChatPanel implements vscode.Disposable {
       );
     } catch {
       // ensureClient already marked the error in the store; nothing to add.
+    } finally {
+      await teardown;
     }
   }
 
@@ -1276,6 +1289,9 @@ export class ChatPanel implements vscode.Disposable {
       return false;
     }
 
+    // Race the /models HTTP query with the probe + loadSession below (it only
+    // reads the endpoint from settings.json — independent of the session).
+    const modelsPromise = this.queryLiveModels();
     this.log.info(`restoring session ${sessionId} …`);
     this.restoring = true;
     this.replayTitle = null;
@@ -1311,8 +1327,9 @@ export class ChatPanel implements vscode.Disposable {
       this.store.replaceTranscript(restored.blocks);
 
       // Model list: same live-endpoint-only source as a fresh session,
-      // otherwise the model dropdown would vanish after a restore.
-      const models = await this.queryLiveModels();
+      // otherwise the model dropdown would vanish after a restore. Already
+      // fetched concurrently with probe/loadSession above.
+      const models = await modelsPromise;
       // After a profile switch the default model is the one written in the
       // NEW profile (its configured modelName), not the previous endpoint's
       // stale current model (user directive).
@@ -1412,7 +1429,7 @@ export class ChatPanel implements vscode.Disposable {
     this.connecting = (async () => {
       let entry: string;
       try {
-        entry = this.resolveEntry();
+        entry = await this.resolveEntry();
       } catch (error) {
         // CLI not found: surface it in the panel instead of leaving it on the
         // loading screen (this used to throw before the try/catch below).
@@ -1431,7 +1448,13 @@ export class ChatPanel implements vscode.Disposable {
         // 30-60s+ before its first initialize response.
         { command: node, args, cwd: workspaceRoot, requestTimeoutMs: 120_000 },
         {
-          onSessionUpdate: (n) => this.onSessionUpdate(n),
+          // A detached client (profile switch overlaps the new spawn with the
+          // old child's teardown) must not leak its dying events into the
+          // fresh session state. Same guard rationale as onExit below.
+          onSessionUpdate: (n) => {
+            if (this.client !== client) return;
+            this.onSessionUpdate(n);
+          },
           // R5: banners/noise on stdout — invisible at the default log level,
           // visible when the Output panel is set to Debug.
           onUnparseableStdout: (line) => {
@@ -1456,8 +1479,14 @@ export class ChatPanel implements vscode.Disposable {
             this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
             this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
           },
-          onRequestPermission: (req: RequestPermissionRequest) =>
-            this.requestPermissionFromUser(req),
+          onRequestPermission: (req: RequestPermissionRequest) => {
+            // Dying client's approval cards would hang on the fresh state —
+            // auto-cancel instead (the process is being torn down anyway).
+            if (this.client !== client) {
+              return Promise.resolve({ outcome: { outcome: "cancelled" } as const });
+            }
+            return this.requestPermissionFromUser(req);
+          },
         },
       );
       this.client = client;
@@ -1537,7 +1566,10 @@ export class ChatPanel implements vscode.Disposable {
     return this.connecting.then(() => this.client!);
   }
 
-  private resolveEntry(): string {
+  // Async: the CLI probe shells out (where.exe / npm root -g). The locator
+  // caches its successful result, so reconnects (profile switch) skip the
+  // seconds-long re-probe entirely.
+  private async resolveEntry(): Promise<string> {
     const configured = this.services.entryOverride
       ?? vscode.workspace.getConfiguration("iflow").get<string>("cliPath");
     if (configured) {
@@ -1547,7 +1579,7 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("iflow.cliPath 不存在，回退自动探测: {0}", configured),
       );
     }
-    const entry = locateIflowEntry();
+    const entry = await locateIflowEntry();
     if (!entry)
       throw new Error(
         vscode.l10n.t("未找到 iFlow CLI（entry.js）。请安装 @iflow-ai/iflow-cli 或设置 iflow.cliPath。"),
@@ -1796,6 +1828,11 @@ export class ChatPanel implements vscode.Disposable {
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     this.sessionCwd = workspaceRoot;
+    // The live /models HTTP query is independent of session/new — race them
+    // concurrently (queryLiveModels swallows its own errors into []). A slow
+    // endpoint previously serialized behind the CLI's 30-60s boot, adding up
+    // to its full 10s timeout on every session start.
+    const modelsPromise = this.queryLiveModels();
     const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
@@ -1805,7 +1842,7 @@ export class ChatPanel implements vscode.Disposable {
     // Model dropdown: live query of the active endpoint's `/models`. The CLI's
     // `_meta` catalog is hardcoded and not truthful for user-supplied
     // endpoints — per user directive, never fall back to it.
-    const models = await this.queryLiveModels();
+    const models = await modelsPromise;
     const cliModelId = meta?.models?.currentModelId ?? null;
     // After a profile switch the CLI's current model belongs to the previous
     // endpoint — default to the model configured in the NEW profile (user

@@ -1,6 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
+
+const execFileP = promisify(execFile);
 
 export interface IflowCommand {
   command: string;
@@ -8,23 +11,57 @@ export interface IflowCommand {
 }
 
 /**
+ * Located entry cache. The probe shells out (where.exe / `npm root -g` —
+ * up to seconds on Windows, `npm` especially) and used to re-run on EVERY
+ * reconnect: every profile switch paid the full probe again. Successful
+ * results are cached (re-validated with existsSync, so an uninstalled CLI
+ * re-probes); failures are NOT cached, so a CLI installed mid-session is
+ * found on the next connect without a host restart.
+ */
+let cachedEntry: string | null = null;
+let probeInFlight: Promise<string | null> | null = null;
+
+/**
  * Locate the installed iFlow CLI bundle entry (a plain .js file we can run
  * with the current Node runtime, avoiding .cmd shim quirks on Windows and
  * shebang wrappers on Unix).
+ *
+ * Async on purpose: the probes were execFileSync, which blocked the
+ * extension host's event loop for the full duration of where.exe /
+ * `npm root -g` while every other extension froze.
+ *
  * Resolution order:
- *  1. IFLOW_CLI_ENTRY env var
+ *  1. IFLOW_CLI_ENTRY env var (checked on every call — costs nothing and
+ *     keeps test/harness overrides working with the cache)
  *  2. PATH lookup: `where.exe iflow` shims on Windows / `which iflow` on Unix
  *  3. npm global root fallback
  *  4. Platform-specific well-known install paths
  */
-export function locateIflowEntry(): string | null {
+export async function locateIflowEntry(): Promise<string | null> {
   const fromEnv = process.env.IFLOW_CLI_ENTRY;
   if (fromEnv && existsSync(fromEnv)) return path.resolve(fromEnv);
 
-  const fromPath = process.platform === "win32" ? locateFromWindowsPath() : locateFromUnixPath();
+  if (probeInFlight) return probeInFlight;
+  probeInFlight = locateUncached()
+    .then((found) => {
+      if (found) cachedEntry = found;
+      return found ?? cachedEntry;
+    })
+    .finally(() => {
+      probeInFlight = null;
+    });
+  return probeInFlight;
+}
+
+async function locateUncached(): Promise<string | null> {
+  // Cached hit still re-validates: a removed CLI must not pin a dead path.
+  if (cachedEntry && existsSync(cachedEntry)) return cachedEntry;
+
+  const fromPath =
+    process.platform === "win32" ? await locateFromWindowsPath() : await locateFromUnixPath();
   if (fromPath) return fromPath;
 
-  const fromNpm = locateFromNpmGlobalRoot();
+  const fromNpm = await locateFromNpmGlobalRoot();
   if (fromNpm) return fromNpm;
 
   for (const candidate of wellKnownCandidates()) {
@@ -33,9 +70,9 @@ export function locateIflowEntry(): string | null {
   return null;
 }
 
-function locateFromWindowsPath(): string | null {
+async function locateFromWindowsPath(): Promise<string | null> {
   try {
-    const whereOut = execFileSync("where.exe", ["iflow"], { encoding: "utf8", windowsHide: true });
+    const whereOut = (await execFileP("where.exe", ["iflow"], { windowsHide: true })).stdout;
     for (const line of whereOut.split(/\r?\n/).map((l: string) => l.trim())) {
       if (!line || !/\.(cmd|bat)$/i.test(line) || !existsSync(line)) continue;
       const fromShim = extractEntryFromShim(line);
@@ -47,9 +84,9 @@ function locateFromWindowsPath(): string | null {
   return null;
 }
 
-function locateFromUnixPath(): string | null {
+async function locateFromUnixPath(): Promise<string | null> {
   try {
-    const whichOut = execFileSync("which", ["-a", "iflow"], { encoding: "utf8" });
+    const whichOut = (await execFileP("which", ["-a", "iflow"])).stdout;
     // The first hit may be a native dispatcher (nvmd) rather than a real shim;
     // try every PATH match before falling through to other strategies.
     for (const found of whichOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
@@ -106,12 +143,12 @@ function entryFromUnixShim(found: string): string | null {
   return null;
 }
 
-function locateFromNpmGlobalRoot(): string | null {
+async function locateFromNpmGlobalRoot(): Promise<string | null> {
   try {
     const out =
       process.platform === "win32"
-        ? execFileSync("npm.cmd", ["root", "-g"], { encoding: "utf8", windowsHide: true, shell: true })
-        : execFileSync("npm", ["root", "-g"], { encoding: "utf8" });
+        ? (await execFileP("npm.cmd", ["root", "-g"], { windowsHide: true, shell: true })).stdout
+        : (await execFileP("npm", ["root", "-g"])).stdout;
     const root = out
       .split(/\r?\n/)
       .map((l: string) => l.trim())

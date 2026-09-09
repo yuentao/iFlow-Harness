@@ -27,7 +27,8 @@ const record = args.includes("--record");
 const probe = args.includes("--probe");
 const promptText = args.find((a, i) => i > 0 && args[i - 1] === "--prompt") ?? "Reply with exactly: OK";
 
-const entry = process.env.IFLOW_CLI_ENTRY ?? locateIflowEntry();
+// locateIflowEntry is async (spawn probes must not block an event loop).
+const entry = process.env.IFLOW_CLI_ENTRY ?? (await locateIflowEntry());
 if (!entry) {
   console.error("[harness] FAIL: could not locate iflow CLI entry.js. Set IFLOW_CLI_ENTRY.");
   process.exit(2);
