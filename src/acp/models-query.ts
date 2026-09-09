@@ -11,6 +11,47 @@ export function settingsFilePath(): string {
   return path.join(home, "settings.json");
 }
 
+/** OAuth credential cache location — same home resolution as settings.json. */
+export function oauthCredsFilePath(): string {
+  const home = process.env.IFLOW_HOME ?? path.join(homedir(), ".iflow");
+  return path.join(home, "oauth_creds.json");
+}
+
+/**
+ * Archive the OAuth credential cache aside when its token is provably dead.
+ *
+ * The CLI's `authenticate` consults this file FIRST on every call; for a
+ * token with an expired `expiry_date` it blocks on a Google OAuth refresh
+ * network call that stalls ~60s (probed, CLI 0.5.19: 63962ms twice in a row;
+ * with the file archived aside: 210ms) before its swallowed exception lets
+ * openai-compatible auth proceed. The iFlow OAuth login method itself is
+ * retired (hardcoded 2026-04-16 deadline in the bundle), so an expired cache
+ * is dead weight.
+ *
+ * Rename-based (reversible), never destructive: a token that still carries a
+ * future `expiry_date`, a missing file, or an unparseable file all return
+ * null untouched (unparseable content fails dEt instantly — no stall).
+ * Returns the archive path when the file was moved, else null.
+ */
+export function retireStaleOAuthCreds(now = Date.now(), file = oauthCredsFilePath()): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { expiry_date?: number };
+    if (typeof parsed?.expiry_date === "number" && parsed.expiry_date > now) return null;
+    try {
+      const archived = `${file}.bak`;
+      renameSync(file, archived);
+      return archived;
+    } catch {
+      // Target exists (previous archive) — use a unique suffix instead.
+      const archived = `${file}.bak-${now}`;
+      renameSync(file, archived);
+      return archived;
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Live model list for the model dropdown.
  *

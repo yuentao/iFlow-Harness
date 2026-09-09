@@ -11,8 +11,8 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage, isContextOverflowError } from "../acp/jsonrpc.js";
-import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
-import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
+import { buildAcpCommand, locateIflowEntry, locateNodeExecutable } from "../acp/cli-locator.js";
+import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
   getActiveProfileName,
@@ -1181,12 +1181,14 @@ export class ChatPanel implements vscode.Disposable {
     // ensureClient's callbacks; the finally below still waits for the kill,
     // so a failed reconnect never leaks the old process.
     const teardown = oldClient?.dispose().catch(() => {}) ?? Promise.resolve();
+    const tSwitch = Date.now();
     try {
       // ensureClient's post-handshake starts a NEW session (user directive:
       // profile switches never restore history — see the block there), and
       // applies pendingSwitchModel (the NEW profile's model) via set_model.
       await this.ensureClient();
       this.store.setAuth(await this.buildAuthState(true, false));
+      this.log.info(`profile switch finished in ${Date.now() - tSwitch}ms (incl. parallel old-CLI teardown)`);
       void vscode.window.showInformationMessage(
         vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
       );
@@ -1438,7 +1440,13 @@ export class ChatPanel implements vscode.Disposable {
         this.store.markError(message);
         throw error;
       }
-      const node = vscode.workspace.getConfiguration("iflow").get<string>("nodePath") || process.execPath;
+      // A standalone node boots the CLI ~2x faster than the Electron host
+      // binary (no Chromium runtime to start); fall back to execPath when
+      // none is found or iflow.nodePath is explicitly configured.
+      const node =
+        vscode.workspace.getConfiguration("iflow").get<string>("nodePath")
+        || (await locateNodeExecutable())
+        || process.execPath;
       const { command, args } = buildAcpCommand(entry);
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
       this.log.info(`spawning CLI: ${command} ${args.join(" ")} (cwd=${workspaceRoot})`);
@@ -1491,9 +1499,10 @@ export class ChatPanel implements vscode.Disposable {
       );
       this.client = client;
       try {
+        const tInit = Date.now();
         const init = await client.connect();
         this.log.info(
-          `initialize ok: authenticated=${init.isAuthenticated ?? false}, loadSession=${init.agentCapabilities.loadSession ?? false}`,
+          `initialize ok in ${Date.now() - tInit}ms: authenticated=${init.isAuthenticated ?? false}, loadSession=${init.agentCapabilities.loadSession ?? false}`,
         );
         // Explicit credentials from a profile switch take priority; otherwise
         // fall back to the persisted active slot.
@@ -1508,6 +1517,16 @@ export class ChatPanel implements vscode.Disposable {
           // M3 flow: push stored openai-compatible credentials to the agent.
           if (storedCreds) {
             try {
+              // The CLI's authenticate consults ~/.iflow/oauth_creds.json
+              // first; an expired cache (iFlow OAuth login is retired —
+              // hardcoded 2026-04-16 deadline in the 0.5.19 bundle) makes it
+              // block ~60s on a dead Google OAuth refresh before the
+              // swallowed exception falls through to openai-compatible auth
+              // (probed: 63962ms with the file vs 210ms archived aside).
+              // Archive it once, reversibly — never delete.
+              const archived = retireStaleOAuthCreds();
+              if (archived) this.log.info(`archived stale OAuth credential cache: ${archived}`);
+              const tAuth = Date.now();
               await client.authenticate({
                 methodId: "openai-compatible",
                 methodInfo: {
@@ -1516,7 +1535,7 @@ export class ChatPanel implements vscode.Disposable {
                   modelName: storedCreds.modelName,
                 },
               });
-              this.log.info("authenticate ok (openai-compatible)");
+              this.log.info(`authenticate ok in ${Date.now() - tAuth}ms (openai-compatible)`);
               this.store.setAuth(await this.buildAuthState(true, false));
             } catch (error) {
               const message = errorMessage(error);
@@ -1833,7 +1852,9 @@ export class ChatPanel implements vscode.Disposable {
     // endpoint previously serialized behind the CLI's 30-60s boot, adding up
     // to its full 10s timeout on every session start.
     const modelsPromise = this.queryLiveModels();
+    const tNewSession = Date.now();
     const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+    this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
     // A new session invalidates any approvals from the old one.

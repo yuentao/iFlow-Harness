@@ -7,6 +7,7 @@ import {
   parseModelsResponse,
   readActiveEndpoint,
   resolveActiveProfileName,
+  retireStaleOAuthCreds,
   settingsFilePath,
   updateCurrentApiProfile,
 } from "../src/acp/models-query";
@@ -147,5 +148,45 @@ describe("readActiveEndpoint", () => {
     expect(readActiveEndpoint(settingsFile({ selectedAuthType: "iflow" }))).toBeNull();
     expect(readActiveEndpoint(settingsFile({ selectedAuthType: "openai-compatible" }))).toBeNull();
     expect(readActiveEndpoint(path.join(tempDir, "missing.json"))).toBeNull();
+  });
+});
+
+describe("retireStaleOAuthCreds", () => {
+  it("archives an expired token aside (reversibly) and reports the archive path", () => {
+    const file = settingsFile({ access_token: "dead", expiry_date: 1000 });
+    const archived = retireStaleOAuthCreds(2000, file);
+    expect(archived).toBe(`${file}.bak`);
+    expect(existsSync(file)).toBe(false);
+    // Reversible: the content survives in the archive.
+    expect(JSON.parse(readFileSync(`${file}.bak`, "utf8")).access_token).toBe("dead");
+  });
+
+  it("leaves a token with a future expiry_date untouched", () => {
+    const file = settingsFile({ access_token: "alive", expiry_date: 99999999999999 });
+    expect(retireStaleOAuthCreds(1000, file)).toBeNull();
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("archives a cache without an expiry field (getTokenInfo would still stall)", () => {
+    const file = settingsFile({ access_token: "no-expiry" });
+    expect(retireStaleOAuthCreds(1000, file)).toBe(`${file}.bak`);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("overwrites a previous .bak archive (rename replaces the target file)", () => {
+    const file = settingsFile({ access_token: "fresh-stale", expiry_date: 0 });
+    writeFileSync(`${file}.bak`, "previous archive", "utf8");
+    expect(retireStaleOAuthCreds(5000, file)).toBe(`${file}.bak`);
+    expect(existsSync(file)).toBe(false);
+    // The new archive replaced the old one — previous content was stale too.
+    expect(JSON.parse(readFileSync(`${file}.bak`, "utf8")).access_token).toBe("fresh-stale");
+  });
+
+  it("returns null for missing or unparseable files (no stall, no touch)", () => {
+    expect(retireStaleOAuthCreds(1000, path.join(tempDir, "missing-oauth.json"))).toBeNull();
+    const corrupt = path.join(tempDir, "corrupt-oauth.json");
+    writeFileSync(corrupt, "{not json", "utf8");
+    expect(retireStaleOAuthCreds(1000, corrupt)).toBeNull();
+    expect(existsSync(corrupt)).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -48,6 +49,28 @@ export interface AcpClientCallbacks {
 }
 
 const ACP_PROTOCOL_VERSION = 1;
+
+const execFileP = promisify(execFile);
+
+/**
+ * Kill the CLI's whole process tree. `child.kill()` only terminates the node
+ * root — MCP servers the CLI spawned survive as orphans, still holding the
+ * stdio pipes and contending with the NEXT CLI instance's MCP startup
+ * (port/file-lock conflicts there produce minute-scale stalls that only show
+ * up on profile switches, never on a cold first start).
+ */
+async function killTree(child: ChildProcess): Promise<void> {
+  if (child.pid === undefined) return;
+  if (process.platform === "win32") {
+    try {
+      await execFileP("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+      return;
+    } catch {
+      // Already exited (or taskkill unavailable) — fall through to kill().
+    }
+  }
+  child.kill();
+}
 
 export class AcpClient {
   private child: ChildProcess | null = null;
@@ -175,7 +198,7 @@ export class AcpClient {
     if (!child || child.exitCode !== null) return;
     this.failAllPending("Client disposed");
     const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    child.kill();
+    await killTree(child);
     const graceful = await Promise.race([exited.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), 3000))]);
     if (!graceful && child.exitCode === null) child.kill("SIGKILL");
     await exited;

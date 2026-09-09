@@ -213,3 +213,56 @@ export function buildAcpCommand(entryJs: string): IflowCommand {
   // SSE stream and emits `agent_message_chunk` per delta.
   return { command: process.execPath, args: [path.resolve(entryJs), "--experimental-acp", "--stream"] };
 }
+
+let cachedNode: string | null = null;
+let nodeProbeInFlight: Promise<string | null> | null = null;
+
+const MIN_NODE_MAJOR = 20;
+
+/**
+ * Locate a real Node executable for spawning the CLI.
+ *
+ * `process.execPath` inside the extension host is the Electron binary
+ * (Code.exe) — it can run the CLI, but boots the whole Chromium runtime
+ * first (probed on CLI 0.5.19: initialize ~13s under Code.exe vs ~6s under
+ * plain node on the same machine). PATH `node` wins when it exists and
+ * passes a one-time version check (>= 20, matching the repo's node20
+ * target); null means "no usable standalone node" and the caller falls
+ * back to process.execPath. Cached + de-duplicated like locateIflowEntry.
+ */
+export async function locateNodeExecutable(): Promise<string | null> {
+  if (nodeProbeInFlight) return nodeProbeInFlight;
+  nodeProbeInFlight = (async () => {
+    if (cachedNode && existsSync(cachedNode)) return cachedNode;
+    try {
+      const out =
+        process.platform === "win32"
+          ? (await execFileP("where.exe", ["node"], { windowsHide: true })).stdout
+          : (await execFileP("which", ["node"])).stdout;
+      for (const line of out.split(/\r?\n/).map((l: string) => l.trim())) {
+        if (!line || !existsSync(line)) continue;
+        if (await nodeMajorAtLeast(line, MIN_NODE_MAJOR)) {
+          cachedNode = line;
+          return cachedNode;
+        }
+      }
+    } catch {
+      // where/which unavailable or node not on PATH
+    }
+    return null;
+  })().finally(() => {
+    nodeProbeInFlight = null;
+  });
+  return nodeProbeInFlight;
+}
+
+/** `node --version` → major >= min? A one-time ~100ms probe per candidate. */
+async function nodeMajorAtLeast(nodePath: string, min: number): Promise<boolean> {
+  try {
+    const version = (await execFileP(nodePath, ["--version"], { windowsHide: true, timeout: 5_000 })).stdout.trim();
+    const major = Number.parseInt(/^v(\d+)\./.exec(version)?.[1] ?? "", 10);
+    return Number.isFinite(major) && major >= min;
+  } catch {
+    return false;
+  }
+}
