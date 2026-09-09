@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Brain,
   Check,
@@ -48,6 +48,27 @@ const KIND_ICON: Record<string, typeof Eye> = {
   other: Wrench,
 };
 
+/**
+ * Animated collapsible body: keeps children mounted and animates height via
+ * the CSS grid-rows 0fr→1fr trick (no JS measurement, smooth both ways).
+ */
+function Collapse({ open, children }: { open: boolean; children: ReactNode }) {
+  return (
+    <div className="collapse-wrap" data-open={open}>
+      <div className="collapse-inner">{children}</div>
+    </div>
+  );
+}
+
+/** Chevron that rotates with the collapse state. */
+function Caret({ open, className = "size-3" }: { open: boolean; className?: string }) {
+  return (
+    <ChevronDown
+      className={`${className} shrink-0 transition-transform duration-300 ${open ? "" : "-rotate-90"}`}
+    />
+  );
+}
+
 function StatusChip({ status }: { status: ToolBlock["status"] }) {
   // W2: the localized chip text is rebuilt only when the status changes.
   const chip = useMemo(() => {
@@ -81,16 +102,14 @@ function OutputDetails({ output }: { output: string }) {
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
       >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <Caret open={open} />
         {t("操作输出")}
       </button>
-      {open && (
-        // max-h: tool output can run thousands of lines — an uncapped pre
-        // made the card height unbounded (matches CompressionCard's cap).
+      <Collapse open={open}>
         <pre className="max-h-64 overflow-auto border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
           {output}
         </pre>
-      )}
+      </Collapse>
     </>
   );
 }
@@ -279,37 +298,62 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             onClick={() => setOpen((v) => !v)}
             className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
           >
-            {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            <Caret open={open} />
             {t("子智能体日志")}
           </button>
-          {open && (
+          <Collapse open={open}>
             <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
               {log}
             </pre>
-          )}
+          </Collapse>
         </>
       )}
     </div>
   );
 }
 
-function ThoughtCard({ block }: { block: ThoughtBlock }) {
-  const [open, setOpen] = useState(false);
+function ThoughtCard({
+  block,
+  isLatest,
+  turnActive,
+}: {
+  block: ThoughtBlock;
+  /** True while this thought is the transcript tail (still streaming). */
+  isLatest: boolean;
+  /** True while the turn is generating (status=streaming, no replay/init). */
+  turnActive: boolean;
+}) {
+  // Default OPEN: the live reasoning is the interesting part of a turn.
+  const [open, setOpen] = useState(true);
+  // User override wins: once they toggle manually, stop auto-collapsing.
+  const userTouched = useRef(false);
+  // Auto-collapse shortly after the thought is done — i.e. when it stops
+  // being the transcript tail (the next block started) or the turn ended.
+  // The delay lets the user finish skimming before the card folds itself.
+  const done = !isLatest || !turnActive;
+  useEffect(() => {
+    if (!done || userTouched.current) return;
+    const timer = setTimeout(() => setOpen(false), 1600);
+    return () => clearTimeout(timer);
+  }, [done]);
   return (
-    <div className="stream-in rounded-lg border border-border/70 bg-panel/60">
+    <div className="stream-in overflow-hidden rounded-lg border border-border/70 bg-panel/60">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          userTouched.current = true;
+          setOpen((v) => !v);
+        }}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
       >
-        {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+        <Caret open={open} className="size-3.5" />
         <Brain className="size-3.5 text-primary" />
         {t("思考过程")}
       </button>
-      {open && (
+      <Collapse open={open}>
         <div className="border-t border-border/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
           <Markdown text={block.text} />
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }
@@ -388,21 +432,17 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
           hasSummary ? "text-muted-foreground hover:text-foreground" : "text-muted-foreground"
         }`}
       >
-        {hasSummary ? (
-          open ? <ChevronDown className="size-3 shrink-0" /> : <ChevronRight className="size-3 shrink-0" />
-        ) : (
-          <CircleDot className="size-3 shrink-0" />
-        )}
+        {hasSummary ? <Caret open={open} /> : <CircleDot className="size-3 shrink-0" />}
         <span className="min-w-0 truncate">{block.notice}</span>
         {hasSummary && <Chip tone="muted">{t("上下文摘要")}</Chip>}
       </button>
-      {open && block.summary && (
+      <Collapse open={open && hasSummary}>
         <div className="border-t border-border/60 px-3 py-2">
           <div className="max-h-64 overflow-y-auto text-[12px] leading-relaxed text-muted-foreground">
-            <Markdown text={block.summary} />
+            {block.summary !== null && <Markdown text={block.summary} />}
           </div>
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }
@@ -412,8 +452,19 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
  * the block reference. With P-1 block patches the unchanged prefix keeps its
  * references (`applyBlockPatch` reuses `blocks.slice(0, tailStart)`), so
  * streaming re-renders only the re-sent tail instead of the whole list.
+ * `isLatest`/`turnActive` feed ThoughtCard's auto-collapse; identity-only
+ * changes re-render thought cards cheaply (no markdown work when text is
+ * unchanged — Markdown memoizes on its `text` prop).
  */
-const BlockView = memo(function BlockView({ block }: { block: Block }) {
+const BlockView = memo(function BlockView({
+  block,
+  isLatest,
+  turnActive,
+}: {
+  block: Block;
+  isLatest: boolean;
+  turnActive: boolean;
+}) {
   switch (block.kind) {
     case "user":
       return <UserMessage block={block} />;
@@ -424,7 +475,7 @@ const BlockView = memo(function BlockView({ block }: { block: Block }) {
         </div>
       );
     case "thought":
-      return <ThoughtCard block={block} />;
+      return <ThoughtCard block={block} isLatest={isLatest} turnActive={turnActive} />;
     case "tool":
       return <ToolCard block={block} />;
     case "subagent":
@@ -500,6 +551,8 @@ function MessageListInner({ state }: { state: SessionState }) {
     setShowJump(!nearBottom);
   }
 
+  const turnActive =
+    state.status === "streaming" && !state.replaying && !state.initializing;
   return (
     <div className="relative min-h-0 flex-1">
       <div className="message-scroll h-full overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
@@ -510,7 +563,12 @@ function MessageListInner({ state }: { state: SessionState }) {
             </div>
           )}
           {state.blocks.map((block, i) => (
-            <BlockView key={block.id ?? `idx-${i}`} block={block} />
+            <BlockView
+              key={block.id ?? `idx-${i}`}
+              block={block}
+              isLatest={i === state.blocks.length - 1}
+              turnActive={turnActive}
+            />
           ))}
           {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
             // Sticky to the bottom of the scroll viewport so the indicator stays

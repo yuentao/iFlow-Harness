@@ -268,6 +268,31 @@
   }
 }
 
+/* --- collapsible card bodies (Collapse component, MessageList) ------------- */
+/* grid-rows 0fr→1fr trick: animates to unknown content height without JS
+   measurement. Children stay mounted (smooth both directions) and hidden
+   from view via the inner overflow clip. */
+.collapse-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.collapse-wrap[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.collapse-wrap[data-open="true"] .collapse-inner {
+  opacity: 1;
+}
+
 /* --- markdown (.md) --- */
 
 .md {
@@ -422,6 +447,10 @@
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+  /* Keep the collapse END state intact (grid-rows must still apply). */
+  .collapse-wrap {
+    transition: none;
   }
 }
 
