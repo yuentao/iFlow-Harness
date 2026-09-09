@@ -426,6 +426,9 @@ const BlockView = memo(function BlockView({ block }: { block: Block }) {
 
 function MessageListInner({ state }: { state: SessionState }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Everything inside the scroller (blocks + streaming indicator) lives in
+  // this wrapper so a ResizeObserver on it sees EVERY content-height change.
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   // Scroll events fire asynchronously after a scrollTop assignment: by the
   // time the handler runs, streaming DOM updates may already have grown
@@ -446,11 +449,21 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   const [showJump, setShowJump] = useState(false);
 
-  // Re-render trigger: last block identity + text length.
-  const last = state.blocks[state.blocks.length - 1];
+  // Follow-scroll trigger: a ResizeObserver on the content wrapper catches
+  // EVERY growth path — streamed text, tool-card status/output flips,
+  // SubAgent entry updates, plan changes, async image loads. The previous
+  // block-shape deps (length/kind/last-text-length) missed all of those, so
+  // the transcript stopped following the moment a tool card updated.
   useEffect(() => {
-    if (stickToBottom.current) scrollToBottom();
-  }, [state.blocks.length, last?.kind, (last && "text" in last ? last.text.length : 0)]);
+    const el = contentRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (stickToBottom.current) scrollToBottom();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
+  }, []);
 
   // Session switch / history restore: jump to the end of the recovered
   // transcript and re-enable stick-to-bottom (the user may have been
@@ -477,25 +490,27 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div className="message-scroll h-full space-y-3 overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
-        {state.blocks.length === 0 && !state.replaying && (
-          <div className="mt-10 text-center text-[12px] text-muted-foreground">
-            {t("向 iFlow 发送第一条消息开始")}
-          </div>
-        )}
-        {state.blocks.map((block, i) => (
-          <BlockView key={block.id ?? `idx-${i}`} block={block} />
-        ))}
-        {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
-          // Sticky to the bottom of the scroll viewport so the indicator stays
-          // visible even while new content streams in above it.
-          <div className="sticky bottom-1 z-10 flex justify-center">
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md">
-              <Loader2 className="size-3 animate-spin" />
-              {state.initializing ? t("正在创建新会话…") : t("正在生成")}
+      <div className="message-scroll h-full overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
+        <div ref={contentRef} className="space-y-3">
+          {state.blocks.length === 0 && !state.replaying && (
+            <div className="mt-10 text-center text-[12px] text-muted-foreground">
+              {t("向 iFlow 发送第一条消息开始")}
             </div>
-          </div>
-        )}
+          )}
+          {state.blocks.map((block, i) => (
+            <BlockView key={block.id ?? `idx-${i}`} block={block} />
+          ))}
+          {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
+            // Sticky to the bottom of the scroll viewport so the indicator stays
+            // visible even while new content streams in above it.
+            <div className="sticky bottom-1 z-10 flex justify-center">
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md">
+                <Loader2 className="size-3 animate-spin" />
+                {state.initializing ? t("正在创建新会话…") : t("正在生成")}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
       {showJump && (
         <button
