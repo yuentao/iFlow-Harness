@@ -174,12 +174,118 @@ function findActiveSubAgent(blocks: Block[]): SubAgentBlock | undefined {
   return undefined;
 }
 
+// --- compression history-item leak sanitizer (slash /compress) ---------------
+
+/**
+ * Wire behavior (probed, CLI 0.5.19 bundle): the ACP adapter bridges the
+ * interactive UI's `addItem` as `agent_message_chunk` text, but items without
+ * a `text` field are emitted as `JSON.stringify(item)` — the `/compress`
+ * command (altNames summarize/compact) pushes exactly such an item:
+ * `{"type":"compression","compression":{"isPending":false,
+ * "originalTokenCount":98134,"newTokenCount":7855,"summary":"…"}}`. The raw
+ * JSON renders as garbage in the transcript, so it is detected and replaced
+ * with a readable notice; the carried-over conversation summary (the
+ * `summary` field) is preserved as markdown text. A JSON blob torn across
+ * chunks cannot be parsed and is left verbatim — the live CLI emits the blob
+ * in a single chunk.
+ */
+interface CompressionHistoryItem {
+  type?: unknown;
+  compression?: {
+    isPending?: unknown;
+    originalTokenCount?: unknown;
+    newTokenCount?: unknown;
+    summary?: unknown;
+  };
+}
+
+/** Scan the balanced JSON object starting at `start`, then shape-check it.
+ * Returns null for torn JSON (no balanced end in this chunk) or a foreign
+ * payload — callers keep the text verbatim in that case. */
+function parseCompressionItem(text: string, start: number): { end: number; item: CompressionHistoryItem } | null {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (ch === "\\") i++; // skip the escaped char inside the string
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        let item: CompressionHistoryItem;
+        try {
+          item = JSON.parse(text.slice(start, i + 1)) as CompressionHistoryItem;
+        } catch {
+          return null;
+        }
+        const c = item.compression;
+        if (
+          item.type === "compression" &&
+          c !== null && typeof c === "object" &&
+          typeof c.isPending === "boolean" &&
+          (c.originalTokenCount === null || typeof c.originalTokenCount === "number") &&
+          (c.newTokenCount === null || typeof c.newTokenCount === "number") &&
+          (c.summary === undefined || typeof c.summary === "string")
+        ) {
+          return { end: i + 1, item };
+        }
+        return null;
+      }
+    }
+  }
+  return null; // torn JSON
+}
+
+function formatCompressionNotice(item: CompressionHistoryItem): string {
+  const c = item.compression!;
+  if (c.isPending) return l10n.t("正在压缩上下文…");
+  const line = l10n.t(
+    "上下文已压缩：{0} → {1} tokens",
+    String(c.originalTokenCount ?? "?"),
+    String(c.newTokenCount ?? "?"),
+  );
+  const summary = typeof c.summary === "string" ? c.summary.trim() : "";
+  return summary ? `${line}\n\n${summary}` : line;
+}
+
+/**
+ * Replace every complete `{"type":"compression",…}` blob in one streaming
+ * text chunk with a readable notice. `prevText` is the text already in the
+ * block (chunks stream in separately — the localized "正在压缩…" info line is
+ * its own item) so a notice starting a chunk still lands on a fresh line.
+ */
+export function sanitizeCompressionLeak(text: string, prevText = ""): string {
+  const MARKER = '{"type":"compression"';
+  let out = "";
+  let rest = text;
+  for (;;) {
+    const idx = rest.indexOf(MARKER);
+    if (idx < 0) return out + rest;
+    const parsed = parseCompressionItem(rest, idx);
+    if (!parsed) return out + rest; // torn or foreign — keep verbatim
+    let notice = formatCompressionNotice(parsed.item);
+    const needsBreak = idx === 0 ? prevText !== "" && !prevText.endsWith("\n") : rest[idx - 1] !== "\n";
+    if (needsBreak) notice = "\n" + notice;
+    out += rest.slice(0, idx) + notice;
+    rest = rest.slice(parsed.end);
+  }
+}
+
 /** Apply one session update to a block list (top-level transcript or a
  * SubAgent's entries). Mutates the list. */
 function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
   switch (update.sessionUpdate) {
     case "agent_message_chunk":
-      if (update.content.type === "text") appendTextToLast(blocks, "text", update.content.text);
+      if (update.content.type === "text") {
+        const last = lastBlock(blocks);
+        const prev = last && last.kind === "text" ? last.text : "";
+        appendTextToLast(blocks, "text", sanitizeCompressionLeak(update.content.text, prev));
+      }
       break;
     case "agent_thought_chunk":
       if (update.content.type === "text") appendTextToLast(blocks, "thought", update.content.text);

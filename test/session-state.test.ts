@@ -92,6 +92,47 @@ describe("SubAgent grouping (agentId)", () => {
   });
 });
 
+describe("compression history-item leak (slash /compress, CLI 0.5.19)", () => {
+  const blob = (pending: boolean) =>
+    JSON.stringify({
+      type: "compression",
+      compression: pending
+        ? { isPending: true, originalTokenCount: null, newTokenCount: null }
+        : { isPending: false, originalTokenCount: 98134, newTokenCount: 7855, summary: "\nThis session is being continued from a previous conversation.\n" },
+    });
+
+  it("replaces the leaked JSON blob with a readable notice and keeps the summary", () => {
+    const state: SessionState = initialSessionState();
+    // Live shape: the localized "正在压缩…" info line is its own chunk; the
+    // compression item (no `text` field on the wire) follows JSON.stringify'd.
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "正在压缩..." } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: blob(false) } }));
+    const text = state.blocks[0]!;
+    if (text.kind !== "text") throw new Error("expected text");
+    expect(text.text).toBe(
+      "正在压缩...\n上下文已压缩：98134 → 7855 tokens\n\nThis session is being continued from a previous conversation.",
+    );
+  });
+
+  it("collapses the pending compression item", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: blob(true) } }));
+    const text = state.blocks[0]!;
+    if (text.kind !== "text") throw new Error("expected text");
+    expect(text.text).toBe("正在压缩上下文…");
+  });
+
+  it("leaves torn JSON and unrelated objects verbatim", () => {
+    const state: SessionState = initialSessionState();
+    const torn = '{"type":"compression","compression":{"isPending":f';
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: torn } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: '{"type":"other","compression":{"a":1}}' } }));
+    const text = state.blocks[0]!;
+    if (text.kind !== "text") throw new Error("expected text");
+    expect(text.text).toBe(torn + '{"type":"other","compression":{"a":1}}');
+  });
+});
+
 describe("stable block ids (P4)", () => {
   it("assigns unique non-empty ids to every live block", () => {
     const state: SessionState = initialSessionState();

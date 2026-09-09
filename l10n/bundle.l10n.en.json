@@ -52,5 +52,7 @@
   "[已回退]": "[reverted]",
   "模型列表查询失败（不回退 CLI 内置目录）: {0}": "Model list query failed (never falling back to the CLI's built-in catalog): {0}",
   "添加附件": "Add attachments",
-  "用户附带以下本地文件（可按需读取）：": "The user attached these local files (read them as needed):"
+  "用户附带以下本地文件（可按需读取）：": "The user attached these local files (read them as needed):",
+  "正在压缩上下文…": "Compressing context…",
+  "上下文已压缩：{0} → {1} tokens": "Context compressed: {0} → {1} tokens"
 }
