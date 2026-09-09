@@ -83,7 +83,11 @@ export function AuthCard({
         if (e.target === e.currentTarget && !auth.needsSetup) onDismiss();
       }}
       onKeyDown={(e) => {
-        if (e.key === "Escape" && !auth.needsSetup) onDismiss();
+        if (e.key === "Escape" && !auth.needsSetup) {
+          // 拦下冒泡：生成进行中打开配置卡时，ESC 只关卡片不停生成。
+          e.stopPropagation();
+          onDismiss();
+        }
       }}
     >
       <div className="auth-modal">

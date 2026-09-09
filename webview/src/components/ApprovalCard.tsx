@@ -65,7 +65,12 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
       onKeyDown={(e) => {
         // W4: Escape means "cancel" — consistent with the card's dismissal
         // semantics (the host treats a missing answer as cancelled too).
-        if (e.key === "Escape") answer(null);
+        // 拦下冒泡：等待审批时 status 仍是 streaming，事件漏到 window 会
+        // 连带触发「ESC 停止生成」，一次按键双语义。
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          answer(null);
+        }
       }}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">

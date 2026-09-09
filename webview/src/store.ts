@@ -587,6 +587,23 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "cancel") {
+        // Mirror the real host: stop → idle with stopReason "cancelled".
+        demoBlocks.push({ kind: "text", text: "*（已停止生成，mock）*" });
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "cancelled",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        return;
+      }
       if (m.type === "sendPrompt") {
         sendPromptFlow(m.text);
       }

@@ -77,6 +77,21 @@ export function Composer() {
     return () => clearTimeout(timer);
   }, [mentionQuery]);
 
+  // ESC 停止生成（与停止按钮同语义）：仅在真实生成中生效（回放/初始化除外）。
+  // 弹窗内的 ESC（mention/斜杠补全在 textarea onKeyDown、Dropdown 在 document）
+  // 都会 stopPropagation，事件只有未被拦截时才到达这里的 window 监听。
+  const canStopForEsc = state?.status === "streaming" && !state?.replaying && !state?.initializing;
+  useEffect(() => {
+    if (!canStopForEsc) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      e.preventDefault();
+      useChat.getState().send({ type: "cancel" });
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [canStopForEsc]);
+
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data;
@@ -439,25 +454,34 @@ export function Composer() {
                 setText(`/${cmdMatches[cmdIndex]!.name} `);
                 return;
               }
+              // 斜杠弹窗打开时 ESC 只吞掉按键（弹窗由输入内容驱动，无独立
+              // 关闭态），阻止冒泡到 window 的「ESC 停止生成」。
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
             }
-            if (mentionQuery !== null && mentionHits.length > 0) {
-              if (e.key === "ArrowDown") {
+            if (mentionQuery !== null) {
+              if (e.key === "ArrowDown" && mentionHits.length > 0) {
                 e.preventDefault();
                 setMentionIndex((i) => Math.min(mentionHits.length - 1, i + 1));
                 return;
               }
-              if (e.key === "ArrowUp") {
+              if (e.key === "ArrowUp" && mentionHits.length > 0) {
                 e.preventDefault();
                 setMentionIndex((i) => Math.max(0, i - 1));
                 return;
               }
-              if (e.key === "Enter" || e.key === "Tab") {
+              if ((e.key === "Enter" || e.key === "Tab") && mentionHits.length > 0) {
                 e.preventDefault();
                 insertMention(mentionHits[mentionIndex]!.path);
                 return;
               }
-              if (e.key === "Escape") {
+              // 弹窗开着（含无匹配）时 ESC 只关闭弹窗，不触发停止生成。
+              if (e.key === "Escape" && !e.nativeEvent.isComposing) {
                 e.preventDefault();
+                e.stopPropagation();
                 setMentionQuery(null);
                 return;
               }
