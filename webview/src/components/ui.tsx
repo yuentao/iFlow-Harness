@@ -16,13 +16,15 @@ const CHIP_TONES: Record<string, string> = {
 export function Chip({
   children,
   tone = "muted",
+  className = "",
 }: {
   children: ReactNode;
   tone?: "muted" | "success" | "warning" | "danger" | "primary" | "info";
+  className?: string;
 }) {
   return (
     <span
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[10px] font-medium tracking-wide ${CHIP_TONES[tone]}`}
+      className={`chip-fade inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[10px] font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
     >
       {children}
     </span>

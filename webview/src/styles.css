@@ -293,6 +293,46 @@
   opacity: 1;
 }
 
+/* --- status-change transitions (tool / subagent cards) ---------------------- */
+/* Cards flip status mid-turn (pending→in_progress→completed/failed); the
+   whole card cross-fades its tone instead of snapping. Border color rides
+   the same transition since some cards tint it per-status. */
+.status-fade {
+  transition:
+    background-color 0.35s ease,
+    border-color 0.35s ease,
+    box-shadow 0.35s ease;
+}
+
+/* Chip appears on status flip: brief scale+fade so the eye catches what
+   changed even when the card is off-screen-bottom. */
+@keyframes chip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.chip-in {
+  animation: chip-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Per-status card tint: in_progress glows primary, failed glows destructive,
+   completed/pending stay neutral. Pairs with .status-fade transitions. */
+.status-in_progress {
+  border-color: color-mix(in oklab, var(--primary) 40%, var(--border));
+  background: color-mix(in oklab, var(--primary) 4%, var(--card));
+}
+
+.status-failed {
+  border-color: color-mix(in oklab, var(--destructive) 40%, var(--border));
+  background: color-mix(in oklab, var(--destructive) 5%, var(--card));
+}
+
 /* --- markdown (.md) --- */
 
 .md {

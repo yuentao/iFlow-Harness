@@ -71,31 +71,44 @@ function Caret({ open, className = "size-3" }: { open: boolean; className?: stri
 
 function StatusChip({ status }: { status: ToolBlock["status"] }) {
   // W2: the localized chip text is rebuilt only when the status changes.
+  // key=status replays the chip-in animation on every status flip, and the
+  // muted→tone crossfade reads as "this just happened".
   const chip = useMemo(() => {
     if (status === "completed")
       return (
-        <Chip tone="success">
+        <Chip tone="success" className="chip-in">
           <Check className="size-2.5" /> {t("已完成")}
         </Chip>
       );
     if (status === "failed")
       return (
-        <Chip tone="danger">
+        <Chip tone="danger" className="chip-in">
           <X className="size-2.5" /> {t("失败")}
         </Chip>
       );
     return (
-      <Chip tone="primary">
+      <Chip tone="primary" className="chip-in">
         <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}
       </Chip>
     );
   }, [status]);
-  return chip;
+  // key forces a remount on status flip → chip-in animation replays.
+  return <span key={status} className="inline-flex">{chip}</span>;
 }
 
 function OutputDetails({ output }: { output: string }) {
   const [open, setOpen] = useState(false);
   if (!output) return null;
+  // Fewer than 3 lines: show inline — a toggle around two short lines is
+  // chrome, not utility. The fold only pays off once content is tall.
+  const lineCount = output.trimEnd().split("\n").length;
+  if (lineCount < 3) {
+    return (
+      <pre className="border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+        {output}
+      </pre>
+    );
+  }
   return (
     <>
       <button
@@ -122,7 +135,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
   const completedWithDiff = block.status === "completed" && hasDiff && block.diff!.oldText !== null;
 
   return (
-    <div className={`stream-in overflow-hidden rounded-lg border border-border bg-card status-${block.status}`}>
+    <div className={`stream-in status-fade overflow-hidden rounded-lg border border-border bg-card status-${block.status}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <Icon className="size-3.5 shrink-0 text-primary" />
         {/* min-w-0 truncate: agent tool titles are uncapped on the wire
@@ -264,7 +277,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const accent = agentAccent(block.agentType);
 
   return (
-    <div className={`stream-in overflow-hidden rounded-lg border bg-card ${accent.border}`}>
+    <div className={`stream-in status-fade overflow-hidden rounded-lg border bg-card ${accent.border}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <Bot className={`size-3.5 shrink-0 ${accent.icon}`} />
         <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
