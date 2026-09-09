@@ -56,12 +56,17 @@ export function Dropdown({
   direction = "down",
   align = "left",
   menuClass = "",
+  /** Classes for the shell div — needed when a trigger uses flex-1/truncate:
+   * the wrapper is the flex item, so without min-w-0 it ignores the trigger's
+   * shrink chain and long content stretches the whole parent row. */
+  wrapperClass = "",
   children,
 }: {
   trigger: (open: boolean) => ReactNode;
   direction?: "down" | "up";
   align?: "left" | "right";
   menuClass?: string;
+  wrapperClass?: string;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -88,8 +93,13 @@ export function Dropdown({
   }, [open]);
 
   return (
-    <div className="relative" ref={ref}>
-      <div onClick={() => setOpen((v) => !v)}>{trigger(open)}</div>
+    <div className={`relative${wrapperClass ? ` ${wrapperClass}` : ""}`} ref={ref}>
+      {/* The click proxy must constrain its child the same way the wrapper
+          does: as a plain block it lets a long trigger label stretch the
+          button far beyond the wrapper width (flex-1 inside is inert). */}
+      <div className={wrapperClass.includes("flex-1") ? "flex min-w-0" : ""} onClick={() => setOpen((v) => !v)}>
+        {trigger(open)}
+      </div>
       {open && (
         <div
           className={`absolute z-30 overflow-hidden rounded-lg border border-border bg-popover panel-shadow ${

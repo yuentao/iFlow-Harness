@@ -189,11 +189,16 @@ export function App() {
             </Dropdown>
           </div>
         </div>
-        <div className="mt-2 flex items-center gap-1.5">
+        {/* min-w-0 on the row + Dropdown wrapper: the flex shrink chain must
+            reach the truncating label inside the trigger, or a long session
+            title stretches the whole header row (seen with prompt-derived
+            labels). */}
+        <div className="mt-2 flex min-w-0 items-center gap-1.5">
           {/* session switcher */}
           {state.sessions.length > 0 ? (
             <Dropdown
               menuClass="w-72 max-h-64 overflow-y-auto"
+              wrapperClass="min-w-0 flex-1"
               trigger={(open) => (
                 <button
                   className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-left text-[11px] hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${

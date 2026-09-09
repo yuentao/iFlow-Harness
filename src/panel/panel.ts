@@ -39,6 +39,7 @@ import type { PendingApprovalUi, CodeContextUi, SessionState, SessionSummaryUi, 
 import {
   backfillBlockIds,
   beginReplay,
+  clampSessionLabel,
   endReplay,
   newSessionState,
   parseTranscriptJsonl,
@@ -1220,9 +1221,11 @@ export class ChatPanel implements vscode.Disposable {
   private async recordSession(id: string, label: string | null): Promise<void> {
     if (!id) return;
     const existing = this.readPersistedSessions();
+    // clamp: legacy persisted entries may carry uncapped labels.
+    const capped = label ? clampSessionLabel(label) : null;
     const prior = existing.find((s) => s.id === id);
     const sessions = [
-      { id, label: label ?? prior?.label ?? DEFAULT_SESSION_LABEL, updatedAt: Date.now() },
+      { id, label: capped ?? prior?.label ?? DEFAULT_SESSION_LABEL, updatedAt: Date.now() },
       ...existing.filter((s) => s.id !== id),
     ];
     this.store.setSessions(sessions, id);
@@ -1330,7 +1333,7 @@ export class ChatPanel implements vscode.Disposable {
         await this.setModel(currentModelId);
       }
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
-      await this.recordSession(loadedId, restored.firstUserText);
+      await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
       void this.persistActiveTranscript(); // seed the extension-owned copy
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
@@ -2014,7 +2017,7 @@ export class ChatPanel implements vscode.Disposable {
     if (!id) return;
     const target = state.sessions.find((s) => s.id === id);
     if (!target || target.label !== DEFAULT_SESSION_LABEL) return;
-    const label = text.trim().slice(0, 60) || target.label;
+    const label = clampSessionLabel(text) || target.label;
     const sessions = state.sessions.map((s) => (s.id === id ? { ...s, label } : s));
     this.store.setSessions(sessions);
     await this.persistSessions(sessions, id);

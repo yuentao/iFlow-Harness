@@ -630,6 +630,20 @@ export function setMeta(
   if (meta.commands !== undefined) state.commands = meta.commands;
 }
 
+/**
+ * Session-switcher label cap. Labels derive from free-form user prompts (or
+ * transcript first-user-text), which can run hundreds of chars; without a
+ * cap they overflow the topbar switcher (CSS truncate only works when the
+ * layout constrains width) and bloat workspaceState. 48 chars ≈ the widest
+ * the trigger can show before ellipsis in practice.
+ */
+export const SESSION_LABEL_MAX = 48;
+
+/** Trim + hard-cap a label to SESSION_LABEL_MAX chars. */
+export function clampSessionLabel(text: string): string {
+  return text.trim().slice(0, SESSION_LABEL_MAX);
+}
+
 export function newSessionState(state: SessionState): SessionState {
   const fresh = initialSessionState();
   // The connection survives a transcript reset — only markConnected/markError
