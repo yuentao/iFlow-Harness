@@ -604,6 +604,15 @@ export function completePrompt(state: SessionState, stopReason: StopReason): voi
   state.status = "idle";
 }
 
+/**
+ * Host-issued transcript notice: not an agent message — appended directly so
+ * the user sees why the turn "restarted" (auto-compress retry after a
+ * context-overflow failure; see panel.ts `sendPrompt` for the trigger).
+ */
+export function appendHostNotice(state: SessionState, text: string): void {
+  state.blocks.push({ kind: "text", text, id: nextBlockId() });
+}
+
 export function setMeta(
   state: SessionState,
   meta: {

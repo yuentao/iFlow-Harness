@@ -13,6 +13,7 @@ import type {
 import { initialSessionState } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
+  appendHostNotice,
   applySessionUpdate,
   beginUserPrompt,
   completePrompt,
@@ -228,6 +229,14 @@ export class SessionStore {
 
   promptCompleted(stopReason: StopReason): void {
     completePrompt(this.state, stopReason);
+    this.flush();
+  }
+
+  /** Append a host-generated transcript notice (context-overflow retry). */
+  appendNotice(text: string): void {
+    const before = this.captureTail();
+    appendHostNotice(this.state, text);
+    this.noteMutation(before, this.captureTail());
     this.flush();
   }
 

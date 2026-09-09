@@ -10,7 +10,7 @@ import { inspect } from "node:util";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
-import { errorMessage } from "../acp/jsonrpc.js";
+import { errorMessage, isContextOverflowError } from "../acp/jsonrpc.js";
 import { buildAcpCommand, locateIflowEntry } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
@@ -31,6 +31,7 @@ import type {
   ContentBlock,
   NewSessionMeta,
   PermissionOption,
+  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "../acp/protocol.js";
@@ -1874,7 +1875,7 @@ export class ChatPanel implements vscode.Disposable {
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
-      const result = await client.prompt({ sessionId, prompt });
+      const result = await this.promptWithOverflowRetry(client, sessionId, prompt);
       this.store.promptCompleted(result.stopReason);
       void this.persistActiveTranscript();
     } catch (error) {
@@ -1886,6 +1887,59 @@ export class ChatPanel implements vscode.Disposable {
       // remain diagnosable from the Output panel.
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
+    }
+  }
+
+  /**
+   * Prompt with one reactive auto-compress retry on context-overflow errors.
+   *
+   * Why this exists — Wire behavior (probed, CLI 0.5.19 bundle):
+   * - The interactive CLI retries a turn after the gateway rejects it with
+   *   "Content length exceed LLM Limit": `RY.run`'s catch calls
+   *   `tryCompressChat(promptId, true, true)` (forced full compression) and
+   *   loops once.
+   * - The ACP adapter (`v2t.prompt`) has NO such catch: its turn loop
+   *   rethrows non-429 errors, so an over-long session surfaces here as a
+   *   rejected `session/prompt` and the UI just errors out.
+   * - The adapter's per-turn `tryCompressChat` gate can also mis-gate: in
+   *   openai-compatible mode `countTokens` is a chars/4 estimate over
+   *   request text (or the last response's usage), so the 0.6/0.8 ratio
+   *   thresholds against `tokensLimit` may never be reached before the real
+   *   gateway limit trips.
+   *
+   * Recovery: detect the overflow → drive the `/compress` slash command
+   * (`handleAcpSlashCommand` bridges it to the forced full compression,
+   * bypassing the ratio gate; its result leaks as a compression JSON chunk
+   * that the transcript sanitizer renders as a card) → resend the original
+   * prompt once. Bounded: at most one compress+retry, so a prompt that is
+   * *itself* too large for the compressed window fails through to the
+   * normal error path.
+   */
+  private async promptWithOverflowRetry(
+    client: AcpClient,
+    sessionId: string,
+    prompt: ContentBlock[],
+  ): Promise<PromptResponse> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await client.prompt({ sessionId, prompt });
+      } catch (error) {
+        if (attempt >= 1 || !isContextOverflowError(error)) throw error;
+        this.log.warn(
+          `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
+        );
+        this.store.appendNotice(
+          vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
+        );
+        const compressed = await client.prompt({
+          sessionId,
+          prompt: [{ type: "text", text: "/compress" }],
+        });
+        // User hit Stop while the compress turn ran: do not resurrect the
+        // prompt behind their back — surface the cancellation as the final
+        // stopReason instead.
+        if (compressed.stopReason === "cancelled") return compressed;
+      }
     }
   }
 
