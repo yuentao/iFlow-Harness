@@ -148,6 +148,44 @@ export function isContextOverflowError(error: unknown): boolean {
 }
 
 /**
+ * Whether a thrown prompt failure looks like a platform/gateway rate limit.
+ *
+ * Wire behavior (probed, CLI 0.5.19): the CLI converts gateway 429s into a
+ * JSON-RPC rejection whose message + data.details carry the provider text,
+ * e.g. "Internal Error: 生成内容流失败：当前模型已达到平台速率限制，系统将重试请求，
+ * 如果频繁报错请切换其他模型使用 · {"details":"…速率限制…"}" — errorMessage()
+ * renders message and data together, so one regex covers both.
+ * Kept broad but bounded (English + common Chinese gateway phrasings + HTTP
+ * 429); a false positive costs one bounded 5s-delayed retry, a false
+ * negative leaves the turn dead on the error banner.
+ */
+const RATE_LIMIT_RE = new RegExp(
+  [
+    "rate[_\\s-]?limit", // rate limit / rate_limit / ratelimit
+    "\\b429\\b", // HTTP 429 in message text
+    "status:?\\s*429", // transport-level phrasing
+    "too\\s+many\\s+requests",
+    "quota\\s+(exceeded|exhausted|has\\s+been\\s+exhausted)",
+    "限流",
+    "速率限制",
+    "请求过于频繁",
+    "请求太快",
+    "稍后再?试",
+    "稍后重试",
+  ].join("|"),
+  "i",
+);
+
+/**
+ * Whether a thrown prompt failure looks like a rate-limit rejection (see
+ * RATE_LIMIT_RE). Pure text heuristic over `errorMessage`, so JSON-RPC
+ * rejection envelopes (message + data.details) are covered too.
+ */
+export function isRateLimitError(error: unknown): boolean {
+  return RATE_LIMIT_RE.test(errorMessage(error));
+}
+
+/**
  * Incremental NDJSON parser: accepts arbitrary chunk boundaries, emits one
  * parsed JSON value per non-empty line.
  *

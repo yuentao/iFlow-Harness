@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError } from "../src/acp/jsonrpc.js";
+import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError, isRateLimitError } from "../src/acp/jsonrpc.js";
 
 describe("errorMessage", () => {
   it("prefers Error.message", () => {
@@ -94,6 +94,36 @@ describe("isContextOverflowError", () => {
     expect(isContextOverflowError(new Error("Invalid API key provided"))).toBe(false);
     expect(isContextOverflowError({ code: -32602, message: "Session not found: s1" })).toBe(false);
     expect(isContextOverflowError("connection closed")).toBe(false);
+  });
+});
+
+describe("isRateLimitError", () => {
+  it("matches the observed gateway rate-limit message in both wire shapes", () => {
+    // Wire behavior (probed, CLI 0.5.19 + api.buzzgw.com): the gateway's
+    // mid-stream rejection surfaces as JSON-RPC InternalError (-32603) whose
+    // message and data.details carry the provider text; errorMessage()
+    // concatenates both, so either alone must match.
+    const details = "生成内容流失败：当前模型已达到平台速率限制，系统将重试请求，如果频繁报错请切换其他模型使用";
+    expect(isRateLimitError({ code: -32603, message: `Internal Error: ${details}` })).toBe(true);
+    expect(
+      isRateLimitError({ code: -32603, message: `Internal Error: ${details}`, data: { details } }),
+    ).toBe(true);
+    expect(isRateLimitError(new Error(details))).toBe(true);
+  });
+
+  it("matches English and transport-level phrasings", () => {
+    expect(isRateLimitError(new Error("Rate limit exceeded. Try again later."))).toBe(true);
+    expect(isRateLimitError(new Error("HTTP 429 Too Many Requests"))).toBe(true);
+    expect(isRateLimitError(new Error("Request failed with status: 429"))).toBe(true);
+    expect(isRateLimitError(new Error("quota exhausted for this project"))).toBe(true);
+    expect(isRateLimitError(new Error("触发限流，请稍后再试"))).toBe(true);
+  });
+
+  it("does not match unrelated failures (overflow, auth, transport)", () => {
+    expect(isRateLimitError(new Error("Content length exceed LLM Limit. TraceID: abc123"))).toBe(false);
+    expect(isRateLimitError(new Error("Invalid API key provided"))).toBe(false);
+    expect(isRateLimitError({ code: -32602, message: "Session not found: s1" })).toBe(false);
+    expect(isRateLimitError("connection closed")).toBe(false);
   });
 });
 

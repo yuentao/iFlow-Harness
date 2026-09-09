@@ -10,7 +10,7 @@ import { inspect } from "node:util";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
-import { errorMessage, isContextOverflowError } from "../acp/jsonrpc.js";
+import { errorMessage, isContextOverflowError, isRateLimitError } from "../acp/jsonrpc.js";
 import { buildAcpCommand, locateIflowEntry, locateNodeExecutable } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
@@ -57,6 +57,8 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const CHAT_FORWARD_TIMEOUT_MS = 10 * 60_000;
 /** R3: stderr lines kept for crash/hang diagnostics. */
 const STDERR_TAIL_LINES = 200;
+/** Delay before the one-shot automatic retry of a rate-limited prompt. */
+const RATE_LIMIT_RETRY_DELAY_MS = 5_000;
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -73,6 +75,22 @@ const IMAGE_MIME_BY_EXT = new Map<string, string>([
   [".bmp", "image/bmp"],
   [".svg", "image/svg+xml"],
 ]);
+
+/** Reusable abortable delay: resolves after `ms`, or early once
+ * `shouldAbort()` returns true (polled every 100ms — plenty for a 5s wait). */
+function abortableDelay(ms: number, shouldAbort: () => boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const tick = 100;
+    let waited = 0;
+    const timer = setInterval(() => {
+      waited += tick;
+      if (shouldAbort() || waited >= ms) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, tick);
+  });
+}
 
 /** workspaceState key: recent sessions for this workspace (M4). */
 const SESSIONS_KEY = "iflow.recentSessions";
@@ -134,6 +152,12 @@ export class ChatPanel implements vscode.Disposable {
   private fileSearchInFlight: Promise<string[]> | null = null;
   /** R3: last N stderr lines from the CLI (diagnostics for crashes/hangs). */
   private readonly stderrTail: string[] = [];
+  /**
+   * Set by any user-facing cancel while a prompt turn is in flight, reset at
+   * the next sendPrompt. The auto-retry paths consult it so a Stop pressed
+   * during a retry wait never resurrects the prompt behind the user's back.
+   */
+  private cancelSeen = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -332,6 +356,7 @@ export class ChatPanel implements vscode.Disposable {
           // panel; cancel here does (the user asked for it).
           if (!cancelSent) {
             cancelSent = true;
+            this.cancelSeen = true;
             const sessionId = this.store.getState().sessionId;
             if (sessionId) this.client?.cancel(sessionId);
           }
@@ -466,6 +491,7 @@ export class ChatPanel implements vscode.Disposable {
         await this.sendPrompt(msg.text, msg.images, msg.files, msg.codeContext);
         break;
       case "cancel":
+        this.cancelSeen = true;
         this.client?.cancel(this.store.getState().sessionId ?? "");
         break;
       case "newSession":
@@ -1948,6 +1974,7 @@ export class ChatPanel implements vscode.Disposable {
       );
       return;
     }
+    this.cancelSeen = false;
     try {
       const client = await this.ensureClient();
       const sessionId = this.store.getState().sessionId;
@@ -1963,7 +1990,7 @@ export class ChatPanel implements vscode.Disposable {
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
-      const result = await this.promptWithOverflowRetry(client, sessionId, prompt);
+      const result = await this.promptWithRetry(client, sessionId, prompt);
       this.store.promptCompleted(result.stopReason);
       // Sound cue: completion chime, but a user stop/cancel stays silent.
       if (result.stopReason !== "cancelled") this.postSound("done");
@@ -1982,7 +2009,8 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Prompt with one reactive auto-compress retry on context-overflow errors.
+   * Prompt with one reactive auto-retry per failure class (bounded at ONE
+   * total retry, whichever class consumes it).
    *
    * Why this exists — Wire behavior (probed, CLI 0.5.19 bundle):
    * - The interactive CLI retries a turn after the gateway rejects it with
@@ -1997,16 +2025,25 @@ export class ChatPanel implements vscode.Disposable {
    *   request text (or the last response's usage), so the 0.6/0.8 ratio
    *   thresholds against `tokensLimit` may never be reached before the real
    *   gateway limit trips.
+   * - Gateway rate limits (provider 429 / 平台速率限制 phrasing) surface the
+   *   same way as a rejected `session/prompt` — the CLI's own retry loop
+   *   only covers a subset of shapes, and a dead turn must be manually
+   *   re-sent otherwise.
    *
-   * Recovery: detect the overflow → drive the `/compress` slash command
-   * (`handleAcpSlashCommand` bridges it to the forced full compression,
-   * bypassing the ratio gate; its result leaks as a compression JSON chunk
-   * that the transcript sanitizer renders as a card) → resend the original
-   * prompt once. Bounded: at most one compress+retry, so a prompt that is
-   * *itself* too large for the compressed window fails through to the
-   * normal error path.
+   * Recovery:
+   * - context overflow → drive the `/compress` slash command
+   *   (`handleAcpSlashCommand` bridges it to the forced full compression,
+   *   bypassing the ratio gate; its result leaks as a compression JSON chunk
+   *   that the transcript sanitizer renders as a card) → resend the original
+   *   prompt once.
+   * - rate limit → notify the user, wait 5s, resend the original prompt
+   *   once. A Stop pressed during the wait aborts the retry (the retry loop
+   *   re-checks `cancelSeen`; the sendPrompt catch still shows the rate-
+   *   limit error banner).
+   * Both paths are bounded: at most one retry, so a prompt that fails the
+   * same way twice falls through to the normal error path.
    */
-  private async promptWithOverflowRetry(
+  private async promptWithRetry(
     client: AcpClient,
     sessionId: string,
     prompt: ContentBlock[],
@@ -2015,21 +2052,36 @@ export class ChatPanel implements vscode.Disposable {
       try {
         return await client.prompt({ sessionId, prompt });
       } catch (error) {
-        if (attempt >= 1 || !isContextOverflowError(error)) throw error;
-        this.log.warn(
-          `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
-        );
-        this.store.appendNotice(
-          vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
-        );
-        const compressed = await client.prompt({
-          sessionId,
-          prompt: [{ type: "text", text: "/compress" }],
-        });
-        // User hit Stop while the compress turn ran: do not resurrect the
-        // prompt behind their back — surface the cancellation as the final
-        // stopReason instead.
-        if (compressed.stopReason === "cancelled") return compressed;
+        if (attempt >= 1) throw error;
+        if (isContextOverflowError(error)) {
+          this.log.warn(
+            `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
+          );
+          this.store.appendNotice(
+            vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
+          );
+          const compressed = await client.prompt({
+            sessionId,
+            prompt: [{ type: "text", text: "/compress" }],
+          });
+          // User hit Stop while the compress turn ran: do not resurrect the
+          // prompt behind their back — surface the cancellation as the final
+          // stopReason instead.
+          if (compressed.stopReason === "cancelled") return compressed;
+          continue;
+        }
+        if (isRateLimitError(error)) {
+          this.log.warn(
+            `rate limit on session ${sessionId}, auto-retrying in ${RATE_LIMIT_RETRY_DELAY_MS / 1000}s: ${this.formatErrorForLog(error)}`,
+          );
+          this.store.appendNotice(
+            vscode.l10n.t("模型触发平台速率限制，{0} 秒后自动重试一次…", Math.round(RATE_LIMIT_RETRY_DELAY_MS / 1000)),
+          );
+          await abortableDelay(RATE_LIMIT_RETRY_DELAY_MS, () => this.cancelSeen);
+          if (this.cancelSeen) throw error; // user pressed Stop during the wait
+          continue;
+        }
+        throw error;
       }
     }
   }
