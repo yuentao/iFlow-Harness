@@ -104,6 +104,50 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
+ * Signatures of gateway/provider context-overflow failures, matched against
+ * `errorMessage()` output. Kept broad but bounded: the worst case of a false
+ * positive is one wasted /compress round-trip (the caller retries at most
+ * once), while a false negative leaves a dead session stuck on the error.
+ *
+ * Wire behavior (probed, CLI 0.5.19 bundle):
+ * - iFlow's openai-compatible adapter throws the literal i18n message
+ *   "Content length exceed LLM Limit. TraceID: …" for HTTP 511 and for
+ *   response `error_code` 511/413.
+ * - Its pre-flight guidance message is "Your input has exceeded the model's
+ *   context length. …" (contextWindowExceeded).
+ * - Third-party gateways phrase overflow their own way: OpenAI-style
+ *   "maximum context length" / `context_length_exceeded`, Anthropic-style
+ *   "prompt is too long", HTTP 413, or Chinese equivalents (上下文超出/超限).
+ * Deliberately excluded: rate-limit phrasing ("rate limit", HTTP 429 — the
+ * CLI converts those to a JSON-RPC 429 error with a distinct message).
+ */
+const CONTEXT_OVERFLOW_RE = new RegExp(
+  [
+    "content\\s+length\\s+exceed", // iFlow openai adapter
+    "exceeds?\\s+llm\\s+limit", // same message, other word orders
+    "exceeded\\s+the\\s+model'?s?\\s+context\\s+length", // CLI contextWindowExceeded
+    "maximum\\s+context\\s+length", // OpenAI
+    "context[_\\s-]?(length|window|limit)[_\\s-]?(is\\s+)?(exceeded?|too\\s+long|is\\s+full|overflow)",
+    "prompt\\s+is\\s+too\\s+long", // Anthropic-style
+    "input\\s+(is\\s+)?too\\s+long",
+    "too\\s+many\\s+(input\\s+)?tokens",
+    "status:\\s*413", // transport-level body-size rejection
+    "上下文(长度)?(超出|超限|过长|已满)", // Chinese gateway phrasing
+    "输入(长度)?(超出|超限|过长)",
+  ].join("|"),
+  "i",
+);
+
+/**
+ * Whether a thrown prompt failure looks like a context-window overflow (see
+ * CONTEXT_OVERFLOW_RE). Pure text heuristic over `errorMessage`, so JSON-RPC
+ * rejection envelopes (message + data) are covered too.
+ */
+export function isContextOverflowError(error: unknown): boolean {
+  return CONTEXT_OVERFLOW_RE.test(errorMessage(error));
+}
+
+/**
  * Incremental NDJSON parser: accepts arbitrary chunk boundaries, emits one
  * parsed JSON value per non-empty line.
  *
