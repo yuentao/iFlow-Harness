@@ -169,5 +169,10 @@ function extractEntryFromShim(shimPath: string): string | null {
 }
 
 export function buildAcpCommand(entryJs: string): IflowCommand {
-  return { command: process.execPath, args: [path.resolve(entryJs), "--experimental-acp"] };
+  // --stream (probed, CLI 0.5.19 bundle): without it `config.stream` is false
+  // and the ACP prompt handler awaits `sendMessageLatency` — the FULL model
+  // response arrives as one dump after each turn, so the panel shows replies
+  // in segments instead of streaming. With it the turn loop iterates the
+  // SSE stream and emits `agent_message_chunk` per delta.
+  return { command: process.execPath, args: [path.resolve(entryJs), "--experimental-acp", "--stream"] };
 }
