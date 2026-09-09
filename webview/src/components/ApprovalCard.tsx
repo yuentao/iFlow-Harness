@@ -78,7 +78,10 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         <span className="text-[12px] font-semibold">{t("iFlow 请求执行工具")}</span>
       </div>
       <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
-        <p className="text-foreground/90">
+        {/* break-words + scroll cap: the wire title is uncapped (whole shell
+            commands / descriptions); unbroken tokens used to punch through
+            the card border, long ones grew the shrink-0 card unbounded. */}
+        <p className="max-h-40 overflow-y-auto break-words text-foreground/90">
           {approval.toolName && (
             <code className="mr-1.5 rounded bg-editor px-1.5 py-0.5 font-mono text-[11px]">
               {approval.toolName}

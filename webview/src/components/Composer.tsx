@@ -442,11 +442,14 @@ export function Composer() {
               }}
             >
               {hit.path.split("/").slice(0, -1).join("/") && (
-                <span className="truncate text-[11px] text-muted-foreground">
+                <span className="min-w-0 truncate text-[11px] text-muted-foreground">
                   {hit.path.split("/").slice(0, -1).join("/")}/
                 </span>
               )}
-              <span className="font-medium">{hit.path.split("/").pop()}</span>
+              {/* break-all: an unbroken long basename would otherwise force
+                  horizontal scroll on the max-h-56 popup (single-axis overflow
+                  makes the other axis auto). */}
+              <span className="break-all font-medium">{hit.path.split("/").pop()}</span>
             </button>
           ))}
         </div>

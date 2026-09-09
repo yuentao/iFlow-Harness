@@ -85,7 +85,9 @@ function OutputDetails({ output }: { output: string }) {
         {t("操作输出")}
       </button>
       {open && (
-        <pre className="overflow-x-auto border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+        // max-h: tool output can run thousands of lines — an uncapped pre
+        // made the card height unbounded (matches CompressionCard's cap).
+        <pre className="max-h-64 overflow-auto border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
           {output}
         </pre>
       )}
@@ -104,9 +106,14 @@ function ToolCard({ block }: { block: ToolBlock }) {
     <div className={`stream-in overflow-hidden rounded-lg border border-border bg-card status-${block.status}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <Icon className="size-3.5 shrink-0 text-primary" />
-        <span className="shrink-0 text-[12px] font-semibold">{block.title || block.toolName || block.toolKind}</span>
+        {/* min-w-0 truncate: agent tool titles are uncapped on the wire
+            ("Running: <whole shell command>", task descriptions) — shrink-0
+            here pushed the status chip out of the card. */}
+        <span className="min-w-0 truncate text-[12px] font-semibold" title={block.title || block.toolName || block.toolKind}>
+          {block.title || block.toolName || block.toolKind}
+        </span>
         {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} />}
-        <span className="ml-auto flex items-center gap-1.5">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {block.reverted && (
             <Chip tone="muted">
               <Undo2 className="size-2.5" /> {t("已回退")}
@@ -242,10 +249,15 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
       <div className="flex items-center gap-2 px-3 py-2">
         <Bot className={`size-3.5 shrink-0 ${accent.icon}`} />
         <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
+        {/* min-w-0 + clip: agentType comes from an uncapped regex capture of
+            the task title; a pathological one gets clipped instead of evicting
+            the status chip. */}
         {block.agentType && (
-          <Chip tone="muted">{block.agentType}</Chip>
+          <span className="flex min-w-0 items-center overflow-hidden">
+            <Chip tone="muted">{block.agentType}</Chip>
+          </span>
         )}
-        <span className="ml-auto">{statusChip}</span>
+        <span className="ml-auto shrink-0">{statusChip}</span>
       </div>
       {nested.length > 0 && (
         <div className="border-t border-border/60 px-3 py-2">
@@ -271,7 +283,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             {t("子智能体日志")}
           </button>
           {open && (
-            <pre className="whitespace-pre-wrap border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
               {log}
             </pre>
           )}
@@ -324,7 +336,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
             ) : (
               <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
             )}
-            <span className={entry.status === "completed" ? "text-muted-foreground line-through" : "text-foreground"}>
+            <span className={`min-w-0 break-words ${entry.status === "completed" ? "text-muted-foreground line-through" : "text-foreground"}`}>
               {entry.content}
             </span>
           </li>

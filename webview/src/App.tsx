@@ -164,8 +164,8 @@ export function App() {
                       }}
                       className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
                     >
-                      <span className="flex w-full items-center text-[12px] text-foreground">
-                        {p.name}
+                      <span className="flex w-full min-w-0 items-center text-[12px] text-foreground">
+                        <span className="min-w-0 truncate">{p.name}</span>
                         {p.active && <Check className="ml-auto size-3 shrink-0 text-primary" />}
                       </span>
                       <span className="w-full truncate font-mono text-[10px] text-muted-foreground">
@@ -286,7 +286,10 @@ export function App() {
       </header>
 
       {state.errorMessage && (
-        <div className="shrink-0 border-b border-border bg-destructive/15 px-3 py-1.5 text-[12px] text-destructive">
+        // break-words + scroll cap: errorMessage() can return unbounded JSON
+        // dumps (unbroken tokens) and multi-line detail — without them the
+        // banner overflowed horizontally / crushed the transcript area.
+        <div className="max-h-24 shrink-0 overflow-y-auto break-words border-b border-border bg-destructive/15 px-3 py-1.5 text-[12px] text-destructive">
           {state.errorMessage}
         </div>
       )}

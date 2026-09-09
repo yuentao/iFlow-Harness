@@ -34,7 +34,7 @@ export function FileRef({ path, line }: { path: string; line?: number | null }) 
   const send = useChat((s) => s.send);
   return (
     <button
-      className="inline-flex min-w-0 items-center gap-1 rounded-sm font-mono text-[11px] text-info underline decoration-info/30 underline-offset-2 hover:decoration-info"
+      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm font-mono text-[11px] text-info underline decoration-info/30 underline-offset-2 hover:decoration-info"
       title={path}
       onClick={(e) => {
         e.preventDefault();
