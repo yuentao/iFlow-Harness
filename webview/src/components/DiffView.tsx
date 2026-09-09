@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode } from "react";
-import { FileCode2 } from "lucide-react";
+import { Ellipsis, FileCode2 } from "lucide-react";
 import type { ToolDiffUi } from "../../../shared/messages";
 import { t } from "../i18n";
 import { FileRef } from "./ui";
@@ -54,9 +54,9 @@ export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactN
                     : "text-syn-com"
               }`}
             >
-              {row.type === "add" ? "+" : row.type === "del" ? "−" : " "}
+              {row.type === "add" ? "+" : row.type === "del" ? "−" : row.type === "hunk" ? <Ellipsis className="inline size-3 align-[-2px]" /> : " "}
             </span>
-            <span className="whitespace-pre text-foreground/90">{row.text === "" ? " " : row.text}</span>
+            <span className="whitespace-pre text-foreground/90">{row.text === "" ? " " : row.text === "⋯" ? "" : row.text}</span>
           </div>
         ))}
       </div>

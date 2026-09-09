@@ -4,9 +4,11 @@ import {
   ChevronDown,
   FileCode,
   FileText,
+  Image as ImageIcon,
   Paperclip,
   SendHorizontal,
   Square,
+  X,
   Zap,
 } from "lucide-react";
 import type { CodeContextUi, FileHitUi, SlashCommand } from "../../../shared/messages";
@@ -333,11 +335,11 @@ export function Composer() {
               <FileText className="size-3 shrink-0 text-primary" />
               <span className="truncate">{f.name}</span>
               <button
-                className="ml-0.5 rounded px-0.5 text-[11px] leading-none text-muted-foreground hover:text-destructive"
+                className="ml-0.5 rounded p-0.5 text-muted-foreground hover:text-destructive"
                 title={t("移除")}
                 onClick={() => removeAttachment(f.id)}
               >
-                ×
+                <X className="size-3" />
               </button>
             </span>
           ))}
@@ -358,11 +360,11 @@ export function Composer() {
               {codeContext.range}
             </span>
             <button
-              className="ml-auto shrink-0 rounded px-1 text-[12px] leading-none text-muted-foreground hover:text-destructive"
+              className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
               title={t("移除")}
               onClick={() => setCodeContext(null)}
             >
-              ×
+              <X className="size-3.5" />
             </button>
           </div>
           <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-[11.5px] leading-[1.6] text-foreground/90">
@@ -381,14 +383,14 @@ export function Composer() {
               {img.data ? (
                 <img src={`data:${img.mimeType};base64,${img.data}`} alt="" className="size-full object-cover" />
               ) : (
-                <span className="text-[16px] text-muted-foreground">…</span>
+                <ImageIcon className="size-4 text-muted-foreground" />
               )}
               <button
-                className="absolute right-0 top-0 size-4 rounded-bl-[4px] bg-black/55 text-[11px] leading-[15px] text-white hover:bg-black/75"
+                className="absolute right-0 top-0 flex size-4 items-center justify-center rounded-bl-[4px] bg-black/55 text-white hover:bg-black/75"
                 title={t("移除")}
                 onClick={() => removeImage(i)}
               >
-                ×
+                <X className="size-2.5" />
               </button>
             </span>
           ))}
@@ -454,7 +456,7 @@ export function Composer() {
         <textarea
           ref={taRef}
           value={text}
-          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或 📎 添加图片/文件）")}
+          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或回形针按钮添加图片/文件）")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="w-full resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(e) => {

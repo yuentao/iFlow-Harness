@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { KeyRound } from "lucide-react";
+import { Circle, KeyRound, Trash2, X } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
@@ -99,11 +99,11 @@ export function AuthCard({
           {/* The setup banner is not dismissible while unauthenticated. */}
           {!auth.needsSetup && (
             <button
-              className="ml-auto text-[12px] text-muted-foreground hover:text-foreground"
+              className="ml-auto text-muted-foreground hover:text-foreground"
               title={t("收起")}
               onClick={onDismiss}
             >
-              ✕
+              <X className="size-3.5" />
             </button>
           )}
         </div>
@@ -129,9 +129,9 @@ export function AuthCard({
                     if (!p.active) send({ type: "activateProfile", name: p.name });
                   }}
                 >
-                  <span className={p.active ? "text-primary" : "text-muted-foreground"}>
-                    {p.active ? "●" : "○"}
-                  </span>
+                  <Circle
+                    className={`size-2.5 shrink-0 ${p.active ? "fill-current text-primary" : "text-muted-foreground"}`}
+                  />
                   <span className="truncate font-semibold text-foreground">{p.name}</span>
                   <span className="truncate font-mono text-[10px] text-muted-foreground">{p.modelName}</span>
                 </button>
@@ -140,12 +140,12 @@ export function AuthCard({
                 </span>
                 {p.source === "extension" && (
                   <button
-                    className="shrink-0 text-[11px] text-muted-foreground opacity-70 hover:opacity-100 hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
+                    className="shrink-0 text-muted-foreground opacity-70 hover:opacity-100 hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
                     title={t("删除 {0}", p.name)}
                     disabled={busy}
                     onClick={() => send({ type: "deleteProfile", name: p.name })}
                   >
-                    🗑
+                    <Trash2 className="size-3.5" />
                   </button>
                 )}
               </div>

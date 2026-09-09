@@ -12,6 +12,7 @@ import {
   FolderInput,
   Globe,
   Loader2,
+  ArrowDown,
   Bot,
   Search,
   SquareTerminal,
@@ -505,7 +506,8 @@ function MessageListInner({ state }: { state: SessionState }) {
             setShowJump(false);
           }}
         >
-          {t("回到最新 ↓")}
+          <ArrowDown className="inline size-3 align-[-1px]" />
+          {t("回到最新")}
         </button>
       )}
     </div>

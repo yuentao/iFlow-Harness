@@ -101,8 +101,8 @@ const en: Record<string, string> = {
   "移除": "Remove",
   "Tab 补全": "Tab to complete",
   "无匹配文件": "No matching files",
-  "向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或 📎 添加图片/文件）":
-    "Ask iFlow… (/ commands · @ files · paste or 📎 attach images/files)",
+  "向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或回形针按钮添加图片/文件）":
+    "Ask iFlow… (/ commands · @ files · paste or use the paperclip button to attach images/files)",
   "（见附件）": "(see attached files)",
   "（见附带的代码上下文）": "(see attached code context)",
   "添加附件": "Add attachments",
@@ -119,7 +119,7 @@ const en: Record<string, string> = {
   "附件图片 {0}": "Attached image {0}",
   "在 VSCode 中打开": "Open in VSCode",
   "向 iFlow 发送第一条消息开始": "Send your first message to iFlow to get started",
-  "回到最新 ↓": "Jump to latest ↓",
+  "回到最新": "Jump to latest",
   "上下文摘要": "Context summary",
   "diff": "diff",
 };
