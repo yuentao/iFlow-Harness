@@ -12,6 +12,7 @@
   "iflow.configuration.defaultMode.description": "Default permission mode for new sessions",
   "iflow.configuration.nodePath.description": "Custom Node.js executable used to spawn the CLI",
   "iflow.configuration.idleTimeoutMinutes.description": "Recycle the CLI process after this many idle minutes",
+  "iflow.configuration.soundFeedback.description": "Play a short sound when a turn completes or fails",
   "participant.description": "Ask the iFlow session (text-only; rich interactions live in the side panel)",
   "iflow.outputChannel.name": "iFlow Harness",
   "iflow.statusbar.tooltip": "iFlow Harness — click to open the chat panel"

@@ -12,6 +12,57 @@ interface HostApi {
   postMessage: (msg: unknown) => void;
 }
 
+// --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
+
+let audioCtx: AudioContext | null = null;
+
+/** One envelope-shaped oscillator blip. */
+function blip(
+  ctx: AudioContext,
+  freq: number,
+  startAt: number,
+  duration: number,
+  type: OscillatorType,
+  peak: number,
+): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, startAt);
+  // Quick attack, exponential decay — reads as a UI cue, not an alarm.
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(peak, startAt + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + duration + 0.02);
+}
+
+/**
+ * Synthesized cues:
+ * - "done": rising two-tone chime (E5 → G5), short and positive.
+ * - "error": falling double-buzz (A3 → F3, square), unmistakably wrong.
+ * Volume kept low (0.08 peak); ~0.35s total, never overlaps the next turn.
+ */
+function playCue(kind: "done" | "error"): void {
+  try {
+    audioCtx ??= new AudioContext();
+    // A suspended context (created before any user gesture) stays silent —
+    // resume on each attempt; by send time the user has interacted anyway.
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    const t = audioCtx.currentTime + 0.01;
+    if (kind === "done") {
+      blip(audioCtx, 659.25, t, 0.14, "sine", 0.08);
+      blip(audioCtx, 783.99, t + 0.13, 0.2, "sine", 0.08);
+    } else {
+      blip(audioCtx, 220, t, 0.13, "square", 0.05);
+      blip(audioCtx, 174.61, t + 0.15, 0.2, "square", 0.05);
+    }
+  } catch {
+    // Audio unavailable (headless/hostile env) — the cue is best-effort.
+  }
+}
+
 /**
  * Dev/browser fallback when running the webview outside VSCode (e.g. a static
  * server for UI iteration): a tiny mock host that answers `ready` with a demo
@@ -394,6 +445,7 @@ function createMockHost(): HostApi {
         });
         window.setTimeout(() => {
           demoBlocks.push({ kind: "text", text: "工具执行完成（mock host）" });
+          playCue("done"); // mirror the real host's turn-finished cue
           broadcast({
             type: "snapshot",
             state: {
@@ -747,6 +799,10 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "theme") {
       set({ editorTheme: msg.kind });
+      return;
+    }
+    if (msg.type === "playSound") {
+      playCue(msg.kind);
       return;
     }
     // Consumed by their own window-level listeners (Composer registers those

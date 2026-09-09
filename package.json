@@ -116,6 +116,11 @@
           "type": "number",
           "default": 30,
           "description": "%iflow.configuration.idleTimeoutMinutes.description%"
+        },
+        "iflow.soundFeedback": {
+          "type": "boolean",
+          "default": true,
+          "description": "%iflow.configuration.soundFeedback.description%"
         }
       }
     }

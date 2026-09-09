@@ -302,7 +302,11 @@ export type HostToWebview =
   | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. */
-  | { type: "theme"; kind: "dark" | "light" };
+  | { type: "theme"; kind: "dark" | "light" }
+  /** Turn finished ("done") or failed ("error") — the webview plays a short
+   * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
+   * panel visibility; the webview only synthesizes on receipt. */
+  | { type: "playSound"; kind: "done" | "error" };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands

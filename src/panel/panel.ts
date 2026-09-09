@@ -565,6 +565,18 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark" });
   }
 
+  /**
+   * Turn-finished / turn-failed sound cue. Gated on the `iflow.soundFeedback`
+   * setting (default on). The sound plays even when the panel is hidden —
+   * that is exactly when the user needs it (they switched away mid-turn).
+   * Synthesized in the webview (Web Audio), no asset files.
+   */
+  private postSound(kind: "done" | "error"): void {
+    const cfg = vscode.workspace.getConfiguration("iflow");
+    if (cfg.get<boolean>("soundFeedback", true) === false) return;
+    this.postToWebview({ type: "playSound", kind });
+  }
+
   // --- Tool approval flow (session/request_permission) --------------------------
 
   private async requestPermissionFromUser(req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
@@ -1892,6 +1904,8 @@ export class ChatPanel implements vscode.Disposable {
       }
       const result = await this.promptWithOverflowRetry(client, sessionId, prompt);
       this.store.promptCompleted(result.stopReason);
+      // Sound cue: completion chime, but a user stop/cancel stays silent.
+      if (result.stopReason !== "cancelled") this.postSound("done");
       void this.persistActiveTranscript();
     } catch (error) {
       // R1 (final): prompts run without a timeout — failures here are real
@@ -1902,6 +1916,7 @@ export class ChatPanel implements vscode.Disposable {
       // remain diagnosable from the Output panel.
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
+      this.postSound("error");
     }
   }
 
