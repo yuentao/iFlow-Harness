@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage } from "../src/acp/jsonrpc.js";
+import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError } from "../src/acp/jsonrpc.js";
 
 describe("errorMessage", () => {
   it("prefers Error.message", () => {
@@ -66,6 +66,34 @@ describe("errorMessage", () => {
     const out = errorMessage({ wrapper: { innerCode: 7 } });
     expect(out).toContain("wrapper");
     expect(out).toContain("innerCode");
+  });
+});
+
+describe("isContextOverflowError", () => {
+  it("matches the iFlow openai-adapter overflow message (HTTP 511 wording)", () => {
+    // Wire behavior (probed, CLI 0.5.19 bundle): literal i18n message thrown
+    // for HTTP 511 and response error_code 511/413.
+    const err = { code: -32000, message: "Content length exceed LLM Limit. TraceID: abc123" };
+    expect(isContextOverflowError(err)).toBe(true);
+  });
+
+  it("matches overflow detail hidden in the JSON-RPC data suffix", () => {
+    const err = { code: -32000, message: "请求失败", data: "Error: maximum context length is 128000 tokens" };
+    expect(isContextOverflowError(err)).toBe(true);
+  });
+
+  it("matches common third-party gateway phrasings", () => {
+    expect(isContextOverflowError(new Error("This model's maximum context length is 200000 tokens"))).toBe(true);
+    expect(isContextOverflowError(new Error("Your prompt is too long: 210000 tokens > 200000 maximum"))).toBe(true);
+    expect(isContextOverflowError(new Error("POST failed: HTTP 413, status: 413"))).toBe(true);
+    expect(isContextOverflowError(new Error("上下文长度超出模型限制"))).toBe(true);
+  });
+
+  it("does not match unrelated failures", () => {
+    expect(isContextOverflowError(new Error("Rate limit exceeded. Try again later."))).toBe(false);
+    expect(isContextOverflowError(new Error("Invalid API key provided"))).toBe(false);
+    expect(isContextOverflowError({ code: -32602, message: "Session not found: s1" })).toBe(false);
+    expect(isContextOverflowError("connection closed")).toBe(false);
   });
 });
 
