@@ -23,6 +23,8 @@ export const AcpMethods = {
   requestPermission: "session/request_permission",
   readTextFile: "fs/read_text_file",
   writeTextFile: "fs/write_text_file",
+  userQuestions: "_iflow/user/questions", // iFlow extension (probed, CLI 0.5.19)
+  exitPlanMode: "_iflow/plan/exit", // iFlow extension (probed, CLI 0.5.19)
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -299,4 +301,51 @@ export interface WriteTextFileRequest {
   sessionId: string;
   path: string;
   content: string;
+}
+
+// ---------------------------------------------------------------------------
+// Agent → Client: iFlow extensions (probed, CLI 0.5.19)
+// ---------------------------------------------------------------------------
+
+/** One selectable option of an `ask_user_question` question. */
+export interface UserQuestionOption {
+  label: string;
+  description: string;
+}
+
+/** One question the `ask_user_question` tool asks the user. */
+export interface UserQuestion {
+  /** The complete question text (ends with a question mark). */
+  question: string;
+  /** Very short chip label (max 12 chars); ALSO the answers map key. */
+  header: string;
+  options: UserQuestionOption[];
+  multiSelect: boolean;
+}
+
+/**
+ * Params of the agent→client `_iflow/user/questions` request, raised by the
+ * `ask_user_question` tool. The client's response MUST be
+ * `{answers: Record<header, label | label[]>}` — the CLI reads `s.answers`
+ * directly and formats it into the tool's functionResponse (a missing key
+ * means "no answer"; the CLI throws when `answers` itself is absent).
+ */
+export interface UserQuestionsRequest {
+  sessionId: string;
+  questions: UserQuestion[];
+}
+
+export interface UserQuestionsResponse {
+  answers: Record<string, string | string[]>;
+}
+
+/** Params of the agent→client `_iflow/plan/exit` request (Plan mode approval). */
+export interface ExitPlanModeRequest {
+  sessionId: string;
+  plan: string;
+}
+
+export interface ExitPlanModeResponse {
+  approved: boolean;
+  reason?: string;
 }

@@ -18,6 +18,10 @@ import {
   ReadTextFileRequest,
   ReadTextFileResponse,
   WriteTextFileRequest,
+  UserQuestionsRequest,
+  UserQuestionsResponse,
+  ExitPlanModeRequest,
+  ExitPlanModeResponse,
 } from "./protocol.js";
 import { JsonRpcPeer, type WireTap } from "./jsonrpc.js";
 
@@ -46,6 +50,11 @@ export interface AcpClientCallbacks {
   onUnparseableStdout?: (line: string) => void;
   /** Approve/deny tool execution. Default: deny (cancel outcome). */
   onRequestPermission?: (request: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
+  /** iFlow extension: answer the ask_user_question tool. Default: empty
+   * answers (the tool reports "no answer" and the agent moves on). */
+  onUserQuestions?: (request: UserQuestionsRequest) => Promise<UserQuestionsResponse>;
+  /** iFlow extension: Plan-mode approval. Default: reject. */
+  onExitPlanMode?: (request: ExitPlanModeRequest) => Promise<ExitPlanModeResponse>;
 }
 
 const ACP_PROTOCOL_VERSION = 1;
@@ -235,6 +244,22 @@ export class AcpClient {
       await mkdir(path.dirname(filePath), { recursive: true });
       await writeFile(filePath, request.content, "utf8");
       return {};
+    });
+
+    // iFlow extension (probed, CLI 0.5.19): the ask_user_question tool
+    // bridges to this request; the response's `answers` map is keyed by
+    // question header. Unregistered before → MethodNotFound → the tool
+    // failed on every call.
+    peer.onRequest(AcpMethods.userQuestions, async (params) => {
+      const request = params as UserQuestionsRequest;
+      if (this.callbacks.onUserQuestions) return await this.onUserQuestions(request);
+      return { answers: {} } satisfies UserQuestionsResponse;
+    });
+
+    peer.onRequest(AcpMethods.exitPlanMode, async (params) => {
+      const request = params as ExitPlanModeRequest;
+      if (this.callbacks.onExitPlanMode) return await this.onExitPlanMode(request);
+      return { approved: false, reason: "Plan approval not supported by this client" } satisfies ExitPlanModeResponse;
     });
   }
 

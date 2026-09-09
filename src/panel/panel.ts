@@ -34,15 +34,21 @@ import type {
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  UserQuestionsRequest,
+  UserQuestionsResponse,
+  ExitPlanModeRequest,
+  ExitPlanModeResponse,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import {
   backfillBlockIds,
   beginReplay,
   clampSessionLabel,
+  clearPendingQuestions,
   endReplay,
   newSessionState,
   parseTranscriptJsonl,
+  setPendingQuestions,
   setSessions,
   toAgentPromptText,
 } from "../../shared/session-state.js";
@@ -142,6 +148,14 @@ export class ChatPanel implements vscode.Disposable {
     }
   >();
   private approvalSeq = 0;
+  /** Awaiting user answers for `_iflow/user/questions`, keyed by card id. */
+  private readonly pendingQuestions = new Map<
+    string,
+    {
+      resolve: (response: UserQuestionsResponse) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
   private persistChain: Promise<void> = Promise.resolve();
@@ -238,6 +252,7 @@ export class ChatPanel implements vscode.Disposable {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
+    this.cancelAllPendingQuestions("");
     try {
       await this.client?.dispose();
     } catch {
@@ -527,6 +542,9 @@ export class ChatPanel implements vscode.Disposable {
       case "respondApproval":
         this.handleApprovalResponse(msg.id, msg.optionId);
         break;
+      case "answerQuestions":
+        this.handleQuestionAnswers(msg.id, msg.answers);
+        break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
         break;
@@ -667,6 +685,59 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.pendingApprovals.clear();
+  }
+
+  // --- User questions flow (_iflow/user/questions, ask_user_question tool) ----
+
+  /**
+   * Surface the `ask_user_question` tool's questions as a card. Resolves with
+   * the user's answers (keyed by question `header`) — the wire contract the
+   * CLI's tool bridge expects (probed, CLI 0.5.19: `s.answers` is read
+   * directly; a missing map means "no answer").
+   */
+  private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
+    const id = `q-${++this.approvalSeq}`;
+    const count = req.questions.length;
+
+    return new Promise<UserQuestionsResponse>((resolve) => {
+      const timer = setTimeout(() => {
+        // Safety: an unanswered card must not block the agent forever.
+        this.pendingQuestions.delete(id);
+        this.store.clearQuestions(id);
+        this.store.appendNotice(vscode.l10n.t("提问超时，已按未回答继续"));
+        resolve({ answers: {} });
+      }, APPROVAL_TIMEOUT_MS);
+
+      this.pendingQuestions.set(id, { resolve, timer });
+      this.store.showQuestions({ id, questions: req.questions });
+      void count;
+    });
+  }
+
+  /** Webview answers (or dismisses) the pending question card. */
+  private handleQuestionAnswers(id: string, answers: Record<string, string | string[]>): void {
+    const pending = this.pendingQuestions.get(id);
+    if (!pending) return;
+    this.pendingQuestions.delete(id);
+    clearTimeout(pending.timer);
+    this.store.clearQuestions(id);
+    const answered = Object.keys(answers).length;
+    this.store.appendNotice(
+      answered > 0
+        ? vscode.l10n.t("已回答 {0} 个问题", answered)
+        : vscode.l10n.t("已跳过提问"),
+    );
+    pending.resolve({ answers });
+  }
+
+  /** Tear down pending question cards (session reset / dispose / CLI exit). */
+  private cancelAllPendingQuestions(reason: string): void {
+    for (const [, pending] of this.pendingQuestions) {
+      clearTimeout(pending.timer);
+      if (reason) this.store.appendNotice(reason);
+      pending.resolve({ answers: {} });
+    }
+    this.pendingQuestions.clear();
   }
 
   // --- Diff revert ----------------------------------------------------------------
@@ -1184,6 +1255,7 @@ export class ChatPanel implements vscode.Disposable {
     // keeping the OLD credentials. Settle it (success or failure) first.
     if (this.connecting) await this.connecting.catch(() => {});
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
+    this.cancelAllPendingQuestions(vscode.l10n.t("重新认证，提问已跳过"));
     // Detach the old client FIRST: dispose() kills its child process, and the
     // resulting exit event must not be mistaken for a crashed session.
     const oldClient = this.client;
@@ -1509,10 +1581,10 @@ export class ChatPanel implements vscode.Disposable {
             if (this.stderrTail.length > 0) {
               this.log.warn(`CLI stderr tail (${this.stderrTail.length} lines):\n${this.stderrTail.join("\n")}`);
             }
-            this.client = null;
-            this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
-            this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
-          },
+                this.client = null;
+                this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
+                this.cancelAllPendingQuestions(vscode.l10n.t("CLI 进程已退出，提问已跳过"));
+                this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));          },
           onRequestPermission: (req: RequestPermissionRequest) => {
             // Dying client's approval cards would hang on the fresh state —
             // auto-cancel instead (the process is being torn down anyway).
@@ -1520,6 +1592,21 @@ export class ChatPanel implements vscode.Disposable {
               return Promise.resolve({ outcome: { outcome: "cancelled" } as const });
             }
             return this.requestPermissionFromUser(req);
+          },
+          onUserQuestions: (req: UserQuestionsRequest) => {
+            if (this.client !== client) return Promise.resolve({ answers: {} });
+            return this.userQuestionsFromAgent(req);
+          },
+          onExitPlanMode: async (req: ExitPlanModeRequest) => {
+            // Plan approval without dedicated UI yet: a QuickPick keeps the
+            // agent unblocked (MethodNotFound previously failed the tool).
+            if (this.client !== client) return { approved: false, reason: "client busy" };
+            const pick = await vscode.window.showQuickPick(
+              [vscode.l10n.t("批准计划"), vscode.l10n.t("拒绝计划")],
+              { placeHolder: vscode.l10n.t("Agent 请求退出 Plan 模式并开始执行") },
+            );
+            const approved = pick === vscode.l10n.t("批准计划");
+            return { approved, reason: approved ? undefined : vscode.l10n.t("用户拒绝了该计划") } satisfies ExitPlanModeResponse;
           },
         },
       );
@@ -1885,6 +1972,7 @@ export class ChatPanel implements vscode.Disposable {
     const store = this.store;
     // A new session invalidates any approvals from the old one.
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
+    this.cancelAllPendingQuestions("");
     store.replaceState(newSessionState(store.getState()));
     // Model dropdown: live query of the active endpoint's `/models`. The CLI's
     // `_meta` catalog is hardcoded and not truthful for user-supplied

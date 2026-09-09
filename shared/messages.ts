@@ -12,11 +12,13 @@ import type {
   ToolKind,
   ToolLocation,
   StopReason,
+  UserQuestion,
+  UserQuestionOption,
 } from "../src/acp/protocol.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
-export type { SlashCommand };
+export type { SlashCommand, UserQuestion, UserQuestionOption };
 
 // ---------------------------------------------------------------------------
 // Transcript blocks (rendered in order)
@@ -150,6 +152,20 @@ export interface PendingApprovalUi {
   options: PermissionOptionUi[];
 }
 
+/**
+ * The `ask_user_question` tool's questions awaiting user answers (iFlow
+ * extension). Rendered like an approval card; the user answers per question
+ * (single choice / multi-select / free text), the host replies on the
+ * `_iflow/user/questions` request with an answers map keyed by `header`.
+ */
+export interface PendingQuestionsUi {
+  id: string;
+  questions: UserQuestion[];
+}
+
+/** One user answer: selected labels, or a free-text "Other" answer. */
+export type UserAnswerValue = string | string[];
+
 /** One entry of the per-workspace recent-session list (M4). */
 export interface SessionSummaryUi {
   id: string;
@@ -169,6 +185,8 @@ export interface SessionState {
   currentModelId: string | null;
   /** Non-null while the host awaits the user's answer for a tool approval. */
   pendingApproval: PendingApprovalUi | null;
+  /** Non-null while the host awaits the user's answers for ask_user_question. */
+  pendingQuestions: PendingQuestionsUi | null;
   /** Auth config state (M3): drives the setup banner / form. */
   auth: AuthUiState;
   /** Recent sessions (per-workspace, persisted host-side) for the switcher. */
@@ -218,6 +236,7 @@ export function initialSessionState(): SessionState {
     models: [],
     currentModelId: null,
     pendingApproval: null,
+    pendingQuestions: null,
     auth: { authenticated: false, needsSetup: false, saved: null, profiles: [] },
     sessions: [],
     activeSessionId: null,
@@ -335,6 +354,10 @@ export type WebviewToHost =
   | { type: "revealOutput"; toolCallId: string }
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
+  /** Answer the pending ask_user_question card; `answers` is keyed by
+   * question `header`. An empty answers object = dismissed (the agent
+   * proceeds with "no answer"). */
+  | { type: "answerQuestions"; id: string; answers: Record<string, string | string[]> }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
   /** M5: open the tool's change in VSCode's native diff editor. */

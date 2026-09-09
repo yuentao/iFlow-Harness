@@ -16,15 +16,18 @@ import {
   appendHostNotice,
   applySessionUpdate,
   beginUserPrompt,
+  clearPendingQuestions,
   completePrompt,
   clearPendingApproval,
   markToolReverted,
   parseTranscriptJsonl,
   setMeta,
   setPendingApproval,
+  setPendingQuestions,
   setSessions,
 } from "../../shared/session-state.js";
 import type { PendingApprovalUi } from "../../shared/messages.js";
+import type { PendingQuestionsUi } from "../../shared/messages.js";
 
 export class SessionStore {
   private state: SessionState = initialSessionState();
@@ -249,6 +252,19 @@ export class SessionStore {
   /** Answer whether the named approval card was still pending. */
   clearApproval(id: string): boolean {
     const cleared = clearPendingApproval(this.state, id);
+    if (cleared) this.flush();
+    return cleared;
+  }
+
+  /** Surface an ask_user_question card to the WebView (immediate flush). */
+  showQuestions(pending: PendingQuestionsUi): void {
+    setPendingQuestions(this.state, pending);
+    this.flush();
+  }
+
+  /** Clear the question card once answered/timed out. */
+  clearQuestions(id: string): boolean {
+    const cleared = clearPendingQuestions(this.state, id);
     if (cleared) this.flush();
     return cleared;
   }

@@ -17,6 +17,7 @@ import {
   type Block,
   type ModelInfoUi,
   type PendingApprovalUi,
+  type PendingQuestionsUi,
   type SessionState,
   type SessionSummaryUi,
   type SubAgentBlock,
@@ -918,6 +919,20 @@ export function clearPendingApproval(state: SessionState, id: string): boolean {
 export function appendApprovalResolution(state: SessionState, toolName: string, resolution: string): void {
   const label = toolName || "tool";
   state.blocks.push({ kind: "text", id: nextBlockId(), text: `*${label} — ${resolution}*` });
+}
+
+// --- user questions (_iflow/user_questions) ---------------------------------
+
+/** Show the ask_user_question card. The WebView answers via `answerQuestions`. */
+export function setPendingQuestions(state: SessionState, pending: PendingQuestionsUi): void {
+  state.pendingQuestions = pending;
+}
+
+/** Clear the card once answered (or timed out / cancelled host-side). */
+export function clearPendingQuestions(state: SessionState, id: string): boolean {
+  if (state.pendingQuestions?.id !== id) return false;
+  state.pendingQuestions = null;
+  return true;
 }
 
 /** Mark a tool's diff as reverted (visual only; the file write happens host-side). */
