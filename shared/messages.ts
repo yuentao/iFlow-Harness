@@ -106,7 +106,20 @@ export interface PlanEntryUi {
   priority?: "high" | "medium" | "low";
 }
 
-export type Block = TextBlock | ThoughtBlock | UserBlock | ToolBlock | SubAgentBlock | PlanBlock;
+/**
+ * Context compression (slash `/compress`, CLI 0.5.19): the ACP bridge leaks
+ * the compression history item as a JSON text chunk; the host sanitizer turns
+ * it into this collapsible card instead of raw JSON garbage.
+ */
+export interface CompressionBlock extends BlockBase {
+  kind: "compression";
+  /** One-line human notice, e.g. "上下文已压缩：98134 → 7855 tokens". */
+  notice: string;
+  /** Conversation summary carried by the item — long, so the webview folds it. */
+  summary: string | null;
+}
+
+export type Block = TextBlock | ThoughtBlock | UserBlock | ToolBlock | SubAgentBlock | CompressionBlock | PlanBlock;
 
 // ---------------------------------------------------------------------------
 // Full session state (owned by Extension Host store)

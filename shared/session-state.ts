@@ -244,36 +244,42 @@ function parseCompressionItem(text: string, start: number): { end: number; item:
 function formatCompressionNotice(item: CompressionHistoryItem): string {
   const c = item.compression!;
   if (c.isPending) return l10n.t("正在压缩上下文…");
-  const line = l10n.t(
+  return l10n.t(
     "上下文已压缩：{0} → {1} tokens",
     String(c.originalTokenCount ?? "?"),
     String(c.newTokenCount ?? "?"),
   );
-  const summary = typeof c.summary === "string" ? c.summary.trim() : "";
-  return summary ? `${line}\n\n${summary}` : line;
+}
+
+function compressionSummaryOf(item: CompressionHistoryItem): string | null {
+  const s = typeof item.compression!.summary === "string" ? item.compression!.summary.trim() : "";
+  return s || null;
 }
 
 /**
- * Replace every complete `{"type":"compression",…}` blob in one streaming
- * text chunk with a readable notice. `prevText` is the text already in the
- * block (chunks stream in separately — the localized "正在压缩…" info line is
- * its own item) so a notice starting a chunk still lands on a fresh line.
+ * Append one streaming agent text chunk. Complete compression history items
+ * become their own collapsible CompressionBlock (the summary is long — the
+ * webview folds it); the remaining text merges normally. Torn or foreign JSON
+ * stays verbatim (see parseCompressionItem).
  */
-export function sanitizeCompressionLeak(text: string, prevText = ""): string {
+function appendAgentChunk(blocks: Block[], text: string): void {
   const MARKER = '{"type":"compression"';
-  let out = "";
   let rest = text;
   for (;;) {
     const idx = rest.indexOf(MARKER);
-    if (idx < 0) return out + rest;
+    if (idx < 0) break;
     const parsed = parseCompressionItem(rest, idx);
-    if (!parsed) return out + rest; // torn or foreign — keep verbatim
-    let notice = formatCompressionNotice(parsed.item);
-    const needsBreak = idx === 0 ? prevText !== "" && !prevText.endsWith("\n") : rest[idx - 1] !== "\n";
-    if (needsBreak) notice = "\n" + notice;
-    out += rest.slice(0, idx) + notice;
+    if (!parsed) break; // torn or foreign — remainder stays verbatim
+    if (idx > 0) appendTextToLast(blocks, "text", rest.slice(0, idx));
+    blocks.push({
+      kind: "compression",
+      id: nextBlockId(),
+      notice: formatCompressionNotice(parsed.item),
+      summary: compressionSummaryOf(parsed.item),
+    });
     rest = rest.slice(parsed.end);
   }
+  if (rest) appendTextToLast(blocks, "text", rest);
 }
 
 /** Apply one session update to a block list (top-level transcript or a
@@ -281,11 +287,7 @@ export function sanitizeCompressionLeak(text: string, prevText = ""): string {
 function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
   switch (update.sessionUpdate) {
     case "agent_message_chunk":
-      if (update.content.type === "text") {
-        const last = lastBlock(blocks);
-        const prev = last && last.kind === "text" ? last.text : "";
-        appendTextToLast(blocks, "text", sanitizeCompressionLeak(update.content.text, prev));
-      }
+      if (update.content.type === "text") appendAgentChunk(blocks, update.content.text);
       break;
     case "agent_thought_chunk":
       if (update.content.type === "text") appendTextToLast(blocks, "thought", update.content.text);
@@ -719,6 +721,12 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
     let entry: {
       type?: string;
       isSidechain?: boolean;
+      isCompactSummary?: boolean;
+      compressionInfo?: {
+        originalTokenCount?: unknown;
+        newTokenCount?: unknown;
+        summary?: unknown;
+      };
       message?: { content?: unknown };
     };
     try {
@@ -781,6 +789,22 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
 
     // A main-chain entry ends the current sidechain run.
     flushSidechain();
+
+    // /compress (and auto-compression) records a user entry flagged
+    // isCompactSummary carrying compressionInfo — render it as the same
+    // collapsible card as live. Not a real user turn: must not set
+    // firstUserText (the switcher label).
+    if (entry.type === "user" && entry.isCompactSummary && entry.compressionInfo) {
+      const info = entry.compressionInfo;
+      const notice = l10n.t(
+        "上下文已压缩：{0} → {1} tokens",
+        String(info.originalTokenCount ?? "?"),
+        String(info.newTokenCount ?? "?"),
+      );
+      const summary = typeof info.summary === "string" ? info.summary.trim() : "";
+      blocks.push({ kind: "compression", notice, summary: summary || null });
+      continue;
+    }
 
     if (entry.type === "user") {
       const texts: string[] = [];

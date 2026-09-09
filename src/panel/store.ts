@@ -156,6 +156,12 @@ export class SessionStore {
           id: `subagent:${last.agentId}`,
           fp: `subagent:${last.agentId}:${last.status}:${last.entries.length}`,
         };
+      case "compression":
+        return {
+          len: blocks.length,
+          id: "compression",
+          fp: `compression:${last.notice.length}:${last.summary?.length ?? -1}`,
+        };
       case "plan":
         return { len: blocks.length, id: "plan", fp: `plan:${last.entries.length}` };
     }

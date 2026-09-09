@@ -101,25 +101,27 @@ describe("compression history-item leak (slash /compress, CLI 0.5.19)", () => {
         : { isPending: false, originalTokenCount: 98134, newTokenCount: 7855, summary: "\nThis session is being continued from a previous conversation.\n" },
     });
 
-  it("replaces the leaked JSON blob with a readable notice and keeps the summary", () => {
+  it("emits a standalone compression card and keeps the summary", () => {
     const state: SessionState = initialSessionState();
     // Live shape: the localized "正在压缩…" info line is its own chunk; the
     // compression item (no `text` field on the wire) follows JSON.stringify'd.
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "正在压缩..." } }));
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: blob(false) } }));
-    const text = state.blocks[0]!;
-    if (text.kind !== "text") throw new Error("expected text");
-    expect(text.text).toBe(
-      "正在压缩...\n上下文已压缩：98134 → 7855 tokens\n\nThis session is being continued from a previous conversation.",
-    );
+    expect(state.blocks.map((b) => b.kind)).toEqual(["text", "compression"]);
+    const card = state.blocks[1]!;
+    if (card.kind !== "compression") throw new Error("expected compression");
+    expect(card.notice).toBe("上下文已压缩：98134 → 7855 tokens");
+    expect(card.summary).toBe("This session is being continued from a previous conversation.");
   });
 
-  it("collapses the pending compression item", () => {
+  it("collapses the pending compression item to a notice-only card", () => {
     const state: SessionState = initialSessionState();
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: blob(true) } }));
-    const text = state.blocks[0]!;
-    if (text.kind !== "text") throw new Error("expected text");
-    expect(text.text).toBe("正在压缩上下文…");
+    expect(state.blocks.map((b) => b.kind)).toEqual(["compression"]);
+    const card = state.blocks[0]!;
+    if (card.kind !== "compression") throw new Error("expected compression");
+    expect(card.notice).toBe("正在压缩上下文…");
+    expect(card.summary).toBeNull();
   });
 
   it("leaves torn JSON and unrelated objects verbatim", () => {
@@ -127,9 +129,25 @@ describe("compression history-item leak (slash /compress, CLI 0.5.19)", () => {
     const torn = '{"type":"compression","compression":{"isPending":f';
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: torn } }));
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: '{"type":"other","compression":{"a":1}}' } }));
+    expect(state.blocks.map((b) => b.kind)).toEqual(["text"]);
     const text = state.blocks[0]!;
     if (text.kind !== "text") throw new Error("expected text");
     expect(text.text).toBe(torn + '{"type":"other","compression":{"a":1}}');
+  });
+
+  it("restores /compress history as a compression card without stealing the session label", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "修复限流器" } }),
+      JSON.stringify({ type: "user", isCompactSummary: true, compressionInfo: { originalTokenCount: 98134, newTokenCount: 7855, summary: "Continued summary." }, message: { content: "Continued summary." } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "继续" }] } }),
+    ].join("\n");
+    const { blocks, firstUserText } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "compression", "text"]);
+    const card = blocks[1]!;
+    if (card.kind !== "compression") throw new Error("expected compression");
+    expect(card.notice).toBe("上下文已压缩：98134 → 7855 tokens");
+    expect(card.summary).toBe("Continued summary.");
+    expect(firstUserText).toBe("修复限流器");
   });
 });
 

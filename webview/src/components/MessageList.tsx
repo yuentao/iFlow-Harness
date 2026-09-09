@@ -358,6 +358,39 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
   );
 }
 
+/** Collapsible context-compression card (slash /compress). The carried
+ * conversation summary is long, so it stays folded until requested. */
+function CompressionCard({ block }: { block: Extract<Block, { kind: "compression" }> }) {
+  const [open, setOpen] = useState(false);
+  const hasSummary = block.summary !== null;
+  return (
+    <div className="stream-in overflow-hidden rounded-lg border border-border/60 bg-card">
+      <button
+        onClick={() => hasSummary && setOpen((v) => !v)}
+        disabled={!hasSummary}
+        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] ${
+          hasSummary ? "text-muted-foreground hover:text-foreground" : "text-muted-foreground"
+        }`}
+      >
+        {hasSummary ? (
+          open ? <ChevronDown className="size-3 shrink-0" /> : <ChevronRight className="size-3 shrink-0" />
+        ) : (
+          <CircleDot className="size-3 shrink-0" />
+        )}
+        <span className="min-w-0 truncate">{block.notice}</span>
+        {hasSummary && <Chip tone="muted">{t("上下文摘要")}</Chip>}
+      </button>
+      {open && block.summary && (
+        <div className="border-t border-border/60 px-3 py-2">
+          <div className="max-h-64 overflow-y-auto text-[12px] leading-relaxed text-muted-foreground">
+            <Markdown text={block.summary} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Memoized per-block renderer (P4): the default shallow compare anchors on
  * the block reference. With P-1 block patches the unchanged prefix keeps its
@@ -380,6 +413,8 @@ const BlockView = memo(function BlockView({ block }: { block: Block }) {
       return <ToolCard block={block} />;
     case "subagent":
       return <SubAgentCard block={block} />;
+    case "compression":
+      return <CompressionCard block={block} />;
     case "plan":
       return <TaskList block={block} />;
   }
