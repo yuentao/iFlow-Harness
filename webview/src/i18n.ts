@@ -104,6 +104,7 @@ const en: Record<string, string> = {
   "向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或 📎 添加图片/文件）":
     "Ask iFlow… (/ commands · @ files · paste or 📎 attach images/files)",
   "（见附件）": "(see attached files)",
+  "（见附带的代码上下文）": "(see attached code context)",
   "添加附件": "Add attachments",
   "{0} 张图片超过大小上限（5MB），已跳过": "Skipped {0} image(s) over the 5 MB limit",
   "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",

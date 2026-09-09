@@ -31,6 +31,23 @@ function createMockHost(): HostApi {
     : "light";
   const demoBlocks: SessionState["blocks"] = [
     {
+      // Mirrors the editor right-click "加入 iFlow 上下文" draft so the
+      // user-bubble code-context styling (styles.css) is visible in mock mode.
+      kind: "user",
+      text: [
+        "关于 `src/panel/panel.ts:120-145`：",
+        "",
+        "```ts",
+        "function pushSnapshot(state: SessionState): void {",
+        "  state.blocks = next.blocks; // full swap, identity changes",
+        "  state.status = next.status;",
+        "  state.blockVersion = ++version;",
+        "}",
+        "```",
+        "",
+      ].join("\n"),
+    },
+    {
       kind: "user",
       text: "帮我看看这个仓库结构",
       images: [
@@ -607,7 +624,13 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "sendPrompt") {
-        sendPromptFlow(m.text);
+        // Mirror the real host: the code-context card is assembled into the
+        // user turn (fenced block ahead of the typed text).
+        const cc = m.codeContext;
+        const full = cc
+          ? [`关于 \`${cc.path}:${cc.range}\`：`, "", "```", cc.code, "```", m.text].filter(Boolean).join("\n\n")
+          : m.text;
+        sendPromptFlow(full);
       }
     },
   };

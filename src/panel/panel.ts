@@ -35,7 +35,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import {
   backfillBlockIds,
   beginReplay,
@@ -361,18 +361,15 @@ export class ChatPanel implements vscode.Disposable {
     await this.sendPrompt(prompt);
   }
 
-  /** Right-click "Add to iFlow Context": prefill the composer for editing. */
+  /**
+   * Right-click "加入 iFlow 上下文": attach the selection as a structured
+   * code-context card above the composer (webview renders it styled and
+   * removable — a plain textarea cannot). The card rides `sendPrompt` back
+   * and is assembled into the agent-facing prompt here at send time.
+   */
   addToContext(relPath: string, range: string, code: string): void {
     void vscode.commands.executeCommand("iflow.chatPanel.focus");
-    const draft = [
-      vscode.l10n.t("关于 `{0}:{1}`：", relPath, range),
-      "",
-      "```",
-      code,
-      "```",
-      "",
-    ].join("\n");
-    this.postToWebview({ type: "setDraft", text: draft });
+    this.postToWebview({ type: "setCodeContext", path: relPath, range, code });
   }
 
   /**
@@ -465,7 +462,7 @@ export class ChatPanel implements vscode.Disposable {
         this.store.pushSnapshot();
         break;
       case "sendPrompt":
-        await this.sendPrompt(msg.text, msg.images, msg.files);
+        await this.sendPrompt(msg.text, msg.images, msg.files, msg.codeContext);
         break;
       case "cancel":
         this.client?.cancel(this.store.getState().sessionId ?? "");
@@ -1831,9 +1828,25 @@ export class ChatPanel implements vscode.Disposable {
     text: string,
     images?: { data: string; mimeType: string }[],
     files?: { name: string; path: string }[],
+    codeContext?: CodeContextUi,
   ): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && !codeContext) return;
+    // Code-context card (right-click 加入上下文): assembled into a fenced
+    // block ahead of the typed text. The typed part goes through
+    // toAgentPromptText (its "/"-escape must not touch code lines); the block
+    // itself rides raw — the composed text starts with "关于 …"，never with
+    // "/", so the CLI's command gate cannot misfire on it.
+    const codeBlock = codeContext
+      ? [
+          vscode.l10n.t("关于 `{0}:{1}`：", codeContext.path, codeContext.range),
+          "",
+          "```",
+          codeContext.code,
+          "```",
+        ].join("\n")
+      : "";
+    const fullText = [codeBlock, trimmed].filter(Boolean).join("\n\n");
     // The agent sees the attachment list inline: absolute paths it can read
     // with its own tools. The transcript block (beginUserPrompt) mirrors the
     // same list so the UI matches what was actually sent.
@@ -1843,11 +1856,13 @@ export class ChatPanel implements vscode.Disposable {
             .map((f) => `- ${f.name} → ${f.path}`)
             .join("\n")}`
         : "";
-    // The agent-facing text escapes "/"-leading non-commands (CLI would
-    // otherwise answer "Unknown command" and the model never sees the text);
-    // the transcript keeps the user's verbatim input.
+    // The agent-facing text escapes "/"-leading non-commands in the TYPED
+    // part (CLI would otherwise answer "Unknown command" and the model never
+    // sees the text); the transcript keeps the composed verbatim input.
     const promptText =
-      toAgentPromptText(trimmed, this.store.getState().commands) + attachmentBlock;
+      [codeBlock, toAgentPromptText(trimmed, this.store.getState().commands)]
+        .filter(Boolean)
+        .join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -1865,11 +1880,11 @@ export class ChatPanel implements vscode.Disposable {
       const sessionId = this.store.getState().sessionId;
       if (!sessionId) throw new Error(vscode.l10n.t("会话未就绪"));
       this.store.userPrompt(
-        trimmed,
+        fullText,
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
         files,
       );
-      void this.labelSessionWithPrompt(trimmed);
+      void this.labelSessionWithPrompt(fullText);
       void this.persistActiveTranscript(); // user turn lands even on a crash
       const prompt: ContentBlock[] = [{ type: "text", text: promptText }];
       for (const img of images ?? []) {

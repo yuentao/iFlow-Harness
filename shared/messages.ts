@@ -231,6 +231,14 @@ export interface FileHitUi {
   path: string;
 }
 
+/** Editor selection attached via right-click "加入 iFlow 上下文" (M5).
+ * `range` is the `L<start>` / `L<start>-L<end>` display form built by the host. */
+export interface CodeContextUi {
+  path: string;
+  range: string;
+  code: string;
+}
+
 // ---------------------------------------------------------------------------
 // Host → WebView messages
 // ---------------------------------------------------------------------------
@@ -304,8 +312,16 @@ export type WebviewToHost =
   | { type: "ready" }
   /** `images`: base64 (no data: prefix) screenshots/pasted images. `files`:
    * non-image attachments with real paths (picked or staged); the host
-   * appends the list to the agent-facing prompt text. */
-  | { type: "sendPrompt"; text: string; images?: { data: string; mimeType: string }[]; files?: { name: string; path: string }[] }
+   * appends the list to the agent-facing prompt text. `codeContext`: the
+   * right-click "加入 iFlow 上下文" selection — the host prepends it as a
+   * fenced block ahead of the typed text. */
+  | {
+      type: "sendPrompt";
+      text: string;
+      images?: { data: string; mimeType: string }[];
+      files?: { name: string; path: string }[];
+      codeContext?: CodeContextUi;
+    }
   | { type: "cancel" }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
@@ -321,8 +337,11 @@ export type WebviewToHost =
   | { type: "openDiff"; toolCallId: string }
   /** M5: fuzzy-search workspace files for the @-mention popup. */
   | { type: "searchFiles"; requestId: number; query: string }
-  /** M5: prefill the composer (right-click "Add to iFlow Context"). */
-  | { type: "setDraft"; text: string }
+  /** Right-click "加入 iFlow 上下文": attach the editor selection as a
+   * structured code-context card above the composer (styled, removable) —
+   * a plain textarea cannot render a fenced block. At most one card; the
+   * host assembles the final prompt text at send time. */
+  | { type: "setCodeContext"; path: string; range: string; code: string }
   /** Non-image files dropped/pasted into the composer: the webview only has
    * File objects it cannot persist, so the host writes them into a session
    * temp dir and replies `stagedFiles` with absolute paths. */

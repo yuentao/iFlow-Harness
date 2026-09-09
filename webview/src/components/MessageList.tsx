@@ -337,7 +337,10 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
   const send = useChat((s) => s.send);
   return (
     <div className="stream-in flex justify-end">
-      <div className="max-w-[85%] rounded-xl rounded-br-sm bg-surface-2 px-3 py-2 text-[13px] leading-relaxed text-foreground">
+      {/* user-bubble scopes the attached-code-context styling (styles.css):
+          fenced blocks here read as right-clicked source context, not as
+          model output. */}
+      <div className="user-bubble max-w-[85%] rounded-xl rounded-br-sm bg-surface-2 px-3 py-2 text-[13px] leading-relaxed text-foreground">
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">

@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  FileCode,
   FileText,
   Paperclip,
   SendHorizontal,
   Square,
   Zap,
 } from "lucide-react";
-import type { FileHitUi, SlashCommand } from "../../../shared/messages";
+import type { CodeContextUi, FileHitUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { Dropdown } from "./ui";
@@ -53,6 +54,10 @@ export function Composer() {
    * identity from the path: picking the same file twice yields two removable
    * chips instead of one key collision. */
   const [attachments, setAttachments] = useState<Array<{ id: number; name: string; path: string }>>([]);
+  /** Right-click "加入 iFlow 上下文" selection — rendered as a styled code
+   * card above the composer (a plain textarea cannot show a fenced block).
+   * At most one card; replaced by a newer right-click, removed explicitly. */
+  const [codeContext, setCodeContext] = useState<CodeContextUi | null>(null);
   const stageSeq = useRef(0);
   const attachSeq = useRef(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -135,9 +140,9 @@ export function Composer() {
         }
         return;
       }
-      if (msg?.type === "setDraft" && typeof msg.text === "string") {
-        // Right-click "Add to iFlow Context": prefill + focus the composer.
-        setText(msg.text);
+      if (msg?.type === "setCodeContext" && typeof msg.code === "string") {
+        // Right-click "加入 iFlow 上下文": show the styled code card + focus.
+        setCodeContext({ path: msg.path, range: msg.range, code: msg.code });
         setMentionQuery(null);
         requestAnimationFrame(() => taRef.current?.focus());
       }
@@ -296,16 +301,18 @@ export function Composer() {
 
   function submit() {
     const value = text.trim();
-    if ((!value && images.length === 0 && attachments.length === 0) || busy) return;
+    if ((!value && images.length === 0 && attachments.length === 0 && !codeContext) || busy) return;
     send({
       type: "sendPrompt",
-      text: value || (attachments.length > 0 ? t("（见附件）") : t("（见附图）")),
+      text: value || (codeContext ? t("（见附带的代码上下文）") : attachments.length > 0 ? t("（见附件）") : t("（见附图）")),
       images: images.length > 0 ? images.filter((img) => img.data) : undefined,
       files: attachments.length > 0 ? attachments.map(({ name, path }) => ({ name, path })) : undefined,
+      codeContext: codeContext ?? undefined,
     });
     setText("");
     setImages([]);
     setAttachments([]);
+    setCodeContext(null);
     setMentionQuery(null);
   }
 
@@ -337,6 +344,32 @@ export function Composer() {
         </div>
       )}
       {note && <div className="mb-1.5 px-0.5 text-[11px] text-warning">{note}</div>}
+      {/* Right-click "加入 iFlow 上下文" code card: the selection is the real
+          payload (rides sendPrompt.codeContext), styled as source context —
+          accent rail + mono block — not as editable draft text. */}
+      {codeContext && (
+        <div className="code-context-card mb-1.5 overflow-hidden rounded-lg border border-border bg-editor">
+          <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
+            <FileCode className="size-3.5 shrink-0 text-primary" />
+            <span className="truncate font-mono text-[11px] text-foreground" title={codeContext.path}>
+              {codeContext.path}
+            </span>
+            <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[10px] text-muted-foreground">
+              {codeContext.range}
+            </span>
+            <button
+              className="ml-auto shrink-0 rounded px-1 text-[12px] leading-none text-muted-foreground hover:text-destructive"
+              title={t("移除")}
+              onClick={() => setCodeContext(null)}
+            >
+              ×
+            </button>
+          </div>
+          <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-[11.5px] leading-[1.6] text-foreground/90">
+            {codeContext.code}
+          </pre>
+        </div>
+      )}
       {images.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
           {images.map((img, i) => (

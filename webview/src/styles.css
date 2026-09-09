@@ -148,6 +148,22 @@
     border-color: var(--color-border);
   }
 
+  /* Interactive elements get the pointer hand: buttons, dropdown triggers
+     (plain divs in ui.tsx), clickable user-attachment images, markdown links
+     and collapsed-card summaries. Disabled controls keep the default arrow
+     so a click that would no-op doesn't promise interactivity. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  summary,
+  .user-bubble img[title],
+  .md a {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+  }
+
   html,
   body {
     margin: 0;
@@ -370,6 +386,35 @@
   border: none;
   border-top: 1px solid var(--border);
   margin: 0.6em 0;
+}
+
+/* --- user bubble: attached code context (editor right-click) --------------- */
+/* Fenced blocks inside a user message come from "Ask iFlow" / "加入 iFlow
+   上下文" — they read as attached source context, not as model output, so
+   they get their own treatment: primary accent rail, flatter radius and a
+   scroll cap so a large selection doesn't stretch the bubble. */
+.user-bubble .md pre {
+  border-left: 2px solid color-mix(in oklab, var(--primary) 60%, transparent);
+  border-radius: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.user-bubble .md pre::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.user-bubble .md pre::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  border-radius: 4px;
+}
+
+/* --- composer: attached code-context card (editor right-click) ------------- */
+/* Same accent rail as the transcript counterpart — the card IS the payload
+   (rides sendPrompt.codeContext), styled as source context, not draft text. */
+.code-context-card {
+  border-left: 2px solid color-mix(in oklab, var(--primary) 60%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {
