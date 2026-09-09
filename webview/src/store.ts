@@ -588,7 +588,9 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "cancel") {
-        // Mirror the real host: stop → idle with stopReason "cancelled".
+        // Mirror the real host: stop → idle with stopReason "cancelled", and
+        // the pending permission request is settled (cancelled) by the CLI.
+        activeApproval = null;
         demoBlocks.push({ kind: "text", text: "*（已停止生成，mock）*" });
         broadcast({
           type: "snapshot",
