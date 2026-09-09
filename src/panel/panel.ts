@@ -1171,6 +1171,9 @@ export class ChatPanel implements vscode.Disposable {
     // Remember for the next handshake (ensureClient reads these).
     this.pendingHandshakeCredentials = creds;
     try {
+      // ensureClient's post-handshake starts a NEW session (user directive:
+      // profile switches never restore history — see the block there), and
+      // applies pendingSwitchModel (the NEW profile's model) via set_model.
       await this.ensureClient();
       this.store.setAuth(await this.buildAuthState(true, false));
       void vscode.window.showInformationMessage(
@@ -1503,14 +1506,17 @@ export class ChatPanel implements vscode.Disposable {
           this.store.setAuth(await this.buildAuthState(true, false));
         }
         this.store.markConnected();
-        // Surface the persisted session list before the session starts so the
-        // switcher renders as soon as the panel opens. Sessions the CLI never
-        // persisted (created but unused) are pruned: nothing to restore.
-        const restorable = await this.pruneUnrestorableSessions();
-        this.store.setSessions(restorable, restorable[0]?.id ?? null);
-        if (!await this.tryRestoreLastSession()) {
-          await this.startNewSession();
-        }
+        // User directive: open on a NEW session — the panel is usable as soon
+        // as session/new returns; previous sessions stay in the switcher for
+        // manual restore. (The old flow ran tryRestoreLastSession here, which
+        // blocked first paint on session/load + transcript replay.)
+        await this.startNewSession();
+        // History list in the background: prune dead entries + push the
+        // switcher list without touching activeSessionId (the fresh session
+        // is active). Fire-and-forget — failures only degrade the switcher.
+        void this.refreshSessionList().catch((error) => {
+          this.log.warn(`session list refresh failed: ${errorMessage(error)}`);
+        });
       } catch (error) {
         this.client = null;
         // C5: second safety net — connect() kills the child when initialize
@@ -1717,6 +1723,18 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Background refresh of the recent-session switcher: prune unrestorable
+   * entries, then push the list WITHOUT touching activeSessionId (used after
+   * a fresh session start — the new session must stay active).
+   */
+  private async refreshSessionList(): Promise<void> {
+    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    const kept = await this.pruneUnrestorableSessions();
+    const activeId = this.store.getState().activeSessionId;
+    this.store.setSessions(kept, activeId);
+  }
+
+  /**
    * Transcript file names on disk under the extension's transcript store
    * (for orphan cleanup). Empty when the store directory doesn't exist yet.
    */
@@ -1745,24 +1763,6 @@ export class ChatPanel implements vscode.Disposable {
     }
     await this.context.workspaceState.update(TRANSCRIPTS_KEY, undefined);
     this.log.info(`migrated ${Object.keys(legacy).length} legacy transcript(s) from workspaceState to files`);
-  }
-
-  /**
-   * Try to restore the last usable session for this workspace. Returns false
-   * when there is nothing restorable (fresh session follows).
-   */
-  private async tryRestoreLastSession(): Promise<boolean> {
-    const lastId = await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null);
-    if (lastId && this.hasPersistedTranscript(lastId)) {
-      return await this.restoreSession(lastId);
-    }
-    // The recorded active session is dead — fall back to the most recent
-    // restorable one from the switcher list.
-    const fallback = this.readPersistedSessions().find((s) => this.hasPersistedTranscript(s.id));
-    if (fallback) {
-      return await this.restoreSession(fallback.id);
-    }
-    return false;
   }
 
   /**
