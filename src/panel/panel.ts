@@ -697,7 +697,6 @@ export class ChatPanel implements vscode.Disposable {
    */
   private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
     const id = `q-${++this.approvalSeq}`;
-    const count = req.questions.length;
 
     return new Promise<UserQuestionsResponse>((resolve) => {
       const timer = setTimeout(() => {
@@ -710,7 +709,6 @@ export class ChatPanel implements vscode.Disposable {
 
       this.pendingQuestions.set(id, { resolve, timer });
       this.store.showQuestions({ id, questions: req.questions });
-      void count;
     });
   }
 

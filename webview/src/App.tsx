@@ -17,6 +17,7 @@ import { Chip, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { QuestionCard } from "./components/QuestionCard";
 import { AuthCard } from "./components/AuthCard";
 import type { AgentStatus } from "../../shared/messages";
 
@@ -301,6 +302,8 @@ export function App() {
       <MessageList />
 
       {state.pendingApproval && <ApprovalCard approval={state.pendingApproval} />}
+
+      {state.pendingQuestions && <QuestionCard pending={state.pendingQuestions} />}
 
       <Composer />
     </div>

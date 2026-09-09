@@ -252,13 +252,13 @@ export class AcpClient {
     // failed on every call.
     peer.onRequest(AcpMethods.userQuestions, async (params) => {
       const request = params as UserQuestionsRequest;
-      if (this.callbacks.onUserQuestions) return await this.onUserQuestions(request);
+      if (this.callbacks.onUserQuestions) return await this.callbacks.onUserQuestions(request);
       return { answers: {} } satisfies UserQuestionsResponse;
     });
 
     peer.onRequest(AcpMethods.exitPlanMode, async (params) => {
       const request = params as ExitPlanModeRequest;
-      if (this.callbacks.onExitPlanMode) return await this.onExitPlanMode(request);
+      if (this.callbacks.onExitPlanMode) return await this.callbacks.onExitPlanMode(request);
       return { approved: false, reason: "Plan approval not supported by this client" } satisfies ExitPlanModeResponse;
     });
   }
