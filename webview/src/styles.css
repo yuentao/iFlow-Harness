@@ -149,13 +149,13 @@
   }
 
   /* Interactive elements get the pointer hand: buttons, dropdown triggers
-     (plain divs in ui.tsx), clickable user-attachment images, markdown links
-     and collapsed-card summaries. Disabled controls keep the default arrow
-     so a click that would no-op doesn't promise interactivity. */
+     (plain divs in ui.tsx), markdown links and collapsed-card summaries.
+     User-attachment images keep their cursor-zoom-in utility (click to zoom
+     — zoom semantics beat the generic hand). Disabled controls keep the
+     default arrow so a click that would no-op doesn't promise interactivity. */
   button:not(:disabled),
   [role="button"]:not(:disabled),
   summary,
-  .user-bubble img[title],
   .md a {
     cursor: pointer;
   }
