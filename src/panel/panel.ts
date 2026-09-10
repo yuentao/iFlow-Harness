@@ -251,6 +251,14 @@ export class ChatPanel implements vscode.Disposable {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+    // Final flush: a turn interrupted by window close / extension reload has
+    // no later persist point (completion never runs) — write the tail now so
+    // the session survives a restart intact. No-op when blocks are empty.
+    try {
+      await this.persistActiveTranscript();
+    } catch {
+      // best-effort; teardown must proceed even if the write failed
+    }
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
     this.cancelAllPendingQuestions("");
     try {
@@ -1258,6 +1266,13 @@ export class ChatPanel implements vscode.Disposable {
     // resulting exit event must not be mistaken for a crashed session.
     const oldClient = this.client;
     this.client = null;
+    // Tail rescue BEFORE the state swap: the outgoing session's transcript is
+    // typically mid-turn here (an errored turn is exactly why the user is
+    // switching profiles), and replaceState below drops the in-memory blocks.
+    // persistActiveTranscript serializes synchronously at call time, so it
+    // must run before the swap; the file write itself lands on the persist
+    // chain and targets the old session's file — no race with the new state.
+    void this.persistActiveTranscript();
     // Splash + "连接中" chip BEFORE the teardown: the old child's kill can
     // wait up to 3s and the new CLI boot 10-60s — feedback must be immediate.
     this.store.replaceState(newSessionState(this.store.getState()));
@@ -1460,7 +1475,12 @@ export class ChatPanel implements vscode.Disposable {
       endReplay(this.store.getState());
       this.log.error(`session restore failed: ${message}`);
       this.store.markError(vscode.l10n.t("会话恢复失败：{0}", message));
-      await this.forgetSession(sessionId);
+      // Do NOT forget the session here: the transcript file still exists and
+      // the failure is often transient (CLI boot hiccup, endpoint down, auth
+      // not ready). Forgetting would drop it from the switcher, and the next
+      // pruneUnrestorableSessions would delete the orphaned transcript file —
+      // turning a retryable failure into irreversible content loss. The user
+      // can still remove it explicitly via the switcher's delete.
       return false;
     } finally {
       this.restoring = false;
@@ -1579,10 +1599,14 @@ export class ChatPanel implements vscode.Disposable {
             if (this.stderrTail.length > 0) {
               this.log.warn(`CLI stderr tail (${this.stderrTail.length} lines):\n${this.stderrTail.join("\n")}`);
             }
-                this.client = null;
-                this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
-                this.cancelAllPendingQuestions(vscode.l10n.t("CLI 进程已退出，提问已跳过"));
-                this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));          },
+            // Crash tail rescue: persist whatever streamed before the CLI died
+            // — the next persist point (prompt completion) will never run.
+            void this.persistActiveTranscript();
+            this.client = null;
+            this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
+            this.cancelAllPendingQuestions(vscode.l10n.t("CLI 进程已退出，提问已跳过"));
+            this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
+          },
           onRequestPermission: (req: RequestPermissionRequest) => {
             // Dying client's approval cards would hang on the fresh state —
             // auto-cancel instead (the process is being torn down anyway).
@@ -1951,6 +1975,10 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async startNewSession(): Promise<void> {
+    // Tail rescue: a manual reset discards the active session's in-memory
+    // blocks below — persist whatever the last (possibly errored) turn left
+    // unsaved first. No-op on first connect (blocks are empty).
+    void this.persistActiveTranscript();
     // Lock the UI while the CLI spins up the new session (sessions/mode/model
     // switches must not race the in-flight `session/new`).
     this.store.setInitializing(true);
@@ -2090,6 +2118,10 @@ export class ChatPanel implements vscode.Disposable {
       // remain diagnosable from the Output panel.
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
+      // Errored-turn rescue: the completion-time persist never runs for a
+      // failed prompt, so whatever streamed before the failure exists only in
+      // memory. Write it now or a restart / profile switch loses it for good.
+      void this.persistActiveTranscript();
       this.postSound("error");
     }
   }
