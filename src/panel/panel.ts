@@ -63,8 +63,12 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const CHAT_FORWARD_TIMEOUT_MS = 10 * 60_000;
 /** R3: stderr lines kept for crash/hang diagnostics. */
 const STDERR_TAIL_LINES = 200;
-/** Delay before the one-shot automatic retry of a rate-limited prompt. */
-const RATE_LIMIT_RETRY_DELAY_MS = 5_000;
+/** Escalating backoff before each automatic retry of a rate-limited prompt
+ * (one entry per retry, capped at the last). Platform rate-limit windows
+ * routinely outlive a single 5s wait: with the old one-shot retry the second
+ * attempt failed too and the turn landed on the error banner with no further
+ * recovery — user-visible as "没有触发自动重试" (reported 2026-09-10). */
+const RATE_LIMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -2145,8 +2149,9 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Prompt with one reactive auto-retry per failure class (bounded at ONE
-   * total retry, whichever class consumes it).
+   * Prompt with bounded reactive auto-retry (rate limits get several
+   * escalating attempts — see RATE_LIMIT_RETRY_DELAYS_MS for why one was
+   * not enough).
    *
    * Why this exists — Wire behavior (probed, CLI 0.5.19 bundle):
    * - The interactive CLI retries a turn after the gateway rejects it with
@@ -2167,53 +2172,72 @@ export class ChatPanel implements vscode.Disposable {
    *   re-sent otherwise.
    *
    * Recovery:
-   * - context overflow → drive the `/compress` slash command
+   * - context overflow (once per send) → drive the `/compress` slash command
    *   (`handleAcpSlashCommand` bridges it to the forced full compression,
    *   bypassing the ratio gate; its result leaks as a compression JSON chunk
    *   that the transcript sanitizer renders as a card) → resend the original
-   *   prompt once.
-   * - rate limit → notify the user, wait 5s, resend the original prompt
-   *   once. A Stop pressed during the wait aborts the retry (the retry loop
-   *   re-checks `cancelSeen`; the sendPrompt catch still shows the rate-
-   *   limit error banner).
-   * Both paths are bounded: at most one retry, so a prompt that fails the
-   * same way twice falls through to the normal error path.
+   *   prompt.
+   * - rate limit (up to RATE_LIMIT_RETRY_DELAYS_MS.length per send) →
+   *   notify the user, wait the escalating delay, resend whatever turn was
+   *   pending — the `/compress` turn included: it runs through this same
+   *   loop (`compressNext`), so a rate-limited compression no longer falls
+   *   straight to the error banner. A Stop pressed during the wait aborts
+   *   the retry (the loop re-checks `cancelSeen`; the sendPrompt catch still
+   *   shows the rate-limit error banner).
+   * Both paths are bounded, so a prompt that keeps failing lands on the
+   * normal error path after the last attempt.
    */
   private async promptWithRetry(
     client: AcpClient,
     sessionId: string,
     prompt: ContentBlock[],
   ): Promise<PromptResponse> {
-    for (let attempt = 0; ; attempt++) {
+    let compressNext = false; // next attempt sends /compress instead of prompt
+    let overflowRecovered = false;
+    let rateLimitRetries = 0;
+    for (;;) {
+      const blocks: ContentBlock[] = compressNext
+        ? [{ type: "text", text: "/compress" }]
+        : prompt;
       try {
-        return await client.prompt({ sessionId, prompt });
+        const result = await client.prompt({ sessionId, prompt: blocks });
+        if (!compressNext) return result;
+        // Compress turn finished: fall through to resending the original
+        // prompt. User hit Stop while it ran: do not resurrect the prompt
+        // behind their back — surface the cancellation as the final
+        // stopReason instead.
+        compressNext = false;
+        if (result.stopReason === "cancelled") return result;
       } catch (error) {
-        if (attempt >= 1) throw error;
-        if (isContextOverflowError(error)) {
+        if (isContextOverflowError(error) && !overflowRecovered) {
+          overflowRecovered = true;
+          compressNext = true;
           this.log.warn(
             `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
           );
           this.store.appendNotice(
             vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
           );
-          const compressed = await client.prompt({
-            sessionId,
-            prompt: [{ type: "text", text: "/compress" }],
-          });
-          // User hit Stop while the compress turn ran: do not resurrect the
-          // prompt behind their back — surface the cancellation as the final
-          // stopReason instead.
-          if (compressed.stopReason === "cancelled") return compressed;
           continue;
         }
-        if (isRateLimitError(error)) {
+        if (
+          isRateLimitError(error) &&
+          rateLimitRetries < RATE_LIMIT_RETRY_DELAYS_MS.length
+        ) {
+          const delayMs = RATE_LIMIT_RETRY_DELAYS_MS[rateLimitRetries]!;
+          rateLimitRetries++;
           this.log.warn(
-            `rate limit on session ${sessionId}, auto-retrying in ${RATE_LIMIT_RETRY_DELAY_MS / 1000}s: ${this.formatErrorForLog(error)}`,
+            `rate limit on session ${sessionId}, auto-retry ${rateLimitRetries}/${RATE_LIMIT_RETRY_DELAYS_MS.length} in ${delayMs / 1000}s: ${this.formatErrorForLog(error)}`,
           );
           this.store.appendNotice(
-            vscode.l10n.t("模型触发平台速率限制，{0} 秒后自动重试一次…", Math.round(RATE_LIMIT_RETRY_DELAY_MS / 1000)),
+            vscode.l10n.t(
+              "模型触发平台速率限制，{0} 秒后自动重试（第 {1}/{2} 次）…",
+              Math.round(delayMs / 1000),
+              rateLimitRetries,
+              RATE_LIMIT_RETRY_DELAYS_MS.length,
+            ),
           );
-          await abortableDelay(RATE_LIMIT_RETRY_DELAY_MS, () => this.cancelSeen);
+          await abortableDelay(delayMs, () => this.cancelSeen);
           if (this.cancelSeen) throw error; // user pressed Stop during the wait
           continue;
         }
