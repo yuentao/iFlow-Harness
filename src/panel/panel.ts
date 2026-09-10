@@ -594,6 +594,18 @@ export class ChatPanel implements vscode.Disposable {
       case "deleteSession":
         await this.deleteSession(msg.sessionId);
         break;
+      case "refreshAuth": {
+        // Dropdown/card opened: recompute the profile list fresh (SecretStorage
+        // + settings.json) without touching the connection-scoped flags.
+        const auth = this.store.getState().auth;
+        this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
+        break;
+      }
+      case "refreshModels":
+        // Dropdown opened: re-query /models (may take seconds — fire and forget;
+        // the store pushes a snapshot when the fresh list lands).
+        void this.refreshLiveModels();
+        break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
         // commit can send message kinds this host does not know; without a
@@ -1994,6 +2006,25 @@ export class ChatPanel implements vscode.Disposable {
       );
       return [];
     }
+  }
+
+  /**
+   * Model dropdown opened (webview `refreshModels`): re-query the live list
+   * and push it. A failed / empty query keeps the already-shown list — a
+   * transient endpoint failure must not collapse the dropdown to a single
+   * entry — and `initializing` is skipped so a late result from the OLD
+   * endpoint cannot clobber the fresh list a profile-switch session start
+   * just pushed.
+   */
+  private async refreshLiveModels(): Promise<void> {
+    if (this.store.getState().initializing) return;
+    const models = await this.queryLiveModels();
+    if (models.length === 0) return;
+    const currentModelId = this.store.getState().currentModelId;
+    if (currentModelId && !models.some((m) => m.id === currentModelId)) {
+      models.unshift({ id: currentModelId, name: currentModelId });
+    }
+    this.store.sessionMeta({ models });
   }
 
   private async startNewSession(): Promise<void> {

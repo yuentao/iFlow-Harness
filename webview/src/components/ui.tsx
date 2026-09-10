@@ -62,6 +62,9 @@ export function Dropdown({
    * the wrapper is the flex item, so without min-w-0 it ignores the trigger's
    * shrink chain and long content stretches the whole parent row. */
   wrapperClass = "",
+  /** Open-state change notification (true = opening). Lets callers refresh
+   * data at open time (auth profile list, live model list). */
+  onOpenChange,
   children,
 }: {
   trigger: (open: boolean) => ReactNode;
@@ -69,6 +72,7 @@ export function Dropdown({
   align?: "left" | "right";
   menuClass?: string;
   wrapperClass?: string;
+  onOpenChange?: (open: boolean) => void;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -99,7 +103,16 @@ export function Dropdown({
       {/* The click proxy must constrain its child the same way the wrapper
           does: as a plain block it lets a long trigger label stretch the
           button far beyond the wrapper width (flex-1 inside is inert). */}
-      <div className={wrapperClass.includes("flex-1") ? "flex min-w-0" : ""} onClick={() => setOpen((v) => !v)}>
+      <div
+        className={wrapperClass.includes("flex-1") ? "flex min-w-0" : ""}
+        onClick={() => {
+          // Discrete toggle (not inside the setState updater): React StrictMode
+          // may invoke updaters twice, which would double-fire onOpenChange.
+          const next = !open;
+          setOpen(next);
+          onOpenChange?.(next);
+        }}
+      >
         {trigger(open)}
       </div>
       {open && (

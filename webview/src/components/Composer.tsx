@@ -579,11 +579,16 @@ export function Composer() {
             </Dropdown>
           )}
 
-          {/* model dropdown */}
+          {/* model dropdown — refreshed at open time: the host re-queries
+              GET {baseUrl}/models, so newly added gateway models show up
+              without restarting the session */}
           {models.length > 0 && (
             <Dropdown
               direction="up"
               menuClass="w-56 max-h-64 overflow-y-auto"
+              onOpenChange={(o) => {
+                if (o) send({ type: "refreshModels" });
+              }}
               trigger={(open) => (
                 <button
                   className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}

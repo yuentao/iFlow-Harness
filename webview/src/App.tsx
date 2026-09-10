@@ -73,6 +73,12 @@ export function App() {
     if (manual) localStorage.setItem("iflow-theme", manual);
   }, [dark, manual]);
 
+  // Auth card opened: refresh the profile list the same way the header
+  // dropdown does, so the card never shows a stale snapshot either.
+  useEffect(() => {
+    if (configOpen) send({ type: "refreshAuth" });
+  }, [configOpen, send]);
+
   if (!state || state.status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
     return (
@@ -131,10 +137,16 @@ export function App() {
             >
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             </button>
-            {/* API profiles: quick switch + manage (opens the full auth card) */}
+            {/* API profiles: quick switch + manage (opens the full auth card).
+                Refresh the profile list at open time: settings.json is rewritten
+                by external tools behind our back, so the shown list must be
+                recomputed on every open, not reused from panel load. */}
             <Dropdown
               align="right"
               menuClass="w-64"
+              onOpenChange={(o) => {
+                if (o) send({ type: "refreshAuth" });
+              }}
               trigger={(open) => (
                 <button
                   className={`${BTN_ICON}${state.auth.authenticated ? "" : " text-warning"}`}

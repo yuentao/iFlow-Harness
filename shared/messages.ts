@@ -389,4 +389,11 @@ export type WebviewToHost =
   /** M4: load a persisted session by id (history replays into the transcript). */
   | { type: "loadSession"; sessionId: string }
   /** M4: forget a persisted session (switcher entry + transcript). */
-  | { type: "deleteSession"; sessionId: string };
+  | { type: "deleteSession"; sessionId: string }
+  /** Re-read the API profile list (SecretStorage + CLI settings.json) when the
+   * profile dropdown / auth card opens — external tools rewrite settings.json
+   * behind our back, so the shown list must be recomputed on open. */
+  | { type: "refreshAuth" }
+  /** Re-query `GET {baseUrl}/models` when the model dropdown opens — the list
+   * captured at session start goes stale (new gateway models appear). */
+  | { type: "refreshModels" };
