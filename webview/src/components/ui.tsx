@@ -4,6 +4,33 @@ import { useChat } from "../store";
 
 /* Shared visual primitives ported from the UI reference design. */
 
+/**
+ * Fuzzy match score for dropdown search (model list etc.): higher ranks
+ * first, null = no match. Case-insensitive subsequence — "g53f" matches
+ * "glm-5.3-flash-free". Ranking prefers substring hit > boundary-anchored
+ * characters > scattered subsequence; contiguous runs and shorter targets
+ * rank higher. Empty query matches everything with score 0.
+ */
+export function fuzzyScore(query: string, target: string): number | null {
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  if (q.length === 0) return 0;
+  const exact = t.indexOf(q);
+  if (exact >= 0) return 1000 - exact * 10 - Math.min(t.length, 100);
+  let score = 0;
+  let ti = 0;
+  let prev = -2;
+  for (let qi = 0; qi < q.length; qi++) {
+    const found = t.indexOf(q[qi]!, ti);
+    if (found < 0) return null;
+    if (found === prev + 1) score += 20; // contiguous run bonus
+    if (found === 0 || /[^a-z0-9]/.test(t[found - 1]!)) score += 10; // boundary bonus
+    prev = found;
+    ti = found + 1;
+  }
+  return score + 100 - Math.min(t.length, 100); // subsequence baseline + shorter-target bonus
+}
+
 const CHIP_TONES: Record<string, string> = {
   muted: "bg-surface text-muted-foreground",
   success: "bg-success/15 text-success",

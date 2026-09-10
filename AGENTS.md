@@ -2,17 +2,18 @@
 
 ## 项目概览
 
-**iflow-harness**（产品名「心流·驭光」）是一个 VSCode 扩展，把 iFlow CLI 的 Agent 能力图形化地接入编辑器。它通过 **ACP（Agent Client Protocol）** 驱动本地安装的 `@iflow-ai/iflow-cli`：spawn 一个 `--experimental-acp` 子进程，用 **NDJSON 分帧的 JSON-RPC 2.0** 双向通信，提供流式对话、工具审批、Diff 回退、会话持久化、API Profile 管理与 @文件补全。
+**iflow-harness**（产品名「心流·驭光」）是一个 VSCode 扩展，把 iFlow CLI 的 Agent 能力图形化地接入编辑器。它通过 **ACP（Agent Client Protocol）** 驱动本地安装的 `@iflow-ai/iflow-cli`：spawn 一个 `--experimental-acp --stream` 子进程，用 **NDJSON 分帧的 JSON-RPC 2.0** 双向通信，提供流式对话、工具审批、Diff 回退、会话持久化、API Profile 管理、@文件补全、附件与选区上下文、ask_user_question 提问卡、Plan 模式审批、速率限制与上下文溢出的自动恢复。
 
-- 技术栈：TypeScript（strict）+ React 19 + Tailwind CSS 4 + zustand + Vite 8 + vitest
+- 技术栈：TypeScript 7（strict）+ React 19 + Tailwind CSS 4 + zustand 5 + Vite 8 + vitest 5
 - 目标环境：VSCode `^1.90.0`，Node 22（CI）/ node20（esbuild target）
-- 仓库：`https://git.pandorastudio.cn/product/iFlow-harness.git`（非 GitHub 远端）
-- 当前版本：见 `CHANGELOG.md` 顶部（`package.json` 的 version 由 CI 从 CHANGELOG 写入，不要手动改）
+- 仓库：`package.json` 声明 GitHub（`https://github.com/yuentao/iFlow-Harness.git`），但实际 `git remote` 仍指向内部 GitLab（`https://git.pandorastudio.cn/product/iFlow-harness.git`）——两处不一致，改发布配置时注意别踩空
+- 当前版本：见 `CHANGELOG.md` 顶部（现为 `0.2.0` / 2026-09-07）；`package.json` 的 version 由 CI 从 CHANGELOG 写入（本地仍为 0.1.0，属正常），**不要手动改**
+- 0.2.0 之后已有大量提交（提问卡、Plan 审批、速率限制重试、提示音、增量快照等）尚未写进 CHANGELOG，见下方「0.2.0 之后的新增能力」
 
 ## 架构：三层单向数据流
 
 ```
-webview/ (React 投影)  ←── 节流快照 ──  shared/ (纯 reducer)  ←── ACP 事件 ──  src/ (Extension Host)  ←── NDJSON ──  iFlow CLI 子进程
+webview/ (React 投影)  ←── snapshot / blockPatch ──  shared/ (纯 reducer)  ←── ACP 事件 ──  src/ (Extension Host)  ←── NDJSON ──  iFlow CLI 子进程
 webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/panel.ts 路由 ──→ AcpClient 调用
 ```
 
@@ -20,30 +21,34 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/extension.ts` | 激活入口、命令注册、`@iflow` chat participant、编辑器选区入口 |
-| `src/acp/client.ts` | spawn CLI 子进程 + initialize 握手；实现 agent→client 的 `fs/read_text_file`、`fs/write_text_file`、`session/request_permission` |
-| `src/acp/jsonrpc.ts` | NDJSON 分帧 + JSON-RPC 路由。**零 VSCode 依赖**，可被任意 IDE 集成复用 |
-| `src/acp/protocol.ts` | ACP wire 类型；iFlow 专有扩展点用 `// iFlow extension` 标注 |
-| `src/acp/cli-locator.ts` | 定位 CLI `bundle/entry.js`（env → PATH shim → npm global → 已知路径） |
+| `src/extension.ts` | 激活入口、命令注册、`@iflow` chat participant、编辑器选区入口（Ask iFlow / 加入上下文） |
+| `src/acp/client.ts` | spawn CLI 子进程 + initialize 握手；实现 agent→client 的 `fs/read_text_file`、`fs/write_text_file`、`session/request_permission`、`_iflow/user/questions`、`_iflow/plan/exit`；`killTree` 进程树清理 |
+| `src/acp/jsonrpc.ts` | NDJSON 分帧（8MB 帧上限）+ JSON-RPC 路由 + `errorMessage` / `isRateLimitError` / `isContextOverflowError`。**零 VSCode 依赖**，可被任意 IDE 集成复用 |
+| `src/acp/protocol.ts` | ACP wire 类型；iFlow 专有扩展点用 `// iFlow extension` 标注（`_iflow/user/questions`、`_iflow/plan/exit`、`session/set_think`） |
+| `src/acp/cli-locator.ts` | 定位 CLI `bundle/entry.js` 与可用 Node 可执行文件（异步探测 + 缓存 + 并发去重）；`buildAcpCommand` 拼 `--experimental-acp --stream` |
 | `src/acp/auth.ts` | openai-compatible 凭据 + 命名 Profile（全部存 VSCode SecretStorage） |
-| `src/acp/models-query.ts` | 实时 `GET {baseUrl}/models` 取模型列表 |
-| `src/panel/panel.ts` | Webview 容器、消息路由、审批流、Diff 回退、会话持久化（最大的文件，~1400 行） |
-| `src/panel/store.ts` | Host 侧 store，负责节流快照下发 |
-| `shared/messages.ts` | Host ↔ WebView 消息协议 + `Block` / `SessionState` 类型（两侧共用） |
-| `shared/session-state.ts` | 纯会话状态 reducer（`applySessionUpdate`、SubAgent 归组、`parseTranscriptJsonl`） |
-| `webview/src/` | React UI：`App.tsx`、`store.ts`（zustand）、`components/*` |
-| `scripts/harness.mjs` | M0 联调工具：直接驱动真实 CLI 跑 ACP 全流程 |
+| `src/acp/models-query.ts` | 实时 `GET {baseUrl}/models` 取模型列表；读 CLI settings.json；归档过期 OAuth 缓存 |
+| `src/panel/panel.ts` | Webview 容器、消息路由、审批流、提问卡、Plan 审批、Diff 回退、会话持久化、速率限制/上下文溢出重试（最大的文件，~2320 行） |
+| `src/panel/store.ts` | Host 侧 store：reducer 应用 + 节流快照 + P-1 增量快照（`blockPatch`）锚定 |
+| `shared/messages.ts` | Host ↔ WebView 消息协议 + `Block` / `SessionState` 类型（两侧共用）+ `applyBlockPatch` |
+| `shared/session-state.ts` | 纯会话状态 reducer（`applySessionUpdate`、SubAgent 归组、`parseTranscriptJsonl`、块 id 分配/回填、`toAgentPromptText`） |
+| `webview/src/` | React UI：`App.tsx`、`store.ts`（zustand + Web Audio 提示音 + `createMockHost`）、`i18n.ts`、`components/*` |
+| `scripts/harness.mjs` | M0 联调工具：驱动真实 CLI 跑 ACP 全流程，`--record` 录 wire 日志，`--probe` 探方法行为 |
+| `scripts/generate-icon.mjs` | 由 SVG 生成 `media/icon.png`（@resvg/resvg-js），`npm run build` 首步调用 |
+| `scripts/read-changelog.mjs` | CI 用：从 CHANGELOG 顶部读版本号与摘要写入 GITHUB_OUTPUT |
+| `docs/code-review-2026-09-08.md` | 全面代码审查报告 + 逐条修复记录（改安全/性能相关代码前值得先看） |
 
 ## 构建与运行
 
 ```bash
 npm ci                 # 安装依赖
 npm run typecheck      # tsc -p tsconfig.json --noEmit
-npm test               # vitest run（单次，非 watch）
-npm run build          # tsc + esbuild(host) + vite build webview
+npm test               # vitest run（单次，非 watch；当前 6 文件 / 136 用例）
+npm run build          # icon + tsc + esbuild(host) + vite build webview
+npm run icon           # 仅重新生成 media/icon.png
 npm run webview:dev    # webview 增量构建（UI 迭代时用）
 npm run harness        # 驱动真实 iFlow CLI 跑 ACP（需本机已装 CLI）
-npm run package        # 打包 .vsix（vsce，含 baseContentUrl）
+npm run package        # 打包 .vsix（vsce --no-dependencies）
 ```
 
 - 调试：`.vscode/launch.json` 提供扩展调试配置（F5 在 Extension Development Host 中加载）。
@@ -56,6 +61,7 @@ npm run package        # 打包 .vsix（vsce，含 baseContentUrl）
 - **纯逻辑放 `shared/` 或 `src/acp/jsonrpc.ts`**，保持零 VSCode 依赖以便单测。UI 组件不 import `vscode`。
 - 新增 wire 消息类型必须同时更新 `shared/messages.ts` 的 `WebviewToHost` / `HostToWebview` 联合类型，两侧共用。
 - 状态变更走 `shared/session-state.ts` 的 reducer 函数，不要在 `panel.ts` 里就地改 state。
+- 新增 transcript 块类型：加进 `Block` 联合并继承 `BlockBase`（带 `id?`），同时确认 `backfillBlockIds` 的递归路径覆盖到。
 
 ### TypeScript
 - `strict: true` + `noUncheckedIndexedAccess: true`。数组索引访问必须显式处理 `undefined`（代码里普遍用 `!` 断言，但仅限已判空处）。
@@ -64,46 +70,80 @@ npm run package        # 打包 .vsix（vsce，含 baseContentUrl）
 
 ### 构建产物
 - `package.json` 有 `"type": "module"`，但 VSCode 扩展宿主要求 CJS → esbuild 输出 `dist/extension.cjs`（`.cjs` 后缀是刻意的）。
-- esbuild 只 bundle `src/extension.ts`，`vscode` 标为 external。
+- esbuild 只 bundle `src/extension.ts`，`vscode` 标为 external，target `node20`。
+- tsc 同时把 `src/`、`shared/` 编译到 `dist/`（`dist/src/acp/*.js` 供 `scripts/harness.mjs` 导入），这些中间产物被 `.vscodeignore` 排除出 VSIX。
 
 ### 本地化（l10n）
 - 用户可见字符串一律 `vscode.l10n.t("中文原文", args)`，**中文是源语言**。
 - 扩展清单字符串走 `package.nls.json` / `package.nls.zh-cn.json`（`%key%` 占位）；webview 走 `webview/src/i18n.ts` + `l10n/bundle.l10n.en.json`。
 - 测试用 `test/vscode-stub.ts` 把 `vscode.l10n.t` 做成恒等翻译，因此断言直接写中文字面量。
+- 双轨 l10n 是已知架构债（审查报告 W7）：host 走 VSCode l10n 工具链、webview 走运行时字典，合并属架构级重构，当前维持现状。
 
 ### 安全与凭据
 - API key **只存 VSCode SecretStorage**，不落盘、不进普通 settings、不打日志。UI 展示用 `maskKey()`（仅末 4 位）。
 - 审批默认拒绝（`outcome: "cancelled"`）；审批卡 5 分钟超时自动拒绝，避免 agent 永久阻塞。
-- Webview HTML 注入 nonce CSP（`script-src 'nonce-...'`），资源引用重写为 `webview.asWebviewUri`。
+- Webview HTML 注入 nonce CSP（`script-src 'nonce-...'`），资源引用重写为 `webview.asWebviewUri`；DOMPurify 显式 `FORBID_TAGS: ["iframe","form"]` + `FORBID_ATTR: ["style","target"]`。
 - 工具 diff 回退前对「编辑器有未保存修改」「内容与 diff 不一致」两种情况弹 modal 二次确认。
+- webview 提供的 data URL 附件有 8MB 上限（`MAX_IMAGE_ATTACHMENT_BYTES`），超限在落盘前拒绝。
+- `openExternal` 仅放行 `^https?://`。
+- **未闭合项**：`client.ts` 的 `resolveAgentPath` 只做相对→绝对拼接，无 session cwd 前缀校验（审查报告 S1，CRITICAL）——agent 可通过 `fs/write_text_file` 写任意路径。动这块时优先补护栏。
+
+## 0.2.0 之后的新增能力（尚未写进 CHANGELOG）
+
+- **ask_user_question 提问卡**：`_iflow/user/questions`（iFlow 扩展方法）→ `QuestionCard.tsx`，支持单选/多选/自由文本，答案按 question `header` 建 map 回传；该方法未注册时 CLI 侧返回 MethodNotFound，工具必失败。
+- **Plan 模式审批**：`_iflow/plan/exit` → 复用审批卡形态，`{approved, reason}` 回传。
+- **速率限制自动重试**：`RATE_LIMIT_RETRY_DELAYS_MS = [5s, 15s, 30s]` 递增退避（单次 5s 重试不够，平台限流窗口常超过 5s）；`isRateLimitError` 匹配 429 / "rate limit" / 中文「速率限制」措辞。
+- **上下文溢出自动压缩**：`isContextOverflowError` → 自动发 `/compress`（桥接 CLI 强制全量压缩，绕过比例门控）→ 重发原 prompt；压缩结果以 `CompressionBlock` 折叠卡呈现，不泄漏原始 JSON。
+- **提示音**：Web Audio 合成（无资源文件），`playSound` 消息驱动；Host 按 `iflow.soundFeedback` 与面板可见性门控；AudioContext 必须在用户手势中创建/恢复（否则 autoplay 策略下永久 suspended，提示音静默）。
+- **代码上下文卡**：右键「加入 iFlow 上下文」→ `CodeContextUi` 卡片（可移除、最多一张），发送时由 Host 拼成 fenced block 前置到 prompt。
+- **附件**：`pickAttachments`（OS 选择器，图片走 base64、其他文件走真实路径）+ `stageFiles`（拖拽/粘贴的非图片文件由 Host 写入会话临时目录）；>5MB 的图片降级为普通文件附件。
+- **CLI 启动优化**：`locateNodeExecutable` 优先用 PATH 上的独立 Node（≥20）而非 Electron 的 `Code.exe`（实测 initialize 13s → 6s），`iflow.nodePath` 可强制指定；`killTree` 清理进程树；`retireStaleOAuthCreds` 把过期 OAuth 缓存改名归档（否则 CLI 每次 authenticate 卡 ~60s 做无用的 Google 刷新）。
+- **增量快照（P-1）**：`blockPatch` 消息只重发 transcript 尾部 + 全部非 blocks 元数据，`blockVersion` 锚定；锚不匹配 → webview 发 `ready` 全量重同步。
+- **transcript 持久化（P2）**：从 `workspaceState` 单体 map 迁到 `context.storageUri/transcripts/<sanitized-sessionId>.json` 每会话一文件，promise 串行链 + temp 写 + rename 原子替换；`migrateLegacyTranscripts` 一次性迁移旧数据（必须在会话过滤前执行，否则未迁移数据会被误判为不可恢复）。
+- **块稳定 id（P4）**：`BlockBase.id` + `nextBlockId()` 单调计数器 + `backfillBlockIds` 回填旧数据；MessageList 用 `block.id` 作 key + `React.memo(BlockView)`，修掉 index key 导致的折叠状态错位。
+- **`--stream` 参数**：`buildAcpCommand` 必须带，否则 CLI 的 ACP prompt 处理器等整轮 SSE 结束才一次性 dump，面板显示为分段而非流式。
+- **状态栏**：agent 状态（连接中/就绪/生成中/等待审批/出错）+ 当前模型，点击打开面板。
+- **下拉实时刷新**：`refreshAuth`（profile 列表，SecretStorage + CLI settings.json）与 `refreshModels`（`GET {baseUrl}/models`）在对应下拉打开时重算——外部工具会偷偷改写 settings.json。
+- **长会话渲染**：超长转录离屏渲染 + 后缀挂载窗口；滚动跟随用 ResizeObserver 覆盖全部内容增长路径。
 
 ## 已知陷阱（代码注释里踩过并验证过的，改代码前必读）
 
 1. **模型下拉数据源**：必须实时 `GET {baseUrl}/models`（OpenAI list models 接口）。CLI 的 `_meta.models.availableModels` 是官方硬编码目录，**不可作为回退**——端点不可达就返回空列表，仅把 `currentModelId` 补到列表头避免下拉空白。
 2. **绕过全局 `fetch`**：VSCode 扩展宿主用代理 agent patch 了 `fetch`，系统代理是 SOCKS 或无 scheme 时会抛 "Invalid URL protocol"。`models-query.ts` 因此用原生 `node:http(s)` 直连。
-3. **CLI 不持久化 ACP 会话**：`--experimental-acp` 模式不写 session 文件（交互模式才写）。扩展因此在 `workspaceState` 自持 transcript 副本；恢复时优先读自己的副本，再回退 CLI 的 `~/.iflow/projects/<cwd-slug>/session-<id>.jsonl`。
-4. **`session/load` 不回放历史**：CLI 0.5.19 只返回 `{sessionId}`（无 modes、无 `_meta`），所以先 `newSession` 取 meta 再 `loadSession`，transcript 从文件重建。
-5. **`set_mode` / `set_model` 不推通知**：agent 不 emit `current_mode_update`，必须把响应里的 `currentModeId` / `currentModelId` 乐观写回 store，否则下拉会弹回。
+3. **CLI 不持久化 ACP 会话**：`--experimental-acp` 模式不写 session 文件（交互模式才写）。扩展因此在 `storageUri/transcripts/` 自持 transcript 副本；恢复时优先读自己的副本，再回退 CLI 的 `~/.iflow/projects/<cwd-slug>/session-<id>.jsonl`。
+4. **`session/load` 不回放历史**：CLI 0.5.19 只返回 `{sessionId}`（无 modes、无 `_meta`），所以先 `newSession` 取 meta 再 `loadSession`，transcript 从文件重建。probe 会话被有意丢弃（只用其 meta/modes），非泄漏。
+5. **`set_mode` / `set_model` 不推通知**：agent 不 emit `current_mode_update`，必须把响应里的 `currentModeId` / `currentModelId` 乐观写回 store，否则下拉会弹回。入口必须判空 `sessionId`（空串照发会被 CLI 乱绑定，响应值再被乐观写回）。
 6. **`diff.path` 可能不可信**：CLI 可能发工具调用视角的相对路径（如 `Home.vue` 实为 `src/views/Home.vue`）。真实路径常在 `tool_call.locations` 里。定位策略：多候选（`diff.path` + `locations`）→ 按「磁盘内容 === diff.newText」优先匹配 → basename 有界搜索 → QuickPick → 文件选择器。
-7. **CLI 定位别扫二进制**：nvmd 等多版本管理器可能把 `iflow` 指向原生 dispatcher 二进制，当文本读会卡死扩展宿主（曾 profile 出 100% CPU）。`cli-locator.ts` 有 256KB 上限 + 首 1KB NUL 字节检测。
-8. **相对路径基准**：agent 给的相对路径要拼 `sessionCwd`（session 创建时的 workspace 根），**不是** `process.cwd()`（扩展宿主 cwd 不等于 workspace）。
+7. **CLI 定位别扫二进制**：nvmd 等多版本管理器可能把 `ifflow` 指向原生 dispatcher 二进制，当文本读会卡死扩展宿主（曾 profile 出 100% CPU）。`cli-locator.ts` 有 256KB 上限 + 首 1KB NUL 字节检测。
+8. **相对路径基准**：agent 给的相对路径要拼 `sessionCwd`（session 创建时的 workspace 根），**不是** `process.cwd()`（扩展宿主 cwd 不等于 workspace）。`openLocation` 也走同一套 `resolveAgentPathToAbsolute`，行号要 clamp 到 `[0, doc.lineCount - 1]`。
 9. **文件写入走 `vscode.workspace.fs`**：回退时不要用裸 `fs.writeFile`，会绕过 VSCode 的文件 watcher。
-10. **SubAgent 归组双策略**：优先用 wire 上的 `agentId`；0.5.19 实测事件不带 `agentId`，退化为以 `task` tool_call 为界的状态机（pending/in_progress → completed/failed 区间内的扁平事件归入该卡）。
+10. **SubAgent 归组双策略**：优先用 wire 上的 `agentId`；0.5.19 实测事件不带 `agentId`，退化为以 `task` tool_call 为界的状态机（pending/in_progress → completed/failed 区间内的扁平事件归入该卡）。`parseTranscriptJsonl` 的 sidechain 归组依赖行序，并发 task 交错写入会把多张卡合并成一张（已知限制）。
 11. **Windows**：命令用 `process.execPath` 直接跑 `entry.js`，避开 `.cmd` shim 与 Unix shebang 的坑；`spawn` 带 `windowsHide: true`。
+12. **提问卡与 Plan 审批不能被 streaming 门控**：两者在 prompt 进行中到达（status 为 `streaming`），agent 正阻塞等答案；按钮必须可用，不要复用「生成中禁用操作」的防呆逻辑。
+13. **prompt 无超时**：`AcpClient.promptTimeoutMs` 默认 `0`（无限等待）——真实任务可能跑数小时，任何超时都会误杀长任务；中断完全由用户显式 Stop（`session/cancel`）驱动。`sendPrompt` 的 `initializing`/`streaming` 并发闸门必须保留（`iflow.askSelection` 与 `@iflow` participant 绕过 webview 的 busy 锁）。
+14. **`iflow.idleTimeoutMinutes` 未实现**：package.json / nls / README 都声明了「CLI 进程空闲多少分钟后回收」，但 `src/` 里没有任何引用——是文档化的空设置。实现或删除前不要对外承诺该行为。
+15. **`--baseContentUrl` 已移除**：0.2.0 的修复方向不是加 baseContentUrl，而是把 `docs/**` 排除出 VSIX（`.vscodeignore`）以瘦身到 202KB。因此 README 里的 `docs/images/*` 链接在 Marketplace 预览中不可用——这是刻意的取舍，别「好心」把 docs 加回包。
+16. **blockPatch 锚定**：`baseVersion` 与接收端 `blockVersion` 不一致、或 `tailStart` 越界，都必须回退到全量重同步（webview 发 `ready`），不能硬合并。
+17. **reducer 就地改 blocks**：`tailOnly` 判断依赖尾部指纹，中段变更对指纹不可见，会保守地清 flag 回退全量快照——不要为了「优化」去掉这个保守回退。
+18. **CLI 探测必须异步**：`where.exe` / `npm root -g` 在 Windows 上可达数秒，`execFileSync` 会冻结整个扩展宿主（其他扩展一起卡）；`locateIflowEntry` / `locateNodeExecutable` 都是 async + 缓存 + 并发去重，成功结果缓存（用 `existsSync` 复验）、失败不缓存（会话中装的 CLI 下次能发现）。
+19. **`chatForward` 等待条件**：必须在 `idle || error` 时退出（prompt 失败后 status 永不回 idle），cancel 只发一次，并有 10 分钟总超时兜底——旧实现三处叠加会导致 participant 永久挂死 + interval 泄漏。
+20. **连接失败要 dispose 子进程**：initialize 超时/握手失败后 CLI 进程会继续存活；`AcpClient.connect()` 内部与 `ensureClient` catch 两处都要 `dispose()`（幂等，双重调用安全）。
 
 ## 测试
 
-- 框架：vitest，配置在 `vitest.config.ts`，`include: ["test/**/*.test.ts"]`，超时 15s。
+- 框架：vitest 5，配置在 `vitest.config.ts`，`include: ["test/**/*.test.ts"]`，超时 15s。当前 **6 个测试文件 / 136 个用例**全部通过。
 - `vscode` 模块通过 alias 指向 `test/vscode-stub.ts`（只提供 `l10n.t` 恒等实现）。
-- 现有覆盖：`jsonrpc`（NDJSON 分帧/路由）、`acp-client`（用 `test/mock-acp-agent.mjs` 起假 agent）、`auth`（SecretStorage 注入式假实现）、`models-query`（临时目录写假 settings.json）、`session-state`（reducer + transcript 解析）。
+- 现有覆盖：`jsonrpc`（NDJSON 分帧/路由/超长帧丢弃）、`acp-client`（用 `test/mock-acp-agent.mjs` 起假 agent）、`auth`（SecretStorage 注入式假实现）、`models-query`（临时目录写假 settings.json）、`session-state`（reducer + transcript 解析 + 块 id 不变量）、`store-snapshot`（节流快照 + blockPatch 锚定）。
 - 约定：测纯逻辑，不起真实 CLI、不碰真实 SecretStorage。需要文件 I/O 时用 `mkdtempSync` + `afterAll` 清理。
-- `test/fixtures/` 存 `scripts/harness.mjs --record` 录制的真实 ACP wire 日志（`.ndjson`）与 M0 摘要（`.json`），用于对照 wire 行为。
+- `test/fixtures/` 存 `scripts/harness.mjs --record` 录制的真实 ACP wire 日志（`.ndjson`）与 M0 摘要（`.json`），当前为 2026-09-05 的两组，用于对照 wire 行为。
 
 ## 联调与验证
 
 ```bash
 npm run harness                                  # initialize → newSession → prompt，权限全拒（安全）
 npm run harness -- --record                      # 额外录制 wire 日志到 test/fixtures
+npm run harness -- --probe                       # 探 set_mode / set_model / set_think 行为（不发 prompt，不耗 token）
+npm run harness -- --prompt "..."                # 自定义 prompt 文本
 IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 指定 CLI 入口
 ```
 
@@ -111,14 +151,17 @@ IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 指定 CLI 入口
 
 ## 发布流程
 
-- **`CHANGELOG.md` 是版本唯一来源**：CI 从顶部 `## [x.y.z] - date` 标题读版本号写入 `package.json`，其下条目作为发布摘要。新增版本时只在 CHANGELOG 加一节，**不要手动改 `package.json` 的 version**。
+- **`CHANGELOG.md` 是版本唯一来源**：CI 从顶部 `## [x.y.z] - date` 标题读版本号写入 `package.json`（`scripts/read-changelog.mjs`），其下条目作为发布摘要。新增版本时只在 CHANGELOG 加一节，**不要手动改 `package.json` 的 version**。
 - `ci.yml`：master 推送与 PR 触发，三平台矩阵（ubuntu/windows/macos）跑 typecheck → test → build。
 - `release.yml`：**仅 release 分支**（或手动触发）打包 `.vsix`、上传 artifact、打 tag 建 release。
-- 打包必须带 `--baseContentUrl` / `--baseImagesUrl`（指向仓库 raw 地址），否则 VSIX 内文档/图片链接失效——这是 0.2.0 修过的发布故障。
+- 打包命令是 `vsce package --no-dependencies`，**不带** `--baseContentUrl` / `--baseImagesUrl`——`docs/**` 已被 `.vscodeignore` 排除，VSIX 内不再引用仓库 raw 链接（0.2.0 的修复方向，见陷阱 #15）。
+- 新增用户可见设置项时记得同步 `package.nls.json` + `package.nls.zh-cn.json`。
 
 ## 给后续 Agent 的建议
 
-- 改 `panel.ts` 前先读它顶部的类字段注释，审批/会话持久化/恢复三条链路都靠私有状态字段串起来。
+- 改 `panel.ts` 前先读它顶部的常量区与类字段注释，审批/提问/会话持久化/恢复/重试五条链路都靠私有状态字段串起来；该文件已 ~2320 行，新增职责优先考虑下沉到 `src/acp/` 或 `shared/`。
 - 任何「CLI 行为」的假设都应在代码注释里标注验证来源（版本 + 实测方式），本仓库大量注释都是这种 `Wire behavior (probed, CLI 0.5.19)` 风格——沿用这个习惯。
-- 新增 UI 组件放到 `webview/src/components/`，样式用 Tailwind 4 + oklch 设计 token（见 `webview/src/styles.css`），深/浅色主题由 Host 推送 `theme` 消息驱动，默认跟随编辑器主题。
+- `docs/code-review-2026-09-08.md` 记录了 3 个 CRITICAL + 8 个 MAJOR 的审查发现及逐条修复记录；未闭合项（S1 路径约束、P-1 全量 COW、列表虚拟化）在动手前先读对应条目。
+- 新增 UI 组件放到 `webview/src/components/`，样式用 Tailwind 4 + oklch 设计 token（见 `webview/src/styles.css`），深/浅色主题由 Host 推送 `theme` 消息驱动，默认跟随编辑器主题；图标统一用 `lucide-react`（不要 emoji/字符）。
 - 想脱离 VSCode 迭代 UI：`webview/src/store.ts` 的 `createMockHost()` 提供 demo 快照，可用静态服务器直接跑 webview。
+- 新增设置项要确认它真的实现了——`iflow.idleTimeoutMinutes` 就是声明了但没实现的先例（陷阱 #14）。

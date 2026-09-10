@@ -6,6 +6,7 @@ import {
   FileText,
   Image as ImageIcon,
   Paperclip,
+  Search,
   SendHorizontal,
   Square,
   X,
@@ -14,7 +15,7 @@ import {
 import type { CodeContextUi, FileHitUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { Dropdown } from "./ui";
+import { Dropdown, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -178,6 +179,25 @@ export function Composer() {
   useEffect(() => {
     setCmdIndex(0);
   }, [cmdMatches.length]);
+
+  // Model dropdown fuzzy search: filters by name AND id (ids are what the
+  // gateway actually accepts and often carry the meaningful segments).
+  const [modelQuery, setModelQuery] = useState("");
+  const [modelIndex, setModelIndex] = useState(0);
+  const filteredModels = useMemo(() => {
+    const q = modelQuery.trim();
+    if (!q) return models.map((m) => ({ m, score: 0 }));
+    return models
+      .map((m) => ({
+        m,
+        score: Math.max(fuzzyScore(q, m.name) ?? -1, fuzzyScore(q, m.id) ?? -1),
+      }))
+      .filter((x) => x.score >= 0)
+      .sort((a, b) => b.score - a.score);
+  }, [modelQuery, models]);
+  useEffect(() => {
+    setModelIndex(0);
+  }, [modelQuery]);
 
   const [note, setNote] = useState<string | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
@@ -588,6 +608,7 @@ export function Composer() {
               menuClass="w-56 max-h-64 overflow-y-auto"
               onOpenChange={(o) => {
                 if (o) send({ type: "refreshModels" });
+                else setModelQuery("");
               }}
               trigger={(open) => (
                 <button
@@ -602,10 +623,42 @@ export function Composer() {
             >
               {(close) => (
                 <>
-                  <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-                    {t("模型")}
+                  {/* fuzzy search box: matches name and id; sticky so it stays
+                      visible while the list scrolls */}
+                  <div className="sticky top-0 z-10 border-b border-border bg-popover p-1.5">
+                    <div className="flex items-center gap-1.5 rounded-md border border-border bg-editor px-2 py-1 focus-within:border-primary/60">
+                      <Search className="size-3 shrink-0 text-muted-foreground" />
+                      <input
+                        autoFocus
+                        value={modelQuery}
+                        placeholder={t("搜索模型…")}
+                        className="w-full min-w-0 bg-transparent font-mono text-[11px] text-foreground outline-none placeholder:text-muted-foreground/70"
+                        onChange={(e) => setModelQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            setModelIndex((i) => Math.min(filteredModels.length - 1, i + 1));
+                          } else if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            setModelIndex((i) => Math.max(0, i - 1));
+                          } else if (e.key === "Enter") {
+                            const hit = filteredModels[modelIndex];
+                            if (!hit) return;
+                            e.preventDefault();
+                            if (hit.m.id !== state?.currentModelId) {
+                              beginPending("model", hit.m.id);
+                              send({ type: "setModel", modelId: hit.m.id });
+                            }
+                            close();
+                          }
+                        }}
+                      />
+                    </div>
                   </div>
-                  {models.map((m) => (
+                  {filteredModels.length === 0 && (
+                    <div className="px-3 py-2 text-[12px] text-muted-foreground">{t("无匹配模型")}</div>
+                  )}
+                  {filteredModels.map(({ m }, i) => (
                     <button
                       key={m.id}
                       onClick={() => {
@@ -615,7 +668,9 @@ export function Composer() {
                         }
                         close();
                       }}
-                      className="flex w-full items-center px-3 py-1.5 text-left font-mono text-[11px] hover:bg-accent"
+                      className={`flex w-full items-center px-3 py-1.5 text-left font-mono text-[11px] ${
+                        i === modelIndex ? "bg-accent" : "hover:bg-accent/60"
+                      }`}
                     >
                       <span className="truncate" title={m.name}>
                         {m.name}

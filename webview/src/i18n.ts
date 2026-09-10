@@ -99,6 +99,8 @@ const en: Record<string, string> = {
   // composer
   "（见附图）": "(see attached image)",
   "移除": "Remove",
+  "搜索模型…": "Search models…",
+  "无匹配模型": "No matching models",
   "Tab 补全": "Tab to complete",
   "无匹配文件": "No matching files",
   "向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或回形针按钮添加图片/文件）":
