@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 const execFileP = promisify(execFile);
@@ -229,31 +229,89 @@ const MIN_NODE_MAJOR = 20;
  * passes a one-time version check (>= 20, matching the repo's node20
  * target); null means "no usable standalone node" and the caller falls
  * back to process.execPath. Cached + de-duplicated like locateIflowEntry.
+ *
+ * 2026-09-11 probe: a GUI-launched VSCode can hold a STALE PATH snapshot —
+ * nvmd rewrote the user PATH, but the running host never inherited it, so
+ * `where.exe node` finds nothing and every CLI spawn paid the Code.exe boot
+ * (initialize 11796ms). The well-known candidates below are checked with
+ * absolute paths precisely for that case — PATH is irrelevant to them.
  */
 export async function locateNodeExecutable(): Promise<string | null> {
   if (nodeProbeInFlight) return nodeProbeInFlight;
   nodeProbeInFlight = (async () => {
     if (cachedNode && existsSync(cachedNode)) return cachedNode;
+    const candidates: string[] = [];
     try {
       const out =
         process.platform === "win32"
           ? (await execFileP("where.exe", ["node"], { windowsHide: true })).stdout
           : (await execFileP("which", ["node"])).stdout;
       for (const line of out.split(/\r?\n/).map((l: string) => l.trim())) {
-        if (!line || !existsSync(line)) continue;
-        if (await nodeMajorAtLeast(line, MIN_NODE_MAJOR)) {
-          cachedNode = line;
-          return cachedNode;
-        }
+        if (line && existsSync(line)) candidates.push(line);
       }
     } catch {
-      // where/which unavailable or node not on PATH
+      // where/which unavailable or node not on the (possibly stale) host PATH
+      // — the well-known candidates below still apply.
+    }
+    candidates.push(...wellKnownNodeCandidates());
+    for (const line of candidates) {
+      if (!existsSync(line)) continue;
+      if (await nodeMajorAtLeast(line, MIN_NODE_MAJOR)) {
+        cachedNode = line;
+        return cachedNode;
+      }
     }
     return null;
   })().finally(() => {
     nodeProbeInFlight = null;
   });
   return nodeProbeInFlight;
+}
+
+/**
+ * Absolute-path node candidates, independent of the host process PATH.
+ * nvmd: enumerate ~/.nvmd/versions/<semver>/node(.exe) and pick the highest
+ * version — the real node binary, not the .nvmd/bin forwarding shim.
+ */
+function wellKnownNodeCandidates(): string[] {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  if (process.platform === "win32") {
+    return [
+      path.join(process.env.ProgramFiles ?? "C:\\Program Files", "nodejs", "node.exe"),
+      home ? newestNvmdNode(home) : "",
+      home ? path.join(home, "scoop", "apps", "nodejs", "current", "node.exe") : "",
+      home ? path.join(home, "scoop", "apps", "nodejs-lts", "current", "node.exe") : "",
+    ].filter((p): p is string => Boolean(p));
+  }
+  return [
+    "/usr/local/bin/node",
+    "/opt/homebrew/bin/node",
+    home ? path.join(home, ".local", "bin", "node") : "",
+    home ? path.join(home, ".volta", "bin", "node") : "",
+  ].filter((p): p is string => Boolean(p));
+}
+
+/** Highest x.y.z under ~/.nvmd/versions whose node binary exists, else "". */
+function newestNvmdNode(home: string): string {
+  try {
+    const versionsDir = path.join(home, ".nvmd", "versions");
+    const best = readdirSync(versionsDir)
+      .filter((name) => /^\d+\.\d+\.\d+$/.test(name))
+      .sort((a, b) => {
+        const pa = a.split(".").map(Number);
+        const pb = b.split(".").map(Number);
+        for (let i = 0; i < 3; i++) {
+          const d = (pb[i] ?? 0) - (pa[i] ?? 0);
+          if (d !== 0) return d;
+        }
+        return 0;
+      })[0];
+    if (!best) return "";
+    const node = path.join(versionsDir, best, process.platform === "win32" ? "node.exe" : "node");
+    return existsSync(node) ? node : "";
+  } catch {
+    return ""; // no nvmd layout
+  }
 }
 
 /** `node --version` → major >= min? A one-time ~100ms probe per candidate. */

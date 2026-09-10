@@ -1682,6 +1682,14 @@ export class ChatPanel implements vscode.Disposable {
       // binary (no Chromium runtime to start); fall back to execPath when
       // none is found or iflow.nodePath is explicitly configured.
       const node = nodePathConfigured || locatedNode || process.execPath;
+      if (!nodePathConfigured && !locatedNode) {
+        // Silent before 2026-09-11: a stale host PATH (GUI-launched VSCode,
+        // version-manager rewrites) made every spawn pay the Code.exe boot
+        // (~2x slower initialize) with nothing in the log. Surface it.
+        this.log.info(
+          "no standalone node found — spawning the CLI with the Electron host binary (slower initialize); set iflow.nodePath to override",
+        );
+      }
       const { command, args } = buildAcpCommand(entry);
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
       this.log.info(`spawning CLI: ${command} ${args.join(" ")} (cwd=${workspaceRoot})`);
