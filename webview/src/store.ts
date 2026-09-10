@@ -39,6 +39,23 @@ function blip(
 }
 
 /**
+ * Autoplay-policy unlock: create/resume the AudioContext inside a user
+ * gesture. An AudioContext lazily created at cue time (turn end — focus is
+ * typically in the editor, not this webview) starts "suspended" and its
+ * resume() never settles without a gesture, so the cue stays silent. Creating
+ * it during any click/keypress in the panel leaves it "running" for good;
+ * the gesture listeners are attached once in setupHostListener.
+ */
+function unlockAudio(): void {
+  try {
+    audioCtx ??= new AudioContext();
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+  } catch {
+    // Audio unavailable (headless/hostile env) — the cue is best-effort.
+  }
+}
+
+/**
  * Synthesized cues:
  * - "done": rising two-tone chime (E5 → G5), short and positive.
  * - "error": falling double-buzz (A3 → F3, square), unmistakably wrong.
@@ -46,10 +63,8 @@ function blip(
  */
 function playCue(kind: "done" | "error"): void {
   try {
-    audioCtx ??= new AudioContext();
-    // A suspended context (created before any user gesture) stays silent —
-    // resume on each attempt; by send time the user has interacted anyway.
-    if (audioCtx.state === "suspended") void audioCtx.resume();
+    unlockAudio();
+    if (!audioCtx) return; // AudioContext construction failed in unlockAudio
     const t = audioCtx.currentTime + 0.01;
     if (kind === "done") {
       blip(audioCtx, 659.25, t, 0.14, "sine", 0.08);
@@ -841,5 +856,10 @@ export function setupHostListener(): void {
   window.addEventListener("message", (event: MessageEvent<HostToWebview>) => {
     useChat.getState().applyHostMessage(event.data);
   });
+  // Pre-unlock Web Audio inside user gestures (see unlockAudio): without this
+  // the turn-end cue is created suspended and stays silent whenever focus has
+  // moved back to the editor — the exact "sound only plays sometimes" bug.
+  window.addEventListener("pointerdown", unlockAudio);
+  window.addEventListener("keydown", unlockAudio);
   useChat.getState().send({ type: "ready" });
 }

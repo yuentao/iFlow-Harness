@@ -176,6 +176,23 @@
     font-family: var(--font-sans);
     font-size: 13px;
     -webkit-font-smoothing: antialiased;
+    /* Selection policy: UI chrome (buttons, chips, titles, labels) must not
+       paint a selection when dragged over. `user-select: auto` resolves to
+       the parent's used value, so one `none` here covers the whole tree;
+       copy-worthy content opts back in via the rule below. */
+    user-select: none;
+  }
+
+  /* Selectable content: message bodies (.md), code/output blocks (pre — tool
+     output, subagent logs, attached code context), form field text, and the
+     diff body (.diff-scroll — its gutter spans carry select-none and stay
+     excluded). */
+  .md,
+  pre,
+  textarea,
+  input,
+  .diff-scroll {
+    user-select: text;
   }
 
   #root {

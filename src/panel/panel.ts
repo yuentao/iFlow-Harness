@@ -1475,6 +1475,8 @@ export class ChatPanel implements vscode.Disposable {
       endReplay(this.store.getState());
       this.log.error(`session restore failed: ${message}`);
       this.store.markError(vscode.l10n.t("会话恢复失败：{0}", message));
+      // Async failure — the user is likely in the editor; cue it.
+      this.postSound("error");
       // Do NOT forget the session here: the transcript file still exists and
       // the failure is often transient (CLI boot hiccup, endpoint down, auth
       // not ready). Forgetting would drop it from the switcher, and the next
@@ -1606,6 +1608,8 @@ export class ChatPanel implements vscode.Disposable {
             this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
             this.cancelAllPendingQuestions(vscode.l10n.t("CLI 进程已退出，提问已跳过"));
             this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
+            // Async failure — the user is likely in the editor; cue it.
+            this.postSound("error");
           },
           onRequestPermission: (req: RequestPermissionRequest) => {
             // Dying client's approval cards would hang on the fresh state —
@@ -1677,6 +1681,8 @@ export class ChatPanel implements vscode.Disposable {
               this.log.error(`authenticate failed: ${message}`);
               this.store.setAuth(await this.buildAuthState(false, true));
               this.store.markError(vscode.l10n.t("认证失败：{0}", message));
+              // Async failure — the user is likely in the editor; cue it.
+              this.postSound("error");
               this.store.markConnected();
               return; // session cannot start; setup banner is the remedy
             }
@@ -1711,6 +1717,8 @@ export class ChatPanel implements vscode.Disposable {
         const message = errorMessage(error);
         this.log.error(`connect failed: ${message}`);
         this.store.markError(message);
+        // Async failure — the user is likely in the editor; cue it.
+        this.postSound("error");
         throw error;
       } finally {
         this.connecting = null;

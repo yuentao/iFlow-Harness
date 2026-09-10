@@ -81,7 +81,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         {/* break-words + scroll cap: the wire title is uncapped (whole shell
             commands / descriptions); unbroken tokens used to punch through
             the card border, long ones grew the shrink-0 card unbounded. */}
-        <p className="max-h-40 overflow-y-auto break-words text-foreground/90">
+        <p className="max-h-40 select-text overflow-y-auto break-words text-foreground/90">
           {approval.toolName && (
             <code className="mr-1.5 rounded bg-editor px-1.5 py-0.5 font-mono text-[11px]">
               {approval.toolName}

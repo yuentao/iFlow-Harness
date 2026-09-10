@@ -290,7 +290,7 @@ export function App() {
         // break-words + scroll cap: errorMessage() can return unbounded JSON
         // dumps (unbroken tokens) and multi-line detail — without them the
         // banner overflowed horizontally / crushed the transcript area.
-        <div className="max-h-24 shrink-0 overflow-y-auto break-words border-b border-border bg-destructive/15 px-3 py-1.5 text-[12px] text-destructive">
+        <div className="max-h-24 shrink-0 select-text overflow-y-auto break-words border-b border-border bg-destructive/15 px-3 py-1.5 text-[12px] text-destructive">
           {state.errorMessage}
         </div>
       )}
