@@ -105,16 +105,25 @@ export function Dropdown({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
+  /** Close + notify. Every close path (trigger toggle, selection via the
+   * `close` render arg, outside click, Escape) must fire onOpenChange(false) —
+   * callers reset per-open state there (e.g. the model search query); only
+   * notifying on the trigger-toggle path left stale query/filter on reopen. */
+  const closeAndNotify = () => {
+    setOpen(false);
+    onOpenChange?.(false);
+  };
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) closeAndNotify();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         // ESC 只关下拉：拦下事件，防止冒泡到 window 的「ESC 停止生成」。
         e.stopPropagation();
-        setOpen(false);
+        closeAndNotify();
       }
     };
     document.addEventListener("mousedown", onDown);
@@ -123,7 +132,10 @@ export function Dropdown({
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+    // closeAndNotify closes over onOpenChange, which callers may pass inline;
+    // the listeners are only active while open, so re-registering on toggles
+    // keeps the closure current.
+  }, [open, onOpenChange]);
 
   return (
     <div className={`relative${wrapperClass ? ` ${wrapperClass}` : ""}`} ref={ref}>
@@ -148,7 +160,7 @@ export function Dropdown({
             direction === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${menuClass}`}
         >
-          {children(() => setOpen(false))}
+          {children(closeAndNotify)}
         </div>
       )}
     </div>
