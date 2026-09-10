@@ -632,13 +632,15 @@ describe("session replay (M4)", () => {
     expect(state.blocks.filter((b) => b.kind === "user")).toHaveLength(1);
   });
 
-  it("still renders user_message_chunk live when the transcript is empty", () => {
+  it("ignores user_message_chunk live even when the transcript is empty", () => {
+    // An echo reaching an empty transcript is stale content from an abandoned
+    // turn (新会话 cleared mid-flight) — never the user's real message.
     const state = initialSessionState();
     applySessionUpdate(
       state,
       notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "首条" } }),
     );
-    expect(state.blocks[0]).toMatchObject({ kind: "user", text: "首条" });
+    expect(state.blocks).toHaveLength(0);
   });
 
   it("beginReplay clears the transcript and endReplay returns to idle", () => {

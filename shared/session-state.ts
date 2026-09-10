@@ -437,10 +437,13 @@ export function applySessionUpdate(
   const replaying = options.replaying;
   switch (update.sessionUpdate) {
     case "user_message_chunk":
-      // Live prompts: the host appends user blocks itself, so agent echo is
-      // ignored. During `session/load` replay (M4) user turns arrive through
-      // this notification and must be rendered.
-      if ((replaying || state.blocks.length === 0) && update.content.type === "text") {
+      // Live prompts: the host appends user blocks itself (beginUserPrompt),
+      // so the agent's echo is always ignored — an echo reaching an EMPTY
+      // transcript can only be a stale chunk from an abandoned turn (新会话
+      // cleared mid-flight), never the user's real message. During
+      // `session/load` replay (M4) user turns arrive through this
+      // notification and must be rendered.
+      if (replaying && update.content.type === "text") {
         appendTextToLast(state.blocks, "user", update.content.text);
       }
       break;

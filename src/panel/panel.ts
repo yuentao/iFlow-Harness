@@ -1437,6 +1437,15 @@ export class ChatPanel implements vscode.Disposable {
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
     if (this.discardedSessionIds.delete(n.sessionId)) return;
+    // Cross-session guard: a turn abandoned by 新会话 (or a profile switch)
+    // keeps streaming server-side; without this check its trailing updates
+    // repopulate the freshly cleared transcript (the reducer applies updates
+    // unconditionally). The reset window (sessionId=null between
+    // replaceState and sessionStarted) drops everything addressed anywhere —
+    // nothing legitimate streams there. Restore is exempt: replayed updates
+    // arrive while store.sessionId is still null. Notifications without a
+    // sessionId pass through (defensive against CLIs that omit it).
+    if (!this.restoring && n.sessionId && n.sessionId !== this.store.getState().sessionId) return;
     // During restore, the first user turn names the session in the switcher.
     if (this.restoring && this.replayTitle === null && n.update.sessionUpdate === "user_message_chunk") {
       if (n.update.content.type === "text" && n.update.content.text.trim()) {
@@ -2141,6 +2150,33 @@ export class ChatPanel implements vscode.Disposable {
     // blocks below — persist whatever the last (possibly errored) turn left
     // unsaved first. No-op on first connect (blocks are empty).
     void this.persistActiveTranscript();
+    // Cancel an in-flight turn before anything else: `session/cancel` is a
+    // no-op on an idle session, and without this the abandoned turn keeps
+    // streaming server-side — its trailing updates would repopulate the
+    // fresh transcript (onSessionUpdate filters them per session, but stop
+    // the source too). This also closes the command-palette entry, which
+    // bypasses the webview's disabled 新会话 button.
+    const inFlight = this.store.getState().sessionId;
+    if (inFlight) {
+      try {
+        this.client?.cancel(inFlight);
+      } catch {
+        // dying client — the restart path handles it
+      }
+    }
+    // Settle pending approval/question cards BEFORE the clear: their
+    // resolution notes belong to the old transcript and are cleared with it.
+    this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
+    this.cancelAllPendingQuestions("");
+    // Clear the transcript IMMEDIATELY. Clearing only after `session/new`
+    // returned left the old transcript visibly in place for the whole CLI
+    // round trip (~5s measured), reading as "新会话残留了旧会话历史".
+    const fresh = newSessionState(this.store.getState());
+    // The abandoned turn's completion handler is dropped by sendPrompt's
+    // session-replaced guard, so settle the status here: a manual reset
+    // always lands idle, never stuck "streaming" with a locked composer.
+    if (fresh.status === "streaming") fresh.status = "idle";
+    this.store.replaceState(fresh);
     // Lock the UI while the CLI spins up the new session (sessions/mode/model
     // switches must not race the in-flight `session/new`).
     this.store.setInitializing(true);
@@ -2158,10 +2194,6 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
-    // A new session invalidates any approvals from the old one.
-    this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
-    this.cancelAllPendingQuestions("");
-    store.replaceState(newSessionState(store.getState()));
     // Model dropdown: live query of the active endpoint's `/models`. The CLI's
     // `_meta` catalog is hardcoded and not truthful for user-supplied
     // endpoints — per user directive, never fall back to it.
