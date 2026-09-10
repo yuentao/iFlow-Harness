@@ -1319,6 +1319,20 @@ export class ChatPanel implements vscode.Disposable {
           methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
         });
         this.log.info(`hot re-authenticate ok in ${Date.now() - tAuth}ms (CLI kept running)`);
+        // The CLI's authenticate serializes its IN-MEMORY settings copy back
+        // to settings.json (setValue updates keys in the copy, then writes the
+        // whole file) — so currentApiProfile reverts to the value the CLI read
+        // at STARTUP (probed 2026-09-11: BUZZ→商汤 hot switch leaves top-level
+        // baseUrl/apiKey = 商汤 but currentApiProfile = "BUZZ"). Both readers
+        // of that pointer — buildProfileList's active marker (CLI-first) and
+        // queryLiveModels' endpoint choice — would pin to the OLD profile.
+        // Re-stamp it from the extension's own record before anything reads it.
+        const activeProfileName = await getActiveProfileName(this.context.secrets);
+        if (activeProfileName && !updateCurrentApiProfile(activeProfileName)) {
+          this.log.warn(
+            `could not re-stamp currentApiProfile after hot re-auth (target: ${activeProfileName})`,
+          );
+        }
         // Tail rescue BEFORE the state swap (same rationale as below).
         void this.persistActiveTranscript();
         this.store.replaceState(newSessionState(this.store.getState()));
