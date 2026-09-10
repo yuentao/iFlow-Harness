@@ -1918,7 +1918,10 @@ export class ChatPanel implements vscode.Disposable {
         await rm(path.join(this.transcriptDir(), name), { force: true });
       }
     }
-    const activeId = (await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null)) ?? kept[0]?.id ?? null;
+    const activeId = this.store.getState().activeSessionId
+      ?? (await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null))
+      ?? kept[0]?.id
+      ?? null;
     await this.persistSessions(kept, kept.some((s) => s.id === activeId) ? activeId : kept[0]?.id ?? null);
     return kept;
   }
@@ -2259,10 +2262,17 @@ export class ChatPanel implements vscode.Disposable {
     const id = state.activeSessionId;
     if (!id) return;
     const target = state.sessions.find((s) => s.id === id);
-    if (!target || target.label !== DEFAULT_SESSION_LABEL) return;
-    const label = clampSessionLabel(text) || target.label;
-    const sessions = state.sessions.map((s) => (s.id === id ? { ...s, label } : s));
-    this.store.setSessions(sessions);
+    if (target && target.label !== DEFAULT_SESSION_LABEL) return;
+    // Upsert, not map-only: the active session can be missing from the list
+    // (e.g. pruned as "dead" before its first prompt landed). Re-adding it is
+    // what stops its transcript file from becoming an orphan that the next
+    // refresh deletes — and it self-heals sessions poisoned by the old bug.
+    const label = clampSessionLabel(text) || target?.label || DEFAULT_SESSION_LABEL;
+    const entry: SessionSummaryUi = { id, label, updatedAt: Date.now() };
+    const sessions = target
+      ? state.sessions.map((s) => (s.id === id ? entry : s))
+      : [entry, ...state.sessions].slice(0, MAX_RECENT_SESSIONS);
+    this.store.setSessions(sessions, id);
     await this.persistSessions(sessions, id);
   }
 }
