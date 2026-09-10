@@ -281,6 +281,9 @@ function createMockHost(): HostApi {
       { id: "mock-session-old", label: "上次的重构讨论", updatedAt: Date.now() - 86_400_000 },
     ],
     activeSessionId: "mock-session",
+    // SessionState requires this since the questions feature; the mock never
+    // opens a question prompt, so every demo snapshot carries `null`.
+    pendingQuestions: null,
     replaying: false,
     initializing: false,
   };
