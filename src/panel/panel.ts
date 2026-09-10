@@ -57,6 +57,9 @@ import { SessionStore } from "./store.js";
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/** Cap for discardedSessionIds (hot re-auth abandons at most one session per
+ * profile switch; the cap only guards pathological unbounded growth). */
+const DISCARDED_SESSION_IDS_CAP = 8;
 /** Hard cap on how long the @iflow participant waits for a prompt to finish
  * (P3). The wait loop ends on idle/error/cancel; this timeout is the last
  * resort if none of those ever fire. */
@@ -1281,6 +1284,73 @@ export class ChatPanel implements vscode.Disposable {
     // Detach the old client FIRST: dispose() kills its child process, and the
     // resulting exit event must not be mistaken for a crashed session.
     const oldClient = this.client;
+    // --- Hot re-auth fast path (bundle-verified, CLI 0.5.19) ---
+    // The ACP authenticate handler updates the agent's instance-level
+    // `authOptions` (via config.refreshAuth), and session/new re-applies
+    // authOptions to every NEW session config — so a running CLI picks up
+    // new credentials on its next session/new WITHOUT a restart. That skips
+    // the whole spawn + initialize round trip (~6s under plain node, 30-60s
+    // with many MCP servers). Known trade-off: the CLI keeps the old session
+    // object in its sessions map (memory only; the process dies with the
+    // panel anyway). Any failure falls back to the full restart below.
+    if (oldClient) {
+      const tHot = Date.now();
+      const hotSessionId = this.store.getState().sessionId;
+      if (hotSessionId) {
+        // Stop a possibly-still-running turn (an errored turn is exactly why
+        // users switch profiles; cancel is a no-op on an idle session) and
+        // drop the dying session's trailing updates (onSessionUpdate consumes
+        // discardedSessionIds delete-style).
+        try {
+          oldClient.cancel(hotSessionId);
+        } catch {
+          // dying client — the restart path handles it
+        }
+        if (this.discardedSessionIds.size >= DISCARDED_SESSION_IDS_CAP) this.discardedSessionIds.clear();
+        this.discardedSessionIds.add(hotSessionId);
+      }
+      try {
+        // Same OAuth-cache guard as the cold path (reversible archive).
+        const archived = retireStaleOAuthCreds();
+        if (archived) this.log.info(`archived stale OAuth credential cache: ${archived}`);
+        const tAuth = Date.now();
+        await oldClient.authenticate({
+          methodId: "openai-compatible",
+          methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
+        });
+        this.log.info(`hot re-authenticate ok in ${Date.now() - tAuth}ms (CLI kept running)`);
+        // Tail rescue BEFORE the state swap (same rationale as below).
+        void this.persistActiveTranscript();
+        this.store.replaceState(newSessionState(this.store.getState()));
+        // The stale currentModelId belongs to the previous endpoint — keep it
+        // out of restoreSession's fallback chain.
+        this.store.getState().currentModelId = null;
+        // startNewSession applies this (the NEW profile's model) via set_model.
+        this.pendingSwitchModel = creds.modelName;
+        this.store.markConnecting();
+        // startNewSession reuses the same live client (ensureClient hands it
+        // straight back) and runs session/new against the new credentials.
+        await this.startNewSession();
+        // Only markConnected/markError may move the status off "connecting"
+        // (newSessionState deliberately preserves it) — the restart path gets
+        // this from ensureClient's post-handshake, but the hot path never
+        // re-enters ensureClient, so the webview would sit on its splash
+        // screen (status === "connecting") forever.
+        this.store.markConnected();
+        this.store.setAuth(await this.buildAuthState(true, false));
+        this.log.info(
+          `profile switch finished in ${Date.now() - tHot}ms (hot re-auth, no CLI restart)`,
+        );
+        void vscode.window.showInformationMessage(
+          vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
+        );
+        return;
+      } catch (error) {
+        // Fall through to the restart path; ensureClient's client-identity
+        // guards already tolerate a replaced/dying client.
+        this.log.warn(`hot re-auth failed, falling back to CLI restart: ${errorMessage(error)}`);
+      }
+    }
     this.client = null;
     // Tail rescue BEFORE the state swap: the outgoing session's transcript is
     // typically mid-turn here (an errored turn is exactly why the user is
@@ -1329,6 +1399,13 @@ export class ChatPanel implements vscode.Disposable {
   /** Credentials to push via authenticate on the next handshake, if any. */
   private pendingHandshakeCredentials: OpenAiCompatCredentials | null = null;
   /**
+   * Sessions abandoned by a hot re-auth (profile switch). The dying session
+   * may still emit trailing session_update notifications on the SAME live
+   * client; onSessionUpdate drops those so they cannot leak into the fresh
+   * state. Consumed delete-style on first sight.
+   */
+  private discardedSessionIds = new Set<string>();
+  /**
    * Set by a profile switch; consumed by the next session start (new or
    * restored). Holds the NEW profile's configured modelName — the default
    * model must be the one written in the profile (user directive), not the
@@ -1342,6 +1419,10 @@ export class ChatPanel implements vscode.Disposable {
   private restoring = false;
 
   private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
+    // Hot re-auth (profile switch) abandons the old session on the SAME live
+    // client — drop its trailing updates so they can't leak into the fresh
+    // state. delete-style: the entry is consumed on first sight.
+    if (this.discardedSessionIds.delete(n.sessionId)) return;
     // During restore, the first user turn names the session in the switcher.
     if (this.restoring && this.replayTitle === null && n.update.sessionUpdate === "user_message_chunk") {
       if (n.update.content.type === "text" && n.update.content.text.trim()) {
@@ -1563,9 +1644,18 @@ export class ChatPanel implements vscode.Disposable {
     if (this.connecting) return this.connecting.then(() => this.client!);
 
     this.connecting = (async () => {
+      // Entry + node probes are independent (each is a cached where.exe / npm
+      // probe, hundreds of ms serialized on cold start) — run them in
+      // parallel. nodePath skips the node probe entirely, preserving the
+      // old `||` short-circuit.
+      const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
       let entry: string;
+      let locatedNode: string | null;
       try {
-        entry = await this.resolveEntry();
+        [entry, locatedNode] = await Promise.all([
+          this.resolveEntry(),
+          nodePathConfigured ? Promise.resolve(null) : locateNodeExecutable(),
+        ]);
       } catch (error) {
         // CLI not found: surface it in the panel instead of leaving it on the
         // loading screen (this used to throw before the try/catch below).
@@ -1577,10 +1667,7 @@ export class ChatPanel implements vscode.Disposable {
       // A standalone node boots the CLI ~2x faster than the Electron host
       // binary (no Chromium runtime to start); fall back to execPath when
       // none is found or iflow.nodePath is explicitly configured.
-      const node =
-        vscode.workspace.getConfiguration("iflow").get<string>("nodePath")
-        || (await locateNodeExecutable())
-        || process.execPath;
+      const node = nodePathConfigured || locatedNode || process.execPath;
       const { command, args } = buildAcpCommand(entry);
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
       this.log.info(`spawning CLI: ${command} ${args.join(" ")} (cwd=${workspaceRoot})`);
@@ -2142,10 +2229,14 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     this.cancelSeen = false;
+    // Hoisted for the catch: a profile switch (hot re-auth or full restart)
+    // cancels an in-flight prompt, whose rejection then lands here AFTER the
+    // fresh state is already in place.
+    let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
-      const sessionId = this.store.getState().sessionId;
-      if (!sessionId) throw new Error(vscode.l10n.t("会话未就绪"));
+      promptSessionId = this.store.getState().sessionId;
+      if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
       this.store.userPrompt(
         fullText,
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
@@ -2157,12 +2248,21 @@ export class ChatPanel implements vscode.Disposable {
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
-      const result = await this.promptWithRetry(client, sessionId, prompt);
+      const result = await this.promptWithRetry(client, promptSessionId, prompt);
       this.store.promptCompleted(result.stopReason);
       // Sound cue: completion chime, but a user stop/cancel stays silent.
       if (result.stopReason !== "cancelled") this.postSound("done");
       void this.persistActiveTranscript();
     } catch (error) {
+      // Session replaced mid-flight (profile switch cancels the in-flight
+      // prompt): the rejection lands after the fresh state is in place, so
+      // the old turn's failure must not mark the new session errored — and
+      // persistActiveTranscript would serialize the emptied blocks over the
+      // NEW session's file. Drop everything but the log line.
+      if (this.store.getState().sessionId !== promptSessionId) {
+        this.log.info(`prompt failed after session switch — dropped (session replaced)`);
+        return;
+      }
       // R1 (final): prompts run without a timeout — failures here are real
       // errors (CLI died, connection closed), not slow turns. Long turns are
       // stopped by the user via Stop (`session/cancel`).
