@@ -1897,7 +1897,14 @@ export class ChatPanel implements vscode.Disposable {
     // unmigrated transcripts would otherwise look unrestorable.
     await this.migrateLegacyTranscripts();
     const before = this.readPersistedSessions();
-    const kept = before.filter((s) => this.hasPersistedTranscript(s.id));
+    // The CURRENTLY ACTIVE session must never be pruned: a panel-open
+    // auto-session has no transcript until its first prompt lands. Dropping
+    // it from the list here poisons the state — the user then chats into a
+    // session the switcher no longer contains, nothing ever re-adds it, and
+    // the orphan cleanup below deletes its transcript file on the next
+    // refresh (close / profile switch) = total content loss.
+    const liveActiveId = this.store.getState().activeSessionId;
+    const kept = before.filter((s) => this.hasPersistedTranscript(s.id) || s.id === liveActiveId);
     if (kept.length !== before.length) {
       this.log.info(`pruned ${before.length - kept.length} unrestorable session(s)`);
     }
