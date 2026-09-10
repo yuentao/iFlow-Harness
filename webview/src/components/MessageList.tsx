@@ -1,10 +1,19 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Brain,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleDot,
   Columns2,
   Eye,
@@ -500,6 +509,16 @@ const BlockView = memo(function BlockView({
   }
 });
 
+/**
+ * Offscreen tail-window tuning: a restored transcript mounts only the newest
+ * TAIL_WINDOW blocks; scrolling toward the top mounts MOUNT_STEP more at a
+ * time (see the sentinel IntersectionObserver in MessageListInner). 60 covers
+ * a few viewport-heights of dense transcript without mounting a whole
+ * multi-thousand-block session up front.
+ */
+const TAIL_WINDOW = 60;
+const MOUNT_STEP = 60;
+
 function MessageListInner({ state }: { state: SessionState }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Everything inside the scroller (blocks + streaming indicator) lives in
@@ -515,6 +534,66 @@ function MessageListInner({ state }: { state: SessionState }) {
   // not touch the stick state. Falls through if a user drag happens to land
   // within 1px of it — the next scroll event corrects the state.
   const programmaticTop = useRef<number | null>(null);
+
+  // --- offscreen history: suffix mounting window ----------------------------
+  // Very long restored transcripts would mount (marked+DOMPurify per text
+  // block) and lay out every block at once. `windowStart` is the absolute
+  // block index below which history stays unmounted; it only ever DECREASES
+  // (mount more old blocks), so streaming appends extend the suffix without
+  // re-cutting already-mounted history. The effective start is clamped to the
+  // block count so a stale window (session switched to a shorter transcript)
+  // can never slice past the end.
+  const [windowStart, setWindowStart] = useState(TAIL_WINDOW);
+  const total = state.blocks.length;
+  const start = Math.min(windowStart, total);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  // Scroll compensation for expansion: expandOlder() records the
+  // distance-from-bottom (scrollHeight - scrollTop); the layout effect
+  // restores it after the newly mounted blocks shift content down, keeping
+  // the viewport visually anchored on the same blocks.
+  const bottomDistance = useRef<number | null>(null);
+
+  // Session switch / history restore: collapse back to the tail window.
+  // Layout effect (not useEffect) so the trimmed list is painted on the first
+  // commit — a plain effect would show one frame of a stale/empty slice when
+  // the previous session left windowStart larger than the new block count.
+  useLayoutEffect(() => {
+    setWindowStart(Math.max(0, state.blocks.length - TAIL_WINDOW));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset on identity change only
+  }, [state.activeSessionId, state.replaying]);
+
+  function expandOlder() {
+    const el = scrollRef.current;
+    if (el) bottomDistance.current = el.scrollHeight - el.scrollTop;
+    setWindowStart((s) => Math.max(0, s - MOUNT_STEP));
+  }
+
+  useLayoutEffect(() => {
+    const dist = bottomDistance.current;
+    if (dist === null) return;
+    bottomDistance.current = null;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight - dist;
+  });
+
+  // Auto-expand: when the sentinel (placeholder above the mounted window)
+  // approaches the viewport top, mount another MOUNT_STEP of history.
+  // Re-created per `start` so one intersection expands exactly one step.
+  useEffect(() => {
+    if (start <= 0) return;
+    const el = sentinelRef.current;
+    const root = scrollRef.current;
+    if (!el || !root) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) expandOlder();
+      },
+      { root, rootMargin: "480px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- expandOlder reads refs only
+  }, [start]);
 
   function scrollToBottom() {
     const el = scrollRef.current;
@@ -575,14 +654,28 @@ function MessageListInner({ state }: { state: SessionState }) {
               {t("向 iFlow 发送第一条消息开始")}
             </div>
           )}
-          {state.blocks.map((block, i) => (
-            <BlockView
-              key={block.id ?? `idx-${i}`}
-              block={block}
-              isLatest={i === state.blocks.length - 1}
-              turnActive={turnActive}
-            />
-          ))}
+          {start > 0 && (
+            // Sentinel + manual affordance: the IntersectionObserver mounts
+            // more history when this approaches the viewport; the button is
+            // the explicit fallback (and shows how much is still hidden).
+            <div ref={sentinelRef} className="flex justify-center">
+              <button
+                onClick={expandOlder}
+                className="inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+              >
+                <ChevronUp className="size-3" />
+                {t("展开更早 {0} 条消息", start)}
+              </button>
+            </div>
+          )}
+          {state.blocks.slice(start).map((block, idx) => {
+            const i = start + idx; // absolute index: stable across expansions
+            return (
+              <div key={block.id ?? `idx-${i}`} className="cv-block">
+                <BlockView block={block} isLatest={i === total - 1} turnActive={turnActive} />
+              </div>
+            );
+          })}
           {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
             // Sticky to the bottom of the scroll viewport so the indicator stays
             // visible even while new content streams in above it.

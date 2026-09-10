@@ -499,6 +499,18 @@
   border-left: 2px solid color-mix(in oklab, var(--primary) 60%, transparent);
 }
 
+/* --- offscreen transcript blocks (超长会话离屏渲染优化) --------------------- */
+/* Each block in MessageList is wrapped in .cv-block. content-visibility:auto
+   lets Chromium skip layout/paint (and defer image decode) for blocks outside
+   the scroll viewport, so a multi-thousand-block transcript costs roughly one
+   viewport of rendering. contain-intrinsic-size uses the `auto` keyword:
+   after a block's first render the browser remembers its real height, keeping
+   the scrollbar stable; 64px is only the pre-render fallback estimate. */
+.cv-block {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;

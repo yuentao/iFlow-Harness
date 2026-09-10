@@ -120,6 +120,7 @@ const en: Record<string, string> = {
   "在 VSCode 中打开": "Open in VSCode",
   "向 iFlow 发送第一条消息开始": "Send your first message to iFlow to get started",
   "回到最新": "Jump to latest",
+  "展开更早 {0} 条消息": "Show {0} earlier messages",
   "上下文摘要": "Context summary",
   "diff": "diff",
 };
