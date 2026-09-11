@@ -2262,7 +2262,16 @@ export class ChatPanel implements vscode.Disposable {
         const state = this.store.getState();
         if (state.sessionId !== sessionId && state.activeSessionId !== sessionId) return;
         if (models.length === 0) {
-          this.store.sessionMeta({ models: [] });
+          // Even a failed/empty /models query keeps the active model
+          // selectable (dropdown-must-not-vanish rule): the webview gates the
+          // dropdown button on `models.length > 0`, so pushing a bare []
+          // here made the button disappear entirely after a transient
+          // endpoint failure (e.g. socket hang up).
+          const currentModelId = state.currentModelId ?? fallbackModelId;
+          this.store.sessionMeta({
+            models: currentModelId ? [{ id: currentModelId, name: currentModelId }] : [],
+            ...(currentModelId ? { currentModelId } : {}),
+          });
           return;
         }
         // The active model may be absent from the live list; add it so the
