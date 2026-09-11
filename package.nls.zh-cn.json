@@ -11,6 +11,7 @@
   "iflow.configuration.cliPath.description": "iFlow CLI bundle entry.js 的路径（留空自动探测）",
   "iflow.configuration.defaultMode.description": "新会话的默认权限模式",
   "iflow.configuration.nodePath.description": "用于启动 CLI 的自定义 Node.js 可执行文件",
+  "iflow.configuration.warmStart.description": "窗口打开时即在后台启动 iFlow CLI，首次打开聊天面板无需等待（每个窗口约占用 100MB 内存）",
   "iflow.configuration.idleTimeoutMinutes.description": "CLI 进程空闲多少分钟后回收",
   "iflow.configuration.soundFeedback.description": "对话生成完成或失败时播放提示音",
   "participant.description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",

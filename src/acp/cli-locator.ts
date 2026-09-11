@@ -34,6 +34,53 @@ let cachedEntry: string | null = null;
 let probeInFlight: Promise<string | null> | null = null;
 
 /**
+ * Cross-window persistence for probe results. The host (panel) wires load/save
+ * to extension globalState: window 2+ hydrates the caches below and skips the
+ * where.exe / npm / node --version probes entirely. Hydrated values keep the
+ * same existsSync re-validation as in-memory ones, so an uninstalled CLI or an
+ * extension update (vendored path) re-probes exactly as before. Only
+ * successful resolutions are saved — failures are never cached.
+ */
+export interface LocatorPaths {
+  entry?: string | null;
+  node?: string | null;
+}
+export interface LocatorPersistence {
+  load(): LocatorPaths | undefined;
+  save(paths: LocatorPaths): void;
+}
+let persistence: LocatorPersistence | null = null;
+let persistenceHydrated = false;
+
+export function configureLocatorPersistence(p: LocatorPersistence | null): void {
+  persistence = p;
+  persistenceHydrated = false;
+}
+
+/** Seed the in-memory caches from storage once per host session. */
+function hydrateCache(): void {
+  if (persistenceHydrated || !persistence) return;
+  persistenceHydrated = true;
+  try {
+    const saved = persistence.load();
+    if (saved?.entry) cachedEntry ??= saved.entry;
+    if (saved?.node) cachedNode ??= saved.node;
+  } catch {
+    // storage unavailable — probes run as before
+  }
+}
+
+/** Best-effort write-back of the currently resolved paths. */
+function persistResolved(): void {
+  if (!persistence) return;
+  try {
+    persistence.save({ entry: cachedEntry, node: cachedNode });
+  } catch {
+    // best effort; the in-memory caches still cover this window
+  }
+}
+
+/**
  * Locate the installed iFlow CLI bundle entry (a plain .js file we can run
  * with the current Node runtime, avoiding .cmd shim quirks on Windows and
  * shebang wrappers on Unix).
@@ -59,10 +106,14 @@ export async function locateIflowEntry(vendorEntry?: string | null): Promise<str
   const fromEnv = process.env.IFLOW_CLI_ENTRY;
   if (fromEnv && existsSync(fromEnv)) return path.resolve(fromEnv);
 
+  hydrateCache();
   if (probeInFlight) return probeInFlight;
   probeInFlight = locateUncached(vendorEntry)
     .then((found) => {
-      if (found) cachedEntry = found;
+      if (found) {
+        cachedEntry = found;
+        persistResolved();
+      }
       return found ?? cachedEntry;
     })
     .finally(() => {
@@ -297,6 +348,7 @@ const MIN_NODE_MAJOR = 20;
 export async function locateNodeExecutable(): Promise<string | null> {
   if (nodeProbeInFlight) return nodeProbeInFlight;
   nodeProbeInFlight = (async () => {
+    hydrateCache();
     if (cachedNode && existsSync(cachedNode)) return cachedNode;
     const candidates: string[] = [];
     try {
@@ -316,6 +368,7 @@ export async function locateNodeExecutable(): Promise<string | null> {
       if (!existsSync(line)) continue;
       if (await nodeMajorAtLeast(line, MIN_NODE_MAJOR)) {
         cachedNode = line;
+        persistResolved();
         return cachedNode;
       }
     }

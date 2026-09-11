@@ -95,10 +95,11 @@
     0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
 
   /* WIN12-style acrylic: translucent tint over a blurred backdrop.
-     The backdrop is the wallpaper gradient painted on <body>, so the tints
-     must stay translucent for anything to show through. */
+     The backdrop is the wallpaper gradient painted on <body>, so the base
+     tint must stay translucent for anything to show through. The pop tint
+     is the deliberate exception (near-opaque — see the .acrylic-pop rule). */
   --acrylic-tint: oklch(1 0 0 / 38%);
-  --acrylic-pop-tint: oklch(1 0 0 / 58%);
+  --acrylic-pop-tint: oklch(1 0 0 / 90%);
   --acrylic-edge: oklch(1 0 0 / 70%);
   --wallpaper:
     radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 42%, transparent), transparent 64%),
@@ -155,7 +156,7 @@
     0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
-  --acrylic-pop-tint: oklch(0.25 0.024 285 / 56%);
+  --acrylic-pop-tint: oklch(0.25 0.024 285 / 88%);
   --acrylic-edge: oklch(1 0 0 / 10%);
   --wallpaper:
     radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 48%, transparent), transparent 64%),
@@ -284,8 +285,7 @@
    their opaque bg-card. The top-edge gradient fakes the glass rim highlight
    without touching box-shadow — .acrylic stays combinable with glow-ring /
    panel-shadow utilities owned by specific cards. */
-.acrylic,
-.acrylic-pop {
+.acrylic {
   background-color: var(--acrylic-tint);
   background-image: linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
   /* Standard property only: esbuild folds a sibling -webkit- alias into the
@@ -295,8 +295,16 @@
   backdrop-filter: blur(48px) saturate(1.8);
 }
 
+/* Popups (dropdown menus, auth modal) always nest INSIDE an ancestor that
+   itself carries backdrop-filter (.acrylic header/composer, .auth-backdrop).
+   Per Filter Effects L2 that ancestor forms a backdrop root: the popup's own
+   backdrop-filter could only sample that subtree's uniform tint, never the
+   transcript behind it — verified in-app, text ghosted through sharp even at
+   blur(48px). Declaring no blur here saves a composited layer; readability
+   is carried entirely by the near-opaque --acrylic-pop-tint instead. */
 .acrylic-pop {
   background-color: var(--acrylic-pop-tint);
+  background-image: linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
   box-shadow:
     inset 0 0 0 1px var(--acrylic-edge),
     var(--shadow-panel);
@@ -305,8 +313,7 @@
 /* No backdrop-filter support → fall back to the opaque panel color; a
    translucent tint without blur would just look washed out. */
 @supports not (backdrop-filter: blur(1px)) {
-  .acrylic,
-  .acrylic-pop {
+  .acrylic {
     background-color: var(--panel);
   }
 }

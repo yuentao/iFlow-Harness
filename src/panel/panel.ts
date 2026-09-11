@@ -11,7 +11,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage, isContextOverflowError, isRateLimitError } from "../acp/jsonrpc.js";
-import { buildAcpCommand, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable } from "../acp/cli-locator.js";
+import { buildAcpCommand, configureLocatorPersistence, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
@@ -109,6 +109,9 @@ function abortableDelay(ms: number, shouldAbort: () => boolean): Promise<void> {
 const SESSIONS_KEY = "iflow.recentSessions";
 /** workspaceState key: session id to restore on panel open (M4). */
 const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
+/** globalState key: cross-window cache of resolved CLI entry + node paths
+ * (locator probe results; existsSync re-validated on every hydrate). */
+const LOCATOR_PATHS_KEY = "iflow.locator.paths";
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
@@ -187,6 +190,13 @@ export class ChatPanel implements vscode.Disposable {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
     this.store.onStateChange = (state) => this.updateStatusBar(state);
+    // Cross-window cache for CLI/node probe results (each probe shells out —
+    // hundreds of ms per window). The locator re-validates hydrated paths
+    // with existsSync, so an uninstalled CLI or an extension update re-probes.
+    configureLocatorPersistence({
+      load: () => this.context.globalState.get<LocatorPaths>(LOCATOR_PATHS_KEY),
+      save: (paths) => void this.context.globalState.update(LOCATOR_PATHS_KEY, paths),
+    });
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = "iflow.openPanel";
     this.statusBar.tooltip = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
@@ -285,6 +295,23 @@ export class ChatPanel implements vscode.Disposable {
   // (command palette / status bar / editor title icon). There is no sidebar
   // view: VSCode always opens a view in the sidebar, which is too narrow as
   // the primary surface.
+
+  /**
+   * Warm start: spawn + initialize the CLI in the background right after
+   * window activation (`iflow.warmStart`, default on). The panel's first open
+   * then rides the already-connecting/live client — ensureClient is idempotent
+   * and hands back the in-flight connect — instead of paying the ~6s
+   * initialize handshake visibly. No webview exists yet; snapshots posted
+   * before it simply no-op, and the panel pushes a fresh snapshot on open.
+   * Failures land in the log and store; the panel shows them when opened.
+   */
+  warmStart(): void {
+    const enabled = vscode.workspace.getConfiguration("iflow").get<boolean>("warmStart", true);
+    if (!enabled) return;
+    void this.ensureClient().catch((error) => {
+      this.log.error("warm start failed", errorMessage(error));
+    });
+  }
 
   /** Open (or reveal) the chat as an editor tab with a generous width. */
   openEditorTab(): void {
@@ -1622,26 +1649,24 @@ export class ChatPanel implements vscode.Disposable {
       this.store.replaceTranscript(restored.blocks);
 
       // Model list: same live-endpoint-only source as a fresh session,
-      // otherwise the model dropdown would vanish after a restore. Already
-      // fetched concurrently with probe/loadSession above.
-      const models = await modelsPromise;
+      // otherwise the model dropdown would vanish after a restore. Fetched
+      // concurrently with probe/loadSession above and late-pushed via
+      // applyLiveModels AFTER sessionStarted — a slow endpoint must not stall
+      // the already-rebuilt transcript (it paints above before models land).
       // After a profile switch the default model is the one written in the
       // NEW profile (its configured modelName), not the previous endpoint's
       // stale current model (user directive).
       const switchModel = this.pendingSwitchModel;
       this.pendingSwitchModel = null;
-      const currentModelId = switchModel ?? this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? models[0]?.id ?? null;
-      if (currentModelId && !models.some((m) => m.id === currentModelId)) {
-        models.unshift({ id: currentModelId, name: currentModelId });
-      }
+      const currentModelId = switchModel ?? this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? null;
 
       this.store.sessionStarted({
         sessionId: loadedId,
         modes,
         commands: meta?.availableCommands ?? [],
-        models,
         currentModelId,
       });
+      this.applyLiveModels(modelsPromise, client, loadedId, meta?.models?.currentModelId ?? null);
       // Keep the restored session's actual model in sync with the profile's
       // configured model (only when a profile switch provided one).
       if (switchModel && currentModelId && currentModelId !== (meta?.models?.currentModelId ?? null)) {
@@ -2215,6 +2240,46 @@ export class ChatPanel implements vscode.Disposable {
     this.store.sessionMeta({ models });
   }
 
+  /**
+   * Late-push the live /models result so the HTTP round trip never gates the
+   * session's first paint (a slow or dead endpoint previously stalled the
+   * splash for up to the full 10s query timeout AFTER session/new had already
+   * returned). Stale results are dropped: a profile switch replaces the CLI
+   * client (identity check) and another session start replaces the active
+   * session — in both cases the old endpoint's list must not clobber the new
+   * state. A failed query clears the preserved list to [], matching what
+   * sessionStarted used to push on failure.
+   */
+  private applyLiveModels(
+    modelsPromise: Promise<SessionState["models"]>,
+    client: AcpClient,
+    sessionId: string,
+    fallbackModelId: string | null,
+  ): void {
+    void modelsPromise
+      .then((models) => {
+        if (this.client !== client) return;
+        const state = this.store.getState();
+        if (state.sessionId !== sessionId && state.activeSessionId !== sessionId) return;
+        if (models.length === 0) {
+          this.store.sessionMeta({ models: [] });
+          return;
+        }
+        // The active model may be absent from the live list; add it so the
+        // controlled dropdown doesn't render blank.
+        const currentModelId = state.currentModelId ?? fallbackModelId;
+        if (currentModelId && !models.some((m) => m.id === currentModelId)) {
+          models.unshift({ id: currentModelId, name: currentModelId });
+        }
+        this.store.sessionMeta({ models, ...(currentModelId ? { currentModelId } : {}) });
+      })
+      .catch((error: unknown) => {
+        // queryLiveModels swallows endpoint errors into []; only unexpected
+        // storage failures reject — never let them become unhandled.
+        this.log.warn(vscode.l10n.t("模型列表查询失败（不回退 CLI 内置目录）: {0}", errorMessage(error)));
+      });
+  }
+
   private async startNewSession(): Promise<void> {
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its
     // hasPersistedTranscript check scans ~/.iflow/projects/<cwd-slug>/).
@@ -2274,33 +2339,28 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
-    // Model dropdown: live query of the active endpoint's `/models`. The CLI's
-    // `_meta` catalog is hardcoded and not truthful for user-supplied
-    // endpoints — per user directive, never fall back to it.
-    const models = await modelsPromise;
     const cliModelId = meta?.models?.currentModelId ?? null;
     // After a profile switch the CLI's current model belongs to the previous
     // endpoint — default to the model configured in the NEW profile (user
     // directive) and push it to the CLI so prompts actually use it.
     const switchModel = this.pendingSwitchModel;
     this.pendingSwitchModel = null;
-    let currentModelId = switchModel ?? cliModelId;
-    // The CLI's current model may be absent from the list; add it so the
-    // controlled <select> doesn't render blank.
-    if (currentModelId && !models.some((m) => m.id === currentModelId)) {
-      models.unshift({ id: currentModelId, name: currentModelId });
-    }
+    const currentModelId = switchModel ?? cliModelId;
     // A failed restore leaves an error banner behind — clear it for the fresh
     // session so the stale message doesn't follow the user around.
     store.getState().errorMessage = null;
     if (store.getState().status === "error") store.getState().status = "idle";
+    // First paint WITHOUT waiting on the /models HTTP round trip. sessionStarted
+    // omits `models` (setMeta keeps the list preserved by newSessionState; []
+    // on cold start) — the live list lands via applyLiveModels below, so a
+    // slow endpoint can no longer stretch the splash to its 10s timeout.
     store.sessionStarted({
       sessionId: session.sessionId,
       modes: session.modes,
       commands: meta?.availableCommands ?? [],
-      models,
       currentModelId,
     });
+    this.applyLiveModels(modelsPromise, client, session.sessionId, cliModelId);
     if (switchModel && currentModelId && currentModelId !== cliModelId) {
       await this.setModel(currentModelId);
     }

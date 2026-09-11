@@ -11,6 +11,12 @@ export function activate(context: vscode.ExtensionContext): void {
   panel = chatPanel;
   context.subscriptions.push(chatPanel);
 
+  // Warm start: spawn + initialize the CLI in the background right after
+  // activation (onStartupFinished) so the first panel open reuses the live
+  // client instead of waiting through the ~6s handshake. Gated by
+  // iflow.warmStart; teardown rides the subscription dispose above.
+  chatPanel.warmStart();
+
   context.subscriptions.push(
     vscode.commands.registerCommand("iflow.openPanel", async () => {
       // Open as a wide, resizable editor tab (falls back to the sidebar view

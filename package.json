@@ -112,6 +112,11 @@
           "default": "",
           "description": "%iflow.configuration.nodePath.description%"
         },
+        "iflow.warmStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "%iflow.configuration.warmStart.description%"
+        },
         "iflow.idleTimeoutMinutes": {
           "type": "number",
           "default": 30,
