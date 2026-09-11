@@ -1466,7 +1466,11 @@ export class ChatPanel implements vscode.Disposable {
     await this.context.workspaceState.update(ACTIVE_SESSION_KEY, activeId);
   }
 
-  /** Upsert a session into the recent list (newest first) and persist it. */
+  /** Upsert a session into the recent list (newest first) and persist it.
+   * `updatedAt` is the session's last-activity time: re-recording an existing
+   * session (restore/switch, label rename) keeps its prior stamp — only
+   * touchActiveSession() (a real turn ending) moves it. New entries stamp
+   * now (creation time). */
   private async recordSession(id: string, label: string | null): Promise<void> {
     if (!id) return;
     const existing = this.readPersistedSessions();
@@ -1474,9 +1478,30 @@ export class ChatPanel implements vscode.Disposable {
     const capped = label ? clampSessionLabel(label) : null;
     const prior = existing.find((s) => s.id === id);
     const sessions = [
-      { id, label: capped ?? prior?.label ?? DEFAULT_SESSION_LABEL, updatedAt: Date.now() },
+      {
+        id,
+        label: capped ?? prior?.label ?? DEFAULT_SESSION_LABEL,
+        // Restoring/switching is not activity — keep the last-end stamp.
+        updatedAt: prior?.updatedAt ?? Date.now(),
+      },
       ...existing.filter((s) => s.id !== id),
     ];
+    this.store.setSessions(sessions, id);
+    await this.persistSessions(sessions, id);
+  }
+
+  /**
+   * Stamp the active session with "now" — called when a turn ENDS (success
+   * or failure), so the switcher shows when the session was last used
+   * instead of a time bumped by mere switching or restoring.
+   */
+  private async touchActiveSession(): Promise<void> {
+    const state = this.store.getState();
+    const id = state.activeSessionId ?? state.sessionId;
+    if (!id) return;
+    const sessions = state.sessions.map((s) =>
+      s.id === id ? { ...s, updatedAt: Date.now() } : s,
+    );
     this.store.setSessions(sessions, id);
     await this.persistSessions(sessions, id);
   }
@@ -2307,6 +2332,7 @@ export class ChatPanel implements vscode.Disposable {
       // Sound cue: completion chime, but a user stop/cancel stays silent.
       if (result.stopReason !== "cancelled") this.postSound("done");
       void this.persistActiveTranscript();
+      void this.touchActiveSession();
     } catch (error) {
       // Session replaced mid-flight (profile switch cancels the in-flight
       // prompt): the rejection lands after the fresh state is in place, so
@@ -2329,6 +2355,7 @@ export class ChatPanel implements vscode.Disposable {
       // failed prompt, so whatever streamed before the failure exists only in
       // memory. Write it now or a restart / profile switch loses it for good.
       void this.persistActiveTranscript();
+      void this.touchActiveSession();
       this.postSound("error");
     }
   }

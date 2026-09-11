@@ -184,6 +184,8 @@ export function Composer() {
   // gateway actually accepts and often carry the meaningful segments).
   const [modelQuery, setModelQuery] = useState("");
   const [modelIndex, setModelIndex] = useState(0);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const currentModelRef = useRef<HTMLButtonElement | null>(null);
   const filteredModels = useMemo(() => {
     const q = modelQuery.trim();
     if (!q) return models.map((m) => ({ m, score: 0 }));
@@ -198,6 +200,16 @@ export function Composer() {
   useEffect(() => {
     setModelIndex(0);
   }, [modelQuery]);
+
+  // Scroll the active model into view when the dropdown opens (empty query
+  // only, so manual scrolling / search results are never hijacked); the
+  // `models` dep re-anchors after the async refreshModels reply re-renders
+  // the list.
+  useEffect(() => {
+    if (modelMenuOpen && !modelQuery.trim()) {
+      currentModelRef.current?.scrollIntoView({ block: "nearest" });
+    }
+  }, [modelMenuOpen, modelQuery, models]);
 
   const [note, setNote] = useState<string | null>(null);
   const noteTimer = useRef<number | undefined>(undefined);
@@ -607,8 +619,17 @@ export function Composer() {
               direction="up"
               menuClass="w-56 max-h-64 overflow-y-auto"
               onOpenChange={(o) => {
-                if (o) send({ type: "refreshModels" });
-                else setModelQuery("");
+                setModelMenuOpen(o);
+                if (o) {
+                  send({ type: "refreshModels" });
+                  // keyboard highlight starts on the active model, not the top
+                  const idx = state?.currentModelId
+                    ? models.findIndex((m) => m.id === state.currentModelId)
+                    : -1;
+                  setModelIndex(idx >= 0 ? idx : 0);
+                } else {
+                  setModelQuery("");
+                }
               }}
               trigger={(open) => (
                 <button
@@ -661,6 +682,7 @@ export function Composer() {
                   {filteredModels.map(({ m }, i) => (
                     <button
                       key={m.id}
+                      ref={m.id === state?.currentModelId ? currentModelRef : undefined}
                       onClick={() => {
                         if (m.id !== state?.currentModelId) {
                           beginPending("model", m.id);
