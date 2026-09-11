@@ -1514,6 +1514,30 @@ export class ChatPanel implements vscode.Disposable {
     await this.persistSessions(sessions, activeId);
   }
 
+  /**
+   * Forget a session that never carried content: no in-memory blocks, no
+   * extension transcript file, no CLI jsonl. startNewSession records every
+   * fresh session up front (switcher highlighting), so one abandoned by
+   * 新会话 / a profile switch / a session switch would otherwise strand an
+   * unrestorable "(无标题会话)" husk in the list until the next reconnect.
+   */
+  private async cleanupEmptySession(id: string | null | undefined): Promise<void> {
+    if (!id) return;
+    // Settle the persist chain first: a profile switch tail-rescues the
+    // outgoing transcript as a fire-and-forget enqueued write BEFORE the
+    // state swap clears the blocks — an existsSync check here would race
+    // that write and misread a real session as empty.
+    await this.persistChain.catch(() => {});
+    const state = this.store.getState();
+    const liveId = state.activeSessionId ?? state.sessionId;
+    // The live session with blocks on screen is never "empty" — its
+    // transcript just hasn't been seeded yet (first turn in flight).
+    if (id === liveId && state.blocks.length > 0) return;
+    if (this.hasPersistedTranscript(id)) return;
+    this.log.info(`forgetting empty session: ${id}`);
+    await this.forgetSession(id);
+  }
+
   /** User-invoked delete from the session switcher: forget + drop transcript. */
   private async deleteSession(sessionId: string): Promise<void> {
     await this.forgetSession(sessionId);
@@ -1532,7 +1556,17 @@ export class ChatPanel implements vscode.Disposable {
     // open, never used) would burn 60s+ on new+load for nothing.
     this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     if (!this.hasPersistedTranscript(sessionId)) {
-      this.log.warn(`skip restore: no persisted transcript for ${sessionId}`);
+      // Dead switcher entry (recorded but never used): clicking it would
+      // fail on every attempt and the husk would sit in the list forever —
+      // forget it instead. Clicking the LIVE active session (no transcript
+      // until its first prompt lands) stays a plain no-op.
+      const liveId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
+      if (sessionId !== liveId) {
+        this.log.warn(`forget dead entry: no persisted transcript for ${sessionId}`);
+        await this.forgetSession(sessionId);
+      } else {
+        this.log.warn(`skip restore: no persisted transcript for ${sessionId}`);
+      }
       return false;
     }
 
@@ -1550,6 +1584,9 @@ export class ChatPanel implements vscode.Disposable {
     // Race the /models HTTP query with the probe + loadSession below (it only
     // reads the endpoint from settings.json — independent of the session).
     const modelsPromise = this.queryLiveModels();
+    // Capture before the state swap: if the switch succeeds, an abandoned
+    // empty active session must not linger in the switcher.
+    const outgoingId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
     this.log.info(`restoring session ${sessionId} …`);
     this.restoring = true;
     this.replayTitle = null;
@@ -1611,6 +1648,7 @@ export class ChatPanel implements vscode.Disposable {
         await this.setModel(currentModelId);
       }
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
+      await this.cleanupEmptySession(outgoingId);
       await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
       void this.persistActiveTranscript(); // seed the extension-owned copy
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
@@ -2171,10 +2209,20 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async startNewSession(): Promise<void> {
+    // Anchor the CLI-transcript lookup before the empty-session cleanup (its
+    // hasPersistedTranscript check scans ~/.iflow/projects/<cwd-slug>/).
+    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     // Tail rescue: a manual reset discards the active session's in-memory
     // blocks below — persist whatever the last (possibly errored) turn left
     // unsaved first. No-op on first connect (blocks are empty).
     void this.persistActiveTranscript();
+    // Drop the outgoing session if it never carried content: startNewSession
+    // records every fresh session up front, so without this each reset /
+    // profile switch would strand an empty "(无标题会话)" husk in the
+    // switcher (empty sessions have no transcript → unrestorable).
+    await this.cleanupEmptySession(
+      this.store.getState().activeSessionId ?? this.store.getState().sessionId,
+    );
     // Cancel an in-flight turn before anything else: `session/cancel` is a
     // no-op on an idle session, and without this the abandoned turn keeps
     // streaming server-side — its trailing updates would repopulate the
