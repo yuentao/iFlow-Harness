@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "mode": "floor",
+  "defaultLimit": 65536,
+  "modelLimits": [
+    { "pattern": "^qwen3", "limit": 65536 },
+    { "pattern": "^qwen2\\.5", "limit": 32768 }
+  ]
+}

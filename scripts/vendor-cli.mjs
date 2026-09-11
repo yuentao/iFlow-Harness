@@ -131,6 +131,22 @@ function sizeOf(dir) {
   return total;
 }
 
+// Ship the loader rule configs alongside the CLI. The extension copies any
+// MISSING ~/.iflow/*.json from here before connecting (existing user files
+// are never overwritten). Runs on EVERY invocation — independent of the CLI
+// vendoring idempotency check — so defaults stay fresh even when the CLI
+// copy is up to date.
+if (existsSync(DEFAULTS_SRC)) {
+  mkdirSync(DEFAULTS_OUT, { recursive: true });
+  let shipped = 0;
+  for (const name of readdirSync(DEFAULTS_SRC)) {
+    if (!name.endsWith(".json")) continue;
+    cpSync(path.join(DEFAULTS_SRC, name), path.join(DEFAULTS_OUT, name), { force: true });
+    shipped++;
+  }
+  console.log(`[vendor-cli] shipped ${shipped} default rule configs → vendor/iflow-defaults/`);
+}
+
 // Already vendored at the target version? Skip unless --force.
 const pkgJsonPath = path.join(VENDOR_DIR, "package.json");
 if (!force && existsSync(pkgJsonPath)) {
@@ -228,20 +244,6 @@ try {
 
   const mb = (sizeOf(VENDOR_DIR) / 1024 / 1024).toFixed(1);
   console.log(`[vendor-cli] vendored ${NPM_PACKAGE}@${version} → vendor/iflow-cli (${mb} MB)`);
-
-  // 5. Ship the loader rule configs alongside the CLI. The extension copies
-  // any MISSING ~/.iflow/*.json from here before connecting (existing user
-  // files are never overwritten).
-  if (existsSync(DEFAULTS_SRC)) {
-    mkdirSync(DEFAULTS_OUT, { recursive: true });
-    let shipped = 0;
-    for (const name of readdirSync(DEFAULTS_SRC)) {
-      if (!name.endsWith(".json")) continue;
-      cpSync(path.join(DEFAULTS_SRC, name), path.join(DEFAULTS_OUT, name), { force: true });
-      shipped++;
-    }
-    console.log(`[vendor-cli] shipped ${shipped} default rule configs → vendor/iflow-defaults/`);
-  }
 } finally {
   rmDir(work, { recursive: true, force: true });
 }

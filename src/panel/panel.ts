@@ -11,7 +11,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage, isContextOverflowError, isRateLimitError } from "../acp/jsonrpc.js";
-import { buildAcpCommand, locateIflowEntry, locateNodeExecutable } from "../acp/cli-locator.js";
+import { buildAcpCommand, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
