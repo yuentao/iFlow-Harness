@@ -11,6 +11,10 @@
 - 流式对话：思考过程折叠、Markdown 渲染、一键中断
 - 粘性「正在生成」指示器，生成期间切换类操作全量防呆禁用，操作消息防抖
 - 子智能体卡片：按类型着色、步骤进度、本地化标题与日志面板
+- 提问卡：agent 发起 `ask_user_question` 提问时渲染交互卡，支持单选 / 多选 / 自由文本
+- Plan 模式审批：agent 提交计划时弹出确认卡，通过或驳回（附理由）
+- 自动恢复：速率限制递增退避重试，上下文溢出自动压缩并重发原 prompt
+- 提示音：对话完成 / 失败音效（Web Audio 合成，`iflow.soundFeedback` 可关）
 
 ![子智能体卡片](docs/images/subagent-card.png)
 
@@ -26,15 +30,15 @@
 **上下文与输入**
 
 - `@文件补全`：输入框 `@` 触发工作区文件模糊搜索，键盘选择插入
-- 选区上下文：编辑器右键 Ask iFlow（直接提问）/ Add to iFlow Context（注入输入框待编辑）
-- 图片输入：粘贴或拖入图片作为附件，对话中缩略图回显，点击在 VSCode 内置预览打开
+- 选区上下文：编辑器右键 Ask iFlow（直接提问）/ Add to iFlow Context（生成代码上下文卡，发送时前置到 prompt，可移除）
+- 附件：粘贴 / 拖拽 / OS 文件选择器多路径添加，图片缩略图回显并可内置预览，其他文件作为路径附件发送（>5MB 图片自动降级为文件附件）
 - Chat Participant：VSCode Chat 中 `@iflow` 纯文本通道，富交互仍在面板内
 
 **会话与配置**
 
 - 会话管理：历史会话切换 / 删除、重启 VSCode 后自动恢复上次会话、无标题会话以首条消息自动命名、恢复时自动滚动到底部
-- API 配置：OpenAI 兼容凭据存 VSCode SecretStorage（不落盘明文、不入日志），多 Profile 切换自动重认证，生成期间禁用凭据变更
-- 模型列表实时查询当前 endpoint 的 `/models`，不使用 CLI 内置硬编码目录
+- API 配置：OpenAI 兼容凭据存 VSCode SecretStorage（不落盘明文、不入日志），多 Profile 热重认证免重启 CLI，生成期间禁用凭据变更
+- 模型列表实时查询当前 endpoint 的 `/models`（不使用 CLI 内置硬编码目录），下拉支持模糊搜索，打开时实时刷新配置与模型
 - 主题：深 / 浅色切换，默认跟随编辑器主题
 - 状态栏：agent 状态（连接中 / 就绪 / 生成中 / 等待审批 / 出错）与当前模型一目了然，点击打开面板
 
@@ -43,17 +47,18 @@
 ## 前置要求
 
 - VSCode `^1.90.0`
-- 已安装 [iFlow CLI](https://www.npmjs.com/package/@iflow-ai/iflow-cli)（扩展会自动探测 PATH 与常见安装位置；也可在设置中指定）
+- [iFlow CLI](https://www.npmjs.com/package/@iflow-ai/iflow-cli)（可选）：扩展已内置 CLI，开箱即用；本地安装的 CLI 会被优先探测（PATH 与常见安装位置，也可用 `iflow.cliPath` 指定）
 - 可用的 OpenAI 兼容 API 端点（baseUrl + apiKey + modelName）
 
 ## 扩展设置
 
 | 设置项 | 说明 |
 |---|---|
-| `iflow.cliPath` | iFlow CLI bundle `entry.js` 路径（留空自动探测） |
+| `iflow.cliPath` | iFlow CLI bundle `entry.js` 路径（留空自动探测，未安装时使用内置 CLI） |
 | `iflow.defaultMode` | 新会话默认权限模式：`smart` / `yolo` / `default` / `plan` |
 | `iflow.nodePath` | 启动 CLI 使用的自定义 Node.js 可执行文件 |
-| `iflow.idleTimeoutMinutes` | CLI 进程空闲多少分钟后回收 |
+| `iflow.warmStart` | 窗口打开时后台预热 CLI，首次打开面板无需等待（默认开启，每窗口约 100MB 内存） |
+| `iflow.soundFeedback` | 对话完成 / 失败时播放提示音（默认开启） |
 
 ## 使用
 
@@ -68,7 +73,7 @@
 npm install
 npm run build      # tsc 类型产出 + esbuild 打包 host + vite 构建 webview
 npm run typecheck  # host 侧类型检查
-npm test           # vitest（67 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
+npm test           # vitest（136 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
 npm run harness    # 驱动真实 CLI 走 ACP 全流程（--record 录制 wire 日志）
 npm run package    # 产出 .vsix
 ```
