@@ -62,11 +62,18 @@ jobs:
 
       # Create/update the git tag and a GitHub-style release with the notes,
       # attaching the packaged .vsix as a downloadable asset.
+      #
+      # Draft pitfall: this action creates the release as a draft first and
+      # only publishes it during finalization (after assets upload) — if
+      # finalization is skipped the release stays Draft forever. Explicit
+      # draft:false forces publish; make_latest must be a STRING per the
+      # action's input table (a bare YAML boolean is ambiguous).
       - name: Create release with notes
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.changelog.outputs.version }}
           name: v${{ steps.changelog.outputs.version }}
           body: ${{ steps.changelog.outputs.notes }}
-          make_latest: true
+          draft: false
+          make_latest: "true"
           files: iflow-harness-*.vsix

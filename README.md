@@ -4,6 +4,16 @@
 
 ![面板总览](docs/images/panel-light.png)
 
+## 亮点
+
+- **开箱即用**：扩展内置裁剪版 iFlow CLI，未安装 CLI 的机器装上就能用（整体 VSIX 约 13MB）；本地安装的 CLI 仍会被优先探测，升级不受内置版本影响
+- **模型兼容增强**：内置 CLI 外挂 5 个定制 loader——按模型配置输出 token 上限（长回复不再被截断）、上下文余量按真实窗口计算、Kimi 采样参数规范化、多模态识别与视觉路由配置化（修复 OpenAI Compatible 模式图片输入）、声明式思考参数规则；loader 源自 [iFlow-Mods](https://github.com/yuentao/iFlow-Mods) Mod 机制，默认规则随扩展分发、连接前自动种到 `~/.iflow/`（不覆盖已有配置），编辑 JSON 即可自定义模型行为、无需改源码，Mod 可用 [iFlow-Mod-Builder](https://github.com/yuentao/iFlow-Mod-Builder) 图形化打包
+- **完整 agent 工作流**：流式对话、工具审批、行号 Diff 与一键 Revert、Plan 计划确认、交互式提问卡（单选 / 多选 / 自由文本）、子智能体进度卡片
+- **长任务自动恢复**：速率限制按 5s / 15s / 30s 递增退避自动重试；上下文溢出自动压缩并重发原 prompt——限流与长上下文都不再中断任务
+- **凭据与审批安全**：API Key 只存 VSCode SecretStorage（不落盘明文、不打日志）；审批默认拒绝、5 分钟超时自动拒答；Webview 走 nonce CSP + DOMPurify 净化
+- **零等待热切换**：切换 API Profile 热重认证、免重启 CLI；`iflow.warmStart` 窗口打开即后台预热，首次打开面板无需等待
+- **精致界面**：Win12 风格亚克力材质、深浅色主题跟随编辑器、超长会话离屏渲染流畅不卡
+
 ## 功能
 
 **对话与生成**
@@ -39,7 +49,7 @@
 - 会话管理：历史会话切换 / 删除、重启 VSCode 后自动恢复上次会话、无标题会话以首条消息自动命名、恢复时自动滚动到底部
 - API 配置：OpenAI 兼容凭据存 VSCode SecretStorage（不落盘明文、不入日志），多 Profile 热重认证免重启 CLI，生成期间禁用凭据变更
 - 模型列表实时查询当前 endpoint 的 `/models`（不使用 CLI 内置硬编码目录），下拉支持模糊搜索，打开时实时刷新配置与模型
-- 主题：深 / 浅色切换，默认跟随编辑器主题
+- 主题：深 / 浅色切换，默认跟随编辑器主题；Win12 风格亚克力材质界面
 - 状态栏：agent 状态（连接中 / 就绪 / 生成中 / 等待审批 / 出错）与当前模型一目了然，点击打开面板
 
 ![深色主题与审批卡片](docs/images/panel-dark.png)
@@ -71,11 +81,13 @@
 
 ```bash
 npm install
-npm run build      # tsc 类型产出 + esbuild 打包 host + vite 构建 webview
-npm run typecheck  # host 侧类型检查
-npm test           # vitest（136 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
-npm run harness    # 驱动真实 CLI 走 ACP 全流程（--record 录制 wire 日志）
-npm run package    # 产出 .vsix
+npm run build         # tsc 类型产出 + esbuild 打包 host + vite 构建 webview
+npm run typecheck     # host 侧类型检查
+npm test              # vitest（136 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
+npm run harness       # 驱动真实 CLI 走 ACP 全流程（--record 录制 wire 日志）
+npm run vendor:cli    # 拉取并裁剪 iFlow CLI 到 vendor/（package 时自动执行）
+npm run defaults:sync # 同步本机 ~/.iflow/ 默认规则到 scripts/iflow-defaults/（发布前）
+npm run package       # vendor:cli + build + vsce 打包 → .vsix（含内置 CLI）
 ```
 
 - F5 调试：`.vscode/launch.json` 提供扩展调试配置（Extension Development Host）；启动前先 `npm run build`，因为 `main` 指向 `./dist/extension.cjs`
@@ -88,8 +100,8 @@ npm run package    # 产出 .vsix
 
 `CHANGELOG.md` 是版本的唯一来源：CI 从顶部 `## [x.y.z] - date` 标题读取版本号写入 `package.json`，其下条目作为发布摘要。新增版本只需在 CHANGELOG 加一节，不要手动改 `package.json` 的 version。
 
-- `ci.yml`：master 推送与 PR 触发，三平台矩阵（ubuntu / windows / macos）跑 typecheck → test → build
-- `release.yml`：仅 release 分支（或手动触发）打包 `.vsix`、上传 artifact、打 tag 建 release
+- `ci.yml`：release 分支的 push 与 PR 触发，三平台矩阵（ubuntu / windows / macos）跑 typecheck → test → build
+- `release.yml`：仅 release 分支（或手动触发）：读 CHANGELOG 版本与摘要写入 `package.json` → `npm run package`（内置 CLI 一起打进 `.vsix`）→ 打 tag `v*` 建 GitHub release 并附 `.vsix`
 
 ## 架构
 
