@@ -354,7 +354,7 @@ export function Composer() {
     "inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-foreground hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
 
   return (
-    <div className="relative shrink-0 border-t border-border bg-panel px-2.5 pb-2.5 pt-2">
+    <div className="acrylic relative shrink-0 border-t border-border px-2.5 pb-2.5 pt-2">
       {/* non-image attachment chips + rejected-file note */}
       {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
@@ -431,7 +431,7 @@ export function Composer() {
 
       {/* slash-command popup: all prefix matches, keyboard navigable */}
       {cmdMatches.length > 0 && (
-        <div className="absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-popover panel-shadow">
+        <div className="acrylic-pop absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border">
           {cmdMatches.map((c, i) => (
             <button
               key={c.name}
@@ -458,7 +458,7 @@ export function Composer() {
 
       {/* @-mention popup */}
       {mentionQuery !== null && (
-        <div className="absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-popover panel-shadow">
+        <div className="acrylic-pop absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border">
           {mentionHits.length === 0 && (
             <div className="px-3 py-1.5 text-[12px] text-muted-foreground">{t("无匹配文件")}</div>
           )}
@@ -487,7 +487,7 @@ export function Composer() {
         </div>
       )}
 
-      <div className="rounded-lg border border-border bg-editor transition-colors focus-within:border-primary/60">
+      <div className="rounded-lg border border-border bg-editor/60 transition-colors focus-within:border-primary/60">
         <textarea
           ref={taRef}
           value={text}
@@ -646,7 +646,7 @@ export function Composer() {
                 <>
                   {/* fuzzy search box: matches name and id; sticky so it stays
                       visible while the list scrolls */}
-                  <div className="sticky top-0 z-10 border-b border-border bg-popover p-1.5">
+                  <div className="sticky top-0 z-10 border-b border-border/60 bg-panel/50 p-1.5 backdrop-blur-md">
                     <div className="flex items-center gap-1.5 rounded-md border border-border bg-editor px-2 py-1 focus-within:border-primary/60">
                       <Search className="size-3 shrink-0 text-muted-foreground" />
                       <input

@@ -93,6 +93,19 @@
   --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 30%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
     0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
+
+  /* WIN12-style acrylic: translucent tint + grain over a blurred backdrop.
+     The backdrop is the wallpaper gradient painted on <body>, so the tints
+     must stay translucent for anything to show through. */
+  --acrylic-tint: oklch(1 0 0 / 55%);
+  --acrylic-pop-tint: oklch(1 0 0 / 72%);
+  --acrylic-edge: oklch(1 0 0 / 70%);
+  --acrylic-noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+  --wallpaper:
+    radial-gradient(52% 44% at 10% -4%, color-mix(in oklab, var(--primary) 20%, transparent), transparent 62%),
+    radial-gradient(40% 36% at 96% 4%, color-mix(in oklab, var(--info) 16%, transparent), transparent 64%),
+    radial-gradient(56% 50% at 50% 112%, color-mix(in oklab, var(--primary) 12%, transparent), transparent 66%),
+    var(--background);
 }
 
 .dark {
@@ -141,6 +154,15 @@
   --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 80%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent),
     0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
+
+  --acrylic-tint: oklch(0.23 0.022 285 / 52%);
+  --acrylic-pop-tint: oklch(0.25 0.024 285 / 68%);
+  --acrylic-edge: oklch(1 0 0 / 10%);
+  --wallpaper:
+    radial-gradient(52% 44% at 10% -4%, color-mix(in oklab, var(--primary) 30%, transparent), transparent 62%),
+    radial-gradient(40% 36% at 96% 4%, color-mix(in oklab, var(--info) 22%, transparent), transparent 64%),
+    radial-gradient(56% 50% at 50% 112%, color-mix(in oklab, var(--primary) 20%, transparent), transparent 66%),
+    var(--background);
 }
 
 @layer base {
@@ -171,7 +193,9 @@
   }
 
   body {
-    background-color: var(--color-background);
+    /* Wallpaper gradient behind every acrylic surface — this is what the
+       frosted layers blur and tint. */
+    background: var(--wallpaper);
     color: var(--color-foreground);
     font-family: var(--font-sans);
     font-size: 13px;
@@ -253,6 +277,38 @@
 
 @utility glow-ring {
   box-shadow: var(--shadow-glow);
+}
+
+/* --- WIN12-style acrylic surfaces (header / composer / popups / dialogs) --- */
+/* backdrop-filter count is deliberately small (≤5 simultaneously mounted):
+   every blurred surface costs a composited layer, so transcript cards keep
+   their opaque bg-card. The top-edge gradient fakes the glass rim highlight
+   without touching box-shadow — .acrylic stays combinable with glow-ring /
+   panel-shadow utilities owned by specific cards. */
+.acrylic,
+.acrylic-pop {
+  background-color: var(--acrylic-tint);
+  background-image: var(--acrylic-noise),
+    linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
+  backdrop-filter: blur(26px) saturate(1.5);
+  -webkit-backdrop-filter: blur(26px) saturate(1.5);
+}
+
+.acrylic-pop {
+  background-color: var(--acrylic-pop-tint);
+  box-shadow:
+    inset 0 0 0 1px var(--acrylic-edge),
+    var(--shadow-panel);
+}
+
+/* No backdrop-filter support → fall back to the opaque panel color; a
+   translucent tint without blur would just look washed out. */
+@supports not (backdrop-filter: blur(1px)) {
+  .acrylic,
+  .acrylic-pop {
+    background-color: var(--panel);
+    background-image: none;
+  }
 }
 
 @utility caret-blink {
@@ -609,8 +665,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in oklab, var(--background) 62%, transparent);
-  backdrop-filter: blur(2px);
+  background: color-mix(in oklab, var(--background) 55%, transparent);
+  backdrop-filter: blur(8px) saturate(1.3);
+  -webkit-backdrop-filter: blur(8px) saturate(1.3);
   animation: fade-in 0.16s ease-out;
 }
 
@@ -620,8 +677,6 @@
   overflow-y: auto;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-panel);
   animation: modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 

@@ -59,7 +59,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   return (
     <div
       ref={cardRef}
-      className="stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40 bg-card"
+      className="acrylic stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40"
       role="alertdialog"
       aria-label={t("工具执行审批")}
       onKeyDown={(e) => {

@@ -90,8 +90,8 @@ export function AuthCard({
         }
       }}
     >
-      <div className="auth-modal">
-        <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/60 bg-card px-3 py-2">
+      <div className="auth-modal acrylic-pop">
+        <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <KeyRound className="size-3.5 text-primary" />
           <span className="text-[12px] font-semibold">
             {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}

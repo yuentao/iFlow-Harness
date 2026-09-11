@@ -107,9 +107,9 @@ export function App() {
     activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-panel text-foreground">
+    <div className="flex h-screen flex-col overflow-hidden text-foreground">
       {/* header */}
-      <header className="aurora shrink-0 border-b border-border px-3 py-2.5">
+      <header className="acrylic shrink-0 border-b border-border px-3 py-2.5">
         <div className="flex items-center gap-2">
           <img src={logo} alt="" className="size-5" />
           <div className="leading-tight">

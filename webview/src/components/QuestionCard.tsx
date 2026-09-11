@@ -71,7 +71,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
 
   return (
     <div
-      className="stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40 bg-card"
+      className="acrylic stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40"
       role="alertdialog"
       aria-label={t("iFlow 提问")}
     >

@@ -156,7 +156,7 @@ export function Dropdown({
       </div>
       {open && (
         <div
-          className={`absolute z-30 overflow-hidden rounded-lg border border-border bg-popover panel-shadow ${
+          className={`absolute z-30 overflow-hidden rounded-lg border border-border acrylic-pop ${
             direction === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${menuClass}`}
         >
