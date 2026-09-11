@@ -217,8 +217,12 @@ function createMockHost(): HostApi {
    * Reproduces the real wire timeline: sendPrompt → streaming → permission
    * request arrives mid-flight → user answers → response continues → idle.
    */
-  function sendPromptFlow(text: string): void {
-    demoBlocks.push({ kind: "user", text });
+  function sendPromptFlow(text: string, images?: string[]): void {
+    // Mirror beginUserPrompt (shared/session-state.ts): images ride the user
+    // block as data URLs, exactly like panel.ts sendPrompt assembles them.
+    demoBlocks.push(
+      images && images.length > 0 ? { kind: "user", text, images } : { kind: "user", text },
+    );
     // Real host behavior: the newest session gets labeled by its first prompt.
     const current = demoMeta.sessions.find((s) => s.id === demoMeta.activeSessionId);
     if (current && (current.label === "（无标题会话）" || demoMeta.sessions[0] === current)) {
@@ -700,7 +704,10 @@ function createMockHost(): HostApi {
         const full = cc
           ? [`关于 \`${cc.path}:${cc.range}\`：`, "", "```", cc.code, "```", m.text].filter(Boolean).join("\n\n")
           : m.text;
-        sendPromptFlow(full);
+        sendPromptFlow(
+          full,
+          m.images?.map((img) => `data:${img.mimeType};base64,${img.data}`),
+        );
       }
     },
   };
@@ -747,6 +754,15 @@ interface ChatStore {
   editorTheme: "light" | "dark" | null;
   /** Optimistic switch lock, null when idle (see PendingOp). */
   pending: PendingOp | null;
+  /**
+   * Bumped on every outgoing sendPrompt. MessageList subscribes to force
+   * scroll-to-bottom on send: the RO follow intentionally stays off while
+   * the user is scrolled up, but sending is an explicit "take me to the
+   * live turn" intent (mainstream chat behavior — ChatGPT/Copilot do the
+   * same), and the image-attach flow regularly happens from a scrolled-up
+   * position, which read as "image messages don't auto-scroll".
+   */
+  promptSeq: number;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
@@ -758,6 +774,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
   pending: null,
+  promptSeq: 0,
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
@@ -851,6 +868,10 @@ export const useChat = create<ChatStore>((set, get) => ({
     if (key === lastSentKey && now - lastSentAt < SEND_DEBOUNCE_MS) return;
     lastSentKey = key;
     lastSentAt = now;
+    if (msg.type === "sendPrompt") {
+      // Signal MessageList to jump to the bottom (see promptSeq on ChatStore).
+      set({ promptSeq: get().promptSeq + 1 });
+    }
     vscode.postMessage(msg);
   },
 }));

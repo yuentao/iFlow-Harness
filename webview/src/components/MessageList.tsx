@@ -630,6 +630,19 @@ function MessageListInner({ state }: { state: SessionState }) {
     return () => cancelAnimationFrame(raf);
   }, [state.activeSessionId, state.replaying]);
 
+  // Prompt sent: force the jump to the live turn regardless of the current
+  // scroll position (see promptSeq on ChatStore for why). The user block
+  // itself arrives a round-trip later; re-arming stickToBottom here makes the
+  // RO follow pick it up on arrival.
+  const promptSeq = useChat((s) => s.promptSeq);
+  useEffect(() => {
+    if (promptSeq === 0) return;
+    stickToBottom.current = true;
+    setShowJump(false);
+    scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
+  }, [promptSeq]);
+
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
