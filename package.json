@@ -132,7 +132,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "harness": "node scripts/harness.mjs",
-    "package": "npm run build && vsce package --no-dependencies"
+    "vendor:cli": "node scripts/vendor-cli.mjs",
+    "defaults:sync": "node scripts/vendor-cli.mjs --sync-defaults",
+    "package": "npm run vendor:cli && npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",

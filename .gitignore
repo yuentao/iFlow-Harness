@@ -5,6 +5,9 @@ node_modules/
 dist/
 UI/
 webview/dist/
+# Vendored iFlow CLI copy (created by scripts/vendor-cli.mjs at package time).
+vendor/
+
 *.vsix
 
 # VS Code extension test artifacts

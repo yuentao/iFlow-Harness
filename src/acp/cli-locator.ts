@@ -1,6 +1,18 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const execFileP = promisify(execFile);
@@ -36,13 +48,19 @@ let probeInFlight: Promise<string | null> | null = null;
  *  2. PATH lookup: `where.exe iflow` shims on Windows / `which iflow` on Unix
  *  3. npm global root fallback
  *  4. Platform-specific well-known install paths
+ *  5. Vendored CLI copy (optional vendorEntry arg): scripts/vendor-cli.mjs
+ *     ships a pruned @iflow-ai/iflow-cli inside the VSIX so the extension
+ *     works on machines with no CLI installed at all. An explicitly
+ *     installed CLI always wins over the vendor fallback — users can
+ *     upgrade their own install freely; the vendored version is pinned at
+ *     build time.
  */
-export async function locateIflowEntry(): Promise<string | null> {
+export async function locateIflowEntry(vendorEntry?: string | null): Promise<string | null> {
   const fromEnv = process.env.IFLOW_CLI_ENTRY;
   if (fromEnv && existsSync(fromEnv)) return path.resolve(fromEnv);
 
   if (probeInFlight) return probeInFlight;
-  probeInFlight = locateUncached()
+  probeInFlight = locateUncached(vendorEntry)
     .then((found) => {
       if (found) cachedEntry = found;
       return found ?? cachedEntry;
@@ -53,7 +71,7 @@ export async function locateIflowEntry(): Promise<string | null> {
   return probeInFlight;
 }
 
-async function locateUncached(): Promise<string | null> {
+async function locateUncached(vendorEntry?: string | null): Promise<string | null> {
   // Cached hit still re-validates: a removed CLI must not pin a dead path.
   if (cachedEntry && existsSync(cachedEntry)) return cachedEntry;
 
@@ -67,6 +85,11 @@ async function locateUncached(): Promise<string | null> {
   for (const candidate of wellKnownCandidates()) {
     if (existsSync(candidate)) return candidate;
   }
+
+  // Last resort: the vendored CLI shipped inside the extension (scripts/
+  // vendor-cli.mjs). existsSync-guarded so a package without vendor/ (dev
+  // checkout, .vscodeignore regression) simply falls through to null.
+  if (vendorEntry && existsSync(vendorEntry)) return path.resolve(vendorEntry);
   return null;
 }
 
@@ -212,6 +235,41 @@ export function buildAcpCommand(entryJs: string): IflowCommand {
   // in segments instead of streaming. With it the turn loop iterates the
   // SSE stream and emits `agent_message_chunk` per delta.
   return { command: process.execPath, args: [path.resolve(entryJs), "--experimental-acp", "--stream"] };
+}
+
+/**
+ * Seed user-level iFlow rule configs that the vendored CLI's custom loaders
+ * read from ~/.iflow/ (kimi-request-overrides / multimodal-models /
+ * output-token-limits / thinking-models). These are USER-state files, not
+ * package assets — the CLI never ships them — so the vendored copy carries
+ * defaults (scripts/iflow-defaults → vendor/iflow-defaults) and this seeds
+ * them once per machine.
+ *
+ * Rules (probed 2026-09-11 against the loader sources):
+ *  - IFLOW_HOME wins over ~/.iflow, matching the loaders' own resolution.
+ *  - Only MISSING files are copied; an existing file is user state and is
+ *    NEVER overwritten.
+ *  - Best effort: any IO failure returns what was created so far instead of
+ *    blocking the connect path. A missing/unreadable config is safe — the
+ *    loaders are zero-side-effect when their config is absent.
+ */
+export function ensureIflowDefaultConfigs(defaultsDir: string): string[] {
+  if (!existsSync(defaultsDir)) return [];
+  const home = process.env.IFLOW_HOME || path.join(os.homedir(), ".iflow");
+  const created: string[] = [];
+  try {
+    mkdirSync(home, { recursive: true });
+    for (const name of readdirSync(defaultsDir)) {
+      if (!name.endsWith(".json")) continue;
+      const target = path.join(home, name);
+      if (existsSync(target)) continue;
+      copyFileSync(path.join(defaultsDir, name), target);
+      created.push(name);
+    }
+  } catch {
+    return created;
+  }
+  return created;
 }
 
 let cachedNode: string | null = null;

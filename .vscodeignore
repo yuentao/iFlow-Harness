@@ -12,6 +12,7 @@ webview/src/**
 webview/index.html
 webview/vite.config.ts
 webview/tsconfig.json
+webview/preview*.log
 tsconfig.json
 tsconfig.test.json
 vitest.config.ts
@@ -22,6 +23,8 @@ dist/src/**
 dist/shared/**
 dist/acp/**
 node_modules/**
+# ...but the vendored CLI's runtime deps MUST ship (scripts/vendor-cli.mjs).
+!vendor/iflow-cli/node_modules/**
 *.vsix
 m4-initial.jpg
 iflow.js.original

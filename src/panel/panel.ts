@@ -1938,7 +1938,14 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("iflow.cliPath 不存在，回退自动探测: {0}", configured),
       );
     }
-    const entry = await locateIflowEntry();
+    // Vendored CLI (scripts/vendor-cli.mjs) ships inside the VSIX as the
+    // out-of-the-box fallback when no CLI is installed on the machine.
+    const vendored = path.join(this.context.extensionPath, "vendor", "iflow-cli", "bundle", "entry.js");
+    // Seed missing ~/.iflow/ rule configs (loader externals). Idempotent:
+    // existing user files are never overwritten, so running on every
+    // connect is safe. Best effort — failures never block the connect.
+    ensureIflowDefaultConfigs(path.join(this.context.extensionPath, "vendor", "iflow-defaults"));
+    const entry = await locateIflowEntry(vendored);
     if (!entry)
       throw new Error(
         vscode.l10n.t("未找到 iFlow CLI（entry.js）。请安装 @iflow-ai/iflow-cli 或设置 iflow.cliPath。"),
