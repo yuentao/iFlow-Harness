@@ -94,17 +94,16 @@
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
     0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
 
-  /* WIN12-style acrylic: translucent tint + grain over a blurred backdrop.
+  /* WIN12-style acrylic: translucent tint over a blurred backdrop.
      The backdrop is the wallpaper gradient painted on <body>, so the tints
      must stay translucent for anything to show through. */
-  --acrylic-tint: oklch(1 0 0 / 55%);
-  --acrylic-pop-tint: oklch(1 0 0 / 72%);
+  --acrylic-tint: oklch(1 0 0 / 38%);
+  --acrylic-pop-tint: oklch(1 0 0 / 58%);
   --acrylic-edge: oklch(1 0 0 / 70%);
-  --acrylic-noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
   --wallpaper:
-    radial-gradient(52% 44% at 10% -4%, color-mix(in oklab, var(--primary) 27%, transparent), transparent 62%),
-    radial-gradient(40% 36% at 96% 4%, color-mix(in oklab, var(--info) 21%, transparent), transparent 64%),
-    radial-gradient(56% 50% at 50% 112%, color-mix(in oklab, var(--primary) 17%, transparent), transparent 66%),
+    radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 42%, transparent), transparent 64%),
+    radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) 30%, transparent), transparent 66%),
+    radial-gradient(64% 58% at 50% 112%, color-mix(in oklab, var(--primary) 28%, transparent), transparent 68%),
     var(--background);
 }
 
@@ -155,13 +154,13 @@
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent),
     0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
 
-  --acrylic-tint: oklch(0.23 0.022 285 / 52%);
-  --acrylic-pop-tint: oklch(0.25 0.024 285 / 68%);
+  --acrylic-tint: oklch(0.23 0.022 285 / 40%);
+  --acrylic-pop-tint: oklch(0.25 0.024 285 / 56%);
   --acrylic-edge: oklch(1 0 0 / 10%);
   --wallpaper:
-    radial-gradient(52% 44% at 10% -4%, color-mix(in oklab, var(--primary) 30%, transparent), transparent 62%),
-    radial-gradient(40% 36% at 96% 4%, color-mix(in oklab, var(--info) 22%, transparent), transparent 64%),
-    radial-gradient(56% 50% at 50% 112%, color-mix(in oklab, var(--primary) 20%, transparent), transparent 66%),
+    radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 48%, transparent), transparent 64%),
+    radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) 34%, transparent), transparent 66%),
+    radial-gradient(64% 58% at 50% 112%, color-mix(in oklab, var(--primary) 32%, transparent), transparent 68%),
     var(--background);
 }
 
@@ -288,13 +287,12 @@
 .acrylic,
 .acrylic-pop {
   background-color: var(--acrylic-tint);
-  background-image: var(--acrylic-noise),
-    linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
+  background-image: linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
   /* Standard property only: esbuild folds a sibling -webkit- alias into the
      prefixed form (ignoring cssTarget), and modern Chromium — the only engine
      a VSCode webview runs on — dropped that alias, which silently killed the
      blur. backdrop-filter itself is supported since Chromium 76. */
-  backdrop-filter: blur(26px) saturate(1.5);
+  backdrop-filter: blur(48px) saturate(1.8);
 }
 
 .acrylic-pop {
@@ -310,7 +308,6 @@
   .acrylic,
   .acrylic-pop {
     background-color: var(--panel);
-    background-image: none;
   }
 }
 
