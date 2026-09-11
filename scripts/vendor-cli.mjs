@@ -80,6 +80,38 @@ function argValue(flag, fallback) {
 }
 const hasFlag = (flag) => argv.includes(flag);
 
+/**
+ * Run npm with a proper argv array on every platform.
+ *
+ * The previous impl passed a single command string with
+ * `shell: process.platform === "win32"`: on Windows the string goes to the
+ * shell and works, but on POSIX `shell:false` makes Node treat the whole
+ * string as a binary name → spawnSync ENOENT (hit on the ubuntu runner).
+ *
+ * Preferred path: drive npm's own npm-cli.js with the current Node binary —
+ * no .cmd shims (Windows EINVAL, Node ≥20.12 / CVE-2024-27980), no shell
+ * quoting, no DEP0190 (shell:true + args array). Falls back to the `npm`
+ * binary on PATH: shell:true single string on Windows (.cmd shim needs a
+ * shell), plain argv array on POSIX.
+ */
+function runNpm(args, opts = {}) {
+  const npmCli = path.join(
+    path.dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  const base = { windowsHide: true, ...opts };
+  if (existsSync(npmCli)) {
+    return execFileSync(process.execPath, [npmCli, ...args], base);
+  }
+  if (process.platform === "win32") {
+    return execFileSync(`npm ${args.join(" ")}`, base);
+  }
+  return execFileSync("npm", args, base);
+}
+
 // --from-dir: the version comes from the source dir's package.json (any
 // --version value is ignored) and bundle/entry.js must exist.
 let version = argValue("--version", PINNED_VERSION);
@@ -180,14 +212,9 @@ try {
       tgz = path.resolve(fromTgz);
       if (!existsSync(tgz)) throw new Error(`--from tarball not found: ${tgz}`);
     } else {
-      console.log(`[vendor-cli] npm pack @iflow-ai/iflow-cli@${version} ...`);
-      // Single command string with shell:true on Windows — spawning .cmd shims
-      // without a shell throws EINVAL (Node ≥20.12, CVE-2024-27980), and
-      // shell:true with an args array raises DEP0190.
-              const spec = `npm pack ${NPM_PACKAGE}@${version} --pack-destination "${work}"`;      const out = execFileSync(spec, {
+      console.log(`[vendor-cli] npm pack ${NPM_PACKAGE}@${version} ...`);
+      const out = runNpm(["pack", `${NPM_PACKAGE}@${version}`, "--pack-destination", work], {
         encoding: "utf8",
-        windowsHide: true,
-        shell: process.platform === "win32",
         stdio: ["ignore", "pipe", "inherit"],
       });
       tgz = path.join(work, out.trim().split(/\r?\n/).filter(Boolean).at(-1));
@@ -204,13 +231,11 @@ try {
     // never executed). Version resolution goes through the CLI's package.json
     // ranges, so the dependency tree follows whatever npm resolves today.
     console.log("[vendor-cli] npm install (production deps) ...");
-    const installOut = execFileSync(
-      `npm install --omit=dev --ignore-scripts --no-audit --no-fund`,
+    const installOut = runNpm(
+      ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
       {
         cwd: pkgDir,
         encoding: "utf8",
-        windowsHide: true,
-        shell: process.platform === "win32",
         stdio: ["ignore", "pipe", "inherit"],
       },
     );

@@ -69,7 +69,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - **版本幂等**：`vendor/iflow-cli/package.json` 的 version 与目标一致就跳过；`--force` 强制重做。注意 `--from-dir` 时「同版本 ≠ 同内容」，本地 loader 定制不在 npm 源里。
 - **默认规则双目录**：源在 `scripts/iflow-defaults/`（进 git），构建时复制到 `vendor/iflow-defaults/`；扩展连接前把 `~/.iflow/` **缺失的**规则文件种过去（`seedDefaultRuleConfigs`），**永不覆盖用户已有文件**；`settings.json` / `iflow_accounts.json` 携带凭据，固定清单之外一概不同步。
 - **`.vscodeignore` 有关键例外**：`node_modules/**` 被排除，但 `!vendor/iflow-cli/node_modules/**` 必须保留——内置 CLI 的运行时依赖靠它进包。
-- **Windows 陷阱**：`npm pack` 用单命令字符串 + `shell:true`（Node ≥20.12 下无 shell spawn `.cmd` 会抛 EINVAL CVE-2024-27980，shell:true 带 args 数组又触发 DEP0190）；解压用系统自带 bsdtar。
+- **Windows 陷阱**：npm 调用统一走 `runNpm()`——优先用 `process.execPath` 直跑 npm 自带的 `npm-cli.js`（跨平台零 shell，避开 `.cmd` shim 的 EINVAL CVE-2024-27980 与 DEP0190；旧实现「单命令字符串 + 仅 win32 开 shell」在 ubuntu runner 上把整串命令当二进制名 spawn，实测 ENOENT）；fallback 才是 PATH 上的 npm（win32 带 shell 单字符串、POSIX argv 数组）。解压用系统自带 bsdtar。
 - 探测优先级（`locateIflowEntry`）：`IFLOW_CLI_ENTRY` 环境变量 → PATH shim → npm 全局 root → 平台已知路径 → **vendor 副本（最后手段）**。显式安装的 CLI 永远赢过 vendor，用户可自由升级自己的安装。
 
 ## 开发约定
