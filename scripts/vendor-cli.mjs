@@ -22,7 +22,7 @@
 //   --force     re-fetch even if vendor/iflow-cli already matches the version
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { mkdtempSync, rmSync as rmDir } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -154,7 +154,10 @@ function sizeOf(dir) {
   const walk = (p) => {
     for (const name of readdirSync(p)) {
       const full = path.join(p, name);
-      const st = statSync(full);
+      // lstat, not stat: npm .bin holds symlinks on Linux; after pruning
+      // packages the links become dangling and statSync (follows) throws
+      // ENOENT. lstatSync measures the link itself — safe and correct.
+      const st = lstatSync(full);
       if (st.isDirectory()) walk(full);
       else total += st.size;
     }
@@ -260,6 +263,22 @@ try {
   const nmDir = path.join(pkgDir, "node_modules");
   if (existsSync(nmDir)) {
     for (const name of PRUNE_PKGS) rmSync(path.join(nmDir, name), { recursive: true, force: true });
+
+    // npm's .bin dir holds symlinks to package bin scripts on Linux; pruning
+    // left dangling ones whose targets no longer exist. statSync follows the
+    // link and throws ENOENT — remove those. On Windows .bin contains .cmd
+    // shim files (not symlinks), so statSync passes and nothing is removed.
+    const binDir = path.join(nmDir, ".bin");
+    if (existsSync(binDir)) {
+      for (const name of readdirSync(binDir)) {
+        const link = path.join(binDir, name);
+        try {
+          statSync(link);
+        } catch {
+          rmSync(link, { force: true });
+        }
+      }
+    }
   }
 
   // 4. Swap into vendor/ (cpSync, not rename: tmp may be on another drive).
