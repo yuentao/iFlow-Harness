@@ -264,21 +264,12 @@ try {
   if (existsSync(nmDir)) {
     for (const name of PRUNE_PKGS) rmSync(path.join(nmDir, name), { recursive: true, force: true });
 
-    // npm's .bin dir holds symlinks to package bin scripts on Linux; pruning
-    // left dangling ones whose targets no longer exist. statSync follows the
-    // link and throws ENOENT — remove those. On Windows .bin contains .cmd
-    // shim files (not symlinks), so statSync passes and nothing is removed.
-    const binDir = path.join(nmDir, ".bin");
-    if (existsSync(binDir)) {
-      for (const name of readdirSync(binDir)) {
-        const link = path.join(binDir, name);
-        try {
-          statSync(link);
-        } catch {
-          rmSync(link, { force: true });
-        }
-      }
-    }
+    // npm's .bin dir holds bin shims (symlinks on Linux, .cmd files on
+    // Windows) that the CLI never invokes at runtime — it loads
+    // bundle/entry.js directly. Remove entirely to avoid vsce choking on
+    // symlinks during VSIX packaging on Linux CI ("currentLevel is
+    // undefined" error).
+    rmSync(path.join(nmDir, ".bin"), { recursive: true, force: true });
   }
 
   // 4. Swap into vendor/ (cpSync, not rename: tmp may be on another drive).
