@@ -548,6 +548,11 @@ export class ChatPanel implements vscode.Disposable {
         await this.sendPrompt(msg.text, msg.images, msg.files, msg.codeContext);
         break;
       case "cancel":
+        // Cancel any pending approvals/questions first, then send cancel to CLI.
+        // This ensures the user can always stop the generation even when
+        // there's a pending approval or question card.
+        this.cancelAllApprovals(vscode.l10n.t("用户取消"));
+        this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
         this.cancelSeen = true;
         this.client?.cancel(this.store.getState().sessionId ?? "");
         break;

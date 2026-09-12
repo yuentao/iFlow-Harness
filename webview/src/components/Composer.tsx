@@ -159,10 +159,12 @@ export function Composer() {
   // prompts would desync it). An in-flight profile/model/mode switch (pending)
   // locks the other switchers too. Stop is only meaningful for a real
   // generation: beginReplay() also reports status "streaming", so replaying
-  // and initializing must be excluded here.
+  // and initializing must be excluded here. Also exclude when there's a
+  // pending approval or question card — the user must handle those first.
   const streaming = state?.status === "streaming";
-  const canStop = Boolean(streaming && !state?.replaying && !state?.initializing);
-  const busy = (streaming || state?.replaying || state?.initializing || pending !== null) ?? false;
+  const hasPendingInteraction = Boolean(state?.pendingApproval || state?.pendingQuestions);
+  const canStop = Boolean(streaming && !state?.replaying && !state?.initializing && !hasPendingInteraction);
+  const busy = (streaming || state?.replaying || state?.initializing || pending !== null || hasPendingInteraction) ?? false;
   const commands: SlashCommand[] = state?.commands ?? [];
   const modes = state?.modes ?? null;
   const models = state?.models ?? [];
