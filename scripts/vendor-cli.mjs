@@ -166,6 +166,28 @@ function sizeOf(dir) {
   return total;
 }
 
+/**
+ * Recursively remove every .bin directory under `root`. npm creates bin
+ * shims (symlinks on Linux, .cmd files on Windows) at every nesting level
+ * of node_modules; the CLI loads bundle/entry.js directly and never uses
+ * them. Leaving symlinks in the tree causes vsce to crash during VSIX
+ * packaging on Linux CI ("currentLevel is undefined").
+ */
+function removeBinDirs(root) {
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (!statSync(full).isDirectory()) continue;
+      if (name === ".bin") {
+        rmSync(full, { recursive: true, force: true });
+      } else {
+        walk(full);
+      }
+    }
+  };
+  walk(root);
+}
+
 // Ship the loader rule configs alongside the CLI. The extension copies any
 // MISSING ~/.iflow/*.json from here before connecting (existing user files
 // are never overwritten). Runs on EVERY invocation — independent of the CLI
@@ -263,14 +285,12 @@ try {
   const nmDir = path.join(pkgDir, "node_modules");
   if (existsSync(nmDir)) {
     for (const name of PRUNE_PKGS) rmSync(path.join(nmDir, name), { recursive: true, force: true });
-
-    // npm's .bin dir holds bin shims (symlinks on Linux, .cmd files on
-    // Windows) that the CLI never invokes at runtime — it loads
-    // bundle/entry.js directly. Remove entirely to avoid vsce choking on
-    // symlinks during VSIX packaging on Linux CI ("currentLevel is
-    // undefined" error).
-    rmSync(path.join(nmDir, ".bin"), { recursive: true, force: true });
   }
+
+  // Remove all .bin dirs at every nesting level — npm creates symlinks
+  // (Linux) or .cmd shims (Windows) that the CLI never uses and vsce can't
+  // package symlinks ("currentLevel is undefined" on Linux CI).
+  removeBinDirs(pkgDir);
 
   // 4. Swap into vendor/ (cpSync, not rename: tmp may be on another drive).
   rmSync(VENDOR_DIR, { recursive: true, force: true });
