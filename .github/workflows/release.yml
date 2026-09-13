@@ -54,26 +54,65 @@ jobs:
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             pkg.version = '${{ steps.changelog.outputs.version }}';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + String.fromCharCode(10));
           "
 
       - name: Build & package (.vsix)
         run: npm run package
 
-      # Create/update the git tag and a GitHub-style release with the notes,
-      # attaching the packaged .vsix as a downloadable asset.
+      # Create or publish the release.
       #
-      # Draft pitfall: this action creates the release as a draft first and
-      # only publishes it during finalization (after assets upload) — if
-      # finalization is skipped the release stays Draft forever. Explicit
-      # draft:false forces publish; make_latest must be a STRING per the
-      # action's input table (a bare YAML boolean is ambiguous).
-      - name: Create release with notes
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: v${{ steps.changelog.outputs.version }}
-          name: v${{ steps.changelog.outputs.version }}
-          body: ${{ steps.changelog.outputs.notes }}
-          draft: false
-          make_latest: "true"
-          files: iflow-harness-*.vsix
+      # Root cause of the original issue:
+      # - `softprops/action-gh-release` v3 has a bug where `draft:false` is
+      #   IGNORED unless `prerelease:true` is also set.
+      #   See: https://github.com/softprops/action-gh-release/issues/379
+      # - Additionally, duplicate workflow runs (e.g., manual re-run or release
+      #   event triggering concurrent runs) can cause published releases to be
+      #   reset back to draft status.
+      #
+      # Solution: use the native `gh` CLI which provides explicit, stateless
+      # operations:
+      #   - `gh release create` without --draft creates a published release
+      #   - `gh release edit <tag> --draft=false` publishes an existing draft
+      #   - `gh release upload <tag> <file> --clobber` overwrites assets
+      # Notes are passed via an env var (GitHub preserves newlines in env
+      # values) and written to a temp file to avoid shell-injection of
+      # multiline markdown content.
+      - name: Create or publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: ${{ steps.changelog.outputs.notes }}
+        shell: bash
+        run: |
+          TAG="v${{ steps.changelog.outputs.version }}"
+          ASSET="iflow-harness-${{ steps.changelog.outputs.version }}.vsix"
+
+          # Determine whether a release (draft or published) already exists.
+          EXISTING_DRAFT=$(gh api repos/${{ github.repository }}/releases/tags/$TAG --jq '.draft' 2>/dev/null || echo "null")
+
+          case "$EXISTING_DRAFT" in
+            true)
+              # A draft exists from a previous run - attach the asset and publish it.
+              echo "Publishing existing draft release for $TAG"
+              sleep 5  # Wait for GitHub API eventual consistency
+              gh release upload "$TAG" "$ASSET" --clobber
+              gh release edit "$TAG" --draft=false
+              ;;
+            false)
+              # Already published - refresh the asset only (never re-edit the release,
+              # which is what caused the published to draft reset before).
+              echo "Release $TAG already published; updating asset"
+              gh release upload "$TAG" "$ASSET" --clobber
+              ;;
+            *)
+              # No release yet - create a published one directly with notes + asset.
+              echo "Creating new published release for $TAG"
+              printf '%s' "$RELEASE_NOTES" > /tmp/release_notes.md
+              gh release create "$TAG" \
+                --title "v${{ steps.changelog.outputs.version }}" \
+                --notes-file /tmp/release_notes.md \
+                --confirm \
+                "$ASSET"
+              rm -f /tmp/release_notes.md
+              ;;
+          esac
