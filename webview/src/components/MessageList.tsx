@@ -553,11 +553,13 @@ function MessageListInner({ state }: { state: SessionState }) {
   // --- offscreen history: suffix mounting window ----------------------------
   // Very long restored transcripts would mount (marked+DOMPurify per text
   // block) and lay out every block at once. `windowStart` is the absolute
-  // block index below which history stays unmounted; it only ever DECREASES
-  // (mount more old blocks), so streaming appends extend the suffix without
-  // re-cutting already-mounted history. The effective start is clamped to the
-  // block count so a stale window (session switched to a shorter transcript)
-  // can never slice past the end.
+  // block index below which history stays unmounted. It moves DOWN as the
+  // user scrolls up (expandOlder mounts more history) and UP again while
+  // streaming to keep the mounted tail bounded (trim effect below), so a
+  // long-running session never accumulates an unbounded DOM. The effective
+  // start is clamped to the block count so a stale window (session switched
+  // to a shorter transcript) can never slice past the end.
+  const MAX_WINDOW = TAIL_WINDOW * 2; // mounted-tail budget while streaming
   const [windowStart, setWindowStart] = useState(TAIL_WINDOW);
   const total = state.blocks.length;
   const start = Math.min(windowStart, total);
@@ -619,6 +621,34 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   const [showJump, setShowJump] = useState(false);
 
+  // Streaming-tail trim: while the user is reading new content at the bottom,
+  // the mounted window must stay bounded — otherwise a long session appends
+  // blocks forever and the offscreen-mounting optimization (which only fires
+  // on session restore / scroll-up expansion) never re-prunes. When the
+  // MOUNTED count exceeds the MAX_WINDOW budget AND the view is pinned to the
+  // bottom, slide windowStart forward and re-anchor; if the user has scrolled
+  // up to read history, do nothing (respect their position — the sentinel
+  // above will expand history on demand as before).
+  // Runs after EVERY commit: the trim must also re-arm when the user RETURNS
+  // to the bottom (onScroll flips stickToBottom → setShowJump(false) renders,
+  // but total/start are unchanged so a deps-keyed effect would never re-run).
+  // The guards below are O(1); the trim itself fires at most once per budget
+  // breach, so per-render evaluation is cheap.
+  useEffect(() => {
+    if (total - start <= MAX_WINDOW) return;
+    if (!stickToBottom.current) return;
+    setWindowStart((s) => Math.max(s, total - MAX_WINDOW));
+    // Pinned trim: the bottom edge is shared by old and new blocks, so after
+    // the head is cut the viewport must simply stay at the (new) bottom —
+    // NO bottomDistance compensation here. Recording dist pre-trim and
+    // restoring it post-trim raced the async onScroll: the restore's scroll
+    // event landed with a stale programmaticTop, read the mid-trim
+    // scrollHeight as "user scrolled up" and froze the trim (measured:
+    // stickToBottom flipped false right after the first trim). scrollToBottom
+    // stamps programmaticTop, so the async scroll event is consumed instead.
+    scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable fns
+  });
   // Follow-scroll trigger: a ResizeObserver on the content wrapper catches
   // EVERY growth path — streamed text, tool-card status/output flips,
   // SubAgent entry updates, plan changes, async image loads. The previous
