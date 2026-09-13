@@ -3,7 +3,7 @@ import { ShieldCheck } from "lucide-react";
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { FileRef } from "./ui";
+import { FileRef, CountdownBar } from "./ui";
 
 const KIND_ORDER: Record<string, number> = {
   allow_once: 0,
@@ -95,6 +95,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           </p>
         )}
       </div>
+      <CountdownBar deadline={approval.deadline} timeoutMs={approval.timeoutMs} />
       <div ref={actionsRef} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => (
           <button

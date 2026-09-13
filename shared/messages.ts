@@ -150,6 +150,12 @@ export interface PendingApprovalUi {
   toolKind: ToolKind;
   locations: ToolLocation[];
   options: PermissionOptionUi[];
+  /** Host-side auto-answer deadline (epoch ms). The webview renders a live
+   * countdown so the user knows the card expires on its own. */
+  deadline: number;
+  /** Total answer window in ms (APPROVAL_TIMEOUT_MS) — used to render a
+   * proportional countdown bar. */
+  timeoutMs: number;
 }
 
 /**
@@ -161,6 +167,10 @@ export interface PendingApprovalUi {
 export interface PendingQuestionsUi {
   id: string;
   questions: UserQuestion[];
+  /** Host-side auto-answer deadline (epoch ms); drives the countdown UI. */
+  deadline: number;
+  /** Total answer window in ms (APPROVAL_TIMEOUT_MS). */
+  timeoutMs: number;
 }
 
 /** One user answer: selected labels, or a free-text "Other" answer. */

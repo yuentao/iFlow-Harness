@@ -3,6 +3,7 @@ import { HelpCircle, Check } from "lucide-react";
 import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { CountdownBar } from "./ui";
 
 /**
  * ask_user_question card (iFlow `_iflow/user/questions`). One section per
@@ -143,6 +144,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
           );
         })}
       </div>
+      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} />
       <div className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         <button
           disabled={answered}

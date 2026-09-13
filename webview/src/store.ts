@@ -209,6 +209,9 @@ function createMockHost(): HostApi {
       { optionId: "allow-always", name: "本次会话始终允许", kind: "allow_always" },
       { optionId: "reject-once", name: "拒绝", kind: "reject_once" },
     ],
+    // Mock the real host: 5-minute expiry window.
+    deadline: Date.now() + 5 * 60_000,
+    timeoutMs: 5 * 60_000,
   };
   // Mirrors real host semantics: the approval card is consumed once answered;
   // mode/model switches must NOT clear it.

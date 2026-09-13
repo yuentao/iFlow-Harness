@@ -508,8 +508,12 @@ describe("approval flow (M2)", () => {
       toolKind: "edit",
       locations: [],
       options: [{ optionId: "o1", name: "Allow", kind: "allow_once" }],
+      deadline: Date.now() + 5 * 60_000,
+      timeoutMs: 5 * 60_000,
     });
     expect(state.pendingApproval?.id).toBe("ap-1");
+    expect(state.pendingApproval?.deadline).toBeGreaterThan(Date.now());
+    expect(state.pendingApproval?.timeoutMs).toBe(5 * 60_000);
     expect(clearPendingApproval(state, "wrong-id")).toBe(false);
     expect(state.pendingApproval?.id).toBe("ap-1");
     expect(clearPendingApproval(state, "ap-1")).toBe(true);
@@ -525,6 +529,8 @@ describe("approval flow (M2)", () => {
       toolKind: "edit",
       locations: [],
       options: [],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
     });
     expect(newSessionState(state).pendingApproval).toBeNull();
   });

@@ -5,6 +5,68 @@ import { useChat } from "../store";
 /* Shared visual primitives ported from the UI reference design. */
 
 /**
+ * Live countdown to a deadline (epoch ms). Re-renders once per second while
+ * pending; the ratio (remaining / original window) feeds a proportional bar.
+ * The interval is keyed on `deadline` so a fresh card restarts the clock.
+ */
+export function useCountdown(deadline: number, timeoutMs: number): {
+  remainingMs: number;
+  ratio: number;
+} {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [deadline]);
+  const remainingMs = Math.max(0, deadline - now);
+  const ratio = timeoutMs > 0 ? Math.min(1, Math.max(0, remainingMs / timeoutMs)) : 0;
+  return { remainingMs, ratio };
+}
+
+/** "mm:ss" countdown text (tabular so the digits don't jitter). */
+export function formatCountdown(remainingMs: number): string {
+  const totalSec = Math.ceil(remainingMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * Auto-expiry indicator for approval/question cards: a thin proportional bar
+ * plus the remaining time. Turns warning (≤60s) then destructive (≤15s) so
+ * the user can see at a glance that a card is about to auto-answer.
+ */
+export function CountdownBar({
+  deadline,
+  timeoutMs,
+}: {
+  deadline: number;
+  timeoutMs: number;
+}) {
+  const { remainingMs, ratio } = useCountdown(deadline, timeoutMs);
+  const urgent = remainingMs <= 15_000;
+  const warning = remainingMs <= 60_000;
+  const barColor = urgent ? "bg-destructive" : warning ? "bg-warning" : "bg-primary";
+  const textClass = urgent ? "text-destructive" : warning ? "text-warning" : "text-muted-foreground";
+  return (
+    <div className="flex items-center gap-2 px-3 pb-2">
+      <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-border/40">
+        <div
+          className={`h-full rounded-full transition-[width] duration-1000 ease-linear ${barColor}`}
+          style={{ width: `${ratio * 100}%` }}
+        />
+      </div>
+      <span
+        className={`shrink-0 font-mono text-[10px] tabular-nums transition-colors duration-300 ${textClass}`}
+      >
+        {formatCountdown(remainingMs)}
+      </span>
+    </div>
+  );
+}
+
+/**
  * Fuzzy match score for dropdown search (model list etc.): higher ranks
  * first, null = no match. Case-insensitive subsequence — "g53f" matches
  * "glm-5.3-flash-free". Ranking prefers substring hit > boundary-anchored

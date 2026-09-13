@@ -686,6 +686,7 @@ export class ChatPanel implements vscode.Disposable {
   private async requestPermissionFromUser(req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     const id = `ap-${++this.approvalSeq}`;
     const toolCall = req.toolCall;
+    const now = Date.now();
     const approval: PendingApprovalUi = {
       id,
       toolName: toolCall.toolName ?? "",
@@ -693,6 +694,8 @@ export class ChatPanel implements vscode.Disposable {
       toolKind: toolCall.kind ?? "other",
       locations: toolCall.locations ?? [],
       options: req.options,
+      deadline: now + APPROVAL_TIMEOUT_MS,
+      timeoutMs: APPROVAL_TIMEOUT_MS,
     };
 
     return await new Promise<RequestPermissionResponse>((resolve) => {
@@ -756,6 +759,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
     const id = `q-${++this.approvalSeq}`;
+    const now = Date.now();
 
     return new Promise<UserQuestionsResponse>((resolve) => {
       const timer = setTimeout(() => {
@@ -767,7 +771,12 @@ export class ChatPanel implements vscode.Disposable {
       }, APPROVAL_TIMEOUT_MS);
 
       this.pendingQuestions.set(id, { resolve, timer });
-      this.store.showQuestions({ id, questions: req.questions });
+      this.store.showQuestions({
+        id,
+        questions: req.questions,
+        deadline: now + APPROVAL_TIMEOUT_MS,
+        timeoutMs: APPROVAL_TIMEOUT_MS,
+      });
     });
   }
 
