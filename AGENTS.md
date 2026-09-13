@@ -7,8 +7,8 @@
 - 技术栈：TypeScript 7（strict）+ React 19 + Tailwind CSS 4 + zustand 5 + Vite 8 + vitest 5
 - 目标环境：VSCode `^1.90.0`，Node 22（CI）/ node20（esbuild target）
 - 仓库：`package.json` 声明 GitHub（`https://github.com/yuentao/iFlow-Harness.git`），但实际 `git remote` 仍指向内部 GitLab（`https://git.pandorastudio.cn/product/iFlow-harness.git`）——两处不一致，改发布配置时注意别踩空
-- 当前版本：见 `CHANGELOG.md` 顶部（现为 `1.0.1` / 2026-09-12）；`package.json` 的 version 由发布流程从 CHANGELOG 写入，**不要手动改**（工作区常见一个未提交的 version bump 属正常现象）
-- 版本历史：0.1.0（2026-08-30 首版）→ 0.2.0（2026-09-07 全新 UI）→ 1.0.0（2026-09-11 提问卡/附件/内置 CLI 等）→ 1.0.1（2026-09-12 模型下拉修复）
+- 当前版本：见 `CHANGELOG.md` 顶部（现为 `1.0.4` / 2026-09-13）。**版本对齐硬性要求**：`package.json` 的 version 必须与 CHANGELOG 顶部 `## [x.y.z]` 保持一致再提交——release workflow 从 CHANGELOG 读版本并覆写 package.json，若两者漂移（如为覆盖商店缓存手动 bump 版本却不改 CHANGELOG），CI 会把版本覆写回旧号，商店与仓库永远对不上（2026-09-13 实际踩坑：商店已 1.0.3，仓库 CHANGELOG 还停留在 1.0.2、package.json 停留在 1.0.1）。
+- 版本历史：0.1.0（2026-08-30 首版）→ 0.2.0（2026-09-07 全新 UI）→ 1.0.0（2026-09-11 提问卡/附件/内置 CLI 等）→ 1.0.1（2026-09-12 模型下拉修复）→ 1.0.3（2026-09-13 商店上架）→ 1.0.4（2026-09-13 倒计时/修复/视觉升级）
 
 ## 架构：三层单向数据流
 
@@ -174,7 +174,7 @@ IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 指定 CLI 入口（也可�
 
 ## 发布流程
 
-- **`CHANGELOG.md` 是版本唯一来源**：release 流程从顶部 `## [x.y.z] - date` 标题读版本号与摘要，写入 `package.json`（`scripts/read-changelog.mjs` + CI 内联脚本）。新增版本时只在 CHANGELOG 加一节，**不要手动改 `package.json` 的 version**。
+- **`CHANGELOG.md` 是版本唯一来源但「双处同步」**:release 流程从顶部 `## [x.y.z] - date` 标题读版本号与摘要,写入 `package.json`(`scripts/read-changelog.mjs` + CI 内联脚本)。新增版本时**同时更新 CHANGELOG 与 `package.json.version` 到同一版本号**再提交——「不要手动改 package.json」的本意是别在未同步 CHANGELOG 的情况下单独改,否则 CI 会把版本覆写回 CHANGELOG 里的旧号,商店与仓库版本永远对不上(2026-09-13 实际踩坑:为覆盖商店缓存手动 bump 到 1.0.3 但 CHANGELOG 仍在 1.0.2、package.json 停留在 1.0.1)。发布前自检:`grep '"version"' package.json` 与 `head -6 CHANGELOG.md` 必须一致。
 - `ci.yml` 与 `release.yml` **都只在 `release` 分支触发**（push + PR / 手动 dispatch）——master 不再跑 CI。
 - `ci.yml`：三平台矩阵（ubuntu/windows/macos）跑 typecheck → test → build。
 - `release.yml`：npm ci → typecheck → test → 读 CHANGELOG → 写 version 进 package.json → `npm run package`（含 `vendor:cli`，从 npm 拉定制 CLI 裁剪进包）→ `softprops/action-gh-release@v3` 打 tag `v*`、建 GitHub release 并附 `.vsix`。
