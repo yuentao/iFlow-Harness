@@ -154,6 +154,11 @@ export function Dropdown({
   /** Open-state change notification (true = opening). Lets callers refresh
    * data at open time (auth profile list, live model list). */
   onOpenChange,
+  /** Hard gate: while true the click proxy ignores all clicks. The trigger
+   * button's own `disabled` + `pointer-events-none` is NOT enough — with
+   * pointer-events suppressed the click falls through to this proxy div,
+   * which still toggles the menu (seen as "dropdowns open while streaming"). */
+  disabled = false,
   children,
 }: {
   trigger: (open: boolean) => ReactNode;
@@ -162,6 +167,7 @@ export function Dropdown({
   menuClass?: string;
   wrapperClass?: string;
   onOpenChange?: (open: boolean) => void;
+  disabled?: boolean;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -206,7 +212,8 @@ export function Dropdown({
           button far beyond the wrapper width (flex-1 inside is inert). */}
       <div
         className={wrapperClass.includes("flex-1") ? "flex min-w-0" : ""}
-        onClick={() => {
+        onClick={(e) => {
+          if (disabled) return;
           // Discrete toggle (not inside the setState updater): React StrictMode
           // may invoke updaters twice, which would double-fire onOpenChange.
           const next = !open;

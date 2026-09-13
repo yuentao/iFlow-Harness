@@ -341,6 +341,12 @@
 .diff-scroll {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklab, var(--foreground) 20%, transparent) transparent;
+  /* Disable native scroll anchoring: when a large chunk lands in one commit,
+     Chromium adjusts scrollTop on its own to keep its anchor node in view,
+     firing a scroll event that onScroll reads as "user scrolled up" — killing
+     stick-to-bottom mid-stream (scrollbar froze in place). Follow-scroll is
+     fully owned by the ResizeObserver logic in MessageListInner. */
+  overflow-anchor: none;
 }
 
 @utility aurora {

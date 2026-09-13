@@ -569,6 +569,7 @@ export function Composer() {
             <Dropdown
               direction="up"
               menuClass="w-56"
+              disabled={busy}
               trigger={(open) => (
                 <button
                   className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
@@ -619,6 +620,7 @@ export function Composer() {
             <Dropdown
               direction="up"
               menuClass="w-56 max-h-64 overflow-y-auto"
+              disabled={busy}
               onOpenChange={(o) => {
                 setModelMenuOpen(o);
                 if (o) {

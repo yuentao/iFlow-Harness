@@ -152,6 +152,7 @@ export function App() {
             <Dropdown
               align="right"
               menuClass="w-64"
+              disabled={locked}
               onOpenChange={(o) => {
                 if (o) send({ type: "refreshAuth" });
               }}
@@ -160,6 +161,7 @@ export function App() {
                   className={`${BTN_ICON}${state.auth.authenticated ? "" : " text-warning"}`}
                   title={t("API 凭据配置")}
                   aria-label={t("API 凭据配置")}
+                  disabled={locked}
                 >
                   <Settings2 className={`size-4${open ? "" : ""}`} />
                 </button>
@@ -220,6 +222,7 @@ export function App() {
             <Dropdown
               menuClass="w-72 max-h-64 overflow-y-auto"
               wrapperClass="min-w-0 flex-1"
+              disabled={locked}
               trigger={(open) => (
                 <button
                   className={`card-lift press flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-left text-[11px] shadow-card hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
