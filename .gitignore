@@ -17,6 +17,10 @@ vendor/
 test/fixtures/*.ndjson
 test/fixtures/*.json
 
+# UI verification screenshots (Playwright smoke runs, repo root only)
+/*.jpg
+/*.png
+
 # Editor & OS files
 .vscode/*
 !.vscode/launch.json
