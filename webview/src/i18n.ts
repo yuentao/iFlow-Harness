@@ -120,7 +120,9 @@ const en: Record<string, string> = {
   "思考过程": "Thinking",
   "附件图片 {0}": "Attached image {0}",
   "在 VSCode 中打开": "Open in VSCode",
-  "向 iFlow 发送第一条消息开始": "Send your first message to iFlow to get started",
+  "准备好了,向 iFlow 提问吧": "Ready — ask iFlow anything",
+  "下发任务、粘贴代码上下文,或直接描述你想实现的功能":
+    "Assign tasks, paste code context, or just describe what you want to build",
   "回到最新": "Jump to latest",
   "展开更早 {0} 条消息": "Show {0} earlier messages",
   "上下文摘要": "Context summary",

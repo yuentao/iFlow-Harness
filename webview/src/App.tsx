@@ -115,8 +115,10 @@ export function App() {
       {/* header */}
       <header className="acrylic relative z-10 shrink-0 border-b border-border px-3 py-2.5">
         <div className="flex items-center gap-2.5">
-          <div className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/25 to-primary/10 ring-1 ring-primary/20">
+          <div className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/30 to-primary/10 shadow-btn ring-1 ring-primary/25">
             <img src={logo} alt="" className="size-[18px]" />
+            {/* top-edge highlight: the logo tile reads as a polished gem */}
+            <span className="pointer-events-none absolute inset-x-0 top-0 h-px rounded-t-lg bg-gradient-to-r from-transparent via-white/60 to-transparent" />
           </div>
           <div className="leading-tight">
             <h1 className="text-[13px] font-extrabold tracking-tight">{t("心流·驭光")}</h1>

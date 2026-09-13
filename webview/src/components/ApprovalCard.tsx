@@ -110,7 +110,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         ))}
         <button
           disabled={answered}
-          className="rounded-lg px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(null)}
         >
           {t("取消")}

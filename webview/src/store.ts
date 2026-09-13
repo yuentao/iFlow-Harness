@@ -297,9 +297,9 @@ function createMockHost(): HostApi {
   // M3 demo: start unauthenticated so the setup banner shows; saved state
   // mirrors what the real host stores (masked, never the raw key).
   let authState: SessionState["auth"] = {
-    authenticated: false,
-    needsSetup: true,
-    saved: null,
+    authenticated: true,
+    needsSetup: false,
+    saved: { baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "...9999" },
     profiles: [
       { name: "BUZZ", source: "cli", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
       { name: "工作密钥", source: "extension", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },

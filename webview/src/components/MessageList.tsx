@@ -44,6 +44,7 @@ import { t } from "../i18n";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { Chip, FileRef } from "./ui";
+import logo from "../assets/iflow.svg";
 
 const KIND_ICON: Record<string, typeof Eye> = {
   read: Eye,
@@ -146,7 +147,11 @@ function ToolCard({ block }: { block: ToolBlock }) {
   return (
     <div className={`stream-in status-fade card-lift overflow-hidden rounded-xl border border-border bg-card shadow-card status-${block.status}`}>
       <div className="flex items-center gap-2 px-3 py-2">
-        <Icon className="size-3.5 shrink-0 text-primary" />
+        {/* Gradient tile behind the icon: gives dense tool cards a scannable
+            glyph instead of a bare stroke icon floating on the card bg. */}
+        <span className="tool-icon">
+          <Icon className="size-3 shrink-0 text-primary" />
+        </span>
         {/* min-w-0 truncate: agent tool titles are uncapped on the wire
             ("Running: <whole shell command>", task descriptions) — shrink-0
             here pushed the status chip out of the card. */}
@@ -288,7 +293,9 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   return (
     <div className={`stream-in status-fade card-lift overflow-hidden rounded-xl border bg-card shadow-card ${accent.border}`}>
       <div className="flex items-center gap-2 px-3 py-2">
-        <Bot className={`size-3.5 shrink-0 ${accent.icon}`} />
+        <span className="tool-icon">
+          <Bot className={`size-3 shrink-0 ${accent.icon}`} />
+        </span>
         <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
         {/* min-w-0 + clip: agentType comes from an uncapped regex capture of
             the task title; a pathological one gets clipped instead of evicting
@@ -419,7 +426,7 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
-      <div className="user-bubble max-w-[85%] rounded-2xl rounded-br-md bg-gradient-to-br from-surface-2 to-surface px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card">
+      <div className="user-bubble relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -435,6 +442,8 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
             ))}
           </div>
         )}
+        {/* subtle inner highlight so the bubble reads as a solid plane */}
+        <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-inner" />
       </div>
     </div>
   );
@@ -492,8 +501,14 @@ const BlockView = memo(function BlockView({
       return <UserMessage block={block} />;
     case "text":
       return (
-        <div className="stream-in text-[13px] leading-relaxed text-foreground/90">
-          <Markdown text={block.text} />
+        <div className={`stream-in assistant-row ${isLatest && turnActive ? "stream-shimmer" : ""}`}>
+          <span className="assistant-avatar">
+            {/* Real brand mark, consistent with the header logo */}
+            <img src={logo} alt="" className="size-3.5" />
+          </span>
+          <div className="assistant-body text-[13px] leading-relaxed text-foreground/90">
+            <Markdown text={block.text} />
+          </div>
         </div>
       );
     case "thought":
@@ -663,8 +678,17 @@ function MessageListInner({ state }: { state: SessionState }) {
       <div className="message-scroll h-full overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
         <div ref={contentRef} className="space-y-3">
           {state.blocks.length === 0 && !state.replaying && (
-            <div className="mt-10 text-center text-[12px] text-muted-foreground">
-              {t("向 iFlow 发送第一条消息开始")}
+            <div className="empty-state stream-in">
+              <div className="empty-state-logo">
+                {/* Real brand mark, consistent with the header logo */}
+                <img src={logo} alt="" className="size-6" />
+              </div>
+              <div className="text-[14px] font-semibold text-foreground">
+                {t("准备好了,向 iFlow 提问吧")}
+              </div>
+              <p className="max-w-[280px] text-[11.5px] leading-relaxed text-muted-foreground">
+                {t("下发任务、粘贴代码上下文,或直接描述你想实现的功能")}
+              </p>
             </div>
           )}
           {start > 0 && (

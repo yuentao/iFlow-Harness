@@ -91,22 +91,39 @@
     transparent 62%
   );
   --gradient-primary: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--primary) 92%, white 8%),
-    var(--primary)
+    160deg,
+    color-mix(in oklab, var(--primary) 78%, white 22%) 0%,
+    var(--primary) 45%,
+    color-mix(in oklab, var(--primary) 90%, black 10%) 100%
   );
   --gradient-primary-hover: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--primary) 88%, white 12%),
-    color-mix(in oklab, var(--primary) 96%, black 4%)
+    160deg,
+    color-mix(in oklab, var(--primary) 82%, white 18%) 0%,
+    color-mix(in oklab, var(--primary) 94%, black 6%) 100%
+  );
+  --gradient-user: linear-gradient(
+    145deg,
+    color-mix(in oklab, var(--primary) 12%, white 88%),
+    color-mix(in oklab, var(--primary) 6%, white 94%)
+  );
+  --gradient-tool-icon: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--primary) 16%, transparent),
+    color-mix(in oklab, var(--primary) 4%, transparent)
   );
   --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 30%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
     0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
-  --shadow-card: 0 1px 2px oklch(0.35 0.03 275 / 6%), 0 6px 20px -8px oklch(0.35 0.03 275 / 12%);
-  --shadow-card-hover: 0 2px 4px oklch(0.35 0.03 275 / 8%), 0 14px 32px -12px oklch(0.35 0.03 275 / 20%);
+  --shadow-card: 0 1px 2px oklch(0.35 0.03 275 / 5%), 0 2px 8px oklch(0.35 0.03 275 / 8%),
+    0 14px 36px -18px oklch(0.35 0.03 275 / 18%);
+  --shadow-card-hover: 0 2px 4px oklch(0.35 0.03 275 / 7%), 0 4px 14px oklch(0.35 0.03 275 / 12%),
+    0 22px 48px -20px oklch(0.35 0.03 275 / 28%);
   --shadow-btn: 0 1px 2px oklch(0.35 0.03 275 / 18%), inset 0 1px 0 oklch(1 0 0 / 30%);
-  --shadow-btn-hover: 0 2px 6px oklch(0.35 0.03 275 / 22%), inset 0 1px 0 oklch(1 0 0 / 32%);
+  --shadow-btn-hover: 0 2px 8px oklch(0.35 0.03 275 / 25%), inset 0 1px 0 oklch(1 0 0 / 32%);
+  /* Composer "stage": sits clearly above the transcript — a crisp hairline
+     plus a broad soft drop so the input reads as the focal element. */
+  --shadow-stage: 0 -2px 12px oklch(0.35 0.03 275 / 5%),
+    0 8px 32px -12px oklch(0.35 0.03 275 / 18%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
 
   /* Motion: spring-like settle for enters, snappy for exits. */
@@ -176,22 +193,37 @@
     transparent 62%
   );
   --gradient-primary: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--primary) 92%, white 6%),
-    var(--primary)
+    160deg,
+    color-mix(in oklab, var(--primary) 78%, white 12%) 0%,
+    var(--primary) 45%,
+    color-mix(in oklab, var(--primary) 88%, black 12%) 100%
   );
   --gradient-primary-hover: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--primary) 88%, white 10%),
-    color-mix(in oklab, var(--primary) 96%, black 4%)
+    160deg,
+    color-mix(in oklab, var(--primary) 82%, white 16%) 0%,
+    color-mix(in oklab, var(--primary) 92%, black 8%) 100%
+  );
+  --gradient-user: linear-gradient(
+    145deg,
+    color-mix(in oklab, var(--primary) 14%, oklch(0.3 0.03 285)),
+    color-mix(in oklab, var(--primary) 8%, oklch(0.26 0.026 285))
+  );
+  --gradient-tool-icon: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--primary) 22%, transparent),
+    color-mix(in oklab, var(--primary) 6%, transparent)
   );
   --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 80%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent),
     0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
-  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 30%), 0 6px 20px -8px oklch(0.1 0.02 285 / 40%);
-  --shadow-card-hover: 0 2px 4px oklch(0.1 0.02 285 / 35%), 0 14px 32px -12px oklch(0.1 0.02 285 / 55%);
+  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 20%), 0 4px 12px oklch(0.1 0.02 285 / 30%),
+    0 20px 48px -20px oklch(0.1 0.02 285 / 60%);
+  --shadow-card-hover: 0 2px 4px oklch(0.1 0.02 285 / 30%), 0 6px 18px oklch(0.1 0.02 285 / 38%),
+    0 28px 60px -24px oklch(0.1 0.02 285 / 70%);
   --shadow-btn: 0 1px 2px oklch(0.1 0.02 285 / 45%), inset 0 1px 0 oklch(1 0 0 / 10%);
-  --shadow-btn-hover: 0 2px 6px oklch(0.1 0.02 285 / 50%), inset 0 1px 0 oklch(1 0 0 / 12%);
+  --shadow-btn-hover: 0 2px 8px oklch(0.1 0.02 285 / 55%), inset 0 1px 0 oklch(1 0 0 / 12%);
+  --shadow-stage: 0 -2px 12px oklch(0.1 0.02 285 / 18%),
+    0 8px 32px -12px oklch(0.1 0.02 285 / 45%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 30%, transparent);
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
@@ -499,6 +531,115 @@
 .status-failed {
   border-color: color-mix(in oklab, var(--destructive) 40%, var(--border));
   background: color-mix(in oklab, var(--destructive) 5%, var(--card));
+}
+
+/* --- tool / subagent icon tiles ------------------------------------------- */
+/* A gradient chip behind the tool-kind icon: gives dense tool cards a
+   scannable glyph instead of a bare stroke icon floating on the card bg. */
+.tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background-image: var(--gradient-tool-icon);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 14%, transparent);
+}
+
+/* --- assistant text blocks ------------------------------------------------- */
+/* AI replies read as a conversation, not a wall: a mini brand avatar marks
+   the voice, and a hover rail lets the eye track the response column. */
+.assistant-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.assistant-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  border-radius: 7px;
+  color: var(--color-primary);
+  background-image: var(--gradient-tool-icon);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
+.assistant-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Streaming capture: a soft shimmer running across the last text block's
+   bottom edge reads as "still writing" without a blocking spinner. */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.stream-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--primary) 22%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* --- empty state (first-run transcript) ------------------------------------ */
+/* A centered brand panel with a soft aurora glow; reads as an invitation
+   rather than an error message. */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0 auto;
+  max-width: 340px;
+  padding: 40px 24px;
+  text-align: center;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--card) 60%, transparent);
+  box-shadow: var(--shadow-card);
+}
+
+.empty-state-logo {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+  font-size: 20px;
+  filter: drop-shadow(0 6px 20px color-mix(in oklab, var(--primary) 30%, transparent));
+}
+
+@keyframes float-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+.empty-state-logo {
+  animation: float-soft 3.6s var(--ease-out-expo) infinite;
 }
 
 /* --- markdown (.md) --- */

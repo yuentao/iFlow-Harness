@@ -355,7 +355,7 @@ export function Composer() {
   const CANVAS_BTN =
     "card-lift press inline-flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
   return (
-    <div className="acrylic relative shrink-0 border-t border-border px-2.5 pb-2.5 pt-2">
+    <div className="acrylic relative shrink-0 border-t border-border px-2.5 pb-2.5 pt-2" style={{ boxShadow: "var(--shadow-stage)" }}>
       {/* non-image attachment chips + rejected-file note */}
       {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
