@@ -111,7 +111,6 @@ jobs:
               gh release create "$TAG" \
                 --title "v${{ steps.changelog.outputs.version }}" \
                 --notes-file /tmp/release_notes.md \
-                --confirm \
                 "$ASSET"
               rm -f /tmp/release_notes.md
               ;;
