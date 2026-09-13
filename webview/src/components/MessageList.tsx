@@ -500,6 +500,10 @@ const BlockView = memo(function BlockView({
     case "user":
       return <UserMessage block={block} />;
     case "text":
+      // Whitespace-only text blocks (streaming separators like "\n\n" between
+      // tool calls) render as an orphaned avatar on an empty row — Markdown
+      // outputs nothing for them. Skip the whole row.
+      if (!block.text.trim()) return null;
       return (
         <div className={`stream-in assistant-row ${isLatest && turnActive ? "stream-shimmer" : ""}`}>
           <span className="assistant-avatar">
