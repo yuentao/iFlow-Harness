@@ -32,7 +32,11 @@ function statusChip(status: AgentStatus) {
     case "idle":
       return (
         <Chip tone="success">
-          <span className="size-1.5 rounded-full bg-success" /> {t("就绪")}
+          <span className="relative flex size-1.5">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
+            <span className="relative inline-flex size-1.5 rounded-full bg-success" />
+          </span>
+          {t("就绪")}
         </Chip>
       );
     case "error":
@@ -53,7 +57,7 @@ function formatSessionTime(ts: number): string {
 }
 
 const BTN_ICON =
-  "rounded p-1 text-muted-foreground hover:bg-surface hover:text-foreground transition-colors disabled:pointer-events-none disabled:opacity-40";
+  "rounded-md p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40";
 
 export function App() {
   const state = useChat((s) => s.state);
@@ -110,8 +114,10 @@ export function App() {
     <div className="flex h-screen flex-col overflow-hidden text-foreground">
       {/* header */}
       <header className="acrylic relative z-10 shrink-0 border-b border-border px-3 py-2.5">
-        <div className="flex items-center gap-2">
-          <img src={logo} alt="" className="size-5" />
+        <div className="flex items-center gap-2.5">
+          <div className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/25 to-primary/10 ring-1 ring-primary/20">
+            <img src={logo} alt="" className="size-[18px]" />
+          </div>
           <div className="leading-tight">
             <h1 className="text-[13px] font-extrabold tracking-tight">{t("心流·驭光")}</h1>
             {!isEnglishLocale() && (
@@ -120,7 +126,7 @@ export function App() {
               </p>
             )}
           </div>
-          <div className="ml-auto flex items-center gap-0.5">
+          <div className="ml-auto flex items-center gap-1">
             <button
               className={BTN_ICON}
               title={t("新会话")}
@@ -214,8 +220,8 @@ export function App() {
               wrapperClass="min-w-0 flex-1"
               trigger={(open) => (
                 <button
-                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-left text-[11px] hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
-                    open ? "bg-surface-2" : ""
+                  className={`card-lift press flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-left text-[11px] shadow-card hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
+                    open ? "bg-surface-2 ring-1 ring-primary/30" : ""
                   }`}
                   title={t("历史会话（选择后恢复该会话上下文）")}
                   disabled={locked}
@@ -235,7 +241,7 @@ export function App() {
                     !state.sessions.some((s) => s.id === state.activeSessionId) && (
                       <button
                         onClick={close}
-                        className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-foreground hover:bg-accent"
+                        className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-foreground hover:bg-accent/60"
                       >
                         {t("当前会话")}
                       </button>
@@ -245,7 +251,7 @@ export function App() {
                     return (
                       <div
                         key={s.id}
-                        className="flex w-full items-center px-3 py-1.5 hover:bg-accent"
+                        className="flex w-full items-center px-3 py-1.5 hover:bg-accent/60"
                       >
                         <button
                           className="flex min-w-0 flex-1 flex-col items-start text-left"
@@ -283,7 +289,7 @@ export function App() {
               )}
             </Dropdown>
           ) : (
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-muted-foreground">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-muted-foreground shadow-card">
               <History className="size-3 shrink-0 text-primary" />
               <span className="truncate">{t("会话历史")}</span>
             </div>

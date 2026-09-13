@@ -14,10 +14,11 @@ const KIND_ORDER: Record<string, number> = {
 
 /** Stable visual class per option kind, mirroring the reference design. */
 function optionClass(kind: PermissionOptionUi["kind"]): string {
-  if (kind.startsWith("allow")) return "bg-primary font-semibold text-primary-foreground hover:opacity-90";
+  if (kind.startsWith("allow"))
+    return "bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn hover:shadow-btn-hover hover:brightness-105";
   if (kind.startsWith("reject"))
     return "border border-destructive/40 text-destructive hover:bg-destructive/10";
-  return "border border-border bg-surface text-foreground hover:bg-surface-2";
+  return "border border-border bg-surface/80 text-foreground hover:bg-surface-2 shadow-card";
 }
 
 /**
@@ -59,7 +60,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   return (
     <div
       ref={cardRef}
-      className="acrylic stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40"
+      className="acrylic stream-in glow-ring card-lift mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
       role="alertdialog"
       aria-label={t("工具执行审批")}
       onKeyDown={(e) => {
@@ -101,7 +102,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           <button
             key={opt.optionId}
             disabled={answered}
-            className={`rounded-md px-2.5 py-1 text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
+            className={`press rounded-lg px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
             onClick={() => answer(opt.optionId)}
           >
             {opt.name}
@@ -109,7 +110,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         ))}
         <button
           disabled={answered}
-          className="rounded-md px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="rounded-lg px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(null)}
         >
           {t("取消")}

@@ -144,7 +144,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
   const completedWithDiff = block.status === "completed" && hasDiff && block.diff!.oldText !== null;
 
   return (
-    <div className={`stream-in status-fade overflow-hidden rounded-lg border border-border bg-card status-${block.status}`}>
+    <div className={`stream-in status-fade card-lift overflow-hidden rounded-xl border border-border bg-card shadow-card status-${block.status}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <Icon className="size-3.5 shrink-0 text-primary" />
         {/* min-w-0 truncate: agent tool titles are uncapped on the wire
@@ -171,14 +171,14 @@ function ToolCard({ block }: { block: ToolBlock }) {
               {completedWithDiff && (
                 <>
                   <button
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-surface-2"
+                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
                     title={t("将该文件恢复为编辑前内容")}
                     onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
                   >
                     <Undo2 className="size-3" /> {t("回退此改动")}
                   </button>
                   <button
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-surface-2"
+                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
                     title={t("在 VSCode diff 视图中查看该变更")}
                     onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
                   >
@@ -286,7 +286,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const accent = agentAccent(block.agentType);
 
   return (
-    <div className={`stream-in status-fade overflow-hidden rounded-lg border bg-card ${accent.border}`}>
+    <div className={`stream-in status-fade card-lift overflow-hidden rounded-xl border bg-card shadow-card ${accent.border}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <Bot className={`size-3.5 shrink-0 ${accent.icon}`} />
         <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
@@ -359,7 +359,7 @@ function ThoughtCard({
     return () => clearTimeout(timer);
   }, [done]);
   return (
-    <div className="stream-in overflow-hidden rounded-lg border border-border/70 bg-panel/60">
+    <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/70 bg-panel/60 shadow-card">
       <button
         onClick={() => {
           userTouched.current = true;
@@ -384,7 +384,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   const total = block.entries.length;
   const done = block.entries.filter((e) => e.status === "completed").length;
   return (
-    <div className="stream-in rounded-lg border border-border bg-card px-3 py-2.5">
+    <div className="stream-in card-lift rounded-xl border border-border bg-card px-3 py-2.5 shadow-card">
       <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
         <CircleDot className="size-3.5 text-primary" />
         {t("任务清单")}
@@ -419,7 +419,7 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
-      <div className="user-bubble max-w-[85%] rounded-xl rounded-br-sm bg-surface-2 px-3 py-2 text-[13px] leading-relaxed text-foreground">
+      <div className="user-bubble max-w-[85%] rounded-2xl rounded-br-md bg-gradient-to-br from-surface-2 to-surface px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card">
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -446,7 +446,7 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
   const [open, setOpen] = useState(false);
   const hasSummary = block.summary !== null;
   return (
-    <div className="stream-in overflow-hidden rounded-lg border border-border/60 bg-card">
+    <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
       <button
         onClick={() => hasSummary && setOpen((v) => !v)}
         disabled={!hasSummary}
@@ -674,7 +674,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             <div ref={sentinelRef} className="flex justify-center">
               <button
                 onClick={expandOlder}
-                className="inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                className="card-lift press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-colors hover:bg-surface hover:text-foreground"
               >
                 <ChevronUp className="size-3" />
                 {t("展开更早 {0} 条消息", start)}
@@ -703,7 +703,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       </div>
       {showJump && (
         <button
-          className="absolute bottom-3 right-4 z-20 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-md transition-opacity hover:opacity-90"
+          className="absolute bottom-3 right-4 z-20 rounded-full bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95"
           onClick={() => {
             stickToBottom.current = true;
             scrollToBottom();

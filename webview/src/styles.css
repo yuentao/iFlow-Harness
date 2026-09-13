@@ -11,11 +11,11 @@
   --radius-md: calc(var(--radius) - 1px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  /* Latin glyphs resolve to Helvetica; CJK falls through to Source Han Sans
-     (思源黑体), then platform fallbacks (PingFang/YaHei). */
-  --font-sans: "Helvetica Neue", Helvetica, "Source Han Sans SC", "Noto Sans SC",
-    "Source Han Sans CN", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  /* Latin glyphs resolve to Inter (variable, optical sizing); CJK falls
+     through to Source Han Sans (思源黑体), then platform fallbacks. */
+  --font-sans: "Inter", "Helvetica Neue", Helvetica, "Source Han Sans SC",
+    "Noto Sans SC", "Source Han Sans CN", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -90,9 +90,28 @@
     color-mix(in oklab, var(--primary) 14%, transparent),
     transparent 62%
   );
+  --gradient-primary: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--primary) 92%, white 8%),
+    var(--primary)
+  );
+  --gradient-primary-hover: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--primary) 88%, white 12%),
+    color-mix(in oklab, var(--primary) 96%, black 4%)
+  );
   --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 30%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
     0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
+  --shadow-card: 0 1px 2px oklch(0.35 0.03 275 / 6%), 0 6px 20px -8px oklch(0.35 0.03 275 / 12%);
+  --shadow-card-hover: 0 2px 4px oklch(0.35 0.03 275 / 8%), 0 14px 32px -12px oklch(0.35 0.03 275 / 20%);
+  --shadow-btn: 0 1px 2px oklch(0.35 0.03 275 / 18%), inset 0 1px 0 oklch(1 0 0 / 30%);
+  --shadow-btn-hover: 0 2px 6px oklch(0.35 0.03 275 / 22%), inset 0 1px 0 oklch(1 0 0 / 32%);
+  --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
+
+  /* Motion: spring-like settle for enters, snappy for exits. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
   /* WIN12-style acrylic: translucent tint over a blurred backdrop.
      The backdrop is the wallpaper gradient painted on <body>, so the base
@@ -101,6 +120,11 @@
   --acrylic-tint: oklch(1 0 0 / 38%);
   --acrylic-pop-tint: oklch(1 0 0 / 90%);
   --acrylic-edge: oklch(1 0 0 / 70%);
+  --acrylic-highlight: linear-gradient(
+    to bottom,
+    oklch(1 0 0 / 55%),
+    oklch(1 0 0 / 0%) 42%
+  );
   --wallpaper:
     radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 42%, transparent), transparent 64%),
     radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) 30%, transparent), transparent 66%),
@@ -151,13 +175,33 @@
     color-mix(in oklab, var(--primary) 32%, transparent),
     transparent 62%
   );
+  --gradient-primary: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--primary) 92%, white 6%),
+    var(--primary)
+  );
+  --gradient-primary-hover: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--primary) 88%, white 10%),
+    color-mix(in oklab, var(--primary) 96%, black 4%)
+  );
   --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 80%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent),
     0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
+  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 30%), 0 6px 20px -8px oklch(0.1 0.02 285 / 40%);
+  --shadow-card-hover: 0 2px 4px oklch(0.1 0.02 285 / 35%), 0 14px 32px -12px oklch(0.1 0.02 285 / 55%);
+  --shadow-btn: 0 1px 2px oklch(0.1 0.02 285 / 45%), inset 0 1px 0 oklch(1 0 0 / 10%);
+  --shadow-btn-hover: 0 2px 6px oklch(0.1 0.02 285 / 50%), inset 0 1px 0 oklch(1 0 0 / 12%);
+  --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 30%, transparent);
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
   --acrylic-pop-tint: oklch(0.25 0.024 285 / 88%);
   --acrylic-edge: oklch(1 0 0 / 10%);
+  --acrylic-highlight: linear-gradient(
+    to bottom,
+    oklch(1 0 0 / 9%),
+    oklch(1 0 0 / 0%) 42%
+  );
   --wallpaper:
     radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 48%, transparent), transparent 64%),
     radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) 34%, transparent), transparent 66%),
@@ -287,7 +331,7 @@
    panel-shadow utilities owned by specific cards. */
 .acrylic {
   background-color: var(--acrylic-tint);
-  background-image: linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
+  background-image: var(--acrylic-highlight);
   /* Standard property only: esbuild folds a sibling -webkit- alias into the
      prefixed form (ignoring cssTarget), and modern Chromium — the only engine
      a VSCode webview runs on — dropped that alias, which silently killed the
@@ -304,10 +348,26 @@
    is carried entirely by the near-opaque --acrylic-pop-tint instead. */
 .acrylic-pop {
   background-color: var(--acrylic-pop-tint);
-  background-image: linear-gradient(to bottom, oklch(1 0 0 / 16%), transparent 38%);
+  background-image: var(--acrylic-highlight);
   box-shadow:
     inset 0 0 0 1px var(--acrylic-edge),
     var(--shadow-panel);
+}
+
+/* Dropdown menu entrance: quick fade + slight rise, anchored to the trigger
+   edge (down = rise from below, up = settle from above). */
+@utility dropdown-in {
+  animation: dropdown-in 0.18s var(--ease-out-expo) both;
+}
+@keyframes dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* No backdrop-filter support → fall back to the opaque panel color; a
@@ -334,18 +394,46 @@
 }
 
 @utility stream-in {
-  animation: stream-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: stream-in 0.4s var(--ease-out-expo) both;
 }
 
 @keyframes stream-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(8px) scale(0.99);
   }
   to {
     opacity: 1;
     transform: none;
   }
+}
+
+/* Card hover lift: a gentle rise + deeper shadow so interactive cards read
+   as "touchable". Paired with .card-lift in components. */
+@utility card-lift {
+  transition:
+    transform 0.25s var(--ease-out-expo),
+    box-shadow 0.25s var(--ease-out-expo);
+}
+.card-lift:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* Press feedback: interactive elements sink 1px on :active. */
+@utility press {
+  transition: transform 0.12s var(--ease-out-expo);
+}
+.press:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+/* Focus ring: soft glow ring around keyboard-focused controls. Applied to
+   buttons/inputs/dropdown triggers — replaces the default browser outline. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+  border-radius: inherit;
 }
 
 /* --- collapsible card bodies (Collapse component, MessageList) ------------- */
@@ -355,7 +443,7 @@
 .collapse-wrap {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: grid-template-rows 0.32s var(--ease-out-expo);
 }
 
 .collapse-wrap[data-open="true"] {
@@ -389,7 +477,7 @@
 @keyframes chip-in {
   from {
     opacity: 0;
-    transform: scale(0.86);
+    transform: scale(0.82) translateY(2px);
   }
   to {
     opacity: 1;
@@ -398,7 +486,7 @@
 }
 
 .chip-in {
-  animation: chip-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: chip-in 0.32s var(--ease-spring) both;
 }
 
 /* Per-status card tint: in_progress glows primary, failed glows destructive,
@@ -601,7 +689,8 @@
 .splash-logo {
   width: 64px;
   height: 64px;
-  animation: splash-pulse 1.6s ease-in-out infinite;
+  filter: drop-shadow(0 8px 24px color-mix(in oklab, var(--primary) 40%, transparent));
+  animation: splash-pulse 1.8s var(--ease-out-expo) infinite;
 }
 
 .splash-title {
@@ -681,9 +770,10 @@
   width: min(400px, calc(100vw - 32px));
   max-height: 78vh;
   overflow-y: auto;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid var(--border);
-  animation: modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: var(--shadow-panel);
+  animation: modal-in 0.28s var(--ease-out-expo);
 }
 
 @keyframes fade-in {
@@ -695,6 +785,10 @@
 @keyframes modal-in {
   from {
     opacity: 0;
-    transform: translateY(10px) scale(0.985);
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }

@@ -72,7 +72,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
 
   return (
     <div
-      className="acrylic stream-in glow-ring mx-3 mb-2 shrink-0 rounded-lg border border-primary/40"
+      className="acrylic stream-in glow-ring card-lift mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
       role="alertdialog"
       aria-label={t("iFlow 提问")}
     >
@@ -100,10 +100,10 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       key={opt.label}
                       disabled={answered}
                       title={opt.description}
-                      className={`rounded-md border px-2.5 py-1 text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-40 ${
+                      className={`press rounded-lg border px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                         active
-                          ? "border-primary bg-primary font-semibold text-primary-foreground"
-                          : "border-border bg-surface text-foreground hover:bg-surface-2"
+                          ? "border-primary bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn"
+                          : "border-border bg-surface/80 text-foreground shadow-card hover:bg-surface-2"
                       }`}
                       onClick={() => toggle(q.header, opt.label, q.multiSelect)}
                     >
@@ -113,10 +113,10 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 })}
                 <button
                   disabled={answered}
-                  className={`rounded-md border px-2.5 py-1 text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-40 ${
+                  className={`press rounded-lg border px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                     isCustomOpen || custom[q.header]?.trim()
                       ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-surface text-muted-foreground hover:text-foreground"
+                      : "border-border bg-surface/80 text-muted-foreground shadow-card hover:text-foreground"
                   }`}
                   onClick={() => setCustomOpen((p) => ({ ...p, [q.header]: !p[q.header] }))}
                 >
@@ -126,7 +126,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
               {isCustomOpen && (
                 <input
                   autoFocus
-                  className="mt-1.5 w-full rounded-md border border-border bg-editor px-2 py-1 text-[11px] outline-none placeholder:text-muted-foreground focus:border-primary"
+                  className="mt-1.5 w-full rounded-lg border border-border bg-editor px-2 py-1 text-[11px] outline-none placeholder:text-muted-foreground focus:border-primary/50"
                   placeholder={t("输入自定义回答，回车确认")}
                   value={custom[q.header] ?? ""}
                   onChange={(e) => setCustom((p) => ({ ...p, [q.header]: e.target.value }))}
@@ -148,7 +148,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
       <div className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         <button
           disabled={answered}
-          className="flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-colors hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+          className="press flex items-center gap-1 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
           onClick={submit}
         >
           <Check className="size-3" />
@@ -156,7 +156,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         </button>
         <button
           disabled={answered}
-          className="rounded-md px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="rounded-lg px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={dismiss}
         >
           {t("跳过")}

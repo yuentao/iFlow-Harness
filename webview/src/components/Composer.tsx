@@ -353,8 +353,7 @@ export function Composer() {
   }
 
   const CANVAS_BTN =
-    "inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-foreground hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
-
+    "card-lift press inline-flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
   return (
     <div className="acrylic relative shrink-0 border-t border-border px-2.5 pb-2.5 pt-2">
       {/* non-image attachment chips + rejected-file note */}
@@ -363,7 +362,7 @@ export function Composer() {
           {attachments.map((f) => (
             <span
               key={f.id}
-              className="inline-flex max-w-[260px] items-center gap-1 rounded-md border border-border bg-surface px-1.5 py-1 text-[11px] text-foreground"
+              className="card-lift inline-flex max-w-[260px] items-center gap-1 rounded-lg border border-border bg-surface/80 px-1.5 py-1 text-[11px] text-foreground shadow-card"
               title={f.path}
             >
               <FileText className="size-3 shrink-0 text-primary" />
@@ -384,7 +383,7 @@ export function Composer() {
           payload (rides sendPrompt.codeContext), styled as source context —
           accent rail + mono block — not as editable draft text. */}
       {codeContext && (
-        <div className="code-context-card mb-1.5 overflow-hidden rounded-lg border border-border bg-editor">
+        <div className="code-context-card card-lift mb-1.5 overflow-hidden rounded-xl border border-border bg-editor shadow-card">
           <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
             <FileCode className="size-3.5 shrink-0 text-primary" />
             <span className="truncate font-mono text-[11px] text-foreground" title={codeContext.path}>
@@ -433,12 +432,12 @@ export function Composer() {
 
       {/* slash-command popup: all prefix matches, keyboard navigable */}
       {cmdMatches.length > 0 && (
-        <div className="acrylic-pop absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border">
+        <div className="acrylic-pop dropdown-in absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
           {cmdMatches.map((c, i) => (
             <button
               key={c.name}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${
-                i === cmdIndex ? "bg-accent" : "hover:bg-accent/60"
+                i === cmdIndex ? "bg-accent/70" : "hover:bg-accent/50"
               }`}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
@@ -460,7 +459,7 @@ export function Composer() {
 
       {/* @-mention popup */}
       {mentionQuery !== null && (
-        <div className="acrylic-pop absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border">
+        <div className="acrylic-pop dropdown-in absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
           {mentionHits.length === 0 && (
             <div className="px-3 py-1.5 text-[12px] text-muted-foreground">{t("无匹配文件")}</div>
           )}
@@ -468,7 +467,7 @@ export function Composer() {
             <button
               key={hit.path}
               className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-[12px] ${
-                i === mentionIndex ? "bg-accent" : "hover:bg-accent/60"
+                i === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
               }`}
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -489,7 +488,7 @@ export function Composer() {
         </div>
       )}
 
-      <div className="rounded-lg border border-border bg-editor/60 transition-colors focus-within:border-primary/60">
+      <div className="rounded-xl border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
         <textarea
           ref={taRef}
           value={text}
@@ -596,7 +595,7 @@ export function Composer() {
                           }
                           close();
                         }}
-                        className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent"
+                        className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50"
                       >
                         <span className="text-[12px] text-foreground">
                           {view.label}
@@ -649,7 +648,7 @@ export function Composer() {
                   {/* fuzzy search box: matches name and id; sticky so it stays
                       visible while the list scrolls */}
                   <div className="sticky top-0 z-10 border-b border-border/60 bg-panel/50 p-1.5 backdrop-blur-md">
-                    <div className="flex items-center gap-1.5 rounded-md border border-border bg-editor px-2 py-1 focus-within:border-primary/60">
+                    <div className="flex items-center gap-1.5 rounded-lg border border-border bg-editor px-2 py-1 transition-colors focus-within:border-primary/50">
                       <Search className="size-3 shrink-0 text-muted-foreground" />
                       <input
                         autoFocus
@@ -693,7 +692,7 @@ export function Composer() {
                         close();
                       }}
                       className={`flex w-full items-center px-3 py-1.5 text-left font-mono text-[11px] ${
-                        i === modelIndex ? "bg-accent" : "hover:bg-accent/60"
+                        i === modelIndex ? "bg-accent/70" : "hover:bg-accent/50"
                       }`}
                     >
                       <span className="truncate" title={m.name}>
@@ -729,7 +728,7 @@ export function Composer() {
               </button>
             ) : (
               <button
-                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
+                className="press inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
                 title={t("发送 (Enter)")}
                 disabled={!text.trim() && images.length === 0 && attachments.length === 0}
                 onClick={submit}

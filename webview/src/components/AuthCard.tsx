@@ -67,7 +67,7 @@ export function AuthCard({
   }
 
   const INPUT =
-    "rounded-md border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60";
+    "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/60 focus:border-primary/50 focus:shadow-focus";
 
   return (
     <div
@@ -117,7 +117,7 @@ export function AuthCard({
             {auth.profiles.map((p) => (
               <div
                 key={p.name}
-                className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] ${
+                className={`card-lift flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[12px] shadow-card ${
                   p.active ? "border-primary/50 bg-primary/10" : "border-border"
                 }`}
               >
@@ -197,7 +197,7 @@ export function AuthCard({
           </label>
           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
             <button
-              className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+              className="press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
               disabled={busy}
               onClick={submit}
             >
