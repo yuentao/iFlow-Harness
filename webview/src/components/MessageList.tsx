@@ -505,12 +505,19 @@ const BlockView = memo(function BlockView({
       // outputs nothing for them. Skip the whole row.
       if (!block.text.trim()) return null;
       return (
-        <div className={`stream-in assistant-row ${isLatest && turnActive ? "stream-shimmer" : ""}`}>
+        <div className="stream-in assistant-row">
           <span className="assistant-avatar">
             {/* Real brand mark, consistent with the header logo */}
             <img src={logo} alt="" className="size-3.5" />
           </span>
-          <div className="assistant-body text-[13px] leading-relaxed text-foreground/90">
+          {/* Shimmer rides the BODY column, not the whole row: on the row it
+              painted a full-width rectangular band behind the avatar (no
+              radius/padding) and read as a disjointed stripe. */}
+          <div
+            className={`assistant-body text-[13px] leading-relaxed text-foreground/90 ${
+              isLatest && turnActive ? "stream-shimmer" : ""
+            }`}
+          >
             <Markdown text={block.text} />
           </div>
         </div>
@@ -783,7 +790,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       </div>
       {showJump && (
         <button
-          className="absolute bottom-3 right-4 z-20 rounded-full bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95"
+          className="card-lift press absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
           onClick={() => {
             stickToBottom.current = true;
             scrollToBottom();

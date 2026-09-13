@@ -64,7 +64,9 @@
   --primary: oklch(0.58 0.22 280);
   --primary-foreground: oklch(1 0 0);
   --muted: oklch(0.93 0.01 265);
-  --muted-foreground: oklch(0.48 0.022 272);
+  /* Slightly darker than the original 0.48: the light-theme placeholder /
+     timestamp text sat right at the readability threshold (visual audit). */
+  --muted-foreground: oklch(0.42 0.024 272);
   --accent: oklch(0.9 0.04 267);
 
   --destructive: oklch(0.57 0.21 25);
@@ -594,6 +596,12 @@
 }
 
 .stream-shimmer {
+  /* Negative margin + matching padding: the glow band wraps the text with
+     breathing room and rounded corners WITHOUT shifting the text layout
+     (net box size is unchanged). */
+  margin: -4px -8px;
+  padding: 4px 8px;
+  border-radius: 12px;
   background-image: linear-gradient(
     90deg,
     transparent 0%,

@@ -40,13 +40,15 @@ export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactN
         {rows.map((row, i) => (
           <div
             key={i}
-            className={`flex gap-3 px-3 ${
+            className={`flex px-3 ${
               row.type === "add" ? "bg-diff-add" : row.type === "del" ? "bg-diff-del" : ""
             }`}
           >
-            <span className="w-7 shrink-0 select-none text-right text-syn-com">{row.n}</span>
+            {/* Gutter merged into one column ("+3" / "−3" / "  4"): separate
+                number + sign columns made paired -/+ lines show the same
+                number twice and read as a rendering glitch. */}
             <span
-              className={`w-2 shrink-0 select-none ${
+              className={`w-9 shrink-0 select-none text-right tabular-nums ${
                 row.type === "add"
                   ? "text-diff-add-fg"
                   : row.type === "del"
@@ -54,9 +56,15 @@ export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactN
                     : "text-syn-com"
               }`}
             >
-              {row.type === "add" ? "+" : row.type === "del" ? "−" : row.type === "hunk" ? <Ellipsis className="inline size-3 align-[-2px]" /> : " "}
+              {row.type === "add"
+                ? `+${row.n}`
+                : row.type === "del"
+                  ? `−${row.n}`
+                  : row.type === "hunk"
+                    ? <Ellipsis className="inline size-3 align-[-2px]" />
+                    : `  ${row.n}`}
             </span>
-            <span className="whitespace-pre text-foreground/90">{row.text === "" ? " " : row.text === "⋯" ? "" : row.text}</span>
+            <span className="ml-3 whitespace-pre text-foreground/90">{row.text === "" ? " " : row.text === "⋯" ? "" : row.text}</span>
           </div>
         ))}
       </div>
