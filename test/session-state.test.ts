@@ -349,17 +349,21 @@ describe("session switcher (M4)", () => {
     expect(state.sessions[0]!.label).toBe("会话一");
   });
 
-  it("newSessionState preserves workspace-scoped session list and flags", () => {
+  it("newSessionState preserves workspace-scoped session list but resets session-scoped ids", () => {
     const state = initialSessionState();
     setSessions(state, [{ id: "s1", label: "会话一", updatedAt: 1 }]);
     state.activeSessionId = "s1";
+    state.sessionId = "s1";
     state.replaying = true;
     const fresh = newSessionState(state);
+    // Workspace-scoped list survives the reset.
     expect(fresh.sessions).toHaveLength(1);
-    expect(fresh.activeSessionId).toBe("s1");
+    // Session-scoped ids do NOT survive: a new session has no inherited
+    // activeSessionId; the caller binds the fresh one via sessionStarted.
+    expect(fresh.activeSessionId).toBeNull();
+    expect(fresh.sessionId).toBeNull();
     expect(fresh.replaying).toBe(true);
     // Session-scoped state still resets.
     expect(fresh.blocks).toHaveLength(0);
-    expect(fresh.sessionId).toBeNull();
   });
 });

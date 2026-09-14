@@ -835,6 +835,15 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   private restoring = false;
 
   private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
+    // Drop late/foreign `session/update` notifications from a previous session.
+    // The CLI is a single long-lived process; if a prior prompt is still
+    // streaming when a new session starts, its chunks would otherwise be
+    // appended to the fresh transcript.
+    const currentId = this.store.getState().sessionId;
+    if (n.sessionId && currentId && n.sessionId !== currentId) {
+      this.log.trace(`ignore session/update for ${n.sessionId} (current ${currentId})`);
+      return;
+    }
     // During restore, the first user turn names the session in the switcher.
     if (this.restoring && this.replayTitle === null && n.update.sessionUpdate === "user_message_chunk") {
       if (n.update.content.type === "text" && n.update.content.text.trim()) {
@@ -910,6 +919,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     const fresh = newSessionState(this.store.getState());
     beginReplay(fresh);
     fresh.activeSessionId = sessionId;
+    fresh.sessionId = sessionId;
     this.store.replaceState(fresh);
     try {
       // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
@@ -1272,6 +1282,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
   }
 
   private async startNewSession(): Promise<void> {
+    const prevSessionId = this.store.getState().sessionId;
     const client = await this.ensureClient();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     this.sessionCwd = workspaceRoot;
@@ -1280,7 +1291,18 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     const store = this.store;
     // A new session invalidates any approvals from the old one.
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
-    store.replaceState(newSessionState(store.getState()));
+    // Stop any prompt still streaming for the previous session. Otherwise its
+    // late `session/update` notifications would be appended to the fresh
+    // transcript (onSessionUpdate filters by sessionId, but only after the new
+    // id is bound — see below).
+    if (prevSessionId) client.cancel(prevSessionId);
+    const fresh = newSessionState(store.getState());
+    // Bind the new ids immediately so that any update arriving during the async
+    // model query below is filtered as a stale/foreign session instead of
+    // leaking into the new transcript.
+    fresh.sessionId = session.sessionId;
+    fresh.activeSessionId = session.sessionId;
+    store.replaceState(fresh);
     // Model dropdown: live query of the active endpoint's `/models`. The CLI's
     // `_meta` catalog is hardcoded and not truthful for user-supplied
     // endpoints — per user directive, never fall back to it.
@@ -1297,6 +1319,7 @@ export class ChatPanel implements vscode.Disposable, vscode.WebviewViewProvider 
     if (store.getState().status === "error") store.getState().status = "idle";
     store.sessionStarted({
       sessionId: session.sessionId,
+      activeSessionId: session.sessionId,
       modes: session.modes,
       commands: meta?.availableCommands ?? [],
       models,

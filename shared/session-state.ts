@@ -168,6 +168,7 @@ export function setMeta(
   state: SessionState,
   meta: {
     sessionId?: string | null;
+    activeSessionId?: string | null;
     modes?: SessionState["modes"];
     models?: ModelInfoUi[];
     currentModelId?: string | null;
@@ -175,6 +176,7 @@ export function setMeta(
   },
 ): void {
   if (meta.sessionId !== undefined) state.sessionId = meta.sessionId;
+  if (meta.activeSessionId !== undefined) state.activeSessionId = meta.activeSessionId;
   if (meta.modes !== undefined) state.modes = meta.modes;
   if (meta.models !== undefined) state.models = meta.models;
   if (meta.currentModelId !== undefined) state.currentModelId = meta.currentModelId;
@@ -196,7 +198,11 @@ export function newSessionState(state: SessionState): SessionState {
   fresh.currentModelId = state.currentModelId;
   // The recent-session list is workspace-scoped and must survive resets.
   fresh.sessions = state.sessions;
-  fresh.activeSessionId = state.activeSessionId;
+  // A new session has no inherited active id; the caller binds the fresh one
+  // via sessionStarted. Keeping the old id here would make transcript
+  // persistence (persistActiveTranscript) and labeling target the wrong
+  // session during the reset window.
+  fresh.activeSessionId = null;
   fresh.replaying = state.replaying;
   // Approval requests are session-scoped; a new session has none pending.
   return fresh;

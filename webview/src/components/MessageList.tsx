@@ -25,7 +25,8 @@ import {
   Undo2,
   ChevronDown,
   ChevronRight,
-  ArrowDown
+  ArrowDown,
+  Loader2
 } from "lucide-react";
 
 const KIND_ICON: Record<string, React.ComponentType<{ size?: number }>> = {
@@ -216,7 +217,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             </button>
           </div>
         ))}
-        {state.status === "streaming" && <div className="cursor">▍</div>}
+        {state.status === "streaming" && <div className="cursor"><Loader2 size={14} /></div>}
       </div>
       {showJump && (
         <button

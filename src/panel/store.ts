@@ -68,7 +68,7 @@ export class SessionStore {
     this.flush();
   }
 
-  sessionStarted(meta: { sessionId: string; models?: SessionState["models"]; currentModelId?: string | null; commands?: SessionState["commands"]; modes?: SessionState["modes"] }): void {
+  sessionStarted(meta: { sessionId: string; activeSessionId?: string | null; models?: SessionState["models"]; currentModelId?: string | null; commands?: SessionState["commands"]; modes?: SessionState["modes"] }): void {
     setMeta(this.state, meta);
     this.flush();
   }
