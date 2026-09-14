@@ -69,6 +69,12 @@ export function Composer() {
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionHits, setMentionHits] = useState<FileHitUi[]>([]);
   const [mentionIndex, setMentionIndex] = useState(0);
+  /** Active @-mention row — kept in a ref so keyboard navigation can scroll
+   * it into view when the popup overflows. */
+  const mentionActiveRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    mentionActiveRef.current?.scrollIntoView({ block: "nearest" });
+  }, [mentionIndex, mentionHits.length]);
   const searchSeq = useRef(0);
 
   useEffect(() => {
@@ -181,6 +187,12 @@ export function Composer() {
   useEffect(() => {
     setCmdIndex(0);
   }, [cmdMatches.length]);
+  /** Active slash-command row — kept in a ref so keyboard navigation can
+   * scroll it into view when the popup overflows. */
+  const cmdActiveRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    cmdActiveRef.current?.scrollIntoView({ block: "nearest" });
+  }, [cmdIndex, cmdMatches.length]);
 
   // Model dropdown fuzzy search: filters by name AND id (ids are what the
   // gateway actually accepts and often carry the meaningful segments).
@@ -436,6 +448,7 @@ export function Composer() {
           {cmdMatches.map((c, i) => (
             <button
               key={c.name}
+              ref={i === cmdIndex ? cmdActiveRef : undefined}
               className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${
                 i === cmdIndex ? "bg-accent/70" : "hover:bg-accent/50"
               }`}
@@ -466,6 +479,7 @@ export function Composer() {
           {mentionHits.map((hit, i) => (
             <button
               key={hit.path}
+              ref={i === mentionIndex ? mentionActiveRef : undefined}
               className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-[12px] ${
                 i === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
               }`}
