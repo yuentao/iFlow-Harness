@@ -482,7 +482,7 @@ body {
 }
 
 .auth-card {
-  max-height: 46vh;
+  max-height: 36vh;
   overflow-y: auto;
 }
 
@@ -571,6 +571,8 @@ body {
   flex-direction: column;
   gap: 4px;
   margin-top: 6px;
+  max-height: 22vh;
+  overflow-y: auto;
 }
 
 .profile-row {
