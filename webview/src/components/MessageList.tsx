@@ -164,7 +164,19 @@ function MessageListInner({ state }: { state: SessionState }) {
       <div className="message-list" ref={scrollRef} onScroll={onScroll}>
         {state.blocks.length === 0 && <div className="empty-hint">{t("向 iFlow 发送第一条消息开始")}</div>}
         {state.blocks.map((block, i) => (
-          <BlockView key={i} block={block} />
+          <div key={i} className="message-wrapper">
+            <BlockView block={block} />
+            <button
+              className="btn delete-message"
+              title={t("删除此消息")}
+              onClick={() => {
+                const send = useChat.getState().send;
+                send({ type: "deleteMessage", blockIndex: i });
+              }}
+            >
+              ×
+            </button>
+          </div>
         ))}
         {state.status === "streaming" && <div className="cursor">▍</div>}
       </div>

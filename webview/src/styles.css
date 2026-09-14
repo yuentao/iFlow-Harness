@@ -158,6 +158,38 @@ body {
 
 /* --- blocks --- */
 
+.message-wrapper {
+  position: relative;
+}
+
+.message-wrapper .delete-message {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.message-wrapper:hover .delete-message {
+  opacity: 1;
+}
+
+.message-wrapper .delete-message:hover {
+  background: var(--vscode-inputValidation-errorBackground, rgba(180, 40, 40, 0.25));
+  color: var(--vscode-errorForeground);
+}
+
 .msg {
   margin: 8px 0;
   line-height: 1.55;

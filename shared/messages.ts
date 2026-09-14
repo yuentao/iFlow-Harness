@@ -219,4 +219,6 @@ export type WebviewToHost =
   /** M3: delete an extension-owned profile. */
   | { type: "deleteProfile"; name: string }
   /** M4: load a persisted session by id (history replays into the transcript). */
-  | { type: "loadSession"; sessionId: string };
+  | { type: "loadSession"; sessionId: string }
+  /** Delete a single message block by index. */
+  | { type: "deleteMessage"; blockIndex: number };

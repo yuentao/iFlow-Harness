@@ -25,6 +25,7 @@ export function Composer() {
   const [mentionHits, setMentionHits] = useState<FileHitUi[]>([]);
   const [mentionIndex, setMentionIndex] = useState(0);
   const searchSeq = useRef(0);
+  const mentionPopRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (mentionQuery === null) return;
@@ -34,6 +35,15 @@ export function Composer() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mentionQuery]);
+
+  // Scroll the active mention item into view when navigating with arrow keys
+  useEffect(() => {
+    if (mentionQuery === null || !mentionPopRef.current) return;
+    const activeItem = mentionPopRef.current.querySelector(".mention-item.active");
+    if (activeItem) {
+      activeItem.scrollIntoView({ block: "nearest" });
+    }
+  }, [mentionIndex, mentionQuery]);
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -185,7 +195,7 @@ export function Composer() {
         </div>
       )}
       {mentionQuery !== null && (
-        <div className="mention-pop">
+        <div className="mention-pop" ref={mentionPopRef}>
           {mentionHits.length === 0 && <div className="mention-empty">{t("无匹配文件")}</div>}
           {mentionHits.map((hit, i) => (
             <div

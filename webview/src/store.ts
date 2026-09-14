@@ -485,6 +485,25 @@ function createMockHost(): HostApi {
       if (m.type === "sendPrompt") {
         sendPromptFlow(m.text);
       }
+      if (m.type === "deleteMessage") {
+        // 删除指定索引的消息块
+        if (m.blockIndex >= 0 && m.blockIndex < demoBlocks.length) {
+          demoBlocks.splice(m.blockIndex, 1);
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: [...demoBlocks],
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              pendingApproval: activeApproval,
+              auth: authState,
+            },
+          });
+        }
+        return;
+      }
     },
   };
 }
