@@ -213,6 +213,34 @@ function createMockHost(): HostApi {
     deadline: Date.now() + 5 * 60_000,
     timeoutMs: 5 * 60_000,
   };
+  const demoQuestions: SessionState["pendingQuestions"] = {
+    id: "question-demo-1",
+    // 30s answer window for the demo.
+    deadline: Date.now() + 30_000,
+    timeoutMs: 30_000,
+    questions: [
+      {
+        header: "方案",
+        question: "你希望用哪种方案实现？",
+        multiSelect: false,
+        options: [
+          { label: "方案 A", description: "基于现有组件改造，改动小、风险低" },
+          { label: "方案 B", description: "全新重写，结构更清晰但工作量大" },
+          { label: "暂不决定", description: "先讨论更多细节再选" },
+        ],
+      },
+      {
+        header: "范围",
+        question: "本次改动覆盖范围？",
+        multiSelect: true,
+        options: [
+          { label: "前端", description: "仅 webview 界面层" },
+          { label: "后端", description: "host 与 ACP 协议层" },
+          { label: "测试", description: "补充 vitest 用例" },
+        ],
+      },
+    ],
+  };
   // Mirrors real host semantics: the approval card is consumed once answered;
   // mode/model switches must NOT clear it.
   let activeApproval: SessionState["pendingApproval"] = demoApproval;
@@ -288,9 +316,9 @@ function createMockHost(): HostApi {
       { id: "mock-session-old", label: "上次的重构讨论", updatedAt: Date.now() - 86_400_000 },
     ],
     activeSessionId: "mock-session",
-    // SessionState requires this since the questions feature; the mock never
-    // opens a question prompt, so every demo snapshot carries `null`.
-    pendingQuestions: null,
+    // Demo: surface the question card so the option-description UI is visible
+    // in browser debug mode.
+    pendingQuestions: demoQuestions,
     replaying: false,
     initializing: false,
   };

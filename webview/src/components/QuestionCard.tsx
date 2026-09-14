@@ -100,14 +100,21 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       key={opt.label}
                       disabled={answered}
                       title={opt.description}
-                      className={`press rounded-lg border px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                      className={`press flex max-w-[260px] flex-col items-start gap-0.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                         active
                           ? "border-primary bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn"
                           : "border-border bg-surface/80 text-foreground shadow-card hover:bg-surface-2"
                       }`}
                       onClick={() => toggle(q.header, opt.label, q.multiSelect)}
                     >
-                      {opt.label}
+                      <span className="font-medium leading-tight">{opt.label}</span>
+                      {opt.description && (
+                        <span
+                          className={`leading-snug ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}
+                        >
+                          {opt.description}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
