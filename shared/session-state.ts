@@ -222,7 +222,7 @@ export function beginReplay(state: SessionState): void {
   state.stopReason = null;
   state.blocks.push({
     kind: "text",
-    text: l10n.t("⏳ 正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）"),
+    text: l10n.t("正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）"),
   });
 }
 

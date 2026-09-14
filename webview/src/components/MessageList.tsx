@@ -4,24 +4,47 @@ import { useChat } from "../store";
 import { t } from "../i18n";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
+import { 
+  Eye, 
+  Edit3, 
+  Trash2, 
+  Folder, 
+  Search, 
+  Zap, 
+  Brain, 
+  Globe, 
+  Wrench,
+  Clock,
+  Loader,
+  CheckCircle,
+  XCircle,
+  Check,
+  Circle,
+  CircleDot,
+  Diff,
+  Undo2,
+  ChevronDown,
+  ChevronRight,
+  ArrowDown
+} from "lucide-react";
 
-const KIND_ICON: Record<string, string> = {
-  read: "👁",
-  edit: "✏",
-  delete: "🗑",
-  move: "📁",
-  search: "🔍",
-  execute: "⚡",
-  think: "🧠",
-  fetch: "🌐",
-  other: "🔧",
+const KIND_ICON: Record<string, React.ComponentType<{ size?: number }>> = {
+  read: Eye,
+  edit: Edit3,
+  delete: Trash2,
+  move: Folder,
+  search: Search,
+  execute: Zap,
+  think: Brain,
+  fetch: Globe,
+  other: Wrench,
 };
 
-const STATUS_ICON: Record<string, string> = {
-  pending: "…",
-  in_progress: "…",
-  completed: "✓",
-  failed: "✗",
+const STATUS_ICON: Record<string, React.ComponentType<{ size?: number }>> = {
+  pending: Clock,
+  in_progress: Loader,
+  completed: CheckCircle,
+  failed: XCircle,
 };
 
 function ToolLine({ block }: { block: ToolBlock }) {
@@ -32,7 +55,14 @@ function ToolLine({ block }: { block: ToolBlock }) {
   return (
     <div className={`tool-block status-${block.status}`}>
       <div className="tool-line">
-        <span className="tool-icon">{STATUS_ICON[block.status] ?? KIND_ICON[block.toolKind] ?? "🔧"}</span>
+        <span className="tool-icon">
+          {(() => {
+            const StatusIcon = STATUS_ICON[block.status];
+            const KindIcon = KIND_ICON[block.toolKind];
+            const IconComponent = StatusIcon ?? KindIcon ?? Wrench;
+            return <IconComponent size={14} />;
+          })()}
+        </span>
         <span className="tool-title" title={block.toolName}>
           {block.title || block.toolName || block.toolKind}
         </span>
@@ -55,20 +85,20 @@ function ToolLine({ block }: { block: ToolBlock }) {
               title={t("在 VSCode diff 视图中查看该变更")}
               onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
             >
-              ⤢ Diff
+              <Diff size={14} /> Diff
             </button>
             <button
               className="btn tool-revert"
               title={t("将该文件恢复为编辑前内容")}
               onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
             >
-              ↩ Revert
+              <Undo2 size={14} /> Revert
             </button>
           </>
         )}
         {hasDiff && (
           <button className="tool-diff-toggle" onClick={() => setShowDiff((v) => !v)}>
-            {showDiff ? "▾ diff" : "▸ diff"}
+            {showDiff ? <ChevronDown size={14} /> : <ChevronRight size={14} />} diff
           </button>
         )}
       </div>
@@ -130,7 +160,15 @@ function BlockView({ block }: { block: Block }) {
         <div className="plan">
           {block.entries.map((entry, i) => (
             <div key={i} className={`plan-entry status-${entry.status ?? "pending"}`}>
-              <span className="plan-check">{entry.status === "completed" ? "☑" : entry.status === "in_progress" ? "◐" : "☐"}</span>
+              <span className="plan-check">
+                {entry.status === "completed" ? (
+                  <Check size={14} />
+                ) : entry.status === "in_progress" ? (
+                  <CircleDot size={14} />
+                ) : (
+                  <Circle size={14} />
+                )}
+              </span>
               {entry.content}
             </div>
           ))}
@@ -174,7 +212,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                 send({ type: "deleteMessage", blockIndex: i });
               }}
             >
-              ×
+              <Trash2 size={14} />
             </button>
           </div>
         ))}
@@ -190,7 +228,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             setShowJump(false);
           }}
         >
-          {t("回到最新 ↓")}
+          {t("回到最新")} <ArrowDown size={14} />
         </button>
       )}
     </div>

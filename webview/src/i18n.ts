@@ -69,7 +69,7 @@ const en: Record<string, string> = {
   "附件图片 {0}": "Attached image {0}",
   "在 VSCode 中打开": "Open in VSCode",
   "向 iFlow 发送第一条消息开始": "Send your first message to iFlow to get started",
-  "回到最新 ↓": "Jump to latest ↓",
+  "回到最新": "Jump to latest",
   "diff": "diff",
 };
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FileHitUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { Square, Send } from "lucide-react";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -267,7 +268,7 @@ export function Composer() {
         />
         {streaming ? (
           <button className="btn stop" title={t("停止生成")} onClick={() => send({ type: "cancel" })}>
-            ■
+            <Square size={14} />
           </button>
         ) : (
           <button
@@ -276,7 +277,7 @@ export function Composer() {
             disabled={!text.trim() && images.length === 0}
             onClick={submit}
           >
-            ➤
+            <Send size={14} />
           </button>
         )}
       </div>

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AuthUiState } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { Key, X, Trash2 } from "lucide-react";
 
 /**
  * M3 auth card: API profile management + credential form.
@@ -56,14 +57,14 @@ export function AuthCard({
   return (
     <div className="approval-card auth-card" role="dialog" aria-label={t("API 凭据配置")}>
       <div className="approval-head">
-        <span className="approval-icon">🔑</span>
+        <span className="approval-icon"><Key size={16} /></span>
         <span className="approval-title">
           {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}
         </span>
         {/* The setup banner is not dismissible while unauthenticated. */}
         {!auth.needsSetup && (
           <button className="approval-dismiss" title={t("收起")} onClick={onDismiss}>
-            ✕
+            <X size={14} />
           </button>
         )}
       </div>
@@ -91,7 +92,7 @@ export function AuthCard({
                   title={t("删除 {0}", p.name)}
                   onClick={() => send({ type: "deleteProfile", name: p.name })}
                 >
-                  🗑
+                  <Trash2 size={14} />
                 </button>
               )}
             </div>

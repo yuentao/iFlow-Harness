@@ -1,6 +1,7 @@
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { Shield } from "lucide-react";
 
 const KIND_ORDER: Record<string, number> = {
   allow_once: 0,
@@ -35,7 +36,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   return (
     <div className="approval-card" role="alertdialog" aria-label={t("工具执行审批")}>
       <div className="approval-head">
-        <span className="approval-icon">🛡</span>
+        <span className="approval-icon"><Shield size={16} /></span>
         <span className="approval-title">{t("iFlow 请求执行工具")}</span>
       </div>
       <div className="approval-body">
