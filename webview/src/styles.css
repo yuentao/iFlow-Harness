@@ -997,7 +997,7 @@ header.acrylic.header-scrolled {
   border-radius: 50%;
   /* Heavy blur turns the radial gradient into a soft glow with no hard edge.
      Opacity follows --aurora-opacity (mirrors the iflow.auroraIntensity
-     setting, pushed by the host with the theme); 0.35 = default 50%. */
+     setting, pushed by the host with the theme); 0.35 = default 35%. */
   filter: blur(72px);
   opacity: var(--aurora-opacity, 0.35);
   will-change: transform;

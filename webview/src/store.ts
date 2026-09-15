@@ -832,10 +832,6 @@ interface ChatStore {
    * position, which read as "image messages don't auto-scroll".
    */
   promptSeq: number;
-  /** Text to prefill into the composer for "edit & resend" of a user message.
-   * The Composer consumes it once and clears it back to null. */
-  editDraft: string | null;
-  setEditDraft: (text: string | null) => void;
   /** True once the transcript is scrolled under the header (scrollTop above a
    * threshold) — the header renders a bottom shadow only while it overlaps
    * messages. Updated at the 0-crossing only, so scrolling doesn't re-render
@@ -854,7 +850,6 @@ export const useChat = create<ChatStore>((set, get) => ({
   editorTheme: null,
   pending: null,
   promptSeq: 0,
-  editDraft: null,
   headerScrolled: false,
   setHeaderScrolled: (scrolled) => set({ headerScrolled: scrolled }),
   toasts: [],
@@ -959,7 +954,6 @@ export const useChat = create<ChatStore>((set, get) => ({
       set({ pending: null });
     }, PENDING_TIMEOUT_MS);
   },
-  setEditDraft: (text: string | null) => set({ editDraft: text }),
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   send: (msg) => {
     // Debounce: identical messages fired within the window (double-clicks on

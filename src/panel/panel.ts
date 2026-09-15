@@ -689,7 +689,7 @@ export class ChatPanel implements vscode.Disposable {
   private postTheme(): void {
     const kind = vscode.window.activeColorTheme.kind;
     const light = kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight;
-    const auroraIntensity = vscode.workspace.getConfiguration("iflow").get<number>("auroraIntensity", 50);
+    const auroraIntensity = vscode.workspace.getConfiguration("iflow").get<number>("auroraIntensity", 35);
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
   }
 

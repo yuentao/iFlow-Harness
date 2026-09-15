@@ -129,7 +129,7 @@
         },
         "iflow.auroraIntensity": {
           "type": "number",
-          "default": 50,
+          "default": 35,
           "minimum": 0,
           "maximum": 100,
           "description": "%iflow.configuration.auroraIntensity.description%"
