@@ -96,15 +96,35 @@ export function Composer() {
   // Drag the top edge to resize the composer height. The handle writes an
   // explicit pixel height; the textarea area (flex-1) fills the remaining
   // space, so the input grows/shrinks with the drag.
+  // Upper bound is viewport-relative (45vh): a fixed pixel cap lets a short
+  // panel get swallowed whole by a dragged-tall composer (the message list
+  // would collapse to nothing). 200px floor keeps the cap sane on tiny
+  // viewports; a resize listener re-clamps an already-set height when the
+  // window shrinks below it.
   const rootRef = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number | null>(null);
+  // The default (content-sized) height doubles as the drag floor: measured
+  // once on mount while `height` is still null, so shrinking all the way
+  // lands exactly on the initial look — the composer never renders shorter
+  // than it started. 110 is only a pre-measure fallback.
+  const minComposerHeight = useRef(110);
+  useEffect(() => {
+    if (rootRef.current) minComposerHeight.current = rootRef.current.offsetHeight;
+  }, []);
   const resizing = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
+  const maxComposerHeight = () => Math.max(200, Math.floor(window.innerHeight * 0.45));
+  useEffect(() => {
+    const onWinResize = () =>
+      setHeight((h) => (h === null ? h : Math.min(h, maxComposerHeight())));
+    window.addEventListener("resize", onWinResize);
+    return () => window.removeEventListener("resize", onWinResize);
+  }, []);
   const onResizeMove = (e: MouseEvent) => {
     if (!resizing.current) return;
     const delta = startY.current - e.clientY; // drag up → taller
-    setHeight(Math.min(480, Math.max(110, startH.current + delta)));
+    setHeight(Math.min(maxComposerHeight(), Math.max(minComposerHeight.current, startH.current + delta)));
   };
   const stopResize = () => {
     if (!resizing.current) return;
@@ -460,7 +480,7 @@ export function Composer() {
   return (
     <div
       ref={rootRef}
-      className={`acrylic relative flex flex-col shrink-0 border-t px-2.5 pb-2.5 pt-2 transition-colors ${
+      className={`acrylic relative flex flex-col shrink-0 border-t p-3 transition-colors ${
         dragOver ? "border-primary/60 bg-primary/5" : "border-border"
       }`}
       style={{ height: height ?? undefined, boxShadow: "var(--shadow-stage)" }}
@@ -555,7 +575,7 @@ export function Composer() {
 
       {/* slash-command popup: all prefix matches, keyboard navigable */}
       {cmdMatches.length > 0 && (
-        <div className="acrylic-pop dropdown-in absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
+        <div className="acrylic-pop dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
           {cmdMatches.map((c, i) => (
             <button
               key={c.name}
@@ -583,7 +603,7 @@ export function Composer() {
 
       {/* @-mention popup */}
       {mentionQuery !== null && (
-        <div className="acrylic-pop dropdown-in absolute inset-x-2.5 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
+        <div className="acrylic-pop dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
           {mentionHits.length === 0 && (
             <div className="px-3 py-1.5 text-[12px] text-muted-foreground">{t("无匹配文件")}</div>
           )}
@@ -688,7 +708,7 @@ export function Composer() {
             }
           }}
         />
-        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2">
+        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-1.5">
           {/* permission mode dropdown */}
           {modes && currentMode && (
             <Dropdown
