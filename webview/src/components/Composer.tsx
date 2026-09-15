@@ -45,6 +45,13 @@ function imageMime(file: File): string {
   return `image/${ext}`;
 }
 
+/** Compact token count, e.g. 12345 → "12.3k", 1_500_000 → "1.5M". */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 /** Stable empty fallbacks — a fresh `[]` per selector call would re-render on
  * every store change (zustand compares with Object.is). */
 const EMPTY_COMMANDS: SlashCommand[] = [];
@@ -64,6 +71,7 @@ export function Composer() {
   const modes = useChat((s) => s.state?.modes ?? null);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
+  const usage = useChat((s) => s.state?.usage ?? null);
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
@@ -868,6 +876,17 @@ export function Composer() {
                 </>
               )}
             </Dropdown>
+          )}
+
+          {/* session token usage — plain mono label, sits right of the
+              model dropdown it counts */}
+          {usage && (
+            <span
+              title={t("本次会话累计 token 消耗（host 估算，非精确计费）")}
+              className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/80"
+            >
+              {formatTokens(usage.totalTokens)} tokens
+            </span>
           )}
 
           <div className="ml-auto flex items-center gap-1.5">

@@ -310,6 +310,9 @@ function createMockHost(): HostApi {
       { id: "claude-opus-5", name: "claude-opus-5" },
     ],
     currentModelId: "glm-5.3-flash-free",
+    // Demo token usage (mirrors the host-estimated SessionUsageUi shape) so
+    // the usage chip next to the model dropdown is visible in mock mode.
+    usage: { inputTokens: 18432, outputTokens: 6421, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 24853 },
     // M4 demo: two persisted sessions; switching restores a short transcript.
     sessions: [
       { id: "mock-session", label: "帮我看看这个仓库结构", updatedAt: Date.now() },
