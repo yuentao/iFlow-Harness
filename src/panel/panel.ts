@@ -605,7 +605,7 @@ export class ChatPanel implements vscode.Disposable {
         this.handleApprovalResponse(msg.id, msg.optionId);
         break;
       case "respondPlanExit":
-        this.handlePlanExitResponse(msg.id, msg.approved, msg.reason);
+        this.handlePlanExitResponse(msg.id, msg.approved, msg.reason, msg.replan === true);
         break;
       case "answerQuestions":
         this.handleQuestionAnswers(msg.id, msg.answers);
@@ -796,22 +796,28 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /** Resolve a pending Plan-mode exit from the webview's answer. */
-  private handlePlanExitResponse(id: string, approved: boolean, reason?: string): void {
+  private handlePlanExitResponse(id: string, approved: boolean, reason?: string, replan = false): void {
     const pending = this.pendingPlanExits.get(id);
     if (!pending) return;
     this.pendingPlanExits.delete(id);
     clearTimeout(pending.timer);
     this.store.clearPlanExit(id);
-    this.store.planExitResolutionNote(approved ? vscode.l10n.t("已批准计划") : reason ?? vscode.l10n.t("已拒绝计划"));
+    this.store.planExitResolutionNote(
+      replan ? vscode.l10n.t("重新规划") : approved ? vscode.l10n.t("已批准计划") : reason ?? vscode.l10n.t("已拒绝计划"),
+    );
     // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
     // its own after `_iflow/plan/exit` resolves — switch back explicitly on
     // BOTH approval and rejection (rejection must not strand the session in
-    // plan mode either; the agent continues in the returned mode).
-    const modes = this.store.getState().modes;
-    const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
-    const target = this.planReturnModeId ?? fallback ?? "smart";
-    this.planReturnModeId = null;
-    void this.setMode(target).catch(() => undefined);
+    // plan mode either; the agent continues in the returned mode). Replan is
+    // the exception: it rejects the plan but keeps the session in plan mode
+    // so the agent can revise it.
+    if (!replan) {
+      const modes = this.store.getState().modes;
+      const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
+      const target = this.planReturnModeId ?? fallback ?? "smart";
+      this.planReturnModeId = null;
+      void this.setMode(target).catch(() => undefined);
+    }
     pending.resolve({
       approved,
       reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),

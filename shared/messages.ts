@@ -414,7 +414,7 @@ export type WebviewToHost =
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
   /** Confirm or reject a pending Plan-mode exit; `approved: false` rejects. */
-  | { type: "respondPlanExit"; id: string; approved: boolean; reason?: string }
+  | { type: "respondPlanExit"; id: string; approved: boolean; reason?: string; replan?: boolean }
   /** Answer the pending ask_user_question card; `answers` is keyed by
    * question `header`. An empty answers object = dismissed (the agent
    * proceeds with "no answer"). */

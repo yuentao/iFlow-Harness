@@ -23,10 +23,10 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, []);
 
-  const answer = (approved: boolean) => {
+  const answer = (approved: boolean, replan = false) => {
     if (answered) return;
     setAnswered(true);
-    send({ type: "respondPlanExit", id: pending.id, approved });
+    send({ type: "respondPlanExit", id: pending.id, approved, replan });
   };
 
   return (
@@ -80,6 +80,14 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           onClick={() => answer(false)}
         >
           {t("拒绝计划")}
+        </button>
+        <button
+          disabled={answered}
+          aria-label={t("重新规划")}
+          className="press rounded-lg border border-primary/40 px-2.5 py-1 text-[11px] text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
+          onClick={() => answer(false, true)}
+        >
+          {t("重新规划")}
         </button>
       </div>
     </div>
