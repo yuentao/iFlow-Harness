@@ -3,6 +3,12 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.1.1] - 2026-09-15
+
+- 修复 面板打开即白屏崩溃：aria-live 播报的 useMemo 位于 splash 早返回之后，首帧（无快照）与快照渲染的 hooks 数量不一致触发 React error #310
+- 优化 输入框拖拽高度：默认高度即最小高度、上限改为视口高度 45%（窗口变矮自动收窄）、操作按钮行与输入文字增加间距、圆角输入框与外层容器间距均匀化
+- 修复 vendor-cli 嵌套 node_modules/.bin 符号链接导致 vsce 在 Linux CI 打包失败
+
 ## [1.1.0] - 2026-09-15
 
 - 新增 会话累计 token 消耗估算（真实 BPE tokenizer + 启发式回退）与状态栏用量指示
