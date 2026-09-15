@@ -457,7 +457,9 @@
 }
 .card-lift:hover {
   transform: translateY(-1px);
-  box-shadow: var(--shadow-card-hover);
+  box-shadow:
+    var(--shadow-card-hover),
+    0 0 0 1px color-mix(in oklab, var(--primary) 22%, transparent);
 }
 
 /* Press feedback: interactive elements sink 1px on :active. */

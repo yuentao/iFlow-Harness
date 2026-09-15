@@ -172,6 +172,7 @@ export function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   /** Close + notify. Every close path (trigger toggle, selection via the
    * `close` render arg, outside click, Escape) must fire onOpenChange(false) —
@@ -229,6 +230,7 @@ export function Dropdown({
       </div>
       {open && (
         <div
+          ref={menuRef}
           role="menu"
           className={`absolute z-30 overflow-hidden rounded-xl border border-border acrylic-pop dropdown-in ${
             direction === "up" ? "bottom-full mb-1" : "top-full mt-1"

@@ -4,6 +4,15 @@ import type { AuthUiState } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
+/** Visible, non-disabled focusable elements within a container (for focus trap). */
+function getFocusable(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null);
+}
+
 /**
  * M3 auth card: API profile management + credential form, rendered as a
  * centered modal.
@@ -39,10 +48,19 @@ export function AuthCard({
   const keyPlaceholder = auth.saved ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…";
   // W3: focus the dialog once on mount. The inline `ref={(el) => el?.focus()}`
   // re-fired on every render (null → el), and a stable effect gives the Tab
-  // order a fixed starting point (the dialog, then the form fields).
+  // order a fixed starting point (the dialog, then the form fields). We also
+  // remember the element that had focus before opening and restore it on
+  // unmount, so keyboard focus isn't stranded in the panel after dismiss.
   const backdropRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    backdropRef.current?.focus();
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const container = backdropRef.current;
+    if (container) {
+      const focusables = getFocusable(container);
+      const firstInput = focusables.find((el) => el.tagName === "INPUT");
+      (firstInput ?? focusables[0])?.focus();
+    }
+    return () => prevFocus?.focus?.();
   }, []);
 
   function submit() {
@@ -87,6 +105,24 @@ export function AuthCard({
           // 拦下冒泡：生成进行中打开配置卡时，ESC 只关卡片不停生成。
           e.stopPropagation();
           onDismiss();
+          return;
+        }
+        // Trap Tab focus inside the dialog so keyboard users can't tab out into
+        // the editor behind the panel.
+        if (e.key === "Tab") {
+          const container = backdropRef.current;
+          if (!container) return;
+          const focusables = getFocusable(container);
+          if (focusables.length === 0) return;
+          const first = focusables[0]!;
+          const last = focusables[focusables.length - 1]!;
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
         }
       }}
     >
