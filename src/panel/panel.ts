@@ -1449,6 +1449,7 @@ export class ChatPanel implements vscode.Disposable {
     } finally {
       await teardown;
     }
+    this.store.setInitializing(false);
   }
 
   /** Credentials to push via authenticate on the next handshake, if any. */

@@ -212,6 +212,10 @@ export function Dropdown({
           button far beyond the wrapper width (flex-1 inside is inert). */}
       <div
         className={wrapperClass.includes("flex-1") ? "flex min-w-0" : ""}
+        role="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-disabled={disabled || undefined}
         onClick={(e) => {
           if (disabled) return;
           // Discrete toggle (not inside the setState updater): React StrictMode
@@ -225,6 +229,7 @@ export function Dropdown({
       </div>
       {open && (
         <div
+          role="menu"
           className={`absolute z-30 overflow-hidden rounded-xl border border-border acrylic-pop dropdown-in ${
             direction === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${menuClass}`}

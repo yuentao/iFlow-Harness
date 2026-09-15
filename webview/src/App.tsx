@@ -163,7 +163,7 @@ export function App() {
                   aria-label={t("API 凭据配置")}
                   disabled={locked}
                 >
-                  <Settings2 className={`size-4${open ? "" : ""}`} />
+                  <Settings2 className="size-4" />
                 </button>
               )}
             >
