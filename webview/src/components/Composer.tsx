@@ -603,6 +603,7 @@ export function Composer() {
                     return (
                       <button
                         key={m.id}
+                        role="menuitem"
                         onClick={() => {
                           if (m.id !== modes.currentModeId) {
                             beginPending("mode", m.id);
@@ -699,6 +700,7 @@ export function Composer() {
                   {filteredModels.map(({ m }, i) => (
                     <button
                       key={m.id}
+                      role="menuitem"
                       ref={m.id === state?.currentModelId ? currentModelRef : undefined}
                       onClick={() => {
                         if (m.id !== state?.currentModelId) {

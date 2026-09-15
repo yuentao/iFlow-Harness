@@ -177,6 +177,7 @@ export function App() {
                   {state.auth.profiles.map((p) => (
                     <button
                       key={p.name}
+                      role="menuitem"
                       disabled={locked}
                       onClick={() => {
                         if (!p.active) {
@@ -245,6 +246,7 @@ export function App() {
                   {state.activeSessionId &&
                     !state.sessions.some((s) => s.id === state.activeSessionId) && (
                       <button
+                        role="menuitem"
                         onClick={close}
                         className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-foreground hover:bg-accent/60"
                       >
@@ -277,6 +279,7 @@ export function App() {
                         </button>
                         {deletable && (
                           <button
+                            role="menuitem"
                             className="shrink-0 rounded p-0.5 text-[11px] text-muted-foreground opacity-60 hover:opacity-100 hover:text-destructive"
                             title={t("删除会话 {0}", s.label)}
                             onClick={(e) => {
