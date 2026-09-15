@@ -126,6 +126,13 @@
           "type": "boolean",
           "default": true,
           "description": "%iflow.configuration.soundFeedback.description%"
+        },
+        "iflow.auroraIntensity": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "%iflow.configuration.auroraIntensity.description%"
         }
       }
     }

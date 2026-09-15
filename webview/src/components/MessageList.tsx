@@ -704,15 +704,22 @@ function MessageListInner({ state }: { state: SessionState }) {
   // SubAgent entry updates, plan changes, async image loads. The previous
   // block-shape deps (length/kind/last-text-length) missed all of those, so
   // the transcript stopped following the moment a tool card updated.
+  // The scroller itself is observed too: its height changes on panel resize
+  // or approval/question card mount/unmount (rendered outside the scroll
+  // area), which can flip content between fitting and overflowing WITHOUT a
+  // scroll event — the header shadow flag must re-sync there.
   useEffect(() => {
     const el = contentRef.current;
+    const scroller = scrollRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
       if (stickToBottom.current) scrollToBottom();
+      syncHeaderScrolled();
     });
     ro.observe(el);
+    if (scroller) ro.observe(scroller);
     return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom/syncHeaderScrolled read refs only
   }, []);
 
   // Session switch / history restore: jump to the end of the recovered
@@ -760,6 +767,19 @@ function MessageListInner({ state }: { state: SessionState }) {
     return () => cancelAnimationFrame(raf);
   }, [state.pendingApproval, state.pendingQuestions]);
 
+  /** Re-sync the header shadow flag from the current scroll position.
+   * Scroll events alone miss resizes: when the panel is resized (or a card
+   * above/below changes layout) and content flips between "fits" and
+   * "overflows" WITHOUT firing a scroll event, the browser clamps scrollTop
+   * silently — the flag would stay stale until the next scroll. Resize
+   * observers below call this too. zustand's Object.is compare makes
+   * same-value sets free. */
+  function syncHeaderScrolled() {
+    const el = scrollRef.current;
+    if (!el) return;
+    setHeaderScrolled(el.scrollTop > 4);
+  }
+
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
@@ -769,10 +789,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       return;
     }
     programmaticTop.current = null;
-    // Header shadow gate: only when messages actually scroll under the top
-    // bar. setHeaderScrolled writes a boolean — zustand's Object.is compare
-    // makes repeated same-value sets free.
-    setHeaderScrolled(el.scrollTop > 4);
+    syncHeaderScrolled();
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = nearBottom;
     setShowJump(!nearBottom);

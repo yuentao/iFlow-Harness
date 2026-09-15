@@ -217,6 +217,9 @@ export class ChatPanel implements vscode.Disposable {
     // once the user picked a theme manually).
     this.context.subscriptions.push(
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("iflow.auroraIntensity")) this.postTheme();
+      }),
     );
     // P6: file-system changes invalidate the @-mention file-list cache.
     const watchRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
@@ -680,11 +683,14 @@ export class ChatPanel implements vscode.Disposable {
     this.store.pushSnapshot();
   }
 
-  /** Forward the editor color theme so the panel can follow it by default. */
+  /** Forward the editor color theme so the panel can follow it by default.
+   * Also carries the iflow.auroraIntensity setting — the webview scales the
+   * background aurora light-spot opacity with it. */
   private postTheme(): void {
     const kind = vscode.window.activeColorTheme.kind;
     const light = kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight;
-    this.postToWebview({ type: "theme", kind: light ? "light" : "dark" });
+    const auroraIntensity = vscode.workspace.getConfiguration("iflow").get<number>("auroraIntensity", 50);
+    this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
   }
 
   /**

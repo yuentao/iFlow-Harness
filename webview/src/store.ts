@@ -917,6 +917,10 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "theme") {
       set({ editorTheme: msg.kind });
+      if (msg.auroraIntensity !== undefined) {
+        const pct = Math.min(100, Math.max(0, msg.auroraIntensity));
+        document.documentElement.style.setProperty("--aurora-opacity", String(pct / 100));
+      }
       return;
     }
     if (msg.type === "playSound") {

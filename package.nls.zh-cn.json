@@ -14,6 +14,7 @@
   "iflow.configuration.warmStart.description": "窗口打开时即在后台启动 iFlow CLI，首次打开聊天面板无需等待（每个窗口约占用 100MB 内存）",
   "iflow.configuration.idleTimeoutMinutes.description": "CLI 进程空闲多少分钟后回收",
   "iflow.configuration.soundFeedback.description": "对话生成完成或失败时播放提示音",
+  "iflow.configuration.auroraIntensity.description": "背景光斑强度（%）",
   "participant.description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",
   "iflow.outputChannel.name": "心流·驭光",
   "iflow.statusbar.tooltip": "心流·驭光 — 点击打开聊天面板"

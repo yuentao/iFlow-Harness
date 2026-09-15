@@ -378,8 +378,10 @@ export type HostToWebview =
    * `files` carry real disk paths (no staging needed). */
   | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
-   * unless the user picked a theme manually in the panel. */
-  | { type: "theme"; kind: "dark" | "light" }
+   * unless the user picked a theme manually in the panel. `auroraIntensity`
+   * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
+   * the background aurora light-spot opacity with it. */
+  | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
    * panel visibility; the webview only synthesizes on receipt. */
