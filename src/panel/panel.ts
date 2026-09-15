@@ -2507,6 +2507,55 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Regenerate the last assistant turn: re-run the most recent user prompt
+   * through the same pipeline as sendPrompt, but WITHOUT recording a new user
+   * block (the prompt already exists in the transcript). Host-owned because the
+   * webview is a projection and must not reach into transcript state to extract
+   * the last prompt. No-op when there is no prior user prompt or a turn is
+   * already in flight.
+   */
+  private async regenerate(): Promise<void> {
+    const state = this.store.getState();
+    if (state.initializing || state.status === "streaming") return;
+    // Walk back to the last user block — that's the prompt we re-run.
+    let lastUserText: string | null = null;
+    for (let i = state.blocks.length - 1; i >= 0; i--) {
+      const b = state.blocks[i];
+      if (!b) continue;
+      if (b.kind === "user") {
+        lastUserText = b.text;
+        break;
+      }
+    }
+    if (!lastUserText || !lastUserText.trim()) return;
+    this.cancelSeen = false;
+    let promptSessionId: string | null = null;
+    try {
+      const client = await this.ensureClient();
+      promptSessionId = this.store.getState().sessionId;
+      if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
+      const prompt: ContentBlock[] = [
+        { type: "text", text: toAgentPromptText(lastUserText.trim(), this.store.getState().commands) },
+      ];
+      const result = await this.promptWithRetry(client, promptSessionId, prompt);
+      this.store.promptCompleted(result.stopReason);
+      if (result.stopReason !== "cancelled") this.postSound("done");
+      void this.persistActiveTranscript();
+      void this.touchActiveSession();
+    } catch (error) {
+      if (this.store.getState().sessionId !== promptSessionId) {
+        this.log.info(`regenerate failed after session switch — dropped (session replaced)`);
+        return;
+      }
+      this.log.error(`regenerate failed: ${this.formatErrorForLog(error)}`);
+      this.store.markError(errorMessage(error));
+      void this.persistActiveTranscript();
+      void this.touchActiveSession();
+      this.postSound("error");
+    }
+  }
+
+  /**
    * Prompt with bounded reactive auto-retry (rate limits get several
    * escalating attempts — see RATE_LIMIT_RETRY_DELAYS_MS for why one was
    * not enough).

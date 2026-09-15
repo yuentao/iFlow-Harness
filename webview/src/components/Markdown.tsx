@@ -16,7 +16,7 @@ const SANITIZE_CONFIG = {
 
 // Copy helper: prefer the async Clipboard API; fall back to a hidden textarea
 // for webview contexts where the API is unavailable.
-function copyText(text: string): Promise<void> {
+export function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     return navigator.clipboard.writeText(text);
   }

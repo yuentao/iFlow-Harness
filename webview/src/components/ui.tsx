@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { FileCode2 } from "lucide-react";
 import { useChat } from "../store";
 
@@ -205,6 +205,71 @@ export function Dropdown({
     // the listeners are only active while open, so re-registering on toggles
     // keeps the closure current.
   }, [open, onOpenChange]);
+
+  // --- keyboard navigation (ARIA menu pattern) ---
+  // ArrowUp/Down move between items, Home/End jump to ends, typing does
+  // type-ahead. Skipped entirely while focus is in a search input (the model
+  // dropdown owns its own input-driven navigation) so we never steal focus.
+  const typeahead = useRef<{ str: string; timer: number | null }>({ str: "", timer: null });
+
+  function getMenuItems(): HTMLElement[] {
+    if (!menuRef.current) return [];
+    return Array.from(
+      menuRef.current.querySelectorAll<HTMLElement>(
+        '[role="menuitem"]:not([data-variant="danger"]), button.menu-item',
+      ),
+    ).filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
+  }
+
+  function focusMenuItem(items: HTMLElement[], idx: number): void {
+    if (items.length === 0) return;
+    const i = ((idx % items.length) + items.length) % items.length;
+    const el = items[i];
+    el?.focus();
+    el?.scrollIntoView({ block: "nearest" });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    // Don't yank focus into the menu if it owns a search input.
+    if (menuRef.current?.querySelector("input, textarea")) return;
+    focusMenuItem(getMenuItems(), 0);
+  }, [open]);
+
+  function onMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>): void {
+    const ae = document.activeElement as HTMLElement | null;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+    const items = getMenuItems();
+    if (items.length === 0) return;
+    const idx = ae ? items.indexOf(ae) : -1;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusMenuItem(items, idx < 0 ? 0 : idx + 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      focusMenuItem(items, idx < 0 ? items.length - 1 : idx - 1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      focusMenuItem(items, 0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      focusMenuItem(items, items.length - 1);
+    } else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // type-ahead: jump to the first item whose visible text starts with the
+      // typed prefix; resets after 500ms of inactivity.
+      e.preventDefault();
+      const ta = typeahead.current;
+      ta.str += e.key.toLowerCase();
+      if (ta.timer) window.clearTimeout(ta.timer);
+      ta.timer = window.setTimeout(() => {
+        ta.str = "";
+      }, 500);
+      const match = items.find((it) => (it.textContent ?? "").trim().toLowerCase().startsWith(ta.str));
+      match?.focus();
+    }
+    // Enter/Space/Escape: let the focused button's own handler (or the
+    // document-level Escape closer) take over.
+  }
 
   return (
     <div className={`relative${wrapperClass ? ` ${wrapperClass}` : ""}`} ref={ref}>

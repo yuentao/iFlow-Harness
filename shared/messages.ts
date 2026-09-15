@@ -355,6 +355,7 @@ export type WebviewToHost =
       files?: { name: string; path: string }[];
       codeContext?: CodeContextUi;
     }
+  | { type: "regenerate" }
   | { type: "cancel" }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }

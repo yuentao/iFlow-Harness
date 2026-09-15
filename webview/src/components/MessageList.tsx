@@ -41,7 +41,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Markdown } from "./Markdown";
+import { Markdown, copyText } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { Chip, FileRef } from "./ui";
 import logo from "../assets/iflow.svg";
@@ -491,10 +491,14 @@ const BlockView = memo(function BlockView({
   block,
   isLatest,
   turnActive,
+  canRegenerate,
+  onRegenerate,
 }: {
   block: Block;
   isLatest: boolean;
   turnActive: boolean;
+  canRegenerate: boolean;
+  onRegenerate: () => void;
 }) {
   switch (block.kind) {
     case "user":
@@ -505,7 +509,7 @@ const BlockView = memo(function BlockView({
       // outputs nothing for them. Skip the whole row.
       if (!block.text.trim()) return null;
       return (
-        <div className="stream-in assistant-row">
+        <div className="stream-in assistant-row group relative">
           <span className="assistant-avatar">
             {/* Real brand mark, consistent with the header logo */}
             <img src={logo} alt="" className="size-3.5" />
@@ -519,6 +523,26 @@ const BlockView = memo(function BlockView({
             }`}
           >
             <Markdown text={block.text} />
+          </div>
+          {/* Hover action bar: copy the whole message; regenerate re-runs the
+              preceding user prompt (only on the final assistant turn, idle). */}
+          <div className="absolute right-0 top-0 flex items-center gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100">
+            {isLatest && canRegenerate && (
+              <button
+                className="card-lift press rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground shadow-card hover:bg-surface-2 hover:text-foreground"
+                title={t("重新生成")}
+                onClick={onRegenerate}
+              >
+                {t("重新生成")}
+              </button>
+            )}
+            <button
+              className="card-lift press rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground shadow-card hover:bg-surface-2 hover:text-foreground"
+              title={t("复制")}
+              onClick={() => void copyText(block.text)}
+            >
+              {t("复制")}
+            </button>
           </div>
         </div>
       );
@@ -752,6 +776,31 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   const turnActive =
     state.status === "streaming" && !state.replaying && !state.initializing;
+
+  // Last user prompt + a regenerate handler: the webview sends a host-backed
+  // `regenerate` message; the host re-runs the preceding user prompt (it owns
+  // transcript state, so it extracts the text rather than the webview).
+  const lastUserText = useMemo(() => {
+    for (let i = total - 1; i >= 0; i--) {
+      const b = state.blocks[i];
+      if (b.kind === "user") return b.text;
+    }
+    return null;
+  }, [state.blocks, total]);
+
+  const canRegenerate =
+    !turnActive &&
+    state.status !== "connecting" &&
+    !state.replaying &&
+    !state.initializing &&
+    !state.pendingApproval &&
+    !state.pendingQuestions &&
+    lastUserText !== null;
+
+  const onRegenerate = () => {
+    useChat.getState().send({ type: "regenerate" });
+  };
+
   return (
     <div className="relative min-h-0 flex-1">
       <div className="message-scroll h-full overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
@@ -788,7 +837,13 @@ function MessageListInner({ state }: { state: SessionState }) {
             const i = start + idx; // absolute index: stable across expansions
             return (
               <div key={block.id ?? `idx-${i}`} className="cv-block">
-                <BlockView block={block} isLatest={i === total - 1} turnActive={turnActive} />
+                <BlockView
+        block={block}
+        isLatest={i === total - 1}
+        turnActive={turnActive}
+        canRegenerate={canRegenerate && i === total - 1}
+        onRegenerate={onRegenerate}
+      />
               </div>
             );
           })}

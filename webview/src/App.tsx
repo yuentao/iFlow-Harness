@@ -66,6 +66,10 @@ export function App() {
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
   const [configOpen, setConfigOpen] = useState(false);
+  // Two-step delete: clicking the trash arms confirmation for that session id;
+  // a second click on 确认 actually sends deleteSession. Prevents accidental
+  // loss of a persisted transcript (the host delete is irreversible).
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   // Theme priority: the user's explicit toggle wins (persisted); otherwise
   // follow the editor color theme pushed by the host; default light.
   const [manual, setManual] = useState<"light" | "dark" | null>(
@@ -289,17 +293,41 @@ export function App() {
                           </span>
                         </button>
                         {deletable && (
-                          <button
-                            role="menuitem"
-                            className="shrink-0 rounded p-0.5 text-[11px] text-muted-foreground opacity-60 hover:opacity-100 hover:text-destructive"
-                            title={t("删除会话 {0}", s.label)}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              send({ type: "deleteSession", sessionId: s.id });
-                            }}
-                          >
-                            <Trash2 className="size-3" />
-                          </button>
+                          confirmingDelete === s.id ? (
+                            <span className="flex shrink-0 items-center gap-1">
+                              <button
+                                className="rounded px-1 py-0.5 text-[10px] font-medium text-destructive hover:bg-destructive/10"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  send({ type: "deleteSession", sessionId: s.id });
+                                  setConfirmingDelete(null);
+                                }}
+                              >
+                                {t("确认")}
+                              </button>
+                              <button
+                                className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-2"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmingDelete(null);
+                                }}
+                              >
+                                {t("取消")}
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              data-variant="danger"
+                              className="shrink-0 rounded p-0.5 text-[11px] text-muted-foreground opacity-60 hover:opacity-100 hover:text-destructive"
+                              title={t("删除会话 {0}", s.label)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmingDelete(s.id);
+                              }}
+                            >
+                              <Trash2 className="size-3" />
+                            </button>
+                          )
                         )}
                       </div>
                     );

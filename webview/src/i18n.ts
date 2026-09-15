@@ -131,6 +131,12 @@ const en: Record<string, string> = {
   "展开更早 {0} 条消息": "Show {0} earlier messages",
   "上下文摘要": "Context summary",
   "diff": "diff",
+  // composer / message list (additional — new entries only)
+  "复制": "Copy",
+  "重新生成": "Regenerate",
+  "确认": "Confirm",
+  "正在启动 iFlow CLI…（首次启动或配置了多个 MCP server 时较久）":
+    "Starting iFlow CLI… (slower on first launch or with multiple MCP servers)",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
