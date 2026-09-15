@@ -829,6 +829,106 @@
   }
 }
 
+/* --- animated background aurora (动态光斑) ---
+   A fixed, non-interactive layer behind the app UI (z-index:-1, above the
+   body wallpaper). Three soft, heavily-blurred color blobs drift slowly via
+   transform-only keyframes (GPU-composited, no per-frame repaint of the
+   gradient). Colors derive from the theme tokens so they re-tint with the
+   light/dark switch automatically. The acrylic surfaces still sample this
+   layer through their backdrop-filter, so the frosted glass picks up the
+   motion too. prefers-reduced-motion (below) freezes the drift. */
+.bg-aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.bg-aurora__blob {
+  position: absolute;
+  border-radius: 50%;
+  /* Heavy blur turns the radial gradient into a soft glow with no hard edge. */
+  filter: blur(72px);
+  opacity: 0.5;
+  will-change: transform;
+}
+
+.bg-aurora__blob--1 {
+  width: 48vmax;
+  height: 48vmax;
+  top: -16vmax;
+  left: -10vmax;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklab, var(--primary) 72%, transparent),
+    transparent 70%
+  );
+  animation: aurora-drift-1 26s var(--ease-out-expo) infinite alternate;
+}
+
+.bg-aurora__blob--2 {
+  width: 40vmax;
+  height: 40vmax;
+  top: -12vmax;
+  right: -12vmax;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklab, var(--info) 64%, transparent),
+    transparent 70%
+  );
+  animation: aurora-drift-2 31s var(--ease-out-expo) infinite alternate;
+}
+
+.bg-aurora__blob--3 {
+  width: 54vmax;
+  height: 54vmax;
+  bottom: -24vmax;
+  left: 26vmax;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in oklab, var(--primary) 56%, transparent),
+    transparent 70%
+  );
+  animation: aurora-drift-3 35s var(--ease-out-expo) infinite alternate;
+}
+
+@keyframes aurora-drift-1 {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(7vmax, 5vmax, 0) scale(1.14);
+  }
+  100% {
+    transform: translate3d(3vmax, 9vmax, 0) scale(0.94);
+  }
+}
+
+@keyframes aurora-drift-2 {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-6vmax, 7vmax, 0) scale(0.9);
+  }
+  100% {
+    transform: translate3d(-2vmax, 3vmax, 0) scale(1.1);
+  }
+}
+
+@keyframes aurora-drift-3 {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(5vmax, -6vmax, 0) scale(1.08);
+  }
+  100% {
+    transform: translate3d(-4vmax, -3vmax, 0) scale(0.96);
+  }
+}
+
 /* --- splash screen (pre-init full-screen brand cover) --- */
 
 .splash {
