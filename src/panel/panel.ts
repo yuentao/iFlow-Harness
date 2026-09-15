@@ -283,6 +283,7 @@ export class ChatPanel implements vscode.Disposable {
       // best-effort; teardown must proceed even if the write failed
     }
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
+    this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     try {
       await this.client?.dispose();
@@ -558,6 +559,7 @@ export class ChatPanel implements vscode.Disposable {
         // This ensures the user can always stop the generation even when
         // there's a pending approval or question card.
         this.cancelAllApprovals(vscode.l10n.t("用户取消"));
+        this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
         this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
         this.cancelSeen = true;
         this.client?.cancel(this.store.getState().sessionId ?? "");
@@ -1383,6 +1385,7 @@ export class ChatPanel implements vscode.Disposable {
     // keeping the OLD credentials. Settle it (success or failure) first.
     if (this.connecting) await this.connecting.catch(() => {});
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
+    this.cancelAllPlanExits(vscode.l10n.t("重新认证，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("重新认证，提问已跳过"));
     // Detach the old client FIRST: dispose() kills its child process, and the
     // resulting exit event must not be mistaken for a crashed session.
@@ -2404,6 +2407,7 @@ export class ChatPanel implements vscode.Disposable {
     // Settle pending approval/question cards BEFORE the clear: their
     // resolution notes belong to the old transcript and are cleared with it.
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
+    this.cancelAllPlanExits(vscode.l10n.t("会话已重置，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Clear the transcript IMMEDIATELY. Clearing only after `session/new`
     // returned left the old transcript visibly in place for the whole CLI
