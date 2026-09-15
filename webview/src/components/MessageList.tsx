@@ -501,12 +501,16 @@ const BlockView = memo(function BlockView({
   block,
   isLatest,
   turnActive,
+  canCopy,
   canRegenerate,
   onRegenerate,
 }: {
   block: Block;
   isLatest: boolean;
   turnActive: boolean;
+  /** False while replaying (history restore) — the replay placeholder is a
+   * text block and must not grow copy/regenerate icons. */
+  canCopy: boolean;
   canRegenerate: boolean;
   onRegenerate: () => void;
 }) {
@@ -538,8 +542,8 @@ const BlockView = memo(function BlockView({
                 message, no extra row. */}
             <Markdown
               text={block.text}
-              showCopyIcon
-              onRegenerate={isLatest && canRegenerate ? onRegenerate : undefined}
+              showCopyIcon={canCopy}
+              onRegenerate={isLatest && canCopy && canRegenerate ? onRegenerate : undefined}
             />
           </div>
           </div>
@@ -866,6 +870,7 @@ function MessageListInner({ state }: { state: SessionState }) {
         block={block}
         isLatest={i === total - 1}
         turnActive={turnActive}
+        canCopy={!state.replaying}
         canRegenerate={canRegenerate && i === total - 1}
         onRegenerate={onRegenerate}
       />
@@ -879,6 +884,16 @@ function MessageListInner({ state }: { state: SessionState }) {
               <div className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md">
                 <Loader2 className="size-3 animate-spin" />
                 {state.initializing ? t("正在创建新会话…") : t("正在生成")}
+              </div>
+            </div>
+          )}
+          {state.replaying && (
+            // History restore indicator — dedicated UI (not a transcript block),
+            // so it never mixes with the restored content or grows copy icons.
+            <div className="sticky bottom-1 z-10 flex justify-center">
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-[11px] font-medium text-primary-foreground shadow-md">
+                <Loader2 className="size-3 animate-spin" />
+                {t("正在恢复历史会话…")}
               </div>
             </div>
           )}

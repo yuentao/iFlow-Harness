@@ -815,8 +815,9 @@ export function setSessions(state: SessionState, sessions: SessionSummaryUi[]): 
 /**
  * Begin history restore after `session/load`: the transcript is cleared and
  * incoming updates re-populate it; `endReplay` flips the flag back.
- * A placeholder block makes the (potentially ~60s) wait visible — CLI startup
- * plus session/load have both been measured at tens of seconds.
+ * No placeholder block: the webview renders its own replay indicator while
+ * `replaying` is true (a block would stream like assistant text and grow
+ * copy icons).
  */
 export function beginReplay(state: SessionState): void {
   state.blocks = [];
@@ -826,11 +827,6 @@ export function beginReplay(state: SessionState): void {
   state.status = "streaming";
   state.errorMessage = null;
   state.stopReason = null;
-  state.blocks.push({
-    kind: "text",
-    id: nextBlockId(),
-    text: l10n.t("正在恢复会话历史…（CLI 启动与会话加载可能需要 30–60 秒，请稍候）"),
-  });
 }
 
 export function endReplay(state: SessionState): void {

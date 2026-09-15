@@ -89,7 +89,7 @@
 
   --gradient-aurora: radial-gradient(
     120% 100% at 12% 0%,
-    color-mix(in oklab, var(--primary) 14%, transparent),
+    color-mix(in oklab, var(--primary) calc(14 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent),
     transparent 62%
   );
   --gradient-primary: linear-gradient(
@@ -149,9 +149,9 @@
     oklch(1 0 0 / 0%) 42%
   );
   --wallpaper:
-    radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 42%, transparent), transparent 64%),
-    radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) 30%, transparent), transparent 66%),
-    radial-gradient(64% 58% at 50% 112%, color-mix(in oklab, var(--primary) 28%, transparent), transparent 68%),
+    radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) calc(42 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent), transparent 64%),
+    radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) calc(30 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent), transparent 66%),
+    radial-gradient(64% 58% at 50% 112%, color-mix(in oklab, var(--primary) calc(28 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent), transparent 68%),
     var(--background);
 }
 
@@ -195,7 +195,7 @@
 
   --gradient-aurora: radial-gradient(
     120% 100% at 12% 0%,
-    color-mix(in oklab, var(--primary) 32%, transparent),
+    color-mix(in oklab, var(--primary) calc(32 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent),
     transparent 62%
   );
   --gradient-primary: linear-gradient(
@@ -243,9 +243,9 @@
     oklch(1 0 0 / 0%) 42%
   );
   --wallpaper:
-    radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) 48%, transparent), transparent 64%),
-    radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) 34%, transparent), transparent 66%),
-    radial-gradient(64% 58% at 50% 112%, color-mix(in oklab, var(--primary) 32%, transparent), transparent 68%),
+    radial-gradient(60% 52% at 10% -4%, color-mix(in oklab, var(--primary) calc(48 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent), transparent 64%),
+    radial-gradient(48% 42% at 96% 4%, color-mix(in oklab, var(--info) calc(34 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent), transparent 66%),
+    radial-gradient(64% 58% at 50% 112%, color-mix(in oklab, var(--primary) calc(32 * var(--aurora-opacity, 0.35) / 0.35 * 1%), transparent), transparent 68%),
     var(--background);
 }
 
