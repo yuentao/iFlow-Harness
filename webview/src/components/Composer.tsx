@@ -580,13 +580,13 @@ export function Composer() {
         </div>
       )}
 
-      <div className="rounded-xl border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
+      <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
         <textarea
           ref={taRef}
           value={text}
           placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或回形针按钮添加图片/文件）")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
-          className="w-full resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
+          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(e) => {
             setText(e.target.value);
             updateMentionFromCaret(e.target.value);
@@ -655,7 +655,7 @@ export function Composer() {
             }
           }}
         />
-        <div className="flex items-center gap-1.5 px-2 pb-2">
+        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2">
           {/* permission mode dropdown */}
           {modes && currentMode && (
             <Dropdown
