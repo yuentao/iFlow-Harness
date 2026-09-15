@@ -560,6 +560,10 @@ function MessageListInner({ state }: { state: SessionState }) {
   // not touch the stick state. Falls through if a user drag happens to land
   // within 1px of it — the next scroll event corrects the state.
   const programmaticTop = useRef<number | null>(null);
+  // True while an animated (smooth) jump-to-latest is running; onScroll must
+  // ignore stick-state updates during the animation so the button doesn't
+  // flicker back mid-flight.
+  const smoothScrolling = useRef(false);
 
   // --- offscreen history: suffix mounting window ----------------------------
   // Very long restored transcripts would mount (marked+DOMPurify per text
@@ -623,9 +627,20 @@ function MessageListInner({ state }: { state: SessionState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- expandOlder reads refs only
   }, [start]);
 
-  function scrollToBottom() {
+  function scrollToBottom(smooth = false) {
     const el = scrollRef.current;
     if (!el) return;
+    if (smooth && "scrollTo" in el) {
+      // Animated jump-to-latest. Suppress stick-state updates during the
+      // animation so the jump button doesn't flicker back mid-flight.
+      smoothScrolling.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      window.setTimeout(() => {
+        smoothScrolling.current = false;
+      }, 500);
+      programmaticTop.current = el.scrollTop; // pre-animation value
+      return;
+    }
     el.scrollTop = el.scrollHeight;
     programmaticTop.current = el.scrollTop; // post-clamp actual value
   }
@@ -724,6 +739,7 @@ function MessageListInner({ state }: { state: SessionState }) {
   function onScroll() {
     const el = scrollRef.current;
     if (!el) return;
+    if (smoothScrolling.current) return; // mid animated jump; state already set
     if (programmaticTop.current !== null && Math.abs(el.scrollTop - programmaticTop.current) < 1) {
       programmaticTop.current = null; // consume once: our own follow-scroll
       return;
@@ -793,7 +809,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           className="card-lift press absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
           onClick={() => {
             stickToBottom.current = true;
-            scrollToBottom();
+            scrollToBottom(true);
             setShowJump(false);
           }}
         >
