@@ -19,15 +19,16 @@ import {
   clearPendingQuestions,
   completePrompt,
   clearPendingApproval,
+  clearPendingPlanExit,
   markToolReverted,
   parseTranscriptJsonl,
   setMeta,
   setPendingApproval,
+  setPendingPlanExit,
   setPendingQuestions,
   setSessions,
 } from "../../shared/session-state.js";
-import type { PendingApprovalUi } from "../../shared/messages.js";
-import type { PendingQuestionsUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi } from "../../shared/messages.js";
 
 export class SessionStore {
   private state: SessionState = initialSessionState();
@@ -254,6 +255,27 @@ export class SessionStore {
     const cleared = clearPendingApproval(this.state, id);
     if (cleared) this.flush();
     return cleared;
+  }
+
+  /** Surface a Plan-mode exit confirmation to the WebView (immediate flush). */
+  showPlanExit(pending: PendingPlanExitUi): void {
+    setPendingPlanExit(this.state, pending);
+    this.flush();
+  }
+
+  /** Answer whether the named plan-exit card was still pending. */
+  clearPlanExit(id: string): boolean {
+    const cleared = clearPendingPlanExit(this.state, id);
+    if (cleared) this.flush();
+    return cleared;
+  }
+
+  /** Visual marker recording the user's Plan-exit decision (the card is transient). */
+  planExitResolutionNote(resolution: string): void {
+    const before = this.captureTail();
+    appendApprovalResolution(this.state, "plan", resolution);
+    this.noteMutation(before, this.captureTail());
+    this.flush();
   }
 
   /** Surface an ask_user_question card to the WebView (immediate flush). */

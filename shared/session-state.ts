@@ -17,6 +17,7 @@ import {
   type Block,
   type ModelInfoUi,
   type PendingApprovalUi,
+  type PendingPlanExitUi,
   type PendingQuestionsUi,
   type SessionState,
   type SessionSummaryUi,
@@ -683,6 +684,7 @@ export function setSessions(state: SessionState, sessions: SessionSummaryUi[]): 
 export function beginReplay(state: SessionState): void {
   state.blocks = [];
   state.pendingApproval = null;
+  state.pendingPlanExit = null;
   state.replaying = true;
   state.status = "streaming";
   state.errorMessage = null;
@@ -912,6 +914,21 @@ export function setPendingApproval(state: SessionState, approval: PendingApprova
 export function clearPendingApproval(state: SessionState, id: string): boolean {
   if (state.pendingApproval?.id !== id) return false;
   state.pendingApproval = null;
+  return true;
+}
+
+// --- plan exit (_iflow/plan/exit) --------------------------------------------
+
+/** Show the Plan-mode exit confirmation card. The WebView answers via
+ * `respondPlanExit`. */
+export function setPendingPlanExit(state: SessionState, pending: PendingPlanExitUi): void {
+  state.pendingPlanExit = pending;
+}
+
+/** Clear the card once answered (or timed out / cancelled host-side). */
+export function clearPendingPlanExit(state: SessionState, id: string): boolean {
+  if (state.pendingPlanExit?.id !== id) return false;
+  state.pendingPlanExit = null;
   return true;
 }
 

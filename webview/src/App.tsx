@@ -18,6 +18,7 @@ import { Chip, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
+import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { AuthCard } from "./components/AuthCard";
 import type { AgentStatus } from "../../shared/messages";
@@ -132,6 +133,7 @@ export function App() {
   const liveMessage = useMemo(() => {
     if (!state) return "";
     if (state.pendingApproval) return t("需要审批工具调用");
+    if (state.pendingPlanExit) return t("需要确认退出计划模式");
     if (state.pendingQuestions) return t("有待回答问题需要回答");
     if (state.status === "connecting") return t("正在连接 iFlow…");
     if (state.status === "streaming") return t("正在生成回复…");
@@ -141,7 +143,7 @@ export function App() {
       return t("已就绪");
     }
     return "";
-  }, [state?.status, state?.errorMessage, state?.stopReason, state?.pendingApproval, state?.pendingQuestions]);
+  }, [state?.status, state?.errorMessage, state?.stopReason, state?.pendingApproval, state?.pendingPlanExit, state?.pendingQuestions]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden text-foreground">
@@ -403,6 +405,8 @@ export function App() {
       <MessageList />
 
       {state.pendingApproval && <ApprovalCard approval={state.pendingApproval} />}
+
+      {state.pendingPlanExit && <PlanExitCard pending={state.pendingPlanExit} />}
 
       {state.pendingQuestions && <QuestionCard pending={state.pendingQuestions} />}
 

@@ -39,7 +39,7 @@ import type {
   ExitPlanModeRequest,
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import {
   backfillBlockIds,
   beginReplay,
@@ -158,6 +158,12 @@ export class ChatPanel implements vscode.Disposable {
     }
   >();
   private approvalSeq = 0;
+  /** Awaiting user confirmation for `_iflow/plan/exit`, keyed by plan-exit id. */
+  private readonly pendingPlanExits = new Map<
+    string,
+    { resolve: (response: ExitPlanModeResponse) => void; timer: NodeJS.Timeout }
+  >();
+  private planExitSeq = 0;
   /** Awaiting user answers for `_iflow/user/questions`, keyed by card id. */
   private readonly pendingQuestions = new Map<
     string,
@@ -589,6 +595,9 @@ export class ChatPanel implements vscode.Disposable {
       case "respondApproval":
         this.handleApprovalResponse(msg.id, msg.optionId);
         break;
+      case "respondPlanExit":
+        this.handlePlanExitResponse(msg.id, msg.approved, msg.reason);
+        break;
       case "answerQuestions":
         this.handleQuestionAnswers(msg.id, msg.answers);
         break;
@@ -747,6 +756,59 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve({ outcome: { outcome: "cancelled" } });
     }
     this.pendingApprovals.clear();
+  }
+
+  // --- Plan-mode exit flow (_iflow/plan/exit) ---------------------------------
+
+  /**
+   * Surface a Plan-mode exit request as a confirmation card in the webview and
+   * resolve once the user answers (or the timeout auto-rejects). Reuses the
+   * approval-card visual form so the panel stays consistent.
+   */
+  private requestPlanExitFromUser(req: ExitPlanModeRequest): Promise<ExitPlanModeResponse> {
+    const id = `plan-${++this.planExitSeq}`;
+    const now = Date.now();
+    const pending: PendingPlanExitUi = {
+      id,
+      plan: req.plan ?? "",
+      deadline: now + APPROVAL_TIMEOUT_MS,
+      timeoutMs: APPROVAL_TIMEOUT_MS,
+    };
+    return new Promise<ExitPlanModeResponse>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingPlanExits.delete(id);
+        this.store.clearPlanExit(id);
+        this.store.planExitResolutionNote(vscode.l10n.t("计划审批超时，已自动拒绝"));
+        resolve({ approved: false, reason: vscode.l10n.t("超时未确认，已拒绝") });
+      }, APPROVAL_TIMEOUT_MS);
+      this.pendingPlanExits.set(id, { resolve, timer });
+      this.store.showPlanExit(pending);
+    });
+  }
+
+  /** Resolve a pending Plan-mode exit from the webview's answer. */
+  private handlePlanExitResponse(id: string, approved: boolean, reason?: string): void {
+    const pending = this.pendingPlanExits.get(id);
+    if (!pending) return;
+    this.pendingPlanExits.delete(id);
+    clearTimeout(pending.timer);
+    this.store.clearPlanExit(id);
+    this.store.planExitResolutionNote(approved ? vscode.l10n.t("已批准计划") : reason ?? vscode.l10n.t("已拒绝计划"));
+    pending.resolve({
+      approved,
+      reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),
+    });
+  }
+
+  /** Cancel every pending Plan exit (client died / replaced) without hanging the agent. */
+  private cancelAllPlanExits(reason: string): void {
+    for (const [id, pending] of this.pendingPlanExits) {
+      clearTimeout(pending.timer);
+      this.store.clearPlanExit(id);
+      this.store.planExitResolutionNote(reason);
+      pending.resolve({ approved: false, reason });
+    }
+    this.pendingPlanExits.clear();
   }
 
   // --- User questions flow (_iflow/user/questions, ask_user_question tool) ----
@@ -1843,6 +1905,7 @@ export class ChatPanel implements vscode.Disposable {
             void this.persistActiveTranscript();
             this.client = null;
             this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
+            this.cancelAllPlanExits(vscode.l10n.t("CLI 进程已退出，计划审批已跳过"));
             this.cancelAllPendingQuestions(vscode.l10n.t("CLI 进程已退出，提问已跳过"));
             this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
             // Async failure — the user is likely in the editor; cue it.
@@ -1861,15 +1924,13 @@ export class ChatPanel implements vscode.Disposable {
             return this.userQuestionsFromAgent(req);
           },
           onExitPlanMode: async (req: ExitPlanModeRequest) => {
-            // Plan approval without dedicated UI yet: a QuickPick keeps the
-            // agent unblocked (MethodNotFound previously failed the tool).
+            // Route Plan-mode exit through the unified webview confirmation card
+            // (mirrors session/request_permission) instead of a native
+            // QuickPick: the card lives inside the panel where the user is
+            // looking, so it can't be dismissed by a stray click the way a
+            // native popup could (which silently rejected and stranded Plan mode).
             if (this.client !== client) return { approved: false, reason: "client busy" };
-            const pick = await vscode.window.showQuickPick(
-              [vscode.l10n.t("批准计划"), vscode.l10n.t("拒绝计划")],
-              { placeHolder: vscode.l10n.t("Agent 请求退出 Plan 模式并开始执行") },
-            );
-            const approved = pick === vscode.l10n.t("批准计划");
-            return { approved, reason: approved ? undefined : vscode.l10n.t("用户拒绝了该计划") } satisfies ExitPlanModeResponse;
+            return this.requestPlanExitFromUser(req);
           },
         },
       );

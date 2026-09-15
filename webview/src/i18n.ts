@@ -146,6 +146,13 @@ const en: Record<string, string> = {
   "正在生成回复…": "Generating response…",
   "已停止生成": "Generation stopped",
   "已就绪": "Ready",
+  // Plan-mode exit confirmation card
+  "iFlow 请求退出 Plan 模式": "iFlow wants to exit Plan mode",
+  "退出 Plan 模式后将开始执行以下计划：": "The following plan will be executed once Plan mode is exited:",
+  "批准计划": "Approve plan",
+  "拒绝计划": "Reject plan",
+  "计划审批操作": "Plan approval actions",
+  "需要确认退出计划模式": "Plan exit needs confirmation",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

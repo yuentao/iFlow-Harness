@@ -159,6 +159,22 @@ export interface PendingApprovalUi {
 }
 
 /**
+ * A Plan-mode exit request awaiting user confirmation (iFlow extension
+ * `_iflow/plan/exit`). Rendered with the same approval-card visual form as
+ * `pendingApproval` so the panel stays visually consistent; the user approves
+ * or rejects, and the host replies `{ approved, reason }`.
+ */
+export interface PendingPlanExitUi {
+  id: string;
+  /** The plan the agent wants to execute once Plan mode is exited. May be long. */
+  plan: string;
+  /** Host-side auto-answer deadline (epoch ms); drives the countdown UI. */
+  deadline: number;
+  /** Total answer window in ms (APPROVAL_TIMEOUT_MS). */
+  timeoutMs: number;
+}
+
+/**
  * The `ask_user_question` tool's questions awaiting user answers (iFlow
  * extension). Rendered like an approval card; the user answers per question
  * (single choice / multi-select / free text), the host replies on the
@@ -195,6 +211,8 @@ export interface SessionState {
   currentModelId: string | null;
   /** Non-null while the host awaits the user's answer for a tool approval. */
   pendingApproval: PendingApprovalUi | null;
+  /** Non-null while the host awaits the user's confirmation to exit Plan mode. */
+  pendingPlanExit: PendingPlanExitUi | null;
   /** Non-null while the host awaits the user's answers for ask_user_question. */
   pendingQuestions: PendingQuestionsUi | null;
   /** Auth config state (M3): drives the setup banner / form. */
@@ -246,6 +264,7 @@ export function initialSessionState(): SessionState {
     models: [],
     currentModelId: null,
     pendingApproval: null,
+    pendingPlanExit: null,
     pendingQuestions: null,
     auth: { authenticated: false, needsSetup: false, saved: null, profiles: [] },
     sessions: [],
@@ -365,6 +384,8 @@ export type WebviewToHost =
   | { type: "revealOutput"; toolCallId: string }
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
+  /** Confirm or reject a pending Plan-mode exit; `approved: false` rejects. */
+  | { type: "respondPlanExit"; id: string; approved: boolean; reason?: string }
   /** Answer the pending ask_user_question card; `answers` is keyed by
    * question `header`. An empty answers object = dismissed (the agent
    * proceeds with "no answer"). */

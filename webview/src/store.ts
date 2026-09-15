@@ -319,6 +319,7 @@ function createMockHost(): HostApi {
     // Demo: surface the question card so the option-description UI is visible
     // in browser debug mode.
     pendingQuestions: demoQuestions,
+    pendingPlanExit: null,
     replaying: false,
     initializing: false,
   };
@@ -512,6 +513,26 @@ function createMockHost(): HostApi {
             },
           });
         }, 600);
+        return;
+      }
+      if (m.type === "respondPlanExit") {
+        demoBlocks.push({
+          kind: "text",
+          text: `*plan exit — ${m.approved ? "已批准（mock）" : "已拒绝（mock）"}*`,
+        });
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "streaming",
+            errorMessage: null,
+            stopReason: null,
+            ...demoMeta,
+            pendingApproval: null,
+            pendingPlanExit: null,
+            auth: authState,
+          },
+        });
         return;
       }
       if (m.type === "revertTool") {
