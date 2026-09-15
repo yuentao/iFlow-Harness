@@ -351,6 +351,23 @@
   overflow-anchor: none;
 }
 
+/* One-shot smooth color transition when the theme (light/dark) is toggled.
+   Scoped to a temporary class (added by App.tsx for ~320ms) so it only
+   animates the theme switch, not every hover/state change. Custom properties
+   themselves don't transition, but the resolved color/background/border of
+   each element does. */
+.theme-anim,
+.theme-anim * {
+  transition:
+    background-color 0.28s ease,
+    border-color 0.28s ease,
+    color 0.28s ease,
+    fill 0.28s ease,
+    stroke 0.28s ease,
+    box-shadow 0.28s ease,
+    transform 0.28s ease !important;
+}
+
 @utility aurora {
   background-image: var(--gradient-aurora);
 }
@@ -709,6 +726,43 @@
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.6;
+}
+
+/* Fenced code blocks get a copy button injected by Markdown.tsx into a
+   .code-block wrapper, so the button stays pinned to the corner while the
+   <pre> scrolls. */
+.code-block {
+  position: relative;
+}
+
+.code-block .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--surface-2) 82%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.code-block:hover .copy-btn,
+.copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  color: var(--foreground);
+  background: var(--surface-2);
 }
 
 .md code {

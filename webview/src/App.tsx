@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -72,9 +72,20 @@ export function App() {
     () => (localStorage.getItem("iflow-theme") as "light" | "dark" | null) ?? null,
   );
   const dark = manual ? manual === "dark" : editorTheme !== null ? editorTheme === "dark" : false;
+  const firstThemeRun = useRef(true);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     if (manual) localStorage.setItem("iflow-theme", manual);
+    // Smoothly animate the theme switch (colors only). Skip the initial mount
+    // so the first paint doesn't flash a transition from the default theme.
+    if (firstThemeRun.current) {
+      firstThemeRun.current = false;
+      return;
+    }
+    const root = document.documentElement;
+    root.classList.add("theme-anim");
+    const id = window.setTimeout(() => root.classList.remove("theme-anim"), 320);
+    return () => window.clearTimeout(id);
   }, [dark, manual]);
 
   // Auth card opened: refresh the profile list the same way the header
