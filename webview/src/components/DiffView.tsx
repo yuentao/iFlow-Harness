@@ -55,7 +55,7 @@ export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactN
           {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}
         </span>
       </div>
-      <div className="diff-scroll max-h-60 overflow-auto border-y border-border/60 bg-editor font-mono text-[11px] leading-[1.7]">
+      <div className="diff-scroll mx-2.5 mb-2.5 max-h-60 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-[11px] leading-[1.7]">
         {rows.map((row, i) =>
           row.type === "hunk" ? (
             <button
