@@ -297,6 +297,7 @@ export function Dropdown({
         <div
           ref={menuRef}
           role="menu"
+          onKeyDown={onMenuKeyDown}
           className={`absolute z-30 overflow-hidden rounded-xl border border-border acrylic-pop dropdown-in ${
             direction === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${menuClass}`}
