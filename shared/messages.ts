@@ -199,6 +199,17 @@ export interface SessionSummaryUi {
   updatedAt: number;
 }
 
+/** Cumulative token usage for the active session, estimated by the host from the
+ * transcript (the CLI is frozen and reports no usage). Coarse — not for billing.
+ * Surfaced in the UI only when non-null (after the first content turn). */
+export interface SessionUsageUi {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+}
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -230,6 +241,10 @@ export interface SessionState {
    * snapshots); absent in mock hosts, treated as 0 by the webview.
    */
   blockVersion?: number;
+  /** Cumulative token usage for the active session, estimated by the host from
+   * the transcript (the CLI is frozen and reports no usage). Optional — null
+   * until the first content turn, so the UI hides the indicator when empty. */
+  usage?: SessionUsageUi | null;
 }
 
 export interface AuthUiState {
@@ -271,6 +286,7 @@ export function initialSessionState(): SessionState {
     activeSessionId: null,
     replaying: false,
     initializing: false,
+    usage: null,
   };
 }
 

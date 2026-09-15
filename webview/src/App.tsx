@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  Coins,
   History,
   Loader2,
   Moon,
@@ -22,6 +23,13 @@ import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { AuthCard } from "./components/AuthCard";
 import type { AgentStatus } from "../../shared/messages";
+
+/** Compact token count, e.g. 12345 → "12.3k", 1_500_000 → "1.5M". */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
 
 function statusChip(status: AgentStatus) {
   switch (status) {
@@ -384,6 +392,14 @@ export function App() {
               <History className="size-3 shrink-0 text-primary" />
               <span className="truncate">{t("会话历史")}</span>
             </div>
+          )}
+          {state.usage && (
+            <span title={t("本次会话累计 token 消耗（host 估算，非精确计费）")} className="inline-flex">
+              <Chip tone="muted">
+                <Coins className="size-2.5" />
+                ≈ {formatTokens(state.usage.totalTokens)}
+              </Chip>
+            </span>
           )}
           {state.replaying ? (
             <Chip tone="info">

@@ -21,6 +21,7 @@ import {
   type PendingQuestionsUi,
   type SessionState,
   type SessionSummaryUi,
+  type SessionUsageUi,
   type SubAgentBlock,
   type ToolBlock,
   type ToolDiffUi,
@@ -604,7 +605,60 @@ export function beginUserPrompt(
   state.errorMessage = null;
 }
 
+/** Rough token estimate for a string. The host has no real tokenizer and the
+ * CLI is frozen (reports no usage), so this blends a CJK-aware heuristic:
+ * CJK / fullwidth / kana chars ≈ 1.5 tokens, other chars ≈ 0.25 tokens. Coarse
+ * and stable — good enough for a "≈ tokens used" hint, not for billing. */
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  const cjk = (text.match(/[　-鿿぀-ヿ＀-￯]/g) ?? []).length;
+  const other = text.length - cjk;
+  return Math.ceil(cjk * 1.5 + other * 0.25);
+}
+
+/** Flatten a block's human-readable text for token estimation. Compression
+ * blocks are skipped — their summary is a derivative of already-counted content
+ * and would double-count. */
+function blockText(block: Block): string {
+  switch (block.kind) {
+    case "text":
+    case "thought":
+    case "user":
+      return block.text;
+    case "tool":
+      return `${block.title}\n${block.output}${block.diff?.newText ?? ""}`;
+    case "plan":
+      return block.entries.map((e) => e.content).join("\n");
+    case "subagent":
+      return block.entries.map(blockText).join("\n");
+    case "compression":
+      return "";
+  }
+}
+
+/** Estimate cumulative token usage of the whole transcript. The CLI is frozen
+ * and reports no usage, so the host estimates from the rendered blocks. Returns
+ * null when there is no content yet (the UI hides the indicator until then). */
+export function estimateSessionUsage(blocks: Block[]): SessionUsageUi | null {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  for (const b of blocks) {
+    const t = estimateTokens(blockText(b));
+    if (t === 0) continue;
+    // User prompts and tool I/O are context the model consumes (input); agent
+    // text/thought/plan/subagent output is generation (output).
+    if (b.kind === "user" || b.kind === "tool") inputTokens += t;
+    else outputTokens += t;
+  }
+  const totalTokens = inputTokens + outputTokens;
+  if (totalTokens === 0) return null;
+  return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens };
+}
+
 export function completePrompt(state: SessionState, stopReason: StopReason): void {
+  // The CLI is frozen and never reports usage, so the host estimates cumulative
+  // consumption from the transcript itself (recomputed idempotently each turn).
+  state.usage = estimateSessionUsage(state.blocks);
   state.stopReason = stopReason;
   state.status = "idle";
 }
@@ -657,6 +711,9 @@ export function newSessionState(state: SessionState): SessionState {
   fresh.sessions = state.sessions;
   fresh.activeSessionId = state.activeSessionId;
   fresh.replaying = state.replaying;
+  // Token usage is per-session; a new session starts from zero (the CLI does
+  // not yet report usage, so this stays null until it does).
+  fresh.usage = null;
   // Approval requests are session-scoped; a new session has none pending.
   return fresh;
 }
