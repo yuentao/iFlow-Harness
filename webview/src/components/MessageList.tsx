@@ -30,6 +30,8 @@ import {
   Wrench,
   X,
   XCircle,
+  AlertTriangle,
+  Info,
   Zap,
 } from "lucide-react";
 import type {
@@ -39,7 +41,7 @@ import type {
   ThoughtBlock,
   ToolBlock,
 } from "../../../shared/messages";
-import { useChat } from "../store";
+import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { Markdown, copyText } from "./Markdown";
 import { DiffView } from "./DiffView";
@@ -881,7 +883,67 @@ function MessageListInner({ state }: { state: SessionState }) {
           {t("回到最新")}
         </button>
       )}
+      <Toasts />
     </div>
+  );
+}
+
+/** Transient host notices (rate-limit retry / context-overflow compress),
+ * rendered as a centered stack above the streaming indicator. Auto-dismissed
+ * by the store timer; click to dismiss early. */
+function Toasts() {
+  const toasts = useChat((s) => s.toasts);
+  if (toasts.length === 0) return null;
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-14 z-20 flex flex-col items-center gap-1.5 px-3">
+      {toasts.map((t) => (
+        <ToastPill key={t.id} toast={t} />
+      ))}
+    </div>
+  );
+}
+
+/** One toast pill. When `countdownMs` is set, a live ticking seconds counter
+ * runs for the wait window so the user sees the rate-limit retry countdown. */
+function ToastPill({ toast }: { toast: ToastItem }) {
+  const dismiss = useChat((s) => s.dismissToast);
+  const [secs, setSecs] = useState(toast.countdownMs ? Math.ceil(toast.countdownMs / 1000) : 0);
+  useEffect(() => {
+    if (toast.countdownMs === undefined) return;
+    const start = Date.now();
+    const total = toast.countdownMs;
+    let last = -1;
+    const tick = () => {
+      const left = Math.max(0, total - (Date.now() - start));
+      const s = Math.ceil(left / 1000);
+      if (s !== last) {
+        last = s;
+        setSecs(s);
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 250);
+    return () => clearInterval(iv);
+  }, [toast.countdownMs]);
+  return (
+    <button
+      onClick={() => dismiss(toast.id)}
+      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${
+        toast.level === "error"
+          ? "border-destructive/40 bg-destructive/15 text-destructive"
+          : toast.level === "warning"
+            ? "border-warning/40 bg-warning/15 text-warning"
+            : "border-border bg-card/90 text-foreground"
+      }`}
+    >
+      {toast.level === "warning" && <AlertTriangle className="size-3.5 shrink-0" />}
+      {toast.level === "error" && <XCircle className="size-3.5 shrink-0" />}
+      {toast.level === "info" && <Info className="size-3.5 shrink-0 text-primary" />}
+      <span className="break-words text-left">{toast.message}</span>
+      {toast.countdownMs !== undefined && (
+        <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>
+      )}
+    </button>
   );
 }
 

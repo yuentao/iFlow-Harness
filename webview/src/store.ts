@@ -791,6 +791,7 @@ let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSentKey = "";
 let lastSentAt = 0;
 let lastResyncAt = 0;
+let toastSeq = 0;
 
 /** Ask the host for a full snapshot (P-1: a blockPatch we cannot anchor). */
 function requestResync(): void {
@@ -800,10 +801,22 @@ function requestResync(): void {
   vscode.postMessage({ type: "ready" });
 }
 
+/** Transient host notice (rate-limit retry / context-overflow compress). */
+export interface ToastItem {
+  id: number;
+  level: "info" | "warning" | "error";
+  message: string;
+  /** When set, the WebView renders a live ticking countdown for this many ms. */
+  countdownMs?: number;
+}
+
 interface ChatStore {
   state: SessionState | null;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
+  /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
+  toasts: ToastItem[];
+  dismissToast: (id: number) => void;
   /** Optimistic switch lock, null when idle (see PendingOp). */
   pending: PendingOp | null;
   /**
@@ -832,6 +845,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   pending: null,
   promptSeq: 0,
   editDraft: null,
+  toasts: [],
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
@@ -897,6 +911,18 @@ export const useChat = create<ChatStore>((set, get) => ({
       playCue(msg.kind);
       return;
     }
+    if (msg.type === "toast") {
+      const id = ++toastSeq;
+      const countdownMs = msg.countdownMs;
+      set((s) => ({ toasts: [...s.toasts, { id, level: msg.level, message: msg.message, countdownMs }] }));
+      // Countdown toasts live for their full window (dismiss when it hits 0);
+      // others get a clamped default lifetime (5s, host may extend to 15s).
+      const duration = countdownMs !== undefined
+        ? Math.min(countdownMs, 60_000)
+        : Math.min(Math.max(msg.durationMs ?? 5000, 2000), 15_000);
+      setTimeout(() => get().dismissToast(id), duration);
+      return;
+    }
     // Consumed by their own window-level listeners (Composer registers those
     // itself) — reaching here is normal, not an unknown-message tripwire.
     // (setDraft is also Composer-consumed but only exists on the wire, not in
@@ -918,6 +944,7 @@ export const useChat = create<ChatStore>((set, get) => ({
     }, PENDING_TIMEOUT_MS);
   },
   setEditDraft: (text: string | null) => set({ editDraft: text }),
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   send: (msg) => {
     // Debounce: identical messages fired within the window (double-clicks on
     // send / revert / switch buttons) are dropped.

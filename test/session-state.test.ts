@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  appendHostNotice,
   applySessionUpdate,
   backfillBlockIds,
   beginUserPrompt,
@@ -384,19 +383,6 @@ describe("host-level transitions", () => {
     completePrompt(state, "end_turn");
     expect(state.status).toBe("idle");
     expect(state.stopReason).toBe("end_turn");
-  });
-
-  it("appendHostNotice adds an agent-styled text block without touching status", () => {
-    const state = initialSessionState();
-    beginUserPrompt(state, "长任务");
-    completePrompt(state, "end_turn");
-    appendHostNotice(state, "上下文长度已达模型上限，自动压缩会话后重试…");
-    expect(state.blocks.at(-1)).toMatchObject({
-      kind: "text",
-      text: "上下文长度已达模型上限，自动压缩会话后重试…",
-    });
-    expect(state.blocks.at(-1)?.id).toBeDefined();
-    expect(state.status).toBe("idle");
   });
 
   it("newSessionState preserves meta but clears transcript", () => {

@@ -2687,7 +2687,8 @@ export class ChatPanel implements vscode.Disposable {
           this.log.warn(
             `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
           );
-          this.store.appendNotice(
+          this.store.sendToast(
+            "info",
             vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
           );
           continue;
@@ -2701,13 +2702,14 @@ export class ChatPanel implements vscode.Disposable {
           this.log.warn(
             `rate limit on session ${sessionId}, auto-retry ${rateLimitRetries}/${RATE_LIMIT_RETRY_DELAYS_MS.length} in ${delayMs / 1000}s: ${this.formatErrorForLog(error)}`,
           );
-          this.store.appendNotice(
+          this.store.sendToast(
+            "warning",
             vscode.l10n.t(
-              "模型触发平台速率限制，{0} 秒后自动重试（第 {1}/{2} 次）…",
-              Math.round(delayMs / 1000),
+              "模型触发平台速率限制，自动重试中（第 {0}/{1} 次）",
               rateLimitRetries,
               RATE_LIMIT_RETRY_DELAYS_MS.length,
             ),
+            { countdownMs: delayMs },
           );
           await abortableDelay(delayMs, () => this.cancelSeen);
           if (this.cancelSeen) throw error; // user pressed Stop during the wait

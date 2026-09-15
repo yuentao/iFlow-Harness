@@ -13,7 +13,6 @@ import type {
 import { initialSessionState } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
-  appendHostNotice,
   applySessionUpdate,
   beginUserPrompt,
   clearPendingQuestions,
@@ -236,12 +235,27 @@ export class SessionStore {
     this.flush();
   }
 
-  /** Append a host-generated transcript notice (context-overflow retry). */
+  /** Surface a transient host notice to the WebView (auto-dismissed by the UI).
+   * `countdownMs` drives a live ticking countdown in the WebView (rate-limit
+   * retry wait); `durationMs` overrides the auto-dismiss lifetime. */
+  sendToast(
+    level: "info" | "warning" | "error",
+    message: string,
+    opts?: { durationMs?: number; countdownMs?: number },
+  ): void {
+    this.post({
+      type: "toast",
+      level,
+      message,
+      durationMs: opts?.durationMs,
+      countdownMs: opts?.countdownMs,
+    });
+  }
+
+  /** Transient host notice without an explicit level (question timeout / skip /
+   * cancel reason). Auto-dismissed by the WebView UI. */
   appendNotice(text: string): void {
-    const before = this.captureTail();
-    appendHostNotice(this.state, text);
-    this.noteMutation(before, this.captureTail());
-    this.flush();
+    this.post({ type: "toast", level: "info", message: text });
   }
 
   /** Surface an approval request to the WebView (immediate flush, no throttle). */
