@@ -2709,7 +2709,7 @@ export class ChatPanel implements vscode.Disposable {
               rateLimitRetries,
               RATE_LIMIT_RETRY_DELAYS_MS.length,
             ),
-            { countdownMs: delayMs },
+            { countdownDeadline: Date.now() + delayMs },
           );
           await abortableDelay(delayMs, () => this.cancelSeen);
           if (this.cancelSeen) throw error; // user pressed Stop during the wait

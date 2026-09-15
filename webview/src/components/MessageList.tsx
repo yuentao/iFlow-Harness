@@ -903,18 +903,20 @@ function Toasts() {
   );
 }
 
-/** One toast pill. When `countdownMs` is set, a live ticking seconds counter
- * runs for the wait window so the user sees the rate-limit retry countdown. */
+/** One toast pill. When `countdownDeadline` (host epoch-ms) is set, the live
+ * countdown is anchored to that absolute deadline so the UI stays in sync with
+ * the host's actual wait — no drift from the message round-trip latency. */
 function ToastPill({ toast }: { toast: ToastItem }) {
   const dismiss = useChat((s) => s.dismissToast);
-  const [secs, setSecs] = useState(toast.countdownMs ? Math.ceil(toast.countdownMs / 1000) : 0);
+  const [secs, setSecs] = useState(
+    toast.countdownDeadline ? Math.ceil((toast.countdownDeadline - Date.now()) / 1000) : 0,
+  );
   useEffect(() => {
-    if (toast.countdownMs === undefined) return;
-    const start = Date.now();
-    const total = toast.countdownMs;
+    if (toast.countdownDeadline === undefined) return;
+    const deadline = toast.countdownDeadline;
     let last = -1;
     const tick = () => {
-      const left = Math.max(0, total - (Date.now() - start));
+      const left = Math.max(0, deadline - Date.now());
       const s = Math.ceil(left / 1000);
       if (s !== last) {
         last = s;
@@ -924,7 +926,7 @@ function ToastPill({ toast }: { toast: ToastItem }) {
     tick();
     const iv = setInterval(tick, 250);
     return () => clearInterval(iv);
-  }, [toast.countdownMs]);
+  }, [toast.countdownDeadline]);
   return (
     <button
       onClick={() => dismiss(toast.id)}
@@ -940,7 +942,7 @@ function ToastPill({ toast }: { toast: ToastItem }) {
       {toast.level === "error" && <XCircle className="size-3.5 shrink-0" />}
       {toast.level === "info" && <Info className="size-3.5 shrink-0 text-primary" />}
       <span className="break-words text-left">{toast.message}</span>
-      {toast.countdownMs !== undefined && (
+      {toast.countdownDeadline !== undefined && (
         <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>
       )}
     </button>

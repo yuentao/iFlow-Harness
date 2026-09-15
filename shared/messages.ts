@@ -338,7 +338,7 @@ export type HostToWebview =
       /** Current non-blocks metadata (status, approvals, modes, …). */
       tail: SessionSnapshotTail;
     }
-  | { type: "toast"; level: "info" | "warning" | "error"; message: string; durationMs?: number; countdownMs?: number }
+  | { type: "toast"; level: "info" | "warning" | "error"; message: string; durationMs?: number; countdownDeadline?: number }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
   | { type: "fileList"; requestId: number; hits: FileHitUi[] }
   /** Reply to `stageFiles`: absolute temp paths aligned with the request's

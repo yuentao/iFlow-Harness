@@ -806,8 +806,9 @@ export interface ToastItem {
   id: number;
   level: "info" | "warning" | "error";
   message: string;
-  /** When set, the WebView renders a live ticking countdown for this many ms. */
-  countdownMs?: number;
+  /** When set, the WebView renders a live countdown to this absolute epoch-ms
+   * deadline (host clock), so the UI stays in sync with the host's actual wait. */
+  countdownDeadline?: number;
 }
 
 interface ChatStore {
@@ -913,12 +914,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "toast") {
       const id = ++toastSeq;
-      const countdownMs = msg.countdownMs;
-      set((s) => ({ toasts: [...s.toasts, { id, level: msg.level, message: msg.message, countdownMs }] }));
-      // Countdown toasts live for their full window (dismiss when it hits 0);
-      // others get a clamped default lifetime (5s, host may extend to 15s).
-      const duration = countdownMs !== undefined
-        ? Math.min(countdownMs, 60_000)
+      const countdownDeadline = msg.countdownDeadline;
+      set((s) => ({ toasts: [...s.toasts, { id, level: msg.level, message: msg.message, countdownDeadline }] }));
+      // Countdown toasts live until the host's deadline (dismiss exactly when the
+      // wait ends); others get a clamped default lifetime (5s, host may extend to 15s).
+      const duration = countdownDeadline !== undefined
+        ? Math.max(0, countdownDeadline - Date.now())
         : Math.min(Math.max(msg.durationMs ?? 5000, 2000), 15_000);
       setTimeout(() => get().dismissToast(id), duration);
       return;

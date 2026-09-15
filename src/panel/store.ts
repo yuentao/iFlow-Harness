@@ -236,19 +236,19 @@ export class SessionStore {
   }
 
   /** Surface a transient host notice to the WebView (auto-dismissed by the UI).
-   * `countdownMs` drives a live ticking countdown in the WebView (rate-limit
-   * retry wait); `durationMs` overrides the auto-dismiss lifetime. */
+   * `countdownDeadline` (host epoch-ms) anchors a live countdown in the WebView
+   * to the host's actual wait; `durationMs` overrides the auto-dismiss lifetime. */
   sendToast(
     level: "info" | "warning" | "error",
     message: string,
-    opts?: { durationMs?: number; countdownMs?: number },
+    opts?: { durationMs?: number; countdownDeadline?: number },
   ): void {
     this.post({
       type: "toast",
       level,
       message,
       durationMs: opts?.durationMs,
-      countdownMs: opts?.countdownMs,
+      countdownDeadline: opts?.countdownDeadline,
     });
   }
 
