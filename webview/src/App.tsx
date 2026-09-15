@@ -115,6 +115,26 @@ export function App() {
     if (configOpen) send({ type: "refreshAuth" });
   }, [configOpen, send]);
 
+  // P1-3: screen-reader status announcements. The aria-live region re-announces
+  // only when this string changes, so idle re-renders stay silent.
+  // NOTE: must stay ABOVE the splash early-return below — a hook after that
+  // return would change the hook count between the first render (state null)
+  // and the snapshot render, which React rejects with error #310.
+  const liveMessage = useMemo(() => {
+    if (!state) return "";
+    if (state.pendingApproval) return t("需要审批工具调用");
+    if (state.pendingPlanExit) return t("需要确认退出计划模式");
+    if (state.pendingQuestions) return t("有待回答问题需要回答");
+    if (state.status === "connecting") return t("正在连接 iFlow…");
+    if (state.status === "streaming") return t("正在生成回复…");
+    if (state.status === "idle") {
+      if (state.errorMessage) return state.errorMessage;
+      if (state.stopReason === "cancelled") return t("已停止生成");
+      return t("已就绪");
+    }
+    return "";
+  }, [state?.status, state?.errorMessage, state?.stopReason, state?.pendingApproval, state?.pendingPlanExit, state?.pendingQuestions]);
+
   if (!state || state.status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
     return (
@@ -141,23 +161,6 @@ export function App() {
   const activeSession = state.sessions.find((s) => s.id === state.activeSessionId);
   const sessionLabel =
     activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
-
-  // P1-3: screen-reader status announcements. The aria-live region re-announces
-  // only when this string changes, so idle re-renders stay silent.
-  const liveMessage = useMemo(() => {
-    if (!state) return "";
-    if (state.pendingApproval) return t("需要审批工具调用");
-    if (state.pendingPlanExit) return t("需要确认退出计划模式");
-    if (state.pendingQuestions) return t("有待回答问题需要回答");
-    if (state.status === "connecting") return t("正在连接 iFlow…");
-    if (state.status === "streaming") return t("正在生成回复…");
-    if (state.status === "idle") {
-      if (state.errorMessage) return state.errorMessage;
-      if (state.stopReason === "cancelled") return t("已停止生成");
-      return t("已就绪");
-    }
-    return "";
-  }, [state?.status, state?.errorMessage, state?.stopReason, state?.pendingApproval, state?.pendingPlanExit, state?.pendingQuestions]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden text-foreground">
