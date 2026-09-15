@@ -806,7 +806,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       </div>
       {showJump && (
         <button
-          className="card-lift press absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
+          className="card-lift press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
           onClick={() => {
             stickToBottom.current = true;
             scrollToBottom(true);

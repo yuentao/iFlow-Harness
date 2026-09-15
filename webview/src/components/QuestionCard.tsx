@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { HelpCircle, Check } from "lucide-react";
 import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -70,6 +70,15 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
     send({ type: "answerQuestions", id: pending.id, answers: {} });
   };
 
+  // Mirror ApprovalCard (W4): keyboard users should land on the question's
+  // actions, not stay trapped in the Composer. Focus the first option button
+  // on mount; the card body may contain other buttons (custom-text toggles)
+  // that precede it, so scope to the actions row.
+  const actionsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, []);
+
   return (
     <div
       className="acrylic stream-in glow-ring card-lift mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
@@ -100,6 +109,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       key={opt.label}
                       disabled={answered}
                       title={opt.description}
+                      aria-label={opt.description ? t("{0}：{1}", opt.label, opt.description) : opt.label}
                       className={`press flex max-w-[260px] flex-col items-start gap-0.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                         active
                           ? "border-primary bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn"
@@ -126,6 +136,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       : "border-border bg-surface/80 text-muted-foreground shadow-card hover:text-foreground"
                   }`}
                   onClick={() => setCustomOpen((p) => ({ ...p, [q.header]: !p[q.header] }))}
+                  aria-label={t("填写自定义回答")}
                 >
                   {t("其他…")}
                 </button>
@@ -152,9 +163,10 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         })}
       </div>
       <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} />
-      <div className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
+      <div ref={actionsRef} role="group" aria-label={t("回答操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         <button
           disabled={answered}
+          aria-label={t("提交回答")}
           className="press flex items-center gap-1 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
           onClick={submit}
         >
@@ -163,6 +175,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         </button>
         <button
           disabled={answered}
+          aria-label={t("跳过提问")}
           className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={dismiss}
         >

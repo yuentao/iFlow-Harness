@@ -97,11 +97,12 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         )}
       </div>
       <CountdownBar deadline={approval.deadline} timeoutMs={approval.timeoutMs} />
-      <div ref={actionsRef} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
+      <div ref={actionsRef} role="group" aria-label={t("审批操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => (
           <button
             key={opt.optionId}
             disabled={answered}
+            aria-label={approval.toolName ? t("{0}（{1}）", opt.name, approval.toolName) : opt.name}
             className={`press rounded-lg px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
             onClick={() => answer(opt.optionId)}
           >
@@ -110,6 +111,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         ))}
         <button
           disabled={answered}
+          aria-label={t("取消审批")}
           className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(null)}
         >

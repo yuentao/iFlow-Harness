@@ -368,6 +368,29 @@
     transform 0.28s ease !important;
 }
 
+/* Subtle attention pulse for the "jump to latest" button when it appears
+   (user has scrolled up in a long session). Plays once on mount; reduced-motion
+   users skip it via the global `animation: none` rule above. */
+@keyframes jump-pulse {
+  0% {
+    box-shadow:
+      var(--shadow-card),
+      0 0 0 0 color-mix(in oklab, var(--primary) 45%, transparent);
+  }
+  70% {
+    box-shadow:
+      var(--shadow-card),
+      0 0 0 9px color-mix(in oklab, var(--primary) 0%, transparent);
+  }
+  100% {
+    box-shadow: var(--shadow-card);
+  }
+}
+
+.jump-pulse {
+  animation: jump-pulse 0.7s ease-out 1;
+}
+
 @utility aurora {
   background-image: var(--gradient-aurora);
 }
