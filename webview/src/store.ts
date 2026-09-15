@@ -836,6 +836,12 @@ interface ChatStore {
    * The Composer consumes it once and clears it back to null. */
   editDraft: string | null;
   setEditDraft: (text: string | null) => void;
+  /** True once the transcript is scrolled under the header (scrollTop above a
+   * threshold) — the header renders a bottom shadow only while it overlaps
+   * messages. Updated at the 0-crossing only, so scrolling doesn't re-render
+   * the header per pixel. */
+  headerScrolled: boolean;
+  setHeaderScrolled: (scrolled: boolean) => void;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
@@ -849,6 +855,8 @@ export const useChat = create<ChatStore>((set, get) => ({
   pending: null,
   promptSeq: 0,
   editDraft: null,
+  headerScrolled: false,
+  setHeaderScrolled: (scrolled) => set({ headerScrolled: scrolled }),
   toasts: [],
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,

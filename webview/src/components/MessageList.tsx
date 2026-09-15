@@ -570,6 +570,7 @@ const MOUNT_STEP = 60;
 
 function MessageListInner({ state }: { state: SessionState }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const setHeaderScrolled = useChat((s) => s.setHeaderScrolled);
   // Everything inside the scroller (blocks + streaming indicator) lives in
   // this wrapper so a ResizeObserver on it sees EVERY content-height change.
   const contentRef = useRef<HTMLDivElement>(null);
@@ -768,6 +769,10 @@ function MessageListInner({ state }: { state: SessionState }) {
       return;
     }
     programmaticTop.current = null;
+    // Header shadow gate: only when messages actually scroll under the top
+    // bar. setHeaderScrolled writes a boolean — zustand's Object.is compare
+    // makes repeated same-value sets free.
+    setHeaderScrolled(el.scrollTop > 4);
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = nearBottom;
     setShowJump(!nearBottom);

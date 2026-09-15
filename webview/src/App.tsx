@@ -88,6 +88,9 @@ export function App() {
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
+  // True once the transcript has scrolled under the header — drives the
+  // header's bottom shadow (no shadow while the top of the list is visible).
+  const headerScrolled = useChat((s) => s.headerScrolled);
   const editorTheme = useChat((s) => s.editorTheme);
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
@@ -179,8 +182,8 @@ export function App() {
       <div aria-live="polite" aria-atomic="true" className="sr-only">
         {liveMessage}
       </div>
-      {/* header */}
-      <header className="acrylic relative z-10 shrink-0 border-b border-border px-3 py-2.5">
+      {/* header — shadow appears only while messages scroll under it */}
+      <header className={`acrylic relative z-10 shrink-0 border-b border-border px-3 py-2.5${headerScrolled ? " header-scrolled" : ""}`}>
         <div className="flex items-center gap-2.5">
           <div className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/30 to-primary/10 shadow-btn ring-1 ring-primary/25">
             <img src={logo} alt="" className="size-[18px]" />

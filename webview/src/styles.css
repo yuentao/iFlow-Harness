@@ -126,6 +126,10 @@
      plus a broad soft drop so the input reads as the focal element. */
   --shadow-stage: 0 -2px 12px oklch(0.35 0.03 275 / 5%),
     0 8px 32px -12px oklch(0.35 0.03 275 / 18%);
+  /* Header mirror of --shadow-stage (flipped for the top edge): shown only
+     while the transcript scrolls under the bar. */
+  --shadow-stage-up: 0 2px 12px oklch(0.35 0.03 275 / 5%),
+    0 -8px 32px -12px oklch(0.35 0.03 275 / 18%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
 
   /* Motion: spring-like settle for enters, snappy for exits. */
@@ -226,6 +230,8 @@
   --shadow-btn-hover: 0 2px 8px oklch(0.1 0.02 285 / 55%), inset 0 1px 0 oklch(1 0 0 / 12%);
   --shadow-stage: 0 -2px 12px oklch(0.1 0.02 285 / 18%),
     0 8px 32px -12px oklch(0.1 0.02 285 / 45%);
+  --shadow-stage-up: 0 2px 12px oklch(0.1 0.02 285 / 18%),
+    0 -8px 32px -12px oklch(0.1 0.02 285 / 45%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 30%, transparent);
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
@@ -417,6 +423,16 @@
      a VSCode webview runs on — dropped that alias, which silently killed the
      blur. backdrop-filter itself is supported since Chromium 76. */
   backdrop-filter: blur(48px) saturate(1.8);
+}
+
+/* Header bottom shadow — shown only while the transcript is scrolled under
+   the top bar (MessageList sets the headerScrolled flag at the 0-crossing).
+   The transition lives on .acrylic elements so the shadow fades in/out. */
+header.acrylic {
+  transition: box-shadow 0.25s var(--ease-out-expo);
+}
+header.acrylic.header-scrolled {
+  box-shadow: var(--shadow-stage-up);
 }
 
 /* Popups (dropdown menus, auth modal) always nest INSIDE an ancestor that
@@ -981,7 +997,7 @@
   border-radius: 50%;
   /* Heavy blur turns the radial gradient into a soft glow with no hard edge. */
   filter: blur(72px);
-  opacity: 0.5;
+  opacity: 0.35;
   will-change: transform;
 }
 
