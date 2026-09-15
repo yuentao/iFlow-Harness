@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -6,6 +6,7 @@ import {
   Loader2,
   Moon,
   Plus,
+  Search,
   Settings2,
   Sun,
   Trash2,
@@ -70,6 +71,7 @@ export function App() {
   // a second click on 确认 actually sends deleteSession. Prevents accidental
   // loss of a persisted transcript (the host delete is irreversible).
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [sessionQuery, setSessionQuery] = useState("");
   // Theme priority: the user's explicit toggle wins (persisted); otherwise
   // follow the editor color theme pushed by the host; default light.
   const [manual, setManual] = useState<"light" | "dark" | null>(
@@ -125,8 +127,28 @@ export function App() {
   const sessionLabel =
     activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
 
+  // P1-3: screen-reader status announcements. The aria-live region re-announces
+  // only when this string changes, so idle re-renders stay silent.
+  const liveMessage = useMemo(() => {
+    if (!state) return "";
+    if (state.pendingApproval) return t("需要审批工具调用");
+    if (state.pendingQuestions) return t("有待回答问题需要回答");
+    if (state.status === "connecting") return t("正在连接 iFlow…");
+    if (state.status === "streaming") return t("正在生成回复…");
+    if (state.status === "idle") {
+      if (state.errorMessage) return state.errorMessage;
+      if (state.stopReason === "cancelled") return t("已停止生成");
+      return t("已就绪");
+    }
+    return "";
+  }, [state?.status, state?.errorMessage, state?.stopReason, state?.pendingApproval, state?.pendingQuestions]);
+
   return (
     <div className="flex h-screen flex-col overflow-hidden text-foreground">
+      {/* P1-3: visually-hidden live region for screen-reader status announcements */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {liveMessage}
+      </div>
       {/* header */}
       <header className="acrylic relative z-10 shrink-0 border-b border-border px-3 py-2.5">
         <div className="flex items-center gap-2.5">
@@ -258,6 +280,18 @@ export function App() {
                   <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                     {t("会话历史")}
                   </div>
+                  <div className="px-2 pb-1.5">
+                    <div className="flex items-center gap-1.5 rounded-lg border border-border bg-editor/60 px-2 py-1 transition-colors focus-within:border-primary/50">
+                      <Search className="size-3 shrink-0 text-muted-foreground" />
+                      <input
+                        autoFocus
+                        value={sessionQuery}
+                        onChange={(e) => setSessionQuery(e.target.value)}
+                        placeholder={t("搜索会话…")}
+                        className="w-full bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70"
+                      />
+                    </div>
+                  </div>
                   {state.activeSessionId &&
                     !state.sessions.some((s) => s.id === state.activeSessionId) && (
                       <button
@@ -268,7 +302,9 @@ export function App() {
                         {t("当前会话")}
                       </button>
                     )}
-                  {state.sessions.map((s) => {
+                  {state.sessions
+                    .filter((s) => s.label.toLowerCase().includes(sessionQuery.trim().toLowerCase()))
+                    .map((s) => {
                     const deletable = s.id !== state.activeSessionId && !locked;
                     return (
                       <div

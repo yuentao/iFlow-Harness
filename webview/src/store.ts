@@ -794,6 +794,10 @@ interface ChatStore {
    * position, which read as "image messages don't auto-scroll".
    */
   promptSeq: number;
+  /** Text to prefill into the composer for "edit & resend" of a user message.
+   * The Composer consumes it once and clears it back to null. */
+  editDraft: string | null;
+  setEditDraft: (text: string | null) => void;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
@@ -806,6 +810,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   editorTheme: null,
   pending: null,
   promptSeq: 0,
+  editDraft: null,
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
     // setDraft) are consumed by their own window-level listeners — Composer
@@ -891,6 +896,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       set({ pending: null });
     }, PENDING_TIMEOUT_MS);
   },
+  setEditDraft: (text: string | null) => set({ editDraft: text }),
   send: (msg) => {
     // Debounce: identical messages fired within the window (double-clicks on
     // send / revert / switch buttons) are dropped.

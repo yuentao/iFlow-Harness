@@ -426,7 +426,16 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
-      <div className="user-bubble relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
+      <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
+        {block.text.trim() && (
+          <button
+            className="card-lift press absolute right-1 top-1 z-10 rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground shadow-card opacity-0 transition-opacity duration-150 hover:bg-surface-2 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+            title={t("编辑并重发")}
+            onClick={() => useChat.getState().setEditDraft(block.text)}
+          >
+            <FilePen className="size-3" />
+          </button>
+        )}
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">

@@ -50,6 +50,8 @@ export function Composer() {
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
+  const editDraft = useChat((s) => s.editDraft);
+  const setEditDraft = useChat((s) => s.setEditDraft);
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
@@ -149,6 +151,21 @@ export function Composer() {
     return () => clearTimeout(timer);
   }, [mentionQuery]);
 
+  // P1-1: user-message "edit & resend" — load the draft text into the textarea
+  // and focus it, then clear so it isn't re-applied on the next render.
+  useEffect(() => {
+    if (editDraft === null) return;
+    setText(editDraft);
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+    });
+    setEditDraft(null);
+  }, [editDraft, setEditDraft]);
+
   // ESC 停止生成（与停止按钮同语义）：仅在真实生成中生效（回放/初始化除外）。
   // 弹窗内的 ESC（mention/斜杠补全在 textarea onKeyDown、Dropdown 在 document）
   // 都会 stopPropagation，事件只有未被拦截时才到达这里的 window 监听。
@@ -163,6 +180,22 @@ export function Composer() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [canStopForEsc]);
+
+  // P1-4: press "/" anywhere outside an input/textarea/contenteditable to jump
+  // focus into the composer. When the textarea is already focused the keystroke
+  // falls through to normal typing (slash-command prefix), so this only fires
+  // from elsewhere (body, header buttons).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      e.preventDefault();
+      taRef.current?.focus();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {

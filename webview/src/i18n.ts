@@ -137,6 +137,15 @@ const en: Record<string, string> = {
   "确认": "Confirm",
   "正在启动 iFlow CLI…（首次启动或配置了多个 MCP server 时较久）":
     "Starting iFlow CLI… (slower on first launch or with multiple MCP servers)",
+  // P1: edit & resend, session search, aria-live announcements
+  "编辑并重发": "Edit & resend",
+  "搜索会话…": "Search sessions…",
+  "需要审批工具调用": "Tool approval required",
+  "有待回答问题需要回答": "Question needs answering",
+  "正在连接 iFlow…": "Connecting to iFlow…",
+  "正在生成回复…": "Generating response…",
+  "已停止生成": "Generation stopped",
+  "已就绪": "Ready",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
