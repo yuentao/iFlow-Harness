@@ -12,6 +12,7 @@ import type {
   ToolCallStatus,
 } from "../src/acp/protocol.js";
 import { l10n } from "vscode";
+import { countTokens as gptCountTokens } from "gpt-tokenizer";
 import {
   initialSessionState,
   type Block,
@@ -605,15 +606,24 @@ export function beginUserPrompt(
   state.errorMessage = null;
 }
 
-/** Rough token estimate for a string. The host has no real tokenizer and the
- * CLI is frozen (reports no usage), so this blends a CJK-aware heuristic:
- * CJK / fullwidth / kana chars ≈ 1.5 tokens, other chars ≈ 0.25 tokens. Coarse
- * and stable — good enough for a "≈ tokens used" hint, not for billing. */
-export function estimateTokens(text: string): number {
-  if (!text) return 0;
+/** CJK-aware fallback used only if the real tokenizer fails to load. */
+function heuristicTokens(text: string): number {
   const cjk = (text.match(/[　-鿿぀-ヿ＀-￯]/g) ?? []).length;
   const other = text.length - cjk;
   return Math.ceil(cjk * 1.5 + other * 0.25);
+}
+
+/** Token count for a string using a real BPE tokenizer (gpt-tokenizer,
+ * o200k_base). Falls back to a CJK-aware heuristic if the library is unavailable.
+ * The CLI is frozen and reports no usage, so the host estimates consumption from
+ * the transcript itself. */
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  try {
+    return gptCountTokens(text);
+  } catch {
+    return heuristicTokens(text);
+  }
 }
 
 /** Flatten a block's human-readable text for token estimation. Compression
