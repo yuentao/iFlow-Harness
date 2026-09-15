@@ -262,6 +262,10 @@ export class NdjsonParser {
       this.consumedOffset = nlOff + 1;
       lineStartCi = nlCi;
       lineStartOff = nlOff + 1;
+      // Advance the scan cursor past the newline — without this the next
+      // outer iteration re-finds the SAME newline from the stale `off` and
+      // loops forever on one line.
+      off = nlOff + 1;
       if (line.length === 0) continue;
       try {
         this.onMessage(JSON.parse(line));

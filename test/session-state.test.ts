@@ -550,7 +550,7 @@ describe("markToolReverted (M2)", () => {
         content: [{ type: "diff", path: "a.ts", oldText: "old", newText: "new" }],
       }),
     );
-    expect(markToolReverted(state, "t1")).toBe(true);
+    expect(markToolReverted(state, "t1")).toBe(0);
     const tool = state.blocks[0]!;
     // C4: the tool SUCCEEDED — its change was undone. `reverted` is the
     // marker; `status` stays "completed" so it never reads as a failure in
@@ -574,7 +574,7 @@ describe("markToolReverted (M2)", () => {
         content: [{ type: "diff", path: "a.ts", oldText: "old", newText: "new" }],
       }),
     );
-    expect(markToolReverted(state, "t1")).toBe(true);
+    expect(markToolReverted(state, "t1")).toBe(0);
     applySessionUpdate(
       state,
       notify({
@@ -591,9 +591,9 @@ describe("markToolReverted (M2)", () => {
     expect(tool.kind === "tool" && tool.diff?.newText).toBe("newer");
   });
 
-  it("returns false for unknown toolCallId", () => {
+  it("returns null for unknown toolCallId", () => {
     const state = initialSessionState();
-    expect(markToolReverted(state, "nope")).toBe(false);
+    expect(markToolReverted(state, "nope")).toBeNull();
   });
 });
 
@@ -820,21 +820,34 @@ describe("tool output truncation (P0-2)", () => {
 });
 
 describe("block token cache (P1 incremental usage)", () => {
-  it("caches tokens at turn end and reuses them on the next turn", () => {
+  it("caches tokens at turn end; streaming growth invalidates and re-tokenizes once", () => {
     const state = initialSessionState();
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第一轮回答" } }));
     completePrompt(state, "end_of_turn");
-    const usage1 = state.usage!;
     const text1 = state.blocks[0]!;
     expect(text1.tokens).toBeGreaterThan(0);
 
-    // Second turn appends new content — cached blocks are NOT re-tokenized.
+    // Second turn appends to the SAME text block (streaming growth) — the
+    // cache is invalidated and recomputed exactly once at turn end.
     countTokensMock.mockClear();
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第二轮回答" } }));
     completePrompt(state, "end_of_turn");
-    // Only the NEW block was tokenized (1 tokenize call for the new block).
+    expect(countTokensMock).toHaveBeenCalledTimes(1); // one recount, not per-chunk
+    expect(state.blocks[0]!.tokens).toBeGreaterThan(0);
+  });
+
+  it("reuses the cache across turns for blocks whose content stopped growing", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "稳定块" } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "ls", title: "", kind: "read", status: "pending" }));
+    completePrompt(state, "end_of_turn");
+    // All blocks now have caches (turn end established them).
+    countTokensMock.mockClear();
+    // Next turn: new user prompt (a fresh block — tokenized once).
+    beginUserPrompt(state, "新问题");
+    completePrompt(state, "end_of_turn");
+    // Only the NEW user block was tokenized; the stable text and tool blocks reused caches.
     expect(countTokensMock).toHaveBeenCalledTimes(1);
-    expect(state.usage!.totalTokens).toBe(usage1.totalTokens + state.blocks[1]!.tokens!);
   });
 
   it("invalidates a tool block's cache when the reducer updates its content", () => {

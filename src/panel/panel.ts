@@ -164,6 +164,13 @@ export class ChatPanel implements vscode.Disposable {
     { resolve: (response: ExitPlanModeResponse) => void; timer: NodeJS.Timeout }
   >();
   private planExitSeq = 0;
+  /**
+   * Mode to return to after a Plan exit is approved. The CLI does NOT switch
+   * modes itself when `_iflow/plan/exit` is approved (verified 2026-09: agent
+   * stays in plan mode), so the client must issue `session/set_mode` after
+   * approval. Captured in setMode() right before switching INTO a plan mode.
+   */
+  private planReturnModeId: string | null = null;
   /** Awaiting user answers for `_iflow/user/questions`, keyed by card id. */
   private readonly pendingQuestions = new Map<
     string,
@@ -796,6 +803,15 @@ export class ChatPanel implements vscode.Disposable {
     clearTimeout(pending.timer);
     this.store.clearPlanExit(id);
     this.store.planExitResolutionNote(approved ? vscode.l10n.t("已批准计划") : reason ?? vscode.l10n.t("已拒绝计划"));
+    // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
+    // its own after `_iflow/plan/exit` resolves — switch back explicitly on
+    // BOTH approval and rejection (rejection must not strand the session in
+    // plan mode either; the agent continues in the returned mode).
+    const modes = this.store.getState().modes;
+    const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
+    const target = this.planReturnModeId ?? fallback ?? "smart";
+    this.planReturnModeId = null;
+    void this.setMode(target).catch(() => undefined);
     pending.resolve({
       approved,
       reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),
@@ -2071,6 +2087,17 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     try {
+      // Capture the mode we're leaving so plan approval can switch back to it.
+      const modesBefore = this.store.getState().modes;
+      if (modesBefore) {
+        if (modesBefore.currentModeId === modeId) {
+          // no-op switch; keep existing memo
+        } else if (modesBefore.availableModes.find((m) => m.id === modeId)?.kind === "plan") {
+          this.planReturnModeId = modesBefore.currentModeId;
+        } else {
+          this.planReturnModeId = null;
+        }
+      }
       const resp = (await this.client?.setMode(sessionId, modeId)) as
         | { success?: boolean; currentModeId?: string }
         | undefined;

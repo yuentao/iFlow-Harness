@@ -85,7 +85,7 @@ describe("SessionStore snapshot paths (P-1)", () => {
     expect("blocks" in patch.tail).toBe(false);
   });
 
-  it("coalesced append: tail range covers the old tail plus new blocks", () => {
+  it("coalesced append: tail range starts at the first mutated block", () => {
     const { store, messages } = makeStore();
     store.markConnected();
     store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第一段" } }));
@@ -98,8 +98,10 @@ describe("SessionStore snapshot paths (P-1)", () => {
     const patch = messages[2];
     expect(patch?.type).toBe("blockPatch");
     if (patch?.type !== "blockPatch") throw new Error("unreachable");
-    expect(patch.tailStart).toBe(0);
-    expect(patch.blocks.map((b) => b.kind)).toEqual(["text", "tool"]);
+    // P0-1: the appended tool block's index (1) is the first mutation — the
+    // unchanged text prefix is NOT re-sent.
+    expect(patch.tailStart).toBe(1);
+    expect(patch.blocks.map((b) => b.kind)).toEqual(["tool"]);
   });
 
   it("metadata-only change pushes a patch with an empty block range", () => {
@@ -140,13 +142,14 @@ describe("SessionStore snapshot paths (P-1)", () => {
     store.markConnected();
     store.userPrompt("问题");
     store.getState().blocks.push(toolBlock("t1", "部分"));
-    store.toolReverted("t1"); // tail block, fp changes
+    store.toolReverted("t1"); // tail block, reported index 1
     store.pushSnapshot();
     const patch = messages[2];
     expect(patch?.type).toBe("blockPatch");
     if (patch?.type !== "blockPatch") throw new Error("unreachable");
-    expect(patch.blocks).toHaveLength(2);
-    const tail = patch.blocks[1]!;
+    expect(patch.tailStart).toBe(1);
+    expect(patch.blocks).toHaveLength(1);
+    const tail = patch.blocks[0]!;
     expect(tail.kind === "tool" && tail.output).toContain("已回退");
   });
 

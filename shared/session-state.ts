@@ -46,12 +46,15 @@ function lastBlock(blocks: Block[]): Block | undefined {
 
 /** Append `text` to the last block when it has the same kind, else push a new
  * block. Returns the index of the mutated/appended block (P-1 change
- * reporting), or undefined when nothing changed (empty text). */
+ * reporting), or undefined when nothing changed (empty text). A streaming
+ * append INVALIDATES the target block's token cache (P1): the text grew, so
+ * the next turn end re-tokenizes it — once, not per chunk. */
 function appendTextToLast(blocks: Block[], kind: "text" | "thought" | "user", text: string): number | undefined {
   if (!text) return undefined;
   const last = lastBlock(blocks);
   if (last && last.kind === kind) {
     last.text += text;
+    last.tokens = undefined;
     return blocks.length - 1;
   }
   blocks.push({ kind, text, id: nextBlockId() } as Block);
