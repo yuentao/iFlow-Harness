@@ -59,6 +59,17 @@ export function Markdown({ text }: { text: string }) {
       pre.parentNode?.insertBefore(wrap, pre);
       wrap.appendChild(pre);
 
+      // Language label from marked's `language-xxx` class on the <code>.
+      const code = pre.querySelector("code");
+      const lang = code?.className.match(/language-([\w+-]+)/)?.[1];
+      if (lang) {
+        const label = document.createElement("span");
+        label.className = "code-lang";
+        label.textContent = lang;
+        wrap.appendChild(label);
+        wrap.classList.add("has-lang");
+      }
+
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "copy-btn";

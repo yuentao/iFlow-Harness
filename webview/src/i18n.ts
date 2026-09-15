@@ -125,6 +125,9 @@ const en: Record<string, string> = {
   "下发任务、粘贴代码上下文,或直接描述你想实现的功能":
     "Assign tasks, paste code context, or just describe what you want to build",
   "回到最新": "Jump to latest",
+  "展开上下文": "Expand context",
+  "拖放文件以添加附件": "Drop files to attach",
+  "拖拽调整高度": "Drag to resize",
   "展开更早 {0} 条消息": "Show {0} earlier messages",
   "上下文摘要": "Context summary",
   "diff": "diff",

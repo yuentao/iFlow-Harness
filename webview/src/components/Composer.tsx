@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
   Check,
   ChevronDown,
@@ -64,6 +64,64 @@ export function Composer() {
   const stageSeq = useRef(0);
   const attachSeq = useRef(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // Drag-and-drop file attachment: dropping files/photos from the OS or editor
+  // onto the composer routes them through the same staging paths as paste. The
+  // `dragover` preventDefault is what lets the webview receive the drop
+  // instead of VSCode opening the file in an editor.
+  const [dragOver, setDragOver] = useState(false);
+  const onDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setDragOver(true);
+  };
+  const onDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+  };
+  const onDrop = (e: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length === 0) return;
+    const imgs = files.filter(isImageFile);
+    const others = files.filter((f) => !isImageFile(f));
+    if (imgs.length > 0) addImages(imgs);
+    if (others.length > 0) addOtherFiles(others);
+  };
+
+  // Drag the top edge to resize the composer height. The handle writes an
+  // explicit pixel height; the textarea area (flex-1) fills the remaining
+  // space, so the input grows/shrinks with the drag.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number | null>(null);
+  const resizing = useRef(false);
+  const startY = useRef(0);
+  const startH = useRef(0);
+  const onResizeMove = (e: MouseEvent) => {
+    if (!resizing.current) return;
+    const delta = startY.current - e.clientY; // drag up → taller
+    setHeight(Math.min(480, Math.max(110, startH.current + delta)));
+  };
+  const stopResize = () => {
+    if (!resizing.current) return;
+    resizing.current = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    window.removeEventListener("mousemove", onResizeMove);
+    window.removeEventListener("mouseup", stopResize);
+  };
+  const startResize = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    resizing.current = true;
+    startY.current = e.clientY;
+    startH.current = rootRef.current?.offsetHeight ?? 160;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onResizeMove);
+    window.addEventListener("mouseup", stopResize);
+  };
 
   // --- @-mention file search (M5) ---
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -367,7 +425,27 @@ export function Composer() {
   const CANVAS_BTN =
     "card-lift press inline-flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
   return (
-    <div className="acrylic relative shrink-0 border-t border-border px-2.5 pb-2.5 pt-2" style={{ boxShadow: "var(--shadow-stage)" }}>
+    <div
+      ref={rootRef}
+      className={`acrylic relative flex flex-col shrink-0 border-t px-2.5 pb-2.5 pt-2 transition-colors ${
+        dragOver ? "border-primary/60 bg-primary/5" : "border-border"
+      }`}
+      style={{ height: height ?? undefined, boxShadow: "var(--shadow-stage)" }}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {/* Top-edge drag handle to resize the composer height. */}
+      <div
+        className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize hover:bg-primary/30"
+        title={t("拖拽调整高度")}
+        onMouseDown={startResize}
+      />
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-primary/5 text-[12px] font-medium text-primary">
+          {t("拖放文件以添加附件")}
+        </div>
+      )}
       {/* non-image attachment chips + rejected-file note */}
       {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1.5">
