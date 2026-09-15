@@ -204,6 +204,48 @@ describe("NdjsonParser", () => {
     parser.feed(`${big}\n{"b":2}\n`);
     expect(messages).toEqual([JSON.parse(big), { b: 2 }]);
   });
+
+  // P1: a large frame split into many network chunks (no newline within any
+  // chunk) must produce one intact message — the chunk-array buffer appends
+  // each piece O(1) and joins only at line parse time (the old single-string
+  // buffer re-copied the accumulated half-frame on every chunk).
+  it("reassembles a large frame split across many chunks without newline separators", () => {
+    const messages: unknown[] = [];
+    const parser = new NdjsonParser((v) => messages.push(v));
+    const payload = { text: "z".repeat(64 * 1024) };
+    const frame = JSON.stringify(payload) + "\n";
+    const CHUNK = 1024;
+    for (let i = 0; i < frame.length; i += CHUNK) {
+      parser.feed(frame.substring(i, i + CHUNK));
+    }
+    expect(messages).toEqual([payload]);
+  });
+
+  it("keeps message order and content when a frame straddles a complete line boundary", () => {
+    const messages: unknown[] = [];
+    const parser = new NdjsonParser((v) => messages.push(v));
+    parser.feed('{"a":1}\n{"b":');
+    parser.feed('2}\n{"c":');
+    parser.feed('3}\n');
+    expect(messages).toEqual([{ a: 1 }, { b: 2 }, { c: 3 }]);
+  });
+
+  it("recovers parsing after an oversized frame split across chunks", () => {
+    const messages: unknown[] = [];
+    const errors: string[] = [];
+    const parser = new NdjsonParser(
+      (v) => messages.push(v),
+      (e) => errors.push(e.message),
+    );
+    const CHUNK = 64 * 1024;
+    for (let i = 0; i < 8 * 1024 * 1024 + 1; i += CHUNK) {
+      parser.feed("x".repeat(Math.min(CHUNK, 8 * 1024 * 1024 + 1 - i)));
+    }
+    expect(messages).toEqual([]);
+    expect(errors).toHaveLength(1);
+    parser.feed('{"a":1}\n');
+    expect(messages).toEqual([{ a: 1 }]);
+  });
 });
 
 describe("JsonRpcPeer", () => {

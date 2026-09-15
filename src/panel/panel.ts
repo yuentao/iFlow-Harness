@@ -278,7 +278,7 @@ export class ChatPanel implements vscode.Disposable {
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
     try {
-      await this.persistActiveTranscript();
+      await this.persistActiveTranscript(true);
     } catch {
       // best-effort; teardown must proceed even if the write failed
     }
@@ -1755,7 +1755,7 @@ export class ChatPanel implements vscode.Disposable {
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.cleanupEmptySession(outgoingId);
       await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
-      void this.persistActiveTranscript(); // seed the extension-owned copy
+      void this.persistActiveTranscript(true); // seed the extension-owned copy
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
     } catch (error) {
@@ -2177,9 +2177,13 @@ export class ChatPanel implements vscode.Disposable {
    * Queue a transcript file write on the persist chain: overlapping persists
    * (e.g. prompt-start seeding and the previous prompt's completion) run
    * back-to-back instead of interleaving inside one file's write sequence.
+   * The payload factory runs on the chain (after a setImmediate yield), so
+   * the synchronous JSON.stringify no longer sits on the event path (P1).
    */
-  private enqueueTranscriptWrite(sessionId: string, payload: string): Promise<void> {
-    const run = this.persistChain.then(() => this.writeTranscriptFile(sessionId, payload));
+  private enqueueTranscriptWrite(sessionId: string, payloadFactory: () => string): Promise<void> {
+    const run = this.persistChain
+      .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
+      .then(() => this.writeTranscriptFile(sessionId, payloadFactory()));
     this.persistChain = run.catch(() => {});
     return run;
   }
@@ -2270,7 +2274,7 @@ export class ChatPanel implements vscode.Disposable {
       if (!transcript || !Array.isArray(transcript.blocks) || transcript.blocks.length === 0) continue;
       await this.enqueueTranscriptWrite(
         sessionId,
-        this.serializeTranscript(transcript.label ?? DEFAULT_SESSION_LABEL, transcript.blocks),
+        () => this.serializeTranscript(transcript.label ?? DEFAULT_SESSION_LABEL, transcript.blocks),
       );
     }
     await this.context.workspaceState.update(TRANSCRIPTS_KEY, undefined);
@@ -2737,18 +2741,54 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * Snapshot the active session's transcript into the extension-owned file
-   * store (M4). P2: the payload is serialized once, synchronously, at call
-   * time and written as this session's own file on the persist chain — the
-   * old workspaceState map made each persist a read-all + clone + write-all
-   * of every session.
+   * store (M4). P2: the payload is written as this session's own file on the
+   * persist chain — the old workspaceState map made each persist a read-all +
+   * clone + write-all of every session.
+   * P1 debounce: 11 call sites used to stringify the whole transcript
+   * synchronously per event (a long session = several MB per stringify on
+   * the host's event loop). Now the stringify is coalesced: one run per
+   * PERSIST_DEBOUNCE_MS window (dirty flag), executed on the persist chain
+   * after a setImmediate yield. `force: true` bypasses the debounce for
+   * must-not-lose moments (restore seeding, pre-dispose flush).
    */
-  private persistActiveTranscript(): Promise<void> {
+  private persistTimer: NodeJS.Timeout | null = null;
+  private persistDirty = false;
+  private static readonly PERSIST_DEBOUNCE_MS = 500;
+
+  private persistActiveTranscript(force = false): Promise<void> {
     const state = this.store.getState();
     const id = state.activeSessionId ?? state.sessionId;
     if (!id || state.blocks.length === 0) return Promise.resolve();
+    if (force) {
+      // Cancel any pending debounced run — this forced write supersedes it.
+      if (this.persistTimer) {
+        clearTimeout(this.persistTimer);
+        this.persistTimer = null;
+      }
+      this.persistDirty = false;
+      const label = state.sessions.find((s) => s.id === id)?.label ?? DEFAULT_SESSION_LABEL;
+      return this.enqueueTranscriptWrite(id, () =>
+        this.serializeTranscript(label, this.store.getState().blocks),
+      );
+    }
+    this.persistDirty = true;
+    if (this.persistTimer) return this.persistChain;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      if (!this.persistDirty) return;
+      this.persistDirty = false;
+      void this.flushDirtyTranscript();
+    }, ChatPanel.PERSIST_DEBOUNCE_MS);
+    return this.persistChain;
+  }
+
+  /** Debounced flush: serialize + enqueue on the persist chain. */
+  private flushDirtyTranscript(): void {
+    const state = this.store.getState();
+    const id = state.activeSessionId ?? state.sessionId;
+    if (!id || state.blocks.length === 0) return;
     const label = state.sessions.find((s) => s.id === id)?.label ?? DEFAULT_SESSION_LABEL;
-    const payload = this.serializeTranscript(label, state.blocks);
-    return this.enqueueTranscriptWrite(id, payload);
+    this.enqueueTranscriptWrite(id, () => this.serializeTranscript(label, state.blocks));
   }
 
   /**

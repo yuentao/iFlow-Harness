@@ -763,3 +763,101 @@ describe("estimateTokens", () => {
     expect(got).toBe(Math.ceil(cjk * 1.5 + other * 0.25));
   });
 });
+
+describe("tool output truncation (P0-2)", () => {
+  it("caps output at MAX_TOOL_OUTPUT_CHARS and records truncatedChars", () => {
+    const state = initialSessionState();
+    const big = "y".repeat(64 * 1024 + 100);
+    applySessionUpdate(state, notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      toolName: "read_file",
+      title: "",
+      kind: "read",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: big } }],
+    }));
+    const tool = state.blocks[0]!;
+    if (tool.kind !== "tool") throw new Error("expected tool block");
+    expect(tool.output.length).toBe(64 * 1024);
+    expect(tool.truncatedChars).toBe(100);
+  });
+
+  it("does not truncate output below the cap (truncatedChars absent)", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      toolName: "read_file",
+      title: "",
+      kind: "read",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "short" } }],
+    }));
+    const tool = state.blocks[0]!;
+    if (tool.kind !== "tool") throw new Error("expected tool block");
+    expect(tool.output).toBe("short");
+    expect(tool.truncatedChars).toBeUndefined();
+  });
+
+  it("does NOT truncate diff newText (revert matches disk content verbatim)", () => {
+    const state = initialSessionState();
+    const bigNew = "z".repeat(64 * 1024 + 500);
+    applySessionUpdate(state, notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      toolName: "edit",
+      title: "",
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: "a.txt", oldText: "old", newText: bigNew }],
+    }));
+    const tool = state.blocks[0]!;
+    if (tool.kind !== "tool") throw new Error("expected tool block");
+    expect(tool.diff?.newText).toBe(bigNew); // intact
+    expect(tool.truncatedChars).toBeUndefined();
+  });
+});
+
+describe("block token cache (P1 incremental usage)", () => {
+  it("caches tokens at turn end and reuses them on the next turn", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第一轮回答" } }));
+    completePrompt(state, "end_of_turn");
+    const usage1 = state.usage!;
+    const text1 = state.blocks[0]!;
+    expect(text1.tokens).toBeGreaterThan(0);
+
+    // Second turn appends new content — cached blocks are NOT re-tokenized.
+    countTokensMock.mockClear();
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第二轮回答" } }));
+    completePrompt(state, "end_of_turn");
+    // Only the NEW block was tokenized (1 tokenize call for the new block).
+    expect(countTokensMock).toHaveBeenCalledTimes(1);
+    expect(state.usage!.totalTokens).toBe(usage1.totalTokens + state.blocks[1]!.tokens!);
+  });
+
+  it("invalidates a tool block's cache when the reducer updates its content", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "ls", title: "", kind: "read", status: "pending" }));
+    completePrompt(state, "end_of_turn");
+    const before = state.blocks[0]!.tokens!;
+
+    // The tool completes with output — the cache must be recomputed, not reused.
+    countTokensMock.mockClear();
+    applySessionUpdate(state, notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      toolName: "ls",
+      title: "",
+      kind: "read",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "新的输出内容" } }],
+    }));
+    const tool = state.blocks[0]!;
+    if (tool.kind !== "tool") throw new Error("expected tool block");
+    expect(tool.tokens).not.toBe(before);
+    // The update itself consumed one tokenize call (recount at mutation time).
+    expect(countTokensMock).toHaveBeenCalledTimes(1);
+  });
+});

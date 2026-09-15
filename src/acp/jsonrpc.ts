@@ -206,7 +206,18 @@ export class NdjsonParser {
   /** Prefix length kept when an oversized partial frame is discarded. */
   private static readonly ERROR_SAMPLE_BYTES = 200;
 
-  private buffer = "";
+  /**
+   * Pending partial frame as a chunk list (P1): a single-string buffer
+   * re-copied the accumulated half-frame on EVERY arriving chunk — for a
+   * large frame split into N network chunks that is O(frame × N) copying
+   * (an 8MB frame over 64KB chunks ≈ hundreds of MB of copies). Chunks
+   * append O(1); only complete lines are joined, and only the chunks a line
+   * spans. `consumed`/`consumedOffset` mark the first unconsumed byte.
+   */
+  private chunks: string[] = [];
+  private consumed = 0;
+  private consumedOffset = 0;
+  private bufferedBytes = 0;
 
   constructor(
     private readonly onMessage: (value: unknown) => void,
@@ -214,15 +225,43 @@ export class NdjsonParser {
   ) {}
 
   feed(chunk: string): void {
-    this.buffer += chunk;
-    let start = 0;
-    // Single scan for all complete lines in this chunk; each line is copied
-    // exactly once via substring (no repeated buffer slicing).
+    this.chunks.push(chunk);
+    this.bufferedBytes += chunk.length;
+    // Scan for complete lines starting at the consumed position. Each line
+    // is built exactly once from the chunks it spans (a small join — not the
+    // whole remainder).
+    let ci = this.consumed;
+    let off = this.consumedOffset;
+    let lineStartCi = ci;
+    let lineStartOff = off;
     for (;;) {
-      const newlineIdx = this.buffer.indexOf("\n", start);
-      if (newlineIdx < 0) break;
-      const line = this.buffer.substring(start, newlineIdx).replace(/\r$/, "").trim();
-      start = newlineIdx + 1;
+      let nlCi = -1;
+      let nlOff = -1;
+      while (ci < this.chunks.length) {
+        const idx = this.chunks[ci]!.indexOf("\n", off);
+        if (idx >= 0) {
+          nlCi = ci;
+          nlOff = idx;
+          break;
+        }
+        ci++;
+        off = 0;
+      }
+      if (nlCi < 0) break; // no more complete lines in the pending chunks
+      let line: string;
+      if (nlCi === lineStartCi) {
+        line = this.chunks[nlCi]!.substring(lineStartOff, nlOff);
+      } else {
+        const parts = [this.chunks[lineStartCi]!.substring(lineStartOff)];
+        for (let k = lineStartCi + 1; k < nlCi; k++) parts.push(this.chunks[k]!);
+        parts.push(this.chunks[nlCi]!.substring(0, nlOff));
+        line = parts.join("");
+      }
+      line = line.replace(/\r$/, "").trim();
+      this.consumed = nlCi;
+      this.consumedOffset = nlOff + 1;
+      lineStartCi = nlCi;
+      lineStartOff = nlOff + 1;
       if (line.length === 0) continue;
       try {
         this.onMessage(JSON.parse(line));
@@ -230,20 +269,39 @@ export class NdjsonParser {
         this.onError?.(error as Error, line);
       }
     }
-    if (start > 0) {
-      this.buffer = this.buffer.substring(start);
+    // Compact: drop fully consumed head chunks (amortized O(1) per feed).
+    if (this.consumed > 0) {
+      this.chunks = this.chunks.slice(this.consumed);
+      this.consumed = 0;
+      this.bufferedBytes = 0;
+      for (let k = 0; k < this.chunks.length; k++) {
+        this.bufferedBytes += this.chunks[k]!.length - (k === 0 ? this.consumedOffset : 0);
+      }
     }
     // Oversized partial frame: no newline anywhere in the buffer. Drop it —
     // an 8MB+ line cannot be a valid JSON-RPC message, and keeping it would
     // let a misbehaving CLI pin the host's memory.
-    if (this.buffer.length > NdjsonParser.MAX_BUFFER_BYTES) {
-      const sample = this.buffer.substring(0, NdjsonParser.ERROR_SAMPLE_BYTES);
-      this.buffer = "";
+    if (this.bufferedBytes > NdjsonParser.MAX_BUFFER_BYTES) {
+      const sample = this.pendingSample();
+      this.chunks = [];
+      this.consumed = 0;
+      this.consumedOffset = 0;
+      this.bufferedBytes = 0;
       this.onError?.(
         new Error(`ndjson frame exceeds ${NdjsonParser.MAX_BUFFER_BYTES} bytes — dropped`),
         sample,
       );
     }
+  }
+
+  /** First ERROR_SAMPLE_BYTES chars of the pending frame (for error reports). */
+  private pendingSample(): string {
+    let sample = "";
+    for (let k = 0; k < this.chunks.length && sample.length < NdjsonParser.ERROR_SAMPLE_BYTES; k++) {
+      const from = k === 0 ? this.consumedOffset : 0;
+      sample += this.chunks[k]!.substring(from);
+    }
+    return sample.substring(0, NdjsonParser.ERROR_SAMPLE_BYTES);
   }
 }
 

@@ -75,8 +75,28 @@ function formatSessionTime(ts: number): string {
 const BTN_ICON =
   "rounded-md p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40";
 
+/** Stable empty fallbacks — a fresh `[]` per selector call would re-render on
+ * every store change (zustand compares with Object.is). */
+const EMPTY_SESSIONS: SessionSummaryUi[] = [];
+
 export function App() {
-  const state = useChat((s) => s.state);
+  // P2-1 selector split: App previously subscribed to the whole state object,
+  // re-rendering the header + dropdowns + cards on every blockPatch (up to
+  // 12.5/s while streaming). Each field below is a primitive or a reference
+  // carried over by the patch's metadata spread — only MessageList (which
+  // subscribes to `state` itself) re-renders while blocks stream.
+  const status = useChat((s) => s.state?.status ?? null);
+  const errorMessage = useChat((s) => s.state?.errorMessage ?? null);
+  const stopReason = useChat((s) => s.state?.stopReason ?? null);
+  const auth = useChat((s) => s.state?.auth ?? null);
+  const sessions = useChat((s) => s.state?.sessions ?? EMPTY_SESSIONS);
+  const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
+  const usage = useChat((s) => s.state?.usage ?? null);
+  const replaying = useChat((s) => s.state?.replaying ?? false);
+  const initializing = useChat((s) => s.state?.initializing ?? false);
+  const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
+  const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
+  const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   const editorTheme = useChat((s) => s.editorTheme);
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
@@ -121,21 +141,21 @@ export function App() {
   // return would change the hook count between the first render (state null)
   // and the snapshot render, which React rejects with error #310.
   const liveMessage = useMemo(() => {
-    if (!state) return "";
-    if (state.pendingApproval) return t("需要审批工具调用");
-    if (state.pendingPlanExit) return t("需要确认退出计划模式");
-    if (state.pendingQuestions) return t("有待回答问题需要回答");
-    if (state.status === "connecting") return t("正在连接 iFlow…");
-    if (state.status === "streaming") return t("正在生成回复…");
-    if (state.status === "idle") {
-      if (state.errorMessage) return state.errorMessage;
-      if (state.stopReason === "cancelled") return t("已停止生成");
+    if (status === null) return "";
+    if (pendingApproval) return t("需要审批工具调用");
+    if (pendingPlanExit) return t("需要确认退出计划模式");
+    if (pendingQuestions) return t("有待回答问题需要回答");
+    if (status === "connecting") return t("正在连接 iFlow…");
+    if (status === "streaming") return t("正在生成回复…");
+    if (status === "idle") {
+      if (errorMessage) return errorMessage;
+      if (stopReason === "cancelled") return t("已停止生成");
       return t("已就绪");
     }
     return "";
-  }, [state?.status, state?.errorMessage, state?.stopReason, state?.pendingApproval, state?.pendingPlanExit, state?.pendingQuestions]);
+  }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions]);
 
-  if (!state || state.status === "connecting") {
+  if (status === null || status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
     return (
       <div className="splash">
@@ -150,17 +170,17 @@ export function App() {
     );
   }
 
-  const showAuthCard = state.auth.needsSetup || configOpen;
+  const showAuthCard = (auth?.needsSetup ?? false) || configOpen;
   // While the agent is streaming (or an approval blocks it), or while a new
   // session / history restore is initializing, switching the session / mode /
   // model / profile would desync the in-flight ACP request.
-  const busy = state.status === "streaming" || state.replaying || state.initializing;
+  const busy = status === "streaming" || replaying || initializing;
   // A profile switch is in flight (optimistic lock): disable every switcher.
   const switching = pending !== null;
   const locked = busy || switching;
-  const activeSession = state.sessions.find((s) => s.id === state.activeSessionId);
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
   const sessionLabel =
-    activeSession?.label ?? (state.activeSessionId ? t("当前会话") : t("会话历史"));
+    activeSession?.label ?? (activeSessionId ? t("当前会话") : t("会话历史"));
 
   return (
     <div className="flex h-screen flex-col overflow-hidden text-foreground">
@@ -214,7 +234,7 @@ export function App() {
               }}
               trigger={(open) => (
                 <button
-                  className={`${BTN_ICON}${state.auth.authenticated ? "" : " text-warning"}`}
+                  className={`${BTN_ICON}${auth?.authenticated ? "" : " text-warning"}`}
                   title={t("API 凭据配置")}
                   aria-label={t("API 凭据配置")}
                   disabled={locked}
@@ -225,12 +245,12 @@ export function App() {
             >
               {(close) => (
                 <>
-                  {state.auth.profiles.length > 0 && (
+                  {(auth?.profiles.length ?? 0) > 0 && (
                     <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                       {t("API 配置")}
                     </div>
                   )}
-                  {state.auth.profiles.map((p) => (
+                  {(auth?.profiles ?? []).map((p) => (
                     <button
                       key={p.name}
                       role="menuitem"
@@ -275,7 +295,7 @@ export function App() {
             labels). */}
         <div className="mt-2 flex min-w-0 items-center gap-1.5">
           {/* session switcher */}
-          {state.sessions.length > 0 ? (
+          {sessions.length > 0 ? (
             <Dropdown
               menuClass="w-72 max-h-64 overflow-y-auto"
               wrapperClass="min-w-0 flex-1"
@@ -311,8 +331,8 @@ export function App() {
                       />
                     </div>
                   </div>
-                  {state.activeSessionId &&
-                    !state.sessions.some((s) => s.id === state.activeSessionId) && (
+                  {activeSessionId &&
+                    !sessions.some((s) => s.id === activeSessionId) && (
                       <button
                         role="menuitem"
                         onClick={close}
@@ -321,10 +341,10 @@ export function App() {
                         {t("当前会话")}
                       </button>
                     )}
-                  {state.sessions
+                  {sessions
                     .filter((s) => s.label.toLowerCase().includes(sessionQuery.trim().toLowerCase()))
                     .map((s) => {
-                    const deletable = s.id !== state.activeSessionId && !locked;
+                    const deletable = s.id !== activeSessionId && !locked;
                     return (
                       <div
                         key={s.id}
@@ -339,7 +359,7 @@ export function App() {
                         >
                           <span className="flex w-full items-center gap-2 text-[12px] text-foreground">
                             <span className="truncate">{s.label}</span>
-                            {s.id === state.activeSessionId && (
+                            {s.id === activeSessionId && (
                               <Check className="ml-auto size-3 shrink-0 text-primary" />
                             )}
                           </span>
@@ -396,48 +416,48 @@ export function App() {
               <span className="truncate">{t("会话历史")}</span>
             </div>
           )}
-          {state.usage && (
+          {usage && (
             <span title={t("本次会话累计 token 消耗（host 估算，非精确计费）")} className="inline-flex">
               <Chip tone="muted">
                 <Coins className="size-2.5" />
-                ≈ {formatTokens(state.usage.totalTokens)}
+                ≈ {formatTokens(usage.totalTokens)}
               </Chip>
             </span>
           )}
-          {state.replaying ? (
+          {replaying ? (
             <Chip tone="info">
               <Loader2 className="size-2.5 animate-spin" /> {t("正在恢复历史会话…")}
             </Chip>
-          ) : state.initializing ? (
+          ) : initializing ? (
             <Chip tone="primary">
               <Loader2 className="size-2.5 animate-spin" /> {t("正在创建新会话…")}
             </Chip>
           ) : (
-            statusChip(state.status)
+            statusChip(status)
           )}
         </div>
       </header>
 
-      {state.errorMessage && (
+      {errorMessage && (
         // break-words + scroll cap: errorMessage() can return unbounded JSON
         // dumps (unbroken tokens) and multi-line detail — without them the
         // banner overflowed horizontally / crushed the transcript area.
         <div className="max-h-24 shrink-0 select-text overflow-y-auto break-words border-b border-border bg-destructive/15 px-3 py-1.5 text-[12px] text-destructive">
-          {state.errorMessage}
+          {errorMessage}
         </div>
       )}
 
       {showAuthCard && (
-        <AuthCard auth={state.auth} editable={configOpen} busy={locked} onDismiss={() => setConfigOpen(false)} />
+        <AuthCard auth={auth!} editable={configOpen} busy={locked} onDismiss={() => setConfigOpen(false)} />
       )}
 
       <MessageList />
 
-      {state.pendingApproval && <ApprovalCard approval={state.pendingApproval} />}
+      {pendingApproval && <ApprovalCard approval={pendingApproval} />}
 
-      {state.pendingPlanExit && <PlanExitCard pending={state.pendingPlanExit} />}
+      {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
 
-      {state.pendingQuestions && <QuestionCard pending={state.pendingQuestions} />}
+      {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
 
       <Composer />
     </div>

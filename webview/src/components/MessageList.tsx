@@ -108,9 +108,15 @@ function StatusChip({ status }: { status: ToolBlock["status"] }) {
   return <span key={status} className="inline-flex">{chip}</span>;
 }
 
-function OutputDetails({ output }: { output: string }) {
+function OutputDetails({ output, truncatedChars }: { output: string; truncatedChars?: number }) {
   const [open, setOpen] = useState(false);
   if (!output) return null;
+  const truncation =
+    truncatedChars && truncatedChars > 0 ? (
+      <span className="ml-1.5 shrink-0 font-mono text-[10px] text-warning">
+        {t("已截断 {0} 字符", truncatedChars.toLocaleString())}
+      </span>
+    ) : null;
   // Fewer than 3 lines: show inline — a toggle around two short lines is
   // chrome, not utility. The fold only pays off once content is tall.
   const lineCount = output.trimEnd().split("\n").length;
@@ -118,6 +124,7 @@ function OutputDetails({ output }: { output: string }) {
     return (
       <pre className="border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
         {output}
+        {truncation}
       </pre>
     );
   }
@@ -129,6 +136,7 @@ function OutputDetails({ output }: { output: string }) {
       >
         <Caret open={open} />
         {t("操作输出")}
+        {truncation}
       </button>
       <Collapse open={open}>
         <pre className="max-h-64 overflow-auto border-t border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
@@ -197,7 +205,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
           }
         />
       )}
-      <OutputDetails output={block.output} />
+      <OutputDetails output={block.output} truncatedChars={block.truncatedChars} />
     </div>
   );
 }
@@ -797,7 +805,11 @@ function MessageListInner({ state }: { state: SessionState }) {
       if (b.kind === "user") return b.text;
     }
     return null;
-  }, [state.blocks, total]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on total only:
+    // user blocks are always APPENDED (beginUserPrompt/replay), so a new user
+    // text implies total grew; the blocks reference changes on every patch
+    // and must not re-trigger this reverse scan.
+  }, [total]);
 
   const canRegenerate =
     !turnActive &&

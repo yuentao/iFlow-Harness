@@ -46,15 +46,15 @@ export class SessionStore {
    * makes the webview request a full re-sync via `ready`.
    */
   private blockVersion = 0;
-  /** Any transcript-block mutation happened since the last push. */
-  private dirty = false;
   /**
-   * Every mutation since the last push was confined to the transcript tail
-   * (verified by tail fingerprints — the reducer mutates blocks in place, so
-   * mid-list changes are invisible to fingerprints and conservatively clear
-   * this flag, falling back to a full snapshot).
+   * Lowest block index mutated since the last push (null = no reported
+   * mutation). The shared reducer returns the index of every block it touches
+   * (P-1 follow-up, 2026-09), so mid-list updates — parallel tool calls
+   * updating a non-tail card — stay on the incremental path: the patch tail
+   * simply starts at the earliest mutated block instead of degrading to a
+   * full-transcript snapshot.
    */
-  private tailOnly = true;
+  private mutatedFrom: number | null = null;
   /** Array identity the webview's transcript is anchored to. */
   private syncedBlocks: Block[] | null = null;
   /** Transcript length the webview is anchored to. */
@@ -103,9 +103,7 @@ export class SessionStore {
   }
 
   userPrompt(text: string, images?: string[], files?: { name: string; path: string }[]): void {
-    const before = this.captureTail();
-    beginUserPrompt(this.state, text, images, files);
-    this.noteMutation(before, this.captureTail());
+    this.noteMutationIndex(beginUserPrompt(this.state, text, images, files));
     this.flush();
   }
 
@@ -120,10 +118,7 @@ export class SessionStore {
   }
 
   onSessionUpdate(notification: SessionNotification, options: { replaying?: boolean } = {}): void {
-    const before = this.captureTail();
-    applySessionUpdate(this.state, notification, options);
-    const after = this.captureTail();
-    this.noteMutation(before, after);
+    this.noteMutationIndex(applySessionUpdate(this.state, notification, options));
     // Streaming chunks arrive at high frequency; coalesce into one snapshot.
     this.scheduleFlush();
   }
@@ -131,78 +126,13 @@ export class SessionStore {
   // --- P-1 change detection ---------------------------------------------------
 
   /**
-   * Cheap fingerprint of the transcript tail. `id` is the tail block's
-   * identity (kind + toolCallId/agentId); `fp` adds content sizes, so
-   * in-place growth of the same block changes `fp` but not `id`.
+   * Record the lowest block index mutated by one reducer call (null when the
+   * update touched no block). Kept as the running minimum until the next
+   * push; `pushSnapshot` re-sends everything from that index on.
    */
-  private captureTail(): { len: number; id: string; fp: string } {
-    const blocks = this.state.blocks;
-    const last = blocks[blocks.length - 1];
-    if (!last) return { len: 0, id: "", fp: "" };
-    switch (last.kind) {
-      case "text":
-      case "thought":
-      case "user":
-        return {
-          len: blocks.length,
-          id: last.kind,
-          fp: `${last.kind}:${last.text.length}:${last.kind === "user" ? last.images?.length ?? 0 : 0}`,
-        };
-      case "tool":
-        return {
-          len: blocks.length,
-          id: `tool:${last.toolCallId}`,
-          fp: `tool:${last.toolCallId}:${last.status}:${last.output.length}:${last.diff ? last.diff.newText?.length ?? 0 : -1}`,
-        };
-      case "subagent":
-        return {
-          len: blocks.length,
-          id: `subagent:${last.agentId}`,
-          fp: `subagent:${last.agentId}:${last.status}:${last.entries.length}`,
-        };
-      case "compression":
-        return {
-          len: blocks.length,
-          id: "compression",
-          fp: `compression:${last.notice.length}:${last.summary?.length ?? -1}`,
-        };
-      case "plan":
-        return { len: blocks.length, id: "plan", fp: `plan:${last.entries.length}` };
-    }
-  }
-
-  /**
-   * Classify one batch of in-place block mutations (the reducer mutates
-   * `state.blocks` directly; tail fingerprints are the only change signal).
-   *
-   * - len +1: a block was appended → tail-only (the reducer appends exactly
-   *   one block per update; a bigger jump means a wholesale swap).
-   * - same len, same fingerprint: ambiguous — could be a metadata-only update
-   *   OR a mid-list mutation invisible to the tail fingerprint → dirty but
-   *   NOT tail-only (the full push re-anchors; correct on both sides).
-   * - same len, different fingerprint: the tail mutated in place iff `id`
-   *   matches (text growth, tool status/output change, SubAgent entries);
-   *   an id flip is conservative.
-   * - both empty: metadata-only update, blocks untouched.
-   */
-  private noteMutation(
-    before: { len: number; id: string; fp: string },
-    after: { len: number; id: string; fp: string },
-  ): void {
-    if (after.len !== before.len) {
-      this.dirty = true;
-      this.tailOnly = this.tailOnly && after.len === before.len + 1;
-      return;
-    }
-    if (after.fp === before.fp) {
-      if (before.fp !== "") {
-        this.dirty = true;
-        this.tailOnly = false;
-      }
-      return;
-    }
-    this.dirty = true;
-    this.tailOnly = this.tailOnly && before.id !== "" && before.id === after.id;
+  private noteMutationIndex(index: number | null): void {
+    if (index === null) return;
+    if (this.mutatedFrom === null || index < this.mutatedFrom) this.mutatedFrom = index;
   }
 
   /**
@@ -214,7 +144,7 @@ export class SessionStore {
     this.syncedBlocks = null;
     this.syncedLen = 0;
     this.syncedVersion = 0;
-    this.tailOnly = false;
+    this.mutatedFrom = null;
   }
 
   /** Replace the recent-session switcher list (M4). */
@@ -286,9 +216,7 @@ export class SessionStore {
 
   /** Visual marker recording the user's Plan-exit decision (the card is transient). */
   planExitResolutionNote(resolution: string): void {
-    const before = this.captureTail();
-    appendApprovalResolution(this.state, "plan", resolution);
-    this.noteMutation(before, this.captureTail());
+    this.noteMutationIndex(appendApprovalResolution(this.state, "plan", resolution));
     this.flush();
   }
 
@@ -306,21 +234,17 @@ export class SessionStore {
   }
 
   approvalResolutionNote(toolName: string, resolution: string): void {
-    const before = this.captureTail();
-    appendApprovalResolution(this.state, toolName, resolution);
-    this.noteMutation(before, this.captureTail());
+    this.noteMutationIndex(appendApprovalResolution(this.state, toolName, resolution));
     this.flush();
   }
 
   /** Visual marker for a reverted tool diff. */
   toolReverted(toolCallId: string): boolean {
-    const before = this.captureTail();
-    const ok = markToolReverted(this.state, toolCallId);
-    if (ok) {
-      this.noteMutation(before, this.captureTail());
-      this.flush();
-    }
-    return ok;
+    const index = markToolReverted(this.state, toolCallId);
+    if (index === null) return false;
+    this.noteMutationIndex(index);
+    this.flush();
+    return true;
   }
 
   /** True while `session/new` is in flight; the webview locks switches. */
@@ -359,14 +283,18 @@ export class SessionStore {
     this.blockVersion++;
     this.state.blockVersion = this.blockVersion; // wire anchor stamp
 
-    if (this.tailOnly && anchorIntact && webviewSynced) {
-      // Incremental path: re-send the transcript tail [syncedLen-1, end) —
-      // the anchored tail block (possibly mutated in place) plus every block
-      // appended since the last push — and the small non-block metadata.
-      // Block objects travel by reference; `postMessage` serializes
-      // synchronously before we regain control (P-1: the unchanged prefix is
-      // never copied, neither host-side nor to the webview).
-      const tailStart = Math.max(0, this.syncedLen - 1);
+    if (anchorIntact && webviewSynced) {
+      // Incremental path: re-send the transcript tail [tailStart, end) — from
+      // the earliest block mutated since the last push (the reducer reports
+      // every mutation index, so mid-list tool updates stay incremental) —
+      // plus the small non-block metadata. Block objects travel by reference;
+      // `postMessage` serializes synchronously before we regain control (P-1:
+      // the unchanged prefix is never copied, neither host-side nor to the
+      // webview).
+      // A null `mutatedFrom` with a length drift means an untracked direct
+      // mutation of getState().blocks (nothing in the host does this today) —
+      // fall back to re-sending from the anchored tail block.
+      const tailStart = this.mutatedFrom ?? Math.max(0, this.syncedLen - 1);
       // Runtime strip: Omit<…> is type-level only, a plain spread would
       // smuggle the whole blocks array back into the patch payload.
       const { blocks: _stripped, ...tail } = this.state;
@@ -374,10 +302,7 @@ export class SessionStore {
         type: "blockPatch",
         baseVersion: this.blockVersion - 1,
         tailStart,
-        // Untracked direct mutations of getState().blocks (nothing in the
-        // host does this today) show up as a length drift without `dirty` —
-        // re-send the tail instead of trusting the dirty flag alone.
-        blocks: this.dirty || blocks.length !== this.syncedLen ? blocks.slice(tailStart) : [],
+        blocks: this.mutatedFrom !== null || blocks.length !== this.syncedLen ? blocks.slice(tailStart) : [],
         tail,
       });
       this.syncedLen = blocks.length;
@@ -395,8 +320,7 @@ export class SessionStore {
       this.syncedLen = blocks.length;
       this.syncedVersion = this.blockVersion;
     }
-    this.dirty = false;
-    this.tailOnly = true;
+    this.mutatedFrom = null;
   }
 
   private flush(): void {

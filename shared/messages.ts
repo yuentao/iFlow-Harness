@@ -41,6 +41,13 @@ export interface ToolDiffUi {
  */
 export interface BlockBase {
   id?: string;
+  /**
+   * P1 incremental token estimation: cached token count of this block's
+   * text (host-side only; the webview ignores it). Written by the reducer
+   * when content definitively changes and lazily established at turn end,
+   * so each turn only tokenizes new content instead of the whole transcript.
+   */
+  tokens?: number;
 }
 
 export interface TextBlock extends BlockBase {
@@ -68,6 +75,12 @@ export interface ToolBlock extends BlockBase {
   toolKind: ToolKind;
   status: ToolCallStatus;
   output: string;
+  /**
+   * P-1 follow-up: present when `output` exceeded MAX_TOOL_OUTPUT_CHARS
+   * (64K chars) and was capped — the number of dropped characters. The
+   * webview surfaces it as a truncation notice on the output pane.
+   */
+  truncatedChars?: number;
   locations: ToolLocation[];
   /** Present when the update carried a structured diff (`type: "diff"`). */
   diff: ToolDiffUi | null;

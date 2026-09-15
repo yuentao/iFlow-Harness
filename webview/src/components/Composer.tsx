@@ -45,8 +45,25 @@ function imageMime(file: File): string {
   return `image/${ext}`;
 }
 
+/** Stable empty fallbacks — a fresh `[]` per selector call would re-render on
+ * every store change (zustand compares with Object.is). */
+const EMPTY_COMMANDS: SlashCommand[] = [];
+const EMPTY_MODELS: ModelInfoUi[] = [];
+
 export function Composer() {
-  const state = useChat((s) => s.state);
+  // P2-1 selector split: the composer previously subscribed to the whole
+  // state object, re-rendering on every blockPatch (up to 12.5/s during
+  // streaming). Each field below is a primitive or a reference carried over
+  // by the patch's metadata spread — none change while blocks stream.
+  const status = useChat((s) => s.state?.status ?? null);
+  const replaying = useChat((s) => s.state?.replaying ?? false);
+  const initializing = useChat((s) => s.state?.initializing ?? false);
+  const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
+  const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
+  const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
+  const modes = useChat((s) => s.state?.modes ?? null);
+  const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
+  const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
@@ -189,7 +206,7 @@ export function Composer() {
   // ESC 停止生成（与停止按钮同语义）：仅在真实生成中生效（回放/初始化除外）。
   // 弹窗内的 ESC（mention/斜杠补全在 textarea onKeyDown、Dropdown 在 document）
   // 都会 stopPropagation，事件只有未被拦截时才到达这里的 window 监听。
-  const canStopForEsc = state?.status === "streaming" && !state?.replaying && !state?.initializing;
+  const canStopForEsc = status === "streaming" && !replaying && !initializing;
   useEffect(() => {
     if (!canStopForEsc) return;
     const handler = (e: KeyboardEvent) => {
@@ -278,13 +295,10 @@ export function Composer() {
   // generation: beginReplay() also reports status "streaming", so replaying
   // and initializing must be excluded here. Also exclude when there's a
   // pending approval or question card — the user must handle those first.
-  const streaming = state?.status === "streaming";
-  const hasPendingInteraction = Boolean(state?.pendingApproval || state?.pendingQuestions);
-  const canStop = Boolean(streaming && !state?.replaying && !state?.initializing && !hasPendingInteraction);
-  const busy = (streaming || state?.replaying || state?.initializing || pending !== null || hasPendingInteraction) ?? false;
-  const commands: SlashCommand[] = state?.commands ?? [];
-  const modes = state?.modes ?? null;
-  const models = state?.models ?? [];
+  const streaming = status === "streaming";
+  const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
+  const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
+  const busy = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
   const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
 
   // Slash-command popup: every command matching the typed prefix. While the
@@ -772,10 +786,9 @@ export function Composer() {
                 if (o) {
                   send({ type: "refreshModels" });
                   // keyboard highlight starts on the active model, not the top
-                  const idx = state?.currentModelId
-                    ? models.findIndex((m) => m.id === state.currentModelId)
-                    : -1;
-                  setModelIndex(idx >= 0 ? idx : 0);
+                    const idx = currentModelId
+                      ? models.findIndex((m) => m.id === currentModelId)
+                      : -1;                  setModelIndex(idx >= 0 ? idx : 0);
                 } else {
                   setModelQuery("");
                 }
@@ -786,7 +799,7 @@ export function Composer() {
                   title={t("模型")}
                   disabled={busy}
                 >
-                  <span className="max-w-[130px] truncate">{state?.currentModelId ?? models[0]!.id}</span>
+                  <span className="max-w-[130px] truncate">{currentModelId ?? models[0]!.id}</span>
                   <ChevronDown className="size-3 shrink-0 opacity-60" />
                 </button>
               )}
@@ -815,7 +828,7 @@ export function Composer() {
                             const hit = filteredModels[modelIndex];
                             if (!hit) return;
                             e.preventDefault();
-                            if (hit.m.id !== state?.currentModelId) {
+                            if (hit.m.id !== currentModelId) {
                               beginPending("model", hit.m.id);
                               send({ type: "setModel", modelId: hit.m.id });
                             }
@@ -832,9 +845,9 @@ export function Composer() {
                     <button
                       key={m.id}
                       role="menuitem"
-                      ref={m.id === state?.currentModelId ? currentModelRef : undefined}
+                      ref={m.id === currentModelId ? currentModelRef : undefined}
                       onClick={() => {
-                        if (m.id !== state?.currentModelId) {
+                        if (m.id !== currentModelId) {
                           beginPending("model", m.id);
                           send({ type: "setModel", modelId: m.id });
                         }
@@ -847,7 +860,7 @@ export function Composer() {
                       <span className="truncate" title={m.name}>
                         {m.name}
                       </span>
-                      {m.id === state?.currentModelId && (
+                      {m.id === currentModelId && (
                         <Check className="ml-auto size-3 shrink-0 text-primary" />
                       )}
                     </button>

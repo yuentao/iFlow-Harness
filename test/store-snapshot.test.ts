@@ -113,19 +113,26 @@ describe("SessionStore snapshot paths (P-1)", () => {
     expect(patch.tail.sessionId).toBe("s9");
   });
 
-  it("ambiguous same-fingerprint mutation falls back to a full snapshot", () => {
+  it("mid-list tool update stays on the patch path with correct tailStart (P0-1)", () => {
     const { store, messages } = makeStore();
     store.markConnected();
     store.userPrompt("问题");
     store.pushSnapshot();
-    // Two tool blocks, then revert the NON-tail one: len and tail fp unchanged.
+    // Two tool blocks, then revert the NON-tail one: the reducer reports the
+    // mutated block's index, so the patch tail starts there instead of
+    // degrading to a full-transcript snapshot (old fingerprint behavior).
     const state = store.getState();
     state.blocks.push(toolBlock("t1", "旧输出"));
     state.blocks.push(toolBlock("t2", "输出"));
-    const ok = store.toolReverted("t1"); // mid-list: invisible to tail fp
+    const ok = store.toolReverted("t1"); // mid-list
     expect(ok).toBe(true);
-    const msg = messages[3];
-    expect(msg?.type).toBe("snapshot"); // conservative full push
+    const patch = messages[3];
+    expect(patch?.type).toBe("blockPatch"); // incremental, NOT snapshot
+    if (patch?.type !== "blockPatch") throw new Error("unreachable");
+    expect(patch.tailStart).toBe(1); // index of t1 (after the user block)
+    expect(patch.blocks).toHaveLength(2); // t1 + t2 re-sent
+    const reverted = patch.blocks[0]!;
+    expect(reverted.kind === "tool" && reverted.output).toContain("已回退");
   });
 
   it("tail tool mutation stays on the patch path", () => {
@@ -364,7 +371,8 @@ describe("P-1 full-chain fidelity (host push → wire → webview merge)", () =>
     store.pushSnapshot();
     push();
 
-    // Revert the NON-tail tool: mid-list mutation → conservative full snapshot.
+    // Revert the NON-tail tool: the reducer reports the mutated index —
+    // the push stays incremental with a tailStart covering t1.
     expect(store.toolReverted("t1")).toBe(true);
     store.pushSnapshot();
     push();

@@ -44,16 +44,41 @@ function lastBlock(blocks: Block[]): Block | undefined {
   return blocks[blocks.length - 1];
 }
 
-function appendTextToLast(blocks: Block[], kind: "text" | "thought" | "user", text: string): void {
+/** Append `text` to the last block when it has the same kind, else push a new
+ * block. Returns the index of the mutated/appended block (P-1 change
+ * reporting), or undefined when nothing changed (empty text). */
+function appendTextToLast(blocks: Block[], kind: "text" | "thought" | "user", text: string): number | undefined {
+  if (!text) return undefined;
   const last = lastBlock(blocks);
   if (last && last.kind === kind) {
     last.text += text;
-    return;
+    return blocks.length - 1;
   }
   blocks.push({ kind, text, id: nextBlockId() } as Block);
+  return blocks.length - 1;
 }
 
-function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
+/**
+ * P-1 follow-up (2026-09): cap a tool block's output at 64K chars. Tool
+ * output is the dominant transcript-size driver (shell dumps, file reads),
+ * and every downstream O(size) path — snapshot serialization, transcript
+ * persistence, token estimation — pays for it on every push. The dropped
+ * tail is only recorded as a count; the webview surfaces it.
+ * Diff payloads are NOT capped: revert matches the disk content against
+ * `diff.newText` verbatim (panel.probeRevertCandidate), truncation there
+ * would silently break the revert flow.
+ */
+export const MAX_TOOL_OUTPUT_CHARS = 64 * 1024;
+
+/** Upsert the tool block for `patch.toolCallId`. Returns the index of the
+ * mutated/appended block (P-1 change reporting). */
+function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
+  let output = patch.output || "";
+  let truncatedChars: number | undefined;
+  if (output.length > MAX_TOOL_OUTPUT_CHARS) {
+    truncatedChars = output.length - MAX_TOOL_OUTPUT_CHARS;
+    output = output.slice(0, MAX_TOOL_OUTPUT_CHARS);
+  }
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === patch.toolCallId) {
@@ -64,15 +89,20 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): void {
       blocks[i] = {
         ...block,
         ...patch,
-        output: patch.output || block.output,
+        output: output || block.output,
+        // An update without fresh output keeps the previous truncation marker.
+        truncatedChars: output ? truncatedChars : block.truncatedChars,
         // A new update without a diff must not erase the previous diff.
         diff: patch.diff ?? block.diff,
         reverted: patch.diff ? false : block.reverted,
       };
-      return;
+      // P1: the tool's content changed — its token cache is stale.
+      recountBlockTokens(blocks[i] as Block);
+      return i;
     }
   }
-  blocks.push({ ...patch, id: nextBlockId() });
+  blocks.push({ ...patch, output, truncatedChars, id: nextBlockId() });
+  return blocks.length - 1;
 }
 
 // --- SubAgent grouping (iFlow: nested updates carry `agentId`) --------------
@@ -88,19 +118,22 @@ function extractAgentId(notification: SessionNotification): string | undefined {
   return undefined;
 }
 
-function findSubAgent(blocks: Block[], agentId: string): SubAgentBlock | undefined {
+/** Index of the SubAgent block bound to `agentId` (P-1: index instead of the
+ * block reference so the caller can report the mutation position). */
+function findSubAgentIndex(blocks: Block[], agentId: string): number | null {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (block.kind === "subagent" && (block.agentId === agentId || block.taskToolCallId === agentId)) {
-      return block;
+      return i;
     }
   }
-  return undefined;
+  return null;
 }
 
 /** Fallback binding: a `task` tool_call arrived without an agentId — adopt the
- * newest unfinished such block once the real agentId shows up. */
-function adoptUnboundSubAgent(blocks: Block[], agentId: string): SubAgentBlock | undefined {
+ * newest unfinished such block once the real agentId shows up. Returns the
+ * block index (P-1 change reporting). */
+function adoptUnboundSubAgent(blocks: Block[], agentId: string): number | null {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (
@@ -110,10 +143,10 @@ function adoptUnboundSubAgent(blocks: Block[], agentId: string): SubAgentBlock |
       (block.status === "pending" || block.status === "in_progress")
     ) {
       block.agentId = agentId;
-      return block;
+      return i;
     }
   }
-  return undefined;
+  return null;
 }
 
 /**
@@ -168,14 +201,14 @@ function isTaskToolCall(update: SessionUpdate): boolean {
  * `tool_call task` (pending/in_progress) and `tool_call_update task`
  * (completed/failed) belongs to that SubAgent.
  */
-function findActiveSubAgent(blocks: Block[]): SubAgentBlock | undefined {
+function findActiveSubAgentIndex(blocks: Block[]): number | null {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (block.kind === "subagent" && (block.status === "pending" || block.status === "in_progress")) {
-      return block;
+      return i;
     }
   }
-  return undefined;
+  return null;
 }
 
 // --- compression history-item leak sanitizer (slash /compress) ---------------
@@ -265,45 +298,51 @@ function compressionSummaryOf(item: CompressionHistoryItem): string | null {
  * become their own collapsible CompressionBlock (the summary is long — the
  * webview folds it); the remaining text merges normally. Torn or foreign JSON
  * stays verbatim (see parseCompressionItem).
+ * Returns the lowest mutated/appended block index (P-1 change reporting).
  */
-function appendAgentChunk(blocks: Block[], text: string): void {
+function appendAgentChunk(blocks: Block[], text: string): number | null {
   const MARKER = '{"type":"compression"';
   let rest = text;
+  let first: number | null = null;
+  const note = (i: number | undefined): void => {
+    if (i !== undefined && (first === null || i < first)) first = i;
+  };
   for (;;) {
     const idx = rest.indexOf(MARKER);
     if (idx < 0) break;
     const parsed = parseCompressionItem(rest, idx);
     if (!parsed) break; // torn or foreign — remainder stays verbatim
-    if (idx > 0) appendTextToLast(blocks, "text", rest.slice(0, idx));
+    if (idx > 0) note(appendTextToLast(blocks, "text", rest.slice(0, idx)));
     blocks.push({
       kind: "compression",
       id: nextBlockId(),
       notice: formatCompressionNotice(parsed.item),
       summary: compressionSummaryOf(parsed.item),
     });
+    note(blocks.length - 1);
     rest = rest.slice(parsed.end);
   }
-  if (rest) appendTextToLast(blocks, "text", rest);
+  if (rest) note(appendTextToLast(blocks, "text", rest));
+  return first;
 }
 
 /** Apply one session update to a block list (top-level transcript or a
- * SubAgent's entries). Mutates the list. */
-function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
+ * SubAgent's entries). Mutates the list. Returns the lowest mutated/appended
+ * block index, or null when the update touched no block (P-1 change
+ * reporting). */
+function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | null {
   switch (update.sessionUpdate) {
     case "agent_message_chunk":
-      if (update.content.type === "text") appendAgentChunk(blocks, update.content.text);
-      break;
+      return update.content.type === "text" ? appendAgentChunk(blocks, update.content.text) : null;
     case "agent_thought_chunk":
-      if (update.content.type === "text") appendTextToLast(blocks, "thought", update.content.text);
-      break;
+      return update.content.type === "text" ? appendTextToLast(blocks, "thought", update.content.text) ?? null : null;
     case "user_message_chunk":
       // Live prompts: the host appends user blocks itself, so agent echo is
       // ignored. During `session/load` replay (M4) user turns arrive through
       // this notification and must be rendered.
-      if (update.content.type === "text") appendTextToLast(blocks, "user", update.content.text);
-      break;
+      return update.content.type === "text" ? appendTextToLast(blocks, "user", update.content.text) ?? null : null;
     case "tool_call":
-      upsertToolBlock(blocks, {
+      return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
         toolName: update.toolName ?? "",
@@ -314,9 +353,8 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
-      break;
     case "tool_call_update":
-      upsertToolBlock(blocks, {
+      return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
         toolName: update.toolName ?? "",
@@ -327,16 +365,15 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): void {
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
-      break;
     case "plan":
       blocks.push({
         kind: "plan",
         id: nextBlockId(),
         entries: update.entries.map((e) => ({ content: e.content, status: e.status, priority: e.priority })),
       });
-      break;
+      return blocks.length - 1;
     default:
-      break;
+      return null;
   }
 }
 
@@ -358,22 +395,23 @@ export function applySessionUpdate(
   state: SessionState,
   notification: SessionNotification,
   options: { replaying?: boolean } = {},
-): void {
+): number | null {
   const update = notification.update;
 
   // Strategy 1: documented `agentId` grouping.
   const agentId = extractAgentId(notification);
   if (agentId) {
-    let sub = findSubAgent(state.blocks, agentId) ?? adoptUnboundSubAgent(state.blocks, agentId);
-    if (!sub) {
+    let subIdx = findSubAgentIndex(state.blocks, agentId) ?? adoptUnboundSubAgent(state.blocks, agentId);
+    if (subIdx === null) {
       const title =
         (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
           ? update.title || update.toolName
           : undefined) ?? l10n.t("子智能体");
-      sub = { kind: "subagent", id: nextBlockId(), agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] };
-      state.blocks.push(sub);
+      state.blocks.push({ kind: "subagent", id: nextBlockId(), agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] });
+      subIdx = state.blocks.length - 1;
     }
-    if (isNestedUpdate(update)) applyUpdateToBlocks(sub.entries, update);
+    const sub = state.blocks[subIdx] as SubAgentBlock;
+    applyUpdateToBlocks(sub.entries, update);
     if (
       (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
       update.toolCallId === sub.taskToolCallId &&
@@ -383,11 +421,14 @@ export function applySessionUpdate(
     } else {
       refreshSubAgentStatus(sub);
     }
-    return;
+    // Nested entries mutate in place, but the card rides every blockPatch
+    // re-serialization with a fresh reference — reporting its index makes
+    // the webview re-render it.
+    return subIdx;
   }
 
   // Strategy 2: `task` tool_call interval state machine.
-  const active = findActiveSubAgent(state.blocks);
+  const activeIdx = findActiveSubAgentIndex(state.blocks);
   const isTask = isTaskToolCall(update);
 
   if (isTask) {
@@ -397,7 +438,8 @@ export function applySessionUpdate(
       toolCallId?: string;
       toolName?: string;
     };
-    if (active) {
+    if (activeIdx !== null) {
+      const active = state.blocks[activeIdx] as SubAgentBlock;
       // Interval bookkeeping: the spawning call's status drives the card.
       if (taskUpdate.status) active.status = taskUpdate.status;
       // A richer title (Launch agent(type): …) upgrades the card type.
@@ -409,8 +451,8 @@ export function applySessionUpdate(
         }
       }
       // Keep the update in the log so the 日志 pane shows the full trail.
-      if (isNestedUpdate(update)) applyUpdateToBlocks(active.entries, update);
-      return;
+      applyUpdateToBlocks(active.entries, update);
+      return activeIdx;
     }
     // Interval opens: a SubAgent card is born.
     const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子智能体");
@@ -424,15 +466,16 @@ export function applySessionUpdate(
       agentType: extractAgentType(title),
       entries: [],
     });
-    return;
+    return state.blocks.length - 1;
   }
 
-  if (active) {
+  if (activeIdx !== null) {
     // Flat nested activity inside the open interval → into the card.
     if (isNestedUpdate(update)) {
+      const active = state.blocks[activeIdx] as SubAgentBlock;
       applyUpdateToBlocks(active.entries, update);
       refreshSubAgentStatus(active);
-      return;
+      return activeIdx;
     }
     // Non-nested updates (mode/commands) still apply top-level: fall through.
   }
@@ -447,24 +490,23 @@ export function applySessionUpdate(
       // `session/load` replay (M4) user turns arrive through this
       // notification and must be rendered.
       if (replaying && update.content.type === "text") {
-        appendTextToLast(state.blocks, "user", update.content.text);
+        return appendTextToLast(state.blocks, "user", update.content.text) ?? null;
       }
-      break;
+      return null;
     case "agent_message_chunk":
     case "agent_thought_chunk":
     case "tool_call":
     case "tool_call_update":
     case "plan":
-      applyUpdateToBlocks(state.blocks, update);
-      break;
+      return applyUpdateToBlocks(state.blocks, update);
     case "available_commands_update":
       state.commands = update.availableCommands;
-      break;
+      return null;
     case "current_mode_update":
       if (state.modes) state.modes = { ...state.modes, currentModeId: update.currentModeId };
-      break;
+      return null;
     default:
-      break;
+      return null;
   }
 }
 
@@ -588,7 +630,7 @@ export function beginUserPrompt(
   text: string,
   images?: string[],
   files?: { name: string; path: string }[],
-): void {
+): number {
   // Mirror the agent-facing attachment list in the transcript so the user
   // message block shows exactly what the agent was told about the files.
   const fileNote =
@@ -604,6 +646,7 @@ export function beginUserPrompt(
   state.status = "streaming";
   state.stopReason = null;
   state.errorMessage = null;
+  return state.blocks.length - 1;
 }
 
 /** CJK-aware fallback used only if the real tokenizer fails to load. */
@@ -646,14 +689,47 @@ function blockText(block: Block): string {
   }
 }
 
+/**
+ * P1 incremental token estimation: `tokens` caches a block's own token count
+ * (written by the reducer when a block's content definitively changes, and
+ * lazily for blocks without one), so each turn end only tokenizes the new
+ * content instead of re-running BPE over the whole transcript (a 100k-token
+ * session previously cost hundreds of ms of host CPU per turn).
+ * SubAgent cards approximate their text tokens as the SUM of their entries'
+ * caches — blockText joins entries with "\n", and the BPE sum-vs-whole
+ * boundary difference is acceptable for a usage ESTIMATE.
+ */
+function blockTokens(block: Block): number {
+  if (block.kind === "compression") return 0;
+  if (block.tokens !== undefined) return block.tokens;
+  if (block.kind === "subagent") {
+    let sum = 0;
+    for (const e of block.entries) sum += blockTokens(e);
+    block.tokens = sum;
+    return sum;
+  }
+  const t = estimateTokens(blockText(block));
+  block.tokens = t;
+  return t;
+}
+
+/** Invalidate (recompute in place) a block's token cache after the reducer
+ * mutated its content. Only called from definitive change points — streaming
+ * tail growth is coalesced by the store and cached lazily at turn end. */
+function recountBlockTokens(block: Block): void {
+  block.tokens = block.kind === "compression" ? 0 : estimateTokens(blockText(block));
+}
+
 /** Estimate cumulative token usage of the whole transcript. The CLI is frozen
- * and reports no usage, so the host estimates from the rendered blocks. Returns
- * null when there is no content yet (the UI hides the indicator until then). */
+ * and reports no usage, so the host estimates from the rendered blocks. Reads
+ * each block's token cache (establishing it lazily); only blocks without a
+ * valid cache trigger a fresh tokenize. Returns null when there is no content
+ * yet (the UI hides the indicator until then). */
 export function estimateSessionUsage(blocks: Block[]): SessionUsageUi | null {
   let inputTokens = 0;
   let outputTokens = 0;
   for (const b of blocks) {
-    const t = estimateTokens(blockText(b));
+    const t = blockTokens(b);
     if (t === 0) continue;
     // User prompts and tool I/O are context the model consumes (input); agent
     // text/thought/plan/subagent output is generation (output).
@@ -994,9 +1070,10 @@ export function clearPendingPlanExit(state: SessionState, id: string): boolean {
  * Append a resolution note below the approval so the transcript records what
  * the user chose (the card itself is transient).
  */
-export function appendApprovalResolution(state: SessionState, toolName: string, resolution: string): void {
+export function appendApprovalResolution(state: SessionState, toolName: string, resolution: string): number {
   const label = toolName || "tool";
   state.blocks.push({ kind: "text", id: nextBlockId(), text: `*${label} — ${resolution}*` });
+  return state.blocks.length - 1;
 }
 
 // --- user questions (_iflow/user_questions) ---------------------------------
@@ -1013,8 +1090,9 @@ export function clearPendingQuestions(state: SessionState, id: string): boolean 
   return true;
 }
 
-/** Mark a tool's diff as reverted (visual only; the file write happens host-side). */
-export function markToolReverted(state: SessionState, toolCallId: string): boolean {
+/** Mark a tool's diff as reverted (visual only; the file write happens host-side).
+ * Returns the mutated block index, or null when no such tool block exists. */
+export function markToolReverted(state: SessionState, toolCallId: string): number | null {
   for (let i = state.blocks.length - 1; i >= 0; i--) {
     const block = state.blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === toolCallId) {
@@ -1024,10 +1102,12 @@ export function markToolReverted(state: SessionState, toolCallId: string): boole
       block.reverted = true;
       const reverted = l10n.t("[已回退]");
       block.output = block.output ? `${block.output}\n${reverted}` : reverted;
-      return true;
+      // P1: output changed — the token cache is stale.
+      recountBlockTokens(block);
+      return i;
     }
   }
-  return false;
+  return null;
 }
 
 export type { ToolDiffUi };
