@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   applySessionUpdate,
   backfillBlockIds,
   beginUserPrompt,
   completePrompt,
+  estimateTokens,
   newSessionState,
   extractTextOutput,
   extractDiff,
@@ -18,6 +19,19 @@ import {
 } from "../shared/session-state";
 import { initialSessionState, type Block, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
+// Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
+// captures `vi` before the `vi.mock` factory is hoisted above the import, so the
+// factory body itself never references `vi` directly (required when globals are off).
+const { countTokensMock, importActual } = vi.hoisted(() => ({
+  countTokensMock: vi.fn<(text: string) => number>(),
+  importActual: vi.importActual,
+}));
+
+vi.mock("gpt-tokenizer", async () => {
+  const actual = await importActual<typeof import("gpt-tokenizer")>("gpt-tokenizer");
+  countTokensMock.mockImplementation(actual.countTokens);
+  return { ...actual, countTokens: countTokensMock };
+});
 
 function notify(update: SessionNotification["update"], sessionId = "s1"): SessionNotification {
   return { sessionId, update };
@@ -727,5 +741,25 @@ describe("session switcher (M4)", () => {
     // Session-scoped state still resets.
     expect(fresh.blocks).toHaveLength(0);
     expect(fresh.sessionId).toBeNull();
+  });
+});
+
+describe("estimateTokens", () => {
+  it("uses the real BPE tokenizer for normal input", () => {
+    // Sanity check: real o200k_base count, not the CJK heuristic.
+    expect(estimateTokens("hello world")).toBe(2);
+  });
+
+  it("falls back to the CJK-aware heuristic when the tokenizer throws", () => {
+    const text = "hello world";
+    countTokensMock.mockImplementationOnce(() => {
+      throw new Error("forced fallback");
+    });
+    const got = estimateTokens(text);
+    // Mirrors the heuristic in session-state.ts: CJK/fullwidth/kana ≈ 1.5 tokens,
+    // other chars ≈ 0.25 tokens. ASCII "hello world" (11 chars) → ceil(11 * 0.25) = 3.
+    const cjk = (text.match(/[　-鿿぀-ヿ＀-￯]/g) ?? []).length;
+    const other = text.length - cjk;
+    expect(got).toBe(Math.ceil(cjk * 1.5 + other * 0.25));
   });
 });
