@@ -43,7 +43,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
-import { Markdown, copyText } from "./Markdown";
+import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { Chip, FileRef } from "./ui";
 import logo from "../assets/iflow.svg";
@@ -437,15 +437,6 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
           fenced blocks here read as right-clicked source context, not as
           model output. */}
       <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
-        {block.text.trim() && (
-          <button
-            className="card-lift press absolute right-1 top-1 z-10 rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground shadow-card opacity-0 transition-opacity duration-150 hover:bg-surface-2 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-            title={t("编辑并重发")}
-            onClick={() => useChat.getState().setEditDraft(block.text)}
-          >
-            <FilePen className="size-3" />
-          </button>
-        )}
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -528,11 +519,12 @@ const BlockView = memo(function BlockView({
       // outputs nothing for them. Skip the whole row.
       if (!block.text.trim()) return null;
       return (
-        <div className="stream-in assistant-row group relative">
-          <span className="assistant-avatar">
-            {/* Real brand mark, consistent with the header logo */}
-            <img src={logo} alt="" className="size-3.5" />
-          </span>
+        <div className="stream-in group">
+          <div className="assistant-row">
+            <span className="assistant-avatar">
+              {/* Real brand mark, consistent with the header logo */}
+              <img src={logo} alt="" className="size-3.5" />
+            </span>
           {/* Shimmer rides the BODY column, not the whole row: on the row it
               painted a full-width rectangular band behind the avatar (no
               radius/padding) and read as a disjointed stripe. */}
@@ -541,27 +533,15 @@ const BlockView = memo(function BlockView({
               isLatest && turnActive ? "stream-shimmer" : ""
             }`}
           >
-            <Markdown text={block.text} />
+            {/* Trailing inline action icons follow the text end: regenerate
+                (latest turn, idle) rides beside copy — no overlay on the
+                message, no extra row. */}
+            <Markdown
+              text={block.text}
+              showCopyIcon
+              onRegenerate={isLatest && canRegenerate ? onRegenerate : undefined}
+            />
           </div>
-          {/* Hover action bar: copy the whole message; regenerate re-runs the
-              preceding user prompt (only on the final assistant turn, idle). */}
-          <div className="absolute right-0 top-0 flex items-center gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100">
-            {isLatest && canRegenerate && (
-              <button
-                className="card-lift press rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground shadow-card hover:bg-surface-2 hover:text-foreground"
-                title={t("重新生成")}
-                onClick={onRegenerate}
-              >
-                {t("重新生成")}
-              </button>
-            )}
-            <button
-              className="card-lift press rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground shadow-card hover:bg-surface-2 hover:text-foreground"
-              title={t("复制")}
-              onClick={() => void copyText(block.text)}
-            >
-              {t("复制")}
-            </button>
           </div>
         </div>
       );

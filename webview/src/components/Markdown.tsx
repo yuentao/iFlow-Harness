@@ -49,7 +49,25 @@ export function copyText(text: string): Promise<void> {
 
 // Links open in the system browser via the host (VSCode webviews cannot
 // navigate themselves). Intercept clicks here.
-export function Markdown({ text }: { text: string }) {
+
+// Trailing copy icon appended inline to the markdown's last element — follows
+// the text end like a tiny action icon instead of an overlay/extra row.
+const COPY_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const CHECK_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+const REGEN_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
+
+export function Markdown({
+  text,
+  showCopyIcon = false,
+  onRegenerate,
+}: {
+  text: string;
+  showCopyIcon?: boolean;
+  onRegenerate?: () => void;
+}) {
   const send = useChat((s) => s.send);
   const ref = useRef<HTMLDivElement>(null);
   // Throttled text: during streaming the block grows every ~80ms; parse the
@@ -98,7 +116,14 @@ export function Markdown({ text }: { text: string }) {
   // put while the <pre> scrolls. The wrapper injection only processes pres
   // that are not yet wrapped (the guard prevents duplicates after React
   // re-sets innerHTML during streaming).
-  useEffect(() => {
+  // Trailing action icons are appended INLINE to the last element of the
+  // markdown so they follow the text end (no overlay, no extra row).
+  // Idempotent ensure: EVERY render re-checks (one cheap querySelector) —
+  // React rewrites innerHTML whenever the html STRING differs and wipes the
+  // injected icons, and an html-only deps effect misses renders where the
+  // string stayed identical after such a wipe (icons vanished after
+  // streaming). Per-render ensure guarantees they come back.
+  const ensureInjected = () => {
     const root = ref.current;
     if (!root) return;
     root.querySelectorAll("pre").forEach((pre) => {
@@ -127,17 +152,71 @@ export function Markdown({ text }: { text: string }) {
       btn.dataset.role = "copy-code";
       wrap.appendChild(btn);
     });
-  }, [html]);
+
+    if (showCopyIcon) {
+      const last = root.lastElementChild;
+      if (last && !last.querySelector(":scope > button[data-role='copy-msg']")) {
+        if (onRegenerateRef.current) {
+          const regen = document.createElement("button");
+          regen.type = "button";
+          regen.className = "copy-msg-btn";
+          regen.dataset.role = "regen-msg";
+          regen.title = "重新生成";
+          regen.setAttribute("aria-label", "重新生成");
+          regen.innerHTML = REGEN_ICON_SVG;
+          last.appendChild(regen);
+        }
+        const icon = document.createElement("button");
+        icon.type = "button";
+        icon.className = "copy-msg-btn";
+        icon.dataset.role = "copy-msg";
+        icon.title = "复制";
+        icon.setAttribute("aria-label", "复制全文");
+        icon.innerHTML = COPY_ICON_SVG;
+        last.appendChild(icon);
+      }
+    }
+  };
+
+  useEffect(ensureInjected);
 
   // P2-2 event delegation: ONE click listener on the container handles every
   // copy button (past and future), instead of a per-button listener plus a
   // fresh querySelectorAll pass on every html change during streaming. The
   // delegated handler reads the sibling <pre> at click time.
+  const textRef = useRef(text);
+  textRef.current = text;
+  const onRegenerateRef = useRef(onRegenerate);
+  onRegenerateRef.current = onRegenerate;
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
+      const regenBtn = target.closest<HTMLElement>("button[data-role='regen-msg']");
+      if (regenBtn) {
+        // Trailing regenerate icon (latest turn only): re-runs the preceding
+        // user prompt via the host callback.
+        onRegenerateRef.current?.();
+        return;
+      }
+      const msgBtn = target.closest<HTMLElement>("button[data-role='copy-msg']");
+      if (msgBtn) {
+        // Trailing message icon: copies the whole block text (same payload as
+        // the old button); swaps to a check icon briefly for feedback.
+        void copyText(textRef.current).then(
+          () => {
+            msgBtn.innerHTML = CHECK_ICON_SVG;
+            msgBtn.classList.add("copied");
+            window.setTimeout(() => {
+              msgBtn.innerHTML = COPY_ICON_SVG;
+              msgBtn.classList.remove("copied");
+            }, 1500);
+          },
+          () => undefined,
+        );
+        return;
+      }
       const btn = target.closest<HTMLElement>("button[data-role='copy-code']");
       if (!btn) return;
       const code = btn.parentElement?.querySelector("pre code")?.textContent ?? "";
@@ -159,6 +238,24 @@ export function Markdown({ text }: { text: string }) {
     root.addEventListener("click", onClick);
     return () => root.removeEventListener("click", onClick);
   }, []);
+
+  // MutationObserver guard: React rewrites dangerouslySetInnerHTML whenever
+  // the html string differs, wiping the injected icons; the per-render
+  // ensure misses wipes that land between renders (React.memo(BlockView)
+  // skips re-renders, so no effect runs to re-inject). Observe the container
+  // and re-inject on any childList wipe — the ensure is idempotent so this
+  // converges instead of looping.
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const observer = new MutationObserver(() => {
+      if (showCopyIcon && !root.querySelector("button[data-role='copy-msg']")) {
+        ensureInjected();
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [showCopyIcon]);
 
   return (
     <div

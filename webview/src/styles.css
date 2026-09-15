@@ -788,6 +788,37 @@
   background: var(--surface-2);
 }
 
+/* Trailing message copy icon (injected inline into the markdown's last
+   element by Markdown.tsx): follows the text end like a tiny action icon.
+   Always visible (dimmed) so users can find it; brightens on hover. */
+.copy-msg-btn {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 5px;
+  padding: 1px;
+  vertical-align: baseline;
+  color: var(--muted-foreground);
+  opacity: 0.55;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease;
+}
+
+.copy-msg-btn:hover,
+.copy-msg-btn:focus-visible,
+.copy-msg-btn.copied {
+  opacity: 1;
+}
+
+.copy-msg-btn:hover,
+.copy-msg-btn.copied {
+  color: var(--color-primary);
+}
+
 /* Fenced-language badge (top-left of the code block). Pushes the code down a
    little so the badge doesn't sit on top of the first line. */
 .code-block.has-lang pre {
