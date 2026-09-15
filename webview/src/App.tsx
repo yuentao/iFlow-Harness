@@ -41,6 +41,12 @@ function statusChip(status: AgentStatus) {
           {t("就绪")}
         </Chip>
       );
+    case "streaming":
+      return (
+        <Chip tone="primary">
+          <Loader2 className="size-2.5 animate-spin" /> {t("生成中")}
+        </Chip>
+      );
     case "error":
       return (
         <Chip tone="danger">
@@ -382,6 +388,10 @@ export function App() {
           {state.replaying ? (
             <Chip tone="info">
               <Loader2 className="size-2.5 animate-spin" /> {t("正在恢复历史会话…")}
+            </Chip>
+          ) : state.initializing ? (
+            <Chip tone="primary">
+              <Loader2 className="size-2.5 animate-spin" /> {t("正在创建新会话…")}
             </Chip>
           ) : (
             statusChip(state.status)

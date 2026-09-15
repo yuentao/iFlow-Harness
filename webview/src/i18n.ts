@@ -48,6 +48,7 @@ const en: Record<string, string> = {
   "连接中": "Connecting",
   "就绪": "Ready",
   "正在生成": "Generating",
+  "生成中": "Generating",
   "初始化中": "Initializing",
   "错误": "Error",
   "管理配置与凭据…": "Manage profiles & credentials…",
