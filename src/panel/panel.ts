@@ -2331,6 +2331,13 @@ export class ChatPanel implements vscode.Disposable {
       } catch {
         // dying client — the restart path handles it
       }
+      // Abandoned-session guard (mirrors the profile-switch path): drop any
+      // trailing session_update from the outgoing session so it cannot leak
+      // into the freshly cleared transcript — including updates that arrive
+      // during the reset window (sessionId=null) or without a sessionId,
+      // which the cross-session guard at onSessionUpdate would otherwise let
+      // through. Consumed delete-style on first sight.
+      this.discardedSessionIds.add(inFlight);
     }
     // Settle pending approval/question cards BEFORE the clear: their
     // resolution notes belong to the old transcript and are cleared with it.
