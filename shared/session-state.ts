@@ -97,6 +97,15 @@ function isSystemStatusText(text: string): boolean {
 }
 
 /**
+ * Legacy backfill matcher: appendApprovalResolution's exact whole-text shape
+ * (`*label — resolution*`). Only used for transcripts persisted before the
+ * system flag existed — the live path flags notes explicitly at creation, so
+ * a false positive here would need an assistant reply that is nothing but
+ * one fully-italic line containing " — ".
+ */
+const LEGACY_RESOLUTION_NOTE = /^\*[^*\n]+ — [^*\n]+\*$/;
+
+/**
  * P-1 follow-up (2026-09): cap a tool block's output at 64K chars. Tool
  * output is the dominant transcript-size driver (shell dumps, file reads),
  * and every downstream O(size) path — snapshot serialization, transcript
@@ -887,6 +896,13 @@ export function markToolCancelled(state: SessionState): void {
 export function backfillBlockIds(blocks: Block[]): void {
   for (const block of blocks) {
     if (!block.id) block.id = nextBlockId();
+    // Pre-system-classification transcripts carry no `system` flag — re-derive
+    // it so restored status lines still render as muted system notes. Only
+    // when absent: an explicit value (host-written) is authoritative.
+    if (block.kind === "text" && block.system === undefined) {
+      block.system =
+        isSystemStatusText(block.text) || LEGACY_RESOLUTION_NOTE.test(block.text) || undefined;
+    }
     if (block.kind === "subagent") backfillBlockIds(block.entries);
   }
 }

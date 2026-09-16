@@ -249,6 +249,21 @@ describe("system status text classification", () => {
     if (b.kind !== "text") throw new Error("expected text");
     expect(b.system).toBe(true);
   });
+
+  it("backfills the system flag on legacy persisted blocks", () => {
+    const blocks = [
+      { kind: "text", text: "正在压缩..." },
+      { kind: "text", text: "*plan — 已批准计划*" },
+      { kind: "text", text: "普通回复 — 不是注记" },
+      { kind: "text", text: "好的", system: false },
+    ] as Block[];
+    backfillBlockIds(blocks);
+    const flags = blocks.map((b) => (b.kind === "text" ? b.system : undefined));
+    expect(flags[0]).toBe(true);
+    expect(flags[1]).toBe(true);
+    expect(flags[2]).toBeUndefined();
+    expect(flags[3]).toBe(false); // explicit value wins
+  });
 });
 
 describe("stable block ids (P4)", () => {
