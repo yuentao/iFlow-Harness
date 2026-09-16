@@ -183,111 +183,12 @@ export function App() {
         {liveMessage}
       </div>
       {/* header — shadow appears only while messages scroll under it */}
-      <header className={`acrylic relative z-10 shrink-0 border-b border-border px-3 py-2.5${headerScrolled ? " header-scrolled" : ""}`}>
-        <div className="flex items-center gap-2.5">
-          <div className="relative flex size-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/30 to-primary/10 shadow-btn ring-1 ring-primary/25">
-            <img src={logo} alt="" className="size-[18px]" />
-            {/* top-edge highlight: the logo tile reads as a polished gem */}
-            <span className="pointer-events-none absolute inset-x-0 top-0 h-px rounded-t-lg bg-gradient-to-r from-transparent via-white/60 to-transparent" />
-          </div>
-          <div className="leading-tight">
-            <h1 className="text-[13px] font-extrabold tracking-tight">{t("心流·驭光")}</h1>
-            {!isEnglishLocale() && (
-              <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-                iFlow Harness
-              </p>
-            )}
-          </div>
-          <div className="ml-auto flex items-center gap-1">
-            <button
-              className={BTN_ICON}
-              title={t("新会话")}
-              disabled={locked}
-              onClick={() => send({ type: "newSession" })}
-            >
-              <Plus className="size-4" />
-            </button>
-            <button
-              className={BTN_ICON}
-              title={dark ? t("切换到浅色主题") : t("切换到深色主题")}
-              aria-label={dark ? t("切换到浅色主题") : t("切换到深色主题")}
-              onClick={() => setManual((prev) => ((prev ?? (dark ? "dark" : "light")) === "dark" ? "light" : "dark"))}
-            >
-              {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-            </button>
-            {/* API profiles: quick switch + manage (opens the full auth card).
-                Refresh the profile list at open time: settings.json is rewritten
-                by external tools behind our back, so the shown list must be
-                recomputed on every open, not reused from panel load. */}
-            <Dropdown
-              align="right"
-              menuClass="w-64"
-              disabled={locked}
-              onOpenChange={(o) => {
-                if (o) send({ type: "refreshAuth" });
-              }}
-              trigger={(open) => (
-                <button
-                  className={`${BTN_ICON}${auth?.authenticated ? "" : " text-warning"}`}
-                  title={t("API 凭据配置")}
-                  aria-label={t("API 凭据配置")}
-                  disabled={locked}
-                >
-                  <Settings2 className="size-4" />
-                </button>
-              )}
-            >
-              {(close) => (
-                <>
-                  {(auth?.profiles.length ?? 0) > 0 && (
-                    <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-                      {t("API 配置")}
-                    </div>
-                  )}
-                  {(auth?.profiles ?? []).map((p) => (
-                    <button
-                      key={p.name}
-                      role="menuitem"
-                      disabled={locked}
-                      onClick={() => {
-                        if (!p.active) {
-                          beginPending("profile", p.name);
-                          send({ type: "activateProfile", name: p.name });
-                        }
-                        close();
-                      }}
-                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
-                    >
-                      <span className="flex w-full min-w-0 items-center text-[12px] text-foreground">
-                        <span className="min-w-0 truncate">{p.name}</span>
-                        {p.active && <Check className="ml-auto size-3 shrink-0 text-primary" />}
-                      </span>
-                      <span className="w-full truncate font-mono text-[10px] text-muted-foreground">
-                        {p.modelName} · {p.keyTail}
-                      </span>
-                    </button>
-                  ))}
-                  <div className="border-t border-border">
-                    <button
-                      className="w-full px-3 py-1.5 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground"
-                      onClick={() => {
-                        setConfigOpen(true);
-                        close();
-                      }}
-                    >
-                      {t("管理配置与凭据…")}
-                    </button>
-                  </div>
-                </>
-              )}
-            </Dropdown>
-          </div>
-        </div>
+      <header className={`acrylic relative z-10 shrink-0 border-b border-border px-3 py-2${headerScrolled ? " header-scrolled" : ""}`}>
         {/* min-w-0 on the row + Dropdown wrapper: the flex shrink chain must
             reach the truncating label inside the trigger, or a long session
             title stretches the whole header row (seen with prompt-derived
             labels). */}
-        <div className="mt-2 flex min-w-0 items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
           {/* session switcher */}
           {sessions.length > 0 ? (
             <Dropdown
@@ -421,6 +322,90 @@ export function App() {
           ) : (
             statusChip(status)
           )}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <button
+              className={BTN_ICON}
+              title={t("新会话")}
+              disabled={locked}
+              onClick={() => send({ type: "newSession" })}
+            >
+              <Plus className="size-4" />
+            </button>
+            <button
+              className={BTN_ICON}
+              title={dark ? t("切换到浅色主题") : t("切换到深色主题")}
+              aria-label={dark ? t("切换到浅色主题") : t("切换到深色主题")}
+              onClick={() => setManual((prev) => ((prev ?? (dark ? "dark" : "light")) === "dark" ? "light" : "dark"))}
+            >
+              {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+            </button>
+            {/* API profiles: quick switch + manage (opens the full auth card).
+                Refresh the profile list at open time: settings.json is rewritten
+                by external tools behind our back, so the shown list must be
+                recomputed on every open, not reused from panel load. */}
+            <Dropdown
+              align="right"
+              menuClass="w-64"
+              disabled={locked}
+              onOpenChange={(o) => {
+                if (o) send({ type: "refreshAuth" });
+              }}
+              trigger={(open) => (
+                <button
+                  className={`${BTN_ICON}${auth?.authenticated ? "" : " text-warning"}`}
+                  title={t("API 凭据配置")}
+                  aria-label={t("API 凭据配置")}
+                  disabled={locked}
+                >
+                  <Settings2 className="size-4" />
+                </button>
+              )}
+            >
+              {(close) => (
+                <>
+                  {(auth?.profiles.length ?? 0) > 0 && (
+                    <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                      {t("API 配置")}
+                    </div>
+                  )}
+                  {(auth?.profiles ?? []).map((p) => (
+                    <button
+                      key={p.name}
+                      role="menuitem"
+                      disabled={locked}
+                      onClick={() => {
+                        if (!p.active) {
+                          beginPending("profile", p.name);
+                          send({ type: "activateProfile", name: p.name });
+                        }
+                        close();
+                      }}
+                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+                    >
+                      <span className="flex w-full min-w-0 items-center text-[12px] text-foreground">
+                        <span className="min-w-0 truncate">{p.name}</span>
+                        {p.active && <Check className="ml-auto size-3 shrink-0 text-primary" />}
+                      </span>
+                      <span className="w-full truncate font-mono text-[10px] text-muted-foreground">
+                        {p.modelName} · {p.keyTail}
+                      </span>
+                    </button>
+                  ))}
+                  <div className="border-t border-border">
+                    <button
+                      className="w-full px-3 py-1.5 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                      onClick={() => {
+                        setConfigOpen(true);
+                        close();
+                      }}
+                    >
+                      {t("管理配置与凭据…")}
+                    </button>
+                  </div>
+                </>
+              )}
+            </Dropdown>
+          </div>
         </div>
       </header>
 
