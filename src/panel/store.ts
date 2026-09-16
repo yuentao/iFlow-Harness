@@ -20,6 +20,7 @@ import {
   clearPendingApproval,
   clearPendingPlanExit,
   markToolReverted,
+  refreshSessionUsage,
   setMeta,
   setPendingApproval,
   setPendingPlanExit,
@@ -266,11 +267,32 @@ export class SessionStore {
     }, this.flushIntervalMs);
   }
 
+  /**
+   * Real-time usage refresh interval while streaming. The refresh itself is a
+   * pure integer fold over the blocks' token caches (the reducer keeps them
+   * valid during streaming), so the cost per refresh is trivial even for long
+   * transcripts; this throttle only bounds how often the webview re-renders
+   * the usage chip. Turn end stays exact — `completePrompt` refreshes
+   * unconditionally.
+   */
+  private static readonly USAGE_REFRESH_INTERVAL_MS = 500;
+  private lastUsageRefreshAt = 0;
+
   /** Push to the webview: incremental tail patch when safe, full snapshot otherwise. */
   pushSnapshot(): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
+    }
+    // Live token counter: while a turn streams, recompute the usage estimate
+    // at most every USAGE_REFRESH_INTERVAL_MS. Must run BEFORE the tail
+    // spread below so the fresh numbers ride this very message.
+    if (this.state.status === "streaming") {
+      const now = Date.now();
+      if (now - this.lastUsageRefreshAt >= SessionStore.USAGE_REFRESH_INTERVAL_MS) {
+        this.lastUsageRefreshAt = now;
+        refreshSessionUsage(this.state);
+      }
     }
     this.onStateChange?.(this.state);
 

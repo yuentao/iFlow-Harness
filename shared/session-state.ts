@@ -66,10 +66,27 @@ function appendTextToLast(
     (kind !== "text" || last.kind !== "text" || Boolean(last.system) === system)
   ) {
     last.text += text;
-    last.tokens = undefined;
+    // Incremental token accumulation (real-time usage): add the appended
+    // chunk's tokens to the block's cache instead of invalidating it, so a
+    // streaming block keeps a VALID count at all times and a live usage
+    // refresh is a pure O(blocks) sum with zero BPE. Sum-of-chunks differs
+    // from whole-text BPE only at token boundaries — acceptable for a usage
+    // ESTIMATE (same stance as the SubAgent entry-sum note below), and
+    // strictly cheaper than re-scanning the growing block on every throttled
+    // refresh. A block without a cache yet (e.g. restored transcript) falls
+    // back to one full count of the merged text so the total never
+    // under-counts.
+    last.tokens =
+      last.tokens !== undefined ? last.tokens + estimateTokens(text) : estimateTokens(blockText(last));
     return blocks.length - 1;
   }
-  blocks.push({ kind, text, id: nextBlockId(), ...(system ? { system: true } : {}) } as Block);
+  blocks.push({
+    kind,
+    text,
+    id: nextBlockId(),
+    tokens: estimateTokens(text),
+    ...(system ? { system: true } : {}),
+  } as Block);
   return blocks.length - 1;
 }
 
@@ -133,7 +150,7 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
       // spread keeps the existing block's id stable across updates. A patch
       // bringing a NEW diff means the file was edited again — the stale
       // revert marker no longer applies (C4).
-      blocks[i] = {
+      const merged: ToolBlock = {
         ...block,
         ...patch,
         output: output || block.output,
@@ -143,8 +160,18 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
         diff: patch.diff ?? block.diff,
         reverted: patch.diff ? false : block.reverted,
       };
-      // P1: the tool's content changed — its token cache is stale.
-      recountBlockTokens(blocks[i] as Block);
+      // P1: recount only when token-bearing content actually changed — pure
+      // status flips (pending → completed) ride the existing cache, keeping
+      // the hot tool-update path BPE-free. `tokens` survives the spread above
+      // (wire patches never carry it); a real change recounts in place.
+      const contentChanged =
+        merged.diff?.path !== block.diff?.path ||
+        merged.diff?.oldText !== block.diff?.oldText ||
+        merged.diff?.newText !== block.diff?.newText ||
+        merged.title !== block.title ||
+        merged.output !== block.output;
+      if (contentChanged) recountBlockTokens(merged);
+      blocks[i] = merged;
       return i;
     }
   }
@@ -743,20 +770,24 @@ function blockText(block: Block): string {
  * (written by the reducer when a block's content definitively changes, and
  * lazily for blocks without one), so each turn end only tokenizes the new
  * content instead of re-running BPE over the whole transcript (a 100k-token
- * session previously cost hundreds of ms of host CPU per turn).
- * SubAgent cards approximate their text tokens as the SUM of their entries'
- * caches — blockText joins entries with "\n", and the BPE sum-vs-whole
- * boundary difference is acceptable for a usage ESTIMATE.
+ * session previously cost hundreds of ms of host CPU per turn). With
+ * streaming appends accumulating incrementally and tool blocks recounting
+ * only on real content changes, caches stay VALID throughout a turn — a
+ * real-time usage refresh is then a pure integer fold over these caches.
+ * SubAgent cards sum their entries' caches LIVE instead of caching the sum:
+ * nested updates mutate entries in place (no invalidation hook reaches the
+ * parent), and the fold is pure addition of already-cached values, so it is
+ * cheap enough to recompute on every refresh with zero stale-cache risk.
+ * The BPE sum-vs-whole boundary difference is acceptable for a usage ESTIMATE.
  */
 function blockTokens(block: Block): number {
   if (block.kind === "compression") return 0;
-  if (block.tokens !== undefined) return block.tokens;
   if (block.kind === "subagent") {
     let sum = 0;
     for (const e of block.entries) sum += blockTokens(e);
-    block.tokens = sum;
     return sum;
   }
+  if (block.tokens !== undefined) return block.tokens;
   const t = estimateTokens(blockText(block));
   block.tokens = t;
   return t;
@@ -793,9 +824,32 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi | null {
 export function completePrompt(state: SessionState, stopReason: StopReason): void {
   // The CLI is frozen and never reports usage, so the host estimates cumulative
   // consumption from the transcript itself (recomputed idempotently each turn).
-  state.usage = estimateSessionUsage(state.blocks);
+  refreshSessionUsage(state);
   state.stopReason = stopReason;
   state.status = "idle";
+}
+
+/**
+ * Recompute `state.usage` in place for a real-time refresh mid-turn. Cheap by
+ * design: every block's token cache stays valid during streaming (appends
+ * accumulate, tool blocks recount only on content changes), so this is an
+ * integer fold — no tokenizer call unless a legacy block lacks a cache.
+ * Reference-stable: when the numbers are unchanged the existing object is
+ * kept, so the webview's zustand selector (Object.is) skips re-rendering the
+ * usage chip on refreshes where nothing moved.
+ */
+export function refreshSessionUsage(state: SessionState): void {
+  const next = estimateSessionUsage(state.blocks);
+  const prev = state.usage;
+  if (
+    prev &&
+    next &&
+    prev.inputTokens === next.inputTokens &&
+    prev.outputTokens === next.outputTokens
+  ) {
+    return;
+  }
+  state.usage = next;
 }
 
 export function setMeta(

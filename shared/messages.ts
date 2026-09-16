@@ -43,8 +43,10 @@ export interface BlockBase {
   /**
    * P1 incremental token estimation: cached token count of this block's
    * text (host-side only; the webview ignores it). Written by the reducer
-   * when content definitively changes and lazily established at turn end,
-   * so each turn only tokenizes new content instead of the whole transcript.
+   * when content definitively changes, accumulated incrementally on streaming
+   * appends, and lazily established for blocks without one — so the cache
+   * stays valid throughout a turn and both the turn-end and the throttled
+   * real-time usage refreshes are pure sums over these caches.
    */
   tokens?: number;
 }

@@ -115,6 +115,10 @@ const en: Record<string, string> = {
   "{0} 个文件暂存失败，已跳过": "Failed to stage {0} file(s) — skipped",
   "停止生成": "Stop generating",
   "发送 (Enter)": "Send (Enter)",
+  "本次会话 token 消耗（host 估算，非精确计费）：输入 {0} · 输出 {1}":
+    "Session token usage (host estimate, not billing): input {0} · output {1}",
+  "输入（用户消息与工具结果）": "Input (user messages & tool results)",
+  "输出（回复与思考）": "Output (replies & thinking)",
   // message list
   "在 VSCode diff 视图中查看该变更": "Open this change in the VSCode diff view",
   "将该文件恢复为编辑前内容": "Revert this file to its pre-edit content",

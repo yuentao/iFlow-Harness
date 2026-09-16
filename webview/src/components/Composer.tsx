@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronDown,
   FileCode,
@@ -57,6 +59,39 @@ function formatTokens(n: number): string {
 const EMPTY_COMMANDS: SlashCommand[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
 
+/**
+ * Session token usage chip — subscribes to the usage NUMBERS as primitives
+ * (postMessage re-clones the usage object on every patch, so an object
+ * selector would re-render on every blockPatch; primitives only move when
+ * the host's throttled real-time refresh actually changes them) — the live
+ * streaming refresh re-renders ONLY this small label, not the whole Composer.
+ * Sits right of the model dropdown it counts.
+ */
+function SessionUsageChip() {
+  const inputTokens = useChat((s) => s.state?.usage?.inputTokens ?? 0);
+  const outputTokens = useChat((s) => s.state?.usage?.outputTokens ?? 0);
+  if (inputTokens + outputTokens === 0) return null;
+  return (
+    <span
+      title={t(
+        "本次会话 token 消耗（host 估算，非精确计费）：输入 {0} · 输出 {1}",
+        inputTokens.toLocaleString(),
+        outputTokens.toLocaleString(),
+      )}
+      className="flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
+    >
+      <span className="flex items-center gap-0.5" title={t("输入（用户消息与工具结果）")}>
+        <ArrowUp className="size-2.5" />
+        {formatTokens(inputTokens)}
+      </span>
+      <span className="flex items-center gap-0.5" title={t("输出（回复与思考）")}>
+        <ArrowDown className="size-2.5" />
+        {formatTokens(outputTokens)}
+      </span>
+    </span>
+  );
+}
+
 export function Composer() {
   // P2-1 selector split: the composer previously subscribed to the whole
   // state object, re-rendering on every blockPatch (up to 12.5/s during
@@ -71,7 +106,6 @@ export function Composer() {
   const modes = useChat((s) => s.state?.modes ?? null);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
-  const usage = useChat((s) => s.state?.usage ?? null);
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
@@ -868,16 +902,9 @@ export function Composer() {
             </Dropdown>
           )}
 
-          {/* session token usage — plain mono label, sits right of the
-              model dropdown it counts */}
-          {usage && (
-            <span
-              title={t("本次会话累计 token 消耗（host 估算，非精确计费）")}
-              className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
-            >
-              {formatTokens(usage.totalTokens)} tokens
-            </span>
-          )}
+          {/* session token usage — input/output split, live-refreshed while
+              streaming; its own component so the refresh re-renders only it */}
+          <SessionUsageChip />
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <button

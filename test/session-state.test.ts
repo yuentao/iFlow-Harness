@@ -5,7 +5,9 @@ import {
   backfillBlockIds,
   beginUserPrompt,
   completePrompt,
+  estimateSessionUsage,
   estimateTokens,
+  refreshSessionUsage,
   newSessionState,
   extractTextOutput,
   extractDiff,
@@ -921,20 +923,27 @@ describe("tool output truncation (P0-2)", () => {
 });
 
 describe("block token cache (P1 incremental usage)", () => {
-  it("caches tokens at turn end; streaming growth invalidates and re-tokenizes once", () => {
+  it("keeps caches valid through streaming: each append tokenizes only its chunk", () => {
     const state = initialSessionState();
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第一轮回答" } }));
+    // The chunk itself established the block's cache — turn end adds nothing.
     completePrompt(state, "end_of_turn");
-    const text1 = state.blocks[0]!;
-    expect(text1.tokens).toBeGreaterThan(0);
+    const before = state.blocks[0]!.tokens!; // capture the NUMBER, not the block ref
+    expect(before).toBeGreaterThan(0);
 
-    // Second turn appends to the SAME text block (streaming growth) — the
-    // cache is invalidated and recomputed exactly once at turn end.
+    // Second turn appends to the SAME text block (streaming growth): the
+    // cache ACCUMULATES the new chunk's tokens — one tokenize call for the
+    // chunk, never a re-scan of the grown block.
     countTokensMock.mockClear();
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第二轮回答" } }));
+    expect(countTokensMock).toHaveBeenCalledTimes(1); // the chunk only, not per-refresh re-scan
+    const grown = state.blocks[0]!.tokens!;
+    expect(grown).toBeGreaterThan(before);
+    expect(state.blocks).toHaveLength(1); // merged into the same block
+    countTokensMock.mockClear();
     completePrompt(state, "end_of_turn");
-    expect(countTokensMock).toHaveBeenCalledTimes(1); // one recount, not per-chunk
-    expect(state.blocks[0]!.tokens).toBeGreaterThan(0);
+    expect(countTokensMock).not.toHaveBeenCalled(); // caches stayed valid all along
+    expect(state.blocks[0]!.tokens).toBe(grown);
   });
 
   it("reuses the cache across turns for blocks whose content stopped growing", () => {
@@ -973,5 +982,67 @@ describe("block token cache (P1 incremental usage)", () => {
     expect(tool.tokens).not.toBe(before);
     // The update itself consumed one tokenize call (recount at mutation time).
     expect(countTokensMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT recount a tool block on a pure status flip (no content change)", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "ls", title: "ls", kind: "read", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "ls", title: "ls", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "输出" } }] }));
+    completePrompt(state, "end_of_turn");
+    const cached = state.blocks[0]!.tokens!;
+
+    // A later update that only flips status (no new output/diff/title) must
+    // ride the cache — the hot tool-update path stays BPE-free.
+    countTokensMock.mockClear();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "ls", title: "ls", kind: "read", status: "in_progress" }));
+    expect(countTokensMock).not.toHaveBeenCalled();
+    expect(state.blocks[0]!.tokens).toBe(cached);
+  });
+});
+
+describe("session usage split & real-time refresh", () => {
+  it("splits input (user/tool) from output (text/thought)", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "用户的问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答内容" } }));
+    // tool_call opens without output; the output arrives on the update (wire shape).
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "ls", title: "列出目录", kind: "read", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "ls", title: "列出目录", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "文件清单" } }] }));
+    completePrompt(state, "end_of_turn");
+    const usage = state.usage!;
+    // user prompt + tool block are input; the agent reply is output.
+    const expectedInput = estimateTokens("用户的问题") + estimateTokens("列出目录\n文件清单");
+    const expectedOutput = estimateTokens("回答内容");
+    expect(usage.inputTokens).toBe(expectedInput);
+    expect(usage.outputTokens).toBe(expectedOutput);
+    expect(usage.totalTokens).toBe(expectedInput + expectedOutput);
+  });
+
+  it("refreshSessionUsage is reference-stable when numbers are unchanged", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+    refreshSessionUsage(state);
+    const first = state.usage;
+    expect(first).not.toBeNull();
+    // No content moved between refreshes → the SAME object is kept (lets the
+    // webview's Object.is selector skip a re-render).
+    refreshSessionUsage(state);
+    expect(state.usage).toBe(first);
+  });
+
+  it("refreshSessionUsage grows live mid-stream without waiting for turn end", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "第一段" } }));
+    refreshSessionUsage(state);
+    const mid = state.usage!;
+    expect(mid.outputTokens).toBeGreaterThan(0);
+    // More streaming, then a refresh BEFORE completePrompt reflects it.
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "，第二段更长的内容" } }));
+    refreshSessionUsage(state);
+    const later = state.usage!;
+    expect(later.outputTokens).toBeGreaterThan(mid.outputTokens);
+    expect(later).not.toBe(mid); // numbers moved → a fresh object
   });
 });
