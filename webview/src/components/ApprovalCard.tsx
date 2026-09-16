@@ -75,8 +75,8 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
       }}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-        <ShieldCheck className="size-3.5 text-primary" />
-        <span className="text-[12px] font-semibold">{t("iFlow 请求执行工具")}</span>
+        <ShieldCheck className="size-3.5 shrink-0 text-primary" />
+        <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 请求执行工具")}</span>
       </div>
       <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
         {/* break-words + scroll cap: the wire title is uncapped (whole shell

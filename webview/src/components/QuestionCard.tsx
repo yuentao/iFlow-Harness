@@ -86,8 +86,8 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
       aria-label={t("iFlow 提问")}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-        <HelpCircle className="size-3.5 text-primary" />
-        <span className="text-[12px] font-semibold">{t("iFlow 需要你的回答")}</span>
+        <HelpCircle className="size-3.5 shrink-0 text-primary" />
+        <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 需要你的回答")}</span>
       </div>
       <div className="space-y-3 px-3 py-2.5 text-[12px]">
         {pending.questions.map((q) => {
@@ -110,7 +110,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       disabled={answered}
                       title={opt.description}
                       aria-label={opt.description ? t("{0}：{1}", opt.label, opt.description) : opt.label}
-                      className={`press flex max-w-[260px] flex-col items-start gap-0.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                      className={`press flex max-w-[min(260px,100%)] flex-col items-start gap-0.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                         active
                           ? "border-primary bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn"
                           : "border-border bg-surface/80 text-foreground shadow-card hover:bg-surface-2"

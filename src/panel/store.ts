@@ -20,7 +20,6 @@ import {
   clearPendingApproval,
   clearPendingPlanExit,
   markToolReverted,
-  parseTranscriptJsonl,
   setMeta,
   setPendingApproval,
   setPendingPlanExit,

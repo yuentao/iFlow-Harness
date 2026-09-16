@@ -177,7 +177,7 @@ export function App() {
     activeSession?.label ?? (activeSessionId ? t("当前会话") : t("会话历史"));
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden text-foreground">
+    <div className="@container flex h-screen flex-col overflow-hidden text-foreground">
       {/* P1-3: visually-hidden live region for screen-reader status announcements */}
       <div aria-live="polite" aria-atomic="true" className="sr-only">
         {liveMessage}
@@ -313,11 +313,11 @@ export function App() {
           )}
           {replaying ? (
             <Chip tone="info">
-              <Loader2 className="size-2.5 animate-spin" /> {t("正在恢复历史会话…")}
+              <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在恢复历史会话…")}</span>
             </Chip>
           ) : initializing ? (
             <Chip tone="primary">
-              <Loader2 className="size-2.5 animate-spin" /> {t("正在创建新会话…")}
+              <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
             </Chip>
           ) : (
             statusChip(status)
@@ -345,7 +345,7 @@ export function App() {
                 recomputed on every open, not reused from panel load. */}
             <Dropdown
               align="right"
-              menuClass="w-64"
+              menuClass="w-64 max-w-[calc(100vw_-_24px)]"
               disabled={locked}
               onOpenChange={(o) => {
                 if (o) send({ type: "refreshAuth" });

@@ -46,8 +46,8 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
       }}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-        <ClipboardCheck className="size-3.5 text-primary" />
-        <span className="text-[12px] font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
+        <ClipboardCheck className="size-3.5 shrink-0 text-primary" />
+        <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
       </div>
       <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
         <p className="text-[11px] text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>

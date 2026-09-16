@@ -128,8 +128,8 @@ export function AuthCard({
     >
       <div className="auth-modal acrylic-pop">
         <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
-          <KeyRound className="size-3.5 text-primary" />
-          <span className="text-[12px] font-semibold">
+          <KeyRound className="size-3.5 shrink-0 text-primary" />
+          <span className="min-w-0 truncate text-[12px] font-semibold">
             {auth.authenticated ? t("API 配置") : t("连接 iFlow 需要配置 API 凭据")}
           </span>
           {/* The setup banner is not dismissible while unauthenticated. */}

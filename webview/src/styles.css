@@ -877,6 +877,13 @@ header.acrylic.header-scrolled {
   text-decoration-color: var(--color-info);
 }
 
+/* injected wrapper (Markdown.tsx): wide GFM tables scroll horizontally on a
+   narrow panel instead of stretching the layout. */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
 .md table {
   border-collapse: collapse;
   margin: 0.5em 0;

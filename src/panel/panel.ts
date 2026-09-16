@@ -44,12 +44,9 @@ import {
   backfillBlockIds,
   beginReplay,
   clampSessionLabel,
-  clearPendingQuestions,
   endReplay,
   newSessionState,
   parseTranscriptJsonl,
-  setPendingQuestions,
-  setSessions,
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";

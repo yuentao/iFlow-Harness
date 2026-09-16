@@ -153,6 +153,16 @@ export function Markdown({
       wrap.appendChild(btn);
     });
 
+    // Wide GFM tables must scroll horizontally on a narrow panel instead of
+    // stretching the whole layout (same idempotent wrap pattern as pres).
+    root.querySelectorAll("table").forEach((table) => {
+      if (table.parentElement?.classList.contains("table-scroll")) return;
+      const wrap = document.createElement("div");
+      wrap.className = "table-scroll";
+      table.parentNode?.insertBefore(wrap, table);
+      wrap.appendChild(table);
+    });
+
     if (showCopyIcon) {
       const last = root.lastElementChild;
       if (last && !last.querySelector(":scope > button[data-role='copy-msg']")) {

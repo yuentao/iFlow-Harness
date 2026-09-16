@@ -5,7 +5,6 @@
  */
 
 import type {
-  NewSessionMeta,
   SessionModeState,
   SlashCommand,
   ToolCallStatus,

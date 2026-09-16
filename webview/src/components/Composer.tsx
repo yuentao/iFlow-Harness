@@ -480,12 +480,14 @@ export function Composer() {
     setMentionQuery(null);
   }
 
+  // whitespace-nowrap: a narrow panel must never squeeze a label into
+  // vertical text (e.g. 智/能 stacked) — the row wraps instead (flex-wrap).
   const CANVAS_BTN =
-    "card-lift press inline-flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
+    "card-lift press inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
   return (
     <div
       ref={rootRef}
-      className={`acrylic relative flex flex-col shrink-0 border-t p-3 transition-colors ${
+      className={`acrylic @container relative flex flex-col shrink-0 border-t p-3 transition-colors ${
         dragOver ? "border-primary/60 bg-primary/5" : "border-border"
       }`}
       style={{ height: height ?? undefined, boxShadow: "var(--shadow-stage)" }}
@@ -510,7 +512,7 @@ export function Composer() {
           {attachments.map((f) => (
             <span
               key={f.id}
-              className="card-lift inline-flex max-w-[260px] items-center gap-1 rounded-lg border border-border bg-surface/80 px-1.5 py-1 text-[11px] text-foreground shadow-card"
+              className="card-lift inline-flex max-w-[min(260px,100%)] items-center gap-1 rounded-lg border border-border bg-surface/80 px-1.5 py-1 text-[11px] text-foreground shadow-card"
               title={f.path}
             >
               <FileText className="size-3 shrink-0 text-primary" />
@@ -713,12 +715,15 @@ export function Composer() {
             }
           }}
         />
-        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-1.5">
+        {/* flex-wrap: a narrow panel drops controls to a second line instead
+            of crushing labels into vertical text; @max-[340px] (composer is
+            the @container) degrades the mode button to icon-only. */}
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-2 pb-2 pt-1.5">
           {/* permission mode dropdown */}
           {modes && currentMode && (
             <Dropdown
               direction="up"
-              menuClass="w-56"
+              menuClass="w-56 max-w-[calc(100vw_-_24px)]"
               disabled={busy}
               trigger={(open) => (
                 <button
@@ -727,8 +732,8 @@ export function Composer() {
                   disabled={busy}
                 >
                   <Zap className="size-3 shrink-0 text-primary" />
-                  {currentMode ? modeDisplay(currentMode).label : ""}
-                  <ChevronDown className="size-3 opacity-60" />
+                  <span className="@max-[340px]:hidden">{currentMode ? modeDisplay(currentMode).label : ""}</span>
+                  <ChevronDown className="size-3 shrink-0 opacity-60 @max-[340px]:hidden" />
                 </button>
               )}
             >
@@ -770,7 +775,7 @@ export function Composer() {
           {models.length > 0 && (
             <Dropdown
               direction="up"
-              menuClass="w-56 max-h-64 overflow-y-auto"
+              menuClass="w-56 max-w-[calc(100vw-24px)] max-h-64 overflow-y-auto"
               disabled={busy}
               onOpenChange={(o) => {
                 setModelMenuOpen(o);
@@ -790,7 +795,9 @@ export function Composer() {
                   title={t("模型")}
                   disabled={busy}
                 >
-                  <span className="max-w-[130px] truncate">{currentModelId ?? models[0]!.id}</span>
+                  <span className="max-w-[130px] truncate @max-[440px]:max-w-[84px] @max-[340px]:max-w-[72px]">
+                    {currentModelId ?? models[0]!.id}
+                  </span>
                   <ChevronDown className="size-3 shrink-0 opacity-60" />
                 </button>
               )}
@@ -866,13 +873,13 @@ export function Composer() {
           {usage && (
             <span
               title={t("本次会话累计 token 消耗（host 估算，非精确计费）")}
-              className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/80"
+              className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
             >
               {formatTokens(usage.totalTokens)} tokens
             </span>
           )}
 
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <button
               className={CANVAS_BTN}
               title={t("添加附件")}
@@ -888,16 +895,16 @@ export function Composer() {
                 disabled={!canStop}
                 onClick={() => send({ type: "cancel" })}
               >
-                <Square className="size-3" /> {t("停止")}
+                <Square className="size-3" /> <span className="@max-[340px]:hidden">{t("停止")}</span>
               </button>
             ) : (
               <button
-                className="press inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
                 title={t("发送 (Enter)")}
                 disabled={!text.trim() && images.length === 0 && attachments.length === 0}
                 onClick={submit}
               >
-                <SendHorizontal className="size-3" /> {t("发送")}
+                <SendHorizontal className="size-3" /> <span className="@max-[340px]:hidden">{t("发送")}</span>
               </button>
             )}
           </div>
