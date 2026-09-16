@@ -659,6 +659,9 @@ export class ChatPanel implements vscode.Disposable {
         // the store pushes a snapshot when the fresh list lands).
         void this.refreshLiveModels();
         break;
+      case "regenerate":
+        await this.regenerate();
+        break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
         // commit can send message kinds this host does not know; without a
@@ -1000,7 +1003,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     const block = state.blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
     if (!block || block.kind !== "tool" || !block.diff) return;
-    const { oldText, newText } = block.diff;
+    const { oldText } = block.diff;
     if (oldText === null) {
       void vscode.window.showWarningMessage(vscode.l10n.t("无法打开 diff：缺少编辑前内容"));
       return;
@@ -1254,7 +1257,6 @@ export class ChatPanel implements vscode.Disposable {
         try {
           const cli = readCliSettings();
           if (!cli) return; // mid-write or removed — wait for the next event
-          const extActive = await getActiveProfileName(this.context.secrets);
           const cliActive = cli.currentApiProfile?.trim() ?? null;
           const state = this.store.getState();
           const shownActive = state.auth.profiles.find((p) => p.active)?.name ?? null;
