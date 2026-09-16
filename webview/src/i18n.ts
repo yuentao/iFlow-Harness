@@ -155,6 +155,14 @@ const en: Record<string, string> = {
   "重新规划": "Re-plan",
   "计划审批操作": "Plan approval actions",
   "需要确认退出计划模式": "Plan exit needs confirmation",
+  // render-error fallback (ErrorBoundary)
+  "重试": "Retry",
+  "界面渲染异常": "Interface rendering error",
+  "界面渲染时遇到异常。重新载入面板即可恢复；也可以直接重试。":
+    "The interface hit a rendering error. Reload the panel to recover, or just retry.",
+  "消息区渲染异常": "Message area rendering error",
+  "内容渲染时遇到异常，将在下一次更新时自动重试。":
+    "Content hit a rendering error — it will retry automatically on the next update.",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

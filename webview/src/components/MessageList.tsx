@@ -43,6 +43,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { Chip, FileRef } from "./ui";
@@ -991,5 +992,14 @@ function ToastPill({ toast }: { toast: ToastItem }) {
 export function MessageList() {
   const state = useChat((s) => s.state);
   if (!state) return null;
-  return <MessageListInner state={state} />;
+  // Inline boundary: a transcript render throw (e.g. markdown parsing a
+  // pathological streaming chunk) must not unmount the header/composer, let
+  // alone the whole panel. resetKey is the state reference — new on every
+  // snapshot/blockPatch — so the next host update auto-retries the render;
+  // a transient bad chunk heals without reopening the tab.
+  return (
+    <ErrorBoundary variant="inline" resetKey={state}>
+      <MessageListInner state={state} />
+    </ErrorBoundary>
+  );
 }
