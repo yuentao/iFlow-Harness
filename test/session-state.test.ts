@@ -1045,4 +1045,18 @@ describe("session usage split & real-time refresh", () => {
     expect(later.outputTokens).toBeGreaterThan(mid.outputTokens);
     expect(later).not.toBe(mid); // numbers moved → a fresh object
   });
+
+  it("usage is zeroed (not null) from session start so the chip shows immediately", () => {
+    const state = initialSessionState();
+    expect(state.usage).not.toBeNull();
+    expect(state.usage!.inputTokens).toBe(0);
+    expect(state.usage!.outputTokens).toBe(0);
+    // A new session resets to a fresh zeroed counter, never null.
+    beginUserPrompt(state, "问题");
+    completePrompt(state, "end_of_turn");
+    expect(state.usage!.totalTokens).toBeGreaterThan(0);
+    const fresh = newSessionState(state);
+    expect(fresh.usage).not.toBeNull();
+    expect(fresh.usage!.totalTokens).toBe(0);
+  });
 });

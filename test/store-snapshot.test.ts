@@ -175,6 +175,20 @@ describe("SessionStore snapshot paths (P-1)", () => {
     expect(patch.blocks).toEqual([expect.objectContaining({ kind: "text", text: "新会话", id: expect.any(String) })]);
   });
 
+  it("replaceTranscript re-estimates usage immediately so a restored session shows it on first paint", () => {
+    const { store, messages } = makeStore();
+    store.markConnected();
+    expect(store.getState().usage?.totalTokens).toBe(0); // zeroed, chip visible
+    store.replaceTranscript([toolBlock("t1", "恢复的历史输出")]);
+    const usage = store.getState().usage;
+    expect(usage).not.toBeNull();
+    expect(usage!.inputTokens).toBeGreaterThan(0); // tool block counts as input
+    // The pushed snapshot carries the restored totals.
+    const snapshot = messages[messages.length - 1];
+    if (snapshot?.type !== "snapshot") throw new Error("expected a full snapshot");
+    expect(snapshot.state.usage!.inputTokens).toBe(usage!.inputTokens);
+  });
+
   it("resync() forces the next push to be a full snapshot", () => {
     const { store, messages } = makeStore();
     store.markConnected();

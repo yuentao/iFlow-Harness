@@ -14,6 +14,7 @@ import type {
 import { l10n } from "vscode";
 import { countTokens as gptCountTokens } from "gpt-tokenizer";
 import {
+  emptySessionUsage,
   initialSessionState,
   type Block,
   type ModelInfoUi,
@@ -803,9 +804,9 @@ function recountBlockTokens(block: Block): void {
 /** Estimate cumulative token usage of the whole transcript. The CLI is frozen
  * and reports no usage, so the host estimates from the rendered blocks. Reads
  * each block's token cache (establishing it lazily); only blocks without a
- * valid cache trigger a fresh tokenize. Returns null when there is no content
- * yet (the UI hides the indicator until then). */
-export function estimateSessionUsage(blocks: Block[]): SessionUsageUi | null {
+ * valid cache trigger a fresh tokenize. An empty transcript yields a zeroed
+ * object (not null) so the UI chip shows from the first paint. */
+export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
   let inputTokens = 0;
   let outputTokens = 0;
   for (const b of blocks) {
@@ -816,9 +817,7 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi | null {
     if (b.kind === "user" || b.kind === "tool") inputTokens += t;
     else outputTokens += t;
   }
-  const totalTokens = inputTokens + outputTokens;
-  if (totalTokens === 0) return null;
-  return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens };
+  return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: inputTokens + outputTokens };
 }
 
 export function completePrompt(state: SessionState, stopReason: StopReason): void {
@@ -841,12 +840,7 @@ export function completePrompt(state: SessionState, stopReason: StopReason): voi
 export function refreshSessionUsage(state: SessionState): void {
   const next = estimateSessionUsage(state.blocks);
   const prev = state.usage;
-  if (
-    prev &&
-    next &&
-    prev.inputTokens === next.inputTokens &&
-    prev.outputTokens === next.outputTokens
-  ) {
+  if (prev && prev.inputTokens === next.inputTokens && prev.outputTokens === next.outputTokens) {
     return;
   }
   state.usage = next;
@@ -900,9 +894,10 @@ export function newSessionState(state: SessionState): SessionState {
   fresh.sessions = state.sessions;
   fresh.activeSessionId = state.activeSessionId;
   fresh.replaying = state.replaying;
-  // Token usage is per-session; a new session starts from zero (the CLI does
-  // not yet report usage, so this stays null until it does).
-  fresh.usage = null;
+  // Token usage is per-session; a new session starts from a zeroed counter
+  // (the chip shows ↑0 ↓0 instead of hiding — the CLI does not yet report
+  // usage, so the host's transcript estimate starts fresh here).
+  fresh.usage = emptySessionUsage();
   // Approval requests are session-scoped; a new session has none pending.
   return fresh;
 }

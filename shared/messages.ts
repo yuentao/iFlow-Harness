@@ -222,7 +222,8 @@ export interface SessionSummaryUi {
 
 /** Cumulative token usage for the active session, estimated by the host from the
  * transcript (the CLI is frozen and reports no usage). Coarse — not for billing.
- * Surfaced in the UI only when non-null (after the first content turn). */
+ * Always present (zeroed at session start) so the UI chip shows from the first
+ * paint, not only after the first content turn. */
 export interface SessionUsageUi {
   inputTokens: number;
   outputTokens: number;
@@ -263,8 +264,9 @@ export interface SessionState {
    */
   blockVersion?: number;
   /** Cumulative token usage for the active session, estimated by the host from
-   * the transcript (the CLI is frozen and reports no usage). Optional — null
-   * until the first content turn, so the UI hides the indicator when empty. */
+   * the transcript (the CLI is frozen and reports no usage). Zeroed at session
+   * start and refreshed live while streaming, so the UI chip is visible from
+   * the first paint. Nullable only for wire-compat with older hosts/mock data. */
   usage?: SessionUsageUi | null;
 }
 
@@ -307,8 +309,14 @@ export function initialSessionState(): SessionState {
     activeSessionId: null,
     replaying: false,
     initializing: false,
-    usage: null,
+    usage: emptySessionUsage(),
   };
+}
+
+/** Zeroed usage so the token chip renders from the first paint (a session
+ * with no content yet shows ↑0 ↓0 rather than hiding the indicator). */
+export function emptySessionUsage(): SessionUsageUi {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
 }
 
 /** One fuzzy-search file hit for the @-mention popup (M5). */

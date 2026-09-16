@@ -65,12 +65,15 @@ const EMPTY_MODELS: ModelInfoUi[] = [];
  * selector would re-render on every blockPatch; primitives only move when
  * the host's throttled real-time refresh actually changes them) — the live
  * streaming refresh re-renders ONLY this small label, not the whole Composer.
+ * The host zeroes usage at session start, so the chip shows ↑0 ↓0 from the
+ * first paint; it hides only when the field is absent entirely (older hosts).
  * Sits right of the model dropdown it counts.
  */
 function SessionUsageChip() {
+  const hasUsage = useChat((s) => s.state?.usage != null);
   const inputTokens = useChat((s) => s.state?.usage?.inputTokens ?? 0);
   const outputTokens = useChat((s) => s.state?.usage?.outputTokens ?? 0);
-  if (inputTokens + outputTokens === 0) return null;
+  if (!hasUsage) return null;
   return (
     <span
       title={t(

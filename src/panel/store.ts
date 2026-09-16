@@ -157,6 +157,12 @@ export class SessionStore {
   /** Swap in a restored transcript (M4: rebuilt from the CLI session file). */
   replaceTranscript(blocks: SessionState["blocks"]): void {
     this.state.blocks = blocks;
+    // The restored content is real consumption — re-estimate immediately so
+    // the usage chip shows the restored totals on first paint instead of
+    // waiting for the next turn end. Persisted blocks carry their token
+    // caches, so this is the cheap cache fold (legacy transcripts without
+    // caches pay one lazy tokenize).
+    refreshSessionUsage(this.state);
     this.flush();
   }
 
