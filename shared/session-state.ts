@@ -48,17 +48,52 @@ function lastBlock(blocks: Block[]): Block | undefined {
  * block. Returns the index of the mutated/appended block (P-1 change
  * reporting), or undefined when nothing changed (empty text). A streaming
  * append INVALIDATES the target block's token cache (P1): the text grew, so
- * the next turn end re-tokenizes it — once, not per chunk. */
-function appendTextToLast(blocks: Block[], kind: "text" | "thought" | "user", text: string): number | undefined {
+ * the next turn end re-tokenizes it — once, not per chunk.
+ * `system` marks host-classified status text (see TextBlock.system): the flag
+ * acts as a merge boundary, so a status line never absorbs the assistant
+ * reply that follows it (and normal text never dilutes a status block). */
+function appendTextToLast(
+  blocks: Block[],
+  kind: "text" | "thought" | "user",
+  text: string,
+  system = false,
+): number | undefined {
   if (!text) return undefined;
   const last = lastBlock(blocks);
-  if (last && last.kind === kind) {
+  if (
+    last &&
+    last.kind === kind &&
+    (kind !== "text" || last.kind !== "text" || Boolean(last.system) === system)
+  ) {
     last.text += text;
     last.tokens = undefined;
     return blocks.length - 1;
   }
-  blocks.push({ kind, text, id: nextBlockId() } as Block);
+  blocks.push({ kind, text, id: nextBlockId(), ...(system ? { system: true } : {}) } as Block);
   return blocks.length - 1;
+}
+
+/**
+ * CLI compression status lines (probed, CLI 0.5.19 bundle): the compress
+ * command streams its progress/failure as plain agent_message_chunks
+ * (nls keys compressingHistory / failedToCompress / failedWithError, plus
+ * the "Compressing context…" info line). Recognized here so the webview
+ * renders them as muted system lines instead of assistant replies carrying
+ * copy/regenerate actions. Matched at chunk start — the CLI emits each
+ * status line as its own chunk (same behavior the compression JSON blob
+ * relies on).
+ */
+const SYSTEM_STATUS_PREFIXES = [
+  "正在压缩",
+  "压缩聊天历史失败",
+  "Compressing chat history",
+  "Compressing context",
+  "Failed to compress chat history",
+];
+
+function isSystemStatusText(text: string): boolean {
+  const t = text.trimStart();
+  return SYSTEM_STATUS_PREFIXES.some((p) => t.startsWith(p));
 }
 
 /**
@@ -310,12 +345,14 @@ function appendAgentChunk(blocks: Block[], text: string): number | null {
   const note = (i: number | undefined): void => {
     if (i !== undefined && (first === null || i < first)) first = i;
   };
+  const append = (segment: string): number | undefined =>
+    appendTextToLast(blocks, "text", segment, isSystemStatusText(segment));
   for (;;) {
     const idx = rest.indexOf(MARKER);
     if (idx < 0) break;
     const parsed = parseCompressionItem(rest, idx);
     if (!parsed) break; // torn or foreign — remainder stays verbatim
-    if (idx > 0) note(appendTextToLast(blocks, "text", rest.slice(0, idx)));
+    if (idx > 0) note(append(rest.slice(0, idx)));
     blocks.push({
       kind: "compression",
       id: nextBlockId(),
@@ -325,7 +362,7 @@ function appendAgentChunk(blocks: Block[], text: string): number | null {
     note(blocks.length - 1);
     rest = rest.slice(parsed.end);
   }
-  if (rest) note(appendTextToLast(blocks, "text", rest));
+  if (rest) note(append(rest));
   return first;
 }
 
@@ -994,7 +1031,11 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
         input?: { description?: string; prompt?: string };
       }>) {
         if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
-          blocks.push({ kind: "text", text: block.text });
+          blocks.push({
+            kind: "text",
+            text: block.text,
+            ...(isSystemStatusText(block.text) ? { system: true } : {}),
+          });
         } else if (block?.type === "tool_use" && typeof block.id === "string") {
           // The SubAgent-spawning `task` call renders as a SubAgent card and
           // adopts the sidechain run that follows it, if any.
@@ -1071,7 +1112,12 @@ export function clearPendingPlanExit(state: SessionState, id: string): boolean {
  */
 export function appendApprovalResolution(state: SessionState, toolName: string, resolution: string): number {
   const label = toolName || "tool";
-  state.blocks.push({ kind: "text", id: nextBlockId(), text: `*${label} — ${resolution}*` });
+  state.blocks.push({
+    kind: "text",
+    id: nextBlockId(),
+    text: `*${label} — ${resolution}*`,
+    system: true,
+  });
   return state.blocks.length - 1;
 }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   applySessionUpdate,
+  appendApprovalResolution,
   backfillBlockIds,
   beginUserPrompt,
   completePrompt,
@@ -162,6 +163,91 @@ describe("compression history-item leak (slash /compress, CLI 0.5.19)", () => {
     expect(card.notice).toBe("上下文已压缩：98134 → 7855 tokens");
     expect(card.summary).toBe("Continued summary.");
     expect(firstUserText).toBe("修复限流器");
+  });
+});
+
+describe("system status text classification", () => {
+  it("flags CLI compression status lines as system text (no copy/regenerate)", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "正在压缩..." } }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    const b = state.blocks[0]!;
+    expect(b.kind).toBe("text");
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("flags compression failure lines as system text", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "压缩聊天历史失败：生成数据错误: fetch failed" },
+      }),
+    );
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+  });
+
+  it("does not merge a leading status line with the assistant reply that follows", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "正在压缩..." } }),
+    );
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "好的，我来看下这个仓库。" } }),
+    );
+    expect(state.blocks).toHaveLength(2);
+    const [sys, reply] = state.blocks as [Extract<Block, { kind: "text" }>, Extract<Block, { kind: "text" }>];
+    expect(sys.system).toBe(true);
+    expect(reply.system).toBeUndefined();
+    expect(reply.text).toBe("好的，我来看下这个仓库。");
+  });
+
+  it("does not let normal reply text absorb a following status line", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "我先分析代码。" } }),
+    );
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "正在压缩..." } }),
+    );
+    expect(state.blocks).toHaveLength(2);
+    const [reply, sys] = state.blocks as [Extract<Block, { kind: "text" }>, Extract<Block, { kind: "text" }>];
+    expect(reply.system).toBeUndefined();
+    expect(sys.system).toBe(true);
+  });
+
+  it("flags approval/plan resolution notes as system text", () => {
+    const state: SessionState = initialSessionState();
+    appendApprovalResolution(state, "plan", "已批准计划");
+    const b = state.blocks[0]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
+    expect(b.text).toBe("*plan — 已批准计划*");
+  });
+
+  it("classifies restored compression status lines as system text", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "压缩一下" } }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "压缩聊天历史失败：stream timeout" }] },
+      }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    const b = blocks[1]!;
+    if (b.kind !== "text") throw new Error("expected text");
+    expect(b.system).toBe(true);
   });
 });
 

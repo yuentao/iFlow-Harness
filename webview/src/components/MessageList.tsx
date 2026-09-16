@@ -522,6 +522,16 @@ const BlockView = memo(function BlockView({
       // tool calls) render as an orphaned avatar on an empty row — Markdown
       // outputs nothing for them. Skip the whole row.
       if (!block.text.trim()) return null;
+      // Host-classified status text (compression chatter, approval/plan
+      // resolution notes): a muted system line — no brand avatar, and no
+      // copy/regenerate actions (it is not an assistant reply).
+      if (block.system) {
+        return (
+          <div className="system-note stream-in pl-0.5 text-[12px] leading-relaxed text-muted-foreground">
+            <Markdown text={block.text} />
+          </div>
+        );
+      }
       return (
         <div className="stream-in group">
           <div className="assistant-row">

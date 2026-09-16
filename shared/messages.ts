@@ -52,6 +52,13 @@ export interface BlockBase {
 export interface TextBlock extends BlockBase {
   kind: "text";
   text: string;
+  /**
+   * Host-classified status text, not an assistant reply: CLI compression
+   * chatter ("正在压缩…", "压缩聊天历史失败：…") and approval/plan
+   * resolution notes. The webview renders these as muted system lines
+   * without copy/regenerate actions.
+   */
+  system?: boolean;
 }
 
 export interface ThoughtBlock extends BlockBase {
