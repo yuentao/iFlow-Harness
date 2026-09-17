@@ -618,6 +618,207 @@ export function extractDiff(content: unknown): ToolDiffUi | null {
   return null;
 }
 
+// --- MCP edit-tool diff synthesis -------------------------------------------
+// Wire behavior (probed, CLI 0.5.19 bundle): built-in edit tools emit a
+// structured `{type:"diff"}` content block, but MCP tool results are flattened
+// to plain text (`returnDisplay` → `{type:"content", text}`) — MCP edits never
+// carry a diff on the wire. The tool parameters DO travel on the wire
+// (`tool_call_update(in_progress).args`), so the host reconstructs a diff from
+// the args plus the post-edit disk content: `newText` = the file as it is on
+// disk now, `oldText` = that content with each edit's new fragment reversed
+// back to its old fragment. Same whole-file semantics as built-in diffs, so
+// revert (write oldText back) and openDiff keep working unchanged.
+
+/** Files above this size skip synthesis — the diff card and its token recount
+ * are not worth megabytes of payload on every snapshot push. */
+export const MAX_SYNTH_DIFF_CHARS = 256 * 1024;
+
+/**
+ * File-path fields commonly carried by tool args (edit AND read tools alike).
+ * Deliberately loose: the host snapshots the path's disk content before the
+ * tool runs and compares after it completes — a non-editing tool leaves the
+ * content unchanged and produces no diff, so over-matching is harmless while
+ * under-matching would hide a real edit. Directory-ish values simply fail the
+ * host's file read and are skipped.
+ */
+const TOOL_PATH_KEYS = ["file_path", "absolute_path", "filePath", "path", "file", "filename", "target_file"] as const;
+
+/** First recognized file path in a tool's args, if any. */
+export function parseToolFilePath(args: unknown): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  return pickEditString(args as Record<string, unknown>, TOOL_PATH_KEYS);
+}
+
+/** Disk state captured before the tool executed. `content === null` means the
+ * file did not exist yet (a creation is coming). */
+export interface PreEditSnapshot {
+  path: string;
+  content: string | null;
+}
+
+/**
+ * Pure before/after comparison for the snapshot strategy — works for ANY
+ * editing tool regardless of name or arg shape:
+ * missing→content = creation, content→missing = deletion, differing =
+ * modification, equal/oversized = no diff.
+ */
+export function snapshotEditDiff(pre: PreEditSnapshot, postContent: string | null): ToolDiffUi | null {
+  if (pre.content === null && postContent === null) return null;
+  if (pre.content !== null && postContent === null) {
+    if (pre.content.length > MAX_SYNTH_DIFF_CHARS) return null;
+    return { path: pre.path, oldText: pre.content, newText: null };
+  }
+  if (pre.content === null && postContent !== null) {
+    if (postContent.length > MAX_SYNTH_DIFF_CHARS) return null;
+    return { path: pre.path, oldText: null, newText: postContent };
+  }
+  if (pre.content === postContent) return null;
+  if (pre.content!.length > MAX_SYNTH_DIFF_CHARS || postContent!.length > MAX_SYNTH_DIFF_CHARS) return null;
+  return { path: pre.path, oldText: pre.content, newText: postContent };
+}
+
+export interface ParsedEditArgs {
+  path: string;
+  /** Edits in forward application order (old → new). */
+  edits: Array<{ oldText: string; newText: string; expectedReplacements: number }>;
+}
+
+const EDIT_PATH_KEYS = ["file_path", "path", "filePath", "absolute_path"] as const;
+const EDIT_PAIR_KEYS: Array<[old: string, new: string]> = [
+  ["old_string", "new_string"],
+  ["old_text", "new_text"],
+  ["oldText", "newText"],
+  ["old", "new"],
+];
+
+function pickEditString(obj: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const v = obj[key];
+    if (typeof v === "string") return v;
+  }
+  return null;
+}
+
+function pickEditPair(obj: Record<string, unknown>): { oldText: string; newText: string } | null {
+  for (const [oldKey, newKey] of EDIT_PAIR_KEYS) {
+    const oldText = obj[oldKey];
+    const newText = obj[newKey];
+    if (typeof oldText === "string" && typeof newText === "string") return { oldText, newText };
+  }
+  return null;
+}
+
+/**
+ * Recognize MCP edit-tool arguments (desktop-commander `edit_block`
+ * `{file_path, old_string, new_string}`, `fast_edit_block`
+ * `{path, old_text, new_text}`, batch `edits: [...]`, and the generic
+ * `{path, oldText, newText}` shape). Returns null for anything that is not
+ * unambiguously a text replacement with a file path — write-style args
+ * (content without an old fragment) are deliberately rejected because the
+ * pre-edit content cannot be reconstructed from them.
+ */
+export function parseEditArgs(args: unknown): ParsedEditArgs | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const obj = args as Record<string, unknown>;
+  const path = pickEditString(obj, EDIT_PATH_KEYS);
+  if (!path) return null;
+  const expected =
+    typeof obj.expected_replacements === "number" && Number.isInteger(obj.expected_replacements) && obj.expected_replacements > 0
+      ? obj.expected_replacements
+      : 1;
+  if (Array.isArray(obj.edits)) {
+    const edits: ParsedEditArgs["edits"] = [];
+    for (const raw of obj.edits) {
+      if (!raw || typeof raw !== "object") return null;
+      const pair = pickEditPair(raw as Record<string, unknown>);
+      if (!pair) return null;
+      edits.push({ ...pair, expectedReplacements: 1 });
+    }
+    return edits.length > 0 ? { path, edits } : null;
+  }
+  const pair = pickEditPair(obj);
+  if (!pair) return null;
+  return { path, edits: [{ ...pair, expectedReplacements: expected }] };
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(needle, from);
+    if (at === -1) return count;
+    count++;
+    from = at + needle.length;
+  }
+}
+
+/**
+ * Rebuild the pre-edit content from the post-edit file: undo each edit in
+ * reverse order by replacing its new fragment with the old fragment. Bails
+ * (null) when a fragment is missing or appears a different number of times
+ * than the tool replaced — the file was likely edited again afterwards, and a
+ * guessed diff would poison the revert flow (AGENTS.md pitfall #6 discipline:
+ * never let a fabricated diff reach the write path).
+ */
+export function synthesizeEditDiff(parsed: ParsedEditArgs, postEdit: string): ToolDiffUi | null {
+  if (postEdit.length > MAX_SYNTH_DIFF_CHARS) return null;
+  let oldFull = postEdit;
+  for (let i = parsed.edits.length - 1; i >= 0; i--) {
+    const { oldText, newText, expectedReplacements } = parsed.edits[i]!;
+    if (newText === oldText) continue;
+    if (newText === "") return null; // deletion: no anchor to reverse-locate
+    const count = countOccurrences(oldFull, newText);
+    if (count !== expectedReplacements) return null;
+    oldFull = oldFull.split(newText).join(oldText);
+  }
+  if (oldFull === postEdit) return null;
+  return { path: parsed.path, oldText: oldFull, newText: postEdit };
+}
+
+/** Find a tool block by `toolCallId`, recursing into SubAgent entries. */
+export function findToolBlockById(blocks: Block[], toolCallId: string): ToolBlock | null {
+  for (const block of blocks) {
+    if (block.kind === "tool" && block.toolCallId === toolCallId) return block;
+    if (block.kind === "subagent") {
+      const nested = findToolBlockById(block.entries, toolCallId);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+/**
+ * Attach a host-synthesized diff to a tool block that has none (the wire diff
+ * always wins — a later structured update is never overwritten). Returns the
+ * top-level mutated index for P-1 reporting, or null when the block is gone
+ * or already carries a diff.
+ */
+export function attachSynthesizedDiff(state: SessionState, toolCallId: string, diff: ToolDiffUi): number | null {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const block = state.blocks[i]!;
+    if (block.kind === "tool") {
+      if (block.toolCallId === toolCallId) {
+        if (block.diff !== null) return null;
+        block.diff = diff;
+        recountBlockTokens(block);
+        return i;
+      }
+    } else if (block.kind === "subagent") {
+      const nested = block.entries.find(
+        (e): e is ToolBlock => e.kind === "tool" && e.toolCallId === toolCallId,
+      );
+      if (nested) {
+        if (nested.diff !== null) return null;
+        nested.diff = diff;
+        recountBlockTokens(nested);
+        // Nested entries mutate in place; the SubAgent card rides the patch.
+        return i;
+      }
+    }
+  }
+  return null;
+}
+
 // --- host-level transitions -------------------------------------------------
 
 // --- CLI slash-command vs. literal-text disambiguation -----------------------

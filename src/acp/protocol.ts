@@ -239,6 +239,11 @@ export interface ToolCallBase {
   status?: ToolCallStatus;
   locations?: ToolLocation[];
   content?: ToolContent[];
+  /** iFlow extension (probed, CLI 0.5.19 bundle): the tool dispatch emits the
+   * raw tool parameters on `tool_call_update(in_progress)` (`args: s`). MCP
+   * tools never carry structured diffs on the wire, so this is the only
+   * source of their edit content. */
+  args?: unknown;
   _meta?: unknown;
   agentId?: string; // iFlow extension (probed, CLI 0.5.19 bundle): SubAgent adapter events carry the agent's id here
 }

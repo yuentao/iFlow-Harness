@@ -7,7 +7,7 @@ import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
 import { inspect } from "node:util";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage, isContextOverflowError, isRateLimitError } from "../acp/jsonrpc.js";
@@ -40,15 +40,22 @@ import type {
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { ParsedEditArgs, PreEditSnapshot } from "../../shared/session-state.js";
 import {
   backfillBlockIds,
   beginReplay,
   clampSessionLabel,
   dropSessionUpdate,
   endReplay,
+  findToolBlockById,
+  MAX_SYNTH_DIFF_CHARS,
   newSessionState,
+  parseEditArgs,
+  parseToolFilePath,
   parseTranscriptJsonl,
   reassignBlockIds,
+  snapshotEditDiff,
+  synthesizeEditDiff,
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
@@ -194,6 +201,21 @@ export class ChatPanel implements vscode.Disposable {
    * during a retry wait never resurrects the prompt behind the user's back.
    */
   private cancelSeen = false;
+  /**
+   * Parsed edit args (shared/parseEditArgs) keyed by toolCallId, kept for the
+   * arg-reversal diff fallback (strategy 2) when no pre-run snapshot exists.
+   * Transient by design: never persisted, capped, cleared with the transcript.
+   */
+  private readonly toolArgs = new Map<string, ParsedEditArgs>();
+  /**
+   * Pre-run disk content per toolCallId (strategy 1): captured synchronously
+   * at `in_progress` — the CLI emits it immediately before `execute` (probed,
+   * CLI 0.5.19 bundle) — and compared after completion to synthesize a real
+   * before/after diff for ANY editing tool. `content: null` = file absent
+   * before the run (creation candidate).
+   */
+  private readonly preSnapshots = new Map<string, PreEditSnapshot>();
+  private static readonly TOOL_ARGS_CAP = 128;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -202,6 +224,7 @@ export class ChatPanel implements vscode.Disposable {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
     this.store.onStateChange = (state) => this.updateStatusBar(state);
+    this.store.onStateReplaced = () => this.clearToolDiffCaches();
     // Cross-window cache for CLI/node probe results (each probe shells out —
     // hundreds of ms per window). The locator re-validates hydrated paths
     // with existsSync, so an uninstalled CLI or an extension update re-probes.
@@ -1002,15 +1025,20 @@ export class ChatPanel implements vscode.Disposable {
    * (left: temp file with the pre-edit content, right: current disk file).
    */
   private async openToolDiff(toolCallId: string): Promise<void> {
-    const state = this.store.getState();
-    const block = state.blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
-    if (!block || block.kind !== "tool" || !block.diff) return;
+    const block = findToolBlockById(this.store.getState().blocks, toolCallId);
+    if (!block || !block.diff) return;
     const { oldText } = block.diff;
     if (oldText === null) {
       void vscode.window.showWarningMessage(vscode.l10n.t("无法打开 diff：缺少编辑前内容"));
       return;
     }
-    const chosen = await this.locateDiffFile(block);
+    const chosen =
+      block.diff.newText === null && path.isAbsolute(block.diff.path)
+        ? // Deletion diff on a known-absolute path: the native diff editor
+          // shows the pre-delete content vs the missing file — the right
+          // visualization, and locateDiffFile's probe cannot match a gone file.
+          this.resolveAgentPathToAbsolute(block.diff.path)
+        : await this.locateDiffFile(block);
     if (!chosen) return;
 
     // Left side: a temp file holding the pre-edit content. Files live in the
@@ -1114,11 +1142,98 @@ export class ChatPanel implements vscode.Disposable {
     return picked?.[0]?.fsPath ?? null;
   }
 
+  /**
+   * Attach a host-synthesized diff to a completed tool block that never
+   * received one on the wire. MCP tools never carry structured diffs (CLI
+   * 0.5.19 flattens MCP results to plain text — verified in the bundle), so
+   * without this their edits render as a bare output card.
+   *
+   * Strategy 1 (tool-agnostic): compare the pre-run disk snapshot captured at
+   * `in_progress` with the post-completion content — any editing tool
+   * (replace-style, write-style, delete, or an MCP editor with unknown arg
+   * shape) produces a real before/after diff.
+   * Strategy 2 (fallback, no snapshot — e.g. the panel attached mid-session):
+   * reverse recognized replacement args on the post-edit file
+   * (shared/synthesizeEditDiff).
+   * Fire-and-forget: any mismatch (file moved on, ambiguous fragments, read
+   * failure) leaves the card unchanged — never a guessed diff (pitfall #6
+   * discipline).
+   */
+  private async maybeSynthesizeToolDiff(toolCallId: string): Promise<void> {
+    // Consume both caches up front: a completed tool must never leave stale
+    // entries behind (the wire-diff early-return below would otherwise leak
+    // them until cap eviction).
+    const snapshot = this.preSnapshots.get(toolCallId);
+    this.preSnapshots.delete(toolCallId);
+    const parsed = this.toolArgs.get(toolCallId);
+    this.toolArgs.delete(toolCallId);
+
+    const block = findToolBlockById(this.store.getState().blocks, toolCallId);
+    if (!block || block.diff !== null) return;
+
+    if (snapshot) {
+      let postContent: string | null = null;
+      try {
+        const buf = await readFile(snapshot.path);
+        if (buf.length <= MAX_SYNTH_DIFF_CHARS && !ChatPanel.isBinary(buf)) postContent = buf.toString("utf8");
+      } catch {
+        postContent = null; // deleted (or unreadable) — deletion diff below
+      }
+      if (postContent === null && snapshot.content !== null) {
+        // A read error is indistinguishable from a deletion here; only claim a
+        // deletion when the file is truly gone (a fabricated revert target is
+        // worse than a missing diff). A binary/oversized post-file still
+        // exists on disk — existsSync fails those cases closed.
+        if (!existsSync(snapshot.path)) {
+          const diff = snapshotEditDiff(snapshot, null);
+          if (diff) this.store.toolDiffSynthesized(toolCallId, diff);
+        }
+        return;
+      }
+      const diff = snapshotEditDiff(snapshot, postContent);
+      if (diff) {
+        this.store.toolDiffSynthesized(toolCallId, diff);
+        return;
+      }
+      // Content identical (or oversized): fall through to arg reversal in
+      // case the tool edited a DIFFERENT path than its args' primary field.
+    }
+
+    if (parsed === undefined) return;
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+    const addCandidate = (p?: string | null) => {
+      if (!p) return;
+      const abs = this.resolveAgentPathToAbsolute(p);
+      const key = abs.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(abs);
+      }
+    };
+    addCandidate(parsed.path);
+    for (const loc of block.locations ?? []) addCandidate(loc.path);
+    for (const candidate of candidates) {
+      let postEdit: string;
+      try {
+        const buf = await readFile(candidate);
+        if (ChatPanel.isBinary(buf)) continue;
+        postEdit = buf.toString("utf8");
+      } catch {
+        continue;
+      }
+      const diff = synthesizeEditDiff(parsed, postEdit);
+      if (!diff) continue;
+      // Keep the diff path anchored to the resolved absolute location so the
+      // revert/diff-editor paths skip the basename-search fallback.
+      this.store.toolDiffSynthesized(toolCallId, { ...diff, path: candidate });
+      return;
+    }
+  }
+
   private async revertToolDiff(toolCallId: string): Promise<void> {
-    const block = this.store
-      .getState()
-      .blocks.find((b) => b.kind === "tool" && b.toolCallId === toolCallId);
-    if (!block || block.kind !== "tool" || !block.diff) return;
+    const block = findToolBlockById(this.store.getState().blocks, toolCallId);
+    if (!block || !block.diff) return;
     const { oldText, newText } = block.diff;
     if (oldText === null) {
       vscode.window.showWarningMessage(
@@ -1126,7 +1241,15 @@ export class ChatPanel implements vscode.Disposable {
       );
       return;
     }
-    const chosen = await this.locateDiffFile(block);
+    const chosen =
+      newText === null && path.isAbsolute(block.diff.path)
+        ? // Deletion diff on a known-absolute path (synthesized deletions
+          // always record one): revert recreates the file there —
+          // locateDiffFile's disk-content probe can never match a missing
+          // file and would dead-end at the manual picker. Relative paths
+          // keep the full locateDiffFile resolution (pitfall #6).
+          this.resolveAgentPathToAbsolute(block.diff.path)
+        : await this.locateDiffFile(block);
     if (!chosen) return;
 
     const fileUri = vscode.Uri.file(chosen);
@@ -1623,6 +1746,98 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     this.store.onSessionUpdate(n, { replaying: this.restoring });
+    // Edit-tool diff synthesis for tools the wire gives no structured diff to
+    // (all MCP tools — CLI 0.5.19 flattens MCP results to plain text). Two
+    // strategies, in priority order (see `maybeSynthesizeToolDiff`):
+    // 1. Pre/post disk snapshot: capture the args' file content NOW, while
+    //    `in_progress` is emitted immediately before `execute` in the CLI
+    //    bundle, then compare after completion. Tool-agnostic — works for any
+    //    editor regardless of name or arg shape.
+    // 2. Arg reversal fallback (restored/late sessions with no snapshot):
+    //    rebuild oldText by reversing recognized replacement args on the
+    //    post-edit file.
+    // Replay (session/load) is skipped — those transcripts are rebuilt from
+    // files, not from live events.
+    if (!this.restoring && (n.update.sessionUpdate === "tool_call" || n.update.sessionUpdate === "tool_call_update")) {
+      const update = n.update;
+      if (update.toolCallId) {
+        if (update.status === "in_progress" && update.args !== undefined) {
+          this.capturePreEditSnapshot(update.toolCallId, update.args);
+        }
+        // Strategy-2 input: keep only the PARSED edit args (raw args may carry a
+        // whole-file `content` payload — never let that linger in memory).
+        if (update.args !== undefined && !this.toolArgs.has(update.toolCallId)) {
+          const parsed = parseEditArgs(update.args);
+          if (parsed) {
+            if (this.toolArgs.size >= ChatPanel.TOOL_ARGS_CAP) {
+              const oldest = this.toolArgs.keys().next().value;
+              if (oldest !== undefined) this.toolArgs.delete(oldest);
+            }
+            this.toolArgs.set(update.toolCallId, parsed);
+          }
+        }
+        if (update.status === "completed") {
+          void this.maybeSynthesizeToolDiff(update.toolCallId);
+        } else if (update.status === "failed") {
+          // A failed tool produces no diff — drop its caches so a whole run of
+          // failures can't pin snapshots until cap eviction.
+          this.preSnapshots.delete(update.toolCallId);
+          this.toolArgs.delete(update.toolCallId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Binary detection via a NUL byte in the first 1KB (same heuristic as the
+   * CLI-locator's shim probe, pitfall #7). utf8 round-trips are LOSSY for
+   * binary content (invalid sequences → U+FFFD), so a synthesized diff's
+   * oldText would be corrupted — reverting would write the corruption back.
+   * Binary files are therefore never snapshotted or diffed.
+   */
+  private static isBinary(buf: Buffer): boolean {
+    return buf.subarray(0, 1024).includes(0);
+  }
+
+  /** Drop all transient diff-synthesis caches (session switch / restore /
+   * hot re-auth): a stale snapshot from the previous session must never be
+   * compared against a same-id tool call in the new one. */
+  private clearToolDiffCaches(): void {
+    this.preSnapshots.clear();
+    this.toolArgs.clear();
+  }
+
+  /**
+   * Snapshot the target file's disk content before the tool runs. Runs
+   * synchronously on purpose: the CLI starts executing the tool the moment it
+   * finishes emitting this update, so an async read could race the write and
+   * capture post-edit content (silently losing the diff). Bounded by
+   * MAX_SYNTH_DIFF_CHARS via stat; unreadable/large/binary paths record
+   * nothing.
+   */
+  private capturePreEditSnapshot(toolCallId: string, args: unknown): void {
+    if (this.preSnapshots.has(toolCallId)) return;
+    const rawPath = parseToolFilePath(args);
+    if (!rawPath) return;
+    const abs = this.resolveAgentPathToAbsolute(rawPath);
+    try {
+      const stat = statSync(abs);
+      if (!stat.isFile() || stat.size > MAX_SYNTH_DIFF_CHARS) return;
+      const buf = readFileSync(abs);
+      if (ChatPanel.isBinary(buf)) return;
+      this.preSnapshots.set(toolCallId, { path: abs, content: buf.toString("utf8") });
+    } catch (error) {
+      // ENOENT is meaningful (a creation is coming). Any other error (EPERM,
+      // unreadable dir…) records nothing — a failed read must never masquerade
+      // as "file will be created" and fabricate an all-additions diff.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        this.preSnapshots.set(toolCallId, { path: abs, content: null });
+      }
+    }
+    if (this.preSnapshots.size > ChatPanel.TOOL_ARGS_CAP) {
+      const oldest = this.preSnapshots.keys().next().value;
+      if (oldest !== undefined) this.preSnapshots.delete(oldest);
+    }
   }
 
   // --- Session persistence (M4) --------------------------------------------------

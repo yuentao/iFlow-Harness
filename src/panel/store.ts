@@ -14,6 +14,7 @@ import { initialSessionState } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
   applySessionUpdate,
+  attachSynthesizedDiff,
   beginUserPrompt,
   clearPendingQuestions,
   completePrompt,
@@ -27,7 +28,7 @@ import {
   setPendingQuestions,
   setSessions,
 } from "../../shared/session-state.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi, ToolDiffUi } from "../../shared/messages.js";
 
 export class SessionStore {
   private state: SessionState = initialSessionState();
@@ -37,6 +38,14 @@ export class SessionStore {
   private readonly flushIntervalMs: number;
   /** Fired whenever the state changed materially (status bar, M5). */
   onStateChange: ((state: SessionState) => void) | null = null;
+  /**
+   * Fired whenever the transcript state is wholesale-replaced (session
+   * switch / restore / hot re-auth). Host-side caches keyed by `toolCallId`
+   * must be dropped here: the CLI mints timestamp-shaped ids
+   * (`<toolName>-<Date.now()>`), so a previous session's entry could otherwise
+   * collide with a same-id tool call in the new one.
+   */
+  onStateReplaced: (() => void) | null = null;
 
   // --- P-1 incremental snapshot bookkeeping ---------------------------------
   /**
@@ -82,6 +91,7 @@ export class SessionStore {
   /** Replace the whole state object (e.g. new session) and flush immediately. */
   replaceState(state: SessionState): void {
     this.state = state;
+    this.onStateReplaced?.();
     this.flush();
   }
 
@@ -157,6 +167,7 @@ export class SessionStore {
   /** Swap in a restored transcript (M4: rebuilt from the CLI session file). */
   replaceTranscript(blocks: SessionState["blocks"]): void {
     this.state.blocks = blocks;
+    this.onStateReplaced?.();
     // The restored content is real consumption — re-estimate immediately so
     // the usage chip shows the restored totals on first paint instead of
     // waiting for the next turn end. Persisted blocks carry their token
@@ -247,6 +258,17 @@ export class SessionStore {
   /** Visual marker for a reverted tool diff. */
   toolReverted(toolCallId: string): boolean {
     const index = markToolReverted(this.state, toolCallId);
+    if (index === null) return false;
+    this.noteMutationIndex(index);
+    this.flush();
+    return true;
+  }
+
+  /** Attach a host-synthesized diff to a tool block that never received one
+   * on the wire (MCP edit tools — CLI 0.5.19 flattens MCP results to text).
+   * Returns whether the block accepted the diff. */
+  toolDiffSynthesized(toolCallId: string, diff: ToolDiffUi): boolean {
+    const index = attachSynthesizedDiff(this.state, toolCallId, diff);
     if (index === null) return false;
     this.noteMutationIndex(index);
     this.flush();

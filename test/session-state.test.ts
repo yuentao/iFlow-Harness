@@ -2,13 +2,19 @@ import { describe, it, expect, vi } from "vitest";
 import {
   applySessionUpdate,
   appendApprovalResolution,
+  attachSynthesizedDiff,
   backfillBlockIds,
   beginUserPrompt,
   completePrompt,
   dropSessionUpdate,
   estimateSessionUsage,
   estimateTokens,
+  findToolBlockById,
+  parseEditArgs,
+  parseToolFilePath,
   refreshSessionUsage,
+  snapshotEditDiff,
+  synthesizeEditDiff,
   newSessionState,
   nextBlockId,
   reassignBlockIds,
@@ -619,6 +625,173 @@ describe("tool diffs (M2)", () => {
       oldText: null,
       newText: "new file",
     });
+  });
+});
+
+describe("MCP edit-tool diff synthesis", () => {
+  it("parseEditArgs recognizes desktop-commander edit shapes", () => {
+    expect(parseEditArgs({ file_path: "/a/b.ts", old_string: "x", new_string: "y" })).toEqual({
+      path: "/a/b.ts",
+      edits: [{ oldText: "x", newText: "y", expectedReplacements: 1 }],
+    });
+    expect(parseEditArgs({ path: "/a/b.ts", old_text: "x", new_text: "y", expected_replacements: 3 })).toEqual({
+      path: "/a/b.ts",
+      edits: [{ oldText: "x", newText: "y", expectedReplacements: 3 }],
+    });
+    // Batch edits ride inside `edits`.
+    const batch = parseEditArgs({
+      path: "/a/b.ts",
+      edits: [
+        { old_text: "a", new_text: "b" },
+        { old_text: "c", new_text: "d" },
+      ],
+    });
+    expect(batch?.edits.length).toBe(2);
+    // Generic wire shape.
+    expect(parseEditArgs({ path: "p", oldText: "o", newText: "n" })).not.toBeNull();
+  });
+
+  it("parseEditArgs rejects non-edit and malformed args", () => {
+    expect(parseEditArgs(null)).toBeNull();
+    expect(parseEditArgs("string")).toBeNull();
+    expect(parseEditArgs([])).toBeNull();
+    // No recognized old/new pair (write-style content cannot be reversed).
+    expect(parseEditArgs({ file_path: "/a/b.ts", content: "whole file" })).toBeNull();
+    // No path.
+    expect(parseEditArgs({ old_string: "x", new_string: "y" })).toBeNull();
+    // Mixed pair keys must not cross-match.
+    expect(parseEditArgs({ path: "p", old_string: "x", new_text: "y" })).toBeNull();
+  });
+
+  it("synthesizeEditDiff reverses a single replacement against the post-edit file", () => {
+    const parsed = parseEditArgs({ file_path: "/a/b.ts", old_string: "const a = 1;", new_string: "const a = 2;" })!;
+    const post = "line0\nconst a = 2;\nline2\n";
+    const diff = synthesizeEditDiff(parsed, post)!;
+    expect(diff).not.toBeNull();
+    expect(diff.newText).toBe(post);
+    expect(diff.oldText).toBe("line0\nconst a = 1;\nline2\n");
+  });
+
+  it("synthesizeEditDiff undoes batch edits in reverse order", () => {
+    const parsed = parseEditArgs({
+      path: "/a/b.ts",
+      edits: [
+        { old_text: "alpha", new_text: "ALPHA" },
+        { old_text: "beta", new_text: "BETA" },
+      ],
+    })!;
+    const post = "ALPHA and BETA\n";
+    const diff = synthesizeEditDiff(parsed, post)!;
+    expect(diff.oldText).toBe("alpha and beta\n");
+  });
+
+  it("synthesizeEditDiff bails when occurrence count disagrees with the tool", () => {
+    const parsed = parseEditArgs({ file_path: "/a/b.ts", old_string: "x", new_string: "y", expected_replacements: 2 })!;
+    // Only one "y" on disk — the file moved on or the count is wrong: no guess.
+    expect(synthesizeEditDiff(parsed, "y\n")).toBeNull();
+    // Missing fragment entirely.
+    const missing = parseEditArgs({ file_path: "/a/b.ts", old_string: "x", new_string: "zzz" })!;
+    expect(synthesizeEditDiff(missing, "nothing here\n")).toBeNull();
+  });
+
+  it("synthesizeEditDiff bails on deletions, no-ops, and oversized files", () => {
+    // Pure deletion: nothing left to anchor the reversal.
+    const del = parseEditArgs({ path: "p", old_string: "gone", new_string: "" })!;
+    expect(synthesizeEditDiff(del, "rest\n")).toBeNull();
+    // No-op edit.
+    const noop = parseEditArgs({ path: "p", old_string: "same", new_string: "same" })!;
+    expect(synthesizeEditDiff(noop, "same\n")).toBeNull();
+    // Oversized post-edit content is skipped.
+    const big = parseEditArgs({ path: "p", old_string: "x", new_string: "y" })!;
+    expect(synthesizeEditDiff(big, "y".repeat(256 * 1024 + 10))).toBeNull();
+  });
+
+  it("attachSynthesizedDiff attaches to a top-level tool block and recounts tokens", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "edit_block", kind: "other", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", content: [{ type: "content", content: { type: "text", text: "ok" } }] }));
+    const idx = attachSynthesizedDiff(state, "t1", { path: "/a/b.ts", oldText: "old", newText: "new" });
+    expect(idx).toBe(0);
+    const tool = state.blocks[0]!;
+    expect(tool.kind === "tool" && tool.diff).toEqual({ path: "/a/b.ts", oldText: "old", newText: "new" });
+    // A second attach must not overwrite (wire diff / first synthesis wins).
+    expect(attachSynthesizedDiff(state, "t1", { path: "other", oldText: "x", newText: "y" })).toBeNull();
+  });
+
+  it("attachSynthesizedDiff reaches nested SubAgent entries and reports the card index", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task-1", toolName: "task", title: "Launch agent(x): 编辑", kind: "other", status: "in_progress" }));
+    applySessionUpdate(
+      state,
+      { sessionId: "s1", agentId: "agent-1", update: { sessionUpdate: "tool_call", toolCallId: "n1", toolName: "edit_block", kind: "other", status: "completed" } },
+    );
+    const idx = attachSynthesizedDiff(state, "n1", { path: "/a/b.ts", oldText: "old", newText: "new" });
+    expect(idx).toBe(0); // the SubAgent card index rides the blockPatch
+    const sub = state.blocks[0]!;
+    expect(sub.kind).toBe("subagent");
+    if (sub.kind === "subagent") {
+      const nested = sub.entries.find((e) => e.kind === "tool");
+      expect(nested && nested.kind === "tool" && nested.diff?.path).toBe("/a/b.ts");
+    }
+    expect(findToolBlockById(state.blocks, "n1")).not.toBeNull();
+    expect(findToolBlockById(state.blocks, "missing")).toBeNull();
+  });
+
+  it("wire structured diff always wins over synthesis targets", () => {
+    // Blocks that already carry a wire diff are never touched (attach returns
+    // null) — the reducer's extractDiff path remains the priority source.
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        toolName: "replace",
+        kind: "edit",
+        status: "completed",
+        content: [{ type: "diff", path: "wire.ts", oldText: "a", newText: "b" }],
+      }),
+    );
+    expect(attachSynthesizedDiff(state, "t1", { path: "synth.ts", oldText: "x", newText: "y" })).toBeNull();
+    const tool = state.blocks[0]!;
+    expect(tool.kind === "tool" && tool.diff?.path).toBe("wire.ts");
+  });
+
+  it("parseToolFilePath extracts paths from any tool's args", () => {
+    expect(parseToolFilePath({ file_path: "/a/b.ts", content: "whole file" })).toBe("/a/b.ts");
+    expect(parseToolFilePath({ path: "src/x.ts", pattern: "anything" })).toBe("src/x.ts");
+    expect(parseToolFilePath({ absolute_path: "/a/b.ts" })).toBe("/a/b.ts");
+    expect(parseToolFilePath({ query: "no path here" })).toBeNull();
+    expect(parseToolFilePath(null)).toBeNull();
+    expect(parseToolFilePath("string")).toBeNull();
+  });
+
+  it("snapshotEditDiff turns before/after disk content into a diff for any tool", () => {
+    // Modification (any edit shape — replace, write, sed, MCP editor…).
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: "old\n" }, "new\n")).toEqual({
+      path: "/a/b.ts",
+      oldText: "old\n",
+      newText: "new\n",
+    });
+    // Creation: absent before, content after (write_file style).
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: null }, "brand new\n")).toEqual({
+      path: "/a/b.ts",
+      oldText: null,
+      newText: "brand new\n",
+    });
+    // Deletion: content before, gone after.
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: "was here\n" }, null)).toEqual({
+      path: "/a/b.ts",
+      oldText: "was here\n",
+      newText: null,
+    });
+    // No-op (a read tool, or an edit that changed nothing) → no diff.
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: "same\n" }, "same\n")).toBeNull();
+    // Absent before AND after (a failed creation) → no diff.
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: null }, null)).toBeNull();
+    // Oversized content on either side is skipped.
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: "x" }, "y".repeat(256 * 1024 + 1))).toBeNull();
+    expect(snapshotEditDiff({ path: "/a/b.ts", content: "x".repeat(256 * 1024 + 1) }, "y")).toBeNull();
   });
 });
 
