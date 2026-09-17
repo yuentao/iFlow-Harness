@@ -1608,6 +1608,10 @@ export class ChatPanel implements vscode.Disposable {
         restoring: this.restoring,
         resetting: this.droppingForReset,
         restoringSessionId: this.restoringSessionId,
+        // SubAgent adapter events carry agentId on the update and a sentinel
+        // sessionId ("default-session", CLI 0.5.19 bundle) — the guard needs
+        // the marker to exempt them from the cross-session drop.
+        agentId: (n.update as { agentId?: string }).agentId,
       })
     ) {
       return;

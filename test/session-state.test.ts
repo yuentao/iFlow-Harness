@@ -412,6 +412,28 @@ describe("applySessionUpdate", () => {
     applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "read_file", title: "x", kind: "read", status: "completed" }));
     expect(state.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1" });
   });
+
+  it("groups nested events carrying update.agentId (real CLI 0.5.19 wire shape)", () => {
+    // Wire shape (verified in the CLI bundle): the SubAgent adapter pushes
+    // {sessionId:"default-session", update:{…, agentId}} — the agentId rides
+    // the UPDATE, not the notification. Regression guard for the shape the
+    // extension actually receives in production.
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task-w", toolName: "task", title: "Launch agent(explore-agent): 探索", kind: "other", status: "in_progress" }));
+    const nested = (update: SessionNotification["update"]): SessionNotification => ({
+      sessionId: "default-session",
+      update: { ...update, agentId: "agent-w" } as SessionNotification["update"],
+    });
+    applySessionUpdate(state, nested({ sessionUpdate: "tool_call", toolCallId: "n-w1", toolName: "read_file", title: "Reading a.ts", kind: "read", status: "pending" }));
+    applySessionUpdate(state, nested({ sessionUpdate: "tool_call_update", toolCallId: "n-w1", toolName: "read_file", kind: "read", status: "completed" }));
+    applySessionUpdate(state, nested({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "探索中" } }));
+    expect(state.blocks).toHaveLength(1); // no top-level leakage
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.agentId).toBe("agent-w"); // adopted from the open interval
+    expect(sub.entries.map((e) => e.kind)).toEqual(["tool", "text"]);
+    expect(sub.entries[0]).toMatchObject({ toolName: "read_file", status: "completed" });
+  });
 });
 
 describe("applySessionUpdate", () => {
@@ -1103,6 +1125,27 @@ describe("dropSessionUpdate guard (leak prevention)", () => {
     // An abandoned turn still streaming on a FOREIGN session must not ride
     // the restoring exemption into the restored transcript.
     expect(dropSessionUpdate({ ...base, restoring: true, sessionId: "ABANDONED", storeSessionId: null, status: "streaming", restoringSessionId: "LOADED" })).toBe(true);
+  });
+
+  it("SubAgent adapter events (sentinel sessionId + agentId) pass only while the own turn streams", () => {
+    // CLI 0.5.19 pushes nested subagent activity from a separate adapter with
+    // the hard-coded sessionId "default-session" and agentId on the update.
+    // Regression guard: the 2026-09-11 cross-session rule dropped ALL of them
+    // (subagent cards lost their progress).
+    const sub = { sessionId: "default-session", agentId: "agent-1" };
+    // Own session streaming → the nested events belong to this turn.
+    expect(dropSessionUpdate({ ...base, ...sub, storeSessionId: "S1", status: "streaming" })).toBe(false);
+    // Idle own session → stragglers from an abandoned turn drop.
+    expect(dropSessionUpdate({ ...base, ...sub, storeSessionId: "S1", status: "idle" })).toBe(true);
+    // No session at all → drop.
+    expect(dropSessionUpdate({ ...base, ...sub, storeSessionId: null, status: "streaming" })).toBe(true);
+    // Reset window → drop (the sentinel never equals the store's id).
+    expect(dropSessionUpdate({ ...base, ...sub, resetting: true, storeSessionId: null, status: "streaming" })).toBe(true);
+    // Restore window → drop (replay never streams a live subagent).
+    expect(dropSessionUpdate({ ...base, ...sub, restoring: true, storeSessionId: null, status: "streaming", restoringSessionId: "LOADED" })).toBe(true);
+    // An agentId event addressed to the OWN session (a future CLI stamping
+    // the real id) is attributable by sessionId alone — no streaming gate.
+    expect(dropSessionUpdate({ ...base, sessionId: "S1", agentId: "agent-1", storeSessionId: "S1", status: "idle" })).toBe(false);
   });
 });
 

@@ -240,12 +240,15 @@ export interface ToolCallBase {
   locations?: ToolLocation[];
   content?: ToolContent[];
   _meta?: unknown;
+  agentId?: string; // iFlow extension (probed, CLI 0.5.19 bundle): SubAgent adapter events carry the agent's id here
 }
 
 export type SessionUpdate =
   | { sessionUpdate: "user_message_chunk"; content: ContentBlock }
-  | { sessionUpdate: "agent_message_chunk"; content: ContentBlock }
-  | { sessionUpdate: "agent_thought_chunk"; content: ContentBlock }
+  // iFlow extension (probed, CLI 0.5.19 bundle): the SubAgent adapter stamps
+  // agentId on nested chunk events too.
+  | ({ sessionUpdate: "agent_message_chunk"; content: ContentBlock; agentId?: string })
+  | ({ sessionUpdate: "agent_thought_chunk"; content: ContentBlock; agentId?: string })
   | ({ sessionUpdate: "tool_call" } & ToolCallBase)
   | ({ sessionUpdate: "tool_call_update" } & ToolCallBase)
   | { sessionUpdate: "plan"; entries: PlanEntry[] }

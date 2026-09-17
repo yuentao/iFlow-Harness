@@ -183,12 +183,17 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
 // --- SubAgent grouping (iFlow: nested updates carry `agentId`) --------------
 
 /**
- * Where the agentId may live on the wire: top-level `agentId` (documented) or
- * inside the update's `_meta` (defensive fallback).
+ * Where the agentId may live on the wire. CLI 0.5.19 (verified in the bundle):
+ * the SubAgent adapter stamps `agentId` directly on the `update` object
+ * (`{sessionId:"default-session", update:{sessionUpdate:"tool_call", …,
+ * agentId}}`). The notification top-level (documented) and `update._meta`
+ * (defensive) positions are kept as fallbacks for other CLI versions.
  */
 function extractAgentId(notification: SessionNotification): string | undefined {
   if (notification.agentId) return notification.agentId;
-  const meta = (notification.update as { _meta?: { agentId?: unknown } })._meta;
+  const update = notification.update as { agentId?: unknown; _meta?: { agentId?: unknown } };
+  if (typeof update.agentId === "string" && update.agentId) return update.agentId;
+  const meta = update._meta;
   if (meta && typeof meta.agentId === "string" && meta.agentId) return meta.agentId;
   return undefined;
 }
@@ -1245,6 +1250,16 @@ export function appendApprovalResolution(state: SessionState, toolName: string, 
  *   sessionId-less update cannot be tied to any session. Accept it only when
  *   a turn is verifiably in flight on the store's own session; during
  *   resets, restore setup, or an idle session it is dropped.
+ * - SubAgent adapter events (update carries `agentId`): CLI 0.5.19 pushes
+ *   these from a SEPARATE adapter whose sessionId is the hard-coded sentinel
+ *   "default-session" (verified in the bundle: the factory never passes the
+ *   real id), so they are foreign-addressed by construction yet belong to the
+ *   turn currently running on the store's own session. Gate them like
+ *   sessionId-less updates — accept only while a turn is verifiably streaming
+ *   on the own session; drop otherwise. An agentId event addressed to the own
+ *   session (a future CLI stamping the real id) is already attributable and
+ *   skips the gate. (Regression: the 2026-09-11 cross-session guard dropped
+ *   every one of them — subagent cards lost all nested progress.)
  */
 export function dropSessionUpdate(args: {
   sessionId: string | null | undefined;
@@ -1255,17 +1270,28 @@ export function dropSessionUpdate(args: {
   /** The session being restored; during the restore window only updates
    * tagged with this id (or untagged replayed turns) legitimately pass. */
   restoringSessionId?: string | null;
+  /** update.agentId — marks a SubAgent adapter event (see rules above). */
+  agentId?: string | null;
 }): boolean {
-  const { sessionId, storeSessionId, status, restoring, resetting } = args;
-  const foreign = sessionId !== null && sessionId !== undefined && sessionId !== storeSessionId;
+  const { sessionId, storeSessionId, status, restoring, resetting, agentId } = args;
   if (resetting && sessionId !== storeSessionId) return true;
   if (restoring) {
     // Restore window: the replay legitimately repopulates the cleared
     // transcript, but ONLY for the session being restored — an abandoned turn
     // still streaming on a foreign session must not ride the exemption.
+    // SubAgent adapter events (sentinel sessionId) drop here too: a restore
+    // replays history, it never streams a live subagent.
     if (sessionId && sessionId !== (args.restoringSessionId ?? null)) return true;
     return false;
   }
+  const foreign = sessionId !== null && sessionId !== undefined && sessionId !== storeSessionId;
+  // SubAgent adapter events are foreign BY CONSTRUCTION (sentinel sessionId)
+  // yet belong to the turn in flight on the own session: attribute them like
+  // sessionId-less updates — streaming on the own session or drop. An agentId
+  // event addressed to the own session (a future CLI stamping the real id) is
+  // already attributable and needs no gate — it falls through as a normal
+  // own-session update.
+  if (foreign && agentId) return storeSessionId === null || status !== "streaming";
   if (foreign) return true;
   if ((sessionId === null || sessionId === undefined) && !restoring) {
     if (resetting || storeSessionId === null || status !== "streaming") return true;
