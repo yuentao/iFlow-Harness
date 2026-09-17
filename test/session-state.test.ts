@@ -5,10 +5,13 @@ import {
   backfillBlockIds,
   beginUserPrompt,
   completePrompt,
+  dropSessionUpdate,
   estimateSessionUsage,
   estimateTokens,
   refreshSessionUsage,
   newSessionState,
+  nextBlockId,
+  reassignBlockIds,
   extractTextOutput,
   extractDiff,
   setPendingApproval,
@@ -1058,5 +1061,118 @@ describe("session usage split & real-time refresh", () => {
     const fresh = newSessionState(state);
     expect(fresh.usage).not.toBeNull();
     expect(fresh.usage!.totalTokens).toBe(0);
+  });
+});
+
+describe("dropSessionUpdate guard (leak prevention)", () => {
+  const base = { status: "streaming" as const, restoring: false, resetting: false };
+
+  it("drops a foreign-session update on an active session", () => {
+    expect(dropSessionUpdate({ ...base, sessionId: "OLD", storeSessionId: "NEW" })).toBe(true);
+  });
+
+  it("accepts an update addressed to the store's own session", () => {
+    expect(dropSessionUpdate({ ...base, sessionId: "S1", storeSessionId: "S1" })).toBe(false);
+  });
+
+  it("drops EVERYTHING foreign during the reset window — including sessionId-less updates", () => {
+    // Store sessionId is null while 新会话 runs; the abandoned turn's
+    // stragglers (with or without a sessionId) must all drop.
+    expect(dropSessionUpdate({ ...base, resetting: true, sessionId: "OLD", storeSessionId: null })).toBe(true);
+    expect(dropSessionUpdate({ ...base, resetting: true, sessionId: null, storeSessionId: null })).toBe(true);
+  });
+
+  it("accepts an own-session update during the reset window (late sessionStarted tail)", () => {
+    expect(dropSessionUpdate({ ...base, resetting: true, sessionId: "NEW", storeSessionId: "NEW" })).toBe(false);
+  });
+
+  it("drops sessionId-less updates unless a turn is verifiably in flight on the own session", () => {
+    // In-flight on the own session: accept (defensive CLI omitting sessionId).
+    expect(dropSessionUpdate({ ...base, sessionId: null, storeSessionId: "S1", status: "streaming" })).toBe(false);
+    // Idle session (turn already settled): stragglers drop.
+    expect(dropSessionUpdate({ ...base, sessionId: null, storeSessionId: "S1", status: "idle" })).toBe(true);
+    // Fresh session never started: drop.
+    expect(dropSessionUpdate({ ...base, sessionId: null, storeSessionId: null, status: "streaming" })).toBe(true);
+  });
+
+  it("restore window: replayed updates for the RESTORED session pass; foreign ones drop", () => {
+    // Replayed updates tagged with the restored session's id pass.
+    expect(dropSessionUpdate({ ...base, restoring: true, sessionId: "LOADED", storeSessionId: null, status: "streaming", restoringSessionId: "LOADED" })).toBe(false);
+    // Untagged replayed turns pass.
+    expect(dropSessionUpdate({ ...base, restoring: true, sessionId: null, storeSessionId: null, status: "streaming", restoringSessionId: "LOADED" })).toBe(false);
+    // An abandoned turn still streaming on a FOREIGN session must not ride
+    // the restoring exemption into the restored transcript.
+    expect(dropSessionUpdate({ ...base, restoring: true, sessionId: "ABANDONED", storeSessionId: null, status: "streaming", restoringSessionId: "LOADED" })).toBe(true);
+  });
+});
+
+describe("block id uniqueness across host reloads (P4)", () => {
+  it("backfillBlockIds seeds the counter past restored ids — no duplicate minting", () => {
+    // Transcript persisted by a PREVIOUS extension-host lifetime: ids up to
+    // b4t (the 404-duplicate-id corruption measured in a real transcript).
+    const restored: Block[] = [
+      { kind: "user", text: "旧消息", id: "b4s" },
+      { kind: "text", text: "旧回复", id: "b4t" },
+    ];
+    backfillBlockIds(restored);
+    // The counter is now seeded past b4t — the next minted id must NOT
+    // collide with any restored id (the module counter restarts at 0 on
+    // every host reload; without the seed it would mint b1, colliding).
+    const fresh = nextBlockId();
+    const restoredIds = new Set(restored.map((b) => b.id));
+    expect(restoredIds.has(fresh)).toBe(false);
+    // And subsequent ids keep growing past the seeded value.
+    const next = nextBlockId();
+    expect(next).not.toBe(fresh);
+    expect(restoredIds.has(next)).toBe(false);
+  });
+
+  it("backfillBlockIds assigns ids to legacy blocks and keeps the counter monotonic", () => {
+    const legacy: Block[] = [{ kind: "text", text: "无 id 的旧块" }];
+    backfillBlockIds(legacy);
+    expect(legacy[0]!.id).toBeDefined();
+    const after = nextBlockId();
+    expect(after).not.toBe(legacy[0]!.id);
+  });
+
+  it("restores ALL ids before minting (subagent entries seeded too)", () => {
+    const deep: Block[] = [
+      { kind: "text", text: "a", id: "bzz" }, // high id on the top level
+      { kind: "subagent", agentId: "a1", taskToolCallId: null, title: "", status: "completed", agentType: null, entries: [{ kind: "text", text: "nested", id: "b9z" }] },
+    ];
+    backfillBlockIds(deep);
+    const minted = nextBlockId();
+    // bzz parses higher than b9z; the counter must be past the max seen.
+    expect(parseInt(minted.slice(1), 36)).toBeGreaterThan(parseInt("bzz".slice(1), 36));
+  });
+
+  it("reassignBlockIds re-mints every restored id — a restored session shares NOTHING with the live namespace", () => {
+    // Restored transcript with ids from a previous host lifetime (the 404-
+    // duplicate-id corruption shape: restored blocks up to b4t).
+    const restored: Block[] = [
+      { kind: "user", text: "旧消息", id: "b1" },
+      { kind: "text", text: "旧回复", id: "b2" },
+      { kind: "subagent", agentId: "a1", taskToolCallId: null, title: "", status: "completed", agentType: null, entries: [{ kind: "text", text: "nested", id: "b3" }] },
+    ];
+    const originalIds = ["b1", "b2", "b3"];
+    // Seed the counter past the originals first (backfillBlockIds's job),
+    // then re-mint — each block gets a FRESH id from this host's counter.
+    backfillBlockIds(restored);
+    reassignBlockIds(restored);
+    const seen = new Set<string>();
+    const walk = (bs: Block[]): void => {
+      for (const b of bs) {
+        expect(b.id).toBeDefined();
+        // No restored id survives the re-mint — the live namespace is clean.
+        expect(originalIds).not.toContain(b.id);
+        expect(seen.has(b.id!)).toBe(false); // mutually unique
+        seen.add(b.id!);
+        if (b.kind === "subagent") walk(b.entries);
+      }
+    };
+    walk(restored);
+    // And live minting after the restore can never collide either.
+    const live = nextBlockId();
+    expect(seen.has(live)).toBe(false);
   });
 });

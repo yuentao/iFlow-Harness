@@ -941,9 +941,27 @@ export function markToolCancelled(state: SessionState): void {
  * P4: assign stable ids to blocks that lack them — transcripts persisted
  * before block ids existed (legacy workspaceState map, files written by
  * earlier versions). Recurses into SubAgent entries. Mutates in place.
+ * ALSO seeds the id counter past every id it sees: restored ids were minted
+ * by a PREVIOUS extension-host lifetime, and the module counter restarts at
+ * 0 on every host reload — without the seed the next minted id would collide
+ * with a restored one (404 duplicate ids measured in a real transcript:
+ * restored blocks up to `b4t` followed by fresh blocks restarting at `b1`).
  */
+function seedBlockSeqPast(id: string | undefined): void {
+  if (!id) return;
+  const m = /^b([0-9a-z]+)$/.exec(id);
+  const digits = m?.[1];
+  if (!digits) return;
+  const n = Number.parseInt(digits, 36);
+  if (Number.isFinite(n) && n > blockSeq) blockSeq = n;
+}
+
 export function backfillBlockIds(blocks: Block[]): void {
   for (const block of blocks) {
+    // Seeding MUST happen even for blocks that already carry an id: the
+    // counter only guarantees uniqueness against ids it has minted itself,
+    // and restored ids come from a previous host lifetime.
+    seedBlockSeqPast(block.id);
     if (!block.id) block.id = nextBlockId();
     // Pre-system-classification transcripts carry no `system` flag — re-derive
     // it so restored status lines still render as muted system notes. Only
@@ -953,6 +971,25 @@ export function backfillBlockIds(blocks: Block[]): void {
         isSystemStatusText(block.text) || LEGACY_RESOLUTION_NOTE.test(block.text) || undefined;
     }
     if (block.kind === "subagent") backfillBlockIds(block.entries);
+  }
+}
+
+/**
+ * Re-mint EVERY id in a restored transcript before it enters the live block
+ * array. Structural isolation (user directive): a new session must share
+ * NOTHING with historical sessions — not even the id namespace. Restored ids
+ * come from previous host lifetimes whose counters this process can never
+ * know; rather than trusting them, each restored block gets a fresh id from
+ * THIS host's counter (seeded past the originals by backfillBlockIds), so
+ * live minting can never collide regardless of what any past lifetime
+ * produced. The original ids stay untouched in the persisted file (lossless).
+ * Recurses into SubAgent entries. Mutates in place; call after
+ * backfillBlockIds (which seeds the counter past the old ids first).
+ */
+export function reassignBlockIds(blocks: Block[]): void {
+  for (const block of blocks) {
+    block.id = nextBlockId();
+    if (block.kind === "subagent") reassignBlockIds(block.entries);
   }
 }
 
@@ -1184,6 +1221,56 @@ export function appendApprovalResolution(state: SessionState, toolName: string, 
     system: true,
   });
   return state.blocks.length - 1;
+}
+
+// --- session-update drop guard (pure; unit-tested) ---------------------------
+
+/**
+ * Decide whether one `session/update` notification must be dropped before it
+ * reaches the reducer. Pure so the guard chain is unit-testable — the leak it
+ * guards against (an abandoned turn's trailing chunks repopulating a freshly
+ * cleared transcript) was user-reported twice before this became a function.
+ *
+ * Rules:
+ * - `resetting` (the 新会话 window between replaceState and sessionStarted):
+ *   drop everything not addressed to the store's own session — including
+ *   updates that carry NO sessionId, which is exactly how the abandoned
+ *   turn's stragglers got through the earlier id-only guards.
+ * - Restore window: the replay legitimately repopulates the cleared
+ *   transcript, but ONLY updates tagged with the session being restored (or
+ *   untagged replayed turns) pass — an abandoned turn streaming on a foreign
+ *   session must not ride the exemption.
+ * - Unattributable (no sessionId): the real CLI stamps sessionId on EVERY
+ *   session/update (wire fixture 2026-09-05, CLI 0.5.19 — 3/3), so a
+ *   sessionId-less update cannot be tied to any session. Accept it only when
+ *   a turn is verifiably in flight on the store's own session; during
+ *   resets, restore setup, or an idle session it is dropped.
+ */
+export function dropSessionUpdate(args: {
+  sessionId: string | null | undefined;
+  storeSessionId: string | null;
+  status: SessionState["status"];
+  restoring: boolean;
+  resetting: boolean;
+  /** The session being restored; during the restore window only updates
+   * tagged with this id (or untagged replayed turns) legitimately pass. */
+  restoringSessionId?: string | null;
+}): boolean {
+  const { sessionId, storeSessionId, status, restoring, resetting } = args;
+  const foreign = sessionId !== null && sessionId !== undefined && sessionId !== storeSessionId;
+  if (resetting && sessionId !== storeSessionId) return true;
+  if (restoring) {
+    // Restore window: the replay legitimately repopulates the cleared
+    // transcript, but ONLY for the session being restored — an abandoned turn
+    // still streaming on a foreign session must not ride the exemption.
+    if (sessionId && sessionId !== (args.restoringSessionId ?? null)) return true;
+    return false;
+  }
+  if (foreign) return true;
+  if ((sessionId === null || sessionId === undefined) && !restoring) {
+    if (resetting || storeSessionId === null || status !== "streaming") return true;
+  }
+  return false;
 }
 
 // --- user questions (_iflow/user_questions) ---------------------------------

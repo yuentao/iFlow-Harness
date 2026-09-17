@@ -44,9 +44,11 @@ import {
   backfillBlockIds,
   beginReplay,
   clampSessionLabel,
+  dropSessionUpdate,
   endReplay,
   newSessionState,
   parseTranscriptJsonl,
+  reassignBlockIds,
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
@@ -1554,6 +1556,18 @@ export class ChatPanel implements vscode.Disposable {
    */
   private discardedSessionIds = new Set<string>();
   /**
+   * True from the moment `startNewSession` clears the transcript until the new
+   * session is established (or the attempt fails). The abandoned turn keeps
+   * streaming server-side during this window, and updates WITHOUT a sessionId
+   * pass both id guards in `onSessionUpdate` (the discarded set is keyed by
+   * the old uuid, the cross-session guard skips empty ids) — they repopulated
+   * the freshly cleared transcript (user-reported "新会话显示异常: 残留旧会话
+   * 内容 + usage 归零"). The window drops everything not already addressed
+   * to the store's own session; history restore is exempt because replayed
+   * updates legitimately arrive while `store.sessionId` is still null.
+   */
+  private droppingForReset = false;
+  /**
    * Set by a profile switch; consumed by the next session start (new or
    * restored). Holds the NEW profile's configured modelName — the default
    * model must be the one written in the profile (user directive), not the
@@ -1565,21 +1579,39 @@ export class ChatPanel implements vscode.Disposable {
   private replayTitle: string | null = null;
   /** True while a `session/load` restore is in flight. */
   private restoring = false;
+  /**
+   * The session being restored. During the restore window, replayed updates
+   * arrive tagged with THIS id — an abandoned turn still streaming on a
+   * FOREIGN session must not ride the restoring exemption into the restored
+   * transcript (the replay itself repopulates the cleared state, so a leak
+   * here reads as "restored session shows another conversation's content").
+   */
+  private restoringSessionId: string | null = null;
 
   private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
     // Hot re-auth (profile switch) abandons the old session on the SAME live
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
     if (this.discardedSessionIds.delete(n.sessionId)) return;
-    // Cross-session guard: a turn abandoned by 新会话 (or a profile switch)
-    // keeps streaming server-side; without this check its trailing updates
-    // repopulate the freshly cleared transcript (the reducer applies updates
-    // unconditionally). The reset window (sessionId=null between
-    // replaceState and sessionStarted) drops everything addressed anywhere —
-    // nothing legitimate streams there. Restore is exempt: replayed updates
-    // arrive while store.sessionId is still null. Notifications without a
-    // sessionId pass through (defensive against CLIs that omit it).
-    if (!this.restoring && n.sessionId && n.sessionId !== this.store.getState().sessionId) return;
+    // Everything else is the pure guard chain (shared/session-state.ts
+    // dropSessionUpdate): reset-window drops (incl. sessionId-less updates,
+    // which slipped through the earlier id-only guards — user-reported leak
+    // twice), cross-session drops, and unattributable drops during restore
+    // setup / idle sessions. Restore is exempt (replayed updates arrive with
+    // `restoring` set and a foreign/null sessionId by design).
+    const s = this.store.getState();
+    if (
+      dropSessionUpdate({
+        sessionId: n.sessionId ?? null,
+        storeSessionId: s.sessionId,
+        status: s.status,
+        restoring: this.restoring,
+        resetting: this.droppingForReset,
+        restoringSessionId: this.restoringSessionId,
+      })
+    ) {
+      return;
+    }
     // During restore, the first user turn names the session in the switcher.
     if (this.restoring && this.replayTitle === null && n.update.sessionUpdate === "user_message_chunk") {
       if (n.update.content.type === "text" && n.update.content.text.trim()) {
@@ -1715,6 +1747,21 @@ export class ChatPanel implements vscode.Disposable {
       return false;
     }
 
+    // Mutual exclusion: a 新会话 is in flight (initializing) — its
+    // session/new can take 30-60s with MCP servers, and running a restore
+    // CONCURRENTLY let the replayed updates repopulate the transcript the
+    // reset just cleared (user-reported: old content + "正在创建新会话…" +
+    // empty-state all on screen). Refuse until the reset settles; the user
+    // can retry the restore once the switcher unlocks.
+    if (this.store.getState().initializing || this.droppingForReset) {
+      this.log.warn(`restore ${sessionId} refused: a new-session switch is in flight`);
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("正在创建新会话，请稍后再恢复历史会话"),
+      );
+      return false;
+    }
+    if (this.restoring) return false; // a restore is already in flight
+
     // Race the /models HTTP query with the probe + loadSession below (it only
     // reads the endpoint from settings.json — independent of the session).
     const modelsPromise = this.queryLiveModels();
@@ -1723,6 +1770,7 @@ export class ChatPanel implements vscode.Disposable {
     const outgoingId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
     this.log.info(`restoring session ${sessionId} …`);
     this.restoring = true;
+    this.restoringSessionId = sessionId;
     this.replayTitle = null;
     this.sessionCwd = workspaceRoot;
     const fresh = newSessionState(this.store.getState());
@@ -1753,6 +1801,15 @@ export class ChatPanel implements vscode.Disposable {
           text: vscode.l10n.t("已恢复会话上下文（CLI 未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。"),
         });
       }
+      // Structural isolation (user directive): a restored transcript carries
+      // ids minted by PREVIOUS host lifetimes this process can never know —
+      // entering the live array with them collided with fresh minting (404
+      // duplicate ids measured). Re-mint every id from THIS host's counter so
+      // a restored session shares NOTHING with the live namespace; the
+      // original ids stay untouched in the persisted file (lossless).
+      // backfillBlockIds (inside loadPersistedTranscript) already seeded the
+      // counter past the originals, so the re-mints are collision-free.
+      reassignBlockIds(restored.blocks);
       this.store.replaceTranscript(restored.blocks);
 
       // Model list: same live-endpoint-only source as a fresh session,
@@ -1801,6 +1858,7 @@ export class ChatPanel implements vscode.Disposable {
       return false;
     } finally {
       this.restoring = false;
+      this.restoringSessionId = null;
       this.replayTitle = null;
     }
   }
@@ -2451,6 +2509,16 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
     this.cancelAllPlanExits(vscode.l10n.t("会话已重置，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
+    // Mutual exclusion: a session restore is in flight — running a reset
+    // CONCURRENTLY let the restore's replayed updates (and the in-flight
+    // session/new's late sessionStarted) interleave into one transcript
+    // (user-reported: old content + "正在创建新会话…" + empty-state on screen
+    // together). Refuse until the restore settles.
+    if (this.restoring) {
+      this.log.warn("new session refused: a session restore is in flight");
+      this.store.appendNotice(vscode.l10n.t("正在恢复历史会话，请稍后再新建会话"));
+      return;
+    }
     // Clear the transcript IMMEDIATELY. Clearing only after `session/new`
     // returned left the old transcript visibly in place for the whole CLI
     // round trip (~5s measured), reading as "新会话残留了旧会话历史".
@@ -2459,7 +2527,17 @@ export class ChatPanel implements vscode.Disposable {
     // session-replaced guard, so settle the status here: a manual reset
     // always lands idle, never stuck "streaming" with a locked composer.
     if (fresh.status === "streaming") fresh.status = "idle";
+    // Detach the switcher from the outgoing session: newSessionState
+    // preserves activeSessionId, which left the dropdown showing the OLD
+    // session's label during the whole CLI boot — reading as "the new session
+    // kept the old conversation". recordSession re-points it to the new id.
+    fresh.activeSessionId = null;
     this.store.replaceState(fresh);
+    // Open the reset window: until the new session is established (finally),
+    // onSessionUpdate drops everything not addressed to the store's own
+    // session — this is what catches the abandoned turn's trailing updates
+    // that arrive WITHOUT a sessionId (they pass both id guards otherwise).
+    this.droppingForReset = true;
     // Lock the UI while the CLI spins up the new session (sessions/mode/model
     // switches must not race the in-flight `session/new`).
     this.store.setInitializing(true);
@@ -2505,6 +2583,11 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
     } finally {
+      // Close the reset window (see the flag's declaration): from here on the
+      // store carries the new sessionId, so the regular cross-session guard
+      // takes over. On failure the store's sessionId stays null and the old
+      // guards behave exactly as before this window existed.
+      this.droppingForReset = false;
       this.store.setInitializing(false);
     }
   }
@@ -2581,6 +2664,13 @@ export class ChatPanel implements vscode.Disposable {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
+      // Session replaced mid-flight (新会话/profile switch cancelled the
+      // in-flight turn): the completion must not settle the NEW session's
+      // state (or overwrite its usage estimate) — drop like the catch path.
+      if (this.store.getState().sessionId !== promptSessionId) {
+        this.log.info(`prompt completed after session switch — dropped (session replaced)`);
+        return;
+      }
       this.store.promptCompleted(result.stopReason);
       // Sound cue: completion chime, but a user stop/cancel stays silent.
       if (result.stopReason !== "cancelled") this.postSound("done");
@@ -2645,6 +2735,12 @@ export class ChatPanel implements vscode.Disposable {
         { type: "text", text: toAgentPromptText(lastUserText.trim(), this.store.getState().commands) },
       ];
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
+      // Session replaced mid-flight: the completion must not settle the NEW
+      // session's state — drop like the sendPrompt success path.
+      if (this.store.getState().sessionId !== promptSessionId) {
+        this.log.info(`regenerate completed after session switch — dropped (session replaced)`);
+        return;
+      }
       this.store.promptCompleted(result.stopReason);
       if (result.stopReason !== "cancelled") this.postSound("done");
       void this.persistActiveTranscript();
