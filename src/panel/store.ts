@@ -184,11 +184,12 @@ export class SessionStore {
 
   /** Surface a transient host notice to the WebView (auto-dismissed by the UI).
    * `countdownDeadline` (host epoch-ms) anchors a live countdown in the WebView
-   * to the host's actual wait; `durationMs` overrides the auto-dismiss lifetime. */
+   * to the host's actual wait; `durationMs` overrides the auto-dismiss lifetime;
+   * `displayOnly` renders the pill as display-only (no click-to-dismiss). */
   sendToast(
     level: "info" | "warning" | "error",
     message: string,
-    opts?: { durationMs?: number; countdownDeadline?: number },
+    opts?: { durationMs?: number; countdownDeadline?: number; displayOnly?: boolean },
   ): void {
     this.post({
       type: "toast",
@@ -196,6 +197,7 @@ export class SessionStore {
       message,
       durationMs: opts?.durationMs,
       countdownDeadline: opts?.countdownDeadline,
+      displayOnly: opts?.displayOnly,
     });
   }
 

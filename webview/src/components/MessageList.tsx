@@ -930,7 +930,8 @@ function MessageListInner({ state }: { state: SessionState }) {
 
 /** Transient host notices (rate-limit retry / context-overflow compress),
  * rendered as a centered stack above the streaming indicator. Auto-dismissed
- * by the store timer; click to dismiss early. */
+ * by the store timer; plain toasts dismiss early on click, while display-only
+ * pills (countdown retries, host-flagged notices) are not clickable. */
 function Toasts() {
   const toasts = useChat((s) => s.toasts);
   if (toasts.length === 0) return null;
@@ -967,17 +968,14 @@ function ToastPill({ toast }: { toast: ToastItem }) {
     const iv = setInterval(tick, 250);
     return () => clearInterval(iv);
   }, [toast.countdownDeadline]);
-  return (
-    <button
-      onClick={() => dismiss(toast.id)}
-      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${
-        toast.level === "error"
-          ? "border-destructive/40 bg-destructive/15 text-destructive"
-          : toast.level === "warning"
-            ? "border-warning/40 bg-warning/15 text-warning"
-            : "border-border bg-card/90 text-foreground"
-      }`}
-    >
+  const tone =
+    toast.level === "error"
+      ? "border-destructive/40 bg-destructive/15 text-destructive"
+      : toast.level === "warning"
+        ? "border-warning/40 bg-warning/15 text-warning"
+        : "border-border bg-card/90 text-foreground";
+  const body = (
+    <>
       {toast.level === "warning" && <AlertTriangle className="size-3.5 shrink-0" />}
       {toast.level === "error" && <XCircle className="size-3.5 shrink-0" />}
       {toast.level === "info" && <Info className="size-3.5 shrink-0 text-primary" />}
@@ -985,6 +983,27 @@ function ToastPill({ toast }: { toast: ToastItem }) {
       {toast.countdownDeadline !== undefined && (
         <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>
       )}
+    </>
+  );
+  // Display-only pills (countdown retries, host-flagged notices like the
+  // context-overflow compress): the wait is owned by the host (it dismisses
+  // the toast when the retry fires), so clicking must not falsely imply the
+  // user can cancel or skip it.
+  if (toast.countdownDeadline !== undefined || toast.displayOnly) {
+    return (
+      <div
+        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+      >
+        {body}
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={() => dismiss(toast.id)}
+      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+    >
+      {body}
     </button>
   );
 }

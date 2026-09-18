@@ -3099,6 +3099,7 @@ export class ChatPanel implements vscode.Disposable {
           this.store.sendToast(
             "info",
             vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
+            { displayOnly: true },
           );
           continue;
         }

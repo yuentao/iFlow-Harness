@@ -158,7 +158,7 @@ export function App() {
         {!isEnglishLocale() && <div className="splash-sub">iFlow Harness</div>}
         <div className="splash-bar" />
         <div className="splash-hint">
-          {t("正在启动 iFlow CLI…（首次启动或配置了多个 MCP server 时较久）")}
+          {t("正在启动 iFlow …（首次启动或配置了多个 MCP server 时较久）")}
         </div>
       </div>
     );

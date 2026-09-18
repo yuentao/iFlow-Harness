@@ -140,8 +140,8 @@ const en: Record<string, string> = {
   "复制": "Copy",
   "重新生成": "Regenerate",
   "确认": "Confirm",
-  "正在启动 iFlow CLI…（首次启动或配置了多个 MCP server 时较久）":
-    "Starting iFlow CLI… (slower on first launch or with multiple MCP servers)",
+  "正在启动 iFlow …（首次启动或配置了多个 MCP server 时较久）":
+    "Starting iFlow … (slower on first launch or with multiple MCP servers)",
   // P1: edit & resend, session search, aria-live announcements
   "编辑并重发": "Edit & resend",
   "搜索会话…": "Search sessions…",
