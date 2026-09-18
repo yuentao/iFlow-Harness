@@ -3,6 +3,14 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.1.2] - 2026-09-19
+
+- 新增 Plan 退出卡片计划编辑与 Markdown 渲染：编辑文本随重新规划回传并在解析备注中留痕
+- 修复 会话历史下拉中搜索框与标题随列表一起滚动消失：菜单改为 flex 列布局，仅会话列表滚动
+- 修复 自动压缩提示在压缩期间被提前自动消失：新增 persistent 标记与 dismissToast 消息，由 host 显式管理提示生命周期
+- 新增 toast displayOnly 标记：host 主导的等待（压缩重试/倒计时）渲染为不可点击 pill，避免误以为可取消
+- 修复 模型下拉与实际使用模型不一致：以面板 currentModelId 为权威值，新会话/恢复会话补发 set_model 并对齐 live 列表
+
 ## [1.1.1] - 2026-09-15
 
 - 修复 面板打开即白屏崩溃：aria-live 播报的 useMemo 位于 splash 早返回之后，首帧（无快照）与快照渲染的 hooks 数量不一致触发 React error #310
