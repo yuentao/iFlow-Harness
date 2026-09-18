@@ -192,7 +192,7 @@ export function App() {
           {/* session switcher */}
           {sessions.length > 0 ? (
             <Dropdown
-              menuClass="w-72 max-h-64 overflow-y-auto"
+              menuClass="w-72 max-h-64 flex flex-col"
               wrapperClass="min-w-0 flex-1"
               disabled={locked}
               trigger={(open) => (
@@ -211,10 +211,10 @@ export function App() {
             >
               {(close) => (
                 <>
-                  <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <div className="shrink-0 px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                     {t("会话历史")}
                   </div>
-                  <div className="px-2 pb-1.5">
+                  <div className="shrink-0 px-2 pb-1.5">
                     <div className="flex items-center gap-1.5 rounded-lg border border-border bg-editor/60 px-2 py-1 transition-colors focus-within:border-primary/50">
                       <Search className="size-3 shrink-0 text-muted-foreground" />
                       <input
@@ -231,11 +231,12 @@ export function App() {
                       <button
                         role="menuitem"
                         onClick={close}
-                        className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-foreground hover:bg-accent/60"
+                        className="flex w-full shrink-0 items-center px-3 py-1.5 text-left text-[12px] text-foreground hover:bg-accent/60"
                       >
                         {t("当前会话")}
                       </button>
                     )}
+                  <div className="min-h-0 flex-1 overflow-y-auto">
                   {sessions
                     .filter((s) => s.label.toLowerCase().includes(sessionQuery.trim().toLowerCase()))
                     .map((s) => {
@@ -302,6 +303,7 @@ export function App() {
                       </div>
                     );
                   })}
+                  </div>
                 </>
               )}
             </Dropdown>
