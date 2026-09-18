@@ -383,7 +383,20 @@ export type HostToWebview =
       /** Current non-blocks metadata (status, approvals, modes, …). */
       tail: SessionSnapshotTail;
     }
-  | { type: "toast"; level: "info" | "warning" | "error"; message: string; durationMs?: number; countdownDeadline?: number; displayOnly?: boolean }
+  | {
+      type: "toast";
+      level: "info" | "warning" | "error";
+      message: string;
+      durationMs?: number;
+      countdownDeadline?: number;
+      displayOnly?: boolean;
+      /** Host-assigned id; echoed back in `dismissToast` to remove this pill. */
+      toastId?: number;
+      /** Host owns the pill's lifetime (e.g. the auto-compress notice): the
+       * webview never auto-dismisses it — only a matching `dismissToast` does. */
+      persistent?: boolean;
+    }
+  | { type: "dismissToast"; toastId: number }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
   | { type: "fileList"; requestId: number; hits: FileHitUi[] }
   /** Reply to `stageFiles`: absolute temp paths aligned with the request's

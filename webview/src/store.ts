@@ -814,6 +814,11 @@ export interface ToastItem {
   countdownDeadline?: number;
   /** Host marks the pill display-only: rendered without click-to-dismiss. */
   displayOnly?: boolean;
+  /** Host-assigned id (matches the wire `toastId`); used by `dismissToast`. */
+  toastId?: number;
+  /** Host owns this pill's lifetime (auto-compress notice): never auto-dismissed
+   * by the WebView — removed only when the host sends `dismissToast`. */
+  persistent?: boolean;
 }
 
 interface ChatStore {
@@ -927,18 +932,37 @@ export const useChat = create<ChatStore>((set, get) => ({
     if (msg.type === "toast") {
       const id = ++toastSeq;
       const countdownDeadline = msg.countdownDeadline;
+      const persistent = msg.persistent === true;
       set((s) => ({
         toasts: [
           ...s.toasts,
-          { id, level: msg.level, message: msg.message, countdownDeadline, displayOnly: msg.displayOnly },
+          {
+            id,
+            level: msg.level,
+            message: msg.message,
+            countdownDeadline,
+            displayOnly: msg.displayOnly,
+            toastId: msg.toastId,
+            persistent,
+          },
         ],
       }));
-      // Countdown toasts live until the host's deadline (dismiss exactly when the
-      // wait ends); others get a clamped default lifetime (5s, host may extend to 15s).
-      const duration = countdownDeadline !== undefined
-        ? Math.max(0, countdownDeadline - Date.now())
-        : Math.min(Math.max(msg.durationMs ?? 5000, 2000), 15_000);
-      setTimeout(() => get().dismissToast(id), duration);
+      // Persistent pills are host-owned (e.g. the auto-compress notice): they
+      // stay until the host sends `dismissToast`. Countdown toasts live until
+      // the host's deadline; others get a clamped default lifetime (5s, host
+      // may extend to 15s).
+      if (!persistent) {
+        const duration = countdownDeadline !== undefined
+          ? Math.max(0, countdownDeadline - Date.now())
+          : Math.min(Math.max(msg.durationMs ?? 5000, 2000), 15_000);
+        setTimeout(() => get().dismissToast(id), duration);
+      }
+      return;
+    }
+    if (msg.type === "dismissToast") {
+      // Host ids and WebView-local ids are separate sequences — match on the
+      // stored `toastId`, not the local one.
+      set((s) => ({ toasts: s.toasts.filter((t) => t.toastId !== msg.toastId) }));
       return;
     }
     // Consumed by their own window-level listeners (Composer registers those

@@ -929,9 +929,10 @@ function MessageListInner({ state }: { state: SessionState }) {
 }
 
 /** Transient host notices (rate-limit retry / context-overflow compress),
- * rendered as a centered stack above the streaming indicator. Auto-dismissed
- * by the store timer; plain toasts dismiss early on click, while display-only
- * pills (countdown retries, host-flagged notices) are not clickable. */
+ * rendered as a centered stack above the streaming indicator. Plain toasts
+ * auto-dismiss on a timer and dismiss early on click; countdown retries and
+ * display-only/persistent pills are not clickable — persistent ones stay
+ * until the host removes them (dismissToast). */
 function Toasts() {
   const toasts = useChat((s) => s.toasts);
   if (toasts.length === 0) return null;
@@ -985,11 +986,11 @@ function ToastPill({ toast }: { toast: ToastItem }) {
       )}
     </>
   );
-  // Display-only pills (countdown retries, host-flagged notices like the
-  // context-overflow compress): the wait is owned by the host (it dismisses
-  // the toast when the retry fires), so clicking must not falsely imply the
-  // user can cancel or skip it.
-  if (toast.countdownDeadline !== undefined || toast.displayOnly) {
+  // Display-only pills (countdown retries, host-flagged / persistent notices
+  // like the context-overflow compress): the wait is owned by the host (it
+  // dismisses the toast when the retry fires / the compress turn ends), so
+  // clicking must not falsely imply the user can cancel or skip it.
+  if (toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent) {
     return (
       <div
         className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}

@@ -449,3 +449,38 @@ describe("P-1 full-chain fidelity (host push → wire → webview merge)", () =>
     expect(wire(webview.state!.blocks)).not.toContainEqual(expect.objectContaining({ text: "旧会话" }));
   });
 });
+
+describe("SessionStore toast lifecycle (persistent display-only notices)", () => {
+  it("sendToast returns a monotonic toastId and forwards displayOnly/persistent", () => {
+    const { store, messages } = makeStore();
+    const id1 = store.sendToast("info", "上下文长度已达模型上限，自动压缩会话后重试…", {
+      displayOnly: true,
+      persistent: true,
+    });
+    const id2 = store.sendToast("warning", "普通提示");
+    expect(id2).toBe(id1 + 1);
+
+    const t1 = messages[0]!;
+    expect(t1.type).toBe("toast");
+    if (t1.type !== "toast") throw new Error("unreachable");
+    expect(t1.toastId).toBe(id1);
+    expect(t1.displayOnly).toBe(true);
+    expect(t1.persistent).toBe(true);
+
+    const t2 = messages[1]!;
+    expect(t2.type).toBe("toast");
+    if (t2.type !== "toast") throw new Error("unreachable");
+    expect(t2.toastId).toBe(id2);
+    expect(t2.persistent).toBeUndefined();
+  });
+
+  it("dismissToast posts a dismissToast carrying the toastId", () => {
+    const { store, messages } = makeStore();
+    const id = store.sendToast("info", "压缩中…", { displayOnly: true, persistent: true });
+    store.dismissToast(id);
+    const msg = messages[1]!;
+    expect(msg.type).toBe("dismissToast");
+    if (msg.type !== "dismissToast") throw new Error("unreachable");
+    expect(msg.toastId).toBe(id);
+  });
+});

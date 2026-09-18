@@ -3076,56 +3076,71 @@ export class ChatPanel implements vscode.Disposable {
     let compressNext = false; // next attempt sends /compress instead of prompt
     let overflowRecovered = false;
     let rateLimitRetries = 0;
-    for (;;) {
-      const blocks: ContentBlock[] = compressNext
-        ? [{ type: "text", text: "/compress" }]
-        : prompt;
-      try {
-        const result = await client.prompt({ sessionId, prompt: blocks });
-        if (!compressNext) return result;
-        // Compress turn finished: fall through to resending the original
-        // prompt. User hit Stop while it ran: do not resurrect the prompt
-        // behind their back — surface the cancellation as the final
-        // stopReason instead.
-        compressNext = false;
-        if (result.stopReason === "cancelled") return result;
-      } catch (error) {
-        if (isContextOverflowError(error) && !overflowRecovered) {
-          overflowRecovered = true;
-          compressNext = true;
-          this.log.warn(
-            `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
-          );
-          this.store.sendToast(
-            "info",
-            vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
-            { displayOnly: true },
-          );
-          continue;
+    // Persistent display-only pill shown while the auto-compress turn runs;
+    // dismissed once that turn ends (or the loop gives up) so it never lingers.
+    let compressToastId: number | null = null;
+    try {
+      for (;;) {
+        const blocks: ContentBlock[] = compressNext
+          ? [{ type: "text", text: "/compress" }]
+          : prompt;
+        try {
+          const result = await client.prompt({ sessionId, prompt: blocks });
+          if (!compressNext) return result;
+          // Compress turn finished: fall through to resending the original
+          // prompt. User hit Stop while it ran: do not resurrect the prompt
+          // behind their back — surface the cancellation as the final
+          // stopReason instead.
+          if (compressToastId !== null) {
+            this.store.dismissToast(compressToastId);
+            compressToastId = null;
+          }
+          compressNext = false;
+          if (result.stopReason === "cancelled") return result;
+        } catch (error) {
+          if (isContextOverflowError(error) && !overflowRecovered) {
+            overflowRecovered = true;
+            compressNext = true;
+            this.log.warn(
+              `context overflow on session ${sessionId}, auto-compressing and retrying: ${this.formatErrorForLog(error)}`,
+            );
+            compressToastId = this.store.sendToast(
+              "info",
+              vscode.l10n.t("上下文长度已达模型上限，自动压缩会话后重试…"),
+              { displayOnly: true, persistent: true },
+            );
+            continue;
+          }
+          if (
+            isRateLimitError(error) &&
+            rateLimitRetries < RATE_LIMIT_RETRY_DELAYS_MS.length
+          ) {
+            const delayMs = RATE_LIMIT_RETRY_DELAYS_MS[rateLimitRetries]!;
+            rateLimitRetries++;
+            this.log.warn(
+              `rate limit on session ${sessionId}, auto-retry ${rateLimitRetries}/${RATE_LIMIT_RETRY_DELAYS_MS.length} in ${delayMs / 1000}s: ${this.formatErrorForLog(error)}`,
+            );
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t(
+                "模型触发平台速率限制，自动重试中（第 {0}/{1} 次）",
+                rateLimitRetries,
+                RATE_LIMIT_RETRY_DELAYS_MS.length,
+              ),
+              { countdownDeadline: Date.now() + delayMs },
+            );
+            await abortableDelay(delayMs, () => this.cancelSeen);
+            if (this.cancelSeen) throw error; // user pressed Stop during the wait
+            continue;
+          }
+          throw error;
         }
-        if (
-          isRateLimitError(error) &&
-          rateLimitRetries < RATE_LIMIT_RETRY_DELAYS_MS.length
-        ) {
-          const delayMs = RATE_LIMIT_RETRY_DELAYS_MS[rateLimitRetries]!;
-          rateLimitRetries++;
-          this.log.warn(
-            `rate limit on session ${sessionId}, auto-retry ${rateLimitRetries}/${RATE_LIMIT_RETRY_DELAYS_MS.length} in ${delayMs / 1000}s: ${this.formatErrorForLog(error)}`,
-          );
-          this.store.sendToast(
-            "warning",
-            vscode.l10n.t(
-              "模型触发平台速率限制，自动重试中（第 {0}/{1} 次）",
-              rateLimitRetries,
-              RATE_LIMIT_RETRY_DELAYS_MS.length,
-            ),
-            { countdownDeadline: Date.now() + delayMs },
-          );
-          await abortableDelay(delayMs, () => this.cancelSeen);
-          if (this.cancelSeen) throw error; // user pressed Stop during the wait
-          continue;
-        }
-        throw error;
+      }
+    } finally {
+      // Belt-and-braces: any exit path that didn't dismiss the compress pill
+      // (final failure, cancellation) removes it here so it never lingers.
+      if (compressToastId !== null) {
+        this.store.dismissToast(compressToastId);
       }
     }
   }

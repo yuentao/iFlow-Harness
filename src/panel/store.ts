@@ -185,12 +185,17 @@ export class SessionStore {
   /** Surface a transient host notice to the WebView (auto-dismissed by the UI).
    * `countdownDeadline` (host epoch-ms) anchors a live countdown in the WebView
    * to the host's actual wait; `durationMs` overrides the auto-dismiss lifetime;
-   * `displayOnly` renders the pill as display-only (no click-to-dismiss). */
+   * `displayOnly` renders the pill as display-only (no click-to-dismiss);
+   * `persistent` keeps the pill until `dismissToast(toastId)` (the WebView
+   * never auto-dismisses it — used for host-owned waits like auto-compress).
+   * Returns the host-assigned toast id. */
+  private toastSeq = 0;
   sendToast(
     level: "info" | "warning" | "error",
     message: string,
-    opts?: { durationMs?: number; countdownDeadline?: number; displayOnly?: boolean },
-  ): void {
+    opts?: { durationMs?: number; countdownDeadline?: number; displayOnly?: boolean; persistent?: boolean },
+  ): number {
+    const toastId = ++this.toastSeq;
     this.post({
       type: "toast",
       level,
@@ -198,7 +203,15 @@ export class SessionStore {
       durationMs: opts?.durationMs,
       countdownDeadline: opts?.countdownDeadline,
       displayOnly: opts?.displayOnly,
+      toastId,
+      persistent: opts?.persistent,
     });
+    return toastId;
+  }
+
+  /** Remove a persistent toast (see `sendToast` `persistent`). */
+  dismissToast(toastId: number): void {
+    this.post({ type: "dismissToast", toastId });
   }
 
   /** Transient host notice without an explicit level (question timeout / skip /
