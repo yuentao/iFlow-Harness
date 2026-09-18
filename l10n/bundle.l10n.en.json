@@ -58,5 +58,9 @@
   "上下文已压缩：{0} → {1} tokens": "Context compressed: {0} → {1} tokens",
   "上下文长度已达模型上限，自动压缩会话后重试…": "Context reached the model's limit — compressing the session and retrying…",
   "模型触发平台速率限制，自动重试中（第 {0}/{1} 次）": "Model hit the platform rate limit — retrying (attempt {0}/{1})",
+  "重新规划": "Re-plan",
+  "重新规划：{0}": "Re-plan: {0}",
+  "已批准计划": "Plan approved",
+  "已拒绝计划": "Plan rejected",
   "本次会话累计 token 消耗（host 估算，非精确计费）": "Cumulative tokens used this session (host estimate, not exact billing)"
 }

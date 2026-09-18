@@ -833,8 +833,18 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingPlanExits.delete(id);
     clearTimeout(pending.timer);
     this.store.clearPlanExit(id);
+    // Replan with edited plan text: the reason IS the revised plan the user
+    // wrote in the card's edit mode — surface a truncated excerpt in the
+    // resolution note so the transcript records what changed (the full text
+    // goes to the agent via the resolve below; the note is display-only).
     this.store.planExitResolutionNote(
-      replan ? vscode.l10n.t("重新规划") : approved ? vscode.l10n.t("已批准计划") : reason ?? vscode.l10n.t("已拒绝计划"),
+      replan
+        ? reason
+          ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
+          : vscode.l10n.t("重新规划")
+        : approved
+          ? vscode.l10n.t("已批准计划")
+          : reason ?? vscode.l10n.t("已拒绝计划"),
     );
     // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
     // its own after `_iflow/plan/exit` resolves — switch back explicitly on

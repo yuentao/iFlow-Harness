@@ -760,27 +760,32 @@ function MessageListInner({ state }: { state: SessionState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
   }, [promptSeq]);
 
-  // Approval / question cards render OUTSIDE the scroll area (App.tsx), so
-  // unmounting either one never touches the content RO — the scroll container
-  // just grows by the card height, leaving the transcript tail floating above
-  // an empty gap. Both answers reseed the agent (semantically "continue", like
-  // sending a prompt), so any card disappearing re-anchors the viewport. This
-  // fixed the reported "answering the question card doesn't scroll to the
-  // latest message" bug; the approval card shares the exact same layout.
+  // Approval / question / plan-exit cards render OUTSIDE the scroll area
+  // (App.tsx), so unmounting any of them never touches the content RO — the
+  // scroll container just grows by the card height, leaving the transcript
+  // tail floating above an empty gap. All three answers reseed the agent
+  // (semantically "continue", like sending a prompt), so any card
+  // disappearing re-anchors the viewport. This fixed the reported "answering
+  // the question card doesn't scroll to the latest message" bug; the
+  // approval card shares the exact same layout, and the plan-exit card the
+  // reported "exiting plan mode doesn't follow the scroll" one.
   const prevApproval = useRef(state.pendingApproval);
   const prevQuestions = useRef(state.pendingQuestions);
+  const prevPlanExit = useRef(state.pendingPlanExit);
   useEffect(() => {
     const approvalCleared = prevApproval.current !== null && state.pendingApproval === null;
     const questionsCleared = prevQuestions.current !== null && state.pendingQuestions === null;
+    const planExitCleared = prevPlanExit.current !== null && state.pendingPlanExit === null;
     prevApproval.current = state.pendingApproval;
     prevQuestions.current = state.pendingQuestions;
-    if (!approvalCleared && !questionsCleared) return;
+    prevPlanExit.current = state.pendingPlanExit;
+    if (!approvalCleared && !questionsCleared && !planExitCleared) return;
     stickToBottom.current = true;
     setShowJump(false);
     const raf = requestAnimationFrame(() => scrollToBottom());
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom reads refs only
     return () => cancelAnimationFrame(raf);
-  }, [state.pendingApproval, state.pendingQuestions]);
+  }, [state.pendingApproval, state.pendingQuestions, state.pendingPlanExit]);
 
   /** Re-sync the header shadow flag from the current scroll position.
    * Scroll events alone miss resizes: when the panel is resized (or a card

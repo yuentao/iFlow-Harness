@@ -157,6 +157,10 @@ const en: Record<string, string> = {
   "批准计划": "Approve plan",
   "拒绝计划": "Reject plan",
   "重新规划": "Re-plan",
+  "编辑计划": "Edit plan",
+  "预览计划": "Preview plan",
+  "编辑": "Edit",
+  "预览": "Preview",
   "计划审批操作": "Plan approval actions",
   "需要确认退出计划模式": "Plan exit needs confirmation",
   // render-error fallback (ErrorBoundary)
