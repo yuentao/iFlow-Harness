@@ -2050,10 +2050,16 @@ export class ChatPanel implements vscode.Disposable {
         currentModelId,
       });
       this.applyLiveModels(modelsPromise, client, loadedId, meta?.models?.currentModelId ?? null);
-      // Keep the restored session's actual model in sync with the profile's
-      // configured model (only when a profile switch provided one).
-      if (switchModel && currentModelId && currentModelId !== (meta?.models?.currentModelId ?? null)) {
-        await this.setModel(currentModelId);
+      // Same wire behavior as startNewSession (probed against CLI 0.5.19
+      // bundle): session/new reports the CLI's BOOT-time model because
+      // set_model never writes back to Config.model, while the shared
+      // contentGeneratorConfig still carries the last dropdown switch.
+      // Re-push whenever the panel's selection differs — after validating
+      // the selection is still offered by the live endpoint.
+      const restoreCliModelId = meta?.models?.currentModelId ?? null;
+      if (currentModelId && currentModelId !== restoreCliModelId) {
+        const pushId = await this.validateModelForPush(modelsPromise, currentModelId, restoreCliModelId);
+        if (pushId) await this.setModel(pushId);
       }
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.cleanupEmptySession(outgoingId);
@@ -2432,6 +2438,36 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
+  /**
+   * Validate the model about to be re-pushed on a session start (see the
+   * wire-behavior note in startNewSession) against the live /models list.
+   * The CLI's session/set_model does NOT validate modelId (probed, CLI 0.5.19
+   * bundle: it assigns blindly and returns success), so a model delisted
+   * mid-session would otherwise poison every prompt of the new session with
+   * model_not_found. Returns the id to push, or null when no push is needed.
+   * On a confirmed delist the dropdown falls back to the CLI's boot model
+   * (or the live list head) with a visible warning — explicit degradation,
+   * never a silently wrong model. An empty/failed live query cannot disprove
+   * the selection (endpoint down ≠ model gone), so the push proceeds.
+   */
+  private async validateModelForPush(
+    modelsPromise: Promise<SessionState["models"]>,
+    desired: string,
+    cliModelId: string | null,
+  ): Promise<string | null> {
+    const live = await modelsPromise.catch(() => [] as SessionState["models"]);
+    if (live.length === 0) return desired;
+    if (live.some((m) => m.id === desired)) return desired;
+    const fallback = cliModelId ?? live[0]!.id;
+    this.store.sessionMeta({ currentModelId: fallback });
+    void vscode.window.showWarningMessage(
+      vscode.l10n.t("模型 {0} 已不在当前可用列表中，已回退为 {1}", desired, fallback),
+    );
+    // The CLI's boot model is already what the shared contentGeneratorConfig
+    // uses — no push needed when that is the fallback.
+    return fallback === cliModelId ? null : fallback;
+  }
+
   // --- Extension-owned transcripts (M4) ------------------------------------------
 
   /**
@@ -2780,7 +2816,18 @@ export class ChatPanel implements vscode.Disposable {
     // directive) and push it to the CLI so prompts actually use it.
     const switchModel = this.pendingSwitchModel;
     this.pendingSwitchModel = null;
-    const currentModelId = switchModel ?? cliModelId;
+    // Wire behavior (probed against CLI 0.5.19 bundle, 2026-09-17):
+    // `session/set_model` only rewrites the in-memory contentGeneratorConfig
+    // (the model prompts actually use) — it never writes back to Config.model
+    // / settings.json, and `session/new` reports `_meta.models.currentModelId`
+    // from Config.model, i.e. the model read from settings.json at CLI BOOT.
+    // So after a dropdown switch, the next session/new reports the OLD boot
+    // model while the shared contentGeneratorConfig still uses the switched-to
+    // one: the dropdown showed a model prompts did NOT use (user-reported).
+    // Treat the panel's current selection as authoritative and re-push it
+    // below whenever it differs from the CLI's boot-time id.
+    const currentModelId =
+      switchModel ?? this.store.getState().currentModelId ?? cliModelId;
     // A failed restore leaves an error banner behind — clear it for the fresh
     // session so the stale message doesn't follow the user around.
     store.getState().errorMessage = null;
@@ -2796,8 +2843,13 @@ export class ChatPanel implements vscode.Disposable {
       currentModelId,
     });
     this.applyLiveModels(modelsPromise, client, session.sessionId, cliModelId);
-    if (switchModel && currentModelId && currentModelId !== cliModelId) {
-      await this.setModel(currentModelId);
+    // See the wire-behavior note above: the new session inherits the CLI's
+    // boot-time model unless we push the panel's selection, so any mismatch
+    // (profile switch OR plain dropdown switch) must be re-applied — after
+    // validating the selection is still offered by the live endpoint.
+    if (currentModelId && currentModelId !== cliModelId) {
+      const pushId = await this.validateModelForPush(modelsPromise, currentModelId, cliModelId);
+      if (pushId) await this.setModel(pushId);
     }
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);

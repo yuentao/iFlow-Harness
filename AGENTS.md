@@ -151,6 +151,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 20. **连接失败要 dispose 子进程**：initialize 超时/握手失败后 CLI 进程会继续存活；`AcpClient.connect()` 内部与 `ensureClient` catch 两处都要 `dispose()`（幂等，双重调用安全）。
 21. **vendor 裁剪变更必须重测**：增删 `PRUNE_DIRS` / `PRUNE_PKGS` 前先对裁剪副本跑 `npm run harness` 全流程；同理 `.vscodeignore` 的 `!vendor/iflow-cli/node_modules/**` 例外一旦丢失，打包出的扩展会因缺依赖直接起不来（本地 dev 感知不到，只有 VSIX 安装才炸）。
 22. **backdrop-filter 被构建链折叠**：Vite CSS 压缩只留 webkit 前缀写法，经 esbuild 属性折叠后 Chromium 反而忽略模糊——亚克力材质必须同时保留标准与前缀写法的正确顺序，改 `webview/src/styles.css` 材质相关代码前先看 3ff19b9 / 0a26782 两个修复提交。
+23. **CLI 模型双变量：`set_model` 不改 `session/new` 上报值**：CLI 内部实际发请求读 `contentGeneratorConfig.model`，而 `session/set_model` 只改这一个、**永不回写** `Config.model`/settings.json；`session/new` 的 `_meta.models.currentModelId` 却取自 `Config.model`（= CLI 启动时 settings.json 的 modelName）。后果：下拉切过模型后点「新会话」/重启 CLI 恢复会话，CLI 上报的还是启动值，直接采纳会让下拉显示 A 而实际用 B（用户实测踩坑，2026-09-17 从 CLI 0.5.19 bundle 逐行验证：`setModel(e){this.contentGeneratorConfig&&(this.contentGeneratorConfig.model=e)}`，`getAvailable` 返回 `currentModelId: config.getAll().model`）。**修复规则**：面板 store 的 `currentModelId` 是权威值，`startNewSession`/`restoreSession` 的回退链必须含它，且只要与 CLI 上报值不一致就补发 `set_model` 对齐——不要反过来信任 `session/new` 的上报值。
 
 ## 测试
 
