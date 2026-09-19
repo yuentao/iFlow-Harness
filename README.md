@@ -8,11 +8,11 @@
 
 - **开箱即用**：扩展内置裁剪版 iFlow CLI，未安装 CLI 的机器装上就能用（整体 VSIX 约 13MB）；本地安装的 CLI 仍会被优先探测，升级不受内置版本影响
 - **模型兼容增强**：内置 CLI 外挂 5 个定制 loader——按模型配置输出 token 上限（长回复不再被截断）、上下文余量按真实窗口计算、Kimi 采样参数规范化、多模态识别与视觉路由配置化（修复 OpenAI Compatible 模式图片输入）、声明式思考参数规则；loader 源自 [iFlow-Mods](https://github.com/yuentao/iFlow-Mods) Mod 机制，默认规则随扩展分发、连接前自动种到 `~/.iflow/`（不覆盖已有配置），编辑 JSON 即可自定义模型行为、无需改源码，Mod 可用 [iFlow-Mod-Builder](https://github.com/yuentao/iFlow-Mod-Builder) 图形化打包
-- **完整 agent 工作流**：流式对话、工具审批、行号 Diff 与一键 Revert、Plan 计划确认、交互式提问卡（单选 / 多选 / 自由文本）、子智能体进度卡片
+- **完整 agent 工作流**：流式对话、工具审批、行号 Diff 与一键 Revert、Plan 计划确认与卡内编辑重规划、交互式提问卡（单选 / 多选 / 自由文本）、子智能体进度卡片
 - **长任务自动恢复**：速率限制按 5s / 15s / 30s 递增退避自动重试；上下文溢出自动压缩并重发原 prompt——限流与长上下文都不再中断任务
 - **凭据与审批安全**：API Key 只存 VSCode SecretStorage（不落盘明文、不打日志）；审批默认拒绝、5 分钟超时自动拒答；Webview 走 nonce CSP + DOMPurify 净化
 - **零等待热切换**：切换 API Profile 热重认证、免重启 CLI；`iflow.warmStart` 窗口打开即后台预热，首次打开面板无需等待
-- **精致界面**：Win12 风格亚克力材质、深浅色主题跟随编辑器、超长会话离屏渲染流畅不卡
+- **精致界面**：Win12 风格亚克力材质、深浅色主题跟随编辑器、可调极光背景光斑、超长会话离屏渲染流畅不卡
 
 ## 功能
 
@@ -22,8 +22,10 @@
 - 粘性「正在生成」指示器，生成期间切换类操作全量防呆禁用，操作消息防抖
 - 子智能体卡片：按类型着色、步骤进度、本地化标题与日志面板
 - 提问卡：agent 发起 `ask_user_question` 提问时渲染交互卡，支持单选 / 多选 / 自由文本
-- Plan 模式审批：agent 提交计划时弹出确认卡，通过或驳回（附理由）
-- 自动恢复：速率限制递增退避重试，上下文溢出自动压缩并重发原 prompt
+- Plan 模式审批：agent 提交计划时弹出确认卡，通过或驳回（附理由），1.1.2 起计划可在卡内编辑并「重新规划」回传修订文本
+- 消息操作：重新生成上一条回复、一键复制；会话搜索与删除（两步确认）
+- 用量估算：会话累计 token 消耗（真实 BPE tokenizer 估算），输入 / 输出分列展示、流式期间实时刷新
+- 自动恢复：速率限制递增退避重试，上下文溢出自动压缩并重发原 prompt，等待过程以倒计时 toast 呈现
 - 提示音：对话完成 / 失败音效（Web Audio 合成，`iflow.soundFeedback` 可关）
 
 ![子智能体卡片](docs/images/subagent-card.png)
@@ -46,9 +48,9 @@
 
 **会话与配置**
 
-- 会话管理：历史会话切换 / 删除、重启 VSCode 后自动恢复上次会话、无标题会话以首条消息自动命名、恢复时自动滚动到底部
+- 会话管理：历史会话搜索 / 切换 / 删除（两步确认）、重启 VSCode 后自动恢复上次会话、无标题会话以首条消息自动命名、恢复时自动滚动到底部
 - API 配置：OpenAI 兼容凭据存 VSCode SecretStorage（不落盘明文、不入日志），多 Profile 热重认证免重启 CLI，生成期间禁用凭据变更
-- 模型列表实时查询当前 endpoint 的 `/models`（不使用 CLI 内置硬编码目录），下拉支持模糊搜索，打开时实时刷新配置与模型
+- 模型列表实时查询当前 endpoint 的 `/models`（不使用 CLI 内置硬编码目录），下拉支持模糊搜索，打开时实时刷新配置与模型；会话恢复以面板 `currentModelId` 为权威值，模型下架时显式回退并提示
 - 主题：深 / 浅色切换，默认跟随编辑器主题；Win12 风格亚克力材质界面
 - 状态栏：agent 状态（连接中 / 就绪 / 生成中 / 等待审批 / 出错）与当前模型一目了然，点击打开面板
 
@@ -69,12 +71,13 @@
 | `iflow.nodePath` | 启动 CLI 使用的自定义 Node.js 可执行文件 |
 | `iflow.warmStart` | 窗口打开时后台预热 CLI，首次打开面板无需等待（默认开启，每窗口约 100MB 内存） |
 | `iflow.soundFeedback` | 对话完成 / 失败时播放提示音（默认开启） |
+| `iflow.auroraIntensity` | 背景极光光斑强度（0–100，默认 35） |
 
 ## 使用
 
 1. 安装扩展后，点击状态栏右侧的 iFlow 状态项打开面板（也可用编辑器标签栏图标或命令面板 `iFlow: Open Chat Panel`）；面板是独立编辑器标签页，宽度可自由拖拽
 2. 首次使用按提示配置 API 凭据（OpenAI 兼容地址 + Key + 模型名），或直接切换 CLI 已有的配置
-3. 输入消息开始对话；工具调用会在面板中请求审批，Diff 卡片支持 Open Diff 与 Revert
+3. 输入消息开始对话；工具调用会在面板中请求审批，Diff 卡片支持 Open Diff 与 Revert；助手回复可重新生成或复制
 4. Chat 视图中 `@iflow <问题>` 可走纯文本通道快速提问
 
 ## 开发
@@ -83,7 +86,7 @@
 npm install
 npm run build         # tsc 类型产出 + esbuild 打包 host + vite 构建 webview
 npm run typecheck     # host 侧类型检查
-npm test              # vitest（136 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
+npm test              # vitest（7 文件 / 191 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
 npm run harness       # 驱动真实 CLI 走 ACP 全流程（--record 录制 wire 日志）
 npm run vendor:cli    # 拉取并裁剪 iFlow CLI 到 vendor/（package 时自动执行）
 npm run defaults:sync # 同步本机 ~/.iflow/ 默认规则到 scripts/iflow-defaults/（发布前）
@@ -101,7 +104,7 @@ npm run package       # vendor:cli + build + vsce 打包 → .vsix（含内置 C
 `CHANGELOG.md` 是版本的唯一来源：CI 从顶部 `## [x.y.z] - date` 标题读取版本号写入 `package.json`，其下条目作为发布摘要。新增版本只需在 CHANGELOG 加一节，不要手动改 `package.json` 的 version。
 
 - `ci.yml`：release 分支的 push 与 PR 触发，三平台矩阵（ubuntu / windows / macos）跑 typecheck → test → build
-- `release.yml`：仅 release 分支（或手动触发）：读 CHANGELOG 版本与摘要写入 `package.json` → `npm run package`（内置 CLI 一起打进 `.vsix`）→ 打 tag `v*` 建 GitHub release 并附 `.vsix`
+- `release.yml`：仅 release 分支（或手动触发）：读 CHANGELOG 版本与摘要写入 `package.json` → `npm run package`（内置 CLI 一起打进 `.vsix`）→ 打 tag `v*` 建 GitHub release 并附 `.vsix`（用原生 `gh` CLI 三态幂等处理：已存在 draft 则发布、已发布仅刷新 asset、不存在则新建）
 
 ## 架构
 
