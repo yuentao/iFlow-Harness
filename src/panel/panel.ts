@@ -2187,14 +2187,27 @@ export class ChatPanel implements vscode.Disposable {
           "no standalone node found — spawning the CLI with the Electron host binary (slower initialize); set iflow.nodePath to override",
         );
       }
-      const { command, args } = buildAcpCommand(entry);
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+
+      // A1: the fs callbacks (fs/read_text_file, fs/write_text_file) are
+      // confined to the union of all open workspace roots — the CLI
+      // legitimately edits files outside the session dir in multi-root
+      // workspaces, but `..` traversal and arbitrary absolute paths are
+      // rejected (see AcpClient.resolveAgentPath). The SAME roots are handed
+      // to the CLI as --include-directories: its file tools validate paths
+      // against `targetDir + includeDirectories` before delegating to our
+      // callbacks, so the two sets must match (probed, CLI 0.5.19 bundle).
+      const allowedRoots = (vscode.workspace.workspaceFolders ?? [])
+        .map((f) => f.uri.fsPath)
+        .filter((p) => p !== workspaceRoot);
+
+      const { command, args } = buildAcpCommand(entry, allowedRoots);
       this.log.info(`spawning CLI: ${command} ${args.join(" ")} (cwd=${workspaceRoot})`);
 
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
         // 30-60s+ before its first initialize response.
-        { command: node, args, cwd: workspaceRoot, requestTimeoutMs: 120_000 },
+        { command: node, args, cwd: workspaceRoot, requestTimeoutMs: 120_000, allowedRoots },
         {
           // A detached client (profile switch overlaps the new spawn with the
           // old child's teardown) must not leak its dying events into the

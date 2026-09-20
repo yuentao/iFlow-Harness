@@ -25,7 +25,7 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 | `src/acp/client.ts` | spawn CLI 子进程 + initialize 握手;实现 agent→client 的 `fs/read_text_file`、`fs/write_text_file`、`session/request_permission`、`_iflow/user/questions`、`_iflow/plan/exit`;`killTree` 进程树清理 |
 | `src/acp/jsonrpc.ts` | NDJSON 分帧(8MB 帧上限)+ JSON-RPC 路由 + `errorMessage` / `isRateLimitError` / `isContextOverflowError`。**零 VSCode 依赖**,可被任意 IDE 集成复用 |
 | `src/acp/protocol.ts` | ACP wire 类型;iFlow 专有扩展点用 `// iFlow extension` 标注(`_iflow/user/questions`、`_iflow/plan/exit`、`session/set_think`) |
-| `src/acp/cli-locator.ts` | 定位 CLI `bundle/entry.js` 与可用 Node 可执行文件(异步探测 + 缓存 + 并发去重 + **跨窗口 globalState 持久化** + **vendor 回退**);`seedDefaultRuleConfigs` 把内置默认规则种到 `~/.iflow/`;`buildAcpCommand` 拼 `--experimental-acp --stream` |
+| `src/acp/cli-locator.ts` | 定位 CLI `bundle/entry.js` 与可用 Node 可执行文件(异步探测 + 缓存 + 并发去重 + **跨窗口 globalState 持久化** + **vendor 回退**);`seedDefaultRuleConfigs` 把内置默认规则种到 `~/.iflow/`;`buildAcpCommand` 拼 `--experimental-acp --stream`,并把额外 workspace 根以 `--include-directories` 传入(与 fs 回调边界同源) |
 | `src/acp/auth.ts` | openai-compatible 凭据 + 命名 Profile(全部存 VSCode SecretStorage);支持热重认证(切换 Profile 免重启 CLI) |
 | `src/acp/models-query.ts` | 实时 `GET {baseUrl}/models` 取模型列表;读 CLI settings.json;归档过期 OAuth 缓存 |
 | `src/panel/panel.ts` | Webview 容器、消息路由、审批流、提问卡、Plan 审批、Diff 回退、会话持久化、速率限制/上下文溢出重试、token 用量估算、toast 生命周期(最大的文件,~3250 行) |
@@ -104,7 +104,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - webview 提供的 data URL 附件有 8MB 上限(`MAX_IMAGE_ATTACHMENT_BYTES`),超限在落盘前拒绝;>5MB 图片(`ATTACHMENT_IMAGE_MAX_BYTES`)降级为文件附件。
 - `openExternal` 仅放行 `^https?://`。
 - vendor 默认规则链路**永不触碰凭据文件**(settings.json / iflow_accounts.json),见上节。
-- **未闭合项**:`client.ts` 的 `resolveAgentPath` 只做相对→绝对拼接,无 session cwd 前缀校验(审查报告 S1,CRITICAL)——agent 可通过 `fs/write_text_file` 写任意路径。动这块时优先补护栏。
+- **S1 已闭合(2026-09-19)**:`client.ts` 的 `resolveAgentPath` 现在做目录边界校验——允许根是 **session cwd + `options.allowedRoots`(panel 传全部 workspace 根)的并集**:相对路径按 cwd 解析、`..` 上逃到所有允许根之外、以及指向所有允许根之外的绝对路径,一律抛 `PathBoundaryError`(导出在 `src/acp/client.ts`),由 `JsonRpcPeer` 转成 JSON-RPC 错误回给 agent,不落盘。多根工作区 / 兄弟目录等合法目录外编辑仍放行(CLI 会把读写委托给 host 的 fs 回调,bundle 实证 `capabilities.readTextFile ? client.readTextFile : fallback`)。**边界必须与 CLI 的工作区上下文同源**(2026-09-19 补修):CLI 侧是 `new WorkspaceContext(targetDir, includeDirectories ?? [])`,且 `read_file`/`write_file`/`replace`/`ls`/`grep`/`glob`/`image_read` 全部先过 `isPathWithinWorkspace()` 才委托给我们的回调——所以 panel 把同一组根经 `buildAcpCommand(entry, allowedRoots)` 以 `--include-directories` 传给 CLI,否则多根工作区会出现「CLI 放行、我们拒绝」。同时 `resolveAgentPath` 对**已存在路径做 realpath 归一**(`realpathOrLexical`,对齐 CLI 的 `fullyResolvedPath`;macOS 的 `/tmp`→`/private/tmp` 这类系统软链两边必须一致),不存在的路径(新建文件)退回词法形式。**注意这只是协议层通道的护栏**:执行类工具(`run_shell_command` 等)仍能经审批后在本机真实 shell 里读写任意路径(信任模型与沙箱建议见 README「安全与信任边界」);校验与后续 I/O 非原子(TOCTOU),且 CLI 运行时的 `/directory add` 无法镜像——完整隔离只能靠操作系统级容器。
 
 ## 关键能力(1.x 迭代,细节在 CHANGELOG 只有一句话,技术要点在此)
 

@@ -279,13 +279,29 @@ function extractEntryFromShim(shimPath: string): string | null {
   return null;
 }
 
-export function buildAcpCommand(entryJs: string): IflowCommand {
+export function buildAcpCommand(entryJs: string, includeDirectories: string[] = []): IflowCommand {
   // --stream (probed, CLI 0.5.19 bundle): without it `config.stream` is false
   // and the ACP prompt handler awaits `sendMessageLatency` — the FULL model
   // response arrives as one dump after each turn, so the panel shows replies
   // in segments instead of streaming. With it the turn loop iterates the
   // SSE stream and emits `agent_message_chunk` per delta.
-  return { command: process.execPath, args: [path.resolve(entryJs), "--experimental-acp", "--stream"] };
+  //
+  // --include-directories (probed, CLI 0.5.19 bundle): the CLI's workspace
+  // context is `new WorkspaceContext(targetDir, includeDirectories ?? [])`,
+  // and every file tool (read_file / write_file / replace / ls / grep / glob
+  // / image_read) validates its path against it BEFORE delegating to the
+  // client's fs callbacks (`capabilities.readTextFile ? client.readTextFile :
+  // fallback`). The extension's own boundary (AcpClient.resolveAgentPath)
+  // uses the same root set, so passing the extra workspace roots here keeps
+  // the CLI's context and our boundary in sync — without it, a multi-root
+  // workspace would have the CLI accept a path our boundary then rejects.
+  // The CLI also accepts `/directory add` at runtime, which we cannot mirror;
+  // that path is covered by the lexical fallback in resolveAgentPath.
+  const args = [path.resolve(entryJs), "--experimental-acp", "--stream"];
+  for (const dir of includeDirectories) {
+    if (dir) args.push("--include-directories", path.resolve(dir));
+  }
+  return { command: process.execPath, args };
 }
 
 /**

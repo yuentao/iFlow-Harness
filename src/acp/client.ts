@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
+import { realpathSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -41,6 +42,15 @@ export interface AcpClientOptions {
   /** Timeout for control-plane requests (default 60s). */
   requestTimeoutMs?: number;
   wireTap?: WireTap;
+  /**
+   * Roots the agent's fs callbacks are allowed to touch, in addition to
+   * `cwd` (the session dir). Real CLIs legitimately operate on files outside
+   * the session dir — multi-root workspaces, a sibling folder the user
+   * explicitly approved, `~/.iflow` config — so the boundary is the union of
+   * these roots, not the session dir alone. Paths resolving outside every
+   * root are rejected (review A1 / AGENTS.md S1).
+   */
+  allowedRoots?: string[];
 }
 
 export interface AcpClientCallbacks {
@@ -60,6 +70,37 @@ export interface AcpClientCallbacks {
 const ACP_PROTOCOL_VERSION = 1;
 
 const execFileP = promisify(execFile);
+
+/**
+ * Boundary containment test: is `target` the root itself, or strictly inside
+ * it? Uses path.relative so the semantics are correct even at the filesystem
+ * root (`/`) and for nested paths. Windows paths are case-insensitive — the
+ * CLI's absolute path may use a different drive-letter case than the
+ * workspace root (`C:\Repo` vs `c:\repo`), which a startsWith check would
+ * spuriously reject.
+ */
+function isInsideRoot(root: string, target: string): boolean {
+  const normalize = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const rel = path.relative(normalize(root), normalize(target));
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
+}
+
+/**
+ * Thrown by AcpClient when an agent-supplied path escapes the session
+ * directory boundary (review A1 / AGENTS.md S1). Carries enough detail for
+ * the JSON-RPC error reply to tell the agent what was rejected and why.
+ */
+export class PathBoundaryError extends Error {
+  constructor(
+    readonly rawPath: string,
+    readonly allowedRoots: string[],
+  ) {
+    super(
+      `path outside allowed directories (${allowedRoots.join(", ")}) is not allowed via fs callbacks: ${rawPath}`,
+    );
+    this.name = "PathBoundaryError";
+  }
+}
 
 /**
  * Kill the CLI's whole process tree. `child.kill()` only terminates the node
@@ -213,9 +254,63 @@ export class AcpClient {
     await exited;
   }
 
-  /** Resolve agent-supplied paths: relative ones are session-cwd relative. */
+  /**
+   * Resolve an agent-supplied path against the session cwd, enforcing a
+   * directory boundary (review A1 / AGENTS.md S1):
+   * - relative paths are session-cwd relative; `..` traversal that escapes
+   *   every allowed root is rejected instead of silently joined;
+   * - absolute paths are accepted only when they point inside an allowed
+   *   root (the CLI's own tools can still reach anywhere via
+   *   `run_shell_command` + approval; that is the documented trust model,
+   *   but the fs callbacks must not be an unguarded write-anything channel).
+   * The boundary is the union of `cwd` and `options.allowedRoots` — real
+   * CLIs legitimately edit files outside the session dir (multi-root
+   * workspaces, a sibling folder the user approved, `~/.iflow` config), so
+   * confining to the session dir alone would break legitimate flows.
+   * Throws a PathBoundaryError so the JSON-RPC layer reports a real error to
+   * the agent instead of the write silently landing outside the boundary.
+   * Existing paths are realpath'd before comparison (see realpathOrLexical),
+   * matching the CLI's own `fullyResolvedPath` — without it, a workspace
+   * under macOS's `/tmp` (which realpaths to `/private/tmp`) would have the
+   * CLI accept a path this check then rejects. Remaining limitation: the
+   * check and the subsequent I/O are not atomic (TOCTOU), so a symlink
+   * swapped in between them can still escape; complete isolation requires
+   * OS-level containment, out of scope for an editor extension. This guard
+   * closes the naive `..`/absolute-path hole.
+   */
   private resolveAgentPath(rawPath: string): string {
-    return path.isAbsolute(rawPath) ? rawPath : path.join(this.options.cwd, rawPath);
+    const base = this.realpathOrLexical(path.resolve(this.options.cwd));
+    const target = path.resolve(this.options.cwd, rawPath);
+    const roots = [base, ...(this.options.allowedRoots ?? []).map((r) => this.realpathOrLexical(path.resolve(r)))];
+    // Compare on the realpath'd target when it exists; a not-yet-created file
+    // (write_file) has no realpath, so fall back to the lexical path. The
+    // parent is realpath'd first so `/tmp/new.ts` still matches a root that
+    // realpaths to `/private/tmp` (macOS).
+    const resolvedTarget = this.realpathOrLexical(target);
+    const inside = roots.some((root) => isInsideRoot(root, resolvedTarget));
+    if (!inside) throw new PathBoundaryError(rawPath, roots);
+    return target;
+  }
+
+  /**
+   * realpath a path when it exists, else realpath its nearest existing
+   * ancestor and re-append the remaining segments. Mirrors the CLI's
+   * `fullyResolvedPath` (realpathSync with an ENOENT fallback) so both sides
+   * agree on macOS system symlinks (`/tmp` → `/private/tmp`). Never throws:
+   * an unresolvable path degrades to the lexical form.
+   */
+  private realpathOrLexical(p: string): string {
+    try {
+      return realpathSync(p);
+    } catch {
+      const parent = path.dirname(p);
+      if (parent === p) return p;
+      try {
+        return path.join(this.realpathOrLexical(parent), path.basename(p));
+      } catch {
+        return p;
+      }
+    }
   }
 
   private registerServerRequests(): void {
@@ -234,7 +329,8 @@ export class AcpClient {
 
     peer.onRequest(AcpMethods.readTextFile, async (params) => {
       const request = params as ReadTextFileRequest;
-      const content = await readFile(this.resolveAgentPath(request.path), "utf8");
+      const filePath = this.resolveAgentPath(request.path);
+      const content = await readFile(filePath, "utf8");
       return { content } satisfies ReadTextFileResponse;
     });
 
