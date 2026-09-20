@@ -16,6 +16,7 @@ webview/preview*.log
 tsconfig.json
 tsconfig.test.json
 vitest.config.ts
+knip.json
 esbuild.mjs
 .gitignore
 # tsc emits intermediate output here; the host bundle is dist/extension.cjs.

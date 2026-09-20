@@ -210,10 +210,6 @@ export interface PromptResponse {
   stopReason: StopReason;
 }
 
-export interface CancelNotification {
-  sessionId: string;
-}
-
 // ---------------------------------------------------------------------------
 // Agent → Client: session/update notifications
 // ---------------------------------------------------------------------------

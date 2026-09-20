@@ -1135,12 +1135,6 @@ export function endReplay(state: SessionState): void {
   state.status = "idle";
 }
 
-export function markToolCancelled(state: SessionState): void {
-  // A cancelled prompt leaves its last assistant turn without stopReason;
-  // no-op for now — visual hint handled via status.
-  void state;
-}
-
 // --- transcript restore (M4: CLI does not replay history on session/load) ----
 
 /**
@@ -1535,5 +1529,3 @@ export function markToolReverted(state: SessionState, toolCallId: string): numbe
 }
 
 export type { ToolDiffUi };
-
-export type { ToolCallStatus };

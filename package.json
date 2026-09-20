@@ -145,6 +145,7 @@
     "typecheck:host": "tsc -p tsconfig.json --noEmit",
     "typecheck:webview": "tsc -p webview/tsconfig.json --noEmit",
     "test": "vitest run",
+    "lint:deps": "knip",
     "harness": "node scripts/harness.mjs",
     "vendor:cli": "node scripts/vendor-cli.mjs",
     "defaults:sync": "node scripts/vendor-cli.mjs --sync-defaults",
@@ -153,7 +154,6 @@
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.3.3",
-    "@types/dompurify": "^3.0.5",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
@@ -162,6 +162,7 @@
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",
     "jsdom": "^30.0.1",
+    "knip": "^6.37.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",

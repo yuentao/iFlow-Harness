@@ -29,6 +29,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Lint dependencies
+        run: npm run lint:deps
+
       - name: Test
         run: npm test
 

@@ -12,12 +12,11 @@ import type {
   ToolLocation,
   StopReason,
   UserQuestion,
-  UserQuestionOption,
 } from "../src/acp/protocol.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
-export type { SlashCommand, UserQuestion, UserQuestionOption };
+export type { SlashCommand, UserQuestion };
 
 // ---------------------------------------------------------------------------
 // Transcript blocks (rendered in order)

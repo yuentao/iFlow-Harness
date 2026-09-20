@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": [
+        "webview/src/main.tsx",
+        "scripts/**/*.mjs"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "shared/**/*.ts",
+        "webview/src/**/*.{ts,tsx,css}",
+        "scripts/**/*.mjs"
+      ],
+      "ignoreExportsUsedInFile": true,
+      "ignoreIssues": {
+        "shared/messages.ts": ["exports", "types"],
+        "src/acp/protocol.ts": ["exports", "types"],
+        "src/acp/jsonrpc.ts": ["exports", "types"]
+      },
+      "vite": {
+        "config": ["webview/vite.config.ts"]
+      }
+    }
+  }
+}
