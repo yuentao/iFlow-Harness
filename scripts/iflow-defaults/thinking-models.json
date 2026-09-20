@@ -3,6 +3,50 @@
   "version": 1,
   "models": [
     {
+      "pattern": "glm-5.3",
+      "supportsThinking": true,
+      "thinkingRequest": {
+        "delete": ["thinking"],
+        "set": {
+          "temperature":1,
+          "top_p":0.95,
+          "reasoning_effort":"max",
+          "enable_thinking": false
+        }
+      },
+      "nonThinkingRequest": {
+        "delete": ["thinking"],
+        "set": {
+          "temperature":1,
+          "top_p":0.95,
+          "reasoning_effort":"max",
+          "enable_thinking": false
+        }
+      }
+    },
+    {
+      "pattern": "glm-5.2",
+      "supportsThinking": true,
+      "thinkingRequest": {
+        "delete": ["thinking"],
+        "set": {
+          "temperature":1,
+          "top_p":0.95,
+          "reasoning_effort":"max",
+          "enable_thinking": false
+        }
+      },
+      "nonThinkingRequest": {
+        "delete": ["thinking"],
+        "set": {
+          "temperature":1,
+          "top_p":0.95,
+          "reasoning_effort":"max",
+          "enable_thinking": false
+        }
+      }
+    },
+    {
       "pattern": "glm-4\\.7",
       "supportsThinking": true,
       "supportedReasoningLevels": ["low", "medium", "high"],
@@ -16,6 +60,32 @@
         "setNested": {
           "chat_template_kwargs.enable_thinking": false
         }
+      }
+    },
+    {
+      "pattern": "qwen3.8",
+      "supportsThinking": true,
+      "maxThinkingTokens": 20000,
+      "thinkingRequest": {
+        "set": {
+          "enable_thinking": true
+        }
+      },
+      "nonThinkingRequest": {
+        "delete": ["enable_thinking"]
+      }
+    },
+    {
+      "pattern": "Qwen3.8",
+      "supportsThinking": true,
+      "maxThinkingTokens": 20000,
+      "thinkingRequest": {
+        "set": {
+          "enable_thinking": true
+        }
+      },
+      "nonThinkingRequest": {
+        "delete": ["enable_thinking"]
       }
     },
     {
@@ -63,46 +133,6 @@
         "setNested": {
           "chat_template_kwargs.enable_thinking": false,
           "thinking.type": "disabled"
-        }
-      }
-    },
-    {
-      "pattern": "xopglm51",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["high"],
-      "maxThinkingTokens": 20000,
-      "thinkingRequest": {
-        "set": {
-          "enable_thinking": true
-        },
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": true,
-          "thinking.type": "enabled"
-        }
-      },
-      "nonThinkingRequest": {
-        "set": {
-          "enable_thinking": false
-        },
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": false,
-          "thinking.type": "disabled"
-        }
-      }
-    },
-    {
-      "pattern": "^glm-",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["low", "medium", "high"],
-      "maxThinkingTokens": 20000,
-      "thinkingRequest": {
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": true
-        }
-      },
-      "nonThinkingRequest": {
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": false
         }
       }
     },

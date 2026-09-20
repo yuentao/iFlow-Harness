@@ -30,17 +30,21 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR_DIR = path.join(REPO_ROOT, "vendor", "iflow-cli");
-// Default rule configs the custom loaders read from ~/.iflow/. FIXED list on
-// purpose: settings.json / iflow_accounts.json carry credentials and must
-// never be synced or shipped — the loaders treat them as optional anyway.
+// Default rule configs the custom loaders read from ~/.iflow/. All top-level
+// *.json files are synced EXCEPT the denylist below: settings.json /
+// iflow_accounts.json / oauth_creds* carry credentials and must never be
+// synced or shipped; model-preferences.json is CLI user state. New rule
+// configs dropped into ~/.iflow/ are picked up with zero changes here —
+// the loaders treat a missing config as optional anyway.
 const DEFAULTS_SRC = path.join(REPO_ROOT, "scripts", "iflow-defaults");
 const DEFAULTS_OUT = path.join(REPO_ROOT, "vendor", "iflow-defaults");
-const SYNC_DEFAULT_FILES = [
-  "kimi-request-overrides.json",
-  "multimodal-models.json",
-  "output-token-limits.json",
-  "thinking-models.json",
+const SYNC_DEFAULT_DENYLIST = [
+  "settings.json",
+  "iflow_accounts.json",
+  "model-preferences.json",
 ];
+const isSyncDenied = (name) =>
+  SYNC_DEFAULT_DENYLIST.some((d) => name === d) || name.startsWith("oauth_creds");
 
 /**
  * Default npm source: the customized CLI fork (@yuentao scope) which carries
@@ -133,19 +137,28 @@ if (fromDir) {
 
 // --sync-defaults: refresh the repo's default rule configs from this
 // machine's ~/.iflow/ (run this after editing your local rules and before
-// re-vendoring/publishing). Fixed file list only — never touches
-// settings.json or anything credential-bearing.
+// re-vendoring/publishing). All top-level *.json are synced except the
+// denylist — settings.json and anything credential-bearing are never touched.
 if (hasFlag("--sync-defaults")) {
   const home = process.env.IFLOW_HOME || path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".iflow");
   mkdirSync(DEFAULTS_SRC, { recursive: true });
   let synced = 0;
-  for (const name of SYNC_DEFAULT_FILES) {
+  const skipped = [];
+  for (const name of readdirSync(home)) {
+    if (!name.endsWith(".json")) continue;
+    if (isSyncDenied(name)) {
+      skipped.push(name);
+      continue;
+    }
     const src = path.join(home, name);
-    if (!existsSync(src)) continue;
+    if (!statSync(src).isFile()) continue;
     cpSync(src, path.join(DEFAULTS_SRC, name), { force: true });
     synced++;
   }
-  console.log(`[vendor-cli] synced ${synced}/${SYNC_DEFAULT_FILES.length} rule configs → scripts/iflow-defaults/`);
+  console.log(`[vendor-cli] synced ${synced} rule config(s) → scripts/iflow-defaults/`);
+  if (skipped.length > 0) {
+    console.log(`[vendor-cli] skipped (denylist): ${skipped.join(", ")}`);
+  }
   process.exit(0);
 }
 
@@ -190,14 +203,22 @@ function removeBinDirs(root) {
 
 // Ship the loader rule configs alongside the CLI. The extension copies any
 // MISSING ~/.iflow/*.json from here before connecting (existing user files
-// are never overwritten). Runs on EVERY invocation — independent of the CLI
-// vendoring idempotency check — so defaults stay fresh even when the CLI
-// copy is up to date.
+// are never overwritten). The source dir is populated by --sync-defaults,
+// whose denylist already excludes credentials — but re-check here so a
+// hand-placed credential file in scripts/iflow-defaults/ can never reach
+// the VSIX. Runs on EVERY invocation — independent of the CLI vendoring
+// idempotency check — so defaults stay fresh even when the CLI copy is up
+// to date.
 if (existsSync(DEFAULTS_SRC)) {
   mkdirSync(DEFAULTS_OUT, { recursive: true });
   let shipped = 0;
   for (const name of readdirSync(DEFAULTS_SRC)) {
     if (!name.endsWith(".json")) continue;
+    if (isSyncDenied(name)) {
+      throw new Error(
+        `[vendor-cli] credential/user-state file in ${DEFAULTS_SRC}: ${name} — remove it before packaging`,
+      );
+    }
     cpSync(path.join(DEFAULTS_SRC, name), path.join(DEFAULTS_OUT, name), { force: true });
     shipped++;
   }
