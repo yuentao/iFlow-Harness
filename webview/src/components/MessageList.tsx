@@ -340,7 +340,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             {t("子智能体日志")}
           </button>
           <Collapse open={open}>
-            <pre className="mx-2.5 mb-2.5 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            <pre className="mx-2.5 mb-2.5 max-h-64 overflow-y-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
               {log}
             </pre>
           </Collapse>

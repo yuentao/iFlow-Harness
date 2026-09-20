@@ -541,11 +541,14 @@ header.acrylic.header-scrolled {
 }
 
 /* Focus ring: soft glow ring around keyboard-focused controls. Applied to
-   buttons/inputs/dropdown triggers — replaces the default browser outline. */
+   buttons/inputs/dropdown triggers — replaces the default browser outline.
+   No `border-radius: inherit` here: it resolves against the PARENT's radius
+   (a button's row container usually has none → 0), which squared off every
+   focused button. The box-shadow ring already follows the element's own
+   border-radius. */
 :focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
-  border-radius: inherit;
 }
 
 /* --- collapsible card bodies (Collapse component, MessageList) ------------- */
@@ -730,6 +733,22 @@ header.acrylic.header-scrolled {
   animation: float-soft 3.6s var(--ease-out-expo) infinite;
 }
 
+/* --- monospace text panes (tool output, subagent log, code context) ------- */
+/* The panel is narrow and the wire never caps line length: a single shell
+   command or error line used to overflow the card horizontally. Wrap instead
+   of scrolling — output is read, not scanned sideways. `overflow-wrap:
+   anywhere` is what actually breaks unbroken strings (long URLs, file paths,
+   hashes); plain `word-break` alone leaves them intact. `overflow-x: hidden`
+   drops the dead horizontal scrollbar that pre-wrap makes unreachable.
+   Fenced markdown code blocks are unaffected: `.md pre` below has higher
+   specificity (0,1,1 vs 0,0,1) and re-declares `white-space: pre` so genuine
+   source lines keep their horizontal scroll. */
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: hidden;
+}
+
 /* --- markdown (.md) --- */
 
 .md {
@@ -776,6 +795,10 @@ header.acrylic.header-scrolled {
   padding: 8px 10px;
   border-radius: 8px;
   overflow-x: auto;
+  /* Fenced source is scanned sideways, not read as prose: keep the original
+     single-line-per-row behavior (the global `pre` rule above wraps). */
+  white-space: pre;
+  overflow-wrap: normal;
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.6;
