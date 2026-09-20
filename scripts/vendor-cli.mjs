@@ -13,8 +13,9 @@
 // the ACP headless path never touches it. 182.7MB → 39.3MB.
 //
 // Usage: node scripts/vendor-cli.mjs [--version 0.5.19] [--from <tgz>] [--from-dir <dir>] [--force]
-//   --version   CLI version to pin (default: latest npm `custom` dist-tag,
-//               falling back to PINNED below when the registry is unreachable)
+//   --version   CLI version to pin (default: npm `latest` dist-tag, falling
+//               back to `custom` then PINNED below when the registry is
+//               unreachable)
 //   --from      use a local .tgz instead of `npm pack` (offline/air-gapped)
 //   --from-dir  vendor from an INSTALLED CLI directory instead of npm. Use
 //               this to carry local customizations the official tarball does
@@ -50,11 +51,14 @@ const isSyncDenied = (name) =>
 /**
  * Default npm source: the customized CLI fork (@yuentao scope) which carries
  * the locally injected *.loader.cjs bundles the official @iflow-ai tarball
- * does not ship. Published with tag `custom` — pull by exact version.
- * --from / --from-dir still override the npm source entirely.
+ * does not ship. Version resolution chain (see below): dist-tags.latest →
+ * dist-tags.custom → PINNED_VERSION. The author publishes new builds on
+ * `latest` and may leave `custom` stale, so latest is checked first;
+ * PINNED_VERSION is the last-resort offline fallback. --from / --from-dir
+ * still override the npm source entirely.
  */
 const NPM_PACKAGE = "@yuentao/iflow-cli";
-const PINNED_VERSION = "0.5.19-custom.1";
+const PINNED_VERSION = "0.5.19-custom.2";
 
 // Directories/files pruned from the package, relative to the package root.
 const PRUNE_DIRS = ["vendors", "scripts"];
@@ -142,17 +146,26 @@ if (fromDir) {
 // keeping the air-gapped path working. Skipped for --from/--from-dir (local
 // sources) and explicit --version.
 if (!version && !fromTgz && !fromDir) {
-  try {
-    const tag = runNpm(["view", NPM_PACKAGE, "dist-tags.custom"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    if (tag) {
-      version = tag;
-      console.log(`[vendor-cli] resolved latest custom tag: ${version}`);
+  // Resolution chain: latest → custom → PINNED. The fork author publishes
+  // new builds on `latest` but has left `custom` stale (custom was
+  // 0.5.19-custom.1 while latest was already 0.5.19-custom.2), so pinning
+  // to the custom tag vendored an out-of-date fork. Falls back through the
+  // chain when a tag is missing, and to PINNED_VERSION when the registry
+  // is unreachable (offline), keeping the air-gapped path working.
+  for (const tagField of ["dist-tags.latest", "dist-tags.custom"]) {
+    try {
+      const tag = runNpm(["view", NPM_PACKAGE, tagField], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      if (tag) {
+        version = tag;
+        console.log(`[vendor-cli] resolved ${tagField}: ${version}`);
+        break;
+      }
+    } catch {
+      // registry unreachable → next fallback
     }
-  } catch {
-    // registry unreachable → PINNED_VERSION fallback below
   }
 }
 version = version ?? PINNED_VERSION;

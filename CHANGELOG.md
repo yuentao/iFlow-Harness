@@ -3,6 +3,11 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.1] - 2026-09-21
+
+- 修复 CLI 探测被本机安装覆盖：扩展内置 vendor CLI（定制 fork）始终优先，仅 IFLOW_CLI_ENTRY 环境变量与 iflow.cliPath 设置可显式覆盖
+- 修复 vendor 拉取非最新 fork：版本解析链改为 npm latest → custom → PINNED（作者新发布标在 latest 上、custom tag 滞后），离线回退 PINNED_VERSION 并更新至 0.5.19-custom.2
+
 ## [1.2.0] - 2026-09-21
 
 - 新增 Markdown 代码块语法高亮：接入 highlight.js 常用语言子集（约 40 语言），未知语言降级为转义纯文本并保留语言徽章

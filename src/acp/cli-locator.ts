@@ -92,15 +92,17 @@ function persistResolved(): void {
  * Resolution order:
  *  1. IFLOW_CLI_ENTRY env var (checked on every call — costs nothing and
  *     keeps test/harness overrides working with the cache)
- *  2. PATH lookup: `where.exe iflow` shims on Windows / `which iflow` on Unix
- *  3. npm global root fallback
- *  4. Platform-specific well-known install paths
- *  5. Vendored CLI copy (optional vendorEntry arg): scripts/vendor-cli.mjs
- *     ships a pruned @iflow-ai/iflow-cli inside the VSIX so the extension
- *     works on machines with no CLI installed at all. An explicitly
- *     installed CLI always wins over the vendor fallback — users can
- *     upgrade their own install freely; the vendored version is pinned at
- *     build time.
+ *  2. Vendored CLI copy (optional vendorEntry arg): scripts/vendor-cli.mjs
+ *     ships a pruned customized fork (@yuentao/iflow-cli) inside the VSIX.
+ *     Since 1.2.1 the vendored copy ALWAYS wins over any locally installed
+ *     CLI — the extension's behavior is pinned to the version it was
+ *     validated against, and local installs (which may be the official
+ *     @iflow-ai package without the loader customizations, or a newer/
+ *     older version) no longer override it. iflow.cliPath remains the
+ *     explicit user override (checked by the caller before this locator).
+ *  3. PATH lookup: `where.exe iflow` shims on Windows / `which iflow` on Unix
+ *  4. npm global root fallback
+ *  5. Platform-specific well-known install paths
  */
 export async function locateIflowEntry(vendorEntry?: string | null): Promise<string | null> {
   const fromEnv = process.env.IFLOW_CLI_ENTRY;
@@ -126,6 +128,12 @@ async function locateUncached(vendorEntry?: string | null): Promise<string | nul
   // Cached hit still re-validates: a removed CLI must not pin a dead path.
   if (cachedEntry && existsSync(cachedEntry)) return cachedEntry;
 
+  // The vendored CLI shipped inside the extension (scripts/vendor-cli.mjs)
+  // always wins over a locally installed one — see the resolution-order
+  // comment above. existsSync-guarded so a package without vendor/ (dev
+  // checkout, .vscodeignore regression) falls through to the probe chain.
+  if (vendorEntry && existsSync(vendorEntry)) return path.resolve(vendorEntry);
+
   const fromPath =
     process.platform === "win32" ? await locateFromWindowsPath() : await locateFromUnixPath();
   if (fromPath) return fromPath;
@@ -137,10 +145,6 @@ async function locateUncached(vendorEntry?: string | null): Promise<string | nul
     if (existsSync(candidate)) return candidate;
   }
 
-  // Last resort: the vendored CLI shipped inside the extension (scripts/
-  // vendor-cli.mjs). existsSync-guarded so a package without vendor/ (dev
-  // checkout, .vscodeignore regression) simply falls through to null.
-  if (vendorEntry && existsSync(vendorEntry)) return path.resolve(vendorEntry);
   return null;
 }
 
