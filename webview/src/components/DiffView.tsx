@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Ellipsis, FileCode2 } from "lucide-react";
 import type { ToolDiffUi } from "../../../shared/messages";
 import { t } from "../i18n";

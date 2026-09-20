@@ -14,7 +14,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type { CodeContextUi, FileHitUi, SlashCommand } from "../../../shared/messages";
+import type { CodeContextUi, FileHitUi, ModelInfoUi, SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { Dropdown, fuzzyScore } from "./ui";
@@ -844,8 +844,8 @@ export function Composer() {
                   {/* fuzzy search box: matches name and id; sticky so it stays
                       visible while the list scrolls */}
                   <div className="sticky top-0 z-10 border-b border-border/60 bg-panel/50 p-1.5 backdrop-blur-md">
-                    <div className="flex items-center gap-1.5 rounded-lg border border-border bg-editor px-2 py-1 transition-colors focus-within:border-primary/50">
-                      <Search className="size-3 shrink-0 text-muted-foreground" />
+                    <div className="flex items-center gap-2.5 rounded-lg border border-border bg-editor px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
+                      <Search className="size-3.5 shrink-0 text-muted-foreground" />
                       <input
                         autoFocus
                         value={modelQuery}

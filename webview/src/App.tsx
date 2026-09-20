@@ -21,7 +21,7 @@ import { ApprovalCard } from "./components/ApprovalCard";
 import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { AuthCard } from "./components/AuthCard";
-import type { AgentStatus } from "../../shared/messages";
+import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
 
 function statusChip(status: AgentStatus) {
   switch (status) {
@@ -214,15 +214,15 @@ export function App() {
                   <div className="shrink-0 px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                     {t("会话历史")}
                   </div>
-                  <div className="shrink-0 px-2 pb-1.5">
-                    <div className="flex items-center gap-1.5 rounded-lg border border-border bg-editor/60 px-2 py-1 transition-colors focus-within:border-primary/50">
-                      <Search className="size-3 shrink-0 text-muted-foreground" />
+                  <div className="shrink-0 px-2 pb-2">
+                    <div className="flex items-center gap-2.5 rounded-lg border border-border bg-editor/60 px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
+                      <Search className="size-3.5 shrink-0 text-muted-foreground" />
                       <input
                         autoFocus
                         value={sessionQuery}
                         onChange={(e) => setSessionQuery(e.target.value)}
                         placeholder={t("搜索会话…")}
-                        className="w-full bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70"
+                        className="w-full min-w-0 bg-transparent text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground/70"
                       />
                     </div>
                   </div>

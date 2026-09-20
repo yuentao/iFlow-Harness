@@ -131,6 +131,12 @@
   --shadow-stage-up: 0 2px 12px oklch(0.35 0.03 275 / 5%),
     0 -8px 32px -12px oklch(0.35 0.03 275 / 18%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
+  /* Small-field variant (dropdown search boxes): an inset 2px ring instead of
+     the 3px outward spread. The outer ring collides with the box's own border
+     and the padding of a 24px-tall field, so the focused state reads as a
+     tight double line; insetting it inside the border keeps the field's
+     footprint stable and leaves the padding room to breathe. */
+  --shadow-focus-soft: inset 0 0 0 2px color-mix(in oklab, var(--primary) 26%, transparent);
 
   /* Motion: spring-like settle for enters, snappy for exits. */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -233,6 +239,7 @@
   --shadow-stage-up: 0 2px 12px oklch(0.1 0.02 285 / 18%),
     0 -8px 32px -12px oklch(0.1 0.02 285 / 45%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 30%, transparent);
+  --shadow-focus-soft: inset 0 0 0 2px color-mix(in oklab, var(--primary) 38%, transparent);
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
   --acrylic-pop-tint: oklch(0.25 0.024 285 / 88%);
@@ -524,6 +531,13 @@ header.acrylic.header-scrolled {
 }
 .press:active {
   transform: translateY(1px) scale(0.99);
+}
+
+/* Explicit utility: Tailwind's --shadow-* namespace only promotes the exact
+   token name to a utility, so `shadow-focus-soft` needs its own declaration
+   or the class silently compiles to nothing (verified in the built CSS). */
+@utility shadow-focus-soft {
+  box-shadow: var(--shadow-focus-soft);
 }
 
 /* Focus ring: soft glow ring around keyboard-focused controls. Applied to
