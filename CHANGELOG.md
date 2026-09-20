@@ -3,6 +3,19 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.0] - 2026-09-21
+
+- 新增 Markdown 代码块语法高亮：接入 highlight.js 常用语言子集（约 40 语言），未知语言降级为转义纯文本并保留语言徽章
+- 修复 fs 回调目录边界逃逸：resolveAgentPath 按允许根并集校验并拒绝 .. 上逃与范围外绝对路径，CLI 侧以 --include-directories 同源对齐
+- 修复 工具卡片阴影不渲染与被裁切：Tailwind v4 将 shadow-card 解析为颜色修饰符导致无 box-shadow，改用普通 CSS 类声明；content-visibility 的 paint containment 裁切以垂直 padding/margin 抵消
+- 优化 审批/提问/Plan 退出卡片改为浮层：挂载不再挤压消息列表，浮层高度经 ResizeObserver 写入 CSS 变量并由列表底部内边距预留
+- 优化 阴影体系整体减半：卡片/按钮/舞台/面板明暗两套令牌统一降调，移除 hover 冗余描边环
+- 优化 等宽文本面板自动换行：长 URL、路径与 hash 自动打断，消除不可达横向滚动条
+- 优化 会话历史与模型下拉搜索框内边距、图标尺寸与内嵌聚焦环样式
+- 优化 内置 CLI 拉取默认解析 npm 最新 custom 标签版本，打包时强制重新裁剪
+- 优化 默认规则同步改为 denylist 模式：扫描全量 JSON 跳过凭据文件，打包二次校验阻断凭据进入 VSIX；thinking-models 新增 glm-5.3/5.2 与 qwen3.8 规则并移除 ^glm- 兜底
+- 优化 构建链路：新增 knip 依赖与死代码检查并接入流水线，typecheck 拆分为主进程与 webview 双侧检查
+
 ## [1.1.2] - 2026-09-19
 
 - 新增 Plan 退出卡片计划编辑与 Markdown 渲染：编辑文本随重新规划回传并在解析备注中留痕
