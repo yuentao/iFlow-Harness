@@ -3,6 +3,11 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.2] - 2026-09-21
+
+- 修复 仍使用本机 CLI：1.2.1 把 vendored 检查放在跨窗口缓存复验之后，旧版扩展持久化的本机路径经 globalState 灌入缓存并抢先命中，vendored CLI 永远不执行；现 vendored 检查提到最前（仅环境变量与 iflow.cliPath 可显式覆盖）
+- 修复 spawn 日志失真：日志打印 buildAcpCommand 的默认可执行文件而非 AcpClient 实际使用的 node，日志曾显示 Code.exe 启动而实际为独立 node
+
 ## [1.2.1] - 2026-09-21
 
 - 修复 CLI 探测被本机安装覆盖：扩展内置 vendor CLI（定制 fork）始终优先，仅 IFLOW_CLI_ENTRY 环境变量与 iflow.cliPath 设置可显式覆盖

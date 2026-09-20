@@ -125,14 +125,19 @@ export async function locateIflowEntry(vendorEntry?: string | null): Promise<str
 }
 
 async function locateUncached(vendorEntry?: string | null): Promise<string | null> {
+  // The vendored CLI shipped inside the extension (scripts/vendor-cli.mjs)
+  // always wins — over the cross-window cache too. Ordering it AFTER the
+  // cachedEntry check was a real bug (1.2.1): an old extension build had
+  // persisted a locally installed CLI path into globalState
+  // (iflow.locator.paths), hydrateCache() seeded it into cachedEntry, the
+  // existsSync re-validation passed, and the vendored copy never ran — the
+  // log showed the local entry.js while this function claimed vendor-first.
+  // existsSync-guarded so a package without vendor/ (dev checkout,
+  // .vscodeignore regression) falls through to the cache and probe chain.
+  if (vendorEntry && existsSync(vendorEntry)) return path.resolve(vendorEntry);
+
   // Cached hit still re-validates: a removed CLI must not pin a dead path.
   if (cachedEntry && existsSync(cachedEntry)) return cachedEntry;
-
-  // The vendored CLI shipped inside the extension (scripts/vendor-cli.mjs)
-  // always wins over a locally installed one — see the resolution-order
-  // comment above. existsSync-guarded so a package without vendor/ (dev
-  // checkout, .vscodeignore regression) falls through to the probe chain.
-  if (vendorEntry && existsSync(vendorEntry)) return path.resolve(vendorEntry);
 
   const fromPath =
     process.platform === "win32" ? await locateFromWindowsPath() : await locateFromUnixPath();

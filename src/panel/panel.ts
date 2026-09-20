@@ -2201,8 +2201,13 @@ export class ChatPanel implements vscode.Disposable {
         .map((f) => f.uri.fsPath)
         .filter((p) => p !== workspaceRoot);
 
-      const { command, args } = buildAcpCommand(entry, allowedRoots);
-      this.log.info(`spawning CLI: ${command} ${args.join(" ")} (cwd=${workspaceRoot})`);
+      const { args } = buildAcpCommand(entry, allowedRoots);
+      // Log the ACTUAL spawn executable (node, not buildAcpCommand's
+      // process.execPath default): the old line printed buildAcpCommand's
+      // command while AcpClient received `node`, so the log showed
+      // "Code.exe ... entry.js" even when a standalone node was used —
+      // actively misleading when debugging which CLI/host booted.
+      this.log.info(`spawning CLI: ${node} ${args.join(" ")} (cwd=${workspaceRoot})`);
 
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
