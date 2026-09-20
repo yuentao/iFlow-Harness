@@ -146,7 +146,7 @@
     "harness": "node scripts/harness.mjs",
     "vendor:cli": "node scripts/vendor-cli.mjs",
     "defaults:sync": "node scripts/vendor-cli.mjs --sync-defaults",
-    "package": "npm run vendor:cli && npm run build && vsce package --no-dependencies"
+    "package": "npm run vendor:cli -- --force && npm run build && vsce package --no-dependencies"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",

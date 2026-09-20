@@ -13,7 +13,8 @@
 // the ACP headless path never touches it. 182.7MB → 39.3MB.
 //
 // Usage: node scripts/vendor-cli.mjs [--version 0.5.19] [--from <tgz>] [--from-dir <dir>] [--force]
-//   --version   CLI version to pin (default: PINNED below, npm registry source)
+//   --version   CLI version to pin (default: latest npm `custom` dist-tag,
+//               falling back to PINNED below when the registry is unreachable)
 //   --from      use a local .tgz instead of `npm pack` (offline/air-gapped)
 //   --from-dir  vendor from an INSTALLED CLI directory instead of npm. Use
 //               this to carry local customizations the official tarball does
@@ -118,7 +119,7 @@ function runNpm(args, opts = {}) {
 
 // --from-dir: the version comes from the source dir's package.json (any
 // --version value is ignored) and bundle/entry.js must exist.
-let version = argValue("--version", PINNED_VERSION);
+let version = argValue("--version", null);
 let fromTgz = argValue("--from", null);
 let fromDir = argValue("--from-dir", null);
 const force = hasFlag("--force");
@@ -134,6 +135,27 @@ if (fromDir) {
   }
   version = JSON.parse(readFileSync(path.join(fromDir, "package.json"), "utf8")).version;
 }
+
+// Default version: resolve the latest `custom` dist-tag from npm so a new
+// published build is picked up without manually bumping PINNED_VERSION.
+// Falls back to PINNED_VERSION when the registry is unreachable (offline),
+// keeping the air-gapped path working. Skipped for --from/--from-dir (local
+// sources) and explicit --version.
+if (!version && !fromTgz && !fromDir) {
+  try {
+    const tag = runNpm(["view", NPM_PACKAGE, "dist-tags.custom"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    if (tag) {
+      version = tag;
+      console.log(`[vendor-cli] resolved latest custom tag: ${version}`);
+    }
+  } catch {
+    // registry unreachable → PINNED_VERSION fallback below
+  }
+}
+version = version ?? PINNED_VERSION;
 
 // --sync-defaults: refresh the repo's default rule configs from this
 // machine's ~/.iflow/ (run this after editing your local rules and before
