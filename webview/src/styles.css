@@ -113,9 +113,9 @@
     color-mix(in oklab, var(--primary) 16%, transparent),
     color-mix(in oklab, var(--primary) 4%, transparent)
   );
-  --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 30%);
-  --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
-    0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
+  --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 15%);
+  --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent),
+    0 10px 32px -16px color-mix(in oklab, var(--primary) 18%, transparent);
   /* Card shadow (always on, not hover-gated). Two real traps verified in the
      built CSS / pixels: (1) Tailwind v4 parses `shadow-card` as a shadow-COLOR
      modifier (`card` is also a color token) and emits no box-shadow — the
@@ -123,20 +123,18 @@
      .cv-block wrapper's content-visibility:auto implies paint containment and
      clips the shadow to the wrapper box — .cv-block pads its clip region.
      Values stay subtle by design: cards sit on a near-white transcript. */
-  --shadow-card: 0 1px 2px oklch(0.2 0.02 275 / 14%), 0 3px 8px oklch(0.2 0.02 275 / 12%),
-    0 12px 26px -12px oklch(0.2 0.02 275 / 22%);
-  --shadow-card-hover: 0 2px 4px oklch(0.2 0.02 275 / 16%), 0 6px 14px oklch(0.2 0.02 275 / 14%),
-    0 18px 34px -14px oklch(0.2 0.02 275 / 28%);
-  --shadow-btn: 0 1px 2px oklch(0.35 0.03 275 / 18%), inset 0 1px 0 oklch(1 0 0 / 30%);
-  --shadow-btn-hover: 0 2px 8px oklch(0.35 0.03 275 / 25%), inset 0 1px 0 oklch(1 0 0 / 32%);
+  --shadow-card: 0 1px 2px oklch(0.2 0.02 275 / 7%), 0 3px 8px oklch(0.2 0.02 275 / 6%),
+    0 12px 26px -12px oklch(0.2 0.02 275 / 11%);
+  --shadow-btn: 0 1px 2px oklch(0.35 0.03 275 / 9%), inset 0 1px 0 oklch(1 0 0 / 30%);
+  --shadow-btn-hover: 0 2px 8px oklch(0.35 0.03 275 / 13%), inset 0 1px 0 oklch(1 0 0 / 32%);
   /* Composer "stage": sits clearly above the transcript — a crisp hairline
      plus a broad soft drop so the input reads as the focal element. */
-  --shadow-stage: 0 -2px 12px oklch(0.35 0.03 275 / 5%),
-    0 8px 32px -12px oklch(0.35 0.03 275 / 18%);
+  --shadow-stage: 0 -2px 12px oklch(0.35 0.03 275 / 3%),
+    0 8px 32px -12px oklch(0.35 0.03 275 / 9%);
   /* Header mirror of --shadow-stage (flipped for the top edge): shown only
      while the transcript scrolls under the bar. */
-  --shadow-stage-up: 0 2px 12px oklch(0.35 0.03 275 / 5%),
-    0 -8px 32px -12px oklch(0.35 0.03 275 / 18%);
+  --shadow-stage-up: 0 2px 12px oklch(0.35 0.03 275 / 3%),
+    0 -8px 32px -12px oklch(0.35 0.03 275 / 9%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
   /* Small-field variant (dropdown search boxes): an inset 2px ring instead of
      the 3px outward spread. The outer ring collides with the box's own border
@@ -232,19 +230,17 @@
     color-mix(in oklab, var(--primary) 22%, transparent),
     color-mix(in oklab, var(--primary) 6%, transparent)
   );
-  --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 80%);
-  --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent),
-    0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
-  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 35%), 0 4px 12px oklch(0.1 0.02 285 / 30%),
-    0 16px 32px -14px oklch(0.1 0.02 285 / 45%);
-  --shadow-card-hover: 0 2px 4px oklch(0.1 0.02 285 / 40%), 0 6px 16px oklch(0.1 0.02 285 / 36%),
-    0 20px 40px -16px oklch(0.1 0.02 285 / 55%);
-  --shadow-btn: 0 1px 2px oklch(0.1 0.02 285 / 45%), inset 0 1px 0 oklch(1 0 0 / 10%);
-  --shadow-btn-hover: 0 2px 8px oklch(0.1 0.02 285 / 55%), inset 0 1px 0 oklch(1 0 0 / 12%);
-  --shadow-stage: 0 -2px 12px oklch(0.1 0.02 285 / 18%),
-    0 8px 32px -12px oklch(0.1 0.02 285 / 45%);
-  --shadow-stage-up: 0 2px 12px oklch(0.1 0.02 285 / 18%),
-    0 -8px 32px -12px oklch(0.1 0.02 285 / 45%);
+  --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 40%);
+  --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 23%, transparent),
+    0 10px 32px -12px color-mix(in oklab, var(--primary) 28%, transparent);
+  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 18%), 0 4px 12px oklch(0.1 0.02 285 / 15%),
+    0 16px 32px -14px oklch(0.1 0.02 285 / 23%);
+  --shadow-btn: 0 1px 2px oklch(0.1 0.02 285 / 23%), inset 0 1px 0 oklch(1 0 0 / 10%);
+  --shadow-btn-hover: 0 2px 8px oklch(0.1 0.02 285 / 28%), inset 0 1px 0 oklch(1 0 0 / 12%);
+  --shadow-stage: 0 -2px 12px oklch(0.1 0.02 285 / 9%),
+    0 8px 32px -12px oklch(0.1 0.02 285 / 23%);
+  --shadow-stage-up: 0 2px 12px oklch(0.1 0.02 285 / 9%),
+    0 -8px 32px -12px oklch(0.1 0.02 285 / 23%);
   --shadow-focus: 0 0 0 3px color-mix(in oklab, var(--primary) 30%, transparent);
   --shadow-focus-soft: inset 0 0 0 2px color-mix(in oklab, var(--primary) 38%, transparent);
 
@@ -420,7 +416,10 @@
 }
 
 @utility glow-ring {
-  box-shadow: var(--shadow-glow);
+  /* Pending-action cards (approval / question / plan-exit): the primary glow
+     plus the always-on card drop shadow. Shadows are permanent here — the
+     card-lift hover variant must not replace them. */
+  box-shadow: var(--shadow-glow), var(--shadow-card);
 }
 
 /* --- WIN12-style acrylic surfaces (header / composer / popups / dialogs) --- */
@@ -518,16 +517,14 @@ header.acrylic.header-scrolled {
   }
 }
 
-/* Card hover lift: a gentle rise + deeper shadow so interactive cards read
-   as "touchable". Paired with .card-lift in components. */
+/* Card hover lift: a gentle rise only — the shadow itself is permanent
+   (.shadow-card / glow-ring), no hover shadow swap. Paired with .card-lift
+   in components. */
 @utility card-lift {
-  transition:
-    transform 0.25s var(--ease-out-expo),
-    box-shadow 0.25s var(--ease-out-expo);
+  transition: transform 0.25s var(--ease-out-expo);
 }
 .card-lift:hover {
   transform: translateY(-1px);
-  box-shadow: var(--shadow-card-hover);
 }
 
 /* Press feedback: interactive elements sink 1px on :active. */
@@ -571,10 +568,18 @@ header.acrylic.header-scrolled {
    No `border-radius: inherit` here: it resolves against the PARENT's radius
    (a button's row container usually has none → 0), which squared off every
    focused button. The box-shadow ring already follows the element's own
-   border-radius. */
-:focus-visible {
+   border-radius.
+   input/textarea are excluded: a bare text control is rectangular, so the
+   ring's square corners poke visibly out of the rounded wrapper it sits in
+   (the composer's rounded-xl shell showed sharp focus corners). Those fields
+   get their focus feedback from the wrapper's focus-within styles instead. */
+:focus-visible:not(input):not(textarea) {
   outline: none;
   box-shadow: var(--shadow-focus);
+}
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
 }
 
 /* --- collapsible card bodies (Collapse component, MessageList) ------------- */

@@ -129,6 +129,29 @@ export function App() {
     if (configOpen) send({ type: "refreshAuth" });
   }, [configOpen, send]);
 
+  // Pending-action cards float over the transcript (see the JSX below). Their
+  // height is variable (plan editor, expanded custom answers), so a ResizeObserver
+  // mirrors it into --pending-card-h on the wrapper; MessageList reads it as the
+  // scroll content's bottom padding so the newest message can always be scrolled
+  // clear of the card. Writing a CSS var keeps this off React's render path.
+  const pendingOverlayRef = useRef<HTMLDivElement>(null);
+  const transcriptWrapRef = useRef<HTMLDivElement>(null);
+  const hasPendingCard = Boolean(pendingApproval || pendingPlanExit || pendingQuestions);
+  useEffect(() => {
+    const wrapper = transcriptWrapRef.current;
+    if (!wrapper) return;
+    const overlay = pendingOverlayRef.current;
+    if (!overlay) {
+      wrapper.style.removeProperty("--pending-card-h");
+      return;
+    }
+    const apply = () => wrapper.style.setProperty("--pending-card-h", `${overlay.offsetHeight}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(overlay);
+    return () => ro.disconnect();
+  }, [hasPendingCard]);
+
   // P1-3: screen-reader status announcements. The aria-live region re-announces
   // only when this string changes, so idle re-renders stay silent.
   // NOTE: must stay ABOVE the splash early-return below — a hook after that
@@ -424,13 +447,26 @@ export function App() {
         <AuthCard auth={auth!} editable={configOpen} busy={locked} onDismiss={() => setConfigOpen(false)} />
       )}
 
-      <MessageList />
-
-      {pendingApproval && <ApprovalCard approval={pendingApproval} />}
-
-      {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
-
-      {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
+      {/* Pending-action cards (approval / plan-exit / question) float OVER the
+          transcript instead of taking a row in the flex column — a shrink-0
+          sibling here would squeeze the message list every time a card mounts.
+          The wrapper is the relative anchor (same box MessageList fills); the
+          overlay is bottom-anchored above the Composer. pointer-events-none on
+          the shell keeps the empty side gutters transparent to scroll/click;
+          each card re-enables pointer events on itself. */}
+      <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
+        <MessageList />
+        {(pendingApproval || pendingPlanExit || pendingQuestions) && (
+          <div
+            ref={pendingOverlayRef}
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex flex-col pb-1"
+          >
+            {pendingApproval && <ApprovalCard approval={pendingApproval} />}
+            {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
+            {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
+          </div>
+        )}
+      </div>
 
       <Composer />
     </div>

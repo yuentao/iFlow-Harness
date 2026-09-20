@@ -729,7 +729,12 @@ function MessageListInner({ state }: { state: SessionState }) {
       if (stickToBottom.current) scrollToBottom();
       syncHeaderScrolled();
     });
-    ro.observe(el);
+    // border-box: the floating approval/question card changes the content's
+    // padding-bottom via --pending-card-h; a content-box observation (the
+    // default) does not fire on padding changes, so in stick-to-bottom mode
+    // the newest message would stay pinned under the card instead of
+    // scrolling clear of it.
+    ro.observe(el, { box: "border-box" });
     if (scroller) ro.observe(scroller);
     return () => ro.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom/syncHeaderScrolled read refs only
@@ -847,7 +852,12 @@ function MessageListInner({ state }: { state: SessionState }) {
   return (
     <div className="relative min-h-0 flex-1">
       <div className="message-scroll h-full overflow-y-auto px-3 pb-3.5 pt-3" ref={scrollRef} onScroll={onScroll}>
-        <div ref={contentRef} className="space-y-3">
+        {/* --pending-card-h: height of the floating approval/question/plan card
+            overlay (set by App's ResizeObserver on the shared wrapper). The
+            card floats over this scroller, so the content reserves its height
+            as bottom padding — otherwise the newest message would sit
+            permanently under the card. */}
+        <div ref={contentRef} className="space-y-3" style={{ paddingBottom: "var(--pending-card-h, 0px)" }}>
           {state.blocks.length === 0 && !state.replaying && (
             <div className="empty-state stream-in">
               <div className="empty-state-logo">
@@ -916,6 +926,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       {showJump && (
         <button
           className="card-lift press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
+          style={{ bottom: "calc(0.75rem + var(--pending-card-h, 0px))" }}
           onClick={() => {
             stickToBottom.current = true;
             scrollToBottom(true);
