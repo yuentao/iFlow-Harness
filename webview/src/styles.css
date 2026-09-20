@@ -116,10 +116,17 @@
   --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 30%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
     0 10px 32px -16px color-mix(in oklab, var(--primary) 35%, transparent);
-  --shadow-card: 0 1px 2px oklch(0.35 0.03 275 / 5%), 0 2px 8px oklch(0.35 0.03 275 / 8%),
-    0 14px 36px -18px oklch(0.35 0.03 275 / 18%);
-  --shadow-card-hover: 0 2px 4px oklch(0.35 0.03 275 / 7%), 0 4px 14px oklch(0.35 0.03 275 / 12%),
-    0 22px 48px -20px oklch(0.35 0.03 275 / 28%);
+  /* Card shadow (always on, not hover-gated). Two real traps verified in the
+     built CSS / pixels: (1) Tailwind v4 parses `shadow-card` as a shadow-COLOR
+     modifier (`card` is also a color token) and emits no box-shadow — the
+     class needs its own plain-CSS rule (see .shadow-card below); (2) the
+     .cv-block wrapper's content-visibility:auto implies paint containment and
+     clips the shadow to the wrapper box — .cv-block pads its clip region.
+     Values stay subtle by design: cards sit on a near-white transcript. */
+  --shadow-card: 0 1px 2px oklch(0.2 0.02 275 / 14%), 0 3px 8px oklch(0.2 0.02 275 / 12%),
+    0 12px 26px -12px oklch(0.2 0.02 275 / 22%);
+  --shadow-card-hover: 0 2px 4px oklch(0.2 0.02 275 / 16%), 0 6px 14px oklch(0.2 0.02 275 / 14%),
+    0 18px 34px -14px oklch(0.2 0.02 275 / 28%);
   --shadow-btn: 0 1px 2px oklch(0.35 0.03 275 / 18%), inset 0 1px 0 oklch(1 0 0 / 30%);
   --shadow-btn-hover: 0 2px 8px oklch(0.35 0.03 275 / 25%), inset 0 1px 0 oklch(1 0 0 / 32%);
   /* Composer "stage": sits clearly above the transcript — a crisp hairline
@@ -228,10 +235,10 @@
   --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 80%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent),
     0 10px 32px -12px color-mix(in oklab, var(--primary) 55%, transparent);
-  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 20%), 0 4px 12px oklch(0.1 0.02 285 / 30%),
-    0 20px 48px -20px oklch(0.1 0.02 285 / 60%);
-  --shadow-card-hover: 0 2px 4px oklch(0.1 0.02 285 / 30%), 0 6px 18px oklch(0.1 0.02 285 / 38%),
-    0 28px 60px -24px oklch(0.1 0.02 285 / 70%);
+  --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 35%), 0 4px 12px oklch(0.1 0.02 285 / 30%),
+    0 16px 32px -14px oklch(0.1 0.02 285 / 45%);
+  --shadow-card-hover: 0 2px 4px oklch(0.1 0.02 285 / 40%), 0 6px 16px oklch(0.1 0.02 285 / 36%),
+    0 20px 40px -16px oklch(0.1 0.02 285 / 55%);
   --shadow-btn: 0 1px 2px oklch(0.1 0.02 285 / 45%), inset 0 1px 0 oklch(1 0 0 / 10%);
   --shadow-btn-hover: 0 2px 8px oklch(0.1 0.02 285 / 55%), inset 0 1px 0 oklch(1 0 0 / 12%);
   --shadow-stage: 0 -2px 12px oklch(0.1 0.02 285 / 18%),
@@ -520,9 +527,7 @@ header.acrylic.header-scrolled {
 }
 .card-lift:hover {
   transform: translateY(-1px);
-  box-shadow:
-    var(--shadow-card-hover),
-    0 0 0 1px color-mix(in oklab, var(--primary) 22%, transparent);
+  box-shadow: var(--shadow-card-hover);
 }
 
 /* Press feedback: interactive elements sink 1px on :active. */
@@ -533,10 +538,31 @@ header.acrylic.header-scrolled {
   transform: translateY(1px) scale(0.99);
 }
 
-/* Explicit utility: Tailwind's --shadow-* namespace only promotes the exact
-   token name to a utility, so `shadow-focus-soft` needs its own declaration
-   or the class silently compiles to nothing (verified in the built CSS). */
-@utility shadow-focus-soft {
+/* Explicit utilities: Tailwind's --shadow-* namespace only promotes the exact
+   token name to a utility, so every custom shadow name used as a class needs
+   its own declaration or the class silently compiles to nothing (verified in
+   the built CSS). `shadow-card` is the worst case — `card` is also a color,
+   so Tailwind parses it as a shadow-COLOR modifier and emits only
+   `--tw-shadow-color: var(--card)`, no box-shadow at all. That is what left
+   every tool card flat. */
+/* Regular CSS classes instead of @utility: Tailwind v4's @utility directive
+   doesn't work for names that conflict with built-in namespaces like shadow-*.
+   `shadow-card` gets parsed as a shadow-COLOR modifier (because `card` is also
+   a color token), and @utility is silently ignored. Regular CSS classes ensure
+   the box-shadow is actually generated. */
+.shadow-card {
+  box-shadow: var(--shadow-card);
+}
+.shadow-btn {
+  box-shadow: var(--shadow-btn);
+}
+.shadow-btn-hover {
+  box-shadow: var(--shadow-btn-hover);
+}
+.shadow-focus {
+  box-shadow: var(--shadow-focus);
+}
+.shadow-focus-soft {
   box-shadow: var(--shadow-focus-soft);
 }
 
@@ -1002,10 +1028,24 @@ pre {
    the scroll viewport, so a multi-thousand-block transcript costs roughly one
    viewport of rendering. contain-intrinsic-size uses the `auto` keyword:
    after a block's first render the browser remembers its real height, keeping
-   the scrollbar stable; 64px is only the pre-render fallback estimate. */
+   the scrollbar stable; 64px is only the pre-render fallback estimate.
+   TRAP (verified in pixels, 2026-09-20): content-visibility:auto implies paint
+   containment, which CLIPS descendant box-shadows to this wrapper's border box
+   — an opaque red shadow on a card painted nothing until the containment was
+   removed, which is why card shadows looked "cut off" no matter how hard the
+   shadow tokens were tuned. Fix: pad the wrapper so the clip region covers the
+   shadow's reach, and cancel the layout effect with an equal negative margin
+   (adjacent wrappers: +14px padding, -14px folded margin, +14px padding → the
+   original 12px space-y-3 gap becomes 14px; contain-intrinsic-size grows to
+   match the padded box). */
 .cv-block {
   content-visibility: auto;
-  contain-intrinsic-size: auto 64px;
+  contain-intrinsic-size: auto 92px;
+  /* Vertical-only padding/negative margin: the shadow spread is vertical, and
+     a horizontal -14px would exceed the scroller's px-3 (12px) padding box,
+     forcing a horizontal scrollbar on the transcript. */
+  padding: 14px 2px;
+  margin: -14px -2px;
 }
 
 @media (prefers-reduced-motion: reduce) {

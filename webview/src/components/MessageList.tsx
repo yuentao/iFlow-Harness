@@ -846,7 +846,7 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div className="message-scroll h-full overflow-y-auto px-3 pb-0.5 pt-3" ref={scrollRef} onScroll={onScroll}>
+      <div className="message-scroll h-full overflow-y-auto px-3 pb-3.5 pt-3" ref={scrollRef} onScroll={onScroll}>
         <div ref={contentRef} className="space-y-3">
           {state.blocks.length === 0 && !state.replaying && (
             <div className="empty-state stream-in">
