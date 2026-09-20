@@ -2,8 +2,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { useChat } from "../store";
+import { renderCodeBlock } from "../highlight";
 
 marked.setOptions({ gfm: true, breaks: true });
+
+// Fenced code blocks are syntax-highlighted per language (hljs token spans
+// colored by the --syn-* design tokens). The highlighted HTML is part of the
+// marked output and passes through the same DOMPurify sanitize step below.
+marked.use({
+  renderer: {
+    code({ text, lang }) {
+      return renderCodeBlock(text, lang);
+    },
+  },
+});
 
 /**
  * P2-2 streaming markdown throttle: the streaming tail re-renders up to

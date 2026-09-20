@@ -195,7 +195,30 @@ function createMockHost(): HostApi {
       summary:
         "This session is being continued from a previous conversation that ran out of context.\n\n按时间顺序分析这次对话：\n\n- 项目背景：Pandora 事件模块「个性化训练计划历史系统」，核心文件 `shared.js`（约 1160 行）、`create_tables.sql`、`models/index.js`。\n- 通知手机号绑定接口：登录接入链路误改为网页授权 OAuth2，需移除手机号绑定接口、移除 /auth/me。\n- 用户纠正：除了店员端接口都应该使用微信登录返回的 openid——session/token 机制要保留。",
     },
-    { kind: "text", text: "这是 **iFlow-chat** 仓库，包含 `docs/` 方案文档与 iFlow CLI 内核文件。\n\n- 需要我深入看某个部分吗？" },
+    {
+      kind: "text",
+      text: [
+        "这是 **iFlow-chat** 仓库，包含 `docs/` 方案文档与 iFlow CLI 内核文件。\n\n- 需要我深入看某个部分吗？",
+        "",
+        "```json",
+        '{',
+        '  "name": "iflow-chat",',
+        '  "version": "1.0.0",',
+        '  "private": true,',
+        '  "scripts": { "dev": "vite --port 5173" },',
+        '  "retries": 3',
+        '}',
+        "```",
+        "",
+        "```python",
+        "def fib(n: int) -> int:",
+        '    """返回第 n 个斐波那契数。"""',
+        "    if n < 2:  # 递归出口",
+        "        return n",
+        "    return fib(n - 1) + fib(n - 2)",
+        "```",
+      ].join("\n"),
+    },
     { kind: "plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
   const demoApproval: SessionState["pendingApproval"] = {

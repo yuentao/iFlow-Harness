@@ -44,6 +44,7 @@
   --color-syn-fn: var(--syn-fn);
   --color-syn-com: var(--syn-com);
   --color-syn-num: var(--syn-num);
+  --color-syn-prop: var(--syn-prop);
 }
 
 :root {
@@ -86,6 +87,7 @@
   --syn-fn: oklch(0.55 0.19 255);
   --syn-com: oklch(0.57 0.025 270);
   --syn-num: oklch(0.55 0.16 35);
+  --syn-prop: oklch(0.52 0.11 205);
 
   --gradient-aurora: radial-gradient(
     120% 100% at 12% 0%,
@@ -203,6 +205,7 @@
   --syn-fn: oklch(0.78 0.12 235);
   --syn-com: oklch(0.55 0.02 285);
   --syn-num: oklch(0.78 0.12 45);
+  --syn-prop: oklch(0.8 0.1 200);
 
   --gradient-aurora: radial-gradient(
     120% 100% at 12% 0%,
@@ -932,6 +935,81 @@ pre {
   border: 1px solid var(--border);
   padding: 1px 5px;
   border-radius: 4px;
+}
+
+/* Syntax highlighting: hljs token spans (produced by webview/src/highlight.ts
+   via the marked code renderer) colored by the --syn-* design tokens, so both
+   themes stay in step with the rest of the panel palette. Scoped to fenced
+   blocks only — inline code keeps the plain mono treatment above. */
+.md pre .hljs-comment,
+.md pre .hljs-quote {
+  color: var(--syn-com);
+  font-style: italic;
+}
+
+.md pre .hljs-keyword,
+.md pre .hljs-selector-tag,
+.md pre .hljs-doctag,
+.md pre .hljs-template-tag {
+  color: var(--syn-key);
+}
+
+.md pre .hljs-string,
+.md pre .hljs-regexp,
+.md pre .hljs-template-variable,
+.md pre .hljs-meta .hljs-string {
+  color: var(--syn-str);
+}
+
+.md pre .hljs-number,
+.md pre .hljs-literal,
+.md pre .hljs-symbol,
+.md pre .hljs-bullet {
+  color: var(--syn-num);
+}
+
+.md pre .hljs-title,
+.md pre .hljs-section,
+.md pre .hljs-built_in {
+  color: var(--syn-fn);
+}
+
+.md pre .hljs-attr,
+.md pre .hljs-attribute,
+.md pre .hljs-variable,
+.md pre .hljs-name,
+.md pre .hljs-title.class_,
+.md pre .hljs-type,
+.md pre .hljs-selector-id,
+.md pre .hljs-selector-class,
+.md pre .hljs-selector-attr,
+.md pre .hljs-selector-pseudo {
+  color: var(--syn-prop);
+}
+
+.md pre .hljs-meta,
+.md pre .hljs-subst {
+  color: var(--muted-foreground);
+}
+
+.md pre .hljs-link {
+  color: var(--color-info);
+}
+
+.md pre .hljs-emphasis {
+  font-style: italic;
+}
+
+.md pre .hljs-strong {
+  font-weight: 600;
+}
+
+.md pre .hljs-addition {
+  color: var(--diff-add-fg);
+}
+
+.md pre .hljs-deletion {
+  color: var(--diff-del-fg);
 }
 
 .md a {
