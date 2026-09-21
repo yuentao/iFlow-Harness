@@ -59,6 +59,7 @@ import {
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
+import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
@@ -398,6 +399,18 @@ export class ChatPanel implements vscode.Disposable {
     });
   }
 
+  /**
+   * A7: staged drop/paste attachments pile up under the OS temp dir with no
+   * in-band cleanup (review 2026-09-19) — sweep session dirs idle for over a
+   * week. Fire-and-forget once per window activation (invoked next to
+   * warmStart); the sweep only touches our own namespaced temp root.
+   */
+  sweepStaleAttachments(): void {
+    void sweepStaleAttachmentDirs({ log: (m) => this.log.info(m) }).catch((error) => {
+      this.log.warn(`attachment sweep failed: ${errorMessage(error)}`);
+    });
+  }
+
   /** Open (or reveal) the chat as an editor tab with a generous width. */
   openEditorTab(): void {
     if (this.editorPanel) {
@@ -555,9 +568,9 @@ export class ChatPanel implements vscode.Disposable {
   ): Promise<void> {
     const MAX_BASE64_LEN = 50 * 1024 * 1024 * 1.34; // ~50MB decoded + base64 slack
     const sessionId = this.store.getState().sessionId ?? "adhoc";
-    const dirUri = vscode.Uri.file(
-      path.join(os.tmpdir(), "iflow-harness-attachments", sessionId.replace(/[^\w.-]/g, "_")),
-    );
+    // A7: the layout lives in attachments.ts so the sweeper and the
+    // session-delete cleanup resolve the exact same dir.
+    const dirUri = vscode.Uri.file(attachmentSessionDir(sessionId));
     await vscode.workspace.fs.createDirectory(dirUri);
     const dir = dirUri.fsPath;
     const paths: Array<string | null> = [];
@@ -609,6 +622,10 @@ export class ChatPanel implements vscode.Disposable {
             images.push({ name, data: Buffer.from(bytes).toString("base64"), mimeType: mime });
             continue;
           }
+          // Over-limit image: NO continue — intentional fall-through to the
+          // files.push below, degrading it to a plain file attachment
+          // instead of silently skipping it (review 2026-09-19 A6 misread
+          // this as a drop; the webview drop/paste path now mirrors it).
         } catch (error) {
           this.log.warn(`reading picked image failed: ${errorMessage(error)}`);
           continue;
@@ -1988,6 +2005,11 @@ export class ChatPanel implements vscode.Disposable {
   private async deleteSession(sessionId: string): Promise<void> {
     await this.forgetSession(sessionId);
     await this.clearTranscript(sessionId);
+    // A7: drop the session's staged-attachment dir too — the transcript that
+    // referenced those paths is gone, so the temp copies are pure residue.
+    await rm(attachmentSessionDir(sessionId), { recursive: true, force: true }).catch((error) => {
+      this.log.warn(`removing attachment dir failed: ${errorMessage(error)}`);
+    });
   }
 
   /**

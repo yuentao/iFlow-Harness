@@ -17,6 +17,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // iflow.warmStart; teardown rides the subscription dispose above.
   chatPanel.warmStart();
 
+  // A7: same one-shot background maintenance slot — sweep staged-attachment
+  // temp dirs idle for over a week (no setting; temp files are ephemeral).
+  chatPanel.sweepStaleAttachments();
+
   context.subscriptions.push(
     vscode.commands.registerCommand("iflow.openPanel", async () => {
       // Open as a wide, resizable editor tab (falls back to the sidebar view

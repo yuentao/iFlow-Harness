@@ -110,7 +110,6 @@ const en: Record<string, string> = {
   "（见附件）": "(see attached files)",
   "（见附带的代码上下文）": "(see attached code context)",
   "添加附件": "Add attachments",
-  "{0} 张图片超过大小上限（5MB），已跳过": "Skipped {0} image(s) over the 5 MB limit",
   "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",
   "{0} 个文件暂存失败，已跳过": "Failed to stage {0} file(s) — skipped",
   "停止生成": "Stop generating",

@@ -390,8 +390,13 @@ export function Composer() {
   function addImages(files: ArrayLike<File>): void {
     const incoming = Array.from(files);
     const accepted = incoming.filter((f) => f.size <= MAX_IMAGE_BYTES);
-    const rejected = incoming.length - accepted.length;
-    if (rejected > 0) showNote(t("{0} 张图片超过大小上限（5MB），已跳过", rejected));
+    // Over-limit images are NOT dropped: they degrade to staged file
+    // attachments, mirroring the host picker's fall-through (picked images
+    // above ATTACHMENT_IMAGE_MAX_BYTES land in filesPicked.files). A large
+    // screenshot thus still reaches the agent as a file path instead of
+    // vanishing; addOtherFiles applies its own 50MB cap + rejection note.
+    const oversized = incoming.filter((f) => f.size > MAX_IMAGE_BYTES);
+    if (oversized.length > 0) addOtherFiles(oversized);
     // Updaters must stay side-effect free: React may run them lazily and, in
     // StrictMode, more than once. Slots are pure placeholders; the actual
     // data lands by scanning for the first empty slot below.
