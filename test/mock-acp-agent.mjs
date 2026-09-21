@@ -27,6 +27,7 @@ async function handle(msg) {
 
   switch (msg.method) {
     case "initialize":
+      if (process.env.ACP_MOCK_MODE === "hang_initialize") return; // never respond
       send({
         jsonrpc: "2.0",
         id: msg.id,

@@ -135,8 +135,35 @@ interface PersistedTranscript {
   blocks: SessionState["blocks"];
 }
 
-interface PanelServices {
+/** Structural shape of a vscode.FileSystemWatcher (the test stub has none). */
+interface PanelWatcher {
+  dispose: () => void;
+  onDidCreate: (listener: () => void) => vscode.Disposable;
+  onDidChange: (listener: () => void) => vscode.Disposable;
+  onDidDelete: (listener: () => void) => vscode.Disposable;
+}
+
+export interface PanelServices {
   entryOverride?: string | undefined;
+  /** Test hook: workspace root used by ensureClient (else workspaceFolders[0]). */
+  workspaceRoot?: string | undefined;
+  /**
+   * Test hook: when set, the vscode file-system watchers are NOT created
+   * (the stub has no watcher API) and these are used instead.
+   */
+  watchers?: PanelWatcher[] | undefined;
+}
+
+/**
+ * Review A3: thrown when an operation resumes after the panel was disposed.
+ * The handshake's post-connect steps and the session/prompt entry points check
+ * it at their checkpoints so a destroyed store is never touched again.
+ */
+export class DisposedError extends Error {
+  constructor(message = "panel disposed") {
+    super(message);
+    this.name = "DisposedError";
+  }
 }
 
 export class ChatPanel implements vscode.Disposable {
@@ -245,7 +272,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     // P6: file-system changes invalidate the @-mention file-list cache.
     const watchRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
-    const fileWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
+    const fileWatcher = this.services.watchers?.[0] ?? vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
     const invalidateFileCache = () => {
       this.fileSearchCache = null;
     };
@@ -258,9 +285,11 @@ export class ChatPanel implements vscode.Disposable {
     // our back. Re-push the merged auth state so the profile list shows the
     // externally-activated profile instead of drifting from reality.
     const settingsDir = vscode.Uri.file(path.dirname(settingsFilePath()));
-    const settingsWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(settingsDir, "settings.json"),
-    );
+    const settingsWatcher =
+      this.services.watchers?.[1] ??
+      vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(settingsDir, "settings.json"),
+      );
     const syncAuth = () => this.syncAuthAfterExternalChange();
     settingsWatcher.onDidChange(syncAuth);
     settingsWatcher.onDidCreate(syncAuth);
@@ -305,6 +334,10 @@ export class ChatPanel implements vscode.Disposable {
    * instead of abandoning it mid-teardown.
    */
   async dispose(): Promise<void> {
+    // Idempotent: `deactivate` awaits it explicitly and VSCode also disposes
+    // it as a subscription, so a second call must be a no-op rather than
+    // re-running teardown against an already-destroyed panel.
+    if (this.disposed) return;
     this.disposed = true;
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
@@ -314,14 +347,27 @@ export class ChatPanel implements vscode.Disposable {
     } catch {
       // best-effort; teardown must proceed even if the write failed
     }
-    this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
-    this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
-    this.cancelAllPendingQuestions("");
+    // A3: kill the client FIRST, then settle the in-flight handshake. The
+    // order matters: awaiting `connecting` before the kill would hang here
+    // until the child's own initialize timeout (up to 120s) — the exact node
+    // process leak this closes. The kill rejects the pending initialize
+    // request, so the handshake bails at its disposed checkpoint and
+    // `connecting` settles promptly; its catch skips the destroyed store.
     try {
       await this.client?.dispose();
     } catch {
       // best-effort teardown; nothing to do if the kill itself failed
     }
+    if (this.connecting) {
+      try {
+        await this.connecting;
+      } catch {
+        // expected: the handshake bailed on the disposed flag
+      }
+    }
+    this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
+    this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
+    this.cancelAllPendingQuestions("");
     this.client = null;
     this.editorPanel?.dispose();
     this.editorPanel = undefined;
@@ -423,6 +469,8 @@ export class ChatPanel implements vscode.Disposable {
    * return the assistant text produced this turn (text-only fallback).
    */
   async chatForward(prompt: string, token: vscode.CancellationToken): Promise<string> {
+    // A3: the panel was disposed — do not start a turn into a destroyed store.
+    if (this.disposed) return "";
     const stateBefore = this.store.getState();
     const textCountBefore = stateBefore.blocks.filter((b) => b.kind === "text").length;
     // sendPrompt never rejects (it catches internally and marks the store
@@ -1546,6 +1594,9 @@ export class ChatPanel implements vscode.Disposable {
     // ensureClient would hand it straight back, skipping the reconnect and
     // keeping the OLD credentials. Settle it (success or failure) first.
     if (this.connecting) await this.connecting.catch(() => {});
+    // A3: a window close during the settle above would otherwise drive the
+    // hot re-auth / restart path against a destroyed store.
+    if (this.disposed) return;
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
     this.cancelAllPlanExits(vscode.l10n.t("重新认证，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("重新认证，提问已跳过"));
@@ -1946,10 +1997,15 @@ export class ChatPanel implements vscode.Disposable {
    * the CLI's own session file instead.
    */
   private async restoreSession(sessionId: string): Promise<boolean> {
+    // A3: the panel was disposed — the store is gone.
+    if (this.disposed) return false;
     // Fast path: the CLI only persists jsonl transcripts for sessions that
     // actually had a conversation. A "dead" session (auto-created on panel
     // open, never used) would burn 60s+ on new+load for nothing.
-    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    this.sessionCwd =
+      this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath;
     if (!this.hasPersistedTranscript(sessionId)) {
       // Dead switcher entry (recorded but never used): clicking it would
       // fail on every attempt and the husk would sit in the list forever —
@@ -1966,6 +2022,10 @@ export class ChatPanel implements vscode.Disposable {
     }
 
     const client = await this.ensureClient();
+    // A3: a dispose during the handshake rejects ensureClient with
+    // DisposedError; a dispose AFTER it must not write into the destroyed
+    // store either.
+    if (this.disposed) return false;
     const workspaceRoot = this.sessionCwd;
     const init = client.getInitializeResult();
     if (init && !init.agentCapabilities.loadSession) {
@@ -2151,8 +2211,18 @@ export class ChatPanel implements vscode.Disposable {
   // --- Agent lifecycle ----------------------------------------------------------
 
   private async ensureClient(): Promise<AcpClient> {
+    // A3: never spawn a new client after the panel is gone — the handshake's
+    // post-connect steps would run against a destroyed store.
+    if (this.disposed) throw new DisposedError();
     if (this.client) return this.client;
-    if (this.connecting) return this.connecting.then(() => this.client!);
+    if (this.connecting) {
+      return this.connecting.then(() => {
+        // A3: dispose() may have settled the handshake and nulled the client
+        // before this continuation runs.
+        if (!this.client) throw new DisposedError();
+        return this.client;
+      });
+    }
 
     this.connecting = (async () => {
       // Entry + node probes are independent (each is a cached where.exe / npm
@@ -2187,7 +2257,10 @@ export class ChatPanel implements vscode.Disposable {
           "no standalone node found — spawning the CLI with the Electron host binary (slower initialize); set iflow.nodePath to override",
         );
       }
-      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+      const workspaceRoot =
+        this.services.workspaceRoot ??
+        vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+        this.context.extensionUri.fsPath;
 
       // A1: the fs callbacks (fs/read_text_file, fs/write_text_file) are
       // confined to the union of all open workspace roots — the CLI
@@ -2279,6 +2352,11 @@ export class ChatPanel implements vscode.Disposable {
       try {
         const tInit = Date.now();
         const init = await client.connect();
+        // A3: dispose() may have settled this handshake while initialize ran.
+        // Throw so the catch below disposes the child and rejects `connecting`
+        // — a resolved handshake would leave awaiting callers holding a
+        // client that dispose() is about to kill.
+        if (this.disposed) throw new DisposedError();
         this.log.info(
           `initialize ok in ${Date.now() - tInit}ms: authenticated=${init.isAuthenticated ?? false}, loadSession=${init.agentCapabilities.loadSession ?? false}`,
         );
@@ -2352,6 +2430,12 @@ export class ChatPanel implements vscode.Disposable {
         // prune, new session) leaves a healthy child with no owner. dispose()
         // is idempotent, so this is safe even after connect()'s own cleanup.
         void client.dispose().catch(() => {});
+        // A3: the handshake bailed on the disposed flag (window close during
+        // initialize) — the store is destroyed, so there is nothing to mark.
+        // The child above still needs killing; the rest is skipped. Surface
+        // DisposedError rather than the raw JSON-RPC "Client disposed" error
+        // so ensureClient's rejection matches its other disposed checkpoints.
+        if (this.disposed) throw new DisposedError(errorMessage(error));
         this.store.setAuth(await this.buildAuthState(false, true));
         const message = errorMessage(error);
         this.log.error(`connect failed: ${message}`);
@@ -2752,9 +2836,14 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async startNewSession(): Promise<void> {
+    // A3: never start a session into a destroyed panel.
+    if (this.disposed) throw new DisposedError();
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its
     // hasPersistedTranscript check scans ~/.iflow/projects/<cwd-slug>/).
-    this.sessionCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    this.sessionCwd =
+      this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath;
     // Tail rescue: a manual reset discards the active session's in-memory
     // blocks below — persist whatever the last (possibly errored) turn left
     // unsaved first. No-op on first connect (blocks are empty).
@@ -2826,6 +2915,10 @@ export class ChatPanel implements vscode.Disposable {
     this.store.setInitializing(true);
     try {
     const client = await this.ensureClient();
+    // A3: a dispose during the handshake rejects ensureClient with
+    // DisposedError; a dispose AFTER it must not write into the destroyed
+    // store either.
+    if (this.disposed) throw new DisposedError();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     this.sessionCwd = workspaceRoot;
     // The live /models HTTP query is independent of session/new — race them
@@ -2899,6 +2992,9 @@ export class ChatPanel implements vscode.Disposable {
   ): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed && !codeContext) return;
+    // A3: the panel was disposed (window close / extension reload) — the
+    // store is gone, so there is nothing to send.
+    if (this.disposed) return;
     // Code-context card (right-click 加入上下文): assembled into a fenced
     // block ahead of the typed text. The typed part goes through
     // toAgentPromptText (its "/"-escape must not touch code lines); the block
@@ -2949,6 +3045,10 @@ export class ChatPanel implements vscode.Disposable {
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
+      // A3: a dispose during the handshake rejects ensureClient with
+      // DisposedError; a dispose AFTER it must not write into the destroyed
+      // store either.
+      if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
       this.store.userPrompt(
@@ -2976,6 +3076,12 @@ export class ChatPanel implements vscode.Disposable {
       void this.persistActiveTranscript();
       void this.touchActiveSession();
     } catch (error) {
+      // A3: the panel was disposed mid-flight — the store is gone, so there
+      // is nothing to mark and nothing to persist.
+      if (this.disposed) {
+        this.log.info(`prompt dropped after dispose: ${errorMessage(error)}`);
+        return;
+      }
       // Session replaced mid-flight (profile switch cancels the in-flight
       // prompt): the rejection lands after the fresh state is in place, so
       // the old turn's failure must not mark the new session errored — and
@@ -3013,6 +3119,8 @@ export class ChatPanel implements vscode.Disposable {
   private async regenerate(): Promise<void> {
     const state = this.store.getState();
     if (state.initializing || state.status === "streaming") return;
+    // A3: the panel was disposed — the store is gone.
+    if (this.disposed) return;
     // Walk back to the last user block — that's the prompt we re-run.
     let lastUserText: string | null = null;
     for (let i = state.blocks.length - 1; i >= 0; i--) {
@@ -3028,6 +3136,10 @@ export class ChatPanel implements vscode.Disposable {
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
+      // A3: a dispose during the handshake rejects ensureClient with
+      // DisposedError; a dispose AFTER it must not write into the destroyed
+      // store either.
+      if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
       const prompt: ContentBlock[] = [
@@ -3045,6 +3157,8 @@ export class ChatPanel implements vscode.Disposable {
       void this.persistActiveTranscript();
       void this.touchActiveSession();
     } catch (error) {
+      // A3: the panel was disposed mid-flight — the store is gone.
+      if (this.disposed) return;
       if (this.store.getState().sessionId !== promptSessionId) {
         this.log.info(`regenerate failed after session switch — dropped (session replaced)`);
         return;

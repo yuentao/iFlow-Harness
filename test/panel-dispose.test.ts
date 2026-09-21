@@ -1,0 +1,132 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { ChatPanel, DisposedError } from "../src/panel/panel.js";
+import type { PanelServices } from "../src/panel/panel.js";
+import type * as vscode from "vscode";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const mockAgent = path.join(here, "mock-acp-agent.mjs");
+
+/**
+ * Review A3: dispose() must cancel an in-flight connect handshake instead of
+ * leaving the spawned node process alive until the child's own initialize
+ * timeout (up to 120s). The mock agent's `hang_initialize` mode never answers
+ * initialize, so the panel's own teardown is the only thing that can end the
+ * handshake — the right order (kill first, then settle) makes that fast.
+ */
+
+function makeContext(): vscode.ExtensionContext {
+  const store = new Map<string, unknown>();
+  const state = {
+    get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? store.get(key) : defaultValue) as T,
+    update: (key: string, value: unknown) => {
+      store.set(key, value);
+      return Promise.resolve();
+    },
+    keys: () => [...store.keys()],
+    delete: (key: string) => {
+      store.delete(key);
+      return Promise.resolve();
+    },
+  };
+  return {
+    subscriptions: [],
+    secrets: {
+      get: () => Promise.resolve(undefined),
+      store: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+    },
+    workspaceState: state,
+    globalState: state,
+    extensionUri: { fsPath: here },
+    extensionPath: here,
+    extensionMode: 3,
+    logPath: here,
+    storageUri: { fsPath: here },
+    globalStorageUri: { fsPath: here },
+    storagePath: here,
+    globalStoragePath: here,
+    asAbsolutePath: (p: string) => path.join(here, p),
+  } as unknown as vscode.ExtensionContext;
+}
+
+/** Watcher doubles: the vscode stub has no watcher API, so the panel is handed these. */
+function makeWatchers(): NonNullable<PanelServices["watchers"]> {
+  const noop = () => ({ dispose: () => {} });
+  return [
+    { dispose: () => {}, onDidCreate: noop, onDidChange: noop, onDidDelete: noop },
+    { dispose: () => {}, onDidCreate: noop, onDidChange: noop, onDidDelete: noop },
+  ];
+}
+
+const panelOf = (panel: ChatPanel) =>
+  panel as unknown as {
+    connecting: Promise<void> | null;
+    client: unknown;
+    disposed: boolean;
+    ensureClient: () => Promise<unknown>;
+    store: { getState: () => { status: string; errorMessage: string | null } };
+  };
+
+describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
+  let panel: ChatPanel;
+
+  beforeEach(() => {
+    // hang_initialize: the child never answers initialize, so the handshake
+    // can only end via the panel's teardown.
+    process.env.ACP_MOCK_MODE = "hang_initialize";
+    const services: PanelServices = {
+      entryOverride: mockAgent,
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    };
+    panel = new ChatPanel(makeContext(), services);
+  });
+
+  afterEach(async () => {
+    // Belt-and-braces: a failed test must not leak the mock agent's node process.
+    try {
+      await panel.dispose();
+    } catch {
+      // already disposed
+    }
+    delete process.env.ACP_MOCK_MODE;
+  });
+
+  it("kills the child and settles the handshake instead of hanging on initialize", async () => {
+    const p = panelOf(panel);
+    const connect = p.ensureClient();
+    void connect.catch(() => {}); // keep the rejection handled while dispose() runs
+    // Wait until the child is actually spawned (ensureClient is async).
+    await vi.waitFor(() => expect(p.client).not.toBeNull(), { timeout: 5000 });
+    expect(p.connecting).not.toBeNull();
+
+    const t0 = Date.now();
+    await panel.dispose();
+    // The kill must be prompt — NOT left to run until the child's 120s
+    // initialize timeout. 5s is generous against that.
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(p.connecting).toBeNull();
+    expect(p.client).toBeNull();
+    // The handshake rejected rather than resolving with a doomed client.
+    await expect(connect).rejects.toThrow(DisposedError);
+  }, 15000);
+
+  it("refuses to start a new connect after dispose", async () => {
+    const p = panelOf(panel);
+    await panel.dispose();
+    await expect(p.ensureClient()).rejects.toThrow(DisposedError);
+    expect(p.client).toBeNull();
+  });
+
+  it("does not mark the store errored when the handshake bailed on dispose", async () => {
+    const p = panelOf(panel);
+    void p.ensureClient().catch(() => {});
+    await vi.waitFor(() => expect(p.client).not.toBeNull(), { timeout: 5000 });
+    expect(p.connecting).not.toBeNull();
+    await panel.dispose();
+    // The store is destroyed, so the handshake must skip markError/setAuth.
+    expect(p.store.getState().errorMessage).toBeNull();
+  }, 15000);
+});
