@@ -16,8 +16,14 @@ describe("errorMessage", () => {
     expect(errorMessage("plain")).toBe("plain");
   });
 
-  it("falls back to JSON for message-less objects", () => {
-    expect(errorMessage({ code: 42 })).toBe('{"code":42}');
+  it("summarizes a message-less JSON-RPC envelope instead of dumping raw JSON", () => {
+    // Review A9: the old fallback returned `{"code":42}` verbatim into the
+    // error banner. Envelopes now render as a compact human-readable summary.
+    expect(errorMessage({ code: 42 })).toBe("JSON-RPC error (42)");
+  });
+
+  it("falls back to capped JSON for message-less non-envelope objects", () => {
+    expect(errorMessage({ status: "boom" })).toBe('{"status":"boom"}');
   });
 
   it("never renders [object Object]", () => {
@@ -59,7 +65,28 @@ describe("errorMessage", () => {
     a.self = a;
     const out = errorMessage(a);
     expect(out).not.toContain("[object");
-    expect(out).toContain("code");
+    // Numeric code short-circuits to the envelope summary (A9) — the
+    // circular sibling never reaches the serializer, so no throw either.
+    expect(out).toBe("JSON-RPC error (1)");
+  });
+
+  it("summarizes envelope code with a capped data detail (A9)", () => {
+    const out = errorMessage({ code: -32603, data: { details: "上游 502" } });
+    expect(out).toBe('JSON-RPC error (-32603) · {"details":"上游 502"}');
+  });
+
+  it("caps banner-bound fallback text so huge envelopes cannot flood the banner (A9)", () => {
+    const out = errorMessage({ blob: "x".repeat(10_000) });
+    expect(out.length).toBeLessThanOrEqual(601); // 600 chars + ellipsis
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("caps the inspect fallback for unserializable shapes (A9)", () => {
+    const big: Record<string, unknown> = { pad: "y".repeat(10_000) };
+    big.self = big; // circular → JSON.stringify throws → inspect fallback
+    const out = errorMessage(big);
+    expect(out.length).toBeLessThanOrEqual(601);
+    expect(out).not.toContain("[object");
   });
 
   it("inspects nested shapes with field names visible", () => {

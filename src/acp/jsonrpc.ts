@@ -42,6 +42,21 @@ export const JsonRpcErrorCode = {
   InternalError: -32603,
 } as const;
 
+/** Hard cap for the *fallback* banner text (review A9). The error banner is
+ * a single-line toast, not a debugger: an uncapped envelope dump pushes the
+ * actionable part off-screen. The cap deliberately covers only the fallback
+ * serialization paths — a legitimate `message` (Error.message, string, or
+ * object `message` + data suffix) passes through uncapped, because
+ * `isContextOverflowError` / `isRateLimitError` regex-match the
+ * `errorMessage()` output and a truncated tail could hide the signature
+ * that gates auto-compress / rate-limit retry. Full shapes for diagnosis
+ * belong in the Output log (panel.ts `formatErrorForLog`). */
+const BANNER_MAX_CHARS = 600;
+
+function capBannerText(text: string): string {
+  return text.length <= BANNER_MAX_CHARS ? text : `${text.slice(0, BANNER_MAX_CHARS)}…`;
+}
+
 /**
  * Extract a human-readable message from an unknown thrown value.
  *
@@ -49,7 +64,10 @@ export const JsonRpcErrorCode = {
  * `Error` instances, so naive `String(error)` renders "[object Object]"
  * (observed in the chat panel's error banner when the CLI rejects a prompt).
  * Preference order: `Error.message` → string `message` property →
- * JSON serialization (guarded against circular structures) → `String()`.
+ * compact envelope summary (`JSON-RPC error <code> · data`, capped) →
+ * capped JSON serialization / inspect. Output is user-visible (error
+ * banners, warning toasts), so every fallback path is capped (review A9);
+ * the uncapped envelope stays diagnosable via `formatErrorForLog`.
  */
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -64,7 +82,7 @@ export function errorMessage(error: unknown): string {
       .filter((line) => line.startsWith("at "))
       .slice(0, 2)
       .join(" ← ");
-    return frames ? `${error.name}: no message (${frames})` : error.name;
+    return frames ? capBannerText(`${error.name}: no message (${frames})`) : error.name;
   }
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null) {
@@ -88,11 +106,17 @@ export function errorMessage(error: unknown): string {
       }
     }
     if (usable) return usable + dataSuffix;
-    // No usable message: serialize the whole envelope so at least the
-    // JSON-RPC code stays visible.
+    // A9: a JSON-RPC envelope (numeric `code`) without a usable message must
+    // not be dumped as raw JSON in the banner — users see malformed JSON and
+    // the envelope fields push any real detail off-screen. Summarize it
+    // instead; `formatErrorForLog` keeps the full envelope in the Output log.
+    if (typeof obj.code === "number") {
+      return capBannerText(`JSON-RPC error (${obj.code})${dataSuffix}`);
+    }
+    // Not an envelope: serialize so at least the shape stays visible (capped).
     try {
       const json = JSON.stringify(error);
-      if (json && json !== "{}") return json;
+      if (json && json !== "{}") return capBannerText(json);
     } catch {
       // circular or otherwise unserializable — fall through to inspect
     }
@@ -100,7 +124,7 @@ export function errorMessage(error: unknown): string {
   // Last resort: Node's inspect shows shapes String() would flatten to
   // "[object Object]" (nested envelopes, null prototypes, symbols, circular
   // references).
-  return inspect(error, { depth: 3, maxArrayLength: 20, breakLength: Infinity });
+  return capBannerText(inspect(error, { depth: 3, maxArrayLength: 20, breakLength: Infinity }));
 }
 
 /**
