@@ -151,7 +151,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 11. **Windows**:命令用 `process.execPath` 直接跑 `entry.js`,避开 `.cmd` shim 与 Unix shebang 的坑;`spawn` 带 `windowsHide: true`。
 12. **提问卡与 Plan 审批不能被 streaming 门控**:两者在 prompt 进行中到达(status 为 `streaming`),agent 正阻塞等答案;按钮必须可用,不要复用「生成中禁用操作」的防呆逻辑。生成中禁用的下拉触发用显式 disabled 硬门控(点击穿透到 Dropdown 内部 click 代理的坑,1.0.5)。
 13. **prompt 无超时**:`AcpClient.promptTimeoutMs` 默认 `0`(无限等待)——真实任务可能跑数小时,任何超时都会误杀长任务;中断完全由用户显式 Stop(`session/cancel`)驱动。`sendPrompt` 的 `initializing`/`streaming` 并发闸门必须保留(`iflow.askSelection` 与 `@iflow` participant 绕过 webview 的 busy 锁)。
-14. **`iflow.idleTimeoutMinutes` 仍是空设置**:package.json manifest 与两个 nls 文件还声明着它,但 `src/` 零引用、README 未列出。实现或从 manifest 删除前不要对外承诺该行为。
+14. **空设置教训(已闭合 2026-09-27,`864131e`)**:`iflow.idleTimeoutMinutes` 曾在 manifest 与两个 nls 文件声明但 `src/` 零引用,长期是空设置——现已连同 nls 描述键一并删除。教训保留:新增设置项必须同步实现,发布前用「manifest 声明 → src 引用」对账,不要对外承诺未实现的行为。
 15. **`--baseContentUrl` 不可用**:0.2.0 起把 `docs/**` 排除出 VSIX(`.vscodeignore`),README 里的 `docs/images/*` 链接在 Marketplace 预览中打不开——刻意的取舍,别「好心」把 docs 加回包。
 16. **blockPatch 锚定**:`baseVersion` 与接收端 `blockVersion` 不一致、或 `tailStart` 越界,都必须回退到全量重同步(webview 发 `ready`),不能硬合并。
 17. **reducer 就地改 blocks**:`tailOnly` 判断依赖尾部指纹,中段变更对指纹不可见,会保守地清 flag 回退全量快照——不要为了「优化」去掉这个保守回退。另一条路径:store 用 `mutatedFrom` 报告每次 reducer 变更的最小索引,中段工具更新仍走增量。
@@ -202,6 +202,6 @@ IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 指定 CLI 入口(也可指
 - 纯 reducer 全在 `shared/session-state.ts`(~1540 行),改动前先确认对应函数与测试;新增 reducer 记得返回变更索引供 store 的 `mutatedFrom` 增量路径使用,并同步 `noteMutationIndex` 接线。
 - 新增 UI 组件放到 `webview/src/components/`,样式用 Tailwind 4 + oklch 设计 token(见 `webview/src/styles.css`),深/浅色主题由 Host 推送 `theme` 消息驱动,默认跟随编辑器主题;图标统一用 `lucide-react`(不要 emoji/字符);动亚克力材质前先看陷阱 #22。
 - 想脱离 VSCode 迭代 UI:`webview/src/store.ts` 的 `createMockHost()` 提供 demo 快照(含审批/提问/Plan 卡与用量说明),可用静态服务器直接跑 webview。
-- 新增设置项要确认它真的实现了——`iflow.idleTimeoutMinutes` 就是声明了但没实现的先例(陷阱 #14)。
+- 新增设置项要确认它真的实现了——`iflow.idleTimeoutMinutes` 就是声明了但没实现的先例(已删除,见陷阱 #14)。
 - 碰 vendor 链路(vendor:cli / defaults:sync / 探测优先级 / .vscodeignore 例外)时,先读「内置 CLI 回退」一节与 `scripts/vendor-cli.mjs` 顶部注释,改动后必须 `npm run harness` 验收并打一个 VSIX 装到干净环境冒烟。
 - webview 侧类型检查:`cd webview && npx tsc --noEmit`(webview 有独立 tsconfig,不参与主 typecheck)。

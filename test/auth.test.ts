@@ -11,6 +11,7 @@ import {
   maskKey,
   type SecretStore,
 } from "../src/acp/auth";
+import { validateAuthForm } from "../shared/messages";
 
 function memoryStore(): SecretStore & { data: Map<string, string> } {
   const data = new Map<string, string>();
@@ -65,6 +66,26 @@ describe("validateCredentials", () => {
     expect(validateCredentials({ baseUrl: "", apiKey: "k", modelName: "m" }).ok).toBe(false);
     expect(validateCredentials({ baseUrl: "https://x", apiKey: "", modelName: "m" }).ok).toBe(false);
     expect(validateCredentials({ baseUrl: "https://x", apiKey: "k", modelName: "" }).ok).toBe(false);
+  });
+});
+
+describe("validateAuthForm (shared webview/host rules, review B3)", () => {
+  it("passes a valid form and trims inputs", () => {
+    expect(validateAuthForm({ baseUrl: " https://x ", modelName: " m ", apiKey: " k " })).toBeNull();
+  });
+
+  it("skips the apiKey check when the field is undefined (edit-profile flow)", () => {
+    expect(validateAuthForm({ baseUrl: "https://x", modelName: "m" })).toBeNull();
+    expect(validateAuthForm({ baseUrl: "https://x", modelName: "m", apiKey: null })).toBe(
+      "API Key 不能为空",
+    );
+  });
+
+  it("returns the first violation as the i18n source string", () => {
+    expect(validateAuthForm({ baseUrl: "ftp://x", modelName: "" })).toBe(
+      "Base URL 必须以 http:// 或 https:// 开头",
+    );
+    expect(validateAuthForm({ baseUrl: "https://x", modelName: "  " })).toBe("模型名称不能为空");
   });
 });
 

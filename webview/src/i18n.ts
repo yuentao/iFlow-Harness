@@ -81,6 +81,7 @@ const en: Record<string, string> = {
   // auth card
   "已保存（{0}）— 留空保持不变": "saved (…{0}) — leave empty to keep",
   "Base URL 必须以 http:// 或 https:// 开头": "Base URL must start with http:// or https://",
+  "API Key 不能为空": "API key is required",
   "模型名称不能为空": "Model name is required",
   "API 配置": "API profiles",
   "连接 iFlow 需要配置 API 凭据": "Connect to iFlow by configuring API credentials",

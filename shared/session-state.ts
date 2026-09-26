@@ -877,6 +877,15 @@ function looksLikeCliPath(m: string, d: string): boolean {
  * and path-like invocations pass through verbatim (the CLI runs / exempts
  * them); every other "/"-leading text is zero-width-escaped so it cannot be
  * mistaken for a command. Non-slash text is returned unchanged.
+ *
+ * VERSION-BOUND (review B3): the splitting/escaping rules below mirror the
+ * CLI's private command parser, probed against CLI 0.5.19 — first-word
+ * whitespace split, name/altName match, path exemption. They are NOT a
+ * general slash-command grammar. If the CLI changes how it tokenizes "/"
+ * input (upgrade or vendor swap), re-probe this function against the new
+ * bundle before trusting the pass-through/escape split; a drift here either
+ * silently swallows user text starting with "/" or sends a real command as
+ * escaped prose.
  */
 export function toAgentPromptText(text: string, commands: readonly SlashCommand[]): string {
   const s = text.trim();
@@ -1083,6 +1092,23 @@ export function clampSessionLabel(text: string): string {
   return text.trim().slice(0, SESSION_LABEL_MAX);
 }
 
+/**
+ * Transcript-scoped fields, cleared together on every transcript reset
+ * (new session, replay start). Single source of truth (review B3): the two
+ * reset paths used to enumerate these by hand and drifted — beginReplay
+ * missed `pendingQuestions`, so a question card from the outgoing session
+ * survived into the restored transcript. Add new transcript-scoped fields
+ * HERE, not at the call sites.
+ */
+function clearTranscriptFields(state: SessionState): void {
+  state.blocks = [];
+  state.pendingApproval = null;
+  state.pendingPlanExit = null;
+  state.pendingQuestions = null;
+  state.errorMessage = null;
+  state.stopReason = null;
+}
+
 export function newSessionState(state: SessionState): SessionState {
   const fresh = initialSessionState();
   // The connection survives a transcript reset — only markConnected/markError
@@ -1104,7 +1130,9 @@ export function newSessionState(state: SessionState): SessionState {
   // (the chip shows ↑0 ↓0 instead of hiding — the CLI does not yet report
   // usage, so the host's transcript estimate starts fresh here).
   fresh.usage = emptySessionUsage();
-  // Approval requests are session-scoped; a new session has none pending.
+  // Idempotent on a fresh object — the point is that BOTH reset paths share
+  // one transcript-field list (see clearTranscriptFields).
+  clearTranscriptFields(fresh);
   return fresh;
 }
 
@@ -1121,13 +1149,9 @@ export function setSessions(state: SessionState, sessions: SessionSummaryUi[]): 
  * copy icons).
  */
 export function beginReplay(state: SessionState): void {
-  state.blocks = [];
-  state.pendingApproval = null;
-  state.pendingPlanExit = null;
+  clearTranscriptFields(state);
   state.replaying = true;
   state.status = "streaming";
-  state.errorMessage = null;
-  state.stopReason = null;
 }
 
 export function endReplay(state: SessionState): void {

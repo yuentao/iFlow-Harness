@@ -954,6 +954,7 @@ describe("session replay (M4)", () => {
     const state = initialSessionState();
     beginUserPrompt(state, "旧内容");
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "旧回答" } }));
+    state.pendingQuestions = { id: "q1", questions: [], deadline: Date.now() + 60_000, timeoutMs: 60_000 };
     beginReplay(state);
     // No placeholder block: the replay wait is rendered by the webview's own
     // indicator while `replaying` is true.
@@ -961,6 +962,10 @@ describe("session replay (M4)", () => {
     expect(state.replaying).toBe(true);
     expect(state.status).toBe("streaming");
     expect(state.pendingApproval).toBeNull();
+    // Review B3: the shared transcript-field list must include
+    // pendingQuestions — a question card from the outgoing session used to
+    // survive into the restored transcript.
+    expect(state.pendingQuestions).toBeNull();
     applySessionUpdate(
       state,
       notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "新内容" } }),

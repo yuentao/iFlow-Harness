@@ -9,6 +9,8 @@
  * `isAuthenticated: false`.
  */
 
+import { validateAuthForm } from "../../shared/messages.js";
+
 export interface OpenAiCompatCredentials {
   baseUrl: string;
   apiKey: string;
@@ -117,10 +119,9 @@ export function validateCredentials(input: {
   const baseUrl = (input.baseUrl ?? "").trim().replace(/\/+$/, "");
   const apiKey = (input.apiKey ?? "").trim();
   const modelName = (input.modelName ?? "").trim();
-  if (!/^https?:\/\//i.test(baseUrl)) {
-    return { ok: false, error: "Base URL 必须以 http:// 或 https:// 开头" };
-  }
-  if (!apiKey) return { ok: false, error: "API Key 不能为空" };
-  if (!modelName) return { ok: false, error: "模型名称不能为空" };
+  // Rules live in shared/messages.ts so the webview form enforces the exact
+  // same checks (review B3). The host always requires a key.
+  const error = validateAuthForm({ baseUrl, apiKey, modelName });
+  if (error) return { ok: false, error };
   return { ok: true, value: { baseUrl, apiKey, modelName } };
 }

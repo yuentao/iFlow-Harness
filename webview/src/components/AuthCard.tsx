@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Circle, KeyRound, Trash2, X } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
+import { validateAuthForm } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
@@ -65,19 +66,22 @@ export function AuthCard({
 
   function submit() {
     const b = baseUrl.trim();
-    if (!/^https?:\/\//i.test(b)) {
-      setFormError(t("Base URL 必须以 http:// 或 https:// 开头"));
-      return;
-    }
-    if (!modelName.trim()) {
-      setFormError(t("模型名称不能为空"));
+    const key = apiKey.trim();
+    // Same rules the host enforces before storing (shared/messages.ts).
+    const error = validateAuthForm({
+      baseUrl: b,
+      modelName: modelName.trim(),
+      apiKey: key === "" ? undefined : key,
+    });
+    if (error) {
+      setFormError(t(error));
       return;
     }
     setFormError(null);
     send({
       type: "saveAuth",
       baseUrl: b,
-      apiKey: apiKey.trim() === "" ? null : apiKey.trim(),
+      apiKey: key === "" ? null : key,
       modelName: modelName.trim(),
       profileName: profileName.trim() || null,
     });

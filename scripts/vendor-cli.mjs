@@ -61,7 +61,7 @@ const NPM_PACKAGE = "@yuentao/iflow-cli";
 const PINNED_VERSION = "0.5.19-custom.2";
 
 // Directories/files pruned from the package, relative to the package root.
-const PRUNE_DIRS = ["vendors", "scripts"];
+const PRUNE_DIRS = ["scripts"];
 const PRUNE_GLOBS = (bundleDir) =>
   readdirSync(bundleDir)
     .filter((name) => name.endsWith(".vsix"))

@@ -280,6 +280,30 @@ export interface AuthUiState {
   profiles: AuthProfileUi[];
 }
 
+/**
+ * Single source of truth for the auth-form rules shared by the webview
+ * AuthCard and the host's `validateCredentials` (review B3: the two used to
+ * mirror each other's regexes by hand). Returns the first violation as a
+ * Chinese source string — the webview translates it through its i18n
+ * dictionary, the host shows it verbatim. `apiKey: undefined` skips the key
+ * check (the edit-profile flow may leave the field empty; the host falls
+ * back to the stored key).
+ */
+export function validateAuthForm(input: {
+  baseUrl: string;
+  modelName: string;
+  apiKey?: string | null;
+}): string | null {
+  if (!/^https?:\/\//i.test(input.baseUrl.trim())) {
+    return "Base URL 必须以 http:// 或 https:// 开头";
+  }
+  if (input.apiKey !== undefined && !(input.apiKey ?? "").trim()) {
+    return "API Key 不能为空";
+  }
+  if (!input.modelName.trim()) return "模型名称不能为空";
+  return null;
+}
+
 export interface AuthProfileUi {
   name: string;
   source: "extension" | "cli";
