@@ -440,7 +440,6 @@ export type WebviewToHost =
   | { type: "setModel"; modelId: string }
   | { type: "openLocation"; path: string; line?: number | null }
   | { type: "openExternal"; uri: string }
-  | { type: "revealOutput"; toolCallId: string }
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
   /** Confirm or reject a pending Plan-mode exit; `approved: false` rejects. */

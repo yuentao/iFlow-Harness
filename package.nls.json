@@ -12,7 +12,6 @@
   "iflow.configuration.defaultMode.description": "Default permission mode for new sessions",
   "iflow.configuration.nodePath.description": "Custom Node.js executable used to spawn the CLI",
   "iflow.configuration.warmStart.description": "Start the iFlow CLI in the background when the window opens, so the chat panel is ready instantly on first open (uses ~100MB memory per window)",
-  "iflow.configuration.idleTimeoutMinutes.description": "Recycle the CLI process after this many idle minutes",
   "iflow.configuration.soundFeedback.description": "Play a short sound when a turn completes or fails",
   "iflow.configuration.auroraIntensity.description": "Background aurora light-spot intensity (%)",
   "participant.description": "Ask the iFlow session (text-only; rich interactions live in the side panel)",

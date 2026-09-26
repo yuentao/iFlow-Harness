@@ -688,9 +688,6 @@ export class ChatPanel implements vscode.Disposable {
           await vscode.env.openExternal(vscode.Uri.parse(msg.uri));
         }
         break;
-      case "revealOutput":
-        void msg;
-        break;
       case "respondApproval":
         this.handleApprovalResponse(msg.id, msg.optionId);
         break;

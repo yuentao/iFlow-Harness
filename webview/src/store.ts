@@ -920,8 +920,8 @@ export const useChat = create<ChatStore>((set, get) => ({
   toasts: [],
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
-    // setDraft) are consumed by their own window-level listeners — Composer
-    // registers those itself, so no re-dispatch happens here.
+    // stagedFiles, filesPicked) are consumed by their own window-level
+    // listeners — Composer registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") {
       setLocale(msg.locale);
       // A pending switch is cleared as soon as the host confirms the value.
@@ -1025,8 +1025,6 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     // Consumed by their own window-level listeners (Composer registers those
     // itself) — reaching here is normal, not an unknown-message tripwire.
-    // (setDraft is also Composer-consumed but only exists on the wire, not in
-    // the HostToWebview union.)
     if (msg.type === "fileList" || msg.type === "stagedFiles" || msg.type === "filesPicked") {
       return;
     }

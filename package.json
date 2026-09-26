@@ -117,11 +117,6 @@
           "default": true,
           "description": "%iflow.configuration.warmStart.description%"
         },
-        "iflow.idleTimeoutMinutes": {
-          "type": "number",
-          "default": 30,
-          "description": "%iflow.configuration.idleTimeoutMinutes.description%"
-        },
         "iflow.soundFeedback": {
           "type": "boolean",
           "default": true,
