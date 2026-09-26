@@ -317,16 +317,23 @@ export function Composer() {
   }, []);
 
   // Streaming, history replay, and new-session init all lock the composer's
-  // switches (the agent / host is mid-operation; mode/model changes and
-  // prompts would desync it). An in-flight profile/model/mode switch (pending)
+  // model/profile switches and sending (the agent / host is mid-operation;
+  // those would desync it). An in-flight profile/model/mode switch (pending)
   // locks the other switchers too. Stop is only meaningful for a real
   // generation: beginReplay() also reports status "streaming", so replaying
   // and initializing must be excluded here. Also exclude when there's a
   // pending approval or question card — the user must handle those first.
+  // Exception: the permission mode dropdown uses modeLocked below, not busy.
   const streaming = status === "streaming";
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
   const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
   const busy = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  // The permission mode is a session-level setting the agent re-reads per turn
+  // (set_mode is an independent JSON-RPC request; CLI 0.5.19 applies it without
+  // touching the in-flight prompt), so it stays switchable while streaming or
+  // while an approval/question card is up. It is only locked before a session
+  // exists (replay/init) or while another switch is in flight.
+  const modeLocked = replaying || initializing || pending !== null;
   const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
 
   // Slash-command popup: every command matching the typed prefix. While the
@@ -766,12 +773,12 @@ export function Composer() {
             <Dropdown
               direction="up"
               menuClass="w-56 max-w-[calc(100vw_-_24px)]"
-              disabled={busy}
+              disabled={modeLocked}
               trigger={(open) => (
                 <button
                   className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
                   title={t("权限模式")}
-                  disabled={busy}
+                  disabled={modeLocked}
                 >
                   <Zap className="size-3 shrink-0 text-primary" />
                   <span className="@max-[340px]:hidden">{currentMode ? modeDisplay(currentMode).label : ""}</span>
