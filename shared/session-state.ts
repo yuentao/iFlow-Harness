@@ -1060,12 +1060,36 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
   return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: inputTokens + outputTokens };
 }
 
-export function completePrompt(state: SessionState, stopReason: StopReason): void {
+/**
+ * Force-close SubAgent cards still non-terminal when a turn ends. The
+ * strategy-2 interval only closes on the spawning `task` call's terminal
+ * update — when the CLI is killed mid-task (or the turn otherwise dies),
+ * that update never arrives and the zombie interval would swallow EVERY
+ * subsequent top-level event into the card. A finished turn can no longer
+ * produce nested events, so any still-open card is provably dead: mark it
+ * failed. Returns the lowest closed card index (for the blockPatch anchor),
+ * or null when nothing changed.
+ */
+export function closeOpenSubAgents(blocks: Block[]): number | null {
+  let mutatedFrom: number | null = null;
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]!;
+    if (block.kind === "subagent" && (block.status === "pending" || block.status === "in_progress")) {
+      block.status = "failed";
+      if (mutatedFrom === null) mutatedFrom = i;
+    }
+  }
+  return mutatedFrom;
+}
+
+export function completePrompt(state: SessionState, stopReason: StopReason): number | null {
   // The CLI is frozen and never reports usage, so the host estimates cumulative
   // consumption from the transcript itself (recomputed idempotently each turn).
   refreshSessionUsage(state);
+  const closedFrom = closeOpenSubAgents(state.blocks);
   state.stopReason = stopReason;
   state.status = "idle";
+  return closedFrom;
 }
 
 /**

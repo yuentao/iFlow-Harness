@@ -17,6 +17,7 @@ import {
   attachSynthesizedDiff,
   beginUserPrompt,
   clearPendingQuestions,
+  closeOpenSubAgents,
   completePrompt,
   clearPendingApproval,
   clearPendingPlanExit,
@@ -103,6 +104,10 @@ export class SessionStore {
   markError(message: string): void {
     this.state.status = "error";
     this.state.errorMessage = message;
+    // An errored turn is over too (prompt reject, CLI process death): close
+    // any SubAgent card still open, or its zombie interval swallows every
+    // later top-level event into the card.
+    this.noteMutationIndex(closeOpenSubAgents(this.state.blocks));
     this.flush();
   }
 
@@ -167,6 +172,11 @@ export class SessionStore {
   /** Swap in a restored transcript (M4: rebuilt from the CLI session file). */
   replaceTranscript(blocks: SessionState["blocks"]): void {
     this.state.blocks = blocks;
+    // A restored transcript can carry a SubAgent card persisted mid-task
+    // (the host snapshot was taken right when the CLI died): the turn that
+    // spawned it is over, so force-close it or its zombie interval swallows
+    // every later top-level event.
+    closeOpenSubAgents(blocks);
     this.onStateReplaced?.();
     // The restored content is real consumption — re-estimate immediately so
     // the usage chip shows the restored totals on first paint instead of
@@ -178,7 +188,10 @@ export class SessionStore {
   }
 
   promptCompleted(stopReason: StopReason): void {
-    completePrompt(this.state, stopReason);
+    // completePrompt also force-closes zombie SubAgent cards (their spawning
+    // task never reported terminal — e.g. the CLI died mid-task); report the
+    // closed index so the card rides the incremental patch.
+    this.noteMutationIndex(completePrompt(this.state, stopReason));
     this.flush();
   }
 

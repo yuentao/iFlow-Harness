@@ -22,6 +22,7 @@ import {
   extractDiff,
   setPendingApproval,
   clearPendingApproval,
+  closeOpenSubAgents,
   markToolReverted,
   setSessions,
   beginReplay,
@@ -327,6 +328,60 @@ describe("stable block ids (P4)", () => {
     const { blocks } = parseTranscriptJsonl(jsonl);
     expect(blocks.map((b) => b.id)).toEqual([expect.any(String), expect.any(String)]);
     expect(blocks[0]!.id).not.toBe(blocks[1]!.id);
+  });
+});
+
+describe("closeOpenSubAgents (zombie interval after a killed turn)", () => {
+  /** Open a flat-interval card and leave it non-terminal (CLI killed mid-task). */
+  function openZombie(state: SessionState): void {
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call", toolCallId: "task-z", toolName: "task", title: "Launch agent(x): 修复", kind: "other", status: "in_progress" }),
+    );
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "n-z", toolName: "read_file", title: "读", kind: "read", status: "completed" }));
+  }
+
+  it("completePrompt force-closes a non-terminal card and later events stay top-level", () => {
+    const state: SessionState = initialSessionState();
+    openZombie(state);
+    expect(state.blocks).toHaveLength(1);
+
+    const closedFrom = completePrompt(state, "cancelled");
+    expect(closedFrom).toBe(0);
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("failed");
+
+    // The next turn must NOT be swallowed by the closed card.
+    beginUserPrompt(state, "继续");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "正常回复" } }));
+    expect(state.blocks.map((b) => b.kind)).toEqual(["subagent", "user", "text"]);
+    const after = state.blocks[0]!;
+    if (after.kind === "subagent" && after.entries.some((e) => e.kind === "text")) {
+      throw new Error("post-turn event leaked into the card");
+    }
+  });
+
+  it("returns null when every card is already terminal (completed cards untouched)", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task-ok", toolName: "task", title: "任务", kind: "other", status: "in_progress" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "task-ok", toolName: "task", kind: "other", status: "completed" }));
+    expect(completePrompt(state, "end_turn")).toBeNull();
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("completed");
+  });
+
+  it("closes multiple open cards and reports the LOWEST index", () => {
+    const state: SessionState = initialSessionState();
+    state.blocks.push(
+      { kind: "text", text: "前置", id: nextBlockId() },
+      { kind: "subagent", id: nextBlockId(), agentId: "a1", taskToolCallId: "t1", title: "一", status: "completed", agentType: null, entries: [] },
+      { kind: "subagent", id: nextBlockId(), agentId: "a2", taskToolCallId: "t2", title: "二", status: "in_progress", agentType: null, entries: [] },
+      { kind: "subagent", id: nextBlockId(), agentId: "a3", taskToolCallId: "t3", title: "三", status: "pending", agentType: null, entries: [] },
+    );
+    expect(closeOpenSubAgents(state.blocks)).toBe(2);
+    expect(state.blocks.map((b) => (b.kind === "subagent" ? b.status : "-"))).toEqual(["-", "completed", "failed", "failed"]);
   });
 });
 
