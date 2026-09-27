@@ -11,7 +11,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import { errorMessage, isContextOverflowError, isRateLimitError } from "../acp/jsonrpc.js";
-import { buildAcpCommand, configureLocatorPersistence, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
+import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
@@ -2276,6 +2276,11 @@ export class ChatPanel implements vscode.Disposable {
           "no standalone node found — spawning the CLI with the Electron host binary (slower initialize); set iflow.nodePath to override",
         );
       }
+      // Run the CLI under a renamed copy of the node binary (`iflow-rt`):
+      // dev cleanup scripts (`pkill node` / `killall node`) match on the
+      // process name and were killing active sessions. Concealment is
+      // best-effort — any failure returns the original path (see locator).
+      const runtime = await concealNodeExecutable(node, this.context.globalStorageUri.fsPath);
       const workspaceRoot =
         this.services.workspaceRoot ??
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
@@ -2299,12 +2304,18 @@ export class ChatPanel implements vscode.Disposable {
       // command while AcpClient received `node`, so the log showed
       // "Code.exe ... entry.js" even when a standalone node was used —
       // actively misleading when debugging which CLI/host booted.
-      this.log.info(`spawning CLI: ${node} ${args.join(" ")} (cwd=${workspaceRoot})`);
+      this.log.info(
+        runtime === node
+          ? `spawning CLI: ${runtime} ${args.join(" ")} (cwd=${workspaceRoot})`
+          : `spawning CLI: ${runtime} (renamed copy of ${node}) ${args.join(" ")} (cwd=${workspaceRoot})`,
+      );
 
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
         // 30-60s+ before its first initialize response.
-        { command: node, args, cwd: workspaceRoot, requestTimeoutMs: 120_000, allowedRoots },
+        // IFLOW_HARNESS=1 marks our subprocess tree so local cleanup scripts
+        // can exclude it (the renamed binary only defeats name-based kills).
+        { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1" }, requestTimeoutMs: 120_000, allowedRoots },
         {
           // A detached client (profile switch overlaps the new spawn with the
           // old child's teardown) must not leak its dying events into the

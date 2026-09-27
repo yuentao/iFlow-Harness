@@ -12,6 +12,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import { chmod as chmodP, copyFile as copyFileP, mkdir as mkdirP, rename as renameP, rm as rmP, stat as statP } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -458,5 +459,69 @@ async function nodeMajorAtLeast(nodePath: string, min: number): Promise<boolean>
     return Number.isFinite(major) && major >= min;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Run the CLI under a renamed copy of the node binary.
+ *
+ * Why: dev cleanup scripts (`pkill node`, `killall node`) match on the process
+ * name and kill the CLI mid-session. A copy named `iflow-rt` is invisible to
+ * name-based kills (command-line-based `pkill -f entry.js` still matches —
+ * this is a probability reduction, not a guarantee; session self-healing is
+ * the real defense).
+ *
+ * Mechanics: copy → chmod → smoke-test (`--version`) → atomic rename into
+ * `<storageDir>/runtime/`. The copy is re-made whenever the SOURCE binary's
+ * size/mtime change (node upgrade). All fs calls are async: a ~90MB sync copy
+ * would freeze the extension host (same lesson as trap #18). macOS code
+ * signatures survive a plain content copy; the smoke test catches the rest
+ * (Gatekeeper quarantine on a corrupted copy, disk-full mid-write, etc.).
+ *
+ * Every failure path returns the ORIGINAL node path — concealment is strictly
+ * best-effort and must never break the connect flow. The Electron host binary
+ * (process.execPath fallback) is never copied: Electron needs its app bundle
+ * layout and is already invisible to `pkill node`.
+ */
+const CONCEALED_RUNTIME_NAME = process.platform === "win32" ? "iflow-rt.exe" : "iflow-rt";
+
+let cachedConcealed: { source: string; path: string; size: number; mtimeMs: number } | null = null;
+let concealInFlight: Promise<string> | null = null;
+
+export function concealNodeExecutable(nodePath: string, storageDir: string): Promise<string> {
+  if (concealInFlight) return concealInFlight;
+  concealInFlight = concealNode(nodePath, storageDir).finally(() => {
+    concealInFlight = null;
+  });
+  return concealInFlight;
+}
+
+async function concealNode(nodePath: string, storageDir: string): Promise<string> {
+  try {
+    if (path.resolve(nodePath) === path.resolve(process.execPath)) return nodePath;
+    const source = await statP(nodePath);
+    if (cachedConcealed && cachedConcealed.source === nodePath && cachedConcealed.size === source.size && cachedConcealed.mtimeMs === source.mtimeMs) {
+      if (existsSync(cachedConcealed.path)) return cachedConcealed.path;
+      cachedConcealed = null;
+    }
+    const dir = path.join(storageDir, "runtime");
+    await mkdirP(dir, { recursive: true });
+    const target = path.join(dir, CONCEALED_RUNTIME_NAME);
+    const temp = `${target}.${process.pid}.tmp`;
+    try {
+      await copyFileP(nodePath, temp);
+      await chmodP(temp, 0o755);
+      // Smoke test BEFORE adopting the copy: a binary that cannot run
+      // (quarantine, partial write, platform mismatch) must not become the
+      // spawn target.
+      await execFileP(temp, ["--version"], { windowsHide: true, timeout: 10_000 });
+      await renameP(temp, target);
+    } finally {
+      await rmP(temp, { force: true }).catch(() => {});
+    }
+    cachedConcealed = { source: nodePath, path: target, size: source.size, mtimeMs: source.mtimeMs };
+    return target;
+  } catch {
+    return nodePath;
   }
 }
