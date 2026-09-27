@@ -18,6 +18,7 @@
   "图片附件过大（超过 {0} MB），已拒绝打开": "Image attachment too large (over {0} MB), refused to open",
   "打开图片失败: {0}": "Failed to open image: {0}",
   "无法打开 diff：缺少编辑前内容": "Cannot open diff: original content missing",
+  "无法打开 {0}: {1}": "Cannot open {0}: {1}",
   "打开 diff 失败: {0}": "Failed to open diff: {0}",
   "找到多个 \"{0}\"，选择目标文件": "Multiple matches for \"{0}\" — pick the target file",
   "选择目标文件": "Select target file",

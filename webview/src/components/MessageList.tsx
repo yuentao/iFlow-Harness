@@ -167,7 +167,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <span className="min-w-0 truncate text-[12px] font-semibold" title={block.title || block.toolName || block.toolKind}>
           {block.title || block.toolName || block.toolKind}
         </span>
-        {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} />}
+        {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} toolCallId={block.toolCallId} />}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {block.reverted && (
             <Chip tone="muted">
@@ -180,6 +180,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
       {hasDiff && (
         <DiffView
           diff={block.diff!}
+          toolCallId={block.toolCallId}
           actions={
             <>
               {completedWithDiff && (

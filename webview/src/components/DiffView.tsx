@@ -23,7 +23,7 @@ const CONTEXT_LINES = 3;
  * folded git-style: each change keeps CONTEXT_LINES of context, the rest of
  * an unchanged file collapses into clickable "⋯" hunks that expand on demand.
  */
-export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactNode }) {
+export function DiffView({ diff, actions, toolCallId }: { diff: ToolDiffUi; actions?: ReactNode; toolCallId?: string }) {
   const { rows: fullRows, windows } = useMemo(() => buildRows(diff), [diff]);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   // A new diff invalidates previous expand/collapse choices.
@@ -49,7 +49,7 @@ export function DiffView({ diff, actions }: { diff: ToolDiffUi; actions?: ReactN
     <div className="overflow-hidden bg-card">
       <div className="flex items-center gap-2 px-3 py-2">
         <FileCode2 className="size-3.5 shrink-0 text-primary" />
-        <FileRef path={diff.path} />
+        <FileRef path={diff.path} toolCallId={toolCallId} />
         <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10px]">
           {addCount > 0 && <span className="text-diff-add-fg">+{addCount}</span>}
           {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}

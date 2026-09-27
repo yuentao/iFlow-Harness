@@ -468,7 +468,10 @@ export type WebviewToHost =
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }
-  | { type: "openLocation"; path: string; line?: number | null }
+  /** Open a file location in the editor. `toolCallId` (when the chip belongs
+   * to a tool card with a diff) lets the host resolve a bare-basename wire
+   * path via the same multi-candidate lookup as revert/openDiff (pitfall #6). */
+  | { type: "openLocation"; path: string; line?: number | null; toolCallId?: string }
   | { type: "openExternal"; uri: string }
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }

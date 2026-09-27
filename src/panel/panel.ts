@@ -673,9 +673,32 @@ export class ChatPanel implements vscode.Disposable {
       case "openLocation": {
         // C1: webview FileRefs may carry session-relative paths — resolve
         // against the session cwd instead of the drive root.
-        const doc = await vscode.workspace.openTextDocument(
-          vscode.Uri.file(this.resolveAgentPathToAbsolute(msg.path)),
-        );
+        // The CLI's wire diff path is often a bare basename (probed, CLI
+        // 0.5.19: confirmation details send `basename(file_path)`), which
+        // resolves to a nonexistent file at the session root — reuse the
+        // same multi-candidate resolution as revert/openDiff (pitfall #6)
+        // whenever the chip belongs to a diff-carrying tool block.
+        let target = this.resolveAgentPathToAbsolute(msg.path);
+        if (msg.toolCallId) {
+          const block = findToolBlockById(this.store.getState().blocks, msg.toolCallId);
+          if (block?.diff) {
+            // locateDiffFile ends in a user-facing picker, so null = cancelled.
+            const chosen = await this.locateDiffFile(block);
+            if (!chosen) return;
+            target = chosen;
+          }
+        }
+        let doc: vscode.TextDocument;
+        try {
+          doc = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+        } catch (error) {
+          // handleWebviewMessage is fire-and-forget — without this the
+          // failed open was completely silent (the Windows bug report).
+          void vscode.window.showWarningMessage(
+            vscode.l10n.t("无法打开 {0}: {1}", target, errorMessage(error)),
+          );
+          return;
+        }
         const line = Math.min(
           Math.max(0, (msg.line ?? 1) - 1),
           Math.max(0, doc.lineCount - 1),

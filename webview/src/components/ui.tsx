@@ -121,7 +121,7 @@ export function Chip({
 }
 
 /** Clickable file reference that opens the location in the editor. */
-export function FileRef({ path, line }: { path: string; line?: number | null }) {
+export function FileRef({ path, line, toolCallId }: { path: string; line?: number | null; toolCallId?: string }) {
   const send = useChat((s) => s.send);
   return (
     <button
@@ -129,7 +129,7 @@ export function FileRef({ path, line }: { path: string; line?: number | null }) 
       title={path}
       onClick={(e) => {
         e.preventDefault();
-        send({ type: "openLocation", path, line });
+        send({ type: "openLocation", path, line, toolCallId });
       }}
     >
       <FileCode2 className="size-3 shrink-0" />
