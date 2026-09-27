@@ -400,6 +400,7 @@ function appendAgentChunk(blocks: Block[], text: string): number | null {
       id: nextBlockId(),
       notice: formatCompressionNotice(parsed.item),
       summary: compressionSummaryOf(parsed.item),
+      newTokenCount: typeof parsed.item.compression?.newTokenCount === "number" ? parsed.item.compression.newTokenCount : null,
     });
     note(blocks.length - 1);
     rest = rest.slice(parsed.end);
@@ -1020,11 +1021,34 @@ function recountBlockTokens(block: Block): void {
  * and reports no usage, so the host estimates from the rendered blocks. Reads
  * each block's token cache (establishing it lazily); only blocks without a
  * valid cache trigger a fresh tokenize. An empty transcript yields a zeroed
- * object (not null) so the UI chip shows from the first paint. */
+ * object (not null) so the UI chip shows from the first paint.
+ *
+ * Compression-aware: `/compress` discards everything before the compression
+ * point — the model carries only the summary onward — so counting the discarded
+ * blocks forever would make the context counter grow *through* a compression
+ * instead of dropping to the compressed context. The last COMPLETED compression
+ * card (it carries `newTokenCount`, the CLI's authoritative post-compression
+ * context size, summary included) marks the fold boundary: blocks before it are
+ * folded into that number, and only blocks after it are counted normally (a
+ * still-pending card contributes 0). Transcripts without a completed
+ * compression fold exactly as before. */
 export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
   let inputTokens = 0;
   let outputTokens = 0;
-  for (const b of blocks) {
+  // Fold boundary: index AFTER the last completed compression card. Blocks
+  // below it are no longer in the model's context.
+  let foldStart = 0;
+  let contextFloor = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]!;
+    if (b.kind === "compression" && typeof b.newTokenCount === "number") {
+      foldStart = i + 1;
+      contextFloor = b.newTokenCount;
+      break;
+    }
+  }
+  for (let i = foldStart; i < blocks.length; i++) {
+    const b = blocks[i]!;
     const t = blockTokens(b);
     if (t === 0) continue;
     // User prompts and tool I/O are context the model consumes (input); agent
@@ -1032,6 +1056,7 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
     if (b.kind === "user" || b.kind === "tool") inputTokens += t;
     else outputTokens += t;
   }
+  inputTokens += contextFloor;
   return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: inputTokens + outputTokens };
 }
 
@@ -1327,7 +1352,12 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
         String(info.newTokenCount ?? "?"),
       );
       const summary = typeof info.summary === "string" ? info.summary.trim() : "";
-      blocks.push({ kind: "compression", notice, summary: summary || null });
+      blocks.push({
+        kind: "compression",
+        notice,
+        summary: summary || null,
+        newTokenCount: typeof info.newTokenCount === "number" ? info.newTokenCount : null,
+      });
       continue;
     }
 

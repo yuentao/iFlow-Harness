@@ -192,6 +192,7 @@ function createMockHost(): HostApi {
     {
       kind: "compression",
       notice: "上下文已压缩：98134 → 7855 tokens",
+      newTokenCount: 7855,
       summary:
         "This session is being continued from a previous conversation that ran out of context.\n\n按时间顺序分析这次对话：\n\n- 项目背景：Pandora 事件模块「个性化训练计划历史系统」，核心文件 `shared.js`（约 1160 行）、`create_tables.sql`、`models/index.js`。\n- 通知手机号绑定接口：登录接入链路误改为网页授权 OAuth2，需移除手机号绑定接口、移除 /auth/me。\n- 用户纠正：除了店员端接口都应该使用微信登录返回的 openid——session/token 机制要保留。",
     },

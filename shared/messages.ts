@@ -139,6 +139,12 @@ export interface CompressionBlock extends BlockBase {
   notice: string;
   /** Conversation summary carried by the item — long, so the webview folds it. */
   summary: string | null;
+  /** Authoritative post-compression context size from the CLI event (the
+   * summary the model actually carries; null on the pending card). The usage
+   * estimator folds everything before the last completed compression card
+   * into this number instead of re-counting the discarded blocks, so the
+   * context counter drops to the compressed context. */
+  newTokenCount: number | null;
 }
 
 export type Block = TextBlock | ThoughtBlock | UserBlock | ToolBlock | SubAgentBlock | CompressionBlock | PlanBlock;

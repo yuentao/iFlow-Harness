@@ -1262,6 +1262,63 @@ describe("session usage split & real-time refresh", () => {
     expect(fresh.usage).not.toBeNull();
     expect(fresh.usage!.totalTokens).toBe(0);
   });
+
+  it("drops the context counter to the compressed context after /compress", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "很长的历史对话".repeat(1000));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "很长的历史回复".repeat(1000) } }));
+    completePrompt(state, "end_of_turn");
+    const before = state.usage!.totalTokens;
+    // The compression event arrives (CLI's authoritative post-compression size).
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: false, originalTokenCount: before, newTokenCount: 7855, summary: "压缩摘要" } }) } }));
+    refreshSessionUsage(state);
+    // Everything before the card folds into the CLI's newTokenCount.
+    expect(state.usage!.inputTokens).toBe(7855);
+    // Post-compression turns count on top of the compressed context.
+    beginUserPrompt(state, "压缩后的新问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "压缩后的回答" } }));
+    completePrompt(state, "end_of_turn");
+    expect(state.usage!.inputTokens).toBe(7855 + estimateTokens("压缩后的新问题"));
+    expect(state.usage!.outputTokens).toBe(estimateTokens("压缩后的回答"));
+    // The counter dropped — the old cumulative fold could only ever grow.
+    expect(state.usage!.totalTokens).toBeLessThan(before);
+  });
+
+  it("a pending compression card does not fold the context", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: true, originalTokenCount: null, newTokenCount: null } }) } }));
+    refreshSessionUsage(state);
+    expect(state.usage!.inputTokens).toBe(estimateTokens("问题"));
+    expect(state.usage!.outputTokens).toBe(estimateTokens("回答"));
+  });
+
+  it("multi-round compression folds at the LAST completed card only", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "第一轮问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: false, originalTokenCount: 90000, newTokenCount: 8000, summary: "第一次摘要" } }) } }));
+    beginUserPrompt(state, "第二轮问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: false, originalTokenCount: 30000, newTokenCount: 3000, summary: "第二次摘要" } }) } }));
+    beginUserPrompt(state, "第三轮问题");
+    refreshSessionUsage(state);
+    // First round's blocks AND the first card fold into the second card's number.
+    expect(state.usage!.inputTokens).toBe(3000 + estimateTokens("第三轮问题"));
+  });
+
+  it("restored transcripts fold at the isCompactSummary card too", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "修复限流器" } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "大量历史输出".repeat(100) }] } }),
+      JSON.stringify({ type: "user", isCompactSummary: true, compressionInfo: { originalTokenCount: 98134, newTokenCount: 7855, summary: "Continued summary." }, message: { content: "Continued summary." } }),
+      JSON.stringify({ type: "user", message: { content: "继续修复" } }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    const usage = estimateSessionUsage(blocks);
+    expect(usage.inputTokens).toBe(7855 + estimateTokens("继续修复"));
+    // The pre-compression assistant output is out of context too.
+    expect(usage.outputTokens).toBe(0);
+  });
 });
 
 describe("dropSessionUpdate guard (leak prevention)", () => {

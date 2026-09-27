@@ -77,13 +77,13 @@ function SessionUsageChip() {
   return (
     <span
       title={t(
-        "本次会话 token 消耗（host 估算，非精确计费）：输入 {0} · 输出 {1}",
+        "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}",
         inputTokens.toLocaleString(),
         outputTokens.toLocaleString(),
       )}
       className="flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
     >
-      <span className="flex items-center gap-0.5" title={t("输入（用户消息与工具结果）")}>
+      <span className="flex items-center gap-0.5" title={t("当前上下文（用户消息与工具结果，压缩后重算）")}>
         <ArrowUp className="size-2.5" />
         {formatTokens(inputTokens)}
       </span>
