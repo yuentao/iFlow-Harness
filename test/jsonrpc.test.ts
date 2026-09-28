@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError, isRateLimitError } from "../src/acp/jsonrpc.js";
+import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError, isRateLimitError, isTransientStreamError } from "../src/acp/jsonrpc.js";
 
 describe("errorMessage", () => {
   it("prefers Error.message", () => {
@@ -151,6 +151,41 @@ describe("isRateLimitError", () => {
     expect(isRateLimitError(new Error("Invalid API key provided"))).toBe(false);
     expect(isRateLimitError({ code: -32602, message: "Session not found: s1" })).toBe(false);
     expect(isRateLimitError("connection closed")).toBe(false);
+  });
+});
+
+describe("isTransientStreamError", () => {
+  it("matches the undici mid-stream drop in the real wire shape", () => {
+    // Wire behavior (probed, CLI 0.5.19 bundle): the gateway killing the SSE
+    // response mid-stream makes bundled undici throw TypeError("terminated");
+    // the CLI wraps it as RequestError.internalError → message
+    // "Internal Error: terminated" with data.details = "terminated".
+    const wire = { code: -32603, message: "Internal Error: terminated", data: { details: "terminated" } };
+    expect(isTransientStreamError(wire)).toBe(true);
+    expect(isTransientStreamError(new Error("terminated"))).toBe(true);
+  });
+
+  it("matches Node socket-level drop phrasings", () => {
+    expect(isTransientStreamError(new Error("socket hang up"))).toBe(true);
+    expect(isTransientStreamError(new Error("read ECONNRESET"))).toBe(true);
+    expect(isTransientStreamError(new Error("connect ETIMEDOUT 1.2.3.4:443"))).toBe(true);
+    expect(isTransientStreamError(new Error("other side closed"))).toBe(true);
+  });
+
+  it("does not match shell-tool text that merely contains 'terminated'", () => {
+    // Word-boundary guard: the shell tool reports "Command terminated by
+    // signal: SIGKILL" inside tool output — never a prompt failure, and the
+    // classifier must not claim it.
+    expect(isTransientStreamError(new Error("Command terminated by signal: SIGKILL"))).toBe(false);
+    expect(isTransientStreamError(new Error("Unterminated string in JSON"))).toBe(false);
+  });
+
+  it("stays independent from the other classifiers", () => {
+    const drop = { code: -32603, message: "Internal Error: terminated", data: { details: "terminated" } };
+    expect(isRateLimitError(drop)).toBe(false);
+    expect(isContextOverflowError(drop)).toBe(false);
+    expect(isTransientStreamError(new Error("Rate limit exceeded. Try again later."))).toBe(false);
+    expect(isTransientStreamError(new Error("Content length exceed LLM Limit."))).toBe(false);
   });
 });
 

@@ -10,7 +10,12 @@ import { inspect } from "node:util";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
-import { errorMessage, isContextOverflowError, isRateLimitError } from "../acp/jsonrpc.js";
+import {
+  errorMessage,
+  isContextOverflowError,
+  isRateLimitError,
+  isTransientStreamError,
+} from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
@@ -79,6 +84,12 @@ const STDERR_TAIL_LINES = 200;
  * attempt failed too and the turn landed on the error banner with no further
  * recovery — user-visible as "没有触发自动重试" (reported 2026-09-10). */
 const RATE_LIMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
+/** Retries for transient mid-stream connection drops (undici "terminated"
+ * etc. — see isTransientStreamError). Shorter ladder than rate limits: a
+ * dropped stream is a one-off socket death, not a quota window, so two quick
+ * retries cover the overwhelming majority without stalling a genuinely dead
+ * network for minutes. */
+const TRANSIENT_STREAM_RETRY_DELAYS_MS = [3_000, 10_000];
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -3260,7 +3271,12 @@ export class ChatPanel implements vscode.Disposable {
    *   straight to the error banner. A Stop pressed during the wait aborts
    *   the retry (the loop re-checks `cancelSeen`; the sendPrompt catch still
    *   shows the rate-limit error banner).
-   * Both paths are bounded, so a prompt that keeps failing lands on the
+   * - transient mid-stream drop (up to TRANSIENT_STREAM_RETRY_DELAYS_MS.length
+   *   per send) → the gateway killing the SSE stream mid-turn surfaces as
+   *   `Internal Error: terminated` (undici body-stream abort, see
+   *   isTransientStreamError); long sessions trip it most. Same retry shape
+   *   as rate limits with a shorter ladder.
+   * All paths are bounded, so a prompt that keeps failing lands on the
    * normal error path after the last attempt.
    */
   private async promptWithRetry(
@@ -3271,6 +3287,7 @@ export class ChatPanel implements vscode.Disposable {
     let compressNext = false; // next attempt sends /compress instead of prompt
     let overflowRecovered = false;
     let rateLimitRetries = 0;
+    let transientStreamRetries = 0;
     // Persistent display-only pill shown while the auto-compress turn runs;
     // dismissed once that turn ends (or the loop gives up) so it never lingers.
     let compressToastId: number | null = null;
@@ -3321,6 +3338,28 @@ export class ChatPanel implements vscode.Disposable {
                 "模型触发平台速率限制，自动重试中（第 {0}/{1} 次）",
                 rateLimitRetries,
                 RATE_LIMIT_RETRY_DELAYS_MS.length,
+              ),
+              { countdownDeadline: Date.now() + delayMs },
+            );
+            await abortableDelay(delayMs, () => this.cancelSeen);
+            if (this.cancelSeen) throw error; // user pressed Stop during the wait
+            continue;
+          }
+          if (
+            isTransientStreamError(error) &&
+            transientStreamRetries < TRANSIENT_STREAM_RETRY_DELAYS_MS.length
+          ) {
+            const delayMs = TRANSIENT_STREAM_RETRY_DELAYS_MS[transientStreamRetries]!;
+            transientStreamRetries++;
+            this.log.warn(
+              `transient stream drop on session ${sessionId}, auto-retry ${transientStreamRetries}/${TRANSIENT_STREAM_RETRY_DELAYS_MS.length} in ${delayMs / 1000}s: ${this.formatErrorForLog(error)}`,
+            );
+            this.store.sendToast(
+              "warning",
+              vscode.l10n.t(
+                "模型响应流中断，自动重试中（第 {0}/{1} 次）",
+                transientStreamRetries,
+                TRANSIENT_STREAM_RETRY_DELAYS_MS.length,
               ),
               { countdownDeadline: Date.now() + delayMs },
             );

@@ -210,6 +210,41 @@ export function isRateLimitError(error: unknown): boolean {
 }
 
 /**
+ * Mid-stream connection drops. Wire behavior (probed, CLI 0.5.19 bundle):
+ * when the gateway kills the SSE response mid-stream (long requests from
+ * very long sessions are the usual trigger), the bundled undici destroys the
+ * body stream with `TypeError("terminated")`; the CLI's prompt handler wraps
+ * it as JSON-RPC -32603 `Internal Error: terminated` with
+ * `data.details = "terminated"`. Other variants seen in the wild are Node
+ * socket errors (`ECONNRESET` / `socket hang up` / `ETIMEDOUT`) surfacing
+ * the same way. All are transient: a retry re-sends the full prompt with
+ * fresh context, so a bounded retry usually rides past a one-off drop.
+ * The `(?!\s+by\s+signal)` lookahead keeps shell-tool text like "Command
+ * terminated by signal: SIGKILL" out (there "terminated" is a standalone
+ * word, so \b alone would match); a false positive anyway only costs one
+ * bounded retry.
+ */
+const TRANSIENT_STREAM_RE = new RegExp(
+  [
+    "\\bterminated\\b(?!\\s+by\\s+signal)", // undici body-stream abort (the 0.5.19 signature)
+    "socket hang up",
+    "\\bECONNRESET\\b",
+    "\\bETIMEDOUT\\b",
+    "\\bEPIPE\\b",
+    "other side closed", // undici upstream close
+  ].join("|"),
+  "i",
+);
+
+/**
+ * Whether a thrown prompt failure looks like a transient mid-stream
+ * connection drop (see TRANSIENT_STREAM_RE).
+ */
+export function isTransientStreamError(error: unknown): boolean {
+  return TRANSIENT_STREAM_RE.test(errorMessage(error));
+}
+
+/**
  * Incremental NDJSON parser: accepts arbitrary chunk boundaries, emits one
  * parsed JSON value per non-empty line.
  *
