@@ -434,15 +434,6 @@ export function App() {
         </div>
       </header>
 
-      {errorMessage && (
-        // break-words + scroll cap: errorMessage() can return unbounded JSON
-        // dumps (unbroken tokens) and multi-line detail — without them the
-        // banner overflowed horizontally / crushed the transcript area.
-        <div className="max-h-24 shrink-0 select-text overflow-y-auto break-words border-b border-border bg-destructive/15 px-3 py-1.5 text-[12px] text-destructive">
-          {errorMessage}
-        </div>
-      )}
-
       {showAuthCard && (
         <AuthCard auth={auth!} editable={configOpen} busy={locked} onDismiss={() => setConfigOpen(false)} />
       )}
@@ -456,6 +447,19 @@ export function App() {
           each card re-enables pointer events on itself. */}
       <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
         <MessageList />
+        {errorMessage && (
+          // Error toast: floats over the transcript top instead of taking a
+          // flex row, frosted (backdrop-blur) so the content behind bleeds
+          // through, asymmetric radius (tight top-left corner) for a
+          // speech-bubble feel. break-words + scroll cap: errorMessage() can
+          // return unbounded JSON dumps (unbroken tokens) and multi-line
+          // detail — without them the toast overflowed its container.
+          <div className="pointer-events-none absolute inset-x-0 top-2.5 z-40 flex justify-center px-3">
+            <div className="stream-in pointer-events-auto max-h-24 max-w-[92%] select-text overflow-y-auto break-words rounded-[4px_16px_16px_16px] border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
+              {errorMessage}
+            </div>
+          </div>
+        )}
         {(pendingApproval || pendingPlanExit || pendingQuestions) && (
           <div
             ref={pendingOverlayRef}
