@@ -658,6 +658,12 @@ export class ChatPanel implements vscode.Disposable {
         // apply on top of a transcript the webview no longer holds).
         this.store.resync();
         this.store.pushSnapshot();
+        // Wire race (verified): the initial postTheme() in openEditorTab fires
+        // before the webview's React message listener exists, so the first
+        // theme/auroraIntensity push is dropped and the aurora stays at its
+        // CSS default until the setting is touched again. Re-post now that
+        // `ready` proves the listener is live.
+        this.postTheme();
         break;
       case "sendPrompt":
         await this.sendPrompt(msg.text, msg.images, msg.files, msg.codeContext);
