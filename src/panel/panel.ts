@@ -3042,6 +3042,21 @@ export class ChatPanel implements vscode.Disposable {
       const pushId = await this.validateModelForPush(modelsPromise, currentModelId, cliModelId);
       if (pushId) await this.setModel(pushId);
     }
+    // iflow.defaultMode: the CLI boots with its own mode (session/new
+    // reports it in modes.currentModeId), so the configured default must be
+    // pushed explicitly on every fresh session — the setting was previously
+    // declared but never read (trap #14 class). Skip silently when the CLI
+    // does not offer the configured id (e.g. an older agent without "plan");
+    // a setMode that is actually attempted surfaces its own failure warning.
+    const configuredMode = vscode.workspace.getConfiguration("iflow").get<string>("defaultMode");
+    if (
+      configuredMode &&
+      session.modes &&
+      configuredMode !== session.modes.currentModeId &&
+      session.modes.availableModes.some((m) => m.id === configuredMode)
+    ) {
+      await this.setMode(configuredMode).catch(() => undefined);
+    }
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
     } finally {
