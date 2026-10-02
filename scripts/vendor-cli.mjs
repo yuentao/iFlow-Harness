@@ -24,7 +24,7 @@
 //   --force     re-fetch even if vendor/iflow-cli already matches the version
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { mkdtempSync, rmSync as rmDir } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -347,6 +347,26 @@ try {
   // (Linux) or .cmd shims (Windows) that the CLI never uses and vsce can't
   // package symlinks ("currentLevel is undefined" on Linux CI).
   removeBinDirs(pkgDir);
+
+  // 3b. Restore the exec bit on the CLI's prebuilt ripgrep binaries. The
+  // npm tarball / vsce zip chain drops unix mode bits, and --ignore-scripts
+  // skips the CLI's postinstall that would have chmod'd them — on installed
+  // machines `rg` then lands 0644 and every CLI search tool fails with
+  // "spawn .../vendors/ripgrep/x64-darwin/rg EACCES" (1.2.3, macOS). The
+  // extension also chmods at connect time (cli-locator.ensureVendorBinariesExecutable)
+  // as a belt-and-braces for already-shipped VSIXes.
+  const rgRoot = path.join(pkgDir, "vendors", "ripgrep");
+  if (existsSync(rgRoot)) {
+    let chmodded = 0;
+    for (const platform of readdirSync(rgRoot)) {
+      if (platform.endsWith("win32")) continue; // ntfs has no exec bit
+      const bin = path.join(rgRoot, platform, "rg");
+      if (!existsSync(bin)) continue;
+      chmodSync(bin, 0o755);
+      chmodded++;
+    }
+    console.log(`[vendor-cli] chmod +x ${chmodded} ripgrep binary(ies)`);
+  }
 
   // 4. Swap into vendor/ (cpSync, not rename: tmp may be on another drive).
   rmSync(VENDOR_DIR, { recursive: true, force: true });

@@ -16,7 +16,7 @@ import {
   isRateLimitError,
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
-import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
+import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
 import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
@@ -2536,11 +2536,16 @@ export class ChatPanel implements vscode.Disposable {
     }
     // Vendored CLI (scripts/vendor-cli.mjs) ships inside the VSIX as the
     // out-of-the-box fallback when no CLI is installed on the machine.
-    const vendored = path.join(this.context.extensionPath, "vendor", "iflow-cli", "bundle", "entry.js");
+    const vendoredCliDir = path.join(this.context.extensionPath, "vendor", "iflow-cli");
+    const vendored = path.join(vendoredCliDir, "bundle", "entry.js");
     // Seed missing ~/.iflow/ rule configs (loader externals). Idempotent:
     // existing user files are never overwritten, so running on every
     // connect is safe. Best effort — failures never block the connect.
     ensureIflowDefaultConfigs(path.join(this.context.extensionPath, "vendor", "iflow-defaults"));
+    // Restore the exec bit on vendored binaries (ripgrep) — the VSIX zip
+    // chain drops unix mode bits and the CLI's search tools then fail with
+    // EACCES when spawning rg (seen on 1.2.3 / macOS).
+    ensureVendorBinariesExecutable(vendoredCliDir);
     const entry = await locateIflowEntry(vendored);
     if (!entry)
       throw new Error(

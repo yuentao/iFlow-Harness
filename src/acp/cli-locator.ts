@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   existsSync,
@@ -347,6 +348,49 @@ export function ensureIflowDefaultConfigs(defaultsDir: string): string[] {
     return created;
   }
   return created;
+}
+
+/**
+ * Restore the executable bit on binaries shipped inside the vendored CLI.
+ *
+ * Why: the VSIX packaging chain (npm tarball → vsce zip → VSCode's unzip on
+ * install) does not reliably preserve unix mode bits, and the vendoring step
+ * runs `npm install --ignore-scripts`, which skips the CLI's own postinstall
+ * (the hook that would have downloaded ripgrep and chmod'd it). Result on
+ * macOS/Linux installs: `vendor/iflow-cli/vendors/ripgrep/<plat>/rg` lands as
+ * 0644 and every CLI search tool fails with
+ * "spawn .../vendors/ripgrep/x64-darwin/rg EACCES" (reported on 1.2.3).
+ *
+ * Fix at connect time, next to ensureIflowDefaultConfigs: chmod every
+ * non-windows `rg` we ship to 0755 when the exec bits are missing. Cheap
+ * (a handful of stat calls), idempotent, and best-effort — a read-only
+ * install must not block the connect flow. Windows is skipped (ntfs has no
+ * exec bit and rg.exe runs regardless).
+ */
+export function ensureVendorBinariesExecutable(vendorDir: string): void {
+  if (process.platform === "win32") return;
+  const ripgrepDir = path.join(vendorDir, "vendors", "ripgrep");
+  if (!existsSync(ripgrepDir)) return;
+  try {
+    for (const platform of readdirSync(ripgrepDir)) {
+      if (platform.endsWith("win32")) continue;
+      const bin = path.join(ripgrepDir, platform, "rg");
+      let stat;
+      try {
+        stat = statSync(bin);
+      } catch {
+        continue; // COPYING etc. — not a platform dir
+      }
+      if (!stat.isFile() || (stat.mode & 0o111) !== 0) continue;
+      try {
+        chmodSync(bin, 0o755);
+      } catch {
+        // best effort — the CLI surfaces a clear EACCES error if this fails
+      }
+    }
+  } catch {
+    // unreadable vendor dir — nothing we can do, never block the connect
+  }
 }
 
 let cachedNode: string | null = null;
