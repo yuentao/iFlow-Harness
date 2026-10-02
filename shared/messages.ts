@@ -435,6 +435,11 @@ export type HostToWebview =
   /** Reply to `pickAttachments`: `images` are base64 attachment payloads,
    * `files` carry real disk paths (no staging needed). */
   | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
+  /** Reply to `listMcpServers` / `saveMcpServers`: the current MCP server
+   * dict (name → config) as it stands on disk after the operation. `error`
+   * non-empty means the read/write failed (the dict is then the last-known or
+   * best-effort value, not a confirmed save). */
+  | { type: "mcpServers"; servers: Record<string, unknown>; error?: string }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. `auroraIntensity`
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
@@ -525,4 +530,13 @@ export type WebviewToHost =
    * to settings.json) take effect without reloading VSCode. */
   | { type: "restartCli" }
   /** Open the VSCode Settings UI filtered to the iFlow extension section. */
-  | { type: "openSettings" };
+  | { type: "openSettings" }
+  /** MCP management card opened: read the CURRENT `mcpServers` dict from
+   * `~/.iflow/settings.json` (the CLI / external tools own that file — the
+   * card must show disk truth, not a cached copy). Reply: `mcpServers`. */
+  | { type: "listMcpServers" }
+  /** Save the full MCP server dict (replace semantics — the card edits a
+   * fresh copy read via `listMcpServers`, so a concurrent external write is
+   * at worst lost, never silently merged). Host writes settings.json and
+   * offers a hot restart. Reply: `mcpServers` with `error` on failure. */
+  | { type: "saveMcpServers"; servers: Record<string, unknown> };

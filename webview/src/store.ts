@@ -95,6 +95,9 @@ function createMockHost(): HostApi {
   const mockTheme: "dark" | "light" = window.matchMedia?.("(prefers-color-scheme: dark)").matches
     ? "dark"
     : "light";
+  // Mock MCP dict: lazily seeded on first read, replaced wholesale on save
+  // (mirrors the host's replace semantics).
+  let mockMcpServers: Record<string, unknown> | undefined;
   const demoBlocks: SessionState["blocks"] = [
     {
       // Mirrors the editor right-click "加入 iFlow 上下文" draft so the
@@ -792,6 +795,29 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "listMcpServers") {
+        const reply = (servers: Record<string, unknown>) =>
+          window.setTimeout(
+            () => window.dispatchEvent(new MessageEvent("message", { data: { type: "mcpServers", servers } })),
+            80,
+          );
+        reply(mockMcpServers ?? (mockMcpServers = {
+          "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
+          "remote-example": { url: "https://mcp.example.com/mcp", type: "http" },
+        }));
+        return;
+      }
+      if (m.type === "saveMcpServers") {
+        mockMcpServers = m.servers;
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", { data: { type: "mcpServers", servers: mockMcpServers ?? {} } }),
+            ),
+          80,
+        );
+        return;
+      }
       if (m.type === "cancel") {
         // Mirror the real host: stop → idle with stopReason "cancelled", and
         // the pending permission request is settled (cancelled) by the CLI.
@@ -1026,7 +1052,12 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     // Consumed by their own window-level listeners (Composer registers those
     // itself) — reaching here is normal, not an unknown-message tripwire.
-    if (msg.type === "fileList" || msg.type === "stagedFiles" || msg.type === "filesPicked") {
+    if (
+      msg.type === "fileList" ||
+      msg.type === "stagedFiles" ||
+      msg.type === "filesPicked" ||
+      msg.type === "mcpServers"
+    ) {
       return;
     }
     // Version-mismatch tripwire: a host/webview pair built from different

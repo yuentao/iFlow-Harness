@@ -19,7 +19,6 @@
   "iflow.configuration.autoOpenPanel.description": "Open the chat panel automatically when VSCode starts",
   "iflow.configuration.language.description": "iFlow CLI interface language written to `~/.iflow/settings.json`. Empty = leave the CLI's own value untouched. Takes effect after a CLI restart.",
   "iflow.configuration.approvalMode.description": "Default approval mode written to ~/.iflow/settings.json (default = ask for confirmation, smart = auto-approve safe edits, yolo = auto-approve everything, plan = read-only planning). Empty = leave the CLI's own value untouched. Takes effect after a CLI restart.",
-  "iflow.configuration.mcpServers.description": "JSON object of MCP servers written to `~/.iflow/settings.json` (`{ \"name\": { \"command\": …, \"args\": … } }`). Empty = leave the CLI's own value untouched. Takes effect after a CLI restart.",
   "participant.description": "Ask the iFlow session (text-only; rich interactions live in the side panel)",
   "iflow.outputChannel.name": "iFlow Harness",
   "iflow.statusbar.tooltip": "iFlow Harness — click to open the chat panel"

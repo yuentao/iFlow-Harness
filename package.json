@@ -165,11 +165,6 @@
           ],
           "default": "",
           "markdownDescription": "%iflow.configuration.approvalMode.description%"
-        },
-        "iflow.mcpServers": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "%iflow.configuration.mcpServers.description%"
         }
       }
     }

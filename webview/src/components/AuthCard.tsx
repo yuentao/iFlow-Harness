@@ -32,11 +32,13 @@ export function AuthCard({
   editable,
   busy,
   onDismiss,
+  onOpenMcp,
 }: {
   auth: AuthUiState;
   editable: boolean;
   busy: boolean;
   onDismiss: () => void;
+  onOpenMcp: () => void;
 }) {
   const send = useChat((s) => s.send);
   const activeProfile = auth.profiles.find((p) => p.active && p.source === "extension");
@@ -263,6 +265,12 @@ export function AuthCard({
               </button>
               <button
                 className="press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+                onClick={onOpenMcp}
+              >
+                {t("管理 MCP 服务器…")}
+              </button>
+              <button
+                className="press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
                 disabled={busy}
                 title={t("重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
                 onClick={() => {
@@ -275,7 +283,7 @@ export function AuthCard({
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground/85">
               {t(
-                "语言、审批模式与 MCP 服务器等 CLI 设置在 VSCode 设置（iflow）中修改；写入 CLI 配置后需重启 CLI 生效，可点击此处热重启（当前会话将自动恢复）。",
+                "语言与审批模式在 VSCode 设置（iflow）中修改；MCP 服务器在管理面板中编辑。两者均写入 CLI 配置，需重启 CLI 生效，可点击此处热重启（当前会话将自动恢复）。",
               )}
             </p>
           </div>

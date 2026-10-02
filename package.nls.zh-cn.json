@@ -19,7 +19,6 @@
   "iflow.configuration.autoOpenPanel.description": "VSCode 启动时自动打开聊天面板",
   "iflow.configuration.language.description": "写入 `~/.iflow/settings.json` 的 iFlow CLI 界面语言。留空表示不修改 CLI 自身的值。重启 CLI 后生效。",
   "iflow.configuration.approvalMode.description": "写入 ~/.iflow/settings.json 的默认审批模式（default = 每次确认，smart = 自动批准安全编辑，yolo = 自动批准全部，plan = 只读规划）。留空表示不修改 CLI 自身的值。重启 CLI 后生效。",
-  "iflow.configuration.mcpServers.description": "以 JSON 对象写入 `~/.iflow/settings.json` 的 MCP 服务器配置（`{ \"名称\": { \"command\": …, \"args\": … } }`）。留空表示不修改 CLI 自身的值。重启 CLI 后生效。",
   "participant.description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",
   "iflow.outputChannel.name": "心流·驭光",
   "iflow.statusbar.tooltip": "心流·驭光 — 点击打开聊天面板"

@@ -21,6 +21,7 @@ import { ApprovalCard } from "./components/ApprovalCard";
 import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { AuthCard } from "./components/AuthCard";
+import { McpCard } from "./components/McpCard";
 import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
 
 function statusChip(status: AgentStatus) {
@@ -96,6 +97,9 @@ export function App() {
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
   const [configOpen, setConfigOpen] = useState(false);
+  // MCP management card (reads/writes settings.json via the host). Mutually
+  // exclusive with the config card — both are centered modals.
+  const [mcpOpen, setMcpOpen] = useState(false);
   // Two-step delete: clicking the trash arms confirmation for that session id;
   // a second click on 确认 actually sends deleteSession. Prevents accidental
   // loss of a persisted transcript (the host delete is irreversible).
@@ -370,7 +374,7 @@ export function App() {
                 recomputed on every open, not reused from panel load. */}
             <Dropdown
               align="right"
-              menuClass="w-64 max-w-[calc(100vw_-_24px)]"
+              menuClass="w-64 max-w-[calc(100vw_-_24px)] max-h-[70vh] flex flex-col"
               disabled={locked}
               onOpenChange={(o) => {
                 if (o) send({ type: "refreshAuth" });
@@ -389,10 +393,11 @@ export function App() {
               {(close) => (
                 <>
                   {(auth?.profiles.length ?? 0) > 0 && (
-                    <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <div className="shrink-0 px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
                       {t("API 配置")}
                     </div>
                   )}
+                  <div className="min-h-0 flex-1 overflow-y-auto">
                   {(auth?.profiles ?? []).map((p) => (
                     <button
                       key={p.name}
@@ -416,7 +421,8 @@ export function App() {
                       </span>
                     </button>
                   ))}
-                  <div className="border-t border-border">
+                  </div>
+                  <div className="shrink-0 border-t border-border">
                     <button
                       className="w-full px-3 py-1.5 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground"
                       onClick={() => {
@@ -434,9 +440,16 @@ export function App() {
         </div>
       </header>
 
-      {showAuthCard && (
-        <AuthCard auth={auth!} editable={configOpen} busy={locked} onDismiss={() => setConfigOpen(false)} />
+      {showAuthCard && !mcpOpen && (
+        <AuthCard
+          auth={auth!}
+          editable={configOpen}
+          busy={locked}
+          onDismiss={() => setConfigOpen(false)}
+          onOpenMcp={() => setMcpOpen(true)}
+        />
       )}
+      {mcpOpen && <McpCard busy={locked} onDismiss={() => setMcpOpen(false)} />}
 
       {/* Pending-action cards (approval / plan-exit / question) float OVER the
           transcript instead of taking a row in the flex column — a shrink-0

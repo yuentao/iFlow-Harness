@@ -67,10 +67,10 @@
   "本次会话累计 token 消耗（host 估算，非精确计费）": "Cumulative tokens used this session (host estimate, not exact billing)",
   "已写入 CLI 配置，重启 CLI 后生效": "CLI config written — restart the CLI to apply",
   "立即重启": "Restart now",
-  "iflow.mcpServers 不是合法 JSON，未写入 CLI 配置": "iflow.mcpServers is not valid JSON — CLI config not written",
-  "iflow.mcpServers 必须是 JSON 对象（服务器名 → 配置），未写入 CLI 配置": "iflow.mcpServers must be a JSON object (server name → config) — CLI config not written",
   "无法写入 {0}（文件缺失或不可读），CLI 配置未同步": "Cannot write {0} (missing or unreadable) — CLI config not synced",
   "正在生成中，请等待完成或先停止，再重启 CLI": "Generating — wait for it to finish or stop it before restarting the CLI",
   "CLI 已重启": "CLI restarted",
-  "CLI 已重启，计划审批已跳过": "CLI restarted, plan approval skipped"
+  "CLI 已重启，计划审批已跳过": "CLI restarted, plan approval skipped",
+  "无法读取 {0}（文件缺失或不可读）": "Cannot read {0} (missing or unreadable)",
+  "无法写入 {0}（文件缺失或不可读），MCP 配置未保存": "Cannot write {0} (missing or unreadable) — MCP config not saved"
 }

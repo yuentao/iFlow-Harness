@@ -283,7 +283,6 @@ export class ChatPanel implements vscode.Disposable {
         if (
           e.affectsConfiguration("iflow.language")
           || e.affectsConfiguration("iflow.approvalMode")
-          || e.affectsConfiguration("iflow.mcpServers")
         ) {
           this.syncCliSettingsToDisk();
         }
@@ -798,6 +797,12 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "openSettings":
         await vscode.commands.executeCommand("workbench.action.openSettings", "iflow");
+        break;
+      case "listMcpServers":
+        this.sendMcpServers();
+        break;
+      case "saveMcpServers":
+        this.saveMcpServers(msg.servers);
         break;
       case "regenerate":
         await this.regenerate();
@@ -1525,20 +1530,21 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Mirror the CLI-bound extension settings (language / approvalMode /
-   * mcpServers) into `~/.iflow/settings.json`. The CLI reads all three only
-   * at startup (probed, CLI 0.5.19 bundle: Config loads settings once, the
-   * `/language` command itself prints "restartRequired"), so an empty value
-   * means "don't touch the CLI's own entry" and a successful write offers an
-   * immediate hot restart. Deliberately one-way: reading these back into the
-   * VSCode config would ping-pong against the CLI's own settings rewrites
-   * (it serializes its whole in-memory copy on authenticate).
+   * Mirror the CLI-bound extension settings (language / approvalMode) into
+   * `~/.iflow/settings.json`. The CLI reads both only at startup (probed,
+   * CLI 0.5.19 bundle: Config loads settings once, the `/language` command
+   * itself prints "restartRequired"), so an empty value means "don't touch
+   * the CLI's own entry" and a successful write offers an immediate hot
+   * restart. Deliberately one-way: reading these back into the VSCode config
+   * would ping-pong against the CLI's own settings rewrites (it serializes
+   * its whole in-memory copy on authenticate). MCP servers are NOT part of
+   * this path — the MCP management card reads/writes settings.json directly
+   * (a text setting would be a second source of truth overwriting the card).
    */
   private cliSettingsSyncTimer: NodeJS.Timeout | undefined;
   private syncCliSettingsToDisk(): void {
-    // The Settings UI applies string edits per keystroke — a half-typed
-    // mcpServers JSON would fire a parse error per keystroke. Debounce so
-    // only the settled value syncs (and prompts a restart) once.
+    // The Settings UI applies string edits per keystroke — debounce so only
+    // the settled value syncs (and prompts a restart) once.
     if (this.cliSettingsSyncTimer) clearTimeout(this.cliSettingsSyncTimer);
     this.cliSettingsSyncTimer = setTimeout(() => {
       this.cliSettingsSyncRun();
@@ -1552,25 +1558,6 @@ export class ChatPanel implements vscode.Disposable {
     if (language) patch.language = language;
     const approvalMode = cfg.get<string>("approvalMode", "");
     if (approvalMode) patch.approvalMode = approvalMode;
-    const mcpRaw = cfg.get<string>("mcpServers", "").trim();
-    if (mcpRaw) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(mcpRaw);
-      } catch {
-        void vscode.window.showErrorMessage(
-          vscode.l10n.t("iflow.mcpServers 不是合法 JSON，未写入 CLI 配置"),
-        );
-        return;
-      }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        void vscode.window.showErrorMessage(
-          vscode.l10n.t("iflow.mcpServers 必须是 JSON 对象（服务器名 → 配置），未写入 CLI 配置"),
-        );
-        return;
-      }
-      patch.mcpServers = parsed as Record<string, unknown>;
-    }
     if (Object.keys(patch).length === 0) return;
     if (!updateCliSettings(patch)) {
       void vscode.window.showWarningMessage(
@@ -1636,6 +1623,48 @@ export class ChatPanel implements vscode.Disposable {
     } finally {
       await teardown;
     }
+  }
+
+  /** MCP card opened: reply with the CURRENT mcpServers dict from
+   * settings.json. A missing/absent field is an empty dict (a fresh CLI
+   * install simply has none), not an error. */
+  private sendMcpServers(): void {
+    const settings = readCliSettings();
+    if (!settings) {
+      this.postToWebview({
+        type: "mcpServers",
+        servers: {},
+        error: vscode.l10n.t("无法读取 {0}（文件缺失或不可读）", settingsFilePath()),
+      });
+      return;
+    }
+    this.postToWebview({ type: "mcpServers", servers: settings.mcpServers ?? {} });
+  }
+
+  /** MCP card saved: replace the whole dict in settings.json (see the
+   * replace-semantics note on the WebviewToHost message), then offer the
+   * same hot-restart affordance as the language/approvalMode sync path —
+   * the CLI only reads mcpServers at startup. */
+  private saveMcpServers(servers: Record<string, unknown>): void {
+    if (!updateCliSettings({ mcpServers: servers })) {
+      this.postToWebview({
+        type: "mcpServers",
+        servers,
+        error: vscode.l10n.t("无法写入 {0}（文件缺失或不可读），MCP 配置未保存", settingsFilePath()),
+      });
+      return;
+    }
+    this.log.info(`MCP servers saved: ${Object.keys(servers).join(", ") || "(none)"}`);
+    this.postToWebview({ type: "mcpServers", servers });
+    const restartLabel = vscode.l10n.t("立即重启");
+    void vscode.window
+      .showInformationMessage(
+        vscode.l10n.t("已写入 CLI 配置，重启 CLI 后生效"),
+        restartLabel,
+      )
+      .then((choice) => {
+        if (choice === restartLabel) void this.restartCli();
+      });
   }
 
   /**
