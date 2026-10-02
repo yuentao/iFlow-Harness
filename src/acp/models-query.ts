@@ -84,6 +84,13 @@ export interface CliSettingsShape {
   modelName?: string;
   currentApiProfile?: string;
   apiProfiles?: Record<string, ProfileShape>;
+  /** CLI UI language ("zh-CN" | "en-US"); CLI reads it at startup only. */
+  language?: string;
+  /** CLI default approval mode ("default" | "smart" | "yolo" | "plan");
+   * startup-only (probed, CLI 0.5.19 bundle: Config reads settings once). */
+  approvalMode?: string;
+  /** MCP servers as a name → config dict; startup-only. */
+  mcpServers?: Record<string, unknown>;
 }
 
 /** Raw CLI settings.json (apiProfiles are the user's named API configs). */
@@ -113,18 +120,18 @@ export function resolveActiveProfileName(
 }
 
 /**
- * Point `currentApiProfile` at `name` without touching anything else.
+ * Merge `patch` into settings.json without touching anything else.
  * Read-modify-write through a temp file + rename (atomic on Windows and
  * POSIX), so a concurrent external writer (cloud sync) can at worst lose our
- * pointer update — never its own profile content. Returns false (caller
- * logs) when the file is missing/unreadable.
+ * patch — never its own content. Returns false (caller logs) when the file is
+ * missing/unreadable.
  */
-export function updateCurrentApiProfile(name: string, settingsPath?: string): boolean {
+export function updateCliSettings(patch: Partial<CliSettingsShape>, settingsPath?: string): boolean {
   const file = settingsPath ?? settingsFilePath();
   try {
     const settings = readCliSettings(file);
     if (!settings) return false;
-    settings.currentApiProfile = name;
+    Object.assign(settings, patch);
     const tmp = `${file}.iflow-harness-tmp`;
     writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");
     if (existsSync(file)) unlinkSync(file);
@@ -139,6 +146,14 @@ export function updateCurrentApiProfile(name: string, settingsPath?: string): bo
     }
     return false;
   }
+}
+
+/**
+ * Point `currentApiProfile` at `name` without touching anything else.
+ * Returns false (caller logs) when the file is missing/unreadable.
+ */
+export function updateCurrentApiProfile(name: string, settingsPath?: string): boolean {
+  return updateCliSettings({ currentApiProfile: name }, settingsPath);
 }
 
 /** Active openai-compatible endpoint from the CLI settings, or null. */

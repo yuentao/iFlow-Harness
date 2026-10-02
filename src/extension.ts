@@ -21,11 +21,20 @@ export function activate(context: vscode.ExtensionContext): void {
   // temp dirs idle for over a week (no setting; temp files are ephemeral).
   chatPanel.sweepStaleAttachments();
 
+  // iflow.autoOpenPanel: open the chat tab on window start. The connect
+  // inside openEditorTab is idempotent with warmStart's in-flight ensureClient.
+  if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoOpenPanel", false)) {
+    chatPanel.openEditorTab();
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("iflow.openPanel", async () => {
       // Open as a wide, resizable editor tab (falls back to the sidebar view
       // via the activity bar icon when a narrow panel is preferred).
       chatPanel.openEditorTab();
+    }),
+    vscode.commands.registerCommand("iflow.restartCli", () => {
+      void chatPanel.restartCli();
     }),
     vscode.commands.registerCommand("iflow.newSession", () => {
       void chatPanel["handleWebviewMessage"]({ type: "newSession" } as never);

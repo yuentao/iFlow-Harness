@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "1.2.3",
+  "version": "1.2.5",
   "type": "module",
   "publisher": "yuantao",
   "author": {
@@ -66,6 +66,11 @@
         "command": "iflow.addSelectionToContext",
         "title": "%command.addSelectionToContext.title%",
         "category": "iFlow"
+      },
+      {
+        "command": "iflow.restartCli",
+        "title": "%command.restartCli.title%",
+        "category": "iFlow"
       }
     ],
     "menus": {
@@ -128,6 +133,43 @@
           "minimum": 0,
           "maximum": 100,
           "description": "%iflow.configuration.auroraIntensity.description%"
+        },
+        "iflow.restoreLastSession": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.restoreLastSession.description%"
+        },
+        "iflow.autoOpenPanel": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.autoOpenPanel.description%"
+        },
+        "iflow.language": {
+          "type": "string",
+          "enum": [
+            "",
+            "zh-CN",
+            "en-US"
+          ],
+          "default": "",
+          "markdownDescription": "%iflow.configuration.language.description%"
+        },
+        "iflow.approvalMode": {
+          "type": "string",
+          "enum": [
+            "",
+            "default",
+            "smart",
+            "yolo",
+            "plan"
+          ],
+          "default": "",
+          "markdownDescription": "%iflow.configuration.approvalMode.description%"
+        },
+        "iflow.mcpServers": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "%iflow.configuration.mcpServers.description%"
         }
       }
     }

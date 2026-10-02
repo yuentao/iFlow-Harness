@@ -17,7 +17,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
-import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCurrentApiProfile } from "../acp/models-query.js";
+import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
   getActiveProfileName,
@@ -30,7 +30,7 @@ import {
   validateCredentials,
   type OpenAiCompatCredentials,
 } from "../acp/auth.js";
-import { readCliSettings } from "../acp/models-query.js";
+import { readCliSettings, type CliSettingsShape } from "../acp/models-query.js";
 import type { AuthUiState } from "../../shared/messages.js";
 import type {
   ContentBlock,
@@ -280,6 +280,13 @@ export class ChatPanel implements vscode.Disposable {
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration("iflow.auroraIntensity")) this.postTheme();
+        if (
+          e.affectsConfiguration("iflow.language")
+          || e.affectsConfiguration("iflow.approvalMode")
+          || e.affectsConfiguration("iflow.mcpServers")
+        ) {
+          this.syncCliSettingsToDisk();
+        }
       }),
     );
     // P6: file-system changes invalidate the @-mention file-list cache.
@@ -785,6 +792,12 @@ export class ChatPanel implements vscode.Disposable {
         // Dropdown opened: re-query /models (may take seconds — fire and forget;
         // the store pushes a snapshot when the fresh list lands).
         void this.refreshLiveModels();
+        break;
+      case "restartCli":
+        await this.restartCli();
+        break;
+      case "openSettings":
+        await vscode.commands.executeCommand("workbench.action.openSettings", "iflow");
         break;
       case "regenerate":
         await this.regenerate();
@@ -1512,6 +1525,120 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Mirror the CLI-bound extension settings (language / approvalMode /
+   * mcpServers) into `~/.iflow/settings.json`. The CLI reads all three only
+   * at startup (probed, CLI 0.5.19 bundle: Config loads settings once, the
+   * `/language` command itself prints "restartRequired"), so an empty value
+   * means "don't touch the CLI's own entry" and a successful write offers an
+   * immediate hot restart. Deliberately one-way: reading these back into the
+   * VSCode config would ping-pong against the CLI's own settings rewrites
+   * (it serializes its whole in-memory copy on authenticate).
+   */
+  private cliSettingsSyncTimer: NodeJS.Timeout | undefined;
+  private syncCliSettingsToDisk(): void {
+    // The Settings UI applies string edits per keystroke — a half-typed
+    // mcpServers JSON would fire a parse error per keystroke. Debounce so
+    // only the settled value syncs (and prompts a restart) once.
+    if (this.cliSettingsSyncTimer) clearTimeout(this.cliSettingsSyncTimer);
+    this.cliSettingsSyncTimer = setTimeout(() => {
+      this.cliSettingsSyncRun();
+    }, 600);
+  }
+
+  private cliSettingsSyncRun(): void {
+    const cfg = vscode.workspace.getConfiguration("iflow");
+    const patch: Partial<CliSettingsShape> = {};
+    const language = cfg.get<string>("language", "");
+    if (language) patch.language = language;
+    const approvalMode = cfg.get<string>("approvalMode", "");
+    if (approvalMode) patch.approvalMode = approvalMode;
+    const mcpRaw = cfg.get<string>("mcpServers", "").trim();
+    if (mcpRaw) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(mcpRaw);
+      } catch {
+        void vscode.window.showErrorMessage(
+          vscode.l10n.t("iflow.mcpServers 不是合法 JSON，未写入 CLI 配置"),
+        );
+        return;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        void vscode.window.showErrorMessage(
+          vscode.l10n.t("iflow.mcpServers 必须是 JSON 对象（服务器名 → 配置），未写入 CLI 配置"),
+        );
+        return;
+      }
+      patch.mcpServers = parsed as Record<string, unknown>;
+    }
+    if (Object.keys(patch).length === 0) return;
+    if (!updateCliSettings(patch)) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("无法写入 {0}（文件缺失或不可读），CLI 配置未同步", settingsFilePath()),
+      );
+      return;
+    }
+    this.log.info(`CLI settings synced to settings.json: ${Object.keys(patch).join(", ")}`);
+    const restartLabel = vscode.l10n.t("立即重启");
+    void vscode.window
+      .showInformationMessage(
+        vscode.l10n.t("已写入 CLI 配置，重启 CLI 后生效"),
+        restartLabel,
+      )
+      .then((choice) => {
+        if (choice === restartLabel) void this.restartCli();
+      });
+  }
+
+  /**
+   * Hot-restart the CLI child (settings-page / command palette): kill the
+   * process, spawn a fresh one, and re-establish the session. Mirrors the
+   * profile-switch cold path — the transcript survives (persisted first),
+   * and the handshake's startup branch restores the CURRENT session via
+   * `restartRestoreId` regardless of `iflow.restoreLastSession` (a restart
+   * must not silently drop the conversation the user was looking at).
+   */
+  async restartCli(): Promise<void> {
+    if (this.disposed) return;
+    const state = this.store.getState();
+    if (state.status === "streaming" || state.initializing) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("正在生成中，请等待完成或先停止，再重启 CLI"),
+      );
+      return;
+    }
+    const outgoingId = state.activeSessionId ?? state.sessionId;
+    if (outgoingId) {
+      // A restart must NOT drop the conversation the user is looking at: the
+      // handshake's startup branch restores this id regardless of
+      // iflow.restoreLastSession.
+      this.restartRestoreId = outgoingId;
+    }
+    this.cancelAllApprovals(vscode.l10n.t("CLI 已重启"));
+    this.cancelAllPlanExits(vscode.l10n.t("CLI 已重启，计划审批已跳过"));
+    this.cancelAllPendingQuestions("");
+    // Tail rescue BEFORE the state swap (same rationale as the profile
+    // switch): the in-memory blocks are discarded by replaceState below.
+    void this.persistActiveTranscript();
+    const oldClient = this.client;
+    this.client = null;
+    this.store.replaceState(newSessionState(this.store.getState()));
+    this.store.markConnecting();
+    // Kill the old child while the new one boots (independent processes).
+    const teardown = oldClient?.dispose().catch(() => {}) ?? Promise.resolve();
+    const tRestart = Date.now();
+    try {
+      await this.ensureClient();
+      this.log.info(`CLI restarted in ${Date.now() - tRestart}ms`);
+    } catch {
+      // ensureClient already marked the error in the store.
+      this.restartRestoreId = null;
+    } finally {
+      await teardown;
+    }
+  }
+
+  /**
    * All known API profiles: extension-owned (SecretStorage, editable) merged
    * with the CLI settings.json ones (read-only source, the user's existing
    * configs). The active profile name drives the `active` flag.
@@ -1786,6 +1913,14 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Credentials to push via authenticate on the next handshake, if any. */
   private pendingHandshakeCredentials: OpenAiCompatCredentials | null = null;
+  /**
+   * Session id the ensureClient handshake must restore after a hot CLI
+   * restart (restartCli sets it BEFORE ensureClient). A restart must not
+   * silently drop the conversation the user was looking at, so this overrides
+   * the iflow.restoreLastSession branch for exactly one handshake; consumed
+   * (cleared) by the branch itself, including on failure.
+   */
+  private restartRestoreId: string | null = null;
   /**
    * Sessions abandoned by a hot re-auth (profile switch). The dying session
    * may still emit trailing session_update notifications on the SAME live
@@ -2482,19 +2617,68 @@ export class ChatPanel implements vscode.Disposable {
           this.store.setAuth(await this.buildAuthState(true, false));
         }
         this.store.markConnected();
-        // User directive: open on a NEW session — the panel is usable as soon
-        // as session/new returns; previous sessions stay in the switcher for
-        // manual restore. (The old flow ran tryRestoreLastSession here, which
-        // blocked first paint on session/load + transcript replay.)
-        await this.startNewSession();
+        // Startup session strategy (iflow.restoreLastSession): by default open
+        // on a NEW session — the panel is usable as soon as session/new
+        // returns; previous sessions stay in the switcher for manual restore.
+        // With the setting on (and a restorable record) the last session is
+        // replayed instead. A hot restart (restartCli) always restores the
+        // CURRENT session via restartRestoreId, overriding the setting for
+        // exactly one handshake. (The old flow always restored, which blocked
+        // first paint on session/load + transcript replay.)
+        const restartTarget = this.restartRestoreId;
+        this.restartRestoreId = null;
+        // Profile switches (explicitSwitch) never restore history — existing
+        // user directive: the abandoned session belongs to the OLD credentials,
+        // the fresh endpoint always opens on a new conversation.
+        let restoreTarget: string | undefined = restartTarget ?? undefined;
+        if (
+          !restoreTarget &&
+          !explicitSwitch &&
+          vscode.workspace.getConfiguration("iflow").get<boolean>("restoreLastSession", false)
+        ) {
+          // The active slot is overwritten by EVERY startNewSession — including
+          // the panel-open auto session that never received a prompt (its
+          // transcript only lands with the first completed turn). Restoring
+          // that husk always fails on hasPersistedTranscript and silently
+          // fell through to a new session (user-reported: setting on, still a
+          // fresh chat). Fall back to the most recently used session that
+          // actually owns a transcript.
+          const active = await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null);
+          if (active && this.hasPersistedTranscript(active)) {
+            restoreTarget = active;
+          } else {
+            if (active) {
+              this.log.info(
+                `active session ${active} has no persisted transcript; falling back to the most recent restorable session`,
+              );
+            }
+            const restorable = this.readPersistedSessions()
+              .filter((s) => this.hasPersistedTranscript(s.id))
+              .sort((a, b) => b.updatedAt - a.updatedAt);
+            restoreTarget = restorable[0]?.id;
+          }
+        }
+        const restored =
+          !!restoreTarget &&
+          (await this.restoreSession(restoreTarget).catch((error: unknown) => {
+            this.log.error(`startup session restore failed: ${errorMessage(error)}`);
+            return false;
+          }));
+        if (!restored) {
+          await this.startNewSession();
+        }
         // History list in the background: prune dead entries + push the
-        // switcher list without touching activeSessionId (the fresh session
-        // is active). Fire-and-forget — failures only degrade the switcher.
+        // switcher list without touching activeSessionId. Fire-and-forget —
+        // failures only degrade the switcher.
         void this.refreshSessionList().catch((error) => {
           this.log.warn(`session list refresh failed: ${errorMessage(error)}`);
         });
       } catch (error) {
         this.client = null;
+        // Consume a pending restart-restore target: a failed handshake must
+        // not leak the id into the NEXT successful handshake (e.g. a profile
+        // switch, which deliberately never restores history).
+        this.restartRestoreId = null;
         // C5: second safety net — connect() kills the child when initialize
         // itself fails, but a failure in the post-handshake steps (restore,
         // prune, new session) leaves a healthy child with no owner. dispose()

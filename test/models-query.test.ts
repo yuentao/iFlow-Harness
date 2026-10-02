@@ -9,6 +9,7 @@ import {
   resolveActiveProfileName,
   retireStaleOAuthCreds,
   settingsFilePath,
+  updateCliSettings,
   updateCurrentApiProfile,
 } from "../src/acp/models-query";
 
@@ -110,6 +111,40 @@ describe("updateCurrentApiProfile", () => {
 
   it("returns false for a missing/unreadable settings file", () => {
     expect(updateCurrentApiProfile("X", path.join(tempDir, "missing.json"))).toBe(false);
+  });
+});
+
+describe("updateCliSettings", () => {
+  it("merges a multi-key patch and preserves every other field", () => {
+    const file = settingsFile({
+      selectedAuthType: "openai-compatible",
+      modelName: "keep-me",
+      language: "zh-CN",
+      apiProfiles: { P: { baseUrl: "https://a/v1", apiKey: "sk-a", modelName: "m" } },
+    });
+    expect(
+      updateCliSettings(
+        {
+          language: "en-US",
+          approvalMode: "smart",
+          mcpServers: { figma: { command: "npx", args: ["-y", "figma-mcp"] } },
+        },
+        file,
+      ),
+    ).toBe(true);
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.language).toBe("en-US");
+    expect(after.approvalMode).toBe("smart");
+    expect(after.mcpServers.figma.args).toEqual(["-y", "figma-mcp"]);
+    // Untouched fields survive the read-modify-write.
+    expect(after.modelName).toBe("keep-me");
+    expect(after.selectedAuthType).toBe("openai-compatible");
+    expect(after.apiProfiles.P.baseUrl).toBe("https://a/v1");
+    expect(existsSync(`${file}.iflow-harness-tmp`)).toBe(false);
+  });
+
+  it("returns false for a missing/unreadable settings file", () => {
+    expect(updateCliSettings({ language: "zh-CN" }, path.join(tempDir, "missing.json"))).toBe(false);
   });
 });
 

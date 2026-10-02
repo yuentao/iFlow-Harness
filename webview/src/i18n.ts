@@ -97,6 +97,13 @@ const en: Record<string, string> = {
   "模型名称": "Model name",
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
   "保存并激活": "Save & activate",
+  "扩展设置": "Extension settings",
+  "打开 VSCode 设置…": "Open VSCode Settings…",
+  "重启 CLI": "Restart CLI",
+  "重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
+    "Restart the CLI process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
+  "语言、审批模式与 MCP 服务器等 CLI 设置在 VSCode 设置（iflow）中修改；写入 CLI 配置后需重启 CLI 生效，可点击此处热重启（当前会话将自动恢复）。":
+    "CLI settings such as language, approval mode and MCP servers are edited in the VSCode Settings (search \"iflow\"); they are written to the CLI config and need a CLI restart to take effect — use the hot restart here (the current session restores automatically).",
   "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。":
     "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving/switching re-authenticates the session via openai-compatible. Profiles imported from the iFlow CLI are read-only: you can switch to them but not delete them here.",
   // composer

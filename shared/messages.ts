@@ -519,4 +519,10 @@ export type WebviewToHost =
   | { type: "refreshAuth" }
   /** Re-query `GET {baseUrl}/models` when the model dropdown opens — the list
    * captured at session start goes stale (new gateway models appear). */
-  | { type: "refreshModels" };
+  | { type: "refreshModels" }
+  /** Settings-page hot restart: tear the CLI child down and spawn a fresh
+   * one so startup-only changes (language / approvalMode / mcpServers written
+   * to settings.json) take effect without reloading VSCode. */
+  | { type: "restartCli" }
+  /** Open the VSCode Settings UI filtered to the iFlow extension section. */
+  | { type: "openSettings" };

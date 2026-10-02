@@ -3,6 +3,18 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.5] - 2026-10-02
+
+- 修复 restoreLastSession 开启后启动仍是新会话：active 槽会被面板打开时自动创建、从未发过消息的空会话覆写（转录要等首次 prompt 完成才落盘），恢复分支静默跳过——现回退到持久化列表中最近一个真正持有转录的会话，并记录回退日志
+
+## [1.2.4] - 2026-10-02
+
+- 新增 启动会话策略设置 iflow.restoreLastSession：开启后面板握手完成时恢复上次使用的会话（无持久化转录或恢复失败自动回退新建会话）
+- 新增 启动自动打开面板设置 iflow.autoOpenPanel：VSCode 启动时自动打开聊天面板（与 warmStart 的连接幂等汇合）
+- 新增 CLI 热重启：设置页「重启 CLI」按钮与 iflow.restartCli 命令，终止并重新 spawn CLI 子进程使启动期设置生效，当前会话自动恢复；生成中拒绝重启
+- 新增 暴露 CLI 设置：iflow.language / iflow.approvalMode / iflow.mcpServers 写入 ~/.iflow/settings.json（留空不干预 CLI 自身值），写入后提示一键热重启
+- 优化 updateCurrentApiProfile 泛化为 updateCliSettings(patch) 原子读-改-写，保留并发外部写入安全语义
+
 ## [1.2.3] - 2026-09-27
 
 - 修复 上下文 token 计数器在 /compress 后不降反增：估算器改为压缩感知，以 CLI 事件携带的权威压缩后上下文大小折叠压缩点之前的所有块（含恢复的转录），多轮压缩只折最后一张，待处理压缩卡不折叠

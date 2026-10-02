@@ -251,6 +251,34 @@ export function AuthCard({
             )}
           </p>
           </div>
+
+          <div className="space-y-2 border-t border-border/60 pt-2.5">
+            <div className="text-[11.5px] text-muted-foreground">{t("扩展设置")}</div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                className="press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+                onClick={() => send({ type: "openSettings" })}
+              >
+                {t("打开 VSCode 设置…")}
+              </button>
+              <button
+                className="press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+                disabled={busy}
+                title={t("重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
+                onClick={() => {
+                  send({ type: "restartCli" });
+                  onDismiss();
+                }}
+              >
+                {t("重启 CLI")}
+              </button>
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+              {t(
+                "语言、审批模式与 MCP 服务器等 CLI 设置在 VSCode 设置（iflow）中修改；写入 CLI 配置后需重启 CLI 生效，可点击此处热重启（当前会话将自动恢复）。",
+              )}
+            </p>
+          </div>
         </div>
       </div>
     </div>
