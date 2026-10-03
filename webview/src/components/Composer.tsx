@@ -14,7 +14,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import type { CodeContextUi, FileHitUi, ModelInfoUi, SlashCommand } from "../../../shared/messages";
+import { collectUserPromptTexts, type CodeContextUi, type FileHitUi, type ModelInfoUi, type SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { Dropdown, fuzzyScore } from "./ui";
@@ -527,6 +527,120 @@ export function Composer() {
     setAttachments([]);
     setCodeContext(null);
     setMentionQuery(null);
+    setHistIndex(-1);
+    histDraft.current = null;
+    histEntryRef.current = null;
+    editedRecall.current = false;
+  }
+
+  // --- ↑/↓ prompt-history recall (shell style) ------------------------------
+  // History is read imperatively at keypress time (useChat.getState()) instead
+  // of subscribing to `blocks`: a blocks selector would re-render the whole
+  // composer on every blockPatch and undo the P2-1 selector split.
+  // histIndex: -1 = not browsing; 0 = newest entry; k = k+1-th newest.
+  // histDraft holds the pre-browsing buffer, restored when ↓ walks past the
+  // newest entry back out of history.
+  const [histIndex, setHistIndex] = useState(-1);
+  const histDraft = useRef<string | null>(null);
+  const histEntryRef = useRef<string | null>(null);
+  const editedRecall = useRef(false);
+  const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
+
+  // A history buffer belongs to one session. Reset it before a restored/new
+  // session can reuse the composer instance, otherwise ArrowDown may restore
+  // the previous session's draft into the new session.
+  useEffect(() => {
+    setHistIndex(-1);
+    histDraft.current = null;
+    histEntryRef.current = null;
+    editedRecall.current = false;
+  }, [activeSessionId]);
+
+  /** Newest-first user prompts of the current session (deduped upstream). */
+  function getUserHistory(): string[] {
+    const blocks = useChat.getState().state?.blocks ?? [];
+    return collectUserPromptTexts(blocks).reverse();
+  }
+
+  function setCaretToEnd(): void {
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    });
+  }
+
+  /** Recall writes the textarea directly (no onChange), so the @-mention
+   * popup — driven by `mentionQuery` — would keep stale hits on screen. */
+  function closeMention(): void {
+    setMentionQuery(null);
+    setMentionHits([]);
+  }
+
+  function applyRecall(value: string): void {
+    histEntryRef.current = value;
+    setText(value);
+    closeMention();
+    setCaretToEnd();
+  }
+
+  /** dir=-1 recalls an older prompt, dir=+1 a newer one (or the draft).
+   * Returns true when the keystroke was consumed. */
+  function recallHistory(dir: -1 | 1): boolean {
+    // The @-mention popup being OPEN (even with zero hits) means the user is
+    // mid-token — recall would replace the whole draft including the "@…"
+    // fragment. The popup's own ArrowUp/Down branches only fire when hits
+    // exist, so the guard belongs here rather than in the popup branch.
+    if (mentionQuery !== null) return false;
+    if (editedRecall.current) {
+      editedRecall.current = false;
+      return false;
+    }
+    const ta = taRef.current;
+    if (!ta || ta.selectionStart === null || ta.selectionEnd === null) return false;
+    if (ta.selectionStart !== ta.selectionEnd) return false;
+    if (histIndex >= 0 && text !== histEntryRef.current) {
+      setHistIndex(-1);
+      histDraft.current = null;
+      histEntryRef.current = null;
+      return false;
+    }
+    if (dir === -1) {
+      // ↑ only recalls while the caret sits on the FIRST line — multi-line
+      // navigation inside the draft keeps its normal meaning.
+      const before = ta.value.slice(0, ta.selectionStart);
+      if (before.includes("\n")) return false;
+      const hist = getUserHistory();
+      if (hist.length === 0) return false;
+      if (histIndex < 0) {
+        histDraft.current = text;
+        setHistIndex(0);
+        applyRecall(hist[0] ?? "");
+        return true;
+      }
+      if (histIndex >= hist.length - 1) return true; // already at the oldest — swallow
+      const next = histIndex + 1;
+      setHistIndex(next);
+      applyRecall(hist[next] ?? "");
+      return true;
+    }
+    // ↓: only while browsing history AND the caret is on the LAST line.
+    if (histIndex < 0) return false;
+    const after = ta.value.slice(ta.selectionEnd);
+    if (after.includes("\n")) return false;
+    const hist = getUserHistory();
+    if (histIndex === 0) {
+      setHistIndex(-1);
+      applyRecall(histDraft.current ?? "");
+      histDraft.current = null;
+      histEntryRef.current = null;
+      return true;
+    }
+    const next = histIndex - 1;
+    setHistIndex(next);
+    applyRecall(hist[next] ?? "");
+    return true;
   }
 
   // whitespace-nowrap: a narrow panel must never squeeze a label into
@@ -697,6 +811,12 @@ export function Composer() {
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(e) => {
+            if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
+              setHistIndex(-1);
+              histDraft.current = null;
+              histEntryRef.current = null;
+              editedRecall.current = true;
+            }
             setText(e.target.value);
             updateMentionFromCaret(e.target.value);
           }}
@@ -710,6 +830,7 @@ export function Composer() {
             if (others.length > 0) addOtherFiles(others);
           }}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.key === "Process" || e.keyCode === 229) return;
             if (cmdMatches.length > 0) {
               if (e.key === "ArrowDown") {
                 e.preventDefault();
@@ -751,12 +872,22 @@ export function Composer() {
                 return;
               }
               // 弹窗开着（含无匹配）时 ESC 只关闭弹窗，不触发停止生成。
-              if (e.key === "Escape" && !e.nativeEvent.isComposing) {
+              if (e.key === "Escape") {
                 e.preventDefault();
                 e.stopPropagation();
                 setMentionQuery(null);
                 return;
               }
+            }
+            // History recall: never while an IME composition is open (the
+            // arrows belong to the candidate picker) or mid-@-mention.
+            if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && recallHistory(-1)) {
+              e.preventDefault();
+              return;
+            }
+            if (e.key === "ArrowDown" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && recallHistory(1)) {
+              e.preventDefault();
+              return;
             }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

@@ -57,6 +57,9 @@ const en: Record<string, string> = {
   "工具执行审批": "Tool execution approval",
   "iFlow 请求执行工具": "iFlow requests to run a tool",
   "取消": "Cancel",
+  // user message delete
+  "删除该消息及其后所有内容": "Delete this message and everything after it",
+  "确认删除该消息及其后所有内容": "Confirm — deletes this message and everything after it",
   // tool cards / message list
   "已完成": "Completed",
   "失败": "Failed",

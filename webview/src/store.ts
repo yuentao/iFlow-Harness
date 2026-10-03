@@ -103,6 +103,7 @@ function createMockHost(): HostApi {
       // Mirrors the editor right-click "加入 iFlow 上下文" draft so the
       // user-bubble code-context styling (styles.css) is visible in mock mode.
       kind: "user",
+      id: "demo-u1",
       text: [
         "关于 `src/panel/panel.ts:120-145`：",
         "",
@@ -118,6 +119,7 @@ function createMockHost(): HostApi {
     },
     {
       kind: "user",
+      id: "demo-u2",
       text: "帮我看看这个仓库结构",
       images: [
         "data:image/svg+xml;base64," +
@@ -303,7 +305,9 @@ function createMockHost(): HostApi {
     // Mirror beginUserPrompt (shared/session-state.ts): images ride the user
     // block as data URLs, exactly like panel.ts sendPrompt assembles them.
     demoBlocks.push(
-      images && images.length > 0 ? { kind: "user", text, images } : { kind: "user", text },
+      images && images.length > 0
+        ? { kind: "user", id: `demo-u-${Date.now()}`, text, images }
+        : { kind: "user", id: `demo-u-${Date.now()}`, text },
     );
     // Real host behavior: the newest session gets labeled by its first prompt.
     const current = demoMeta.sessions.find((s) => s.id === demoMeta.activeSessionId);
@@ -372,7 +376,7 @@ function createMockHost(): HostApi {
     activeSessionId: "mock-session",
     // Demo: surface the question card so the option-description UI is visible
     // in browser debug mode.
-    pendingQuestions: demoQuestions,
+    pendingQuestions: demoQuestions as SessionState["pendingQuestions"],
     pendingPlanExit: null,
     replaying: false,
     initializing: false,
@@ -512,6 +516,26 @@ function createMockHost(): HostApi {
             stopReason: "end_turn",
             ...demoMeta,
             pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "answerQuestions") {
+        // Mirror the real host: answering clears the card. demoMeta carries
+        // pendingQuestions, so the mutation must land on demoMeta itself —
+        // every broadcast spreads it back otherwise and the composer stays
+        // busy forever.
+        demoMeta.pendingQuestions = null;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
             auth: authState,
           },
         });
@@ -719,6 +743,24 @@ function createMockHost(): HostApi {
             },
           });
         }, 700);
+        return;
+      }
+      if (m.type === "deleteUserMessage") {
+        // Mirror the real host: delete the user block AND everything after it.
+        const idx = demoBlocks.findIndex((b) => b.kind === "user" && b.id === m.blockId);
+        if (idx >= 0) demoBlocks.splice(idx);
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
         return;
       }
       if (m.type === "deleteSession") {

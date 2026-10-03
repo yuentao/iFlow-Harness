@@ -429,8 +429,15 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   );
 }
 
-function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
+function UserMessage({ block, canDelete }: { block: Extract<Block, { kind: "user" }>; canDelete: boolean }) {
   const send = useChat((s) => s.send);
+  // Two-step delete (mirrors the session switcher): the first click arms the
+  // confirmation, the second actually deletes. Deleting truncates everything
+  // after this message too, so an accidental click must never eat a turn.
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    if (!canDelete) setConfirming(false);
+  }, [canDelete]);
   return (
     <div className="stream-in flex justify-end">
       {/* user-bubble scopes the attached-code-context styling (styles.css):
@@ -454,6 +461,38 @@ function UserMessage({ block }: { block: Extract<Block, { kind: "user" }> }) {
         )}
         {/* subtle inner highlight so the bubble reads as a solid plane */}
         <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-inner" />
+        {canDelete && block.id && (
+          confirming ? (
+            <div className="absolute -top-2.5 right-1 z-10 flex items-center gap-1 rounded-lg border border-border bg-panel/95 px-1.5 py-0.5 shadow-card backdrop-blur-md">
+              <button
+                data-variant="danger"
+                className="rounded px-1 py-0.5 text-[10px] font-medium text-destructive hover:bg-destructive/10"
+                title={t("确认删除该消息及其后所有内容")}
+                onClick={() => {
+                  setConfirming(false);
+                  send({ type: "deleteUserMessage", blockId: block.id! });
+                }}
+              >
+                {t("确认")}
+              </button>
+              <button
+                className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-2"
+                onClick={() => setConfirming(false)}
+              >
+                {t("取消")}
+              </button>
+            </div>
+          ) : (
+            <button
+              data-variant="danger"
+              className="absolute -top-2 right-1 z-10 rounded-md border border-border bg-panel/90 p-0.5 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              title={t("删除该消息及其后所有内容")}
+              onClick={() => setConfirming(true)}
+            >
+              <Trash2 className="size-3" />
+            </button>
+          )
+        )}
       </div>
     </div>
   );
@@ -503,6 +542,7 @@ const BlockView = memo(function BlockView({
   turnActive,
   canCopy,
   canRegenerate,
+  canDelete,
   onRegenerate,
 }: {
   block: Block;
@@ -512,11 +552,14 @@ const BlockView = memo(function BlockView({
    * text block and must not grow copy/regenerate icons. */
   canCopy: boolean;
   canRegenerate: boolean;
+  /** Deleting is only offered on a settled transcript (not replaying /
+   * initializing / streaming) — mirrors the host-side gate. */
+  canDelete: boolean;
   onRegenerate: () => void;
 }) {
   switch (block.kind) {
     case "user":
-      return <UserMessage block={block} />;
+      return <UserMessage block={block} canDelete={canDelete} />;
     case "text":
       // Whitespace-only text blocks (streaming separators like "\n\n" between
       // tool calls) render as an orphaned avatar on an empty row — Markdown
@@ -897,6 +940,15 @@ function MessageListInner({ state }: { state: SessionState }) {
         turnActive={turnActive}
         canCopy={!state.replaying}
         canRegenerate={canRegenerate && i === total - 1}
+        canDelete={
+          !state.replaying &&
+          !state.initializing &&
+          state.status !== "connecting" &&
+          state.status !== "streaming" &&
+          !state.pendingApproval &&
+          !state.pendingQuestions &&
+          !state.pendingPlanExit
+        }
         onRegenerate={onRegenerate}
       />
               </div>

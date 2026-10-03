@@ -17,7 +17,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
-import { queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings, updateCurrentApiProfile } from "../acp/models-query.js";
+import { acpSessionFilePath, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings, updateCurrentApiProfile } from "../acp/models-query.js";
 import {
   clearCredentials,
   getActiveProfileName,
@@ -52,6 +52,7 @@ import {
   clampSessionLabel,
   dropSessionUpdate,
   endReplay,
+  findCliHistoryCut,
   findToolBlockById,
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
@@ -806,6 +807,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "regenerate":
         await this.regenerate();
+        break;
+      case "deleteUserMessage":
+        await this.deleteUserMessage(msg.blockId);
         break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
@@ -1587,6 +1591,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   async restartCli(): Promise<void> {
     if (this.disposed) return;
+    if (this.historySyncBusy) return;
     const state = this.store.getState();
     if (state.status === "streaming" || state.initializing) {
       void vscode.window.showWarningMessage(
@@ -1759,6 +1764,7 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Switch the active API profile and re-authenticate the session. */
   private async activateProfile(name: string): Promise<void> {
+    if (this.historySyncBusy) return;
     const profiles = await loadProfiles(this.context.secrets);
     let creds: OpenAiCompatCredentials | null = profiles[name]
       ? { ...profiles[name] }
@@ -1800,6 +1806,7 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Tear down the current CLI connection and start fresh with new credentials. */
   private async reconnectWithCredentials(creds: OpenAiCompatCredentials): Promise<void> {
+    if (this.historySyncBusy) return;
     // A first connect still in flight owns the `connecting` promise —
     // ensureClient would hand it straight back, skipping the reconnect and
     // keeping the OLD credentials. Settle it (success or failure) first.
@@ -1981,6 +1988,15 @@ export class ChatPanel implements vscode.Disposable {
   private replayTitle: string | null = null;
   /** True while a `session/load` restore is in flight. */
   private restoring = false;
+  /**
+   * True while deleteUserMessage rewrites the CLI's session-state file and
+   * reloads the session (`session/load`). The reload replaces the CLI's
+   * session object, so a prompt that slips into this window would run on the
+   * about-to-be-retired one — and its `finally { saveSessionState() }` would
+   * overwrite the freshly truncated file with the OLD untruncated history.
+   * sendPrompt / startNewSession refuse while it is set.
+   */
+  private historySyncBusy = false;
   /**
    * The session being restored. During the restore window, replayed updates
    * arrive tagged with THIS id — an abandoned turn still streaming on a
@@ -2204,13 +2220,28 @@ export class ChatPanel implements vscode.Disposable {
 
   /** User-invoked delete from the session switcher: forget + drop transcript. */
   private async deleteSession(sessionId: string): Promise<void> {
-    await this.forgetSession(sessionId);
-    await this.clearTranscript(sessionId);
-    // A7: drop the session's staged-attachment dir too — the transcript that
-    // referenced those paths is gone, so the temp copies are pure residue.
-    await rm(attachmentSessionDir(sessionId), { recursive: true, force: true }).catch((error) => {
-      this.log.warn(`removing attachment dir failed: ${errorMessage(error)}`);
-    });
+    if (this.disposed || this.historySyncBusy) return;
+    const lockState = this.store.getState();
+    const lockClient = this.client;
+    this.historySyncBusy = true;
+    this.store.setInitializing(true);
+    this.cancelAllApprovals(vscode.l10n.t("会话已删除"));
+    this.cancelAllPlanExits(vscode.l10n.t("会话已删除，计划审批已跳过"));
+    this.cancelAllPendingQuestions(vscode.l10n.t("会话已删除，提问已跳过"));
+    try {
+      await this.forgetSession(sessionId);
+      await this.clearTranscript(sessionId);
+      // A7: drop the session's staged-attachment dir too — the transcript that
+      // referenced those paths is gone, so the temp copies are pure residue.
+      await rm(attachmentSessionDir(sessionId), { recursive: true, force: true }).catch((error) => {
+        this.log.warn(`removing attachment dir failed: ${errorMessage(error)}`);
+      });
+    } finally {
+      this.historySyncBusy = false;
+      if (!this.disposed && this.store.getState() === lockState && this.client === lockClient) {
+        this.store.setInitializing(false);
+      }
+    }
   }
 
   /**
@@ -2220,6 +2251,7 @@ export class ChatPanel implements vscode.Disposable {
    * the CLI's own session file instead.
    */
   private async restoreSession(sessionId: string): Promise<boolean> {
+    if (this.historySyncBusy) return false;
     // A3: the panel was disposed — the store is gone.
     if (this.disposed) return false;
     // Fast path: the CLI only persists jsonl transcripts for sessions that
@@ -2773,6 +2805,7 @@ export class ChatPanel implements vscode.Disposable {
   // response must be written back into the store or the dropdown snaps back.
 
   private async setMode(modeId: string): Promise<void> {
+    if (this.historySyncBusy) return;
     const sessionId = this.store.getState().sessionId;
     // C2: an empty sessionId would make the CLI bind the mode to a bogus
     // session — refuse until a session actually exists.
@@ -2811,6 +2844,7 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async setModel(modelId: string): Promise<void> {
+    if (this.historySyncBusy) return;
     const sessionId = this.store.getState().sessionId;
     // C2: same empty-sessionId guard as setMode.
     if (!sessionId) {
@@ -3124,6 +3158,7 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async startNewSession(): Promise<void> {
+    if (this.historySyncBusy) return;
     // A3: never start a session into a destroyed panel.
     if (this.disposed) throw new DisposedError();
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its
@@ -3335,9 +3370,9 @@ export class ChatPanel implements vscode.Disposable {
     // prompts interleave in the transcript. The webview already disables its
     // composer in both states — this gate closes the side doors.
     const state = this.store.getState();
-    if (state.initializing || state.status === "streaming") {
+    if (state.initializing || state.status === "streaming" || this.historySyncBusy) {
       this.log.info(
-        `sendPrompt rejected: initializing=${state.initializing}, status=${state.status}`,
+        `sendPrompt rejected: initializing=${state.initializing}, status=${state.status}, historySync=${this.historySyncBusy}`,
       );
       return;
     }
@@ -3420,6 +3455,7 @@ export class ChatPanel implements vscode.Disposable {
    * already in flight.
    */
   private async regenerate(): Promise<void> {
+    if (this.historySyncBusy) return;
     const state = this.store.getState();
     if (state.initializing || state.status === "streaming") return;
     // A3: the panel was disposed — the store is gone.
@@ -3439,6 +3475,7 @@ export class ChatPanel implements vscode.Disposable {
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
+      if (this.historySyncBusy) return;
       // A3: a dispose during the handshake rejects ensureClient with
       // DisposedError; a dispose AFTER it must not write into the destroyed
       // store either.
@@ -3471,6 +3508,82 @@ export class ChatPanel implements vscode.Disposable {
       void this.persistActiveTranscript();
       void this.touchActiveSession();
       this.postSound("error");
+    }
+  }
+
+  /**
+   * Delete a user message only after the CLI history is precisely verified,
+   * rewritten, reloaded, and its model/mode are restored. The host transcript
+   * is committed last, so any failed step leaves the visible transcript intact.
+   */
+  private async deleteUserMessage(blockId: string): Promise<void> {
+    if (this.disposed || this.historySyncBusy) return;
+    const state = this.store.getState();
+    if (
+      state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
+      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+    ) {
+      this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再删除消息"));
+      return;
+    }
+    const removed = this.store.deleteUserMessage(blockId, false);
+    const sessionId = state.sessionId;
+    const client = this.client;
+    if (!removed || !sessionId || !client) {
+      this.store.appendNotice(vscode.l10n.t("无法在模型上下文中验证该消息，已保留原转录。"));
+      return;
+    }
+    const cwd = this.sessionCwd ?? this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+    const file = acpSessionFilePath(sessionId);
+    this.historySyncBusy = true;
+    this.store.setInitializing(true);
+    this.cancelAllApprovals(vscode.l10n.t("正在删除消息"));
+    this.cancelAllPlanExits(vscode.l10n.t("正在删除消息，计划审批已跳过"));
+    this.cancelAllPendingQuestions(vscode.l10n.t("正在删除消息，提问已跳过"));
+    let raw: string | null = null;
+    let reloadAttempted = false;
+    try {
+      try {
+        raw = await readFile(file, "utf8");
+        const parsed = JSON.parse(raw) as { chatHistory?: unknown };
+        const cut = findCliHistoryCut(parsed.chatHistory, removed.history);
+        if (cut === null || !Array.isArray(parsed.chatHistory)) throw new Error("CLI history cannot be matched exactly");
+        parsed.chatHistory.splice(cut);
+        const tmp = `${file}.tmp`;
+        await writeFile(tmp, JSON.stringify(parsed), "utf8");
+        await rename(tmp, file);
+        reloadAttempted = true;
+        await client.loadSession({ cwd, mcpServers: [], sessionId });
+        if (this.disposed || this.client !== client || this.store.getState().sessionId !== sessionId) {
+          throw new Error("session changed during history synchronization");
+        }
+        const after = this.store.getState();
+        if (after.modes?.currentModeId) await client.setMode(sessionId, after.modes.currentModeId);
+        if (after.currentModelId) await client.setModel(sessionId, after.currentModelId);
+      } catch (error) {
+        if (raw !== null) {
+          try {
+            await writeFile(file, raw, "utf8");
+            if (reloadAttempted && !this.disposed && this.client === client) {
+              await client.loadSession({ cwd, mcpServers: [], sessionId });
+            }
+          } catch (rollbackError) {
+            this.log.error(`deleteUserMessage: rollback FAILED: ${this.formatErrorForLog(rollbackError)}`);
+          }
+        }
+        this.log.warn(`deleteUserMessage failed; transcript retained: ${errorMessage(error)}`);
+        this.store.appendNotice(vscode.l10n.t("无法在模型上下文中验证该消息，已保留原转录。"));
+        return;
+      }
+      if (!this.store.commitUserMessageDeletion(blockId)) throw new Error("message changed during deletion");
+      await this.persistActiveTranscript(true); // Empty transcripts are durable tombstones.
+      void this.touchActiveSession();
+    } finally {
+      this.historySyncBusy = false;
+      if (!this.disposed && this.store.getState() === state && this.client === client) {
+        this.store.setInitializing(false);
+      }
     }
   }
 
@@ -3652,7 +3765,7 @@ export class ChatPanel implements vscode.Disposable {
   private persistActiveTranscript(force = false): Promise<void> {
     const state = this.store.getState();
     const id = state.activeSessionId ?? state.sessionId;
-    if (!id || state.blocks.length === 0) return Promise.resolve();
+    if (!id || (!force && state.blocks.length === 0)) return Promise.resolve();
     if (force) {
       // Cancel any pending debounced run — this forced write supersedes it.
       if (this.persistTimer) {

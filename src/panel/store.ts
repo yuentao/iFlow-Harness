@@ -10,7 +10,7 @@ import type {
   HostToWebview,
   SessionState,
 } from "../../shared/messages.js";
-import { initialSessionState } from "../../shared/messages.js";
+import { initialSessionState, normalizeUserPromptText } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
   applySessionUpdate,
@@ -21,6 +21,7 @@ import {
   completePrompt,
   clearPendingApproval,
   clearPendingPlanExit,
+  deleteUserMessageById,
   markToolReverted,
   refreshSessionUsage,
   setMeta,
@@ -299,6 +300,36 @@ export class SessionStore {
     const index = attachSynthesizedDiff(this.state, toolCallId, diff);
     if (index === null) return false;
     this.noteMutationIndex(index);
+    this.flush();
+    return true;
+  }
+
+  /**
+   * Delete a user message and everything after it. The returned full prefix of
+   * user prompts lets the host prove that the CLI history has not been
+   * compressed, reordered, or ambiguously duplicated before truncating it.
+   */
+  deleteUserMessage(blockId: string, commit = true): { text: string; history: string[]; occurrence: number } | null {
+    const blocks = this.state.blocks;
+    const index = blocks.findIndex((b) => b.kind === "user" && b.id === blockId);
+    if (index < 0) return null;
+    const block = blocks[index]!;
+    if (block.kind !== "user") return null;
+    const text = block.text;
+    const priorUsers = blocks
+      .slice(0, index)
+      .filter((b): b is Extract<Block, { kind: "user" }> => b.kind === "user");
+    const history = priorUsers.map((b) => b.text);
+    const occurrence = priorUsers.filter((b) => normalizeUserPromptText(b.text) === normalizeUserPromptText(text)).length;
+    history.push(text);
+    if (commit) this.commitUserMessageDeletion(blockId);
+    return { text, history, occurrence };
+  }
+
+  commitUserMessageDeletion(blockId: string): boolean {
+    const mutated = deleteUserMessageById(this.state, blockId);
+    if (mutated === null) return false;
+    this.noteMutationIndex(mutated);
     this.flush();
     return true;
   }

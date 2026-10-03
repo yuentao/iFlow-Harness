@@ -469,6 +469,15 @@ export type WebviewToHost =
       codeContext?: CodeContextUi;
     }
   | { type: "regenerate" }
+  /** Delete one user message AND everything after it (truncate the
+   * transcript at that block). Host-owned: the transcript lives in the
+   * Extension Host, the webview only names the block by its stable id (P4).
+   * The host additionally truncates the CLI's own conversation history
+   * (`~/.iflow/acp/sessions/<sessionId>.json` + `session/load` reload) so the
+   * model genuinely stops seeing the deleted turn — when that sync is
+   * impossible (history compressed away / text unlocatable) the host says so
+   * via a toast instead of silently pretending. */
+  | { type: "deleteUserMessage"; blockId: string }
   | { type: "cancel" }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
@@ -540,3 +549,43 @@ export type WebviewToHost =
    * at worst lost, never silently merged). Host writes settings.json and
    * offers a hot restart. Reply: `mcpServers` with `error` on failure. */
   | { type: "saveMcpServers"; servers: Record<string, unknown> };
+
+// ---------------------------------------------------------------------------
+// User-prompt text helpers (zero-dependency — shared by the host reducer, the
+// host's CLI-history matching, and the webview composer's ↑/↓ recall)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical form of a user prompt for cross-store matching (transcript block
+ * ↔ CLI chatHistory entry ↔ composer history recall): strips the zero-width
+ * escape `toAgentPromptText` prefixes to non-command "/" input (the CLI
+ * persists the escaped form), drops the `（文件：name → path）` attachment
+ * note lines beginUserPrompt appends, and trims.
+ */
+export function normalizeUserPromptText(text: string): string {
+  return text
+    .replace(/\u200B/g, "")
+    .split("\n")
+    .filter((line) => !/^（文件：.*→.*）$/.test(line))
+    .join("\n")
+    .trim();
+}
+
+/**
+ * User-prompt texts of a transcript, oldest → newest, for the composer's
+ * ↑/↓ history recall. Normalized via normalizeUserPromptText (attachment
+ * notes stripped), blanks dropped, duplicates removed keeping the LAST
+ * occurrence so recall shows the freshest copy first.
+ */
+export function collectUserPromptTexts(blocks: readonly Block[]): string[] {
+  const texts: string[] = [];
+  for (const b of blocks) {
+    if (b.kind !== "user") continue;
+    const stripped = normalizeUserPromptText(b.text);
+    if (!stripped) continue;
+    const dup = texts.lastIndexOf(stripped);
+    if (dup >= 0) texts.splice(dup, 1);
+    texts.push(stripped);
+  }
+  return texts;
+}

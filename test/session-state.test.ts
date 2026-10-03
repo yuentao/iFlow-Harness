@@ -23,6 +23,8 @@ import {
   setPendingApproval,
   clearPendingApproval,
   closeOpenSubAgents,
+  deleteUserMessageById,
+  findCliHistoryCut,
   markToolReverted,
   setSessions,
   beginReplay,
@@ -30,7 +32,7 @@ import {
   parseTranscriptJsonl,
   toAgentPromptText,
 } from "../shared/session-state";
-import { initialSessionState, type Block, type SessionState } from "../shared/messages";
+import { initialSessionState, collectUserPromptTexts, normalizeUserPromptText, type Block, type SessionState } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -1507,5 +1509,151 @@ describe("block id uniqueness across host reloads (P4)", () => {
     // And live minting after the restore can never collide either.
     const live = nextBlockId();
     expect(seen.has(live)).toBe(false);
+  });
+});
+
+describe("deleteUserMessageById (truncate transcript at a user turn)", () => {
+  function seeded(): SessionState {
+    const state = initialSessionState();
+    beginUserPrompt(state, "第一条");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回复一" } }));
+    beginUserPrompt(state, "第二条");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回复二" } }));
+    return state;
+  }
+
+  it("removes the user block AND everything after it, returning the index", () => {
+    const state = seeded();
+    const firstUser = state.blocks.find((b) => b.kind === "user" && b.text === "第一条")!;
+    const before = state.blocks.length;
+    const index = deleteUserMessageById(state, firstUser.id!);
+    expect(index).toBe(0);
+    // Everything from the deleted turn on is gone — no orphaned reply.
+    expect(state.blocks).toHaveLength(0);
+    expect(state.blocks.length).toBeLessThan(before);
+  });
+
+  it("keeps earlier turns when deleting a later message", () => {
+    const state = seeded();
+    const secondUser = state.blocks.find((b) => b.kind === "user" && b.text === "第二条")!;
+    const index = deleteUserMessageById(state, secondUser.id!);
+    expect(index).toBeGreaterThan(0);
+    // The first turn (user + reply) survives untouched.
+    expect(state.blocks.map((b) => b.kind)).toEqual(["user", "text"]);
+    expect((state.blocks[0] as { text: string }).text).toBe("第一条");
+  });
+
+  it("recomputes the usage estimate after the deletion", () => {
+    const state = seeded();
+    refreshSessionUsage(state);
+    const before = state.usage!.inputTokens;
+    expect(before).toBeGreaterThan(0);
+    const firstUser = state.blocks.find((b) => b.kind === "user")!;
+    deleteUserMessageById(state, firstUser.id!);
+    // Deleting every turn drops the input estimate to the emptied baseline.
+    expect(state.usage!.inputTokens).toBeLessThan(before);
+  });
+
+  it("returns null for a non-user block id or an unknown id", () => {
+    const state = seeded();
+    const textBlock = state.blocks.find((b) => b.kind === "text")!;
+    expect(deleteUserMessageById(state, textBlock.id!)).toBeNull();
+    expect(deleteUserMessageById(state, "no-such-id")).toBeNull();
+    // Untouched on a miss.
+    expect(state.blocks.length).toBeGreaterThan(0);
+  });
+});
+
+describe("findCliHistoryCut (locate a turn inside the CLI chatHistory)", () => {
+  const user = (text: string) => ({ role: "user", parts: [{ text }] });
+  const model = (text: string) => ({ role: "model", parts: [{ text }] });
+  const toolResp = (name: string) => ({ role: "user", parts: [{ functionResponse: { name, response: {} } }] });
+
+  it("matches an exact text-only user entry", () => {
+    const history = [user("第一条"), model("回复"), user("第二条"), model("回复二")];
+    expect(findCliHistoryCut(history, ["第一条", "第二条"])).toBe(2);
+  });
+
+  it("matches by prefix (agent-side text carries an attachment block the transcript lacks)", () => {
+    const history = [user("看这个文件\n\n用户附带以下本地文件（可按需读取）：\n- a.ts → /p/a.ts")];
+    expect(findCliHistoryCut(history, ["看这个文件"])).toBe(0);
+  });
+
+  it("disambiguates identical prompts by occurrence", () => {
+    const history = [user("hi"), model("a"), user("hi"), model("b")];
+    expect(findCliHistoryCut(history, ["hi"])).toBe(0);
+    expect(findCliHistoryCut(history, ["hi", "hi"])).toBe(2);
+    // A third occurrence does not exist.
+    expect(findCliHistoryCut(history, ["hi", "hi", "hi"])).toBeNull();
+  });
+
+  it("keeps exact and attachment-prefix occurrences in one chronological pool", () => {
+    const history = [
+      user("hi\n\n用户附带以下本地文件（可按需读取）：\n- a.ts → /p/a.ts"),
+      model("x"),
+      user("hi"),
+    ];
+    expect(findCliHistoryCut(history, ["hi"])).toBe(0);
+    expect(findCliHistoryCut(history, ["hi", "hi"])).toBe(2);
+  });
+
+  it("rejects an arbitrary longer prompt instead of cutting at a prefix", () => {
+    const history = [user("部署服务并检查日志")];
+    expect(findCliHistoryCut(history, ["部署服务"])).toBeNull();
+  });
+
+  it("strips whole system-reminder parts before matching", () => {
+    const history = [
+      { role: "user", parts: [{ text: "<system-reminder>context</system-reminder>" }, { text: "真正的提问" }] },
+    ];
+    expect(findCliHistoryCut(history, ["真正的提问"])).toBe(0);
+  });
+
+  it("never matches a tool-response entry (role user but functionResponse parts)", () => {
+    const history = [toolResp("read_file"), model("x")];
+    expect(findCliHistoryCut(history, ["read_file"])).toBeNull();
+  });
+
+  it("returns null when the history was compressed away (no match)", () => {
+    const history = [model("这是压缩后的摘要，原文已不在上下文中。"), user("之后的新消息")];
+    expect(findCliHistoryCut(history, ["很久以前被压缩掉的原始提问"])).toBeNull();
+  });
+
+  it("returns null for a non-array history or an empty needle", () => {
+    expect(findCliHistoryCut(undefined, ["x"])).toBeNull();
+    expect(findCliHistoryCut({ not: "an array" }, ["x"])).toBeNull();
+    expect(findCliHistoryCut([user("x")], ["   "])).toBeNull();
+  });
+
+  it("matches the zero-width-escaped form the CLI persisted", () => {
+    // toAgentPromptText prefixes U+200B to non-command "/" input; the CLI
+    // stores the escaped text, the transcript block carries the same escape.
+    const history = [user("\u200B/foo not a command")];
+    expect(findCliHistoryCut(history, ["\u200B/foo not a command"])).toBe(0);
+  });
+});
+
+describe("normalizeUserPromptText & collectUserPromptTexts", () => {
+  it("strips the zero-width escape and the attachment note lines", () => {
+    expect(normalizeUserPromptText("\u200B/foo bar")).toBe("/foo bar");
+    expect(normalizeUserPromptText("看这个\n（文件：a.ts → /p/a.ts）\n（文件：b.ts → /p/b.ts）")).toBe("看这个");
+  });
+
+  it("collects user prompts oldest→newest, deduped keeping the last, notes stripped", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "第一条");
+    beginUserPrompt(state, "重复");
+    beginUserPrompt(state, "第二条");
+    beginUserPrompt(state, "重复");
+    const texts = collectUserPromptTexts(state.blocks);
+    // Dedup keeps the LAST occurrence → "重复" sits at its newest position.
+    expect(texts).toEqual(["第一条", "第二条", "重复"]);
+  });
+
+  it("drops attachment-only prompts down to their typed text and skips blanks", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "看文件", undefined, [{ name: "a.ts", path: "/p/a.ts" }]);
+    const texts = collectUserPromptTexts(state.blocks);
+    expect(texts).toEqual(["看文件"]);
   });
 });

@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ChatPanel, DisposedError } from "../src/panel/panel.js";
+import { acpSessionFilePath } from "../src/acp/models-query.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type * as vscode from "vscode";
 
@@ -68,6 +71,90 @@ const panelOf = (panel: ChatPanel) =>
     ensureClient: () => Promise<unknown>;
     store: { getState: () => { status: string; errorMessage: string | null } };
   };
+
+describe("ChatPanel delete-user-message transaction", () => {
+  let panel: ChatPanel;
+  let iflowHome: string;
+
+  beforeEach(async () => {
+    iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-delete-test-"));
+    process.env.IFLOW_HOME = iflowHome;
+    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    await rm(iflowHome, { recursive: true, force: true });
+    delete process.env.IFLOW_HOME;
+  });
+
+  function harness(loadSession: () => Promise<void> | void) {
+    const p = panel as unknown as {
+      client: unknown;
+      store: { getState: () => any; userPrompt: (text: string) => void; sessionStarted: (meta: any) => void };
+      deleteUserMessage: (id: string) => Promise<void>;
+      sendPrompt: (text: string) => Promise<void>;
+      historySyncBusy: boolean;
+      ownTranscriptFilePath: (id: string) => string;
+    };
+    p.store.sessionStarted({ sessionId: "delete-session", currentModelId: "model-a", modes: { currentModeId: "default", availableModes: [] } });
+    p.store.userPrompt("first");
+    p.store.userPrompt("second");
+    p.store.getState().status = "idle";
+    p.client = {
+      loadSession: vi.fn(async () => loadSession()),
+      setMode: vi.fn(async () => ({ success: true })),
+      setModel: vi.fn(async () => ({ success: true })),
+    };
+    return p;
+  }
+
+  async function seedCliHistory() {
+    const file = acpSessionFilePath("delete-session");
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify({ chatHistory: [
+      { role: "user", parts: [{ text: "first" }] },
+      { role: "model", parts: [{ text: "reply" }] },
+      { role: "user", parts: [{ text: "second" }] },
+    ] }), "utf8");
+    return file;
+  }
+
+  it("retains the original transcript when the CLI reload fails and releases the lock", async () => {
+    const p = harness(async () => { throw new Error("reload failed"); });
+    const file = await seedCliHistory();
+    const targetId = p.store.getState().blocks[0]!.id!;
+    await p.deleteUserMessage(targetId);
+    expect(p.store.getState().blocks).toHaveLength(2);
+    expect(p.historySyncBusy).toBe(false);
+    expect(p.store.getState().initializing).toBe(false);
+    expect(JSON.parse(await readFile(file, "utf8")).chatHistory).toHaveLength(3);
+  });
+
+  it("blocks a prompt while the CLI history reload is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const p = harness(() => gate);
+    await seedCliHistory();
+    const targetId = p.store.getState().blocks[0]!.id!;
+    const deleting = p.deleteUserMessage(targetId);
+    await vi.waitFor(() => expect(p.historySyncBusy).toBe(true));
+    await p.sendPrompt("must not start");
+    expect(p.store.getState().blocks).toHaveLength(2);
+    release();
+    await deleting;
+  });
+
+  it("persists an empty transcript after a successful deletion", async () => {
+    const p = harness(() => undefined);
+    await seedCliHistory();
+    const targetId = p.store.getState().blocks[0]!.id!;
+    await p.deleteUserMessage(targetId);
+    expect(p.store.getState().blocks).toHaveLength(0);
+    const persisted = JSON.parse(await readFile(p.ownTranscriptFilePath("delete-session"), "utf8"));
+    expect(persisted.blocks).toEqual([]);
+  });
+});
 
 describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
   let panel: ChatPanel;

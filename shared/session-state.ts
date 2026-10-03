@@ -16,6 +16,7 @@ import { countTokens as gptCountTokens } from "gpt-tokenizer";
 import {
   emptySessionUsage,
   initialSessionState,
+  normalizeUserPromptText,
   type Block,
   type ModelInfoUi,
   type PendingApprovalUi,
@@ -1602,6 +1603,82 @@ export function markToolReverted(state: SessionState, toolCallId: string): numbe
       recountBlockTokens(block);
       return i;
     }
+  }
+  return null;
+}
+
+// --- delete a user message (truncate transcript + CLI history) ---------------
+
+/**
+ * Delete the user message with the given block id AND everything after it
+ * (the user directive: deleting a prompt also removes the turn it produced).
+ * Returns the truncation index (for the blockPatch `mutatedFrom` anchor) or
+ * null when no user block carries that id. Recomputes the usage estimate —
+ * the deleted blocks genuinely leave the context, and `refreshSessionUsage`
+ * is reference-stable when the numbers happen to be unchanged.
+ */
+export function deleteUserMessageById(state: SessionState, blockId: string): number | null {
+  const index = state.blocks.findIndex((b) => b.kind === "user" && b.id === blockId);
+  if (index < 0) return null;
+  state.blocks.splice(index);
+  refreshSessionUsage(state);
+  return index;
+}
+
+/** Text of a chatHistory entry's parts, skipping whole system-reminder
+ * parts (the CLI/adapter injects them around the typed text — measured in a
+ * real `~/.iflow/acp/sessions/*.json`). Returns null when the entry is not a
+ * pure-text user turn (tool responses ride role:"user" too, but carry
+ * functionResponse parts — never deletion candidates). */
+function cliEntryUserText(entry: unknown): string | null {
+  const e = entry as { role?: unknown; parts?: unknown } | null;
+  if (!e || e.role !== "user" || !Array.isArray(e.parts)) return null;
+  let text = "";
+  for (const part of e.parts as Array<Record<string, unknown>>) {
+    if (!part || typeof part.text !== "string") return null;
+    const trimmed = part.text.trim();
+    if (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) continue;
+    text += part.text;
+  }
+  return text.replace(/\u200B/g, "").trim();
+}
+
+/**
+ * Locate the truncation point in the CLI's own conversation history for a
+ * deleted user prompt. Wire shape (probed, CLI 0.5.19 `saveSessionState` →
+ * `~/.iflow/acp/sessions/<id>.json`): `chatHistory` is Gemini-API-form
+ * `{ role, parts }` entries; a real user turn is a text-only `role:"user"`
+ * entry. The caller supplies every transcript user prompt through the target,
+ * so identical text, compression, and injected turns cannot be mistaken for
+ * the intended deletion target.
+ *
+ * Matching is deliberately conservative: each CLI text-only user turn from
+ * the beginning must exactly match the corresponding transcript prompt, with
+ * one explicit attachment suffix exception. Any mismatch returns null; the
+ * caller must NOT truncate and must tell the user. NEVER guess a truncation
+ * point: a wrong index silently amputates live context (same discipline as
+ * the synthesized-diff rule, pitfall #6).
+ */
+export function findCliHistoryCut(
+  chatHistory: unknown,
+  expectedUserTexts: readonly string[],
+): number | null {
+  if (!Array.isArray(chatHistory) || expectedUserTexts.length === 0) return null;
+  const expected = expectedUserTexts.map(normalizeUserPromptText);
+  if (expected.some((text) => !text)) return null;
+  let matched = 0;
+  for (let i = 0; i < chatHistory.length; i++) {
+    const hay = cliEntryUserText(chatHistory[i]);
+    if (hay === null) continue;
+    const needle = expected[matched];
+    if (!needle) return null;
+    const suffix = hay.slice(needle.length);
+    const exact = hay === needle;
+    const attachmentPrefix = hay.startsWith(needle) &&
+      /(?:^|\n)用户附带以下本地文件[\s\S]*：\n- /u.test(suffix);
+    if (!exact && !attachmentPrefix) return null;
+    if (matched === expected.length - 1) return i;
+    matched++;
   }
   return null;
 }

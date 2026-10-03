@@ -18,6 +18,23 @@ export function oauthCredsFilePath(): string {
 }
 
 /**
+ * The CLI's ACP session-state file — `~/.iflow/acp/sessions/<sessionId>.json`.
+ *
+ * Wire behavior (probed, CLI 0.5.19 bundle): every `session/prompt` ends in a
+ * `finally { saveSessionState() }` that writes
+ * `{ sessionId, cwd, createdAt, lastActivity, chatHistory }` where `chatHistory`
+ * is the full Gemini-API-form conversation (`{ role, parts }`). `session/load`
+ * reads this file back and calls `setHistory(chatHistory)`, which is what makes
+ * a genuine context-level deletion possible: rewrite the file, reload, and the
+ * model stops seeing the removed turns. Home resolution mirrors the CLI's own
+ * `Tn()` (IFLOW_HOME override, else `os.homedir()/.iflow`).
+ */
+export function acpSessionFilePath(sessionId: string): string {
+  const home = process.env.IFLOW_HOME ?? path.join(homedir(), ".iflow");
+  return path.join(home, "acp", "sessions", `${sessionId}.json`);
+}
+
+/**
  * Archive the OAuth credential cache aside when its token is provably dead.
  *
  * The CLI's `authenticate` consults this file FIRST on every call; for a

@@ -72,5 +72,7 @@
   "CLI 已重启": "CLI restarted",
   "CLI 已重启，计划审批已跳过": "CLI restarted, plan approval skipped",
   "无法读取 {0}（文件缺失或不可读）": "Cannot read {0} (missing or unreadable)",
-  "无法写入 {0}（文件缺失或不可读），MCP 配置未保存": "Cannot write {0} (missing or unreadable) — MCP config not saved"
+  "无法写入 {0}（文件缺失或不可读），MCP 配置未保存": "Cannot write {0} (missing or unreadable) — MCP config not saved",
+  "正在生成或切换会话，请先停止后再删除消息": "Generating or switching sessions — stop it before deleting a message",
+  "无法在模型上下文中验证该消息，已保留原转录。": "Could not verify the message in model context; the original transcript was kept."
 }

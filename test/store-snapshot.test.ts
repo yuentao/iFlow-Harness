@@ -484,3 +484,61 @@ describe("SessionStore toast lifecycle (persistent display-only notices)", () =>
     expect(msg.toastId).toBe(id);
   });
 });
+
+describe("SessionStore.deleteUserMessage (snapshot anchoring)", () => {
+  it("forces a FULL snapshot — a length shrink breaks the append-only anchor", () => {
+    const { store, messages } = makeStore();
+    store.markConnected(); // v1 full snapshot
+    store.userPrompt("第一条");
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回复一" } }));
+    store.pushSnapshot();
+    store.userPrompt("第二条");
+    store.pushSnapshot();
+    const firstUserId = store
+      .getState()
+      .blocks.find((b) => b.kind === "user" && b.text === "第一条")!.id!;
+    messages.length = 0;
+
+    const removed = store.deleteUserMessage(firstUserId);
+    expect(removed).not.toBeNull();
+    expect(removed!.text).toBe("第一条");
+    expect(removed!.occurrence).toBe(0);
+
+    // Deleting shrinks the block array, so `syncedLen >= length` no longer
+    // holds and the incremental anchor is invalid. A blockPatch CANNOT express
+    // a removal (applyBlockPatch treats an empty tail as metadata-only and
+    // would silently keep the deleted blocks), so the store must fall back to
+    // a full snapshot.
+    const msg = messages[messages.length - 1]!;
+    expect(msg.type).toBe("snapshot");
+    if (msg.type !== "snapshot") throw new Error("unreachable");
+    // Deleting the FIRST user turn truncates everything after it → empty.
+    expect(msg.state.blocks).toHaveLength(0);
+  });
+
+  it("keeps earlier turns and reports the occurrence index for duplicate prompts", () => {
+    const { store } = makeStore();
+    store.markConnected();
+    store.userPrompt("重复");
+    store.onSessionUpdate(notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回复甲" } }));
+    store.pushSnapshot();
+    store.userPrompt("重复");
+    store.pushSnapshot();
+    // The SECOND identical prompt carries occurrence 1 (one earlier twin).
+    const secondId = [...store.getState().blocks]
+      .reverse()
+      .find((b) => b.kind === "user" && b.text === "重复")!.id!;
+    const removed = store.deleteUserMessage(secondId);
+    expect(removed!.occurrence).toBe(1);
+    // Only the second turn is gone; the first (user + reply) survives.
+    expect(store.getState().blocks.map((b) => b.kind)).toEqual(["user", "text"]);
+  });
+
+  it("returns null and pushes nothing for an unknown block id", () => {
+    const { store, messages } = makeStore();
+    store.markConnected();
+    messages.length = 0;
+    expect(store.deleteUserMessage("no-such-id")).toBeNull();
+    expect(messages).toHaveLength(0);
+  });
+});
