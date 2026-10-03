@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChatPanel, DisposedError } from "../src/panel/panel.js";
 import { acpSessionFilePath } from "../src/acp/models-query.js";
@@ -85,6 +86,9 @@ describe("ChatPanel delete-user-message transaction", () => {
   afterEach(async () => {
     await panel.dispose();
     await rm(iflowHome, { recursive: true, force: true });
+    // The panel's storageUri is this test dir — the successful-delete case
+    // writes an empty-transcript tombstone under test/transcripts/.
+    await rm(path.join(here, "transcripts"), { recursive: true, force: true });
     delete process.env.IFLOW_HOME;
   });
 
@@ -153,6 +157,20 @@ describe("ChatPanel delete-user-message transaction", () => {
     expect(p.store.getState().blocks).toHaveLength(0);
     const persisted = JSON.parse(await readFile(p.ownTranscriptFilePath("delete-session"), "utf8"));
     expect(persisted.blocks).toEqual([]);
+  });
+
+  it("never persists an empty transcript on dispose (tombstone is delete-only)", async () => {
+    // Regression (6d89c4f): the tombstone write must stay exclusive to the
+    // delete path. A dispose flush of an EMPTY session would create a
+    // transcript file, making the dead husk look restorable — prune keeps it,
+    // restoreLastSession restores a broken empty shell.
+    const p = harness(() => undefined);
+    // Blocks were added then fully deleted WITHOUT the delete-message path
+    // (simulates any other truncation) — dispose must not persist the husk.
+    p.store.getState().blocks.length = 0;
+    await panel.dispose();
+    const file = p.ownTranscriptFilePath("delete-session");
+    expect(existsSync(file)).toBe(false);
   });
 });
 

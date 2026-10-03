@@ -502,7 +502,6 @@ describe("SessionStore.deleteUserMessage (snapshot anchoring)", () => {
     const removed = store.deleteUserMessage(firstUserId);
     expect(removed).not.toBeNull();
     expect(removed!.text).toBe("第一条");
-    expect(removed!.occurrence).toBe(0);
 
     // Deleting shrinks the block array, so `syncedLen >= length` no longer
     // holds and the incremental anchor is invalid. A blockPatch CANNOT express
@@ -516,7 +515,7 @@ describe("SessionStore.deleteUserMessage (snapshot anchoring)", () => {
     expect(msg.state.blocks).toHaveLength(0);
   });
 
-  it("keeps earlier turns and reports the occurrence index for duplicate prompts", () => {
+  it("keeps earlier turns when deleting a duplicate prompt", () => {
     const { store } = makeStore();
     store.markConnected();
     store.userPrompt("重复");
@@ -524,12 +523,11 @@ describe("SessionStore.deleteUserMessage (snapshot anchoring)", () => {
     store.pushSnapshot();
     store.userPrompt("重复");
     store.pushSnapshot();
-    // The SECOND identical prompt carries occurrence 1 (one earlier twin).
     const secondId = [...store.getState().blocks]
       .reverse()
       .find((b) => b.kind === "user" && b.text === "重复")!.id!;
     const removed = store.deleteUserMessage(secondId);
-    expect(removed!.occurrence).toBe(1);
+    expect(removed!.history).toEqual(["重复", "重复"]);
     // Only the second turn is gone; the first (user + reply) survives.
     expect(store.getState().blocks.map((b) => b.kind)).toEqual(["user", "text"]);
   });

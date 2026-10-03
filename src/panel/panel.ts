@@ -2225,9 +2225,15 @@ export class ChatPanel implements vscode.Disposable {
     const lockClient = this.client;
     this.historySyncBusy = true;
     this.store.setInitializing(true);
-    this.cancelAllApprovals(vscode.l10n.t("会话已删除"));
-    this.cancelAllPlanExits(vscode.l10n.t("会话已删除，计划审批已跳过"));
-    this.cancelAllPendingQuestions(vscode.l10n.t("会话已删除，提问已跳过"));
+    // Only the ACTIVE session's pending cards belong to what is being deleted.
+    // Cancelling them unconditionally (all sessions) silently rejected a live
+    // approval while the user deleted an unrelated session from the switcher.
+    const activeId = lockState.activeSessionId ?? lockState.sessionId;
+    if (sessionId === activeId) {
+      this.cancelAllApprovals(vscode.l10n.t("会话已删除"));
+      this.cancelAllPlanExits(vscode.l10n.t("会话已删除，计划审批已跳过"));
+      this.cancelAllPendingQuestions(vscode.l10n.t("会话已删除，提问已跳过"));
+    }
     try {
       await this.forgetSession(sessionId);
       await this.clearTranscript(sessionId);
@@ -3538,9 +3544,9 @@ export class ChatPanel implements vscode.Disposable {
     const file = acpSessionFilePath(sessionId);
     this.historySyncBusy = true;
     this.store.setInitializing(true);
-    this.cancelAllApprovals(vscode.l10n.t("正在删除消息"));
-    this.cancelAllPlanExits(vscode.l10n.t("正在删除消息，计划审批已跳过"));
-    this.cancelAllPendingQuestions(vscode.l10n.t("正在删除消息，提问已跳过"));
+    // No cancelAll* here: the entry gate above excludes every pending card and
+    // the lock (plus the webview's locked composer) keeps new ones from
+    // arriving mid-sync — the agent only pushes cards in response to a prompt.
     let raw: string | null = null;
     let reloadAttempted = false;
     try {
@@ -3577,7 +3583,10 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       if (!this.store.commitUserMessageDeletion(blockId)) throw new Error("message changed during deletion");
-      await this.persistActiveTranscript(true); // Empty transcripts are durable tombstones.
+      // The deleted turn may have been the only content — an empty transcript
+      // is the durable tombstone proving the deletion (force + allowEmpty is
+      // the ONLY place an empty write is legal, see persistActiveTranscript).
+      await this.persistActiveTranscript(true, true);
       void this.touchActiveSession();
     } finally {
       this.historySyncBusy = false;
@@ -3762,10 +3771,16 @@ export class ChatPanel implements vscode.Disposable {
   private persistDirty = false;
   private static readonly PERSIST_DEBOUNCE_MS = 500;
 
-  private persistActiveTranscript(force = false): Promise<void> {
+  private persistActiveTranscript(force = false, allowEmpty = false): Promise<void> {
     const state = this.store.getState();
     const id = state.activeSessionId ?? state.sessionId;
-    if (!id || (!force && state.blocks.length === 0)) return Promise.resolve();
+    // Empty transcripts are only durable where a deletion left them (tombstone,
+    // `allowEmpty`); every other caller (dispose flush, restore seed, turn end)
+    // must keep skipping empty writes — otherwise an unused auto-session would
+    // gain a transcript file, defeating hasPersistedTranscript's "dead husk"
+    // detection (prune keeps it, restoreLastSession restores a broken empty
+    // shell instead of falling back to the last real conversation).
+    if (!id || (state.blocks.length === 0 && !allowEmpty)) return Promise.resolve();
     if (force) {
       // Cancel any pending debounced run — this forced write supersedes it.
       if (this.persistTimer) {

@@ -10,7 +10,7 @@ import type {
   HostToWebview,
   SessionState,
 } from "../../shared/messages.js";
-import { initialSessionState, normalizeUserPromptText } from "../../shared/messages.js";
+import { initialSessionState } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
   applySessionUpdate,
@@ -309,21 +309,20 @@ export class SessionStore {
    * user prompts lets the host prove that the CLI history has not been
    * compressed, reordered, or ambiguously duplicated before truncating it.
    */
-  deleteUserMessage(blockId: string, commit = true): { text: string; history: string[]; occurrence: number } | null {
+  deleteUserMessage(blockId: string, commit = true): { text: string; history: string[] } | null {
     const blocks = this.state.blocks;
     const index = blocks.findIndex((b) => b.kind === "user" && b.id === blockId);
     if (index < 0) return null;
     const block = blocks[index]!;
     if (block.kind !== "user") return null;
     const text = block.text;
-    const priorUsers = blocks
+    const history = blocks
       .slice(0, index)
-      .filter((b): b is Extract<Block, { kind: "user" }> => b.kind === "user");
-    const history = priorUsers.map((b) => b.text);
-    const occurrence = priorUsers.filter((b) => normalizeUserPromptText(b.text) === normalizeUserPromptText(text)).length;
+      .filter((b): b is Extract<Block, { kind: "user" }> => b.kind === "user")
+      .map((b) => b.text);
     history.push(text);
     if (commit) this.commitUserMessageDeletion(blockId);
-    return { text, history, occurrence };
+    return { text, history };
   }
 
   commitUserMessageDeletion(blockId: string): boolean {
