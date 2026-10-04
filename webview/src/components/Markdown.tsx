@@ -165,6 +165,44 @@ export function Markdown({
       wrap.appendChild(btn);
     });
 
+    // Pseudo code-blocks: instead of a fenced block the model sometimes wraps
+    // EVERY line in single backticks — each line renders as an inline-code
+    // pill, which reads as a per-line background stripe. Detect those
+    // paragraphs (a <p> made only of code + <br>, or a run of ≥2 consecutive
+    // single-code <p>s) and tag them `.code-lines`; styles.css strips the
+    // pill treatment so they render as plain mono lines. Idempotent.
+    const lineCodeCount = (el: Element): number => {
+      if (el.tagName !== "P") return -1;
+      let codes = 0;
+      for (const n of Array.from(el.childNodes)) {
+        if (n.nodeType === 1) {
+          const tag = (n as Element).tagName;
+          if (tag === "CODE") codes++;
+          else if (tag !== "BR") return -1;
+        } else if ((n.textContent ?? "").trim() !== "") {
+          return -1;
+        }
+      }
+      return codes;
+    };
+    let run: HTMLElement[] = [];
+    const flushRun = () => {
+      if (run.length >= 2) for (const p of run) p.classList.add("code-lines");
+      run = [];
+    };
+    for (const el of Array.from(root.children)) {
+      const codes = lineCodeCount(el);
+      if (codes >= 1) {
+        run.push(el as HTMLElement);
+        // A single <p> of several backtick-wrapped lines is self-evidently a
+        // code block — no run needed.
+        if (codes >= 2) el.classList.add("code-lines");
+      } else {
+        flushRun();
+      }
+    }
+    flushRun();
+
     // Wide GFM tables must scroll horizontally on a narrow panel instead of
     // stretching the whole layout (same idempotent wrap pattern as pres).
     root.querySelectorAll("table").forEach((table) => {

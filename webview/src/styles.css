@@ -937,6 +937,23 @@ pre {
   border-radius: 4px;
 }
 
+/* Pseudo code-blocks (Markdown.tsx `.code-lines`): the model wrapped every
+   line in single backticks instead of using a fence, so each line rendered as
+   an inline-code pill — visually a per-line background stripe. Strip the pill
+   treatment and tighten the paragraph rhythm so the lines read as one
+   continuous mono block. */
+.md p.code-lines {
+  margin-block: 0;
+  line-height: 1.7;
+}
+
+.md .code-lines code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+}
+
 /* Syntax highlighting: hljs token spans (produced by webview/src/highlight.ts
    via the marked code renderer) colored by the --syn-* design tokens, so both
    themes stay in step with the rest of the panel palette. Scoped to fenced
