@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { HelpCircle, Check } from "lucide-react";
+import { HelpCircle, Check, Circle, CircleDot, Square, CheckSquare, Plus } from "lucide-react";
 import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { CountdownBar } from "./ui";
+
+/**
+ * When any option's description exceeds this length, the option row switches
+ * from horizontal wrap (cards of uneven height, cramped 260px columns with
+ * broken line-wraps) to a single-column full-width list, which stays readable
+ * for long copy.
+ */
+const LONG_DESCRIPTION_CHARS = 30;
 
 /**
  * ask_user_question card (iFlow `_iflow/user/questions`). One section per
@@ -93,52 +101,69 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         {pending.questions.map((q) => {
           const picks = selected[q.header] ?? new Set<string>();
           const isCustomOpen = customOpen[q.header] ?? false;
+          const vertical = q.options.some((opt) => (opt.description?.length ?? 0) > LONG_DESCRIPTION_CHARS);
           return (
             <div key={q.header}>
-              <p className="mb-1 flex items-center gap-1.5">
-                <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+              <p className="mb-1.5 flex items-start gap-1.5 leading-snug">
+                <span className="mt-px shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
                   {q.header}
                 </span>
-                <span className="text-foreground/90">{q.question}</span>
+                <span className="min-w-0 text-foreground/90">{q.question}</span>
               </p>
-              <div className="flex flex-wrap gap-1.5">
+              <div className={vertical ? "grid gap-1.5" : "flex flex-wrap gap-1.5"}>
                 {q.options.map((opt) => {
                   const active = picks.has(opt.label);
+                  const Indicator = q.multiSelect
+                    ? active
+                      ? CheckSquare
+                      : Square
+                    : active
+                      ? CircleDot
+                      : Circle;
                   return (
                     <button
                       key={opt.label}
                       disabled={answered}
                       title={opt.description}
                       aria-label={opt.description ? t("{0}：{1}", opt.label, opt.description) : opt.label}
-                      className={`press flex max-w-[min(260px,100%)] flex-col items-start gap-0.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                      className={`press flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                        vertical ? "w-full" : "max-w-[min(260px,100%)]"
+                      } ${
                         active
-                          ? "border-primary bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn"
-                          : "border-border bg-surface/80 text-foreground shadow-card hover:bg-surface-2"
+                          ? "border-primary/60 bg-primary/10 shadow-card"
+                          : "border-border bg-surface/80 shadow-card hover:border-primary/30 hover:bg-surface-2"
                       }`}
                       onClick={() => toggle(q.header, opt.label, q.multiSelect)}
                     >
-                      <span className="font-medium leading-tight">{opt.label}</span>
-                      {opt.description && (
-                        <span
-                          className={`leading-snug ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}
-                        >
-                          {opt.description}
+                      <Indicator
+                        className={`mt-px size-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground/60"}`}
+                      />
+                      <span className="min-w-0">
+                        <span className={`block font-medium leading-tight ${active ? "text-primary" : "text-foreground"}`}>
+                          {opt.label}
                         </span>
-                      )}
+                        {opt.description && (
+                          <span className="mt-0.5 block leading-snug text-muted-foreground">{opt.description}</span>
+                        )}
+                      </span>
                     </button>
                   );
                 })}
                 <button
                   disabled={answered}
-                  className={`press rounded-lg border px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                  className={`press flex items-center gap-1.5 rounded-lg border px-2.5 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                    vertical ? `w-full justify-start py-1.5 ${isCustomOpen ? "" : "border-dashed"}` : "py-1"
+                  } ${
                     isCustomOpen || custom[q.header]?.trim()
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-surface/80 text-muted-foreground shadow-card hover:text-foreground"
+                      ? "border-primary/60 bg-primary/10 text-primary"
+                      : "border-border bg-surface/80 text-muted-foreground shadow-card hover:border-primary/30 hover:text-foreground"
                   }`}
                   onClick={() => setCustomOpen((p) => ({ ...p, [q.header]: !p[q.header] }))}
                   aria-label={t("填写自定义回答")}
                 >
+                  <Plus className="size-3.5 shrink-0" />
                   {t("其他…")}
+                  {vertical && <span className="text-muted-foreground/70">{t("自定义回答")}</span>}
                 </button>
               </div>
               {isCustomOpen && (

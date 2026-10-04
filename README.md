@@ -8,7 +8,7 @@
 
 - **开箱即用**：扩展内置裁剪版 iFlow CLI，未安装 CLI 的机器装上就能用（整体 VSIX 约 13MB）；本地安装的 CLI 仍会被优先探测，升级不受内置版本影响
 - **模型兼容增强**：内置 CLI 外挂 5 个定制 loader——按模型配置输出 token 上限（长回复不再被截断）、上下文余量按真实窗口计算、Kimi 采样参数规范化、多模态识别与视觉路由配置化（修复 OpenAI Compatible 模式图片输入）、声明式思考参数规则；loader 源自 [iFlow-Mods](https://github.com/yuentao/iFlow-Mods) Mod 机制，默认规则随扩展分发、连接前自动种到 `~/.iflow/`（不覆盖已有配置），编辑 JSON 即可自定义模型行为、无需改源码，Mod 可用 [iFlow-Mod-Builder](https://github.com/yuentao/iFlow-Mod-Builder) 图形化打包
-- **完整 agent 工作流**：流式对话、工具审批、行号 Diff 与一键 Revert、Plan 计划确认与卡内编辑重规划、交互式提问卡（单选 / 多选 / 自由文本）、子智能体进度卡片
+- **完整 agent 工作流**：流式对话、工具审批、行号 Diff 与一键 Revert、Plan 计划确认与卡内编辑重规划、交互式提问卡（单选 / 多选 / 自由文本）、子代理进度卡片
 - **长任务自动恢复**：速率限制按 5s / 15s / 30s 递增退避自动重试；上下文溢出自动压缩并重发原 prompt——限流与长上下文都不再中断任务
 - **凭据与审批安全**：API Key 只存 VSCode SecretStorage（不落盘明文、不打日志）；审批默认拒绝、5 分钟超时自动拒答；Webview 走 nonce CSP + DOMPurify 净化
 - **零等待热切换**：切换 API Profile 热重认证、免重启 CLI；`iflow.warmStart` 窗口打开即后台预热，首次打开面板无需等待
@@ -20,7 +20,7 @@
 
 - 流式对话：思考过程折叠、Markdown 渲染、一键中断
 - 粘性「正在生成」指示器，生成期间切换类操作全量防呆禁用，操作消息防抖
-- 子智能体卡片：按类型着色、步骤进度、本地化标题与日志面板
+- 子代理卡片：按类型着色、步骤进度、本地化标题与日志面板
 - 提问卡：agent 发起 `ask_user_question` 提问时渲染交互卡，支持单选 / 多选 / 自由文本
 - Plan 模式审批：agent 提交计划时弹出确认卡，通过或驳回（附理由），1.1.2 起计划可在卡内编辑并「重新规划」回传修订文本
 - 消息操作：重新生成上一条回复、一键复制；会话搜索与删除（两步确认）
@@ -28,7 +28,7 @@
 - 自动恢复：速率限制递增退避重试，上下文溢出自动压缩并重发原 prompt，等待过程以倒计时 toast 呈现
 - 提示音：对话完成 / 失败音效（Web Audio 合成，`iflow.soundFeedback` 可关）
 
-![子智能体卡片](docs/images/subagent-card.png)
+![子代理卡片](docs/images/subagent-card.png)
 
 **工具与审批**
 

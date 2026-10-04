@@ -216,7 +216,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
  * verbatim.
  */
 function localizeStepTitle(title: string): string {
-  if (/^task$/i.test(title.trim())) return t("子智能体");
+  if (/^task$/i.test(title.trim())) return t("子代理");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
   if (m) return t("启动子代理（{0}）：{1}", m[1], m[2]);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
@@ -338,7 +338,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
           >
             <Caret open={open} />
-            {t("子智能体日志")}
+            {t("子代理日志")}
           </button>
           <Collapse open={open}>
             <pre className="mx-2.5 mb-2.5 max-h-64 overflow-y-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">

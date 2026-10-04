@@ -490,7 +490,7 @@ export function applySessionUpdate(
       const title =
         (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
           ? update.title || update.toolName
-          : undefined) ?? l10n.t("子智能体");
+          : undefined) ?? l10n.t("子代理");
       state.blocks.push({ kind: "subagent", id: nextBlockId(), agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] });
       subIdx = state.blocks.length - 1;
     }
@@ -539,7 +539,7 @@ export function applySessionUpdate(
       return activeIdx;
     }
     // Interval opens: a SubAgent card is born.
-    const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子智能体");
+    const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子代理");
     state.blocks.push({
       kind: "subagent",
       id: nextBlockId(),
@@ -1323,7 +1323,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           kind: "subagent",
           agentId: `sidechain-${blocks.length}`,
           taskToolCallId: null,
-          title: l10n.t("子智能体"),
+          title: l10n.t("子代理"),
           status: "in_progress",
           agentType: null,
           entries: [],
@@ -1421,7 +1421,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           // The SubAgent-spawning `task` call renders as a SubAgent card and
           // adopts the sidechain run that follows it, if any.
           if (block.name === "task") {
-            const desc = block.input?.description || block.name || l10n.t("子智能体");
+            const desc = block.input?.description || block.name || l10n.t("子代理");
             const nextSidechain: SubAgentBlock = {
               kind: "subagent",
               agentId: block.id,
