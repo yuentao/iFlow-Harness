@@ -58,7 +58,7 @@ const isSyncDenied = (name) =>
  * still override the npm source entirely.
  */
 const NPM_PACKAGE = "@yuentao/iflow-cli";
-const PINNED_VERSION = "0.5.19-custom.2";
+const PINNED_VERSION = "0.5.19-custom.3";
 
 // Directories/files pruned from the package, relative to the package root.
 const PRUNE_DIRS = ["scripts"];
@@ -286,6 +286,10 @@ try {
     console.log(`[vendor-cli] copying local CLI from ${fromDir} ...`);
     pkgDir = path.join(work, "package");
     cpSync(fromDir, pkgDir, { recursive: true });
+    // A source checkout's .git must never ship: .vscodeignore excludes
+    // .gitignore/.github but NOT .git/, so a 19MB repo would land in the
+    // VSIX (the npm-tarball path never has one).
+    rmSync(path.join(pkgDir, ".git"), { recursive: true, force: true });
   } else {
     // 1. Obtain the package tgz (npm pack, or a local --from tarball).
     let tgz;

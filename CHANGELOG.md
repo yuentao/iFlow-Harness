@@ -3,6 +3,10 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.6] - 2026-10-04
+
+- 修复 npm registry 不可达时 npx 型 MCP 服务器挂起、阻塞内置 CLI 的 ACP initialize 握手导致面板永远无法就绪：CLI 0.5.19 在 --experimental-acp 下 isNonInteractive 为 true，discoverAllTools 走同步 await discoverAllMcpTools() 分支且连接无超时；内置 CLI 升级至 0.5.19-custom.3，注入 mcp-background-loader 让 ACP 场景改走 CLI 自带的后台发现路径（与交互 TUI 一致，MCP 工具连接完成后陆续注册），IFLOW_MCP_BACKGROUND=0 可退回原行为
+
 ## [1.2.5] - 2026-10-02
 
 - 新增 MCP 服务器管理面板：API 配置弹窗「管理 MCP 服务器…」打开卡片，直接读取 ~/.iflow/settings.json 现有 mcpServers 展示列表（stdio 命令 / 远程 URL），支持增删改（JSON 编辑 + 校验），保存原子写回并提示一键热重启；移除文本设置项 iflow.mcpServers（与面板形成双份真值会互相覆写）
