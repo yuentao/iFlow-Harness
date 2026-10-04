@@ -650,7 +650,7 @@ export function Composer() {
   return (
     <div
       ref={rootRef}
-      className={`acrylic @container relative flex flex-col shrink-0 border-t p-3 transition-colors ${
+      className={`acrylic @container relative z-20 flex flex-col shrink-0 border-t p-3 transition-colors ${
         dragOver ? "border-primary/60 bg-primary/5" : "border-border"
       }`}
       style={{ height: height ?? undefined, boxShadow: "var(--shadow-stage)" }}

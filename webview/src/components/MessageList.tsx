@@ -957,7 +957,9 @@ function MessageListInner({ state }: { state: SessionState }) {
           {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
             // Sticky to the bottom of the scroll viewport so the indicator stays
             // visible even while new content streams in above it.
-            <div className="sticky bottom-2 z-10 flex justify-center py-1.5">
+            // pointer-events-none: the composer's upward-opening mode dropdown
+            // expands into this area — the pill must not steal its clicks.
+            <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center py-1.5">
               <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-[11.5px] font-medium text-primary-foreground shadow-lg">
                 <Loader2 className="size-3 animate-spin" />
                 {state.initializing ? t("正在创建新会话…") : t("正在生成")}
@@ -967,7 +969,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           {state.replaying && (
             // History restore indicator — dedicated UI (not a transcript block),
             // so it never mixes with the restored content or grows copy icons.
-            <div className="sticky bottom-2 z-10 flex justify-center py-1.5">
+            <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center py-1.5">
               <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-[11.5px] font-medium text-primary-foreground shadow-lg">
                 <Loader2 className="size-3 animate-spin" />
                 {t("正在恢复历史会话…")}

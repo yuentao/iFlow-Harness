@@ -210,7 +210,9 @@ export function App() {
         {liveMessage}
       </div>
       {/* header — shadow appears only while messages scroll under it */}
-      <header className={`acrylic relative z-10 shrink-0 border-b border-border px-3 py-2${headerScrolled ? " header-scrolled" : ""}`}>
+      {/* z-30: above the Composer (z-20) so the header's downward-opening
+          dropdowns paint over it, below .auth-backdrop (fixed z-40). */}
+      <header className={`acrylic relative z-30 shrink-0 border-b border-border px-3 py-2${headerScrolled ? " header-scrolled" : ""}`}>
         {/* min-w-0 on the row + Dropdown wrapper: the flex shrink chain must
             reach the truncating label inside the trigger, or a long session
             title stretches the whole header row (seen with prompt-derived
@@ -463,12 +465,13 @@ export function App() {
         {errorMessage && (
           // Error toast: floats over the transcript top instead of taking a
           // flex row, frosted (backdrop-blur) so the content behind bleeds
-          // through, asymmetric radius (tight top-left corner) for a
-          // speech-bubble feel. break-words + scroll cap: errorMessage() can
+          // through. z-[5]: must stay BELOW the header's stacking context
+          // (z-10) — at z-40 it covered the header's downward-opening config
+          // dropdown. break-words + scroll cap: errorMessage() can
           // return unbounded JSON dumps (unbroken tokens) and multi-line
           // detail — without them the toast overflowed its container.
-          <div className="pointer-events-none absolute inset-x-0 top-2.5 z-40 flex justify-center px-3">
-            <div className="stream-in pointer-events-auto max-h-24 max-w-[92%] select-text overflow-y-auto break-words rounded-[4px_16px_16px_16px] border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
+          <div className="pointer-events-none absolute inset-x-0 top-2.5 z-[5] flex justify-center px-3">
+            <div className="stream-in pointer-events-auto max-h-24 max-w-[92%] select-text overflow-y-auto break-words rounded-2xl border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
               {errorMessage}
             </div>
           </div>
