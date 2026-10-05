@@ -243,6 +243,7 @@ export function McpCard({ busy, onDismiss }: { busy: boolean; onDismiss: () => v
                             title={t("删除 {0}", entry.name)}
                             className="ml-1"
                             triggerClassName="opacity-70 hover:opacity-100"
+                            iconClassName="size-3.5"
                           />
                         </div>
                         {transport && (

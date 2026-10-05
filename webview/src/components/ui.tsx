@@ -155,6 +155,7 @@ export function InlineConfirm({
   title,
   className = "",
   triggerClassName = "",
+  iconClassName = "size-3",
 }: {
   armed: boolean;
   onArm: () => void;
@@ -169,6 +170,9 @@ export function InlineConfirm({
   /** Extra classes for the idle icon button only (floating surfaces add a
    * backdrop + opacity reveal there; inline rows keep the bare icon). */
   triggerClassName?: string;
+  /** Icon size — inline rows pass the sibling action icon's size so the row
+   * reads as one consistent set (e.g. size-3.5 next to a size-3.5 pencil). */
+  iconClassName?: string;
 }) {
   if (!armed) {
     return (
@@ -181,7 +185,7 @@ export function InlineConfirm({
           onArm();
         }}
       >
-        <Trash2 className="size-3" />
+        <Trash2 className={iconClassName} />
       </button>
     );
   }

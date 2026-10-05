@@ -60,6 +60,8 @@
   "上下文长度已达模型上限，自动压缩会话后重试…": "Context reached the model's limit — compressing the session and retrying…",
   "模型触发平台速率限制，自动重试中（第 {0}/{1} 次）": "Model hit the platform rate limit — retrying (attempt {0}/{1})",
   "模型响应流中断，自动重试中（第 {0}/{1} 次）": "Model response stream dropped — retrying (attempt {0}/{1})",
+  "模型返回了空响应，自动重试中（第 {0}/{1} 次）": "Model returned an empty response — retrying (attempt {0}/{1})",
+  "模型连续返回空响应，自动重试后仍未恢复。可稍后重试，或切换其他 API 配置。": "The model kept returning empty responses and did not recover after automatic retries. Try again later, or switch to another API profile.",
   "重新规划": "Re-plan",
   "重新规划：{0}": "Re-plan: {0}",
   "已批准计划": "Plan approved",

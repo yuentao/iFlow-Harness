@@ -464,6 +464,28 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
 // --- protocol update application -------------------------------------------
 
 /**
+ * Whether one `session/update` carries visible agent output for the current
+ * turn — streamed text, a thinking chunk, a tool call, or a plan. Used to
+ * detect the "empty response" failure: the gateway returns a 200 with no
+ * content, the CLI records an empty model turn and reports `end_turn`, and the
+ * panel would otherwise render the user bubble with nothing after it (the
+ * "发消息没反应" report). Metadata-only updates (available_commands_update,
+ * current_mode_update) and the user's own echoed turn do NOT count as output.
+ */
+export function isAgentOutputUpdate(update: { sessionUpdate: string }): boolean {
+  switch (update.sessionUpdate) {
+    case "agent_message_chunk":
+    case "agent_thought_chunk":
+    case "tool_call":
+    case "tool_call_update":
+    case "plan":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * Apply one `session/update` notification to the state (mutates `state`,
  * which the store owns between snapshots).
  *

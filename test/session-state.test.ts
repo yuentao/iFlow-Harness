@@ -10,6 +10,7 @@ import {
   estimateSessionUsage,
   estimateTokens,
   findToolBlockById,
+  isAgentOutputUpdate,
   parseEditArgs,
   parseToolFilePath,
   refreshSessionUsage,
@@ -1708,5 +1709,26 @@ describe("normalizeUserPromptText & collectUserPromptTexts", () => {
     beginUserPrompt(state, "看文件", undefined, [{ name: "a.ts", path: "/p/a.ts" }]);
     const texts = collectUserPromptTexts(state.blocks);
     expect(texts).toEqual(["看文件"]);
+  });
+});
+
+describe("isAgentOutputUpdate (empty-response detection)", () => {
+  it("counts visible agent output: text, thought, tool call, tool update, plan", () => {
+    expect(isAgentOutputUpdate({ sessionUpdate: "agent_message_chunk" })).toBe(true);
+    expect(isAgentOutputUpdate({ sessionUpdate: "agent_thought_chunk" })).toBe(true);
+    expect(isAgentOutputUpdate({ sessionUpdate: "tool_call" })).toBe(true);
+    expect(isAgentOutputUpdate({ sessionUpdate: "tool_call_update" })).toBe(true);
+    expect(isAgentOutputUpdate({ sessionUpdate: "plan" })).toBe(true);
+  });
+
+  it("metadata-only and user-echo updates are NOT output", () => {
+    // available_commands_update / current_mode_update fire on session/new and
+    // mode switches — an empty-response turn can still emit them, so counting
+    // them would mask the failure the gate exists to catch.
+    expect(isAgentOutputUpdate({ sessionUpdate: "available_commands_update" })).toBe(false);
+    expect(isAgentOutputUpdate({ sessionUpdate: "current_mode_update" })).toBe(false);
+    // The user's own turn echoed by the agent (live prompts render from the
+    // host's beginUserPrompt block; replay uses this channel).
+    expect(isAgentOutputUpdate({ sessionUpdate: "user_message_chunk" })).toBe(false);
   });
 });

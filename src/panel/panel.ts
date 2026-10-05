@@ -54,6 +54,7 @@ import {
   endReplay,
   findCliHistoryCut,
   findToolBlockById,
+  isAgentOutputUpdate,
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
   parseEditArgs,
@@ -91,6 +92,21 @@ const RATE_LIMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
  * retries cover the overwhelming majority without stalling a genuinely dead
  * network for minutes. */
 const TRANSIENT_STREAM_RETRY_DELAYS_MS = [3_000, 10_000];
+/** Retries for an EMPTY model response: the gateway answers 200 with no
+ * content, the CLI records an empty model turn and returns `end_turn` with
+ * zero output (verified in `~/.iflow/acp/sessions/*.json` — the stuck sessions
+ * carry runs of `{"role":"model","parts":[]}` entries, one per user retry).
+ * The panel would otherwise show the user bubble with nothing after it and no
+ * error — the "会话莫名中断、发消息没反应，切 API 配置才恢复" report (the
+ * profile switch rotates the endpoint/gateway, which is why it "fixes" it).
+ * Transient in most cases (a session recovers on its own minutes later), so
+ * retry with a short ladder before surfacing the error. */
+const EMPTY_RESPONSE_RETRY_DELAYS_MS = [3_000, 8_000];
+/** Thrown by promptWithRetry when the empty-response retry ladder is
+ * exhausted. The catch chain re-throws it untouched: its user-facing wording
+ * would otherwise trip the rate-limit heuristic ("稍后重试" ∈ RATE_LIMIT_RE)
+ * and send the turn through another pointless retry round. */
+class EmptyResponseError extends Error {}
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -241,6 +257,14 @@ export class ChatPanel implements vscode.Disposable {
    * during a retry wait never resurrects the prompt behind the user's back.
    */
   private cancelSeen = false;
+  /**
+   * Whether the CURRENT prompt attempt produced any visible agent output
+   * (text / thought / tool call / plan — see `isAgentOutputUpdate`). Set in
+   * onSessionUpdate, reset per attempt inside promptWithRetry; read by the
+   * completion gate to detect the empty-response failure (the CLI returns
+   * `end_turn` with zero output when the gateway answers empty).
+   */
+  private turnHadAgentOutput = false;
   /**
    * Parsed edit args (shared/parseEditArgs) keyed by toolCallId, kept for the
    * arg-reversal diff fallback (strategy 2) when no pre-run snapshot exists.
@@ -2041,6 +2065,10 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     this.store.onSessionUpdate(n, { replaying: this.restoring });
+    // Empty-response detection: any visible agent output during the live turn
+    // disqualifies it from the "gateway answered empty" retry. Replay updates
+    // (session/load) are excluded — they belong to a past turn.
+    if (!this.restoring && isAgentOutputUpdate(n.update)) this.turnHadAgentOutput = true;
     // Edit-tool diff synthesis for tools the wire gives no structured diff to
     // (all MCP tools — CLI 0.5.19 flattens MCP results to plain text). Two
     // strategies, in priority order (see `maybeSynthesizeToolDiff`):
@@ -3667,6 +3695,12 @@ export class ChatPanel implements vscode.Disposable {
    *   `Internal Error: terminated` (undici body-stream abort, see
    *   isTransientStreamError); long sessions trip it most. Same retry shape
    *   as rate limits with a shorter ladder.
+   * - empty response (up to EMPTY_RESPONSE_RETRY_DELAYS_MS.length per send) →
+   *   the gateway answers 200 with no content: the CLI records an empty model
+   *   turn and returns `end_turn` with zero output, which the panel used to
+   *   render as a silent no-op (the "发消息没反应" report). Detected via
+   *   `turnHadAgentOutput`; after the ladder the turn lands on the error
+   *   banner (EmptyResponseError) instead of staying silent.
    * All paths are bounded, so a prompt that keeps failing lands on the
    * normal error path after the last attempt.
    */
@@ -3679,6 +3713,7 @@ export class ChatPanel implements vscode.Disposable {
     let overflowRecovered = false;
     let rateLimitRetries = 0;
     let transientStreamRetries = 0;
+    let emptyResponseRetries = 0;
     // Persistent display-only pill shown while the auto-compress turn runs;
     // dismissed once that turn ends (or the loop gives up) so it never lingers.
     let compressToastId: number | null = null;
@@ -3687,9 +3722,56 @@ export class ChatPanel implements vscode.Disposable {
         const blocks: ContentBlock[] = compressNext
           ? [{ type: "text", text: "/compress" }]
           : prompt;
+        // Fresh output flag per attempt: the gate below judges THIS attempt
+        // only (a compress turn's own output must not mask an empty resend).
+        this.turnHadAgentOutput = false;
         try {
           const result = await client.prompt({ sessionId, prompt: blocks });
-          if (!compressNext) return result;
+          if (!compressNext) {
+            // Empty-response gate (see EMPTY_RESPONSE_RETRY_DELAYS_MS): the
+            // gateway answered 200 with no content, the CLI recorded an empty
+            // model turn and returned end_turn — the panel would show the user
+            // bubble with nothing after it and NO error (the "发消息没反应"
+            // report). Slash commands are exempt: the CLI handles them locally
+            // and legitimately returns end_turn with no agent output.
+            // (toAgentPromptText prefixes a zero-width space to unknown
+            // "/"-leading text, which trimStart keeps — only real commands
+            // still start with "/" here.)
+            const first = blocks[0];
+            const isSlash = first?.type === "text" && first.text.trimStart().startsWith("/");
+            if (
+              result.stopReason === "end_turn" &&
+              !isSlash &&
+              !this.turnHadAgentOutput &&
+              !this.cancelSeen
+            ) {
+              if (emptyResponseRetries < EMPTY_RESPONSE_RETRY_DELAYS_MS.length) {
+                const delayMs = EMPTY_RESPONSE_RETRY_DELAYS_MS[emptyResponseRetries]!;
+                emptyResponseRetries++;
+                this.log.warn(
+                  `empty model response on session ${sessionId}, auto-retry ${emptyResponseRetries}/${EMPTY_RESPONSE_RETRY_DELAYS_MS.length} in ${delayMs / 1000}s`,
+                );
+                this.store.sendToast(
+                  "warning",
+                  vscode.l10n.t(
+                    "模型返回了空响应，自动重试中（第 {0}/{1} 次）",
+                    emptyResponseRetries,
+                    EMPTY_RESPONSE_RETRY_DELAYS_MS.length,
+                  ),
+                  { countdownDeadline: Date.now() + delayMs },
+                );
+                await abortableDelay(delayMs, () => this.cancelSeen);
+                if (this.cancelSeen) return result; // user pressed Stop during the wait
+                continue;
+              }
+              // Ladder exhausted: surface it loudly instead of the silent
+              // no-output turn the user used to be stuck with.
+              throw new Error(
+                vscode.l10n.t("模型连续返回空响应，自动重试后仍未恢复。可稍后重试，或切换其他 API 配置。"),
+              );
+            }
+            return result;
+          }
           // Compress turn finished: fall through to resending the original
           // prompt. User hit Stop while it ran: do not resurrect the prompt
           // behind their back — surface the cancellation as the final
@@ -3701,6 +3783,9 @@ export class ChatPanel implements vscode.Disposable {
           compressNext = false;
           if (result.stopReason === "cancelled") return result;
         } catch (error) {
+          // The empty-response ladder already ran; never re-classify it as a
+          // rate limit (its wording contains "稍后重试").
+          if (error instanceof EmptyResponseError) throw error;
           if (isContextOverflowError(error) && !overflowRecovered) {
             overflowRecovered = true;
             compressNext = true;
