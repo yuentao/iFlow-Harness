@@ -3518,9 +3518,13 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Delete a user message only after the CLI history is precisely verified,
-   * rewritten, reloaded, and its model/mode are restored. The host transcript
-   * is committed last, so any failed step leaves the visible transcript intact.
+   * Delete a user message and its whole tail. The CLI history is truncated
+   * first (verified, rewritten, reloaded, model/mode restored) so the model
+   * forgets the deleted turns; the host transcript commits last, so any failed
+   * step leaves the visible transcript intact. When the deleted tail is not in
+   * the model context at all (compressed away, slash command, or the CLI
+   * session file was never written), the transcript deletion stands on its own
+   * — the model has nothing to forget.
    */
   private async deleteUserMessage(blockId: string): Promise<void> {
     if (this.disposed || this.historySyncBusy) return;
@@ -3533,10 +3537,14 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     const removed = this.store.deleteUserMessage(blockId, false);
+    if (!removed) return;
+    // Transcript-only delete: nothing to verify when the CLI session does not
+    // exist (never prompted / file lost), so the model cannot be holding turns
+    // the transcript is about to drop.
     const sessionId = state.sessionId;
     const client = this.client;
-    if (!removed || !sessionId || !client) {
-      this.store.appendNotice(vscode.l10n.t("无法在模型上下文中验证该消息，已保留原转录。"));
+    if (!sessionId || !client) {
+      this.commitTranscriptOnlyDeletion(blockId);
       return;
     }
     const cwd = this.sessionCwd ?? this.services.workspaceRoot ??
@@ -3550,23 +3558,28 @@ export class ChatPanel implements vscode.Disposable {
     let raw: string | null = null;
     let reloadAttempted = false;
     try {
+      let truncated = false;
       try {
         raw = await readFile(file, "utf8");
         const parsed = JSON.parse(raw) as { chatHistory?: unknown };
-        const cut = findCliHistoryCut(parsed.chatHistory, removed.history);
-        if (cut === null || !Array.isArray(parsed.chatHistory)) throw new Error("CLI history cannot be matched exactly");
-        parsed.chatHistory.splice(cut);
-        const tmp = `${file}.tmp`;
-        await writeFile(tmp, JSON.stringify(parsed), "utf8");
-        await rename(tmp, file);
-        reloadAttempted = true;
-        await client.loadSession({ cwd, mcpServers: [], sessionId });
-        if (this.disposed || this.client !== client || this.store.getState().sessionId !== sessionId) {
-          throw new Error("session changed during history synchronization");
+        const cut = findCliHistoryCut(parsed.chatHistory, removed.allUserTexts, removed.targetIndex);
+        if (cut.kind === "refuse") throw new Error("CLI history cannot be matched exactly");
+        if (cut.kind === "truncate") {
+          if (!Array.isArray(parsed.chatHistory)) throw new Error("CLI history is malformed");
+          parsed.chatHistory.splice(cut.index);
+          const tmp = `${file}.tmp`;
+          await writeFile(tmp, JSON.stringify(parsed), "utf8");
+          await rename(tmp, file);
+          truncated = true;
+          reloadAttempted = true;
+          await client.loadSession({ cwd, mcpServers: [], sessionId });
+          if (this.disposed || this.client !== client || this.store.getState().sessionId !== sessionId) {
+            throw new Error("session changed during history synchronization");
+          }
+          const after = this.store.getState();
+          if (after.modes?.currentModeId) await client.setMode(sessionId, after.modes.currentModeId);
+          if (after.currentModelId) await client.setModel(sessionId, after.currentModelId);
         }
-        const after = this.store.getState();
-        if (after.modes?.currentModeId) await client.setMode(sessionId, after.modes.currentModeId);
-        if (after.currentModelId) await client.setModel(sessionId, after.currentModelId);
       } catch (error) {
         if (raw !== null) {
           try {
@@ -3579,10 +3592,19 @@ export class ChatPanel implements vscode.Disposable {
           }
         }
         this.log.warn(`deleteUserMessage failed; transcript retained: ${errorMessage(error)}`);
-        this.store.appendNotice(vscode.l10n.t("无法在模型上下文中验证该消息，已保留原转录。"));
+        this.store.sendToast("warning", vscode.l10n.t("无法在模型上下文中验证该消息，已保留原转录。"));
         return;
       }
-      if (!this.store.commitUserMessageDeletion(blockId)) throw new Error("message changed during deletion");
+      if (truncated) {
+        if (!this.store.commitUserMessageDeletion(blockId)) throw new Error("message changed during deletion");
+      } else {
+        // skip: the deleted tail never reached (or already left) the model
+        // context — drop it from the transcript and say so plainly.
+        this.log.info(`deleteUserMessage: target not in CLI context — transcript-only delete`);
+        this.commitTranscriptOnlyDeletion(blockId);
+        this.store.appendNotice(vscode.l10n.t("该消息已不在模型上下文中，仅从当前转录移除。"));
+        return;
+      }
       // The deleted turn may have been the only content — an empty transcript
       // is the durable tombstone proving the deletion (force + allowEmpty is
       // the ONLY place an empty write is legal, see persistActiveTranscript).
@@ -3594,6 +3616,14 @@ export class ChatPanel implements vscode.Disposable {
         this.store.setInitializing(false);
       }
     }
+  }
+
+  /** Commit a transcript-only user-message deletion (no CLI history involved)
+   * and persist it with the same empty-transcript rules as the full path. */
+  private commitTranscriptOnlyDeletion(blockId: string): void {
+    if (!this.store.commitUserMessageDeletion(blockId)) return;
+    void this.persistActiveTranscript(true, true);
+    void this.touchActiveSession();
   }
 
   /**

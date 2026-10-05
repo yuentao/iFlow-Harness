@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { FileCode2 } from "lucide-react";
+import { FileCode2, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 
 /* Shared visual primitives ported from the UI reference design. */
@@ -135,6 +135,80 @@ export function FileRef({ path, line, toolCallId }: { path: string; line?: numbe
       <FileCode2 className="size-3 shrink-0" />
       <span className="truncate">{path.split(/[\\/]/).pop()}</span>
     </button>
+  );
+}
+
+/**
+ * Two-step destructive-action confirm, shared by every delete affordance
+ * (message, session, MCP entry) so they read as one control: an icon button
+ * arms the row, then 确认 / 取消 replace it in place. Destructive styling
+ * mirrors the approval card's reject option (destructive outline + tint).
+ * `onConfirm` fires on the second click; the row auto-disarms.
+ */
+export function InlineConfirm({
+  armed,
+  onArm,
+  onCancel,
+  onConfirm,
+  confirmLabel,
+  cancelLabel,
+  title,
+  className = "",
+  triggerClassName = "",
+}: {
+  armed: boolean;
+  onArm: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+  confirmLabel: string;
+  cancelLabel: string;
+  /** Tooltip for the armed (trash) button. */
+  title: string;
+  /** Positioning shared by both states (e.g. absolute anchoring). */
+  className?: string;
+  /** Extra classes for the idle icon button only (floating surfaces add a
+   * backdrop + opacity reveal there; inline rows keep the bare icon). */
+  triggerClassName?: string;
+}) {
+  if (!armed) {
+    return (
+      <button
+        data-variant="danger"
+        className={`press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive ${className} ${triggerClassName}`}
+        title={title}
+        onClick={(e) => {
+          e.stopPropagation();
+          onArm();
+        }}
+      >
+        <Trash2 className="size-3" />
+      </button>
+    );
+  }
+  return (
+    <span
+      className={`stream-in inline-flex shrink-0 items-center gap-1 rounded-lg border border-destructive/40 bg-card/95 px-1 py-0.5 shadow-card backdrop-blur-md ${className}`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-destructive transition-colors hover:bg-destructive/10"
+        onClick={(e) => {
+          e.stopPropagation();
+          onConfirm();
+        }}
+      >
+        {confirmLabel}
+      </button>
+      <button
+        className="press rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+        onClick={(e) => {
+          e.stopPropagation();
+          onCancel();
+        }}
+      >
+        {cancelLabel}
+      </button>
+    </span>
   );
 }
 

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Pencil, Plus, Server, Trash2, X } from "lucide-react";
+import { ArrowLeft, Pencil, Plus, Server, X } from "lucide-react";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { InlineConfirm } from "./ui";
 
 /** Visible, non-disabled focusable elements within a container (for focus trap). */
 function getFocusable(container: HTMLElement): HTMLElement[] {
@@ -229,25 +230,20 @@ export function McpCard({ busy, onDismiss }: { busy: boolean; onDismiss: () => v
                           >
                             <Pencil className="size-3.5" />
                           </button>
-                          {confirmDelete === i ? (
-                            <button
-                              className="shrink-0 rounded-full border border-destructive/50 px-1.5 text-[10px] text-destructive hover:bg-destructive/10"
-                              onClick={() => {
-                                setEntries(entries!.filter((_, j) => j !== i));
-                                setConfirmDelete(null);
-                              }}
-                            >
-                              {t("确认删除")}
-                            </button>
-                          ) : (
-                            <button
-                              className="shrink-0 text-muted-foreground opacity-70 hover:opacity-100 hover:text-destructive"
-                              title={t("删除 {0}", entry.name)}
-                              onClick={() => setConfirmDelete(i)}
-                            >
-                              <Trash2 className="size-3.5" />
-                            </button>
-                          )}
+                          <InlineConfirm
+                            armed={confirmDelete === i}
+                            onArm={() => setConfirmDelete(i)}
+                            onCancel={() => setConfirmDelete(null)}
+                            onConfirm={() => {
+                              setEntries(entries!.filter((_, j) => j !== i));
+                              setConfirmDelete(null);
+                            }}
+                            confirmLabel={t("确认")}
+                            cancelLabel={t("取消")}
+                            title={t("删除 {0}", entry.name)}
+                            className="ml-1"
+                            triggerClassName="opacity-70 hover:opacity-100"
+                          />
                         </div>
                         {transport && (
                           <div className="truncate font-mono text-[10px] text-muted-foreground" title={transport}>

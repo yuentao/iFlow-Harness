@@ -44,7 +44,7 @@ import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
-import { Chip, FileRef } from "./ui";
+import { Chip, FileRef, InlineConfirm } from "./ui";
 import logo from "../assets/iflow.svg";
 
 const KIND_ICON: Record<string, typeof Eye> = {
@@ -462,36 +462,20 @@ function UserMessage({ block, canDelete }: { block: Extract<Block, { kind: "user
         {/* subtle inner highlight so the bubble reads as a solid plane */}
         <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-inner" />
         {canDelete && block.id && (
-          confirming ? (
-            <div className="absolute -top-2.5 right-1 z-10 flex items-center gap-1 rounded-lg border border-border bg-panel/95 px-1.5 py-0.5 shadow-card backdrop-blur-md">
-              <button
-                data-variant="danger"
-                className="rounded px-1 py-0.5 text-[10px] font-medium text-destructive hover:bg-destructive/10"
-                title={t("确认删除该消息及其后所有内容")}
-                onClick={() => {
-                  setConfirming(false);
-                  send({ type: "deleteUserMessage", blockId: block.id! });
-                }}
-              >
-                {t("确认")}
-              </button>
-              <button
-                className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-2"
-                onClick={() => setConfirming(false)}
-              >
-                {t("取消")}
-              </button>
-            </div>
-          ) : (
-            <button
-              data-variant="danger"
-              className="absolute -top-2 right-1 z-10 rounded-md border border-border bg-panel/90 p-0.5 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-              title={t("删除该消息及其后所有内容")}
-              onClick={() => setConfirming(true)}
-            >
-              <Trash2 className="size-3" />
-            </button>
-          )
+          <InlineConfirm
+            armed={confirming}
+            onArm={() => setConfirming(true)}
+            onCancel={() => setConfirming(false)}
+            onConfirm={() => {
+              setConfirming(false);
+              send({ type: "deleteUserMessage", blockId: block.id! });
+            }}
+            confirmLabel={t("确认")}
+            cancelLabel={t("取消")}
+            title={t("删除该消息及其后所有内容")}
+            className="absolute -top-2.5 right-1 z-10"
+            triggerClassName="border border-border bg-panel/90 shadow-card backdrop-blur-md opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          />
         )}
       </div>
     </div>

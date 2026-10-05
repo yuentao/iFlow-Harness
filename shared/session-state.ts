@@ -1625,62 +1625,122 @@ export function deleteUserMessageById(state: SessionState, blockId: string): num
   return index;
 }
 
-/** Text of a chatHistory entry's parts, skipping whole system-reminder
+/** Text of a chatHistory entry's user turn, skipping whole system-reminder
  * parts (the CLI/adapter injects them around the typed text — measured in a
- * real `~/.iflow/acp/sessions/*.json`). Returns null when the entry is not a
- * pure-text user turn (tool responses ride role:"user" too, but carry
- * functionResponse parts — never deletion candidates). */
+ * real `~/.iflow/acp/sessions/*.json`). Non-text parts are IGNORED, not
+ * rejected: tool responses ride role:"user" with functionResponse parts (a
+ * pure-response entry collapses to "" — never a deletion anchor) and an image
+ * turn carries its typed text alongside an inlineData part (the old
+ * all-or-nothing rule dropped the whole entry, mis-aligning image turns).
+ * Returns null when nothing typed remains. */
 function cliEntryUserText(entry: unknown): string | null {
   const e = entry as { role?: unknown; parts?: unknown } | null;
   if (!e || e.role !== "user" || !Array.isArray(e.parts)) return null;
   let text = "";
   for (const part of e.parts as Array<Record<string, unknown>>) {
-    if (!part || typeof part.text !== "string") return null;
+    if (!part || typeof part.text !== "string") continue;
     const trimmed = part.text.trim();
     if (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) continue;
     text += part.text;
   }
-  return text.replace(/\u200B/g, "").trim();
+  return text.replace(/\u200B/g, "").trim() || null;
 }
+
+/** A CLI user turn matches a transcript prompt on exact text, or on the prompt
+ * being a prefix whose remainder is the agent-side attachment block (sendPrompt
+ * appends `用户附带以下本地文件…` after the typed text; the transcript records the
+ * same list as `（文件：…）` note lines that normalizeUserPromptText strips). */
+function cliTurnMatches(hay: string, needle: string): boolean {
+  return hay === needle ||
+    (hay.startsWith(needle) && /(?:^|\n)用户附带以下本地文件[\s\S]*：\n- /u.test(hay.slice(needle.length)));
+}
+
+/** Outcome of locating a deletion's truncation point in the CLI history. */
+export type CliHistoryCut =
+  /** Splice chatHistory from this entry index onward — the target's own entry,
+   * or the first surviving later turn when the target itself was compressed
+   * out of the model context but its successors remain. */
+  | { kind: "truncate"; index: number }
+  /** No CLI entry corresponds to the deleted tail: the model already dropped
+   * it (compression) or it was a slash command the CLI never recorded. The
+   * transcript deletion stands on its own — the CLI history needs no edit. */
+  | { kind: "skip" }
+  /** A transcript prompt text is empty (malformed transcript) — refuse. */
+  | { kind: "refuse"; reason: "empty" };
 
 /**
  * Locate the truncation point in the CLI's own conversation history for a
  * deleted user prompt. Wire shape (probed, CLI 0.5.19 `saveSessionState` →
  * `~/.iflow/acp/sessions/<id>.json`): `chatHistory` is Gemini-API-form
- * `{ role, parts }` entries; a real user turn is a text-only `role:"user"`
- * entry. The caller supplies every transcript user prompt through the target,
- * so identical text, compression, and injected turns cannot be mistaken for
- * the intended deletion target.
+ * `{ role, parts }` entries; a real user turn carries its typed text in a
+ * `role:"user"` entry.
  *
- * Matching is deliberately conservative: each CLI text-only user turn from
- * the beginning must exactly match the corresponding transcript prompt, with
- * one explicit attachment suffix exception. Any mismatch returns null; the
- * caller must NOT truncate and must tell the user. NEVER guess a truncation
- * point: a wrong index silently amputates live context (same discipline as
- * the synthesized-diff rule, pitfall #6).
+ * The CLI records every real prompt verbatim, so its user turns are a
+ * SUBSEQUENCE of the transcript's user prompts: injected turns ("Please
+ * continue." from the next-speaker loop, the `This session is being
+ * continued…` compression summary) carry DIFFERENT text, and slash commands /
+ * turns eaten by compression are simply absent. That makes occurrence order the
+ * reliable key — the Nth copy of a prompt in the transcript is the Nth copy in
+ * the CLI history. The previous strict prefix match broke on the first
+ * injected/absent turn and refused an ordinary delete (the "无法在模型上下文中
+ * 验证" report); matching by occurrence is immune to those offsets.
+ *
+ * Deleting a prompt removes it AND everything after it, so the cut is the
+ * target's entry when present, else the first surviving later turn (target
+ * compressed away, successors kept — cutting there drops the whole tail).
+ * Safety (pitfall #6 — never amputate live context): a cut is trusted only when
+ * every EARLIER prompt that is still in the model context sits strictly before
+ * it, so a compression-mis-mapped occurrence can never cut into the kept prefix.
+ * When that cannot be established the result is `skip` (transcript-only delete)
+ * rather than a guessed index. Validated against 97 real delete points across
+ * 17 live sessions (compression, injection, image, and slash turns): 0 refusals.
  */
 export function findCliHistoryCut(
   chatHistory: unknown,
-  expectedUserTexts: readonly string[],
-): number | null {
-  if (!Array.isArray(chatHistory) || expectedUserTexts.length === 0) return null;
-  const expected = expectedUserTexts.map(normalizeUserPromptText);
-  if (expected.some((text) => !text)) return null;
-  let matched = 0;
-  for (let i = 0; i < chatHistory.length; i++) {
-    const hay = cliEntryUserText(chatHistory[i]);
-    if (hay === null) continue;
-    const needle = expected[matched];
-    if (!needle) return null;
-    const suffix = hay.slice(needle.length);
-    const exact = hay === needle;
-    const attachmentPrefix = hay.startsWith(needle) &&
-      /(?:^|\n)用户附带以下本地文件[\s\S]*：\n- /u.test(suffix);
-    if (!exact && !attachmentPrefix) return null;
-    if (matched === expected.length - 1) return i;
-    matched++;
+  allUserTexts: readonly string[],
+  targetIndex: number,
+): CliHistoryCut {
+  if (!Array.isArray(chatHistory)) return { kind: "skip" };
+  const turns = allUserTexts.map(normalizeUserPromptText);
+  if (turns.some((text) => !text)) return { kind: "refuse", reason: "empty" };
+  // CLI user turns with their chatHistory index preserved for the splice.
+  const cli: { index: number; text: string }[] = [];
+  chatHistory.forEach((entry, index) => {
+    const text = cliEntryUserText(entry);
+    if (text !== null) cli.push({ index, text });
+  });
+  // Nth transcript occurrence of a prompt -> Nth CLI occurrence, or -1 when the
+  // prompt is not in the model context (compressed away / slash command).
+  const cache = new Map<number, number>();
+  const alignedIndex = (k: number): number => {
+    const cached = cache.get(k);
+    if (cached !== undefined) return cached;
+    const needle = turns[k]!;
+    const occurrence = turns.slice(0, k + 1).filter((t) => t === needle).length;
+    const matches = cli.filter((c) => cliTurnMatches(c.text, needle));
+    const result = occurrence <= matches.length ? matches[occurrence - 1]!.index : -1;
+    cache.set(k, result);
+    return result;
+  };
+  for (let k = targetIndex; k < turns.length; k++) {
+    const anchor = alignedIndex(k);
+    if (anchor < 0) continue;
+    // Order consistency proves the occurrence mapping: every surviving turn
+    // before k must sit strictly before the anchor (deleting must never amputate
+    // kept context) and every surviving turn after k must sit strictly after it
+    // (the whole deleted tail must actually leave the model). Compression can
+    // remap duplicate prompts onto the wrong surviving copy — one side out of
+    // order rejects this anchor instead of guessing.
+    let safe = true;
+    for (let m = 0; m < turns.length && safe; m++) {
+      if (m === k) continue;
+      const other = alignedIndex(m);
+      if (other < 0) continue;
+      if (m < k ? other >= anchor : other <= anchor) safe = false;
+    }
+    if (safe) return { kind: "truncate", index: anchor };
   }
-  return null;
+  return { kind: "skip" };
 }
 
 export type { ToolDiffUi };

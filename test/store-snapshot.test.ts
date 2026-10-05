@@ -527,7 +527,8 @@ describe("SessionStore.deleteUserMessage (snapshot anchoring)", () => {
       .reverse()
       .find((b) => b.kind === "user" && b.text === "重复")!.id!;
     const removed = store.deleteUserMessage(secondId);
-    expect(removed!.history).toEqual(["重复", "重复"]);
+    expect(removed!.allUserTexts).toEqual(["重复", "重复"]);
+    expect(removed!.targetIndex).toBe(1);
     // Only the second turn is gone; the first (user + reply) survives.
     expect(store.getState().blocks.map((b) => b.kind)).toEqual(["user", "text"]);
   });

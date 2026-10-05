@@ -77,5 +77,6 @@
   "会话已删除": "Session deleted",
   "会话已删除，计划审批已跳过": "Session deleted, plan approval skipped",
   "会话已删除，提问已跳过": "Session deleted, pending question skipped",
-  "无法在模型上下文中验证该消息，已保留原转录。": "Could not verify the message in model context; the original transcript was kept."
+  "无法在模型上下文中验证该消息，已保留原转录。": "Could not verify the message in model context; the original transcript was kept.",
+  "该消息已不在模型上下文中，仅从当前转录移除。": "The message is no longer in the model context; it was removed from the transcript only."
 }

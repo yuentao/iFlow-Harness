@@ -3,6 +3,11 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.7] - 2026-10-04
+
+- 修复删除用户消息频繁误报「无法在模型上下文中验证该消息，已保留原转录」：findCliHistoryCut 由「transcript 与 CLI chatHistory 从头严格逐条相等」改为出现序数对齐——CLI 会注入异文本条目（next-speaker 的 Please continue.、自动压缩摘要）、slash 轮次不入 chatHistory、图片轮混有 inlineData，旧算法在这些正常偏移下 63% 的删除点被误拒（17 个真实会话 97 个删除点复现）；新算法按「transcript 第 N 个相同文本 ↔ CLI 第 N 个相同文本」定位，目标被压缩时截到第一条幸存后继，目标/后继均不在模型上下文时纯转录删除并提示；双向安全网（前序幸存轮次须在截断点之前、后序幸存轮次须在之后，证明压缩未把重复文本错映射）无法成立时退回纯转录删除，绝不猜测截断索引；图片轮的 typed text 不再被 inlineData 连坐跳过；验证失败提示由 info toast 升级为 warning toast
+- 删除确认交互统一设计语言：新增 ui.tsx `InlineConfirm` 两步确认组件（危险描边 + 确认/取消，与审批卡同一套 acrylic/press 风格），消息气泡、会话历史下拉、MCP 服务器条目三处删除入口替换各自手写的割裂确认条
+
 ## [1.2.6] - 2026-10-04
 
 - 修复 npm registry 不可达时 npx 型 MCP 服务器挂起、阻塞内置 CLI 的 ACP initialize 握手导致面板永远无法就绪：CLI 0.5.19 在 --experimental-acp 下 isNonInteractive 为 true，discoverAllTools 走同步 await discoverAllMcpTools() 分支且连接无超时；内置 CLI 升级至 0.5.19-custom.3，注入 mcp-background-loader 让 ACP 场景改走 CLI 自带的后台发现路径（与交互 TUI 一致，MCP 工具连接完成后陆续注册），IFLOW_MCP_BACKGROUND=0 可退回原行为

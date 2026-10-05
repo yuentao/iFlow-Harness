@@ -9,12 +9,11 @@ import {
   Search,
   Settings2,
   Sun,
-  Trash2,
 } from "lucide-react";
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { isEnglishLocale, t } from "./i18n";
-import { Chip, Dropdown } from "./components/ui";
+import { Chip, Dropdown, InlineConfirm } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -293,41 +292,20 @@ export function App() {
                           </span>
                         </button>
                         {deletable && (
-                          confirmingDelete === s.id ? (
-                            <span className="flex shrink-0 items-center gap-1">
-                              <button
-                                className="rounded px-1 py-0.5 text-[10px] font-medium text-destructive hover:bg-destructive/10"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  send({ type: "deleteSession", sessionId: s.id });
-                                  setConfirmingDelete(null);
-                                }}
-                              >
-                                {t("确认")}
-                              </button>
-                              <button
-                                className="rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-surface-2"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setConfirmingDelete(null);
-                                }}
-                              >
-                                {t("取消")}
-                              </button>
-                            </span>
-                          ) : (
-                            <button
-                              data-variant="danger"
-                              className="shrink-0 rounded p-0.5 text-[11px] text-muted-foreground opacity-60 hover:opacity-100 hover:text-destructive"
-                              title={t("删除会话 {0}", s.label)}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmingDelete(s.id);
-                              }}
-                            >
-                              <Trash2 className="size-3" />
-                            </button>
-                          )
+                          <InlineConfirm
+                            armed={confirmingDelete === s.id}
+                            onArm={() => setConfirmingDelete(s.id)}
+                            onCancel={() => setConfirmingDelete(null)}
+                            onConfirm={() => {
+                              send({ type: "deleteSession", sessionId: s.id });
+                              setConfirmingDelete(null);
+                            }}
+                            confirmLabel={t("确认")}
+                            cancelLabel={t("取消")}
+                            title={t("删除会话 {0}", s.label)}
+                            className="ml-1"
+                            triggerClassName="opacity-60 hover:opacity-100"
+                          />
                         )}
                       </div>
                     );

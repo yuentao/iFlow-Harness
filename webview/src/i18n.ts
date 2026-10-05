@@ -59,7 +59,6 @@ const en: Record<string, string> = {
   "取消": "Cancel",
   // user message delete
   "删除该消息及其后所有内容": "Delete this message and everything after it",
-  "确认删除该消息及其后所有内容": "Confirm — deletes this message and everything after it",
   // tool cards / message list
   "已完成": "Completed",
   "失败": "Failed",
@@ -115,7 +114,6 @@ const en: Record<string, string> = {
   "返回列表": "Back to list",
   "读取中…": "Loading…",
   "尚未配置 MCP 服务器": "No MCP servers configured",
-  "确认删除": "Confirm delete",
   "添加": "Add",
   "保存": "Save",
   "已保存": "Saved",

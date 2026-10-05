@@ -305,24 +305,23 @@ export class SessionStore {
   }
 
   /**
-   * Delete a user message and everything after it. The returned full prefix of
-   * user prompts lets the host prove that the CLI history has not been
-   * compressed, reordered, or ambiguously duplicated before truncating it.
+   * Delete a user message and everything after it. The returned FULL user-prompt
+   * sequence plus the target's index lets the host locate the truncation point
+   * in the CLI history by occurrence order — the turns after the target matter
+   * because deleting one deletes its whole tail, and a compressed-away target
+   * is located via its first surviving successor.
    */
-  deleteUserMessage(blockId: string, commit = true): { text: string; history: string[] } | null {
+  deleteUserMessage(blockId: string, commit = true): { text: string; allUserTexts: string[]; targetIndex: number } | null {
     const blocks = this.state.blocks;
     const index = blocks.findIndex((b) => b.kind === "user" && b.id === blockId);
     if (index < 0) return null;
     const block = blocks[index]!;
     if (block.kind !== "user") return null;
-    const text = block.text;
-    const history = blocks
-      .slice(0, index)
-      .filter((b): b is Extract<Block, { kind: "user" }> => b.kind === "user")
-      .map((b) => b.text);
-    history.push(text);
+    const userBlocks = blocks.filter((b): b is Extract<Block, { kind: "user" }> => b.kind === "user");
+    const allUserTexts = userBlocks.map((b) => b.text);
+    const targetIndex = userBlocks.indexOf(block);
     if (commit) this.commitUserMessageDeletion(blockId);
-    return { text, history };
+    return { text: block.text, allUserTexts, targetIndex };
   }
 
   commitUserMessageDeletion(blockId: string): boolean {

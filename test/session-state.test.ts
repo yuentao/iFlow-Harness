@@ -1568,23 +1568,37 @@ describe("findCliHistoryCut (locate a turn inside the CLI chatHistory)", () => {
   const user = (text: string) => ({ role: "user", parts: [{ text }] });
   const model = (text: string) => ({ role: "model", parts: [{ text }] });
   const toolResp = (name: string) => ({ role: "user", parts: [{ functionResponse: { name, response: {} } }] });
+  const injected = (text: string) => user(text);
+  const truncate = (index: number) => ({ kind: "truncate" as const, index });
 
-  it("matches an exact text-only user entry", () => {
+  it("truncates at the target's exact text-only entry", () => {
     const history = [user("第一条"), model("回复"), user("第二条"), model("回复二")];
-    expect(findCliHistoryCut(history, ["第一条", "第二条"])).toBe(2);
+    expect(findCliHistoryCut(history, ["第一条", "第二条"], 1)).toEqual(truncate(2));
+    expect(findCliHistoryCut(history, ["第一条", "第二条"], 0)).toEqual(truncate(0));
   });
 
   it("matches by prefix (agent-side text carries an attachment block the transcript lacks)", () => {
     const history = [user("看这个文件\n\n用户附带以下本地文件（可按需读取）：\n- a.ts → /p/a.ts")];
-    expect(findCliHistoryCut(history, ["看这个文件"])).toBe(0);
+    expect(findCliHistoryCut(history, ["看这个文件"], 0)).toEqual(truncate(0));
   });
 
   it("disambiguates identical prompts by occurrence", () => {
     const history = [user("hi"), model("a"), user("hi"), model("b")];
-    expect(findCliHistoryCut(history, ["hi"])).toBe(0);
-    expect(findCliHistoryCut(history, ["hi", "hi"])).toBe(2);
-    // A third occurrence does not exist.
-    expect(findCliHistoryCut(history, ["hi", "hi", "hi"])).toBeNull();
+    expect(findCliHistoryCut(history, ["hi", "hi"], 0)).toEqual(truncate(0));
+    expect(findCliHistoryCut(history, ["hi", "hi"], 1)).toEqual(truncate(2));
+  });
+
+  it("ignores CLI-injected turns (Please continue. / compression summary)", () => {
+    // The next-speaker loop and auto-compression inject role:"user" entries
+    // with foreign text; occurrence matching must walk past them.
+    const history = [
+      user("原始提问"),
+      model("答"),
+      injected("Please continue."),
+      model("续答"),
+      user("第二个提问"),
+    ];
+    expect(findCliHistoryCut(history, ["原始提问", "第二个提问"], 1)).toEqual(truncate(4));
   });
 
   it("keeps exact and attachment-prefix occurrences in one chronological pool", () => {
@@ -1593,43 +1607,82 @@ describe("findCliHistoryCut (locate a turn inside the CLI chatHistory)", () => {
       model("x"),
       user("hi"),
     ];
-    expect(findCliHistoryCut(history, ["hi"])).toBe(0);
-    expect(findCliHistoryCut(history, ["hi", "hi"])).toBe(2);
+    expect(findCliHistoryCut(history, ["hi", "hi"], 0)).toEqual(truncate(0));
+    expect(findCliHistoryCut(history, ["hi", "hi"], 1)).toEqual(truncate(2));
   });
 
-  it("rejects an arbitrary longer prompt instead of cutting at a prefix", () => {
+  it("never matches a prompt that is only a prefix of the CLI turn (attachment block shape required)", () => {
     const history = [user("部署服务并检查日志")];
-    expect(findCliHistoryCut(history, ["部署服务"])).toBeNull();
+    // "部署服务" is a bare prefix without the attachment block — not a match.
+    expect(findCliHistoryCut(history, ["部署服务"], 0)).toEqual({ kind: "skip" });
   });
 
   it("strips whole system-reminder parts before matching", () => {
     const history = [
       { role: "user", parts: [{ text: "<system-reminder>context</system-reminder>" }, { text: "真正的提问" }] },
     ];
-    expect(findCliHistoryCut(history, ["真正的提问"])).toBe(0);
+    expect(findCliHistoryCut(history, ["真正的提问"], 0)).toEqual(truncate(0));
   });
 
   it("never matches a tool-response entry (role user but functionResponse parts)", () => {
     const history = [toolResp("read_file"), model("x")];
-    expect(findCliHistoryCut(history, ["read_file"])).toBeNull();
+    expect(findCliHistoryCut(history, ["read_file"], 0)).toEqual({ kind: "skip" });
   });
 
-  it("returns null when the history was compressed away (no match)", () => {
-    const history = [model("这是压缩后的摘要，原文已不在上下文中。"), user("之后的新消息")];
-    expect(findCliHistoryCut(history, ["很久以前被压缩掉的原始提问"])).toBeNull();
+  it("keeps the typed text of an image turn (inlineData part ignored)", () => {
+    const history = [
+      { role: "user", parts: [{ text: "看这个截图" }, { inlineData: { data: "AAA", mimeType: "image/png" } }] },
+      model("看到了"),
+    ];
+    expect(findCliHistoryCut(history, ["看这个截图"], 0)).toEqual(truncate(0));
   });
 
-  it("returns null for a non-array history or an empty needle", () => {
-    expect(findCliHistoryCut(undefined, ["x"])).toBeNull();
-    expect(findCliHistoryCut({ not: "an array" }, ["x"])).toBeNull();
-    expect(findCliHistoryCut([user("x")], ["   "])).toBeNull();
+  it("cuts at the first surviving successor when the target was compressed away", () => {
+    // CLI compressed its head into a summary entry: the target prompt is gone
+    // but its successor remains — cutting at the successor drops the whole tail.
+    const history = [
+      injected("This session is being continued from a previous conversation that ran out of context. ..."),
+      model("..."),
+      user("幸存的后续提问"),
+    ];
+    expect(findCliHistoryCut(history, ["被压缩的原始提问", "幸存的后续提问"], 0)).toEqual(truncate(2));
+  });
+
+  it("skips (transcript-only delete) when nothing of the tail remains in the CLI", () => {
+    const history = [model("这是压缩后的摘要，原文已不在上下文中。")];
+    expect(findCliHistoryCut(history, ["很久以前被压缩掉的原始提问"], 0)).toEqual({ kind: "skip" });
+  });
+
+  it("skips for a slash command the CLI never recorded", () => {
+    const history = [user("真正的提问"), model("答")];
+    // /compress rides the transcript but never reaches chatHistory.
+    expect(findCliHistoryCut(history, ["真正的提问", "/compress"], 1)).toEqual({ kind: "skip" });
+  });
+
+  it("refuses to guess when an earlier surviving turn sits after the anchor", () => {
+    // Compression remap: transcript [X, Y] but the CLI only kept one "X" that
+    // occurrence-maps behind Y's own surviving copy — cutting there would eat
+    // Y's successor context... the safety net must refuse the cut instead.
+    const history = [user("甲"), model("a"), user("乙"), model("b")];
+    // Deleting "甲" with a transcript whose later copy of "甲" maps AFTER "乙"
+    // (history below) would cut into kept context → skip.
+    const remap = [user("乙"), model("b"), user("甲")];
+    expect(findCliHistoryCut(remap, ["甲", "乙", "甲"], 0)).toEqual({ kind: "skip" });
+    // Sanity: the same history with an aligned transcript truncates fine.
+    expect(findCliHistoryCut(remap, ["乙", "甲"], 1)).toEqual(truncate(2));
+  });
+
+  it("returns skip for a non-array history and refuses on empty prompt text", () => {
+    expect(findCliHistoryCut(undefined, ["x"], 0)).toEqual({ kind: "skip" });
+    expect(findCliHistoryCut({ not: "an array" }, ["x"], 0)).toEqual({ kind: "skip" });
+    expect(findCliHistoryCut([user("x")], ["   "], 0)).toEqual({ kind: "refuse", reason: "empty" });
   });
 
   it("matches the zero-width-escaped form the CLI persisted", () => {
     // toAgentPromptText prefixes U+200B to non-command "/" input; the CLI
     // stores the escaped text, the transcript block carries the same escape.
     const history = [user("\u200B/foo not a command")];
-    expect(findCliHistoryCut(history, ["\u200B/foo not a command"])).toBe(0);
+    expect(findCliHistoryCut(history, ["\u200B/foo not a command"], 0)).toEqual(truncate(0));
   });
 });
 
