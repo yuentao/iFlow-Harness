@@ -69,7 +69,6 @@ const en: Record<string, string> = {
   "文件对比": "File diff",
   "任务清单": "Task list",
   "运行中": "Running",
-  "子代理日志": "SubAgent log",
   "启动子代理（{0}）：{1}": "Launch agent ({0}): {1}",
   "读取 {0}": "Reading {0}",
   "运行：{0}": "Running: {0}",
@@ -167,6 +166,7 @@ const en: Record<string, string> = {
   "拖放文件以添加附件": "Drop files to attach",
   "拖拽调整高度": "Drag to resize",
   "展开更早 {0} 条消息": "Show {0} earlier messages",
+  "显示更早 {0} 条": "Show {0} earlier steps",
   "上下文摘要": "Context summary",
   "diff": "diff",
   // composer / message list (additional — new entries only)

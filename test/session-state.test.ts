@@ -81,6 +81,59 @@ describe("SubAgent grouping (agentId)", () => {
     expect(sub.entries[2]).toMatchObject({ kind: "tool", toolName: "read_file", status: "completed" });
   });
 
+  it("opens a separate card per parallel task instead of merging into the open one", () => {
+    // Parallel tasks (verified live): the main-session `task` tool_call
+    // carries no agentId, and a second `task` arrives while the first card
+    // is still in_progress. The old "any task update belongs to the open
+    // interval" rule merged it into card 1 and card 2 never existed.
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task_a", toolName: "task", title: "Launch agent(explore-agent): 审查前端业务", kind: "other", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task_b", toolName: "task", title: "Launch agent(explore-agent): 审查后端业务", kind: "other", status: "pending" }));
+    // Nested (agentId-less) flat activity goes to the newest open card…
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "r1", toolName: "read_file", title: "Reading a.ts", kind: "read", status: "completed" }));
+    // …while each task's own completion matches by its OWN toolCallId,
+    // even out of order (b finishes before a).
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "task_b", toolName: "task", kind: "other", status: "completed" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "task_a", toolName: "task", kind: "other", status: "completed" }));
+
+    expect(state.blocks.map((b) => b.kind)).toEqual(["subagent", "subagent"]);
+    const [a, b] = state.blocks as [Extract<Block, { kind: "subagent" }>, Extract<Block, { kind: "subagent" }>];
+    expect(a.taskToolCallId).toBe("task_a");
+    expect(a.title).toContain("前端");
+    expect(a.status).toBe("completed");
+    expect(b.taskToolCallId).toBe("task_b");
+    expect(b.title).toContain("后端");
+    expect(b.status).toBe("completed");
+    // r1 (agentId-less nested) rides the newest open card at the time (b);
+    // card a's entries only ever saw its own spawning call.
+    expect(a.entries.map((e) => e.kind)).toEqual(["tool"]);
+    expect(b.entries.some((e) => e.kind === "tool" && (e as Extract<Block, { kind: "tool" }>).toolName === "task")).toBe(true);
+  });
+
+  it("adopts unbound cards FIFO so parallel adapter events hit the right card", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task_a", toolName: "task", title: "Launch agent(x): 任务甲", kind: "other", status: "in_progress" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task_b", toolName: "task", title: "Launch agent(x): 任务乙", kind: "other", status: "in_progress" }));
+    // Adapter event for the FIRST agent (agents start in launch order).
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "nested_a1",
+        toolName: "read_file",
+        title: "Reading a.ts",
+        kind: "read",
+        status: "completed",
+        agentId: "agent-1",
+      } as SessionNotification["update"]),
+    );
+    const [a, b] = state.blocks as [Extract<Block, { kind: "subagent" }>, Extract<Block, { kind: "subagent" }>];
+    expect(a.agentId).toBe("agent-1");
+    expect(a.entries.some((e) => e.kind === "tool" && (e as Extract<Block, { kind: "tool" }>).toolCallId === "nested_a1")).toBe(true);
+    expect(b.agentId).toBe("task_b");
+    expect(b.entries).toHaveLength(0);
+  });
+
   it("reads agentId from update._meta as a fallback", () => {
     const state: SessionState = initialSessionState();
     applySessionUpdate(

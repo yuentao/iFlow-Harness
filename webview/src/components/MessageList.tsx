@@ -241,8 +241,12 @@ function agentAccent(type: string | null): { border: string; icon: string; chip:
   return palette[hash % palette.length]!;
 }
 
+/** Steps beyond this count are folded behind a "show earlier" toggle; the
+ * newest steps stay visible because during streaming they arrive at the tail. */
+const SUB_AGENT_VISIBLE_STEPS = 4;
+
 function SubAgentCard({ block }: { block: SubAgentBlock }) {
-  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
   // W2: derived counter + localized chip text — memoized so re-renders that
   // don't change `entries` skip the t() replaceAll work.
@@ -250,6 +254,9 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     () => nested.filter((b) => b.status === "completed" || b.status === "failed").length,
     [block.entries],
   );
+  const overflow = nested.length > SUB_AGENT_VISIBLE_STEPS;
+  const hiddenCount = nested.length - SUB_AGENT_VISIBLE_STEPS;
+  const visible = overflow && !expanded ? nested.slice(nested.length - SUB_AGENT_VISIBLE_STEPS) : nested;
   const progress = nested.length > 0 ? ` ${done}/${nested.length}` : "";
   const statusChip =
     block.status === "completed" ? (
@@ -279,25 +286,6 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
       <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
     );
 
-  // Compact mono log over the nested entries (reference-design "日志" pane).
-  // P5: memoized on the entries reference — a streaming card re-renders on
-  // every nested chunk, and rebuilding this string each time is O(entries).
-  const log = useMemo(() => {
-    return block.entries
-      .map((e) => {
-        if (e.kind === "tool") {
-          const s = e.status === "completed" ? t("已完成") : e.status === "failed" ? t("失败") : t("运行中");
-          const title = localizeStepTitle(e.title && e.title !== e.toolName ? e.title : e.toolName);
-          return `> tool: ${e.toolName} — ${title} · ${s}`;
-        }
-        if (e.kind === "text") return e.text;
-        if (e.kind === "thought") return `> ${e.text}`;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }, [block.entries]);
-
   const accent = agentAccent(block.agentType);
 
   return (
@@ -320,7 +308,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
       {nested.length > 0 && (
         <div className="border-t border-border/60 px-3 py-2">
           <ul className="space-y-1.5">
-            {nested.map((t2) => (
+            {visible.map((t2) => (
               <li key={t2.toolCallId} className="flex items-center gap-2 text-[12px]">
                 {stepIcon(t2.status)}
                 <span className={`min-w-0 truncate ${t2.status === "completed" ? "text-muted-foreground" : "text-foreground"}`}>
@@ -329,23 +317,16 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
               </li>
             ))}
           </ul>
+          {overflow && (
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              {expanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+              {expanded ? t("收起") : t("显示更早 {0} 条", String(hiddenCount))}
+            </button>
+          )}
         </div>
-      )}
-      {block.entries.length > 0 && (
-        <>
-          <button
-            onClick={() => setOpen((v) => !v)}
-            className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
-          >
-            <Caret open={open} />
-            {t("子代理日志")}
-          </button>
-          <Collapse open={open}>
-            <pre className="mx-2.5 mb-2.5 max-h-64 overflow-y-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-              {log}
-            </pre>
-          </Collapse>
-        </>
       )}
     </div>
   );

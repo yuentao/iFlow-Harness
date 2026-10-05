@@ -212,10 +212,14 @@ function findSubAgentIndex(blocks: Block[], agentId: string): number | null {
 }
 
 /** Fallback binding: a `task` tool_call arrived without an agentId — adopt the
- * newest unfinished such block once the real agentId shows up. Returns the
- * block index (P-1 change reporting). */
+ * OLDEST unfinished such block once the real agentId shows up (FIFO, not
+ * newest-first: with parallel tasks the agents start in task-launch order, so
+ * the first adapter event seen belongs to the earliest still-unbound card;
+ * newest-first misattributed events to the wrong card — verified against the
+ * 0.5.19 adapter, which emits per-agent events as each agent starts). Returns
+ * the block index (P-1 change reporting). */
 function adoptUnboundSubAgent(blocks: Block[], agentId: string): number | null {
-  for (let i = blocks.length - 1; i >= 0; i--) {
+  for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]!;
     if (
       block.kind === "subagent" &&
@@ -544,8 +548,20 @@ export function applySessionUpdate(
       toolCallId?: string;
       toolName?: string;
     };
-    if (activeIdx !== null) {
-      const active = state.blocks[activeIdx] as SubAgentBlock;
+    // Attribute the update by the spawning call's OWN toolCallId, not "the
+    // newest open card": with parallel tasks (verified live 0.5.19 — the
+    // main-session `task` tool_call carries no agentId, so it lands here)
+    // a second `task` while card 1 is still open must open its own card,
+    // and completions may arrive out of order. The old "any task update
+    // belongs to the open interval" rule merged parallel SubAgents into one
+    // card and left the real second card uncreated (its adapter events then
+    // spawned a nameless fallback card).
+    const ownIdx =
+      taskUpdate.toolCallId !== undefined && taskUpdate.toolCallId !== null
+        ? findSubAgentIndex(state.blocks, taskUpdate.toolCallId)
+        : null;
+    if (ownIdx !== null) {
+      const active = state.blocks[ownIdx] as SubAgentBlock;
       // Interval bookkeeping: the spawning call's status drives the card.
       if (taskUpdate.status) active.status = taskUpdate.status;
       // A richer title (Launch agent(type): …) upgrades the card type.
@@ -556,11 +572,11 @@ export function applySessionUpdate(
           active.title = taskUpdate.title;
         }
       }
-      // Keep the update in the log so the 日志 pane shows the full trail.
+      // Keep the update in the step list so the trail stays complete.
       applyUpdateToBlocks(active.entries, update);
-      return activeIdx;
+      return ownIdx;
     }
-    // Interval opens: a SubAgent card is born.
+    // No card owns this spawning call → interval opens: a SubAgent card is born.
     const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子代理");
     state.blocks.push({
       kind: "subagent",
