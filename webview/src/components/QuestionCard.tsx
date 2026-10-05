@@ -97,7 +97,14 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         <HelpCircle className="size-3.5 shrink-0 text-primary" />
         <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 需要你的回答")}</span>
       </div>
-      <div className="space-y-3 px-3 py-2.5 text-[12px]">
+      {/* Scroll cap (same discipline as ApprovalCard's max-h-40 title): the
+          card is a bottom-anchored overlay, so uncapped question lists grew
+          it past the viewport — the header got covered and the submit row
+          pushed off-screen (multi-question asks with long descriptions).
+          The cap is viewport-relative minus fixed slack for the editor
+          header + Composer + this card's own chrome, so only the questions
+          scroll while title / countdown / actions stay visible. */}
+      <div className="max-h-[max(140px,calc(100vh-240px))] space-y-3 overflow-y-auto px-3 py-2.5 text-[12px]">
         {pending.questions.map((q) => {
           const picks = selected[q.header] ?? new Set<string>();
           const isCustomOpen = customOpen[q.header] ?? false;
