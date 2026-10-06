@@ -11,6 +11,7 @@
   "请解释/处理这段代码（`{0}:{1}`）：": "Please explain / work on this code (`{0}:{1}`):",
   "关于 `{0}:{1}`：": "About `{0}:{1}`:",
   "审批超时，已自动拒绝": "approval timed out, auto-rejected",
+  "审批超时自动拒绝后，模型长时间无响应，已自动中断本轮。可重新发送或切换 API 配置后重试。": "After the approval timed out and was auto-rejected, the model produced no response for a long time; this turn was aborted automatically. Resend, or switch API profiles and retry.",
   "已取消": "cancelled",
   "已拒绝": "rejected",
   "已允许（{0}）": "allowed ({0})",

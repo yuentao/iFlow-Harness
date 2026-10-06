@@ -71,6 +71,18 @@ import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/**
+ * Post-rejection liveness window (user-reported 2026-10-06: "审批超时自动拒绝
+ * 之后就一直卡在正在生成"). After a timeout auto-reject the CLI continues the
+ * turn with a FRESH model request; a wedged gateway can leave that request
+ * hanging with zero `session/update` events forever — the host prompt has no
+ * timeout by design (pitfall #13) and the CLI's SSE has none either, so the
+ * panel strands on "generating" with no escape. Wire repro (real CLI, 8s/2min/
+ * 5min delayed-cancelled responses) shows the healthy path settles in seconds,
+ * so total silence past this window after a rejection means the turn is dead:
+ * cancel it and surface the error so the composer unlocks.
+ */
+const POST_REJECTION_IDLE_MS = 120_000;
 /** Cap for discardedSessionIds (hot re-auth abandons at most one session per
  * profile switch; the cap only guards pathological unbounded growth). */
 const DISCARDED_SESSION_IDS_CAP = 8;
@@ -266,6 +278,15 @@ export class ChatPanel implements vscode.Disposable {
    */
   private turnHadAgentOutput = false;
   /**
+   * Armed after a timeout auto-reject (approval / plan-exit / question) while
+   * a turn is in flight. If the CLI's follow-up model request wedges (zero
+   * `session/update` for POST_REJECTION_IDLE_MS — see the constant), the
+   * watchdog cancels the dead turn instead of stranding the panel on
+   * "generating" forever. Cleared by the next session/update, at turn end,
+   * and on dispose.
+   */
+  private postRejectionWatchdog: NodeJS.Timeout | null = null;
+  /**
    * Parsed edit args (shared/parseEditArgs) keyed by toolCallId, kept for the
    * arg-reversal diff fallback (strategy 2) when no pre-run snapshot exists.
    * Transient by design: never persisted, capped, cleared with the transcript.
@@ -411,6 +432,7 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
     this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
+    this.clearPostRejectionWatchdog();
     this.client = null;
     this.editorPanel?.dispose();
     this.editorPanel = undefined;
@@ -707,6 +729,9 @@ export class ChatPanel implements vscode.Disposable {
         this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
         this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
         this.cancelSeen = true;
+        // The user took explicit control of the turn — a post-rejection
+        // watchdog armed earlier must not fire behind their back.
+        this.clearPostRejectionWatchdog();
         this.client?.cancel(this.store.getState().sessionId ?? "");
         break;
       case "newSession":
@@ -899,9 +924,13 @@ export class ChatPanel implements vscode.Disposable {
       const timer = setTimeout(() => {
         // Safety: an unanswered card must not block the agent forever.
         this.pendingApprovals.delete(id);
+        // Resolve FIRST: the wire response is what unblocks the agent — a
+        // throwing UI-layer store call must never swallow it (the turn would
+        // strand with the card gone and the agent still waiting).
+        resolve({ outcome: { outcome: "cancelled" } });
         this.store.clearApproval(id);
         this.store.approvalResolutionNote(approval.toolName, vscode.l10n.t("审批超时，已自动拒绝"));
-        resolve({ outcome: { outcome: "cancelled" } });
+        this.armPostRejectionWatchdog();
       }, APPROVAL_TIMEOUT_MS);
 
       this.pendingApprovals.set(id, {
@@ -946,6 +975,40 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingApprovals.clear();
   }
 
+  /**
+   * Arm the post-rejection liveness watchdog (see POST_REJECTION_IDLE_MS).
+   * Only timeout auto-rejections arm it: a manual reject/allow means the user
+   * is watching, and long-running tools keep the event stream alive anyway —
+   * any session/update disarms this. A fire therefore means the follow-up
+   * model request after our rejection is wedged: cancel the turn (a live CLI
+   * answers `cancelled` and the turn settles normally) and mark the error so
+   * a dead CLI cannot strand the panel on "generating" forever.
+   */
+  private armPostRejectionWatchdog(): void {
+    this.clearPostRejectionWatchdog();
+    const sessionId = this.store.getState().sessionId;
+    if (!sessionId) return;
+    this.postRejectionWatchdog = setTimeout(() => {
+      this.postRejectionWatchdog = null;
+      const state = this.store.getState();
+      if (this.disposed || state.sessionId !== sessionId || state.status !== "streaming") return;
+      this.log.warn(
+        `post-rejection turn silent for ${POST_REJECTION_IDLE_MS / 1000}s on session ${sessionId} — cancelling dead turn`,
+      );
+      this.client?.cancel(sessionId);
+      this.store.markError(
+        vscode.l10n.t("审批超时自动拒绝后，模型长时间无响应，已自动中断本轮。可重新发送或切换 API 配置后重试。"),
+      );
+    }, POST_REJECTION_IDLE_MS);
+  }
+
+  private clearPostRejectionWatchdog(): void {
+    if (this.postRejectionWatchdog) {
+      clearTimeout(this.postRejectionWatchdog);
+      this.postRejectionWatchdog = null;
+    }
+  }
+
   // --- Plan-mode exit flow (_iflow/plan/exit) ---------------------------------
 
   /**
@@ -965,9 +1028,11 @@ export class ChatPanel implements vscode.Disposable {
     return new Promise<ExitPlanModeResponse>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingPlanExits.delete(id);
+        // Resolve FIRST — see the approval-timeout comment above.
+        resolve({ approved: false, reason: vscode.l10n.t("超时未确认，已拒绝") });
         this.store.clearPlanExit(id);
         this.store.planExitResolutionNote(vscode.l10n.t("计划审批超时，已自动拒绝"));
-        resolve({ approved: false, reason: vscode.l10n.t("超时未确认，已拒绝") });
+        this.armPostRejectionWatchdog();
       }, APPROVAL_TIMEOUT_MS);
       this.pendingPlanExits.set(id, { resolve, timer });
       this.store.showPlanExit(pending);
@@ -1040,9 +1105,11 @@ export class ChatPanel implements vscode.Disposable {
       const timer = setTimeout(() => {
         // Safety: an unanswered card must not block the agent forever.
         this.pendingQuestions.delete(id);
+        // Resolve FIRST — see the approval-timeout comment above.
+        resolve({ answers: {} });
         this.store.clearQuestions(id);
         this.store.appendNotice(vscode.l10n.t("提问超时，已按未回答继续"));
-        resolve({ answers: {} });
+        this.armPostRejectionWatchdog();
       }, APPROVAL_TIMEOUT_MS);
 
       this.pendingQuestions.set(id, { resolve, timer });
@@ -2068,7 +2135,14 @@ export class ChatPanel implements vscode.Disposable {
     // Empty-response detection: any visible agent output during the live turn
     // disqualifies it from the "gateway answered empty" retry. Replay updates
     // (session/load) are excluded — they belong to a past turn.
-    if (!this.restoring && isAgentOutputUpdate(n.update)) this.turnHadAgentOutput = true;
+    // Visible output ALSO proves the follow-up model request after a timeout
+    // auto-rejection is alive — disarm the post-rejection watchdog (tool
+    // status events alone do not: the CLI can emit a lone tool_call_update
+    // for the rejected tool and then wedge on the next model request).
+    if (!this.restoring && isAgentOutputUpdate(n.update)) {
+      this.turnHadAgentOutput = true;
+      this.clearPostRejectionWatchdog();
+    }
     // Edit-tool diff synthesis for tools the wire gives no structured diff to
     // (all MCP tools — CLI 0.5.19 flattens MCP results to plain text). Two
     // strategies, in priority order (see `maybeSynthesizeToolDiff`):
@@ -3852,6 +3926,9 @@ export class ChatPanel implements vscode.Disposable {
       if (compressToastId !== null) {
         this.store.dismissToast(compressToastId);
       }
+      // The turn is over on every exit path — a post-rejection watchdog armed
+      // mid-turn has nothing left to guard.
+      this.clearPostRejectionWatchdog();
     }
   }
 
