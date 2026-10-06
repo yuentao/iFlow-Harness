@@ -1864,13 +1864,40 @@ export class ChatPanel implements vscode.Disposable {
       vscode.window.showWarningMessage(vscode.l10n.t("未找到 API 配置: {0}", name));
       return;
     }
+    // User directive (2026-10-06): a profile switch must not silently drop
+    // the conversation — ask first. Only meaningful with a live session;
+    // without one the switch is just the initial connect. "Stay" reloads the
+    // SAME conversation via session/load under the new credentials — a live
+    // ACP session keeps the OLD endpoint after hot authenticate, only
+    // new/load rebuild config from the updated authOptions (bundle-verified,
+    // CLI 0.5.19, see reloadSessionUnderCreds).
+    const liveSessionId = this.store.getState().sessionId;
+    let keepSession = false;
+    if (liveSessionId) {
+      const newLabel = vscode.l10n.t("开启新会话");
+      const keepLabel = vscode.l10n.t("停留在当前会话");
+      const pick = await vscode.window.showWarningMessage(
+        vscode.l10n.t("切换到 API 配置「{0}」。开启新会话，或保留当前对话并改用新配置继续？", name),
+        { modal: true },
+        newLabel,
+        keepLabel,
+      );
+      // Esc / close = cancel the ENTIRE switch: no secret writes, no
+      // settings.json pointer change, no reconnect. The snapshot clears the
+      // webview's pending chip (it would otherwise sit until its 10s timeout).
+      if (pick !== newLabel && pick !== keepLabel) {
+        this.store.pushSnapshot();
+        return;
+      }
+      keepSession = pick === keepLabel;
+    }
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds);
     // Same pointer sync as saveAuthAndReconnect — see the rationale there.
     if (!updateCurrentApiProfile(name)) {
       this.log.warn(`could not update currentApiProfile in settings.json (target: ${name})`);
     }
-    await this.reconnectWithCredentials(creds);
+    await this.reconnectWithCredentials(creds, keepSession);
   }
 
   /** Read a profile from CLI settings.json (read-only source). */
@@ -1895,8 +1922,17 @@ export class ChatPanel implements vscode.Disposable {
     this.store.setAuth(await this.buildAuthState(this.store.getState().auth.authenticated, false));
   }
 
-  /** Tear down the current CLI connection and start fresh with new credentials. */
-  private async reconnectWithCredentials(creds: OpenAiCompatCredentials): Promise<void> {
+  /** Tear down the current CLI connection and start fresh with new credentials.
+   * `keepSession` (user chose 停留在当前会话 at the switch prompt): the hot
+   * path reloads the SAME conversation in place via `reloadSessionUnderCreds`
+   * (seamless — the transcript never clears); the cold path can only restore
+   * after the process restart, routed through `restartRestoreId` like a CLI
+   * restart. Both fall back to a new session when the reload fails — a
+   * silently ineffective switch would be worse than a visible one. */
+  private async reconnectWithCredentials(
+    creds: OpenAiCompatCredentials,
+    keepSession = false,
+  ): Promise<void> {
     if (this.historySyncBusy) return;
     // A first connect still in flight owns the `connecting` promise —
     // ensureClient would hand it straight back, skipping the reconnect and
@@ -1927,14 +1963,17 @@ export class ChatPanel implements vscode.Disposable {
         // Stop a possibly-still-running turn (an errored turn is exactly why
         // users switch profiles; cancel is a no-op on an idle session) and
         // drop the dying session's trailing updates (onSessionUpdate consumes
-        // discardedSessionIds delete-style).
+        // discardedSessionIds delete-style). keepSession skips the discard:
+        // the SAME session is reloaded in place, its updates stay legitimate.
         try {
           oldClient.cancel(hotSessionId);
         } catch {
           // dying client — the restart path handles it
         }
-        if (this.discardedSessionIds.size >= DISCARDED_SESSION_IDS_CAP) this.discardedSessionIds.clear();
-        this.discardedSessionIds.add(hotSessionId);
+        if (!keepSession) {
+          if (this.discardedSessionIds.size >= DISCARDED_SESSION_IDS_CAP) this.discardedSessionIds.clear();
+          this.discardedSessionIds.add(hotSessionId);
+        }
       }
       try {
         // Same OAuth-cache guard as the cold path (reversible archive).
@@ -1959,6 +1998,31 @@ export class ChatPanel implements vscode.Disposable {
           this.log.warn(
             `could not re-stamp currentApiProfile after hot re-auth (target: ${activeProfileName})`,
           );
+        }
+        // keepSession: reload the SAME conversation in place under the new
+        // credentials — the transcript never clears (seamless). Only the
+        // CLI-side session object is rebuilt (session/load, same id).
+        if (keepSession && hotSessionId) {
+          const reloaded = await this.reloadSessionUnderCreds(hotSessionId, creds);
+          if (reloaded) {
+            this.store.setAuth(await this.buildAuthState(true, false));
+            this.log.info(
+              `profile switch finished in ${Date.now() - tHot}ms (hot re-auth, session reloaded in place)`,
+            );
+            void vscode.window.showInformationMessage(
+              vscode.l10n.t(
+                "已切换 API 配置: {0}，当前对话已改用新配置",
+                (await getActiveProfileName(this.context.secrets)) ?? "",
+              ),
+            );
+            return;
+          }
+          // Reload failed (CLI refused the load, or the session file is
+          // gone). Degrade visibly to the new-session flow below — a
+          // silently ineffective switch would be worse.
+          this.log.warn("keep-session reload failed, falling back to a new session");
+          if (this.discardedSessionIds.size >= DISCARDED_SESSION_IDS_CAP) this.discardedSessionIds.clear();
+          this.discardedSessionIds.add(hotSessionId);
         }
         // Tail rescue BEFORE the state swap (same rationale as below).
         void this.persistActiveTranscript();
@@ -1993,6 +2057,15 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     this.client = null;
+    // keepSession on the cold path: the process restart makes a seamless
+    // reload impossible, but the conversation is restored after the
+    // handshake from the transcript tail-rescued below (same mechanism as
+    // restartCli — restartRestoreId outranks the explicitSwitch no-restore
+    // rule in ensureClient's startup branch).
+    if (keepSession) {
+      const coldSessionId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
+      if (coldSessionId) this.restartRestoreId = coldSessionId;
+    }
     // Tail rescue BEFORE the state swap: the outgoing session's transcript is
     // typically mid-turn here (an errored turn is exactly why the user is
     // switching profiles), and replaceState below drops the in-memory blocks.
@@ -2020,15 +2093,23 @@ export class ChatPanel implements vscode.Disposable {
     // so a failed reconnect never leaks the old process.
     const teardown = oldClient?.dispose().catch(() => {}) ?? Promise.resolve();
     const tSwitch = Date.now();
+    const coldKeeps = this.restartRestoreId !== null;
     try {
-      // ensureClient's post-handshake starts a NEW session (user directive:
-      // profile switches never restore history — see the block there), and
-      // applies pendingSwitchModel (the NEW profile's model) via set_model.
+      // ensureClient's post-handshake starts a NEW session by default (the
+      // abandoned session belongs to the OLD credentials) — unless this
+      // switch chose keepSession, which armed restartRestoreId above so the
+      // same conversation is restored instead. Either way pendingSwitchModel
+      // (the NEW profile's model) is applied via set_model.
       await this.ensureClient();
       this.store.setAuth(await this.buildAuthState(true, false));
       this.log.info(`profile switch finished in ${Date.now() - tSwitch}ms (incl. parallel old-CLI teardown)`);
       void vscode.window.showInformationMessage(
-        vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
+        coldKeeps
+          ? vscode.l10n.t(
+              "已切换 API 配置: {0}，当前对话已改用新配置",
+              (await getActiveProfileName(this.context.secrets)) ?? "",
+            )
+          : vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
       );
     } catch {
       // ensureClient already marked the error in the store; nothing to add.
@@ -2036,6 +2117,70 @@ export class ChatPanel implements vscode.Disposable {
       await teardown;
     }
     this.store.setInitializing(false);
+  }
+
+  /**
+   * Seamless keep-session profile switch (hot re-auth path): reload the
+   * SAME conversation under the new credentials WITHOUT touching the
+   * transcript — no replaceState, no replay, no splash; the panel never
+   * blinks, only the success toast confirms.
+   *
+   * Why a reload is required at all: a live ACP session keeps the OLD
+   * endpoint in its config after `authenticate` updates the agent-level
+   * authOptions — only session/new / session/load rebuild the config from
+   * the updated authOptions (bundle-verified, CLI 0.5.19). session/load with
+   * the SAME id rebuilds the CLI session from its own
+   * `~/.iflow/acp/sessions/<id>.json` (setHistory restores the model
+   * context) and does NOT replay session/update (pitfall #4) — so the
+   * panel's transcript stays exactly right as it stands.
+   *
+   * The window holds `historySyncBusy` (the same gate deleteUserMessage's
+   * reload uses): sendPrompt / startNewSession / setModel refuse while the
+   * old session object is about to be replaced. The model alignment runs
+   * AFTER the gate releases — setModel refuses while it is held.
+   *
+   * Returns false on any failure; the caller falls back to the visible
+   * new-session flow — a silently ineffective switch is the worse failure.
+   */
+  private async reloadSessionUnderCreds(
+    sessionId: string,
+    creds: OpenAiCompatCredentials,
+  ): Promise<boolean> {
+    const client = this.client;
+    if (!client || this.disposed) return false;
+    const init = client.getInitializeResult();
+    if (!init?.agentCapabilities.loadSession) {
+      this.log.warn("keep-session switch refused: CLI does not declare loadSession");
+      return false;
+    }
+    const cwd =
+      this.sessionCwd ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath;
+    this.historySyncBusy = true;
+    try {
+      await client.loadSession({ cwd, mcpServers: [], sessionId });
+      if (this.disposed || this.client !== client) return false;
+    } catch (error) {
+      this.log.warn(`keep-session session/load failed: ${errorMessage(error)}`);
+      return false;
+    } finally {
+      this.historySyncBusy = false;
+    }
+    // Model alignment to the NEW endpoint (pitfalls #23/#25): modes/commands
+    // survive untouched (the CLI replays nothing on load), but the model
+    // dropdown must follow the switch — default to the NEW profile's
+    // configured model, validated against the live /models before pushing
+    // (set_model validates nothing itself).
+    const modelsPromise = this.queryLiveModels();
+    const desired = this.pendingSwitchModel ?? creds.modelName;
+    this.pendingSwitchModel = null;
+    this.store.sessionMeta({ currentModelId: desired });
+    this.applyLiveModels(modelsPromise, client, sessionId, desired);
+    const pushId = await this.validateModelForPush(modelsPromise, desired, null);
+    if (pushId) await this.setModel(pushId);
+    this.log.info(`session ${sessionId} reloaded under the new credentials (in place)`);
+    return true;
   }
 
   /** Credentials to push via authenticate on the next handshake, if any. */
@@ -2796,9 +2941,12 @@ export class ChatPanel implements vscode.Disposable {
         // first paint on session/load + transcript replay.)
         const restartTarget = this.restartRestoreId;
         this.restartRestoreId = null;
-        // Profile switches (explicitSwitch) never restore history — existing
-        // user directive: the abandoned session belongs to the OLD credentials,
-        // the fresh endpoint always opens on a new conversation.
+        // Profile switches default to a NEW session — the abandoned session
+        // belongs to the OLD credentials endpoint. A switch made with the
+        // keepSession choice arms restartRestoreId (same one-handshake
+        // override as restartCli), and restartTarget already outranks the
+        // explicitSwitch guard, so the restore wins for exactly that
+        // handshake.
         let restoreTarget: string | undefined = restartTarget ?? undefined;
         if (
           !restoreTarget &&
