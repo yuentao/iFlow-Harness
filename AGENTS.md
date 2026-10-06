@@ -45,7 +45,7 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 ```bash
 npm ci                 # 安装依赖
 npm run typecheck      # tsc -p tsconfig.json --noEmit
-npm test               # vitest run(单次,非 watch;当前 7 文件 / 191 用例)
+npm test               # vitest run(单次,非 watch;当前 11 文件 / 271 用例)
 npm run build          # icon + tsc + esbuild(host) + vite build webview
 npm run icon           # 仅重新生成 media/icon.png
 npm run webview:dev    # webview 增量构建(UI 迭代时用)
@@ -64,6 +64,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 `scripts/vendor-cli.mjs` 把 CLI 打进 VSIX,使扩展在**完全没装 CLI** 的机器上可用。要点:
 
 - **来源是定制 fork**:npm 源为 `@yuentao/iflow-cli@0.5.19-custom.3`(tag `custom`),带本地注入的 `*.loader.cjs` 定制 bundle——官方 `@iflow-ai` 包不含。loader 源码来自 [iFlow-Mods](https://github.com/yuentao/iFlow-Mods) Mod 仓库:patch 型 Mod(thinking-mode / multimodal-image / output-token-limit / kimi-request-override / context-window refactor)在 CLI 源码同一插入点以 1 行 require 注入 loader,monkey-patch 模型规则并外置到 `~/.iflow/*.json`;Mod 可用 [iFlow-Mod-Builder](https://github.com/yuentao/iFlow-Mod-Builder)(Tauri+Vue3 GUI)打包成 `.iflow-mod` 安装。`--from <tgz>` / `--from-dir <dir>` 可完全绕开 npm 源(离线/本地定制场景——`--from-dir` 正是装载带新 loader 的本地定制 CLI 的路径,`--from-dir` 自带 node_modules 会跳过安装;脚本会剔除源目录的 `.git` 防进 VSIX)。custom.3 新增 `mcp-background-loader.cjs`(方法体委托型,不经过 L950):CLI 0.5.19 在 `--experimental-acp` 下 `isNonInteractive` 为 true,`discoverAllTools` 走**同步** `await discoverAllMcpTools()` 分支且 MCP `connect()` 无超时——npx 型服务器在 npm registry 不可达时无限挂起、ACP initialize 握手永久卡死(交互 TUI 反而走后台分支不受影响);loader 让 ACP 场景改走 CLI 自带的 `startMcpDiscoveryInBackground()`(MCP 工具连接完成后陆续注册),`-p` 一次性模式保持同步,`IFLOW_MCP_BACKGROUND=0` 退回原行为。
+- **mcp-session-share Mod(ACP 进程内 MCP 连接池)**:CLI 0.5.19 的每个 ACP 会话(session/new 与 session/load 都算)各自 `newSessionConfig()` 新建 Config,`discoverAllMcpTools()` 为每个配置的 MCP server spawn 一整条 stdio 进程链(cmd→npx-cli→server→watchdog,Windows 上每 server 约 3 个 node);harness 恢复会话的 probe newSession+loadSession 让舰队翻倍,而 ACP 方法表没有 session/close,被丢弃 probe 会话的舰队常驻整个 CLI 生命周期(2026-10-05 实测:单窗口 4 个 npx server 遗留 58 个 node.exe)。Mod 把 `discoverAllMcpTools()` 包上进程级池(`globalThis.__iflowMcpShare`,key=server 名+配置指纹):首会话认领 spawn 权(claim)并登记;后续会话收养健康池内 client(重指向新会话的 toolRegistry/promptRegistry/workspaceContext/config 后仅 `discover()` 重放,零 spawn);指纹变化/client 状态非 connected/discover 抛错 → 驱逐走原 spawn 路径。claim 机制专为 background-loader 后台化后的并发交叠设计(probe 与 load 的 discovery 同时进行,无 claim 则都查空池都 spawn)。仅 `--experimental-acp` 生效,TUI 与 `-p` 一次性不受影响,`IFLOW_MCP_SESSION_SHARE=0|false` 关闭,loader 缺失回退原行为。**与其他 Mod 同标准交付**:源在 iFlowMods 仓库 `mcp-session-share-refactor/`(mod.json type=patch + code.js 单点替换 + `mcp-session-share-loader.cjs` → core + README),方法体委托型不经过 L950 插入点,`.iflow-mod` 安装包放 dist/(gitignored);注入体随定制 fork `@yuentao/iflow-cli` 的 bundle 发布,vendor-cli 直接拉取即带上,**harness 不再自造注入脚本**。验证(2026-10-05):同一 CLI 进程连开 2 会话,session1 舰队 9 进程、session2 增量 0、dispose 后清零。**改 CLI bundle 版本后必须在 iFlowMods 重新生成 code.js——锚点漂移会让构建脚本硬失败**。
 - **裁剪有实测背书,不是猜的**:每个被裁项(node-pty 62.6MB、devtools、jimp 图像链等,共 182.7MB → 39.3MB)都于 2026-09-11 用 `npm run harness` 对裁剪副本跑完整 ACP 流程验证过——被裁的只服务交互 TUI,ACP headless 路径不碰。**增删 PRUNE 清单前必须重跑 harness 验证**。
 - **版本幂等**:`vendor/iflow-cli/package.json` 的 version 与目标一致就跳过;`--force` 强制重做。注意 `--from-dir` 时「同版本 ≠ 同内容」,本地 loader 定制不在 npm 源里。
 - **默认规则双目录**:源在 `scripts/iflow-defaults/`(进 git),构建时复制到 `vendor/iflow-defaults/`;扩展连接前把 `~/.iflow/` **缺失的**规则文件种过去(`seedDefaultRuleConfigs`),**永不覆盖用户已有文件**;`settings.json` / `iflow_accounts.json` 携带凭据,固定清单之外一概不同步。
@@ -166,7 +167,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 
 ## 测试
 
-- 框架:vitest 5,配置在 `vitest.config.ts`,`include: ["test/**/*.test.{ts,tsx}"]`,`testTimeout`/`hookTimeout` 均为 5000ms。当前 **7 个测试文件 / 191 个用例**全部通过(2026-09-19 实测)。
+- 框架:vitest 5,配置在 `vitest.config.ts`,`include: ["test/**/*.test.{ts,tsx}"]`,`testTimeout`/`hookTimeout` 均为 5000ms。当前 **11 个测试文件 / 271 个用例**(2026-10-05 实测;`attachments.test.ts` 的 broken-symlink 用例在非特权 Windows 上因 CreateSymbolicLink 需权限而 EPERM,属环境限制非回归)。
 - `vscode` 模块通过 alias 指向 `test/vscode-stub.ts`(只提供 `l10n.t` 恒等实现)。
 - 现有覆盖:`jsonrpc`(NDJSON 分帧/路由/超长帧丢弃)、`acp-client`(用 `test/mock-acp-agent.mjs` 起假 agent)、`auth`(SecretStorage 注入式假实现)、`models-query`(临时目录写假 settings.json)、`session-state`(reducer + transcript 解析 + 块 id 不变量 + SubAgent 归组 + 系统状态分类 + 压缩卡泄漏 + tool diff 合成 + 审批流 + 用量估算与 P1 token 缓存)、`store-snapshot`(节流快照 + blockPatch 锚定 + P-1 全链路保真 + toast 生命周期)、`error-boundary`(jsdom 环境,渲染抛错回退 + resetKey 自愈,`@vitest-environment jsdom`)。
 - 约定:测纯逻辑,不起真实 CLI、不碰真实 SecretStorage。需要文件 I/O 时用 `mkdtempSync` + `afterAll` 清理。UI 组件(如 ErrorBoundary)用 jsdom 跑。
