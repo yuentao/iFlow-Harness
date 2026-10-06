@@ -21,16 +21,18 @@ import {
   completePrompt,
   clearPendingApproval,
   clearPendingPlanExit,
+  clearPendingProfileSwitch,
   deleteUserMessageById,
   markToolReverted,
   refreshSessionUsage,
   setMeta,
   setPendingApproval,
   setPendingPlanExit,
+  setPendingProfileSwitch,
   setPendingQuestions,
   setSessions,
 } from "../../shared/session-state.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi, ToolDiffUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, ToolDiffUi } from "../../shared/messages.js";
 
 export class SessionStore {
   private state: SessionState = initialSessionState();
@@ -275,6 +277,19 @@ export class SessionStore {
   /** Clear the question card once answered/timed out. */
   clearQuestions(id: string): boolean {
     const cleared = clearPendingQuestions(this.state, id);
+    if (cleared) this.flush();
+    return cleared;
+  }
+
+  /** Open the profile-switch choice dialog in the WebView (immediate flush). */
+  showProfileSwitch(pending: PendingProfileSwitchUi): void {
+    setPendingProfileSwitch(this.state, pending);
+    this.flush();
+  }
+
+  /** Close the profile-switch dialog once answered / cancelled. */
+  clearProfileSwitch(id: string): boolean {
+    const cleared = clearPendingProfileSwitch(this.state, id);
     if (cleared) this.flush();
     return cleared;
   }

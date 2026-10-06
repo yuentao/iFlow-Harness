@@ -215,6 +215,20 @@ export interface PendingQuestionsUi {
   timeoutMs: number;
 }
 
+/**
+ * A pending API-profile switch awaiting the user's choice, rendered as a
+ * custom centered modal in the webview (the native showWarningMessage dialog
+ * would break the panel's acrylic visual language). The user picks "start a
+ * new session" or "keep the current conversation"; dismissing the dialog
+ * cancels the entire switch. No deadline: unlike approval cards this blocks
+ * no agent, so it waits for the user indefinitely.
+ */
+export interface PendingProfileSwitchUi {
+  id: string;
+  /** Display name of the profile being switched TO. */
+  profileName: string;
+}
+
 /** One user answer: selected labels, or a free-text "Other" answer. */
 export type UserAnswerValue = string | string[];
 
@@ -253,6 +267,8 @@ export interface SessionState {
   pendingPlanExit: PendingPlanExitUi | null;
   /** Non-null while the host awaits the user's answers for ask_user_question. */
   pendingQuestions: PendingQuestionsUi | null;
+  /** Non-null while the profile-switch choice dialog is open (see PendingProfileSwitchUi). */
+  pendingProfileSwitch: PendingProfileSwitchUi | null;
   /** Auth config state (M3): drives the setup banner / form. */
   auth: AuthUiState;
   /** Recent sessions (per-workspace, persisted host-side) for the switcher. */
@@ -333,6 +349,7 @@ export function initialSessionState(): SessionState {
     pendingApproval: null,
     pendingPlanExit: null,
     pendingQuestions: null,
+    pendingProfileSwitch: null,
     auth: { authenticated: false, needsSetup: false, saved: null, profiles: [] },
     sessions: [],
     activeSessionId: null,
@@ -495,6 +512,10 @@ export type WebviewToHost =
    * question `header`. An empty answers object = dismissed (the agent
    * proceeds with "no answer"). */
   | { type: "answerQuestions"; id: string; answers: Record<string, string | string[]> }
+/** Answer the profile-switch choice dialog; `keepSession: null` cancels the
+ * entire switch (dialog dismissed / 取消 — no credential or reconnect side
+ * effects, the active profile pointer stays where it was). */
+| { type: "respondProfileSwitch"; id: string; keepSession: boolean | null }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
   /** M5: open the tool's change in VSCode's native diff editor. */

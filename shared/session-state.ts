@@ -21,6 +21,7 @@ import {
   type ModelInfoUi,
   type PendingApprovalUi,
   type PendingPlanExitUi,
+  type PendingProfileSwitchUi,
   type PendingQuestionsUi,
   type SessionState,
   type SessionSummaryUi,
@@ -1622,6 +1623,21 @@ export function setPendingQuestions(state: SessionState, pending: PendingQuestio
 export function clearPendingQuestions(state: SessionState, id: string): boolean {
   if (state.pendingQuestions?.id !== id) return false;
   state.pendingQuestions = null;
+  return true;
+}
+
+// --- profile-switch choice (extension-side dialog, no agent involvement) ----
+
+/** Open the profile-switch choice dialog. The WebView answers via
+ * `respondProfileSwitch` (keepSession: null = cancel the entire switch). */
+export function setPendingProfileSwitch(state: SessionState, pending: PendingProfileSwitchUi): void {
+  state.pendingProfileSwitch = pending;
+}
+
+/** Close the dialog once answered / cancelled host-side. */
+export function clearPendingProfileSwitch(state: SessionState, id: string): boolean {
+  if (state.pendingProfileSwitch?.id !== id) return false;
+  state.pendingProfileSwitch = null;
   return true;
 }
 

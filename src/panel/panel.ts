@@ -44,7 +44,7 @@ import type {
   ExitPlanModeRequest,
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import type { ParsedEditArgs, PreEditSnapshot } from "../../shared/session-state.js";
 import {
   backfillBlockIds,
@@ -253,6 +253,14 @@ export class ChatPanel implements vscode.Disposable {
       timer: NodeJS.Timeout;
     }
   >();
+  /**
+   * Awaiting the user's choice in the profile-switch dialog, keyed by dialog id.
+   * No timer: the dialog blocks no agent (unlike approval/plan/question cards),
+   * so it waits for the user indefinitely — every cancel path (panel dispose,
+   * session teardown) resolves it explicitly instead.
+   */
+  private readonly pendingProfileSwitches = new Map<string, { resolve: (keepSession: boolean | null) => void }>();
+  private profileSwitchSeq = 0;
   /** Serializes per-session transcript file writes (P2): overlapping persists
    * must not interleave inside one file's temp+rename sequence. */
   private persistChain: Promise<void> = Promise.resolve();
@@ -432,6 +440,7 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
     this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
+    this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
     this.client = null;
     this.editorPanel?.dispose();
@@ -793,6 +802,9 @@ export class ChatPanel implements vscode.Disposable {
       case "answerQuestions":
         this.handleQuestionAnswers(msg.id, msg.answers);
         break;
+      case "respondProfileSwitch":
+        this.handleProfileSwitchResponse(msg.id, msg.keepSession);
+        break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
         break;
@@ -1146,6 +1158,54 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve({ answers: {} });
     }
     this.pendingQuestions.clear();
+  }
+
+  // --- Profile-switch choice dialog (extension-side, custom webview modal) ----
+
+  /**
+   * Ask the user how a profile switch should treat the current conversation,
+   * rendered as a custom centered modal in the webview (the native
+   * showWarningMessage dialog breaks the panel's acrylic visual language).
+   * Resolves `true` = keep & reload the session, `false` = start a new
+   * session, `null` = the user cancelled the entire switch. No timeout: the
+   * dialog blocks no agent, so it waits for the user; every teardown path
+   * resolves pending dialogs as cancelled (see cancelAllProfileSwitches).
+   */
+  private requestProfileSwitchChoice(profileName: string): Promise<boolean | null> {
+    // The webview's optimistic switch chip expires after 10s, so the profile
+    // dropdown is clickable again while this dialog is open — a second switch
+    // would overwrite the store's single dialog slot and orphan the first
+    // promise. Cancel any open dialog first (its switch is abandoned).
+    this.cancelAllProfileSwitches();
+    const id = `pswitch-${++this.profileSwitchSeq}`;
+    const pending: PendingProfileSwitchUi = { id, profileName };
+    return new Promise<boolean | null>((resolve) => {
+      this.pendingProfileSwitches.set(id, { resolve });
+      this.store.showProfileSwitch(pending);
+    });
+  }
+
+  /** Resolve a pending profile-switch dialog from the webview's answer. */
+  private handleProfileSwitchResponse(id: string, keepSession: boolean | null): void {
+    const pending = this.pendingProfileSwitches.get(id);
+    if (!pending) return;
+    this.pendingProfileSwitches.delete(id);
+    this.store.clearProfileSwitch(id);
+    pending.resolve(keepSession);
+  }
+
+  /**
+   * Resolve every open profile-switch dialog as cancelled (panel dispose /
+   * session teardown). Without this the activateProfile promise would hang
+   * forever on a webview that can no longer answer, keeping its reconnect
+   * chain alive behind a dead panel.
+   */
+  private cancelAllProfileSwitches(): void {
+    for (const [id, pending] of this.pendingProfileSwitches) {
+      this.store.clearProfileSwitch(id);
+      pending.resolve(null);
+    }
+    this.pendingProfileSwitches.clear();
   }
 
   // --- Diff revert ----------------------------------------------------------------
@@ -1874,22 +1934,16 @@ export class ChatPanel implements vscode.Disposable {
     const liveSessionId = this.store.getState().sessionId;
     let keepSession = false;
     if (liveSessionId) {
-      const newLabel = vscode.l10n.t("开启新会话");
-      const keepLabel = vscode.l10n.t("停留在当前会话");
-      const pick = await vscode.window.showWarningMessage(
-        vscode.l10n.t("切换到 API 配置「{0}」。开启新会话，或保留当前对话并改用新配置继续？", name),
-        { modal: true },
-        newLabel,
-        keepLabel,
-      );
-      // Esc / close = cancel the ENTIRE switch: no secret writes, no
-      // settings.json pointer change, no reconnect. The snapshot clears the
-      // webview's pending chip (it would otherwise sit until its 10s timeout).
-      if (pick !== newLabel && pick !== keepLabel) {
+      const choice = await this.requestProfileSwitchChoice(name);
+      // null = user cancelled the entire switch: no secret writes, no
+      // settings.json pointer change, no reconnect. The dialog already
+      // cleared itself from the store; pushSnapshot clears the webview's
+      // pending chip (it would otherwise sit until its 10s timeout).
+      if (choice === null) {
         this.store.pushSnapshot();
         return;
       }
-      keepSession = pick === keepLabel;
+      keepSession = choice;
     }
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds);

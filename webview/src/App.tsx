@@ -19,6 +19,7 @@ import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
+import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { AuthCard } from "./components/AuthCard";
 import { McpCard } from "./components/McpCard";
 import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
@@ -88,6 +89,7 @@ export function App() {
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
+  const pendingProfileSwitch = useChat((s) => s.state?.pendingProfileSwitch ?? null);
   // True once the transcript has scrolled under the header — drives the
   // header's bottom shadow (no shadow while the top of the list is visible).
   const headerScrolled = useChat((s) => s.headerScrolled);
@@ -165,6 +167,7 @@ export function App() {
     if (pendingApproval) return t("需要审批工具调用");
     if (pendingPlanExit) return t("需要确认退出计划模式");
     if (pendingQuestions) return t("有待回答问题需要回答");
+    if (pendingProfileSwitch) return t("等待选择切换 API 配置的会话处理方式");
     if (status === "connecting") return t("正在连接 iFlow…");
     if (status === "streaming") return t("正在生成回复…");
     if (status === "idle") {
@@ -173,7 +176,7 @@ export function App() {
       return t("已就绪");
     }
     return "";
-  }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions]);
+  }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions, pendingProfileSwitch]);
 
   if (status === null || status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
@@ -430,6 +433,12 @@ export function App() {
         />
       )}
       {mcpOpen && <McpCard busy={locked} onDismiss={() => setMcpOpen(false)} />}
+
+      {/* Profile-switch choice dialog: centered modal over everything (the
+          switch can be started from the header dropdown or the auth card's
+          profile list, so it must stack above both — same fixed z-40 layer,
+          later in the DOM wins). */}
+      {pendingProfileSwitch && <ProfileSwitchCard pending={pendingProfileSwitch} />}
 
       {/* Pending-action cards (approval / plan-exit / question) float OVER the
           transcript instead of taking a row in the flex column — a shrink-0

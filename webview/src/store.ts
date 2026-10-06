@@ -378,6 +378,7 @@ function createMockHost(): HostApi {
     // in browser debug mode.
     pendingQuestions: demoQuestions as SessionState["pendingQuestions"],
     pendingPlanExit: null,
+    pendingProfileSwitch: null as SessionState["pendingProfileSwitch"],
     replaying: false,
     initializing: false,
   };
@@ -392,6 +393,42 @@ function createMockHost(): HostApi {
       { name: "工作密钥", source: "extension", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
     ],
   };
+  /** The profile named in the open switch dialog (respondProfileSwitch target). */
+  let pendingSwitchTarget: string | null = null;
+  /** Apply a profile switch and broadcast the snapshot (shared by the
+   * dialog-answer path and the no-session fast path). `keepSession=false`
+   * mirrors the real host's new-session flow (transcript cleared); `true`
+   * mirrors the seamless in-place reload (transcript untouched). */
+  function applyProfileSwitch(name: string, keepSession: boolean): void {
+    const activated = authState.profiles.find((p) => p.name === name);
+    authState = {
+      ...authState,
+      authenticated: true,
+      needsSetup: false,
+      profiles: authState.profiles.map((p) => ({ ...p, active: p.name === name })),
+    };
+    if (activated) {
+      // Switching profiles re-queries /models on the new endpoint.
+      demoMeta.models = [
+        { id: activated.modelName, name: activated.modelName },
+        ...demoMeta.models.filter((x) => x.id !== activated.modelName),
+      ];
+      demoMeta.currentModelId = activated.modelName;
+    }
+    if (!keepSession) demoBlocks.length = 0;
+    broadcast({
+      type: "snapshot",
+      state: {
+        blocks: [...demoBlocks],
+        status: "idle",
+        errorMessage: null,
+        stopReason: "end_turn",
+        ...demoMeta,
+        pendingApproval: null,
+        auth: authState,
+      },
+    });
+  }
   return {
     postMessage(msg) {
       const m = msg as WebviewToHost;
@@ -473,33 +510,50 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "activateProfile") {
-        const activated = authState.profiles.find((p) => p.name === m.name);
-        authState = {
-          ...authState,
-          authenticated: true,
-          needsSetup: false,
-          profiles: authState.profiles.map((p) => ({ ...p, active: p.name === m.name })),
-        };
-        if (activated) {
-          // Switching profiles re-queries /models on the new endpoint.
-          demoMeta.models = [
-            { id: activated.modelName, name: activated.modelName },
-            ...demoMeta.models.filter((x) => x.id !== activated.modelName),
-          ];
-          demoMeta.currentModelId = activated.modelName;
+        // Mirror the real host: with a live session the switch first asks
+        // how the conversation survives (custom dialog → respondProfileSwitch);
+        // without one it proceeds directly (initial connect).
+        if (demoMeta.activeSessionId) {
+          pendingSwitchTarget = m.name;
+          demoMeta.pendingProfileSwitch = { id: `pswitch-demo-${Date.now()}`, profileName: m.name };
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: [...demoBlocks],
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              pendingApproval: null,
+              auth: authState,
+            },
+          });
+          return;
         }
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "idle",
-            errorMessage: null,
-            stopReason: "end_turn",
-            ...demoMeta,
-            pendingApproval: null,
-            auth: authState,
-          },
-        });
+        applyProfileSwitch(m.name, true);
+        return;
+      }
+      if (m.type === "respondProfileSwitch") {
+        demoMeta.pendingProfileSwitch = null;
+        // null = cancel the entire switch: snapshot with the dialog cleared,
+        // nothing else touched (active profile stays where it was).
+        if (m.keepSession !== null && pendingSwitchTarget) {
+          applyProfileSwitch(pendingSwitchTarget, m.keepSession === true);
+        } else {
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: [...demoBlocks],
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              pendingApproval: null,
+              auth: authState,
+            },
+          });
+        }
+        pendingSwitchTarget = null;
         return;
       }
       if (m.type === "deleteProfile") {

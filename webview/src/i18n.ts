@@ -131,6 +131,14 @@ const en: Record<string, string> = {
     "Config reads/writes the mcpServers field in ~/.iflow/settings.json directly; a CLI restart is required after saving (the current session restores automatically).",
   "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。":
     "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving/switching re-authenticates the session via openai-compatible. Profiles imported from the iFlow CLI are read-only: you can switch to them but not delete them here.",
+  // profile-switch choice dialog
+  "切换 API 配置": "Switch API profile",
+  "取消切换": "Cancel the switch",
+  "切换到 API 配置「{0}」后，当前对话如何处理？": "How should the current conversation be handled when switching to API profile \"{0}\"?",
+  "停留在当前会话": "Stay in the current session",
+  "保留当前对话，改用新配置继续": "Keep the current conversation and continue with the new configuration",
+  "开启新会话": "Start a new session",
+  "以新配置开始新对话": "Start new conversation with the new configuration",
   // composer
   "（见附图）": "(see attached image)",
   "移除": "Remove",
@@ -180,6 +188,7 @@ const en: Record<string, string> = {
   "搜索会话…": "Search sessions…",
   "需要审批工具调用": "Tool approval required",
   "有待回答问题需要回答": "Question needs answering",
+  "等待选择切换 API 配置的会话处理方式": "Choose how the session is handled when switching API profiles",
   "自定义回答": "Custom answer",
   "正在连接 iFlow…": "Connecting to iFlow…",
   "正在生成回复…": "Generating response…",
