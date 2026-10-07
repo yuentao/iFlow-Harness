@@ -5,7 +5,12 @@
 
 ## [1.2.9] - 2026-10-07
 
+- 修复 审批超时自动拒绝后卡死在生成中：新增 post-rejection 存活看门狗，超时自动拒绝后若模型 2 分钟无响应则自动中断本轮并解锁输入框；修正超时处理器 resolve 顺序确保 wire 响应不被 UI 层异常吞掉
+- 新增 API 配置切换保留当前会话选项：切换时若有活跃会话则弹窗询问开启新会话或停留在当前会话，keepSession 通过 session/load 原地重载会话实现无缝切换（转录不闪烁），冷启动路径经恢复 ID 自动恢复会话
+- 优化 API 配置切换选择弹窗为自定义 webview 模态：替换原生提示以保持面板亚克力视觉语言一致性，支持取消整个切换与二次切换自动取消前一个弹窗
+- 优化 API 配置权威源改为扩展侧 SecretStorage：激活 Profile 解析与模型列表查询改扩展优先，删除 settings.json 外部变更同步链路与 currentApiProfile 回写，面板配置不再依赖共享 CLI 设置文件
 - 变更 移除 CLI 探测回退链：内置定制 fork（vendor/iflow-cli）是面板唯一执行体，不再探测本机安装的 CLI（PATH / npm 全局 / 已知路径），删除 `iflow.cliPath` 设置项与 `IFLOW_CLI_ENTRY` 扩展侧覆盖——定制 loader 补丁只存在于内置 bundle，跑外部 CLI 会静默丢补丁改变 agent 行为；内置 CLI 缺失时直接报错提示重装扩展（dev checkout 先跑 `npm run vendor:cli`）
+- 变更 同步内置默认规则：thinking-models 收敛为 glm-/qwen3.8-/deepseek-v4- 宽前缀匹配，新增 stream-toolcall-repair 规则（随定制 CLI 的流式工具调用修复 loader 生效）
 
 ## [1.2.8] - 2026-10-05
 

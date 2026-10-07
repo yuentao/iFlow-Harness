@@ -3,7 +3,7 @@
   "version": 1,
   "models": [
     {
-      "pattern": "glm-5.3",
+      "pattern": "glm-",
       "supportsThinking": true,
       "thinkingRequest": {
         "delete": ["thinking"],
@@ -25,45 +25,7 @@
       }
     },
     {
-      "pattern": "glm-5.2",
-      "supportsThinking": true,
-      "thinkingRequest": {
-        "delete": ["thinking"],
-        "set": {
-          "temperature":1,
-          "top_p":0.95,
-          "reasoning_effort":"max",
-          "enable_thinking": false
-        }
-      },
-      "nonThinkingRequest": {
-        "delete": ["thinking"],
-        "set": {
-          "temperature":1,
-          "top_p":0.95,
-          "reasoning_effort":"max",
-          "enable_thinking": false
-        }
-      }
-    },
-    {
-      "pattern": "glm-4\\.7",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["low", "medium", "high"],
-      "maxThinkingTokens": 20000,
-      "thinkingRequest": {
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": true
-        }
-      },
-      "nonThinkingRequest": {
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": false
-        }
-      }
-    },
-    {
-      "pattern": "qwen3.8",
+      "pattern": "qwen3.8-",
       "supportsThinking": true,
       "maxThinkingTokens": 20000,
       "thinkingRequest": {
@@ -76,7 +38,7 @@
       }
     },
     {
-      "pattern": "Qwen3.8",
+      "pattern": "Qwen3.8-",
       "supportsThinking": true,
       "maxThinkingTokens": 20000,
       "thinkingRequest": {
@@ -86,69 +48,6 @@
       },
       "nonThinkingRequest": {
         "delete": ["enable_thinking"]
-      }
-    },
-    {
-      "pattern": "glm-5",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["low", "medium", "high"],
-      "maxThinkingTokens": 20000,
-      "thinkingRequest": {
-        "set": {
-          "enable_thinking": true
-        },
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": true,
-          "thinking.type": "enabled"
-        }
-      },
-      "nonThinkingRequest": {
-        "set": {
-          "enable_thinking": false
-        },
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": false,
-          "thinking.type": "disabled"
-        }
-      }
-    },
-    {
-      "pattern": "glm-5.1",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["high"],
-      "maxThinkingTokens": 20000,
-      "thinkingRequest": {
-        "set": {
-          "enable_thinking": true
-        },
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": true,
-          "thinking.type": "enabled"
-        }
-      },
-      "nonThinkingRequest": {
-        "set": {
-          "enable_thinking": false
-        },
-        "setNested": {
-          "chat_template_kwargs.enable_thinking": false,
-          "thinking.type": "disabled"
-        }
-      }
-    },
-    {
-      "pattern": "^claude-3\\.5-sonnet",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["low", "medium", "high"],
-      "maxThinkingTokens": 25000,
-      "thinkingRequest": {
-        "setNested": {
-          "thinking.enabled": true
-        },
-        "setTemplate": {
-          "thinking.max_tokens": "{{maxTokens}}",
-          "thinking.reasoning_level": "{{reasoningLevel}}"
-        }
       }
     },
     {
@@ -200,24 +99,7 @@
       }
     },
     {
-      "pattern": "deepseek-v4-flash",
-      "supportsThinking": true,
-      "supportedReasoningLevels": ["high"],
-      "maxThinkingTokens": 65536,
-      "thinkingRequest": {
-        "setNested": {
-          "thinking.type": "enabled",
-          "thinking.reasoning_effort": "max"
-        }
-      },
-      "nonThinkingRequest": {
-        "setNested": {
-          "thinking.type": "disabled"
-        }
-      }
-    },
-    {
-      "pattern": "deepseek-v4-pro",
+      "pattern": "deepseek-v4-",
       "supportsThinking": true,
       "supportedReasoningLevels": ["high"],
       "maxThinkingTokens": 65536,
@@ -235,7 +117,6 @@
     }
   ],
   "modelAliases": {
-    "deepseek-v3\\.2-chat": "deepseek-v3.2-reasoner",
     "astron-code-latest": "glm-5.1"
   }
 }
