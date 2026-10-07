@@ -16,7 +16,7 @@ import {
   isRateLimitError,
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
-import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
+import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
 import { acpSessionFilePath, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings } from "../acp/models-query.js";
 import {
   clearCredentials,
@@ -156,8 +156,8 @@ function abortableDelay(ms: number, shouldAbort: () => boolean): Promise<void> {
 const SESSIONS_KEY = "iflow.recentSessions";
 /** workspaceState key: session id to restore on panel open (M4). */
 const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
-/** globalState key: cross-window cache of resolved CLI entry + node paths
- * (locator probe results; existsSync re-validated on every hydrate). */
+/** globalState key: cross-window cache of the resolved node runtime
+ * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
@@ -318,9 +318,10 @@ export class ChatPanel implements vscode.Disposable {
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
     this.store.onStateChange = (state) => this.updateStatusBar(state);
     this.store.onStateReplaced = () => this.clearToolDiffCaches();
-    // Cross-window cache for CLI/node probe results (each probe shells out —
-    // hundreds of ms per window). The locator re-validates hydrated paths
-    // with existsSync, so an uninstalled CLI or an extension update re-probes.
+    // Cross-window cache for the node-probe result (the probe shells out —
+    // hundreds of ms per window). The locator re-validates the hydrated path
+    // with existsSync, so a removed node re-probes. The CLI entry needs no
+    // cache: it is the vendored fork, resolved synchronously in resolveEntry.
     configureLocatorPersistence({
       load: () => this.context.globalState.get<LocatorPaths>(LOCATOR_PATHS_KEY),
       save: (paths) => void this.context.globalState.update(LOCATOR_PATHS_KEY, paths),
@@ -2728,21 +2729,17 @@ export class ChatPanel implements vscode.Disposable {
     }
 
     this.connecting = (async () => {
-      // Entry + node probes are independent (each is a cached where.exe / npm
-      // probe, hundreds of ms serialized on cold start) — run them in
-      // parallel. nodePath skips the node probe entirely, preserving the
-      // old `||` short-circuit.
+      // The entry resolves synchronously (vendored fork, no probe). The node
+      // probe still shells out (where.exe / node --version) and is cached.
       const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
       let entry: string;
       let locatedNode: string | null;
       try {
-        [entry, locatedNode] = await Promise.all([
-          this.resolveEntry(),
-          nodePathConfigured ? Promise.resolve(null) : locateNodeExecutable(),
-        ]);
+        entry = this.resolveEntry();
+        locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
       } catch (error) {
-        // CLI not found: surface it in the panel instead of leaving it on the
-        // loading screen (this used to throw before the try/catch below).
+        // Vendored CLI missing: surface it in the panel instead of leaving it
+        // on the loading screen (this used to throw before the try/catch below).
         const message = errorMessage(error);
         this.log.error(message);
         this.store.markError(message);
@@ -3019,23 +3016,15 @@ export class ChatPanel implements vscode.Disposable {
     return this.connecting.then(() => this.client!);
   }
 
-  // Async: the CLI probe shells out (where.exe / npm root -g). The locator
-  // caches its successful result, so reconnects (profile switch) skip the
-  // seconds-long re-probe entirely.
-  private async resolveEntry(): Promise<string> {
-    const configured = this.services.entryOverride
-      ?? vscode.workspace.getConfiguration("iflow").get<string>("cliPath");
-    if (configured) {
-      const resolved = path.resolve(configured);
-      if (existsSync(resolved)) return resolved;
-      vscode.window.showWarningMessage(
-        vscode.l10n.t("iflow.cliPath 不存在，回退自动探测: {0}", configured),
-      );
-    }
-    // Vendored CLI (scripts/vendor-cli.mjs) ships inside the VSIX as the
-    // out-of-the-box fallback when no CLI is installed on the machine.
+  // The vendored fork (scripts/vendor-cli.mjs) is the ONLY execution body —
+  // no local-CLI probing, no env/settings override (the loader patches live
+  // only in that bundle; see resolveVendoredEntry). entryOverride stays as
+  // the test seam for the mock ACP agent. Synchronous by design: a single
+  // existsSync inside the package, nothing to await.
+  private resolveEntry(): string {
+    const override = this.services.entryOverride;
+    if (override) return path.resolve(override);
     const vendoredCliDir = path.join(this.context.extensionPath, "vendor", "iflow-cli");
-    const vendored = path.join(vendoredCliDir, "bundle", "entry.js");
     // Seed missing ~/.iflow/ rule configs (loader externals). Idempotent:
     // existing user files are never overwritten, so running on every
     // connect is safe. Best effort — failures never block the connect.
@@ -3044,12 +3033,13 @@ export class ChatPanel implements vscode.Disposable {
     // chain drops unix mode bits and the CLI's search tools then fail with
     // EACCES when spawning rg (seen on 1.2.3 / macOS).
     ensureVendorBinariesExecutable(vendoredCliDir);
-    const entry = await locateIflowEntry(vendored);
-    if (!entry)
+    try {
+      return resolveVendoredEntry(this.context.extensionPath);
+    } catch (error) {
       throw new Error(
-        vscode.l10n.t("未找到 iFlow CLI（entry.js）。请安装 @iflow-ai/iflow-cli 或设置 iflow.cliPath。"),
+        vscode.l10n.t("内置 iFlow CLI 缺失，扩展包不完整，请重新安装：{0}", errorMessage(error)),
       );
-    return entry;
+    }
   }
 
   // --- Mode / model switching ---------------------------------------------------

@@ -2,15 +2,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
   chmodSync,
-  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
-  openSync,
   readdirSync,
-  readFileSync,
-  readSync,
-  realpathSync,
   statSync,
 } from "node:fs";
 import { chmod as chmodP, copyFile as copyFileP, mkdir as mkdirP, rename as renameP, rm as rmP, stat as statP } from "node:fs/promises";
@@ -25,26 +20,16 @@ export interface IflowCommand {
 }
 
 /**
- * Located entry cache. The probe shells out (where.exe / `npm root -g` —
- * up to seconds on Windows, `npm` especially) and used to re-run on EVERY
- * reconnect: every profile switch paid the full probe again. Successful
- * results are cached (re-validated with existsSync, so an uninstalled CLI
- * re-probes); failures are NOT cached, so a CLI installed mid-session is
- * found on the next connect without a host restart.
- */
-let cachedEntry: string | null = null;
-let probeInFlight: Promise<string | null> | null = null;
-
-/**
- * Cross-window persistence for probe results. The host (panel) wires load/save
- * to extension globalState: window 2+ hydrates the caches below and skips the
- * where.exe / npm / node --version probes entirely. Hydrated values keep the
- * same existsSync re-validation as in-memory ones, so an uninstalled CLI or an
- * extension update (vendored path) re-probes exactly as before. Only
- * successful resolutions are saved — failures are never cached.
+ * Cross-window persistence for the node-probe result (the probe shells out —
+ * `where.exe node` / `node --version` — hundreds of ms per window). Window 2+
+ * hydrates the cache and skips the probe entirely. Hydrated values keep the
+ * same existsSync re-validation as in-memory ones, so a removed node re-probes
+ * exactly as before. Only successful resolutions are saved — failures are
+ * never cached. The CLI entry itself needs no cache: resolveVendoredEntry is a
+ * synchronous existsSync of a path inside the extension package, which changes
+ * only on extension update (a new process).
  */
 export interface LocatorPaths {
-  entry?: string | null;
   node?: string | null;
 }
 export interface LocatorPersistence {
@@ -65,7 +50,6 @@ function hydrateCache(): void {
   persistenceHydrated = true;
   try {
     const saved = persistence.load();
-    if (saved?.entry) cachedEntry ??= saved.entry;
     if (saved?.node) cachedNode ??= saved.node;
   } catch {
     // storage unavailable — probes run as before
@@ -76,218 +60,35 @@ function hydrateCache(): void {
 function persistResolved(): void {
   if (!persistence) return;
   try {
-    persistence.save({ entry: cachedEntry, node: cachedNode });
+    persistence.save({ node: cachedNode });
   } catch {
     // best effort; the in-memory caches still cover this window
   }
 }
 
 /**
- * Locate the installed iFlow CLI bundle entry (a plain .js file we can run
- * with the current Node runtime, avoiding .cmd shim quirks on Windows and
- * shebang wrappers on Unix).
+ * Resolve the CLI entry INSIDE the extension package (scripts/vendor-cli.mjs
+ * ships the cut-down customized fork @yuentao/iflow-cli into vendor/iflow-cli).
  *
- * Async on purpose: the probes were execFileSync, which blocked the
- * extension host's event loop for the full duration of where.exe /
- * `npm root -g` while every other extension froze.
- *
- * Resolution order:
- *  1. IFLOW_CLI_ENTRY env var (checked on every call — costs nothing and
- *     keeps test/harness overrides working with the cache)
- *  2. Vendored CLI copy (optional vendorEntry arg): scripts/vendor-cli.mjs
- *     ships a pruned customized fork (@yuentao/iflow-cli) inside the VSIX.
- *     Since 1.2.1 the vendored copy ALWAYS wins over any locally installed
- *     CLI — the extension's behavior is pinned to the version it was
- *     validated against, and local installs (which may be the official
- *     @iflow-ai package without the loader customizations, or a newer/
- *     older version) no longer override it. iflow.cliPath remains the
- *     explicit user override (checked by the caller before this locator).
- *  3. PATH lookup: `where.exe iflow` shims on Windows / `which iflow` on Unix
- *  4. npm global root fallback
- *  5. Platform-specific well-known install paths
+ * The vendored fork is the ONLY execution body — there is deliberately no
+ * fallback to a locally installed CLI (PATH / npm global / well-known paths)
+ * and no env-variable override. The custom loader patches (thinking-mode,
+ * multimodal, output-token-limit, kimi-request-override, mcp-background,
+ * mcp-session-share, api-config-isolation) live ONLY in this bundle: running
+ * the official @iflow-ai package would silently drop them and change agent
+ * behavior, so a missing vendor copy is a broken extension package, not a
+ * situation to paper over — throw and let the panel surface it.
+ * iflow.nodePath (the runtime, not the CLI) is unaffected by this.
  */
-export async function locateIflowEntry(vendorEntry?: string | null): Promise<string | null> {
-  const fromEnv = process.env.IFLOW_CLI_ENTRY;
-  if (fromEnv && existsSync(fromEnv)) return path.resolve(fromEnv);
-
-  hydrateCache();
-  if (probeInFlight) return probeInFlight;
-  probeInFlight = locateUncached(vendorEntry)
-    .then((found) => {
-      if (found) {
-        cachedEntry = found;
-        persistResolved();
-      }
-      return found ?? cachedEntry;
-    })
-    .finally(() => {
-      probeInFlight = null;
-    });
-  return probeInFlight;
-}
-
-async function locateUncached(vendorEntry?: string | null): Promise<string | null> {
-  // The vendored CLI shipped inside the extension (scripts/vendor-cli.mjs)
-  // always wins — over the cross-window cache too. Ordering it AFTER the
-  // cachedEntry check was a real bug (1.2.1): an old extension build had
-  // persisted a locally installed CLI path into globalState
-  // (iflow.locator.paths), hydrateCache() seeded it into cachedEntry, the
-  // existsSync re-validation passed, and the vendored copy never ran — the
-  // log showed the local entry.js while this function claimed vendor-first.
-  // existsSync-guarded so a package without vendor/ (dev checkout,
-  // .vscodeignore regression) falls through to the cache and probe chain.
-  if (vendorEntry && existsSync(vendorEntry)) return path.resolve(vendorEntry);
-
-  // Cached hit still re-validates: a removed CLI must not pin a dead path.
-  if (cachedEntry && existsSync(cachedEntry)) return cachedEntry;
-
-  const fromPath =
-    process.platform === "win32" ? await locateFromWindowsPath() : await locateFromUnixPath();
-  if (fromPath) return fromPath;
-
-  const fromNpm = await locateFromNpmGlobalRoot();
-  if (fromNpm) return fromNpm;
-
-  for (const candidate of wellKnownCandidates()) {
-    if (existsSync(candidate)) return candidate;
+export function resolveVendoredEntry(extensionPath: string): string {
+  const entry = path.join(extensionPath, "vendor", "iflow-cli", "bundle", "entry.js");
+  if (!existsSync(entry)) {
+    throw new Error(
+      `bundled iFlow CLI missing (expected ${entry}). ` +
+        "Extension package incomplete — reinstall from the VSIX or run `npm run vendor:cli` in a dev checkout.",
+    );
   }
-
-  return null;
-}
-
-async function locateFromWindowsPath(): Promise<string | null> {
-  try {
-    const whereOut = (await execFileP("where.exe", ["iflow"], { windowsHide: true })).stdout;
-    for (const line of whereOut.split(/\r?\n/).map((l: string) => l.trim())) {
-      if (!line || !/\.(cmd|bat)$/i.test(line) || !existsSync(line)) continue;
-      const fromShim = extractEntryFromShim(line);
-      if (fromShim) return fromShim;
-    }
-  } catch {
-    // where.exe unavailable or no match
-  }
-  return null;
-}
-
-async function locateFromUnixPath(): Promise<string | null> {
-  try {
-    const whichOut = (await execFileP("which", ["-a", "iflow"])).stdout;
-    // The first hit may be a native dispatcher (nvmd) rather than a real shim;
-    // try every PATH match before falling through to other strategies.
-    for (const found of whichOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
-      if (!existsSync(found)) continue;
-      const entry = entryFromUnixShim(found);
-      if (entry) return entry;
-    }
-  } catch {
-    // which unavailable or no match
-  }
-  return null;
-}
-
-/**
- * Resolve a Unix `iflow` on PATH to the bundle entry. nvmd/nvm/pnpm style
- * shims are symlinks straight to entry.js — but multi-version managers like
- * nvmd may point at a NATIVE dispatcher binary instead. Reading that as text
- * and regex-scanning it blocked the extension host for seconds (profiled,
- * 100% CPU), so only small text scripts are ever scanned.
- */
-function entryFromUnixShim(found: string): string | null {
-  try {
-    const real = realpathSync(found);
-    if (path.basename(real) === "entry.js") return real;
-
-    // Guard: never scan binaries / large files (native dispatchers, etc.).
-    const MAX_SCRIPT_BYTES = 256 * 1024;
-    const stat = statSync(real);
-    if (!stat.isFile() || stat.size > MAX_SCRIPT_BYTES) return null;
-    // NUL byte in the first KB → binary (nvmd-style native dispatcher).
-    const head = Buffer.alloc(1024);
-    const fd = openSync(real, "r");
-    try {
-      readSync(fd, head, 0, 1024, 0);
-    } finally {
-      closeSync(fd);
-    }
-    if (head.includes(0)) return null;
-
-    // Wrapper script: look for an entry.js path inside it.
-    const text = readFileSync(real, "utf8");
-    const match = text.match(/([^\s"'`]*entry\.js)/);
-    if (match?.[1]) {
-      const candidate = path.resolve(path.dirname(real), match[1].replace(/^\$dirname\/?/, ""));
-      if (existsSync(candidate)) return candidate;
-    }
-    // Sibling layout: shim next to lib/node_modules (version-manager layout).
-    const sibling = path.join(path.dirname(real), "lib", "node_modules", "@iflow-ai", "iflow-cli", "bundle", "entry.js");
-    if (existsSync(sibling)) return sibling;
-    return null;
-  } catch {
-    // unreadable shim
-  }
-  return null;
-}
-
-async function locateFromNpmGlobalRoot(): Promise<string | null> {
-  try {
-    const out =
-      process.platform === "win32"
-        ? (await execFileP("npm.cmd", ["root", "-g"], { windowsHide: true, shell: true })).stdout
-        : (await execFileP("npm", ["root", "-g"])).stdout;
-    const root = out
-      .split(/\r?\n/)
-      .map((l: string) => l.trim())
-      .filter(Boolean)
-      .at(-1);
-    if (root) {
-      const candidate = path.join(root, "@iflow-ai", "iflow-cli", "bundle", "entry.js");
-      if (existsSync(candidate)) return candidate;
-    }
-  } catch {
-    // npm not resolvable
-  }
-  return null;
-}
-
-function wellKnownCandidates(): string[] {
-  if (process.platform === "win32") {
-    return [
-      path.join(process.env.APPDATA ?? "", "npm", "node_modules", "@iflow-ai", "iflow-cli", "bundle", "entry.js"),
-    ];
-  }
-  const home = process.env.HOME ?? "";
-  const prefixRoots = [
-    "/usr/local",
-    "/opt/homebrew",
-    path.join(home, ".npm-global"),
-    path.join(home, ".nvmd", "current"),
-  ];
-  return prefixRoots.map((p) => path.join(p, "lib", "node_modules", "@iflow-ai", "iflow-cli", "bundle", "entry.js"));
-}
-
-/**
- * Extract the bundle entry from an npm .cmd shim. Shims reference the entry
- * via %dp0% / %~dp0 variables (relative to the shim directory), so expand
- * those before matching an absolute path.
- */
-function extractEntryFromShim(shimPath: string): string | null {
-  try {
-    const content = readFileSync(shimPath, "utf8");
-    const dir = path.dirname(shimPath);
-    const expanded = content
-      .replace(/%~dp0/gi, dir + path.sep)
-      .replace(/%dp0%/gi, dir + path.sep)
-      .replace(/\\\\+/g, "\\");
-    const match = expanded.match(/([A-Za-z]:\\[^\s"%|&*<>]*?entry\.js)/);
-    if (match?.[1] && existsSync(match[1])) return path.resolve(match[1]);
-
-    // Sibling layout fallback: shim lives next to node_modules/
-    const sibling = path.join(dir, "node_modules", "@iflow-ai", "iflow-cli", "bundle", "entry.js");
-    if (existsSync(sibling)) return sibling;
-  } catch {
-    // unreadable shim
-  }
-  return null;
+  return entry;
 }
 
 export function buildAcpCommand(entryJs: string, includeDirectories: string[] = []): IflowCommand {
@@ -407,7 +208,8 @@ const MIN_NODE_MAJOR = 20;
  * plain node on the same machine). PATH `node` wins when it exists and
  * passes a one-time version check (>= 20, matching the repo's node20
  * target); null means "no usable standalone node" and the caller falls
- * back to process.execPath. Cached + de-duplicated like locateIflowEntry.
+ * back to process.execPath. Cached + de-duplicated + persisted across
+ * windows (see LocatorPaths above).
  *
  * 2026-09-11 probe: a GUI-launched VSCode can hold a STALE PATH snapshot —
  * nvmd rewrote the user PATH, but the running host never inherited it, so

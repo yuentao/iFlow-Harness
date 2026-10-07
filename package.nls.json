@@ -9,7 +9,6 @@
   "command.addSelectionToContext.title": "Add to iFlow Context",
   "command.restartCli.title": "iFlow: Restart CLI (apply settings)",
   "iflow.configuration.title": "iFlow Harness",
-  "iflow.configuration.cliPath.description": "Path to the iFlow CLI bundle entry.js (leave empty for auto-detection)",
   "iflow.configuration.defaultMode.description": "Default permission mode for new sessions",
   "iflow.configuration.nodePath.description": "Custom Node.js executable used to spawn the CLI",
   "iflow.configuration.warmStart.description": "Start the iFlow CLI in the background when the window opens, so the chat panel is ready instantly on first open (uses ~100MB memory per window)",

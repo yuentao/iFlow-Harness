@@ -3,6 +3,10 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.2.9] - 2026-10-07
+
+- 变更 移除 CLI 探测回退链：内置定制 fork（vendor/iflow-cli）是面板唯一执行体，不再探测本机安装的 CLI（PATH / npm 全局 / 已知路径），删除 `iflow.cliPath` 设置项与 `IFLOW_CLI_ENTRY` 扩展侧覆盖——定制 loader 补丁只存在于内置 bundle，跑外部 CLI 会静默丢补丁改变 agent 行为；内置 CLI 缺失时直接报错提示重装扩展（dev checkout 先跑 `npm run vendor:cli`）
+
 ## [1.2.8] - 2026-10-05
 
 - 修复 多个子代理并行时子任务归类错误：策略 2 的「区间状态机」把任何 task 更新都塞进最新未终态卡，并行时第二个 task 的 tool_call 混进第一张卡、真正的第二张卡从未创建，其适配器事件只能兜底建出无标题无类型的无名卡——现 task 自身的 call/update 按其 toolCallId 精确归属对应卡，匹配不到任何卡才开新卡；`adoptUnboundSubAgent` 改按 FIFO（最早未绑定卡）收养，与适配器按 agent 启动顺序推事件的时序一致；补充并行双 task 与 FIFO 收养回归测试

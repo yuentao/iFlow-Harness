@@ -59,14 +59,13 @@
 ## 前置要求
 
 - VSCode `^1.90.0`
-- [iFlow CLI](https://www.npmjs.com/package/@iflow-ai/iflow-cli)（可选）：扩展已内置 CLI，开箱即用；本地安装的 CLI 会被优先探测（PATH 与常见安装位置，也可用 `iflow.cliPath` 指定）
+- 无需单独安装 iFlow CLI：扩展内置定制 fork（`vendor/iflow-cli`），它是面板唯一的执行体——本机安装的 CLI 不会被探测或使用
 - 可用的 OpenAI 兼容 API 端点（baseUrl + apiKey + modelName）
 
 ## 扩展设置
 
 | 设置项 | 说明 |
 |---|---|
-| `iflow.cliPath` | iFlow CLI bundle `entry.js` 路径（留空自动探测，未安装时使用内置 CLI） |
 | `iflow.defaultMode` | 新会话默认权限模式：`smart` / `yolo` / `default` / `plan` |
 | `iflow.nodePath` | 启动 CLI 使用的自定义 Node.js 可执行文件 |
 | `iflow.warmStart` | 窗口打开时后台预热 CLI，首次打开面板无需等待（默认开启，每窗口约 100MB 内存） |

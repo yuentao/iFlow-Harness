@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-**iflow-harness**(产品名「心流·驭光」)是一个 VSCode 扩展,把 iFlow CLI 的 Agent 能力图形化地接入编辑器。它通过 **ACP(Agent Client Protocol)** 驱动本地安装的 `@iflow-ai/iflow-cli`:spawn 一个 `--experimental-acp --stream` 子进程,用 **NDJSON 分帧的 JSON-RPC 2.0** 双向通信,提供流式对话、工具审批、Diff 回退、会话持久化、API Profile 管理、@文件补全、附件与选区上下文、ask_user_question 提问卡、Plan 模式审批、速率限制与上下文溢出的自动恢复。**扩展内置裁剪版 CLI(`vendor/`),未安装 CLI 的机器也能开箱即用**——本地安装的 CLI 仍优先探测。
+**iflow-harness**(产品名「心流·驭光」)是一个 VSCode 扩展,把 iFlow CLI 的 Agent 能力图形化地接入编辑器。它通过 **ACP(Agent Client Protocol)** 驱动 CLI:spawn 一个 `--experimental-acp --stream` 子进程,用 **NDJSON 分帧的 JSON-RPC 2.0** 双向通信,提供流式对话、工具审批、Diff 回退、会话持久化、API Profile 管理、@文件补全、附件与选区上下文、ask_user_question 提问卡、Plan 模式审批、速率限制与上下文溢出的自动恢复。**执行体固定为扩展内置的裁剪版定制 fork(`vendor/iflow-cli`,源 `@yuentao/iflow-cli`)**——loader 补丁只存在于这个 bundle 里,扩展不探测、不使用本机安装的 CLI,也没有任何 env/设置覆盖(2026-10-07 移除探测回退链)。
 
 - 技术栈:TypeScript 7(strict)+ React 19 + Tailwind CSS 4 + zustand 5 + Vite 8 + vitest 5
 - 目标环境:VSCode `^1.90.0`,Node 22(CI)/ node20(esbuild target)
@@ -25,7 +25,7 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 | `src/acp/client.ts` | spawn CLI 子进程 + initialize 握手;实现 agent→client 的 `fs/read_text_file`、`fs/write_text_file`、`session/request_permission`、`_iflow/user/questions`、`_iflow/plan/exit`;`killTree` 进程树清理 |
 | `src/acp/jsonrpc.ts` | NDJSON 分帧(8MB 帧上限)+ JSON-RPC 路由 + `errorMessage` / `isRateLimitError` / `isContextOverflowError`。**零 VSCode 依赖**,可被任意 IDE 集成复用 |
 | `src/acp/protocol.ts` | ACP wire 类型;iFlow 专有扩展点用 `// iFlow extension` 标注(`_iflow/user/questions`、`_iflow/plan/exit`、`session/set_think`) |
-| `src/acp/cli-locator.ts` | 定位 CLI `bundle/entry.js` 与可用 Node 可执行文件(异步探测 + 缓存 + 并发去重 + **跨窗口 globalState 持久化** + **vendor 回退**);`seedDefaultRuleConfigs` 把内置默认规则种到 `~/.iflow/`;`buildAcpCommand` 拼 `--experimental-acp --stream`,并把额外 workspace 根以 `--include-directories` 传入(与 fs 回调边界同源) |
+| `src/acp/cli-locator.ts` | `resolveVendoredEntry` 硬解析内置 CLI `bundle/entry.js`(唯一入口,缺失即抛错,无探测回退)与定位可用 Node 可执行文件(异步探测 + 缓存 + 并发去重 + **跨窗口 globalState 持久化**);`seedDefaultRuleConfigs` 把内置默认规则种到 `~/.iflow/`;`buildAcpCommand` 拼 `--experimental-acp --stream`,并把额外 workspace 根以 `--include-directories` 传入(与 fs 回调边界同源) |
 | `src/acp/auth.ts` | openai-compatible 凭据 + 命名 Profile(全部存 VSCode SecretStorage);支持热重认证(切换 Profile 免重启 CLI) |
 | `src/acp/models-query.ts` | 实时 `GET {baseUrl}/models` 取模型列表;读 CLI settings.json;归档过期 OAuth 缓存 |
 | `src/panel/panel.ts` | Webview 容器、消息路由、审批流、提问卡、Plan 审批、Diff 回退、会话持久化、速率限制/上下文溢出重试、token 用量估算、toast 生命周期(最大的文件,~3250 行) |
@@ -56,12 +56,12 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 ```
 
 - 调试:`.vscode/launch.json` 提供扩展调试配置(F5 在 Extension Development Host 中加载)。
-- 本地 F5 前必须 `npm run build`,因为 `main` 指向 `./dist/extension.cjs`,webview 读 `webview/dist/index.html`。调试内置 CLI 回退时还需先跑一次 `npm run vendor:cli`(vendor/ 被 gitignore,dev checkout 通常不存在)。
+- 本地 F5 前必须 `npm run build`,因为 `main` 指向 `./dist/extension.cjs`,webview 读 `webview/dist/index.html`。还需先跑一次 `npm run vendor:cli`(vendor/ 被 gitignore,dev checkout 通常不存在,缺了扩展直接报「内置 CLI 缺失」——这是刻意设计,没有本机 CLI 兜底)。
 - 打包产物:仓库根目录的 `iflow-harness-*.vsix`(内置 CLI 后 VSIX 约 13MB,不再是 0.2.0 时代的 200KB)。
 
-## 内置 CLI 回退(vendor)
+## 内置 CLI(vendor,唯一执行体)
 
-`scripts/vendor-cli.mjs` 把 CLI 打进 VSIX,使扩展在**完全没装 CLI** 的机器上可用。要点:
+`scripts/vendor-cli.mjs` 把 CLI 打进 VSIX。自 2026-10-07 起内置 fork 是面板**唯一**的 CLI 来源:扩展宿主不探测 PATH/npm/已知路径,没有 `iflow.cliPath` 设置,`resolveVendoredEntry` 缺失即抛错(定制 loader 补丁只在这个 bundle 里,跑官方包=静默丢补丁改变 agent 行为,宁可报错不兜底)。要点:
 
 - **来源是定制 fork**:npm 源为 `@yuentao/iflow-cli@0.5.19-custom.3`(tag `custom`),带本地注入的 `*.loader.cjs` 定制 bundle——官方 `@iflow-ai` 包不含。loader 源码来自 [iFlow-Mods](https://github.com/yuentao/iFlow-Mods) Mod 仓库:patch 型 Mod(thinking-mode / multimodal-image / output-token-limit / kimi-request-override / context-window refactor)在 CLI 源码同一插入点以 1 行 require 注入 loader,monkey-patch 模型规则并外置到 `~/.iflow/*.json`;Mod 可用 [iFlow-Mod-Builder](https://github.com/yuentao/iFlow-Mod-Builder)(Tauri+Vue3 GUI)打包成 `.iflow-mod` 安装。`--from <tgz>` / `--from-dir <dir>` 可完全绕开 npm 源(离线/本地定制场景——`--from-dir` 正是装载带新 loader 的本地定制 CLI 的路径,`--from-dir` 自带 node_modules 会跳过安装;脚本会剔除源目录的 `.git` 防进 VSIX)。custom.3 新增 `mcp-background-loader.cjs`(方法体委托型,不经过 L950):CLI 0.5.19 在 `--experimental-acp` 下 `isNonInteractive` 为 true,`discoverAllTools` 走**同步** `await discoverAllMcpTools()` 分支且 MCP `connect()` 无超时——npx 型服务器在 npm registry 不可达时无限挂起、ACP initialize 握手永久卡死(交互 TUI 反而走后台分支不受影响);loader 让 ACP 场景改走 CLI 自带的 `startMcpDiscoveryInBackground()`(MCP 工具连接完成后陆续注册),`-p` 一次性模式保持同步,`IFLOW_MCP_BACKGROUND=0` 退回原行为。
 - **mcp-session-share Mod(ACP 进程内 MCP 连接池)**:CLI 0.5.19 的每个 ACP 会话(session/new 与 session/load 都算)各自 `newSessionConfig()` 新建 Config,`discoverAllMcpTools()` 为每个配置的 MCP server spawn 一整条 stdio 进程链(cmd→npx-cli→server→watchdog,Windows 上每 server 约 3 个 node);harness 恢复会话的 probe newSession+loadSession 让舰队翻倍,而 ACP 方法表没有 session/close,被丢弃 probe 会话的舰队常驻整个 CLI 生命周期(2026-10-05 实测:单窗口 4 个 npx server 遗留 58 个 node.exe)。Mod 把 `discoverAllMcpTools()` 包上进程级池(`globalThis.__iflowMcpShare`,key=server 名+配置指纹):首会话认领 spawn 权(claim)并登记;后续会话收养健康池内 client(重指向新会话的 toolRegistry/promptRegistry/workspaceContext/config 后仅 `discover()` 重放,零 spawn);指纹变化/client 状态非 connected/discover 抛错 → 驱逐走原 spawn 路径。claim 机制专为 background-loader 后台化后的并发交叠设计(probe 与 load 的 discovery 同时进行,无 claim 则都查空池都 spawn)。仅 `--experimental-acp` 生效,TUI 与 `-p` 一次性不受影响,`IFLOW_MCP_SESSION_SHARE=0|false` 关闭,loader 缺失回退原行为。**与其他 Mod 同标准交付**:源在 iFlowMods 仓库 `mcp-session-share-refactor/`(mod.json type=patch + code.js 单点替换 + `mcp-session-share-loader.cjs` → core + README),方法体委托型不经过 L950 插入点,`.iflow-mod` 安装包放 dist/(gitignored);注入体随定制 fork `@yuentao/iflow-cli` 的 bundle 发布,vendor-cli 直接拉取即带上,**harness 不再自造注入脚本**。验证(2026-10-05):同一 CLI 进程连开 2 会话,session1 舰队 9 进程、session2 增量 0、dispose 后清零。**改 CLI bundle 版本后必须在 iFlowMods 重新生成 code.js——锚点漂移会让构建脚本硬失败**。
@@ -70,7 +70,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - **默认规则双目录**:源在 `scripts/iflow-defaults/`(进 git),构建时复制到 `vendor/iflow-defaults/`;扩展连接前把 `~/.iflow/` **缺失的**规则文件种过去(`seedDefaultRuleConfigs`),**永不覆盖用户已有文件**;`settings.json` / `iflow_accounts.json` 携带凭据,固定清单之外一概不同步。
 - **`.vscodeignore` 有关键例外**:`node_modules/**` 被排除,但 `!vendor/iflow-cli/node_modules/**` 必须保留——内置 CLI 的运行时依赖靠它进包。
 - **Windows 陷阱**:npm 调用统一走 `runNpm()`——优先用 `process.execPath` 直跑 npm 自带的 `npm-cli.js`(跨平台零 shell,避开 `.cmd` shim 的 EINVAL CVE-2024-27980 与 DEP0190;旧实现「单命令字符串 + 仅 win32 开 shell」在 ubuntu runner 上把整串命令当二进制名 spawn,实测 ENOENT);fallback 才是 PATH 上的 npm(win32 带 shell 单字符串、POSIX argv 数组)。解压用系统自带 bsdtar。1.1.1 修过一处 vendor 嵌套 `node_modules/.bin` 符号链接导致 vsce 在 Linux CI 打包失败。
-- 探测优先级(`locateIflowEntry`):`IFLOW_CLI_ENTRY` 环境变量 → PATH shim → npm 全局 root → 平台已知路径 → **vendor 副本(最后手段)**。显式安装的 CLI 永远赢过 vendor,用户可自由升级自己的安装。
+- **无探测链(2026-10-07)**:`resolveVendoredEntry(extensionPath)` 同步拼 `vendor/iflow-cli/bundle/entry.js` + existsSync,缺失即抛。曾经的 `IFLOW_CLI_ENTRY` env、PATH shim、npm root、well-known 探测与 `iflow.cliPath` 设置已全部移除——`IFLOW_CLI_ENTRY` 仅 `scripts/harness.mjs` / repro fixture 支持,用于 vendor 裁剪验收指向任意 entry,扩展进程不读。
 
 ## 开发约定
 
@@ -157,7 +157,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 15. **`--baseContentUrl` 不可用**:0.2.0 起把 `docs/**` 排除出 VSIX(`.vscodeignore`),README 里的 `docs/images/*` 链接在 Marketplace 预览中打不开——刻意的取舍,别「好心」把 docs 加回包。
 16. **blockPatch 锚定**:`baseVersion` 与接收端 `blockVersion` 不一致、或 `tailStart` 越界,都必须回退到全量重同步(webview 发 `ready`),不能硬合并。
 17. **reducer 就地改 blocks**:`tailOnly` 判断依赖尾部指纹,中段变更对指纹不可见,会保守地清 flag 回退全量快照——不要为了「优化」去掉这个保守回退。另一条路径:store 用 `mutatedFrom` 报告每次 reducer 变更的最小索引,中段工具更新仍走增量。
-18. **CLI 探测必须异步**:`where.exe` / `npm root -g` 在 Windows 上可达数秒,`execFileSync` 会冻结整个扩展宿主(其他扩展一起卡);`locateIflowEntry` / `locateNodeExecutable` 都是 async + 缓存 + 并发去重 + globalState 持久化,成功结果缓存(用 `existsSync` 复验)、失败不缓存(会话中装的 CLI 下次能发现)。
+18. **外部进程探测必须异步**:`where.exe` / `node --version` 在 Windows 上可达数秒,`execFileSync` 会冻结整个扩展宿主(其他扩展一起卡);`locateNodeExecutable` 是 async + 缓存 + 并发去重 + globalState 持久化,成功结果缓存(用 `existsSync` 复验)、失败不缓存。CLI entry 本身自 2026-10-07 起不再探测(vendor 唯一入口,同步 existsSync),此教训保留给未来任何 shelling out 的探测。
 19. **`chatForward` 等待条件**:必须在 `idle || error` 时退出(prompt 失败后 status 永不回 idle),cancel 只发一次,并有 10 分钟总超时兜底——旧实现三处叠加会导致 participant 永久挂死 + interval 泄漏。
 20. **连接失败要 dispose 子进程**:initialize 超时/握手失败后 CLI 进程会继续存活;`AcpClient.connect()` 内部与 `ensureClient` catch 两处都要 `dispose()`(幂等,双重调用安全)。
 21. **vendor 裁剪变更必须重测**:增删 `PRUNE_DIRS` / `PRUNE_PKGS` 前先对裁剪副本跑 `npm run harness` 全流程;同理 `.vscodeignore` 的 `!vendor/iflow-cli/node_modules/**` 例外一旦丢失,打包出的扩展会因缺依赖直接起不来(本地 dev 感知不到,只有 VSIX 安装才炸)。
@@ -181,7 +181,7 @@ npm run harness                                  # initialize → newSession →
 npm run harness -- --record                      # 额外录制 wire 日志(现被 gitignore,不入库)
 npm run harness -- --probe                       # 探 set_mode / set_model / set_think 行为(不发 prompt,不耗 token)
 npm run harness -- --prompt "..."                # 自定义 prompt 文本
-IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 指定 CLI 入口(也可指向 vendor 副本)
+IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 覆盖入口(vendor 裁剪验收用;默认已是 vendor/iflow-cli)
 ```
 
 `harness.mjs` 从 `dist/src/acp/*.js` 导入(即需要先 `npm run build`),因此它同时是「构建产物可用性」的冒烟测试;对裁剪后的 `vendor/iflow-cli` 跑它也是 vendor 变更的验收手段(见陷阱 #21)。
@@ -206,5 +206,5 @@ IFLOW_CLI_ENTRY=/path/to/entry.js npm run harness  # 指定 CLI 入口(也可指
 - 新增 UI 组件放到 `webview/src/components/`,样式用 Tailwind 4 + oklch 设计 token(见 `webview/src/styles.css`),深/浅色主题由 Host 推送 `theme` 消息驱动,默认跟随编辑器主题;图标统一用 `lucide-react`(不要 emoji/字符);动亚克力材质前先看陷阱 #22。
 - 想脱离 VSCode 迭代 UI:`webview/src/store.ts` 的 `createMockHost()` 提供 demo 快照(含审批/提问/Plan 卡与用量说明),可用静态服务器直接跑 webview。
 - 新增设置项要确认它真的实现了——`iflow.idleTimeoutMinutes` 就是声明了但没实现的先例(已删除,见陷阱 #14)。
-- 碰 vendor 链路(vendor:cli / defaults:sync / 探测优先级 / .vscodeignore 例外)时,先读「内置 CLI 回退」一节与 `scripts/vendor-cli.mjs` 顶部注释,改动后必须 `npm run harness` 验收并打一个 VSIX 装到干净环境冒烟。
+- 碰 vendor 链路(vendor:cli / defaults:sync / .vscodeignore 例外)时,先读「内置 CLI(vendor,唯一执行体)」一节与 `scripts/vendor-cli.mjs` 顶部注释,改动后必须 `npm run harness` 验收并打一个 VSIX 装到干净环境冒烟。
 - webview 侧类型检查:`cd webview && npx tsc --noEmit`(webview 有独立 tsconfig,不参与主 typecheck)。

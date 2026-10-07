@@ -2,12 +2,17 @@
 // Mirrors panel.ts requestPermissionFromUser's timeout path: after a delay,
 // respond { outcome: { outcome: "cancelled" } }. Watchdog reports whether the
 // in-flight session/prompt ever settles afterwards.
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { AcpClient } from "../../dist/src/acp/client.js";
-import { buildAcpCommand, locateIflowEntry } from "../../dist/src/acp/cli-locator.js";
+import { buildAcpCommand, resolveVendoredEntry } from "../../dist/src/acp/cli-locator.js";
 
-const entry = process.env.IFLOW_CLI_ENTRY ?? (await locateIflowEntry());
-if (!entry) {
-  console.error("FAIL: no CLI entry");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+let entry;
+try {
+  entry = process.env.IFLOW_CLI_ENTRY ?? resolveVendoredEntry(repoRoot);
+} catch {
+  console.error("FAIL: vendored CLI missing (run npm run vendor:cli)");
   process.exit(2);
 }
 console.log("[repro] CLI entry:", entry);

@@ -17,7 +17,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AcpClient } from "../dist/src/acp/client.js";
-import { buildAcpCommand, locateIflowEntry } from "../dist/src/acp/cli-locator.js";
+import { buildAcpCommand, resolveVendoredEntry } from "../dist/src/acp/cli-locator.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -27,10 +27,14 @@ const record = args.includes("--record");
 const probe = args.includes("--probe");
 const promptText = args.find((a, i) => i > 0 && args[i - 1] === "--prompt") ?? "Reply with exactly: OK";
 
-// locateIflowEntry is async (spawn probes must not block an event loop).
-const entry = process.env.IFLOW_CLI_ENTRY ?? (await locateIflowEntry());
-if (!entry) {
-  console.error("[harness] FAIL: could not locate iflow CLI entry.js. Set IFLOW_CLI_ENTRY.");
+// The extension always runs the vendored fork; the harness mirrors that.
+// IFLOW_CLI_ENTRY stays as an explicit override for vendor-pruning validation
+// (point it at a pruned copy to prove the cut bundle still passes ACP).
+let entry;
+try {
+  entry = process.env.IFLOW_CLI_ENTRY ?? resolveVendoredEntry(root);
+} catch {
+  console.error("[harness] FAIL: vendored CLI missing. Run `npm run vendor:cli` or set IFLOW_CLI_ENTRY.");
   process.exit(2);
 }
 console.log(`[harness] CLI entry: ${entry}`);
