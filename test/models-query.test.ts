@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -10,7 +10,6 @@ import {
   retireStaleOAuthCreds,
   settingsFilePath,
   updateCliSettings,
-  updateCurrentApiProfile,
 } from "../src/acp/models-query";
 
 const tempDir = mkdtempSync(path.join(tmpdir(), "iflow-models-"));
@@ -64,13 +63,14 @@ describe("parseModelsResponse", () => {
 });
 
 describe("resolveActiveProfileName", () => {
-  it("prefers the CLI's currentApiProfile (external tools rewrite it)", () => {
+  it("prefers the extension record (isolated home: SecretStorage is the authority)", () => {
     expect(
       resolveActiveProfileName({ currentApiProfile: "商汤" }, "BUZZ"),
-    ).toBe("商汤");
+    ).toBe("BUZZ");
   });
 
-  it("falls back to the extension record when the CLI pointer is empty", () => {
+  it("falls back to the CLI pointer when the extension has no record", () => {
+    expect(resolveActiveProfileName({ currentApiProfile: "商汤" }, null)).toBe("商汤");
     expect(resolveActiveProfileName({ currentApiProfile: "  " }, "BUZZ")).toBe("BUZZ");
     expect(resolveActiveProfileName({}, "BUZZ")).toBe("BUZZ");
   });
@@ -82,35 +82,6 @@ describe("resolveActiveProfileName", () => {
 
   it("falls back when there is no settings file at all", () => {
     expect(resolveActiveProfileName(null, "BUZZ")).toBe("BUZZ");
-  });
-});
-
-describe("updateCurrentApiProfile", () => {
-  it("repoints currentApiProfile and preserves every other field", () => {
-    const file = settingsFile({
-      selectedAuthType: "openai-compatible",
-      baseUrl: "https://old.example.com/v1",
-      apiKey: "sk-top",
-      currentApiProfile: "Old",
-      apiProfiles: {
-        Old: { baseUrl: "https://old.example.com/v1", apiKey: "sk-top", modelName: "m-old" },
-        New: { baseUrl: "https://new.example.com/v1", apiKey: "sk-new", modelName: "m-new" },
-      },
-      mcpServers: { demo: { command: "npx" } },
-    });
-    expect(updateCurrentApiProfile("New", file)).toBe(true);
-    const after = JSON.parse(readFileSync(file, "utf8"));
-    expect(after.currentApiProfile).toBe("New");
-    expect(after.baseUrl).toBe("https://old.example.com/v1");
-    expect(after.apiProfiles.Old.modelName).toBe("m-old");
-    expect(after.apiProfiles.New.apiKey).toBe("sk-new");
-    expect(after.mcpServers.demo.command).toBe("npx");
-    // Atomic write: no temp leftover next to the real file.
-    expect(existsSync(`${file}.iflow-harness-tmp`)).toBe(false);
-  });
-
-  it("returns false for a missing/unreadable settings file", () => {
-    expect(updateCurrentApiProfile("X", path.join(tempDir, "missing.json"))).toBe(false);
   });
 });
 

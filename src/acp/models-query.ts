@@ -121,19 +121,21 @@ export function readCliSettings(settingsPath?: string): CliSettingsShape | null 
 }
 
 /**
- * Active profile name, CLI-first. `~/.iflow/settings.json` is what the CLI
- * actually loads on startup AND is rewritten by external tools (iFlow's
- * profile manager / cloud sync — verified: 0.5.19's bundle contains no
- * apiProfiles handling, the fields come and go externally). When
- * `currentApiProfile` is present it therefore wins over the extension's own
- * record; the extension value is only a fallback for fresh installs.
+ * Active profile name, extension-first. The panel authenticates its child
+ * with SecretStorage creds and the CLI-side api-config-isolation patch keeps
+ * the panel-owned fields (apiKey/baseUrl/currentApiProfile…) out of the
+ * shared settings.json write-back — so the extension's own record is the
+ * authoritative pointer for the panel. The CLI file's currentApiProfile is
+ * maintained by the CLI/external tools and lags at whatever was active at the
+ * child's startup; it is only a fallback for fresh installs where the user
+ * configured profiles outside the panel and the extension has no record yet.
  */
 export function resolveActiveProfileName(
   cli: CliSettingsShape | null,
   extensionActive: string | null,
 ): string | null {
-  const fromCli = cli?.currentApiProfile?.trim();
-  return fromCli || extensionActive || null;
+  if (extensionActive?.trim()) return extensionActive.trim();
+  return cli?.currentApiProfile?.trim() || null;
 }
 
 /**
@@ -163,14 +165,6 @@ export function updateCliSettings(patch: Partial<CliSettingsShape>, settingsPath
     }
     return false;
   }
-}
-
-/**
- * Point `currentApiProfile` at `name` without touching anything else.
- * Returns false (caller logs) when the file is missing/unreadable.
- */
-export function updateCurrentApiProfile(name: string, settingsPath?: string): boolean {
-  return updateCliSettings({ currentApiProfile: name }, settingsPath);
 }
 
 /** Active openai-compatible endpoint from the CLI settings, or null. */

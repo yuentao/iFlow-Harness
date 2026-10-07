@@ -131,8 +131,9 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
   let storageDir: string;
 
   beforeEach(async () => {
-    // updateCurrentApiProfile / retireStaleOAuthCreds resolve ~/.iflow through
-    // IFLOW_HOME — point it at a temp dir so tests never touch the real home.
+    // retireStaleOAuthCreds / settings paths resolve the iflow home through
+    // IFLOW_HOME (the test seam) — point it at
+    // a temp dir so tests never touch the real home.
     iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-switch-test-"));
     process.env.IFLOW_HOME = iflowHome;
     // Dedicated storage dir: the transcript files this test's sessions seed

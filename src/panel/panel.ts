@@ -17,7 +17,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateIflowEntry, locateNodeExecutable, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings, updateCurrentApiProfile } from "../acp/models-query.js";
+import { acpSessionFilePath, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings } from "../acp/models-query.js";
 import {
   clearCredentials,
   getActiveProfileName,
@@ -325,6 +325,12 @@ export class ChatPanel implements vscode.Disposable {
       load: () => this.context.globalState.get<LocatorPaths>(LOCATOR_PATHS_KEY),
       save: (paths) => void this.context.globalState.update(LOCATOR_PATHS_KEY, paths),
     });
+    // API-config isolation (user directive 2026-10-06) lives CLI-side: the
+    // vendored/forked bundle carries the api-config-isolation patch which,
+    // under IFLOW_HARNESS=1 (see the spawn env below), keeps the panel-owned
+    // auth fields out of the shared ~/.iflow/settings.json write-back. The
+    // extension therefore uses the SHARED home for everything else (slash
+    // commands, agents, skills, memory, acp/sessions) — no private dir.
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = "iflow.openPanel";
     this.statusBar.tooltip = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
@@ -351,21 +357,6 @@ export class ChatPanel implements vscode.Disposable {
     fileWatcher.onDidCreate(invalidateFileCache);
     fileWatcher.onDidDelete(invalidateFileCache);
     this.context.subscriptions.push(fileWatcher);
-    // External settings.json writes (iFlow profile manager, cloud sync —
-    // verified: the 0.5.19 bundle holds no apiProfiles handling, the fields
-    // are maintained outside the CLI) can repoint currentApiProfile behind
-    // our back. Re-push the merged auth state so the profile list shows the
-    // externally-activated profile instead of drifting from reality.
-    const settingsDir = vscode.Uri.file(path.dirname(settingsFilePath()));
-    const settingsWatcher =
-      this.services.watchers?.[1] ??
-      vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(settingsDir, "settings.json"),
-      );
-    const syncAuth = () => this.syncAuthAfterExternalChange();
-    settingsWatcher.onDidChange(syncAuth);
-    settingsWatcher.onDidCreate(syncAuth);
-    this.context.subscriptions.push(settingsWatcher);
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
   }
@@ -1650,40 +1641,6 @@ export class ChatPanel implements vscode.Disposable {
     return { baseUrl: creds.baseUrl, modelName: creds.modelName, keyTail: maskKey(creds.apiKey) };
   }
 
-  /** Debounce for external settings.json change events (writers rewrite the
-   * file in bursts; mid-write reads can also yield broken JSON). */
-  private settingsSyncTimer: NodeJS.Timeout | null = null;
-
-  /**
-   * A watcher fired on settings.json: re-merge the CLI profile list so the
-   * panel reflects an externally-repointed currentApiProfile instead of
-   * drifting. Deliberately does NOT reconnect — the running session is bound
-   * to the credentials it authenticated with; switching is a user action.
-   */
-  private syncAuthAfterExternalChange(): void {
-    if (this.settingsSyncTimer) clearTimeout(this.settingsSyncTimer);
-    this.settingsSyncTimer = setTimeout(() => {
-      void (async () => {
-        try {
-          const cli = readCliSettings();
-          if (!cli) return; // mid-write or removed — wait for the next event
-          const cliActive = cli.currentApiProfile?.trim() ?? null;
-          const state = this.store.getState();
-          const shownActive = state.auth.profiles.find((p) => p.active)?.name ?? null;
-          if (cliActive === shownActive) return; // already in sync
-          this.log.info(
-            `settings.json changed externally: currentApiProfile ${shownActive ?? "∅"} → ${cliActive ?? "∅"}`,
-          );
-          this.store.setAuth(
-            await this.buildAuthState(state.auth.authenticated, state.auth.needsSetup),
-          );
-        } catch (error) {
-          this.log.warn(`settings.json resync failed: ${errorMessage(error)}`);
-        }
-      })();
-    }, 500);
-  }
-
   /**
    * Mirror the CLI-bound extension settings (language / approvalMode) into
    * `~/.iflow/settings.json`. The CLI reads both only at startup (probed,
@@ -1901,14 +1858,11 @@ export class ChatPanel implements vscode.Disposable {
     await saveProfiles(this.context.secrets, profiles);
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds); // active-slot for the next handshake
-    // Keep the CLI's own pointer in sync: settings.json is what the CLI loads
-    // when it starts OUTSIDE this panel (crash-restart, user-opened CLI). If
-    // currentApiProfile still names the old profile, that standalone start
-    // silently reverts to stale credentials. Failure is non-fatal — the
-    // in-panel session already re-authenticates with the pushed creds.
-    if (!updateCurrentApiProfile(name)) {
-      this.log.warn(`could not update currentApiProfile in settings.json (target: ${name})`);
-    }
+    // No settings.json pointer write: the panel's active profile is recorded
+    // only in SecretStorage (the panel-owned fields never reach the shared
+    // file — see the api-config-isolation note in the constructor). Writing
+    // currentApiProfile would make a terminal CLI start follow the panel's
+    // last pick, which is exactly the cross-process influence we isolate.
 
     await this.reconnectWithCredentials(creds);
   }
@@ -1947,10 +1901,6 @@ export class ChatPanel implements vscode.Disposable {
     }
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds);
-    // Same pointer sync as saveAuthAndReconnect — see the rationale there.
-    if (!updateCurrentApiProfile(name)) {
-      this.log.warn(`could not update currentApiProfile in settings.json (target: ${name})`);
-    }
     await this.reconnectWithCredentials(creds, keepSession);
   }
 
@@ -2039,20 +1989,11 @@ export class ChatPanel implements vscode.Disposable {
           methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
         });
         this.log.info(`hot re-authenticate ok in ${Date.now() - tAuth}ms (CLI kept running)`);
-        // The CLI's authenticate serializes its IN-MEMORY settings copy back
-        // to settings.json (setValue updates keys in the copy, then writes the
-        // whole file) — so currentApiProfile reverts to the value the CLI read
-        // at STARTUP (probed 2026-09-11: BUZZ→商汤 hot switch leaves top-level
-        // baseUrl/apiKey = 商汤 but currentApiProfile = "BUZZ"). Both readers
-        // of that pointer — buildProfileList's active marker (CLI-first) and
-        // queryLiveModels' endpoint choice — would pin to the OLD profile.
-        // Re-stamp it from the extension's own record before anything reads it.
-        const activeProfileName = await getActiveProfileName(this.context.secrets);
-        if (activeProfileName && !updateCurrentApiProfile(activeProfileName)) {
-          this.log.warn(
-            `could not re-stamp currentApiProfile after hot re-auth (target: ${activeProfileName})`,
-          );
-        }
+        // (The old re-stamp of currentApiProfile is gone: the CLI-side
+        // api-config-isolation patch keeps the panel-owned fields out of the
+        // settings write-back entirely, and the active pointer's authority is
+        // the SecretStorage record — resolveActiveProfileName is
+        // extension-first.)
         // keepSession: reload the SAME conversation in place under the new
         // credentials — the transcript never clears (seamless). Only the
         // CLI-side session object is rebuilt (session/load, same id).
@@ -2857,7 +2798,9 @@ export class ChatPanel implements vscode.Disposable {
         // Generous control-plane timeout: a CLI with many MCP servers can take
         // 30-60s+ before its first initialize response.
         // IFLOW_HARNESS=1 marks our subprocess tree so local cleanup scripts
-        // can exclude it (the renamed binary only defeats name-based kills).
+        // can exclude it (the renamed binary only defeats name-based kills),
+        // and switches on the CLI-side api-config-isolation patch — without
+        // it (plain CLI / TUI / -p) the settings write-back is untouched.
         { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1" }, requestTimeoutMs: 120_000, allowedRoots },
         {
           // A detached client (profile switch overlaps the new spawn with the
@@ -3383,10 +3326,14 @@ export class ChatPanel implements vscode.Disposable {
    * current model stays selectable so the dropdown isn't blank).
    */
   private async queryLiveModels(): Promise<SessionState["models"]> {
-    // CLI-first again: external tools rewrite currentApiProfile behind our
-    // back, so the model list must reflect the endpoint the CLI will actually
-    // use (settings.json), not the extension's possibly-stale record.
-    const endpoint = readActiveEndpoint() ?? (await loadCredentials(this.context.secrets));
+    // Extension-first: the panel's active endpoint is its SecretStorage
+    // credentials — the CLI-side api-config-isolation patch keeps them out of
+    // the shared settings.json, so the shared currentApiProfile is no longer
+    // what this panel's child authenticates with (the old CLI-first rule existed because external
+    // tools rewrote the SHARED currentApiProfile behind our back — that no
+    // longer reaches us). The CLI settings read stays as a fallback for
+    // setups where only CLI-side profiles exist.
+    const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
     if (!endpoint) return [];
     try {
       return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
