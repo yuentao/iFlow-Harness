@@ -67,6 +67,10 @@ import {
 } from "../../shared/session-state.js";
 import { SessionStore } from "./store.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
+import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
+import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
+import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
+import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** User answer window for a tool-approval card. */
@@ -114,6 +118,20 @@ const TRANSIENT_STREAM_RETRY_DELAYS_MS = [3_000, 10_000];
  * Transient in most cases (a session recovers on its own minutes later), so
  * retry with a short ladder before surfacing the error. */
 const EMPTY_RESPONSE_RETRY_DELAYS_MS = [3_000, 8_000];
+/** M1 P1-5/P0-7: hard ceiling for an INTERNAL prompt (enhance / AI title).
+ * Unlike a user turn (no timeout by design, pitfall #13) these are
+ * fire-and-forget conveniences — a wedged gateway must not hold their
+ * internal session open forever; on timeout we cancel and give up silently. */
+const INTERNAL_PROMPT_TIMEOUT_MS = 60_000;
+/** M1 P0-5: an execute-class tool still running after this long earns an OS
+ * notification when it finally lands (only while the panel is hidden). */
+const LONG_TOOL_NOTIFY_MS = 30_000;
+/** M1 P0-6: occupancy ratio at which the context-warning pill fires
+ * (≥100% is handled by the existing overflow auto-compress path). */
+const CONTEXT_WARN_RATIO = 0.9;
+/** M1 P0-6: hysteresis floor — the warning pill only clears below this ratio,
+ * so a ratio jittering around 90% doesn't flap the pill on and off. */
+const CONTEXT_WARN_EXIT_RATIO = 0.85;
 /** Thrown by promptWithRetry when the empty-response retry ladder is
  * exhausted. The catch chain re-throws it untouched: its user-facing wording
  * would otherwise trip the rate-limit heuristic ("稍后重试" ∈ RATE_LIMIT_RE)
@@ -310,13 +328,49 @@ export class ChatPanel implements vscode.Disposable {
   private readonly preSnapshots = new Map<string, PreEditSnapshot>();
   private static readonly TOOL_ARGS_CAP = 128;
 
+  // --- M1 state ---------------------------------------------------------------
+  /** M1 P0-5: last known webview-panel visibility (the OS-notification gate).
+   * `retainContextWhenHidden` means the webview document NEVER reports
+   * hidden, so the host must track `WebviewPanel.visible` itself. Absent
+   * panel = not visible = notifications allowed. */
+  private panelVisible = false;
+  /** M1 P0-5: pure gate state (throttle timestamps per event kind). */
+  private osNotifyGate: OsNotifyGate = initOsNotifyGate();
+  /** M1 P0-5: toolCallId → start epoch of execute-class tools still running
+   * (only while the panel is hidden; entries are dropped at terminal). */
+  private readonly runningToolStarts = new Map<string, number>();
+  /** M1 P1-5/P0-7: sessionIds created for internal prompts (enhance / AI
+   * title). Their session/update stream is intercepted BEFORE the store and
+   * never reaches the transcript; the set is small (one at a time). */
+  private readonly internalSessionIds = new Set<string>();
+  /** M1: one internal prompt at a time (enhance and title generation share
+   * the lane; a second request while one runs fails fast). */
+  private internalPromptBusy = false;
+  /** M1 P0-6: true while the ≥90% occupancy warning pill is shown (the
+   * state machine fires once per entry into the warn zone). */
+  private contextWarnActive = false;
+  /** M1 P0-7: sessions whose AI title was already generated (or attempted —
+   * a failure never retries in a storm). */
+  private readonly titledSessionIds = new Set<string>();
+  /** M1 P1-4: bounded ACP wire ring buffer (exported via the command). */
+  private readonly wireLog = new WireRingBuffer();
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly services: PanelServices = {},
   ) {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
-    this.store.onStateChange = (state) => this.updateStatusBar(state);
+    this.store.onStateChange = (state) => {
+      this.updateStatusBar(state);
+      // M1 P0-6: occupancy-warning state machine (pure numeric compare per
+      // push; toast/dismiss are post-only, no re-entrancy into the store).
+      this.evaluateContextWarning();
+    };
+    // M1 P0-6/P1-6: the store consults this on every usage refresh, so a
+    // model switch or a settings edit lands on the occupancy bar without
+    // per-call-site wiring (the push itself is the invalidation signal).
+    this.store.getUsageContext = () => this.resolveUsageContext();
     this.store.onStateReplaced = () => this.clearToolDiffCaches();
     // Cross-window cache for the node-probe result (the probe shells out —
     // hundreds of ms per window). The locator re-validates the hydrated path
@@ -346,6 +400,15 @@ export class ChatPanel implements vscode.Disposable {
           || e.affectsConfiguration("iflow.approvalMode")
         ) {
           this.syncCliSettingsToDisk();
+        }
+        // M1 P0-6/P1-6: the usage resolver reads these fresh on every push —
+        // one flush is enough to repaint the occupancy bar / cost chip.
+        if (
+          e.affectsConfiguration("iflow.contextWindowOverrides")
+          || e.affectsConfiguration("iflow.costTable")
+        ) {
+          this.usageOverridesCache = null;
+          this.store.pushSnapshot();
         }
       }),
     );
@@ -494,6 +557,17 @@ export class ChatPanel implements vscode.Disposable {
     );
     panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "media", "iflow.svg");
     this.editorPanel = panel;
+    // M1 P0-5: the OS-notification gate needs the panel's visibility. The
+    // webview document never reports hidden (retainContextWhenHidden), so
+    // `WebviewPanel.visible` is the only truth — track it here.
+    this.panelVisible = panel.visible;
+    panel.onDidChangeViewState(
+      (e) => {
+        this.panelVisible = e.webviewPanel.visible;
+      },
+      null,
+      this.context.subscriptions,
+    );
     this.wireWebview(panel.webview);
     panel.onDidDispose(
       () => {
@@ -864,6 +938,15 @@ export class ChatPanel implements vscode.Disposable {
       case "deleteUserMessage":
         await this.deleteUserMessage(msg.blockId);
         break;
+      case "exportSession":
+        await this.exportActiveSession(msg.format);
+        break;
+      case "enhancePrompt":
+        await this.enhancePrompt(msg.requestId, msg.text);
+        break;
+      case "toastAction":
+        this.handleToastAction(msg.actionId, msg.toastId);
+        break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
         // commit can send message kinds this host does not know; without a
@@ -907,9 +990,331 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "playSound", kind });
   }
 
+  // --- M1: OS notifications (P0-5) --------------------------------------------
+
+  /**
+   * Native notification for a user-blocking event, gated on
+   * setting × panel-visibility × per-kind throttle (shared/notifications.ts).
+   * A visible panel already shows the card — the notification exists exactly
+   * for when the user switched to the editor and the agent is blocked.
+   */
+  private notifyOs(event: OsNotifyEvent, text: string): void {
+    const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
+    const gate = gateOsNotification({
+      event,
+      setting,
+      panelVisible: this.panelVisible,
+      nowMs: Date.now(),
+      gate: this.osNotifyGate,
+    });
+    if (!gate.fire) return;
+    this.osNotifyGate = gate.gate;
+    const openLabel = vscode.l10n.t("打开面板");
+    void vscode.window.showInformationMessage(text, openLabel).then((pick) => {
+      if (pick === openLabel) this.openEditorTab();
+    });
+  }
+
+  // --- M1: internal prompts (P1-5 enhance / P0-7 AI title) --------------------
+  //
+  // Isolation discipline: an internal prompt must NOT enter the transcript,
+  // the CLI chatHistory of the user session, or the regenerate chain. It runs
+  // on a DEDICATED session on the same CLI client (session/new is cheap and
+  // the mcp-session-share pool absorbs the fleet; the CLI has no
+  // session/close — P2-7 — so the object lingers server-side, same accepted
+  // trade as the restore probe session). Its session/update stream is
+  // intercepted at the top of onSessionUpdate and never reaches the store.
+
+  /** Accumulator for the in-flight internal prompt's agent text. */
+  private internalPromptText = "";
+
+  /** Run one internal prompt on a throwaway session; resolves with the
+   * agent's text (trimmed) or null on any failure. Never throws. */
+  private async runInternalPrompt(text: string): Promise<string | null> {
+    if (this.disposed || this.internalPromptBusy) return null;
+    const client = await this.ensureClient().catch(() => null);
+    if (!client || this.disposed || this.client !== client) return null;
+    const cwd =
+      this.sessionCwd ??
+      this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath;
+    let internalSessionId = "";
+    this.internalPromptBusy = true;
+    this.internalPromptText = "";
+    // Hard ceiling (INTERNAL_PROMPT_TIMEOUT_MS): unlike a user turn these are
+    // fire-and-forget conveniences — a wedged gateway must not hold them.
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      const res = await client.newSession({ cwd, mcpServers: [] });
+      internalSessionId = res.sessionId;
+      this.internalSessionIds.add(internalSessionId);
+      // Same model as the user session (enhancement quality); set_model is a
+      // blind assignment on the CLI (pitfall #23) so an unknown id is safe.
+      const modelId = this.store.getState().currentModelId;
+      if (modelId) await client.setModel(internalSessionId, modelId).catch(() => undefined);
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("internal prompt timeout")), INTERNAL_PROMPT_TIMEOUT_MS);
+      });
+      await Promise.race([
+        client.prompt({ sessionId: internalSessionId, prompt: [{ type: "text", text }] }),
+        timeout,
+      ]);
+      if (this.disposed || this.client !== client) return null;
+      return this.internalPromptText.trim() || null;
+    } catch (error) {
+      this.log.info(`internal prompt failed: ${errorMessage(error)}`);
+      if (internalSessionId && this.client === client) {
+        try {
+          client.cancel(internalSessionId);
+        } catch {
+          // dying client
+        }
+      }
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (internalSessionId) this.internalSessionIds.delete(internalSessionId);
+      this.internalPromptBusy = false;
+      this.internalPromptText = "";
+    }
+  }
+
+  /** P1-5: enhance the composer draft. Reply: `enhancedPrompt`. */
+  private async enhancePrompt(requestId: number, text: string): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("没有可增强的内容") });
+      return;
+    }
+    if (this.internalPromptBusy) {
+      this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("已有内部请求进行中，请稍后再试") });
+      return;
+    }
+    const template = vscode.l10n.t(
+      "你是提示词工程师。把下面用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只输出改写后的请求本身，不要任何解释或引号。\n\n原始请求：\n",
+    );
+    const enhanced = await this.runInternalPrompt(template + trimmed);
+    if (this.disposed) return;
+    if (enhanced) {
+      this.postToWebview({ type: "enhancedPrompt", requestId, text: enhanced });
+    } else {
+      this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("增强失败，已保留原文") });
+    }
+  }
+
+  /**
+   * P0-7: one-shot AI title for a session whose label is still the
+   * first-message truncation. Silent on every failure (the old label stays);
+   * `titledSessionIds` records attempts, so a failure never retries in a
+   * storm and success is likewise once-per-session.
+   */
+  private async maybeGenerateAiTitle(sessionId: string): Promise<void> {
+    if (this.disposed || this.titledSessionIds.has(sessionId)) return;
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoTitle", true) === false) return;
+    const state = this.store.getState();
+    if (state.sessionId !== sessionId && state.activeSessionId !== sessionId) return;
+    const target = state.sessions.find((s) => s.id === sessionId);
+    if (!target) return;
+    const firstUser = state.blocks.find((b) => b.kind === "user");
+    if (!firstUser || firstUser.kind !== "user") return;
+    // Only replace the mechanical truncation form (or the untitled default)
+    // — a label the user could not have produced mechanically is left alone.
+    const mechanical = clampSessionLabel(firstUser.text);
+    if (target.label !== mechanical && target.label !== DEFAULT_SESSION_LABEL) return;
+    // One lane: an in-flight internal prompt means this session gets no title
+    // NOW — but the id is not registered yet, so the next turn's completion
+    // retries (the busy check must come before the registration).
+    if (this.internalPromptBusy) return;
+    this.titledSessionIds.add(sessionId);
+    const template = vscode.l10n.t(
+      "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n",
+    );
+    const summary = await this.runInternalPrompt(template + firstUser.text.slice(0, 2000));
+    if (!summary || this.disposed) return;
+    const title = clampSessionLabel(summary.split("\n")[0] ?? "");
+    if (!title) return;
+    const current = this.store.getState();
+    if (current.sessionId !== sessionId && current.activeSessionId !== sessionId) return;
+    const entry = current.sessions.find((s) => s.id === sessionId);
+    if (!entry) return;
+    const sessions = current.sessions.map((s) => (s.id === sessionId ? { ...s, label: title } : s));
+    this.store.setSessions(sessions, current.activeSessionId);
+    await this.persistSessions(sessions, current.activeSessionId);
+    // Keep the transcript file's label in sync with the new title.
+    void this.persistActiveTranscript(true);
+  }
+
+  // --- M1: session export (P0-7) -----------------------------------------------
+
+  /** Export the active transcript (Markdown / JSON) via a native save dialog. */
+  private async exportActiveSession(format: "markdown" | "json"): Promise<void> {
+    const state = this.store.getState();
+    const id = state.activeSessionId ?? state.sessionId;
+    if (!id || state.blocks.length === 0) {
+      this.store.appendNotice(vscode.l10n.t("当前会话没有可导出的内容"));
+      return;
+    }
+    const label = state.sessions.find((s) => s.id === id)?.label ?? DEFAULT_SESSION_LABEL;
+    const content =
+      format === "markdown"
+        ? transcriptToMarkdown({ label, sessionId: state.sessionId, modelId: state.currentModelId, blocks: state.blocks, usage: state.usage })
+        : transcriptToJson({ label, sessionId: state.sessionId, blocks: state.blocks });
+    const safeLabel = label.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").slice(0, 60) || "iflow-session";
+    const defaultDir = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.joinPath(defaultDir, `${safeLabel}.${format === "markdown" ? "md" : "json"}`),
+      filters: format === "markdown" ? { Markdown: ["md"] } : { JSON: ["json"] },
+    });
+    if (!uri) return;
+    try {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
+      this.store.sendToast("info", vscode.l10n.t("会话已导出：{0}", uri.fsPath), { durationMs: 8000 });
+    } catch (error) {
+      this.store.sendToast("error", vscode.l10n.t("导出失败：{0}", errorMessage(error)));
+    }
+  }
+
+  /**
+   * M1 P1-4: export the bounded ACP wire log (redacted NDJSON, harness
+   * `--record` shape) via a native save dialog. Command-palette entry; the
+   * buffer is always-on (capped), so whatever the current CLI process has
+   * exchanged is available without a repro flag.
+   */
+  async exportWireLog(): Promise<void> {
+    const defaultDir = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.joinPath(defaultDir, `iflow-acp-log-${stamp}.ndjson`),
+      filters: { "NDJSON log": ["ndjson", "log", "txt"] },
+    });
+    if (!uri) return;
+    try {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(this.wireLog.dump(), "utf8"));
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t("ACP 日志已导出（{0} 帧，已脱敏）：{1}", this.wireLog.size, uri.fsPath),
+      );
+    } catch (error) {
+      void vscode.window.showErrorMessage(vscode.l10n.t("导出 ACP 日志失败：{0}", errorMessage(error)));
+    }
+  }
+
+  // --- M1: context occupancy (P0-6) + cost (P1-6) ------------------------------
+
+  /** Resolve the store's usage context: settings overrides → curated tables →
+   * conservative fallback. Synchronous and cheap (runs per push). */
+  /** Cached parse of the two usage settings (invalidated on config change —
+   * `resolveUsageContext` runs on EVERY store push, so re-parsing the arrays
+   * per push would waste work during streaming). */
+  private usageOverridesCache: { overrides: Record<string, number>; cost: Record<string, { input: number; output: number }> } | null = null;
+
+  private resolveUsageContext(): { contextWindow: number | null; estimated: boolean; costPrice: { input: number; output: number } | null } {
+    const cfg = vscode.workspace.getConfiguration("iflow");
+    let cached = this.usageOverridesCache;
+    if (!cached) {
+      cached = {
+        overrides: parseContextWindowOverrides(cfg.get<string[]>("contextWindowOverrides", [])),
+        cost: parseCostTable(cfg.get<string[]>("costTable", [])),
+      };
+      this.usageOverridesCache = cached;
+    }
+    const modelId = this.store.getState().currentModelId;
+    const { window, estimated } = resolveContextWindow(modelId, cached.overrides);
+    return { contextWindow: window, estimated, costPrice: resolveCost(modelId, cached.cost) };
+  }
+
+  /**
+   * Occupancy-warning state machine (runs on every store push). Fires ONE
+   * persistent pill with a 立即压缩 action when usage crosses
+   * CONTEXT_WARN_RATIO; hysteretic exit at 85% (a compression or a session
+   * switch drops the ratio and removes the pill). ≥100% stays owned by the
+   * existing overflow auto-compress path.
+   */
+  private contextWarnToastId: number | null = null;
+
+  private evaluateContextWarning(): void {
+    const usage = this.store.getState().usage;
+    const window = usage?.contextWindow ?? null;
+    const used = usage?.contextUsed ?? 0;
+    const ratio = window !== null && window > 0 ? used / window : 0;
+    if (this.contextWarnActive) {
+      // Exit below the hysteresis floor — a compression or a session switch
+      // drops the ratio and removes the pill.
+      if (ratio < CONTEXT_WARN_EXIT_RATIO) {
+        this.contextWarnActive = false;
+        if (this.contextWarnToastId !== null) {
+          this.store.dismissToast(this.contextWarnToastId);
+          this.contextWarnToastId = null;
+        }
+      }
+    } else if (ratio >= CONTEXT_WARN_RATIO) {
+      this.contextWarnActive = true;
+      this.contextWarnToastId = this.store.sendToast(
+        "warning",
+        vscode.l10n.t("上下文已用约 {0}%，接近上限，建议压缩", Math.min(99, Math.round(ratio * 100))),
+        {
+          persistent: true,
+          action: { actionId: "compress", label: vscode.l10n.t("立即压缩") },
+        },
+      );
+    }
+  }
+
+  /** Toast inline-action dispatch (currently only P0-6's compress action). */
+  private handleToastAction(actionId: string, toastId?: number): void {
+    if (typeof toastId === "number") this.store.dismissToast(toastId);
+    if (actionId === "compress") {
+      this.contextWarnActive = false;
+      void this.runCompressTurn();
+    }
+  }
+
+  /**
+   * Drive the `/compress` slash command on the active session (same bridge
+   * the overflow path uses, but user-initiated from the warning pill). No
+   * user block is recorded — the compression result surfaces as the usual
+   * collapsible CompressionBlock.
+   */
+  private async runCompressTurn(): Promise<void> {
+    if (this.historySyncBusy) return;
+    const state = this.store.getState();
+    if (state.initializing || state.status === "streaming") return;
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    const client = await this.ensureClient().catch(() => null);
+    if (!client || this.disposed || this.client !== client) return;
+    if (this.store.getState().sessionId !== sessionId) return;
+    try {
+      const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
+      if (this.store.getState().sessionId === sessionId) this.store.promptCompleted(result.stopReason);
+    } catch (error) {
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      this.log.warn(`manual compress failed: ${errorMessage(error)}`);
+      this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+    }
+  }
+
+
   // --- Tool approval flow (session/request_permission) --------------------------
 
+  /** True when `sessionId` belongs to an internal prompt session (enhance /
+   * AI title). Those sessions must never surface a card into the user's
+   * panel — the session/update stream is intercepted separately, but the
+   * agent→client request paths (permission / plan exit / questions) are
+   * independent and would otherwise leak. */
+  private isInternalSessionId(sessionId: string | null | undefined): boolean {
+    return sessionId !== null && sessionId !== undefined && this.internalSessionIds.has(sessionId);
+  }
+
   private async requestPermissionFromUser(req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    // M1 P1-5/P0-7: an INTERNAL session (enhance / AI title) must never pop
+    // an approval card into the user's panel — its tool calls are rejected
+    // outright. The session/update stream is already intercepted, but this
+    // request path is separate and would otherwise leak a card.
+    if (this.isInternalSessionId(req.sessionId)) {
+      this.log.info(`internal session ${req.sessionId} requested permission — auto-cancelled`);
+      return { outcome: { outcome: "cancelled" } };
+    }
     const id = `ap-${++this.approvalSeq}`;
     const toolCall = req.toolCall;
     const now = Date.now();
@@ -944,6 +1349,12 @@ export class ChatPanel implements vscode.Disposable {
         timer,
       });
       this.store.showApproval(approval);
+      // M1 P0-5: the agent is BLOCKED until the card is answered — when the
+      // panel is hidden this is the notification that matters most.
+      this.notifyOs(
+        "approval",
+        vscode.l10n.t("iFlow 等待审批：{0}（{1} 秒后自动拒绝）", approval.title || approval.toolName, Math.round(APPROVAL_TIMEOUT_MS / 1000)),
+      );
     });
   }
 
@@ -1021,6 +1432,11 @@ export class ChatPanel implements vscode.Disposable {
    * approval-card visual form so the panel stays consistent.
    */
   private requestPlanExitFromUser(req: ExitPlanModeRequest): Promise<ExitPlanModeResponse> {
+    // Internal sessions never request plan approval — reject without a card.
+    if (this.isInternalSessionId(req.sessionId)) {
+      this.log.info(`internal session ${req.sessionId} requested plan exit — auto-rejected`);
+      return Promise.resolve({ approved: false, reason: "internal session" });
+    }
     const id = `plan-${++this.planExitSeq}`;
     const now = Date.now();
     const pending: PendingPlanExitUi = {
@@ -1040,6 +1456,11 @@ export class ChatPanel implements vscode.Disposable {
       }, APPROVAL_TIMEOUT_MS);
       this.pendingPlanExits.set(id, { resolve, timer });
       this.store.showPlanExit(pending);
+      // M1 P0-5: Plan approval blocks the agent too.
+      this.notifyOs(
+        "plan",
+        vscode.l10n.t("iFlow 等待计划审批（{0} 秒后自动拒绝）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
+      );
     });
   }
 
@@ -1102,6 +1523,11 @@ export class ChatPanel implements vscode.Disposable {
    * directly; a missing map means "no answer").
    */
   private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
+    // Internal sessions never ask the user — answer empty without a card.
+    if (this.isInternalSessionId(req.sessionId)) {
+      this.log.info(`internal session ${req.sessionId} asked questions — auto-skipped`);
+      return Promise.resolve({ answers: {} });
+    }
     const id = `q-${++this.approvalSeq}`;
     const now = Date.now();
 
@@ -1123,6 +1549,11 @@ export class ChatPanel implements vscode.Disposable {
         deadline: now + APPROVAL_TIMEOUT_MS,
         timeoutMs: APPROVAL_TIMEOUT_MS,
       });
+      // M1 P0-5: the agent blocks on the answers too.
+      this.notifyOs(
+        "question",
+        vscode.l10n.t("iFlow 有问题需要你回答（{0} 秒后自动继续）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
+      );
     });
   }
 
@@ -2239,6 +2670,20 @@ export class ChatPanel implements vscode.Disposable {
   private restoringSessionId: string | null = null;
 
   private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
+    // M1 P1-5/P0-7: internal-prompt sessions (enhance / AI title) are
+    // intercepted BEFORE the store — their stream must never touch the
+    // transcript, the usage estimate, or the guard chain. Only the agent's
+    // text chunks are accumulated for the awaiting caller.
+    if (n.sessionId && this.internalSessionIds.has(n.sessionId)) {
+      const kind = (n.update as { sessionUpdate?: string }).sessionUpdate;
+      if (kind === "agent_message_chunk") {
+        const content = (n.update as { content?: { type?: string; text?: string } }).content;
+        if (content?.type === "text" && typeof content.text === "string") {
+          this.internalPromptText += content.text;
+        }
+      }
+      return;
+    }
     // Hot re-auth (profile switch) abandons the old session on the SAME live
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
@@ -2321,6 +2766,32 @@ export class ChatPanel implements vscode.Disposable {
           // failures can't pin snapshots until cap eviction.
           this.preSnapshots.delete(update.toolCallId);
           this.toolArgs.delete(update.toolCallId);
+        }
+        // M1 P0-5: long-running execute-class tools earn a native notification
+        // when they finally land AND the user is not watching the panel.
+        // `kind` rides only the initial tool_call (probed, CLI 0.5.19 — the
+        // update events omit it), so timing starts there (pending→in_progress
+        // drift is milliseconds). The terminal event clears the timer either
+        // way; the notification itself re-passes the full gate (visibility
+        // may have changed mid-tool).
+        if (update.sessionUpdate === "tool_call" && update.kind === "execute" && !this.panelVisible) {
+          this.runningToolStarts.set(update.toolCallId, Date.now());
+        } else if (update.status === "completed" || update.status === "failed") {
+          const startedAt = this.runningToolStarts.get(update.toolCallId);
+          if (startedAt !== undefined) {
+            this.runningToolStarts.delete(update.toolCallId);
+            if (Date.now() - startedAt >= LONG_TOOL_NOTIFY_MS) {
+              const title = typeof update.title === "string" && update.title ? update.title : update.toolCallId;
+              this.notifyOs(
+                "longTool",
+                vscode.l10n.t(
+                  "长任务已完成（运行 {0} 秒）：{1}",
+                  Math.round((Date.now() - startedAt) / 1000),
+                  title.length > 80 ? `${title.slice(0, 80)}…` : title,
+                ),
+              );
+            }
+          }
         }
       }
     }
@@ -2798,7 +3269,7 @@ export class ChatPanel implements vscode.Disposable {
         // can exclude it (the renamed binary only defeats name-based kills),
         // and switches on the CLI-side api-config-isolation patch — without
         // it (plain CLI / TUI / -p) the settings write-back is untouched.
-        { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1" }, requestTimeoutMs: 120_000, allowedRoots },
+        { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1" }, requestTimeoutMs: 120_000, allowedRoots, wireTap: this.wireLog.tap },
         {
           // A detached client (profile switch overlaps the new spawn with the
           // old child's teardown) must not leak its dying events into the
@@ -3657,7 +4128,15 @@ export class ChatPanel implements vscode.Disposable {
       }
       this.store.promptCompleted(result.stopReason);
       // Sound cue: completion chime, but a user stop/cancel stays silent.
-      if (result.stopReason !== "cancelled") this.postSound("done");
+      if (result.stopReason !== "cancelled") {
+        this.postSound("done");
+        // M1 P0-5: the turn landed while the user is away (panel hidden) —
+        // tell them it's ready. Cancelled turns stay silent (they stopped it).
+        this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
+        // M1 P0-7: the first completed turn is the AI-title window (no-op
+        // unless the label is still the mechanical truncation).
+        if (promptSessionId) void this.maybeGenerateAiTitle(promptSessionId);
+      }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
     } catch (error) {

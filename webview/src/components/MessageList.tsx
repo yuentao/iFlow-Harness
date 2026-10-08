@@ -622,7 +622,16 @@ function MessageListInner({ state }: { state: SessionState }) {
   // to a shorter transcript) can never slice past the end.
   const MAX_WINDOW = TAIL_WINDOW * 2; // mounted-tail budget while streaming
   const [windowStart, setWindowStart] = useState(TAIL_WINDOW);
-  const total = state.blocks.length;
+  // M1 P1-3 Focus view: a pure RENDER filter over the host transcript (the
+  // host state is never modified). tool / thought / system / plan /
+  // compression cards collapse; user + assistant text remain. The mounting
+  // window, sentinel counts and empty-state all key off this filtered view.
+  const focusMode = useChat((s) => s.focusMode);
+  const visibleBlocks = useMemo(
+    () => (focusMode ? state.blocks.filter((b) => b.kind === "user" || (b.kind === "text" && !b.system)) : state.blocks),
+    [state.blocks, focusMode],
+  );
+  const total = visibleBlocks.length;
   const start = Math.min(windowStart, total);
   const sentinelRef = useRef<HTMLDivElement>(null);
   // Scroll compensation for expansion: expandOlder() records the
@@ -636,9 +645,9 @@ function MessageListInner({ state }: { state: SessionState }) {
   // commit — a plain effect would show one frame of a stale/empty slice when
   // the previous session left windowStart larger than the new block count.
   useLayoutEffect(() => {
-    setWindowStart(Math.max(0, state.blocks.length - TAIL_WINDOW));
+    setWindowStart(Math.max(0, visibleBlocks.length - TAIL_WINDOW));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset on identity change only
-  }, [state.activeSessionId, state.replaying]);
+  }, [state.activeSessionId, state.replaying, focusMode]);
 
   function expandOlder() {
     const el = scrollRef.current;
@@ -867,7 +876,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             as bottom padding — otherwise the newest message would sit
             permanently under the card. */}
         <div ref={contentRef} className="space-y-3" style={{ paddingBottom: "var(--pending-card-h, 0px)" }}>
-          {state.blocks.length === 0 && !state.replaying && (
+          {visibleBlocks.length === 0 && !state.replaying && (
             <div className="empty-state stream-in">
               <div className="empty-state-logo">
                 {/* Real brand mark, consistent with the header logo */}
@@ -895,7 +904,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               </button>
             </div>
           )}
-          {state.blocks.slice(start).map((block, idx) => {
+          {visibleBlocks.slice(start).map((block, idx) => {
             const i = start + idx; // absolute index: stable across expansions
             return (
               <div key={block.id ?? `idx-${i}`} className="cv-block">
@@ -919,7 +928,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               </div>
             );
           })}
-          {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && state.blocks.length > 0 && (
+          {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && visibleBlocks.length > 0 && (
             // Sticky to the bottom of the scroll viewport so the indicator stays
             // visible even while new content streams in above it.
             // pointer-events-none: the composer's upward-opening mode dropdown
@@ -1020,6 +1029,20 @@ function ToastPill({ toast }: { toast: ToastItem }) {
       )}
     </>
   );
+  // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button — the pill
+  // body stays non-clickable when host-owned (persistent/display-only), but
+  // the action must always be reachable.
+  const actionButton =
+    toast.action && (
+      <button
+        onClick={() =>
+          useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
+        }
+        className="ml-1 shrink-0 rounded-md border border-current/40 px-1.5 py-0.5 text-[10.5px] font-semibold opacity-90 transition-opacity hover:opacity-100"
+      >
+        {toast.action.label}
+      </button>
+    );
   // Display-only pills (countdown retries, host-flagged / persistent notices
   // like the context-overflow compress): the wait is owned by the host (it
   // dismisses the toast when the retry fires / the compress turn ends), so
@@ -1030,6 +1053,7 @@ function ToastPill({ toast }: { toast: ToastItem }) {
         className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
       >
         {body}
+        {actionButton}
       </div>
     );
   }

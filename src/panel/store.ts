@@ -33,9 +33,19 @@ import {
   setSessions,
 } from "../../shared/session-state.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, ToolDiffUi } from "../../shared/messages.js";
+import type { UsageContext } from "../../shared/session-state.js";
 
 export class SessionStore {
   private state: SessionState = initialSessionState();
+
+  /**
+   * M1 P0-6/P1-6: host-resolved usage context (model context window + unit
+   * price). The panel registers a resolver (settings + active model →
+   * UsageContext); every snapshot push and turn-end refresh consults it, so
+   * a model switch or settings edit lands without per-call-site wiring. The
+   * resolver is synchronous and cheap (config read + table lookup).
+   */
+  getUsageContext: (() => UsageContext | null) | null = null;
 
   private post: (message: HostToWebview) => void;
   private flushTimer: NodeJS.Timeout | null = null;
@@ -186,7 +196,7 @@ export class SessionStore {
     // waiting for the next turn end. Persisted blocks carry their token
     // caches, so this is the cheap cache fold (legacy transcripts without
     // caches pay one lazy tokenize).
-    refreshSessionUsage(this.state);
+    refreshSessionUsage(this.state, this.getUsageContext?.() ?? null);
     this.flush();
   }
 
@@ -194,7 +204,7 @@ export class SessionStore {
     // completePrompt also force-closes zombie SubAgent cards (their spawning
     // task never reported terminal — e.g. the CLI died mid-task); report the
     // closed index so the card rides the incremental patch.
-    this.noteMutationIndex(completePrompt(this.state, stopReason));
+    this.noteMutationIndex(completePrompt(this.state, stopReason, this.getUsageContext?.() ?? null));
     this.flush();
   }
 
@@ -209,7 +219,13 @@ export class SessionStore {
   sendToast(
     level: "info" | "warning" | "error",
     message: string,
-    opts?: { durationMs?: number; countdownDeadline?: number; displayOnly?: boolean; persistent?: boolean },
+    opts?: {
+      durationMs?: number;
+      countdownDeadline?: number;
+      displayOnly?: boolean;
+      persistent?: boolean;
+      action?: { actionId: string; label: string };
+    },
   ): number {
     const toastId = ++this.toastSeq;
     this.post({
@@ -221,6 +237,7 @@ export class SessionStore {
       displayOnly: opts?.displayOnly,
       toastId,
       persistent: opts?.persistent,
+      action: opts?.action,
     });
     return toastId;
   }
@@ -386,13 +403,18 @@ export class SessionStore {
     }
     // Live token counter: while a turn streams, recompute the usage estimate
     // at most every USAGE_REFRESH_INTERVAL_MS. Must run BEFORE the tail
-    // spread below so the fresh numbers ride this very message.
+    // spread below so the fresh numbers ride this very message. Outside
+    // streaming the fold is a cheap integer pass and runs per push, so a
+    // model switch or a contextWindow/costTable settings edit (which flush
+    // once) lands on the occupancy bar immediately.
     if (this.state.status === "streaming") {
       const now = Date.now();
       if (now - this.lastUsageRefreshAt >= SessionStore.USAGE_REFRESH_INTERVAL_MS) {
         this.lastUsageRefreshAt = now;
-        refreshSessionUsage(this.state);
+        refreshSessionUsage(this.state, this.getUsageContext?.() ?? null);
       }
+    } else {
+      refreshSessionUsage(this.state, this.getUsageContext?.() ?? null);
     }
     this.onStateChange?.(this.state);
 

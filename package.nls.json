@@ -18,7 +18,14 @@
   "iflow.configuration.autoOpenPanel.description": "Open the chat panel automatically when VSCode starts",
   "iflow.configuration.language.description": "iFlow CLI interface language written to `~/.iflow/settings.json`. Empty = leave the CLI's own value untouched. Takes effect after a CLI restart.",
   "iflow.configuration.approvalMode.description": "Default approval mode written to ~/.iflow/settings.json (default = ask for confirmation, smart = auto-approve safe edits, yolo = auto-approve everything, plan = read-only planning). Empty = leave the CLI's own value untouched. Takes effect after a CLI restart.",
+  "iflow.configuration.osNotifications.description": "Show OS notifications when the panel is not visible: 'approvals' = only when a tool approval / question / plan blocks the agent; 'all' = also on long tool completions and finished turns; 'off' = never.",
+  "iflow.configuration.contextWindowOverrides.description": "Model context-window overrides, one per line as `model=tokenCount` (e.g. `glm-4.6=200000`). Overrides the built-in table; unknown models fall back to a conservative default.",
+  "iflow.configuration.costTable.description": "Unit prices for the session cost estimate, one per line as `model=inputPrice,outputPrice` in USD per million tokens (e.g. `deepseek-v3=0.27,1.1`).",
+  "iflow.configuration.autoTitle.description": "After a session's first turn, generate a short AI title for it in the session switcher (one extra lightweight model call per session).",
   "participant.description": "Ask the iFlow session (text-only; rich interactions live in the side panel)",
   "iflow.outputChannel.name": "iFlow Harness",
-  "iflow.statusbar.tooltip": "iFlow Harness — click to open the chat panel"
+  "iflow.statusbar.tooltip": "iFlow Harness — click to open the chat panel",
+  "command.exportSessionMarkdown.title": "iFlow: Export Session as Markdown",
+  "command.exportSessionJson.title": "iFlow: Export Session as JSON",
+  "command.exportWireLog.title": "iFlow: Export ACP Wire Log (redacted)"
 }

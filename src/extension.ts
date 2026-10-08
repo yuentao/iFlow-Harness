@@ -47,6 +47,19 @@ export function activate(context: vscode.ExtensionContext): void {
       const sel = readActiveSelection();
       if (sel) chatPanel.addToContext(sel.path, sel.range, sel.text);
     }),
+    // M1 P0-7: export the active session from the command palette too (the
+    // panel's session dropdown carries the same action once M1 UI lands).
+    vscode.commands.registerCommand("iflow.exportSessionMarkdown", () => {
+      void chatPanel["handleWebviewMessage"]({ type: "exportSession", format: "markdown" } as never);
+    }),
+    vscode.commands.registerCommand("iflow.exportSessionJson", () => {
+      void chatPanel["handleWebviewMessage"]({ type: "exportSession", format: "json" } as never);
+    }),
+    // M1 P1-4: redacted ACP wire log for offline analysis (harness --record
+    // compatible NDJSON).
+    vscode.commands.registerCommand("iflow.exportWireLog", () => {
+      void chatPanel.exportWireLog();
+    }),
   );
 
   // M5: @iflow chat participant — text-only fallback into the same session.

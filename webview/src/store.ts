@@ -367,7 +367,18 @@ function createMockHost(): HostApi {
     currentModelId: "glm-5.3-flash-free",
     // Demo token usage (mirrors the host-estimated SessionUsageUi shape) so
     // the usage chip next to the model dropdown is visible in mock mode.
-    usage: { inputTokens: 18432, outputTokens: 6421, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 24853 },
+    usage: {
+      inputTokens: 18432,
+      outputTokens: 6421,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 24853,
+      contextWindow: 200_000,
+      contextUsed: 24853,
+      estimated: false,
+      breakdown: { user: 3211, assistant: 5120, tool: 14201, thought: 2321 },
+      estimatedCost: 0.0271,
+    },
     // M4 demo: two persisted sessions; switching restores a short transcript.
     sessions: [
       { id: "mock-session", label: "帮我看看这个仓库结构", updatedAt: Date.now() },
@@ -933,6 +944,19 @@ function createMockHost(): HostApi {
         });
         return;
       }
+      if (m.type === "enhancePrompt") {
+        // Mock enhancement: echo a "structured" rewrite after a beat so the
+        // composer fill-back flow is testable in browser debug mode.
+        const enhanced = `${m.text.trim()}\n\n（目标：明确预期产出；约束：列出边界；验收：给出可验证标准。）`;
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", { data: { type: "enhancedPrompt", requestId: m.requestId, text: enhanced } }),
+            ),
+          300,
+        );
+        return;
+      }
       if (m.type === "sendPrompt") {
         // Mirror the real host: the code-context card is assembled into the
         // user turn (fenced block ahead of the typed text).
@@ -1000,6 +1024,9 @@ export interface ToastItem {
   /** Host owns this pill's lifetime (auto-compress notice): never auto-dismissed
    * by the WebView — removed only when the host sends `dismissToast`. */
   persistent?: boolean;
+  /** M1 P0-6: inline action button (e.g. 立即压缩 on the context-warning
+   * pill). Clicking sends `toastAction` with the actionId + host toastId. */
+  action?: { actionId: string; label: string };
 }
 
 interface ChatStore {
@@ -1026,6 +1053,13 @@ interface ChatStore {
    * the header per pixel. */
   headerScrolled: boolean;
   setHeaderScrolled: (scrolled: boolean) => void;
+  /**
+   * M1 P1-3 Focus view: collapse tool / thought / system blocks and render
+   * only user + assistant text. Pure webview-local rendering state (the host
+   * transcript stays complete) — toggled from the header or Ctrl/Cmd+Alt+F.
+   */
+  focusMode: boolean;
+  toggleFocusMode: () => void;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
@@ -1040,6 +1074,8 @@ export const useChat = create<ChatStore>((set, get) => ({
   promptSeq: 0,
   headerScrolled: false,
   setHeaderScrolled: (scrolled) => set({ headerScrolled: scrolled }),
+  focusMode: false,
+  toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
   toasts: [],
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
@@ -1152,7 +1188,8 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "fileList" ||
       msg.type === "stagedFiles" ||
       msg.type === "filesPicked" ||
-      msg.type === "mcpServers"
+      msg.type === "mcpServers" ||
+      msg.type === "enhancedPrompt"
     ) {
       return;
     }

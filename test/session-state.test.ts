@@ -1430,6 +1430,86 @@ describe("session usage split & real-time refresh", () => {
     // The pre-compression assistant output is out of context too.
     expect(usage.outputTokens).toBe(0);
   });
+
+  it("P0-6: contextUsed mirrors the post-fold total and breakdown sums by kind", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "用户的问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答内容" } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "思考过程" } }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "t1", toolName: "ls", title: "列出目录", kind: "read", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "ls", title: "列出目录", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "文件清单" } }] }));
+    refreshSessionUsage(state);
+    const usage = state.usage!;
+    // contextUsed is the model's carried context, not a separate counter.
+    expect(usage.contextUsed).toBe(usage.totalTokens);
+    const b = usage.breakdown!;
+    expect(b.user).toBe(estimateTokens("用户的问题"));
+    expect(b.assistant).toBe(estimateTokens("回答内容"));
+    expect(b.thought).toBe(estimateTokens("思考过程"));
+    expect(b.tool).toBe(estimateTokens("列出目录\n文件清单"));
+    // Every kind lands in exactly one bucket, and they sum to the total.
+    expect(b.user + b.assistant + b.tool + b.thought).toBe(usage.totalTokens);
+  });
+
+  it("P0-6: the breakdown folds at the compression boundary too", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "压缩前的历史问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: false, originalTokenCount: 90000, newTokenCount: 7855, summary: "摘要" } }) } }));
+    beginUserPrompt(state, "压缩后的新问题");
+    refreshSessionUsage(state);
+    // Pre-compression blocks are out of the fold window entirely.
+    expect(state.usage!.breakdown!.user).toBe(estimateTokens("压缩后的新问题"));
+    expect(state.usage!.breakdown!.assistant).toBe(0);
+  });
+
+  it("P0-6/P1-6: usageCtx stamps window, estimated flag and cost onto the estimate", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+    refreshSessionUsage(state, {
+      contextWindow: 128_000,
+      estimated: false,
+      costPrice: { input: 2, output: 8 },
+    });
+    const usage = state.usage!;
+    expect(usage.contextWindow).toBe(128_000);
+    expect(usage.estimated).toBe(false);
+    expect(usage.estimatedCost).toBe(
+      (usage.inputTokens / 1_000_000) * 2 + (usage.outputTokens / 1_000_000) * 8,
+    );
+  });
+
+  it("P1-6: a null price yields a null cost instead of a bogus zero", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    refreshSessionUsage(state, { contextWindow: 128_000, estimated: true, costPrice: null });
+    expect(state.usage!.estimatedCost).toBeNull();
+    expect(state.usage!.estimated).toBe(true);
+  });
+
+  it("P0-6/P1-6: a usageCtx change breaks reference stability and re-stamps", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    refreshSessionUsage(state, { contextWindow: 128_000, estimated: false, costPrice: null });
+    const first = state.usage;
+    // Same numbers, same ctx → the object is kept.
+    refreshSessionUsage(state, { contextWindow: 128_000, estimated: false, costPrice: null });
+    expect(state.usage).toBe(first);
+    // Model switch (new window) → a fresh object, old numbers preserved.
+    refreshSessionUsage(state, { contextWindow: 200_000, estimated: false, costPrice: null });
+    expect(state.usage).not.toBe(first);
+    expect(state.usage!.inputTokens).toBe(first!.inputTokens);
+    expect(state.usage!.contextWindow).toBe(200_000);
+  });
+
+  it("P0-6: completePrompt threads the usage context through", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+    completePrompt(state, "end_of_turn", { contextWindow: 32_768, estimated: true, costPrice: null });
+    expect(state.usage!.contextWindow).toBe(32_768);
+    expect(state.usage!.estimated).toBe(true);
+  });
 });
 
 describe("dropSessionUpdate guard (leak prevention)", () => {

@@ -7,6 +7,7 @@ import {
   FileCode,
   FileText,
   Image as ImageIcon,
+  Loader2,
   Paperclip,
   Search,
   SendHorizontal,
@@ -54,6 +55,13 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+/** USD estimate: sub-cent figures keep 4 decimals (a cheap model's turn is
+ * well under a cent), everything else 2. */
+function formatCost(usd: number): string {
+  if (usd > 0 && usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
 /** Stable empty fallbacks — a fresh `[]` per selector call would re-render on
  * every store change (zustand compares with Object.is). */
 const EMPTY_COMMANDS: SlashCommand[] = [];
@@ -68,19 +76,44 @@ const EMPTY_MODELS: ModelInfoUi[] = [];
  * The host zeroes usage at session start, so the chip shows ↑0 ↓0 from the
  * first paint; it hides only when the field is absent entirely (older hosts).
  * Sits right of the model dropdown it counts.
+ *
+ * M1 P0-6: when the host resolves a context window for the active model, the
+ * chip grows a mini occupancy bar (post-compression context / window, hover
+ * shows the per-kind breakdown; a fallback window is labeled 估算).
+ * M1 P1-6: an estimated cost (unit price × cached token sums) rides along
+ * when a price is known for the model.
  */
 function SessionUsageChip() {
   const hasUsage = useChat((s) => s.state?.usage != null);
   const inputTokens = useChat((s) => s.state?.usage?.inputTokens ?? 0);
   const outputTokens = useChat((s) => s.state?.usage?.outputTokens ?? 0);
+  const contextWindow = useChat((s) => s.state?.usage?.contextWindow ?? null);
+  const contextUsed = useChat((s) => s.state?.usage?.contextUsed ?? 0);
+  const estimated = useChat((s) => s.state?.usage?.estimated ?? false);
+  const estimatedCost = useChat((s) => s.state?.usage?.estimatedCost ?? null);
+  const bdUser = useChat((s) => s.state?.usage?.breakdown?.user ?? 0);
+  const bdAssistant = useChat((s) => s.state?.usage?.breakdown?.assistant ?? 0);
+  const bdTool = useChat((s) => s.state?.usage?.breakdown?.tool ?? 0);
+  const bdThought = useChat((s) => s.state?.usage?.breakdown?.thought ?? 0);
   if (!hasUsage) return null;
+  const pct = contextWindow && contextWindow > 0 ? Math.min(100, Math.round((contextUsed / contextWindow) * 100)) : null;
+  const barTone =
+    pct === null ? "" : pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-primary/70";
+  const hoverTitle =
+    pct === null
+      ? t(
+          "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}",
+          inputTokens.toLocaleString(),
+          outputTokens.toLocaleString(),
+        )
+      : [
+          t("上下文占用 {0} / {1}（{2}%{3}）", contextUsed.toLocaleString(), (contextWindow as number).toLocaleString(), pct, estimated ? t("，窗口为估算值") : ""),
+          t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", bdUser.toLocaleString(), bdAssistant.toLocaleString(), bdTool.toLocaleString(), bdThought.toLocaleString()),
+          estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(estimatedCost)) : t("该模型无单价记录，不显示成本"),
+        ].join("\n");
   return (
     <span
-      title={t(
-        "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}",
-        inputTokens.toLocaleString(),
-        outputTokens.toLocaleString(),
-      )}
+      title={hoverTitle}
       className="flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
     >
       <span className="flex items-center gap-0.5" title={t("当前上下文（用户消息与工具结果，压缩后重算）")}>
@@ -91,6 +124,19 @@ function SessionUsageChip() {
         <ArrowDown className="size-2.5" />
         {formatTokens(outputTokens)}
       </span>
+      {pct !== null && (
+        <span className="ml-0.5 flex items-center gap-1" title={t("上下文窗口占用")}>
+          <span className="h-1 w-8 overflow-hidden rounded-full bg-border/70">
+            <span className={`block h-full rounded-full transition-all duration-300 ${barTone}`} style={{ width: `${pct}%` }} />
+          </span>
+          <span className={pct >= 90 ? "text-destructive" : pct >= 70 ? "text-warning" : ""}>{pct}%</span>
+        </span>
+      )}
+      {estimatedCost !== null && (
+        <span className="ml-0.5 opacity-80" title={t("预估成本（token 估算 × 公开单价，仅供参考）")}>
+          {formatCost(estimatedCost)}
+        </span>
+      )}
     </span>
   );
 }
@@ -393,6 +439,51 @@ export function Composer() {
     window.clearTimeout(noteTimer.current);
     noteTimer.current = window.setTimeout(() => setNote(null), 5000);
   }
+
+  // M1 P1-5 Enhance Prompt: hand the draft to the host (one internal prompt,
+  // never recorded in the transcript) and fill the rewrite back in. The
+  // original text is kept in a ref so a second click undoes the enhancement
+  // (Roo's wand toggles between draft and enhanced). The reply arrives on the
+  // shared window-message listener below (matched by requestId).
+  const [enhancing, setEnhancing] = useState(false);
+  const enhanceSeq = useRef(0);
+  const enhancePending = useRef(false);
+  const enhanceOriginal = useRef<string | null>(null);
+  function enhance() {
+    const value = text.trim();
+    if (!value || busy || enhancePending.current) return;
+    // Second click while an enhancement is shown: restore the original draft.
+    if (enhanceOriginal.current !== null) {
+      setText(enhanceOriginal.current);
+      enhanceOriginal.current = null;
+      showNote(t("已还原原始输入"));
+      return;
+    }
+    enhancePending.current = true;
+    setEnhancing(true);
+    enhanceOriginal.current = text;
+    send({ type: "enhancePrompt", requestId: ++enhanceSeq.current, text: value });
+  }
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const msg = event.data;
+      if (msg?.type !== "enhancedPrompt" || msg.requestId !== enhanceSeq.current) return;
+      enhancePending.current = false;
+      setEnhancing(false);
+      if (msg.error) {
+        // Keep the original draft (the host preserved it too).
+        enhanceOriginal.current = null;
+        showNote(msg.error);
+        return;
+      }
+      setText(msg.text);
+      showNote(t("已增强输入（再次点击增强可还原）"));
+      requestAnimationFrame(() => taRef.current?.focus());
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- listener reads refs + stable setters only
+  }, []);
 
   function addImages(files: ArrayLike<File>): void {
     const incoming = Array.from(files);
@@ -1053,6 +1144,14 @@ export function Composer() {
           <SessionUsageChip />
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <button
+              className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""}`}
+              title={enhanceOriginal.current !== null ? t("还原原始输入") : t("增强提示词（AI 改写为更清晰的请求）")}
+              disabled={busy || (!text.trim() && enhanceOriginal.current === null)}
+              onClick={enhance}
+            >
+              {enhancing ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />}
+            </button>
             <button
               className={CANVAS_BTN}
               title={t("添加附件")}

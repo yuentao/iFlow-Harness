@@ -71,6 +71,21 @@
         "command": "iflow.restartCli",
         "title": "%command.restartCli.title%",
         "category": "iFlow"
+      },
+      {
+        "command": "iflow.exportSessionMarkdown",
+        "title": "%command.exportSessionMarkdown.title%",
+        "category": "iFlow"
+      },
+      {
+        "command": "iflow.exportSessionJson",
+        "title": "%command.exportSessionJson.title%",
+        "category": "iFlow"
+      },
+      {
+        "command": "iflow.exportWireLog",
+        "title": "%command.exportWireLog.title%",
+        "category": "iFlow"
       }
     ],
     "menus": {
@@ -160,6 +175,33 @@
           ],
           "default": "",
           "markdownDescription": "%iflow.configuration.approvalMode.description%"
+        },
+        "iflow.osNotifications": {
+          "type": "string",
+          "enum": [
+            "off",
+            "approvals",
+            "all"
+          ],
+          "default": "approvals",
+          "description": "%iflow.configuration.osNotifications.description%"
+        },
+        "iflow.contextWindowOverrides": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "%iflow.configuration.contextWindowOverrides.description%"
+        },
+        "iflow.costTable": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "%iflow.configuration.costTable.description%"
+        },
+        "iflow.autoTitle": {
+          "type": "boolean",
+          "default": true,
+          "description": "%iflow.configuration.autoTitle.description%"
         }
       }
     }

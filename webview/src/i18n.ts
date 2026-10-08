@@ -214,6 +214,22 @@ const en: Record<string, string> = {
   "消息区渲染异常": "Message area rendering error",
   "内容渲染时遇到异常，将在下一次更新时自动重试。":
     "Content hit a rendering error — it will retry automatically on the next update.",
+  // M1: Focus view, context occupancy, cost, prompt enhancement
+  "Focus 视图": "Focus view",
+  "Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）":
+    "Focus view: conversation only, tools and thoughts collapsed (Ctrl+Alt+F)",
+  "退出 Focus 视图（Ctrl+Alt+F）": "Exit Focus view (Ctrl+Alt+F)",
+  "上下文占用 {0} / {1}（{2}%{3}）": "Context {0} / {1} ({2}%{3})",
+  "，窗口为估算值": ", window is an estimate",
+  "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
+  "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",
+  "该模型无单价记录，不显示成本": "No unit price recorded for this model — no cost shown",
+  "上下文窗口占用": "Context window occupancy",
+  "预估成本（token 估算 × 公开单价，仅供参考）": "Estimated cost (token estimate × published prices, indicative only)",
+  "增强提示词（AI 改写为更清晰的请求）": "Enhance prompt (AI rewrites it into a clearer request)",
+  "还原原始输入": "Restore the original input",
+  "已增强输入（再次点击增强可还原）": "Prompt enhanced (click Enhance again to restore)",
+  "已还原原始输入": "Original input restored",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

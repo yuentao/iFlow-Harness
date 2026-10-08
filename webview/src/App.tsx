@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  Focus,
   History,
   Loader2,
   Moon,
@@ -178,6 +179,22 @@ export function App() {
     return "";
   }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions, pendingProfileSwitch]);
 
+  const focusMode = useChat((s) => s.focusMode);
+  const toggleFocusMode = useChat((s) => s.toggleFocusMode);
+
+  // M1 P1-3: Ctrl/Cmd+Alt+F toggles Focus view from anywhere (also while the
+  // composer has focus — Alt+F is not a text-editing chord). Declared BEFORE
+  // the splash early-return (hook-count stability, see the liveMessage note).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "f" || !e.altKey || !(e.ctrlKey || e.metaKey) || e.isComposing) return;
+      e.preventDefault();
+      toggleFocusMode();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [toggleFocusMode]);
+
   if (status === null || status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
     return (
@@ -335,6 +352,15 @@ export function App() {
             statusChip(status)
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
+            <button
+              className={`${BTN_ICON}${focusMode ? " bg-accent/60 text-primary ring-1 ring-primary/30" : ""}`}
+              title={focusMode ? t("退出 Focus 视图（Ctrl+Alt+F）") : t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
+              aria-label={t("Focus 视图")}
+              aria-pressed={focusMode}
+              onClick={toggleFocusMode}
+            >
+              <Focus className="size-4" />
+            </button>
             <button
               className={BTN_ICON}
               title={t("新会话")}

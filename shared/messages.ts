@@ -249,6 +249,34 @@ export interface SessionUsageUi {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
+  /**
+   * P0-6 context-occupancy bar: model context window in tokens (host-resolved
+   * from the built-in table + `iflow.contextWindowOverrides`; null when the
+   * model is unknown and no override matches — the bar then shows the raw
+   * count without a percentage).
+   */
+  contextWindow?: number | null;
+  /** Current context occupancy in tokens (post-compression fold; equals the
+   * model's actual carried context, not cumulative consumption). */
+  contextUsed?: number;
+  /** True when `contextWindow` is a conservative fallback guess rather than a
+   * table/override hit — the UI labels the percentage "估算". */
+  estimated?: boolean;
+  /** P0-6 hover breakdown by block kind (only the post-fold tail counts). */
+  breakdown?: UsageBreakdownUi;
+  /**
+   * P1-6 estimated cost in USD from `iflow.costTable` unit prices (per-million
+   * tokens × cached token sums). Null when the active model has no unit price.
+   */
+  estimatedCost?: number | null;
+}
+
+/** P0-6 hover breakdown: token sums per block kind (post-compression fold). */
+export interface UsageBreakdownUi {
+  user: number;
+  assistant: number;
+  tool: number;
+  thought: number;
 }
 
 export interface SessionState {
@@ -441,6 +469,12 @@ export type HostToWebview =
       /** Host owns the pill's lifetime (e.g. the auto-compress notice): the
        * webview never auto-dismisses it — only a matching `dismissToast` does. */
       persistent?: boolean;
+      /** Optional inline action button (M1 P0-6: "立即压缩" on the
+       * context-warning pill). Clicking it sends `toastAction` with this id;
+       * the host performs the action and owns pill removal (persistent
+       * semantics unchanged — a non-persistent action pill still
+       * auto-dismisses). */
+      action?: { actionId: string; label: string };
     }
   | { type: "dismissToast"; toastId: number }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */
@@ -465,7 +499,13 @@ export type HostToWebview =
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
    * panel visibility; the webview only synthesizes on receipt. */
-  | { type: "playSound"; kind: "done" | "error" };
+  | { type: "playSound"; kind: "done" | "error" }
+  /** Reply to `enhancePrompt` (M1 P1-5): the host ran one internal prompt
+   * (never recorded in the transcript) and returns the enhanced text so the
+   * composer can fill it back in. `requestId` matches the request; `error`
+   * non-empty means the enhancement failed (the composer keeps the original
+   * text). */
+  | { type: "enhancedPrompt"; requestId: number; text: string; error?: string };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -569,7 +609,19 @@ export type WebviewToHost =
    * fresh copy read via `listMcpServers`, so a concurrent external write is
    * at worst lost, never silently merged). Host writes settings.json and
    * offers a hot restart. Reply: `mcpServers` with `error` on failure. */
-  | { type: "saveMcpServers"; servers: Record<string, unknown> };
+  | { type: "saveMcpServers"; servers: Record<string, unknown> }
+  /** M1 P0-7: export the ACTIVE session's transcript. `format` picks the
+   * serializer; the host shows a native save dialog and writes the file
+   * (Markdown renders every block type, JSON copies the transcript file). */
+  | { type: "exportSession"; format: "markdown" | "json" }
+  /** M1 P1-5: ask the host to enhance the composer draft with one internal
+   * prompt (never enters the transcript / queue and does not participate in
+   * regenerate). Reply: `enhancedPrompt` matched by `requestId`. */
+  | { type: "enhancePrompt"; requestId: number; text: string }
+  /** M1 P0-6: a toast's inline action button was clicked (see the `toast`
+   * message's `action`). The host dispatches on `actionId` (e.g. "compress"
+   * drives the /compress bridge) and dismisses the pill. */
+  | { type: "toastAction"; actionId: string; toastId?: number };
 
 // ---------------------------------------------------------------------------
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the

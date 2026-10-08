@@ -13,6 +13,7 @@ import type {
 } from "../src/acp/protocol.js";
 import { l10n } from "vscode";
 import { countTokens as gptCountTokens } from "gpt-tokenizer";
+import { estimateCost } from "./context-window.js";
 import {
   emptySessionUsage,
   initialSessionState,
@@ -29,6 +30,7 @@ import {
   type SubAgentBlock,
   type ToolBlock,
   type ToolDiffUi,
+  type UsageBreakdownUi,
 } from "./messages.js";
 
 // --- merging helpers -------------------------------------------------------
@@ -1075,6 +1077,8 @@ function recountBlockTokens(block: Block): void {
 export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
   let inputTokens = 0;
   let outputTokens = 0;
+  // P0-6 hover breakdown (kind-classified sums over the SAME fold window).
+  const breakdown: UsageBreakdownUi = { user: 0, assistant: 0, tool: 0, thought: 0 };
   // Fold boundary: index AFTER the last completed compression card. Blocks
   // below it are no longer in the model's context.
   let foldStart = 0;
@@ -1095,9 +1099,24 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
     // text/thought/plan/subagent output is generation (output).
     if (b.kind === "user" || b.kind === "tool") inputTokens += t;
     else outputTokens += t;
+    if (b.kind === "user") breakdown.user += t;
+    else if (b.kind === "tool") breakdown.tool += t;
+    else if (b.kind === "thought") breakdown.thought += t;
+    else breakdown.assistant += t; // text / plan / subagent (nested kinds not split)
   }
   inputTokens += contextFloor;
-  return { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: inputTokens + outputTokens };
+  const totalTokens = inputTokens + outputTokens;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens,
+    // Post-fold context occupancy — what the model actually carries (the
+    // same number the overflow gate fights against), not cumulative burn.
+    contextUsed: totalTokens,
+    breakdown,
+  };
 }
 
 /**
@@ -1122,14 +1141,28 @@ export function closeOpenSubAgents(blocks: Block[]): number | null {
   return mutatedFrom;
 }
 
-export function completePrompt(state: SessionState, stopReason: StopReason): number | null {
+export function completePrompt(state: SessionState, stopReason: StopReason, usageCtx?: UsageContext | null): number | null {
   // The CLI is frozen and never reports usage, so the host estimates cumulative
   // consumption from the transcript itself (recomputed idempotently each turn).
-  refreshSessionUsage(state);
+  refreshSessionUsage(state, usageCtx);
   const closedFrom = closeOpenSubAgents(state.blocks);
   state.stopReason = stopReason;
   state.status = "idle";
   return closedFrom;
+}
+
+/**
+ * Host-resolved context for the usage enrichments (P0-6 bar + P1-6 cost).
+ * The host owns the resolution (settings + active model); the reducer stays
+ * pure and merely stamps the numbers onto the estimate.
+ */
+export interface UsageContext {
+  /** Resolved model context window (null = unknown model, no override). */
+  contextWindow: number | null;
+  /** True when the window is the conservative fallback (UI labels 估算). */
+  estimated: boolean;
+  /** Unit price per million tokens (null = no price known → no cost shown). */
+  costPrice: { input: number; output: number } | null;
 }
 
 /**
@@ -1141,10 +1174,22 @@ export function completePrompt(state: SessionState, stopReason: StopReason): num
  * kept, so the webview's zustand selector (Object.is) skips re-rendering the
  * usage chip on refreshes where nothing moved.
  */
-export function refreshSessionUsage(state: SessionState): void {
+export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext | null): void {
   const next = estimateSessionUsage(state.blocks);
+  if (usageCtx) {
+    next.contextWindow = usageCtx.contextWindow;
+    next.estimated = usageCtx.estimated;
+    next.estimatedCost = estimateCost(next, usageCtx.costPrice);
+  }
   const prev = state.usage;
-  if (prev && prev.inputTokens === next.inputTokens && prev.outputTokens === next.outputTokens) {
+  if (
+    prev &&
+    prev.inputTokens === next.inputTokens &&
+    prev.outputTokens === next.outputTokens &&
+    prev.contextWindow === next.contextWindow &&
+    prev.estimated === next.estimated &&
+    prev.estimatedCost === next.estimatedCost
+  ) {
     return;
   }
   state.usage = next;
