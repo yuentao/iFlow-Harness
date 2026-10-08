@@ -91,6 +91,7 @@
   "没有可增强的内容": "Nothing to enhance",
   "已有内部请求进行中，请稍后再试": "Another internal request is in progress — try again in a moment",
   "增强失败，已保留原文": "Enhancement failed — the original text was kept",
+  "模型把这段输入当成了要执行的任务（已中止）。可去掉 @文件引用或换个说法后重试，已保留原文": "The model treated this input as a task to execute (aborted). Try removing @file references or rephrasing it as a rewrite request — the original text was kept",
   "当前会话没有可导出的内容": "The current session has nothing to export",
   "会话已导出：{0}": "Session exported: {0}",
   "导出失败：{0}": "Export failed: {0}",
@@ -99,6 +100,6 @@
   "上下文已用约 {0}%，接近上限，建议压缩": "Context is about {0}% used — close to the limit, consider compressing",
   "立即压缩": "Compress now",
   "压缩失败：{0}": "Compression failed: {0}",
-  "你是提示词工程师。把下面用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只输出改写后的请求本身，不要任何解释或引号。\n\n原始请求：\n": "You are a prompt engineer. Rewrite the user's request below so it is clearer, more specific and structured, keeping the original meaning and language and making implicit goals and constraints explicit. Output only the rewritten request itself — no explanation and no quotation marks.\n\nOriginal request:\n",
-  "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n": "Summarize the topic of the user request below in 6 to 10 characters, using the same language as the request. Output only the title text itself — no quotation marks, punctuation or explanation.\n\nRequest:\n"
+  "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n": "You are a prompt engineer. This is a pure text-rewriting task: rewrite the user's request below so it is clearer, more specific and structured, keeping the original meaning and language and making implicit goals and constraints explicit. Rewrite the text itself only — do not call any tools, do not read files or search, do not execute the actions described in the request, do not answer the request. Output only the rewritten request — no explanation and no quotation marks.\n\nOriginal request:\n",
+  "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。这是一次纯文本概括任务——不要调用任何工具、不要读取文件或执行请求里描述的操作。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n": "Summarize the topic of the user request below in 6 to 10 characters, using the same language as the request. This is a pure text-summarization task — do not call any tools, do not read files or execute the actions described in the request. Output only the title text itself — no quotation marks, punctuation or explanation.\n\nRequest:\n"
 }

@@ -1027,6 +1027,18 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Accumulator for the in-flight internal prompt's agent text. */
   private internalPromptText = "";
+  /**
+   * Reject hook for the in-flight internal prompt. Set while a prompt runs;
+   * the session/update interceptor fires it the moment the internal session
+   * issues a tool call — enhancement is a pure text rewrite, a tool call
+   * means the model treated the draft as a task to EXECUTE (user-reported
+   * 2026-10-08: "@docs/…md 开始实现M2" made the model read_file the doc and
+   * stall mid-task; the 60s ceiling then surfaced a generic timeout).
+   */
+  private internalPromptReject: ((error: Error) => void) | null = null;
+  /** Why the last runInternalPrompt failed (read by enhancePrompt for a
+   * targeted message; "none" on success). Overwritten by the next call. */
+  private lastInternalPromptFailure: "tool-call" | "timeout" | "failed" | "none" = "none";
 
   /** Run one internal prompt on a throwaway session; resolves with the
    * agent's text (trimmed) or null on any failure. Never throws. */
@@ -1042,9 +1054,13 @@ export class ChatPanel implements vscode.Disposable {
     let internalSessionId = "";
     this.internalPromptBusy = true;
     this.internalPromptText = "";
+    this.lastInternalPromptFailure = "none";
     // Hard ceiling (INTERNAL_PROMPT_TIMEOUT_MS): unlike a user turn these are
     // fire-and-forget conveniences — a wedged gateway must not hold them.
     let timer: NodeJS.Timeout | null = null;
+    // Why the race settled into the catch: "failed" (prompt rejected) stays
+    // unless the timeout or the tool-call guard reassigns it before rejecting.
+    let reason: "timeout" | "tool-call" | "failed" = "failed";
     try {
       const res = await client.newSession({ cwd, mcpServers: [] });
       internalSessionId = res.sessionId;
@@ -1053,17 +1069,41 @@ export class ChatPanel implements vscode.Disposable {
       // blind assignment on the CLI (pitfall #23) so an unknown id is safe.
       const modelId = this.store.getState().currentModelId;
       if (modelId) await client.setModel(internalSessionId, modelId).catch(() => undefined);
+      // Safety: the CLI may boot in YOLO approval mode, where a model that
+      // misreads the enhancement draft as a task to EXECUTE would run write /
+      // delete / shell tools with no prompt (the fs-callback boundary only
+      // guards the read/write channel, not run_shell_command). Force a non-YOLO
+      // mode per-session so any dangerous tool routes through request_permission
+      // — which auto-cancels for internal sessions (isInternalSessionId) —
+      // instead of executing. setMode is per-session (probed, CLI 0.5.19); a
+      // CLI without a "default" mode just keeps its boot mode.
+      await client.setMode(internalSessionId, "default").catch(() => undefined);
+      // Tool-call guard: enhancement is a pure text rewrite, so ANY tool call
+      // on the internal session means the model treated the draft as a task to
+      // run (user-reported 2026-10-08). Abort immediately with a clear reason
+      // rather than waiting out the ceiling for a turn that will never land.
+      const guard = new Promise<never>((_, reject) => {
+        this.internalPromptReject = (error) => {
+          reason = "tool-call";
+          reject(error);
+        };
+      });
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("internal prompt timeout")), INTERNAL_PROMPT_TIMEOUT_MS);
+        timer = setTimeout(() => {
+          reason = "timeout";
+          reject(new Error("internal prompt timeout"));
+        }, INTERNAL_PROMPT_TIMEOUT_MS);
       });
       await Promise.race([
         client.prompt({ sessionId: internalSessionId, prompt: [{ type: "text", text }] }),
         timeout,
+        guard,
       ]);
       if (this.disposed || this.client !== client) return null;
       return this.internalPromptText.trim() || null;
     } catch (error) {
-      this.log.info(`internal prompt failed: ${errorMessage(error)}`);
+      this.lastInternalPromptFailure = reason;
+      this.log.info(`internal prompt failed (${reason}): ${errorMessage(error)}`);
       if (internalSessionId && this.client === client) {
         try {
           client.cancel(internalSessionId);
@@ -1074,6 +1114,7 @@ export class ChatPanel implements vscode.Disposable {
       return null;
     } finally {
       if (timer) clearTimeout(timer);
+      this.internalPromptReject = null;
       if (internalSessionId) this.internalSessionIds.delete(internalSessionId);
       this.internalPromptBusy = false;
       this.internalPromptText = "";
@@ -1092,12 +1133,19 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     const template = vscode.l10n.t(
-      "你是提示词工程师。把下面用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只输出改写后的请求本身，不要任何解释或引号。\n\n原始请求：\n",
+      "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n",
     );
     const enhanced = await this.runInternalPrompt(template + trimmed);
     if (this.disposed) return;
     if (enhanced) {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: enhanced });
+    } else if (this.lastInternalPromptFailure === "tool-call") {
+      this.postToWebview({
+        type: "enhancedPrompt",
+        requestId,
+        text: "",
+        error: vscode.l10n.t("模型把这段输入当成了要执行的任务（已中止）。可去掉 @文件引用或换个说法后重试，已保留原文"),
+      });
     } else {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("增强失败，已保留原文") });
     }
@@ -1128,7 +1176,7 @@ export class ChatPanel implements vscode.Disposable {
     if (this.internalPromptBusy) return;
     this.titledSessionIds.add(sessionId);
     const template = vscode.l10n.t(
-      "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n",
+      "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。这是一次纯文本概括任务——不要调用任何工具、不要读取文件或执行请求里描述的操作。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n",
     );
     const summary = await this.runInternalPrompt(template + firstUser.text.slice(0, 2000));
     if (!summary || this.disposed) return;
@@ -2681,6 +2729,13 @@ export class ChatPanel implements vscode.Disposable {
         if (content?.type === "text" && typeof content.text === "string") {
           this.internalPromptText += content.text;
         }
+      } else if (kind === "tool_call" || kind === "tool_call_update") {
+        // The model treated the enhancement/title draft as a task to EXECUTE
+        // (user-reported 2026-10-08: "@docs/…md 开始实现M2" made the model
+        // read_file the doc and stall mid-task). Abort the in-flight internal
+        // prompt now with a clear reason instead of waiting out the ceiling.
+        const toolName = (n.update as { toolName?: string }).toolName ?? "";
+        this.internalPromptReject?.(new Error(`internal session issued tool_call (${toolName})`));
       }
       return;
     }
