@@ -8,8 +8,9 @@ export interface CompletionResult {
   /** Accumulated assistant text (partial when reason is timeout/stalled). */
   text: string;
   /** Why the stream ended: a clean stop, the wall-clock ceiling, a stalled
-   * stream, or a transport/HTTP failure. */
-  reason: "complete" | "timeout" | "stalled" | "failed";
+   * stream, a transport/HTTP failure, or an external cancel (user dismissed
+   * the enhancement — never salvage a cancelled partial). */
+  reason: "complete" | "timeout" | "stalled" | "failed" | "cancelled";
 }
 
 export interface CompletionOptions {
@@ -17,8 +18,12 @@ export interface CompletionOptions {
   timeoutMs: number;
   /** Abort when the SSE stream produced nothing for this long. */
   idleMs: number;
-  /** External abort (panel disposal / superseded request). */
-  signal?: { aborted: boolean };
+  /** External abort (panel disposal / user cancel). `onAbort` registers a
+   * synchronous cancel hook so a user-initiated cancel settles the promise
+   * immediately (the panel releases its internal-prompt lane in the same
+   * tick — re-clicking enhance right after a cancel is not busy-rejected);
+   * signals without the hook fall back to a 500ms poll. */
+  signal?: { aborted: boolean; onAbort?: (cancel: () => void) => void };
 }
 
 /** `https://host/v1` → `https://host/v1/chat/completions` (idempotent, trims
@@ -98,11 +103,13 @@ export async function streamChatCompletion(
     let settled = false;
     let lastActivity = Date.now();
     let idleTimer: NodeJS.Timeout | null = null;
+    let signalTimer: NodeJS.Timeout | null = null;
     const finish = (reason: CompletionResult["reason"]) => {
       if (settled) return;
       settled = true;
       if (ceiling) clearTimeout(ceiling);
       if (idleTimer) clearTimeout(idleTimer);
+      if (signalTimer) clearTimeout(signalTimer);
       try {
         req.destroy();
       } catch {
@@ -152,10 +159,6 @@ export async function streamChatCompletion(
     // stamp; total silence past the window means the stream wedged.
     const tick = () => {
       if (settled) return;
-      if (opts.signal?.aborted) {
-        finish("failed");
-        return;
-      }
       if (Date.now() - lastActivity >= opts.idleMs) {
         finish("stalled");
         return;
@@ -163,6 +166,22 @@ export async function streamChatCompletion(
       idleTimer = setTimeout(tick, Math.max(250, Math.floor(opts.idleMs / 4)));
     };
     idleTimer = setTimeout(tick, opts.idleMs);
+    // Cancel path: with an onAbort hook the caller gets a synchronous
+    // teardown (immediate settle + socket destroy); the 500ms poll stays as
+    // the fallback for plain signals — a dismissed enhancement tears the
+    // gateway connection down within 500ms either way.
+    if (opts.signal) {
+      opts.signal.onAbort?.(() => finish("cancelled"));
+      const pollSignal = () => {
+        if (settled) return;
+        if (opts.signal?.aborted) {
+          finish("cancelled");
+          return;
+        }
+        signalTimer = setTimeout(pollSignal, 500);
+      };
+      signalTimer = setTimeout(pollSignal, 500);
+    }
     req.on("error", (error) => {
       // A destroy() from finish() surfaces here too — settled guards it.
       if (!settled && errorMessage(error).includes("socket hang up") && text) {

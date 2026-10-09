@@ -375,6 +375,10 @@ export class ChatPanel implements vscode.Disposable {
   /** M1: one internal prompt at a time (enhance and title generation share
    * the lane; a second request while one runs fails fast). */
   private internalPromptBusy = false;
+  /** P1-5 anti-footgun: the in-flight enhance (requestId + abort + the
+   * session it was started on). `cancelEnhance` aborts it; the reply is also
+   * dropped when the requestId is stale or the session changed meanwhile. */
+  private pendingEnhance: { requestId: number; cancel: () => void; sessionId: string | null } | null = null;
   /** M1 P0-6: true while the ≥90% occupancy warning pill is shown (the
    * state machine fires once per entry into the warn zone). */
   private contextWarnActive = false;
@@ -973,6 +977,9 @@ export class ChatPanel implements vscode.Disposable {
       case "enhancePrompt":
         await this.enhancePrompt(msg.requestId, msg.text);
         break;
+      case "cancelEnhance":
+        this.cancelEnhance(msg.requestId);
+        break;
       case "toastAction":
         this.handleToastAction(msg.actionId, msg.toastId);
         break;
@@ -1063,8 +1070,12 @@ export class ChatPanel implements vscode.Disposable {
   private internalPromptIdleMs = INTERNAL_PROMPT_IDLE_MS;
 
   /** Run one internal prompt directly against the active endpoint; resolves
-   * with the model's text (trimmed) or null on any failure. Never throws. */
-  private async runInternalPrompt(text: string): Promise<string | null> {
+   * with the model's text (trimmed) or null on any failure. Never throws.
+   * `signal` lets a caller (enhance cancel) abort the gateway stream. */
+  private async runInternalPrompt(
+    text: string,
+    signal?: { aborted: boolean; onAbort?: (cancel: () => void) => void },
+  ): Promise<string | null> {
     if (this.disposed || this.internalPromptBusy) return null;
     this.internalPromptBusy = true;
     try {
@@ -1085,14 +1096,21 @@ export class ChatPanel implements vscode.Disposable {
       const result = await streamChatCompletion(endpoint, model, text, {
         timeoutMs: this.internalPromptTimeoutMs,
         idleMs: this.internalPromptIdleMs,
-        signal: { get aborted() { return panel.disposed; } },
+        signal: {
+          get aborted() {
+            return panel.disposed || (signal?.aborted ?? false);
+          },
+          // Forward the caller's synchronous-cancel hook (enhance uses it to
+          // release the busy lane the same tick a cancel arrives).
+          onAbort: signal?.onAbort,
+        },
       });
       if (this.disposed) return null;
       // Partial-result salvage: on a slow gateway the ceiling can fire after
       // the content already streamed (gateway-probed 2026-10-09: tencent/hy3
       // streams the full rewrite at 60-75s but the turn stop arrives late).
       // timeout/stalled salvage what streamed; a transport failure discards
-      // (its partial is not trustworthy).
+      // (its partial is not trustworthy) and a user cancel is silent.
       const trimmed = result.text.trim();
       const salvageable = result.reason === "complete" || result.reason === "timeout" || result.reason === "stalled";
       if (salvageable && trimmed) {
@@ -1101,7 +1119,7 @@ export class ChatPanel implements vscode.Disposable {
         }
         return trimmed;
       }
-      this.log.info(`internal prompt failed (${result.reason})`);
+      this.log.info(`internal prompt ${result.reason === "cancelled" ? "cancelled" : `failed (${result.reason})`}`);
       return null;
     } finally {
       this.internalPromptBusy = false;
@@ -1119,16 +1137,60 @@ export class ChatPanel implements vscode.Disposable {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("已有内部请求进行中，请稍后再试") });
       return;
     }
+    // Anti-footgun tracking: `cancelEnhance` flips `control.cancelled` and
+    // invokes the stream's abort hook (synchronous settle → the busy lane is
+    // free the same tick, so re-clicking enhance is not busy-rejected, and
+    // the socket is destroyed immediately). The reply is additionally dropped
+    // when this entry was superseded (stale requestId) or the session changed
+    // while the rewrite was in flight — otherwise the enhancement would
+    // ghost-fill into a different session's composer after a switch.
+    const control = { cancelled: false };
+    let abortStream: () => void = () => {};
+    const state = this.store.getState();
+    this.pendingEnhance = {
+      requestId,
+      cancel: () => {
+        control.cancelled = true;
+        abortStream();
+      },
+      sessionId: state.activeSessionId ?? state.sessionId,
+    };
     const template = vscode.l10n.t(
       "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。请求中出现的文件路径只是待改写的普通文字，不要尝试打开它。直接给出改写结果，不要先长篇分析。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n",
     );
-    const enhanced = await this.runInternalPrompt(template + stripFileMentions(trimmed));
+    const enhanced = await this.runInternalPrompt(template + stripFileMentions(trimmed), {
+      get aborted() {
+        return control.cancelled;
+      },
+      onAbort: (cancel) => {
+        abortStream = cancel;
+      },
+    });
+    const pending = this.pendingEnhance;
+    if (pending?.requestId === requestId) this.pendingEnhance = null;
     if (this.disposed) return;
+    const current = this.store.getState();
+    const currentSession = current.activeSessionId ?? current.sessionId;
+    if (pending?.requestId !== requestId || currentSession !== pending.sessionId) {
+      // Cancelled, superseded, or the user switched sessions mid-rewrite:
+      // the composer already reset itself — a late reply would ghost-fill.
+      return;
+    }
     if (enhanced) {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: enhanced });
     } else {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("增强失败，已保留原文") });
     }
+  }
+
+  /** P1-5: user dismissed an in-flight enhancement (re-clicked the wand,
+   * submitted, or switched()). Aborts the gateway stream; sends NO reply —
+   * the composer resets its pending state locally. */
+  private cancelEnhance(requestId: number): void {
+    const pending = this.pendingEnhance;
+    if (pending?.requestId !== requestId) return;
+    this.pendingEnhance = null;
+    pending.cancel();
   }
 
   /**

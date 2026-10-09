@@ -20,11 +20,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 // --- streamChatCompletion mock ------------------------------------------------
 
-type CompletionResult = { text: string; reason: "complete" | "timeout" | "stalled" | "failed" };
+type CompletionResult = {
+  text: string;
+  reason: "complete" | "timeout" | "stalled" | "failed" | "cancelled";
+};
 
 const completionMock = vi.hoisted(() => {
   const state: {
-    calls: Array<{ model: string; prompt: string; timeoutMs: number; idleMs: number }>;
+    calls: Array<{
+      model: string;
+      prompt: string;
+      timeoutMs: number;
+      idleMs: number;
+      signal?: { aborted: boolean; onAbort?: (cancel: () => void) => void };
+    }>;
     next: () => Promise<CompletionResult>;
   } = { calls: [], next: () => Promise.resolve({ text: "", reason: "failed" }) };
   return {
@@ -33,10 +42,26 @@ const completionMock = vi.hoisted(() => {
       _endpoint: unknown,
       model: string,
       prompt: string,
-      opts: { timeoutMs: number; idleMs: number },
+      opts: {
+        timeoutMs: number;
+        idleMs: number;
+        signal?: { aborted: boolean; onAbort?: (cancel: () => void) => void };
+      },
     ) => {
-      state.calls.push({ model, prompt, timeoutMs: opts.timeoutMs, idleMs: opts.idleMs });
-      return state.next();
+      state.calls.push({ model, prompt, timeoutMs: opts.timeoutMs, idleMs: opts.idleMs, signal: opts.signal });
+      const pending = state.next();
+      // Mirror the real module: an onAbort hook receives a synchronous
+      // settle-canceller, so a user cancel releases the panel lane at once.
+      if (opts.signal?.onAbort) {
+        let settle: (r: CompletionResult) => void = () => {};
+        const tracked = new Promise<CompletionResult>((resolve) => {
+          settle = resolve;
+          pending.then(resolve);
+        });
+        opts.signal.onAbort(() => settle({ text: "", reason: "cancelled" }));
+        return tracked;
+      }
+      return pending;
     },
   };
 });
@@ -103,9 +128,12 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 type PanelInternals = {
   runInternalPrompt: (text: string) => Promise<string | null>;
   enhancePrompt: (requestId: number, text: string) => Promise<void>;
+  cancelEnhance: (requestId: number) => void;
   internalPromptTimeoutMs: number;
   internalPromptIdleMs: number;
   postToWebview: (message: unknown) => void;
+  pendingEnhance: { requestId: number; cancel: () => void; sessionId: string | null } | null;
+  store: { getState: () => { activeSessionId: string | null; sessionId: string | null } };
 };
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
@@ -247,5 +275,89 @@ describe("ChatPanel internal prompt via direct gateway (enhance regression)", ()
     const msg = posted.find((m) => m.type === "enhancedPrompt");
     expect(msg?.error).toContain("增强失败");
     expect(msg?.text).toBe("");
+  });
+});
+
+// --- enhance anti-footgun (cancel / session isolation) --------------------------
+
+describe("ChatPanel enhance cancellation & session isolation", () => {
+  let panel: ChatPanel;
+  let posted: Array<{ type?: string; error?: string; text?: string; requestId?: number }>;
+  let internalsPanel: PanelInternals;
+
+  beforeEach(() => {
+    completionMock.state.calls = [];
+    queueCompletion({ text: "", reason: "failed" });
+    const made = makePanel();
+    panel = made.panel;
+    internalsPanel = internals(panel);
+    posted = [];
+    internalsPanel.postToWebview = (message) => {
+      posted.push(message as { type?: string; error?: string; text?: string; requestId?: number });
+    };
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+  });
+
+  /** Start an enhance whose completion hangs until `release` resolves. */
+  async function startHangingEnhance(requestId = 7) {
+    let release: (v: CompletionResult) => void = () => {};
+    queueCompletion(() => new Promise((resolve) => (release = resolve)));
+    const running = internalsPanel.enhancePrompt(requestId, "帮我写个周报");
+    await vi.waitFor(() => expect(completionMock.state.calls).toHaveLength(1));
+    return { running, release };
+  }
+
+  it("cancelEnhance aborts the stream and never replies", async () => {
+    const { running, release } = await startHangingEnhance(7);
+    internalsPanel.cancelEnhance(7);
+    // The onAbort hook settles the completion synchronously → the enhance
+    // promise resolves without ever posting a reply.
+    await running;
+    release({ text: "late", reason: "complete" });
+    expect(posted.filter((m) => m.type === "enhancedPrompt")).toHaveLength(0);
+    expect(internalsPanel.pendingEnhance).toBeNull();
+  });
+
+  it("releases the internal lane immediately on cancel (no busy-reject on retry)", async () => {
+    const { running } = await startHangingEnhance(7);
+    internalsPanel.cancelEnhance(7);
+    await running;
+    // A fresh enhance right after a cancel must get through (busy released
+    // in the same tick via the abort hook, not after a 500ms poll).
+    queueCompletion({ text: "第二次改写", reason: "complete" });
+    await internalsPanel.enhancePrompt(8, "再来一次");
+    expect(completionMock.state.calls).toHaveLength(2);
+    const msg = posted.find((m) => m.type === "enhancedPrompt" && m.requestId === 8);
+    expect(msg?.text).toBe("第二次改写");
+  });
+
+  it("ignores a cancel for a stale requestId", async () => {
+    const { running, release } = await startHangingEnhance(7);
+    internalsPanel.cancelEnhance(6); // superseded request — must NOT abort 7
+    expect(internalsPanel.pendingEnhance?.requestId).toBe(7);
+    release({ text: "改写完成", reason: "complete" });
+    await running;
+    const msg = posted.find((m) => m.type === "enhancedPrompt");
+    expect(msg?.text).toBe("改写完成");
+  });
+
+  it("drops the reply when the session changed mid-rewrite (no ghost fill)", async () => {
+    const { running, release } = await startHangingEnhance(7);
+    // User switches sessions while the rewrite is in flight.
+    internalsPanel.store.getState().activeSessionId = "other-session";
+    release({ text: "迟到的改写", reason: "complete" });
+    await running;
+    expect(posted.filter((m) => m.type === "enhancedPrompt")).toHaveLength(0);
+  });
+
+  it("replies when the session is unchanged", async () => {
+    const { running, release } = await startHangingEnhance(7);
+    release({ text: "正常回填", reason: "complete" });
+    await running;
+    const msg = posted.find((m) => m.type === "enhancedPrompt");
+    expect(msg?.text).toBe("正常回填");
   });
 });

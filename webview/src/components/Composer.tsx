@@ -445,13 +445,43 @@ export function Composer() {
   // original text is kept in a ref so a second click undoes the enhancement
   // (Roo's wand toggles between draft and enhanced). The reply arrives on the
   // shared window-message listener below (matched by requestId).
+  // Anti-footgun (the rewrite takes 40-180s): re-clicking the wand cancels
+  // the in-flight request; submitting or switching sessions cancels it too;
+  // and a reply whose draft the user edited meanwhile is DISCARDED instead of
+  // clobbering fresh typing. `enhanceSnapshot` records the exact draft the
+  // rewrite was generated from — the host additionally drops replies that
+  // arrive after a cancel or a session switch.
   const [enhancing, setEnhancing] = useState(false);
   const enhanceSeq = useRef(0);
   const enhancePending = useRef(false);
   const enhanceOriginal = useRef<string | null>(null);
-  function enhance() {
+  const enhanceSnapshot = useRef<string | null>(null);
+  // The reply listener below is registered once ([] deps) — it must read the
+  // CURRENT draft through a ref, not the stale `text` captured at mount.
+  const textRef = useRef(text);
+  textRef.current = text;
+  const cancelInflightRef = useRef<() => void>(() => {});
+  function cancelInflight(): void {
+    if (!enhancePending.current) return;
+    send({ type: "cancelEnhance", requestId: enhanceSeq.current });
+    // Late replies can no longer match the sequence → ignored here too, even
+    // against a host build that still answers a cancelled request.
+    enhanceSeq.current += 1;
+    enhancePending.current = false;
+    enhanceOriginal.current = null;
+    enhanceSnapshot.current = null;
+    setEnhancing(false);
+  }
+  cancelInflightRef.current = cancelInflight;
+  function enhance(): void {
+    // While a rewrite is in flight the wand becomes a cancel button.
+    if (enhancePending.current) {
+      cancelInflight();
+      showNote(t("已取消增强"));
+      return;
+    }
     const value = text.trim();
-    if (!value || busy || enhancePending.current) return;
+    if (!value || busy) return;
     // Second click while an enhancement is shown: restore the original draft.
     if (enhanceOriginal.current !== null) {
       setText(enhanceOriginal.current);
@@ -462,6 +492,7 @@ export function Composer() {
     enhancePending.current = true;
     setEnhancing(true);
     enhanceOriginal.current = text;
+    enhanceSnapshot.current = text;
     send({ type: "enhancePrompt", requestId: ++enhanceSeq.current, text: value });
   }
   useEffect(() => {
@@ -470,10 +501,19 @@ export function Composer() {
       if (msg?.type !== "enhancedPrompt" || msg.requestId !== enhanceSeq.current) return;
       enhancePending.current = false;
       setEnhancing(false);
+      const snapshot = enhanceSnapshot.current;
+      enhanceSnapshot.current = null;
       if (msg.error) {
         // Keep the original draft (the host preserved it too).
         enhanceOriginal.current = null;
         showNote(msg.error);
+        return;
+      }
+      // The user kept typing while the rewrite was in flight — never
+      // clobber fresh work; drop the result instead.
+      if (snapshot !== null && textRef.current !== snapshot) {
+        enhanceOriginal.current = null;
+        showNote(t("输入已修改，已放弃增强结果"));
         return;
       }
       setText(msg.text);
@@ -606,6 +646,9 @@ export function Composer() {
   function submit() {
     const value = text.trim();
     if ((!value && images.length === 0 && attachments.length === 0 && !codeContext) || busy) return;
+    // The draft is gone once sent — a rewrite still in flight would
+    // ghost-fill the cleared composer, so cancel it first.
+    cancelInflightRef.current();
     send({
       type: "sendPrompt",
       text: value || (codeContext ? t("（见附带的代码上下文）") : attachments.length > 0 ? t("（见附件）") : t("（见附图）")),
@@ -645,6 +688,10 @@ export function Composer() {
     histDraft.current = null;
     histEntryRef.current = null;
     editedRecall.current = false;
+    // Session changed: the host drops the rewrite on its session-isolation
+    // check WITHOUT replying, so the wand must be reset locally here or it
+    // would spin forever. cancelInflight also tells the host to abort.
+    cancelInflightRef.current();
   }, [activeSessionId]);
 
   /** Newest-first user prompts of the current session (deduped upstream). */
@@ -1146,8 +1193,14 @@ export function Composer() {
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <button
               className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""}`}
-              title={enhanceOriginal.current !== null ? t("还原原始输入") : t("增强提示词（AI 改写为更清晰的请求）")}
-              disabled={busy || (!text.trim() && enhanceOriginal.current === null)}
+              title={
+                enhancing
+                  ? t("正在增强，点击取消")
+                  : enhanceOriginal.current !== null
+                    ? t("还原原始输入")
+                    : t("增强提示词（AI 改写为更清晰的请求）")
+              }
+              disabled={!enhancing && (busy || (!text.trim() && enhanceOriginal.current === null))}
               onClick={enhance}
             >
               {enhancing ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />}

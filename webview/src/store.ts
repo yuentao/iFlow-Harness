@@ -90,6 +90,8 @@ function createMockHost(): HostApi {
       60,
     );
   };
+  /** requestId → pending mock-rewrite timer (cancelEnhance clears it). */
+  const mockEnhanceTimers = new Map<number, number>();
   // Mock editor theme: read the OS preference so browser verification can
   // exercise both paths.
   const mockTheme: "dark" | "light" = window.matchMedia?.("(prefers-color-scheme: dark)").matches
@@ -948,13 +950,23 @@ function createMockHost(): HostApi {
         // Mock enhancement: echo a "structured" rewrite after a beat so the
         // composer fill-back flow is testable in browser debug mode.
         const enhanced = `${m.text.trim()}\n\n（目标：明确预期产出；约束：列出边界；验收：给出可验证标准。）`;
-        window.setTimeout(
+        const timer = window.setTimeout(
           () =>
             window.dispatchEvent(
               new MessageEvent("message", { data: { type: "enhancedPrompt", requestId: m.requestId, text: enhanced } }),
             ),
           300,
         );
+        mockEnhanceTimers.set(m.requestId, timer);
+        return;
+      }
+      if (m.type === "cancelEnhance") {
+        // Mirror the real host: an aborted enhancement never replies.
+        const timer = mockEnhanceTimers.get(m.requestId);
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          mockEnhanceTimers.delete(m.requestId);
+        }
         return;
       }
       if (m.type === "sendPrompt") {

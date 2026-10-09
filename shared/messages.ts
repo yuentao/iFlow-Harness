@@ -618,6 +618,11 @@ export type WebviewToHost =
    * prompt (never enters the transcript / queue and does not participate in
    * regenerate). Reply: `enhancedPrompt` matched by `requestId`. */
   | { type: "enhancePrompt"; requestId: number; text: string }
+  /** Cancel an in-flight `enhancePrompt` (re-clicking the wand, submitting,
+   * or switching sessions while an enhancement is pending). The host aborts
+   * the gateway stream and sends NO reply — the composer resets its own
+   * pending state locally, so a late result has nothing to fill into. */
+  | { type: "cancelEnhance"; requestId: number }
   /** M1 P0-6: a toast's inline action button was clicked (see the `toast`
    * message's `action`). The host dispatches on `actionId` (e.g. "compress"
    * drives the /compress bridge) and dismisses the pill. */
