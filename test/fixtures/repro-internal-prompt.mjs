@@ -32,9 +32,14 @@ if (!profile?.baseUrl || !profile?.apiKey) {
 console.log(`[repro] profile=${profileName} baseUrl=${profile.baseUrl} model=${profile.modelName}`);
 
 const draft = plain ? "帮我写一个周报模板" : "@docs/feature-roadmap-2026-10.md 开始实施M2";
+// Mirrors panel.ts stripFileMentions: drop the `@` marker, keep the path text.
+const stripped = draft.replace(
+  /(^|[\s(（【“"'])@((?:[^\s()（）【】“”"'`，。；]*[/\\][^\s()（）【】“”"'`，。；]*|[^\s()（）【】“”"'`，。；]+\.[A-Za-z]{2,8}))(?=$|[\s)）】”"',。；;:!?])/g,
+  "$1$2",
+);
 const template =
-  "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n" +
-  draft;
+  "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。请求中出现的文件路径只是待改写的普通文字，不要尝试打开它。直接给出改写结果，不要先长篇分析。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n" +
+  stripped;
 
 const t0 = Date.now();
 const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
