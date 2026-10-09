@@ -123,6 +123,27 @@ const EMPTY_RESPONSE_RETRY_DELAYS_MS = [3_000, 8_000];
  * fire-and-forget conveniences — a wedged gateway must not hold their
  * internal session open forever; on timeout we cancel and give up silently. */
 const INTERNAL_PROMPT_TIMEOUT_MS = 60_000;
+/**
+ * Neutralise `@path` file references in an internal-prompt draft (enhance /
+ * AI title) by dropping the `@` and keeping the path text (user-reported
+ * 2026-10-09, gateway-probed). Enhancement is a pure text rewrite — the file
+ * content is irrelevant, and a reference is the documented agentic-drift
+ * trigger (pitfall #26); on thinking models the `@` additionally invites a
+ * "should I read the file first" reasoning loop that never converges
+ * (tencent/hy3 streamed `reasoning_content` for 150s+ without ever emitting
+ * content or finish_reason on "@docs/…md 开始实施M2"). The bare path converges
+ * in 33s, and a bracketed placeholder does NOT (probed) — so the fix is to
+ * drop the `@` marker itself while keeping the path words, preserving the
+ * draft's meaning. Only word-initial `@`-tokens that look like paths (a
+ * slash, or a file extension) are touched — emails like user@example.com and
+ * @word mentions survive.
+ */
+export function stripFileMentions(text: string): string {
+  return text.replace(
+    /(^|[\s(（【“"'])@((?:[^\s()（）【】“”"'`，。；]*[/\\][^\s()（）【】“”"'`，。；]*|[^\s()（）【】“”"'`，。；]+\.[A-Za-z]{2,8}))(?=$|[\s)）】”"',。；;:!?])/g,
+    "$1$2",
+  );
+}
 /** M1 P0-5: an execute-class tool still running after this long earns an OS
  * notification when it finally lands (only while the panel is hidden). */
 const LONG_TOOL_NOTIFY_MS = 30_000;
