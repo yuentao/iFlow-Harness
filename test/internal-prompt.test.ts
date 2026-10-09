@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ChatPanel } from "../src/panel/panel.js";
+import { stripFileMentions } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type * as vscode from "vscode";
 
@@ -67,6 +68,7 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
  */
 function makeFakeClient() {
   const calls: string[] = [];
+  const promptTexts: string[] = [];
   let settle: (v: unknown) => void = () => {};
   const promptPromise = new Promise((resolve) => {
     settle = resolve;
@@ -84,8 +86,9 @@ function makeFakeClient() {
       calls.push(`setMode:${modeId}`);
       return {};
     },
-    prompt: async () => {
+    prompt: async (req: { prompt: Array<{ type: string; text?: string }> }) => {
       calls.push("prompt");
+      promptTexts.push(req.prompt.map((c) => c.text ?? "").join(""));
       return promptPromise;
     },
     cancel: (sessionId: string) => {
@@ -93,7 +96,7 @@ function makeFakeClient() {
     },
     dispose: async () => {},
   };
-  return { client, calls, settle };
+  return { client, calls, promptTexts, settle };
 }
 
 type PanelInternals = {
@@ -107,6 +110,23 @@ type PanelInternals = {
 };
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
+
+describe("stripFileMentions (internal-prompt @-reference neutraliser)", () => {
+  it("drops the @ but keeps the path text", () => {
+    expect(stripFileMentions("@docs/feature-roadmap-2026-10.md 开始实施M2")).toBe("docs/feature-roadmap-2026-10.md 开始实施M2");
+    expect(stripFileMentions("看下 src/a.ts 和 @src/a.ts 的问题")).toBe("看下 src/a.ts 和 src/a.ts 的问题");
+    expect(stripFileMentions("@README.md 开头")).toBe("README.md 开头");
+    expect(stripFileMentions("路径在末尾 @docs/z.md")).toBe("路径在末尾 docs/z.md");
+    expect(stripFileMentions("（@src/x.ts）")).toBe("（src/x.ts）");
+  });
+
+  it("leaves emails, mentions and bare @ untouched", () => {
+    expect(stripFileMentions("联系 a@b.com 确认")).toBe("联系 a@b.com 确认");
+    expect(stripFileMentions("@张三 你好")).toBe("@张三 你好");
+    expect(stripFileMentions("@ 单独符号")).toBe("@ 单独符号");
+    expect(stripFileMentions("修复@src/y.ts问题")).toBe("修复@src/y.ts问题"); // mid-word @ is not a composer mention
+  });
+});
 
 describe("ChatPanel internal prompt tool-call guard (enhance regression)", () => {
   let panel: ChatPanel;
@@ -180,6 +200,23 @@ describe("ChatPanel internal prompt tool-call guard (enhance regression)", () =>
     expect(msg?.error).toContain("当成了要执行的任务");
     expect(msg?.text).toBe("");
     settle({ stopReason: "cancelled" });
+  });
+
+  it("neutralises @file references in the draft before sending (thinking-loop guard)", async () => {
+    // Gateway-probed 2026-10-09: tencent/hy3 streamed reasoning_content only
+    // (never content, never finish_reason) for 150s+ on "@docs/…md 开始实施M2"
+    // — the `@` reference invites a "should I read the file first" loop that
+    // blows past the internal ceiling. The bare path converges in ~33s, so
+    // enhance must drop the `@` while keeping the path words.
+    const { p, calls, promptTexts, settle } = inject(panel);
+    const done = p.enhancePrompt(1, "@docs/feature-roadmap-2026-10.md 开始实施M2");
+    await vi.waitFor(() => expect(calls).toContain("prompt"));
+    const sent = promptTexts[0] ?? "";
+    expect(sent).not.toContain("@docs/");
+    expect(sent).toContain("docs/feature-roadmap-2026-10.md");
+    expect(sent).toContain("开始实施M2");
+    settle({ stopReason: "end_turn" });
+    await done;
   });
 
   it("resolves with the agent text when no tool call occurs", async () => {
