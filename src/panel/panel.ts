@@ -1154,9 +1154,9 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     const template = vscode.l10n.t(
-      "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n",
+      "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。请求中出现的文件路径只是待改写的普通文字，不要尝试打开它。直接给出改写结果，不要先长篇分析。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n",
     );
-    const enhanced = await this.runInternalPrompt(template + trimmed);
+    const enhanced = await this.runInternalPrompt(template + stripFileMentions(trimmed));
     if (this.disposed) return;
     if (enhanced) {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: enhanced });
@@ -1199,7 +1199,7 @@ export class ChatPanel implements vscode.Disposable {
     const template = vscode.l10n.t(
       "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。这是一次纯文本概括任务——不要调用任何工具、不要读取文件或执行请求里描述的操作。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n",
     );
-    const summary = await this.runInternalPrompt(template + firstUser.text.slice(0, 2000));
+    const summary = await this.runInternalPrompt(template + stripFileMentions(firstUser.text).slice(0, 2000));
     if (!summary || this.disposed) return;
     const title = clampSessionLabel(summary.split("\n")[0] ?? "");
     if (!title) return;
