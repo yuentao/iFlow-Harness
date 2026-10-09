@@ -91,7 +91,6 @@
   "没有可增强的内容": "Nothing to enhance",
   "已有内部请求进行中，请稍后再试": "Another internal request is in progress — try again in a moment",
   "增强失败，已保留原文": "Enhancement failed — the original text was kept",
-  "模型把这段输入当成了要执行的任务（已中止）。可去掉 @文件引用或换个说法后重试，已保留原文": "The model treated this input as a task to execute (aborted). Try removing @file references or rephrasing it as a rewrite request — the original text was kept",
   "当前会话没有可导出的内容": "The current session has nothing to export",
   "会话已导出：{0}": "Session exported: {0}",
   "导出失败：{0}": "Export failed: {0}",

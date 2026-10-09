@@ -9,15 +9,49 @@ import type * as vscode from "vscode";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * User-reported 2026-10-08: enhance ("增强提示词") failed every time with
- * "internal prompt timeout". The CLI-side session files (~/.iflow/acp/
- * sessions) showed the model treated the enhancement draft — which contained
- * an @file reference and an imperative ("@docs/…md 开始实现M2") — as a task to
- * EXECUTE: it called read_file, the tool result landed, and the turn then
- * stalled mid-task until the 60s internal ceiling fired. The panel now aborts
- * the moment the internal session issues a tool call, instead of waiting out
- * the ceiling, and reports the reason.
+ * Internal prompts (enhance / AI title) run DIRECTLY against the
+ * OpenAI-compatible endpoint (src/acp/complete.ts) since the fourth-wave
+ * fix (gateway-probed 2026-10-09, pitfall #26): the CLI's ~61K-token fixed
+ * input pushed thinking models into 180s+ reasoning loops that never produce
+ * content, while the same enhance task sent directly converged in 60.3s.
+ * These tests mock the completion module and assert the panel-side contract:
+ * salvage semantics, busy gating, and @-reference neutralisation of the draft.
  */
+
+// --- streamChatCompletion mock ------------------------------------------------
+
+type CompletionResult = { text: string; reason: "complete" | "timeout" | "stalled" | "failed" };
+
+const completionMock = vi.hoisted(() => {
+  const state: {
+    calls: Array<{ model: string; prompt: string; timeoutMs: number; idleMs: number }>;
+    next: () => Promise<CompletionResult>;
+  } = { calls: [], next: () => Promise.resolve({ text: "", reason: "failed" }) };
+  return {
+    state,
+    streamChatCompletion: (
+      _endpoint: unknown,
+      model: string,
+      prompt: string,
+      opts: { timeoutMs: number; idleMs: number },
+    ) => {
+      state.calls.push({ model, prompt, timeoutMs: opts.timeoutMs, idleMs: opts.idleMs });
+      return state.next();
+    },
+  };
+});
+
+vi.mock("../src/acp/complete.js", () => ({
+  streamChatCompletion: completionMock.streamChatCompletion,
+}));
+
+function queueCompletion(result: CompletionResult | (() => Promise<CompletionResult>)) {
+  completionMock.state.next = typeof result === "function" ? result : () => Promise.resolve(result);
+}
+
+// --- panel scaffolding ----------------------------------------------------------
+
+const TEST_CREDS = { baseUrl: "https://gateway.test/v1", apiKey: "sk-test-1234", modelName: "test-model" };
 
 function makeContext(): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
@@ -36,7 +70,11 @@ function makeContext(): vscode.ExtensionContext {
   return {
     subscriptions: [],
     secrets: {
-      get: () => Promise.resolve(undefined),
+      // Panel-owned credentials live here (auth.ts AUTH_SECRET_KEY); the
+      // panel must never fall back to the real ~/.iflow/settings.json in
+      // tests, so this always returns a valid profile.
+      get: (key: string) =>
+        Promise.resolve(key === "iflow.openai-compatible" ? JSON.stringify(TEST_CREDS) : undefined),
       store: () => Promise.resolve(),
       delete: () => Promise.resolve(),
     },
@@ -62,54 +100,26 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
   ];
 }
 
-/**
- * AcpClient double: newSession hands out one id, prompt hangs until the test
- * settles it (mirroring a model that stalls mid-task), cancel is recorded.
- */
-function makeFakeClient() {
-  const calls: string[] = [];
-  const promptTexts: string[] = [];
-  let settle: (v: unknown) => void = () => {};
-  const promptPromise = new Promise((resolve) => {
-    settle = resolve;
-  });
-  const client = {
-    newSession: async () => {
-      calls.push("newSession");
-      return { sessionId: "internal-1" };
-    },
-    setModel: async () => {
-      calls.push("setModel");
-      return {};
-    },
-    setMode: async (_sid: string, modeId: string) => {
-      calls.push(`setMode:${modeId}`);
-      return {};
-    },
-    prompt: async (req: { prompt: Array<{ type: string; text?: string }> }) => {
-      calls.push("prompt");
-      promptTexts.push(req.prompt.map((c) => c.text ?? "").join(""));
-      return promptPromise;
-    },
-    cancel: (sessionId: string) => {
-      calls.push(`cancel:${sessionId}`);
-    },
-    dispose: async () => {},
-  };
-  return { client, calls, promptTexts, settle };
-}
-
 type PanelInternals = {
-  client: unknown;
-  connecting: Promise<void> | null;
   runInternalPrompt: (text: string) => Promise<string | null>;
   enhancePrompt: (requestId: number, text: string) => Promise<void>;
-  lastInternalPromptFailure: string;
-  onSessionUpdate: (n: unknown) => void;
+  internalPromptTimeoutMs: number;
+  internalPromptIdleMs: number;
   postToWebview: (message: unknown) => void;
 };
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
+
+function makePanel() {
+  const panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+  const posted: Array<{ type?: string; error?: string; text?: string }> = [];
+  internals(panel).postToWebview = (message) => {
+    posted.push(message as { type?: string; error?: string; text?: string });
+  };
+  return { panel, posted };
+}
+
+// --- stripFileMentions -----------------------------------------------------------
 
 describe("stripFileMentions (internal-prompt @-reference neutraliser)", () => {
   it("drops the @ but keeps the path text", () => {
@@ -128,111 +138,114 @@ describe("stripFileMentions (internal-prompt @-reference neutraliser)", () => {
   });
 });
 
-describe("ChatPanel internal prompt tool-call guard (enhance regression)", () => {
+// --- direct-gateway internal prompts ---------------------------------------------
+
+describe("ChatPanel internal prompt via direct gateway (enhance regression)", () => {
   let panel: ChatPanel;
+  let posted: Array<{ type?: string; error?: string; text?: string }>;
 
   beforeEach(() => {
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+    completionMock.state.calls = [];
+    queueCompletion({ text: "", reason: "failed" });
+    panel = makePanel().panel;
+    posted = [];
+    internals(panel).postToWebview = (message) => {
+      posted.push(message as { type?: string; error?: string; text?: string });
+    };
   });
 
   afterEach(async () => {
     await panel.dispose();
   });
 
-  function inject(panel: ChatPanel) {
-    const fake = makeFakeClient();
+  it("returns the completion text on a clean stop", async () => {
+    queueCompletion({ text: " rewritten ", reason: "complete" });
+    expect(await internals(panel).runInternalPrompt("rewrite this")).toBe("rewritten");
+    const call = completionMock.state.calls[0];
+    expect(call?.model).toBe(TEST_CREDS.modelName);
+    expect(call?.prompt).toBe("rewrite this");
+  });
+
+  it("salvages partial text when the ceiling fires (slow gateway, no turn-stop)", async () => {
+    // Gateway-probed 2026-10-09: tencent/hy3 via Y-API streamed the FULL
+    // enhanced rewrite at 60-75s but the turn-stop never arrived — the
+    // ceiling must return what streamed instead of discarding it.
+    queueCompletion({ text: "enhanced text", reason: "timeout" });
+    expect(await internals(panel).runInternalPrompt("rewrite this")).toBe("enhanced text");
+  });
+
+  it("salvages partial text when the stream stalls", async () => {
+    queueCompletion({ text: "half an answer", reason: "stalled" });
+    expect(await internals(panel).runInternalPrompt("rewrite this")).toBe("half an answer");
+  });
+
+  it("returns null on a stalled stream with no text", async () => {
+    queueCompletion({ text: "", reason: "stalled" });
+    expect(await internals(panel).runInternalPrompt("rewrite this")).toBeNull();
+  });
+
+  it("discards partial text on transport failure", async () => {
+    // A transport error's partial is not trustworthy — unlike timeout/stalled
+    // it must not be salvaged.
+    queueCompletion({ text: "corrupted…", reason: "failed" });
+    expect(await internals(panel).runInternalPrompt("rewrite this")).toBeNull();
+  });
+
+  it("passes the configured ceiling and idle windows through", async () => {
     const p = internals(panel);
-    p.client = fake.client;
-    p.connecting = null;
-    const posted: Array<{ type?: string; error?: string; text?: string }> = [];
-    p.postToWebview = (message) => {
-      posted.push(message as { type?: string; error?: string; text?: string });
-    };
-    return { ...fake, p, posted };
-  }
-
-  it("aborts the internal prompt the moment its session issues a tool_call", async () => {
-    const { p, calls, settle } = inject(panel);
-    const resultPromise = p.runInternalPrompt("rewrite this");
-    await vi.waitFor(() => expect(calls).toContain("prompt"));
-    // The model treats the draft as a task to execute (the user-reported flow).
-    p.onSessionUpdate({
-      sessionId: "internal-1",
-      update: { sessionUpdate: "tool_call", toolCallId: "t1", toolName: "read_file", status: "pending" },
-    });
-    // The guard rejects immediately — no waiting for the 60s ceiling.
-    expect(await resultPromise).toBeNull();
-    expect(p.lastInternalPromptFailure).toBe("tool-call");
-    expect(calls).toContain("cancel:internal-1");
-    // Non-YOLO mode is forced per internal session so a runaway model cannot
-    // silently execute write/shell tools (request_permission auto-cancels).
-    expect(calls).toContain("setMode:default");
-    settle({ stopReason: "cancelled" });
+    p.internalPromptTimeoutMs = 1234;
+    p.internalPromptIdleMs = 567;
+    queueCompletion({ text: "ok", reason: "complete" });
+    await p.runInternalPrompt("x");
+    const call = completionMock.state.calls[0];
+    expect(call?.timeoutMs).toBe(1234);
+    expect(call?.idleMs).toBe(567);
   });
 
-  it("aborts on tool_call_update too (--stream mode never sends the pending tool_call)", async () => {
-    // Wire behavior (probed, CLI 0.5.19 bundle): with --stream the CLI skips
-    // the pending tool_call announcement (`getStream() ||` short-circuits) and
-    // only emits tool_call_update once the tool finished — the guard must
-    // catch this shape or the abort silently never fires in the panel.
-    const { p, calls, settle } = inject(panel);
-    const resultPromise = p.runInternalPrompt("rewrite this");
-    await vi.waitFor(() => expect(calls).toContain("prompt"));
-    p.onSessionUpdate({
-      sessionId: "internal-1",
-      update: { sessionUpdate: "tool_call_update", toolCallId: "t1", toolName: "read_file", status: "completed" },
-    });
-    expect(await resultPromise).toBeNull();
-    expect(p.lastInternalPromptFailure).toBe("tool-call");
-    settle({ stopReason: "cancelled" });
+  it("fails fast while another internal prompt is in flight", async () => {
+    let release: (v: CompletionResult) => void = () => {};
+    queueCompletion(() => new Promise((resolve) => (release = resolve)));
+    const first = internals(panel).runInternalPrompt("first");
+    await vi.waitFor(() => expect(completionMock.state.calls).toHaveLength(1));
+    expect(await internals(panel).runInternalPrompt("second")).toBeNull();
+    expect(completionMock.state.calls).toHaveLength(1);
+    release({ text: "done", reason: "complete" });
+    expect(await first).toBe("done");
   });
 
-  it("reports a targeted error when the model treated the draft as a task", async () => {
-    const { p, calls, posted, settle } = inject(panel);
-    const done = p.enhancePrompt(1, "@docs/spec.md 开始实现");
-    await vi.waitFor(() => expect(calls).toContain("prompt"));
-    p.onSessionUpdate({
-      sessionId: "internal-1",
-      update: { sessionUpdate: "tool_call", toolCallId: "t1", toolName: "read_file", status: "pending" },
-    });
-    await done;
-    const msg = posted.find((m) => m.type === "enhancedPrompt");
-    expect(msg?.error).toContain("当成了要执行的任务");
-    expect(msg?.text).toBe("");
-    settle({ stopReason: "cancelled" });
-  });
-
-  it("neutralises @file references in the draft before sending (thinking-loop guard)", async () => {
-    // Gateway-probed 2026-10-09: tencent/hy3 streamed reasoning_content only
-    // (never content, never finish_reason) for 150s+ on "@docs/…md 开始实施M2"
-    // — the `@` reference invites a "should I read the file first" loop that
-    // blows past the internal ceiling. The bare path converges in ~33s, so
-    // enhance must drop the `@` while keeping the path words.
-    const { p, calls, promptTexts, settle } = inject(panel);
-    const done = p.enhancePrompt(1, "@docs/feature-roadmap-2026-10.md 开始实施M2");
-    await vi.waitFor(() => expect(calls).toContain("prompt"));
-    const sent = promptTexts[0] ?? "";
+  it("neutralises @file references in the draft before sending", async () => {
+    // The `@` marker itself (not the path words) invites the thinking model's
+    // "should I read the file first" loop (gateway-probed 2026-10-09); the
+    // direct call keeps the guard so the cheap rewrite stays cheap.
+    queueCompletion({ text: "ok", reason: "complete" });
+    await internals(panel).enhancePrompt(1, "@docs/feature-roadmap-2026-10.md 开始实施M2");
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
     expect(sent).not.toContain("@docs/");
     expect(sent).toContain("docs/feature-roadmap-2026-10.md");
     expect(sent).toContain("开始实施M2");
-    settle({ stopReason: "end_turn" });
-    await done;
   });
 
-  it("resolves with the agent text when no tool call occurs", async () => {
-    const { p, calls, settle } = inject(panel);
-    const resultPromise = p.runInternalPrompt("rewrite this");
-    await vi.waitFor(() => expect(calls).toContain("prompt"));
-    p.onSessionUpdate({
-      sessionId: "internal-1",
-      update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking…" } },
-    });
-    p.onSessionUpdate({
-      sessionId: "internal-1",
-      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "rewritten" } },
-    });
-    settle({ stopReason: "end_turn" });
-    expect(await resultPromise).toBe("rewritten");
-    expect(p.lastInternalPromptFailure).toBe("none");
+  it("posts the enhancement on success", async () => {
+    queueCompletion({ text: "改写后的请求", reason: "complete" });
+    await internals(panel).enhancePrompt(1, "帮我写一个周报模板");
+    const msg = posted.find((m) => m.type === "enhancedPrompt");
+    expect(msg?.text).toBe("改写后的请求");
+    expect(msg?.error).toBeUndefined();
+  });
+
+  it("posts the salvaged text as a success", async () => {
+    queueCompletion({ text: "改写后的请求", reason: "timeout" });
+    await internals(panel).enhancePrompt(1, "帮我写一个周报模板");
+    const msg = posted.find((m) => m.type === "enhancedPrompt");
+    expect(msg?.text).toBe("改写后的请求");
+    expect(msg?.error).toBeUndefined();
+  });
+
+  it("posts a generic failure message when nothing streamed", async () => {
+    queueCompletion({ text: "", reason: "failed" });
+    await internals(panel).enhancePrompt(1, "随便写点什么");
+    const msg = posted.find((m) => m.type === "enhancedPrompt");
+    expect(msg?.error).toContain("增强失败");
+    expect(msg?.text).toBe("");
   });
 });

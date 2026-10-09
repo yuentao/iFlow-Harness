@@ -1,8 +1,9 @@
 // Repro: enhance prompt "internal prompt timeout" (user-reported 2026-10-09).
-// Mirrors panel.ts runInternalPrompt: authenticate (panel creds — here read
-// from ~/.iflow/settings.json apiProfiles, see AGENTS.md pitfall #26) →
-// newSession → setModel → setMode(default) → prompt(enhance template).
-// Timestamped wire + update timeline exposes where the turn wedges.
+// Fourth-wave revision: internal prompts now bypass the CLI entirely and call
+// the OpenAI-compatible endpoint directly via src/acp/complete.ts. This script
+// exercises that exact path against the real gateway — same profile resolution
+// (~/.iflow/settings.json apiProfiles), same enhance template, same ceiling /
+// idle / salvage semantics as panel.ts runInternalPrompt.
 //
 // Usage:
 //   node test/fixtures/repro-internal-prompt.mjs                  # @file draft (user's failing input)
@@ -12,15 +13,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AcpClient } from "../../dist/src/acp/client.js";
-import { buildAcpCommand, resolveVendoredEntry } from "../../dist/src/acp/cli-locator.js";
+import { streamChatCompletion } from "../../dist/src/acp/complete.js";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const entry = process.env.IFLOW_CLI_ENTRY ?? resolveVendoredEntry(repoRoot);
-const { command, args } = buildAcpCommand(entry);
-
-const plain = process.argv.includes("--plain");
 const profileArg = process.argv.find((a) => a.startsWith("--profile="))?.slice(10);
+const plain = process.argv.includes("--plain");
 
 const settings = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".iflow", "settings.json"), "utf8"));
 const profileName = profileArg || settings.currentApiProfile;
@@ -43,79 +39,26 @@ const template =
 
 const t0 = Date.now();
 const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
-const chunks = [];
-let lastChunkAt = 0;
 
-const client = new AcpClient(
-  {
-    command,
-    args,
-    cwd: repoRoot,
-    env: { IFLOW_HARNESS: "1" },
-    wireTap: (dir, msg) => {
-      const s = JSON.stringify(msg);
-      if (s.includes("agent_message_chunk") || s.includes("agent_thought_chunk")) return;
-      const label = msg?.method ?? (msg?.result !== undefined ? `result#${msg.id}` : msg?.error !== undefined ? `error#${msg.id}` : `resp#${msg.id}`);
-      console.log(`[wire ${dir} ${ts()}] ${String(label).slice(0, 120)} ${msg?.method === "session/update" ? JSON.stringify(msg.params?.update?.sessionUpdate ?? "") : ""}`);
-    },
-  },
-  {
-    onSessionUpdate: (n) => {
-      const u = n.update;
-      const label = u?.sessionUpdate;
-      if (label === "agent_message_chunk" || label === "agent_thought_chunk") {
-        lastChunkAt = Date.now();
-        chunks.push({ kind: label, text: String(u.content?.text ?? "") });
-        return;
-      }
-      console.log(`[update ${ts()}] ${label ?? "?"} tool=${u?.toolName ?? ""} status=${u?.status ?? ""}`);
-    },
-    onStderr: (line) => console.error(`[stderr ${ts()}] ${line.slice(0, 300)}`),
-    onExit: (code, signal) => console.error(`[repro] agent exit code=${code} signal=${signal}`),
-    onRequestPermission: async (req) => {
-      console.log(`[permission ${ts()}] tool=${req.toolCall?.toolName} → cancelled (mirrors panel)`);
-      return { outcome: { outcome: "cancelled" } };
-    },
-  },
+// Same ceilings as panel.ts (INTERNAL_PROMPT_TIMEOUT_MS / INTERNAL_PROMPT_IDLE_MS).
+const TIMEOUT_MS = 180_000;
+const IDLE_MS = 90_000;
+
+console.log(`[repro ${ts()}] POST ${profile.baseUrl}/chat/completions (stream)`);
+const result = await streamChatCompletion(
+  { baseUrl: profile.baseUrl, apiKey: profile.apiKey, modelName: profile.modelName },
+  profile.modelName,
+  template,
+  { timeoutMs: TIMEOUT_MS, idleMs: IDLE_MS },
 );
 
-try {
-  const init = await client.connect();
-  console.log(`[repro ${ts()}] connected`);
-  await client.authenticate({
-    methodId: "openai-compatible",
-    methodInfo: { baseUrl: profile.baseUrl, apiKey: profile.apiKey, modelName: profile.modelName },
-  });
-  console.log(`[repro ${ts()}] authenticated`);
-  const session = await client.newSession({ cwd: repoRoot, mcpServers: [] });
-  console.log(`[repro ${ts()}] session=${session.sessionId} cliModel=${session._meta?.models?.currentModelId}`);
-  await client.setModel(session.sessionId, profile.modelName);
-  console.log(`[repro ${ts()}] setModel(${profile.modelName}) ok`);
-  console.log(`[repro ${ts()}] setMode → ${JSON.stringify(await client.setMode(session.sessionId, "default"))}`);
-  if (process.argv.includes("--no-think")) {
-    console.log(`[repro ${ts()}] setThink(false) → ${JSON.stringify(await client.setThink(session.sessionId, false))}`);
-  }
-
-  const promptStarted = Date.now();
-  const res = await Promise.race([
-    client.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: template }] }).then((r) => ({ settled: true, r })),
-    new Promise((resolve) => setTimeout(() => resolve({ settled: false }), 90_000)),
-  ]);
-  if (res.settled) {
-    console.log(`[repro ${ts()}] prompt settled stopReason=${res.r?.stopReason} after ${((Date.now() - promptStarted) / 1000).toFixed(1)}s`);
-  } else {
-    console.log(`[repro ${ts()}] PROMPT STILL PENDING after 90s — wedge reproduced`);
-    client.cancel(session.sessionId);
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  const text = chunks.filter((c) => c.kind === "agent_message_chunk").map((c) => c.text).join("");
-  const thought = chunks.filter((c) => c.kind === "agent_thought_chunk").map((c) => c.text).join("");
-  console.log(`[repro] chunks=${chunks.length} lastChunkAt=${lastChunkAt ? `${((lastChunkAt - t0) / 1000).toFixed(1)}s` : "none"}`);
-  console.log(`[repro] thought(${thought.length}): ${JSON.stringify(thought.slice(0, 200))}`);
-  console.log(`[repro] text(${text.length}): ${JSON.stringify(text.slice(0, 300))}`);
-} catch (error) {
-  console.error(`[repro ${ts()}] ERROR`, error?.message ?? error);
-} finally {
-  await client.dispose().catch(() => {});
+const trimmed = result.text.trim();
+const salvageable = result.reason === "complete" || result.reason === "timeout" || result.reason === "stalled";
+console.log(`[repro ${ts()}] reason=${result.reason} text=${trimmed.length} chars`);
+console.log(`[repro] text: ${JSON.stringify(trimmed.slice(0, 300))}`);
+if (salvageable && trimmed) {
+  console.log(`[repro] PASS — panel would ${result.reason === "complete" ? "return" : "salvage"} the enhancement`);
   process.exit(0);
 }
+console.log(`[repro] FAIL — panel would show enhance failure`);
+process.exit(1);

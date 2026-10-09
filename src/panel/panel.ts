@@ -31,6 +31,7 @@ import {
   type OpenAiCompatCredentials,
 } from "../acp/auth.js";
 import { readCliSettings, type CliSettingsShape } from "../acp/models-query.js";
+import { streamChatCompletion } from "../acp/complete.js";
 import type { AuthUiState } from "../../shared/messages.js";
 import type {
   ContentBlock,
@@ -121,8 +122,19 @@ const EMPTY_RESPONSE_RETRY_DELAYS_MS = [3_000, 8_000];
 /** M1 P1-5/P0-7: hard ceiling for an INTERNAL prompt (enhance / AI title).
  * Unlike a user turn (no timeout by design, pitfall #13) these are
  * fire-and-forget conveniences — a wedged gateway must not hold their
- * internal session open forever; on timeout we cancel and give up silently. */
-const INTERNAL_PROMPT_TIMEOUT_MS = 60_000;
+ * internal session open forever; on timeout we cancel and give up silently.
+ * Third-wave revision (gateway-probed 2026-10-09): 60s was too tight for
+ * slow gateways — tencent/hy3 via Y-API spent 60-75s in reasoning before the
+ * first content chunk (and CLI-internal rate-limit backoff pauses the update
+ * stream with the wall clock still running), so the ceiling killed turns
+ * whose enhanced text was in fact being produced. 180s + the idle abort
+ * below covers slow-but-progressing turns while still reaping wedged ones. */
+const INTERNAL_PROMPT_TIMEOUT_MS = 180_000;
+/** Abort an internal prompt whose session stream went silent for this long.
+ * A healthy stream emits chunks every few seconds; the CLI's rate-limit
+ * backoff pauses were observed well under this. Catches a mid-stream wedge
+ * without waiting out the full wall-clock ceiling. */
+const INTERNAL_PROMPT_IDLE_MS = 90_000;
 /**
  * Neutralise `@path` file references in an internal-prompt draft (enhance /
  * AI title) by dropping the `@` and keeping the path text (user-reported
@@ -360,10 +372,6 @@ export class ChatPanel implements vscode.Disposable {
   /** M1 P0-5: toolCallId → start epoch of execute-class tools still running
    * (only while the panel is hidden; entries are dropped at terminal). */
   private readonly runningToolStarts = new Map<string, number>();
-  /** M1 P1-5/P0-7: sessionIds created for internal prompts (enhance / AI
-   * title). Their session/update stream is intercepted BEFORE the store and
-   * never reaches the transcript; the set is small (one at a time). */
-  private readonly internalSessionIds = new Set<string>();
   /** M1: one internal prompt at a time (enhance and title generation share
    * the lane; a second request while one runs fails fast). */
   private internalPromptBusy = false;
@@ -1039,106 +1047,64 @@ export class ChatPanel implements vscode.Disposable {
   // --- M1: internal prompts (P1-5 enhance / P0-7 AI title) --------------------
   //
   // Isolation discipline: an internal prompt must NOT enter the transcript,
-  // the CLI chatHistory of the user session, or the regenerate chain. It runs
-  // on a DEDICATED session on the same CLI client (session/new is cheap and
-  // the mcp-session-share pool absorbs the fleet; the CLI has no
-  // session/close — P2-7 — so the object lingers server-side, same accepted
-  // trade as the restore probe session). Its session/update stream is
-  // intercepted at the top of onSessionUpdate and never reaches the store.
+  // the CLI chatHistory of the user session, or the regenerate chain.
+  // Fourth-wave revision (gateway-probed 2026-10-09, pitfall #26): it no
+  // longer runs on a CLI session at all — the CLI's ~61K-token fixed input
+  // (system prompt + every tool schema) pushes thinking models into 180s+
+  // reasoning loops that never produce content, while the same enhance task
+  // sent DIRECTLY to the endpoint converged in 60.3s. A plain text rewrite
+  // never needed the agent session; streamChatCompletion talks to the
+  // OpenAI-compatible endpoint itself, so there is no session to intercept,
+  // no tool-call surface to guard, and nothing to cancel server-side.
 
-  /** Accumulator for the in-flight internal prompt's agent text. */
-  private internalPromptText = "";
-  /**
-   * Reject hook for the in-flight internal prompt. Set while a prompt runs;
-   * the session/update interceptor fires it the moment the internal session
-   * issues a tool call — enhancement is a pure text rewrite, a tool call
-   * means the model treated the draft as a task to EXECUTE (user-reported
-   * 2026-10-08: "@docs/…md 开始实现M2" made the model read_file the doc and
-   * stall mid-task; the 60s ceiling then surfaced a generic timeout).
-   */
-  private internalPromptReject: ((error: Error) => void) | null = null;
-  /** Why the last runInternalPrompt failed (read by enhancePrompt for a
-   * targeted message; "none" on success). Overwritten by the next call. */
-  private lastInternalPromptFailure: "tool-call" | "timeout" | "failed" | "none" = "none";
+  /** Wall-clock ceiling / idle window for the in-flight internal prompt.
+   * Instance fields (constants as defaults) so tests can inject small values. */
+  private internalPromptTimeoutMs = INTERNAL_PROMPT_TIMEOUT_MS;
+  private internalPromptIdleMs = INTERNAL_PROMPT_IDLE_MS;
 
-  /** Run one internal prompt on a throwaway session; resolves with the
-   * agent's text (trimmed) or null on any failure. Never throws. */
+  /** Run one internal prompt directly against the active endpoint; resolves
+   * with the model's text (trimmed) or null on any failure. Never throws. */
   private async runInternalPrompt(text: string): Promise<string | null> {
     if (this.disposed || this.internalPromptBusy) return null;
-    const client = await this.ensureClient().catch(() => null);
-    if (!client || this.disposed || this.client !== client) return null;
-    const cwd =
-      this.sessionCwd ??
-      this.services.workspaceRoot ??
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-      this.context.extensionUri.fsPath;
-    let internalSessionId = "";
     this.internalPromptBusy = true;
-    this.internalPromptText = "";
-    this.lastInternalPromptFailure = "none";
-    // Hard ceiling (INTERNAL_PROMPT_TIMEOUT_MS): unlike a user turn these are
-    // fire-and-forget conveniences — a wedged gateway must not hold them.
-    let timer: NodeJS.Timeout | null = null;
-    // Why the race settled into the catch: "failed" (prompt rejected) stays
-    // unless the timeout or the tool-call guard reassigns it before rejecting.
-    let reason: "timeout" | "tool-call" | "failed" = "failed";
     try {
-      const res = await client.newSession({ cwd, mcpServers: [] });
-      internalSessionId = res.sessionId;
-      this.internalSessionIds.add(internalSessionId);
-      // Same model as the user session (enhancement quality); set_model is a
-      // blind assignment on the CLI (pitfall #23) so an unknown id is safe.
-      const modelId = this.store.getState().currentModelId;
-      if (modelId) await client.setModel(internalSessionId, modelId).catch(() => undefined);
-      // Safety: the CLI may boot in YOLO approval mode, where a model that
-      // misreads the enhancement draft as a task to EXECUTE would run write /
-      // delete / shell tools with no prompt (the fs-callback boundary only
-      // guards the read/write channel, not run_shell_command). Force a non-YOLO
-      // mode per-session so any dangerous tool routes through request_permission
-      // — which auto-cancels for internal sessions (isInternalSessionId) —
-      // instead of executing. setMode is per-session (probed, CLI 0.5.19); a
-      // CLI without a "default" mode just keeps its boot mode.
-      await client.setMode(internalSessionId, "default").catch(() => undefined);
-      // Tool-call guard: enhancement is a pure text rewrite, so ANY tool call
-      // on the internal session means the model treated the draft as a task to
-      // run (user-reported 2026-10-08). Abort immediately with a clear reason
-      // rather than waiting out the ceiling for a turn that will never land.
-      const guard = new Promise<never>((_, reject) => {
-        this.internalPromptReject = (error) => {
-          reason = "tool-call";
-          reject(error);
-        };
-      });
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reason = "timeout";
-          reject(new Error("internal prompt timeout"));
-        }, INTERNAL_PROMPT_TIMEOUT_MS);
-      });
-      await Promise.race([
-        client.prompt({ sessionId: internalSessionId, prompt: [{ type: "text", text }] }),
-        timeout,
-        guard,
-      ]);
-      if (this.disposed || this.client !== client) return null;
-      return this.internalPromptText.trim() || null;
-    } catch (error) {
-      this.lastInternalPromptFailure = reason;
-      this.log.info(`internal prompt failed (${reason}): ${errorMessage(error)}`);
-      if (internalSessionId && this.client === client) {
-        try {
-          client.cancel(internalSessionId);
-        } catch {
-          // dying client
-        }
+      // Endpoint: panel-owned credentials (SecretStorage) first — the same
+      // source the user session authenticates with; the CLI's settings.json
+      // profile is the fallback (terminal-configured gateway). Never rely on
+      // the CLI process env: internal prompts bypass it entirely now.
+      const endpoint = (await loadCredentials(this.context.secrets).catch(() => null)) ?? readActiveEndpoint();
+      if (!endpoint || this.disposed) return null;
+      // Model: the panel's current selection (enhancement quality, pitfall #23
+      // — store value is authoritative); fall back to the profile's model.
+      const model = this.store.getState().currentModelId || endpoint.modelName;
+      if (!model) {
+        this.log.warn("internal prompt skipped: no model configured");
+        return null;
       }
+      const panel = this;
+      const result = await streamChatCompletion(endpoint, model, text, {
+        timeoutMs: this.internalPromptTimeoutMs,
+        idleMs: this.internalPromptIdleMs,
+        signal: { get aborted() { return panel.disposed; } },
+      });
+      if (this.disposed) return null;
+      // Partial-result salvage: on a slow gateway the ceiling can fire after
+      // the content already streamed (gateway-probed 2026-10-09: tencent/hy3
+      // streams the full rewrite at 60-75s but the turn stop arrives late).
+      // timeout/stalled salvage what streamed; a transport failure discards
+      // (its partial is not trustworthy).
+      const trimmed = result.text.trim();
+      const salvageable = result.reason === "complete" || result.reason === "timeout" || result.reason === "stalled";
+      if (salvageable && trimmed) {
+        if (result.reason !== "complete") {
+          this.log.info(`internal prompt salvaged (${result.reason}) with ${trimmed.length} chars`);
+        }
+        return trimmed;
+      }
+      this.log.info(`internal prompt failed (${result.reason})`);
       return null;
     } finally {
-      if (timer) clearTimeout(timer);
-      this.internalPromptReject = null;
-      if (internalSessionId) this.internalSessionIds.delete(internalSessionId);
       this.internalPromptBusy = false;
-      this.internalPromptText = "";
     }
   }
 
@@ -1160,13 +1126,6 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed) return;
     if (enhanced) {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: enhanced });
-    } else if (this.lastInternalPromptFailure === "tool-call") {
-      this.postToWebview({
-        type: "enhancedPrompt",
-        requestId,
-        text: "",
-        error: vscode.l10n.t("模型把这段输入当成了要执行的任务（已中止）。可去掉 @文件引用或换个说法后重试，已保留原文"),
-      });
     } else {
       this.postToWebview({ type: "enhancedPrompt", requestId, text: "", error: vscode.l10n.t("增强失败，已保留原文") });
     }
@@ -1366,24 +1325,7 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Tool approval flow (session/request_permission) --------------------------
 
-  /** True when `sessionId` belongs to an internal prompt session (enhance /
-   * AI title). Those sessions must never surface a card into the user's
-   * panel — the session/update stream is intercepted separately, but the
-   * agent→client request paths (permission / plan exit / questions) are
-   * independent and would otherwise leak. */
-  private isInternalSessionId(sessionId: string | null | undefined): boolean {
-    return sessionId !== null && sessionId !== undefined && this.internalSessionIds.has(sessionId);
-  }
-
   private async requestPermissionFromUser(req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    // M1 P1-5/P0-7: an INTERNAL session (enhance / AI title) must never pop
-    // an approval card into the user's panel — its tool calls are rejected
-    // outright. The session/update stream is already intercepted, but this
-    // request path is separate and would otherwise leak a card.
-    if (this.isInternalSessionId(req.sessionId)) {
-      this.log.info(`internal session ${req.sessionId} requested permission — auto-cancelled`);
-      return { outcome: { outcome: "cancelled" } };
-    }
     const id = `ap-${++this.approvalSeq}`;
     const toolCall = req.toolCall;
     const now = Date.now();
@@ -1501,11 +1443,6 @@ export class ChatPanel implements vscode.Disposable {
    * approval-card visual form so the panel stays consistent.
    */
   private requestPlanExitFromUser(req: ExitPlanModeRequest): Promise<ExitPlanModeResponse> {
-    // Internal sessions never request plan approval — reject without a card.
-    if (this.isInternalSessionId(req.sessionId)) {
-      this.log.info(`internal session ${req.sessionId} requested plan exit — auto-rejected`);
-      return Promise.resolve({ approved: false, reason: "internal session" });
-    }
     const id = `plan-${++this.planExitSeq}`;
     const now = Date.now();
     const pending: PendingPlanExitUi = {
@@ -1592,11 +1529,6 @@ export class ChatPanel implements vscode.Disposable {
    * directly; a missing map means "no answer").
    */
   private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
-    // Internal sessions never ask the user — answer empty without a card.
-    if (this.isInternalSessionId(req.sessionId)) {
-      this.log.info(`internal session ${req.sessionId} asked questions — auto-skipped`);
-      return Promise.resolve({ answers: {} });
-    }
     const id = `q-${++this.approvalSeq}`;
     const now = Date.now();
 
@@ -2739,27 +2671,6 @@ export class ChatPanel implements vscode.Disposable {
   private restoringSessionId: string | null = null;
 
   private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
-    // M1 P1-5/P0-7: internal-prompt sessions (enhance / AI title) are
-    // intercepted BEFORE the store — their stream must never touch the
-    // transcript, the usage estimate, or the guard chain. Only the agent's
-    // text chunks are accumulated for the awaiting caller.
-    if (n.sessionId && this.internalSessionIds.has(n.sessionId)) {
-      const kind = (n.update as { sessionUpdate?: string }).sessionUpdate;
-      if (kind === "agent_message_chunk") {
-        const content = (n.update as { content?: { type?: string; text?: string } }).content;
-        if (content?.type === "text" && typeof content.text === "string") {
-          this.internalPromptText += content.text;
-        }
-      } else if (kind === "tool_call" || kind === "tool_call_update") {
-        // The model treated the enhancement/title draft as a task to EXECUTE
-        // (user-reported 2026-10-08: "@docs/…md 开始实现M2" made the model
-        // read_file the doc and stall mid-task). Abort the in-flight internal
-        // prompt now with a clear reason instead of waiting out the ceiling.
-        const toolName = (n.update as { toolName?: string }).toolName ?? "";
-        this.internalPromptReject?.(new Error(`internal session issued tool_call (${toolName})`));
-      }
-      return;
-    }
     // Hot re-auth (profile switch) abandons the old session on the SAME live
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
