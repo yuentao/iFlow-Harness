@@ -69,7 +69,7 @@ import {
 import { SessionStore } from "./store.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
-import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
+import { gateOsNotification, initOsNotifyGate, isUserWatching, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
 import { WireRingBuffer } from "./wire-log.js";
 
@@ -369,9 +369,15 @@ export class ChatPanel implements vscode.Disposable {
   private panelVisible = false;
   /** M1 P0-5: pure gate state (throttle timestamps per event kind). */
   private osNotifyGate: OsNotifyGate = initOsNotifyGate();
-  /** M1 P0-5: toolCallId → start epoch of execute-class tools still running
-   * (only while the panel is hidden; entries are dropped at terminal). */
-  private readonly runningToolStarts = new Map<string, number>();
+  /** M1 P0-5: toolCallId → start epoch + title of execute-class tools still
+   * running (recorded always; the notification-time gate re-checks
+   * visibility). The title rides only the initial tool_call (same wire trait
+   * as kind, probed CLI 0.5.19), so it must be captured there — otherwise
+   * the notification shows the raw toolCallId. Capped FIFO like toolArgs — a
+   * long execute-heavy session must not grow it unboundedly if terminal
+   * events are ever missed. */
+  private readonly runningToolStarts = new Map<string, { startedAt: number; title: string | null }>();
+  private static readonly RUNNING_TOOL_CAP = 128;
   /** M1: one internal prompt at a time (enhance and title generation share
    * the lane; a second request while one runs fails fast). */
   private internalPromptBusy = false;
@@ -404,7 +410,7 @@ export class ChatPanel implements vscode.Disposable {
     // model switch or a settings edit lands on the occupancy bar without
     // per-call-site wiring (the push itself is the invalidation signal).
     this.store.getUsageContext = () => this.resolveUsageContext();
-    this.store.onStateReplaced = () => this.clearToolDiffCaches();
+    this.store.onStateReplaced = () => this.clearToolCaches();
     // Cross-window cache for the node-probe result (the probe shells out —
     // hundreds of ms per window). The locator re-validates the hydrated path
     // with existsSync, so a removed node re-probes. The CLI entry needs no
@@ -1016,11 +1022,14 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * Turn-finished / turn-failed sound cue. Gated on the `iflow.soundFeedback`
-   * setting (default on). The sound plays even when the panel is hidden —
-   * that is exactly when the user needs it (they switched away mid-turn).
-   * Synthesized in the webview (Web Audio), no asset files.
+   * setting (default on) AND panel visibility — the shared "is the user
+   * looking" judgement with notifyOs (roadmap P0-5): a watching user already
+   * sees the card flip, a chime would be noise; the sound exists for when
+   * they switched away mid-turn. Synthesized in the webview (Web Audio), no
+   * asset files.
    */
   private postSound(kind: "done" | "error"): void {
+    if (isUserWatching(this.panelVisible)) return;
     const cfg = vscode.workspace.getConfiguration("iflow");
     if (cfg.get<boolean>("soundFeedback", true) === false) return;
     this.postToWebview({ type: "playSound", kind });
@@ -1030,25 +1039,29 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * Native notification for a user-blocking event, gated on
-   * setting × panel-visibility × per-kind throttle (shared/notifications.ts).
-   * A visible panel already shows the card — the notification exists exactly
-   * for when the user switched to the editor and the agent is blocked.
+   * setting × panel-visibility × window-focus (turnDone only) × per-kind
+   * throttle (shared/notifications.ts). A visible panel already shows the
+   * card — the notification exists exactly for when the user switched to the
+   * editor and the agent is blocked. Returns whether it fired: callers use
+   * that to skip the sound cue, so an event never announces itself twice.
    */
-  private notifyOs(event: OsNotifyEvent, text: string): void {
+  private notifyOs(event: OsNotifyEvent, text: string): boolean {
     const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
     const gate = gateOsNotification({
       event,
       setting,
       panelVisible: this.panelVisible,
+      windowFocused: vscode.window.state.focused,
       nowMs: Date.now(),
       gate: this.osNotifyGate,
     });
-    if (!gate.fire) return;
+    if (!gate.fire) return false;
     this.osNotifyGate = gate.gate;
     const openLabel = vscode.l10n.t("打开面板");
     void vscode.window.showInformationMessage(text, openLabel).then((pick) => {
       if (pick === openLabel) this.openEditorTab();
     });
+    return true;
   }
 
   // --- M1: internal prompts (P1-5 enhance / P0-7 AI title) --------------------
@@ -2820,24 +2833,37 @@ export class ChatPanel implements vscode.Disposable {
         // when they finally land AND the user is not watching the panel.
         // `kind` rides only the initial tool_call (probed, CLI 0.5.19 — the
         // update events omit it), so timing starts there (pending→in_progress
-        // drift is milliseconds). The terminal event clears the timer either
-        // way; the notification itself re-passes the full gate (visibility
-        // may have changed mid-tool).
-        if (update.sessionUpdate === "tool_call" && update.kind === "execute" && !this.panelVisible) {
-          this.runningToolStarts.set(update.toolCallId, Date.now());
+        // drift is milliseconds). Record UNCONDITIONALLY: the common case is
+        // a tool that starts while the user watches and finishes after they
+        // switch away — gating the recording on current visibility would drop
+        // exactly those. The terminal event clears the entry either way; the
+        // notification itself re-passes the full gate (visibility may have
+        // changed mid-tool).
+        if (
+          update.sessionUpdate === "tool_call" &&
+          update.kind === "execute" &&
+          update.status !== "completed" &&
+          update.status !== "failed"
+        ) {
+          if (this.runningToolStarts.size >= ChatPanel.RUNNING_TOOL_CAP) {
+            const oldest = this.runningToolStarts.keys().next().value;
+            if (oldest !== undefined) this.runningToolStarts.delete(oldest);
+          }
+          this.runningToolStarts.set(update.toolCallId, {
+            startedAt: Date.now(),
+            title: typeof update.title === "string" && update.title ? update.title : null,
+          });
         } else if (update.status === "completed" || update.status === "failed") {
-          const startedAt = this.runningToolStarts.get(update.toolCallId);
-          if (startedAt !== undefined) {
+          const entry = this.runningToolStarts.get(update.toolCallId);
+          if (entry !== undefined) {
             this.runningToolStarts.delete(update.toolCallId);
-            if (Date.now() - startedAt >= LONG_TOOL_NOTIFY_MS) {
-              const title = typeof update.title === "string" && update.title ? update.title : update.toolCallId;
+            if (Date.now() - entry.startedAt >= LONG_TOOL_NOTIFY_MS) {
+              const rawTitle =
+                (typeof update.title === "string" && update.title ? update.title : entry.title) ?? update.toolCallId;
+              const title = rawTitle.length > 80 ? `${rawTitle.slice(0, 80)}…` : rawTitle;
               this.notifyOs(
                 "longTool",
-                vscode.l10n.t(
-                  "长任务已完成（运行 {0} 秒）：{1}",
-                  Math.round((Date.now() - startedAt) / 1000),
-                  title.length > 80 ? `${title.slice(0, 80)}…` : title,
-                ),
+                vscode.l10n.t("长任务已完成（运行 {0} 秒）：{1}", Math.round((Date.now() - entry.startedAt) / 1000), title),
               );
             }
           }
@@ -2857,12 +2883,14 @@ export class ChatPanel implements vscode.Disposable {
     return buf.subarray(0, 1024).includes(0);
   }
 
-  /** Drop all transient diff-synthesis caches (session switch / restore /
-   * hot re-auth): a stale snapshot from the previous session must never be
-   * compared against a same-id tool call in the new one. */
-  private clearToolDiffCaches(): void {
+  /** Drop all transient per-tool-call caches (session switch / restore / hot
+   * re-auth): a stale snapshot or long-tool start timestamp from the previous
+   * session must never be compared against a same-id tool call in the new
+   * one. */
+  private clearToolCaches(): void {
     this.preSnapshots.clear();
     this.toolArgs.clear();
+    this.runningToolStarts.clear();
   }
 
   /**
@@ -4176,12 +4204,17 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       this.store.promptCompleted(result.stopReason);
-      // Sound cue: completion chime, but a user stop/cancel stays silent.
+      // Completion cue, but a user stop/cancel stays silent. Notification and
+      // chime are mutually exclusive (roadmap P0-5): when the native
+      // notification fires the user already gets told; otherwise the sound
+      // carries the signal (postSound itself stays quiet while the panel is
+      // visible — the watching user sees the card flip).
       if (result.stopReason !== "cancelled") {
-        this.postSound("done");
-        // M1 P0-5: the turn landed while the user is away (panel hidden) —
-        // tell them it's ready. Cancelled turns stay silent (they stopped it).
-        this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
+        // M1 P0-5: the turn landed while the user is away (panel hidden,
+        // window unfocused) — tell them it's ready.
+        if (!this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"))) {
+          this.postSound("done");
+        }
         // M1 P0-7: the first completed turn is the AI-title window (no-op
         // unless the label is still the mechanical truncation).
         if (promptSessionId) void this.maybeGenerateAiTitle(promptSessionId);
@@ -4268,7 +4301,14 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       this.store.promptCompleted(result.stopReason);
-      if (result.stopReason !== "cancelled") this.postSound("done");
+      // Same completion cue policy as sendPrompt (notification first, chime
+      // only when nothing fired natively) — a regenerated turn landing while
+      // the user is away must announce itself too.
+      if (result.stopReason !== "cancelled") {
+        if (!this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"))) {
+          this.postSound("done");
+        }
+      }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
     } catch (error) {

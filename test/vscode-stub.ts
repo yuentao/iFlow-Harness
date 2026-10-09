@@ -131,7 +131,8 @@ export class FileSystemWatcher {
   dispose(): void {}
 }
 
-/** Configuration stub: `get()` returns the override or the default. */
+/** Configuration stub: `get()` returns the override or the default. Tests
+ * inject overrides via `setConfigOverrides` (e.g. the osNotifications tier). */
 class WorkspaceConfiguration {
   constructor(private readonly overrides: Record<string, unknown> = {}) {}
   get<T>(key: string, defaultValue?: T): T {
@@ -139,9 +140,17 @@ class WorkspaceConfiguration {
   }
 }
 
+const configOverrides: Record<string, unknown> = {};
+
+/** Test hook: set `iflow.*` configuration values returned by the stub. */
+export function setConfigOverrides(values: Record<string, unknown>): void {
+  for (const key of Object.keys(configOverrides)) delete configOverrides[key];
+  Object.assign(configOverrides, values);
+}
+
 export const workspace = {
   workspaceFolders: undefined as unknown[] | undefined,
-  getConfiguration: (_section?: string) => new WorkspaceConfiguration(),
+  getConfiguration: (_section?: string) => new WorkspaceConfiguration(configOverrides),
   createFileSystemWatcher: (_pattern: unknown) => new FileSystemWatcher(_pattern),
   onDidChangeConfiguration: () => new Disposable(),
 };
@@ -151,6 +160,8 @@ export const window = {
   createStatusBarItem: () => new StatusBarItem(),
   activeColorTheme: { kind: ColorThemeKind.Dark },
   onDidChangeActiveColorTheme: () => new Disposable(),
+  /** Mutable so tests drive the turnDone focus gate (shared/notifications). */
+  state: { focused: true },
   showInformationMessage: () => Promise.resolve(undefined),
   showWarningMessage: () => Promise.resolve(undefined),
   showErrorMessage: () => Promise.resolve(undefined),
