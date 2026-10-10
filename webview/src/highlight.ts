@@ -11,7 +11,7 @@ import hljs from "highlight.js/lib/common";
  * DOMPurify's default allowlist), so untrusted fence content stays sanitized.
  */
 
-const escapeHtml = (s: string): string =>
+export const escapeHtml = (s: string): string =>
   s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

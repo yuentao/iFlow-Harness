@@ -182,6 +182,18 @@ export class SessionStore {
     this.flush();
   }
 
+  /**
+   * M2 P0-3: write the queue projection (UI entries + pause flag). The queue
+   * is non-blocks metadata, so it rides the existing blockPatch tail channel
+   * — no anchoring changes. The heavy payloads live host-side (panel's
+   * queuePayloads map), never on the wire.
+   */
+  setQueue(queue: SessionState["queue"], paused: boolean): void {
+    this.state.queue = queue;
+    this.state.queuePaused = paused;
+    this.flush();
+  }
+
   /** Swap in a restored transcript (M4: rebuilt from the CLI session file). */
   replaceTranscript(blocks: SessionState["blocks"]): void {
     this.state.blocks = blocks;

@@ -2,20 +2,72 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { useChat } from "../store";
-import { renderCodeBlock } from "../highlight";
+import { escapeHtml, renderCodeBlock } from "../highlight";
 
 marked.setOptions({ gfm: true, breaks: true });
 
 // Fenced code blocks are syntax-highlighted per language (hljs token spans
 // colored by the --syn-* design tokens). The highlighted HTML is part of the
 // marked output and passes through the same DOMPurify sanitize step below.
+// P1-7: ```mermaid fences become a lazy-render placeholder instead — its
+// initial DOM is a plain code block, so a failed/absent mermaid render falls
+// back to the highlighted source with zero extra machinery.
 marked.use({
   renderer: {
     code({ text, lang }) {
+      const id = (lang ?? "").split(/\s+/)[0] ?? "";
+      if (id === "mermaid") {
+        return `<div class="mermaid-block" data-state="pending"><pre><code class="hljs language-mermaid">${escapeHtml(text)}</code></pre></div>\n`;
+      }
       return renderCodeBlock(text, lang);
     },
   },
 });
+
+// --- P1-7 Mermaid lazy rendering --------------------------------------------
+// mermaid (~MBs) must not ride the first paint: the module is dynamically
+// imported on the first ```mermaid fence. Dynamic-import chunks inherit the
+// entry script's CSP nonce in Chromium (the webview's script-src is nonce-
+// only), so the lazy chunk loads without loosening the CSP.
+// securityLevel "strict" (mermaid's official CSP recommendation) escapes all
+// label HTML; htmlLabels off keeps the SVG pure vector+text (no
+// foreignObject). The produced SVG still gets its own DOMPurify pass with a
+// svg profile that whitelists the inline style attributes mermaid emits —
+// the main markdown sanitizer FORBIDS style, so this output must never be
+// routed through that config.
+let mermaidLoader: Promise<typeof import("mermaid").default> | null = null;
+function loadMermaid(): Promise<typeof import("mermaid").default> {
+  if (!mermaidLoader) {
+    mermaidLoader = import("mermaid").then((m) => {
+      const mermaid = m.default;
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: document.documentElement.classList.contains("dark") ? "dark" : "default",
+        flowchart: { htmlLabels: false },
+      });
+      return mermaid;
+    });
+    mermaidLoader.catch(() => {
+      // A failed load must not poison later fences (e.g. a transient chunk
+      // fetch failure): drop the memo so the next block retries.
+      mermaidLoader = null;
+    });
+  }
+  return mermaidLoader;
+}
+
+/** source → svg cache: streaming re-parses rewrite innerHTML constantly and
+ * a completed diagram must not re-render on every patch. FIFO-capped. */
+const mermaidCache = new Map<string, Promise<string>>();
+const MERMAID_CACHE_MAX = 32;
+let mermaidSeq = 0;
+
+const MERMAID_SANITIZE = {
+  USE_PROFILES: { svg: true, svgFilters: true },
+  ADD_TAGS: ["style"],
+  ADD_ATTR: ["style"],
+};
 
 /**
  * P2-2 streaming markdown throttle: the streaming tail re-renders up to
@@ -239,6 +291,62 @@ export function Markdown({
   };
 
   useEffect(ensureInjected);
+
+  // P1-7: render ```mermaid placeholders. The sanitized html carries each
+  // fence as `.mermaid-block[data-state=pending]` whose inner code block is
+  // both the source carrier and the fallback view. A source that changed
+  // within the last 350ms is NOT rendered yet (streaming rewrites innerHTML
+  // at the parse throttle's cadence; rendering a half-written diagram would
+  // mostly fail to parse and burn CPU) — the debounce converges once the
+  // stream settles. Completed sources hit the promise cache and swap in
+  // synchronously-ish, so React's innerHTML rewrites don't re-run mermaid.
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const blocks = root.querySelectorAll<HTMLElement>(".mermaid-block[data-state='pending']");
+    if (blocks.length === 0) return;
+    const themeKey = document.documentElement.classList.contains("dark") ? "d" : "l";
+    const timers: number[] = [];
+    const apply = (el: HTMLElement, key: string, source: string): void => {
+      let cached = mermaidCache.get(key);
+      if (!cached) {
+        cached = (async () => {
+          const mermaid = await loadMermaid();
+          const { svg } = await mermaid.render(`mmd-${++mermaidSeq}`, source);
+          return DOMPurify.sanitize(svg, MERMAID_SANITIZE);
+        })();
+        mermaidCache.set(key, cached);
+        if (mermaidCache.size > MERMAID_CACHE_MAX) {
+          const oldest = mermaidCache.keys().next().value;
+          if (oldest !== undefined) mermaidCache.delete(oldest);
+        }
+      }
+      void cached
+        .then((svg) => {
+          // React may have rewritten innerHTML (or the component unmounted)
+          // while the render ran — only touch a still-pending live node.
+          if (!el.isConnected || el.dataset.state !== "pending") return;
+          el.innerHTML = svg;
+          el.dataset.state = "done";
+        })
+        .catch(() => {
+          if (!el.isConnected || el.dataset.state !== "pending") return;
+          el.dataset.state = "error"; // keep the code block: plain-text fallback
+        });
+    };
+    blocks.forEach((el) => {
+      const source = el.querySelector("code")?.textContent ?? "";
+      if (!source.trim()) return;
+      const key = `${themeKey}\0${source}`;
+      if (mermaidCache.has(key)) {
+        apply(el, key, source);
+        return;
+      }
+      const timer = window.setTimeout(() => apply(el, key, source), 350);
+      timers.push(timer);
+    });
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [html]);
 
   // P2-2 event delegation: ONE click listener on the container handles every
   // copy button (past and future), instead of a per-button listener plus a

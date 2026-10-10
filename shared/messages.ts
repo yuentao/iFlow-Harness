@@ -239,6 +239,43 @@ export interface SessionSummaryUi {
   updatedAt: number;
 }
 
+/**
+ * M2 P0-3 — one queued prompt (typed while a turn is streaming). The queue's
+ * truth lives in the Extension Host; this is the UI projection riding the
+ * blockPatch tail channel. The full payload (images/files/contexts) stays
+ * host-side in a parallel map keyed by `id` — base64 images must never ride
+ * every snapshot.
+ */
+export interface QueuedPromptUi {
+  id: string;
+  /** The typed text; the UI truncates for display. */
+  text: string;
+  /** Attachment display names (images + files) — badge only. */
+  attachments: string[];
+  /** Host-side enqueue time (epoch ms). */
+  enqueuedAt: number;
+}
+
+/** M2 P0-4 — context-source kinds the composer can attach. */
+export type ContextKind = "code" | "folder" | "problems" | "git" | "url";
+
+/**
+ * M2 P0-4 — one context card above the composer (generalizes the single
+ * right-click code-context card). The host resolves `content` (already
+ * truncated to the per-kind limit) and assembles every card into a titled
+ * fenced section ahead of the typed text at send time.
+ */
+export interface ContextRefUi {
+  id: string;
+  kind: ContextKind;
+  /** Card title: path / "工作区诊断" / the URL. */
+  label: string;
+  /** Card subtitle: range / item counts / branch info. */
+  detail: string;
+  /** The injected body (host-truncated; the composer folds it). */
+  content: string;
+}
+
 /** Cumulative token usage for the active session, estimated by the host from the
  * transcript (the CLI is frozen and reports no usage). Coarse — not for billing.
  * Always present (zeroed at session start) so the UI chip shows from the first
@@ -317,6 +354,18 @@ export interface SessionState {
    * start and refreshed live while streaming, so the UI chip is visible from
    * the first paint. Nullable only for wire-compat with older hosts/mock data. */
   usage?: SessionUsageUi | null;
+  /**
+   * M2 P0-3 — prompts typed while a turn streams, waiting for their turn
+   * (host-owned FIFO; the webview renders the queue strip). Non-blocks
+   * metadata, so it rides the existing blockPatch tail channel.
+   */
+  queue?: QueuedPromptUi[];
+  /**
+   * M2 P0-3 — true when the last turn ENDED IN ERROR and auto-dispatch is
+   * halted (every queued message would hit the same failure). The composer
+   * shows 继续/清空 controls; dispatch resumes on `queueAction: resume`.
+   */
+  queuePaused?: boolean;
 }
 
 export interface AuthUiState {
@@ -384,6 +433,8 @@ export function initialSessionState(): SessionState {
     replaying: false,
     initializing: false,
     usage: emptySessionUsage(),
+    queue: [],
+    queuePaused: false,
   };
 }
 
@@ -505,7 +556,15 @@ export type HostToWebview =
    * composer can fill it back in. `requestId` matches the request; `error`
    * non-empty means the enhancement failed (the composer keeps the original
    * text). */
-  | { type: "enhancedPrompt"; requestId: number; text: string; error?: string };
+  | { type: "enhancedPrompt"; requestId: number; text: string; error?: string }
+  /** Reply to `queueAction: edit` (M2 P0-3): the entry's full payload is
+   * handed back to the composer (the queue entry is removed host-side).
+   * `error` non-empty means the id was already gone (consumed / cleared). */
+  | { type: "queueEdited"; requestId: number; text: string; images?: { data: string; mimeType: string }[]; files?: { name: string; path: string }[]; contexts?: ContextRefUi[]; error?: string }
+  /** Reply to {@link WebviewToHost resolveContext} (M2 P0-4): the host read
+   * the source and returns the (truncated) card body. `error` non-empty
+   * means resolution failed (the composer shows the reason as a note). */
+  | { type: "contextResolved"; requestId: number; kind: ContextKind; label: string; detail: string; content: string; error?: string };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -523,8 +582,25 @@ export type WebviewToHost =
       text: string;
       images?: { data: string; mimeType: string }[];
       files?: { name: string; path: string }[];
-      codeContext?: CodeContextUi;
+      /** M2 P0-4: context cards (right-click selection, @folder/@problems/
+       * @git/@url) — the host assembles each into a titled fenced section
+       * ahead of the typed text. Replaces the old single `codeContext`. */
+      contexts?: ContextRefUi[];
     }
+  /**
+   * M2 P0-3 — operate on the host-owned prompt queue. `edit` pops the entry
+   * back into the composer (the host replies via `queueEdited`), `delete`
+   * drops it, `move` swaps it with its neighbour (`delta` = -1 up / +1 down),
+   * `sendNow` cancels the in-flight turn and dispatches THIS entry first,
+   * `resume` clears the error-pause, `clear` empties the queue.
+   */
+  | { type: "queueAction"; action: "edit" | "delete" | "move" | "sendNow" | "resume" | "clear"; id?: string; delta?: number; requestId?: number }
+  /**
+   * M2 P0-4 — resolve a context source into a card body. `query` is the
+   * folder rel-path / URL / empty (problems & git are workspace-wide).
+   * Reply: `contextResolved` matched by requestId.
+   */
+  | { type: "resolveContext"; requestId: number; kind: ContextKind; query: string }
   | { type: "regenerate" }
   /** Delete one user message AND everything after it (truncate the
    * transcript at that block). Host-owned: the transcript lives in the
@@ -560,8 +636,10 @@ export type WebviewToHost =
   | { type: "revertTool"; toolCallId: string }
   /** M5: open the tool's change in VSCode's native diff editor. */
   | { type: "openDiff"; toolCallId: string }
-  /** M5: fuzzy-search workspace files for the @-mention popup. */
-  | { type: "searchFiles"; requestId: number; query: string }
+  /** M5: fuzzy-search workspace files for the @-mention popup. M2 P0-4:
+   * `kind: "folder"` searches directories instead (the popup shows folder
+   * paths; selecting one attaches a @folder context card). */
+  | { type: "searchFiles"; requestId: number; query: string; kind?: "file" | "folder" }
   /** Right-click "加入 iFlow 上下文": attach the editor selection as a
    * structured code-context card above the composer (styled, removable) —
    * a plain textarea cannot render a fenced block. At most one card; the

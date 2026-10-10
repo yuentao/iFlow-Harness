@@ -1,21 +1,29 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Check,
   ChevronDown,
   FileCode,
   FileText,
+  Folder as FolderIcon,
+  GitBranch,
+  Globe,
   Image as ImageIcon,
+  ListOrdered,
   Loader2,
   Paperclip,
+  Pencil,
+  Play,
   Search,
   SendHorizontal,
   Square,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
-import { collectUserPromptTexts, type CodeContextUi, type FileHitUi, type ModelInfoUi, type SlashCommand } from "../../../shared/messages";
+import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { Dropdown, fuzzyScore } from "./ui";
@@ -66,6 +74,7 @@ function formatCost(usd: number): string {
  * every store change (zustand compares with Object.is). */
 const EMPTY_COMMANDS: SlashCommand[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
+const EMPTY_QUEUE: QueuedPromptUi[] = [];
 
 /**
  * Session token usage chip — subscribes to the usage NUMBERS as primitives
@@ -141,6 +150,118 @@ function SessionUsageChip() {
   );
 }
 
+/** QueueStrip's edit round-trip ids share one counter with the Composer's
+ * queueEdited listener matching (module-level: the strip is a sibling). */
+const queueEditSeqGlobal = { current: 0 };
+
+/**
+ * M2 P0-3 queued-message strip. Subscribes to the queue ARRAY itself — the
+ * same isolation pattern as SessionUsageChip: blockPatch re-clones the tail,
+ * so only this small strip re-renders when the queue changes, never the
+ * whole Composer. Renders nothing while the queue is empty and unpaused.
+ */
+function QueueStrip() {
+  const queue = useChat((s) => s.state?.queue ?? EMPTY_QUEUE);
+  const paused = useChat((s) => s.state?.queuePaused ?? false);
+  const send = useChat((s) => s.send);
+  const [confirmClear, setConfirmClear] = useState(false);
+  if (queue.length === 0 && !paused) return null;
+  const act = (action: "edit" | "delete" | "move" | "sendNow" | "resume" | "clear", id?: string, delta?: number): void => {
+    send({ type: "queueAction", action, id, delta });
+  };
+  const miniBtn =
+    "rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground";
+  return (
+    <div className="mb-1.5 overflow-hidden rounded-xl border border-border bg-surface/70 shadow-card">
+      <div className="flex items-center gap-1.5 border-b border-border/60 px-2.5 py-1">
+        <ListOrdered className="size-3 shrink-0 text-primary" />
+        <span className="text-[11px] font-medium text-foreground">
+          {t("队列 · {0} 条待发送", queue.length)}
+        </span>
+        {paused && (
+          <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">
+            <AlertTriangle className="size-2.5" /> {t("已暂停")}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-1">
+          {paused && queue.length > 0 && (
+            <button
+              className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/25"
+              title={t("继续依序发送队列")}
+              onClick={() => act("resume")}
+            >
+              <Play className="size-2.5" /> {t("继续")}
+            </button>
+          )}
+          {queue.length > 0 && (
+            <button
+              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-destructive"
+              title={t("清空队列")}
+              onClick={() => {
+                if (!confirmClear) {
+                  setConfirmClear(true);
+                  window.setTimeout(() => setConfirmClear(false), 3000);
+                  return;
+                }
+                setConfirmClear(false);
+                act("clear");
+              }}
+            >
+              <Trash2 className="size-2.5" /> {confirmClear ? t("确认清空？") : t("清空")}
+            </button>
+          )}
+        </div>
+      </div>
+      {queue.length > 0 && (
+        <ul className="max-h-32 overflow-y-auto">
+          {queue.map((q, i) => (
+            <li
+              key={q.id}
+              className="group flex items-center gap-1.5 border-b border-border/40 px-2.5 py-1 last:border-b-0 hover:bg-accent/30"
+            >
+              <span className="w-4 shrink-0 text-right font-mono text-[10px] text-muted-foreground/70">{i + 1}</span>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground" title={q.text}>
+                {q.text || t("（附件消息）")}
+              </span>
+              {q.attachments.length > 0 && (
+                <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[9px] text-muted-foreground">
+                  {t("附件 {0}", q.attachments.length)}
+                </span>
+              )}
+              <span className="flex shrink-0 items-center gap-0.5 opacity-40 transition-opacity group-hover:opacity-100">
+                <button className={miniBtn} title={t("打断并立即发送")} onClick={() => act("sendNow", q.id)}>
+                  <Play className="size-3" />
+                </button>
+                <button
+                  className={miniBtn}
+                  title={t("取回编辑")}
+                  onClick={() => send({ type: "queueAction", action: "edit", id: q.id, requestId: ++queueEditSeqGlobal.current })}
+                >
+                  <Pencil className="size-3" />
+                </button>
+                <button className={miniBtn} title={t("上移")} disabled={i === 0} onClick={() => act("move", q.id, -1)}>
+                  <ArrowUp className="size-3" />
+                </button>
+                <button
+                  className={miniBtn}
+                  title={t("下移")}
+                  disabled={i === queue.length - 1}
+                  onClick={() => act("move", q.id, 1)}
+                >
+                  <ArrowDown className="size-3" />
+                </button>
+                <button className={miniBtn} title={t("删除")} onClick={() => act("delete", q.id)}>
+                  <X className="size-3" />
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function Composer() {
   // P2-1 selector split: the composer previously subscribed to the whole
   // state object, re-rendering on every blockPatch (up to 12.5/s during
@@ -165,12 +286,15 @@ export function Composer() {
    * identity from the path: picking the same file twice yields two removable
    * chips instead of one key collision. */
   const [attachments, setAttachments] = useState<Array<{ id: number; name: string; path: string }>>([]);
-  /** Right-click "加入 iFlow 上下文" selection — rendered as a styled code
-   * card above the composer (a plain textarea cannot show a fenced block).
-   * At most one card; replaced by a newer right-click, removed explicitly. */
-  const [codeContext, setCodeContext] = useState<CodeContextUi | null>(null);
+  /** M2 P0-4: context cards above the composer (right-click selection +
+   * @folder/@problems/@git/@url). Generalizes the old single code card;
+   * each card is removable, the host assembles all of them at send time. */
+  const [contexts, setContexts] = useState<ContextRefUi[]>([]);
+  const contextSeq = useRef(0);
   const stageSeq = useRef(0);
   const attachSeq = useRef(0);
+  /** M2 P0-4: resolveContext request id (contextResolved reply matches it). */
+  const contextResolveSeq = useRef(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // Drag-and-drop file attachment: dropping files/photos from the OS or editor
@@ -265,13 +389,18 @@ export function Composer() {
 
   useEffect(() => {
     if (mentionQuery === null) return;
-    const q = mentionQuery.trim();
+    const raw = mentionQuery.trim();
+    if (raw.toLowerCase().startsWith("url:")) return; // URL source: no file search
+    // M2 P0-4: "@/…" searches folders (host derives the dir set from the
+    // same file cache); plain "@" tokens keep searching files.
+    const folder = raw.startsWith("/");
+    const q = folder ? raw.slice(1) : raw;
     const requestId = ++searchSeq.current;
     // W5: read `send` from the store imperatively — its reference is stable,
     // so the effect legitimately depends only on `mentionQuery` (no eslint
     // suppression needed).
     const timer = setTimeout(
-      () => useChat.getState().send({ type: "searchFiles", requestId, query: q }),
+      () => useChat.getState().send({ type: "searchFiles", requestId, query: q, kind: folder ? "folder" : "file" }),
       120,
     );
     return () => clearTimeout(timer);
@@ -352,28 +481,86 @@ export function Composer() {
         return;
       }
       if (msg?.type === "setCodeContext" && typeof msg.code === "string") {
-        // Right-click "加入 iFlow 上下文": show the styled code card + focus.
-        setCodeContext({ path: msg.path, range: msg.range, code: msg.code });
+        // Right-click "加入 iFlow 上下文": attach as a code-kind context
+        // card (M2 P0-4 generalization). Re-right-clicking the same file +
+        // range replaces the previous card instead of stacking duplicates.
+        const card: ContextRefUi = {
+          id: `ctx-${++contextSeq.current}`,
+          kind: "code",
+          label: msg.path,
+          detail: msg.range,
+          content: msg.code,
+        };
+        setContexts((prev) => {
+          const dup = prev.findIndex((c) => c.kind === "code" && c.label === msg.path && c.detail === msg.range);
+          if (dup >= 0) {
+            const next = [...prev];
+            next[dup] = card;
+            return next;
+          }
+          return [...prev, card];
+        });
         setMentionQuery(null);
         requestAnimationFrame(() => taRef.current?.focus());
+      }
+      if (msg?.type === "queueEdited" && msg.requestId === queueEditSeqGlobal.current) {
+        // M2 P0-3: an entry popped back from the queue fills the composer.
+        // Guarded like enhance: never clobber fresh typing (the user may
+        // have typed while the round trip ran) — drop with a note instead.
+        queueEditSeqGlobal.current += 1;
+        if (msg.error) {
+          showNote(msg.error);
+          return;
+        }
+        if (textRef.current.trim() !== "") {
+          showNote(t("输入框非空，已放弃回填（队列条目仍在）"));
+          return;
+        }
+        setText(msg.text);
+        if (msg.images?.length)
+          setImages(
+            msg.images.map((img: { data: string; mimeType: string }) => ({ data: img.data, mimeType: img.mimeType })),
+          );
+        if (msg.files?.length) {
+          setAttachments(
+            msg.files.map((f: { name: string; path: string }) => ({ id: ++attachSeq.current, name: f.name, path: f.path })),
+          );
+        }
+        if (msg.contexts?.length) setContexts(msg.contexts);
+        requestAnimationFrame(() => taRef.current?.focus());
+      }
+      if (msg?.type === "contextResolved" && msg.requestId === contextResolveSeq.current) {
+        // M2 P0-4: a resolved @folder/@problems/@git/@url source becomes a card.
+        contextResolveSeq.current += 1;
+        if (msg.error) {
+          showNote(msg.error);
+          return;
+        }
+        setContexts((prev) => [
+          ...prev,
+          { id: `ctx-${++contextSeq.current}`, kind: msg.kind, label: msg.label, detail: msg.detail, content: msg.content },
+        ]);
       }
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // Streaming, history replay, and new-session init all lock the composer's
-  // model/profile switches and sending (the agent / host is mid-operation;
-  // those would desync it). An in-flight profile/model/mode switch (pending)
-  // locks the other switchers too. Stop is only meaningful for a real
-  // generation: beginReplay() also reports status "streaming", so replaying
-  // and initializing must be excluded here. Also exclude when there's a
-  // pending approval or question card — the user must handle those first.
-  // Exception: the permission mode dropdown uses modeLocked below, not busy.
+  // Stop is only meaningful for a real generation: beginReplay() also reports
+  // status "streaming", so replaying and initializing must be excluded there.
+  // M2 P0-3: streaming no longer locks the composer — Enter while generating
+  // ENQUEUES the message (host-owned queue, dispatched when the turn settles).
+  // The switches that would desync the agent (model/profile dropdowns,
+  // attachments, enhance) keep the original mid-turn lock; only replay/init/
+  // an in-flight switch block sending entirely (the host enqueue gate rejects
+  // replay too, so the webview must not offer it).
   const streaming = status === "streaming";
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
   const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
-  const busy = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  const sendBlocked = replaying || initializing || pending !== null;
+  /** Enter/发送 while a real turn streams → the host queues this message. */
+  const enqueueMode = streaming && !replaying && !initializing;
   // The permission mode is a session-level setting the agent re-reads per turn
   // (set_mode is an independent JSON-RPC request; CLI 0.5.19 applies it without
   // touching the in-flight prompt), so it stays switchable while streaming or
@@ -481,7 +668,7 @@ export function Composer() {
       return;
     }
     const value = text.trim();
-    if (!value || busy) return;
+    if (!value || controlsLocked) return;
     // Second click while an enhancement is shown: restore the original draft.
     if (enhanceOriginal.current !== null) {
       setText(enhanceOriginal.current);
@@ -614,6 +801,105 @@ export function Composer() {
     return { at, token: before.slice(at + 1) };
   }, [mentionQuery, text]);
 
+  // --- M2 P0-4: extended @-mention sources ---------------------------------
+  // "@" files (original), "@/" folders, "@problems" / "@git" workspace
+  // snapshots, "@url:…" web pages. Keyword/url sources resolve through the
+  // host (resolveContext) and land as context cards — they never expand
+  // inline into the draft.
+  const mentionKind: "file" | "folder" | "url" = mentionQuery === null
+    ? "file"
+    : mentionQuery.trim().toLowerCase().startsWith("url:")
+      ? "url"
+      : mentionQuery.startsWith("/")
+        ? "folder"
+        : "file";
+  /** Keyword source rows (@problems / @git), shown only while the token is
+   * still a prefix of the keyword — once the user types past it the row
+   * disappears and plain file search takes over. */
+  const KEYWORD_SOURCES: ReadonlyArray<{ kind: "problems" | "git"; keyword: string; icon: typeof AlertTriangle }> = [
+    { kind: "problems", keyword: "problems", icon: AlertTriangle },
+    { kind: "git", keyword: "git", icon: GitBranch },
+  ];
+  const sourceActions = useMemo(() => {
+    if (mentionQuery === null) return [];
+    const raw = mentionQuery.trim().toLowerCase();
+    if (raw.startsWith("url:")) {
+      const target = mentionQuery.trim().slice(4).trim();
+      return [{ kind: "url" as const, keyword: "", icon: Globe, label: target || t("附加当前 URL 内容"), ready: true }];
+    }
+    if (raw.startsWith("/")) return []; // folder mode: hits only
+    return KEYWORD_SOURCES.filter((s) => s.keyword.startsWith(raw)).map((s) => ({
+      kind: s.kind,
+      keyword: s.keyword,
+      icon: s.icon,
+      label: s.kind === "problems" ? t("工作区诊断（Problems）") : t("Git 状态与变更"),
+      ready: raw === s.keyword,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- KEYWORD_SOURCES is a module-level constant shape
+  }, [mentionQuery]);
+  /** Rows the keyboard navigates: source actions first, then file/folder hits. */
+  const popupRowCount = sourceActions.length + (mentionKind === "url" ? 0 : mentionHits.length);
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [sourceActions.length, mentionHits.length]);
+
+  /** Attach a folder hit as a context card (M2 P0-4: folders are cards, not
+   * inline @paths — the host builds the listing). */
+  function resolveFolderContext(relPath: string): void {
+    useChat.getState().send({
+      type: "resolveContext",
+      requestId: ++contextResolveSeq.current,
+      kind: "folder",
+      query: relPath,
+    });
+    const ta = taRef.current;
+    if (ta && mentionToken !== null) {
+      const caret = ta.selectionStart ?? text.length;
+      setText(text.slice(0, mentionToken.at) + text.slice(caret));
+    }
+    setMentionQuery(null);
+    setMentionHits([]);
+    requestAnimationFrame(() => taRef.current?.focus());
+  }
+
+  /** Attach @problems / @git as a context card (token consumed). */
+  function resolveKeywordContext(kind: "problems" | "git"): void {
+    useChat.getState().send({
+      type: "resolveContext",
+      requestId: ++contextResolveSeq.current,
+      kind,
+      query: "",
+    });
+    const ta = taRef.current;
+    if (ta && mentionToken !== null) {
+      const caret = ta.selectionStart ?? text.length;
+      setText(text.slice(0, mentionToken.at) + text.slice(caret));
+    }
+    setMentionQuery(null);
+    setMentionHits([]);
+    requestAnimationFrame(() => taRef.current?.focus());
+  }
+
+  /** Attach @url:<target> as a context card (host fetches + extracts text). */
+  function attachUrlContext(): void {
+    const target = mentionQuery!.trim().slice(4).trim();
+    if (!target) return;
+    useChat.getState().send({
+      type: "resolveContext",
+      requestId: ++contextResolveSeq.current,
+      kind: "url",
+      query: target,
+    });
+    const ta = taRef.current;
+    if (ta && mentionToken !== null) {
+      const caret = ta.selectionStart ?? text.length;
+      setText(text.slice(0, mentionToken.at) + text.slice(caret));
+    }
+    setMentionQuery(null);
+    setMentionHits([]);
+    requestAnimationFrame(() => taRef.current?.focus());
+  }
+
   function updateMentionFromCaret(value: string): void {
     const ta = taRef.current;
     if (!ta) return;
@@ -645,21 +931,28 @@ export function Composer() {
 
   function submit() {
     const value = text.trim();
-    if ((!value && images.length === 0 && attachments.length === 0 && !codeContext) || busy) return;
+    const hasPayload = value !== "" || images.length > 0 || attachments.length > 0 || contexts.length > 0;
+    if (!hasPayload || sendBlocked) return;
     // The draft is gone once sent — a rewrite still in flight would
     // ghost-fill the cleared composer, so cancel it first.
     cancelInflightRef.current();
     send({
       type: "sendPrompt",
-      text: value || (codeContext ? t("（见附带的代码上下文）") : attachments.length > 0 ? t("（见附件）") : t("（见附图）")),
+      text:
+        value ||
+        (contexts.length > 0
+          ? t("（见附带的上下文）")
+          : attachments.length > 0
+            ? t("（见附件）")
+            : t("（见附图）")),
       images: images.length > 0 ? images.filter((img) => img.data) : undefined,
       files: attachments.length > 0 ? attachments.map(({ name, path }) => ({ name, path })) : undefined,
-      codeContext: codeContext ?? undefined,
+      contexts: contexts.length > 0 ? contexts : undefined,
     });
     setText("");
     setImages([]);
     setAttachments([]);
-    setCodeContext(null);
+    setContexts([]);
     setMentionQuery(null);
     setHistIndex(-1);
     histDraft.current = null;
@@ -802,6 +1095,8 @@ export function Composer() {
         title={t("拖拽调整高度")}
         onMouseDown={startResize}
       />
+      {/* M2 P0-3: queued-message strip (own subscription to state.queue). */}
+      <QueueStrip />
       {dragOver && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-primary/5 text-[12px] font-medium text-primary">
           {t("拖放文件以添加附件")}
@@ -830,30 +1125,57 @@ export function Composer() {
         </div>
       )}
       {note && <div className="mb-1.5 px-0.5 text-[11px] text-warning">{note}</div>}
-      {/* Right-click "加入 iFlow 上下文" code card: the selection is the real
-          payload (rides sendPrompt.codeContext), styled as source context —
-          accent rail + mono block — not as editable draft text. */}
-      {codeContext && (
-        <div className="code-context-card card-lift mb-1.5 overflow-hidden rounded-xl border border-border bg-editor shadow-card">
-          <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
-            <FileCode className="size-3.5 shrink-0 text-primary" />
-            <span className="truncate font-mono text-[11px] text-foreground" title={codeContext.path}>
-              {codeContext.path}
-            </span>
-            <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[10px] text-muted-foreground">
-              {codeContext.range}
-            </span>
-            <button
-              className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
-              title={t("移除")}
-              onClick={() => setCodeContext(null)}
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
-          <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-[11.5px] leading-[1.6] text-foreground/90">
-            {codeContext.code}
-          </pre>
+      {/* M2 P0-4 context cards: right-click selection + @folder/@problems/
+          @git/@url. Each card is removable; the host assembles every card
+          into a titled fenced section ahead of the typed text at send time. */}
+      {contexts.length > 0 && (
+        <div className="mb-1.5 flex flex-col gap-1.5">
+          {contexts.map((c) => {
+            const Icon =
+              c.kind === "code"
+                ? FileCode
+                : c.kind === "folder"
+                  ? FolderIcon
+                  : c.kind === "problems"
+                    ? AlertTriangle
+                    : c.kind === "git"
+                      ? GitBranch
+                      : Globe;
+            return (
+              <div
+                key={c.id}
+                className="code-context-card card-lift overflow-hidden rounded-xl border border-border bg-editor shadow-card"
+              >
+                <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
+                  <Icon className="size-3.5 shrink-0 text-primary" />
+                  <span className="truncate font-mono text-[11px] text-foreground" title={c.label}>
+                    {c.label}
+                  </span>
+                  {c.detail && (
+                    <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[10px] text-muted-foreground">
+                      {c.detail}
+                    </span>
+                  )}
+                  <button
+                    className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
+                    title={t("移除")}
+                    onClick={() => setContexts((prev) => prev.filter((x) => x.id !== c.id))}
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+                {c.kind === "code" ? (
+                  <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-[11.5px] leading-[1.6] text-foreground/90">
+                    {c.content}
+                  </pre>
+                ) : (
+                  <pre className="max-h-24 overflow-auto whitespace-pre-wrap px-2.5 py-1.5 font-mono text-[11px] leading-[1.55] text-muted-foreground">
+                    {c.content}
+                  </pre>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
       {images.length > 0 && (
@@ -909,35 +1231,68 @@ export function Composer() {
         </div>
       )}
 
-      {/* @-mention popup */}
+      {/* @-mention popup (M2 P0-4): source-action rows (@problems / @git /
+          @url) first, then file or folder hits. Selecting a source resolves a
+          context card via the host instead of inserting text. */}
       {mentionQuery !== null && (
         <div className="acrylic-pop dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
-          {mentionHits.length === 0 && (
-            <div className="px-3 py-1.5 text-[12px] text-muted-foreground">{t("无匹配文件")}</div>
-          )}
-          {mentionHits.map((hit, i) => (
-            <button
-              key={hit.path}
-              ref={i === mentionIndex ? mentionActiveRef : undefined}
-              className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-[12px] ${
-                i === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
-              }`}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                insertMention(hit.path);
-              }}
-            >
-              {hit.path.split("/").slice(0, -1).join("/") && (
-                <span className="min-w-0 truncate text-[11px] text-muted-foreground">
-                  {hit.path.split("/").slice(0, -1).join("/")}/
+          {sourceActions.map((a, i) => {
+            const Icon = a.icon;
+            return (
+              <button
+                key={`src-${a.kind}`}
+                ref={i === mentionIndex ? mentionActiveRef : undefined}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${
+                  i === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
+                }`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  if (a.kind === "problems" || a.kind === "git") resolveKeywordContext(a.kind);
+                  else attachUrlContext();
+                }}
+              >
+                <Icon className="size-3.5 shrink-0 text-primary" />
+                <span className="font-mono text-[11px] text-primary">
+                  @{a.kind === "url" ? `url:${a.label}` : a.keyword}
                 </span>
-              )}
-              {/* break-all: an unbroken long basename would otherwise force
-                  horizontal scroll on the max-h-56 popup (single-axis overflow
-                  makes the other axis auto). */}
-              <span className="break-all font-medium">{hit.path.split("/").pop()}</span>
-            </button>
-          ))}
+                <span className="truncate text-[11px] text-muted-foreground">{a.label}</span>
+              </button>
+            );
+          })}
+          {mentionKind !== "url" && mentionHits.length === 0 && sourceActions.length === 0 && (
+            <div className="px-3 py-1.5 text-[12px] text-muted-foreground">
+              {mentionKind === "folder" ? t("无匹配文件夹") : t("无匹配文件")}
+            </div>
+          )}
+          {mentionKind !== "url" &&
+            mentionHits.map((hit, i) => {
+              const idx = sourceActions.length + i;
+              return (
+                <button
+                  key={hit.path}
+                  ref={idx === mentionIndex ? mentionActiveRef : undefined}
+                  className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-[12px] ${
+                    idx === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
+                  }`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    if (mentionKind === "folder") resolveFolderContext(hit.path);
+                    else insertMention(hit.path);
+                  }}
+                >
+                  {mentionKind === "folder" && <FolderIcon className="size-3 shrink-0 self-center text-primary" />}
+                  {hit.path.split("/").slice(0, -1).join("/") && (
+                    <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                      {hit.path.split("/").slice(0, -1).join("/")}/
+                    </span>
+                  )}
+                  {/* break-all: an unbroken long basename would otherwise force
+                      horizontal scroll on the max-h-56 popup (single-axis overflow
+                      makes the other axis auto). */}
+                  <span className="break-all font-medium">{hit.path.split("/").pop()}</span>
+                </button>
+              );
+            })}
         </div>
       )}
 
@@ -945,7 +1300,7 @@ export function Composer() {
         <textarea
           ref={taRef}
           value={text}
-          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · 粘贴或回形针按钮添加图片/文件）")}
+          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
           onChange={(e) => {
@@ -994,19 +1349,30 @@ export function Composer() {
               }
             }
             if (mentionQuery !== null) {
-              if (e.key === "ArrowDown" && mentionHits.length > 0) {
+              if (e.key === "ArrowDown" && popupRowCount > 0) {
                 e.preventDefault();
-                setMentionIndex((i) => Math.min(mentionHits.length - 1, i + 1));
+                setMentionIndex((i) => Math.min(popupRowCount - 1, i + 1));
                 return;
               }
-              if (e.key === "ArrowUp" && mentionHits.length > 0) {
+              if (e.key === "ArrowUp" && popupRowCount > 0) {
                 e.preventDefault();
                 setMentionIndex((i) => Math.max(0, i - 1));
                 return;
               }
-              if ((e.key === "Enter" || e.key === "Tab") && mentionHits.length > 0) {
+              if ((e.key === "Enter" || e.key === "Tab") && popupRowCount > 0) {
                 e.preventDefault();
-                insertMention(mentionHits[mentionIndex]!.path);
+                const srcCount = sourceActions.length;
+                if (mentionIndex < srcCount) {
+                  const a = sourceActions[mentionIndex]!;
+                  if (a.kind === "problems" || a.kind === "git") resolveKeywordContext(a.kind);
+                  else attachUrlContext();
+                } else {
+                  const hit = mentionHits[mentionIndex - srcCount];
+                  if (hit) {
+                    if (mentionKind === "folder") resolveFolderContext(hit.path);
+                    else insertMention(hit.path);
+                  }
+                }
                 return;
               }
               // 弹窗开着（含无匹配）时 ESC 只关闭弹窗，不触发停止生成。
@@ -1094,7 +1460,7 @@ export function Composer() {
             <Dropdown
               direction="up"
               menuClass="w-56 max-w-[calc(100vw-24px)] max-h-64 overflow-y-auto"
-              disabled={busy}
+              disabled={controlsLocked}
               onOpenChange={(o) => {
                 setModelMenuOpen(o);
                 if (o) {
@@ -1111,7 +1477,7 @@ export function Composer() {
                 <button
                   className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}
                   title={t("模型")}
-                  disabled={busy}
+                  disabled={controlsLocked}
                 >
                   <span className="max-w-[130px] truncate @max-[440px]:max-w-[84px] @max-[340px]:max-w-[72px]">
                     {currentModelId ?? models[0]!.id}
@@ -1200,7 +1566,7 @@ export function Composer() {
                     ? t("还原原始输入")
                     : t("增强提示词（AI 改写为更清晰的请求）")
               }
-              disabled={!enhancing && (busy || (!text.trim() && enhanceOriginal.current === null))}
+              disabled={!enhancing && (controlsLocked || (!text.trim() && enhanceOriginal.current === null))}
               onClick={enhance}
             >
               {enhancing ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />}
@@ -1208,30 +1574,33 @@ export function Composer() {
             <button
               className={CANVAS_BTN}
               title={t("添加附件")}
-              disabled={busy}
+              disabled={controlsLocked}
               onClick={() => send({ type: "pickAttachments" })}
             >
               <Paperclip className="size-3" />
             </button>
-            {busy ? (
+            {canStop && (
               <button
                 className={`${CANVAS_BTN} text-muted-foreground hover:text-foreground`}
                 title={t("停止生成")}
-                disabled={!canStop}
                 onClick={() => send({ type: "cancel" })}
               >
                 <Square className="size-3" /> <span className="@max-[340px]:hidden">{t("停止")}</span>
               </button>
-            ) : (
-              <button
-                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-                title={t("发送 (Enter)")}
-                disabled={!text.trim() && images.length === 0 && attachments.length === 0}
-                onClick={submit}
-              >
-                <SendHorizontal className="size-3" /> <span className="@max-[340px]:hidden">{t("发送")}</span>
-              </button>
             )}
+            <button
+              className={
+                enqueueMode
+                  ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/50 bg-primary/15 px-3 py-1 text-[11px] font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                  : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+              }
+              title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
+              disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
+              onClick={submit}
+            >
+              {enqueueMode ? <ListOrdered className="size-3" /> : <SendHorizontal className="size-3" />}{" "}
+              <span className="@max-[340px]:hidden">{enqueueMode ? t("排队") : t("发送")}</span>
+            </button>
           </div>
         </div>
       </div>

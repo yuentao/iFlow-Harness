@@ -6,7 +6,10 @@
 import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
-import { inspect } from "node:util";
+import { inspect, promisify } from "node:util";
+import { execFile as execFileCb } from "node:child_process";
+import { get as httpGet } from "node:http";
+import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
@@ -45,7 +48,25 @@ import type {
   ExitPlanModeRequest,
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CodeContextUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, ContextKind, ContextRefUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import {
+  clearQueue as clearQueueUi,
+  enqueuePrompt as enqueuePromptUi,
+  moveQueued as moveQueuedUi,
+  removeQueued as removeQueuedUi,
+  shiftQueued as shiftQueuedUi,
+  QUEUE_MAX,
+} from "../../shared/queue.js";
+import {
+  assembleContextSections,
+  buildFolderListing,
+  buildGitReport,
+  extractHtmlText,
+  formatDiagnosticsReport,
+  isHttpUrl,
+  normalizeFolderRel,
+  truncateChars,
+} from "../../shared/context-source.js";
 import type { ParsedEditArgs, PreEditSnapshot } from "../../shared/session-state.js";
 import {
   backfillBlockIds,
@@ -74,6 +95,15 @@ import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
 import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
+/** M2 P0-4: async execFile (never sync — trap #18: external process probes
+ * must not block the extension host). */
+const execFileAsync = promisify(execFileCb);
+/** M2 P0-4 @git: per-command timeout and combined output cap. */
+const GIT_CONTEXT_TIMEOUT_MS = 5_000;
+const GIT_CONTEXT_MAX_CHARS = 32_000;
+/** M2 P0-4 @url: fetch timeout / response cap / final text cap. */
+const URL_FETCH_TIMEOUT_MS = 10_000;
+const URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 /**
@@ -394,6 +424,26 @@ export class ChatPanel implements vscode.Disposable {
   /** M1 P1-4: bounded ACP wire ring buffer (exported via the command). */
   private readonly wireLog = new WireRingBuffer();
 
+  // --- M2 state ---------------------------------------------------------------
+  /**
+   * M2 P0-3: the prompt queue's full payloads, keyed by entry id. The UI
+   * projection (`QueuedPromptUi`) rides the snapshot tail; the heavy payload
+   * (images base64, files, contexts) stays here so it never serializes onto
+   * every blockPatch. Insertion order is irrelevant — the store's `queue`
+   * array is the FIFO order; this map only resolves id → payload.
+   */
+  private readonly queuePayloads = new Map<
+    string,
+    { images?: { data: string; mimeType: string }[]; files?: { name: string; path: string }[]; contexts?: ContextRefUi[] }
+  >();
+  private queueSeqSeed = 0;
+  /**
+   * M2 P0-3: when the user clicks 立即发送 on a queued entry, we cancel the
+   * in-flight turn and set this to that entry's id; the turn's completion
+   * handler dispatches THAT entry first (bypassing FIFO order) then clears it.
+   */
+  private queueSendNowId: string | null = null;
+
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly services: PanelServices = {},
@@ -410,7 +460,13 @@ export class ChatPanel implements vscode.Disposable {
     // model switch or a settings edit lands on the occupancy bar without
     // per-call-site wiring (the push itself is the invalidation signal).
     this.store.getUsageContext = () => this.resolveUsageContext();
-    this.store.onStateReplaced = () => this.clearToolCaches();
+    this.store.onStateReplaced = () => {
+      this.clearToolCaches();
+      // M2 P0-3: every wholesale state swap (new session / restore / hot
+      // re-auth / restart) drops the queue — a queued prompt belongs to the
+      // outgoing session only.
+      this.clearQueue();
+    };
     // Cross-window cache for the node-probe result (the probe shells out —
     // hundreds of ms per window). The locator re-validates the hydrated path
     // with existsSync, so a removed node re-probes. The CLI entry needs no
@@ -648,7 +704,12 @@ export class ChatPanel implements vscode.Disposable {
       `default-src 'none'`,
       `img-src ${webview.cspSource} data:`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
-      `script-src 'nonce-${nonce}'`,
+      // P1-7: mermaid loads as a lazy dynamic-import chunk. Vite's
+      // modulepreload helper emits a <link rel=modulepreload> that carries no
+      // nonce, so a nonce-only script-src would block it. cspSource scopes the
+      // allowance to this extension's own dist (vscode-webview-resource
+      // scheme) — no external script is ever permitted.
+      `script-src 'nonce-${nonce}' ${webview.cspSource}`,
       `font-src ${webview.cspSource}`,
     ].join("; ");
     // The built index.html already has <html>/<head>/<body>; inject CSP as the first head child.
@@ -833,7 +894,13 @@ export class ChatPanel implements vscode.Disposable {
         this.postTheme();
         break;
       case "sendPrompt":
-        await this.sendPrompt(msg.text, msg.images, msg.files, msg.codeContext);
+        await this.sendPrompt(msg.text, msg.images, msg.files, msg.contexts);
+        break;
+      case "queueAction":
+        this.handleQueueAction(msg);
+        break;
+      case "resolveContext":
+        void this.resolveContext(msg.requestId, msg.kind, msg.query);
         break;
       case "cancel":
         // Cancel any pending approvals/questions first, then send cancel to CLI.
@@ -917,7 +984,7 @@ export class ChatPanel implements vscode.Disposable {
         await this.openToolDiff(msg.toolCallId);
         break;
       case "searchFiles":
-        void this.searchWorkspaceFiles(msg.requestId, msg.query);
+        void this.searchWorkspaceFiles(msg.requestId, msg.query, msg.kind ?? "file");
         break;
       case "stageFiles":
         void this.stageDroppedFiles(msg);
@@ -1745,11 +1812,26 @@ export class ChatPanel implements vscode.Disposable {
    * `findFiles` (glob-excludes) + a simple relevance score is plenty at this
    * scale and avoids pulling in a fuzzy-matching dependency.
    */
-  private async searchWorkspaceFiles(requestId: number, query: string): Promise<void> {
+  private async searchWorkspaceFiles(requestId: number, query: string, kind: "file" | "folder" = "file"): Promise<void> {
     try {
       const rels = await this.loadWorkspaceFileRels();
+      // M2 P0-4: folder search derives the directory set from the same file
+      // cache — every ancestor prefix of every file, deduped, trailing "/".
+      let candidates = rels;
+      if (kind === "folder") {
+        const dirs = new Set<string>();
+        for (const rel of rels) {
+          const parts = rel.split("/");
+          let acc = "";
+          for (let i = 0; i < parts.length - 1; i++) {
+            acc = acc ? `${acc}/${parts[i]}` : parts[i]!;
+            if (!acc.split("/").some((seg) => seg.startsWith("."))) dirs.add(`${acc}/`);
+          }
+        }
+        candidates = [...dirs];
+      }
       const q = query.trim().toLowerCase();
-      const scored = rels.map((rel) => {
+      const scored = candidates.map((rel) => {
         let score = 0;
         if (q) {
           const lower = rel.toLowerCase();
@@ -4121,28 +4203,37 @@ export class ChatPanel implements vscode.Disposable {
     text: string,
     images?: { data: string; mimeType: string }[],
     files?: { name: string; path: string }[],
-    codeContext?: CodeContextUi,
+    contexts?: ContextRefUi[],
   ): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed && !codeContext) return;
+    const hasContexts = (contexts?.length ?? 0) > 0;
+    if (!trimmed && !hasContexts) return;
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return;
-    // Code-context card (right-click 加入上下文): assembled into a fenced
-    // block ahead of the typed text. The typed part goes through
-    // toAgentPromptText (its "/"-escape must not touch code lines); the block
-    // itself rides raw — the composed text starts with "关于 …"，never with
-    // "/", so the CLI's command gate cannot misfire on it.
-    const codeBlock = codeContext
-      ? [
-          vscode.l10n.t("关于 `{0}:{1}`：", codeContext.path, codeContext.range),
-          "",
-          "```",
-          codeContext.code,
-          "```",
-        ].join("\n")
+    // M2 P0-3: a turn is streaming — the composer no longer blocks typing,
+    // so this is the QUEUE path (roadmap: Enter while generating = enqueue).
+    // replaying/historySyncBusy stay rejected: beginReplay also reports
+    // "streaming", and a queue entry typed during a restore would race the
+    // transcript the restore is rebuilding.
+    const gateState = this.store.getState();
+    if (gateState.status === "streaming") {
+      if (gateState.replaying || this.historySyncBusy) {
+        this.log.info("sendPrompt rejected: replay/history-sync in flight");
+        return;
+      }
+      this.enqueuePrompt(trimmed, images, files, contexts);
+      return;
+    }
+    // Context cards (right-click selection + @folder/@problems/@git/@url):
+    // each becomes a titled fenced section ahead of the typed text. Sections
+    // ride RAW — the composed text starts with a section title, never with
+    // "/", so the CLI's command gate cannot misfire; only the typed part
+    // goes through toAgentPromptText (its "/"-escape must not touch code).
+    const contextBlock = hasContexts
+      ? assembleContextSections(contexts!, (c) => this.contextSectionTitle(c))
       : "";
-    const fullText = [codeBlock, trimmed].filter(Boolean).join("\n\n");
+    const fullText = [contextBlock, trimmed].filter(Boolean).join("\n\n");
     // The agent sees the attachment list inline: absolute paths it can read
     // with its own tools. The transcript block (beginUserPrompt) mirrors the
     // same list so the UI matches what was actually sent.
@@ -4156,7 +4247,7 @@ export class ChatPanel implements vscode.Disposable {
     // part (CLI would otherwise answer "Unknown command" and the model never
     // sees the text); the transcript keeps the composed verbatim input.
     const promptText =
-      [codeBlock, toAgentPromptText(trimmed, this.store.getState().commands)]
+      [contextBlock, toAgentPromptText(trimmed, this.store.getState().commands)]
         .filter(Boolean)
         .join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
@@ -4221,6 +4312,11 @@ export class ChatPanel implements vscode.Disposable {
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
+      // M2 P0-3: the turn settled — the idle slot is free, feed it the next
+      // queued message (no-op when the queue is empty). A user Stop
+      // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
+      // keeps steering (roadmap Steer semantics).
+      void this.dispatchQueue();
     } catch (error) {
       // A3: the panel was disposed mid-flight — the store is gone, so there
       // is nothing to mark and nothing to persist.
@@ -4245,6 +4341,10 @@ export class ChatPanel implements vscode.Disposable {
       // remain diagnosable from the Output panel.
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
+      // M2 P0-3: a real failure pauses auto-dispatch — every queued message
+      // would hit the same broken endpoint/CLI. The composer's queue strip
+      // shows 继续/清空; dispatch resumes on `queueAction: resume`.
+      this.pauseQueueOnError();
       // Errored-turn rescue: the completion-time persist never runs for a
       // failed prompt, so whatever streamed before the failure exists only in
       // memory. Write it now or a restart / profile switch loses it for good.
@@ -4327,6 +4427,364 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * M2 P0-3: queue a prompt typed while a turn streams (roadmap: Enter during
+   * generation = enqueue; the queue is host-owned, FIFO, capped at
+   * QUEUE_MAX). The UI projection rides the snapshot tail; the heavy payload
+   * (images/files/contexts) stays in `queuePayloads` so base64 never
+   * serializes onto every blockPatch.
+   */
+  private enqueuePrompt(
+    text: string,
+    images?: { data: string; mimeType: string }[],
+    files?: { name: string; path: string }[],
+    contexts?: ContextRefUi[],
+  ): void {
+    const state = this.store.getState();
+    const id = `q-${Date.now().toString(36)}-${++this.queueSeqSeed}`;
+    const attachments = [
+      ...(images ?? []).map((_, i) => vscode.l10n.t("图片{0}", i + 1)),
+      ...(files ?? []).map((f) => f.name),
+    ];
+    const entry: QueuedPromptUi = { id, text, attachments, enqueuedAt: Date.now() };
+    const { queue, ok } = enqueuePromptUi(state.queue ?? [], entry);
+    if (!ok) {
+      this.store.sendToast("warning", vscode.l10n.t("队列已满（最多 {0} 条），本条未加入", QUEUE_MAX));
+      return;
+    }
+    this.queuePayloads.set(id, { images, files, contexts });
+    this.store.setQueue(queue, state.queuePaused ?? false);
+  }
+
+  /**
+   * M2 P0-3: consume the queue when a slot is free. Dispatch order: the
+   * `queueSendNowId` entry (Steer) if still present, else the FIFO head.
+   * Gates: paused (error-pause), streaming/connecting (the next settle
+   * re-dispatches), init/replay/history-sync windows. "error" status is
+   * dispatchable — that is exactly what 继续 (resume) needs; the next
+   * userPrompt clears the error banner itself.
+   */
+  private async dispatchQueue(): Promise<void> {
+    if (this.disposed) return;
+    const state = this.store.getState();
+    if (state.queuePaused) return;
+    const queue = state.queue ?? [];
+    if (queue.length === 0) {
+      this.queueSendNowId = null;
+      return;
+    }
+    if (state.status === "streaming" || state.status === "connecting") return;
+    if (state.initializing || state.replaying || this.historySyncBusy) return;
+    let head: QueuedPromptUi | null = null;
+    let next = queue;
+    if (this.queueSendNowId) {
+      const idx = queue.findIndex((q) => q.id === this.queueSendNowId);
+      if (idx >= 0) {
+        head = queue[idx]!;
+        next = queue.filter((_, i) => i !== idx);
+      }
+      this.queueSendNowId = null;
+    }
+    if (!head) {
+      const shifted = shiftQueuedUi(queue);
+      head = shifted.head;
+      next = shifted.queue;
+    }
+    if (!head) return;
+    const payload = this.queuePayloads.get(head.id);
+    this.queuePayloads.delete(head.id);
+    this.store.setQueue(next, false);
+    await this.sendPrompt(head.text, payload?.images, payload?.files, payload?.contexts);
+  }
+
+  /**
+   * M2 P0-3: a real turn failure halts auto-dispatch (roadmap: every queued
+   * message would hit the same broken endpoint — pause + warning, the queue
+   * strip offers 继续/清空). No-op when nothing is queued.
+   */
+  private pauseQueueOnError(): void {
+    const state = this.store.getState();
+    const queue = state.queue ?? [];
+    if (queue.length === 0) return;
+    this.store.setQueue(queue, true);
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t("本轮失败，队列已暂停（{0} 条待发送），可在队列条继续或清空", queue.length),
+    );
+  }
+
+  /**
+   * M2 P0-3: single clear point for the queue. Wired to `store.onStateReplaced`
+   * (covers newSession / restoreSession / restartCli / profile-switch — every
+   * wholesale state swap) and called explicitly by the delete-truncate path
+   * (roadmap: truncating the transcript clears the queue, first version).
+   */
+  private clearQueue(): void {
+    this.queuePayloads.clear();
+    this.queueSendNowId = null;
+    const state = this.store.getState();
+    if ((state.queue?.length ?? 0) === 0 && !state.queuePaused) return;
+    this.store.setQueue(clearQueueUi(), false);
+  }
+
+  /** M2 P0-3: webview queue-strip actions (edit/delete/move/sendNow/resume/clear). */
+  private handleQueueAction(msg: Extract<WebviewToHost, { type: "queueAction" }>): void {
+    const state = this.store.getState();
+    const queue = state.queue ?? [];
+    switch (msg.action) {
+      case "edit": {
+        const id = msg.id;
+        const idx = id ? queue.findIndex((q) => q.id === id) : -1;
+        if (!id || idx < 0) {
+          if (msg.requestId !== undefined) {
+            this.postToWebview({
+              type: "queueEdited",
+              requestId: msg.requestId,
+              text: "",
+              error: vscode.l10n.t("该队列消息已发送或清空"),
+            });
+          }
+          return;
+        }
+        const entry = queue[idx]!;
+        const payload = this.queuePayloads.get(id);
+        this.queuePayloads.delete(id);
+        this.store.setQueue(removeQueuedUi(queue, id), state.queuePaused ?? false);
+        this.postToWebview({
+          type: "queueEdited",
+          requestId: msg.requestId ?? 0,
+          text: entry.text,
+          images: payload?.images,
+          files: payload?.files,
+          contexts: payload?.contexts,
+        });
+        break;
+      }
+      case "delete": {
+        if (msg.id) this.queuePayloads.delete(msg.id);
+        this.store.setQueue(removeQueuedUi(queue, msg.id ?? ""), state.queuePaused ?? false);
+        break;
+      }
+      case "move": {
+        if (msg.id && msg.delta) {
+          this.store.setQueue(moveQueuedUi(queue, msg.id, msg.delta), state.queuePaused ?? false);
+        }
+        break;
+      }
+      case "sendNow": {
+        if (!msg.id || !queue.some((q) => q.id === msg.id)) return;
+        this.queueSendNowId = msg.id;
+        if (state.status === "streaming") {
+          // Steer: interrupt the current turn exactly like the Stop button
+          // (settle the blocking cards first, then cancel the session); the
+          // completion handler dispatches the marked entry first.
+          this.cancelAllApprovals(vscode.l10n.t("用户打断并立即发送"));
+          this.cancelAllPlanExits(vscode.l10n.t("用户打断并立即发送，计划审批已跳过"));
+          this.cancelAllPendingQuestions(vscode.l10n.t("用户打断并立即发送"));
+          this.cancelSeen = true;
+          this.clearPostRejectionWatchdog();
+          this.client?.cancel(state.sessionId ?? "");
+        } else {
+          void this.dispatchQueue();
+        }
+        break;
+      }
+      case "resume": {
+        this.store.setQueue(queue, false);
+        void this.dispatchQueue();
+        break;
+      }
+      case "clear": {
+        this.clearQueue();
+        break;
+      }
+    }
+  }
+
+  /** M2 P0-4: per-kind section title for the prompt prefix (host l10n). */
+  private contextSectionTitle(ctx: ContextRefUi): string {
+    switch (ctx.kind) {
+      case "code":
+        return vscode.l10n.t("关于 `{0}:{1}`：", ctx.label, ctx.detail);
+      case "folder":
+        return vscode.l10n.t("文件夹 `{0}` 的直接子项清单：", ctx.label);
+      case "problems":
+        return vscode.l10n.t("工作区诊断（{0}）：", ctx.detail);
+      case "git":
+        return vscode.l10n.t("工作区 Git 状态与变更：");
+      case "url":
+        return vscode.l10n.t("网页内容（{0}）：", ctx.label);
+    }
+  }
+
+  /**
+   * M2 P0-4: resolve an @mention context source into a card body. All four
+   * sources are host-side (zero CLI dependency, roadmap). git goes through
+   * async execFile (trap #18 — never sync); URL uses native node:http(s)
+   * (trap #2 — the extension host patches global fetch with a proxy agent
+   * that breaks on SOCKS/plain-host proxies).
+   */
+  private async resolveContext(requestId: number, kind: ContextKind, query: string): Promise<void> {
+    const reply = (label: string, detail: string, content: string, error?: string): void => {
+      this.postToWebview({ type: "contextResolved", requestId, kind, label, detail, content, error });
+    };
+    try {
+      if (kind === "folder") {
+        const rels = await this.loadWorkspaceFileRels();
+        const folder = normalizeFolderRel(query);
+        const body = buildFolderListing(rels, folder);
+        if (body.trim() === "") {
+          reply(query, "", "", vscode.l10n.t("该文件夹为空或不存在"));
+          return;
+        }
+        const count = body.split("\n").filter((l) => l.startsWith("- ")).length;
+        reply(folder === "" ? "./" : folder, vscode.l10n.t("{0} 个子项", count), body);
+        return;
+      }
+      if (kind === "problems") {
+        const SEVERITY_LABELS = [vscode.l10n.t("错误"), vscode.l10n.t("警告"), vscode.l10n.t("信息"), vscode.l10n.t("提示")];
+        const rows: { sev: number; path: string; line: number; message: string }[] = [];
+        for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+          const rel = vscode.workspace.asRelativePath(uri.fsPath, false).replace(/\\/g, "/");
+          for (const d of diags) {
+            rows.push({
+              sev: d.severity,
+              path: rel,
+              line: d.range.start.line + 1,
+              message: d.message.replace(/\s+/g, " ").trim(),
+            });
+          }
+        }
+        if (rows.length === 0) {
+          reply("", "", "", vscode.l10n.t("当前没有诊断信息"));
+          return;
+        }
+        rows.sort((a, b) => a.sev - b.sev || a.path.localeCompare(b.path) || a.line - b.line);
+        const capped = rows.slice(0, 200);
+        let body = formatDiagnosticsReport(
+          capped.map((r) => ({
+            path: r.path,
+            line: r.line,
+            severityLabel: SEVERITY_LABELS[r.sev] ?? vscode.l10n.t("其他"),
+            message: r.message,
+          })),
+        );
+        if (rows.length > capped.length) {
+          body += `\n${vscode.l10n.t("…（共 {0} 条，仅列出前 200 条）", rows.length)}`;
+        }
+        reply(vscode.l10n.t("工作区诊断"), vscode.l10n.t("{0} 条", rows.length), body);
+        return;
+      }
+      if (kind === "git") {
+        const cwd = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!cwd) {
+          reply("", "", "", vscode.l10n.t("没有打开的工作区"));
+          return;
+        }
+        const run = async (args: string[]): Promise<string> => {
+          const { stdout } = await execFileAsync("git", args, {
+            cwd,
+            timeout: GIT_CONTEXT_TIMEOUT_MS,
+            windowsHide: true,
+            maxBuffer: 4 * 1024 * 1024,
+            encoding: "utf8",
+          });
+          return stdout;
+        };
+        let status: string;
+        let diff: string;
+        try {
+          status = await run(["status", "--porcelain"]);
+          diff = await run(["diff"]);
+        } catch (error) {
+          reply("", "", "", vscode.l10n.t("git 查询失败（工作区可能不是 git 仓库）：{0}", errorMessage(error)));
+          return;
+        }
+        const truncated = diff.length > GIT_CONTEXT_MAX_CHARS;
+        const body = buildGitReport(status, truncateChars(diff, GIT_CONTEXT_MAX_CHARS), truncated);
+        reply(vscode.l10n.t("工作区 Git"), vscode.l10n.t("status + diff"), body);
+        return;
+      }
+      if (kind === "url") {
+        const raw = query.trim();
+        const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+        if (!isHttpUrl(withScheme)) {
+          reply(raw, "", "", vscode.l10n.t("仅支持 http/https 链接"));
+          return;
+        }
+        const body = await this.fetchUrlText(withScheme);
+        const host = new URL(withScheme).hostname;
+        reply(withScheme, host, body);
+        return;
+      }
+      reply("", "", "", vscode.l10n.t("不支持的上下文类型"));
+    } catch (error) {
+      reply("", "", "", errorMessage(error));
+    }
+  }
+
+  /**
+   * M2 P0-4: fetch a URL as text (native node:http(s), trap #2). Follows at
+   * most 3 redirects, caps the response at URL_MAX_RESPONSE_BYTES, extracts
+   * text from HTML (crude tag-stripping), truncates to the @url char limit.
+   */
+  private fetchUrlText(url: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        fn();
+      };
+      const attempt = (target: string, redirectsLeft: number): void => {
+        const mod = target.startsWith("https:") ? httpsGet : httpGet;
+        const req = mod(target, { headers: { "user-agent": "iFlow-Harness/1.x (context fetch)" } }, (res) => {
+          const status = res.statusCode ?? 0;
+          if (status >= 300 && status < 400 && res.headers.location && redirectsLeft > 0) {
+            res.resume();
+            let next: string;
+            try {
+              next = new URL(res.headers.location, target).toString();
+            } catch {
+              finish(() => reject(new Error(vscode.l10n.t("重定向地址无效"))));
+              return;
+            }
+            if (!isHttpUrl(next)) {
+              finish(() => reject(new Error(vscode.l10n.t("仅支持 http/https 链接"))));
+              return;
+            }
+            attempt(next, redirectsLeft - 1);
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            res.resume();
+            finish(() => reject(new Error(vscode.l10n.t("HTTP {0}", status))));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          res.on("data", (c: Buffer) => {
+            size += c.length;
+            if (size <= URL_MAX_RESPONSE_BYTES) chunks.push(c);
+          });
+          res.on("end", () => {
+            const raw = Buffer.concat(chunks).toString("utf8");
+            const isHtml = (res.headers["content-type"] ?? "").includes("html");
+            const text = isHtml ? extractHtmlText(raw) : raw;
+            finish(() => resolve(truncateChars(text, 64_000)));
+          });
+          res.on("error", (e) => finish(() => reject(e)));
+        });
+        req.setTimeout(URL_FETCH_TIMEOUT_MS, () => {
+          req.destroy();
+          finish(() => reject(new Error(vscode.l10n.t("抓取超时（{0}s）", URL_FETCH_TIMEOUT_MS / 1000))));
+        });
+        req.on("error", (e) => finish(() => reject(e)));
+      };
+      attempt(url, 3);
+    });
+  }
+
+  /**
    * Delete a user message and its whole tail. The CLI history is truncated
    * first (verified, rewritten, reloaded, model/mode restored) so the model
    * forgets the deleted turns; the host transcript commits last, so any failed
@@ -4406,6 +4864,9 @@ export class ChatPanel implements vscode.Disposable {
       }
       if (truncated) {
         if (!this.store.commitUserMessageDeletion(blockId)) throw new Error("message changed during deletion");
+        // M2 P0-3: the transcript was truncated — queued prompts belong to
+        // the deleted tail's future, drop them (roadmap: 截断即清空队列).
+        this.clearQueue();
       } else {
         // skip: the deleted tail never reached (or already left) the model
         // context — drop it from the transcript and say so plainly.
@@ -4431,6 +4892,8 @@ export class ChatPanel implements vscode.Disposable {
    * and persist it with the same empty-transcript rules as the full path. */
   private commitTranscriptOnlyDeletion(blockId: string): void {
     if (!this.store.commitUserMessageDeletion(blockId)) return;
+    // M2 P0-3: same truncate-clears-queue rule as the full delete path.
+    this.clearQueue();
     void this.persistActiveTranscript(true, true);
     void this.touchActiveSession();
   }

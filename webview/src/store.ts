@@ -300,6 +300,48 @@ function createMockHost(): HostApi {
   // mode/model switches must NOT clear it.
   let activeApproval: SessionState["pendingApproval"] = demoApproval;
   /**
+   * M2 P0-3 mock queue: entries typed while the demo turn streams. The mock
+   * settles the turn (approval answer OR a 6s fallback) and then dispatches
+   * the head, mirroring the host's queue lifecycle for browser iteration.
+   */
+  const mockQueue: Array<{ id: string; text: string; attachments: string[]; enqueuedAt: number }> = [];
+  let mockQueuePaused = false;
+  let mockTurnEndTimer: number | null = null;
+  let mockQueueSeq = 0;
+  /** Current demo turn status — the sendPrompt handler enqueues while it is
+   * "streaming" (mirrors the host's queue gate). */
+  let mockStatus: "streaming" | "idle" = "idle";
+  function broadcastDemo(status: "streaming" | "idle", stopReason: SessionState["stopReason"]): void {
+    mockStatus = status;
+    broadcast({
+      type: "snapshot",
+      state: {
+        blocks: [...demoBlocks],
+        status,
+        errorMessage: null,
+        stopReason,
+        ...demoMeta,
+        queue: [...mockQueue],
+        queuePaused: mockQueuePaused,
+        pendingApproval: activeApproval,
+        auth: authState,
+      },
+    });
+  }
+  function settleMockTurn(): void {
+    if (mockTurnEndTimer !== null) {
+      window.clearTimeout(mockTurnEndTimer);
+      mockTurnEndTimer = null;
+    }
+    if (mockQueuePaused || mockQueue.length === 0) {
+      broadcastDemo("idle", "end_turn");
+      return;
+    }
+    const head = mockQueue.shift()!;
+    broadcastDemo("idle", "end_turn");
+    window.setTimeout(() => sendPromptFlow(head.text), 120);
+  }
+  /**
    * Reproduces the real wire timeline: sendPrompt → streaming → permission
    * request arrives mid-flight → user answers → response continues → idle.
    */
@@ -319,34 +361,20 @@ function createMockHost(): HostApi {
         ...demoMeta.sessions.filter((s) => s.id !== current.id),
       ];
     }
-    broadcast({
-      type: "snapshot",
-      state: {
-        blocks: [...demoBlocks],
-        status: "streaming",
-        errorMessage: null,
-        stopReason: null,
-        ...demoMeta,
-        pendingApproval: null,
-        auth: authState,
-      },
-    });
+    broadcastDemo("streaming", null);
     // Mid-stream permission request (agent blocks waiting for the answer).
     window.setTimeout(() => {
       activeApproval = demoApproval;
-      broadcast({
-        type: "snapshot",
-        state: {
-          blocks: [...demoBlocks],
-          status: "streaming",
-          errorMessage: null,
-          stopReason: null,
-          ...demoMeta,
-          pendingApproval: activeApproval,
-          auth: authState,
-        },
-      });
+      broadcastDemo("streaming", null);
     }, 400);
+    // Fallback settle (M2): if the demo approval card is never answered, the
+    // turn still lands idle after 6s so the queue strip / steer flow stays
+    // exercisable in browser debug mode.
+    if (mockTurnEndTimer !== null) window.clearTimeout(mockTurnEndTimer);
+    mockTurnEndTimer = window.setTimeout(() => {
+      activeApproval = null;
+      settleMockTurn();
+    }, 6_000);
   }
   const demoMeta = {
     sessionId: "mock-session",
@@ -630,33 +658,12 @@ function createMockHost(): HostApi {
           });
         }
         // Answer received → agent keeps working (still streaming) until done.
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "streaming",
-            errorMessage: null,
-            stopReason: null,
-            ...demoMeta,
-            pendingApproval: null,
-            auth: authState,
-          },
-        });
+        broadcastDemo("streaming", null);
         window.setTimeout(() => {
           demoBlocks.push({ kind: "text", text: "工具执行完成（mock host）" });
           playCue("done"); // mirror the real host's turn-finished cue
-          broadcast({
-            type: "snapshot",
-            state: {
-              blocks: [...demoBlocks],
-              status: "idle",
-              errorMessage: null,
-              stopReason: "end_turn",
-              ...demoMeta,
-              pendingApproval: null,
-              auth: authState,
-            },
-          });
+          activeApproval = null;
+          settleMockTurn();
         }, 600);
         return;
       }
@@ -928,22 +935,12 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "cancel") {
-        // Mirror the real host: stop → idle with stopReason "cancelled", and
-        // the pending permission request is settled (cancelled) by the CLI.
+        // Mirror the real host: stop → idle with stopReason "cancelled", the
+        // pending permission request is settled, and the queue keeps
+        // steering (the host drains it on the cancelled path too).
         activeApproval = null;
         demoBlocks.push({ kind: "text", text: "*（已停止生成，mock）*" });
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "idle",
-            errorMessage: null,
-            stopReason: "cancelled",
-            ...demoMeta,
-            pendingApproval: activeApproval,
-            auth: authState,
-          },
-        });
+        settleMockTurn();
         return;
       }
       if (m.type === "enhancePrompt") {
@@ -970,16 +967,83 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "sendPrompt") {
-        // Mirror the real host: the code-context card is assembled into the
-        // user turn (fenced block ahead of the typed text).
-        const cc = m.codeContext;
-        const full = cc
-          ? [`关于 \`${cc.path}:${cc.range}\`：`, "", "```", cc.code, "```", m.text].filter(Boolean).join("\n\n")
-          : m.text;
+        // Mirror the real host: context cards are assembled into the user turn
+        // (titled fenced sections ahead of the typed text).
+        const ctxs = m.contexts ?? [];
+        const prefix = ctxs
+          .map((c) => [`关于 \`${c.label}\`（${c.detail}）：`, "", "```text", c.content, "```"].join("\n"))
+          .join("\n\n");
+        const full = [prefix, m.text].filter(Boolean).join("\n\n");
+        // M2 P0-3: a turn streaming → enqueue instead of send (mirrors host).
+        if (mockStatus === "streaming") {
+          mockQueue.push({
+            id: `mq-${++mockQueueSeq}`,
+            text: full,
+            attachments: (m.files ?? []).map((f) => f.name),
+            enqueuedAt: Date.now(),
+          });
+          broadcastDemo(mockStatus, null);
+          return;
+        }
         sendPromptFlow(
           full,
           m.images?.map((img) => `data:${img.mimeType};base64,${img.data}`),
         );
+        return;
+      }
+      if (m.type === "queueAction") {
+        // M2 P0-3 mock: mirror the host queue ops on the projection.
+        if (m.action === "clear") {
+          mockQueue.length = 0;
+          mockQueuePaused = false;
+        } else if (m.action === "resume") {
+          mockQueuePaused = false;
+        } else if (m.action === "delete" && m.id) {
+          const i = mockQueue.findIndex((q) => q.id === m.id);
+          if (i >= 0) mockQueue.splice(i, 1);
+        } else if (m.action === "move" && m.id && m.delta) {
+          const from = mockQueue.findIndex((q) => q.id === m.id);
+          const to = Math.min(mockQueue.length - 1, Math.max(0, from + m.delta));
+          if (from >= 0 && to !== from) {
+            const [mv] = mockQueue.splice(from, 1);
+            if (mv) mockQueue.splice(to, 0, mv);
+          }
+        } else if (m.action === "edit" && m.id) {
+          const i = mockQueue.findIndex((q) => q.id === m.id);
+          if (i >= 0) {
+            const [entry] = mockQueue.splice(i, 1);
+            if (entry) {
+              window.setTimeout(
+                () => window.dispatchEvent(new MessageEvent("message", { data: { type: "queueEdited", requestId: m.requestId ?? 0, text: entry.text } })),
+                30,
+              );
+            }
+          }
+        } else if (m.action === "sendNow" && m.id) {
+          const i = mockQueue.findIndex((q) => q.id === m.id);
+          if (i >= 0) {
+            const [entry] = mockQueue.splice(i, 1);
+            mockQueuePaused = false;
+            if (entry) window.setTimeout(() => sendPromptFlow(entry.text), 60);
+          }
+        }
+        broadcastDemo(mockStatus, null);
+        return;
+      }
+      if (m.type === "resolveContext") {
+        // M2 P0-4 mock: fabricate a plausible card body per kind.
+        const bodies: Record<string, { label: string; detail: string; content: string }> = {
+          folder: { label: m.query || "./", detail: "3 个子项", content: "- src/\n- package.json\n- README.md" },
+          problems: { label: "工作区诊断", detail: "2 条", content: "src/App.tsx:\n  [错误] L10: 未找到名称 foo" },
+          git: { label: "工作区 Git", detail: "status + diff", content: "状态（git status --porcelain）：\n  M src/App.tsx" },
+          url: { label: m.query, detail: "example.com", content: "示例网页正文（mock 抓取）" },
+        };
+        const b = bodies[m.kind] ?? { label: m.query, detail: "", content: "" };
+        window.setTimeout(
+          () => window.dispatchEvent(new MessageEvent("message", { data: { type: "contextResolved", requestId: m.requestId, kind: m.kind, ...b } })),
+          80,
+        );
+        return;
       }
     },
   };
@@ -1201,7 +1265,9 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "stagedFiles" ||
       msg.type === "filesPicked" ||
       msg.type === "mcpServers" ||
-      msg.type === "enhancedPrompt"
+      msg.type === "enhancedPrompt" ||
+      msg.type === "queueEdited" ||
+      msg.type === "contextResolved"
     ) {
       return;
     }
