@@ -176,26 +176,66 @@ export function buildGitReport(statusPorcelain: string, diff: string, truncated:
  * Crude HTML → text: drop script/style/head blocks, strip tags, decode the
  * handful of entities that actually show up, collapse blank lines. Not a
  * parser — a context-injection extractor (roadmap P0-4 "HTML 粗提取").
+ *
+ * SPA fallback (2026-10-10, probed on www.pandorastudio.cn): single-page
+ * apps ship an empty `<div id="app">` body — every visible word lives in
+ * JS-rendered DOM, so tag-stripping yields "" and the card silently loses
+ * its content (and assembleContextSections then drops the section). For
+ * those pages the head meta IS the only static text, so an empty body
+ * falls back to title + description/og:description.
  */
 export function extractHtmlText(html: string): string {
+  const body = stripHtmlBody(html);
+  return body === "" ? extractMetaFallback(html) : body;
+}
+
+/** Tag-strip + entity-decode the document body (head/script removed first). */
+function stripHtmlBody(html: string): string {
   let text = html
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<(script|style|noscript|svg|head)[\s\S]*?<\/\1>/gi, "")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|div|li|h[1-6]|tr|section|article)>/gi, "\n")
     .replace(/<[^>]+>/g, "");
-  text = text
+  text = decodeHtmlEntities(text);
+  return text
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter((l) => l !== "")
+    .join("\n");
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
-  return text
-    .split("\n")
-    .map((l) => l.replace(/\s+/g, " ").trim())
-    .filter((l) => l !== "")
-    .join("\n");
+}
+
+/** `<meta name|property="value" content="…">` in either attribute order. */
+function metaContent(html: string, attr: string, value: string): string {
+  for (const tag of html.match(/<meta\s[^>]*>/gi) ?? []) {
+    if (!new RegExp(`${attr}\\s*=\\s*["']${value}["']`, "i").test(tag)) continue;
+    const content = /content\s*=\s*["']([\s\S]*?)["']/i.exec(tag);
+    const valueText = content?.[1]?.trim();
+    if (valueText) return decodeHtmlEntities(valueText);
+  }
+  return "";
+}
+
+/** Last-resort context for pages with no static body (SPAs): the document
+ * title plus its description / og:description meta. "" when nothing usable. */
+export function extractMetaFallback(html: string): string {
+  const lines: string[] = [];
+  const title = decodeHtmlEntities(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").replace(/\s+/g, " ").trim();
+  const description =
+    metaContent(html, "name", "description") || metaContent(html, "property", "og:description");
+  if (title !== "") lines.push(`标题：${title}`);
+  if (description !== "") lines.push(`描述：${description}`);
+  return lines.join("\n");
 }
 
 /** Only http/https may be fetched (same discipline as openExternal). */
@@ -205,5 +245,21 @@ export function isHttpUrl(raw: string): boolean {
     return u.protocol === "http:" || u.protocol === "https:";
   } catch {
     return false;
+  }
+}
+
+/**
+ * Decode a fetched body per its Content-Type charset (panel's fetchUrlText
+ * used to hardcode utf8 — GBK/GB2312 Chinese pages came back mojibake).
+ * GB2312/GBK normalize to gb18030 (its superset, supported by Node's
+ * full-icu TextDecoder); an unknown/unsupported label falls back to utf-8.
+ */
+export function decodeResponseText(bytes: Uint8Array, contentType: string): string {
+  const label = /charset\s*=\s*"?([\w-]+)"?/i.exec(contentType)?.[1]?.toLowerCase() ?? "";
+  const encoding = label === "gb2312" || label === "gbk" ? "gb18030" : label || "utf-8";
+  try {
+    return new TextDecoder(encoding).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8").decode(bytes);
   }
 }

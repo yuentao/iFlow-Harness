@@ -11,6 +11,8 @@ import {
   formatGitStatus,
   buildGitReport,
   extractHtmlText,
+  extractMetaFallback,
+  decodeResponseText,
   isHttpUrl,
   type DiagnosticLineUi,
 } from "../shared/context-source.js";
@@ -123,6 +125,43 @@ describe("problems / git / url formatters (P0-4)", () => {
     const text = extractHtmlText(html);
     expect(text).toBe("Title\nHello & welcome\nLine 2");
     expect(text).not.toContain("evil");
+  });
+
+  // SPA regression (2026-10-10, probed on www.pandorastudio.cn): body is an
+  // empty mount point, tag-stripping yields "" — the card used to render
+  // blank and assembleContextSections silently dropped it at send time.
+  it("SPA body falls back to title + description meta", () => {
+    const html = `<html><head><title>上海潘哆呐科技 | Pandona Studio</title>` +
+      `<meta name="description" content="专注网站建设、SAAS平台 &amp; AI应用" />` +
+      `</head><body><div id="app"></div><noscript>需启用 JS</noscript></body></html>`;
+    expect(extractHtmlText(html)).toBe("标题：上海潘哆呐科技 | Pandona Studio\n描述：专注网站建设、SAAS平台 & AI应用");
+  });
+
+  it("SPA fallback uses og:description when name=description absent", () => {
+    const html = `<html><head><meta property="og:description" content="OG 描述" /></head><body><div id="app"></div></body></html>`;
+    expect(extractHtmlText(html)).toBe("描述：OG 描述");
+  });
+
+  it("SPA with no title/description extracts to empty (host replies error)", () => {
+    const html = `<html><head></head><body><div id="app"></div></body></html>`;
+    expect(extractHtmlText(html)).toBe("");
+    expect(extractMetaFallback(html)).toBe("");
+  });
+
+  it("metaContent matches either attribute order and decodes entities", () => {
+    const html = `<head><title>A &amp; B</title><meta content="先 content 后 name" name="description" /></head><body></body>`;
+    expect(extractMetaFallback(html)).toBe("标题：A & B\n描述：先 content 后 name");
+  });
+
+  it("decodeResponseText honors charset, normalizes GBK, falls back on junk", () => {
+    const bytes = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4]); // "中文" in GBK/GB18030
+    expect(decodeResponseText(bytes, "text/html; charset=GBK")).toBe("中文");
+    expect(decodeResponseText(bytes, 'text/html; charset="gb2312"')).toBe("中文");
+    // utf-8 bytes under an unknown/unsupported charset label fall back to utf-8
+    const utf8 = new TextEncoder().encode("héllo");
+    expect(decodeResponseText(utf8, "text/plain; charset=not-a-real-charset")).toBe("héllo");
+    // no charset header at all → utf-8
+    expect(decodeResponseText(utf8, "text/html")).toBe("héllo");
   });
 
   it("isHttpUrl allows only http/https", () => {

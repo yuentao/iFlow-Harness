@@ -61,6 +61,7 @@ import {
   assembleContextSections,
   buildFolderListing,
   buildGitReport,
+  decodeResponseText,
   extractHtmlText,
   formatDiagnosticsReport,
   isHttpUrl,
@@ -4712,6 +4713,12 @@ export class ChatPanel implements vscode.Disposable {
           return;
         }
         const body = await this.fetchUrlText(withScheme);
+        if (body.trim() === "") {
+          // An empty card would be silently dropped by assembleContextSections
+          // at send time — tell the user instead (SPA with no meta fallback).
+          reply(withScheme, "", "", vscode.l10n.t("未能提取到文本内容（页面可能依赖 JS 渲染且无标题/描述）"));
+          return;
+        }
         const host = new URL(withScheme).hostname;
         reply(withScheme, host, body);
         return;
@@ -4737,7 +4744,14 @@ export class ChatPanel implements vscode.Disposable {
       };
       const attempt = (target: string, redirectsLeft: number): void => {
         const mod = target.startsWith("https:") ? httpsGet : httpGet;
-        const req = mod(target, { headers: { "user-agent": "iFlow-Harness/1.x (context fetch)" } }, (res) => {
+        const req = mod(target, {
+          headers: {
+            "user-agent": "iFlow-Harness/1.x (context fetch)",
+            // identity: some servers gzip by default even unasked, and the
+            // raw bytes would decode to binary garbage below.
+            "accept-encoding": "identity",
+          },
+        }, (res) => {
           const status = res.statusCode ?? 0;
           if (status >= 300 && status < 400 && res.headers.location && redirectsLeft > 0) {
             res.resume();
@@ -4765,9 +4779,10 @@ export class ChatPanel implements vscode.Disposable {
           res.on("data", (c: Buffer) => {
             size += c.length;
             if (size <= URL_MAX_RESPONSE_BYTES) chunks.push(c);
+            else res.resume(); // keep draining; the cap truncates, the timeout must not fire
           });
           res.on("end", () => {
-            const raw = Buffer.concat(chunks).toString("utf8");
+            const raw = decodeResponseText(Buffer.concat(chunks), res.headers["content-type"] ?? "");
             const isHtml = (res.headers["content-type"] ?? "").includes("html");
             const text = isHtml ? extractHtmlText(raw) : raw;
             finish(() => resolve(truncateChars(text, 64_000)));

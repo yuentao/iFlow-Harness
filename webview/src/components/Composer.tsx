@@ -293,8 +293,12 @@ export function Composer() {
   const contextSeq = useRef(0);
   const stageSeq = useRef(0);
   const attachSeq = useRef(0);
-  /** M2 P0-4: resolveContext request id (contextResolved reply matches it). */
+  /** M2 P0-4: resolveContext request id generator + in-flight registry.
+   * The reply must match by id against the SET — matching only the latest
+   * id silently dropped every slower reply (URL fetches run up to 10s; a
+   * folder/problems card issued meanwhile killed the URL card entirely). */
   const contextResolveSeq = useRef(0);
+  const pendingContextResolves = useRef(new Set<number>());
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // Drag-and-drop file attachment: dropping files/photos from the OS or editor
@@ -529,9 +533,8 @@ export function Composer() {
         if (msg.contexts?.length) setContexts(msg.contexts);
         requestAnimationFrame(() => taRef.current?.focus());
       }
-      if (msg?.type === "contextResolved" && msg.requestId === contextResolveSeq.current) {
+      if (msg?.type === "contextResolved" && pendingContextResolves.current.delete(msg.requestId)) {
         // M2 P0-4: a resolved @folder/@problems/@git/@url source becomes a card.
-        contextResolveSeq.current += 1;
         if (msg.error) {
           showNote(msg.error);
           return;
@@ -825,7 +828,13 @@ export function Composer() {
     const raw = mentionQuery.trim().toLowerCase();
     if (raw.startsWith("url:")) {
       const target = mentionQuery.trim().slice(4).trim();
-      return [{ kind: "url" as const, keyword: "", icon: Globe, label: target || t("附加当前 URL 内容"), ready: true }];
+      return [{
+        kind: "url" as const,
+        keyword: "",
+        icon: Globe,
+        label: target || t("输入 URL 后回车附加"),
+        ready: target !== "",
+      }];
     }
     if (raw.startsWith("/")) return []; // folder mode: hits only
     return KEYWORD_SOURCES.filter((s) => s.keyword.startsWith(raw)).map((s) => ({
@@ -843,12 +852,20 @@ export function Composer() {
     setMentionIndex(0);
   }, [sourceActions.length, mentionHits.length]);
 
+  /** Mint a resolveContext request id and register it as in-flight (the
+   * reply listener consumes it whenever it lands, in any order). */
+  function nextContextRequestId(): number {
+    const id = ++contextResolveSeq.current;
+    pendingContextResolves.current.add(id);
+    return id;
+  }
+
   /** Attach a folder hit as a context card (M2 P0-4: folders are cards, not
    * inline @paths — the host builds the listing). */
   function resolveFolderContext(relPath: string): void {
     useChat.getState().send({
       type: "resolveContext",
-      requestId: ++contextResolveSeq.current,
+      requestId: nextContextRequestId(),
       kind: "folder",
       query: relPath,
     });
@@ -866,7 +883,7 @@ export function Composer() {
   function resolveKeywordContext(kind: "problems" | "git"): void {
     useChat.getState().send({
       type: "resolveContext",
-      requestId: ++contextResolveSeq.current,
+      requestId: nextContextRequestId(),
       kind,
       query: "",
     });
@@ -886,7 +903,7 @@ export function Composer() {
     if (!target) return;
     useChat.getState().send({
       type: "resolveContext",
-      requestId: ++contextResolveSeq.current,
+      requestId: nextContextRequestId(),
       kind: "url",
       query: target,
     });

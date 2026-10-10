@@ -6,7 +6,7 @@
 ## [1.3.0] - 2026-10-10
 
 - 新增 消息排队与打断发送（Steer）：生成中可继续输入，Enter 即入队（host 队列上限 10 条，当前轮结束后自动依序发送）；队列条支持编辑取回/删除/上下移/立即发送（打断当前轮）；本轮失败自动暂停队列并提示，可继续或清空；新会话/恢复/重启 CLI/profile 切换/删除截断转录时队列集中清空
-- 新增 @mention 上下文源扩展：`@/` 搜索文件夹、`@problems` 注入工作区诊断、`@git` 注入 status+diff（超时 5s/32KB 上限）、`@url:` 抓取网页正文（仅 http/https、2MB 响应上限、3 次重定向）；右键选区入口并入统一上下文卡列表（可移除、多卡并存），发送时 host 拼成带标题 fenced 段落前置到 prompt（永不 slash-leading，围栏自适应防正文逃逸）
+- 新增 @mention 上下文源扩展：`@/` 搜索文件夹、`@problems` 注入工作区诊断、`@git` 注入 status+diff（超时 5s/32KB 上限）、`@url:` 抓取网页正文（仅 http/https、2MB 响应上限、3 次重定向；SPA 空正文回退 title/description，按 charset 解码 GBK 等中文站，提取为空时明确提示而非静默空卡）；右键选区入口并入统一上下文卡列表（可移除、多卡并存），发送时 host 拼成带标题 fenced 段落前置到 prompt（永不 slash-leading，围栏自适应防正文逃逸）
 - 新增 Mermaid 图表渲染：` ```mermaid ` 围栏懒加载渲染（动态 import 不进首屏 bundle），securityLevel strict + 独立 SVG 净化白名单（inline style），解析失败回退高亮源码纯文本；深/浅主题跟随编辑器
 
 ## [1.2.9] - 2026-10-07

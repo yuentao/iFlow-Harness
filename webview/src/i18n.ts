@@ -153,7 +153,7 @@ const en: Record<string, string> = {
   "（见附带的上下文）": "(see attached context)",
   "工作区诊断（Problems）": "Workspace diagnostics (Problems)",
   "Git 状态与变更": "Git status & changes",
-  "附加当前 URL 内容": "Attach this URL's content",
+  "输入 URL 后回车附加": "Type a URL, then press Enter to attach",
   // M2 P0-3 message queue strip
   "队列 · {0} 条待发送": "Queue · {0} pending",
   "已暂停": "paused",

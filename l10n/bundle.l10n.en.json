@@ -130,5 +130,6 @@
   "不支持的上下文类型": "Unsupported context kind",
   "重定向地址无效": "Invalid redirect target",
   "HTTP {0}": "HTTP {0}",
-  "抓取超时（{0}s）": "Fetch timed out ({0}s)"
+  "抓取超时（{0}s）": "Fetch timed out ({0}s)",
+  "未能提取到文本内容（页面可能依赖 JS 渲染且无标题/描述）": "No text could be extracted (the page may rely on JS rendering and has no title/description)"
 }
