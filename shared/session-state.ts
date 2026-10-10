@@ -1241,6 +1241,9 @@ function clearTranscriptFields(state: SessionState): void {
   state.pendingQuestions = null;
   state.errorMessage = null;
   state.stopReason = null;
+  // M3 P0-1: checkpoints are transcript-scoped (anchored to user-block ids);
+  // a wholesale transcript swap invalidates the whole index projection.
+  state.checkpoints = [];
 }
 
 export function newSessionState(state: SessionState): SessionState {

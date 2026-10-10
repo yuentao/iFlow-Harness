@@ -256,6 +256,30 @@ export interface QueuedPromptUi {
   enqueuedAt: number;
 }
 
+/**
+ * M3 P0-1 — one turn-level workspace checkpoint (shadow-git snapshot taken
+ * before the turn's prompt). The UI projection rides the blockPatch tail
+ * channel like the queue; the shadow commits live on disk under
+ * `storageUri/checkpoints/<sessionId>/git`. Anchored to the stable id (P4) of
+ * the user block that opened the turn — the same key `deleteUserMessage`
+ * truncates by, so "restore to this turn" and "delete from this turn" line up.
+ */
+export interface CheckpointUi {
+  /** Stable id of the user block that opened the turn (restore anchor). */
+  userBlockId: string;
+  /** 0-based turn ordinal (order of user prompts in the session). */
+  turnIndex: number;
+  /** Shadow commit sha; null when the capture failed or was skipped (partial). */
+  sha: string | null;
+  /** Host-side capture time (epoch ms). */
+  createdAt: number;
+  /** True when the snapshot is incomplete (git unavailable / timed out /
+   * over the file-count cap) — file restore is unavailable for this turn. */
+  partial: boolean;
+  /** First line of the turn's prompt (≤30 chars) for the restore dialog. */
+  label: string;
+}
+
 /** M2 P0-4 — context-source kinds the composer can attach. */
 export type ContextKind = "code" | "folder" | "problems" | "git" | "url";
 
@@ -366,6 +390,13 @@ export interface SessionState {
    * shows 继续/清空 controls; dispatch resumes on `queueAction: resume`.
    */
   queuePaused?: boolean;
+  /**
+   * M3 P0-1 — turn-level workspace checkpoints (host-owned shadow-git index;
+   * the webview renders a "回滚到此轮" affordance on each anchored user
+   * bubble). Non-blocks metadata, so it rides the existing blockPatch tail
+   * channel. Absent = checkpointing disabled / nothing captured yet.
+   */
+  checkpoints?: CheckpointUi[];
 }
 
 export interface AuthUiState {
@@ -435,6 +466,7 @@ export function initialSessionState(): SessionState {
     usage: emptySessionUsage(),
     queue: [],
     queuePaused: false,
+    checkpoints: [],
   };
 }
 
@@ -634,6 +666,15 @@ export type WebviewToHost =
 | { type: "respondProfileSwitch"; id: string; keepSession: boolean | null }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
+  /**
+   * M3 P0-1 — restore the workspace / conversation to a turn checkpoint.
+   * `mode`: "files" = shadow-git checkout of that turn's snapshot (with the
+   * same unsaved-editor / disk-drift confirmations as revertTool);
+   * "conversation" = truncate the transcript at that user message (reuses the
+   * deleteUserMessage chain incl. the CLI chatHistory truncation);
+   * "both" = files first, then conversation.
+   */
+  | { type: "restoreCheckpoint"; userBlockId: string; mode: "files" | "conversation" | "both" }
   /** M5: open the tool's change in VSCode's native diff editor. */
   | { type: "openDiff"; toolCallId: string }
   /** M5: fuzzy-search workspace files for the @-mention popup. M2 P0-4:

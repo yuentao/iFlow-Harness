@@ -22,6 +22,8 @@
   "iflow.configuration.contextWindowOverrides.description": "模型上下文窗口覆写，每行一条 `模型名=token数`（如 `glm-4.6=200000`）。优先于内置表；未知模型回退保守默认值。",
   "iflow.configuration.costTable.description": "会话成本估算的单价表，每行一条 `模型名=输入价,输出价`（USD/百万 token，如 `deepseek-v3=0.27,1.1`）。",
   "iflow.configuration.autoTitle.description": "会话首轮完成后为其生成 AI 简短标题（每会话一次，一次轻量模型调用）。",
+  "iflow.configuration.checkpoints.description": "每轮对话前把工作区快照到独立的影子 git 仓库，从而支持按轮回退文件改动。绝不触碰用户自己的 .git，非 git 目录同样可用。",
+  "iflow.configuration.checkpointMaxFiles.description": "当会话工作区文件数超过该上限时关闭工作区快照（防止超大工作区拖慢面板）。",
   "participant.description": "向 iFlow 会话提问（纯文本通道，审批等富交互请在侧边栏面板）",
   "iflow.outputChannel.name": "心流·驭光",
   "iflow.statusbar.tooltip": "心流·驭光 — 点击打开聊天面板",

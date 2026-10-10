@@ -22,6 +22,7 @@ import {
   Loader2,
   ArrowDown,
   Bot,
+  History,
   Search,
   Trash2,
   Undo2,
@@ -34,6 +35,7 @@ import {
 } from "lucide-react";
 import type {
   Block,
+  CheckpointUi,
   SessionState,
   SubAgentBlock,
   ThoughtBlock,
@@ -410,15 +412,30 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   );
 }
 
-function UserMessage({ block, canDelete }: { block: Extract<Block, { kind: "user" }>; canDelete: boolean }) {
+function UserMessage({
+  block,
+  canDelete,
+  checkpoint,
+}: {
+  block: Extract<Block, { kind: "user" }>;
+  canDelete: boolean;
+  /** This turn's workspace checkpoint (M3 P0-1); absent → no rollback entry. */
+  checkpoint?: CheckpointUi;
+}) {
   const send = useChat((s) => s.send);
-  // Two-step delete (mirrors the session switcher): the first click arms the
-  // confirmation, the second actually deletes. Deleting truncates everything
-  // after this message too, so an accidental click must never eat a turn.
-  const [confirming, setConfirming] = useState(false);
+  // One shared armed state: the delete confirm and the rollback mode-picker
+  // expand in the SAME anchored row, so only one may be open at a time (two
+  // wide pills would otherwise overlap). "none" shows the bare icon buttons.
+  const [armed, setArmed] = useState<"none" | "delete" | "rollback">("none");
   useEffect(() => {
-    if (!canDelete) setConfirming(false);
+    if (!canDelete) setArmed("none");
   }, [canDelete]);
+  const canRollbackFiles = !!checkpoint && !checkpoint.partial;
+  const showRollback = canDelete && !!block.id && !!checkpoint;
+  const rollback = (mode: "files" | "conversation" | "both") => {
+    setArmed("none");
+    send({ type: "restoreCheckpoint", userBlockId: block.id!, mode });
+  };
   return (
     <div className="stream-in flex justify-end">
       {/* user-bubble scopes the attached-code-context styling (styles.css):
@@ -442,21 +459,70 @@ function UserMessage({ block, canDelete }: { block: Extract<Block, { kind: "user
         )}
         {/* subtle inner highlight so the bubble reads as a solid plane */}
         <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-inner" />
-        {canDelete && block.id && (
-          <InlineConfirm
-            armed={confirming}
-            onArm={() => setConfirming(true)}
-            onCancel={() => setConfirming(false)}
-            onConfirm={() => {
-              setConfirming(false);
-              send({ type: "deleteUserMessage", blockId: block.id! });
-            }}
-            confirmLabel={t("确认")}
-            cancelLabel={t("取消")}
-            title={t("删除该消息及其后所有内容")}
-            className="absolute -top-2.5 right-1 z-10"
-            triggerClassName="border border-border bg-panel/90 shadow-card backdrop-blur-md opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-          />
+        {(canDelete || showRollback) && (
+          <div className="absolute -top-2.5 right-1 z-10 flex items-center gap-1">
+            {showRollback && (
+              <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                {armed === "rollback" ? (
+                  <span className="stream-in inline-flex items-center gap-0.5 rounded-lg border border-border bg-card/95 px-1 py-0.5 shadow-card backdrop-blur-md">
+                    <button
+                      className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
+                      disabled={!canRollbackFiles}
+                      title={canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件")}
+                      onClick={() => rollback("files")}
+                    >
+                      {t("文件")}
+                    </button>
+                    <button
+                      className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-surface"
+                      title={t("仅删除该消息及其后所有对话")}
+                      onClick={() => rollback("conversation")}
+                    >
+                      {t("对话")}
+                    </button>
+                    <button
+                      className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      disabled={!canRollbackFiles}
+                      title={canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件")}
+                      onClick={() => rollback("both")}
+                    >
+                      {t("全部")}
+                    </button>
+                    <button
+                      className="press rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+                      title={t("取消")}
+                      onClick={() => setArmed("none")}
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    className="press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-all hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover:opacity-100"
+                    title={t("回滚到此轮之前")}
+                    onClick={() => setArmed("rollback")}
+                  >
+                    <History className="size-3" />
+                  </button>
+                )}
+              </div>
+            )}
+            {canDelete && block.id && (
+              <InlineConfirm
+                armed={armed === "delete"}
+                onArm={() => setArmed("delete")}
+                onCancel={() => setArmed("none")}
+                onConfirm={() => {
+                  setArmed("none");
+                  send({ type: "deleteUserMessage", blockId: block.id! });
+                }}
+                confirmLabel={t("确认")}
+                cancelLabel={t("取消")}
+                title={t("删除该消息及其后所有内容")}
+                triggerClassName="border border-border bg-panel/90 shadow-card backdrop-blur-md opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              />
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -508,6 +574,7 @@ const BlockView = memo(function BlockView({
   canCopy,
   canRegenerate,
   canDelete,
+  checkpoint,
   onRegenerate,
 }: {
   block: Block;
@@ -520,11 +587,13 @@ const BlockView = memo(function BlockView({
   /** Deleting is only offered on a settled transcript (not replaying /
    * initializing / streaming) — mirrors the host-side gate. */
   canDelete: boolean;
+  /** This turn's checkpoint (user blocks only, M3 P0-1). */
+  checkpoint?: CheckpointUi;
   onRegenerate: () => void;
 }) {
   switch (block.kind) {
     case "user":
-      return <UserMessage block={block} canDelete={canDelete} />;
+      return <UserMessage block={block} canDelete={canDelete} checkpoint={checkpoint} />;
     case "text":
       // Whitespace-only text blocks (streaming separators like "\n\n" between
       // tool calls) render as an orphaned avatar on an empty row — Markdown
@@ -631,6 +700,13 @@ function MessageListInner({ state }: { state: SessionState }) {
     () => (focusMode ? state.blocks.filter((b) => b.kind === "user" || (b.kind === "text" && !b.system)) : state.blocks),
     [state.blocks, focusMode],
   );
+  // M3 P0-1: index the turn checkpoints by their anchor user-block id so each
+  // user bubble can look up its own rollback entry in O(1).
+  const checkpointByBlockId = useMemo(() => {
+    const map = new Map<string, CheckpointUi>();
+    for (const c of state.checkpoints ?? []) map.set(c.userBlockId, c);
+    return map;
+  }, [state.checkpoints]);
   const total = visibleBlocks.length;
   const start = Math.min(windowStart, total);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -914,6 +990,7 @@ function MessageListInner({ state }: { state: SessionState }) {
         turnActive={turnActive}
         canCopy={!state.replaying}
         canRegenerate={canRegenerate && i === total - 1}
+        checkpoint={block.kind === "user" && block.id ? checkpointByBlockId.get(block.id) : undefined}
         canDelete={
           !state.replaying &&
           !state.initializing &&

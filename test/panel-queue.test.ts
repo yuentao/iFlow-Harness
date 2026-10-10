@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import { setConfigOverrides } from "./vscode-stub.js";
 import { QUEUE_MAX } from "../shared/queue.js";
 import type { QueuedPromptUi, SessionState } from "../shared/messages.js";
 
@@ -109,6 +110,10 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
   let toasts: { level: string; message: string }[];
 
   beforeEach(async () => {
+    // sendPrompt awaits the M3 workspace snapshot (a real git subprocess); this
+    // file tests queue wiring only, so disable checkpoints to keep the prompt
+    // landing within a single flush().
+    setConfigOverrides({ checkpoints: false });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-queue-storage-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;

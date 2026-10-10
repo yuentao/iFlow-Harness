@@ -59,6 +59,15 @@ const en: Record<string, string> = {
   "取消": "Cancel",
   // user message delete
   "删除该消息及其后所有内容": "Delete this message and everything after it",
+  // turn-level checkpoint rollback (M3 P0-1)
+  "回滚到此轮之前": "Roll back to before this turn",
+  "文件": "Files",
+  "对话": "Chat",
+  "全部": "Both",
+  "仅回滚工作区文件到本轮之前": "Restore workspace files to before this turn",
+  "仅删除该消息及其后所有对话": "Delete this message and everything after it",
+  "回滚文件并删除该消息及其后所有对话": "Restore files and delete this message and everything after it",
+  "该轮快照不完整，无法恢复文件": "This turn's snapshot is incomplete; files cannot be restored",
   // tool cards / message list
   "已完成": "Completed",
   "失败": "Failed",

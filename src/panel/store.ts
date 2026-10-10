@@ -130,9 +130,11 @@ export class SessionStore {
     this.flush();
   }
 
-  userPrompt(text: string, images?: string[], files?: { name: string; path: string }[]): void {
-    this.noteMutationIndex(beginUserPrompt(this.state, text, images, files));
+  userPrompt(text: string, images?: string[], files?: { name: string; path: string }[]): number {
+    const index = beginUserPrompt(this.state, text, images, files);
+    this.noteMutationIndex(index);
     this.flush();
+    return index;
   }
 
   sessionStarted(meta: { sessionId: string; models?: SessionState["models"]; currentModelId?: string | null; commands?: SessionState["commands"]; modes?: SessionState["modes"] }): void {
@@ -191,6 +193,16 @@ export class SessionStore {
   setQueue(queue: SessionState["queue"], paused: boolean): void {
     this.state.queue = queue;
     this.state.queuePaused = paused;
+    this.flush();
+  }
+
+  /**
+   * M3 P0-1: write the checkpoint index projection. Like the queue it is
+   * non-blocks metadata riding the blockPatch tail channel; the shadow
+   * commits themselves stay on disk (panel's CheckpointManager).
+   */
+  setCheckpoints(checkpoints: SessionState["checkpoints"]): void {
+    this.state.checkpoints = checkpoints;
     this.flush();
   }
 

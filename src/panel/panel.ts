@@ -48,7 +48,7 @@ import type {
   ExitPlanModeRequest,
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, ContextKind, ContextRefUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
 import {
   clearQueue as clearQueueUi,
   enqueuePrompt as enqueuePromptUi,
@@ -57,6 +57,15 @@ import {
   shiftQueued as shiftQueuedUi,
   QUEUE_MAX,
 } from "../../shared/queue.js";
+import {
+  checkpointLabelFromText,
+  parseCheckpointIndex,
+  pruneCheckpointsForBlocks,
+  reanchorCheckpoints,
+  serializeCheckpointIndex,
+  upsertCheckpoint,
+} from "../../shared/checkpoints.js";
+import { CheckpointManager } from "./checkpoints.js";
 import {
   assembleContextSections,
   buildFolderListing,
@@ -444,6 +453,21 @@ export class ChatPanel implements vscode.Disposable {
    * handler dispatches THAT entry first (bypassing FIFO order) then clears it.
    */
   private queueSendNowId: string | null = null;
+
+  /**
+   * M3 P0-1: shadow-git snapshotter (one shadow repo per session under
+   * `storageUri/checkpoints/`). Lazily consulted per turn; disabled per
+   * session when git is missing / init failed / the workspace is too big.
+   */
+  private readonly checkpoints = new CheckpointManager({
+    log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
+  });
+  /** Sessions whose disable-reason toast was already shown (avoid repeats). */
+  private readonly checkpointWarnedSessions = new Set<string>();
+  /** Persist chain for checkpoint index files (same discipline as transcripts). */
+  private checkpointPersistChain: Promise<void> = Promise.resolve();
+  /** Index loaded before a restore's id re-mint; consumed by finalizeCheckpointIndex. */
+  private pendingCheckpointIndex: { sessionId: string; checkpoints: CheckpointUi[] } | null = null;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -980,6 +1004,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
+        break;
+      case "restoreCheckpoint":
+        await this.restoreCheckpoint(msg.userBlockId, msg.mode);
         break;
       case "openDiff":
         await this.openToolDiff(msg.toolCallId);
@@ -3111,6 +3138,8 @@ export class ChatPanel implements vscode.Disposable {
     try {
       await this.forgetSession(sessionId);
       await this.clearTranscript(sessionId);
+      // M3 P0-1: drop the session's shadow repo + checkpoint index too.
+      await this.removeCheckpointsForSession(sessionId);
       // A7: drop the session's staged-attachment dir too — the transcript that
       // referenced those paths is gone, so the temp copies are pure residue.
       await rm(attachmentSessionDir(sessionId), { recursive: true, force: true }).catch((error) => {
@@ -3233,8 +3262,29 @@ export class ChatPanel implements vscode.Disposable {
       // original ids stay untouched in the persisted file (lossless).
       // backfillBlockIds (inside loadPersistedTranscript) already seeded the
       // counter past the originals, so the re-mints are collision-free.
+      // M3 P0-1 phase 1: the persisted checkpoint index anchors to the
+      // ORIGINAL ids (the transcript file is lossless), so read it + reopen
+      // the shadow repo BEFORE the re-mint happens.
+      await this.loadCheckpointIndex(loadedId);
+      const preRemintUserIds = restored.blocks
+        .filter((b) => b.kind === "user" && b.id)
+        .map((b) => b.id as string);
       reassignBlockIds(restored.blocks);
       this.store.replaceTranscript(restored.blocks);
+      // M3 P0-1 phase 2: the re-mint changed every user id in place (same
+      // order, same array) — re-anchor the loaded index to the live ids.
+      const postRemintUserIds = restored.blocks
+        .filter((b) => b.kind === "user" && b.id)
+        .map((b) => b.id as string);
+      if (preRemintUserIds.length === postRemintUserIds.length) {
+        const remap = new Map<string, string>();
+        for (let i = 0; i < preRemintUserIds.length; i++) {
+          const from = preRemintUserIds[i];
+          const to = postRemintUserIds[i];
+          if (from && to) remap.set(from, to);
+        }
+        this.finalizeCheckpointIndex(remap);
+      }
 
       // Model list: same live-endpoint-only source as a fresh session,
       // otherwise the model dropdown would vanish after a restore. Fetched
@@ -3791,6 +3841,17 @@ export class ChatPanel implements vscode.Disposable {
     return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "transcripts");
   }
 
+  // --- Turn-level checkpoints (M3 P0-1) ------------------------------------------
+
+  /** Root of the shadow-git stores: `storageUri/checkpoints/<sessionId>/git`. */
+  private checkpointRoot(): string {
+    return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "checkpoints");
+  }
+
+  private checkpointIndexPath(sessionId: string): string {
+    return path.join(this.checkpointRoot(), CheckpointManager.safeSessionId(sessionId), "index.json");
+  }
+
   private ownTranscriptFileName(sessionId: string): string {
     // Session ids come from the CLI and webview messages — restrict to a
     // filesystem-safe charset so a hostile id cannot escape the directory.
@@ -3888,6 +3949,19 @@ export class ChatPanel implements vscode.Disposable {
       if (name.endsWith(".json") && !keptFileNames.has(name)) {
         await rm(path.join(this.transcriptDir(), name), { force: true });
       }
+    }
+    // M3 P0-1: same garbage collection for shadow-repo dirs — a checkpoint
+    // store whose session left the list is pure residue (dirs are keyed by
+    // the same sanitized id as the transcript files, minus the extension).
+    const keptDirNames = new Set(kept.map((s) => CheckpointManager.safeSessionId(s.id)));
+    try {
+      for (const name of await readdir(this.checkpointRoot())) {
+        if (!keptDirNames.has(name)) {
+          await rm(path.join(this.checkpointRoot(), name), { recursive: true, force: true });
+        }
+      }
+    } catch {
+      // ENOENT: no session ever captured a checkpoint — nothing to prune.
     }
     const activeId = this.store.getState().activeSessionId
       ?? (await this.context.workspaceState.get<string | null>(ACTIVE_SESSION_KEY, null))
@@ -4283,6 +4357,29 @@ export class ChatPanel implements vscode.Disposable {
       );
       void this.labelSessionWithPrompt(fullText);
       void this.persistActiveTranscript(); // user turn lands even on a crash
+      // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
+      // file changes are revertible. Awaited — a parallel capture would race
+      // the agent's writes and bake them into the "before" snapshot. Best
+      // effort: a partial capture never blocks the prompt.
+      {
+        const afterUser = this.store.getState().blocks;
+        const userIndex = afterUser.length - 1;
+        const userBlockId = afterUser[userIndex]?.id;
+        const sha = await this.captureWorkspaceSnapshot(promptSessionId, fullText);
+        if (userBlockId) {
+          const turnIndex = afterUser
+            .slice(0, userIndex + 1)
+            .filter((b) => b.kind === "user").length - 1;
+          this.recordCheckpoint(promptSessionId, {
+            userBlockId,
+            turnIndex,
+            sha,
+            createdAt: Date.now(),
+            partial: sha === null,
+            label: checkpointLabelFromText(fullText),
+          });
+        }
+      }
       const prompt: ContentBlock[] = [{ type: "text", text: promptText }];
       for (const img of images ?? []) {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
@@ -4882,6 +4979,8 @@ export class ChatPanel implements vscode.Disposable {
         // M2 P0-3: the transcript was truncated — queued prompts belong to
         // the deleted tail's future, drop them (roadmap: 截断即清空队列).
         this.clearQueue();
+        // M3 P0-1: the deleted turns' checkpoints anchor to gone user blocks.
+        this.pruneCheckpointIndexAfterTruncation();
       } else {
         // skip: the deleted tail never reached (or already left) the model
         // context — drop it from the transcript and say so plainly.
@@ -4909,6 +5008,8 @@ export class ChatPanel implements vscode.Disposable {
     if (!this.store.commitUserMessageDeletion(blockId)) return;
     // M2 P0-3: same truncate-clears-queue rule as the full delete path.
     this.clearQueue();
+    // M3 P0-1: same checkpoint prune as the full delete path.
+    this.pruneCheckpointIndexAfterTruncation();
     void this.persistActiveTranscript(true, true);
     void this.touchActiveSession();
   }
@@ -5188,6 +5289,212 @@ export class ChatPanel implements vscode.Disposable {
     if (!id || state.blocks.length === 0) return;
     const label = state.sessions.find((s) => s.id === id)?.label ?? DEFAULT_SESSION_LABEL;
     this.enqueueTranscriptWrite(id, () => this.serializeTranscript(label, state.blocks));
+  }
+
+  // --- Turn-level checkpoints (M3 P0-1) ------------------------------------------
+
+  private checkpointSettingEnabled(): boolean {
+    return vscode.workspace.getConfiguration("iflow").get<boolean>("checkpoints", true);
+  }
+
+  /** Work tree the shadow repo mirrors = the session cwd (pitfall #8). */
+  private checkpointCwd(): string {
+    return this.sessionCwd ?? this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
+  }
+
+  /**
+   * Snapshot the workspace for the turn about to start. Awaited by sendPrompt
+   * BEFORE the CLI prompt is issued — a parallel capture would race the
+   * agent's own writes and bake them into the "before" snapshot. Returns the
+   * commit sha (null = partial: git missing / init failed / timed out / over
+   * the file cap); the reason is toasted once per session.
+   */
+  private async captureWorkspaceSnapshot(sessionId: string, text: string): Promise<string | null> {
+    if (!this.checkpointSettingEnabled()) return null;
+    this.checkpoints.setMaxFiles(
+      vscode.workspace.getConfiguration("iflow").get<number>("checkpointMaxFiles", 50_000),
+    );
+    const reason = await this.checkpoints.ensureReady(sessionId, this.checkpointRoot(), this.checkpointCwd());
+    if (reason) {
+      if (!this.checkpointWarnedSessions.has(sessionId)) {
+        this.checkpointWarnedSessions.add(sessionId);
+        this.store.sendToast("warning", vscode.l10n.t("本轮起工作区快照不可用（{0}），回滚将只处理对话。", reason));
+      }
+      return null;
+    }
+    const label = checkpointLabelFromText(text);
+    return this.checkpoints.captureTurn(sessionId, label || vscode.l10n.t("轮次快照"));
+  }
+
+  /** Record one turn's checkpoint into the store projection + index file. */
+  private recordCheckpoint(sessionId: string, entry: CheckpointUi): void {
+    if (this.disposed) return;
+    const state = this.store.getState();
+    // Session switched (or the panel moved on) while the capture was running.
+    if ((state.activeSessionId ?? state.sessionId) !== sessionId) return;
+    const next = upsertCheckpoint(state.checkpoints ?? [], entry);
+    this.store.setCheckpoints(next);
+    void this.persistCheckpointIndex(sessionId, next);
+  }
+
+  /** Atomic index write (temp + rename), serialized on its own chain. */
+  private persistCheckpointIndex(sessionId: string, checkpoints: readonly CheckpointUi[]): Promise<void> {
+    const run = this.checkpointPersistChain
+      .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
+      .then(async () => {
+        const target = this.checkpointIndexPath(sessionId);
+        await mkdir(path.dirname(target), { recursive: true });
+        const tmp = `${target}.tmp`;
+        await writeFile(tmp, serializeCheckpointIndex(checkpoints), "utf8");
+        await rename(tmp, target);
+      });
+    this.checkpointPersistChain = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Phase 1 of the restore wiring: read the persisted index (whose anchors
+   * are the ORIGINAL block ids — the transcript file is lossless) and reopen
+   * the shadow repo so file restores work. Must run BEFORE
+   * `reassignBlockIds` re-mints the ids; the raw list is kept for
+   * {@link finalizeCheckpointIndex}. Silent no-op when the session predates
+   * the feature.
+   */
+  private async loadCheckpointIndex(sessionId: string): Promise<void> {
+    this.pendingCheckpointIndex = null;
+    let raw: string;
+    try {
+      raw = await readFile(this.checkpointIndexPath(sessionId), "utf8");
+    } catch {
+      return; // no index — nothing to restore
+    }
+    const parsed = parseCheckpointIndex(raw);
+    if (!parsed || parsed.length === 0) return;
+    if (this.checkpointSettingEnabled()) {
+      const lastSha = [...parsed].reverse().find((c) => c.sha)?.sha ?? null;
+      await this.checkpoints.reopen(sessionId, this.checkpointRoot(), this.checkpointCwd(), lastSha);
+    }
+    this.pendingCheckpointIndex = { sessionId, checkpoints: parsed };
+  }
+
+  /**
+   * Phase 2: after `replaceTranscript` re-minted the block ids, re-anchor the
+   * loaded index to the live ids (old→new map captured by the caller around
+   * the re-mint) and push the projection. No-op when phase 1 found nothing
+   * or the session changed meanwhile.
+   */
+  private finalizeCheckpointIndex(remap: ReadonlyMap<string, string>): void {
+    const pending = this.pendingCheckpointIndex;
+    this.pendingCheckpointIndex = null;
+    if (!pending) return;
+    const state = this.store.getState();
+    if (state.activeSessionId !== pending.sessionId) return;
+    const reanchored = reanchorCheckpoints(pending.checkpoints, remap);
+    if (reanchored.length > 0) this.store.setCheckpoints(reanchored);
+  }
+
+  /** Drop checkpoints whose anchor user block no longer exists (truncation). */
+  private pruneCheckpointIndexAfterTruncation(): void {
+    const state = this.store.getState();
+    const sessionId = state.activeSessionId ?? state.sessionId;
+    const list = state.checkpoints ?? [];
+    if (!sessionId || list.length === 0) return;
+    const pruned = pruneCheckpointsForBlocks(list, state.blocks);
+    if (pruned.length === list.length) return;
+    this.store.setCheckpoints(pruned);
+    void this.persistCheckpointIndex(sessionId, pruned);
+  }
+
+  /** Delete a session's shadow repo (session deleted / pruned as dead). */
+  private async removeCheckpointsForSession(sessionId: string): Promise<void> {
+    this.checkpointWarnedSessions.delete(sessionId);
+    await this.checkpoints.removeSession(sessionId, this.checkpointRoot());
+  }
+
+  /**
+   * M3 P0-1 restore entry point (three modes, roadmap §1 P0-1): "files" =
+   * shadow-git checkout of the turn's pre-turn snapshot; "conversation" =
+   * truncate the transcript at that user message (reuses the deleteUserMessage
+   * chain incl. CLI chatHistory truncation); "both" = files first, then
+   * conversation. Gates mirror deleteUserMessage (no mid-turn restores).
+   */
+  private async restoreCheckpoint(
+    userBlockId: string,
+    mode: "files" | "conversation" | "both",
+  ): Promise<void> {
+    if (this.disposed || this.historySyncBusy) return;
+    const state = this.store.getState();
+    if (
+      state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
+      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+    ) {
+      this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再回滚"));
+      return;
+    }
+    const sessionId = state.activeSessionId ?? state.sessionId;
+    if (!sessionId) return;
+    const entry = (state.checkpoints ?? []).find((c) => c.userBlockId === userBlockId);
+    if (!entry) {
+      this.store.appendNotice(vscode.l10n.t("该轮没有可用的工作区快照"));
+      return;
+    }
+    if (mode === "files" || mode === "both") {
+      if (!entry.sha) {
+        this.store.appendNotice(vscode.l10n.t("该轮快照不完整，无法恢复文件（可选择仅回滚对话）"));
+        return;
+      }
+      const restored = await this.confirmAndRestoreCheckpointFiles(sessionId, entry);
+      if (!restored) return;
+    }
+    if (mode === "conversation" || mode === "both") {
+      // Reuses the full delete chain: transcript truncation + CLI history
+      // truncation + reload, plus the checkpoint-index prune inside it.
+      await this.deleteUserMessage(userBlockId);
+    }
+  }
+
+  /**
+   * Confirm + perform the workspace checkout. Two guard rails mirror
+   * revertToolDiff: dirty editors (unsaved buffers) and an explicit modal
+   * (this is a whole-workspace overwrite). Returns false when the user
+   * cancels or the checkout fails.
+   */
+  private async confirmAndRestoreCheckpointFiles(sessionId: string, entry: CheckpointUi): Promise<boolean> {
+    const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && d.uri.scheme === "file");
+    if (dirty.length > 0) {
+      const pick = await vscode.window.showWarningMessage(
+        vscode.l10n.t("有 {0} 个文件在编辑器中有未保存的修改。回滚将从磁盘重新加载并丢弃这些修改。", dirty.length),
+        { modal: true },
+        vscode.l10n.t("丢弃并回滚"),
+      );
+      if (pick !== vscode.l10n.t("丢弃并回滚")) return false;
+    }
+    const title = entry.label || vscode.l10n.t("该轮");
+    const pick = await vscode.window.showWarningMessage(
+      vscode.l10n.t("将工作区文件回滚到「{0}」之前的状态？已跟踪文件会被覆盖；该快照之后新建的文件会保留。", title),
+      { modal: true },
+      vscode.l10n.t("回滚文件"),
+    );
+    if (pick !== vscode.l10n.t("回滚文件")) return false;
+    try {
+      await this.checkpoints.restoreFiles(sessionId, entry.sha!);
+    } catch (error) {
+      void vscode.window.showErrorMessage(vscode.l10n.t("工作区回滚失败: {0}", errorMessage(error)));
+      return false;
+    }
+    // Reload the editors we just overwrote from disk so the restored content
+    // is what the user sees (same trick as revertToolDiff).
+    for (const doc of dirty) {
+      try {
+        await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true });
+        await vscode.commands.executeCommand("workbench.action.files.revert");
+      } catch {
+        // best-effort reload
+      }
+    }
+    void vscode.window.showInformationMessage(vscode.l10n.t("工作区文件已回滚到该轮之前的状态。"));
+    return true;
   }
 
   /**

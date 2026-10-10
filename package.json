@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "type": "module",
   "publisher": "yuantao",
   "author": {
@@ -206,6 +206,17 @@
           "type": "boolean",
           "default": true,
           "description": "%iflow.configuration.autoTitle.description%"
+        },
+        "iflow.checkpoints": {
+          "type": "boolean",
+          "default": true,
+          "description": "%iflow.configuration.checkpoints.description%"
+        },
+        "iflow.checkpointMaxFiles": {
+          "type": "number",
+          "default": 50000,
+          "minimum": 1,
+          "description": "%iflow.configuration.checkpointMaxFiles.description%"
         }
       }
     }

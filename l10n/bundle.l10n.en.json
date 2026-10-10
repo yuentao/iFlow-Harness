@@ -131,5 +131,16 @@
   "重定向地址无效": "Invalid redirect target",
   "HTTP {0}": "HTTP {0}",
   "抓取超时（{0}s）": "Fetch timed out ({0}s)",
-  "未能提取到文本内容（页面可能依赖 JS 渲染且无标题/描述）": "No text could be extracted (the page may rely on JS rendering and has no title/description)"
+  "未能提取到文本内容（页面可能依赖 JS 渲染且无标题/描述）": "No text could be extracted (the page may rely on JS rendering and has no title/description)",
+  "轮次快照": "Turn snapshot",
+  "本轮起工作区快照不可用（{0}），回滚将只处理对话。": "Workspace snapshots are unavailable from this turn on ({0}); rollback will only affect the conversation.",
+  "正在生成、连接或等待确认，请先完成当前操作后再回滚": "Generating, connecting, or awaiting a confirmation — finish the current operation before rolling back",
+  "该轮没有可用的工作区快照": "This turn has no workspace snapshot",
+  "该轮快照不完整，无法恢复文件（可选择仅回滚对话）": "This turn's snapshot is incomplete; files cannot be restored (you can roll back the conversation only)",
+  "有 {0} 个文件在编辑器中有未保存的修改。回滚将从磁盘重新加载并丢弃这些修改。": "{0} file(s) have unsaved changes in the editor. Rolling back reloads them from disk and discards those changes.",
+  "丢弃并回滚": "Discard and roll back",
+  "将工作区文件回滚到「{0}」之前的状态？已跟踪文件会被覆盖；该快照之后新建的文件会保留。": "Roll workspace files back to the state before “{0}”? Tracked files will be overwritten; files created after this snapshot are kept.",
+  "回滚文件": "Roll back files",
+  "工作区回滚失败: {0}": "Workspace rollback failed: {0}",
+  "工作区文件已回滚到该轮之前的状态。": "Workspace files were rolled back to the state before this turn."
 }
