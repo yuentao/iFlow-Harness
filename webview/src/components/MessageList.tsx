@@ -1,5 +1,6 @@
 import {
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -430,11 +431,17 @@ function UserMessage({
   block,
   canDelete,
   checkpoint,
+  onEditingChange,
 }: {
   block: Extract<Block, { kind: "user" }>;
   canDelete: boolean;
   /** This turn's workspace checkpoint (M3 P0-1); absent → no rollback entry. */
   checkpoint?: CheckpointUi;
+  /** Reports inline-editor open/close so the parent can hide the floating
+   * "jump to latest" pill (z-20, bottom-right) while editing — a near-bottom
+   * bubble's editor action row would otherwise sit under the pill. Stable
+   * parent callback (BlockView is memo'd); identifies THIS bubble. */
+  onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   const send = useChat((s) => s.send);
   // One shared armed state: the delete confirm, the rollback mode-picker and
@@ -450,6 +457,13 @@ function UserMessage({
       setDraft(null);
     }
   }, [canDelete]);
+  const editing = draft !== null;
+  const editingBlockId = block.id;
+  useEffect(() => {
+    if (!editingBlockId) return;
+    onEditingChange?.(editingBlockId, editing);
+    return () => onEditingChange?.(editingBlockId, false);
+  }, [editingBlockId, editing, onEditingChange]);
   const canRollbackFiles = !!checkpoint && !checkpoint.partial;
   const showRollback = canDelete && !!block.id && !!checkpoint;
   const rollback = (mode: "files" | "conversation" | "both") => {
@@ -666,6 +680,7 @@ const BlockView = memo(function BlockView({
   canDelete,
   checkpoint,
   onRegenerate,
+  onEditingChange,
 }: {
   block: Block;
   isLatest: boolean;
@@ -680,10 +695,12 @@ const BlockView = memo(function BlockView({
   /** This turn's checkpoint (user blocks only, M3 P0-1). */
   checkpoint?: CheckpointUi;
   onRegenerate: () => void;
+  /** M4 P1-9: forwarded to UserMessage's inline editor (see there). */
+  onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   switch (block.kind) {
     case "user":
-      return <UserMessage block={block} canDelete={canDelete} checkpoint={checkpoint} />;
+      return <UserMessage block={block} canDelete={canDelete} checkpoint={checkpoint} onEditingChange={onEditingChange} />;
     case "text":
       // Whitespace-only text blocks (streaming separators like "\n\n" between
       // tool calls) render as an orphaned avatar on an empty row — Markdown
@@ -867,6 +884,16 @@ function MessageListInner({ state }: { state: SessionState }) {
   }
 
   const [showJump, setShowJump] = useState(false);
+  // M4 P1-9: the user bubble whose inline editor is open (at most one at a
+  // time). While set, the floating "jump to latest" pill hides — it is a
+  // z-20 bottom-right overlay and would sit on top of the editor's action
+  // row for a bubble near the viewport bottom.
+  const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
+  const handleEditingChange = useCallback((blockId: string, editing: boolean) => {
+    setEditingBlockId((prev) =>
+      editing ? blockId : prev === blockId ? null : prev,
+    );
+  }, []);
 
   // Streaming-tail trim: while the user is reading new content at the bottom,
   // the mounted window must stay bounded — otherwise a long session appends
@@ -1091,6 +1118,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           !state.pendingPlanExit
         }
         onRegenerate={onRegenerate}
+        onEditingChange={handleEditingChange}
       />
               </div>
             );
@@ -1119,7 +1147,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           )}
         </div>
       </div>
-      {showJump && (
+      {showJump && !editingBlockId && (
         <button
           className="card-lift press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
           style={{ bottom: "calc(0.75rem + var(--pending-card-h, 0px))" }}
