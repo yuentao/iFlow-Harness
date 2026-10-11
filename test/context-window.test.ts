@@ -112,6 +112,12 @@ describe("resolveContextWindow", () => {
     expect(resolveContextWindow("minimax-m3", {}).window).toBe(1_000_000);
     expect(resolveContextWindow("minimax-m2.7", {}).window).toBe(200_000);
     expect(resolveContextWindow("grok-4.7", {}).window).toBe(500_000);
+    // Tencent Hunyuan: Hy3 256K (tencent.com + HuggingFace), earlier
+    // hunyuan-* generation 128K via the prefix. The hy3 miss that fell back
+    // to the 32K default is what misreported 100% occupancy (2026-10-11).
+    expect(resolveContextWindow("hy3", {})).toEqual({ window: 256_000, estimated: false });
+    expect(resolveContextWindow("tencent/hy3", {})).toEqual({ window: 256_000, estimated: false });
+    expect(resolveContextWindow("hunyuan-turbo", {}).window).toBe(128_000);
   });
 
   it("unknown model falls back to the conservative default and flags estimated", () => {

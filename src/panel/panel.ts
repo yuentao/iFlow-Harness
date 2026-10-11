@@ -218,6 +218,13 @@ const CONTEXT_WARN_RATIO = 0.9;
 /** M1 P0-6: hysteresis floor — the warning pill only clears below this ratio,
  * so a ratio jittering around 90% doesn't flap the pill on and off. */
 const CONTEXT_WARN_EXIT_RATIO = 0.85;
+/** Turn-end auto-compress threshold (see maybeAutoCompressOnIdle). Sits above
+ * CONTEXT_WARN_RATIO so the user gets a 90–95% manual window (the warning
+ * pill's 立即压缩) before the system compresses on its own. An `estimated`
+ * (guessed) window never triggers it — the 2026-10-11 hy3 report proved a
+ * missing table row (32K fallback vs a real 256K window) misreports 100% and
+ * would otherwise compress a perfectly healthy session every turn. */
+const CONTEXT_AUTOCOMPRESS_RATIO = 0.95;
 /** Thrown by promptWithRetry when the empty-response retry ladder is
  * exhausted. The catch chain re-throws it untouched: its user-facing wording
  * would otherwise trip the rate-limit heuristic ("稍后重试" ∈ RATE_LIMIT_RE)
@@ -1567,6 +1574,69 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
       this.log.warn(`manual compress failed: ${errorMessage(error)}`);
       this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+    }
+  }
+
+  /** Re-entrancy guard for the turn-end auto-compress (one compress turn at a time). */
+  private autoCompressInFlight = false;
+
+  /**
+   * Turn-end PROACTIVE compression. The overflow path in promptWithRetry is
+   * strictly reactive: it only fires once the gateway REJECTS a turn with an
+   * overflow error. A session that creeps up on its window (or a host-side
+   * estimate that says so) never trips it — the turn just keeps streaming
+   * until something finally dies (2026-10-11 report: chip at 100%, pill up,
+   * "自动压缩" never happened, because no rejection ever arrived).
+   *
+   * This closes the gap at the idle boundary: after a turn settles, if the
+   * occupancy estimate is ≥ CONTEXT_AUTOCOMPRESS_RATIO, drive one `/compress`
+   * turn before the next prompt (queued or typed) starts. Guards:
+   * - `estimated` windows never trigger (a guessed denominator must not
+   *   compress a healthy session — the hy3 32K-fallback misreport was the
+   *   exact false-positive this guard prevents);
+   * - only a truly idle session (streaming/connecting/init/replay windows
+   *   and pending approval/question/plan cards stay untouched);
+   * - `autoCompressInFlight` keeps one compress turn at a time; a failed
+   *   compression is logged + warned, never escalated to the error banner
+   *   (the user's next real prompt still has the reactive overflow path).
+   */
+  private async maybeAutoCompressOnIdle(sessionId: string): Promise<void> {
+    if (this.disposed || this.autoCompressInFlight || this.historySyncBusy) return;
+    const state = this.store.getState();
+    if (state.sessionId !== sessionId) return;
+    if (state.initializing || state.replaying || state.status !== "idle") return;
+    if (state.pendingApproval || state.pendingPlanExit || state.pendingQuestions) return;
+    const usage = state.usage;
+    const window = usage?.contextWindow ?? null;
+    if (!usage || usage.estimated || window === null || window <= 0) return;
+    const ratio = (usage.contextUsed ?? 0) / window;
+    if (ratio < CONTEXT_AUTOCOMPRESS_RATIO) return;
+    this.autoCompressInFlight = true;
+    const toastId = this.store.sendToast(
+      "info",
+      vscode.l10n.t("上下文接近上限，自动压缩会话…"),
+      { displayOnly: true, persistent: true },
+    );
+    try {
+      const client = await this.ensureClient().catch(() => null);
+      if (!client || this.disposed || this.client !== client) return;
+      if (this.store.getState().sessionId !== sessionId) return;
+      const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      this.store.promptCompleted(result.stopReason);
+      this.log.info(
+        `turn-end auto-compress on session ${sessionId} (context ratio ${Math.round(ratio * 100)}%)`,
+      );
+      void this.persistActiveTranscript();
+    } catch (error) {
+      // The reactive overflow path still guards the next real prompt, so a
+      // failed proactive compress is a warning, not an error banner.
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      this.log.warn(`turn-end auto-compress failed: ${errorMessage(error)}`);
+      this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+    } finally {
+      this.autoCompressInFlight = false;
+      this.store.dismissToast(toastId);
     }
   }
 
@@ -4813,6 +4883,13 @@ export class ChatPanel implements vscode.Disposable {
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
+      // Turn-end proactive compression (see maybeAutoCompressOnIdle): a user
+      // Stop (cancelled) skips it — the user is steering, and firing a
+      // compress turn right after they pressed Stop reads as "won't stop".
+      // Awaited so a queued next message rides the SMALLER context.
+      if (result.stopReason !== "cancelled") {
+        await this.maybeAutoCompressOnIdle(promptSessionId);
+      }
       // M2 P0-3: the turn settled — the idle slot is free, feed it the next
       // queued message (no-op when the queue is empty). A user Stop
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
@@ -4909,6 +4986,8 @@ export class ChatPanel implements vscode.Disposable {
         if (!this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"))) {
           this.postSound("done");
         }
+        // Same turn-end proactive compression policy as sendPrompt.
+        await this.maybeAutoCompressOnIdle(promptSessionId);
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();

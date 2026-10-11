@@ -98,6 +98,12 @@ export const CONTEXT_WINDOW_TABLE: Readonly<Record<string, number>> = {
   "doubao-seed-2-1-lite": 1_024_000,
   "doubao-seed-2-1": 256_000,
   "doubao-seed-2-0": 256_000,
+  // --- Tencent Hunyuan (Hy3 256K per tencent.com + HuggingFace model card,
+  //     verified 2026-10-11; earlier hunyuan-turbo/large generation is 128K —
+  //     the prefix value stays conservative, overestimating a window hides
+  //     an overflow that is about to happen) ---
+  "hy3": 256_000,
+  "hunyuan": 128_000,
   // --- MiniMax (M3 1M with MSA sparse attention; M2.x ~200k) ---
   "minimax-m3": 1_000_000,
   "minimax-m2": 200_000,
