@@ -60,13 +60,66 @@ describe("resolveContextWindow", () => {
   });
 
   it("longest table key wins over a shorter prefix", () => {
-    // glm-4.6 (200k) must beat a hypothetical glm-4 prefix; here verified
-    // against the real table: glm-4.5 (128k) must not shadow glm-4.6.
+    // glm-5.3 (1M) must beat the glm-5 prefix (198k); glm-4.6 (200k) must
+    // not shadow glm-4.5 (128k) or vice versa.
+    expect(resolveContextWindow("glm-5.3", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("glm-5.2", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("glm-5", {}).window).toBe(198_000);
     expect(resolveContextWindow("glm-4.6", {}).window).toBe(200_000);
     expect(resolveContextWindow("glm-4.5", {}).window).toBe(128_000);
   });
 
+  it("table hit is not flagged estimated", () => {
+    expect(resolveContextWindow("deepseek-v3", {})).toEqual({ window: 128_000, estimated: false });
+    expect(resolveContextWindow("deepseek-v4-pro", {})).toEqual({ window: 1_000_000, estimated: false });
+  });
+
+  it("bare keys cover dated snapshots via longest-prefix match", () => {
+    // Dated snapshot ids must resolve through their bare generation key.
+    expect(resolveContextWindow("gpt-5.4-2026-03-05", {}).window).toBe(1_050_000);
+    expect(resolveContextWindow("gpt-4o-2024-11-20", {}).window).toBe(128_000);
+    expect(resolveContextWindow("claude-opus-5-5", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("claude-sonnet-4-6", {}).window).toBe(200_000);
+    expect(resolveContextWindow("doubao-seed-2-1-pro-260915", {}).window).toBe(1_024_000);
+    expect(resolveContextWindow("doubao-seed-2-1-turbo-260628", {}).window).toBe(256_000);
+    expect(resolveContextWindow("doubao-seed-2-0-lite-260428", {}).window).toBe(256_000);
+    expect(resolveContextWindow("nemotron-3-super-120b-a12b", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("step-5-preview", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("kimi-k2.7-code", {}).window).toBe(256_000);
+    expect(resolveContextWindow("grok-4.20-0309-reasoning", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("mistral-medium-3-5", {}).window).toBe(128_000);
+  });
+
+  it("covers the 2026-10 vendor lineup (scraped from official docs)", () => {
+    // OpenAI current gen 1.05M, GPT-5 400k.
+    expect(resolveContextWindow("gpt-6-astra", {}).window).toBe(1_050_000);
+    expect(resolveContextWindow("gpt-5.5", {}).window).toBe(1_050_000);
+    expect(resolveContextWindow("gpt-5", {}).window).toBe(400_000);
+    // Anthropic 5.5 lineup 1M.
+    expect(resolveContextWindow("claude-fable-5-1", {}).window).toBe(1_000_000);
+    // Gemini 1,048,576 across 2.5–3.8.
+    expect(resolveContextWindow("gemini-3.8-flash", {}).window).toBe(1_048_576);
+    expect(resolveContextWindow("gemini-2.5-pro", {}).window).toBe(1_048_576);
+    // DeepSeek V4 1M / legacy 128k; Kimi K3 1M / K2 256k.
+    expect(resolveContextWindow("deepseek-flash", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("kimi-k3", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("kimi-k2", {}).window).toBe(256_000);
+    // Qwen 3.6+ 1M, qwen3.5 compact 256k, qwen3 legacy 128k.
+    expect(resolveContextWindow("qwen3.8-max", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("qwen3.5-plus", {}).window).toBe(256_000);
+    expect(resolveContextWindow("qwen3-max", {}).window).toBe(128_000);
+    // MiniMax M3 1M / M2 200k; Grok 4.7 500k.
+    expect(resolveContextWindow("minimax-m3", {}).window).toBe(1_000_000);
+    expect(resolveContextWindow("minimax-m2.7", {}).window).toBe(200_000);
+    expect(resolveContextWindow("grok-4.7", {}).window).toBe(500_000);
+  });
+
   it("unknown model falls back to the conservative default and flags estimated", () => {
+    // SenseNova has no verifiable public source — deliberately unlisted.
+    expect(resolveContextWindow("sensenova-6.8-flash", {})).toEqual({
+      window: DEFAULT_CONTEXT_WINDOW,
+      estimated: true,
+    });
     expect(resolveContextWindow("totally-unknown-model-x9", {})).toEqual({
       window: DEFAULT_CONTEXT_WINDOW,
       estimated: true,

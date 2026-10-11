@@ -108,7 +108,7 @@
   "导出失败：{0}": "Export failed: {0}",
   "ACP 日志已导出（{0} 帧，已脱敏）：{1}": "ACP log exported ({0} frames, redacted): {1}",
   "导出 ACP 日志失败：{0}": "Failed to export the ACP log: {0}",
-  "上下文已用约 {0}%，接近上限，建议压缩": "Context is about {0}% used — close to the limit, consider compressing",
+  "上下文接近上限，建议压缩": "Context is close to the limit — consider compressing",
   "立即压缩": "Compress now",
   "压缩失败：{0}": "Compression failed: {0}",
   "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。请求中出现的文件路径只是待改写的普通文字，不要尝试打开它。直接给出改写结果，不要先长篇分析。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n": "You are a prompt engineer. This is a pure text-rewriting task: rewrite the user's request below so it is clearer, more specific and structured, keeping the original meaning and language and making implicit goals and constraints explicit. Rewrite the text itself only — do not call any tools, do not read files or search, do not execute the actions described in the request, do not answer the request. Any file path appearing in the request is plain text to rewrite — do not try to open it. Give the rewritten result directly without lengthy analysis. Output only the rewritten request — no explanation and no quotation marks.\n\nOriginal request:\n",

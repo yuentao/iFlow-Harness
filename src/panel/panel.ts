@@ -1483,6 +1483,16 @@ export class ChatPanel implements vscode.Disposable {
    * CONTEXT_WARN_RATIO; hysteretic exit at 85% (a compression or a session
    * switch drops the ratio and removes the pill). ≥100% stays owned by the
    * existing overflow auto-compress path.
+   *
+   * Two display-truthfulness rules (2026-10-11):
+   * - An `estimated` context window (fallback guess for an unlisted model)
+   *   never warns: the ratio would present a guessed denominator as fact.
+   *   If a warning is already up and the window becomes estimated (model
+   *   switch), the pill is dismissed instead of left stale.
+   * - The toast text carries NO percentage. The pill is persistent until the
+   *   hysteresis exit, so a frozen trigger-time number drifts against the
+   *   live usage chip after a compression (99% pill vs 91% chip, reported
+   *   2026-10-11). The chip owns all live numbers; the pill only signals.
    */
   private contextWarnToastId: number | null = null;
 
@@ -1491,6 +1501,18 @@ export class ChatPanel implements vscode.Disposable {
     const window = usage?.contextWindow ?? null;
     const used = usage?.contextUsed ?? 0;
     const ratio = window !== null && window > 0 ? used / window : 0;
+    if (usage?.estimated) {
+      // Estimated window: withdraw any live warning rather than warn on a
+      // guessed denominator (also covers model-switch-away mid-warning).
+      if (this.contextWarnActive) {
+        this.contextWarnActive = false;
+        if (this.contextWarnToastId !== null) {
+          this.store.dismissToast(this.contextWarnToastId);
+          this.contextWarnToastId = null;
+        }
+      }
+      return;
+    }
     if (this.contextWarnActive) {
       // Exit below the hysteresis floor — a compression or a session switch
       // drops the ratio and removes the pill.
@@ -1505,7 +1527,7 @@ export class ChatPanel implements vscode.Disposable {
       this.contextWarnActive = true;
       this.contextWarnToastId = this.store.sendToast(
         "warning",
-        vscode.l10n.t("上下文已用约 {0}%，接近上限，建议压缩", Math.min(99, Math.round(ratio * 100))),
+        vscode.l10n.t("上下文接近上限，建议压缩"),
         {
           persistent: true,
           action: { actionId: "compress", label: vscode.l10n.t("立即压缩") },

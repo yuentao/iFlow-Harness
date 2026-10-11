@@ -138,7 +138,9 @@ function SessionUsageChip() {
           <span className="h-1 w-8 overflow-hidden rounded-full bg-border/70">
             <span className={`block h-full rounded-full transition-all duration-300 ${barTone}`} style={{ width: `${pct}%` }} />
           </span>
-          <span className={pct >= 90 ? "text-destructive" : pct >= 70 ? "text-warning" : ""}>{pct}%</span>
+          <span className={pct >= 90 ? "text-destructive" : pct >= 70 ? "text-warning" : ""}>
+            {estimated ? "≈" : ""}{pct}%
+          </span>
         </span>
       )}
       {estimatedCost !== null && (

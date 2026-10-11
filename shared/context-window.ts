@@ -17,33 +17,111 @@ import type { SessionUsageUi } from "./messages.js";
 export const DEFAULT_CONTEXT_WINDOW = 32_768;
 
 /** Curated context windows (tokens). Keys are matched against a normalized
- * model id (see `normalizeModelId`), longest-key-first, so `glm-4.6` wins
- * over a hypothetical `glm` prefix. Values are the models' published
- * context sizes as of 2026-10; `iflow.contextWindowOverrides` covers newer
- * releases without a code change. */
+ * model id (see `normalizeModelId`), longest-key-first, so `glm-5.3` wins
+ * over a hypothetical `glm-5` prefix, and a bare key covers dated snapshots
+ * (`gpt-5.4-2026-03-05` hits `gpt-5.4`). Values are the models' published
+ * context sizes, scraped from each vendor's official model/pricing pages on
+ * 2026-10-11 (OpenAI docs/models, Anthropic models overview, Gemini API
+ * models, DeepSeek pricing, Kimi model list, bigmodel GLM pages, Aliyun
+ * bailian model table, Volcengine ark model list, MiniMax, xAI pricing,
+ * Mistral model pages, NVIDIA/StepFun via OpenRouter);
+ * `iflow.contextWindowOverrides` covers newer releases without a code change.
+ * SenseNova (商汤日日新) has no verifiable public source — deliberately not
+ * listed; unknown models fall back to the conservative default. */
 export const CONTEXT_WINDOW_TABLE: Readonly<Record<string, number>> = {
+  // --- OpenAI (1.05M current gen; GPT-5 400k; o-series 200k; 4.x 128k) ---
+  "gpt-6-astra": 1_050_000,
+  "gpt-6-sol": 1_050_000,
+  "gpt-6-luna": 1_050_000,
+  "gpt-6.1-sol": 1_050_000,
+  "gpt-5.6-sol": 1_050_000,
+  "gpt-5.6-luna": 1_050_000,
+  "gpt-5.6-terra": 1_050_000,
+  "gpt-5.5": 1_050_000,
+  "gpt-5.4": 1_050_000,
+  "gpt-5.2": 1_050_000,
+  "gpt-5.1": 400_000,
+  "gpt-5": 400_000,
   "gpt-4.1": 128_000,
   "gpt-4o": 128_000,
   "o3": 200_000,
   "o4-mini": 200_000,
-  "claude-sonnet": 200_000,
-  "claude-opus": 200_000,
-  "claude-haiku": 200_000,
+  // --- Anthropic (current 5.5 lineup 1M; 4.x generation 200k) ---
+  "claude-fable": 1_000_000,
+  "claude-opus-5": 1_000_000,
+  "claude-sonnet-5": 1_000_000,
+  "claude-haiku-5": 1_000_000,
+  "claude-opus-4": 200_000,
+  "claude-sonnet-4": 200_000,
+  "claude-haiku-4": 200_000,
+  // --- Google Gemini (2.5 through 3.8 all 1,048,576) ---
+  "gemini-3.8-flash": 1_048_576,
+  "gemini-3.6-flash": 1_048_576,
+  "gemini-3.5": 1_048_576,
+  "gemini-3.1-pro": 1_048_576,
+  "gemini-3.1-flash": 1_048_576,
+  "gemini-3-flash": 1_048_576,
   "gemini-2.5-pro": 1_048_576,
   "gemini-2.5-flash": 1_048_576,
+  // --- DeepSeek (V4 generation 1M; V3/R1 legacy 128k) ---
+  "deepseek-flash": 1_000_000,
+  "deepseek-v4": 1_000_000,
   "deepseek-chat": 128_000,
   "deepseek-reasoner": 128_000,
   "deepseek-v3": 128_000,
   "deepseek-r1": 128_000,
+  // --- Kimi / Moonshot (K3 1M; K2.x 256k; moonshot-v1 legacy 128k) ---
+  "kimi-k3": 1_000_000,
+  "kimi-k2.7": 256_000,
+  "kimi-k2.6": 256_000,
   "kimi-k2": 256_000,
+  "moonshot-v1": 128_000,
+  // --- Z.ai GLM (5.3/5.2 1M; 5.1/5 198k per Aliyun listing; 4.6 200k) ---
+  "glm-5.3": 1_000_000,
+  "glm-5.2": 1_000_000,
+  "glm-5.1": 198_000,
+  "glm-5": 198_000,
   "glm-4.6": 200_000,
   "glm-4.5": 128_000,
-  "glm-5": 200_000,
+  // --- Qwen (3.6+ generations 1M; qwen3.5 compact tiers 256k; qwen-long 10M) ---
+  "qwen3.8": 1_000_000,
+  "qwen3.7": 1_000_000,
+  "qwen3.6": 1_000_000,
+  "qwen3-coder": 1_000_000,
+  "qwen3.5": 256_000,
   "qwen3": 128_000,
   "qwen-plus": 1_000_000,
-  "doubao-seed": 256_000,
+  "qwen-long": 10_000_000,
+  // --- Doubao / Volcengine Seed (2.1 pro/lite + evolving 1024k; turbo/2.0 256k) ---
+  "doubao-seed-evolving": 1_024_000,
+  "doubao-seed-2-1-pro": 1_024_000,
+  "doubao-seed-2-1-lite": 1_024_000,
+  "doubao-seed-2-1": 256_000,
+  "doubao-seed-2-0": 256_000,
+  // --- MiniMax (M3 1M with MSA sparse attention; M2.x ~200k) ---
+  "minimax-m3": 1_000_000,
   "minimax-m2": 200_000,
-  "moonshot-v1-128k": 128_000,
+  // --- xAI Grok (4.5/4.6/4.7 500k; 4.3/4.20 1M; build 256k) ---
+  "grok-4.7": 500_000,
+  "grok-4.6": 500_000,
+  "grok-4.5": 500_000,
+  "grok-4.3": 1_000_000,
+  "grok-4.20": 1_000_000,
+  "grok-build": 256_000,
+  "grok-4": 256_000,
+  // --- Mistral (Large 4 1M; Medium/Small ~128k) ---
+  "mistral-large-4": 1_000_000,
+  "mistral-medium-3": 128_000,
+  "mistral-small-4": 128_000,
+  "codestral": 256_000,
+  // --- NVIDIA Nemotron (3 Super/Ultra 1M official spec) ---
+  "nemotron-3-super": 1_000_000,
+  "nemotron-3-ultra": 1_000_000,
+  "nemotron-3-nano": 262_000,
+  // --- StepFun (Step 5 1M; Step 3.7 Flash 262k) ---
+  "step-5": 1_000_000,
+  "step-3.7": 262_000,
+  "step-3.5": 262_000,
 };
 
 /** Curated unit prices (USD per MILLION tokens, input/output). Approximate
