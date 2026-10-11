@@ -1,8 +1,175 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { FileCode2, Trash2 } from "lucide-react";
+import { ArrowLeft, FileCode2, Trash2, X } from "lucide-react";
 import { useChat } from "../store";
+import { t } from "../i18n";
 
 /* Shared visual primitives ported from the UI reference design. */
+
+/** Visible, non-disabled focusable elements within a container (focus trap + initial focus). */
+export function getFocusable(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null);
+}
+
+/**
+ * Shared centered-modal shell for the settings surface (API config / MCP
+ * servers / approval policies / profile-switch). Converges the backdrop,
+ * ESC-to-close, Tab focus trap, mount-focus + unmount-restore, and the header
+ * (optional back arrow + icon + title + close button) that the four cards
+ * previously each re-implemented with subtly different behavior — a major
+ * source of the settings版块's "every dialog feels different" fragmentation.
+ *
+ * - `onClose`: ESC / backdrop click / header X. The profile-switch dialog
+ *   passes its cancel handler here (Esc == cancel the whole switch).
+ * - `onBack`: when set, the header shows a back arrow instead of the icon
+ *   (list ⇄ editor navigation inside a section).
+ * - `dismissible`: false suppresses the X and the backdrop/Esc close (the
+ *   mandatory unauthenticated setup view).
+ * - `initialFocus`: "input" (default) focuses the first text control; "first"
+ *   focuses the first focusable (choice dialogs).
+ */
+export function ModalShell({
+  title,
+  icon,
+  onClose,
+  onBack,
+  dismissible = true,
+  ariaLabel,
+  role = "dialog",
+  initialFocus = "input",
+  wide = false,
+  footer,
+  children,
+}: {
+  title: ReactNode;
+  icon?: ReactNode;
+  onClose: () => void;
+  onBack?: (() => void) | null;
+  dismissible?: boolean;
+  ariaLabel: string;
+  role?: "dialog" | "alertdialog";
+  initialFocus?: "input" | "first";
+  wide?: boolean;
+  footer?: ReactNode;
+  children: ReactNode;
+}) {
+  const backdropRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const prevFocus = document.activeElement as HTMLElement | null;
+    const container = backdropRef.current;
+    if (container) {
+      const focusables = getFocusable(container);
+      // A section can pin the initial focus with data-autofocus (e.g. the
+      // primary option of a choice dialog — without it "first" lands on the
+      // header's close button, which DOM-orders before the body).
+      const pinned = container.querySelector<HTMLElement>("[data-autofocus]");
+      if (pinned && focusables.includes(pinned)) {
+        pinned.focus();
+      } else if (initialFocus === "input") {
+        (focusables.find((el) => el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA") ??
+          focusables[0])?.focus();
+      } else {
+        focusables[0]?.focus();
+      }
+    }
+    return () => prevFocus?.focus?.();
+    // Mount-only: the trap must not re-steal focus when the content re-renders.
+  }, []);
+
+  useEffect(() => {
+    // Document-level ESC/Tab handling: the old per-div onKeyDown missed keys
+    // whenever focus sat outside the modal (e.g. right after clicking a
+    // button that unmounted — focus falls back to body, which never bubbles
+    // through the backdrop). Registered on mount only; ESC must
+    // stopPropagation so the window's "Esc stops generation" listener never
+    // sees it.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const container = backdropRef.current;
+      if (!container) return;
+      if (e.key === "Escape") {
+        if (!dismissible) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key === "Tab") {
+        const inside = container.contains(document.activeElement);
+        const focusables = getFocusable(container);
+        if (focusables.length === 0) return;
+        if (!inside) {
+          // Focus escaped the modal (unmounted trigger, editor click): pull it back.
+          e.preventDefault();
+          focusables[0]!.focus();
+          return;
+        }
+        const first = focusables[0]!;
+        const last = focusables[focusables.length - 1]!;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // onClose closes over section state (e.g. the choice dialog's answered
+    // flag); re-registering keeps the closure current.
+  }, [dismissible, onClose]);
+
+  return (
+    <div
+      ref={backdropRef}
+      className="auth-backdrop"
+      role={role}
+      aria-modal="true"
+      aria-label={ariaLabel}
+      tabIndex={-1}
+      onMouseDown={(e) => {
+        if (dismissible && e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className={`auth-modal acrylic-pop${wide ? " auth-modal-wide @container" : ""}`}>
+        <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
+          {onBack ? (
+            <button
+              type="button"
+              className="press -ml-1 shrink-0 rounded p-0.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
+              title={t("返回列表")}
+              aria-label={t("返回列表")}
+              onClick={onBack}
+            >
+              <ArrowLeft className="size-3.5" />
+            </button>
+          ) : (
+            icon
+          )}
+          <span className="min-w-0 truncate text-[12px] font-semibold">{title}</span>
+          {dismissible && (
+            <button
+              type="button"
+              className="press ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
+              title={t("收起")}
+              aria-label={t("收起")}
+              onClick={onClose}
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
+        {children}
+        {footer}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Live countdown to a deadline (epoch ms). Re-renders once per second while

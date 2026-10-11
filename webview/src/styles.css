@@ -1378,6 +1378,32 @@ pre {
   animation: modal-in 0.28s var(--ease-out-expo);
 }
 
+/* Wide settings modal: fixed header + footer, scrolling body between them.
+ * The nav rail and content live inside .auth-modal-body (a flex row on wide
+ * viewports, collapsing to a stacked tab bar via @container below). */
+.auth-modal-wide {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 32px));
+  /* Fixed height: tab switches change the content's height, which used to
+   * resize the whole modal every switch (the body scrolls internally, so a
+   * fixed height costs nothing — the content area absorbs the slack). */
+  height: min(600px, 84vh);
+  overflow: hidden;
+}
+
+.auth-modal-wide .auth-modal-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+@media (max-width: 460px) {
+  .auth-modal-wide .auth-modal-body {
+    flex-direction: column;
+  }
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;

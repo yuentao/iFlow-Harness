@@ -26,9 +26,7 @@ import { ApprovalCard } from "./components/ApprovalCard";
 import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
-import { AuthCard } from "./components/AuthCard";
-import { McpCard } from "./components/McpCard";
-import { ApprovalPolicyCard } from "./components/ApprovalPolicyCard";
+import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
 
 function statusChip(status: AgentStatus) {
@@ -102,15 +100,8 @@ export function App() {
   const headerScrolled = useChat((s) => s.headerScrolled);
   const editorTheme = useChat((s) => s.editorTheme);
   const pending = useChat((s) => s.pending);
-  const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
-  const [configOpen, setConfigOpen] = useState(false);
-  // MCP management card (reads/writes settings.json via the host). Mutually
-  // exclusive with the config card — both are centered modals.
-  const [mcpOpen, setMcpOpen] = useState(false);
-  // M4 P1-1 approval-policy card. Also opens itself when the host pushes a
-  // 「始终允许」 rule draft (approval card → policy card handoff).
-  const [policyOpen, setPolicyOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   // Two-step delete: clicking the trash arms confirmation for that session id;
   // a second click on 确认 actually sends deleteSession. Prevents accidental
   // loss of a persisted transcript (the host delete is irreversible).
@@ -141,20 +132,20 @@ export function App() {
     return () => window.clearTimeout(id);
   }, [dark, manual]);
 
-  // Auth card opened: refresh the profile list the same way the header
-  // dropdown does, so the card never shows a stale snapshot either.
+  // Settings modal opened: refresh the profile list the same way the header
+  // dropdown does, so the modal never shows a stale snapshot either.
   useEffect(() => {
-    if (configOpen) send({ type: "refreshAuth" });
-  }, [configOpen, send]);
+    if (settingsTab) send({ type: "refreshAuth" });
+  }, [settingsTab, send]);
 
   // M4 P1-1 handoff: an approval card's 「始终允许」 makes the host derive a
-  // rule draft and push `approvalPolicy` — open the policy card so the user
-  // can name & save it (the card's own listener loads the draft into the
-  // editor; here we only flip visibility).
+  // rule draft and push `approvalPolicy` — jump the settings modal to the
+  // policy tab so the user can name & save it (the section's own listener
+  // loads the draft into the editor; here we only route visibility).
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data as { type?: string; draft?: unknown };
-      if (msg?.type === "approvalPolicy" && msg.draft) setPolicyOpen(true);
+      if (msg?.type === "approvalPolicy" && msg.draft) setSettingsTab("policy");
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
@@ -235,7 +226,11 @@ export function App() {
     );
   }
 
-  const showAuthCard = (auth?.needsSetup ?? false) || configOpen;
+  // Unified settings modal: open when a tab is selected — or force-opened on
+  // the API tab while unauthenticated (credentials are mandatory; the modal
+  // stays non-dismissible until they're set, same rule as the old setup card).
+  const settingsOpen = settingsTab !== null || (auth?.needsSetup ?? false);
+  const settingsTabValue: SettingsTab = settingsTab ?? "api";
   // While the agent is streaming (or an approval blocks it), or while a new
   // session / history restore is initializing, switching the session / mode /
   // model / profile would desync the in-flight ACP request.
@@ -442,91 +437,33 @@ export function App() {
             >
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             </button>
-            {/* API profiles: quick switch + manage (opens the full auth card).
-                Refresh the profile list at open time: settings.json is rewritten
-                by external tools behind our back, so the shown list must be
-                recomputed on every open, not reused from panel load. */}
-            <Dropdown
-              align="right"
-              menuClass="w-64 max-w-[calc(100vw_-_24px)] max-h-[70vh] flex flex-col"
-              disabled={locked}
-              onOpenChange={(o) => {
-                if (o) send({ type: "refreshAuth" });
-              }}
-              trigger={(open) => (
-                <button
-                  className={`${BTN_ICON}${auth?.authenticated ? "" : " text-warning"}`}
-                  title={t("API 凭据配置")}
-                  aria-label={t("API 凭据配置")}
-                  disabled={locked}
-                >
-                  <Settings2 className="size-4" />
-                </button>
-              )}
+            {/* Settings hub: profiles & credentials, MCP servers, approval
+                policies. The gear used to open a profile quick-switcher whose
+                list duplicated (and behaved differently from) the auth card's
+                — now it opens the unified settings modal directly. Never
+                disabled: browsing settings mid-turn is safe, and every
+                mutating control inside gates itself on `busy`. */}
+            <button
+              className={`${BTN_ICON}${auth?.authenticated ? "" : " text-warning"}`}
+              title={t("设置")}
+              aria-label={t("设置")}
+              onClick={() => setSettingsTab("api")}
             >
-              {(close) => (
-                <>
-                  {(auth?.profiles.length ?? 0) > 0 && (
-                    <div className="shrink-0 px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-                      {t("API 配置")}
-                    </div>
-                  )}
-                  <div className="min-h-0 flex-1 overflow-y-auto">
-                  {(auth?.profiles ?? []).map((p) => (
-                    <button
-                      key={p.name}
-                      role="menuitem"
-                      disabled={locked}
-                      onClick={() => {
-                        if (!p.active) {
-                          beginPending("profile", p.name);
-                          send({ type: "activateProfile", name: p.name });
-                        }
-                        close();
-                      }}
-                      className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
-                    >
-                      <span className="flex w-full min-w-0 items-center text-[12px] text-foreground">
-                        <span className="min-w-0 truncate">{p.name}</span>
-                        {p.active && <Check className="ml-auto size-3 shrink-0 text-primary" />}
-                      </span>
-                      <span className="w-full truncate font-mono text-[10px] text-muted-foreground">
-                        {p.modelName} · {p.keyTail}
-                      </span>
-                    </button>
-                  ))}
-                  </div>
-                  <div className="shrink-0 border-t border-border">
-                    <button
-                      className="w-full px-3 py-1.5 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground"
-                      onClick={() => {
-                        setConfigOpen(true);
-                        close();
-                      }}
-                    >
-                      {t("管理配置与凭据…")}
-                    </button>
-                  </div>
-                </>
-              )}
-            </Dropdown>
+              <Settings2 className="size-4" />
+            </button>
           </div>
         </div>
       </header>
 
-      {showAuthCard && !mcpOpen && !policyOpen && (
-        <AuthCard
-          auth={auth!}
-          editable={configOpen}
+      {settingsOpen && auth && (
+        <SettingsModal
+          tab={settingsTabValue}
+          onTabChange={setSettingsTab}
+          onDismiss={() => setSettingsTab(null)}
+          dismissible={!auth.needsSetup}
           busy={locked}
-          onDismiss={() => setConfigOpen(false)}
-          onOpenMcp={() => setMcpOpen(true)}
-          onOpenApprovalPolicy={() => setPolicyOpen(true)}
+          auth={auth}
         />
-      )}
-      {mcpOpen && !policyOpen && <McpCard busy={locked} onDismiss={() => setMcpOpen(false)} />}
-      {policyOpen && (
-        <ApprovalPolicyCard busy={locked} onDismiss={() => setPolicyOpen(false)} />
       )}
 
       {/* Profile-switch choice dialog: centered modal over everything (the

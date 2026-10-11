@@ -108,35 +108,40 @@ const en: Record<string, string> = {
   // composer
   "发送": "Send",
   "停止": "Stop",
-  // auth card
+  // settings modal (unified: API profiles / MCP / approval policies)
+  "设置": "Settings",
+  "API 配置": "API profiles",
   "已保存（{0}）— 留空保持不变": "saved (…{0}) — leave empty to keep",
   "Base URL 必须以 http:// 或 https:// 开头": "Base URL must start with http:// or https://",
   "API Key 不能为空": "API key is required",
   "模型名称不能为空": "Model name is required",
-  "API 配置": "API profiles",
   "连接 iFlow 需要配置 API 凭据": "Connect to iFlow by configuring API credentials",
   "收起": "Collapse",
-  "API 配置（点击切换，切换后重新认证会话）": "API profiles (click to switch; switching re-authenticates the session)",
   "扩展": "Extension",
   "CLI": "CLI",
   "删除 {0}": "Delete {0}",
-  "新增 / 更新配置": "Add / update profile",
+  "编辑 {0}": "Edit {0}",
+  "添加 API 配置": "Add API profile",
+  "添加配置": "Add profile",
+  "编辑配置": "Edit profile",
+  "尚未添加 API 配置": "No API profiles yet",
   "配置名称（可选，默认为模型名）": "Profile name (optional, defaults to the model name)",
   "如 BUZZ、工作密钥…": "e.g. BUZZ, work key…",
   "Base URL（OpenAI 兼容）": "Base URL (OpenAI-compatible)",
   "模型名称": "Model name",
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
   "保存并激活": "Save & activate",
-  "扩展设置": "Extension settings",
   "打开 VSCode 设置…": "Open VSCode Settings…",
   "重启 CLI": "Restart CLI",
   "重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
     "Restart the CLI process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
-  "语言与审批模式在 VSCode 设置（iflow）中修改；MCP 服务器在管理面板中编辑。两者均写入 CLI 配置，需重启 CLI 生效，可点击此处热重启（当前会话将自动恢复）。":
-    "Language and approval mode are edited in the VSCode Settings (search \"iflow\"); MCP servers are edited in the management panel. Both are written to the CLI config and need a CLI restart to take effect — use the hot restart here (the current session restores automatically).",
-  "管理 MCP 服务器…": "Manage MCP servers…",
-  // M4 P1-1 approval policy card
-  "审批策略…": "Approval policies…",
+  "点击配置即切换并重新认证会话；来自 iFlow CLI 的配置为只读，可切换但不可在此删除。":
+    "Click a profile to switch and re-authenticate the session. Profiles imported from the iFlow CLI are read-only: you can switch to them but not delete them here.",
+  "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。":
+    "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving re-authenticates the session via openai-compatible.",
+  "这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。":
+    "This is a read-only CLI profile; saving creates an extension-owned profile with the same name that takes precedence.",
+  "正在重新认证…": "Re-authenticating…",
   "审批策略": "Approval policies",
   "审批规则": "Approval rule",
   "自动允许": "Auto-allow",
@@ -180,10 +185,8 @@ const en: Record<string, string> = {
   "名称重复：{0}": "Duplicate name: {0}",
   "编辑只改本地副本，点击「保存」才写入文件。":
     "Editing only changes a local copy; click Save to write the file.",
-  "配置直接读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后需重启 CLI 生效（当前会话自动恢复）。":
-    "Config reads/writes the mcpServers field in ~/.iflow/settings.json directly; a CLI restart is required after saving (the current session restores automatically).",
-  "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存/切换后将以 openai-compatible 方式重新认证会话。来自 iFlow CLI 的配置为只读，可点击切换但不可在此删除。":
-    "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving/switching re-authenticates the session via openai-compatible. Profiles imported from the iFlow CLI are read-only: you can switch to them but not delete them here.",
+  "配置直接读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。":
+    "Config reads/writes the mcpServers field in ~/.iflow/settings.json directly; after saving, click Restart CLI in the footer to apply (the current session restores automatically).",
   // profile-switch choice dialog
   "切换 API 配置": "Switch API profile",
   "取消切换": "Cancel the switch",
