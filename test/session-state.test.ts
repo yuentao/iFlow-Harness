@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   applySessionUpdate,
+  canStopSubAgent,
   appendApprovalResolution,
   attachSynthesizedDiff,
   backfillBlockIds,
@@ -53,6 +54,141 @@ vi.mock("gpt-tokenizer", async () => {
 function notify(update: SessionNotification["update"], sessionId = "s1"): SessionNotification {
   return { sessionId, update };
 }
+
+describe("SubAgent tree lifecycle (M5)", () => {
+  const task = (id: string, agentId?: string, status: "pending" | "completed" = "pending"): SessionNotification => ({
+    sessionId: "s1", update: { sessionUpdate: "tool_call_update", toolName: "task", toolCallId: id, status, agentId },
+  });
+  const chunk = (agentId: string, text = "hello"): SessionNotification => ({ sessionId: "default-session", update: { sessionUpdate: "agent_message_chunk", agentId, content: { type: "text", text } } });
+
+  it("nests tasks under their caller and binds child agents FIFO across the whole tree", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, task("root"));
+    applySessionUpdate(state, chunk("parent"));
+    expect(applySessionUpdate(state, task("child-a", "parent"))).toBe(0);
+    applySessionUpdate(state, task("child-b", "parent"));
+    expect(applySessionUpdate(state, chunk("agent-a"))).toBe(0);
+    applySessionUpdate(state, chunk("agent-b"));
+    const root = state.blocks[0]!;
+    if (root.kind !== "subagent") throw new Error("root");
+    const children = root.entries.filter((b) => b.kind === "subagent");
+    expect(children.map((c) => c.agentId)).toEqual(["agent-a", "agent-b"]);
+    expect(applySessionUpdate(state, task("child-a", "parent", "completed"))).toBe(0);
+    expect(children[0]!.status).toBe("completed");
+    expect(children[1]!.status).toBe("pending");
+    expect(root.status).toBe("pending");
+  });
+
+  it.each([false, true])("binds interleaved cards created at the same time (restored: %s)", (restored) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+    const state = initialSessionState();
+    applySessionUpdate(state, task("root1"));
+    // parent1's output binds root1 before the parallel task is created.
+    applySessionUpdate(state, chunk("parent1"));
+    // root2 is created later at the top level.
+    applySessionUpdate(state, task("root2"));
+    // nested1 is created later still, under parent1.
+    applySessionUpdate(state, task("nested1", "parent1"));
+
+    if (restored) {
+      state.blocks = JSON.parse(JSON.stringify(state.blocks)) as Block[];
+      backfillBlockIds(state.blocks);
+      reassignBlockIds(state.blocks);
+    }
+    // The first unbound card in global creation order is root2, not nested1.
+    expect(applySessionUpdate(state, chunk("parent2"))).toBe(1);
+
+    const root1 = state.blocks[0]!;
+    const root2 = state.blocks[1]!;
+    if (root1.kind !== "subagent" || root2.kind !== "subagent") throw new Error("expected root cards");
+    const nested1 = root1.entries.find((block) => block.kind === "subagent");
+    if (!nested1 || nested1.kind !== "subagent") throw new Error("expected nested1");
+    expect(root2.agentId).toBe("parent2");
+    expect(nested1.agentId).toBe("nested1");
+    expect(root2.entries).toEqual([{ kind: "text", text: "hello", id: expect.any(String), tokens: expect.any(Number) }]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each([
+    ["bzz", "b100", 1],
+    ["bzzzzzzzzzzzzzz", "b100000000000000", 1],
+    [undefined, "b100", 0],
+    ["legacy", "b100", 0],
+    ["b100", "b100", 0],
+  ] as const)("handles base36 boundaries and legacy ids (%s, %s)", (rootId, nestedId, index) => {
+    const state = initialSessionState();
+    applySessionUpdate(state, task("root1"));
+    applySessionUpdate(state, chunk("parent1"));
+    applySessionUpdate(state, task("root2"));
+    applySessionUpdate(state, task("nested1", "parent1"));
+    const root1 = state.blocks[0]!;
+    const root2 = state.blocks[1]!;
+    if (root1.kind !== "subagent" || root2.kind !== "subagent") throw new Error("roots");
+    const nested = root1.entries.find((block) => block.kind === "subagent")!;
+    root2.id = rootId;
+    nested.id = nestedId;
+    expect(applySessionUpdate(state, chunk("parent2"))).toBe(index);
+    expect(index === 1 ? root2 : nested).toMatchObject({ agentId: "parent2" });
+    expect(applySessionUpdate(state, chunk("last-agent"))).toBe(index === 1 ? 0 : 1);
+  });
+
+  it("sums every nested leaf once and records first-entry and terminal times", () => {
+    const state = initialSessionState();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    applySessionUpdate(state, task("root"));
+    expect(state.blocks[0]!.startedAt).toBeUndefined();
+    applySessionUpdate(state, chunk("parent", "parent text"));
+    applySessionUpdate(state, task("child", "parent"));
+    clock.mockReturnValue(2000);
+    applySessionUpdate(state, chunk("child-agent", "child text"));
+    const root = state.blocks[0]!;
+    if (root.kind !== "subagent") throw new Error("root");
+    const child = root.entries.find((b) => b.kind === "subagent")!;
+    expect(root.startedAt).toBe(1000);
+    expect(child.startedAt).toBe(2000);
+    expect(root.tokens).toBe(estimateTokens("parent text") + estimateTokens("child text"));
+    expect(estimateSessionUsage(state.blocks).totalTokens).toBe(root.tokens);
+    clock.mockReturnValue(3000);
+    applySessionUpdate(state, task("child", "parent", "completed"));
+    expect(child.completedAt).toBe(3000);
+    clock.mockRestore();
+  });
+
+  it("recursively closes active descendants even under a terminal root, without inventing legacy duration", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, task("root"));
+    applySessionUpdate(state, chunk("parent"));
+    applySessionUpdate(state, task("child", "parent"));
+    const root = state.blocks[0]!;
+    if (root.kind !== "subagent") throw new Error("root");
+    root.status = "completed";
+    expect(closeOpenSubAgents(state.blocks, 5000)).toBe(0);
+    const child = root.entries.find((b) => b.kind === "subagent")!;
+    expect(child.status).toBe("failed");
+    expect(child.startedAt).toBeUndefined();
+    expect(child.completedAt).toBeUndefined();
+  });
+
+  it("validates session, streaming and active nested target before stop fallback", () => {
+    const state = initialSessionState();
+    state.sessionId = "s1";
+    state.status = "streaming";
+    applySessionUpdate(state, task("root"));
+    applySessionUpdate(state, chunk("parent"));
+    applySessionUpdate(state, task("child", "parent"));
+    expect(canStopSubAgent(state, "s1", "child")).toBe(true);
+    expect(canStopSubAgent(state, "other", "child")).toBe(false);
+    expect(canStopSubAgent(state, "s1", "missing")).toBe(false);
+    state.status = "idle";
+    expect(canStopSubAgent(state, "s1", "child")).toBe(false);
+    state.status = "streaming";
+    applySessionUpdate(state, task("child", "parent", "completed"));
+    expect(canStopSubAgent(state, "s1", "child")).toBe(false);
+  });
+});
 
 describe("SubAgent grouping (agentId)", () => {
   it("groups flat nested activity by the task interval (live wire shape, no agentId)", () => {
@@ -1591,6 +1727,14 @@ describe("dropSessionUpdate guard (leak prevention)", () => {
 });
 
 describe("block id uniqueness across host reloads (P4)", () => {
+  it("seeds and increments beyond Number precision without repeating ids", () => {
+    // 36^14 is well beyond Number.MAX_SAFE_INTEGER; increments must stay exact.
+    const restored: Block[] = [{ kind: "text", text: "old", id: "b100000000000000" }];
+    backfillBlockIds(restored);
+    expect(nextBlockId()).toBe("b100000000000001");
+    expect(nextBlockId()).toBe("b100000000000002");
+  });
+
   it("backfillBlockIds seeds the counter past restored ids — no duplicate minting", () => {
     // Transcript persisted by a PREVIOUS extension-host lifetime: ids up to
     // b4t (the 404-duplicate-id corruption measured in a real transcript).

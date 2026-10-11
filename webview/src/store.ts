@@ -197,7 +197,11 @@ function createMockHost(): HostApi {
       title: "Launch agent(general-purpose): 读取 package.json 的 name",
       status: "completed",
       agentType: "general-purpose",
+      tokens: 150,
+      startedAt: Date.now() - 12_000,
+      completedAt: Date.now() - 2_000,
       entries: [
+        { kind: "subagent", id: "demo-child", agentId: "demo-child", taskToolCallId: "demo-child-task", title: "Launch agent(explore-agent): package metadata", status: "completed", agentType: "explore-agent", tokens: 50, startedAt: Date.now() - 8_000, completedAt: Date.now() - 3_000, entries: [{ kind: "text", text: "Package metadata checked.", tokens: 50 }] },
         { kind: "tool", toolCallId: "sa-1", toolName: "read_file", title: "Reading J:\\git\\iFlow-chat\\package.json", toolKind: "read", status: "completed", output: "", locations: [], diff: null },
         { kind: "tool", toolCallId: "sa-2", toolName: "run_shell_command", title: "Running: node --version; npm --version", toolKind: "execute", status: "completed", output: "", locations: [], diff: null },
       ],
@@ -1015,6 +1019,13 @@ function createMockHost(): HostApi {
           draft: mockApprovalDraft,
         };
         window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: payload })), 80);
+        return;
+      }
+      if (m.type === "stopSubagent") {
+        // The mock mirrors the real ACP limitation: this is whole-turn cancel.
+        activeApproval = null;
+        demoBlocks.push({ kind: "text", text: "*（CLI 暂不支持单独停止子代理，已停止整轮生成）*" });
+        settleMockTurn();
         return;
       }
       if (m.type === "cancel") {

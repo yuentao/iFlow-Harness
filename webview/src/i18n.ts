@@ -92,6 +92,13 @@ const en: Record<string, string> = {
   "文件对比": "File diff",
   "任务清单": "Task list",
   "运行中": "Running",
+  "子代理": "Subagent",
+  "停止此子代理（将停止整轮生成）": "Stop this subagent (stops the whole turn)",
+  "tokens": "tokens",
+  "耗时": "Duration",
+  "未知": "Unknown",
+  "只读转录": "Read-only transcript",
+  "子代理 token 为转录估算，包含子代理": "Estimated transcript tokens, including child agents",
   "启动子代理（{0}）：{1}": "Launch agent ({0}): {1}",
   "读取 {0}": "Reading {0}",
   "运行：{0}": "Running: {0}",
@@ -187,6 +194,103 @@ const en: Record<string, string> = {
     "Editing only changes a local copy; click Save to write the file.",
   "配置直接读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。":
     "Config reads/writes the mcpServers field in ~/.iflow/settings.json directly; after saving, click Restart CLI in the footer to apply (the current session restores automatically).",
+  "MCP 参数向导": "MCP parameter wizard",
+  "MCP 视图": "MCP view",
+  "已配置": "Configured",
+  "浏览目录": "Browse catalog",
+  "搜索 MCP 目录": "Search MCP catalog",
+  "搜索名称、描述或包名": "Search by name, description, or package",
+  "目录分类": "Catalog category",
+  "全部分类": "All categories",
+  "目录仅生成配置；不会执行安装、克隆或构建。重启 CLI 时可能由 npx、uvx 或 Docker 获取依赖。":
+    "The catalog only generates configuration; it does not install, clone, or build anything. Dependencies may be fetched by npx, uvx, or Docker when the CLI restarts.",
+  "未找到匹配的 MCP 服务器": "No matching MCP servers",
+  "配置参数": "Configure",
+  "官方资料": "Official docs",
+  "此模板无需必填参数，可在 JSON 编辑器中继续调整。":
+    "This template has no required parameters; you can continue editing it in the JSON editor.",
+  "远程服务可能需要登录授权；请先查看官方资料确认客户端支持。":
+    "Remote services may require login authorization; check the official documentation to confirm client support first.",
+  "参数会填入配置 JSON，保存后写入 CLI 配置文件。":
+    "Parameters will be inserted into the configuration JSON and written to the CLI configuration file when saved.",
+  "填入 JSON 编辑器": "Fill JSON editor",
+  "文件与开发": "Files & development",
+  "效率与推理": "Productivity & reasoning",
+  "网页与搜索": "Web & search",
+  "浏览器与自动化": "Browser & automation",
+  "文档与代码": "Documentation & code",
+  "协作与项目": "Collaboration & projects",
+  "数据库与存储": "Databases & storage",
+  "允许访问的目录": "Directory allowed to access",
+  "Git 仓库目录": "Git repository directory",
+  "Notion integration token": "Notion integration token",
+  "Brave Search API key": "Brave Search API key",
+  "输入 API key": "Enter API key",
+  "Exa API key": "Exa API key",
+  "API key": "API key",
+  "Firecrawl API key": "Firecrawl API key",
+  "MongoDB connection string": "MongoDB connection string",
+  "Tavily API key": "Tavily API key",
+  "Qdrant URL": "Qdrant URL",
+  "Qdrant API key": "Qdrant API key",
+  "Collection 名称": "Collection name",
+  "Elasticsearch URL": "Elasticsearch URL",
+  "Elasticsearch API key": "Elasticsearch API key",
+  "数据库 DSN": "Database DSN",
+  "Redis URL": "Redis URL",
+  "请填写必需参数：{0}": "Please fill in the required parameter: {0}",
+  "保存中…": "Saving…",
+  // MCP catalog descriptions
+  "在显式授权的目录范围内读取、写入和搜索文件。":
+    "Read, write, and search files within explicitly authorized directories.",
+  "读取、搜索和操作指定 Git 仓库。":
+    "Read, search, and perform operations on a specified Git repository.",
+  "以知识图谱方式保存和检索持久化记忆。":
+    "Store and retrieve persistent memory as a knowledge graph.",
+  "提供逐步展开的结构化推理工具。":
+    "Provide tools for structured, step-by-step reasoning.",
+  "抓取网页并转换为便于模型处理的文本。":
+    "Fetch web pages and convert them into text suitable for model processing.",
+  "测试 MCP 协议功能的参考服务器，适合验证连接。":
+    "A reference server for testing MCP protocol features and verifying connections.",
+  "时区转换与当前时间查询。":
+    "Convert between time zones and look up the current time.",
+  "通过无障碍快照驱动浏览器自动化。":
+    "Automate browsers using accessibility snapshots.",
+  "通过 Chrome DevTools 协议检查页面和浏览器性能。":
+    "Inspect pages and browser performance using the Chrome DevTools Protocol.",
+  "按需检索最新的库和框架文档。":
+    "Retrieve up-to-date library and framework documentation on demand.",
+  "访问 Notion 页面、数据库和工作区内容。":
+    "Access Notion pages, databases, and workspace content.",
+  "通过 Brave Search API 进行网页搜索。":
+    "Search the web using the Brave Search API.",
+  "Exa 网页搜索、内容抓取和研究工具。":
+    "Exa tools for web search, content retrieval, and research.",
+  "网页搜索、抓取和站点爬取工具。":
+    "Tools for web search, page scraping, and website crawling.",
+  "连接 MongoDB；模板启用只读模式。":
+    "Connect to MongoDB; the template enables read-only mode.",
+  "Tavily 网页搜索、提取和爬取工具。":
+    "Tavily tools for web search, content extraction, and crawling.",
+  "向量检索和语义记忆；模板使用 Qdrant Cloud。":
+    "Vector search and semantic memory; the template uses Qdrant Cloud.",
+  "通过 DBHub 连接兼容数据库；需提供 DSN。":
+    "Connect to supported databases through DBHub; a DSN is required.",
+  "通过 Redis MCP Server 连接 Redis 数据库。":
+    "Connect to Redis databases through Redis MCP Server.",
+  "连接 Elasticsearch 集群并使用 API key 鉴权。":
+    "Connect to an Elasticsearch cluster and authenticate with an API key.",
+  // MCP parameter examples retain their literal values in English.
+  "C:\\Projects\\my-app": "C:\\Projects\\my-app",
+  "ntn_…": "ntn_…",
+  "fc-…": "fc-…",
+  "mongodb://localhost:27017/myDatabase": "mongodb://localhost:27017/myDatabase",
+  "https://…:6333": "https://…:6333",
+  "my-collection": "my-collection",
+  "postgres://user:password@localhost:5432/dbname": "postgres://user:password@localhost:5432/dbname",
+  "redis://localhost:6379/0": "redis://localhost:6379/0",
+  "https://…": "https://…",
   // profile-switch choice dialog
   "切换 API 配置": "Switch API profile",
   "取消切换": "Cancel the switch",

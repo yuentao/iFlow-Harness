@@ -24,6 +24,7 @@ import {
   ArrowDown,
   Bot,
   History,
+  Square,
   Pencil,
   Search,
   Trash2,
@@ -264,6 +265,20 @@ const SUB_AGENT_VISIBLE_STEPS = 4;
 
 function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const [expanded, setExpanded] = useState(false);
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const send = useChat((s) => s.send);
+  const state = useChat((s) => s.state);
+  const active = block.status === "pending" || block.status === "in_progress";
+  const canStop = active && state?.status === "streaming" && !!state.sessionId && !state.initializing && !state.replaying;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!active || block.startedAt === undefined) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active, block.startedAt]);
+  const duration = block.startedAt === undefined || (!active && block.completedAt === undefined)
+    ? t("未知") : `${Math.max(0, Math.floor(((block.completedAt ?? now) - block.startedAt) / 1000))}s`;
+  const children = block.entries.filter((b): b is SubAgentBlock => b.kind === "subagent");
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
   // W2: derived counter + localized chip text — memoized so re-renders that
   // don't change `entries` skip the t() replaceAll work.
@@ -321,8 +336,19 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
           </span>
         )}
         <span className="ml-auto shrink-0">{statusChip}</span>
+        {canStop && (
+          <button className="press shrink-0 rounded p-1 text-muted-foreground hover:text-destructive"
+            title={t("停止此子代理（将停止整轮生成）")} aria-label={t("停止此子代理（将停止整轮生成）")}
+            onClick={() => send({ type: "stopSubagent", sessionId: state!.sessionId!, agentId: block.agentId })}>
+            <Square className="size-3" />
+          </button>
+        )}
       </div>
-      {nested.length > 0 && (
+      <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-[10px] text-muted-foreground">
+        <span title={t("子代理 token 为转录估算，包含子代理")}>≈ {block.tokens === undefined ? t("未知") : block.tokens.toLocaleString()} tokens</span>
+        <span>{t("耗时")} {duration}</span>
+      </div>
+      {block.entries.length > 0 && (
         <div className="border-t border-border/60 px-3 py-2">
           <ul className="space-y-1.5">
             {visible.map((t2) => (
@@ -334,6 +360,23 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
               </li>
             ))}
           </ul>
+          {children.length > 0 && (
+            <div className="mt-2 space-y-1.5 border-l border-border/70 pl-2">
+              {children.map((child) => <SubAgentCard key={child.id ?? child.agentId} block={child} />)}
+            </div>
+          )}
+          <button
+            onClick={() => setTranscriptOpen((v) => !v)}
+            className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            {transcriptOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+            {transcriptOpen ? t("收起") : t("只读转录")}
+          </button>
+          <Collapse open={transcriptOpen}>
+            <div className="mt-1 space-y-1 border-l border-border/50 pl-2 text-[11px] text-muted-foreground">
+              {block.entries.map((entry, index) => <ReadOnlySubAgentEntry key={entry.id ?? `${entry.kind}-${index}`} block={entry} />)}
+            </div>
+          </Collapse>
           {overflow && (
             <button
               onClick={() => setExpanded((v) => !v)}
@@ -347,6 +390,15 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
       )}
     </div>
   );
+}
+
+function ReadOnlySubAgentEntry({ block }: { block: Block }) {
+  if (block.kind === "subagent") return null; // Rendered once in the tree above.
+  if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} /></div><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
+  if (block.kind === "thought") return <div><Brain className="mr-1 inline size-3" />{block.text}</div>;
+  if (block.kind === "text" || block.kind === "user") return <Markdown text={block.text} />;
+  if (block.kind === "plan") return <TaskList block={block} />;
+  return <div>{block.notice}</div>;
 }
 
 function ThoughtCard({

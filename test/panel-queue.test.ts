@@ -283,6 +283,42 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(toasts.some((t) => t.level === "warning" && t.message.includes("队列已满"))).toBe(true);
   });
 
+  it("subagent stop validates the live target and reuses the complete cancel cleanup", async () => {
+    const stop = vi.fn();
+    p.client = { cancel: stop };
+    const internals = panel as unknown as {
+      cancelSeen: boolean;
+      cancelAllApprovals: (reason: string) => void;
+      cancelAllPlanExits: (reason: string) => void;
+      cancelAllPendingQuestions: (reason: string) => void;
+      clearPostRejectionWatchdog: () => void;
+    };
+    const approvals = vi.spyOn(internals, "cancelAllApprovals");
+    const plans = vi.spyOn(internals, "cancelAllPlanExits");
+    const questions = vi.spyOn(internals, "cancelAllPendingQuestions");
+    const watchdog = vi.spyOn(internals, "clearPostRejectionWatchdog");
+    p.store.replaceState({ ...p.store.getState(), status: "streaming", blocks: [{
+      kind: "subagent", agentId: "parent", taskToolCallId: "root", title: "root", agentType: null, status: "in_progress", entries: [{
+        kind: "subagent", agentId: "child", taskToolCallId: "task-child", title: "child", agentType: null, status: "pending", entries: [],
+      }],
+    }] });
+    await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "old-session", agentId: "child" });
+    await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "missing" });
+    expect(stop).not.toHaveBeenCalled();
+    await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "child" });
+    expect(stop).toHaveBeenCalledExactlyOnceWith("q-session");
+    expect(approvals).toHaveBeenCalledOnce();
+    expect(plans).toHaveBeenCalledOnce();
+    expect(questions).toHaveBeenCalledOnce();
+    expect(watchdog).toHaveBeenCalledOnce();
+    expect(internals.cancelSeen).toBe(true);
+    expect(toasts.at(-1)?.message).toContain("整轮生成");
+    p.store.replaceState({ ...p.store.getState(), status: "idle" });
+    await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "child" });
+    expect(stop).toHaveBeenCalledOnce();
+    p.client = null;
+  });
+
   it("replay-in-progress rejects enqueue (restore must not race the transcript)", async () => {
     const first = send("first turn");
     await flush();

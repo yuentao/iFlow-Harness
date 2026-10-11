@@ -9,7 +9,6 @@ import type {
   SessionUpdate,
   SlashCommand,
   StopReason,
-  ToolCallStatus,
 } from "../src/acp/protocol.js";
 import { l10n } from "vscode";
 import { countTokens as gptCountTokens } from "gpt-tokenizer";
@@ -40,7 +39,7 @@ import {
  * and restores, so ids stay unique within any live blocks array. The React
  * key falls back to the index only for legacy data (host backfills those).
  */
-let blockSeq = 0;
+let blockSeq = 0n;
 export function nextBlockId(): string {
   return `b${(++blockSeq).toString(36)}`;
 }
@@ -211,34 +210,76 @@ function extractAgentId(notification: SessionNotification): string | undefined {
 function findSubAgentIndex(blocks: Block[], agentId: string): number | null {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
-    if (block.kind === "subagent" && (block.agentId === agentId || block.taskToolCallId === agentId)) {
-      return i;
+    if (block.kind === "subagent" && (block.agentId === agentId || block.taskToolCallId === agentId)) return i;
+    if (block.kind === "subagent") {
+      const nested = findSubAgentIndex(block.entries, agentId);
+      if (nested !== null) return i;
     }
   }
   return null;
 }
 
-/** Fallback binding: a `task` tool_call arrived without an agentId — adopt the
- * OLDEST unfinished such block once the real agentId shows up (FIFO, not
- * newest-first: with parallel tasks the agents start in task-launch order, so
- * the first adapter event seen belongs to the earliest still-unbound card;
- * newest-first misattributed events to the wrong card — verified against the
- * 0.5.19 adapter, which emits per-agent events as each agent starts). Returns
- * the block index (P-1 change reporting). */
-function adoptUnboundSubAgent(blocks: Block[], agentId: string): number | null {
+/** Locate a nested card by its real id, returning its owning entries array. */
+function findSubAgentRef(blocks: Block[], agentId: string): { block: SubAgentBlock; index: number; owner: Block[] } | null {
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]!;
-    if (
-      block.kind === "subagent" &&
-      block.agentId === block.taskToolCallId &&
-      block.taskToolCallId !== null &&
-      (block.status === "pending" || block.status === "in_progress")
-    ) {
-      block.agentId = agentId;
-      return i;
-    }
+    if (block.kind !== "subagent") continue;
+    if (block.agentId === agentId || block.taskToolCallId === agentId) return { block, index: i, owner: blocks };
+    const nested = findSubAgentRef(block.entries, agentId);
+    if (nested) return nested;
   }
   return null;
+}
+
+/**
+ * Compare the ordinal encoded by a generated block id without converting it
+ * to Number. The latter loses ordering once a long-running host crosses the
+ * safe-integer boundary, while the base36 representation remains sortable by
+ * digit count and lexicographic order.
+ */
+function compareBlockIds(a: string, b: string): number {
+  const aDigits = a.slice(1).replace(/^0+/, "") || "0";
+  const bDigits = b.slice(1).replace(/^0+/, "") || "0";
+  if (aDigits.length !== bDigits.length) return aDigits.length - bDigits.length;
+  for (let i = 0; i < aDigits.length; i++) {
+    const aValue = Number.parseInt(aDigits[i]!, 36);
+    const bValue = Number.parseInt(bDigits[i]!, 36);
+    if (aValue !== bValue) return aValue - bValue;
+  }
+  return 0;
+}
+
+function stableBlockId(id: string | undefined): boolean {
+  return typeof id === "string" && /^b[0-9a-z]+$/.test(id);
+}
+
+function adoptUnboundSubAgentDeep(blocks: Block[], agentId: string): { block: SubAgentBlock; index: number; owner: Block[] } | null {
+  const candidates: Array<{ block: SubAgentBlock; index: number; owner: Block[] }> = [];
+  const collect = (owner: Block[]): void => {
+    for (let index = 0; index < owner.length; index++) {
+      const block = owner[index]!;
+      if (block.kind === "subagent") {
+        if (block.agentId === block.taskToolCallId && block.taskToolCallId &&
+          (block.status === "pending" || block.status === "in_progress")) {
+          candidates.push({ block, index, owner });
+        }
+        collect(block.entries);
+      }
+    }
+  };
+  collect(blocks);
+  if (!candidates.length) return null;
+
+  // Live blocks always receive nextBlockId() at creation. Sorting those ids
+  // gives FIFO across the entire tree, independent of nesting depth. Legacy
+  // blocks without a usable id keep traversal order; no synthetic timestamp is
+  // introduced for restored data.
+  const selected = candidates.every((candidate) => stableBlockId(candidate.block.id))
+    ? candidates.reduce((best, candidate) =>
+      compareBlockIds(candidate.block.id!, best.block.id!) < 0 ? candidate : best)
+    : candidates[0]!;
+  selected.block.agentId = agentId;
+  return { block: selected.block, index: selected.index, owner: selected.owner };
 }
 
 /**
@@ -515,98 +556,71 @@ export function applySessionUpdate(
 ): number | null {
   const update = notification.update;
 
-  // Strategy 1: documented `agentId` grouping.
+  // CLI 0.5.19 vendor iflow.js: adapter forwards update.agentId only;
+  // its internal parentAgentId/timestamp are NOT forwarded to ACP. A task's
+  // agentId therefore identifies its caller, not the newly spawned child.
   const agentId = extractAgentId(notification);
-  if (agentId) {
-    let subIdx = findSubAgentIndex(state.blocks, agentId) ?? adoptUnboundSubAgent(state.blocks, agentId);
-    if (subIdx === null) {
-      const title =
-        (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
-          ? update.title || update.toolName
-          : undefined) ?? l10n.t("子代理");
-      state.blocks.push({ kind: "subagent", id: nextBlockId(), agentId, taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] });
-      subIdx = state.blocks.length - 1;
-    }
-    const sub = state.blocks[subIdx] as SubAgentBlock;
-    applyUpdateToBlocks(sub.entries, update);
-    if (
-      (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
-      update.toolCallId === sub.taskToolCallId &&
-      update.status
-    ) {
-      sub.status = update.status;
-    } else {
-      refreshSubAgentStatus(sub);
-    }
-    // Nested entries mutate in place, but the card rides every blockPatch
-    // re-serialization with a fresh reference — reporting its index makes
-    // the webview re-render it.
-    return subIdx;
-  }
-
-  // Strategy 2: `task` tool_call interval state machine.
-  const activeIdx = findActiveSubAgentIndex(state.blocks);
   const isTask = isTaskToolCall(update);
-
-  if (isTask) {
-    const taskUpdate = update as {
-      status?: ToolCallStatus;
-      title?: string;
-      toolCallId?: string;
-      toolName?: string;
-    };
-    // Attribute the update by the spawning call's OWN toolCallId, not "the
-    // newest open card": with parallel tasks (verified live 0.5.19 — the
-    // main-session `task` tool_call carries no agentId, so it lands here)
-    // a second `task` while card 1 is still open must open its own card,
-    // and completions may arrive out of order. The old "any task update
-    // belongs to the open interval" rule merged parallel SubAgents into one
-    // card and left the real second card uncreated (its adapter events then
-    // spawned a nameless fallback card).
-    const ownIdx =
-      taskUpdate.toolCallId !== undefined && taskUpdate.toolCallId !== null
-        ? findSubAgentIndex(state.blocks, taskUpdate.toolCallId)
+  const now = options.replaying ? undefined : Date.now();
+  const stamp = (sub: SubAgentBlock): void => {
+    if (sub.entries.length && sub.startedAt === undefined && now !== undefined) sub.startedAt = now;
+    if ((sub.status === "completed" || sub.status === "failed") && sub.completedAt === undefined && now !== undefined) sub.completedAt = now;
+  };
+  const finish = (sub: SubAgentBlock): number | null => {
+    stamp(sub);
+    if (sub.status === "completed" || sub.status === "failed") closeOpenSubAgents(sub.entries, now);
+    // Refresh all ancestors once; their inclusive sum counts each leaf once.
+    for (const block of state.blocks) if (block.kind === "subagent") blockTokens(block);
+    return findSubAgentIndex(state.blocks, sub.agentId);
+  };
+  if (isTask && (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")) {
+    let ref = findSubAgentRef(state.blocks, update.toolCallId);
+    const created = !ref;
+    if (!ref) {
+      const parent = agentId
+        ? findSubAgentRef(state.blocks, agentId) ?? adoptUnboundSubAgentDeep(state.blocks, agentId)
         : null;
-    if (ownIdx !== null) {
-      const active = state.blocks[ownIdx] as SubAgentBlock;
-      // Interval bookkeeping: the spawning call's status drives the card.
-      if (taskUpdate.status) active.status = taskUpdate.status;
-      // A richer title (Launch agent(type): …) upgrades the card type.
-      if (taskUpdate.title && !active.agentType) {
-        const type = extractAgentType(taskUpdate.title);
-        if (type) {
-          active.agentType = type;
-          active.title = taskUpdate.title;
-        }
-      }
-      // Keep the update in the step list so the trail stays complete.
-      applyUpdateToBlocks(active.entries, update);
-      return ownIdx;
+      const owner = parent?.block.entries ?? state.blocks;
+      const title = update.title || update.toolName || l10n.t("\u5b50\u4ee3\u7406");
+      const sub: SubAgentBlock = {
+        kind: "subagent", id: nextBlockId(), agentId: update.toolCallId,
+        taskToolCallId: update.toolCallId, title, status: update.status ?? "in_progress",
+        agentType: extractAgentType(title), entries: [],
+      };
+      owner.push(sub);
+      ref = { block: sub, owner, index: owner.length - 1 };
+      if (parent) stamp(parent.block);
     }
-    // No card owns this spawning call → interval opens: a SubAgent card is born.
-    const title = taskUpdate.title || taskUpdate.toolName || l10n.t("子代理");
-    state.blocks.push({
-      kind: "subagent",
-      id: nextBlockId(),
-      agentId: taskUpdate.toolCallId ?? "",
-      taskToolCallId: taskUpdate.toolCallId ?? null,
-      title,
-      status: taskUpdate.status ?? "in_progress",
-      agentType: extractAgentType(title),
-      entries: [],
-    });
-    return state.blocks.length - 1;
+    const sub = ref.block;
+    if (update.status) sub.status = update.status;
+    if (update.title && !sub.agentType) {
+      const type = extractAgentType(update.title);
+      if (type) { sub.agentType = type; sub.title = update.title; }
+    }
+    // Keep the spawning task only in its own child's transcript.
+    if (!created) applyUpdateToBlocks(sub.entries, update);
+    return finish(sub);
   }
-
-  if (activeIdx !== null) {
-    // Flat nested activity inside the open interval → into the card.
-    if (isNestedUpdate(update)) {
-      const active = state.blocks[activeIdx] as SubAgentBlock;
-      applyUpdateToBlocks(active.entries, update);
-      refreshSubAgentStatus(active);
-      return activeIdx;
+  if (agentId && isNestedUpdate(update)) {
+    let ref = findSubAgentRef(state.blocks, agentId) ?? adoptUnboundSubAgentDeep(state.blocks, agentId);
+    if (!ref) {
+      const title = (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
+        ? update.title || update.toolName : undefined) ?? l10n.t("\u5b50\u4ee3\u7406");
+      const sub: SubAgentBlock = { kind: "subagent", id: nextBlockId(), agentId,
+        taskToolCallId: null, title, status: "in_progress", agentType: null, entries: [] };
+      state.blocks.push(sub);
+      ref = { block: sub, owner: state.blocks, index: state.blocks.length - 1 };
     }
-    // Non-nested updates (mode/commands) still apply top-level: fall through.
+    applyUpdateToBlocks(ref.block.entries, update);
+    refreshSubAgentStatus(ref.block);
+    return finish(ref.block);
+  }
+  const activeIdx = findActiveSubAgentIndex(state.blocks);
+  if (activeIdx !== null && isNestedUpdate(update)) {
+    const active = state.blocks[activeIdx] as SubAgentBlock;
+    applyUpdateToBlocks(active.entries, update);
+    refreshSubAgentStatus(active);
+    return finish(active);
   }
 
   const replaying = options.replaying;
@@ -1048,6 +1062,7 @@ function blockTokens(block: Block): number {
   if (block.kind === "subagent") {
     let sum = 0;
     for (const e of block.entries) sum += blockTokens(e);
+    block.tokens = sum;
     return sum;
   }
   if (block.tokens !== undefined) return block.tokens;
@@ -1133,16 +1148,28 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
  * failed. Returns the lowest closed card index (for the blockPatch anchor),
  * or null when nothing changed.
  */
-export function closeOpenSubAgents(blocks: Block[]): number | null {
+export function closeOpenSubAgents(blocks: Block[], now = Date.now()): number | null {
   let mutatedFrom: number | null = null;
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]!;
-    if (block.kind === "subagent" && (block.status === "pending" || block.status === "in_progress")) {
+    if (block.kind !== "subagent") continue;
+    const nested = closeOpenSubAgents(block.entries, now);
+    const active = block.status === "pending" || block.status === "in_progress";
+    if (active) {
       block.status = "failed";
-      if (mutatedFrom === null) mutatedFrom = i;
+      // No fabricated duration for old transcripts without a start time.
+      if (block.startedAt !== undefined) block.completedAt ??= now;
     }
+    if ((active || nested !== null) && mutatedFrom === null) mutatedFrom = i;
   }
   return mutatedFrom;
+}
+
+/** Host validation for the per-card stop fallback (session/cancel only). */
+export function canStopSubAgent(state: SessionState, sessionId: string, agentId: string): boolean {
+  if (!sessionId || state.sessionId !== sessionId || state.status !== "streaming" || state.initializing || state.replaying) return false;
+  const target = findSubAgentRef(state.blocks, agentId)?.block;
+  return !!target && (target.status === "pending" || target.status === "in_progress");
 }
 
 export function completePrompt(state: SessionState, stopReason: StopReason, usageCtx?: UsageContext | null): number | null {
@@ -1330,8 +1357,9 @@ function seedBlockSeqPast(id: string | undefined): void {
   const m = /^b([0-9a-z]+)$/.exec(id);
   const digits = m?.[1];
   if (!digits) return;
-  const n = Number.parseInt(digits, 36);
-  if (Number.isFinite(n) && n > blockSeq) blockSeq = n;
+  let n = 0n;
+  for (const digit of digits) n = n * 36n + BigInt(Number.parseInt(digit, 36));
+  if (n > blockSeq) blockSeq = n;
 }
 
 export function backfillBlockIds(blocks: Block[]): void {
@@ -1365,10 +1393,25 @@ export function backfillBlockIds(blocks: Block[]): void {
  * backfillBlockIds (which seeds the counter past the old ids first).
  */
 export function reassignBlockIds(blocks: Block[]): void {
-  for (const block of blocks) {
-    block.id = nextBlockId();
-    if (block.kind === "subagent") reassignBlockIds(block.entries);
+  const collected: Block[] = [];
+  const collect = (owner: Block[]): void => {
+    for (const block of owner) {
+      collected.push(block);
+      if (block.kind === "subagent") collect(block.entries);
+    }
+  };
+  collect(blocks);
+  // Re-mint in original creation order, not tree order: a younger descendant
+  // may precede an older root in the transcript tree. Stable sorting preserves
+  // traversal order for duplicate legacy ids. If any id is unknown, the old
+  // traversal fallback is the only order available without inventing history.
+  if (collected.every((block) => stableBlockId(block.id))) {
+    collected.sort((a, b) => compareBlockIds(a.id!, b.id!));
   }
+  for (const block of collected) {
+    seedBlockSeqPast(block.id);
+  }
+  for (const block of collected) block.id = nextBlockId();
 }
 
 /**

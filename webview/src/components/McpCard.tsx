@@ -1,6 +1,7 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { Pencil, Plus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { ChevronDown, Pencil, Plus, Search } from "lucide-react";
 import { useChat } from "../store";
+import { mcpCatalog, fillMcpTemplate, entriesToServers, sameMcpServers, type CatalogItem } from "./mcp-catalog";
 import { t } from "../i18n";
 import { InlineConfirm } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
@@ -61,36 +62,67 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
   const [editError, setEditError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<"configured" | "catalog">("configured");
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("");
+  const [wizard, setWizard] = useState<CatalogItem | null>(null);
+  const [wizardName, setWizardName] = useState("");
+  const [values, setValues] = useState<Record<string, string>>({});
+  const pending = useRef<Record<string, unknown> | null>(null);
+  const loaded = useRef(false);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const filtered = useMemo(() => mcpCatalog.filter((item) =>
+    (!category || item.category === category) &&
+    `${item.name} ${t(item.description)} ${t(item.category)} ${JSON.stringify(item.template)}`
+      .toLowerCase().includes(query.trim().toLowerCase())), [query, category]);
 
   // Open → request the current disk state. The reply arrives as a window
   // message (same channel Composer uses for filesPicked — store.ts routes
   // these kinds away from the snapshot pipeline). Late replies after
   // unmount are dropped by React's setState-on-unmounted no-op.
   useEffect(() => {
-    send({ type: "listMcpServers" });
     const handler = (event: MessageEvent) => {
       const msg = event.data as { type?: string; servers?: Record<string, unknown>; error?: string };
       if (msg?.type !== "mcpServers") return;
+      if (pending.current) {
+        // Failure is terminal too. Never replace local drafts with either reply.
+        if (!msg.error && (!msg.servers || !sameMcpServers(pending.current, msg.servers))) return;
+        pending.current = null;
+        setSaving(false);
+        if (msg.error) {
+          setEditError(msg.error);
+          return;
+        }
+        setSavedFlash(true);
+        flashTimer.current = setTimeout(() => setSavedFlash(false), 2500);
+        return;
+      }
+      if (loaded.current) return; // stale read/save replies must not overwrite edits
+      loaded.current = true;
       if (msg.error) {
         setLoadError(msg.error);
         setEntries([]);
         return;
       }
-      setEntries(
-        Object.entries(msg.servers ?? {}).map(([name, config]) => ({
-          name,
-          json: JSON.stringify(config ?? {}, null, 2),
-        })),
-      );
+      setEntries(Object.entries(msg.servers ?? {}).map(([name, config]) => ({
+        name, json: JSON.stringify(config, null, 2),
+      })));
     };
     window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
+    send({ type: "listMcpServers" });
+    return () => {
+      window.removeEventListener("message", handler);
+      clearTimeout(flashTimer.current);
+    };
   }, [send]);
 
   // Sub-editor → shell header (back arrow + contextual title).
   useEffect(() => {
     onHeader(
-      editing !== null
+      wizard !== null
+        ? { back: () => { setWizard(null); setEditError(null); }, title: t("MCP 参数向导") }
+        : editing !== null
         ? {
             back: () => {
               setEditing(null);
@@ -100,28 +132,42 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           }
         : null,
     );
-  }, [editing, isNew, onHeader]);
+  }, [editing, isNew, wizard, onHeader]);
 
   function save() {
-    if (!entries) return;
-    const servers: Record<string, unknown> = {};
+    if (!entries || pending.current || loadError || editing !== null || wizard) return;
     for (const entry of entries) {
       const error = validateEntry(entry);
-      if (error) {
-        setEditError(error);
-        return;
-      }
-      const name = entry.name.trim();
-      if (name in servers) {
-        setEditError(t("名称重复：{0}", name));
-        return;
-      }
-      servers[name] = JSON.parse(entry.json);
+      if (error) { setEditError(error); return; }
     }
+    let servers: Record<string, unknown>;
+    try { servers = entriesToServers(entries); }
+    catch (error) { setEditError(t("名称重复：{0}", (error as Error).message)); return; }
     setEditError(null);
+    setSavedFlash(false);
+    pending.current = servers;
+    setSaving(true);
     send({ type: "saveMcpServers", servers });
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 2500);
+  }
+
+  function fillEditor() {
+    if (!wizard || !entries) return;
+    const name = wizardName.trim();
+    if (!name) { setEditError(t("名称不能为空")); return; }
+    if (entries.some((entry) => entry.name.trim() === name)) {
+      setEditError(t("名称重复：{0}", name)); return;
+    }
+    try {
+      const json = JSON.stringify(fillMcpTemplate(wizard, values), null, 2);
+      setEditing(entries.length);
+      setEntries((current) => [...(current ?? []), { name, json }]);
+      setIsNew(true);
+      setWizard(null);
+      setValues({});
+      setTab("configured");
+      setEditError(null);
+      setSavedFlash(false);
+    } catch (error) { setEditError(t("请填写必需参数：{0}", (error as Error).message)); }
   }
 
   const INPUT =
@@ -135,7 +181,38 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     <>
       {loadError && <div className="text-[12px] text-destructive">{loadError}</div>}
 
-      {editing === null && (
+      {editing === null && wizard === null && (
+        <div className="mb-2 flex gap-1" role="tablist" aria-label={t("MCP 视图")}>
+          <button role="tab" aria-selected={tab === "configured"} className={BTN} onClick={() => { setTab("configured"); setEditError(null); }}>{t("已配置")}</button>
+          <button role="tab" aria-selected={tab === "catalog"} className={BTN} onClick={() => { setTab("catalog"); setEditError(null); }}>{t("浏览目录")}</button>
+        </div>
+      )}
+      {editing === null && wizard === null && tab === "catalog" && (
+        <div className="space-y-2">
+          <label className="flex items-center gap-1"><Search className="size-3.5" /><input className={`${INPUT} flex-1`} aria-label={t("搜索 MCP 目录")} placeholder={t("搜索名称、描述或包名")} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
+          <label className="flex items-center gap-1"><ChevronDown className="size-3.5" /><select className={`${INPUT} flex-1`} aria-label={t("目录分类")} value={category} onChange={(e) => setCategory(e.target.value)}><option value="">{t("全部分类")}</option>{[...new Set(mcpCatalog.map((item) => item.category))].map((c) => <option key={c} value={c}>{t(c)}</option>)}</select></label>
+          <p className="text-[11px] text-muted-foreground">{t("目录仅生成配置；不会执行安装、克隆或构建。重启 CLI 时可能由 npx、uvx 或 Docker 获取依赖。")}</p>
+          {filtered.length === 0 && <p className="text-[12px] text-muted-foreground">{t("未找到匹配的 MCP 服务器")}</p>}
+          {filtered.map((item) => <div key={item.id} className="rounded-lg border border-border p-2 space-y-1">
+            <div className="flex items-center gap-2"><strong className="min-w-0 flex-1 text-[12px]">{item.name}</strong><span className="text-[10px] text-muted-foreground">{t(item.category)} · {typeof item.template.command === "string" ? item.template.command : "HTTP"}</span></div>
+            <p className="text-[11px] text-muted-foreground">{t(item.description)}</p>
+            <div className="flex gap-2"><button className={BTN} disabled={entries === null || !!loadError || saving} onClick={() => { setWizard(item); setWizardName(item.name); setValues({}); setEditError(null); }}>{t("配置参数")}</button><button className={BTN} onClick={() => send({ type: "openExternal", uri: item.source })}>{t("官方资料")}</button></div>
+          </div>)}
+        </div>
+      )}
+      {wizard && (
+        <div className="space-y-2">
+          <p className="text-[12px] text-muted-foreground">{t(wizard.description)}</p>
+          <label className="flex flex-col gap-1"><span>{t("名称")}</span><input className={INPUT} value={wizardName} onChange={(e) => setWizardName(e.target.value)} /></label>
+          {wizard.fields.map((field) => <label key={field.key} className="flex flex-col gap-1 text-[11.5px]"><span>{t(field.label)}{field.required ? " *" : ""}</span><input className={INPUT} type={field.secret ? "password" : "text"} required={field.required} autoComplete="off" placeholder={t(field.placeholder)} value={values[field.key] ?? ""} onChange={(e) => setValues((current) => ({ ...current, [field.key]: e.target.value }))} /><span className="font-mono text-[10px] text-muted-foreground">{field.key}</span></label>)}
+          {wizard.fields.length === 0 && <p className="text-[11px] text-muted-foreground">{t("此模板无需必填参数，可在 JSON 编辑器中继续调整。")}</p>}
+          {wizard.template.type === "http" && <p className="text-[11px] text-muted-foreground">{t("远程服务可能需要登录授权；请先查看官方资料确认客户端支持。")}</p>}
+          <p className="text-[11px] text-muted-foreground">{t("参数会填入配置 JSON，保存后写入 CLI 配置文件。")}</p>
+          <button className={SAVE_BTN} onClick={fillEditor}>{t("填入 JSON 编辑器")}</button>
+          {editError && <p role="alert" className="text-[12px] text-destructive">{editError}</p>}
+        </div>
+      )}
+      {editing === null && wizard === null && tab === "configured" && (
         <>
           {entries === null ? (
             <div className="py-4 text-center text-[12px] text-muted-foreground">{t("读取中…")}</div>
@@ -145,7 +222,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </div>
           ) : (
             <div className="space-y-1.5">
-              {entries!.map((entry, i) => {
+              {(entries ?? []).map((entry, i) => {
                 let transport = "";
                 try {
                   transport = transportOf(JSON.parse(entry.json));
@@ -161,6 +238,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       <button
                         className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
                         title={t("编辑")}
+                        disabled={saving || !!loadError}
                         onClick={() => {
                           setEditing(i);
                           setIsNew(false);
@@ -169,12 +247,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       >
                         <Pencil className="size-3.5" />
                       </button>
-                      <InlineConfirm
+                      {!saving && !loadError && <InlineConfirm
                         armed={confirmDelete === i}
                         onArm={() => setConfirmDelete(i)}
                         onCancel={() => setConfirmDelete(null)}
                         onConfirm={() => {
-                          setEntries(entries!.filter((_, j) => j !== i));
+                          setEntries((current) => current?.filter((_, j) => j !== i) ?? null);
+                          setSavedFlash(false);
                           setConfirmDelete(null);
                         }}
                         confirmLabel={t("确认")}
@@ -183,7 +262,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         className="ml-1"
                         triggerClassName="opacity-70 hover:opacity-100"
                         iconClassName="size-3.5"
-                      />
+                      />}
                     </div>
                     {transport && (
                       <div className="truncate font-mono text-[10px] text-muted-foreground" title={transport}>
@@ -199,7 +278,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
             <button
               className={BTN}
-              disabled={entries === null}
+              disabled={entries === null || !!loadError || saving}
               onClick={() => {
                 setEntries([...(entries ?? []), { name: "", json: '{\n  "command": "npx",\n  "args": ["-y", "…"]\n}' }]);
                 setEditing(entries === null ? 0 : entries.length);
@@ -210,8 +289,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               <Plus className="mr-0.5 inline size-3 align-[-2px]" />
               {t("添加")}
             </button>
-            <button className={SAVE_BTN} disabled={busy || entries === null || savedFlash} onClick={save}>
-              {savedFlash ? t("已保存") : t("保存")}
+            <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
+              {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
             </button>
             {editError && <span className="text-[12px] text-destructive">{editError}</span>}
           </div>
@@ -223,7 +302,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         </>
       )}
 
-      {editing !== null && entries && (
+      {editing !== null && entries?.[editing] && (
         <div className="space-y-2">
           <label className="flex flex-col gap-0.5">
             <span className="text-[11.5px] text-muted-foreground">{t("名称")}</span>
@@ -234,7 +313,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               placeholder={t("如 chrome-devtools")}
               onChange={(e) => {
                 const v = e.target.value;
-                setEntries(entries.map((en, j) => (j === editing ? { ...en, name: v } : en)));
+                setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, name: v } : en)) ?? null);
+                setSavedFlash(false);
               }}
             />
           </label>
@@ -248,7 +328,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               value={entries[editing]!.json}
               onChange={(e) => {
                 const v = e.target.value;
-                setEntries(entries.map((en, j) => (j === editing ? { ...en, json: v } : en)));
+                setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: v } : en)) ?? null);
+                setSavedFlash(false);
               }}
             />
           </label>
@@ -256,7 +337,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             <button
               className={SAVE_BTN}
               onClick={() => {
-                const error = validateEntry(entries[editing]!);
+                const entry = entries[editing];
+                if (!entry) return;
+                const error = validateEntry(entry) ?? (entries.some((other, i) => i !== editing && other.name.trim() === entry.name.trim()) ? t("名称重复：{0}", entry.name.trim()) : null);
                 if (error) {
                   setEditError(error);
                   return;

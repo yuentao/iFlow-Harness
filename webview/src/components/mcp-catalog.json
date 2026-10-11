@@ -1,0 +1,458 @@
+[
+  {
+    "id": "filesystem",
+    "name": "filesystem",
+    "category": "文件与开发",
+    "description": "在显式授权的目录范围内读取、写入和搜索文件。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${allowed_paths}"
+      ]
+    },
+    "fields": [
+      {
+        "key": "allowed_paths",
+        "label": "允许访问的目录",
+        "placeholder": "C:\\Projects\\my-app",
+        "required": true
+      }
+    ]
+  },
+  {
+    "id": "git",
+    "name": "git",
+    "category": "文件与开发",
+    "description": "读取、搜索和操作指定 Git 仓库。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
+    "template": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "${repository_path}"
+      ]
+    },
+    "fields": [
+      {
+        "key": "repository_path",
+        "label": "Git 仓库目录",
+        "placeholder": "C:\\Projects\\my-app",
+        "required": true
+      }
+    ]
+  },
+  {
+    "id": "memory",
+    "name": "memory",
+    "category": "效率与推理",
+    "description": "以知识图谱方式保存和检索持久化记忆。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "sequential-thinking",
+    "name": "sequential-thinking",
+    "category": "效率与推理",
+    "description": "提供逐步展开的结构化推理工具。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "fetch",
+    "name": "fetch",
+    "category": "网页与搜索",
+    "description": "抓取网页并转换为便于模型处理的文本。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+    "template": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "everything",
+    "name": "everything",
+    "category": "效率与推理",
+    "description": "测试 MCP 协议功能的参考服务器，适合验证连接。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-everything"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "time",
+    "name": "time",
+    "category": "效率与推理",
+    "description": "时区转换与当前时间查询。",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+    "template": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-time"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "playwright",
+    "name": "playwright",
+    "category": "浏览器与自动化",
+    "description": "通过无障碍快照驱动浏览器自动化。",
+    "source": "https://github.com/microsoft/playwright-mcp",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "chrome-devtools",
+    "name": "chrome-devtools",
+    "category": "浏览器与自动化",
+    "description": "通过 Chrome DevTools 协议检查页面和浏览器性能。",
+    "source": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "context7",
+    "name": "context7",
+    "category": "文档与代码",
+    "description": "按需检索最新的库和框架文档。",
+    "source": "https://github.com/upstash/context7",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "fields": []
+  },
+  {
+    "id": "notion",
+    "name": "notionApi",
+    "category": "协作与项目",
+    "description": "访问 Notion 页面、数据库和工作区内容。",
+    "source": "https://github.com/makenotion/notion-mcp-server",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@notionhq/notion-mcp-server"
+      ],
+      "env": {
+        "NOTION_TOKEN": "${NOTION_TOKEN}"
+      }
+    },
+    "fields": [
+      {
+        "key": "NOTION_TOKEN",
+        "label": "Notion integration token",
+        "placeholder": "ntn_…",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "brave-search",
+    "name": "brave-search",
+    "category": "网页与搜索",
+    "description": "通过 Brave Search API 进行网页搜索。",
+    "source": "https://github.com/brave/brave-search-mcp-server",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      }
+    },
+    "fields": [
+      {
+        "key": "BRAVE_API_KEY",
+        "label": "Brave Search API key",
+        "placeholder": "输入 API key",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "exa",
+    "name": "exa",
+    "category": "网页与搜索",
+    "description": "Exa 网页搜索、内容抓取和研究工具。",
+    "source": "https://github.com/exa-labs/exa-mcp-server",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "exa-mcp-server"
+      ],
+      "env": {
+        "EXA_API_KEY": "${EXA_API_KEY}"
+      }
+    },
+    "fields": [
+      {
+        "key": "EXA_API_KEY",
+        "label": "Exa API key",
+        "placeholder": "API key",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "firecrawl",
+    "name": "firecrawl-mcp",
+    "category": "网页与搜索",
+    "description": "网页搜索、抓取和站点爬取工具。",
+    "source": "https://github.com/mendableai/firecrawl-mcp-server",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "firecrawl-mcp"
+      ],
+      "env": {
+        "FIRECRAWL_API_KEY": "${FIRECRAWL_API_KEY}"
+      }
+    },
+    "fields": [
+      {
+        "key": "FIRECRAWL_API_KEY",
+        "label": "Firecrawl API key",
+        "placeholder": "fc-…",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "mongodb",
+    "name": "mongodb",
+    "category": "数据库与存储",
+    "description": "连接 MongoDB；模板启用只读模式。",
+    "source": "https://github.com/mongodb-js/mongodb-mcp-server",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mongodb-mcp-server@latest",
+        "--readOnly"
+      ],
+      "env": {
+        "MDB_MCP_CONNECTION_STRING": "${MDB_MCP_CONNECTION_STRING}"
+      }
+    },
+    "fields": [
+      {
+        "key": "MDB_MCP_CONNECTION_STRING",
+        "label": "MongoDB connection string",
+        "placeholder": "mongodb://localhost:27017/myDatabase",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "tavily",
+    "name": "tavily-mcp",
+    "category": "网页与搜索",
+    "description": "Tavily 网页搜索、提取和爬取工具。",
+    "source": "https://github.com/tavily-ai/tavily-mcp",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "tavily-mcp@latest"
+      ],
+      "env": {
+        "TAVILY_API_KEY": "${TAVILY_API_KEY}"
+      }
+    },
+    "fields": [
+      {
+        "key": "TAVILY_API_KEY",
+        "label": "Tavily API key",
+        "placeholder": "API key",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "qdrant",
+    "name": "qdrant",
+    "category": "数据库与存储",
+    "description": "向量检索和语义记忆；模板使用 Qdrant Cloud。",
+    "source": "https://github.com/qdrant/mcp-server-qdrant",
+    "template": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-qdrant"
+      ],
+      "env": {
+        "QDRANT_URL": "${QDRANT_URL}",
+        "QDRANT_API_KEY": "${QDRANT_API_KEY}",
+        "COLLECTION_NAME": "${COLLECTION_NAME}",
+        "EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2"
+      }
+    },
+    "fields": [
+      {
+        "key": "QDRANT_URL",
+        "label": "Qdrant URL",
+        "placeholder": "https://…:6333",
+        "required": true
+      },
+      {
+        "key": "QDRANT_API_KEY",
+        "label": "Qdrant API key",
+        "placeholder": "输入 API key",
+        "required": true,
+        "secret": true
+      },
+      {
+        "key": "COLLECTION_NAME",
+        "label": "Collection 名称",
+        "placeholder": "my-collection",
+        "required": true
+      }
+    ]
+  },
+  {
+    "id": "dbhub",
+    "name": "dbhub",
+    "category": "数据库与存储",
+    "description": "通过 DBHub 连接兼容数据库；需提供 DSN。",
+    "source": "https://github.com/bytebase/dbhub",
+    "template": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@bytebase/dbhub@latest",
+        "--transport",
+        "stdio",
+        "--dsn",
+        "${DATABASE_DSN}"
+      ]
+    },
+    "fields": [
+      {
+        "key": "DATABASE_DSN",
+        "label": "数据库 DSN",
+        "placeholder": "postgres://user:password@localhost:5432/dbname",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "redis",
+    "name": "redis",
+    "category": "数据库与存储",
+    "description": "通过 Redis MCP Server 连接 Redis 数据库。",
+    "source": "https://github.com/redis/mcp-redis",
+    "template": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "redis-mcp-server@latest",
+        "redis-mcp-server",
+        "--url",
+        "${REDIS_URL}"
+      ]
+    },
+    "fields": [
+      {
+        "key": "REDIS_URL",
+        "label": "Redis URL",
+        "placeholder": "redis://localhost:6379/0",
+        "required": true,
+        "secret": true
+      }
+    ]
+  },
+  {
+    "id": "elasticsearch",
+    "name": "elasticsearch-mcp-server",
+    "category": "数据库与存储",
+    "description": "连接 Elasticsearch 集群并使用 API key 鉴权。",
+    "source": "https://github.com/elastic/mcp-server-elasticsearch",
+    "template": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "ES_URL",
+        "-e",
+        "ES_API_KEY",
+        "docker.elastic.co/mcp/elasticsearch",
+        "stdio"
+      ],
+      "env": {
+        "ES_URL": "${ES_URL}",
+        "ES_API_KEY": "${ES_API_KEY}"
+      }
+    },
+    "fields": [
+      {
+        "key": "ES_URL",
+        "label": "Elasticsearch URL",
+        "placeholder": "https://…",
+        "required": true
+      },
+      {
+        "key": "ES_API_KEY",
+        "label": "Elasticsearch API key",
+        "placeholder": "输入 API key",
+        "required": true,
+        "secret": true
+      }
+    ]
+  }
+]

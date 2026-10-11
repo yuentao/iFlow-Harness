@@ -80,6 +80,7 @@ import {
 import type { ParsedEditArgs, PreEditSnapshot } from "../../shared/session-state.js";
 import {
   backfillBlockIds,
+  canStopSubAgent,
   beginReplay,
   clampSessionLabel,
   dropSessionUpdate,
@@ -971,18 +972,13 @@ export class ChatPanel implements vscode.Disposable {
       case "resolveContext":
         void this.resolveContext(msg.requestId, msg.kind, msg.query);
         break;
+      case "stopSubagent":
+        if (!canStopSubAgent(this.store.getState(), msg.sessionId, msg.agentId)) break;
+        this.store.sendToast("info", vscode.l10n.t("CLI 暂不支持单独停止子代理，已请求停止整轮生成"));
+        this.cancelCurrentTurn();
+        break;
       case "cancel":
-        // Cancel any pending approvals/questions first, then send cancel to CLI.
-        // This ensures the user can always stop the generation even when
-        // there's a pending approval or question card.
-        this.cancelAllApprovals(vscode.l10n.t("用户取消"));
-        this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
-        this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
-        this.cancelSeen = true;
-        // The user took explicit control of the turn — a post-rejection
-        // watchdog armed earlier must not fire behind their back.
-        this.clearPostRejectionWatchdog();
-        this.client?.cancel(this.store.getState().sessionId ?? "");
+        this.cancelCurrentTurn();
         break;
       case "newSession":
         await this.startNewSession();
@@ -1899,6 +1895,17 @@ export class ChatPanel implements vscode.Disposable {
       if (this.offerAlwaysAllowRule(pending.req)) void this.sendApprovalPolicy();
       else this.log.info("allow-always offered but no rule could be derived — kept as one-time approval");
     }
+  }
+
+  /** Shared complete user-stop chain: unblock cards, suppress retries/watchdog. */
+  private cancelCurrentTurn(): void {
+    this.cancelAllApprovals(vscode.l10n.t("用户取消"));
+    this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
+    this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
+    this.cancelSeen = true;
+    this.clearPostRejectionWatchdog();
+    const sessionId = this.store.getState().sessionId;
+    if (sessionId) this.client?.cancel(sessionId);
   }
 
   private cancelAllApprovals(reason: string): void {

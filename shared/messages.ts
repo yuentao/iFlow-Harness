@@ -66,6 +66,9 @@ export interface DiffHunkUi {
  */
 export interface BlockBase {
   id?: string;
+  /** Host-observed lifecycle timestamps. Legacy transcripts omit these. */
+  startedAt?: number;
+  completedAt?: number;
   /**
    * P1 incremental token estimation: cached token count of this block's
    * text (host-side only; the webview ignores it). Written by the reducer
@@ -709,6 +712,8 @@ export type WebviewToHost =
    */
   | { type: "editAndResend"; blockId: string; text: string }
   | { type: "cancel" }
+  /** CLI 0.5.19 only supports whole-turn cancellation. */
+  | { type: "stopSubagent"; sessionId: string; agentId: string }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }
