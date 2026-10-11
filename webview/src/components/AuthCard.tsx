@@ -33,12 +33,14 @@ export function AuthCard({
   busy,
   onDismiss,
   onOpenMcp,
+  onOpenApprovalPolicy,
 }: {
   auth: AuthUiState;
   editable: boolean;
   busy: boolean;
   onDismiss: () => void;
   onOpenMcp: () => void;
+  onOpenApprovalPolicy: () => void;
 }) {
   const send = useChat((s) => s.send);
   const activeProfile = auth.profiles.find((p) => p.active && p.source === "extension");
@@ -268,6 +270,12 @@ export function AuthCard({
                 onClick={onOpenMcp}
               >
                 {t("管理 MCP 服务器…")}
+              </button>
+              <button
+                className="press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+                onClick={onOpenApprovalPolicy}
+              >
+                {t("审批策略…")}
               </button>
               <button
                 className="press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"

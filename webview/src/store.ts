@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import {
   applyBlockPatch,
+  type ApprovalRule,
   type HostToWebview,
   type SessionState,
+  type SessionSummaryUi,
   type WebviewToHost,
 } from "../../shared/messages";
 
@@ -100,6 +102,10 @@ function createMockHost(): HostApi {
   // Mock MCP dict: lazily seeded on first read, replaced wholesale on save
   // (mirrors the host's replace semantics).
   let mockMcpServers: Record<string, unknown> | undefined;
+  // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
+  // the host's approvalPolicy message.
+  let mockApprovalRules: ApprovalRule[] | undefined;
+  let mockApprovalDraft: ApprovalRule | null | undefined;
   const demoBlocks: SessionState["blocks"] = [
     {
       // Mirrors the editor right-click "加入 iFlow 上下文" draft so the
@@ -410,10 +416,12 @@ function createMockHost(): HostApi {
       estimatedCost: 0.0271,
     },
     // M4 demo: two persisted sessions; switching restores a short transcript.
+    // The old one ships archived so the switcher's collapsed section is
+    // visible in mock mode (M4 P1-8).
     sessions: [
       { id: "mock-session", label: "帮我看看这个仓库结构", updatedAt: Date.now() },
-      { id: "mock-session-old", label: "上次的重构讨论", updatedAt: Date.now() - 86_400_000 },
-    ],
+      { id: "mock-session-old", label: "上次的重构讨论", updatedAt: Date.now() - 86_400_000, archived: true },
+    ] as SessionSummaryUi[],
     activeSessionId: "mock-session",
     // Demo: surface the question card so the option-description UI is visible
     // in browser debug mode.
@@ -712,6 +720,28 @@ function createMockHost(): HostApi {
         });
         return;
       }
+      if (m.type === "applyHunkSelection") {
+        for (const block of demoBlocks) {
+          if (block.kind === "tool" && block.toolCallId === m.toolCallId) {
+            block.hunkDecisions = [...m.keep];
+            block.partiallyReverted = m.keep.some((k) => !k);
+            block.output = `[逐块回退（mock）：保留 ${m.keep.filter(Boolean).length} · 回退 ${m.keep.filter((k) => !k).length}]`;
+          }
+        }
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        return;
+      }
       if (m.type === "setMode") {
         // Mirrors real CLI behavior: respond with the new current mode.
         demoMeta.modes = {
@@ -858,6 +888,32 @@ function createMockHost(): HostApi {
         });
         return;
       }
+      if (m.type === "setSessionFlags") {
+        // M4 P1-8 mock: flip pinned/archived on the demo index (false deletes
+        // the property, mirroring the host's clean-index rule).
+        demoMeta.sessions = demoMeta.sessions.map((s) => {
+          if (s.id !== m.sessionId) return s;
+          const next = { ...s };
+          if (m.pinned) next.pinned = true;
+          else delete next.pinned;
+          if (m.archived) next.archived = true;
+          else delete next.archived;
+          return next;
+        });
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        return;
+      }
       if (m.type === "searchFiles") {
         // Demo workspace listing for the @-mention popup.
         const demo = [
@@ -932,6 +988,33 @@ function createMockHost(): HostApi {
             ),
           80,
         );
+        return;
+      }
+      if (m.type === "listApprovalPolicy" || m.type === "saveApprovalPolicy" || m.type === "dismissApprovalRuleDraft") {
+        if (m.type === "saveApprovalPolicy") mockApprovalRules = m.rules;
+        if (m.type === "dismissApprovalRuleDraft") mockApprovalDraft = null;
+        if (!mockApprovalRules) {
+          mockApprovalRules = [
+            { id: "rule-read-src", label: "允许读取 src 下文件", enabled: true, action: "allow", kinds: ["read"], path: "src/**", hits: 12 },
+            { id: "deny-env", label: "拒绝读取 .env", enabled: true, action: "deny", path: "**/.env*" },
+            { id: "ask-push", label: "git push 弹卡", enabled: false, action: "ask", commands: ["git"] },
+          ];
+          mockApprovalDraft = {
+            id: `rule-draft-${Date.now().toString(36)}`,
+            label: "允许执行 git status",
+            enabled: true,
+            action: "allow",
+            kinds: ["execute"],
+            commands: ["git"],
+          };
+        }
+        const payload = {
+          type: "approvalPolicy",
+          rules: mockApprovalRules,
+          projectRules: [{ id: "proj-lock", label: "项目：拒绝改 lock 文件", enabled: true, action: "deny", path: "**/package-lock.json" }],
+          draft: mockApprovalDraft,
+        };
+        window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: payload })), 80);
         return;
       }
       if (m.type === "cancel") {
@@ -1265,6 +1348,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "stagedFiles" ||
       msg.type === "filesPicked" ||
       msg.type === "mcpServers" ||
+      msg.type === "approvalPolicy" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
       msg.type === "contextResolved"

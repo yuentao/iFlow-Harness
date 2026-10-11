@@ -59,6 +59,11 @@ const en: Record<string, string> = {
   "取消": "Cancel",
   // user message delete
   "删除该消息及其后所有内容": "Delete this message and everything after it",
+  // edit & resend (M4 P1-9)
+  "编辑并重发该消息": "Edit and resend this message",
+  "重发": "Resend",
+  "重发将先回滚该轮文件变更并删除其后的对话": "Resending first restores this turn's file snapshot, then deletes the conversation after it",
+  "重发将删除该消息及其后所有对话": "Resending deletes this message and everything after it",
   // turn-level checkpoint rollback (M3 P0-1)
   "回滚到此轮之前": "Roll back to before this turn",
   "文件": "Files",
@@ -75,6 +80,15 @@ const en: Record<string, string> = {
   "操作输出": "Output",
   "回退此改动": "Revert this change",
   "已回退": "Reverted",
+  "部分回退": "Partially reverted",
+  "保留": "Keep",
+  "回退": "Revert",
+  "改动 {0}/{1}": "Change {0}/{1}",
+  "应用（保留 {0} · 回退 {1}）": "Apply (keep {0} · revert {1})",
+  "全部保留": "Keep all",
+  "保留此改动": "Keep this change",
+  "回退此改动（恢复为编辑前内容）": "Revert this change (restore pre-edit content)",
+  "将回退的块恢复为编辑前内容，保留其余改动": "Restore reverted hunks to their pre-edit content, keeping the rest",
   "文件对比": "File diff",
   "任务清单": "Task list",
   "运行中": "Running",
@@ -85,6 +99,12 @@ const en: Record<string, string> = {
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
   "删除会话 {0}": "Delete session {0}",
+  // M4 P1-8 session pin & archive
+  "置顶": "Pin",
+  "取消置顶": "Unpin",
+  "归档": "Archive",
+  "取消归档": "Unarchive",
+  "已归档（{0}）": "Archived ({0})",
   // composer
   "发送": "Send",
   "停止": "Stop",
@@ -115,6 +135,30 @@ const en: Record<string, string> = {
   "语言与审批模式在 VSCode 设置（iflow）中修改；MCP 服务器在管理面板中编辑。两者均写入 CLI 配置，需重启 CLI 生效，可点击此处热重启（当前会话将自动恢复）。":
     "Language and approval mode are edited in the VSCode Settings (search \"iflow\"); MCP servers are edited in the management panel. Both are written to the CLI config and need a CLI restart to take effect — use the hot restart here (the current session restores automatically).",
   "管理 MCP 服务器…": "Manage MCP servers…",
+  // M4 P1-1 approval policy card
+  "审批策略…": "Approval policies…",
+  "审批策略": "Approval policies",
+  "审批规则": "Approval rule",
+  "自动允许": "Auto-allow",
+  "自动拒绝": "Auto-deny",
+  "弹卡确认": "Ask (card)",
+  "尚未配置审批规则": "No approval rules configured",
+  "项目规则（只读）": "Project rules (read-only)",
+  "启用": "Enabled",
+  "点击启用": "Click to enable",
+  "点击停用": "Click to disable",
+  "命中 {0} 次": "hit {0}×",
+  "规则名称": "Rule name",
+  "如 允许读取 src 下文件": "e.g. Allow reading files under src",
+  "动作": "Action",
+  "路径通配（相对会话目录）": "Path glob (relative to the session cwd)",
+  "命令首词（逗号分隔，仅执行类）": "Command first-words (comma-separated, execute only)",
+  "MCP 服务器名": "MCP server name",
+  "工具名（精确匹配）": "Tool name (exact match)",
+  "维度全部留空将匹配所有请求（谨慎）；编辑只改本地副本，点击「保存」才生效。":
+    "Leaving every dimension empty matches ALL requests (use with care); editing only changes a local copy — click Save to apply.",
+  "审批请求按顺序匹配规则（项目规则优先），首条命中即生效：自动允许 / 自动拒绝 / 弹卡。内置硬底线：rm、git push 等破坏性命令永不被自动允许，命中时仍弹卡确认。":
+    "Approval requests match rules in order (project rules first); the first match decides: auto-allow / auto-deny / ask. Built-in hard floor: destructive commands such as rm or git push are never auto-allowed — they still show the card.",
   // MCP management card
   "MCP 服务器": "MCP servers",
   "添加 MCP 服务器": "Add MCP server",

@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   Check,
   ChevronDown,
+  ChevronRight,
   Focus,
   History,
   Loader2,
   Moon,
+  Pin,
+  PinOff,
   Plus,
   Search,
   Settings2,
@@ -23,6 +28,7 @@ import { QuestionCard } from "./components/QuestionCard";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { AuthCard } from "./components/AuthCard";
 import { McpCard } from "./components/McpCard";
+import { ApprovalPolicyCard } from "./components/ApprovalPolicyCard";
 import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
 
 function statusChip(status: AgentStatus) {
@@ -102,11 +108,17 @@ export function App() {
   // MCP management card (reads/writes settings.json via the host). Mutually
   // exclusive with the config card — both are centered modals.
   const [mcpOpen, setMcpOpen] = useState(false);
+  // M4 P1-1 approval-policy card. Also opens itself when the host pushes a
+  // 「始终允许」 rule draft (approval card → policy card handoff).
+  const [policyOpen, setPolicyOpen] = useState(false);
   // Two-step delete: clicking the trash arms confirmation for that session id;
   // a second click on 确认 actually sends deleteSession. Prevents accidental
   // loss of a persisted transcript (the host delete is irreversible).
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [sessionQuery, setSessionQuery] = useState("");
+  // M4 P1-8: archived sessions live in a collapsed second section — they are
+  // kept out of the default results until the user opens the section.
+  const [showArchived, setShowArchived] = useState(false);
   // Theme priority: the user's explicit toggle wins (persisted); otherwise
   // follow the editor color theme pushed by the host; default light.
   const [manual, setManual] = useState<"light" | "dark" | null>(
@@ -134,6 +146,19 @@ export function App() {
   useEffect(() => {
     if (configOpen) send({ type: "refreshAuth" });
   }, [configOpen, send]);
+
+  // M4 P1-1 handoff: an approval card's 「始终允许」 makes the host derive a
+  // rule draft and push `approvalPolicy` — open the policy card so the user
+  // can name & save it (the card's own listener loads the draft into the
+  // editor; here we only flip visibility).
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const msg = event.data as { type?: string; draft?: unknown };
+      if (msg?.type === "approvalPolicy" && msg.draft) setPolicyOpen(true);
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
 
   // Pending-action cards float over the transcript (see the JSX below). Their
   // height is variable (plan editor, expanded custom answers), so a ResizeObserver
@@ -285,51 +310,91 @@ export function App() {
                       </button>
                     )}
                   <div className="min-h-0 flex-1 overflow-y-auto">
-                  {sessions
-                    .filter((s) => s.label.toLowerCase().includes(sessionQuery.trim().toLowerCase()))
-                    .map((s) => {
-                    const deletable = s.id !== activeSessionId && !locked;
-                    return (
-                      <div
-                        key={s.id}
-                        className="flex w-full items-center px-3 py-1.5 hover:bg-accent/60"
-                      >
-                        <button
-                          className="flex min-w-0 flex-1 flex-col items-start text-left"
-                          onClick={() => {
-                            send({ type: "loadSession", sessionId: s.id });
-                            close();
-                          }}
-                        >
-                          <span className="flex w-full items-center gap-2 text-[12px] text-foreground">
-                            <span className="truncate">{s.label}</span>
-                            {s.id === activeSessionId && (
-                              <Check className="ml-auto size-3 shrink-0 text-primary" />
-                            )}
-                          </span>
-                          <span className="font-mono text-[10px] text-muted-foreground">
-                            {formatSessionTime(s.updatedAt)}
-                          </span>
-                        </button>
-                        {deletable && (
-                          <InlineConfirm
-                            armed={confirmingDelete === s.id}
-                            onArm={() => setConfirmingDelete(s.id)}
-                            onCancel={() => setConfirmingDelete(null)}
-                            onConfirm={() => {
-                              send({ type: "deleteSession", sessionId: s.id });
-                              setConfirmingDelete(null);
+                  {(() => {
+                    const q = sessionQuery.trim().toLowerCase();
+                    const matches = (s: SessionSummaryUi) => s.label.toLowerCase().includes(q);
+                    const activeList = sessions.filter((s) => !s.archived && matches(s));
+                    const archivedList = sessions.filter((s) => s.archived && matches(s));
+                    // M4 P1-8: one row renderer for both sections. Pin/archive
+                    // toggle via setSessionFlags (index-only, safe mid-stream);
+                    // delete keeps its two-step confirm.
+                    const renderRow = (s: SessionSummaryUi) => {
+                      const deletable = s.id !== activeSessionId && !locked;
+                      const flag = (pinned: boolean, archived: boolean) =>
+                        send({ type: "setSessionFlags", sessionId: s.id, pinned, archived });
+                      return (
+                        <div key={s.id} className="flex w-full items-center px-3 py-1.5 hover:bg-accent/60">
+                          <button
+                            className="flex min-w-0 flex-1 flex-col items-start text-left"
+                            onClick={() => {
+                              send({ type: "loadSession", sessionId: s.id });
+                              close();
                             }}
-                            confirmLabel={t("确认")}
-                            cancelLabel={t("取消")}
-                            title={t("删除会话 {0}", s.label)}
-                            className="ml-1"
-                            triggerClassName="opacity-60 hover:opacity-100"
-                          />
+                          >
+                            <span className="flex w-full items-center gap-2 text-[12px] text-foreground">
+                              {!!s.pinned && <Pin className="size-3 shrink-0 text-primary/80" />}
+                              <span className="truncate">{s.label}</span>
+                              {s.id === activeSessionId && (
+                                <Check className="ml-auto size-3 shrink-0 text-primary" />
+                              )}
+                            </span>
+                            <span className="font-mono text-[10px] text-muted-foreground">
+                              {formatSessionTime(s.updatedAt)}
+                            </span>
+                          </button>
+                          <button
+                            className="shrink-0 p-0.5 text-muted-foreground opacity-60 hover:opacity-100 hover:text-foreground"
+                            title={s.pinned ? t("取消置顶") : t("置顶")}
+                            onClick={() => flag(!s.pinned, !!s.archived)}
+                          >
+                            {s.pinned ? <PinOff className="size-3" /> : <Pin className="size-3" />}
+                          </button>
+                          <button
+                            className="shrink-0 p-0.5 text-muted-foreground opacity-60 hover:opacity-100 hover:text-foreground"
+                            title={s.archived ? t("取消归档") : t("归档")}
+                            onClick={() => flag(!!s.pinned, !s.archived)}
+                          >
+                            {s.archived ? <ArchiveRestore className="size-3" /> : <Archive className="size-3" />}
+                          </button>
+                          {deletable && (
+                            <InlineConfirm
+                              armed={confirmingDelete === s.id}
+                              onArm={() => setConfirmingDelete(s.id)}
+                              onCancel={() => setConfirmingDelete(null)}
+                              onConfirm={() => {
+                                send({ type: "deleteSession", sessionId: s.id });
+                                setConfirmingDelete(null);
+                              }}
+                              confirmLabel={t("确认")}
+                              cancelLabel={t("取消")}
+                              title={t("删除会话 {0}", s.label)}
+                              className="ml-1"
+                              triggerClassName="opacity-60 hover:opacity-100"
+                            />
+                          )}
+                        </div>
+                      );
+                    };
+                    return (
+                      <>
+                        {activeList.map(renderRow)}
+                        {archivedList.length > 0 && (
+                          <button
+                            className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[10px] uppercase tracking-wider text-muted-foreground hover:bg-accent/40"
+                            onClick={() => setShowArchived((v) => !v)}
+                          >
+                            {showArchived ? (
+                              <ChevronDown className="size-3" />
+                            ) : (
+                              <ChevronRight className="size-3" />
+                            )}
+                            {t("已归档（{0}）", archivedList.length)}
+                          </button>
                         )}
-                      </div>
+                        {showArchived && archivedList.map(renderRow)}
+                      </>
                     );
-                  })}
+                  })()}
                   </div>
                 </>
               )}
@@ -449,16 +514,20 @@ export function App() {
         </div>
       </header>
 
-      {showAuthCard && !mcpOpen && (
+      {showAuthCard && !mcpOpen && !policyOpen && (
         <AuthCard
           auth={auth!}
           editable={configOpen}
           busy={locked}
           onDismiss={() => setConfigOpen(false)}
           onOpenMcp={() => setMcpOpen(true)}
+          onOpenApprovalPolicy={() => setPolicyOpen(true)}
         />
       )}
-      {mcpOpen && <McpCard busy={locked} onDismiss={() => setMcpOpen(false)} />}
+      {mcpOpen && !policyOpen && <McpCard busy={locked} onDismiss={() => setMcpOpen(false)} />}
+      {policyOpen && (
+        <ApprovalPolicyCard busy={locked} onDismiss={() => setPolicyOpen(false)} />
+      )}
 
       {/* Profile-switch choice dialog: centered modal over everything (the
           switch can be started from the header dropdown or the auth card's

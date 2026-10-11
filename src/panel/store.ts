@@ -24,6 +24,7 @@ import {
   clearPendingProfileSwitch,
   deleteUserMessageById,
   markToolReverted,
+  markToolHunkDecisions,
   refreshSessionUsage,
   setMeta,
   setPendingApproval,
@@ -343,6 +344,16 @@ export class SessionStore {
   /** Visual marker for a reverted tool diff. */
   toolReverted(toolCallId: string): boolean {
     const index = markToolReverted(this.state, toolCallId);
+    if (index === null) return false;
+    this.noteMutationIndex(index);
+    this.flush();
+    return true;
+  }
+
+  /** M4 P0-2: record committed per-hunk decisions + the partially-reverted
+   * marker after the host wrote the replayed text to disk. */
+  toolHunkDecisions(toolCallId: string, decisions: readonly boolean[], partial: boolean): boolean {
+    const index = markToolHunkDecisions(this.state, toolCallId, decisions, partial);
     if (index === null) return false;
     this.noteMutationIndex(index);
     this.flush();

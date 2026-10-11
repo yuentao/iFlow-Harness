@@ -13,10 +13,14 @@ import type {
   StopReason,
   UserQuestion,
 } from "../src/acp/protocol.js";
+import type { ApprovalRule } from "./approval-policy.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
 export type { SlashCommand, UserQuestion };
+// M4 P1-1: the approval-policy card edits these directly (the rule shape is
+// shared pure data, not session state — it never rides a snapshot).
+export type { ApprovalRule, ApprovalAction } from "./approval-policy.js";
 
 // ---------------------------------------------------------------------------
 // Transcript blocks (rendered in order)
@@ -27,6 +31,29 @@ export interface ToolDiffUi {
   path: string;
   oldText: string | null;
   newText: string | null;
+}
+
+/**
+ * M4 P0-2 — one hunk of a whole-file old→new change (computed by
+ * `shared/hunks.ts#computeHunks`, never persisted to disk — always derived
+ * from the diff text so it can never drift from it). `rowStart`/`rowEnd`
+ * index the shared `diffRows` sequence (the renderer's line list) so the
+ * keep/revert header lands on the right rows; the old/new ranges drive the
+ * deterministic replay.
+ */
+export interface DiffHunkUi {
+  /** First `diffRows` row index belonging to this hunk. */
+  rowStart: number;
+  /** One past the last row index. */
+  rowEnd: number;
+  /** 0-based start line in oldText's split("\n"). */
+  oldStart: number;
+  /** Lines replaced in oldText (0 = pure insertion). */
+  oldLines: number;
+  /** 0-based start line in newText's split("\n"). */
+  newStart: number;
+  /** Lines inserted from newText (0 = pure deletion). */
+  newLines: number;
 }
 
 /**
@@ -97,6 +124,20 @@ export interface ToolBlock extends BlockBase {
    * "failed" aggregate into SubAgent cards nesting successful tools.
    */
   reverted?: boolean;
+  /**
+   * M4 P0-2 — per-hunk keep/revert decisions after `applyHunkSelection`
+   * committed (index-aligned with `computeHunks(diff.oldText, diff.newText)`;
+   * true = keep the new-side change, false = revert that hunk). Persisted so
+   * a re-render restores the hunk headers' state. Cleared when a NEW diff
+   * arrives for the same tool call (the decisions anchor to the old text).
+   */
+  hunkDecisions?: boolean[];
+  /**
+   * M4 P0-2 — a partial (per-hunk) revert landed: the file now holds the
+   * replayed text, neither the diff's newText nor its oldText. Distinct from
+   * `reverted` (whole-file revert).
+   */
+  partiallyReverted?: boolean;
 }
 
 /**
@@ -237,6 +278,11 @@ export interface SessionSummaryUi {
   id: string;
   label: string;
   updatedAt: number;
+  /** M4 P1-8: pinned sessions sort above the rest in the switcher. */
+  pinned?: boolean;
+  /** M4 P1-8: archived sessions move to a collapsed second section and are
+   * kept out of the default (active) results. */
+  archived?: boolean;
 }
 
 /**
@@ -574,6 +620,14 @@ export type HostToWebview =
    * non-empty means the read/write failed (the dict is then the last-known or
    * best-effort value, not a confirmed save). */
   | { type: "mcpServers"; servers: Record<string, unknown>; error?: string }
+  /** M4 P1-1: the approval pre-review rule table. `rules` are the user's
+   * global rules (editable, persisted in globalState); `projectRules` come
+   * from the workspace's `.iflow/approval.json` and are READ-ONLY here (the
+   * file is user-owned — the host matches them first but never writes them).
+   * `draft` non-null means a 「始终允许」 click derived a rule that is now
+   * waiting to be named: the webview opens the policy card in naming mode and
+   * either saves it into `rules` or dismisses it. */
+  | { type: "approvalPolicy"; rules: ApprovalRule[]; projectRules: ApprovalRule[]; draft?: ApprovalRule | null }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. `auroraIntensity`
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
@@ -643,6 +697,17 @@ export type WebviewToHost =
    * impossible (history compressed away / text unlocatable) the host says so
    * via a toast instead of silently pretending. */
   | { type: "deleteUserMessage"; blockId: string }
+  /**
+   * M4 P1-9 — edit a historical user message and re-send it (Cline semantics).
+   * The host truncates the turn and everything after it (the full
+   * deleteUserMessage chain: transcript + CLI chatHistory + reload), then
+   * sends `text` as a fresh prompt. When the turn carries a complete
+   * checkpoint, its file snapshot is restored FIRST (same unsaved-editor /
+   * modal confirmations as restoreCheckpoint "files") so the re-run starts
+   * from the pre-turn workspace; without a checkpoint the host degrades to a
+   * pure truncate-and-resend and says so via a toast.
+   */
+  | { type: "editAndResend"; blockId: string; text: string }
   | { type: "cancel" }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
@@ -666,6 +731,14 @@ export type WebviewToHost =
 | { type: "respondProfileSwitch"; id: string; keepSession: boolean | null }
   /** Revert a completed tool call that carried a structured diff. */
   | { type: "revertTool"; toolCallId: string }
+  /**
+   * M4 P0-2 — commit per-hunk keep/revert decisions for a tool diff.
+   * `keep` is the index-aligned bitmap over `computeHunks(oldText, newText)`
+   * (true = keep the change, false = revert that hunk). The host replays the
+   * kept hunks deterministically and writes the result — refusing outright
+   * when the file drifted from the diff's newText (no fuzzy patching).
+   */
+  | { type: "applyHunkSelection"; toolCallId: string; keep: boolean[] }
   /**
    * M3 P0-1 — restore the workspace / conversation to a turn checkpoint.
    * `mode`: "files" = shadow-git checkout of that turn's snapshot (with the
@@ -707,6 +780,9 @@ export type WebviewToHost =
   | { type: "loadSession"; sessionId: string }
   /** M4: forget a persisted session (switcher entry + transcript). */
   | { type: "deleteSession"; sessionId: string }
+  /** M4 P1-8: toggle a session's pinned / archived flags (persisted with the
+   * session index; the switcher renders archived ones in a second section). */
+  | { type: "setSessionFlags"; sessionId: string; pinned: boolean; archived: boolean }
   /** Re-read the API profile list (SecretStorage + CLI settings.json) when the
    * profile dropdown / auth card opens — external tools rewrite settings.json
    * behind our back, so the shown list must be recomputed on open. */
@@ -729,6 +805,18 @@ export type WebviewToHost =
    * at worst lost, never silently merged). Host writes settings.json and
    * offers a hot restart. Reply: `mcpServers` with `error` on failure. */
   | { type: "saveMcpServers"; servers: Record<string, unknown> }
+  /** M4 P1-1: approval-policy card opened — re-read the global table and the
+   * workspace `.iflow/approval.json` (external tools may have rewritten it).
+   * Reply: `approvalPolicy`. */
+  | { type: "listApprovalPolicy" }
+  /** Save the whole global rule table (replace semantics — the card edits a
+   * fresh copy read via `listApprovalPolicy`). Also clears a pending `draft`
+   * when the card saved it into `rules`. Reply: `approvalPolicy`. */
+  | { type: "saveApprovalPolicy"; rules: ApprovalRule[] }
+  /** Abandon the 「始终允许」-derived draft without adding it. The wire
+   * response already went out (the CLI's own proceed_always still applies for
+   * this session) — only the persistent host-side rule is dropped. */
+  | { type: "dismissApprovalRuleDraft" }
   /** M1 P0-7: export the ACTIVE session's transcript. `format` picks the
    * serializer; the host shows a native save dialog and writes the file
    * (Markdown renders every block type, JSON copies the transcript file). */

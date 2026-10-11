@@ -94,9 +94,22 @@ import {
   parseTranscriptJsonl,
   reassignBlockIds,
   snapshotEditDiff,
+  sortSessionSummaries,
   synthesizeEditDiff,
   toAgentPromptText,
 } from "../../shared/session-state.js";
+import { computeHunks, replayHunks } from "../../shared/hunks.js";
+import {
+  APPROVAL_RULES_MAX,
+  decideApproval,
+  deriveAllowRule,
+  hardDenyReason,
+  normalizeApprovalRule,
+  parseApprovalPolicy,
+  serializeApprovalPolicy,
+  type ApprovalRequestInfo,
+  type ApprovalRule,
+} from "../../shared/approval-policy.js";
 import { SessionStore } from "./store.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
@@ -250,6 +263,13 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
+/** M4 P1-1 globalState key: the serialized global approval pre-review rule
+ * table (`{version, rules}` — see shared/approval-policy.ts). */
+const APPROVAL_POLICY_KEY = "iflow.approvalPolicy";
+/** M4 P1-1: workspace-relative project override, matched BEFORE the global
+ * table so a repo can tighten (or loosen, within the hard-veto floor) the
+ * user's rules. Read-only from the panel's side — never written back. */
+const APPROVAL_POLICY_PROJECT_FILE = ".iflow/approval.json";
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
@@ -318,11 +338,25 @@ export class ChatPanel implements vscode.Disposable {
     {
       options: PermissionOption[];
       toolName: string;
+      /** M4 P1-1: the original request — needed to derive an allow rule when
+       * the user upgrades an approval to 「始终允许」. */
+      req: RequestPermissionRequest;
       resolve: (response: RequestPermissionResponse) => void;
       timer: NodeJS.Timeout;
     }
   >();
   private approvalSeq = 0;
+  /** M4 P1-1: cached global pre-review rule table (null = not loaded yet).
+   * Invalidated on save and on panel dispose only — globalState is ours. */
+  private approvalRules: ApprovalRule[] | null = null;
+  /** M4 P1-1: cached workspace `.iflow/approval.json` rules (read-only).
+   * Invalidated by the workspace file watcher, on session start and on card
+   * open — an external tool (or the user's editor) owns that file. */
+  private approvalProjectRules: ApprovalRule[] | null = null;
+  /** M4 P1-1: a 「始终允许」 click derived this rule; it is NOT persisted until
+   * the user names it in the policy card (or it is dismissed). */
+  private approvalDraft: ApprovalRule | null = null;
+  private approvalRuleSeq = 0;
   /** Awaiting user confirmation for `_iflow/plan/exit`, keyed by plan-exit id. */
   private readonly pendingPlanExits = new Map<
     string,
@@ -537,6 +571,9 @@ export class ChatPanel implements vscode.Disposable {
     const fileWatcher = this.services.watchers?.[0] ?? vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
     const invalidateFileCache = () => {
       this.fileSearchCache = null;
+      // M4 P1-1: the project override lives inside the workspace, so the same
+      // watcher covers it — drop the cache and the next pre-review re-reads.
+      this.approvalProjectRules = null;
     };
     fileWatcher.onDidCreate(invalidateFileCache);
     fileWatcher.onDidDelete(invalidateFileCache);
@@ -1005,6 +1042,9 @@ export class ChatPanel implements vscode.Disposable {
       case "revertTool":
         await this.revertToolDiff(msg.toolCallId);
         break;
+      case "applyHunkSelection":
+        await this.applyHunkSelection(msg.toolCallId, msg.keep);
+        break;
       case "restoreCheckpoint":
         await this.restoreCheckpoint(msg.userBlockId, msg.mode);
         break;
@@ -1042,6 +1082,9 @@ export class ChatPanel implements vscode.Disposable {
       case "deleteSession":
         await this.deleteSession(msg.sessionId);
         break;
+      case "setSessionFlags":
+        this.setSessionFlags(msg.sessionId, msg.pinned, msg.archived);
+        break;
       case "refreshAuth": {
         // Dropdown/card opened: recompute the profile list fresh (SecretStorage
         // + settings.json) without touching the connection-scoped flags.
@@ -1066,11 +1109,24 @@ export class ChatPanel implements vscode.Disposable {
       case "saveMcpServers":
         this.saveMcpServers(msg.servers);
         break;
+      case "listApprovalPolicy":
+        void this.sendApprovalPolicy();
+        break;
+      case "saveApprovalPolicy":
+        this.saveApprovalPolicy(msg.rules);
+        break;
+      case "dismissApprovalRuleDraft":
+        this.approvalDraft = null;
+        void this.sendApprovalPolicy();
+        break;
       case "regenerate":
         await this.regenerate();
         break;
       case "deleteUserMessage":
         await this.deleteUserMessage(msg.blockId);
+        break;
+      case "editAndResend":
+        await this.editAndResend(msg.blockId, msg.text);
         break;
       case "exportSession":
         await this.exportActiveSession(msg.format);
@@ -1493,6 +1549,190 @@ export class ChatPanel implements vscode.Disposable {
   }
 
 
+  // --- M4 P1-1: approval pre-review rule table --------------------------------
+
+  /** Auto-decision transcript notes already emitted this turn, keyed by
+   * `ruleId|toolName`. An "allow all reads" rule would otherwise add a system
+   * line per read_file call; cleared at every prompt attempt (see
+   * promptWithRetry's `turnHadAgentOutput` reset). */
+  private readonly autoApprovalNoted = new Set<string>();
+
+  /** Workspace file the project override is read from (null = no workspace). */
+  private approvalProjectUri(): vscode.Uri | null {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return null;
+    return vscode.Uri.joinPath(root, ...APPROVAL_POLICY_PROJECT_FILE.split("/"));
+  }
+
+  /**
+   * Load (and cache) both rule tables. Async on purpose: the approval path
+   * must never do sync I/O in the extension host (trap #18 discipline), and
+   * the project file is owned by the user / external tools.
+   */
+  private async loadApprovalRules(): Promise<{ global: ApprovalRule[]; project: ApprovalRule[] }> {
+    if (!this.approvalRules) {
+      const raw = this.context.globalState.get<string>(APPROVAL_POLICY_KEY);
+      this.approvalRules = raw ? parseApprovalPolicy(raw) ?? [] : [];
+    }
+    if (!this.approvalProjectRules) this.approvalProjectRules = await this.readProjectApprovalRules();
+    return { global: this.approvalRules, project: this.approvalProjectRules };
+  }
+
+  private async readProjectApprovalRules(): Promise<ApprovalRule[]> {
+    const uri = this.approvalProjectUri();
+    if (!uri) return [];
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      const rules = parseApprovalPolicy(Buffer.from(bytes).toString("utf8"));
+      if (!rules) {
+        this.log.warn(`approval policy: ignoring malformed ${APPROVAL_POLICY_PROJECT_FILE}`);
+        return [];
+      }
+      return rules;
+    } catch {
+      return []; // absent is the normal case — global rules only
+    }
+  }
+
+  /** Precedence order for matching: project rules override global ones. */
+  private approvalRuleChain(global: readonly ApprovalRule[], project: readonly ApprovalRule[]): ApprovalRule[] {
+    return [...project, ...global];
+  }
+
+  private persistApprovalRules(rules: ApprovalRule[]): void {
+    this.approvalRules = rules;
+    void this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
+  }
+
+  /** Bump a matched GLOBAL rule's hit counter (project rules are read-only —
+   * the panel never writes a file the user owns). */
+  private noteApprovalRuleHit(ruleId: string | undefined, project: readonly ApprovalRule[]): void {
+    if (!ruleId || !this.approvalRules) return;
+    if (project.some((r) => r.id === ruleId)) return;
+    let changed = false;
+    const next = this.approvalRules.map((r) => {
+      if (r.id !== ruleId) return r;
+      changed = true;
+      return { ...r, hits: (r.hits ?? 0) + 1 };
+    });
+    if (changed) this.persistApprovalRules(next);
+  }
+
+  /** The wire facts a decision is made from (see ApprovalRequestInfo: CLI
+   * 0.5.19 permission requests carry kind/title/locations, not toolName/args). */
+  private approvalRequestInfo(req: RequestPermissionRequest): ApprovalRequestInfo {
+    const toolCall = req.toolCall;
+    return {
+      toolName: toolCall.toolName ?? "",
+      toolKind: toolCall.kind ?? "other",
+      title: toolCall.title ?? "",
+      paths: (toolCall.locations ?? []).map((l) => l.path),
+      cwd: this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+    };
+  }
+
+  /**
+   * Run the rule table over an incoming permission request BEFORE surfacing a
+   * card. Returns the wire response to send, or null when the user must still
+   * decide (no rule matched, or a hard veto downgraded an allow to ask).
+   *
+   * Discipline: the response's `optionId` is ALWAYS one the agent offered —
+   * the CLI parses it with `nativeEnum(...)` (probed, CLI 0.5.19 bundle), so a
+   * fabricated id throws and strands the turn. When the wanted shape is
+   * missing, allow falls back to the card and deny falls back to `cancelled`
+   * (the same response the 5-minute timeout produces).
+   */
+  private async preReviewApproval(req: RequestPermissionRequest): Promise<RequestPermissionResponse | null> {
+    const { global, project } = await this.loadApprovalRules();
+    const chain = this.approvalRuleChain(global, project);
+    if (chain.length === 0) return null;
+    const info = this.approvalRequestInfo(req);
+    const decision = decideApproval(chain, info);
+    if (decision.action === "ask") return null;
+
+    const pick = (kinds: readonly string[]): PermissionOption | undefined => {
+      for (const kind of kinds) {
+        const found = req.options.find((o) => o.kind === kind);
+        if (found) return found;
+      }
+      return undefined;
+    };
+
+    let response: RequestPermissionResponse;
+    if (decision.action === "allow") {
+      const option = pick(["allow_once", "allow_always"]);
+      if (!option) {
+        this.log.warn(
+          `approval policy: rule "${decision.ruleLabel ?? decision.ruleId}" matched but the request offers no allow option — showing the card`,
+        );
+        return null;
+      }
+      response = { outcome: { outcome: "selected", optionId: option.optionId } };
+    } else {
+      const option = pick(["reject_once", "reject_always"]);
+      response = option
+        ? { outcome: { outcome: "selected", optionId: option.optionId } }
+        : { outcome: { outcome: "cancelled" } };
+    }
+
+    this.noteApprovalRuleHit(decision.ruleId, project);
+    // One transcript trace per rule per tool per turn (see autoApprovalNoted).
+    const noteKey = `${decision.ruleId ?? ""}|${info.toolName}`;
+    if (!this.autoApprovalNoted.has(noteKey)) {
+      this.autoApprovalNoted.add(noteKey);
+      const ruleName = decision.ruleLabel ?? decision.ruleId ?? "";
+      this.store.approvalResolutionNote(
+        info.toolName || info.title || "tool",
+        decision.action === "allow"
+          ? vscode.l10n.t("按策略自动允许（{0}）", ruleName)
+          : vscode.l10n.t("按策略自动拒绝（{0}）", ruleName),
+      );
+    }
+    return response;
+  }
+
+  /**
+   * 「始终允许」 upgrade (roadmap P1-1): derive the narrowest rule for THIS
+   * request and hand it to the policy card for naming. Nothing is persisted
+   * until the user saves — a rule that silently auto-approves future turns
+   * must be a deliberate, visible act. Returns false when no rule can be
+   * derived (hard-vetoed command, or the request carries nothing to match on).
+   */
+  private offerAlwaysAllowRule(req: RequestPermissionRequest): boolean {
+    const info = this.approvalRequestInfo(req);
+    if (hardDenyReason(info)) return false;
+    const draft = deriveAllowRule(info, `rule-${Date.now().toString(36)}-${++this.approvalRuleSeq}`);
+    if (!draft) return false;
+    this.approvalDraft = draft;
+    return true;
+  }
+
+  /** Push the current tables (+ any pending draft) to the policy card. */
+  private async sendApprovalPolicy(): Promise<void> {
+    const { global, project } = await this.loadApprovalRules();
+    this.postToWebview({
+      type: "approvalPolicy",
+      rules: global,
+      projectRules: project,
+      draft: this.approvalDraft,
+    });
+  }
+
+  /** Save the global table (replace semantics — see shared/messages.ts). */
+  private saveApprovalPolicy(rules: readonly ApprovalRule[]): void {
+    const clean: ApprovalRule[] = [];
+    for (const raw of rules.slice(0, APPROVAL_RULES_MAX)) {
+      const rule = normalizeApprovalRule(raw, `rule-${clean.length + 1}`);
+      if (rule && !clean.some((r) => r.id === rule.id)) clean.push(rule);
+    }
+    this.persistApprovalRules(clean);
+    // Saving from the card resolves the draft either way (the user either
+    // kept it in `rules` or threw it away).
+    this.approvalDraft = null;
+    void this.sendApprovalPolicy();
+  }
+
+
   // --- Tool approval flow (session/request_permission) --------------------------
 
   private async requestPermissionFromUser(req: RequestPermissionRequest): Promise<RequestPermissionResponse> {
@@ -1526,6 +1766,7 @@ export class ChatPanel implements vscode.Disposable {
       this.pendingApprovals.set(id, {
         options: req.options,
         toolName: approval.toolName,
+        req,
         resolve,
         timer,
       });
@@ -1559,6 +1800,13 @@ export class ChatPanel implements vscode.Disposable {
       isReject ? vscode.l10n.t("已拒绝") : vscode.l10n.t("已允许（{0}）", option?.name ?? optionId),
     );
     pending.resolve({ outcome: { outcome: "selected", optionId } });
+    // M4 P1-1: 「始终允许」 upgrades to a named rule. The approval itself is
+    // already resolved — rule creation is a deliberate second step in the
+    // policy card (pre-filled draft, user names & saves).
+    if (option?.kind === "allow_always") {
+      if (this.offerAlwaysAllowRule(pending.req)) void this.sendApprovalPolicy();
+      else this.log.info("allow-always offered but no rule could be derived — kept as one-time approval");
+    }
   }
 
   private cancelAllApprovals(reason: string): void {
@@ -2197,6 +2445,98 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       vscode.window.showErrorMessage(
         vscode.l10n.t("回退失败: {0}", errorMessage(error)),
+      );
+    }
+  }
+
+  /**
+   * M4 P0-2 — apply a per-hunk keep/revert decision. Deterministic: the target
+   * text is replayed from the diff's oldText with only the kept hunks applied
+   * (shared/hunks.ts), so no fuzzy patching ever touches the file. The op is
+   * REFUSED when disk content no longer equals the diff's newText — the file
+   * moved on since the edit, and a partial write would be guesswork (the
+   * roadmap routes that case to the turn checkpoint instead).
+   */
+  private async applyHunkSelection(toolCallId: string, keep: boolean[]): Promise<void> {
+    const block = findToolBlockById(this.store.getState().blocks, toolCallId);
+    if (!block || !block.diff) return;
+    const { oldText, newText } = block.diff;
+    if (oldText === null || newText === null) {
+      // Creation/deletion diffs have no per-hunk semantics — whole-file revert
+      // (or nothing) is the only meaningful action there.
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("无法逐块回退：新建或删除文件只能整文件处理"),
+      );
+      return;
+    }
+    const hunks = computeHunks(oldText, newText);
+    if (!hunks || hunks.length === 0) {
+      vscode.window.showWarningMessage(vscode.l10n.t("该改动无法逐块回退，请使用整文件回退"));
+      return;
+    }
+    if (keep.length !== hunks.length) {
+      this.log.warn(`applyHunkSelection: decision length ${keep.length} ≠ hunk count ${hunks.length}`);
+      return;
+    }
+    if (!keep.some((k) => k)) {
+      // Nothing kept = whole-file revert; route through the battle-tested path
+      // (it owns the already-reverted short-circuit and messaging).
+      await this.revertToolDiff(toolCallId);
+      return;
+    }
+    if (keep.every((k) => k)) {
+      void vscode.window.showInformationMessage(vscode.l10n.t("未回退任何改动"));
+      return;
+    }
+
+    const chosen = await this.locateDiffFile(block);
+    if (!chosen) return;
+    const fileUri = vscode.Uri.file(chosen);
+    let currentText: string | null = null;
+    try {
+      currentText = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString("utf8");
+    } catch {
+      currentText = null;
+    }
+    if (currentText !== newText) {
+      // Refuse rather than fuzzy-merge: the diff's line ranges no longer map
+      // onto the file. The user can restore the whole turn via the checkpoint.
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("文件内容与 diff 记录不一致（可能已被继续修改）。请先回退整份改动，或使用「回滚到此轮之前」。"),
+      );
+      return;
+    }
+
+    try {
+      const openDoc = vscode.workspace.textDocuments.find(
+        (d) => d.uri.fsPath.toLowerCase() === fileUri.fsPath.toLowerCase(),
+      );
+      if (openDoc?.isDirty) {
+        const pick = await vscode.window.showWarningMessage(
+          vscode.l10n.t("该文件在编辑器中有未保存的修改。逐块回退将从磁盘重新加载并丢弃这些修改。"),
+          { modal: true },
+          vscode.l10n.t("丢弃并回退"),
+        );
+        if (pick !== vscode.l10n.t("丢弃并回退")) return;
+      }
+
+      const targetText = replayHunks(oldText, newText, hunks, keep);
+      // Write through the VSCode file service so watchers stay consistent
+      // (raw fs.writeFile bypasses them — pitfall #9).
+      await vscode.workspace.fs.writeFile(fileUri, Buffer.from(targetText, "utf8"));
+      const doc = openDoc ?? (await vscode.workspace.openTextDocument(fileUri));
+      await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true });
+      if (doc.isDirty) {
+        await vscode.commands.executeCommand("workbench.action.files.revert");
+      }
+      const revertedCount = keep.filter((k) => !k).length;
+      this.store.toolHunkDecisions(toolCallId, keep, true);
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t("已回退 {0} 处改动（保留 {1} 处）: {2}", revertedCount, keep.length - revertedCount, chosen),
+      );
+    } catch (error) {
+      vscode.window.showErrorMessage(
+        vscode.l10n.t("逐块回退失败: {0}", errorMessage(error)),
       );
     }
   }
@@ -3043,7 +3383,12 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async persistSessions(sessions: SessionSummaryUi[], activeId: string | null): Promise<void> {
-    await this.context.workspaceState.update(SESSIONS_KEY, sessions.slice(0, MAX_RECENT_SESSIONS));
+    // M4 P1-8: canonical order (pinned first, newest activity) on EVERY
+    // persist — stored index and rendered list can never drift. The cap
+    // drops from the tail, which after sorting means oldest non-pinned
+    // first (archived sessions are old by nature, so they leave first).
+    const sorted = sortSessionSummaries(sessions);
+    await this.context.workspaceState.update(SESSIONS_KEY, sorted.slice(0, MAX_RECENT_SESSIONS));
     await this.context.workspaceState.update(ACTIVE_SESSION_KEY, activeId);
   }
 
@@ -3064,6 +3409,9 @@ export class ChatPanel implements vscode.Disposable {
         label: capped ?? prior?.label ?? DEFAULT_SESSION_LABEL,
         // Restoring/switching is not activity — keep the last-end stamp.
         updatedAt: prior?.updatedAt ?? Date.now(),
+        // M4 P1-8: a pin is deliberate and survives a restore; archived does
+        // not — using the session again means it is active again.
+        ...(prior?.pinned ? { pinned: true } : {}),
       },
       ...existing.filter((s) => s.id !== id),
     ];
@@ -3093,6 +3441,26 @@ export class ChatPanel implements vscode.Disposable {
     const activeId = sessions[0]?.id ?? null;
     this.store.setSessions(sessions, activeId);
     await this.persistSessions(sessions, activeId);
+  }
+
+  /** M4 P1-8: toggle pinned / archived on a persisted session (switcher
+   * buttons). False flags delete the property — the index stays clean and
+   * legacy readers (which never set these) see exactly what they expect. */
+  private setSessionFlags(sessionId: string, pinned: boolean, archived: boolean): void {
+    const state = this.store.getState();
+    const target = state.sessions.find((s) => s.id === sessionId);
+    if (!target) return;
+    const sessions = state.sessions.map((s) => {
+      if (s.id !== sessionId) return s;
+      const next: SessionSummaryUi = { ...s };
+      if (pinned) next.pinned = true;
+      else delete next.pinned;
+      if (archived) next.archived = true;
+      else delete next.archived;
+      return next;
+    });
+    this.store.setSessions(sessions, state.activeSessionId);
+    void this.persistSessions(sessions, state.activeSessionId ?? state.sessionId);
   }
 
   /**
@@ -3519,11 +3887,24 @@ export class ChatPanel implements vscode.Disposable {
             // Async failure — the user is likely in the editor; cue it.
             this.postSound("error");
           },
-          onRequestPermission: (req: RequestPermissionRequest) => {
+          onRequestPermission: async (req: RequestPermissionRequest) => {
             // Dying client's approval cards would hang on the fresh state —
             // auto-cancel instead (the process is being torn down anyway).
-            if (this.client !== client) {
-              return Promise.resolve({ outcome: { outcome: "cancelled" } as const });
+            if (this.client !== client || this.disposed) {
+              return { outcome: { outcome: "cancelled" } as const };
+            }
+            // M4 P1-1: the rule table answers matching requests without a card.
+            // A failing pre-review must NEVER strand the agent — degrade to the
+            // card (the pre-P1-1 behaviour) instead of rejecting or throwing.
+            const auto = await this.preReviewApproval(req).catch((error: unknown) => {
+              this.log.warn(`approval pre-review failed: ${errorMessage(error)}`);
+              return null;
+            });
+            if (auto) return auto;
+            // Re-check after the await: the client may have been torn down
+            // while the policy files were read (A3 discipline).
+            if (this.client !== client || this.disposed) {
+              return { outcome: { outcome: "cancelled" } as const };
             }
             return this.requestPermissionFromUser(req);
           },
@@ -5015,6 +5396,64 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * M4 P1-9 — edit a historical user message and re-send it (Cline semantics,
+   * roadmap P1-9). Three steps, each reusing an existing chain:
+   * 1. restore the turn's checkpoint files FIRST (when the snapshot is
+   *    complete) so the re-run starts from the pre-turn workspace — same
+   *    unsaved-editor / modal confirmations as restoreCheckpoint "files";
+   *    cancelling the modal aborts the whole operation. Without a usable
+   *    checkpoint the flow degrades to truncate-and-resend with a warning
+   *    toast (roadmap: 无 checkpoint 时降级为纯截断重发并提示).
+   * 2. truncate the turn and everything after it via deleteUserMessage
+   *    (transcript + CLI chatHistory + reload, queue/Checkpoint prune inside).
+   * 3. re-send the edited text through sendPrompt — the normal turn pipeline
+   *    (context assembly, checkpoint capture, auto-retry) applies unchanged.
+   * If step 2 refused (history unverifiable → the block is still in the
+   * transcript) the resend is skipped: firing on top of a stale turn would
+   * duplicate it.
+   */
+  private async editAndResend(blockId: string, text: string): Promise<void> {
+    if (this.disposed || this.historySyncBusy) return;
+    const trimmed = text.trim();
+    if (!trimmed) {
+      this.store.appendNotice(vscode.l10n.t("编辑后的消息为空，未发送"));
+      return;
+    }
+    const state = this.store.getState();
+    if (
+      state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
+      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+    ) {
+      this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再编辑消息"));
+      return;
+    }
+    const target = state.blocks.find((b) => b.kind === "user" && b.id === blockId);
+    if (!target || target.kind !== "user") return;
+    // 1. Files first — the same order and confirmations as restoreCheckpoint
+    //    "both", so a cancelled modal leaves transcript and CLI untouched.
+    const sessionId = state.activeSessionId ?? state.sessionId;
+    const entry = sessionId ? (state.checkpoints ?? []).find((c) => c.userBlockId === blockId) : undefined;
+    if (sessionId && entry && entry.sha && !entry.partial) {
+      const restored = await this.confirmAndRestoreCheckpointFiles(sessionId, entry);
+      if (!restored) return;
+    } else {
+      this.store.sendToast("warning", vscode.l10n.t("该轮没有可用的工作区文件快照，仅截断对话后重发。"));
+    }
+    // 2. Full truncation (transcript + CLI history + session reload).
+    await this.deleteUserMessage(blockId);
+    if (this.disposed) return;
+    if (this.store.getState().blocks.some((b) => b.kind === "user" && b.id === blockId)) {
+      // The delete refused (or the session moved on mid-sync) — the turn is
+      // still in the transcript; resending would duplicate it.
+      this.log.info(`editAndResend: truncation of ${blockId} did not land — resend skipped`);
+      return;
+    }
+    // 3. Edited text rides the normal prompt pipeline (new user block, fresh
+    //    checkpoint, queue/retry semantics all apply).
+    await this.sendPrompt(trimmed);
+  }
+
+  /**
    * Prompt with bounded reactive auto-retry (rate limits get several
    * escalating attempts — see RATE_LIMIT_RETRY_DELAYS_MS for why one was
    * not enough).
@@ -5085,6 +5524,9 @@ export class ChatPanel implements vscode.Disposable {
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).
         this.turnHadAgentOutput = false;
+        // M4 P1-1: auto-approval transcript notes dedupe per turn — a new
+        // attempt (or turn) may legitimately re-note the same rule hit.
+        this.autoApprovalNoted.clear();
         try {
           const result = await client.prompt({ sessionId, prompt: blocks });
           if (!compressNext) {
@@ -5512,7 +5954,15 @@ export class ChatPanel implements vscode.Disposable {
     // what stops its transcript file from becoming an orphan that the next
     // refresh deletes — and it self-heals sessions poisoned by the old bug.
     const label = clampSessionLabel(text) || target?.label || DEFAULT_SESSION_LABEL;
-    const entry: SessionSummaryUi = { id, label, updatedAt: Date.now() };
+    // M4 P1-8: keep the user's flags — a title refresh must not silently
+    // un-pin or un-archive the session.
+    const entry: SessionSummaryUi = {
+      id,
+      label,
+      updatedAt: Date.now(),
+      ...(target?.pinned ? { pinned: true } : {}),
+      ...(target?.archived ? { archived: true } : {}),
+    };
     const sessions = target
       ? state.sessions.map((s) => (s.id === id ? entry : s))
       : [entry, ...state.sessions].slice(0, MAX_RECENT_SESSIONS);

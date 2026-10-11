@@ -15,6 +15,7 @@ import {
   parseToolFilePath,
   refreshSessionUsage,
   snapshotEditDiff,
+  sortSessionSummaries,
   synthesizeEditDiff,
   newSessionState,
   nextBlockId,
@@ -1158,6 +1159,20 @@ describe("session switcher (M4)", () => {
     // Session-scoped state still resets.
     expect(fresh.blocks).toHaveLength(0);
     expect(fresh.sessionId).toBeNull();
+  });
+
+  it("sortSessionSummaries: pinned first, then newest activity (M4 P1-8)", () => {
+    const input = [
+      { id: "old", label: "旧", updatedAt: 100 },
+      { id: "pin-old", label: "置顶旧", updatedAt: 50, pinned: true },
+      { id: "new", label: "新", updatedAt: 300 },
+      { id: "arch-new", label: "归档新", updatedAt: 200, archived: true },
+      { id: "pin-new", label: "置顶新", updatedAt: 400, pinned: true },
+    ];
+    const sorted = sortSessionSummaries(input);
+    expect(sorted.map((s) => s.id)).toEqual(["pin-new", "pin-old", "new", "arch-new", "old"]);
+    // Immutable: the stored index and the caller's array never alias mutations.
+    expect(input.map((s) => s.id)).toEqual(["old", "pin-old", "new", "arch-new", "pin-new"]);
   });
 });
 

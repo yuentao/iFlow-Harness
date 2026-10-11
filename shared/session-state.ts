@@ -164,6 +164,10 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
         // A new update without a diff must not erase the previous diff.
         diff: patch.diff ?? block.diff,
         reverted: patch.diff ? false : block.reverted,
+        // P0-2: per-hunk decisions anchor to the diff text they were derived
+        // from — a new diff invalidates them exactly like the revert marker.
+        hunkDecisions: patch.diff ? undefined : block.hunkDecisions,
+        partiallyReverted: patch.diff ? false : block.partiallyReverted,
       };
       // P1: recount only when token-bearing content actually changed — pure
       // status flips (pending → completed) ride the existing cache, keeping
@@ -1227,6 +1231,19 @@ export function clampSessionLabel(text: string): string {
 }
 
 /**
+ * M4 P1-8: canonical switcher order — pinned first, then newest activity.
+ * The host sorts before EVERY persist so the stored index and the rendered
+ * list can never drift; archived entries keep their place here (the switcher
+ * splits sections itself, the index stays one flat list).
+ */
+export function sortSessionSummaries(sessions: readonly SessionSummaryUi[]): SessionSummaryUi[] {
+  return [...sessions].sort((a, b) => {
+    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
+/**
  * Transcript-scoped fields, cleared together on every transcript reset
  * (new session, replay start). Single source of truth (review B3): the two
  * reset paths used to enumerate these by hand and drifted — beginReplay
@@ -1704,6 +1721,44 @@ export function markToolReverted(state: SessionState, toolCallId: string): numbe
       // P1: output changed — the token cache is stale.
       recountBlockTokens(block);
       return i;
+    }
+  }
+  return null;
+}
+
+/**
+ * M4 P0-2 — record committed per-hunk keep/revert decisions on a tool block
+ * after the host wrote the replayed text to disk. `decisions` is the
+ * index-aligned keep bitmap; `partial` marks that the file now holds neither
+ * the diff's oldText nor its newText (distinct from whole-file `reverted`).
+ * Returns the mutated top-level block index (SubAgent nesting included, same
+ * walk as attachSynthesizedDiff) or null when no such tool block exists.
+ */
+export function markToolHunkDecisions(
+  state: SessionState,
+  toolCallId: string,
+  decisions: readonly boolean[],
+  partial: boolean,
+): number | null {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const block = state.blocks[i]!;
+    if (block.kind === "tool") {
+      if (block.toolCallId === toolCallId) {
+        block.hunkDecisions = [...decisions];
+        block.partiallyReverted = partial;
+        // No recount: decisions are UI metadata, the transcript text is
+        // unchanged (the FILE changed, not the block).
+        return i;
+      }
+    } else if (block.kind === "subagent") {
+      const nested = block.entries.find(
+        (e): e is ToolBlock => e.kind === "tool" && e.toolCallId === toolCallId,
+      );
+      if (nested) {
+        nested.hunkDecisions = [...decisions];
+        nested.partiallyReverted = partial;
+        return i;
+      }
     }
   }
   return null;

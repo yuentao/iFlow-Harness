@@ -23,6 +23,7 @@ import {
   ArrowDown,
   Bot,
   History,
+  Pencil,
   Search,
   Trash2,
   Undo2,
@@ -176,6 +177,11 @@ function ToolCard({ block }: { block: ToolBlock }) {
               <Undo2 className="size-2.5" /> {t("已回退")}
             </Chip>
           )}
+          {block.partiallyReverted && !block.reverted && (
+            <Chip tone="muted">
+              <Undo2 className="size-2.5" /> {t("部分回退")}
+            </Chip>
+          )}
           <StatusChip status={block.status} />
         </span>
       </div>
@@ -183,6 +189,14 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <DiffView
           diff={block.diff!}
           toolCallId={block.toolCallId}
+          hunkActions={
+            completedWithDiff && block.diff!.newText !== null
+              ? {
+                  decisions: block.hunkDecisions,
+                  onApply: (keep) => send({ type: "applyHunkSelection", toolCallId: block.toolCallId, keep }),
+                }
+              : undefined
+          }
           actions={
             <>
               {completedWithDiff && (
@@ -423,12 +437,18 @@ function UserMessage({
   checkpoint?: CheckpointUi;
 }) {
   const send = useChat((s) => s.send);
-  // One shared armed state: the delete confirm and the rollback mode-picker
-  // expand in the SAME anchored row, so only one may be open at a time (two
-  // wide pills would otherwise overlap). "none" shows the bare icon buttons.
-  const [armed, setArmed] = useState<"none" | "delete" | "rollback">("none");
+  // One shared armed state: the delete confirm, the rollback mode-picker and
+  // the inline editor expand in the SAME anchored row, so only one may be
+  // open at a time (two wide pills would otherwise overlap). "none" shows the
+  // bare icon buttons.
+  const [armed, setArmed] = useState<"none" | "delete" | "rollback" | "edit">("none");
+  // M4 P1-9: draft for the inline editor; null = not editing.
+  const [draft, setDraft] = useState<string | null>(null);
   useEffect(() => {
-    if (!canDelete) setArmed("none");
+    if (!canDelete) {
+      setArmed("none");
+      setDraft(null);
+    }
   }, [canDelete]);
   const canRollbackFiles = !!checkpoint && !checkpoint.partial;
   const showRollback = canDelete && !!block.id && !!checkpoint;
@@ -436,12 +456,69 @@ function UserMessage({
     setArmed("none");
     send({ type: "restoreCheckpoint", userBlockId: block.id!, mode });
   };
+  const startEdit = () => {
+    setArmed("edit");
+    setDraft(block.text);
+  };
+  const cancelEdit = () => {
+    setArmed("none");
+    setDraft(null);
+  };
+  const submitEdit = () => {
+    const text = (draft ?? "").trim();
+    if (!text || !block.id) return;
+    setArmed("none");
+    setDraft(null);
+    send({ type: "editAndResend", blockId: block.id, text });
+  };
   return (
     <div className="stream-in flex justify-end">
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
       <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
+        {draft !== null ? (
+          /* M4 P1-9 inline editor: re-sending truncates this turn and
+             everything after it (checkpoint restore first when available),
+             so the editor replaces the bubble rather than cloning it. */
+          <div className="w-full min-w-[280px]" onClick={(e) => e.stopPropagation()}>
+            <textarea
+              className="max-h-64 min-h-16 w-full resize-y rounded-lg border border-border bg-panel/80 px-2 py-1.5 text-[13px] leading-relaxed text-foreground outline-none focus:border-primary/60"
+              value={draft}
+              rows={Math.min(12, Math.max(3, draft.split("\n").length + 1))}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  submitEdit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelEdit();
+                }
+              }}
+            />
+            <div className="mt-1.5 flex items-center justify-end gap-1.5">
+              <span className="mr-auto text-[10.5px] text-muted-foreground">
+                {checkpoint && !checkpoint.partial ? t("重发将先回滚该轮文件变更并删除其后的对话") : t("重发将删除该消息及其后所有对话")}
+              </span>
+              <button
+                className="press rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                onClick={cancelEdit}
+              >
+                {t("取消")}
+              </button>
+              <button
+                className="press rounded-md bg-primary px-2.5 py-0.5 text-[11px] font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={!draft.trim()}
+                title={t("重发")}
+                onClick={submitEdit}
+              >
+                {t("重发")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -508,6 +585,17 @@ function UserMessage({
               </div>
             )}
             {canDelete && block.id && (
+              <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className="press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-all hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover:opacity-100"
+                  title={t("编辑并重发该消息")}
+                  onClick={() => (armed === "edit" ? cancelEdit() : startEdit())}
+                >
+                  <Pencil className="size-3" />
+                </button>
+              </div>
+            )}
+            {canDelete && block.id && (
               <InlineConfirm
                 armed={armed === "delete"}
                 onArm={() => setArmed("delete")}
@@ -523,6 +611,8 @@ function UserMessage({
               />
             )}
           </div>
+        )}
+          </>
         )}
       </div>
     </div>

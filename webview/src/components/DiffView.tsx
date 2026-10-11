@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Ellipsis, FileCode2 } from "lucide-react";
+import { Check, Ellipsis, FileCode2, Undo2 } from "lucide-react";
 import type { ToolDiffUi } from "../../../shared/messages";
+import { computeHunks, diffRows } from "../../../shared/hunks";
 import { t } from "../i18n";
 import { FileRef } from "./ui";
 
@@ -11,6 +12,12 @@ interface DiffRow {
   text: string;
   /** Gap index for hunk separators, so clicking expands the right region. */
   win?: number;
+  /** P0-2: index into the hunk list this row belongs to (changed rows only). */
+  hunk?: number;
+  /** P0-2: this changed row is the FIRST row of its hunk (render the header). */
+  hunkHead?: boolean;
+  /** P0-2: this changed row is inside a reverted hunk (rendered struck through). */
+  reverted?: boolean;
 }
 
 /** Context lines kept around each change, like git's unified diff. */
@@ -22,9 +29,55 @@ const CONTEXT_LINES = 3;
  * LCS-based so edits show as paired -/+ lines like an editor gutter, then
  * folded git-style: each change keeps CONTEXT_LINES of context, the rest of
  * an unchanged file collapses into clickable "⋯" hunks that expand on demand.
+ *
+ * M4 P0-2: when `hunkActions` is provided (editable diffs only), each hunk
+ * gets a keep/revert header and the bottom action bar gains a commit button.
  */
-export function DiffView({ diff, actions, toolCallId }: { diff: ToolDiffUi; actions?: ReactNode; toolCallId?: string }) {
-  const { rows: fullRows, windows } = useMemo(() => buildRows(diff), [diff]);
+export function DiffView({
+  diff,
+  actions,
+  toolCallId,
+  hunkActions,
+}: {
+  diff: ToolDiffUi;
+  actions?: ReactNode;
+  toolCallId?: string;
+  /** P0-2 per-hunk editing: present only for completed, editable diffs. */
+  hunkActions?: {
+    /** Committed decisions to restore UI state (index-aligned with hunks). */
+    decisions?: boolean[];
+    /** Commit the (possibly edited) decision set. */
+    onApply: (keep: boolean[]) => void;
+    /** True while the host is processing a commit. */
+    busy?: boolean;
+  };
+}) {
+  const editable = !!hunkActions && diff.oldText !== null && diff.newText !== null;
+  const hunks = useMemo(
+    () => (editable ? computeHunks(diff.oldText!, diff.newText!) : null),
+    [editable, diff.oldText, diff.newText],
+  );
+  const hunkCount = hunks?.length ?? 0;
+  const [keep, setKeep] = useState<boolean[]>(() => new Array(hunkCount).fill(true));
+  // A new diff, or a fresh commit from outside, resets the local decision set.
+  useEffect(() => {
+    setKeep(new Array(hunkCount).fill(true));
+  }, [diff, hunkCount]);
+  useEffect(() => {
+    if (hunkActions?.decisions && hunkActions.decisions.length === hunkCount) {
+      setKeep(hunkActions.decisions);
+    }
+  }, [hunkActions?.decisions, hunkCount]);
+
+  const dirty = useMemo(
+    () => editable && keep.some((k) => !k),
+    [editable, keep],
+  );
+
+  const { rows: fullRows, windows } = useMemo(
+    () => buildRows(diff, hunks, keep),
+    [diff, hunks, keep],
+  );
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   // A new diff invalidates previous expand/collapse choices.
   useEffect(() => setExpanded(new Set()), [diff]);
@@ -44,6 +97,18 @@ export function DiffView({ diff, actions, toolCallId }: { diff: ToolDiffUi; acti
       return next;
     });
   };
+
+  const setHunk = (index: number, value: boolean) => {
+    setKeep((prev) => {
+      if (prev[index] === value) return prev;
+      const next = [...prev];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const keepCount = keep.filter(Boolean).length;
+  const revertCount = hunkCount - keepCount;
 
   return (
     <div className="overflow-hidden bg-card">
@@ -71,43 +136,123 @@ export function DiffView({ diff, actions, toolCallId }: { diff: ToolDiffUi; acti
               </span>
             </button>
           ) : (
-            <div
-              key={i}
-              className={`flex px-3 ${
-                row.type === "add" ? "bg-diff-add" : row.type === "del" ? "bg-diff-del" : ""
-              }`}
-            >
-              {/* Gutter merged into one column ("+3" / "−3" / "  4"): separate
-                  number + sign columns made paired -/+ lines show the same
-                  number twice and read as a rendering glitch. */}
-              <span
-                className={`w-9 shrink-0 select-none text-right tabular-nums ${
-                  row.type === "add"
-                    ? "text-diff-add-fg"
-                    : row.type === "del"
-                      ? "text-diff-del-fg"
-                      : "text-syn-com"
-                }`}
+            <div key={i}>
+              {editable && row.hunkHead && row.hunk !== undefined && (
+                <HunkHeader
+                  index={row.hunk}
+                  total={hunkCount}
+                  kept={keep[row.hunk] !== false}
+                  onToggle={(value) => setHunk(row.hunk!, value)}
+                />
+              )}
+              <div
+                className={`flex px-3 ${
+                  row.type === "add" ? "bg-diff-add" : row.type === "del" ? "bg-diff-del" : ""
+                } ${row.reverted ? "opacity-40" : ""}`}
               >
-                {row.type === "add"
-                  ? `+${row.n}`
-                  : row.type === "del"
-                    ? `−${row.n}`
-                    : `  ${row.n}`}
-              </span>
-              <span className="ml-3 whitespace-pre text-foreground/90">
-                {row.text === "" ? " " : row.text === "⋯" ? "" : row.text}
-              </span>
+                {/* Gutter merged into one column ("+3" / "−3" / "  4"): separate
+                    number + sign columns made paired -/+ lines show the same
+                    number twice and read as a rendering glitch. */}
+                <span
+                  className={`w-9 shrink-0 select-none text-right tabular-nums ${
+                    row.type === "add"
+                      ? "text-diff-add-fg"
+                      : row.type === "del"
+                        ? "text-diff-del-fg"
+                        : "text-syn-com"
+                  }`}
+                >
+                  {row.type === "add"
+                    ? `+${row.n}`
+                    : row.type === "del"
+                      ? `−${row.n}`
+                      : `  ${row.n}`}
+                </span>
+                <span
+                  className={`ml-3 whitespace-pre text-foreground/90 ${
+                    row.reverted && row.type !== "same" ? "line-through" : ""
+                  }`}
+                >
+                  {row.text === "" ? " " : row.text === "⋯" ? "" : row.text}
+                </span>
+              </div>
             </div>
           ),
         )}
       </div>
+      {editable && hunkCount > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2">
+          <button
+            className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!dirty || hunkActions?.busy}
+            title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+            onClick={() => hunkActions?.onApply([...keep])}
+          >
+            <Check className="size-3" /> {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
+          </button>
+          {dirty && (
+            <button
+              className="press inline-flex items-center gap-1 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setKeep(new Array(hunkCount).fill(true))}
+            >
+              <Undo2 className="size-2.5" /> {t("全部保留")}
+            </button>
+          )}
+        </div>
+      )}
       {actions && <div className="flex flex-wrap items-center gap-2 px-3 py-2">{actions}</div>}
     </div>
   );
 }
 
-function buildRows(diff: ToolDiffUi): { rows: DiffRow[]; windows: Array<[number, number]> } {
+/** Per-hunk keep/revert header, rendered above the hunk's first changed row. */
+function HunkHeader({
+  index,
+  total,
+  kept,
+  onToggle,
+}: {
+  index: number;
+  total: number;
+  kept: boolean;
+  onToggle: (value: boolean) => void;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2 border-y border-border/40 px-3 py-0.5 text-[10px] ${
+        kept ? "bg-surface/50 text-muted-foreground" : "bg-diff-del/40 text-diff-del-fg"
+      }`}
+    >
+      <span className="font-medium">{t("改动 {0}/{1}", index + 1, total)}</span>
+      <span className="ml-auto flex items-center gap-1">
+        <button
+          className={`press rounded px-1.5 py-0.5 font-medium transition-colors ${
+            kept ? "bg-success/20 text-success" : "text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+          }`}
+          title={t("保留此改动")}
+          onClick={() => onToggle(true)}
+        >
+          {t("保留")}
+        </button>
+        <button
+          className={`press rounded px-1.5 py-0.5 font-medium transition-colors ${
+            !kept ? "bg-diff-del text-diff-del-fg" : "text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+          }`}
+          title={t("回退此改动（恢复为编辑前内容）")}
+          onClick={() => onToggle(false)}
+        >
+          {t("回退")}
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function buildRows(
+  diff: ToolDiffUi,
+  hunks: { rowStart: number; rowEnd: number }[] | null,
+  keep: boolean[],
+): { rows: DiffRow[]; windows: Array<[number, number]> } {
   const oldLines = diff.oldText === null ? [] : diff.oldText.split("\n");
   const newLines = diff.newText === null ? [] : diff.newText.split("\n");
 
@@ -126,8 +271,40 @@ function buildRows(diff: ToolDiffUi): { rows: DiffRow[]; windows: Array<[number,
     };
   }
 
-  const rows = lcsRows(oldLines, newLines);
+  const ops = diffRows(oldLines, newLines);
+  const rows: DiffRow[] = [];
+  let prevHunk = -1;
+  for (let index = 0; index < ops.length; index++) {
+    const op = ops[index]!;
+    if (op.type === "same" || !hunks) {
+      rows.push({
+        type: op.type,
+        n: op.type === "add" ? String(op.newNo + 1) : String(op.oldNo + 1),
+        text: op.text,
+      });
+      continue;
+    }
+    const hunkIndex = findHunk(hunks, index);
+    const head = hunkIndex >= 0 && hunkIndex !== prevHunk;
+    if (hunkIndex >= 0) prevHunk = hunkIndex;
+    rows.push({
+      type: op.type,
+      n: op.type === "add" ? String(op.newNo + 1) : String(op.oldNo + 1),
+      text: op.text,
+      hunk: hunkIndex >= 0 ? hunkIndex : undefined,
+      hunkHead: head,
+      reverted: hunkIndex >= 0 ? keep[hunkIndex] === false : false,
+    });
+  }
   return { rows, windows: computeWindows(rows) };
+}
+
+/** The hunk whose op range contains `index`, or -1 (unchanged rows). */
+function findHunk(hunks: { rowStart: number; rowEnd: number }[], index: number): number {
+  for (let h = 0; h < hunks.length; h++) {
+    if (index >= hunks[h]!.rowStart && index < hunks[h]!.rowEnd) return h;
+  }
+  return -1;
 }
 
 /**
@@ -196,50 +373,4 @@ function computeWindows(rows: DiffRow[]): Array<[number, number]> {
   }
   windows.push([start, end]);
   return windows;
-}
-
-/** Classic LCS table over lines; fine for the line counts typical of tool diffs. */
-function lcsRows(oldLines: string[], newLines: string[]): DiffRow[] {
-  const n = oldLines.length;
-  const m = newLines.length;
-  // Guard against pathological inputs (whole-file rewrites of huge files).
-  if (n * m > 4_000_000) {
-    return [
-      ...oldLines.map((text, i) => ({ type: "del" as const, n: String(i + 1), text })),
-      ...newLines.map((text, j) => ({ type: "add" as const, n: String(j + 1), text })),
-    ];
-  }
-
-  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      lcs[i]![j] = oldLines[i] === newLines[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
-    }
-  }
-
-  const rows: DiffRow[] = [];
-  let i = 0;
-  let j = 0;
-  let oldNo = 1;
-  let newNo = 1;
-  while (i < n && j < m) {
-    if (oldLines[i] === newLines[j]) {
-      rows.push({ type: "same", n: String(oldNo), text: oldLines[i]! });
-      i++;
-      j++;
-      oldNo++;
-      newNo++;
-    } else if (lcs[i + 1]![j]! >= lcs[i]![j + 1]!) {
-      rows.push({ type: "del", n: String(oldNo), text: oldLines[i]! });
-      i++;
-      oldNo++;
-    } else {
-      rows.push({ type: "add", n: String(newNo), text: newLines[j]! });
-      j++;
-      newNo++;
-    }
-  }
-  while (i < n) rows.push({ type: "del", n: String(oldNo++), text: oldLines[i++]! });
-  while (j < m) rows.push({ type: "add", n: String(newNo++), text: newLines[j++]! });
-  return rows;
 }
