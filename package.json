@@ -217,6 +217,23 @@
           "default": 50000,
           "minimum": 1,
           "description": "%iflow.configuration.checkpointMaxFiles.description%"
+        },
+        "iflow.checkpointDir": {
+          "type": "string",
+          "default": "",
+          "description": "%iflow.configuration.checkpointDir.description%"
+        },
+        "iflow.checkpointMaxTurns": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "%iflow.configuration.checkpointMaxTurns.description%"
+        },
+        "iflow.checkpointMaxSizeMB": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "%iflow.configuration.checkpointMaxSizeMB.description%"
         }
       }
     }

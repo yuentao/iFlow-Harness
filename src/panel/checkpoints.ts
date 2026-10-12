@@ -27,12 +27,19 @@
  * localizes when surfacing them.
  */
 
+import os from "node:os";
 import path from "node:path";
-import { mkdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFileCb);
+
+/** Ref anchoring the live capture chain. commit-tree commits are dangling by
+ * design; without a ref a later `git gc --prune=now` (retention) would sweep
+ * the snapshots we intend to KEEP. */
+const LIVE_REF = "refs/iflow/live";
 
 /** Per-command git timeout (roadmap: 提交带超时 10s，超限降级 partial). */
 const GIT_TIMEOUT_MS = 10_000;
@@ -165,6 +172,9 @@ export class CheckpointManager {
       try {
         await this.git(state, ["cat-file", "-e", `${lastSha}^{commit}`]);
         state.lastSha = lastSha;
+        // Repos created before ref-anchoring existed: stamp the ref now so
+        // a retention gc never sweeps the live chain.
+        await this.git(state, ["update-ref", LIVE_REF, lastSha]).catch(() => undefined);
       } catch {
         // The index references a commit the repo lost (dir wiped): start a
         // fresh chain instead of failing every capture.
@@ -193,6 +203,9 @@ export class CheckpointManager {
       const sha = shaOut.trim();
       if (!sha) throw new Error("commit-tree returned nothing");
       state.lastSha = sha;
+      // Anchor the chain so a retention gc never sweeps live commits.
+      // Best effort: capture stays valid even if the ref write fails.
+      await this.git(state, ["update-ref", LIVE_REF, sha]).catch(() => undefined);
       return sha;
     } catch (error) {
       this.log.warn(`checkpoint capture failed for ${sessionId}: ${errorMessage(error)}`);
@@ -226,6 +239,99 @@ export class CheckpointManager {
   /** Forget in-memory state only (session switched) — disk stays for restore. */
   forgetSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+  }
+
+  /**
+   * Turn-count retention: rewrite the kept snapshots (oldest→newest order)
+   * into a fresh ancestor-free chain, anchor the head on refs/iflow/live,
+   * then `gc --prune=now` sweeps everything the dropped turns owned
+   * exclusively. The rewrite is REQUIRED: the original commits chain via
+   * parent links, so keeping only the newest would still make every older
+   * commit reachable and gc would delete nothing. Trees are shared via
+   * content addressing, so rewritten commits cost near-zero extra space and
+   * `checkout <newSha> -- .` restores identically.
+   *
+   * Returns old→new sha pairs (the caller rewrites its index). Throws when a
+   * kept sha is missing or any git step fails — the caller keeps the old
+   * index untouched and retries next turn.
+   */
+  async pruneToKeptShas(
+    sessionId: string,
+    keptShas: readonly string[],
+  ): Promise<Array<{ oldSha: string; newSha: string }>> {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.disabledReason) {
+      throw new Error("checkpoint session state is no longer available");
+    }
+    const mapping: Array<{ oldSha: string; newSha: string }> = [];
+    let parent: string | null = null;
+    for (const oldSha of keptShas) {
+      const { stdout: treeOut } = await this.git(state, ["rev-parse", `${oldSha}^{tree}`]);
+      const tree = treeOut.trim();
+      if (!tree) throw new Error(`tree for ${oldSha} not found`);
+      const { stdout: msgOut } = await this.git(state, ["log", "-1", "--format=%s", oldSha]);
+      const args = ["commit-tree", tree, "-m", msgOut.trim() || "checkpoint"];
+      if (parent) args.push("-p", parent);
+      const { stdout: shaOut } = await this.git(state, args);
+      const newSha = shaOut.trim();
+      if (!newSha) throw new Error(`commit-tree returned nothing for ${oldSha}`);
+      mapping.push({ oldSha, newSha });
+      parent = newSha;
+    }
+    // Anchor first, then prune: the live ref is the only thing keeping the
+    // rewritten chain alive against --prune=now.
+    if (parent) await this.git(state, ["update-ref", LIVE_REF, parent]);
+    await this.git(state, ["gc", "--prune=now"], this.timeoutMs * 6);
+    state.lastSha = parent;
+    return mapping;
+  }
+
+  /** Recursive byte size of one session's store dir (0 when absent). */
+  static async dirSizeBytes(dir: string): Promise<number> {
+    let total = 0;
+    const stack = [dir];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      let entries;
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch {
+        continue; // vanished mid-walk or unreadable — treat as nothing
+      }
+      for (const entry of entries) {
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(full);
+        } else if (entry.isFile()) {
+          try {
+            total += (await stat(full)).size;
+          } catch {
+            // raced with a delete — skip
+          }
+        }
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Resolve the checkpoint root for `iflow.checkpointDir`. Empty → the
+   * default storageUri location. `~` expands; relative paths resolve against
+   * the workspace root. A per-workspace hash subfolder is ALWAYS appended
+   * under a custom root: pruneUnrestorableSessions deletes unknown
+   * subdirectories, and without the split one window would wipe another
+   * window's session stores sharing the same custom root.
+   */
+  static resolveCheckpointRoot(customDir: string, workspaceRoot: string | null, defaultRoot: string): string {
+    const trimmed = customDir.trim();
+    if (!trimmed) return defaultRoot;
+    let base = trimmed;
+    if (base === "~" || base.startsWith("~/") || base.startsWith("~\\")) {
+      base = path.join(os.homedir(), base.slice(1));
+    }
+    const abs = path.isAbsolute(base) ? base : path.resolve(workspaceRoot ?? defaultRoot, base);
+    const scope = createHash("sha1").update(workspaceRoot ?? "no-workspace").digest("hex").slice(0, 12);
+    return path.join(abs, scope);
   }
 
   private probeGit(): Promise<boolean> {

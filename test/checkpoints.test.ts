@@ -13,12 +13,15 @@
 
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import crypto from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import os from "node:os";
 import path from "node:path";
 import {
   checkpointLabelFromText,
   parseCheckpointIndex,
+  planCheckpointRetention,
   pruneCheckpointsForBlocks,
   reanchorCheckpoints,
   serializeCheckpointIndex,
@@ -101,6 +104,27 @@ describe("shared checkpoint reducers", () => {
       checkpoints: [cp("u1", 0), { userBlockId: "bad" }],
     });
     expect(parseCheckpointIndex(raw)?.map((c) => c.userBlockId)).toEqual(["u1"]);
+  });
+
+  it("retention keeps the newest N, drops oldest first", () => {
+    const list = [cp("u1", 0), cp("u2", 1), cp("u3", 2)];
+    const { kept, dropped } = planCheckpointRetention(list, 2);
+    expect(kept.map((c) => c.userBlockId)).toEqual(["u2", "u3"]);
+    expect(dropped.map((c) => c.userBlockId)).toEqual(["u1"]);
+  });
+
+  it("retention is a no-op at/below the cap or when disabled", () => {
+    const list = [cp("u1", 0), cp("u2", 1)];
+    expect(planCheckpointRetention(list, 2).dropped).toEqual([]);
+    expect(planCheckpointRetention(list, 5).kept).toEqual(list);
+    expect(planCheckpointRetention(list, 0).dropped).toEqual([]);
+    expect(planCheckpointRetention(list, Number.NaN).dropped).toEqual([]);
+  });
+
+  it("retention keeps partial placeholders in the budget", () => {
+    const list = [cp("u1", 0, { sha: null, partial: true }), cp("u2", 1)];
+    const { kept } = planCheckpointRetention(list, 1);
+    expect(kept.map((c) => c.userBlockId)).toEqual(["u2"]);
   });
 });
 
@@ -260,6 +284,109 @@ describe("CheckpointManager (real shadow git)", () => {
     } finally {
       rmSync(work, { recursive: true, force: true });
       rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  maybe("pruneToKeptShas rewrites the chain: new shas restore, old shas die, gc reclaims", async () => {
+    const work = tempDir("iflow-cp-work-");
+    const store = tempDir("iflow-cp-store-");
+    try {
+      writeFileSync(path.join(work, "a.txt"), "v1");
+      const mgr = new CheckpointManager({ log: silentLog() });
+      await mgr.ensureReady("s1", store, work);
+      // A large incompressible blob owned ONLY by turn 1's tree: deleting it
+      // before turn 2 means the kept trees never reference it, so pruning
+      // turn 1 + gc must reclaim its bytes.
+      writeFileSync(path.join(work, "big.bin"), Buffer.from(crypto.randomBytes(400_000)));
+      const sha1 = await mgr.captureTurn("s1", "t1");
+      rmSync(path.join(work, "big.bin"));
+      writeFileSync(path.join(work, "a.txt"), "v2");
+      const sha2 = await mgr.captureTurn("s1", "t2");
+      writeFileSync(path.join(work, "a.txt"), "v3");
+      const sha3 = await mgr.captureTurn("s1", "t3");
+
+      const sessionDir = path.join(store, CheckpointManager.safeSessionId("s1"));
+      const before = await CheckpointManager.dirSizeBytes(sessionDir);
+
+      const mapping = await mgr.pruneToKeptShas("s1", [sha2!, sha3!]);
+      expect(mapping).toHaveLength(2);
+      const [m2, m3] = mapping as [{ oldSha: string; newSha: string }, { oldSha: string; newSha: string }];
+      expect(m2.oldSha).toBe(sha2);
+      expect(m3.newSha).toMatch(/^[0-9a-f]{40}$/);
+
+      // Kept snapshots restore through their REWRITTEN shas.
+      writeFileSync(path.join(work, "a.txt"), "dirty");
+      await mgr.restoreFiles("s1", m2.newSha);
+      expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v2");
+      await mgr.restoreFiles("s1", m3.newSha);
+      expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v3");
+
+      // Dropped + pre-rewrite shas are gone (gc --prune=now swept them).
+      await expect(mgr.restoreFiles("s1", sha1!)).rejects.toThrow();
+      await expect(mgr.restoreFiles("s1", sha2!)).rejects.toThrow();
+
+      // The big blob belonged only to the old chain → the store shrank.
+      const after = await CheckpointManager.dirSizeBytes(sessionDir);
+      expect(after).toBeLessThan(before);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+      rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  maybe("prune keeps the live ref anchored so a later gc cannot sweep survivors", async () => {
+    const work = tempDir("iflow-cp-work-");
+    const store = tempDir("iflow-cp-store-");
+    try {
+      writeFileSync(path.join(work, "a.txt"), "v1");
+      const mgr = new CheckpointManager({ log: silentLog() });
+      await mgr.ensureReady("s1", store, work);
+      const sha1 = await mgr.captureTurn("s1", "t1");
+      writeFileSync(path.join(work, "a.txt"), "v2");
+      const sha2 = await mgr.captureTurn("s1", "t2");
+      const { mapping } = { mapping: await mgr.pruneToKeptShas("s1", [sha1!, sha2!]) };
+      const head = mapping[mapping.length - 1]!.newSha;
+      // Another capture after the prune chains onto the rewritten head.
+      writeFileSync(path.join(work, "a.txt"), "v3");
+      const sha3 = await mgr.captureTurn("s1", "t3");
+      expect(sha3).toMatch(/^[0-9a-f]{40}$/);
+      writeFileSync(path.join(work, "a.txt"), "dirty");
+      await mgr.restoreFiles("s1", head);
+      expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v2");
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+      rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  it("resolveCheckpointRoot: empty → default; ~ and relative expand; per-workspace hash isolates", () => {
+    const def = path.join("D:", "storage", "checkpoints");
+    expect(CheckpointManager.resolveCheckpointRoot("", null, def)).toBe(def);
+    expect(CheckpointManager.resolveCheckpointRoot("   ", null, def)).toBe(def);
+    const home = CheckpointManager.resolveCheckpointRoot("~/cp", "J:\\ws", def);
+    expect(home.startsWith(os.homedir())).toBe(true);
+    expect(home).not.toBe(def);
+    const rel = CheckpointManager.resolveCheckpointRoot("snap", "J:\\ws", def);
+    expect(path.isAbsolute(rel)).toBe(true);
+    expect(rel.startsWith(path.resolve("J:\\ws", "snap").toLowerCase()) ||
+           rel.toLowerCase().startsWith(path.resolve("J:\\ws", "snap").toLowerCase())).toBe(true);
+    // Two workspaces under one custom root never collide (prune safety).
+    const a = CheckpointManager.resolveCheckpointRoot("R:\\cp", "J:\\ws-a", def);
+    const b = CheckpointManager.resolveCheckpointRoot("R:\\cp", "J:\\ws-b", def);
+    expect(a).not.toBe(b);
+    expect(path.dirname(a)).toBe(path.dirname(b));
+  });
+
+  it("dirSizeBytes sums recursively and tolerates a missing dir", async () => {
+    const dir = tempDir("iflow-cp-size-");
+    try {
+      writeFileSync(path.join(dir, "a"), "12345");
+      mkdirSync(path.join(dir, "sub"), { recursive: true });
+      writeFileSync(path.join(dir, "sub", "b"), "678");
+      expect(await CheckpointManager.dirSizeBytes(dir)).toBe(8);
+      expect(await CheckpointManager.dirSizeBytes(path.join(dir, "nope"))).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

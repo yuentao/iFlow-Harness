@@ -110,3 +110,21 @@ export function parseCheckpointIndex(raw: string): CheckpointUi[] | null {
     return null;
   }
 }
+
+/**
+ * Turn-count retention plan (one session): keep the NEWEST `maxTurns`
+ * entries (the index array is append-ordered, so "newest" = array tail),
+ * drop the rest. `maxTurns <= 0` disables the cap. Partial placeholders
+ * count toward the budget like real captures — they anchor a turn and the
+ * restore dialog shows them.
+ */
+export function planCheckpointRetention(
+  list: readonly CheckpointUi[],
+  maxTurns: number,
+): { kept: CheckpointUi[]; dropped: CheckpointUi[] } {
+  if (!Number.isFinite(maxTurns) || maxTurns <= 0 || list.length <= maxTurns) {
+    return { kept: [...list], dropped: [] };
+  }
+  const dropCount = list.length - Math.floor(maxTurns);
+  return { kept: list.slice(dropCount), dropped: list.slice(0, dropCount) };
+}

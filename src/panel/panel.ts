@@ -11,7 +11,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { readFile, readdir, writeFile, mkdir, rm, rename } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir, rm, rename, stat } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import {
   errorMessage,
@@ -60,6 +60,7 @@ import {
 import {
   checkpointLabelFromText,
   parseCheckpointIndex,
+  planCheckpointRetention,
   pruneCheckpointsForBlocks,
   reanchorCheckpoints,
   serializeCheckpointIndex,
@@ -4339,9 +4340,20 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Turn-level checkpoints (M3 P0-1) ------------------------------------------
 
-  /** Root of the shadow-git stores: `storageUri/checkpoints/<sessionId>/git`. */
+  /**
+   * Root of the shadow-git stores: `storageUri/checkpoints/<sessionId>/git`,
+   * or `<iflow.checkpointDir>/<workspace-hash>/<sessionId>/git` when the
+   * setting is set (move stores off workspaceStorage — e.g. huge GGUF-heavy
+   * workspaces filled C:). Read fresh per call so the setting applies to the
+   * next capture without a window reload.
+   */
   private checkpointRoot(): string {
-    return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "checkpoints");
+    const defaultRoot = path.join(
+      (this.context.storageUri ?? this.context.globalStorageUri).fsPath,
+      "checkpoints",
+    );
+    const custom = vscode.workspace.getConfiguration("iflow").get<string>("checkpointDir", "");
+    return CheckpointManager.resolveCheckpointRoot(custom, this.sessionCwd ?? null, defaultRoot);
   }
 
   private checkpointIndexPath(sessionId: string): string {
@@ -5902,6 +5914,115 @@ export class ChatPanel implements vscode.Disposable {
     const next = upsertCheckpoint(state.checkpoints ?? [], entry);
     this.store.setCheckpoints(next);
     void this.persistCheckpointIndex(sessionId, next);
+    void this.enforceCheckpointRetention(sessionId);
+  }
+
+  /**
+   * Post-capture retention (settings: checkpointMaxTurns / checkpointMaxSizeMB,
+   * 0 = off). Runs fire-and-forget after a turn's checkpoint is recorded —
+   * never blocks the prompt, failures only log (the next capture retries).
+   *
+   * Turn cap: prune the shadow repo to the newest N captures (rewritten
+   * chain + gc) and rewrite the live index with the new shas.
+   * Size cap: whole-session LRU eviction under the global byte budget —
+   * per-turn gc cannot shrink a single huge capture (one GGUF set IS one
+   * snapshot), only dropping stale sessions reclaims that. The active
+   * session is never evicted. Orphan stores (no index after an idle window,
+   * or an index without a single restorable sha — the partial-only /
+   * corrupt-repo residue) are reclaimed unconditionally.
+   */
+  private async enforceCheckpointRetention(sessionId: string): Promise<void> {
+    if (this.disposed) return;
+    const cfg = vscode.workspace.getConfiguration("iflow");
+    const maxTurns = cfg.get<number>("checkpointMaxTurns", 0);
+    const maxSizeMB = cfg.get<number>("checkpointMaxSizeMB", 0);
+    const state = this.store.getState();
+    const activeId = state.activeSessionId ?? state.sessionId;
+
+    if (maxTurns > 0 && activeId === sessionId) {
+      const list = state.checkpoints ?? [];
+      const { kept, dropped } = planCheckpointRetention(list, maxTurns);
+      if (dropped.length > 0) {
+        const keptShas = [...new Set(kept.map((c) => c.sha).filter((s): s is string => !!s))];
+        try {
+          const mapping = keptShas.length > 0
+            ? await this.checkpoints.pruneToKeptShas(sessionId, keptShas)
+            : [];
+          if (this.disposed) return;
+          const live = this.store.getState();
+          if ((live.activeSessionId ?? live.sessionId) !== sessionId) return;
+          const remap = new Map(mapping.map((m) => [m.oldSha, m.newSha]));
+          const rewritten = kept.map((c) =>
+            c.sha && remap.has(c.sha) ? { ...c, sha: remap.get(c.sha)! } : c);
+          this.store.setCheckpoints(rewritten);
+          void this.persistCheckpointIndex(sessionId, rewritten);
+          this.log.info(`checkpoint retention: dropped ${dropped.length} turn(s) for ${sessionId}`);
+        } catch (error) {
+          this.log.warn(`checkpoint retention failed for ${sessionId}: ${errorMessage(error)}`);
+        }
+      }
+    }
+
+    if (maxSizeMB <= 0) return;
+    const root = this.checkpointRoot();
+    let names: string[];
+    try {
+      const entries = await readdir(root, { withFileTypes: true });
+      names = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch {
+      return; // no store dir yet
+    }
+    const scored: Array<{ name: string; bytes: number; lastUsed: number }> = [];
+    for (const name of names) {
+      const dir = path.join(root, name);
+      const bytes = await CheckpointManager.dirSizeBytes(dir);
+      let lastUsed = 0;
+      try {
+        lastUsed = (await stat(path.join(dir, "index.json"))).mtimeMs;
+      } catch {
+        try {
+          lastUsed = (await stat(dir)).mtimeMs;
+        } catch {
+          // vanished mid-scan
+        }
+      }
+      scored.push({ name, bytes, lastUsed });
+    }
+    const activeDir = activeId ? CheckpointManager.safeSessionId(activeId) : null;
+    // Orphans: index-less stores idle >10 min (crashed capture / corrupt repo
+    // — the idle guard avoids racing a brand-new session's first capture),
+    // or an index whose entries have no restorable sha at all.
+    const removed = new Set<string>();
+    for (const s of scored) {
+      if (s.name === activeDir) continue;
+      try {
+        const parsed = parseCheckpointIndex(await readFile(path.join(root, s.name, "index.json"), "utf8"));
+        if (!parsed || !parsed.some((c) => c.sha)) removed.add(s.name);
+      } catch {
+        if (Date.now() - s.lastUsed > 10 * 60 * 1000) removed.add(s.name);
+      }
+    }
+    let total = scored.reduce((sum, s) => sum + (removed.has(s.name) ? 0 : s.bytes), 0);
+    const budget = maxSizeMB * 1024 * 1024;
+    for (const s of [...scored].sort((a, b) => a.lastUsed - b.lastUsed)) {
+      if (total <= budget) break;
+      if (removed.has(s.name) || s.name === activeDir) continue;
+      removed.add(s.name);
+      total -= s.bytes;
+    }
+    if (removed.size === 0) return;
+    const freedBytes = scored
+      .filter((s) => removed.has(s.name))
+      .reduce((sum, s) => sum + s.bytes, 0);
+    for (const name of removed) {
+      await rm(path.join(root, name), { recursive: true, force: true }).catch(() => undefined);
+    }
+    this.log.info(`checkpoint retention: removed ${removed.size} store dir(s), freed ${Math.round(freedBytes / (1024 * 1024))} MB`);
+    this.store.sendToast(
+      "info",
+      vscode.l10n.t("已按快照上限清理 {0} 个快照仓库（释放约 {1} MB）", removed.size, Math.round(freedBytes / (1024 * 1024))),
+      { durationMs: 8000 },
+    );
   }
 
   /** Atomic index write (temp + rename), serialized on its own chain. */
