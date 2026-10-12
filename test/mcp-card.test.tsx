@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { McpSection } from "../webview/src/components/McpCard";
-import { entriesToServers, fillMcpTemplate, mcpCatalog, sameMcpServers } from "../webview/src/components/mcp-catalog";
+import { entriesToServers, sameMcpServers } from "../webview/src/components/mcp-servers";
 
 const send = vi.hoisted(() => vi.fn());
 vi.mock("../webview/src/store", () => ({ useChat: (selector: (s: { send: typeof send }) => unknown) => selector({ send }) }));
@@ -35,25 +35,6 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); });
 
-it("contains 20 sourced templates with declared and usable parameters", () => {
-  expect(mcpCatalog).toHaveLength(20);
-  expect(new Set(mcpCatalog.map((i) => i.id)).size).toBe(20);
-  for (const item of mcpCatalog) {
-    expect(item.source).toMatch(/^https:\/\/github.com\//);
-    const values = Object.fromEntries(item.fields.map((f) => [f.key, 'C:\\path with spaces\\"quoted"\n${literal}']));
-    const config = fillMcpTemplate(item, values);
-    expect(JSON.parse(JSON.stringify(config))).toEqual(config);
-    expect(typeof config.command).toBe("string");
-  }
-});
-it("substitutes paths as data without mutating templates and rejects missing values", () => {
-  const item = mcpCatalog.find((i) => i.id === "filesystem")!;
-  const original = JSON.stringify(item);
-  expect(() => fillMcpTemplate(item, {})).toThrow("allowed_paths");
-  const path = 'C:\\new folder\\"quoted"';
-  expect(fillMcpTemplate(item, { allowed_paths: path }).args).toContain(path);
-  expect(JSON.stringify(item)).toBe(original);
-});
 it("preserves unknown fields and legal prototype-like names while rejecting duplicates", () => {
   const servers = entriesToServers([{ name: "__proto__", json: '{"extra":{"x":1},"env":{"TOKEN":"abc"}}' }, { name: "constructor", json: '{}' }]);
   expect(Object.keys(servers)).toEqual(["__proto__", "constructor"]);
@@ -99,21 +80,3 @@ it("ignores stale replies while editing and preserves the editor index", () => {
   expect(container.querySelector("input")!.value).toBe("my-draft");
   expect(container.querySelector("textarea")).toBeTruthy();
 });
-it("filters catalog and fills the existing editor without saving or overwriting", () => {
-  reply({ filesystem: { command: "keep", custom: true } });
-  click("浏览目录");
-  input(container.querySelector("input")!, "server-filesystem");
-  expect(container.querySelectorAll("button").length).toBe(4);
-  click("配置参数");
-  const inputs = container.querySelectorAll("input");
-  input(inputs[1]!, 'C:\\Projects\\my app');
-  click("填入 JSON 编辑器");
-  expect(container.textContent).toContain("名称重复：filesystem");
-  input(inputs[0]!, "filesystem-local");
-  click("填入 JSON 编辑器");
-  expect(JSON.parse(container.querySelector("textarea")!.value).args).toContain('C:\\Projects\\my app');
-  expect(send.mock.calls.map(([m]) => m.type)).toEqual(["listMcpServers"]);
-  click("完成"); click("保存");
-  expect(send.mock.calls.at(-1)![0].servers.filesystem).toEqual({ command: "keep", custom: true });
-});
-

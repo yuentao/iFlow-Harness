@@ -221,13 +221,15 @@ Markdown 组件对 ` ```mermaid ` 代码块懒加载渲染（webview 新增 merm
 
 **判断**：语义索引是重资产（embedding provider、向量库、增量索引、分支感知），且行业正在退潮。**不建议自建**。低成本替代组合：
 1. `@repository map`（对标 Continue）：host 侧用 tree-sitter 或简单正则生成仓库符号地图（文件→导出符号摘要），作为上下文卡注入。S 规模，覆盖大部分「让模型认识仓库结构」的需求。
-2. 推荐用户接 code-index / grep MCP 服务器（文档 + McpCard 预设模板）。
+2. 推荐用户接 code-index / grep MCP 服务器（文档 + McpCard 手工配置，预设模板随 P2-4 一并移除）。
 
 ### P2-4 MCP 目录 / Registry（M，纯面板）
 
 **竞品基准**：Cline MCP Marketplace、Roo Marketplace、Zed ACP Registry。
 
 **方案**：McpCard 增加「浏览目录」标签页——内置一份策展 JSON 目录（随扩展发版，含 name/描述/安装模板 stdio 或 npx/所需 env 参数向导），一键填入现有编辑表单（仍走 saveMcpServers 原子写 + 热重启提示）。**不做**自动 clone/build（Cline 的 GitHub repo 自动接线有供应链安全风险，与仓库安全纪律冲突）。目录来源建议先人工维护 20 个常用 server。
+
+**状态（2026-10-12）**：已按本方案实现（webview 侧「浏览目录」标签页 + 参数向导 + 策展目录），评估后判定价值不足——用户本就能直接编辑 JSON 配 MCP server，策展目录维护成本高、条目易过时，收益不抵成本，**已移除**。McpCard 保留纯 JSON 编辑管理（1.2.5 形态）。
 
 ### P2-5 Rules / 项目指令文件（M，CLI 依赖）
 
@@ -257,7 +259,7 @@ Markdown 组件对 ` ```mermaid ` 代码块懒加载渲染（webview 新增 merm
 | M2 | P0-3 排队、P0-4 mention 扩展、P1-7 Mermaid | 都动 Composer / sendPrompt 链路，互相有交互（队列消息带 contexts），一起做 |
 | M3 | P0-1 checkpoint | 独立子系统中最大件，恢复链路依赖 deleteUserMessage 现状先稳定 |
 | M4 | P0-2 hunk、P1-1 审批策略、P1-8 归档/分组/Fork、P1-9 编辑重发 | hunk 依赖 diff 数据已稳；Fork/编辑重发依赖 checkpoint；审批策略需规则表新组件 |
-| M5 | P1-2 子代理增强、P2-4 MCP 目录 | 中等价值，等前面链路稳定 |
+| M5 | P1-2 子代理增强、~~P2-4 MCP 目录~~（已实现后判定鸡肋，移除） | 中等价值，等前面链路稳定 |
 | M6 | P2 其余项 | 每项先出 CLI bundle 实证结论再立项；建议顺序 P2-1(2) > P2-5(2) > P2-2(面板部分) > P2-3(repository map) |
 
 明确不做 / 挂起：自建向量索引（行业退潮，Continue 已弃用）、MCP 自动 clone/build（供应链风险）、并发 prompt（ACP 单会话串行假设）。
@@ -292,4 +294,4 @@ Markdown 组件对 ` ```mermaid ` 代码块懒加载渲染（webview 新增 merm
 | 浏览器 | 无 | Cline/Cursor 内置 | P2-2 |
 | 并行任务 | 单会话 | Cursor Agents Window | P2-1 |
 | 语义索引 | 无（agentic search） | Roo/Copilot | P2-3（建议 repository map 替代） |
-| MCP 生态 | JSON 手工编辑 | Marketplace/Registry | P2-4 |
+| MCP 生态 | JSON 手工编辑 | Marketplace/Registry | ~~P2-4~~（实现后移除，维持手工编辑） |

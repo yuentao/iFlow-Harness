@@ -26,6 +26,7 @@ import {
   setPendingApproval,
   clearPendingApproval,
   closeOpenSubAgents,
+  markSubAgentStopped,
   deleteUserMessageById,
   findCliHistoryCut,
   markToolReverted,
@@ -172,7 +173,7 @@ describe("SubAgent tree lifecycle (M5)", () => {
     expect(child.completedAt).toBeUndefined();
   });
 
-  it("validates session, streaming and active nested target before stop fallback", () => {
+  it("validates session, streaming and active nested target before stop", () => {
     const state = initialSessionState();
     state.sessionId = "s1";
     state.status = "streaming";
@@ -187,6 +188,63 @@ describe("SubAgent tree lifecycle (M5)", () => {
     state.status = "streaming";
     applySessionUpdate(state, task("child", "parent", "completed"));
     expect(canStopSubAgent(state, "s1", "child")).toBe(false);
+  });
+
+  it("markSubAgentStopped flags the card (and its subtree) as stopped, terminal", () => {
+    const state = initialSessionState();
+    state.sessionId = "s1";
+    state.status = "streaming";
+    applySessionUpdate(state, task("root"));
+    applySessionUpdate(state, chunk("parent"));
+    applySessionUpdate(state, task("child", "parent"));
+    // give the child an entry (stamps startedAt) and a grandchild card
+    applySessionUpdate(state, chunk("child"));
+    applySessionUpdate(state, task("grand", "child"));
+    const index = markSubAgentStopped(state, "child", 9000);
+    // mutation index is the TOP-LEVEL owning card index (blockPatch anchor)
+    expect(index).toBe(0);
+    const root = state.blocks[0]!;
+    if (root.kind !== "subagent") throw new Error("root");
+    expect(root.stopped).toBeUndefined();
+    expect(root.status).not.toBe("failed");
+    expect(root.status).not.toBe("completed");
+    const child = root.entries.find((b) => b.kind === "subagent")!;
+    if (child.kind !== "subagent") throw new Error("child");
+    expect(child.stopped).toBe(true);
+    expect(child.status).toBe("failed");
+    expect(child.completedAt).toBe(9000);
+    const grand = child.entries.find((b) => b.kind === "subagent")!;
+    if (grand.kind !== "subagent") throw new Error("grand");
+    expect(grand.stopped).toBe(true);
+    expect(grand.status).toBe("failed");
+    // a stopped card is no longer a valid stop target
+    expect(canStopSubAgent(state, "s1", "child")).toBe(false);
+    // unknown agentId is a no-op
+    expect(markSubAgentStopped(state, "missing")).toBeNull();
+  });
+
+  it("markSubAgentStopped keeps a completed card's status but flags stopped", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, task("root"));
+    applySessionUpdate(state, task("root", undefined, "completed"));
+    const index = markSubAgentStopped(state, "root");
+    expect(index).toBe(0);
+    const root = state.blocks[0]!;
+    if (root.kind !== "subagent") throw new Error("root");
+    expect(root.stopped).toBe(true);
+    expect(root.status).toBe("completed");
+  });
+
+  it("stopped survives the transcript persist/restore round-trip", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, task("root"));
+    markSubAgentStopped(state, "root");
+    const restored = JSON.parse(JSON.stringify(state.blocks)) as typeof state.blocks;
+    backfillBlockIds(restored);
+    const root = restored[0]!;
+    if (root.kind !== "subagent") throw new Error("root");
+    expect(root.stopped).toBe(true);
+    expect(root.status).toBe("failed");
   });
 });
 

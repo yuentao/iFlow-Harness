@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Pencil, Plus, ShieldCheck, ShieldQuestion, ShieldX } from "lucide-react";
+import { Pencil, Plus, ShieldCheck, ShieldQuestion, ShieldX, Trash2 } from "lucide-react";
 import type { ApprovalAction, ApprovalRule } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { InlineConfirm } from "./ui";
+import { ConfirmDialog } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -186,21 +186,14 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
               >
                 <Pencil className="size-3.5" />
               </button>
-              <InlineConfirm
-                armed={confirmDelete === rule.id}
-                onArm={() => setConfirmDelete(rule.id)}
-                onCancel={() => setConfirmDelete(null)}
-                onConfirm={() => {
-                  setRules((prev) => (prev ?? []).filter((r) => r.id !== rule.id));
-                  setConfirmDelete(null);
-                }}
-                confirmLabel={t("确认")}
-                cancelLabel={t("取消")}
+              <button
+                data-variant="danger"
+                className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
                 title={t("删除 {0}", rule.label)}
-                className="ml-1"
-                triggerClassName="opacity-70 hover:opacity-100"
-                iconClassName="size-3.5"
-              />
+                onClick={() => setConfirmDelete(rule.id)}
+              >
+                <Trash2 className="size-3.5" />
+              </button>
             </>
           )}
         </div>
@@ -388,6 +381,18 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
             {t("维度全部留空将匹配所有请求（谨慎）；编辑只改本地副本，点击「保存」才生效。")}
           </p>
         </div>
+      )}
+
+      {confirmDelete !== null && (rules ?? []).some((r) => r.id === confirmDelete) && (
+        <ConfirmDialog
+          title={t("删除审批规则")}
+          message={t("确定删除规则「{0}」吗？保存后生效。", (rules ?? []).find((r) => r.id === confirmDelete)!.label)}
+          onConfirm={() => {
+            setRules((prev) => (prev ?? []).filter((r) => r.id !== confirmDelete));
+            setConfirmDelete(null);
+          }}
+          onCancel={() => setConfirmDelete(null)}
+        />
       )}
     </>
   );

@@ -23,6 +23,7 @@ import {
   clearPendingPlanExit,
   clearPendingProfileSwitch,
   deleteUserMessageById,
+  markSubAgentStopped,
   markToolReverted,
   markToolHunkDecisions,
   refreshSessionUsage,
@@ -152,6 +153,12 @@ export class SessionStore {
     this.noteMutationIndex(applySessionUpdate(this.state, notification, options));
     // Streaming chunks arrive at high frequency; coalesce into one snapshot.
     this.scheduleFlush();
+  }
+
+  /** Optimistic "已停止" card update after `_iflow/agent/cancel` confirmed. */
+  markSubagentStopped(agentId: string): void {
+    this.noteMutationIndex(markSubAgentStopped(this.state, agentId));
+    this.flush();
   }
 
   // --- P-1 change detection ---------------------------------------------------

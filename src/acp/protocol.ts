@@ -18,6 +18,9 @@ export const AcpMethods = {
   setMode: "session/set_mode",
   setModel: "session/set_model",
   setThink: "session/set_think", // iFlow extension (verify on wire)
+  // iFlow extension (agent-cancel-refactor Mod in the vendored fork): stop a
+  // single SubAgent by its wire agentId; answers {stopped, reason?}.
+  cancelAgent: "_iflow/agent/cancel",
   // Agent → Client
   sessionUpdate: "session/update",
   requestPermission: "session/request_permission",

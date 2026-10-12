@@ -1165,11 +1165,43 @@ export function closeOpenSubAgents(blocks: Block[], now = Date.now()): number | 
   return mutatedFrom;
 }
 
-/** Host validation for the per-card stop fallback (session/cancel only). */
+/** Host validation for the per-card stop (`_iflow/agent/cancel`, Mod-gated). */
 export function canStopSubAgent(state: SessionState, sessionId: string, agentId: string): boolean {
   if (!sessionId || state.sessionId !== sessionId || state.status !== "streaming" || state.initializing || state.replaying) return false;
   const target = findSubAgentRef(state.blocks, agentId)?.block;
   return !!target && (target.status === "pending" || target.status === "in_progress");
+}
+
+/**
+ * Optimistic confirmation of a per-agent stop: called when the CLI answered
+ * `_iflow/agent/cancel` with `{stopped:true}`. The CLI adapter emits
+ * AGENT_FAILED for an aborted agent (it fires before the abort check), so we
+ * align `status` with the terminal state the wire will reach and set the
+ * `stopped` flag that drives the "已停止" chip instead of "失败". The agent's
+ * own catch returns a graceful interrupted result, so the parent turn keeps
+ * running — only this card (and its nested cards) is closed here.
+ */
+export function markSubAgentStopped(state: SessionState, agentId: string, now = Date.now()): number | null {
+  const ref = findSubAgentRef(state.blocks, agentId);
+  if (!ref) return null;
+  // Descendants abort with the merged signal (their parent's agent signal is
+  // the loop signal), and the adapter reports each of them as AGENT_FAILED —
+  // mark the whole subtree stopped, not just the requested card.
+  const closeStopped = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (block.kind !== "subagent") continue;
+      block.stopped = true;
+      if (block.status !== "completed" && block.status !== "failed") {
+        block.status = "failed";
+        if (block.startedAt !== undefined) block.completedAt ??= now;
+      }
+      closeStopped(block.entries);
+    }
+  };
+  closeStopped([ref.block]);
+  // Refresh all ancestors once; their inclusive sum counts each leaf once.
+  for (const block of state.blocks) if (block.kind === "subagent") blockTokens(block);
+  return findSubAgentIndex(state.blocks, agentId);
 }
 
 export function completePrompt(state: SessionState, stopReason: StopReason, usageCtx?: UsageContext | null): number | null {

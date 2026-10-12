@@ -241,6 +241,18 @@ export class AcpClient {
     return await this.peer!.request(AcpMethods.setThink, { sessionId, thinkEnabled, ...(thinkConfig ? { thinkConfig } : {}) });
   }
 
+  /**
+   * iFlow extension (agent-cancel-refactor Mod in the vendored fork): stop a
+   * single SubAgent by its wire agentId. The CLI's per-agent AbortController
+   * aborts the agent's in-flight LLM stream and tools while the parent turn
+   * keeps running (the task result comes back as "interrupted"). Answers
+   * `{stopped: boolean, reason?: string}` — unknown/stale agentIds answer
+   * `{stopped:false,reason:"not_found"}` rather than a JSON-RPC error.
+   */
+  async cancelAgent(sessionId: string, agentId: string): Promise<{ stopped?: boolean; reason?: string }> {
+    return (await this.peer!.request(AcpMethods.cancelAgent, { sessionId, agentId })) as { stopped?: boolean; reason?: string };
+  }
+
   /** Kill the agent process. Pending requests are rejected. */
   async dispose(): Promise<void> {
     this.stopped = true;

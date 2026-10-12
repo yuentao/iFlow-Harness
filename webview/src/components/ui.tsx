@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ArrowLeft, FileCode2, Trash2, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { ArrowLeft, FileCode2, X } from "lucide-react";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
@@ -13,6 +14,14 @@ export function getFocusable(container: HTMLElement): HTMLElement[] {
     ),
   ).filter((el) => el.offsetParent !== null);
 }
+
+/**
+ * Open-modal stack (mount order = z-order for same-layer modals). ModalShell's
+ * ESC/Tab handling is document-level; when a ConfirmDialog stacks on the
+ * settings modal, only the TOP instance may react — otherwise one ESC closes
+ * both layers and the two focus traps fight over Tab.
+ */
+const modalStack: symbol[] = [];
 
 /**
  * Shared centered-modal shell for the settings surface (API config / MCP
@@ -57,7 +66,11 @@ export function ModalShell({
   children: ReactNode;
 }) {
   const backdropRef = useRef<HTMLDivElement>(null);
+  // Stack token: stable per mount, identifies this modal in modalStack.
+  const stackToken = useRef(Symbol("modal"));
   useEffect(() => {
+    const token = stackToken.current;
+    modalStack.push(token);
     const prevFocus = document.activeElement as HTMLElement | null;
     const container = backdropRef.current;
     if (container) {
@@ -75,7 +88,11 @@ export function ModalShell({
         focusables[0]?.focus();
       }
     }
-    return () => prevFocus?.focus?.();
+    return () => {
+      const at = modalStack.indexOf(token);
+      if (at >= 0) modalStack.splice(at, 1);
+      prevFocus?.focus?.();
+    };
     // Mount-only: the trap must not re-steal focus when the content re-renders.
   }, []);
 
@@ -90,6 +107,8 @@ export function ModalShell({
       if (e.isComposing) return;
       const container = backdropRef.current;
       if (!container) return;
+      // Only the topmost open modal reacts (see modalStack).
+      if (modalStack[modalStack.length - 1] !== stackToken.current) return;
       if (e.key === "Escape") {
         if (!dismissible) return;
         e.preventDefault();
@@ -306,80 +325,51 @@ export function FileRef({ path, line, toolCallId }: { path: string; line?: numbe
 }
 
 /**
- * Two-step destructive-action confirm, shared by every delete affordance
- * (message, session, MCP entry) so they read as one control: an icon button
- * arms the row, then 确认 / 取消 replace it in place. Destructive styling
- * mirrors the approval card's reject option (destructive outline + tint).
- * `onConfirm` fires on the second click; the row auto-disarms.
+ * Modal destructive-action confirm, shared by every delete affordance
+ * (message, session, MCP entry, profile, approval rule). Replaces the old
+ * InlineConfirm two-step pill: the in-row armed state was too fiddly to hit
+ * in dense rows, so arming now opens a real dialog. Rendered through a
+ * portal to document.body — the settings modal's acrylic layers create
+ * containing blocks that would trap a plain `fixed` descendant.
+ * ModalShell semantics: ESC / backdrop / X all cancel. Initial focus sits on
+ * 取消 (data-autofocus) so an accidental Enter never fires the destructive
+ * action.
  */
-export function InlineConfirm({
-  armed,
-  onArm,
-  onCancel,
-  onConfirm,
-  confirmLabel,
-  cancelLabel,
+export function ConfirmDialog({
   title,
-  className = "",
-  triggerClassName = "",
-  iconClassName = "size-3",
+  message,
+  confirmLabel,
+  onConfirm,
+  onCancel,
 }: {
-  armed: boolean;
-  onArm: () => void;
-  onCancel: () => void;
-  onConfirm: () => void;
-  confirmLabel: string;
-  cancelLabel: string;
-  /** Tooltip for the armed (trash) button. */
   title: string;
-  /** Positioning shared by both states (e.g. absolute anchoring). */
-  className?: string;
-  /** Extra classes for the idle icon button only (floating surfaces add a
-   * backdrop + opacity reveal there; inline rows keep the bare icon). */
-  triggerClassName?: string;
-  /** Icon size — inline rows pass the sibling action icon's size so the row
-   * reads as one consistent set (e.g. size-3.5 next to a size-3.5 pencil). */
-  iconClassName?: string;
+  message: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
 }) {
-  if (!armed) {
-    return (
-      <button
-        data-variant="danger"
-        className={`press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive ${className} ${triggerClassName}`}
-        title={title}
-        onClick={(e) => {
-          e.stopPropagation();
-          onArm();
-        }}
-      >
-        <Trash2 className={iconClassName} />
-      </button>
-    );
-  }
-  return (
-    <span
-      className={`stream-in inline-flex shrink-0 items-center gap-1 rounded-lg border border-destructive/40 bg-card/95 px-1 py-0.5 shadow-card backdrop-blur-md ${className}`}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <button
-        className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-destructive transition-colors hover:bg-destructive/10"
-        onClick={(e) => {
-          e.stopPropagation();
-          onConfirm();
-        }}
-      >
-        {confirmLabel}
-      </button>
-      <button
-        className="press rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-        onClick={(e) => {
-          e.stopPropagation();
-          onCancel();
-        }}
-      >
-        {cancelLabel}
-      </button>
-    </span>
+  return createPortal(
+    <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog">
+      <div className="px-3.5 py-3 text-[12px] leading-relaxed text-foreground/90">{message}</div>
+      <div className="flex items-center justify-end gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2">
+        <button
+          data-autofocus
+          type="button"
+          className="press rounded-lg border border-border bg-editor px-3 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-accent"
+          onClick={onCancel}
+        >
+          {t("取消")}
+        </button>
+        <button
+          type="button"
+          className="press rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1 text-[11.5px] font-semibold text-destructive transition-colors hover:bg-destructive/20"
+          onClick={onConfirm}
+        >
+          {confirmLabel ?? t("删除")}
+        </button>
+      </div>
+    </ModalShell>,
+    document.body,
   );
 }
 

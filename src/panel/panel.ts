@@ -972,11 +972,27 @@ export class ChatPanel implements vscode.Disposable {
       case "resolveContext":
         void this.resolveContext(msg.requestId, msg.kind, msg.query);
         break;
-      case "stopSubagent":
+      case "stopSubagent": {
         if (!canStopSubAgent(this.store.getState(), msg.sessionId, msg.agentId)) break;
-        this.store.sendToast("info", vscode.l10n.t("CLI 暂不支持单独停止子代理，已请求停止整轮生成"));
-        this.cancelCurrentTurn();
+        const agentClient = this.client;
+        if (!agentClient) break;
+        try {
+          // agent-cancel-refactor Mod (vendored fork): aborts ONLY this
+          // agent's signal chain; the parent turn keeps running with an
+          // interrupted-task result (verified on wire, probe 2026-10-12).
+          const res = await agentClient.cancelAgent(msg.sessionId, msg.agentId);
+          if (res?.stopped) {
+            this.store.markSubagentStopped(msg.agentId);
+          } else if (res?.reason === "not_found") {
+            this.store.sendToast("info", vscode.l10n.t("该子代理已结束"));
+          } else {
+            this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
+          }
+        } catch {
+          this.store.sendToast("warning", vscode.l10n.t("停止子代理失败"));
+        }
         break;
+      }
       case "cancel":
         this.cancelCurrentTurn();
         break;

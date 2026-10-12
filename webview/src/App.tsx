@@ -15,11 +15,12 @@ import {
   Search,
   Settings2,
   Sun,
+  Trash2,
 } from "lucide-react";
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { isEnglishLocale, t } from "./i18n";
-import { Chip, Dropdown, InlineConfirm } from "./components/ui";
+import { Chip, ConfirmDialog, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -102,10 +103,9 @@ export function App() {
   const pending = useChat((s) => s.pending);
   const send = useChat((s) => s.send);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
-  // Two-step delete: clicking the trash arms confirmation for that session id;
-  // a second click on 确认 actually sends deleteSession. Prevents accidental
-  // loss of a persisted transcript (the host delete is irreversible).
-  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  // Delete keeps a modal confirm (the host delete is irreversible); the armed
+  // session is held here so the dialog can render its label.
+  const [confirmingDelete, setConfirmingDelete] = useState<SessionSummaryUi | null>(null);
   const [sessionQuery, setSessionQuery] = useState("");
   // M4 P1-8: archived sessions live in a collapsed second section — they are
   // kept out of the default results until the user opens the section.
@@ -352,20 +352,17 @@ export function App() {
                             {s.archived ? <ArchiveRestore className="size-3" /> : <Archive className="size-3" />}
                           </button>
                           {deletable && (
-                            <InlineConfirm
-                              armed={confirmingDelete === s.id}
-                              onArm={() => setConfirmingDelete(s.id)}
-                              onCancel={() => setConfirmingDelete(null)}
-                              onConfirm={() => {
-                                send({ type: "deleteSession", sessionId: s.id });
-                                setConfirmingDelete(null);
-                              }}
-                              confirmLabel={t("确认")}
-                              cancelLabel={t("取消")}
+                            <button
+                              data-variant="danger"
+                              className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-60 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
                               title={t("删除会话 {0}", s.label)}
-                              className="ml-1"
-                              triggerClassName="opacity-60 hover:opacity-100"
-                            />
+                              onClick={() => {
+                                close();
+                                setConfirmingDelete(s);
+                              }}
+                            >
+                              <Trash2 className="size-3" />
+                            </button>
                           )}
                         </div>
                       );
@@ -508,6 +505,18 @@ export function App() {
       </div>
 
       <Composer />
+
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={t("删除会话")}
+          message={t("确定删除会话「{0}」吗？此操作不可撤销。", confirmingDelete.label)}
+          onConfirm={() => {
+            send({ type: "deleteSession", sessionId: confirmingDelete.id });
+            setConfirmingDelete(null);
+          }}
+          onCancel={() => setConfirmingDelete(null)}
+        />
+      )}
     </div>
   );
 }

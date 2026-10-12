@@ -67,7 +67,7 @@ type PanelState = Pick<
 > & { activeSessionId: string | null };
 
 type PanelInternals = {
-  client: { cancel: (id: string) => void } | null;
+  client: { cancel: (id: string) => void; cancelAgent?: (sessionId: string, agentId: string) => Promise<{ stopped?: boolean; reason?: string }> } | null;
   panelVisible: boolean;
   historySyncBusy: boolean;
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
@@ -283,39 +283,39 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(toasts.some((t) => t.level === "warning" && t.message.includes("队列已满"))).toBe(true);
   });
 
-  it("subagent stop validates the live target and reuses the complete cancel cleanup", async () => {
-    const stop = vi.fn();
-    p.client = { cancel: stop };
-    const internals = panel as unknown as {
-      cancelSeen: boolean;
-      cancelAllApprovals: (reason: string) => void;
-      cancelAllPlanExits: (reason: string) => void;
-      cancelAllPendingQuestions: (reason: string) => void;
-      clearPostRejectionWatchdog: () => void;
-    };
-    const approvals = vi.spyOn(internals, "cancelAllApprovals");
-    const plans = vi.spyOn(internals, "cancelAllPlanExits");
-    const questions = vi.spyOn(internals, "cancelAllPendingQuestions");
-    const watchdog = vi.spyOn(internals, "clearPostRejectionWatchdog");
-    p.store.replaceState({ ...p.store.getState(), status: "streaming", blocks: [{
+  it("subagent stop routes to _iflow/agent/cancel without cancelling the turn", async () => {
+    const cancelTurn = vi.fn();
+    const cancelAgent = vi.fn(async (_sessionId: string, agentId: string) =>
+      agentId === "child" ? { stopped: true } : { stopped: false, reason: "not_found" });
+    p.client = { cancel: cancelTurn, cancelAgent };
+    const blocks = [{
       kind: "subagent", agentId: "parent", taskToolCallId: "root", title: "root", agentType: null, status: "in_progress", entries: [{
         kind: "subagent", agentId: "child", taskToolCallId: "task-child", title: "child", agentType: null, status: "pending", entries: [],
       }],
-    }] });
+    }];
+    p.store.replaceState({ ...p.store.getState(), status: "streaming", blocks: structuredClone(blocks) });
+    // gate: wrong session / unknown agent never reach the wire
     await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "old-session", agentId: "child" });
     await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "missing" });
-    expect(stop).not.toHaveBeenCalled();
+    expect(cancelAgent).not.toHaveBeenCalled();
+    expect(cancelTurn).not.toHaveBeenCalled();
+    // confirmed stop: card flips to stopped, the TURN keeps running
     await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "child" });
-    expect(stop).toHaveBeenCalledExactlyOnceWith("q-session");
-    expect(approvals).toHaveBeenCalledOnce();
-    expect(plans).toHaveBeenCalledOnce();
-    expect(questions).toHaveBeenCalledOnce();
-    expect(watchdog).toHaveBeenCalledOnce();
-    expect(internals.cancelSeen).toBe(true);
-    expect(toasts.at(-1)?.message).toContain("整轮生成");
+    expect(cancelAgent).toHaveBeenCalledExactlyOnceWith("q-session", "child");
+    expect(cancelTurn).not.toHaveBeenCalled();
+    const stopped = (p.store.getState().blocks[0] as { entries: { agentId: string; stopped?: boolean; status: string }[] })
+      .entries.find((e) => e.agentId === "child")!;
+    expect(stopped.stopped).toBe(true);
+    expect(stopped.status).toBe("failed");
+    expect(p.store.getState().status).toBe("streaming");
+    // not_found answers with an info toast, no card mutation
+    p.store.replaceState({ ...p.store.getState(), blocks: structuredClone(blocks) });
+    await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "parent" });
+    expect(toasts.at(-1)?.message).toContain("该子代理已结束");
+    // a terminal card is no longer a valid target
     p.store.replaceState({ ...p.store.getState(), status: "idle" });
     await p.handleWebviewMessage({ type: "stopSubagent", sessionId: "q-session", agentId: "child" });
-    expect(stop).toHaveBeenCalledOnce();
+    expect(cancelAgent).toHaveBeenCalledTimes(2);
     p.client = null;
   });
 

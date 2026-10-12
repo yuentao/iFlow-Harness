@@ -156,5 +156,6 @@
   "回滚文件": "Roll back files",
   "工作区回滚失败: {0}": "Workspace rollback failed: {0}",
   "工作区文件已回滚到该轮之前的状态。": "Workspace files were rolled back to the state before this turn.",
-  "CLI 暂不支持单独停止子代理，已请求停止整轮生成": "The CLI cannot stop a single subagent yet; stopping the whole turn was requested."
+  "该子代理已结束": "This subagent has already finished.",
+  "停止子代理失败": "Failed to stop the subagent."
 }

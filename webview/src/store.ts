@@ -1022,9 +1022,10 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "stopSubagent") {
-        // The mock mirrors the real ACP limitation: this is whole-turn cancel.
-        activeApproval = null;
-        demoBlocks.push({ kind: "text", text: "*（CLI 暂不支持单独停止子代理，已停止整轮生成）*" });
+        // The mock mirrors the agent-cancel Mod: only the targeted agent
+        // stops; the parent turn keeps running with an interrupted result.
+        // (No real subagent lifecycle here, so settle the demo turn.)
+        demoBlocks.push({ kind: "text", text: "*（已停止该子代理，整轮继续，mock）*" });
         settleMockTurn();
         return;
       }

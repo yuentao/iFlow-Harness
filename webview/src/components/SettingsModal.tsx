@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck } from "lucide-react";
+import { KeyRound, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Trash2 } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Chip, InlineConfirm, ModalShell } from "./ui";
+import { Chip, ConfirmDialog, ModalShell } from "./ui";
 import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 
@@ -150,7 +150,7 @@ function ApiConfigSection({
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [form, setForm] = useState({ profileName: "", baseUrl: "", apiKey: "", modelName: "" });
   const [formError, setFormError] = useState<string | null>(null);
-  // Two-step delete (same control as sessions / MCP rows — the host delete
+  // Modal delete confirm (same dialog as sessions / MCP rows — the host delete
   // is irreversible: the profile's key leaves SecretStorage for good).
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
@@ -347,20 +347,14 @@ function ApiConfigSection({
                 <Pencil className="size-3.5" />
               </button>
               {p.source === "extension" && (
-                <InlineConfirm
-                  armed={confirmingDelete === p.name}
-                  onArm={() => setConfirmingDelete(p.name)}
-                  onCancel={() => setConfirmingDelete(null)}
-                  onConfirm={() => {
-                    send({ type: "deleteProfile", name: p.name });
-                    setConfirmingDelete(null);
-                  }}
-                  confirmLabel={t("确认")}
-                  cancelLabel={t("取消")}
+                <button
+                  data-variant="danger"
+                  className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
                   title={t("删除 {0}", p.name)}
-                  triggerClassName="opacity-70 hover:opacity-100"
-                  iconClassName="size-3.5"
-                />
+                  onClick={() => setConfirmingDelete(p.name)}
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
               )}
             </div>
           ))}
@@ -375,6 +369,18 @@ function ApiConfigSection({
       <p className="text-[11px] leading-relaxed text-muted-foreground/85">
         {t("点击配置即切换并重新认证会话；来自 iFlow CLI 的配置为只读，可切换但不可在此删除。")}
       </p>
+
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={t("删除配置")}
+          message={t("确定删除配置「{0}」吗？其密钥将从 SecretStorage 中永久移除。", confirmingDelete)}
+          onConfirm={() => {
+            send({ type: "deleteProfile", name: confirmingDelete });
+            setConfirmingDelete(null);
+          }}
+          onCancel={() => setConfirmingDelete(null)}
+        />
+      )}
     </div>
   );
 }

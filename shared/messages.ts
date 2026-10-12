@@ -158,6 +158,13 @@ export interface SubAgentBlock extends BlockBase {
   status: ToolCallStatus;
   /** SubAgent type parsed from the task title, e.g. "general-purpose" — drives the card accent color. */
   agentType: string | null;
+  /**
+   * Host-set (optimistic, never from the wire): the user stopped this agent
+   * via `_iflow/agent/cancel` and the CLI confirmed. The adapter still emits
+   * AGENT_FAILED for an aborted agent, so without this flag the card would
+   * read "failed" where the user meant "stopped".
+   */
+  stopped?: boolean;
   entries: Block[];
 }
 

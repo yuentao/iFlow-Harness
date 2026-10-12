@@ -49,7 +49,7 @@ import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
-import { Chip, FileRef, InlineConfirm } from "./ui";
+import { Chip, ConfirmDialog, FileRef } from "./ui";
 import logo from "../assets/iflow.svg";
 
 const KIND_ICON: Record<string, typeof Eye> = {
@@ -291,7 +291,11 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const visible = overflow && !expanded ? nested.slice(nested.length - SUB_AGENT_VISIBLE_STEPS) : nested;
   const progress = nested.length > 0 ? ` ${done}/${nested.length}` : "";
   const statusChip =
-    block.status === "completed" ? (
+    block.stopped ? (
+      <Chip tone="muted">
+        <Square className="size-2.5" /> {t("已停止")}
+      </Chip>
+    ) : block.status === "completed" ? (
       <Chip tone="success">
         <Check className="size-2.5" /> {t("已完成")}
         {progress}
@@ -338,7 +342,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
         <span className="ml-auto shrink-0">{statusChip}</span>
         {canStop && (
           <button className="press shrink-0 rounded p-1 text-muted-foreground hover:text-destructive"
-            title={t("停止此子代理（将停止整轮生成）")} aria-label={t("停止此子代理（将停止整轮生成）")}
+            title={t("停止此子代理")} aria-label={t("停止此子代理")}
             onClick={() => send({ type: "stopSubagent", sessionId: state!.sessionId!, agentId: block.agentId })}>
             <Square className="size-3" />
           </button>
@@ -496,11 +500,12 @@ function UserMessage({
   onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   const send = useChat((s) => s.send);
-  // One shared armed state: the delete confirm, the rollback mode-picker and
-  // the inline editor expand in the SAME anchored row, so only one may be
-  // open at a time (two wide pills would otherwise overlap). "none" shows the
-  // bare icon buttons.
-  const [armed, setArmed] = useState<"none" | "delete" | "rollback" | "edit">("none");
+  // One shared armed state: the rollback mode-picker and the inline editor
+  // expand in the SAME anchored row, so only one may be open at a time (two
+  // wide pills would otherwise overlap). "none" shows the bare icon buttons.
+  // Delete moved to a modal (confirmDelete) — the armed pill was too fiddly.
+  const [armed, setArmed] = useState<"none" | "rollback" | "edit">("none");
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // M4 P1-9: draft for the inline editor; null = not editing.
   const [draft, setDraft] = useState<string | null>(null);
   useEffect(() => {
@@ -662,25 +667,32 @@ function UserMessage({
               </div>
             )}
             {canDelete && block.id && (
-              <InlineConfirm
-                armed={armed === "delete"}
-                onArm={() => setArmed("delete")}
-                onCancel={() => setArmed("none")}
-                onConfirm={() => {
-                  setArmed("none");
-                  send({ type: "deleteUserMessage", blockId: block.id! });
-                }}
-                confirmLabel={t("确认")}
-                cancelLabel={t("取消")}
+              <button
+                data-variant="danger"
+                className="press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-all hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover:opacity-100"
                 title={t("删除该消息及其后所有内容")}
-                triggerClassName="border border-border bg-panel/90 shadow-card backdrop-blur-md opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-              />
+                onClick={() => setConfirmDelete(true)}
+              >
+                <Trash2 className="size-3" />
+              </button>
             )}
           </div>
         )}
           </>
         )}
       </div>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title={t("删除消息")}
+          message={t("确定删除该消息及其后所有内容吗？此操作不可撤销。")}
+          onConfirm={() => {
+            setConfirmDelete(false);
+            send({ type: "deleteUserMessage", blockId: block.id! });
+          }}
+          onCancel={() => setConfirmDelete(false)}
+        />
+      )}
     </div>
   );
 }
