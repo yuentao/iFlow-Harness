@@ -48,7 +48,7 @@ import type {
   ExitPlanModeRequest,
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import {
   clearQueue as clearQueueUi,
   enqueuePrompt as enqueuePromptUi,
@@ -131,6 +131,13 @@ const URL_FETCH_TIMEOUT_MS = 10_000;
 const URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/**
+ * Size cap for the approval card's diff preview (per side). The wire diff is
+ * the tool's FULL old/new text — a whole-file rewrite of a large file would
+ * otherwise ride every snapshot push. Same 256KB discipline as the MCP diff
+ * synthesis cap; over the cap the card degrades to the title-only form.
+ */
+const APPROVAL_DIFF_PREVIEW_MAX_CHARS = 256 * 1024;
 /**
  * Post-rejection liveness window (user-reported 2026-10-06: "审批超时自动拒绝
  * 之后就一直卡在正在生成"). After a timeout auto-reject the CLI continues the
@@ -334,6 +341,15 @@ export class ChatPanel implements vscode.Disposable {
   private client: AcpClient | null = null;
   private store: SessionStore;
   private connecting: Promise<void> | null = null;
+  /**
+   * Handshake generation counter (P0-3 restart escape). restartCli bumps it
+   * before spawning a replacement CLI, so a wedged handshake being torn down
+   * recognises itself as superseded: its catch/finally then skip every shared
+   * -state mutation (store error, this.client, restartRestoreId, clearing
+   * `connecting`) that would otherwise clobber the successor's fresh
+   * handshake running concurrently.
+   */
+  private connectGeneration = 0;
   private disposed = false;
   /** Diagnostics trail visible in the Output panel (helps locate connect issues). */
   private readonly log: vscode.LogOutputChannel;
@@ -1844,12 +1860,33 @@ export class ChatPanel implements vscode.Disposable {
     const id = `ap-${++this.approvalSeq}`;
     const toolCall = req.toolCall;
     const now = Date.now();
+    // Edit-type tools carry their pending change on the permission request
+    // itself (probed, CLI 0.5.19 fork bundle: `shouldConfirmExecute` pushes
+    // `{type:"diff", path, oldText, newText}` into toolCall.content BEFORE
+    // the tool runs). Forwarding it lets the card show WHAT will be written
+    // instead of asking the user to approve blind. Over-cap sides drop the
+    // preview entirely (never truncate — a partial diff is a lying diff).
+    let diff: ToolDiffUi | null = null;
+    for (const entry of toolCall.content ?? []) {
+      if (entry.type !== "diff") continue;
+      const oldText = entry.oldText ?? null;
+      const newText = entry.newText ?? null;
+      if (
+        (oldText !== null && oldText.length > APPROVAL_DIFF_PREVIEW_MAX_CHARS) ||
+        (newText !== null && newText.length > APPROVAL_DIFF_PREVIEW_MAX_CHARS)
+      ) {
+        break;
+      }
+      diff = { path: entry.path, oldText, newText };
+      break;
+    }
     const approval: PendingApprovalUi = {
       id,
       toolName: toolCall.toolName ?? "",
       title: toolCall.title ?? "",
       toolKind: toolCall.kind ?? "other",
       locations: toolCall.locations ?? [],
+      diff,
       options: req.options,
       deadline: now + APPROVAL_TIMEOUT_MS,
       timeoutMs: APPROVAL_TIMEOUT_MS,
@@ -2796,6 +2833,19 @@ export class ChatPanel implements vscode.Disposable {
     void this.persistActiveTranscript();
     const oldClient = this.client;
     this.client = null;
+    // P0-3: a handshake still in flight owns its own child. ensureClient
+    // assigns `this.client = client` BEFORE awaiting connect(), so oldClient
+    // above already holds the wedged in-flight child whose dispose() (below)
+    // rejects its pending initialize immediately instead of waiting out the
+    // 120s timeout. But `connecting` would be handed straight back to the
+    // ensureClient call below — the restart would silently no-op onto the
+    // wedged promise. Supersede it: bump the generation (the old handshake's
+    // catch/finally guards then neutralize its shared-state writes) and detach
+    // `connecting` so ensureClient spawns a fresh CLI.
+    if (this.connecting) {
+      this.connectGeneration++;
+      this.connecting = null;
+    }
     this.store.replaceState(newSessionState(this.store.getState()));
     this.store.markConnecting();
     // Kill the old child while the new one boots (independent processes).
@@ -3894,6 +3944,10 @@ export class ChatPanel implements vscode.Disposable {
     }
 
     this.connecting = (async () => {
+      // P0-3: capture the generation so a restartCli supersession (which bumps
+      // the counter and nulls `connecting`) is visible to this closure's
+      // catch/finally below.
+      const generation = this.connectGeneration;
       // The entry resolves synchronously (vendored fork, no probe). The node
       // probe still shells out (where.exe / node --version) and is cached.
       const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
@@ -4039,6 +4093,12 @@ export class ChatPanel implements vscode.Disposable {
           },
         },
       );
+      // P0-3: superseded during the prelude (async node probe) — publishing
+      // our client would clobber the successor's; throw before connecting so
+      // the outer catch's generation guard ends this handshake silently.
+      if (generation !== this.connectGeneration) {
+        throw new Error("CLI restart requested while connecting");
+      }
       this.client = client;
       try {
         const tInit = Date.now();
@@ -4048,6 +4108,12 @@ export class ChatPanel implements vscode.Disposable {
         // — a resolved handshake would leave awaiting callers holding a
         // client that dispose() is about to kill.
         if (this.disposed) throw new DisposedError();
+        // P0-3: restartCli superseded this handshake while initialize ran —
+        // abandon before authenticate/session work races the successor's own
+        // post-handshake sequence on the shared store.
+        if (generation !== this.connectGeneration) {
+          throw new Error("CLI restart requested while connecting");
+        }
         this.log.info(
           `initialize ok in ${Date.now() - tInit}ms: authenticated=${init.isAuthenticated ?? false}, loadSession=${init.agentCapabilities.loadSession ?? false}`,
         );
@@ -4101,6 +4167,12 @@ export class ChatPanel implements vscode.Disposable {
           }
         } else {
           this.store.setAuth(await this.buildAuthState(true, false));
+        }
+        // P0-3: authenticate can itself take minutes on a wedged endpoint; a
+        // restart that landed during it must not have this generation mark the
+        // store connected or start sessions — the successor owns the UI now.
+        if (generation !== this.connectGeneration) {
+          throw new Error("CLI restart requested while connecting");
         }
         this.store.markConnected();
         // Startup session strategy (iflow.restoreLastSession): by default open
@@ -4163,16 +4235,24 @@ export class ChatPanel implements vscode.Disposable {
           this.log.warn(`session list refresh failed: ${errorMessage(error)}`);
         });
       } catch (error) {
-        this.client = null;
-        // Consume a pending restart-restore target: a failed handshake must
-        // not leak the id into the NEXT successful handshake (e.g. a profile
-        // switch, which deliberately never restores history).
-        this.restartRestoreId = null;
         // C5: second safety net — connect() kills the child when initialize
         // itself fails, but a failure in the post-handshake steps (restore,
         // prune, new session) leaves a healthy child with no owner. dispose()
         // is idempotent, so this is safe even after connect()'s own cleanup.
         void client.dispose().catch(() => {});
+        // P0-3: restartCli already owns the recovery — the successor handshake
+        // runs with its own error/status handling. Touching shared state here
+        // (client, restartRestoreId, store error) would clobber it mid-flight;
+        // the wedged child above is all this generation still owns.
+        if (generation !== this.connectGeneration) {
+          this.log.info("superseded handshake aborted by CLI restart");
+          throw error;
+        }
+        this.client = null;
+        // Consume a pending restart-restore target: a failed handshake must
+        // not leak the id into the NEXT successful handshake (e.g. a profile
+        // switch, which deliberately never restores history).
+        this.restartRestoreId = null;
         // A3: the handshake bailed on the disposed flag (window close during
         // initialize) — the store is destroyed, so there is nothing to mark.
         // The child above still needs killing; the rest is skipped. Surface
@@ -4187,7 +4267,10 @@ export class ChatPanel implements vscode.Disposable {
         this.postSound("error");
         throw error;
       } finally {
-        this.connecting = null;
+        // P0-3: `connecting` now belongs to the successor handshake (restartCli
+        // nulled it before spawning the replacement) — only the current
+        // generation may clear it, or it would erase the successor's promise.
+        if (generation === this.connectGeneration) this.connecting = null;
       }
     })();
 

@@ -830,6 +830,14 @@ const BlockView = memo(function BlockView({
 const TAIL_WINDOW = 60;
 const MOUNT_STEP = 60;
 
+/** P0-4 empty-state examples: localized at render time (the locale arrives
+ * with the first snapshot, later than module evaluation). */
+const EXAMPLE_PROMPTS = [
+  "帮我梳理这个仓库的结构与核心模块",
+  "给核心模块补充单元测试",
+  "分析这个报错的可能原因并给出修复方案",
+];
+
 function MessageListInner({ state }: { state: SessionState }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const setHeaderScrolled = useChat((s) => s.setHeaderScrolled);
@@ -1140,10 +1148,26 @@ function MessageListInner({ state }: { state: SessionState }) {
                 <img src={logo} alt="" className="size-6" />
               </div>
               <div className="text-[14px] font-semibold text-foreground">
-                {t("准备好了,向 iFlow 提问吧")}
+                {t("准备好了，向 iFlow 提问吧")}
               </div>
               <p className="max-w-[280px] text-[11.5px] leading-relaxed text-muted-foreground">
-                {t("下发任务、粘贴代码上下文,或直接描述你想实现的功能")}
+                {t("下发任务、粘贴代码上下文，或直接描述你想实现的功能")}
+              </p>
+              {/* P0-4: example prompts lower the first-message barrier — a
+                  click fills the composer (never clobbers a typed draft). */}
+              <div className="mt-3 flex max-w-[300px] flex-col items-stretch gap-1.5">
+                {EXAMPLE_PROMPTS.map((ex) => (
+                  <button
+                    key={ex}
+                    className="card-lift press rounded-xl border border-border bg-card/80 px-3 py-1.5 text-left text-[11.5px] text-foreground/90 shadow-card transition-colors hover:border-primary/40 hover:bg-surface-2"
+                    onClick={() => useChat.getState().requestDraft(t(ex))}
+                  >
+                    {t(ex)}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-3 text-[10.5px] leading-relaxed text-muted-foreground/80">
+                {t("/ 命令 · @ 文件 · @problems · @git · 粘贴文件添加附件")}
               </p>
             </div>
           )}

@@ -267,9 +267,20 @@ const en: Record<string, string> = {
   "思考过程": "Thinking",
   "附件图片 {0}": "Attached image {0}",
   "在 VSCode 中打开": "Open in VSCode",
-  "准备好了,向 iFlow 提问吧": "Ready — ask iFlow anything",
-  "下发任务、粘贴代码上下文,或直接描述你想实现的功能":
+  "准备好了，向 iFlow 提问吧": "Ready — ask iFlow anything",
+  "下发任务、粘贴代码上下文，或直接描述你想实现的功能":
     "Assign tasks, paste code context, or just describe what you want to build",
+  // P0-4: empty-state example chips & capability hint
+  "帮我梳理这个仓库的结构与核心模块": "Walk me through this repository's structure and core modules",
+  "给核心模块补充单元测试": "Add unit tests to the core modules",
+  "分析这个报错的可能原因并给出修复方案": "Analyze this error's likely causes and propose a fix",
+  "/ 命令 · @ 文件 · @problems · @git · 粘贴文件添加附件":
+    "/ commands · @ files · @problems · @git · paste to attach",
+  // P0-3: splash patience line & error toast actions
+  "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
+    "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
+  "重启 CLI 并重试（会话自动恢复）": "Restart the CLI and retry (the session restores automatically)",
+  "关闭": "Dismiss",
   "回到最新": "Jump to latest",
   "展开上下文": "Expand context",
   "拖放文件以添加附件": "Drop files to attach",

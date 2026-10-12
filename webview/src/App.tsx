@@ -12,10 +12,12 @@ import {
   Pin,
   PinOff,
   Plus,
+  RefreshCw,
   Search,
   Settings2,
   Sun,
   Trash2,
+  X,
 } from "lucide-react";
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
@@ -195,6 +197,30 @@ export function App() {
     return "";
   }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions, pendingProfileSwitch]);
 
+  // P0-3: connecting elapsed timer. A wedged handshake used to strand the
+  // splash with no feedback and no escape hatch; the live seconds plus a
+  // patience-threshold restart affordance give the user both. The hook sits
+  // BEFORE the splash early-return (hook-count stability, see liveMessage).
+  const connectingSince = useRef<number | null>(null);
+  const [connectingElapsed, setConnectingElapsed] = useState(0);
+  useEffect(() => {
+    if (status !== "connecting") {
+      connectingSince.current = null;
+      setConnectingElapsed(0);
+      return;
+    }
+    if (connectingSince.current === null) connectingSince.current = Date.now();
+    const tick = () =>
+      setConnectingElapsed(Math.max(0, Math.floor((Date.now() - (connectingSince.current ?? Date.now())) / 1000)));
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, [status]);
+
+  // The error toast is host-owned (errorMessage rides the snapshot); a local
+  // dismiss hides it until a DIFFERENT error arrives.
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+
   const focusMode = useChat((s) => s.focusMode);
   const toggleFocusMode = useChat((s) => s.toggleFocusMode);
 
@@ -213,6 +239,11 @@ export function App() {
 
   if (status === null || status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
+    // P0-3: a live elapsed counter turns a silent hang into a diagnosable
+    // wait, and past the patience threshold the splash grows its own restart
+    // escape (the host's handshake timeout eventually markErrors, but that
+    // can take 2 minutes — the user shouldn't have to stare at a spinner).
+    const impatient = connectingElapsed >= 45;
     return (
       <div className="splash">
         <img src={logo} alt="" className="splash-logo" />
@@ -221,7 +252,21 @@ export function App() {
         <div className="splash-bar" />
         <div className="splash-hint">
           {t("正在启动 iFlow …（首次启动或配置了多个 MCP server 时较久）")}
+          {status === "connecting" && (
+            <span className="ml-1 font-mono tabular-nums opacity-70">{connectingElapsed}s</span>
+          )}
         </div>
+        {impatient && (
+          <div className="splash-hint mt-2 flex flex-col items-center gap-2">
+            <span>{t("等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达")}</span>
+            <button
+              className="press rounded-lg border border-border bg-surface/80 px-3 py-1 text-[11.5px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
+              onClick={() => send({ type: "restartCli" })}
+            >
+              {t("重启 CLI")}
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -478,7 +523,7 @@ export function App() {
           each card re-enables pointer events on itself. */}
       <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
         <MessageList />
-        {errorMessage && (
+        {errorMessage && dismissedError !== errorMessage && (
           // Error toast: floats over the transcript top instead of taking a
           // flex row, frosted (backdrop-blur) so the content behind bleeds
           // through. z-[5]: must stay BELOW the header's stacking context
@@ -486,9 +531,28 @@ export function App() {
           // dropdown. break-words + scroll cap: errorMessage() can
           // return unbounded JSON dumps (unbroken tokens) and multi-line
           // detail — without them the toast overflowed its container.
+          // P0-3: dismiss + retry — a dead-end banner made every failure a
+          // dead end; restartCli is the universal recovery action (the host
+          // restores the session after the handshake).
           <div className="pointer-events-none absolute inset-x-0 top-2.5 z-[5] flex justify-center px-3">
-            <div className="stream-in pointer-events-auto max-h-24 max-w-[92%] select-text overflow-y-auto break-words rounded-2xl border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
-              {errorMessage}
+            <div className="stream-in pointer-events-auto flex max-h-40 max-w-[92%] items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
+              <span className="min-w-0 max-h-24 select-text overflow-y-auto break-words">{errorMessage}</span>
+              <button
+                className="press shrink-0 rounded-md border border-destructive/40 px-1.5 py-0.5 text-[10.5px] font-semibold transition-opacity hover:opacity-100"
+                title={t("重启 CLI 并重试（会话自动恢复）")}
+                onClick={() => send({ type: "restartCli" })}
+              >
+                <RefreshCw className="mr-0.5 inline size-2.5 align-[-1px]" />
+                {t("重试")}
+              </button>
+              <button
+                className="press shrink-0 rounded p-0.5 opacity-80 transition-opacity hover:opacity-100"
+                title={t("关闭")}
+                aria-label={t("关闭")}
+                onClick={() => setDismissedError(errorMessage)}
+              >
+                <X className="size-3" />
+              </button>
             </div>
           </div>
         )}

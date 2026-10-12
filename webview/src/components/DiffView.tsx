@@ -38,6 +38,7 @@ export function DiffView({
   actions,
   toolCallId,
   hunkActions,
+  maxHeightClass = "max-h-60",
 }: {
   diff: ToolDiffUi;
   actions?: ReactNode;
@@ -51,6 +52,10 @@ export function DiffView({
     /** True while the host is processing a commit. */
     busy?: boolean;
   };
+  /** Height cap class for the scroll body. Bottom-anchored overlay cards
+   * (approval) pass a viewport-relative cap so the fixed 240px default
+   * cannot push the card's action row off-screen on short panels. */
+  maxHeightClass?: string;
 }) {
   const editable = !!hunkActions && diff.oldText !== null && diff.newText !== null;
   const hunks = useMemo(
@@ -120,7 +125,7 @@ export function DiffView({
           {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}
         </span>
       </div>
-      <div className="diff-scroll mx-2.5 mb-2.5 max-h-60 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-[11px] leading-[1.7]">
+      <div className={`diff-scroll mx-2.5 mb-2.5 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-[11px] leading-[1.7] ${maxHeightClass}`}>
         {rows.map((row, i) =>
           row.type === "hunk" ? (
             <button

@@ -226,6 +226,17 @@ export interface PendingApprovalUi {
   title: string;
   toolKind: ToolKind;
   locations: ToolLocation[];
+  /**
+   * Read-only diff preview for edit-type approvals. Wire behavior (probed,
+   * CLI 0.5.19 fork bundle): edit tools' `session/request_permission` carries
+   * `{type:"diff", path, oldText, newText}` on `toolCall.content` BEFORE the
+   * tool runs — the host forwards the first entry so the card can show WHAT
+   * the tool is about to write. Null when the request carries no structured
+   * diff (shell tools, MCP) or either side exceeds the preview size cap.
+   * Optional for older hosts / mock fixtures — absent renders the title-only
+   * card.
+   */
+  diff?: ToolDiffUi | null;
   options: PermissionOptionUi[];
   /** Host-side auto-answer deadline (epoch ms). The webview renders a live
    * countdown so the user knows the card expires on its own. */

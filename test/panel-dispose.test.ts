@@ -235,3 +235,55 @@ describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
     expect(p.store.getState().errorMessage).toBeNull();
   }, 15000);
 });
+
+/**
+ * P0-3 (UI audit): the splash's 「重启 CLI」 and the error toast's 「重试」
+ * both route to restartCli. Before the generation guard, a restart during a
+ * wedged initialize was a silent no-op: this.client was still null-ish for
+ * the OLD child path and ensureClient handed the same wedged `connecting`
+ * promise straight back. The mock's hang_initialize mode reproduces the wedge;
+ * clearing the env before the restart lets the replacement child answer.
+ */
+describe("ChatPanel restartCli vs wedged connect (P0-3)", () => {
+  let panel: ChatPanel;
+
+  afterEach(async () => {
+    try {
+      await panel.dispose();
+    } catch {
+      // already disposed
+    }
+    delete process.env.ACP_MOCK_MODE;
+  });
+
+  it("supersedes a wedged initialize and boots a fresh CLI instead of hanging", async () => {
+    process.env.ACP_MOCK_MODE = "hang_initialize";
+    panel = new ChatPanel(makeContext(), {
+      entryOverride: mockAgent,
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    });
+    const p = panelOf(panel);
+    const wedged = p.ensureClient();
+    void wedged.catch(() => {}); // the superseded handshake rejects — keep it handled
+    await vi.waitFor(() => expect(p.client).not.toBeNull(), { timeout: 5000 });
+
+    // The replacement child must answer initialize: drop the hang mode BEFORE
+    // restartCli spawns it (AcpClient snapshots process.env at spawn time).
+    delete process.env.ACP_MOCK_MODE;
+    const t0 = Date.now();
+    await p.restartCli();
+    // The wedged child's dispose rejects its pending initialize immediately
+    // (no waiting for the 120s request timeout) and the fresh handshake rides
+    // the mock's normal answers. Generous bound vs the 120s it replaces.
+    expect(Date.now() - t0).toBeLessThan(20000);
+
+    // Success state: connected, no error leaked from the superseded catch.
+    await vi.waitFor(() => expect(p.store.getState().status).toBe("idle"), { timeout: 5000 });
+    expect(p.store.getState().errorMessage).toBeNull();
+    expect(p.connecting).toBeNull();
+    expect(p.client).not.toBeNull();
+    // The wedged handshake rejected (superseded), it never resolved.
+    await expect(wedged).rejects.toThrow();
+  }, 30000);
+});

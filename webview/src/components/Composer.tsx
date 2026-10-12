@@ -1002,6 +1002,26 @@ export function Composer() {
   const editedRecall = useRef(false);
   const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
 
+  // P0-4: empty-state example chips fill the composer through the store.
+  // Never clobber a typed draft (same discipline as the queue-edit round
+  // trip) — the request is consumed either way so a later click can re-fire.
+  const draftRequest = useChat((s) => s.composerDraftRequest);
+  useEffect(() => {
+    if (!draftRequest) return;
+    if (textRef.current.trim() !== "") {
+      useChat.getState().clearDraftRequest(draftRequest.seq);
+      return;
+    }
+    setText(draftRequest.text);
+    useChat.getState().clearDraftRequest(draftRequest.seq);
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    });
+  }, [draftRequest]);
+
   // A history buffer belongs to one session. Reset it before a restored/new
   // session can reuse the composer instance, otherwise ArrowDown may restore
   // the previous session's draft into the new session.

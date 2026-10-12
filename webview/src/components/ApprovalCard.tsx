@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Lock, ShieldCheck } from "lucide-react";
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { FileRef, CountdownBar } from "./ui";
+import { DiffView } from "./DiffView";
 
 const KIND_ORDER: Record<string, number> = {
   allow_once: 0,
@@ -12,8 +13,17 @@ const KIND_ORDER: Record<string, number> = {
   reject_always: 3,
 };
 
-/** Stable visual class per option kind, mirroring the reference design. */
+/**
+ * Visual risk tiering per option kind: a ONE-TIME allow is the primary action
+ * (solid gradient), while an ALWAYS allow changes the safety boundary for the
+ * whole session — it renders as a secondary outlined button with a lock glyph
+ * so the two can never be conflated by muscle memory (visual audit P0-2).
+ */
 function optionClass(kind: PermissionOptionUi["kind"]): string {
+  if (kind === "allow_once")
+    return "bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn hover:shadow-btn-hover hover:brightness-105";
+  if (kind === "allow_always")
+    return "border border-primary/40 bg-primary/10 font-medium text-primary hover:bg-primary/20";
   if (kind.startsWith("allow"))
     return "bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn hover:shadow-btn-hover hover:brightness-105";
   if (kind.startsWith("reject"))
@@ -96,6 +106,15 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           </p>
         )}
       </div>
+      {/* Pre-execution diff preview (edit tools only): the wire request itself
+          carries old/new text, so the user approves the CHANGE, not a title.
+          Read-only DiffView — hunk editing belongs to the post-completion
+          tool card, not the approval gate. */}
+      {approval.diff && (
+        <div className="border-t border-border/60">
+          <DiffView diff={approval.diff} maxHeightClass="max-h-[max(120px,calc(100vh-360px))]" />
+        </div>
+      )}
       <CountdownBar deadline={approval.deadline} timeoutMs={approval.timeoutMs} />
       <div ref={actionsRef} role="group" aria-label={t("审批操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => (
@@ -103,9 +122,10 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
             key={opt.optionId}
             disabled={answered}
             aria-label={approval.toolName ? t("{0}（{1}）", opt.name, approval.toolName) : opt.name}
-            className={`press rounded-lg px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
+            className={`press inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
             onClick={() => answer(opt.optionId)}
           >
+            {opt.kind === "allow_always" && <Lock className="size-3 shrink-0" />}
             {opt.name}
           </button>
         ))}

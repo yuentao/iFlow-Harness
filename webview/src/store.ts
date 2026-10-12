@@ -1231,6 +1231,14 @@ interface ChatStore {
    */
   focusMode: boolean;
   toggleFocusMode: () => void;
+  /**
+   * P0-4: one-shot "fill the composer" request (empty-state example chips).
+   * The seq lets the Composer's effect fire on repeated requests with the
+   * SAME text; null = nothing pending. Composer clears it after consuming.
+   */
+  composerDraftRequest: { text: string; seq: number } | null;
+  requestDraft: (text: string) => void;
+  clearDraftRequest: (seq: number) => void;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
@@ -1247,6 +1255,13 @@ export const useChat = create<ChatStore>((set, get) => ({
   setHeaderScrolled: (scrolled) => set({ headerScrolled: scrolled }),
   focusMode: false,
   toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
+  composerDraftRequest: null,
+  requestDraft: (text) =>
+    set((s) => ({
+      composerDraftRequest: { text, seq: (s.composerDraftRequest?.seq ?? 0) + 1 },
+    })),
+  clearDraftRequest: (seq) =>
+    set((s) => (s.composerDraftRequest?.seq === seq ? { composerDraftRequest: null } : s)),
   toasts: [],
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
