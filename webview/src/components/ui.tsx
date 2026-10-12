@@ -244,7 +244,7 @@ export function CountdownBar({
         />
       </div>
       <span
-        className={`shrink-0 font-mono text-[10px] tabular-nums transition-colors duration-300 ${textClass}`}
+        className={`shrink-0 font-mono text-[11px] tabular-nums transition-colors duration-300 ${textClass}`}
       >
         {formatCountdown(remainingMs)}
       </span>
@@ -299,7 +299,7 @@ export function Chip({
 }) {
   return (
     <span
-      className={`chip-fade inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[10px] font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
+      className={`chip-fade inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[11px] font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
     >
       {children}
     </span>
@@ -341,12 +341,24 @@ export function ConfirmDialog({
   confirmLabel,
   onConfirm,
   onCancel,
+  /** P1-8: multi-action variant — when set, replaces the single confirm
+   * button with this action group (e.g. the rollback mode picker: files /
+   * conversation / both). Cancel keeps data-autofocus so an accidental Enter
+   * never fires a destructive action. */
+  actions,
 }: {
   title: string;
   message: string;
   confirmLabel?: string;
-  onConfirm: () => void;
+  onConfirm?: () => void;
   onCancel: () => void;
+  actions?: {
+    label: string;
+    title?: string;
+    disabled?: boolean;
+    variant?: "default" | "primary" | "danger";
+    onClick: () => void;
+  }[];
 }) {
   return createPortal(
     <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog">
@@ -360,13 +372,34 @@ export function ConfirmDialog({
         >
           {t("取消")}
         </button>
-        <button
-          type="button"
-          className="press rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1 text-[11.5px] font-semibold text-destructive transition-colors hover:bg-destructive/20"
-          onClick={onConfirm}
-        >
-          {confirmLabel ?? t("删除")}
-        </button>
+        {actions
+          ? actions.map((a) => (
+              <button
+                key={a.label}
+                type="button"
+                title={a.title}
+                disabled={a.disabled}
+                className={`press rounded-lg border px-3 py-1 text-[11.5px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  a.variant === "primary"
+                    ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
+                    : a.variant === "danger"
+                      ? "border-destructive/50 bg-destructive/10 text-destructive hover:bg-destructive/20"
+                      : "border-border bg-editor text-foreground hover:bg-accent"
+                }`}
+                onClick={a.onClick}
+              >
+                {a.label}
+              </button>
+            ))
+          : (
+            <button
+              type="button"
+              className="press rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1 text-[11.5px] font-semibold text-destructive transition-colors hover:bg-destructive/20"
+              onClick={onConfirm}
+            >
+              {confirmLabel ?? t("删除")}
+            </button>
+          )}
       </div>
     </ModalShell>,
     document.body,
@@ -508,15 +541,18 @@ export function Dropdown({
 
   return (
     <div className={`relative${wrapperClass ? ` ${wrapperClass}` : ""}`} ref={ref}>
-      {/* The click proxy must constrain its child the same way the wrapper
-          does: as a plain block it lets a long trigger label stretch the
-          button far beyond the wrapper width (flex-1 inside is inert). */}
+      {/* P1-10: this is a plain click proxy, NOT a button — the trigger
+          render prop already renders a real <button>; a role="button" here
+          would nest interactive elements (ARIA violation, doubled screen-
+          reader announcement). The proxy must stay: with the inner button
+          disabled (pointer-events-none) clicks fall through to this div, and
+          the disabled gate below is what keeps dropdowns closed mid-turn.
+          menu semantics (aria-haspopup/aria-expanded) live on the caller's
+          real button. The proxy must constrain its child the same way the
+          wrapper does: as a plain block it lets a long trigger label stretch
+          the button far beyond the wrapper width (flex-1 inside is inert). */}
       <div
         className={wrapperClass.includes("flex-1") ? "flex min-w-0" : ""}
-        role="button"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-disabled={disabled || undefined}
         onClick={(e) => {
           if (disabled) return;
           // Discrete toggle (not inside the setState updater): React StrictMode

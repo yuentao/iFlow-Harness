@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Focus,
   History,
   Loader2,
@@ -22,6 +23,7 @@ import {
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { isEnglishLocale, t } from "./i18n";
+import { copyText } from "./components/Markdown";
 import { Chip, ConfirmDialog, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
@@ -71,6 +73,76 @@ function formatSessionTime(ts: number): string {
   const sameDay = d.toDateString() === now.toDateString();
   if (sameDay) return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+/**
+ * P1-9: the error toast used to be a dead-end scroll box — CLI errors are
+ * often multi-line JSON dumps you could neither read fully nor take with
+ * you. Now: collapsed to one line by default with an expand toggle (only
+ * when the text is actually long), a copy button (Clipboard API with the
+ * textarea fallback from Markdown.tsx), plus the P0-3 retry/dismiss.
+ */
+function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  const send = useChat((s) => s.send);
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const isLong = message.length > 90 || message.includes("\n");
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [copied]);
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-2.5 z-[5] flex justify-center px-3">
+      <div className="stream-in pointer-events-auto flex max-h-40 w-full max-w-[92%] items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
+        <div className="min-w-0 flex-1">
+          <div
+            className={`select-text break-words ${expanded ? "max-h-28 overflow-y-auto" : "line-clamp-1"}`}
+            title={isLong && !expanded ? message : undefined}
+          >
+            {message}
+          </div>
+          {isLong && (
+            <button
+              className="press mt-0.5 rounded text-[11px] font-medium text-destructive/90 underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? t("收起") : t("展开")}
+            </button>
+          )}
+        </div>
+        <button
+          className="press shrink-0 rounded p-0.5 opacity-80 transition-opacity hover:opacity-100"
+          title={copied ? t("已复制") : t("复制错误信息")}
+          aria-label={t("复制错误信息")}
+          onClick={() => {
+            void copyText(message).then(
+              () => setCopied(true),
+              () => {},
+            );
+          }}
+        >
+          {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+        </button>
+        <button
+          className="press shrink-0 rounded-md border border-destructive/40 px-1.5 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-100"
+          title={t("重启 CLI 并重试（会话自动恢复）")}
+          onClick={() => send({ type: "restartCli" })}
+        >
+          <RefreshCw className="mr-0.5 inline size-2.5 align-[-1px]" />
+          {t("重试")}
+        </button>
+        <button
+          className="press shrink-0 rounded p-0.5 opacity-80 transition-opacity hover:opacity-100"
+          title={t("关闭")}
+          aria-label={t("关闭")}
+          onClick={onDismiss}
+        >
+          <X className="size-3" />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 const BTN_ICON =
@@ -310,6 +382,8 @@ export function App() {
               disabled={locked}
               trigger={(open) => (
                 <button
+                  aria-haspopup="menu"
+                  aria-expanded={open}
                   className={`card-lift press flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-left text-[11px] shadow-card hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
                     open ? "bg-surface-2 ring-1 ring-primary/30" : ""
                   }`}
@@ -324,7 +398,7 @@ export function App() {
             >
               {(close) => (
                 <>
-                  <div className="shrink-0 px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <div className="shrink-0 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
                     {t("会话历史")}
                   </div>
                   <div className="shrink-0 px-2 pb-2">
@@ -335,7 +409,7 @@ export function App() {
                         value={sessionQuery}
                         onChange={(e) => setSessionQuery(e.target.value)}
                         placeholder={t("搜索会话…")}
-                        className="w-full min-w-0 bg-transparent text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground/70"
+                        className="w-full min-w-0 bg-transparent text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground/80"
                       />
                     </div>
                   </div>
@@ -365,6 +439,7 @@ export function App() {
                       return (
                         <div key={s.id} className="flex w-full items-center px-3 py-1.5 hover:bg-accent/60">
                           <button
+                            role="menuitem"
                             className="flex min-w-0 flex-1 flex-col items-start text-left"
                             onClick={() => {
                               send({ type: "loadSession", sessionId: s.id });
@@ -378,11 +453,12 @@ export function App() {
                                 <Check className="ml-auto size-3 shrink-0 text-primary" />
                               )}
                             </span>
-                            <span className="font-mono text-[10px] text-muted-foreground">
+                            <span className="font-mono text-[11px] text-muted-foreground">
                               {formatSessionTime(s.updatedAt)}
                             </span>
                           </button>
                           <button
+                            role="menuitem"
                             className="shrink-0 p-0.5 text-muted-foreground opacity-60 hover:opacity-100 hover:text-foreground"
                             title={s.pinned ? t("取消置顶") : t("置顶")}
                             onClick={() => flag(!s.pinned, !!s.archived)}
@@ -390,6 +466,7 @@ export function App() {
                             {s.pinned ? <PinOff className="size-3" /> : <Pin className="size-3" />}
                           </button>
                           <button
+                            role="menuitem"
                             className="shrink-0 p-0.5 text-muted-foreground opacity-60 hover:opacity-100 hover:text-foreground"
                             title={s.archived ? t("取消归档") : t("归档")}
                             onClick={() => flag(!!s.pinned, !s.archived)}
@@ -398,6 +475,7 @@ export function App() {
                           </button>
                           {deletable && (
                             <button
+                              role="menuitem"
                               data-variant="danger"
                               className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-60 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
                               title={t("删除会话 {0}", s.label)}
@@ -417,7 +495,7 @@ export function App() {
                         {activeList.map(renderRow)}
                         {archivedList.length > 0 && (
                           <button
-                            className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[10px] uppercase tracking-wider text-muted-foreground hover:bg-accent/40"
+                            className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] uppercase tracking-wider text-muted-foreground hover:bg-accent/40"
                             onClick={() => setShowArchived((v) => !v)}
                           >
                             {showArchived ? (
@@ -524,37 +602,7 @@ export function App() {
       <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
         <MessageList />
         {errorMessage && dismissedError !== errorMessage && (
-          // Error toast: floats over the transcript top instead of taking a
-          // flex row, frosted (backdrop-blur) so the content behind bleeds
-          // through. z-[5]: must stay BELOW the header's stacking context
-          // (z-10) — at z-40 it covered the header's downward-opening config
-          // dropdown. break-words + scroll cap: errorMessage() can
-          // return unbounded JSON dumps (unbroken tokens) and multi-line
-          // detail — without them the toast overflowed its container.
-          // P0-3: dismiss + retry — a dead-end banner made every failure a
-          // dead end; restartCli is the universal recovery action (the host
-          // restores the session after the handshake).
-          <div className="pointer-events-none absolute inset-x-0 top-2.5 z-[5] flex justify-center px-3">
-            <div className="stream-in pointer-events-auto flex max-h-40 max-w-[92%] items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
-              <span className="min-w-0 max-h-24 select-text overflow-y-auto break-words">{errorMessage}</span>
-              <button
-                className="press shrink-0 rounded-md border border-destructive/40 px-1.5 py-0.5 text-[10.5px] font-semibold transition-opacity hover:opacity-100"
-                title={t("重启 CLI 并重试（会话自动恢复）")}
-                onClick={() => send({ type: "restartCli" })}
-              >
-                <RefreshCw className="mr-0.5 inline size-2.5 align-[-1px]" />
-                {t("重试")}
-              </button>
-              <button
-                className="press shrink-0 rounded p-0.5 opacity-80 transition-opacity hover:opacity-100"
-                title={t("关闭")}
-                aria-label={t("关闭")}
-                onClick={() => setDismissedError(errorMessage)}
-              >
-                <X className="size-3" />
-              </button>
-            </div>
-          </div>
+          <ErrorToast message={errorMessage} onDismiss={() => setDismissedError(errorMessage)} />
         )}
         {(pendingApproval || pendingPlanExit || pendingQuestions) && (
           <div

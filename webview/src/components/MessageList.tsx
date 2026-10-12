@@ -24,6 +24,7 @@ import {
   ArrowDown,
   Bot,
   History,
+  ListOrdered,
   Square,
   Pencil,
   Search,
@@ -117,7 +118,7 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
   if (!output) return null;
   const truncation =
     truncatedChars && truncatedChars > 0 ? (
-      <span className="ml-1.5 shrink-0 font-mono text-[10px] text-warning">
+      <span className="ml-1.5 shrink-0 font-mono text-[11px] text-warning">
         {t("已截断 {0} 字符", truncatedChars.toLocaleString())}
       </span>
     ) : null;
@@ -348,7 +349,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
           </button>
         )}
       </div>
-      <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-[10px] text-muted-foreground">
+      <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-[11px] text-muted-foreground">
         <span title={t("子代理 token 为转录估算，包含子代理")}>≈ {block.tokens === undefined ? t("未知") : block.tokens.toLocaleString()} tokens</span>
         <span>{t("耗时")} {duration}</span>
       </div>
@@ -459,7 +460,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
       <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
         <CircleDot className="size-3.5 text-primary" />
         {t("任务清单")}
-        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+        <span className="ml-auto font-mono text-[11px] text-muted-foreground">
           {done} / {total}
         </span>
       </div>
@@ -487,12 +488,16 @@ function UserMessage({
   block,
   canDelete,
   checkpoint,
+  isLastUser,
   onEditingChange,
 }: {
   block: Extract<Block, { kind: "user" }>;
   canDelete: boolean;
   /** This turn's workspace checkpoint (M3 P0-1); absent → no rollback entry. */
   checkpoint?: CheckpointUi;
+  /** P1-5: the newest user bubble shows its action icons at full opacity —
+   * rollback is a headline capability and must not hide behind hover. */
+  isLastUser: boolean;
   /** Reports inline-editor open/close so the parent can hide the floating
    * "jump to latest" pill (z-20, bottom-right) while editing — a near-bottom
    * bubble's editor action row would otherwise sit under the pill. Stable
@@ -500,17 +505,23 @@ function UserMessage({
   onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   const send = useChat((s) => s.send);
-  // One shared armed state: the rollback mode-picker and the inline editor
-  // expand in the SAME anchored row, so only one may be open at a time (two
-  // wide pills would otherwise overlap). "none" shows the bare icon buttons.
-  // Delete moved to a modal (confirmDelete) — the armed pill was too fiddly.
-  const [armed, setArmed] = useState<"none" | "rollback" | "edit">("none");
+  // P1-5: action icons ride at 40% instead of vanishing (opacity-0 made the
+  // rollback/edit/delete affordances undiscoverable); hover lifts to 100, and
+  // the newest bubble is always fully visible.
+  const actionBtnClass = (danger = false) =>
+    `press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground shadow-card backdrop-blur-md transition-all hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
+      isLastUser ? "opacity-100" : "opacity-40"
+    } group-hover:opacity-100${danger ? " hover:bg-destructive/10 hover:text-destructive" : ""}`;
+  // P1-8: rollback moved from an inline armed pill-row to the shared
+  // ConfirmDialog (three-action variant) — delete already uses the dialog,
+  // and one dangerous-action language across the product beats three.
+  const [confirmRollback, setConfirmRollback] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   // M4 P1-9: draft for the inline editor; null = not editing.
   const [draft, setDraft] = useState<string | null>(null);
   useEffect(() => {
     if (!canDelete) {
-      setArmed("none");
+      setConfirmRollback(false);
       setDraft(null);
     }
   }, [canDelete]);
@@ -524,21 +535,18 @@ function UserMessage({
   const canRollbackFiles = !!checkpoint && !checkpoint.partial;
   const showRollback = canDelete && !!block.id && !!checkpoint;
   const rollback = (mode: "files" | "conversation" | "both") => {
-    setArmed("none");
+    setConfirmRollback(false);
     send({ type: "restoreCheckpoint", userBlockId: block.id!, mode });
   };
   const startEdit = () => {
-    setArmed("edit");
     setDraft(block.text);
   };
   const cancelEdit = () => {
-    setArmed("none");
     setDraft(null);
   };
   const submitEdit = () => {
     const text = (draft ?? "").trim();
     if (!text || !block.id) return;
-    setArmed("none");
     setDraft(null);
     send({ type: "editAndResend", blockId: block.id, text });
   };
@@ -569,7 +577,7 @@ function UserMessage({
               }}
             />
             <div className="mt-1.5 flex items-center justify-end gap-1.5">
-              <span className="mr-auto text-[10.5px] text-muted-foreground">
+              <span className="mr-auto text-[11px] text-muted-foreground">
                 {checkpoint && !checkpoint.partial ? t("重发将先回滚该轮文件变更并删除其后的对话") : t("重发将删除该消息及其后所有对话")}
               </span>
               <button
@@ -611,56 +619,21 @@ function UserMessage({
           <div className="absolute -top-2.5 right-1 z-10 flex items-center gap-1">
             {showRollback && (
               <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                {armed === "rollback" ? (
-                  <span className="stream-in inline-flex items-center gap-0.5 rounded-lg border border-border bg-card/95 px-1 py-0.5 shadow-card backdrop-blur-md">
-                    <button
-                      className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
-                      disabled={!canRollbackFiles}
-                      title={canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件")}
-                      onClick={() => rollback("files")}
-                    >
-                      {t("文件")}
-                    </button>
-                    <button
-                      className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-foreground transition-colors hover:bg-surface"
-                      title={t("仅删除该消息及其后所有对话")}
-                      onClick={() => rollback("conversation")}
-                    >
-                      {t("对话")}
-                    </button>
-                    <button
-                      className="press rounded px-1.5 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
-                      disabled={!canRollbackFiles}
-                      title={canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件")}
-                      onClick={() => rollback("both")}
-                    >
-                      {t("全部")}
-                    </button>
-                    <button
-                      className="press rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
-                      title={t("取消")}
-                      onClick={() => setArmed("none")}
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </span>
-                ) : (
-                  <button
-                    className="press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-all hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover:opacity-100"
-                    title={t("回滚到此轮之前")}
-                    onClick={() => setArmed("rollback")}
-                  >
-                    <History className="size-3" />
-                  </button>
-                )}
+                <button
+                  className={actionBtnClass()}
+                  title={t("回滚到此轮之前")}
+                  onClick={() => setConfirmRollback(true)}
+                >
+                  <History className="size-3" />
+                </button>
               </div>
             )}
             {canDelete && block.id && (
               <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
                 <button
-                  className="press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-all hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover:opacity-100"
+                  className={actionBtnClass()}
                   title={t("编辑并重发该消息")}
-                  onClick={() => (armed === "edit" ? cancelEdit() : startEdit())}
+                  onClick={() => (editing ? cancelEdit() : startEdit())}
                 >
                   <Pencil className="size-3" />
                 </button>
@@ -669,7 +642,7 @@ function UserMessage({
             {canDelete && block.id && (
               <button
                 data-variant="danger"
-                className="press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground opacity-0 shadow-card backdrop-blur-md transition-all hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover:opacity-100"
+                className={actionBtnClass(true)}
                 title={t("删除该消息及其后所有内容")}
                 onClick={() => setConfirmDelete(true)}
               >
@@ -681,6 +654,38 @@ function UserMessage({
           </>
         )}
       </div>
+
+      {confirmRollback && (
+        <ConfirmDialog
+          title={t("回滚到此轮之前")}
+          message={
+            canRollbackFiles
+              ? t("选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。")
+              : t("该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。")
+          }
+          onCancel={() => setConfirmRollback(false)}
+          actions={[
+            {
+              label: t("文件"),
+              title: canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件"),
+              disabled: !canRollbackFiles,
+              onClick: () => rollback("files"),
+            },
+            {
+              label: t("对话"),
+              title: t("仅删除该消息及其后所有对话"),
+              onClick: () => rollback("conversation"),
+            },
+            {
+              label: t("全部"),
+              title: canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件"),
+              disabled: !canRollbackFiles,
+              variant: "primary",
+              onClick: () => rollback("both"),
+            },
+          ]}
+        />
+      )}
 
       {confirmDelete && (
         <ConfirmDialog
@@ -743,6 +748,7 @@ const BlockView = memo(function BlockView({
   canRegenerate,
   canDelete,
   checkpoint,
+  isLastUser,
   onRegenerate,
   onEditingChange,
 }: {
@@ -758,13 +764,23 @@ const BlockView = memo(function BlockView({
   canDelete: boolean;
   /** This turn's checkpoint (user blocks only, M3 P0-1). */
   checkpoint?: CheckpointUi;
+  /** P1-5: newest user bubble keeps its action icons visible. */
+  isLastUser: boolean;
   onRegenerate: () => void;
   /** M4 P1-9: forwarded to UserMessage's inline editor (see there). */
   onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   switch (block.kind) {
     case "user":
-      return <UserMessage block={block} canDelete={canDelete} checkpoint={checkpoint} onEditingChange={onEditingChange} />;
+      return (
+        <UserMessage
+          block={block}
+          canDelete={canDelete}
+          checkpoint={checkpoint}
+          isLastUser={isLastUser}
+          onEditingChange={onEditingChange}
+        />
+      );
     case "text":
       // Whitespace-only text blocks (streaming separators like "\n\n" between
       // tool calls) render as an orphaned avatar on an empty row — Markdown
@@ -888,6 +904,17 @@ function MessageListInner({ state }: { state: SessionState }) {
   }, [state.checkpoints]);
   const total = visibleBlocks.length;
   const start = Math.min(windowStart, total);
+  // P1-5: index (within the RENDERED visibleBlocks, which focusMode may have
+  // filtered — user blocks always survive that filter) of the newest user
+  // bubble whose action icons stay visible. total-keyed: user blocks are
+  // append-only, same invariant as lastUserText.
+  const lastUserIndex = useMemo(() => {
+    for (let i = total - 1; i >= 0; i--) {
+      if (visibleBlocks[i]?.kind === "user") return i;
+    }
+    return -1;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see lastUserText
+  }, [total]);
   const sentinelRef = useRef<HTMLDivElement>(null);
   // Scroll compensation for expansion: expandOlder() records the
   // distance-from-bottom (scrollHeight - scrollTop); the layout effect
@@ -1166,7 +1193,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                   </button>
                 ))}
               </div>
-              <p className="mt-3 text-[10.5px] leading-relaxed text-muted-foreground/80">
+              <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground/80">
                 {t("/ 命令 · @ 文件 · @problems · @git · 粘贴文件添加附件")}
               </p>
             </div>
@@ -1196,6 +1223,7 @@ function MessageListInner({ state }: { state: SessionState }) {
         canCopy={!state.replaying}
         canRegenerate={canRegenerate && i === total - 1}
         checkpoint={block.kind === "user" && block.id ? checkpointByBlockId.get(block.id) : undefined}
+        isLastUser={i === lastUserIndex}
         canDelete={
           !state.replaying &&
           !state.initializing &&
@@ -1211,6 +1239,23 @@ function MessageListInner({ state }: { state: SessionState }) {
               </div>
             );
           })}
+          {/* P1-11: queued-message echo — right after the transcript tail so
+              pressing Enter mid-turn gives instant feedback IN the transcript
+              (the QueueStrip sits above the composer and is easy to miss).
+              Rides the host's queue array directly: an entry vanishes the
+              moment the host dequeues it, no client-side matching. */}
+          {(state.queue ?? []).map((q) => (
+            <div key={q.id} className="stream-in flex justify-end">
+              <div className="flex max-w-[85%] items-start gap-1.5 rounded-2xl rounded-br-md border border-dashed border-border bg-surface/40 px-3 py-2 text-[13px] leading-relaxed text-muted-foreground">
+                <span className="min-w-0 whitespace-pre-wrap break-words opacity-70">
+                  {q.text || t("（附件消息）")}
+                </span>
+                <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-1.5 py-[1px] text-[11px] font-medium text-primary">
+                  <ListOrdered className="size-2.5" /> {t("排队中")}
+                </span>
+              </div>
+            </div>
+          ))}
           {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && visibleBlocks.length > 0 && (
             // Sticky to the bottom of the scroll viewport so the indicator stays
             // visible even while new content streams in above it.
@@ -1321,7 +1366,7 @@ function ToastPill({ toast }: { toast: ToastItem }) {
         onClick={() =>
           useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
         }
-        className="ml-1 shrink-0 rounded-md border border-current/40 px-1.5 py-0.5 text-[10.5px] font-semibold opacity-90 transition-opacity hover:opacity-100"
+        className="ml-1 shrink-0 rounded-md border border-current/40 px-1.5 py-0.5 text-[11px] font-semibold opacity-90 transition-opacity hover:opacity-100"
       >
         {toast.action.label}
       </button>

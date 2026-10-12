@@ -32,7 +32,7 @@ export interface SectionHeader {
 type SectionHeaderSetter = (header: SectionHeader | null) => void;
 
 const INPUT =
-  "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/60 focus:border-primary/50 focus:shadow-focus";
+  "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
 const BTN =
   "press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
 const SAVE_BTN =
@@ -333,7 +333,7 @@ function ApiConfigSection({
                       {p.source === "extension" ? t("扩展") : t("CLI")}
                     </Chip>
                   </span>
-                  <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                  <span className="block truncate font-mono text-[11px] text-muted-foreground">
                     {p.modelName} · {p.keyTail}
                   </span>
                 </span>

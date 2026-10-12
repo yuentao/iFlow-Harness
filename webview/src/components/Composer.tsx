@@ -20,13 +20,14 @@ import {
   SendHorizontal,
   Square,
   Trash2,
+  Wand2,
   X,
   Zap,
 } from "lucide-react";
 import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { Dropdown, fuzzyScore } from "./ui";
+import { ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -133,7 +134,7 @@ function SessionUsageChip() {
   return (
     <span
       title={hoverTitle}
-      className="flex shrink-0 items-center gap-1 font-mono text-[10px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
+      className="flex shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
     >
       <span className="flex items-center gap-0.5" title={t("当前上下文（用户消息与工具结果，压缩后重算）")}>
         <ArrowUp className="size-2.5" />
@@ -176,6 +177,8 @@ function QueueStrip() {
   const queue = useChat((s) => s.state?.queue ?? EMPTY_QUEUE);
   const paused = useChat((s) => s.state?.queuePaused ?? false);
   const send = useChat((s) => s.send);
+  // P1-8: the 3s armed pill was the product's second confirm language;
+  // destructive actions now all share the modal ConfirmDialog.
   const [confirmClear, setConfirmClear] = useState(false);
   if (queue.length === 0 && !paused) return null;
   const act = (action: "edit" | "delete" | "move" | "sendNow" | "resume" | "clear", id?: string, delta?: number): void => {
@@ -191,14 +194,14 @@ function QueueStrip() {
           {t("队列 · {0} 条待发送", queue.length)}
         </span>
         {paused && (
-          <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">
+          <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning">
             <AlertTriangle className="size-2.5" /> {t("已暂停")}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
           {paused && queue.length > 0 && (
             <button
-              className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/25"
+              className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/25"
               title={t("继续依序发送队列")}
               onClick={() => act("resume")}
             >
@@ -207,19 +210,11 @@ function QueueStrip() {
           )}
           {queue.length > 0 && (
             <button
-              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-destructive"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-destructive"
               title={t("清空队列")}
-              onClick={() => {
-                if (!confirmClear) {
-                  setConfirmClear(true);
-                  window.setTimeout(() => setConfirmClear(false), 3000);
-                  return;
-                }
-                setConfirmClear(false);
-                act("clear");
-              }}
+              onClick={() => setConfirmClear(true)}
             >
-              <Trash2 className="size-2.5" /> {confirmClear ? t("确认清空？") : t("清空")}
+              <Trash2 className="size-2.5" /> {t("清空")}
             </button>
           )}
         </div>
@@ -231,7 +226,7 @@ function QueueStrip() {
               key={q.id}
               className="group flex items-center gap-1.5 border-b border-border/40 px-2.5 py-1 last:border-b-0 hover:bg-accent/30"
             >
-              <span className="w-4 shrink-0 text-right font-mono text-[10px] text-muted-foreground/70">{i + 1}</span>
+              <span className="w-4 shrink-0 text-right font-mono text-[11px] text-muted-foreground/80">{i + 1}</span>
               <span className="min-w-0 flex-1 truncate text-[11px] text-foreground" title={q.text}>
                 {q.text || t("（附件消息）")}
               </span>
@@ -269,6 +264,18 @@ function QueueStrip() {
             </li>
           ))}
         </ul>
+      )}
+      {confirmClear && (
+        <ConfirmDialog
+          title={t("清空队列")}
+          message={t("确定清空队列中全部 {0} 条待发送消息吗？", queue.length)}
+          confirmLabel={t("清空")}
+          onConfirm={() => {
+            setConfirmClear(false);
+            act("clear");
+          }}
+          onCancel={() => setConfirmClear(false)}
+        />
       )}
     </div>
   );
@@ -1201,7 +1208,7 @@ export function Composer() {
                     {c.label}
                   </span>
                   {c.detail && (
-                    <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[10px] text-muted-foreground">
+                    <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[11px] text-muted-foreground">
                       {c.detail}
                     </span>
                   )}
@@ -1349,9 +1356,8 @@ export function Composer() {
         <textarea
           ref={taRef}
           value={text}
-          placeholder={t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）")}
-          rows={Math.min(6, Math.max(2, text.split("\n").length))}
-          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/70"
+                      placeholder={enqueueMode ? t("生成中 · Enter 排队发送") : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
               setHistIndex(-1);
@@ -1448,10 +1454,12 @@ export function Composer() {
             }
           }}
         />
-        {/* flex-wrap: a narrow panel drops controls to a second line instead
-            of crushing labels into vertical text; @max-[340px] (composer is
-            the @container) degrades the mode button to icon-only. */}
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-2 pb-2 pt-1.5">
+        {/* P1-7: fixed single row, two zones — left = session settings +
+            status (shrinks via truncate / icon-only degradation), right =
+            actions at a constant anchor. No flex-wrap: wrapping used to drop
+            buttons to a second line and drift the send key's position. */}
+        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-1.5">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {/* permission mode dropdown */}
           {modes && currentMode && (
             <Dropdown
@@ -1460,6 +1468,8 @@ export function Composer() {
               disabled={modeLocked}
               trigger={(open) => (
                 <button
+                  aria-haspopup="menu"
+                  aria-expanded={open}
                   className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
                   title={t("权限模式")}
                   disabled={modeLocked}
@@ -1493,7 +1503,7 @@ export function Composer() {
                             <Check className="ml-1 inline size-3 text-primary" />
                           )}
                         </span>
-                        <span className="text-[10px] text-muted-foreground">{view.desc}</span>
+                        <span className="text-[11px] text-muted-foreground">{view.desc}</span>
                       </button>
                     );
                   })}
@@ -1524,6 +1534,8 @@ export function Composer() {
               }}
               trigger={(open) => (
                 <button
+                  aria-haspopup="menu"
+                  aria-expanded={open}
                   className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}
                   title={t("模型")}
                   disabled={controlsLocked}
@@ -1546,7 +1558,7 @@ export function Composer() {
                         autoFocus
                         value={modelQuery}
                         placeholder={t("搜索模型…")}
-                        className="w-full min-w-0 bg-transparent font-mono text-[11px] text-foreground outline-none placeholder:text-muted-foreground/70"
+                        className="w-full min-w-0 bg-transparent font-mono text-[11px] text-foreground outline-none placeholder:text-muted-foreground/80"
                         onChange={(e) => setModelQuery(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "ArrowDown") {
@@ -1604,8 +1616,9 @@ export function Composer() {
           {/* session token usage — input/output split, live-refreshed while
               streaming; its own component so the refresh re-renders only it */}
           <SessionUsageChip />
+          </div>
 
-          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1.5">
             <button
               className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""}`}
               title={
@@ -1618,7 +1631,7 @@ export function Composer() {
               disabled={!enhancing && (controlsLocked || (!text.trim() && enhanceOriginal.current === null))}
               onClick={enhance}
             >
-              {enhancing ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />}
+              {enhancing ? <Loader2 className="size-3 animate-spin" /> : <Wand2 className="size-3" />}
             </button>
             <button
               className={CANVAS_BTN}
@@ -1628,28 +1641,33 @@ export function Composer() {
             >
               <Paperclip className="size-3" />
             </button>
-            {canStop && (
+            {/* P1-7: stop and send share ONE slot (swap in place) — the old
+                separate stop button made the primary action area jump every
+                time a turn started/ended. Queuing stays on Enter (the
+                textarea's enqueueMode placeholder says so). */}
+            {canStop ? (
               <button
-                className={`${CANVAS_BTN} text-muted-foreground hover:text-foreground`}
+                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-3 py-1 text-[11px] font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95"
                 title={t("停止生成")}
                 onClick={() => send({ type: "cancel" })}
               >
                 <Square className="size-3" /> <span className="@max-[340px]:hidden">{t("停止")}</span>
               </button>
+            ) : (
+              <button
+                className={
+                  enqueueMode
+                    ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/50 bg-primary/15 px-3 py-1 text-[11px] font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                    : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                }
+                title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
+                disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
+                onClick={submit}
+              >
+                {enqueueMode ? <ListOrdered className="size-3" /> : <SendHorizontal className="size-3" />}{" "}
+                <span className="@max-[340px]:hidden">{enqueueMode ? t("排队") : t("发送")}</span>
+              </button>
             )}
-            <button
-              className={
-                enqueueMode
-                  ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/50 bg-primary/15 px-3 py-1 text-[11px] font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-                  : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-              }
-              title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
-              disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
-              onClick={submit}
-            >
-              {enqueueMode ? <ListOrdered className="size-3" /> : <SendHorizontal className="size-3" />}{" "}
-              <span className="@max-[340px]:hidden">{enqueueMode ? t("排队") : t("发送")}</span>
-            </button>
           </div>
         </div>
       </div>

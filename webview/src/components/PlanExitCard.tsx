@@ -74,7 +74,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           disabled={answered}
           aria-label={editing ? t("预览计划") : t("编辑计划")}
           title={editing ? t("预览计划") : t("编辑计划")}
-          className="press ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => setEditing((v) => !v)}
         >
           {editing ? <Eye className="size-3" /> : <Pencil className="size-3" />}

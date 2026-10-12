@@ -120,7 +120,7 @@ export function DiffView({
       <div className="flex items-center gap-2 px-3 py-2">
         <FileCode2 className="size-3.5 shrink-0 text-primary" />
         <FileRef path={diff.path} toolCallId={toolCallId} />
-        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10px]">
+        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px]">
           {addCount > 0 && <span className="text-diff-add-fg">+{addCount}</span>}
           {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}
         </span>
@@ -197,7 +197,7 @@ export function DiffView({
           </button>
           {dirty && (
             <button
-              className="press inline-flex items-center gap-1 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+              className="press inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
               onClick={() => setKeep(new Array(hunkCount).fill(true))}
             >
               <Undo2 className="size-2.5" /> {t("全部保留")}
@@ -224,7 +224,7 @@ function HunkHeader({
 }) {
   return (
     <div
-      className={`flex items-center gap-2 border-y border-border/40 px-3 py-0.5 text-[10px] ${
+      className={`flex items-center gap-2 border-y border-border/40 px-3 py-0.5 text-[11px] ${
         kept ? "bg-surface/50 text-muted-foreground" : "bg-diff-del/40 text-diff-del-fg"
       }`}
     >

@@ -112,7 +112,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
           return (
             <div key={q.header}>
               <p className="mb-1.5 flex items-start gap-1.5 leading-snug">
-                <span className="mt-px shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                <span className="mt-px shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary">
                   {q.header}
                 </span>
                 <span className="min-w-0 text-foreground/90">{q.question}</span>
@@ -143,7 +143,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       onClick={() => toggle(q.header, opt.label, q.multiSelect)}
                     >
                       <Indicator
-                        className={`mt-px size-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground/60"}`}
+                        className={`mt-px size-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground/80"}`}
                       />
                       <span className="min-w-0">
                         <span className={`block font-medium leading-tight ${active ? "text-primary" : "text-foreground"}`}>
@@ -170,7 +170,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 >
                   <Plus className="size-3.5 shrink-0" />
                   {t("其他…")}
-                  {vertical && <span className="text-muted-foreground/70">{t("自定义回答")}</span>}
+                  {vertical && <span className="text-muted-foreground/80">{t("自定义回答")}</span>}
                 </button>
               </div>
               {isCustomOpen && (
@@ -186,7 +186,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 />
               )}
               {q.multiSelect && picks.size > 1 && (
-                <p className="mt-1 text-[10px] text-muted-foreground">
+                <p className="mt-1 text-[11px] text-muted-foreground">
                   {t("已选 {0} 项", picks.size)}
                 </p>
               )}

@@ -73,6 +73,11 @@ const en: Record<string, string> = {
   "仅删除该消息及其后所有对话": "Delete this message and everything after it",
   "回滚文件并删除该消息及其后所有对话": "Restore files and delete this message and everything after it",
   "该轮快照不完整，无法恢复文件": "This turn's snapshot is incomplete; files cannot be restored",
+  "选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。":
+    "Choose the rollback scope: restore files to before this turn, delete this message and everything after it, or both.",
+  "该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。":
+    "This turn's snapshot is incomplete; files cannot be restored — you can only delete this message and everything after it.",
+  "确定清空队列中全部 {0} 条待发送消息吗？": "Clear all {0} queued messages?",
   // tool cards / message list
   "已完成": "Completed",
   "失败": "Failed",
@@ -125,6 +130,9 @@ const en: Record<string, string> = {
   "模型名称不能为空": "Model name is required",
   "连接 iFlow 需要配置 API 凭据": "Connect to iFlow by configuring API credentials",
   "收起": "Collapse",
+  "展开": "Expand",
+  "复制错误信息": "Copy error message",
+  "已复制": "Copied",
   "扩展": "Extension",
   "CLI": "CLI",
   "删除 {0}": "Delete {0}",
@@ -225,9 +233,9 @@ const en: Record<string, string> = {
   "继续依序发送队列": "Resume sending the queue in order",
   "继续": "Resume",
   "清空队列": "Clear queue",
-  "确认清空？": "Confirm clear?",
   "清空": "Clear",
   "（附件消息）": "(attachment message)",
+  "排队中": "Queued",
   "附件 {0}": "{0} attachment(s)",
   "打断并立即发送": "Interrupt & send now",
   "取回编辑": "Edit (back to composer)",
@@ -250,6 +258,7 @@ const en: Record<string, string> = {
   "输入框非空，已放弃回填（队列条目仍在）":
     "Composer is not empty — refill dropped (the queue entry is still there)",
   "排队发送 (Enter)": "Queue (Enter)",
+  "生成中 · Enter 排队发送": "Generating · Enter to queue",
   "排队": "Queue",
   "添加附件": "Add attachments",
   "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",

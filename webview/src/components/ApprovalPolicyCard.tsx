@@ -134,7 +134,7 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
   }
 
   const INPUT =
-    "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/60 focus:border-primary/50 focus:shadow-focus";
+    "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
   const BTN =
     "press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
   const SAVE_BTN =
@@ -152,14 +152,14 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
       >
         <div className="flex items-center gap-1.5">
           <ActionIcon action={rule.action} />
-          <span className={`min-w-0 flex-1 truncate text-[12px] font-semibold ${rule.enabled ? "text-foreground" : "text-muted-foreground/60 line-through"}`}>
+          <span className={`min-w-0 flex-1 truncate text-[12px] font-semibold ${rule.enabled ? "text-foreground" : "text-muted-foreground/80 line-through"}`}>
             {rule.label}
           </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground">{t(ACTION_LABEL[rule.action])}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">{t(ACTION_LABEL[rule.action])}</span>
           {!readOnly && (
             <>
               <label
-                className="shrink-0 cursor-pointer text-[10px] text-muted-foreground"
+                className="shrink-0 cursor-pointer text-[11px] text-muted-foreground"
                 title={rule.enabled ? t("点击停用") : t("点击启用")}
               >
                 <input
@@ -199,12 +199,12 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
         </div>
         <div className="flex items-center gap-2">
           {summary && (
-            <div className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground" title={summary}>
+            <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground" title={summary}>
               {summary}
             </div>
           )}
           {!readOnly && typeof rule.hits === "number" && rule.hits > 0 && (
-            <div className="shrink-0 text-[10px] text-muted-foreground/80">{t("命中 {0} 次", rule.hits)}</div>
+            <div className="shrink-0 text-[11px] text-muted-foreground/80">{t("命中 {0} 次", rule.hits)}</div>
           )}
         </div>
       </div>
@@ -297,7 +297,7 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
                 <button
                   key={kind}
                   type="button"
-                  className={`press rounded-full border px-2 py-0.5 font-mono text-[10.5px] transition-all duration-200 ${
+                  className={`press rounded-full border px-2 py-0.5 font-mono text-[11px] transition-all duration-200 ${
                     active
                       ? "border-primary/50 bg-primary/15 text-foreground"
                       : "border-border text-muted-foreground hover:border-primary/30"
