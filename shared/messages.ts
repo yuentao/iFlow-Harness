@@ -357,7 +357,9 @@ export interface ContextRefUi {
 }
 
 /** Cumulative token usage for the active session, estimated by the host from the
- * transcript (the CLI is frozen and reports no usage). Coarse — not for billing.
+ * transcript (the CLI's generator layer captures usage but the ACP layer never
+ * surfaces it — PromptResponse carries only stopReason, probed CLI 0.5.19
+ * bundle). Coarse — not for billing.
  * Always present (zeroed at session start) so the UI chip shows from the first
  * paint, not only after the first content turn. */
 export interface SessionUsageUi {
@@ -430,7 +432,9 @@ export interface SessionState {
    */
   blockVersion?: number;
   /** Cumulative token usage for the active session, estimated by the host from
-   * the transcript (the CLI is frozen and reports no usage). Zeroed at session
+   * the transcript (the CLI's generator layer captures usage but the ACP layer
+   * never surfaces it — PromptResponse carries only stopReason, probed CLI
+   * 0.5.19 bundle). Zeroed at session
    * start and refreshed live while streaming, so the UI chip is visible from
    * the first paint. Nullable only for wire-compat with older hosts/mock data. */
   usage?: SessionUsageUi | null;

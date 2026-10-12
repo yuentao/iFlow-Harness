@@ -1011,8 +1011,9 @@ function heuristicTokens(text: string): number {
 
 /** Token count for a string using a real BPE tokenizer (gpt-tokenizer,
  * o200k_base). Falls back to a CJK-aware heuristic if the library is unavailable.
- * The CLI is frozen and reports no usage, so the host estimates consumption from
- * the transcript itself. */
+ * The CLI's generator layer captures real usage but the ACP layer never surfaces
+ * it (PromptResponse carries only stopReason, probed CLI 0.5.19 bundle), so the
+ * host estimates consumption from the transcript itself. */
 export function estimateTokens(text: string): number {
   if (!text) return 0;
   try {
@@ -1205,8 +1206,10 @@ export function markSubAgentStopped(state: SessionState, agentId: string, now = 
 }
 
 export function completePrompt(state: SessionState, stopReason: StopReason, usageCtx?: UsageContext | null): number | null {
-  // The CLI is frozen and never reports usage, so the host estimates cumulative
-  // consumption from the transcript itself (recomputed idempotently each turn).
+  // The ACP layer never surfaces the usage the CLI's generator already captured
+  // (PromptResponse carries only stopReason, probed CLI 0.5.19 bundle), so the
+  // host estimates cumulative consumption from the transcript itself
+  // (recomputed idempotently each turn).
   refreshSessionUsage(state, usageCtx);
   const closedFrom = closeOpenSubAgents(state.blocks);
   state.stopReason = stopReason;
