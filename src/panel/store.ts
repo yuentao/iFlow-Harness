@@ -3,7 +3,7 @@
  * shared reducer, and pushes throttled snapshots to the WebView.
  */
 
-import type { SessionNotification, StopReason } from "../acp/protocol.js";
+import type { SessionNotification, StopReason, TurnUsageReport } from "../acp/protocol.js";
 import type {
   AuthUiState,
   Block,
@@ -232,11 +232,13 @@ export class SessionStore {
     this.flush();
   }
 
-  promptCompleted(stopReason: StopReason): void {
+  promptCompleted(stopReason: StopReason, turnUsage?: TurnUsageReport | null): void {
     // completePrompt also force-closes zombie SubAgent cards (their spawning
     // task never reported terminal — e.g. the CLI died mid-task); report the
-    // closed index so the card rides the incremental patch.
-    this.noteMutationIndex(completePrompt(this.state, stopReason, this.getUsageContext?.() ?? null));
+    // closed index so the card rides the incremental patch. `turnUsage` is the
+    // authoritative occupancy from PromptResponse.usage (acp-usage-report
+    // Mod); null/undefined keeps the transcript estimate.
+    this.noteMutationIndex(completePrompt(this.state, stopReason, this.getUsageContext?.() ?? null, turnUsage));
     this.flush();
   }
 

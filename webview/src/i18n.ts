@@ -319,8 +319,11 @@ const en: Record<string, string> = {
   "Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）":
     "Focus view: conversation only, tools and thoughts collapsed (Ctrl+Alt+F)",
   "退出 Focus 视图（Ctrl+Alt+F）": "Exit Focus view (Ctrl+Alt+F)",
-  "上下文占用 {0} / {1}（{2}%{3}）": "Context {0} / {1} ({2}%{3})",
+  "上下文占用 {0} / {1}（{2}%{3}{4}）": "Context {0} / {1} ({2}%{3}{4})",
   "，窗口为估算值": ", window is an estimate",
+  "，占用为 CLI 上报值": ", occupancy reported by the CLI",
+  "当前上下文 {0} tokens（CLI 上报）· 输出 {1}（估算）":
+    "Context {0} tokens (reported by the CLI) · output {1} (estimated)",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
   "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",
   "该模型无单价记录，不显示成本": "No unit price recorded for this model — no cost shown",

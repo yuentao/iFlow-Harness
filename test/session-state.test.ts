@@ -1719,6 +1719,91 @@ describe("session usage split & real-time refresh", () => {
     expect(state.usage!.contextWindow).toBe(32_768);
     expect(state.usage!.estimated).toBe(true);
   });
+
+  describe("authoritative occupancy overlay (P2-7 usage report)", () => {
+    it("completePrompt overlays the reported occupancy and flags it authoritative", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
+      const usage = state.usage!;
+      expect(usage.contextUsed).toBe(61_000);
+      expect(usage.usageAuthoritative).toBe(true);
+      // The input/output SPLIT stays estimated (the wire carries no split).
+      expect(usage.inputTokens).toBe(estimateTokens("问题"));
+      expect(state.usageReport).toEqual({ lastRequestInputTokens: 61_000, atBlockCount: state.blocks.length });
+    });
+
+    it("without a report the numbers stay estimated (flag absent)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      completePrompt(state, "end_turn", null, null);
+      expect(state.usage!.usageAuthoritative).toBeUndefined();
+      expect(state.usageReport ?? null).toBeNull();
+    });
+
+    it("a zero/negative report is ignored (gateway emitted nothing)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 0 });
+      expect(state.usageReport ?? null).toBeNull();
+      expect(state.usage!.usageAuthoritative).toBeUndefined();
+    });
+
+    it("the report expires once the transcript grows (next turn streams)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
+      expect(state.usage!.usageAuthoritative).toBe(true);
+      // A new turn appends blocks — the reported number describes the model's
+      // context at the PREVIOUS turn end and must not mask the live estimate.
+      beginUserPrompt(state, "第二个问题");
+      refreshSessionUsage(state);
+      expect(state.usage!.usageAuthoritative).toBeUndefined();
+      expect(state.usage!.contextUsed).toBeLessThan(61_000);
+      // The next report lands and re-authorises the overlay.
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 62_000 });
+      expect(state.usage!.contextUsed).toBe(62_000);
+      expect(state.usage!.usageAuthoritative).toBe(true);
+    });
+
+    it("a compression card after the report expires it (fold floor is the CLI's own number)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
+      // The compression card is a new block → the atBlockCount anchor expires
+      // the stale report; the fold's floor (newTokenCount) is itself CLI
+      // authoritative, so the bar keeps trustworthy numbers.
+      applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: false, originalTokenCount: 61_000, newTokenCount: 7_855, summary: "摘要" } }) } }));
+      refreshSessionUsage(state);
+      expect(state.usage!.usageAuthoritative).toBeUndefined();
+      expect(state.usage!.contextUsed).toBe(7_855);
+    });
+
+    it("deleting a user message clears the report (CLI history truncates in lockstep)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题一");
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
+      const userId = state.blocks.find((b) => b.kind === "user")!.id!;
+      beginUserPrompt(state, "问题二");
+      deleteUserMessageById(state, userId);
+      expect(state.usageReport ?? null).toBeNull();
+      expect(state.usage!.usageAuthoritative).toBeUndefined();
+    });
+
+    it("reference stability accounts for the overlay (report flip forces a new object)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      refreshSessionUsage(state);
+      const estimated = state.usage;
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
+      expect(state.usage).not.toBe(estimated);
+      // Re-refreshing with nothing changed keeps the SAME authoritative object.
+      const reported = state.usage;
+      refreshSessionUsage(state);
+      expect(state.usage).toBe(reported);
+    });
+  });
 });
 
 describe("dropSessionUpdate guard (leak prevention)", () => {

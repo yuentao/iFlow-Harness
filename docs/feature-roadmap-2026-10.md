@@ -247,9 +247,9 @@ Markdown 组件对 ` ```mermaid ` 代码块懒加载渲染（webview 新增 merm
 
 汇总以上需要 CLI 能力的项，供 Mod 立项排期：
 1. `_iflow/agent/cancel` per-agent 取消（P1-2）。
-2. usage 上报（P0-6 占用 / P1-6 成本升级为权威值）。**前提更正（bundle 实证，CLI 0.5.19 custom.7）**："CLI 冻结不报 token"不准确——OpenAI 兼容生成器层已捕获真实 usage：请求带 `stream_options:{include_usage:!0}`，SSE 帧经 `saveUsageMetadata` 写入 `lastUsageMetadata`（prompt/completion/total_tokens），交互模式的 budget 检查与 `recordAssistantResponse` 已在消费；缺的只是 ACP 会话层 `prompt()` 遍历响应时不读它、出参 zod schema `{stopReason}` 也没有 `_meta` 槽位（扩展侧 `src/acp/protocol.ts` 的 `PromptResponse` 同步要扩）。分两档交付：
-   - **占用权威化**：`PromptResponse` 扩 `usage` 字段，取末帧 `promptTokenCount`（= 末次请求的全部输入，与 P0-6 `contextUsed` 口径正好吻合），双侧扩协议即可。
-   - **累计/成本权威化**：一次 turn 工具循环多次请求、每次 `promptTokenCount` 都含完整历史，末帧单值覆盖不了 Σ 口径——需 CLI 带 turn 内累计或逐请求 usage 数组；且 `saveUsageMetadata` 目前把 `cache_read/cache_creation` 合并进 prompt_tokens 后丢弃细分，cache 读单价远低于未缓存，权威值直乘会高估成本，需保留 cached 细分。
+2. usage 上报（P0-6 占用 / P1-6 成本升级为权威值）。**前提更正（bundle 实证，CLI 0.5.19 custom.7）**："CLI 冻结不报 token"不准确——OpenAI 兼容生成器层已捕获真实 usage：请求带 `stream_options:{include_usage:!0}`，SSE 帧经 `saveUsageMetadata` 写入 `lastUsageMetadata`（prompt/completion/total_tokens），交互模式的 budget 检查与 `recordAssistantResponse` 已在消费；缺的只是 ACP 会话层 `prompt()` 遍历响应时不读它、返回 `{stopReason}` 把它丢弃（dispatcher 只对**入参** zod parse、返回值透传，无需动 schema——动态实证）。分两档交付：
+   - **占用权威化（✅ 已实施 2026-10-12，acp-usage-report Mod）**：`PromptResponse.usage.lastRequestInputTokens` = 末次请求 `promptTokenCount`（= 轮末模型实际携带上下文，与 P0-6 `contextUsed` 口径吻合）。动态实证两个关键事实：`usageMetadata` 只挂在流的**末块**上（中间块没有），且 ACP 会话读不到 generator 的 `lastUsageMetadata`——块级捕获是唯一可行路径。扩展侧覆盖层带 `usageAuthoritative` 标志与 `atBlockCount` 过期锚（新块/压缩卡/删除消息即退回估算）。验证：`test/fixtures/probe-usage-report.mjs`（默认上报 37404 tokens；`IFLOW_USAGE_REPORT=0` 退回上游逐字节一致）。
+   - **累计/成本权威化（未实施）**：一次 turn 工具循环多次请求、每次 `promptTokenCount` 都含完整历史，末帧单值覆盖不了 Σ 口径——需 CLI 带 turn 内累计或逐请求 usage 数组；且 `saveUsageMetadata` 目前把 `cache_read/cache_creation` 合并进 prompt_tokens 后丢弃细分，cache 读单价远低于未缓存，权威值直乘会高估成本，需保留 cached 细分。
    - **降级纪律**：`include_usage` 的 usage 回传依赖网关末帧输出（BYOK 第三方代理常吞），权威值非恒可得——面板估算器不可删，无权威值时回退估算并以 `estimated` 标志区分。
 3. 项目级 rules / AGENTS.md 加载中枢（P2-5）。
 4. 内置 browser 工具或官方 Playwright MCP 预设（P2-2）。

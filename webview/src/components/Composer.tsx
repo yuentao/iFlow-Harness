@@ -99,6 +99,7 @@ function SessionUsageChip() {
   const contextWindow = useChat((s) => s.state?.usage?.contextWindow ?? null);
   const contextUsed = useChat((s) => s.state?.usage?.contextUsed ?? 0);
   const estimated = useChat((s) => s.state?.usage?.estimated ?? false);
+  const usageAuthoritative = useChat((s) => s.state?.usage?.usageAuthoritative ?? false);
   const estimatedCost = useChat((s) => s.state?.usage?.estimatedCost ?? null);
   const bdUser = useChat((s) => s.state?.usage?.breakdown?.user ?? 0);
   const bdAssistant = useChat((s) => s.state?.usage?.breakdown?.assistant ?? 0);
@@ -111,12 +112,21 @@ function SessionUsageChip() {
   const hoverTitle =
     pct === null
       ? t(
-          "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}",
-          inputTokens.toLocaleString(),
+          usageAuthoritative
+            ? "当前上下文 {0} tokens（CLI 上报）· 输出 {1}（估算）"
+            : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}",
+          (usageAuthoritative ? contextUsed : inputTokens).toLocaleString(),
           outputTokens.toLocaleString(),
         )
       : [
-          t("上下文占用 {0} / {1}（{2}%{3}）", contextUsed.toLocaleString(), (contextWindow as number).toLocaleString(), pct, estimated ? t("，窗口为估算值") : ""),
+          t(
+            "上下文占用 {0} / {1}（{2}%{3}{4}）",
+            contextUsed.toLocaleString(),
+            (contextWindow as number).toLocaleString(),
+            pct,
+            estimated ? t("，窗口为估算值") : "",
+            usageAuthoritative ? t("，占用为 CLI 上报值") : "",
+          ),
           t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", bdUser.toLocaleString(), bdAssistant.toLocaleString(), bdTool.toLocaleString(), bdThought.toLocaleString()),
           estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(estimatedCost)) : t("该模型无单价记录，不显示成本"),
         ].join("\n");

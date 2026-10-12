@@ -356,10 +356,12 @@ export interface ContextRefUi {
   content: string;
 }
 
-/** Cumulative token usage for the active session, estimated by the host from the
- * transcript (the CLI's generator layer captures usage but the ACP layer never
- * surfaces it — PromptResponse carries only stopReason, probed CLI 0.5.19
- * bundle). Coarse — not for billing.
+/** Cumulative token usage for the active session. `contextUsed` is the CLI's
+ * authoritative occupancy when the acp-usage-report-refactor Mod reported one
+ * this turn (see `usageAuthoritative`); the input/output split and everything
+ * else stay host estimates from the transcript (the ACP wire carries no split —
+ * the generator's real usage never reaches PromptResponse upstream, probed CLI
+ * 0.5.19 bundle). Coarse — not for billing.
  * Always present (zeroed at session start) so the UI chip shows from the first
  * paint, not only after the first content turn. */
 export interface SessionUsageUi {
@@ -379,8 +381,15 @@ export interface SessionUsageUi {
    * model's actual carried context, not cumulative consumption). */
   contextUsed?: number;
   /** True when `contextWindow` is a conservative fallback guess rather than a
-   * table/override hit — the UI labels the percentage "估算". */
+   * table/override hit — the UI labels the percentage "估算". Orthogonal to
+   * `usageAuthoritative` (window source vs token source). */
   estimated?: boolean;
+  /** True when `inputTokens`/`outputTokens`/`contextUsed` come from the CLI's
+   * authoritative turn usage (acp-usage-report-refactor Mod reported them at
+   * least once this transcript and nothing has invalidated the numbers since).
+   * False/absent = transcript estimation (the fallback while the Mod is missing
+   * or the gateway swallowed `stream_options.include_usage`). */
+  usageAuthoritative?: boolean;
   /** P0-6 hover breakdown by block kind (only the post-fold tail counts). */
   breakdown?: UsageBreakdownUi;
   /**
@@ -396,6 +405,18 @@ export interface UsageBreakdownUi {
   assistant: number;
   tool: number;
   thought: number;
+}
+
+/** Authoritative context occupancy the CLI reported at the last turn end
+ * (acp-usage-report-refactor Mod). `atBlockCount` is the transcript length when
+ * the report landed — it anchors staleness: the number describes the model's
+ * carried context AT that point, so any later block (a new turn's streaming
+ * output, or a compression card) invalidates it and the fold estimate resumes.
+ * Only `contextUsed` is overlaid from this; the input/output split stays
+ * estimated (the wire carries no split — roadmap P2-7 第二档). */
+export interface TurnUsageState {
+  lastRequestInputTokens: number;
+  atBlockCount: number;
 }
 
 export interface SessionState {
@@ -438,6 +459,17 @@ export interface SessionState {
    * start and refreshed live while streaming, so the UI chip is visible from
    * the first paint. Nullable only for wire-compat with older hosts/mock data. */
   usage?: SessionUsageUi | null;
+  /**
+   * Authoritative context occupancy reported by the CLI at the last turn end
+   * (acp-usage-report-refactor Mod: the FINAL model request's input tokens =
+   * exactly what the model carried). `atBlockCount` is the transcript length
+   * when the report landed — any new block (next turn streaming, or a fresh
+   * compression card) makes the number stale, and the fold estimate takes
+   * over again (post-compression the fold's floor is the CLI's own
+   * newTokenCount, still authoritative). Only `contextUsed` is overlaid;
+   * the input/output split stays estimated (the wire carries no split).
+   */
+  usageReport?: TurnUsageState | null;
   /**
    * M2 P0-3 — prompts typed while a turn streams, waiting for their turn
    * (host-owned FIFO; the webview renders the queue strip). Non-blocks

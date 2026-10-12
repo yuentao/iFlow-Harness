@@ -209,8 +209,24 @@ export interface PromptRequest {
 
 export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" | string;
 
+/** iFlow extension (acp-usage-report-refactor Mod, CLI 0.5.19 fork): the FINAL
+ * model request's input-token count for the turn — exactly the context the
+ * model carried when the turn ended (system prompt + tool schemas + history +
+ * this turn's tool I/O), which the host's transcript fold undercounts because
+ * it only sees transcript blocks. Authoritative replacement for the occupancy
+ * bar's `contextUsed`. Absent when the Mod is missing or the gateway never
+ * emitted usage (BYOK proxies often swallow `stream_options.include_usage`) —
+ * the host then keeps estimating. The input/output split and cross-turn
+ * cumulative burn are a separate contract (roadmap P2-7 第二档, needs
+ * per-request arrays), deliberately not carried here. */
+export interface TurnUsageReport {
+  lastRequestInputTokens: number;
+}
+
 export interface PromptResponse {
   stopReason: StopReason;
+  /** iFlow extension — see TurnUsageReport. */
+  usage?: TurnUsageReport;
 }
 
 // ---------------------------------------------------------------------------

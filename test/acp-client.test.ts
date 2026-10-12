@@ -15,13 +15,13 @@ afterEach(async () => {
   await Promise.all(clients.splice(0).map((c) => c.dispose()));
 });
 
-function createClient(mode?: string, callbacks?: ConstructorParameters<typeof AcpClient>[1]) {
+function createClient(mode?: string, callbacks?: ConstructorParameters<typeof AcpClient>[1], extraEnv?: Record<string, string>) {
   const client = new AcpClient(
     {
       command: process.execPath,
       args: [mockAgent],
       cwd: here,
-      env: mode ? { ACP_MOCK_MODE: mode } : undefined,
+      env: { ...(mode ? { ACP_MOCK_MODE: mode } : {}), ...(extraEnv ?? {}) },
     },
     callbacks,
   );
@@ -51,6 +51,9 @@ describe("AcpClient (integration with mock ACP agent)", () => {
 
     const result = await client.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "hi" }] });
     expect(result.stopReason).toBe("end_turn");
+    // No ACP_MOCK_USAGE → the agent answered upstream-style {stopReason} only;
+    // the iFlow usage extension must surface as absent, never a fabricated 0.
+    expect(result.usage).toBeUndefined();
 
     const labels = updates.map((u) => u.update.sessionUpdate);
     expect(labels).toContain("agent_thought_chunk");
@@ -63,6 +66,21 @@ describe("AcpClient (integration with mock ACP agent)", () => {
       .map((u) => (u.update.content as { text?: string }).text ?? "")
       .join("");
     expect(text).toBe("Hello world");
+  });
+
+  it("surfaces the authoritative usage report on PromptResponse (iFlow extension)", async () => {
+    // ACP_MOCK_USAGE makes the mock agent attach usage.lastRequestInputTokens
+    // to its prompt result (acp-usage-report Mod's extension point); the client
+    // must pass it through untouched for the panel's occupancy overlay.
+    const client = new AcpClient(
+      { command: process.execPath, args: [mockAgent], cwd: here, env: { ACP_MOCK_USAGE: "61000" } },
+    );
+    clients.push(client);
+    await client.connect();
+    await client.newSession({ cwd: here, mcpServers: [] });
+    const result = await client.prompt({ sessionId: "mock-session-1", prompt: [{ type: "text", text: "hi" }] });
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ lastRequestInputTokens: 61000 });
   });
 
   it("routes server→client request_permission to the injected handler", async () => {

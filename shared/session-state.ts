@@ -9,6 +9,7 @@ import type {
   SessionUpdate,
   SlashCommand,
   StopReason,
+  TurnUsageReport,
 } from "../src/acp/protocol.js";
 import { l10n } from "vscode";
 import { countTokens as gptCountTokens } from "gpt-tokenizer";
@@ -1205,11 +1206,22 @@ export function markSubAgentStopped(state: SessionState, agentId: string, now = 
   return findSubAgentIndex(state.blocks, agentId);
 }
 
-export function completePrompt(state: SessionState, stopReason: StopReason, usageCtx?: UsageContext | null): number | null {
-  // The ACP layer never surfaces the usage the CLI's generator already captured
-  // (PromptResponse carries only stopReason, probed CLI 0.5.19 bundle), so the
-  // host estimates cumulative consumption from the transcript itself
-  // (recomputed idempotently each turn).
+export function completePrompt(
+  state: SessionState,
+  stopReason: StopReason,
+  usageCtx?: UsageContext | null,
+  turnUsage?: TurnUsageReport | null,
+): number | null {
+  // Authoritative occupancy (acp-usage-report-refactor Mod): the turn's FINAL
+  // request input = the context the model carried at turn end. Stamped before
+  // the refresh so the overlay lands in the same snapshot; anchored to the
+  // current block count — the first new block (next turn, compression card)
+  // expires it and the fold estimate resumes. Without a report (Mod missing,
+  // gateway swallowed include_usage, cancelled turn), nothing changes and the
+  // host keeps estimating cumulative consumption from the transcript.
+  if (turnUsage && typeof turnUsage.lastRequestInputTokens === "number" && turnUsage.lastRequestInputTokens > 0) {
+    state.usageReport = { lastRequestInputTokens: turnUsage.lastRequestInputTokens, atBlockCount: state.blocks.length };
+  }
   refreshSessionUsage(state, usageCtx);
   const closedFrom = closeOpenSubAgents(state.blocks);
   state.stopReason = stopReason;
@@ -1242,6 +1254,17 @@ export interface UsageContext {
  */
 export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext | null): void {
   const next = estimateSessionUsage(state.blocks);
+  // Authoritative occupancy overlay (acp-usage-report-refactor Mod): the last
+  // reported turn's FINAL request input IS the model's carried context at that
+  // moment. Valid only while the transcript hasn't moved since (atBlockCount
+  // anchor): a new turn's streaming blocks or a fresh compression card change
+  // what the model carries, and the fold estimate (whose post-compression floor
+  // is the CLI's own newTokenCount — still authoritative) takes over.
+  const report = state.usageReport;
+  if (report && report.atBlockCount === state.blocks.length && report.lastRequestInputTokens > 0) {
+    next.contextUsed = report.lastRequestInputTokens;
+    next.usageAuthoritative = true;
+  }
   if (usageCtx) {
     next.contextWindow = usageCtx.contextWindow;
     next.estimated = usageCtx.estimated;
@@ -1252,6 +1275,8 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
     prev &&
     prev.inputTokens === next.inputTokens &&
     prev.outputTokens === next.outputTokens &&
+    prev.contextUsed === next.contextUsed &&
+    prev.usageAuthoritative === next.usageAuthoritative &&
     prev.contextWindow === next.contextWindow &&
     prev.estimated === next.estimated &&
     prev.estimatedCost === next.estimatedCost
@@ -1856,6 +1881,10 @@ export function deleteUserMessageById(state: SessionState, blockId: string): num
   const index = state.blocks.findIndex((b) => b.kind === "user" && b.id === blockId);
   if (index < 0) return null;
   state.blocks.splice(index);
+  // The CLI chatHistory is truncated in lockstep — the model's context really
+  // changed, so a reported occupancy is dead even if the block count happens
+  // to land back on `atBlockCount` (the staleness anchor alone can't see this).
+  state.usageReport = null;
   refreshSessionUsage(state);
   return index;
 }

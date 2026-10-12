@@ -1581,7 +1581,7 @@ export class ChatPanel implements vscode.Disposable {
     if (this.store.getState().sessionId !== sessionId) return;
     try {
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
-      if (this.store.getState().sessionId === sessionId) this.store.promptCompleted(result.stopReason);
+      if (this.store.getState().sessionId === sessionId) this.store.promptCompleted(result.stopReason, result.usage);
     } catch (error) {
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
       this.log.warn(`manual compress failed: ${errorMessage(error)}`);
@@ -1635,7 +1635,7 @@ export class ChatPanel implements vscode.Disposable {
       if (this.store.getState().sessionId !== sessionId) return;
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
-      this.store.promptCompleted(result.stopReason);
+      this.store.promptCompleted(result.stopReason, result.usage);
       this.log.info(
         `turn-end auto-compress on session ${sessionId} (context ratio ${Math.round(ratio * 100)}%)`,
       );
@@ -4888,7 +4888,7 @@ export class ChatPanel implements vscode.Disposable {
         this.log.info(`prompt completed after session switch — dropped (session replaced)`);
         return;
       }
-      this.store.promptCompleted(result.stopReason);
+      this.store.promptCompleted(result.stopReason, result.usage);
       // Completion cue, but a user stop/cancel stays silent. Notification and
       // chime are mutually exclusive (roadmap P0-5): when the native
       // notification fires the user already gets told; otherwise the sound
@@ -5001,7 +5001,7 @@ export class ChatPanel implements vscode.Disposable {
         this.log.info(`regenerate completed after session switch — dropped (session replaced)`);
         return;
       }
-      this.store.promptCompleted(result.stopReason);
+      this.store.promptCompleted(result.stopReason, result.usage);
       // Same completion cue policy as sendPrompt (notification first, chime
       // only when nothing fired natively) — a regenerated turn landing while
       // the user is away must announce itself too.

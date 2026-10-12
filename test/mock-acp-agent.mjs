@@ -118,7 +118,16 @@ async function handle(msg) {
           ],
         },
       });
-      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+      // ACP_MOCK_USAGE: emulate the acp-usage-report Mod's authoritative
+      // occupancy report on PromptResponse (iFlow extension point).
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          stopReason: "end_turn",
+          ...(process.env.ACP_MOCK_USAGE ? { usage: { lastRequestInputTokens: Number(process.env.ACP_MOCK_USAGE) } } : {}),
+        },
+      });
       break;
     }
 
