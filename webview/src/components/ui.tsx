@@ -306,6 +306,29 @@ export function Chip({
   );
 }
 
+/*
+ * P2-18 shared button primitives. The settings surface used to re-declare
+ * byte-identical INPUT/BTN/SAVE_BTN strings in three files (Composer had its
+ * own CANVAS_BTN variant, the header its BTN_ICON) — four definitions whose
+ * radius/padding/disabled-state semantics drifted every visual tweak. One
+ * home now; call sites import (aliasing INPUT where their local name is kept)
+ * so a family-wide change is a single edit.
+ */
+export const BTN_INPUT =
+  "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
+export const BTN =
+  "press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
+export const SAVE_BTN =
+  "press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
+/** Canvas-surface chip button (composer controls): lifts like transcript
+ * cards. whitespace-nowrap: a narrow panel must never squeeze a label into
+ * vertical text (e.g. 智/能 stacked) — the row wraps instead (flex-wrap). */
+export const CANVAS_BTN =
+  "card-lift press inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
+/** Compact icon-only button (header cluster). */
+export const BTN_ICON =
+  "rounded-md p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40";
+
 /** Clickable file reference that opens the location in the editor. */
 export function FileRef({ path, line, toolCallId }: { path: string; line?: number | null; toolCallId?: string }) {
   const send = useChat((s) => s.send);

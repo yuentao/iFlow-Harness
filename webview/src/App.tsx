@@ -24,7 +24,7 @@ import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { isEnglishLocale, t } from "./i18n";
 import { copyText } from "./components/Markdown";
-import { Chip, ConfirmDialog, Dropdown } from "./components/ui";
+import { BTN_ICON, Chip, ConfirmDialog, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -144,9 +144,6 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
     </div>
   );
 }
-
-const BTN_ICON =
-  "rounded-md p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40";
 
 /** Stable empty fallbacks — a fresh `[]` per selector call would re-render on
  * every store change (zustand compares with Object.is). */
@@ -309,6 +306,18 @@ export function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [toggleFocusMode]);
 
+  // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
+  // a11y audit #15). Each time Focus view turns on, a pill announces the mode
+  // and its exit shortcut at the top of the transcript, auto-retiring after
+  // 3s — discoverability without a permanent chrome element.
+  const [focusHint, setFocusHint] = useState(false);
+  useEffect(() => {
+    if (!focusMode) return;
+    setFocusHint(true);
+    const id = window.setTimeout(() => setFocusHint(false), 3000);
+    return () => window.clearTimeout(id);
+  }, [focusMode]);
+
   if (status === null || status === "connecting") {
     // Full-screen brand splash until the session is fully initialized.
     // P0-3: a live elapsed counter turns a silent hang into a diagnosable
@@ -323,7 +332,7 @@ export function App() {
         {!isEnglishLocale() && <div className="splash-sub">iFlow Harness</div>}
         <div className="splash-bar" />
         <div className="splash-hint">
-          {t("正在启动 iFlow …（首次启动或配置了多个 MCP server 时较久）")}
+          {t("正在启动 iFlow…（首次启动或配置了多个 MCP server 时较久）")}
           {status === "connecting" && (
             <span className="ml-1 font-mono tabular-nums opacity-70">{connectingElapsed}s</span>
           )}
@@ -601,6 +610,14 @@ export function App() {
           each card re-enables pointer events on itself. */}
       <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
         <MessageList />
+        {focusMode && focusHint && (
+          <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-[11px] text-muted-foreground shadow-card">
+              <Focus className="size-3 shrink-0" />
+              {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
+            </div>
+          </div>
+        )}
         {errorMessage && dismissedError !== errorMessage && (
           <ErrorToast message={errorMessage} onDismiss={() => setDismissedError(errorMessage)} />
         )}

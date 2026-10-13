@@ -277,8 +277,10 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [active, block.startedAt]);
+  // P2-13: em dash placeholder — the literal word 未知 read as a rendering
+  // defect in dense meta rows.
   const duration = block.startedAt === undefined || (!active && block.completedAt === undefined)
-    ? t("未知") : `${Math.max(0, Math.floor(((block.completedAt ?? now) - block.startedAt) / 1000))}s`;
+    ? "—" : `${Math.max(0, Math.floor(((block.completedAt ?? now) - block.startedAt) / 1000))}s`;
   const children = block.entries.filter((b): b is SubAgentBlock => b.kind === "subagent");
   const nested = block.entries.filter((b): b is ToolBlock => b.kind === "tool");
   // W2: derived counter + localized chip text — memoized so re-renders that
@@ -350,7 +352,9 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
         )}
       </div>
       <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-[11px] text-muted-foreground">
-        <span title={t("子代理 token 为转录估算，包含子代理")}>≈ {block.tokens === undefined ? t("未知") : block.tokens.toLocaleString()} tokens</span>
+        <span title={t("子代理 token 为转录估算，包含子代理")}>
+          {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
+        </span>
         <span>{t("耗时")} {duration}</span>
       </div>
       {block.entries.length > 0 && (
@@ -846,6 +850,18 @@ const BlockView = memo(function BlockView({
 const TAIL_WINDOW = 60;
 const MOUNT_STEP = 60;
 
+/** P2-16 restore-skeleton row shapes, cycled by index: right-aligned "user
+ * bubble" bars alternate with left-aligned assistant text lines (varied
+ * widths) so the placeholder block reads as a conversation coming back. */
+const SKELETON_ROWS = [
+  { align: "end", h: "h-7", w: "46%" },
+  { align: "start", h: "h-4", w: "78%" },
+  { align: "start", h: "h-4", w: "62%" },
+  { align: "end", h: "h-7", w: "38%" },
+  { align: "start", h: "h-4", w: "84%" },
+  { align: "start", h: "h-4", w: "54%" },
+] as const;
+
 /** P0-4 empty-state examples: localized at render time (the locale arrives
  * with the first snapshot, later than module evaluation). */
 const EXAMPLE_PROMPTS = [
@@ -1239,6 +1255,28 @@ function MessageListInner({ state }: { state: SessionState }) {
               </div>
             );
           })}
+          {state.replaying && (
+            // P2-16: restore skeleton — the panel used to sit blank until
+            // the replayed burst landed. Placeholder rows echo the transcript
+            // rhythm (right-aligned user bubbles alternating with left
+            // assistant lines, varied widths) so "more coming" reads as
+            // conversation, not a striped table; purely decorative.
+            <div aria-hidden="true" className="pointer-events-none mt-3 flex flex-col gap-2.5 opacity-60">
+              {Array.from({ length: Math.min(8, Math.max(5, Math.ceil(total / 4))) }, (_, i) => {
+                const row = SKELETON_ROWS[i % SKELETON_ROWS.length]!;
+                return (
+                  <div key={`skel-${i}`} className={`flex ${row.align === "end" ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`${row.h} skeleton-bar ${
+                        row.align === "end" ? "rounded-2xl rounded-br-md" : "rounded-lg"
+                      } bg-surface/70`}
+                      style={{ width: row.w }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {/* P1-11: queued-message echo — right after the transcript tail so
               pressing Enter mid-turn gives instant feedback IN the transcript
               (the QueueStrip sits above the composer and is easy to miss).
@@ -1261,7 +1299,12 @@ function MessageListInner({ state }: { state: SessionState }) {
             // visible even while new content streams in above it.
             // pointer-events-none: the composer's upward-opening mode dropdown
             // expands into this area — the pill must not steal its clicks.
-            <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center py-1.5">
+            // P2-19: sticky offset rides above a mounted pending card
+            // (--pending-card-h) instead of being covered by it.
+            <div
+              className="pointer-events-none sticky z-10 flex justify-center py-1.5"
+              style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
+            >
               <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-[11.5px] font-medium text-primary-foreground shadow-lg">
                 <Loader2 className="size-3 animate-spin" />
                 {state.initializing ? t("正在创建新会话…") : t("正在生成")}
@@ -1271,7 +1314,12 @@ function MessageListInner({ state }: { state: SessionState }) {
           {state.replaying && (
             // History restore indicator — dedicated UI (not a transcript block),
             // so it never mixes with the restored content or grows copy icons.
-            <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center py-1.5">
+            // P2-19: rides above a mounted pending card, same as the streaming
+            // pill.
+            <div
+              className="pointer-events-none sticky z-10 flex justify-center py-1.5"
+              style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
+            >
               <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-[11.5px] font-medium text-primary-foreground shadow-lg">
                 <Loader2 className="size-3 animate-spin" />
                 {t("正在恢复历史会话…")}
@@ -1308,7 +1356,14 @@ function Toasts() {
   const toasts = useChat((s) => s.toasts);
   if (toasts.length === 0) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-14 z-20 flex flex-col items-center gap-1.5 px-3">
+    // P2-19: bottom-anchored pending cards (approval / plan / question, z-30)
+    // used to cover this stack. --pending-card-h (App's ResizeObserver on the
+    // shared wrapper) lifts the stack above the card, same pattern as the
+    // jump pill.
+    <div
+      className="pointer-events-none absolute inset-x-0 z-20 flex flex-col items-center gap-1.5 px-3"
+      style={{ bottom: "calc(3.5rem + var(--pending-card-h, 0px))" }}
+    >
       {toasts.map((t) => (
         <ToastPill key={t.id} toast={t} />
       ))}

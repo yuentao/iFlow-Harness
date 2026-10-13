@@ -102,7 +102,6 @@ const en: Record<string, string> = {
   "已停止": "Stopped",
   "tokens": "tokens",
   "耗时": "Duration",
-  "未知": "Unknown",
   "只读转录": "Read-only transcript",
   "子代理 token 为转录估算，包含子代理": "Estimated transcript tokens, including child agents",
   "启动子代理（{0}）：{1}": "Launch agent ({0}): {1}",
@@ -301,8 +300,8 @@ const en: Record<string, string> = {
   // composer / message list (additional — new entries only)
   "复制": "Copy",
   "重新生成": "Regenerate",
-  "正在启动 iFlow …（首次启动或配置了多个 MCP server 时较久）":
-    "Starting iFlow … (slower on first launch or with multiple MCP servers)",
+  "正在启动 iFlow…（首次启动或配置了多个 MCP server 时较久）":
+    "Starting iFlow… (slower on first launch or with multiple MCP servers)",
   // P1: edit & resend, session search, aria-live announcements
   "编辑并重发": "Edit & resend",
   "搜索会话…": "Search sessions…",
@@ -310,6 +309,7 @@ const en: Record<string, string> = {
   "有待回答问题需要回答": "Question needs answering",
   "等待选择切换 API 配置的会话处理方式": "Choose how the session is handled when switching API profiles",
   "自定义回答": "Custom answer",
+  "其他": "Other",
   "正在连接 iFlow…": "Connecting to iFlow…",
   "正在生成回复…": "Generating response…",
   "已停止生成": "Generation stopped",

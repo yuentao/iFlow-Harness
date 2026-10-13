@@ -3,7 +3,7 @@ import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, type McpEntry } from "./mcp-servers";
 import { t } from "../i18n";
-import { ConfirmDialog } from "./ui";
+import { BTN, BTN_INPUT as INPUT, ConfirmDialog, SAVE_BTN } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -134,13 +134,6 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     setSaving(true);
     send({ type: "saveMcpServers", servers });
   }
-
-  const INPUT =
-    "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
-  const BTN =
-    "press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
-  const SAVE_BTN =
-    "press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
 
   return (
     <>

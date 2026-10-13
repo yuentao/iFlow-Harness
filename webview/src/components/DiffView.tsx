@@ -32,6 +32,10 @@ const CONTEXT_LINES = 3;
  *
  * M4 P0-2: when `hunkActions` is provided (editable diffs only), each hunk
  * gets a keep/revert header and the bottom action bar gains a commit button.
+ * P2-14: every toggle (fold gaps, keep/revert, commit) is a real <button> —
+ * Tab reaches it, Enter toggles, and the global :focus-visible ring paints —
+ * with ARIA state (aria-expanded / aria-pressed) so keyboard and AT users
+ * can read which hunks are folded or reverted, not just see it.
  */
 export function DiffView({
   diff,
@@ -133,6 +137,7 @@ export function DiffView({
               type="button"
               className="flex w-full items-center gap-1.5 px-3 py-0.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
               title={expanded.has(row.win ?? -1) ? t("收起") : t("展开上下文")}
+              aria-expanded={expanded.has(row.win ?? -1)}
               onClick={() => toggleGap(row.win ?? -1)}
             >
               <Ellipsis className="size-3 shrink-0" />
@@ -235,6 +240,7 @@ function HunkHeader({
             kept ? "bg-success/20 text-success" : "text-muted-foreground hover:bg-surface-2 hover:text-foreground"
           }`}
           title={t("保留此改动")}
+          aria-pressed={kept}
           onClick={() => onToggle(true)}
         >
           {t("保留")}
@@ -244,6 +250,7 @@ function HunkHeader({
             !kept ? "bg-diff-del text-diff-del-fg" : "text-muted-foreground hover:bg-surface-2 hover:text-foreground"
           }`}
           title={t("回退此改动（恢复为编辑前内容）")}
+          aria-pressed={!kept}
           onClick={() => onToggle(false)}
         >
           {t("回退")}

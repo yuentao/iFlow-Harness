@@ -19,6 +19,7 @@ let state: SessionState;
 vi.mock("../webview/src/store", () => ({ useChat }));
 vi.mock("../webview/src/i18n", () => ({ t: (s: string) => s, modeDisplay: () => ({ label: "mode", desc: "" }) }));
 vi.mock("../webview/src/components/ui", () => ({
+  CANVAS_BTN: "",
   Dropdown: ({ trigger, children }: { trigger: (open: boolean) => ReactNode; children: ReactNode }) => <>{trigger(false)}{children}</>,
   fuzzyScore: () => 0,
 }));

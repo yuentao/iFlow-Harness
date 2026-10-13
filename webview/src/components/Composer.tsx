@@ -27,7 +27,7 @@ import {
 import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
+import { CANVAS_BTN, ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -1130,10 +1130,6 @@ export function Composer() {
     return true;
   }
 
-  // whitespace-nowrap: a narrow panel must never squeeze a label into
-  // vertical text (e.g. 智/能 stacked) — the row wraps instead (flex-wrap).
-  const CANVAS_BTN =
-    "card-lift press inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
   return (
     <div
       ref={rootRef}

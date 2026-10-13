@@ -169,7 +169,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                   aria-label={t("填写自定义回答")}
                 >
                   <Plus className="size-3.5 shrink-0" />
-                  {t("其他…")}
+                  {t("其他")}
                   {vertical && <span className="text-muted-foreground/80">{t("自定义回答")}</span>}
                 </button>
               </div>
