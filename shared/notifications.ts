@@ -50,15 +50,19 @@ export function initOsNotifyGate(): OsNotifyGate {
 }
 
 /**
- * The shared "is the user looking at the panel?" judgement — one predicate
- * for BOTH the OS-notification gate and the sound cue, so a completion never
- * fires a native toast and a chime at the same time (roadmap P0-5: merge the
- * two gates). Watching = panel visible AND the window focused: the panel
- * keeps `retainContextWhenHidden`, so a user who switches to another app
+ * The "is the user looking at the panel?" judgement gating the OS-notification
+ * trigger (roadmap P0-5). Watching = panel visible AND the window focused: the
+ * panel keeps `retainContextWhenHidden`, so a user who switches to another app
  * leaves `visible` true while nobody is looking — treating visible alone as
- * "watching" silences BOTH the chime and the native toast (1.5.0 regression:
- * the away-user cue vanished entirely). Panel visible + focused is the only
- * state where the card flip is self-evident.
+ * "watching" silenced the away-user toast (1.5.0 regression, fixed by adding
+ * the focus term). Panel visible + focused is the only state where the card
+ * flip is self-evident.
+ *
+ * History: cd1c406 merged this predicate with the sound-cue gate so a
+ * completion never toasted AND chimed; together with the call-site
+ * exclusivity that left the chime reachable only in hidden-panel+focused-
+ * window — users reported the cue as vanished (2026-10-13), so the chime went
+ * back to universal and this predicate now gates ONLY the native toast.
  */
 export function isUserWatching(panelVisible: boolean, windowFocused: boolean): boolean {
   return panelVisible && windowFocused;

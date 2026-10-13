@@ -115,6 +115,13 @@ function StatusChip({ status }: { status: ToolBlock["status"] }) {
 
 function OutputDetails({ output, truncatedChars }: { output: string; truncatedChars?: number }) {
   const [open, setOpen] = useState(false);
+  // Collapse keeps its children MOUNTED for the height animation — so a
+  // folded tool output used to pin its whole text (up to 64K chars) in the
+  // DOM forever, dozens of cards deep inside the mount window (long-session
+  // renderer bloat, 2026-10). Mount the body on first open only; afterwards
+  // it stays mounted so the close animation still plays. Never opened =
+  // zero DOM beyond the toggle row.
+  const [openedOnce, setOpenedOnce] = useState(false);
   if (!output) return null;
   const truncation =
     truncatedChars && truncatedChars > 0 ? (
@@ -136,7 +143,10 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
   return (
     <>
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setOpenedOnce(true);
+          setOpen((v) => !v);
+        }}
         className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} />
@@ -144,9 +154,11 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
         {truncation}
       </button>
       <Collapse open={open}>
-        <pre className="mx-2.5 mb-2.5 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-          {output}
-        </pre>
+        {openedOnce && (
+          <pre className="mx-2.5 mb-2.5 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            {output}
+          </pre>
+        )}
       </Collapse>
     </>
   );
@@ -184,6 +196,13 @@ function ToolCard({ block }: { block: ToolBlock }) {
             <Chip tone="muted">
               <Undo2 className="size-2.5" /> {t("部分回退")}
             </Chip>
+          )}
+          {block.evicted && (
+            <span
+              title={t("为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留")}
+            >
+              <Chip tone="muted">{t("内容已释放")}</Chip>
+            </span>
           )}
           <StatusChip status={block.status} />
         </span>
@@ -267,6 +286,8 @@ const SUB_AGENT_VISIBLE_STEPS = 4;
 function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const [expanded, setExpanded] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
+  /** First-open latch for the lazy-mounted read-only transcript body. */
+  const [transcriptMounted, setTranscriptMounted] = useState(false);
   const send = useChat((s) => s.send);
   const state = useChat((s) => s.state);
   const active = block.status === "pending" || block.status === "in_progress";
@@ -375,16 +396,24 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             </div>
           )}
           <button
-            onClick={() => setTranscriptOpen((v) => !v)}
+            onClick={() => {
+              setTranscriptMounted(true);
+              setTranscriptOpen((v) => !v);
+            }}
             className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
           >
             {transcriptOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
             {transcriptOpen ? t("收起") : t("只读转录")}
           </button>
           <Collapse open={transcriptOpen}>
-            <div className="mt-1 space-y-1 border-l border-border/50 pl-2 text-[11px] text-muted-foreground">
-              {block.entries.map((entry, index) => <ReadOnlySubAgentEntry key={entry.id ?? `${entry.kind}-${index}`} block={entry} />)}
-            </div>
+            {/* Lazy mount (same discipline as OutputDetails): a folded
+                read-only transcript used to pin every nested entry's output
+                in the DOM — hundreds of entries per SubAgent card. */}
+            {transcriptMounted && (
+              <div className="mt-1 space-y-1 border-l border-border/50 pl-2 text-[11px] text-muted-foreground">
+                {block.entries.map((entry, index) => <ReadOnlySubAgentEntry key={entry.id ?? `${entry.kind}-${index}`} block={entry} />)}
+              </div>
+            )}
           </Collapse>
           {overflow && (
             <button
@@ -404,7 +433,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
 function ReadOnlySubAgentEntry({ block }: { block: Block }) {
   if (block.kind === "subagent") return null; // Rendered once in the tree above.
   if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} /></div><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
-  if (block.kind === "thought") return <div><Brain className="mr-1 inline size-3" />{block.text}</div>;
+  if (block.kind === "thought") return <div><Brain className="mr-1 inline size-3" />{block.evicted ? <span className="opacity-60">{t("内容已释放")}</span> : block.text}</div>;
   if (block.kind === "text" || block.kind === "user") return <Markdown text={block.text} />;
   if (block.kind === "plan") return <TaskList block={block} />;
   return <div>{block.notice}</div>;
@@ -446,6 +475,9 @@ function ThoughtCard({
         <Caret open={open} className="size-3.5" />
         <Brain className="size-3.5 text-primary" />
         {t("思考过程")}
+        {block.evicted && (
+          <span className="text-[10px] text-muted-foreground/70">{t("内容已释放")}</span>
+        )}
       </button>
       <Collapse open={open}>
         <div className="border-t border-border/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
@@ -615,6 +647,13 @@ function UserMessage({
                 onClick={() => send({ type: "openImage", dataUrl: src })}
               />
             ))}
+          </div>
+        )}
+        {block.evicted && (!block.images || block.images.length === 0) && (
+          <div className="mt-1.5">
+            <span title={t("为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录")}>
+              <Chip tone="muted">{t("附件图片已释放")}</Chip>
+            </span>
           </div>
         )}
         {/* subtle inner highlight so the bubble reads as a solid plane */}

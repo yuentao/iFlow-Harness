@@ -78,6 +78,16 @@ export interface BlockBase {
    * real-time usage refreshes are pure sums over these caches.
    */
   tokens?: number;
+  /**
+   * Webview-only memory eviction marker (long-session bloat, 2026-10):
+   * `evictBlockPayloads` released this block's heavy payload (tool output /
+   * diff, thought text, attached images, compression summary) because it sat
+   * far outside the render window. The HOST never sets this — its state stays
+   * complete for revert / openDiff / export / transcript persistence — so the
+   * flag only ever appears in the webview projection, where the UI renders an
+   * honest "released" marker instead of an empty card.
+   */
+  evicted?: boolean;
 }
 
 export interface TextBlock extends BlockBase {
@@ -620,6 +630,77 @@ export function applyBlockPatch(
   if (patch.tailStart < 0 || patch.tailStart > current.blocks.length) return null;
   if (patch.blocks.length === 0) return current.blocks;
   return [...current.blocks.slice(0, patch.tailStart), ...patch.blocks];
+}
+
+/**
+ * Webview-only memory eviction (long-session bloat, 2026-10): release the
+ * heavy payload of blocks sitting far outside the render window. The DOM
+ * mount window (MessageList TAIL_WINDOW/MAX_WINDOW) already bounds what is
+ * RENDERED, but the webview store kept every block's full payload for the
+ * whole session — tool outputs (64K chars cap), structured diffs (256KB cap),
+ * attached images (≤8MB data URLs) and compression summaries accumulate
+ * without bound in the renderer heap as the session grows.
+ *
+ * Only the WEBVIEW projection is trimmed: the host state stays complete
+ * (revert / openDiff / export / transcript persistence all read it), and a
+ * full snapshot on restore re-evicts deterministically. Blocks newer than
+ * the last `keepRecent` entries are never touched (keepRecent exceeds the
+ * max mount window, so every mounted card always has its payload).
+ *
+ * Pure and idempotent: already-evicted blocks carry no payload left, so a
+ * second pass changes nothing and returns the SAME array/block references —
+ * the store can run it after every snapshot/patch without defeating zustand
+ * selectors or React memo. `evicted` marks the trimmed blocks so the UI can
+ * render an honest "released" marker instead of an empty card.
+ */
+export function evictBlockPayloads(blocks: readonly Block[], keepRecent: number): Block[] {
+  const keep = Math.max(0, Math.floor(keepRecent));
+  const cutoff = Math.max(0, blocks.length - keep);
+  if (cutoff === 0) return blocks as Block[];
+  let changed = false;
+  const out = blocks.slice();
+  for (let i = 0; i < cutoff; i++) {
+    const next = evictOneBlock(blocks[i]!);
+    if (next !== blocks[i]) {
+      out[i] = next;
+      changed = true;
+    }
+  }
+  return changed ? out : (blocks as Block[]);
+}
+
+/** One block's payload release; identity-stable when there is nothing to drop. */
+function evictOneBlock(block: Block): Block {
+  switch (block.kind) {
+    case "tool": {
+      if (block.output === "" && block.diff === null) return block;
+      return { ...block, output: "", truncatedChars: undefined, diff: null, evicted: true };
+    }
+    case "thought": {
+      if (block.text === "") return block;
+      return { ...block, text: "", evicted: true };
+    }
+    case "user": {
+      if (!block.images || block.images.length === 0) return block;
+      return { ...block, images: undefined, evicted: true };
+    }
+    case "compression": {
+      if (block.summary === null) return block;
+      return { ...block, summary: null, evicted: true };
+    }
+    case "subagent": {
+      let entriesChanged = false;
+      const entries = block.entries.map((entry) => {
+        const next = evictOneBlock(entry);
+        if (next !== entry) entriesChanged = true;
+        return next;
+      });
+      if (!entriesChanged) return block;
+      return { ...block, entries };
+    }
+    default:
+      return block;
+  }
 }
 
 export type HostToWebview =

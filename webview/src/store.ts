@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   applyBlockPatch,
+  evictBlockPayloads,
   type ApprovalRule,
   type HostToWebview,
   type SessionState,
@@ -1165,6 +1166,22 @@ const SEND_DEBOUNCE_MS = 400;
 const PENDING_TIMEOUT_MS = 10_000;
 /** Min interval between full re-sync requests (unanchorable blockPatch). */
 const RESYNC_THROTTLE_MS = 1_000;
+/**
+ * Long-session memory bound (2026-10): the webview keeps FULL payloads only
+ * for this many transcript-tail blocks; older blocks' heavy content (tool
+ * output/diff, thought text, images, compression summaries) is released by
+ * `evictBlockPayloads` and rendered with a "released" marker. Must exceed
+ * MessageList's MAX_WINDOW (120 mounted blocks) so every mounted card always
+ * has its payload; the host state stays complete regardless (revert /
+ * export / persistence read the host, not this projection).
+ */
+const EVICT_KEEP_BLOCKS = 200;
+
+/** Apply the payload eviction to an incoming state; identity-stable pass. */
+function evict(state: SessionState): SessionState {
+  const blocks = evictBlockPayloads(state.blocks, EVICT_KEEP_BLOCKS);
+  return blocks === state.blocks ? state : { ...state, blocks };
+}
 
 let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSentKey = "";
@@ -1282,11 +1299,11 @@ export const useChat = create<ChatStore>((set, get) => ({
             clearTimeout(pendingTimer);
             pendingTimer = null;
           }
-          set({ pending: null, state: msg.state });
+          set({ pending: null, state: evict(msg.state) });
           return;
         }
       }
-      set({ state: msg.state });
+      set({ state: evict(msg.state) });
       return;
     }
     if (msg.type === "blockPatch") {
@@ -1300,7 +1317,7 @@ export const useChat = create<ChatStore>((set, get) => ({
         requestResync();
         return;
       }
-      const state: SessionState = { ...msg.tail, blocks };
+      const state: SessionState = evict({ ...msg.tail, blocks });
       const pending = get().pending;
       if (pending) {
         const confirmed =

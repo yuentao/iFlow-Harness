@@ -86,6 +86,7 @@ import {
   findCliHistoryCut,
   findToolBlockById,
   isAgentOutputUpdate,
+  isTaskToolCall,
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
   parseEditArgs,
@@ -112,7 +113,7 @@ import {
 import { SessionStore } from "./store.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
-import { gateOsNotification, initOsNotifyGate, isUserWatching, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
+import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
 import { WireRingBuffer } from "./wire-log.js";
 
@@ -218,6 +219,16 @@ export function stripFileMentions(text: string): string {
 /** M1 P0-5: an execute-class tool still running after this long earns an OS
  * notification when it finally lands (only while the panel is hidden). */
 const LONG_TOOL_NOTIFY_MS = 30_000;
+/** OS toast text must stay ONE short line: `run_shell_command` titles carry
+ * the WHOLE command — a 40-line python script flooded the native approval
+ * toast verbatim (user report 2026-10-13). Collapse every whitespace run
+ * (newlines included) to a single space and cap the length; the approval
+ * CARD keeps the full text (that is where the command is reviewed), only
+ * the toast gets the summary. */
+function notifySummary(raw: string, max = 80): string {
+  const flat = raw.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
 /** M1 P0-6: occupancy ratio at which the context-warning pill fires
  * (≥100% is handled by the existing overflow auto-compress path). */
 const CONTEXT_WARN_RATIO = 0.9;
@@ -1216,18 +1227,21 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Turn-finished / turn-failed sound cue. Gated on the `iflow.soundFeedback`
-   * setting (default on) AND the shared "is the user looking" judgement with
-   * notifyOs (roadmap P0-5): watching = panel visible AND window focused — a
-   * watching user already sees the card flip, a chime would be noise; the
-   * sound exists for when they switched away mid-turn, even if the panel
-   * tab is still technically visible (`retainContextWhenHidden` keeps
-   * `visible` true across app switches, so visibility alone would swallow
-   * the cue — 1.5.0 regression). Synthesized in the webview (Web Audio), no
-   * asset files.
+   * Turn-finished / turn-failed sound cue — the UNIVERSAL completion signal:
+   * it plays in every panel/focus state and only `iflow.soundFeedback`
+   * (default on) gates it. History: 8441788 shipped it ungated; cd1c406 added
+   * a watching gate (visible panel AND focused window) plus toast-exclusivity
+   * at the call sites, which together left the chime reachable only in
+   * hidden-panel+focused-window — i.e. effectively never, and users reported
+   * the cue as vanished (2026-10-13 「生成完成的通知音效消失了」). A watching
+   * user hearing the chime is the familiar pre-1.5.0 confirmation, not noise.
+   * OS toasts stay ADDITIVE away-notifications with their own gate; when both
+   * fire (away + unfocused + `osNotifications: all`) the brief toast system
+   * sound + chime overlap is the accepted price of the cue never vanishing
+   * again (set `osNotifications: approvals` for a chime-only away cue).
+   * Synthesized in the webview (Web Audio), no asset files.
    */
   private postSound(kind: "done" | "error"): void {
-    if (isUserWatching(this.panelVisible, vscode.window.state.focused)) return;
     const cfg = vscode.workspace.getConfiguration("iflow");
     if (cfg.get<boolean>("soundFeedback", true) === false) return;
     this.postToWebview({ type: "playSound", kind });
@@ -1240,8 +1254,9 @@ export class ChatPanel implements vscode.Disposable {
    * setting × panel-visibility × window-focus (turnDone only) × per-kind
    * throttle (shared/notifications.ts). A visible panel already shows the
    * card — the notification exists exactly for when the user switched to the
-   * editor and the agent is blocked. Returns whether it fired: callers use
-   * that to skip the sound cue, so an event never announces itself twice.
+   * editor and the agent is blocked. Returns whether it fired (informational
+   * since the chime became universal — the toast is additive, not an
+   * either/or with the sound cue).
    */
   private notifyOs(event: OsNotifyEvent, text: string): boolean {
     const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
@@ -1928,7 +1943,11 @@ export class ChatPanel implements vscode.Disposable {
       // panel is hidden this is the notification that matters most.
       this.notifyOs(
         "approval",
-        vscode.l10n.t("iFlow 等待审批：{0}（{1} 秒后自动拒绝）", approval.title || approval.toolName, Math.round(APPROVAL_TIMEOUT_MS / 1000)),
+        vscode.l10n.t(
+          "iFlow 等待审批：{0}（{1} 秒后自动拒绝）",
+          notifySummary(approval.title || approval.toolName),
+          Math.round(APPROVAL_TIMEOUT_MS / 1000),
+        ),
       );
     });
   }
@@ -3525,9 +3544,17 @@ export class ChatPanel implements vscode.Disposable {
         // exactly those. The terminal event clears the entry either way; the
         // notification itself re-passes the full gate (visibility may have
         // changed mid-tool).
+        // The SubAgent-spawning `task` call is EXCLUDED: its terminal update
+        // lands MID-TURN — the parent keeps generating after the subagent
+        // returns — so the toast fired at subagent landing while the panel
+        // still showed 正在生成, reading as a premature "your task finished"
+        // (user report 2026-10-13: 「长任务已完成（运行 306 秒）：Task」 mid-turn;
+        // the opaque title "Task" reinforces the misreading). Subagent progress
+        // has its own card; real completion is trigger 3 (turnDone).
         if (
           update.sessionUpdate === "tool_call" &&
           update.kind === "execute" &&
+          !isTaskToolCall(update) &&
           update.status !== "completed" &&
           update.status !== "failed"
         ) {
@@ -3546,10 +3573,16 @@ export class ChatPanel implements vscode.Disposable {
             if (Date.now() - entry.startedAt >= LONG_TOOL_NOTIFY_MS) {
               const rawTitle =
                 (typeof update.title === "string" && update.title ? update.title : entry.title) ?? update.toolCallId;
-              const title = rawTitle.length > 80 ? `${rawTitle.slice(0, 80)}…` : rawTitle;
+              const title = notifySummary(rawTitle);
+              const secs = Math.round((Date.now() - entry.startedAt) / 1000);
+              // A failed tool must never be announced as 已完成 — the parent
+              // agent usually keeps going (retry / recovery), so a "completed"
+              // toast for an errored tool is doubly wrong.
               this.notifyOs(
                 "longTool",
-                vscode.l10n.t("长任务已完成（运行 {0} 秒）：{1}", Math.round((Date.now() - entry.startedAt) / 1000), title),
+                update.status === "failed"
+                  ? vscode.l10n.t("长任务失败（运行 {0} 秒）：{1}", secs, title)
+                  : vscode.l10n.t("长任务已完成（运行 {0} 秒）：{1}", secs, title),
               );
             }
           }
@@ -5075,17 +5108,16 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
-      // Completion cue, but a user stop/cancel stays silent. Notification and
-      // chime are mutually exclusive (roadmap P0-5): when the native
-      // notification fires the user already gets told; otherwise the sound
-      // carries the signal (postSound itself stays quiet only while the user
-      // is watching — visible panel AND focused window).
+      // Completion cue, but a user stop/cancel stays silent. The chime is the
+      // universal cue (postSound); the native toast is the ADDITIVE
+      // away-notification (M1 P0-5) with its own gate — no longer mutually
+      // exclusive, the exclusivity made the chime unreachable for away users
+      // on `osNotifications: all` (user report 2026-10-13).
       if (result.stopReason !== "cancelled") {
         // M1 P0-5: the turn landed while the user is away — tell them it's
         // ready.
-        if (!this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"))) {
-          this.postSound("done");
-        }
+        this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
+        this.postSound("done");
         // M1 P0-7: the first completed turn is the AI-title window (no-op
         // unless the label is still the mechanical truncation).
         if (promptSessionId) void this.maybeGenerateAiTitle(promptSessionId);
@@ -5188,13 +5220,12 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
-      // Same completion cue policy as sendPrompt (notification first, chime
-      // only when nothing fired natively) — a regenerated turn landing while
-      // the user is away must announce itself too.
+      // Same completion cue policy as sendPrompt (chime universal, toast
+      // additive) — a regenerated turn landing while the user is away must
+      // announce itself too.
       if (result.stopReason !== "cancelled") {
-        if (!this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"))) {
-          this.postSound("done");
-        }
+        this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
+        this.postSound("done");
         // Same turn-end proactive compression policy as sendPrompt.
         await this.maybeAutoCompressOnIdle(promptSessionId);
       }

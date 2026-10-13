@@ -83,6 +83,13 @@ const en: Record<string, string> = {
   "失败": "Failed",
   "执行中": "Running",
   "操作输出": "Output",
+  // long-session memory eviction markers
+  "内容已释放": "Content released",
+  "附件图片已释放": "Attached images released",
+  "为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留":
+    "Released from webview memory to bound long-session usage; revert & export stay complete on the host",
+  "为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录":
+    "Attached images released from webview memory to bound long-session usage; the host keeps the full record",
   "回退此改动": "Revert this change",
   "已回退": "Reverted",
   "部分回退": "Partially reverted",

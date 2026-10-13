@@ -86,4 +86,24 @@ describe("WireRingBuffer", () => {
   it("returns an empty string for an empty buffer", () => {
     expect(new WireRingBuffer(1).dump()).toBe("");
   });
+
+  it("evicts oldest frames when the char budget is breached", () => {
+    // Each frame's line is ~49 chars; a 64-char budget holds exactly one.
+    const buf = new WireRingBuffer(100, 64);
+    buf.tap("out", { pad: "x".repeat(40) });
+    expect(buf.size).toBe(1);
+    buf.tap("out", { pad: "y".repeat(40) });
+    expect(buf.size).toBe(1);
+    const lines = buf.dump().trim().split("\n");
+    expect(JSON.parse(lines[0]!).msg.pad).toBe("y".repeat(40));
+  });
+
+  it("keeps the newest frame even when it alone exceeds the budget", () => {
+    const buf = new WireRingBuffer(10, 32);
+    for (let i = 0; i < 3; i++) buf.tap("out", { i });
+    expect(buf.size).toBe(3);
+    buf.tap("out", { pad: "z".repeat(200) });
+    expect(buf.size).toBe(1);
+    expect(JSON.parse(buf.dump().trim()).msg.pad).toBe("z".repeat(200));
+  });
 });

@@ -90,7 +90,7 @@ const permissionRequest: RequestPermissionRequest = {
   ],
 };
 
-function toolUpdate(status: string, title?: string, initial = false): unknown {
+function toolUpdate(status: string, title?: string, initial = false, toolName?: string): unknown {
   return {
     sessionId: "notify-session",
     update: {
@@ -99,6 +99,7 @@ function toolUpdate(status: string, title?: string, initial = false): unknown {
       kind: "execute",
       status,
       ...(title !== undefined ? { title } : {}),
+      ...(toolName !== undefined ? { toolName } : {}),
       content: [],
       locations: [],
     },
@@ -107,13 +108,13 @@ function toolUpdate(status: string, title?: string, initial = false): unknown {
 
 /**
  * M1 P0-5 host wiring (roadmap: OS notifications gated on setting × panel
- * visibility × window focus × throttle, merged with the sound gate so one
- * event never announces itself twice). The pure gate itself is pinned in
+ * visibility × window focus × throttle). The pure gate itself is pinned in
  * notifications.test.ts; these cover what the gate alone cannot: the
- * approval-card trigger, the notification/sound exclusivity on turn
- * completion (the regenerate path shares the sendPrompt policy), and the
- * long-tool timer lifecycle (recorded regardless of visibility, cleared on
- * session switch).
+ * approval-card trigger, the completion-cue policy on turn end (the chime is
+ * universal — only `iflow.soundFeedback` gates it — while the turnDone toast
+ * is additive per its own gate; the regenerate path shares the sendPrompt
+ * policy), and the long-tool timer lifecycle (recorded regardless of
+ * visibility, cleared on session switch).
  */
 describe("ChatPanel OS notifications (P0-5 wiring)", () => {
   let panel: ChatPanel;
@@ -154,6 +155,24 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(openSpy).toHaveBeenCalled();
   });
 
+  it("approval toast collapses a multi-line command title to one short line", async () => {
+    // User report 2026-10-13: run_shell_command's title IS the whole command —
+    // a 40-line python script flooded the native toast verbatim.
+    const script = `python3 -c "${"print(1)\n".repeat(30)}"`;
+    const pending = p.requestPermissionFromUser({
+      ...permissionRequest,
+      toolCall: { ...permissionRequest.toolCall, title: script },
+    });
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+    const msg = String(infoMessage.mock.calls[0]![0]);
+    expect(msg).not.toContain("\n");
+    expect(msg).toContain('python3 -c "print(1) print(1)');
+    // 80-char summary + template wrapper stays a scannable single line.
+    expect(msg.length).toBeLessThan(120);
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+  });
+
   it("stays silent while the focused panel is visible (the card is already on screen)", async () => {
     (vscode.window as unknown as { state: { focused: boolean } }).state.focused = true;
     p.panelVisible = true;
@@ -182,19 +201,33 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     await Promise.all([first, second]);
   });
 
-  it("regenerate completion notifies instead of chiming when the user is away", async () => {
+  it("regenerate completion notifies AND chimes when the user is away (cues are additive)", async () => {
     p.store.userPrompt("再试一次");
     p.store.promptCompleted("end_turn"); // back to idle — regenerate's gate
     const sound = vi.spyOn(p, "postSound");
     await p.regenerate();
     expect(infoMessage).toHaveBeenCalledTimes(1);
     expect(String(infoMessage.mock.calls[0]![0])).toContain("已完成本轮回复");
-    // Notification and chime are mutually exclusive (one "user watching" gate).
-    expect(sound).not.toHaveBeenCalled();
+    // The chime is universal again (2026-10-13 restore): the toast no longer
+    // suppresses it — an away user gets both channels.
+    expect(sound).toHaveBeenCalledWith("done");
   });
 
-  it("regenerate completion falls back to the chime when the gate blocks (window focused)", async () => {
+  it("regenerate completion chimes without a toast while its window stays focused", async () => {
     (vscode.window as unknown as { state: { focused: boolean } }).state.focused = true;
+    p.store.userPrompt("再试一次");
+    p.store.promptCompleted("end_turn");
+    const sound = vi.spyOn(p, "postSound");
+    await p.regenerate();
+    expect(infoMessage).not.toHaveBeenCalled();
+    expect(sound).toHaveBeenCalledWith("done");
+  });
+
+  it("regenerate completion chimes while the user watches the focused visible panel", async () => {
+    // User report 2026-10-13: the completion chime "vanished" — the watching
+    // gate silenced exactly this state, which is where users sit at turn end.
+    (vscode.window as unknown as { state: { focused: boolean } }).state.focused = true;
+    p.panelVisible = true;
     p.store.userPrompt("再试一次");
     p.store.promptCompleted("end_turn");
     const sound = vi.spyOn(p, "postSound");
@@ -220,6 +253,24 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     vi.advanceTimersByTime(1_000);
     p.onSessionUpdate(toolUpdate("completed"));
     expect(infoMessage).not.toHaveBeenCalled();
+  });
+
+  it("the SubAgent-spawning task tool never notifies — its terminal lands mid-turn", async () => {
+    // User report 2026-10-13: 「长任务已完成（运行 306 秒）：Task」 fired while
+    // the panel still showed 正在生成 — the subagent landing is NOT the user's
+    // task finishing; the parent agent keeps generating afterwards.
+    p.onSessionUpdate(toolUpdate("in_progress", "Task", true, "Task"));
+    vi.advanceTimersByTime(31_000);
+    p.onSessionUpdate(toolUpdate("completed", undefined, false, "Task"));
+    expect(infoMessage).not.toHaveBeenCalled();
+  });
+
+  it("a failed long tool is announced as failed, not completed", async () => {
+    p.onSessionUpdate(toolUpdate("in_progress", "npm run build", true));
+    vi.advanceTimersByTime(31_000);
+    p.onSessionUpdate(toolUpdate("failed"));
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+    expect(String(infoMessage.mock.calls[0]![0])).toContain("长任务失败");
   });
 
   it("session switch clears long-tool timers so a same-id tool in the new session cannot misfire", async () => {

@@ -73,11 +73,24 @@ export function wireFrameLine(frame: WireFrame): string {
  * Bounded ring buffer of wire frames. `push` runs on every JSON-RPC frame
  * (hot path): it stringifies once and drops the oldest entry beyond the cap.
  * `dump()` produces the redacted NDJSON export.
+ *
+ * Two caps, whichever binds first: frame COUNT and a char BUDGET. The count
+ * cap alone is not a memory bound — one raw frame carries whatever the wire
+ * carried (a full tool output or structured diff can be hundreds of KB), so
+ * 2000 such frames pin hundreds of MB in the Extension Host for the whole
+ * session (long-session bloat, 2026-10). The budget is measured in
+ * `line.length` (UTF-16 code units ≈ the JS heap cost of the retained
+ * string), which bounds retention regardless of frame shape.
  */
 export class WireRingBuffer {
   private readonly frames: WireFrame[] = [];
+  /** Sum of `line.length` over `frames` — maintained on push/evict. */
+  private chars = 0;
 
-  constructor(private readonly capacity = 2000) {}
+  constructor(
+    private readonly capacity = 2000,
+    private readonly maxChars = 8 * 1024 * 1024,
+  ) {}
 
   /** A `WireTap`-compatible sink for `JsonRpcPeer` / `AcpClient`. */
   readonly tap: WireTap = (direction, message) => {
@@ -88,7 +101,21 @@ export class WireRingBuffer {
       line = String(message);
     }
     this.frames.push({ ts: Date.now(), direction, line });
-    if (this.frames.length > this.capacity) this.frames.splice(0, this.frames.length - this.capacity);
+    this.chars += line.length;
+    // Evict oldest-first until BOTH caps hold. Batched: a single oversized
+    // frame can breach the budget by many frames' worth at once. The newest
+    // frame always survives (a one-frame-over-budget wire frame — up to the
+    // 8MB NDJSON cap — would otherwise empty the buffer and leave exports
+    // with nothing); worst-case retention is maxChars + one oversized frame.
+    let drop = 0;
+    while (
+      drop < this.frames.length - 1 &&
+      (this.frames.length - drop > this.capacity || this.chars > this.maxChars)
+    ) {
+      this.chars -= this.frames[drop]!.line.length;
+      drop++;
+    }
+    if (drop > 0) this.frames.splice(0, drop);
   };
 
   get size(): number {

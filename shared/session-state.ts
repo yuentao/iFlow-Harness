@@ -320,7 +320,7 @@ function isNestedUpdate(update: SessionUpdate): boolean {
 
 /** Wire check (0.5.19, verified live): the SubAgent's spawning tool_call.
  * Lowercased — CLI versions differ in casing ("task" vs "Task"). */
-function isTaskToolCall(update: SessionUpdate): boolean {
+export function isTaskToolCall(update: SessionUpdate): boolean {
   return (
     (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") &&
     typeof update.toolName === "string" &&

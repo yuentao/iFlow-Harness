@@ -94,10 +94,10 @@
 
 **触发点**（均要求面板不可见，host 侧以 webview panel 的 `visible` 状态判定，不用 document.hidden）：
 1. 审批卡 / 提问卡 / Plan 审批到达（文案含剩余秒数，与卡内倒计时同源）。
-2. 执行类工具运行超过 30s 后到达终态。
+2. 执行类工具运行超过 30s 后到达终态（排除 SubAgent 的 `task` 生成调用：其终态落在轮中——父代理在子代理返回后继续生成，此时播报「已完成」是过早完成误报，2026-10-13 用户实测；子代理进度自有卡片、真实完成由触发点 3 覆盖；`failed` 终态用独立的「长任务失败」文案，绝不报「已完成」）。
 3. 整轮完成且窗口失焦。
 
-**实现**：`vscode.window.showInformationMessage` + 「打开面板」按钮；同类事件 5s 去重节流；已接入审批/提问/Plan、长工具完成和整轮完成触发点。与现有 `playSound` 门控逻辑合并到同一个「用户是否在看着」判定函数：仅当 panel visible 且窗口 focused 时视为正在观看，避免用户切走窗口后声音和 OS 通知同时被错误吞掉。
+**实现**：`vscode.window.showInformationMessage` + 「打开面板」按钮；同类事件 5s 去重节流；已接入审批/提问/Plan、长工具完成和整轮完成触发点。「用户是否在看着」（panel visible 且窗口 focused）只门控 OS 通知；提示音是通用的完成/失败信号（仅 `iflow.soundFeedback` 门控，任何面板/焦点状态都响——曾与通知互斥并共享观看闸门，结果离开态与观看态都听不到铃，2026-10-13 用户实测后恢复通用），toast 作为附加的离开态提醒可与铃同时出现。
 
 **设置项**：`iflow.osNotifications`（枚举：`off` / `approvals`（默认）/ `all`）。
 

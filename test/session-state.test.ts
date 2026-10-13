@@ -36,7 +36,7 @@ import {
   parseTranscriptJsonl,
   toAgentPromptText,
 } from "../shared/session-state";
-import { initialSessionState, collectUserPromptTexts, normalizeUserPromptText, type Block, type SessionState } from "../shared/messages";
+import { evictBlockPayloads, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, type Block, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -2165,5 +2165,99 @@ describe("isAgentOutputUpdate (empty-response detection)", () => {
     // The user's own turn echoed by the agent (live prompts render from the
     // host's beginUserPrompt block; replay uses this channel).
     expect(isAgentOutputUpdate({ sessionUpdate: "user_message_chunk" })).toBe(false);
+  });
+});
+
+describe("evictBlockPayloads (webview long-session memory bound)", () => {
+  const tool = (id: string): ToolBlock => ({
+    kind: "tool",
+    id,
+    toolCallId: id,
+    toolName: "edit_file",
+    title: "Edit",
+    toolKind: "edit",
+    status: "completed",
+    output: "some output",
+    locations: [],
+    diff: { path: "p.ts", oldText: "a", newText: "b" },
+  });
+
+  it("releases heavy payloads of blocks outside the keep window and marks them", () => {
+    const blocks: Block[] = [tool("old"), tool("new")];
+    const out = evictBlockPayloads(blocks, 1);
+    const evicted = out[0] as ToolBlock;
+    expect(evicted.evicted).toBe(true);
+    expect(evicted.output).toBe("");
+    expect(evicted.diff).toBeNull();
+    expect(evicted.truncatedChars).toBeUndefined();
+    // Identity markers survive — revert chips still render on evicted cards.
+    expect(evicted.toolCallId).toBe("old");
+    // The kept tail is untouched, same reference.
+    expect(out[1]).toBe(blocks[1]);
+  });
+
+  it("keeps user text / plan / text blocks and the whole list when within the window", () => {
+    const blocks: Block[] = [
+      { kind: "user", id: "u1", text: "prompt", images: ["data:image/png;base64,AAA"] },
+      { kind: "text", id: "t1", text: "reply" },
+    ];
+    // keepRecent covers everything → identity-stable, nothing evicted.
+    expect(evictBlockPayloads(blocks, 5)).toBe(blocks);
+    const out = evictBlockPayloads(blocks, 1);
+    const user = out[0] as Extract<Block, { kind: "user" }>;
+    expect(user.evicted).toBe(true);
+    expect(user.images).toBeUndefined();
+    // The typed prompt itself is never released (delete/regenerate scans).
+    expect(user.text).toBe("prompt");
+    expect(out[1]).toBe(blocks[1]);
+  });
+
+  it("evicts thought text and compression summaries", () => {
+    const blocks: Block[] = [
+      { kind: "thought", id: "th", text: "reasoning…" },
+      { kind: "compression", id: "c", notice: "已压缩", summary: "long summary", newTokenCount: 10 },
+      { kind: "text", id: "tail", text: "x" },
+    ];
+    const out = evictBlockPayloads(blocks, 1);
+    const thought = out[0] as Extract<Block, { kind: "thought" }>;
+    const comp = out[1] as Extract<Block, { kind: "compression" }>;
+    expect(thought.text).toBe("");
+    expect(thought.evicted).toBe(true);
+    expect(comp.summary).toBeNull();
+    expect(comp.evicted).toBe(true);
+    // The one-line notice carries the compression numbers — never released.
+    expect(comp.notice).toBe("已压缩");
+  });
+
+  it("recurses into subagent entries", () => {
+    const blocks: Block[] = [
+      {
+        kind: "subagent",
+        id: "sa",
+        agentId: "a1",
+        taskToolCallId: null,
+        title: "task",
+        status: "completed",
+        agentType: null,
+        entries: [tool("nested"), { kind: "thought", id: "nth", text: "deep" }],
+      },
+      { kind: "text", id: "tail", text: "x" },
+    ];
+    const out = evictBlockPayloads(blocks, 1);
+    const card = out[0] as Extract<Block, { kind: "subagent" }>;
+    const nestedTool = card.entries[0] as ToolBlock;
+    const nestedThought = card.entries[1] as Extract<Block, { kind: "thought" }>;
+    expect(nestedTool.output).toBe("");
+    expect(nestedTool.diff).toBeNull();
+    expect(nestedTool.evicted).toBe(true);
+    expect(nestedThought.text).toBe("");
+  });
+
+  it("is idempotent: a second pass returns the same array and block references", () => {
+    const blocks: Block[] = [tool("old"), tool("new")];
+    const once = evictBlockPayloads(blocks, 1);
+    const twice = evictBlockPayloads(once, 1);
+    expect(twice).toBe(once);
+    expect(twice[0]).toBe(once[0]);
   });
 });
