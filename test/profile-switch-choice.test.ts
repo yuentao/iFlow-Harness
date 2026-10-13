@@ -357,24 +357,24 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     expect(workspaceGet("iflow.workspaceActiveProfile")).toBe("B");
   });
 
-  it("workspace record beats the global slot and re-syncs the active credentials", async () => {
+  it("workspace record beats the global slot without rewriting shared credentials", async () => {
     await seedProfile(); // extension profile B
     await workspaceSet("iflow.workspaceActiveProfile", "B");
     // Global slot points at a DIFFERENT config (another window's last switch).
     const secrets = (
       panel as unknown as { context: { secrets: { store: (k: string, v: string) => Promise<void> } } }
     ).context.secrets;
-    await secrets.store(
-      "iflow.openai-compatible",
-      JSON.stringify({ baseUrl: "https://other.example.com/v1", apiKey: "sk-other", modelName: "other-model" }),
-    );
+    const otherCreds = { baseUrl: "https://other.example.com/v1", apiKey: "sk-other", modelName: "other-model" };
+    await secrets.store("iflow.openai-compatible", JSON.stringify(otherCreds));
+    await secrets.store("iflow.active-profile", "Other");
 
     const creds = await p.resolveWorkspaceHandshakeCreds();
 
     expect(creds).toEqual(CREDS);
-    // The SecretStorage active slot + pointer were re-synced to the workspace pick.
-    expect(JSON.parse((await secretGet("iflow.openai-compatible"))!)).toEqual(CREDS);
-    expect(await secretGet("iflow.active-profile")).toBe("B");
+    // The workspace resolver is read-only: another window's global slot is
+    // preserved instead of being overwritten by this panel.
+    expect(JSON.parse((await secretGet("iflow.openai-compatible"))!)).toEqual(otherCreds);
+    expect(await secretGet("iflow.active-profile")).toBe("Other");
   });
 
   it("workspace record resolves CLI-sourced profiles from settings.json", async () => {
@@ -388,6 +388,34 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     await workspaceSet("iflow.workspaceActiveProfile", "C");
 
     expect(await p.resolveWorkspaceHandshakeCreds()).toEqual(cliProfile);
+  });
+
+  it("keeps two windows on independent workspace profiles", async () => {
+    const sharedSecrets = (panel as unknown as { context: { secrets: vscode.SecretStorage } }).context.secrets;
+    const secondStorage = await mkdtemp(path.join(os.tmpdir(), "iflow-switch-storage-2-"));
+    const secondPanel = new ChatPanel(makeContext(secondStorage), { workspaceRoot: here, watchers: makeWatchers() });
+    const second = secondPanel as unknown as PanelInternals;
+    try {
+      const profiles = {
+        A: { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "model-a" },
+        B: CREDS,
+      };
+      await sharedSecrets.store("iflow.profiles", JSON.stringify(profiles));
+      const secondSecrets = (secondPanel as unknown as { context: { secrets: vscode.SecretStorage } }).context.secrets;
+      await secondSecrets.store("iflow.profiles", JSON.stringify(profiles));
+      await workspaceSet("iflow.workspaceActiveProfile", "A");
+      await (secondPanel as unknown as { context: { workspaceState: { update: (k: string, v: unknown) => Promise<void> } } }).context.workspaceState.update(
+        "iflow.workspaceActiveProfile",
+        "B",
+      );
+
+      expect(await p.resolveWorkspaceHandshakeCreds()).toEqual(profiles.A);
+      expect(await second.resolveWorkspaceHandshakeCreds()).toEqual(profiles.B);
+      expect(await p.resolveWorkspaceHandshakeCreds()).toEqual(profiles.A);
+    } finally {
+      await secondPanel.dispose();
+      await rm(secondStorage, { recursive: true, force: true });
+    }
   });
 
   it("a stale workspace record (profile deleted) falls back to null", async () => {

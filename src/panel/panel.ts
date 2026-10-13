@@ -22,14 +22,11 @@ import {
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
 import { acpSessionFilePath, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings } from "../acp/models-query.js";
 import {
-  clearCredentials,
   getActiveProfileName,
   loadCredentials,
   loadProfiles,
   maskKey,
-  saveCredentials,
   saveProfiles,
-  setActiveProfileName,
   validateCredentials,
   type OpenAiCompatCredentials,
 } from "../acp/auth.js";
@@ -1113,7 +1110,8 @@ export class ChatPanel implements vscode.Disposable {
         await this.saveAuthAndReconnect(msg.baseUrl, msg.apiKey, msg.modelName, msg.profileName ?? null);
         break;
       case "clearAuth":
-        await clearCredentials(this.context.secrets);
+        await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
+        await this.context.workspaceState.update(WORKSPACE_MODEL_KEY, undefined);
         this.store.setAuth(await this.buildAuthState(false, true));
         break;
       case "activateProfile":
@@ -1296,7 +1294,7 @@ export class ChatPanel implements vscode.Disposable {
       // source the user session authenticates with; the CLI's settings.json
       // profile is the fallback (terminal-configured gateway). Never rely on
       // the CLI process env: internal prompts bypass it entirely now.
-      const endpoint = (await loadCredentials(this.context.secrets).catch(() => null)) ?? readActiveEndpoint();
+      const endpoint = (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ?? (await loadCredentials(this.context.secrets).catch(() => null)) ?? readActiveEndpoint();
       if (!endpoint || this.disposed) return null;
       // Model: the panel's current selection (enhancement quality, pitfall #23
       // — store value is authoritative); fall back to the profile's model.
@@ -2929,10 +2927,8 @@ export class ChatPanel implements vscode.Disposable {
     // loads on startup and what external tools (profile manager / cloud sync)
     // rewrite behind our back. The extension's own record only fills in for
     // fresh installs where currentApiProfile isn't set yet.
-    const activeName = resolveActiveProfileName(
-      cli,
-      await getActiveProfileName(this.context.secrets),
-    );
+    const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
+    const activeName = workspaceName || resolveActiveProfileName(cli, await getActiveProfileName(this.context.secrets));
     const list: AuthUiState["profiles"] = [];
     const push = (name: string, source: "extension" | "cli", p: OpenAiCompatCredentials) => {
       list.push({
@@ -2960,7 +2956,9 @@ export class ChatPanel implements vscode.Disposable {
   private async buildAuthState(authenticated: boolean, needsSetup: boolean): Promise<AuthUiState> {
     // P7: computed fresh every call — the old cache went stale between write
     // points (e.g. `saved` outliving a deleted profile until the next save).
-    const creds = await loadCredentials(this.context.secrets);
+    // Resolve this workspace's profile first; the SecretStorage credentials
+    // slot is shared by all windows and is not a per-panel source of truth.
+    const creds = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
     return {
       authenticated,
       needsSetup,
@@ -2975,7 +2973,7 @@ export class ChatPanel implements vscode.Disposable {
     modelName: string,
     profileName: string | null,
   ): Promise<void> {
-    const stored = await loadCredentials(this.context.secrets);
+    const stored = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
     const validation = validateCredentials({
       baseUrl,
       apiKey: apiKey ?? stored?.apiKey ?? null,
@@ -2993,10 +2991,9 @@ export class ChatPanel implements vscode.Disposable {
     const profiles = await loadProfiles(this.context.secrets);
     profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
     await saveProfiles(this.context.secrets, profiles);
-    await setActiveProfileName(this.context.secrets, name);
-    await saveCredentials(this.context.secrets, creds); // active-slot for the next handshake
-    // Remember per-workspace too: the SecretStorage pointer is global, this
-    // record is what restores THIS workspace's pick on restart.
+    // The active-profile pointer and credentials slot are global SecretStorage
+    // values shared by every VS Code window. The workspace record plus the
+    // explicit credentials passed below are the authority for this panel.
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
     await this.rememberWorkspaceModelFor(name, creds.modelName);
 
@@ -3035,11 +3032,11 @@ export class ChatPanel implements vscode.Disposable {
       }
       keepSession = choice;
     }
-    await setActiveProfileName(this.context.secrets, name);
-    await saveCredentials(this.context.secrets, creds);
-    // Per-workspace memory (see WORKSPACE_PROFILE_KEY): CLI-sourced profiles
-    // are recorded by name too — resolveWorkspaceHandshakeCreds re-resolves
-    // them from settings.json on the next start.
+    // Do not update the global SecretStorage active pointer or credentials
+    // slot: those values are shared by other VS Code windows. This panel's
+    // workspace record and explicit `creds` remain isolated instead.
+    // CLI-sourced profiles are recorded by name too — the next handshake
+    // re-resolves them from settings.json.
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
     if (!this.workspaceModelId(name)) {
       await this.rememberWorkspaceModelFor(name, creds.modelName);
@@ -3055,14 +3052,17 @@ export class ChatPanel implements vscode.Disposable {
     return { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName };
   }
 
+  /** Resolve the active profile label for THIS window. */
+  private async workspaceActiveProfileName(): Promise<string | null> {
+    const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
+    return workspaceName || (await getActiveProfileName(this.context.secrets));
+  }
+
   /**
-   * Credentials of the profile THIS workspace last activated, or null (no
-   * record / stale record → caller falls back to the global active slot).
-   * The SecretStorage active pointer is global, so without this a second
-   * window's switch would silently become every workspace's startup config.
-   * When the workspace record wins over the global slot, the SecretStorage
-   * pointer + active creds are re-synced to it, so every other read point
-   * (internal prompts, live-model queries, setup detection) agrees.
+   * Credentials of the profile THIS workspace last activated, or null when
+   * there is no record / the record is stale. SecretStorage's active pointer
+   * and credentials slot are global, so this function must be read-only: a
+   * second VS Code window may be using a different profile at the same time.
    */
   private async resolveWorkspaceHandshakeCreds(): Promise<OpenAiCompatCredentials | null> {
     const name = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY);
@@ -3071,17 +3071,7 @@ export class ChatPanel implements vscode.Disposable {
     const profiles = await loadProfiles(this.context.secrets);
     const creds = profiles[trimmed] ? { ...profiles[trimmed] } : this.cliProfileCredentials(trimmed);
     if (!creds) return null;
-    const active = await loadCredentials(this.context.secrets);
-    const same =
-      active !== null &&
-      active.baseUrl === creds.baseUrl &&
-      active.apiKey === creds.apiKey &&
-      active.modelName === creds.modelName;
-    if (!same) {
-      await setActiveProfileName(this.context.secrets, trimmed);
-      await saveCredentials(this.context.secrets, creds);
-      this.log.info(`workspace API profile restored: ${trimmed}`);
-    }
+    this.log.info(`workspace API profile restored: ${trimmed}`);
     return creds;
   }
 
@@ -3122,11 +3112,10 @@ export class ChatPanel implements vscode.Disposable {
     if (this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY) === name) {
       await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
     }
-    const activeName = await getActiveProfileName(this.context.secrets);
-    if (activeName === name) {
-      await clearCredentials(this.context.secrets);
+    const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
+    if (workspaceName === name) {
       this.store.setAuth(await this.buildAuthState(false, true));
-      return; // active profile deleted → user must pick/configure again
+      return; // this workspace's profile was deleted → choose another profile
     }
     this.store.setAuth(await this.buildAuthState(this.store.getState().auth.authenticated, false));
   }
@@ -3212,7 +3201,7 @@ export class ChatPanel implements vscode.Disposable {
             void vscode.window.showInformationMessage(
               vscode.l10n.t(
                 "已切换 API 配置: {0}，当前对话已改用新配置",
-                (await getActiveProfileName(this.context.secrets)) ?? "",
+                (await this.workspaceActiveProfileName()) ?? "",
               ),
             );
             return;
@@ -3247,7 +3236,7 @@ export class ChatPanel implements vscode.Disposable {
           `profile switch finished in ${Date.now() - tHot}ms (hot re-auth, no CLI restart)`,
         );
         void vscode.window.showInformationMessage(
-          vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
+          vscode.l10n.t("已切换 API 配置: {0}", (await this.workspaceActiveProfileName()) ?? ""),
         );
         return;
       } catch (error) {
@@ -3307,9 +3296,9 @@ export class ChatPanel implements vscode.Disposable {
         coldKeeps
           ? vscode.l10n.t(
               "已切换 API 配置: {0}，当前对话已改用新配置",
-              (await getActiveProfileName(this.context.secrets)) ?? "",
+              (await this.workspaceActiveProfileName()) ?? "",
             )
-          : vscode.l10n.t("已切换 API 配置: {0}", (await getActiveProfileName(this.context.secrets)) ?? ""),
+          : vscode.l10n.t("已切换 API 配置: {0}", (await this.workspaceActiveProfileName()) ?? ""),
       );
     } catch {
       // ensureClient already marked the error in the store; nothing to add.
@@ -4718,7 +4707,7 @@ export class ChatPanel implements vscode.Disposable {
     // tools rewrote the SHARED currentApiProfile behind our back — that no
     // longer reaches us). The CLI settings read stays as a fallback for
     // setups where only CLI-side profiles exist.
-    const endpoint = (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
+    const endpoint = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
     if (!endpoint) return [];
     try {
       return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
