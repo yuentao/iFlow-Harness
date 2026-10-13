@@ -282,6 +282,8 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
  * this per-workspace record restores it. Name only; credentials stay in
  * SecretStorage / CLI settings.json. */
 const WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
+/** workspaceState key: the last model selected in this workspace. */
+const WORKSPACE_MODEL_KEY = "iflow.workspaceActiveModel";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
@@ -2993,11 +2995,10 @@ export class ChatPanel implements vscode.Disposable {
     await saveProfiles(this.context.secrets, profiles);
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds); // active-slot for the next handshake
-    // No settings.json pointer write: the panel's active profile is recorded
-    // only in SecretStorage (the panel-owned fields never reach the shared
-    // file — see the api-config-isolation note in the constructor). Writing
-    // currentApiProfile would make a terminal CLI start follow the panel's
-    // last pick, which is exactly the cross-process influence we isolate.
+    // Remember per-workspace too: the SecretStorage pointer is global, this
+    // record is what restores THIS workspace's pick on restart.
+    await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
+    await this.rememberWorkspaceModelFor(name, creds.modelName);
 
     await this.reconnectWithCredentials(creds);
   }
@@ -3036,6 +3037,13 @@ export class ChatPanel implements vscode.Disposable {
     }
     await setActiveProfileName(this.context.secrets, name);
     await saveCredentials(this.context.secrets, creds);
+    // Per-workspace memory (see WORKSPACE_PROFILE_KEY): CLI-sourced profiles
+    // are recorded by name too — resolveWorkspaceHandshakeCreds re-resolves
+    // them from settings.json on the next start.
+    await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
+    if (!this.workspaceModelId(name)) {
+      await this.rememberWorkspaceModelFor(name, creds.modelName);
+    }
     await this.reconnectWithCredentials(creds, keepSession);
   }
 
@@ -3077,11 +3085,43 @@ export class ChatPanel implements vscode.Disposable {
     return creds;
   }
 
+  /** Return the last model selected for a workspace profile, if any. */
+  private workspaceModelId(profileName?: string): string | null {
+    const name = profileName?.trim() || this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
+    if (!name) return null;
+    const saved = this.context.workspaceState.get<Record<string, unknown>>(WORKSPACE_MODEL_KEY);
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      const model = saved[name];
+      return typeof model === "string" ? model.trim() || null : null;
+    }
+    // Compatibility with the first implementation, which stored one string.
+    const legacy = this.context.workspaceState.get<string>(WORKSPACE_MODEL_KEY);
+    return legacy?.trim() || null;
+  }
+
+  private async rememberWorkspaceModelFor(profileName: string, modelId: string): Promise<void> {
+    if (!profileName.trim() || !modelId.trim()) return;
+    const saved = this.context.workspaceState.get<Record<string, unknown>>(WORKSPACE_MODEL_KEY);
+    const models = saved && typeof saved === "object" && !Array.isArray(saved) ? { ...saved } : {};
+    models[profileName.trim()] = modelId.trim();
+    await this.context.workspaceState.update(WORKSPACE_MODEL_KEY, models);
+  }
+
+  private async rememberWorkspaceModel(modelId: string): Promise<void> {
+    const profileName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
+    if (profileName) await this.rememberWorkspaceModelFor(profileName, modelId);
+  }
+
   private async deleteProfile(name: string): Promise<void> {
     const profiles = await loadProfiles(this.context.secrets);
     if (!profiles[name]) return; // CLI-sourced profiles are read-only
     delete profiles[name];
     await saveProfiles(this.context.secrets, profiles);
+    // Drop this workspace's memory of the deleted profile so the next
+    // handshake doesn't resolve a stale name (falls back to the global slot).
+    if (this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY) === name) {
+      await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
+    }
     const activeName = await getActiveProfileName(this.context.secrets);
     if (activeName === name) {
       await clearCredentials(this.context.secrets);
@@ -3871,7 +3911,12 @@ export class ChatPanel implements vscode.Disposable {
       // stale current model (user directive).
       const switchModel = this.pendingSwitchModel;
       this.pendingSwitchModel = null;
-      const currentModelId = switchModel ?? this.store.getState().currentModelId ?? meta?.models?.currentModelId ?? null;
+      const currentModelId =
+        switchModel ??
+        this.store.getState().currentModelId ??
+        this.workspaceModelId() ??
+        meta?.models?.currentModelId ??
+        null;
 
       this.store.sessionStarted({
         sessionId: loadedId,
@@ -4159,15 +4204,27 @@ export class ChatPanel implements vscode.Disposable {
           `initialize ok in ${Date.now() - tInit}ms: authenticated=${init.isAuthenticated ?? false}, loadSession=${init.agentCapabilities.loadSession ?? false}`,
         );
         // Explicit credentials from a profile switch take priority; otherwise
-        // fall back to the persisted active slot.
+        // the profile THIS workspace last activated; otherwise the global
+        // active slot.
         const explicitSwitch = this.pendingHandshakeCredentials !== null;
-        const storedCreds = this.pendingHandshakeCredentials ?? (await loadCredentials(this.context.secrets));
+        let workspaceRestored = false;
+        let storedCreds: OpenAiCompatCredentials | null = this.pendingHandshakeCredentials;
         this.pendingHandshakeCredentials = null;
+        if (!storedCreds) {
+          storedCreds = await this.resolveWorkspaceHandshakeCreds();
+          workspaceRestored = storedCreds !== null;
+        }
+        if (!storedCreds) storedCreds = await loadCredentials(this.context.secrets);
         // A profile switch must ALWAYS re-push authenticate: the CLI caches
         // auth across spawns and reports isAuthenticated=true for the PREVIOUS
         // profile's endpoint (observed: BUZZ→商汤 switch skipped authenticate,
         // prompts hit the BUZZ gateway with SenseTime models → model_not_found).
-        if (!init.isAuthenticated || explicitSwitch) {
+        // A workspace-restored profile forces it too: a cold child reads the
+        // shared ~/.iflow/settings.json at startup, so its isAuthenticated=true
+        // can reflect the TERMINAL CLI's config rather than this workspace's
+        // remembered profile — trusting it would show profile A while running
+        // profile B (same class of stale flag as above).
+        if (!init.isAuthenticated || explicitSwitch || workspaceRestored) {
           // M3 flow: push stored openai-compatible credentials to the agent.
           if (storedCreds) {
             try {
@@ -4402,6 +4459,7 @@ export class ChatPanel implements vscode.Disposable {
         | undefined;
       if (resp?.success && resp.currentModelId) {
         this.store.sessionMeta({ currentModelId: resp.currentModelId });
+        await this.rememberWorkspaceModel(resp.currentModelId);
         return;
       }
       vscode.window.showWarningMessage(
@@ -4855,7 +4913,10 @@ export class ChatPanel implements vscode.Disposable {
     // Treat the panel's current selection as authoritative and re-push it
     // below whenever it differs from the CLI's boot-time id.
     const currentModelId =
-      switchModel ?? this.store.getState().currentModelId ?? cliModelId;
+      switchModel ??
+      this.store.getState().currentModelId ??
+      this.workspaceModelId() ??
+      cliModelId;
     // A failed restore leaves an error banner behind — clear it for the fresh
     // session so the stale message doesn't follow the user around.
     store.getState().errorMessage = null;

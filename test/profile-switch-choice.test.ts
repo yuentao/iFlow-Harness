@@ -107,6 +107,14 @@ type PanelInternals = {
   queryLiveModels: () => Promise<{ id: string; name: string }[]>;
   refreshSessionList: () => Promise<unknown>;
   activateProfile: (name: string) => Promise<void>;
+  deleteProfile: (name: string) => Promise<void>;
+  setModel: (modelId: string) => Promise<void>;
+  workspaceModelId: (profileName?: string) => string | null;
+  resolveWorkspaceHandshakeCreds: () => Promise<{
+    baseUrl: string;
+    apiKey: string;
+    modelName: string;
+  } | null>;
 };
 
 const CREDS = { baseUrl: "https://gw.example.com/v1", apiKey: "sk-test-1234", modelName: "model-b" };
@@ -313,5 +321,102 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     // The first switch was abandoned (never authenticated); the second ran.
     expect(p.client!.authenticate).toHaveBeenCalledTimes(1);
     expect(p.client!.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Per-workspace active-profile memory ---------------------------------
+  // The SecretStorage active pointer is global (shared across windows), so
+  // each workspace keeps its own record of the last activated profile and
+  // restores it on the next handshake (resolveWorkspaceHandshakeCreds).
+
+  function workspaceGet(key: string): string | undefined {
+    return (
+      panel as unknown as { context: { workspaceState: { get: (k: string) => unknown } } }
+    ).context.workspaceState.get(key) as string | undefined;
+  }
+
+  async function workspaceSet(key: string, value: string | undefined): Promise<void> {
+    await (
+      panel as unknown as { context: { workspaceState: { update: (k: string, v: unknown) => Promise<void> } } }
+    ).context.workspaceState.update(key, value);
+  }
+
+  async function secretGet(key: string): Promise<string | undefined> {
+    return (
+      panel as unknown as { context: { secrets: { get: (k: string) => Promise<string | undefined> } } }
+    ).context.secrets.get(key);
+  }
+
+  it("remembers the activated profile in the workspace record", async () => {
+    await seedProfile();
+    p.client = makeFakeClient();
+    p.queryLiveModels = async () => [];
+    p.refreshSessionList = async () => [];
+
+    await p.activateProfile("B");
+
+    expect(workspaceGet("iflow.workspaceActiveProfile")).toBe("B");
+  });
+
+  it("workspace record beats the global slot and re-syncs the active credentials", async () => {
+    await seedProfile(); // extension profile B
+    await workspaceSet("iflow.workspaceActiveProfile", "B");
+    // Global slot points at a DIFFERENT config (another window's last switch).
+    const secrets = (
+      panel as unknown as { context: { secrets: { store: (k: string, v: string) => Promise<void> } } }
+    ).context.secrets;
+    await secrets.store(
+      "iflow.openai-compatible",
+      JSON.stringify({ baseUrl: "https://other.example.com/v1", apiKey: "sk-other", modelName: "other-model" }),
+    );
+
+    const creds = await p.resolveWorkspaceHandshakeCreds();
+
+    expect(creds).toEqual(CREDS);
+    // The SecretStorage active slot + pointer were re-synced to the workspace pick.
+    expect(JSON.parse((await secretGet("iflow.openai-compatible"))!)).toEqual(CREDS);
+    expect(await secretGet("iflow.active-profile")).toBe("B");
+  });
+
+  it("workspace record resolves CLI-sourced profiles from settings.json", async () => {
+    const cliProfile = { baseUrl: "https://cli.example.com/v1", apiKey: "sk-cli-9999", modelName: "cli-model" };
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      path.join(iflowHome, "settings.json"),
+      JSON.stringify({ apiProfiles: { C: cliProfile } }),
+      "utf8",
+    );
+    await workspaceSet("iflow.workspaceActiveProfile", "C");
+
+    expect(await p.resolveWorkspaceHandshakeCreds()).toEqual(cliProfile);
+  });
+
+  it("a stale workspace record (profile deleted) falls back to null", async () => {
+    await workspaceSet("iflow.workspaceActiveProfile", "Gone");
+    expect(await p.resolveWorkspaceHandshakeCreds()).toBeNull();
+  });
+
+  it("deleting the remembered profile clears the workspace record", async () => {
+    await seedProfile();
+    await workspaceSet("iflow.workspaceActiveProfile", "B");
+
+    await p.deleteProfile("B");
+
+    expect(workspaceGet("iflow.workspaceActiveProfile")).toBeUndefined();
+  });
+
+  it("remembers the selected model for the active workspace profile", async () => {
+    await seedProfile();
+    await workspaceSet("iflow.workspaceActiveProfile", "B");
+    p.client = makeFakeClient();
+    p.client.setModel.mockImplementation(async (_sessionId: string, modelId: string) => ({
+      success: true,
+      currentModelId: modelId,
+    }));
+    p.store.sessionStarted({ sessionId: "model-session" });
+
+    await p.setModel("Qwen3.8-Flash-Next");
+
+    expect(p.workspaceModelId("B")).toBe("Qwen3.8-Flash-Next");
+    expect(workspaceGet("iflow.workspaceActiveModel")).toEqual({ B: "Qwen3.8-Flash-Next" });
   });
 });
