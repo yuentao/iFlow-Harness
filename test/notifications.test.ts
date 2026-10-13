@@ -35,25 +35,39 @@ describe("osNotifyAllowed", () => {
 });
 
 describe("isUserWatching", () => {
-  it("mirrors panel visibility (the shared sound/light gate)", () => {
-    expect(isUserWatching(true)).toBe(true);
-    expect(isUserWatching(false)).toBe(false);
+  it("requires both panel visibility and window focus", () => {
+    expect(isUserWatching(true, true)).toBe(true);
+    expect(isUserWatching(true, false)).toBe(false);
+    expect(isUserWatching(false, true)).toBe(false);
+    expect(isUserWatching(false, false)).toBe(false);
   });
 });
 
 describe("gateOsNotification", () => {
-  it("never fires while the panel is visible", () => {
+  it("never fires while the panel is visible and the window is focused", () => {
     const gate = initOsNotifyGate();
     const out = gateOsNotification({
       event: "approval",
       setting: "all",
       panelVisible: true,
-      windowFocused: false,
+      windowFocused: true,
       nowMs: 1000,
       gate,
     });
     expect(out.fire).toBe(false);
     expect(out.gate).toBe(gate); // untouched, same reference
+  });
+
+  it("fires for a visible panel when its window is unfocused", () => {
+    const out = gateOsNotification({
+      event: "approval",
+      setting: "approvals",
+      panelVisible: true,
+      windowFocused: false,
+      nowMs: 1000,
+      gate: initOsNotifyGate(),
+    });
+    expect(out.fire).toBe(true);
   });
 
   it("fires when hidden and the setting allows it, stamping the gate", () => {

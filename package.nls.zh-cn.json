@@ -24,6 +24,7 @@
   "iflow.configuration.autoTitle.description": "会话首轮完成后为其生成 AI 简短标题（每会话一次，一次轻量模型调用）。",
   "iflow.configuration.checkpoints.description": "每轮对话前把工作区快照到独立的影子 git 仓库，从而支持按轮回退文件改动。绝不触碰用户自己的 .git，非 git 目录同样可用。",
   "iflow.configuration.checkpointMaxFiles.description": "当会话工作区文件数超过该上限时关闭工作区快照（防止超大工作区拖慢面板）。",
+  "iflow.configuration.checkpointMaxFileMB.description": "快照工作区时跳过大于该尺寸（MB）的文件——其改动不参与回退，影子仓库也保持小巧。未改动的文件跨轮共享存储，不会重复占用。0 = 不限大小。",
   "iflow.configuration.checkpointDir.description": "轮级快照仓库的自定义根目录（支持 ~ 与工作区相对路径），每个工作区在根下拥有独立子目录。留空则使用默认的 workspaceStorage 位置。",
   "iflow.configuration.checkpointMaxTurns.description": "每个会话最多保留的快照轮数，超出后在每轮捕获后清理最旧快照。0 = 不限制。",
   "iflow.configuration.checkpointMaxSizeMB.description": "全部快照仓库的总体积上限（MB），超出后按最久未使用整目录删除会话仓库（无索引/损坏的孤儿目录会被顺带回收）。0 = 不限制。",

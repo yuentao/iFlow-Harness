@@ -36,9 +36,9 @@
 
 **UI**：MessageList 每个 user 气泡动作条加「回滚到此轮」→ InlineConfirm 两步确认（1.2.7 组件）→ 弹三档选择；会话下拉底部可加「本轮变更」入口展示该轮影子 diff 摘要。
 
-**性能与边界**：提交带超时（10s），超限降级 partial；`git add -A` 前探测文件数，超阈值（默认 5 万）关闭并提示设置项；影子仓库默认 `add -A` 包含未跟踪文件、尊重 `.gitignore`，两者交互要在验收用例里固定行为；Windows 全程异步 execFile 直跑 git（陷阱 #18）+ `windowsHide`；会话删除时同步清理影子仓库目录。
+**性能与边界**：提交带超时（10s），超限降级 partial；`git add -A` 前探测文件数，超阈值（默认 5 万）关闭并提示设置项；影子仓库默认 `add -A` 包含未跟踪文件、尊重 `.gitignore`，两者交互要在验收用例里固定行为；Windows 全程异步 execFile 直跑 git（陷阱 #18）+ `windowsHide`；会话删除时同步清理影子仓库目录。**已实现大文件过滤**：`iflow.checkpointMaxFileMB` 默认 300，捕获前逐文件测量并通过 Git exclude pathspec 排除超限文件；0 表示关闭限制，被跳过文件不参与文件回滚。
 
-**设置项**：`iflow.checkpoints`（默认开）、`iflow.checkpointMaxFiles`。
+**设置项**：`iflow.checkpoints`（默认开）、`iflow.checkpointMaxFiles`、`iflow.checkpointMaxFileMB`。
 
 **测试**：临时目录起影子仓库（commit→改文件→checkout 回滚）单测，不起 CLI；三档恢复的 reducer 截断路径复用 deleteUserMessage 测试基座；partial 降级路径。
 
@@ -97,7 +97,7 @@
 2. 执行类工具运行超过 30s 后到达终态。
 3. 整轮完成且窗口失焦。
 
-**实现**：`vscode.window.showInformationMessage` + 「打开面板」按钮；同类事件 5s 去重节流；与现有 `playSound` 门控逻辑合并到同一个「用户是否在看着」判定函数，避免声光重复。
+**实现**：`vscode.window.showInformationMessage` + 「打开面板」按钮；同类事件 5s 去重节流；已接入审批/提问/Plan、长工具完成和整轮完成触发点。与现有 `playSound` 门控逻辑合并到同一个「用户是否在看着」判定函数：仅当 panel visible 且窗口 focused 时视为正在观看，避免用户切走窗口后声音和 OS 通知同时被错误吞掉。
 
 **设置项**：`iflow.osNotifications`（枚举：`off` / `approvals`（默认）/ `all`）。
 

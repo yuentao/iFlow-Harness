@@ -17,6 +17,15 @@
  *   for the whole session (logged once; the panel toasts the reason).
  * - The pre-capture file-count probe guards against multi-GB workspaces:
  *   over the cap the session is disabled and the panel surfaces the reason.
+ * - Files above `maxFileBytes` (roadmap P0-1 大文件过滤) are excluded from
+ *   `add` via a NUL-delimited exclude-pathspec file (written INSIDE the
+ *   shadow git dir, never the user's work tree). Their changes are frozen at
+ *   whatever the snapshot last held and never enter the shadow repo, so one
+ *   300MB model file cannot bloat every turn's commit. `git add -A` with an
+ *   explicit `.` include + excludes still prunes deleted files (probed, git
+ *   2.49). When the filter excludes EVERY file the commit is the empty tree
+ *   and `checkout <sha> -- .` would fail with "pathspec '.' did not match"
+ *   (probed) — restoreFiles rejects such a snapshot with a clear reason.
  *
  * Restore semantics: `checkout <sha> -- .` restores tracked files to the
  * snapshot. Files created AFTER the snapshot stay on disk (auto-deleting
@@ -30,7 +39,7 @@
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -50,6 +59,11 @@ const COMMIT_MESSAGE_MAX_CHARS = 200;
 /** Identity for shadow commits — never depends on the user's git config. */
 const SHADOW_IDENTITY = ["-c", "user.name=iflow-harness", "-c", "user.email=checkpoint@iflow.local"];
 
+/** `git hash-object -t tree /dev/null` — the tree a capture produces when the
+ * size filter excluded every single file (probed, git 2.49: restoring one
+ * with `checkout <sha> -- .` fails "pathspec '.' did not match"). */
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 export interface CheckpointLog {
   info(message: string): void;
   warn(message: string): void;
@@ -64,6 +78,9 @@ interface ShadowRepo {
   disabledReason: string | null;
   /** Last captured sha (parent of the next commit-tree). */
   lastSha: string | null;
+  /** Files the last capture skipped for exceeding `maxFileBytes` (the panel
+   * toasts this once per session; reset by the next capture). */
+  skippedLastTurn: number;
 }
 
 export class CheckpointManager {
@@ -73,16 +90,37 @@ export class CheckpointManager {
   private readonly log: CheckpointLog;
   private readonly timeoutMs: number;
   private maxFiles: number;
+  /** Files above this on-disk size are excluded from `add` (0 = no size
+   * filter). Panel re-reads `iflow.checkpointMaxFileMB` before each capture. */
+  private maxFileBytes: number;
 
-  constructor(options: { log: CheckpointLog; timeoutMs?: number; maxFiles?: number }) {
+  constructor(options: {
+    log: CheckpointLog;
+    timeoutMs?: number;
+    maxFiles?: number;
+    maxFileBytes?: number;
+  }) {
     this.log = options.log;
     this.timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
     this.maxFiles = options.maxFiles ?? 50_000;
+    this.maxFileBytes = options.maxFileBytes ?? 300 * 1024 * 1024;
   }
 
   /** Panel re-reads `iflow.checkpointMaxFiles` before each capture. */
   setMaxFiles(maxFiles: number): void {
     if (Number.isFinite(maxFiles) && maxFiles > 0) this.maxFiles = maxFiles;
+  }
+
+  /** Panel re-reads `iflow.checkpointMaxFileMB` before each capture
+   * (MB → bytes; <= 0 disables the size filter). */
+  setMaxFileBytes(maxFileBytes: number): void {
+    if (Number.isFinite(maxFileBytes)) this.maxFileBytes = Math.max(0, maxFileBytes);
+  }
+
+  /** How many files the LAST capture of this session skipped for exceeding
+   * the size cap (0 when the filter is off or nothing was skipped). */
+  skippedFiles(sessionId: string): number {
+    return this.sessions.get(sessionId)?.skippedLastTurn ?? 0;
   }
 
   /** Filesystem-safe session dir name — same sanitizer as transcripts. */
@@ -120,6 +158,7 @@ export class CheckpointManager {
       workTree,
       disabledReason: null,
       lastSha: null,
+      skippedLastTurn: 0,
     };
     this.sessions.set(sessionId, state);
 
@@ -192,8 +231,39 @@ export class CheckpointManager {
   async captureTurn(sessionId: string, message: string): Promise<string | null> {
     const state = this.sessions.get(sessionId);
     if (!state || state.disabledReason) return null;
+    let excludeFile: string | null = null;
+    state.skippedLastTurn = 0;
     try {
-      await this.git(state, ["add", "-A"]);
+      const addArgs = ["add", "-A"];
+      let pathspecs: string[] | null = null;
+      if (this.maxFileBytes > 0) {
+        const { stdout } = await this.git(state, ["ls-files", "-z", "-c", "-o", "--exclude-standard"]);
+        const candidates = stdout.split("\0").filter(Boolean);
+        const excluded: string[] = [];
+        for (const relativePath of candidates) {
+          try {
+            const file = await stat(path.resolve(state.workTree, relativePath));
+            if (file.isFile() && file.size > this.maxFileBytes) {
+              // Git pathspecs use `/` even on Windows. `literal` prevents
+              // names containing `*`, `?`, `[` or `:` from becoming patterns.
+              const gitPath = relativePath.replaceAll("\\", "/");
+              excluded.push(`:(exclude,literal)${gitPath}`);
+            }
+          } catch {
+            // A file can disappear between ls-files and stat; let git handle
+            // that race in the normal add path.
+          }
+        }
+        state.skippedLastTurn = excluded.length;
+        if (excluded.length > 0) {
+          pathspecs = [".", ...excluded];
+          excludeFile = path.join(state.gitDir, `iflow-excludes-${process.pid}-${Date.now()}.nul`);
+          await writeFile(excludeFile, Buffer.from(`${pathspecs.join("\0")}\0`, "utf8"));
+          addArgs.push(`--pathspec-from-file=${excludeFile}`, "--pathspec-file-nul");
+        }
+      }
+      if (!pathspecs) addArgs.push(".");
+      await this.git(state, addArgs);
       const { stdout: treeOut } = await this.git(state, ["write-tree"]);
       const tree = treeOut.trim();
       if (!tree) throw new Error("write-tree returned nothing");
@@ -210,6 +280,8 @@ export class CheckpointManager {
     } catch (error) {
       this.log.warn(`checkpoint capture failed for ${sessionId}: ${errorMessage(error)}`);
       return null;
+    } finally {
+      if (excludeFile) await rm(excludeFile, { force: true }).catch(() => undefined);
     }
   }
 
@@ -224,6 +296,10 @@ export class CheckpointManager {
     }
     // Validate the sha exists before touching the work tree.
     await this.git(state, ["cat-file", "-e", `${sha}^{commit}`]);
+    const { stdout: treeOut } = await this.git(state, ["rev-parse", `${sha}^{tree}`]);
+    if (treeOut.trim() === EMPTY_TREE_SHA) {
+      throw new Error("checkpoint contains no restorable files (all files exceeded the size limit)");
+    }
     await this.git(state, ["checkout", sha, "--", "."], this.timeoutMs * 3);
   }
 

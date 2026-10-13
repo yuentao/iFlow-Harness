@@ -276,6 +276,12 @@ function abortableDelay(ms: number, shouldAbort: () => boolean): Promise<void> {
 const SESSIONS_KEY = "iflow.recentSessions";
 /** workspaceState key: session id to restore on panel open (M4). */
 const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
+/** workspaceState key: the API profile this workspace last activated. The
+ * SecretStorage active-profile pointer is global (shared across windows), so
+ * multi-workspace users kept losing their per-project config on restart —
+ * this per-workspace record restores it. Name only; credentials stay in
+ * SecretStorage / CLI settings.json. */
+const WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
@@ -523,6 +529,8 @@ export class ChatPanel implements vscode.Disposable {
   });
   /** Sessions whose disable-reason toast was already shown (avoid repeats). */
   private readonly checkpointWarnedSessions = new Set<string>();
+  /** Sessions whose large-file skip toast was already shown (avoid repeats). */
+  private readonly checkpointSkippedWarnedSessions = new Set<string>();
   /** Persist chain for checkpoint index files (same discipline as transcripts). */
   private checkpointPersistChain: Promise<void> = Promise.resolve();
   /** Index loaded before a restore's id re-mint; consumed by finalizeCheckpointIndex. */
@@ -1209,14 +1217,17 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * Turn-finished / turn-failed sound cue. Gated on the `iflow.soundFeedback`
-   * setting (default on) AND panel visibility — the shared "is the user
-   * looking" judgement with notifyOs (roadmap P0-5): a watching user already
-   * sees the card flip, a chime would be noise; the sound exists for when
-   * they switched away mid-turn. Synthesized in the webview (Web Audio), no
+   * setting (default on) AND the shared "is the user looking" judgement with
+   * notifyOs (roadmap P0-5): watching = panel visible AND window focused — a
+   * watching user already sees the card flip, a chime would be noise; the
+   * sound exists for when they switched away mid-turn, even if the panel
+   * tab is still technically visible (`retainContextWhenHidden` keeps
+   * `visible` true across app switches, so visibility alone would swallow
+   * the cue — 1.5.0 regression). Synthesized in the webview (Web Audio), no
    * asset files.
    */
   private postSound(kind: "done" | "error"): void {
-    if (isUserWatching(this.panelVisible)) return;
+    if (isUserWatching(this.panelVisible, vscode.window.state.focused)) return;
     const cfg = vscode.workspace.getConfiguration("iflow");
     if (cfg.get<boolean>("soundFeedback", true) === false) return;
     this.postToWebview({ type: "playSound", kind });
@@ -3034,6 +3045,36 @@ export class ChatPanel implements vscode.Disposable {
     const p = cli?.apiProfiles?.[name];
     if (!p?.baseUrl || !p?.apiKey || !p?.modelName) return null;
     return { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName };
+  }
+
+  /**
+   * Credentials of the profile THIS workspace last activated, or null (no
+   * record / stale record → caller falls back to the global active slot).
+   * The SecretStorage active pointer is global, so without this a second
+   * window's switch would silently become every workspace's startup config.
+   * When the workspace record wins over the global slot, the SecretStorage
+   * pointer + active creds are re-synced to it, so every other read point
+   * (internal prompts, live-model queries, setup detection) agrees.
+   */
+  private async resolveWorkspaceHandshakeCreds(): Promise<OpenAiCompatCredentials | null> {
+    const name = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY);
+    if (!name?.trim()) return null;
+    const trimmed = name.trim();
+    const profiles = await loadProfiles(this.context.secrets);
+    const creds = profiles[trimmed] ? { ...profiles[trimmed] } : this.cliProfileCredentials(trimmed);
+    if (!creds) return null;
+    const active = await loadCredentials(this.context.secrets);
+    const same =
+      active !== null &&
+      active.baseUrl === creds.baseUrl &&
+      active.apiKey === creds.apiKey &&
+      active.modelName === creds.modelName;
+    if (!same) {
+      await setActiveProfileName(this.context.secrets, trimmed);
+      await saveCredentials(this.context.secrets, creds);
+      this.log.info(`workspace API profile restored: ${trimmed}`);
+    }
+    return creds;
   }
 
   private async deleteProfile(name: string): Promise<void> {
@@ -4987,11 +5028,11 @@ export class ChatPanel implements vscode.Disposable {
       // Completion cue, but a user stop/cancel stays silent. Notification and
       // chime are mutually exclusive (roadmap P0-5): when the native
       // notification fires the user already gets told; otherwise the sound
-      // carries the signal (postSound itself stays quiet while the panel is
-      // visible — the watching user sees the card flip).
+      // carries the signal (postSound itself stays quiet only while the user
+      // is watching — visible panel AND focused window).
       if (result.stopReason !== "cancelled") {
-        // M1 P0-5: the turn landed while the user is away (panel hidden,
-        // window unfocused) — tell them it's ready.
+        // M1 P0-5: the turn landed while the user is away — tell them it's
+        // ready.
         if (!this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"))) {
           this.postSound("done");
         }
@@ -5973,9 +6014,10 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async captureWorkspaceSnapshot(sessionId: string, text: string): Promise<string | null> {
     if (!this.checkpointSettingEnabled()) return null;
-    this.checkpoints.setMaxFiles(
-      vscode.workspace.getConfiguration("iflow").get<number>("checkpointMaxFiles", 50_000),
-    );
+    const cfg = vscode.workspace.getConfiguration("iflow");
+    this.checkpoints.setMaxFiles(cfg.get<number>("checkpointMaxFiles", 50_000));
+    const maxFileMB = cfg.get<number>("checkpointMaxFileMB", 300);
+    this.checkpoints.setMaxFileBytes(maxFileMB * 1024 * 1024);
     const reason = await this.checkpoints.ensureReady(sessionId, this.checkpointRoot(), this.checkpointCwd());
     if (reason) {
       if (!this.checkpointWarnedSessions.has(sessionId)) {
@@ -5985,7 +6027,16 @@ export class ChatPanel implements vscode.Disposable {
       return null;
     }
     const label = checkpointLabelFromText(text);
-    return this.checkpoints.captureTurn(sessionId, label || vscode.l10n.t("轮次快照"));
+    const sha = await this.checkpoints.captureTurn(sessionId, label || vscode.l10n.t("轮次快照"));
+    const skipped = this.checkpoints.skippedFiles(sessionId);
+    if (sha && skipped > 0 && !this.checkpointSkippedWarnedSessions.has(sessionId)) {
+      this.checkpointSkippedWarnedSessions.add(sessionId);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("本轮快照已跳过 {0} 个超过大小限制的文件；这些文件不会参与文件回滚。", skipped),
+      );
+    }
+    return sha;
   }
 
   /** Record one turn's checkpoint into the store projection + index file. */
@@ -6179,6 +6230,7 @@ export class ChatPanel implements vscode.Disposable {
   /** Delete a session's shadow repo (session deleted / pruned as dead). */
   private async removeCheckpointsForSession(sessionId: string): Promise<void> {
     this.checkpointWarnedSessions.delete(sessionId);
+    this.checkpointSkippedWarnedSessions.delete(sessionId);
     await this.checkpoints.removeSession(sessionId, this.checkpointRoot());
   }
 

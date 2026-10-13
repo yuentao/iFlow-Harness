@@ -154,10 +154,19 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(openSpy).toHaveBeenCalled();
   });
 
-  it("stays silent while the panel is visible (the card is already on screen)", async () => {
+  it("stays silent while the focused panel is visible (the card is already on screen)", async () => {
+    (vscode.window as unknown as { state: { focused: boolean } }).state.focused = true;
     p.panelVisible = true;
     const pending = p.requestPermissionFromUser(permissionRequest);
     expect(infoMessage).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+  });
+
+  it("notifies when the panel is visible but its window is unfocused", async () => {
+    p.panelVisible = true;
+    const pending = p.requestPermissionFromUser(permissionRequest);
+    expect(infoMessage).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
     await pending;
   });

@@ -218,6 +218,12 @@
           "minimum": 1,
           "description": "%iflow.configuration.checkpointMaxFiles.description%"
         },
+        "iflow.checkpointMaxFileMB": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "description": "%iflow.configuration.checkpointMaxFileMB.description%"
+        },
         "iflow.checkpointDir": {
           "type": "string",
           "default": "",

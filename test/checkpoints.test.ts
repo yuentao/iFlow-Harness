@@ -232,6 +232,63 @@ describe("CheckpointManager (real shadow git)", () => {
     }
   });
 
+  maybe("skips files above the byte cap and leaves them untouched on restore", async () => {
+    const work = tempDir("iflow-cp-work-");
+    const store = tempDir("iflow-cp-store-");
+    try {
+      writeFileSync(path.join(work, "keep.txt"), "before");
+      writeFileSync(path.join(work, "large.bin"), Buffer.from("large-before"));
+      const mgr = new CheckpointManager({ log: silentLog(), maxFileBytes: 6 });
+      await mgr.ensureReady("s1", store, work);
+      const sha = await mgr.captureTurn("s1", "t1");
+      expect(sha).toMatch(/^[0-9a-f]{40}$/);
+      expect(mgr.skippedFiles("s1")).toBe(1);
+
+      writeFileSync(path.join(work, "keep.txt"), "after");
+      writeFileSync(path.join(work, "large.bin"), Buffer.from("large-after"));
+      await mgr.restoreFiles("s1", sha!);
+      expect(readFileSync(path.join(work, "keep.txt"), "utf8")).toBe("before");
+      expect(readFileSync(path.join(work, "large.bin"), "utf8")).toBe("large-after");
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+      rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  maybe("a zero byte cap disables large-file filtering", async () => {
+    const work = tempDir("iflow-cp-work-");
+    const store = tempDir("iflow-cp-store-");
+    try {
+      writeFileSync(path.join(work, "large.bin"), Buffer.from("large"));
+      const mgr = new CheckpointManager({ log: silentLog(), maxFileBytes: 0 });
+      await mgr.ensureReady("s1", store, work);
+      const sha = await mgr.captureTurn("s1", "t1");
+      expect(mgr.skippedFiles("s1")).toBe(0);
+      writeFileSync(path.join(work, "large.bin"), "changed");
+      await mgr.restoreFiles("s1", sha!);
+      expect(readFileSync(path.join(work, "large.bin"), "utf8")).toBe("large");
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+      rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  maybe("rejects restoring an empty snapshot when every file was filtered", async () => {
+    const work = tempDir("iflow-cp-work-");
+    const store = tempDir("iflow-cp-store-");
+    try {
+      writeFileSync(path.join(work, "large.bin"), Buffer.from("large"));
+      const mgr = new CheckpointManager({ log: silentLog(), maxFileBytes: 1 });
+      await mgr.ensureReady("s1", store, work);
+      const sha = await mgr.captureTurn("s1", "t1");
+      expect(mgr.skippedFiles("s1")).toBe(1);
+      await expect(mgr.restoreFiles("s1", sha!)).rejects.toThrow(/no restorable files/);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+      rmSync(store, { recursive: true, force: true });
+    }
+  });
+
   maybe("over the file cap the session is disabled with a reason", async () => {
     const work = tempDir("iflow-cp-work-");
     const store = tempDir("iflow-cp-store-");

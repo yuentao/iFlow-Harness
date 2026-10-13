@@ -7,7 +7,9 @@
  * hidden). A notification fires only when all gates pass:
  *
  *   setting  — `iflow.osNotifications`: off / approvals (default) / all
- *   visibility — panel not visible (a visible panel already shows the card)
+ *   visibility — the user is NOT watching (panel visible AND window focused
+ *              — a watching user already sees the card; a visible panel in an
+ *              unfocused window counts as away, see `isUserWatching`)
  *   focus    — turnDone additionally requires the window unfocused (roadmap
  *              trigger 3 is "整轮完成且窗口失焦": a finished turn must not
  *              ping a user who is merely reading code in another editor tab
@@ -51,10 +53,15 @@ export function initOsNotifyGate(): OsNotifyGate {
  * The shared "is the user looking at the panel?" judgement — one predicate
  * for BOTH the OS-notification gate and the sound cue, so a completion never
  * fires a native toast and a chime at the same time (roadmap P0-5: merge the
- * two gates). Panel visible = looking; panel hidden = away.
+ * two gates). Watching = panel visible AND the window focused: the panel
+ * keeps `retainContextWhenHidden`, so a user who switches to another app
+ * leaves `visible` true while nobody is looking — treating visible alone as
+ * "watching" silences BOTH the chime and the native toast (1.5.0 regression:
+ * the away-user cue vanished entirely). Panel visible + focused is the only
+ * state where the card flip is self-evident.
  */
-export function isUserWatching(panelVisible: boolean): boolean {
-  return panelVisible;
+export function isUserWatching(panelVisible: boolean, windowFocused: boolean): boolean {
+  return panelVisible && windowFocused;
 }
 
 /**
@@ -66,13 +73,15 @@ export function gateOsNotification(args: {
   event: OsNotifyEvent;
   setting: string;
   panelVisible: boolean;
-  /** `vscode.window.state.focused` — only consulted by `turnDone` (see the
-   * focus gate in the module docstring). */
+  /** `vscode.window.state.focused` — consulted by the watching gate (a
+   * visible panel in an unfocused window is NOT being watched, see
+   * `isUserWatching`) and additionally required to be false by `turnDone`
+   * (see the focus gate in the module docstring). */
   windowFocused: boolean;
   nowMs: number;
   gate: OsNotifyGate;
 }): { fire: boolean; gate: OsNotifyGate } {
-  if (args.panelVisible) return { fire: false, gate: args.gate };
+  if (isUserWatching(args.panelVisible, args.windowFocused)) return { fire: false, gate: args.gate };
   if (!osNotifyAllowed(args.event, args.setting)) return { fire: false, gate: args.gate };
   if (args.event === "turnDone" && args.windowFocused) return { fire: false, gate: args.gate };
   const last = args.gate.lastFiredAt[args.event];

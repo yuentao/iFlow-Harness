@@ -24,6 +24,7 @@
   "iflow.configuration.autoTitle.description": "After a session's first turn, generate a short AI title for it in the session switcher (one extra lightweight model call per session).",
   "iflow.configuration.checkpoints.description": "Snapshot the workspace into a private shadow git repo before each turn so file changes can be rolled back per turn. The user's own .git is never touched; non-git folders work too.",
   "iflow.configuration.checkpointMaxFiles.description": "Disable workspace snapshots for a session when its file count exceeds this cap (guards against very large workspaces).",
+  "iflow.configuration.checkpointMaxFileMB.description": "Skip files larger than this size (MB) when snapshotting the workspace — their changes are excluded from rollback and the shadow repo stays small. Shared by every turn, so one huge file does not multiply storage. 0 = no size limit.",
   "iflow.configuration.checkpointDir.description": "Custom root directory for turn-level snapshot stores (supports ~ and workspace-relative paths). Each workspace gets its own subfolder under this root. Leave empty to use the default workspaceStorage location.",
   "iflow.configuration.checkpointMaxTurns.description": "Keep at most this many snapshots per session; older snapshots are pruned after each turn. 0 = no limit.",
   "iflow.configuration.checkpointMaxSizeMB.description": "Global cap for all snapshot stores in MB; when exceeded the least-recently-used session stores are deleted whole (orphaned/corrupt stores are always reclaimed). 0 = no limit.",
