@@ -3,6 +3,19 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.6.0] - 2026-10-13
+
+- 新增 审批卡内嵌 Diff 预览：编辑类工具审批卡渲染只读 DiffView 的 pending diff（256KB 单侧上限，超限整体丢弃而非截半——半截 diff 是撒谎的 diff），用户批的是变更本身而非一个标题；放行按钮风险分层「允许一次」实心渐变主按钮 vs 「始终允许」描边+图标，不可肌肉记忆混淆
+- 新增 CLI 连接逃逸与错误重试：连接耗时秒数计时器，45s 耐心阈值后弹出「重启 CLI」按钮（host 握手超时要 2 分钟，用户不该干盯着 spinner）；错误 toast 内「重试」（restartCli 会话自动恢复）与「关闭」按钮；restartCli 代际守卫防被取代 wedged 握手覆盖后继共享状态
+- 新增 上下文接近上限自动压缩与占用条预警：内置模型窗口表 + contextWindowOverrides 覆盖 + 未知模型保守回并标注估算 + 分类 breakdown + 滞回 toast 带「立即压缩」内动作；acp-usage-report Mod 把末次请求输入补进 PromptResponse 使占用条 contextUsed 权威值（块数一变即退回估算）
+- 新增 子代理单独停止与 MCP 服务目录：agent-cancel-refactor Mod 按 agentId 单独停止子代理（父继续，被停代理走 CLI 优雅 interrupt 分支）；子代理树生命周期重构 + MCP 服务目录卡片可视化管理
+- 新增 工作区级 Profile 与模型记忆：SecretStorage active profile pointer 是全局跨窗口共享，一个窗口切换静变所有工作区启动配置——现在每个工作区各自记「最后激活 profile」与「最后选模型」，握手优先解析工作区记录命中时强制 re-authenticate（冷启动子进程读共享 settings.json，isAuthenticated 可能反映终端 CLI 配置而非本工作区记住）
+- 新增 快照大文件过滤与自定义存储路径：iflow.checkpointMaxFileMB（默认 300、0=不限）捕获前逐文件测量超限者 exclude pathspec 排除（一个 300MB 模型文件不再放大每轮提交，被跳过文件不参与文件回滚）；checkpoint 保留策略与自定义存储路径
+- 新增 设置面板统一 Tab 弹窗；空状态示例 prompt + 能力提示行（/命令 · @文件 · @problems · @git · 粘贴附件）
+- 优化 P1/P2 交互与可读性：用户气泡操作图标常驻可见（核心能力不该藏 hover）、Composer 固定单行两区（停止与发送原地互换）、危险操作统一 ConfirmDialog 模态、ErrorToast 组件（多行 JSON 默认单行折叠 + 展开/复制）、Dropdown 去 nested role a11y、全局字号 11px、DiffView ARIA 状态、Focus 视图 pill、恢复会话骨架屏、pending card 遮挡修复、共享按钮原语
+- 优化 长会话内存双上限与 OS 提醒修复：webview 侧 evictBlockPayloads 释放保留窗口之外旧块重 payload（双上限块数 200 + 字节预算 4M，host 全保真承诺）；WireRingBuffer 双上限；Collapse 折叠体懒挂载；DiffView DOM 行上限 800；离开态提示音与 OS 通知共用 isUserWatching 双条件（panel visible AND window focused，此前只看 visible 但 retainContextWhenHidden 使切 App 时仍 true 导致两提醒全灭）
+- 修复 多窗口 API 配置隔离与消息编辑操作栏遮挡：工作区 profile 记录压过全局 slot 且重新同步 active creds；用户消息编辑跳转按钮不再遮挡操作栏
+
 ## [1.5.0] - 2026-10-11
 
 - 新增 工具 Diff 逐块（hunk）保留/回退：DiffView 每个 hunk 头部带保留/回退开关，提交后 host 从 oldText 确定性回放保留块写盘——hunk 切分与回放共用 shared/hunks.ts 单一实现（UI 预览与落盘字节一致），磁盘内容与 diff newText 不一致时整单拒绝（绝不做模糊 patch），超过 200 个 hunk 自动降级为整文件操作

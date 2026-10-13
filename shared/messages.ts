@@ -594,14 +594,6 @@ export interface FileHitUi {
   path: string;
 }
 
-/** Editor selection attached via right-click "加入 iFlow 上下文" (M5).
- * `range` is the `L<start>` / `L<start>-L<end>` display form built by the host. */
-export interface CodeContextUi {
-  path: string;
-  range: string;
-  code: string;
-}
-
 // ---------------------------------------------------------------------------
 // Host → WebView messages
 // ---------------------------------------------------------------------------
