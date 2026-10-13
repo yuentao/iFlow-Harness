@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Trash2 } from "lucide-react";
+import { KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sun, Trash2 } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -11,8 +11,9 @@ import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 /**
  * Unified settings modal — the single home for everything the gear opens:
  * API profiles & credentials, MCP servers, approval policies, plus the
- * VSCode-settings / CLI-restart utilities in the footer. Replaces the old
- * three-modal sprawl (AuthCard embedding 「扩展设置」 buttons that swapped
+ * VSCode-settings / CLI-restart utilities and the light/dark theme control
+ * in the footer (the theme toggle used to sit in the header). Replaces the
+ * old three-modal sprawl (AuthCard embedding 「扩展设置」 buttons that swapped
  * into McpCard / ApprovalPolicyCard with no way back), which made the whole
  * settings surface feel disjointed.
  *
@@ -38,6 +39,8 @@ export function SettingsModal({
   dismissible,
   busy,
   auth,
+  dark,
+  onThemeChange,
 }: {
   tab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
@@ -46,6 +49,11 @@ export function SettingsModal({
   dismissible: boolean;
   busy: boolean;
   auth: AuthUiState;
+  /** Effective theme (manual choice ?? editor theme) — drives the footer
+   * segmented control's active state. */
+  dark: boolean;
+  /** Persist an explicit theme choice (replaces the old header toggle). */
+  onThemeChange: (mode: "light" | "dark") => void;
 }) {
   const send = useChat((s) => s.send);
   // The active section reports {back, title} when it opens a sub-editor; the
@@ -89,6 +97,37 @@ export function SettingsModal({
             <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
             {t("重启 CLI")}
           </button>
+          {/* Theme control (moved out of the header): an explicit choice
+              persists and overrides the editor theme, same semantics as the
+              old header toggle. */}
+          <div
+            className="ml-auto flex shrink-0 items-center gap-0.5 rounded-lg border border-border/60 bg-surface/60 p-0.5"
+            role="group"
+            aria-label={t("主题")}
+          >
+            <button
+              type="button"
+              aria-pressed={!dark}
+              title={t("浅色主题")}
+              className={`press flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+                !dark ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              }`}
+              onClick={() => onThemeChange("light")}
+            >
+              <Sun className="size-3" /> {t("浅色")}
+            </button>
+            <button
+              type="button"
+              aria-pressed={dark}
+              title={t("深色主题")}
+              className={`press flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+                dark ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              }`}
+              onClick={() => onThemeChange("dark")}
+            >
+              <Moon className="size-3" /> {t("深色")}
+            </button>
+          </div>
         </div>
       }
     >

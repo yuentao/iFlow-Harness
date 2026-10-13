@@ -36,7 +36,7 @@ import {
   parseTranscriptJsonl,
   toAgentPromptText,
 } from "../shared/session-state";
-import { evictBlockPayloads, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, type Block, type SessionState, type ToolBlock } from "../shared/messages";
+import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, type Block, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -824,6 +824,98 @@ describe("applySessionUpdate", () => {
     state.modes = { currentModeId: "default", availableModes: [{ id: "yolo", name: "YOLO" }] };
     applySessionUpdate(state, notify({ sessionUpdate: "current_mode_update", currentModeId: "yolo" }));
     expect(state.modes?.currentModeId).toBe("yolo");
+  });
+});
+
+describe("todo tool unification (single TaskList card)", () => {
+  it("suppresses todo_write tool cards — the CLI's plan update is the single representation", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call", toolCallId: "tw1", toolName: "todo_write", title: "Updating todos", status: "in_progress" }),
+    );
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call_update", toolCallId: "tw1", toolName: "todo_write", title: "Updating todos", status: "completed" }),
+    );
+    expect(state.blocks).toEqual([]);
+    // The plan update the CLI sends right after the completed update
+    // (bundle: handleTodoWriteToolResult) renders the unified TaskList card.
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "plan", entries: [{ content: "步骤一", status: "in_progress", priority: "high" }] }),
+    );
+    expect(state.blocks.map((b) => b.kind)).toEqual(["plan"]);
+  });
+
+  it("suppresses every todo naming variant and todo_read bookkeeping", () => {
+    const state = initialSessionState();
+    const names = ["TodoWrite", "todo-write", "todowrite", "todo_read", "TodoRead", "todo-read", "todo_update"];
+    names.forEach((toolName, i) => {
+      expect(
+        applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: `t${i}`, toolName, status: "completed" })),
+      ).toBeNull();
+    });
+    expect(state.blocks).toEqual([]);
+  });
+
+  it("keeps non-todo tool cards untouched", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call_update", toolCallId: "r1", toolName: "read_file", title: "Reading a.ts", status: "completed" }),
+    );
+    expect(state.blocks.map((b) => b.kind)).toEqual(["tool"]);
+  });
+
+  it("restores todo_write from CLI jsonl as a TaskList (plan) block and drops todo_read", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "开始" } }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "tu1",
+              name: "todo_write",
+              input: {
+                todos: [
+                  { id: "1", task: "写代码", status: "in_progress", priority: "high" },
+                  { id: "2", task: "写测试", status: "pending" },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "tu2", name: "todo_read", input: {} }] } }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "plan"]);
+    const plan = blocks[1]!;
+    if (plan.kind !== "plan") throw new Error("expected plan");
+    expect(plan.entries).toEqual([
+      { content: "写代码", status: "in_progress", priority: "high" },
+      { content: "写测试", status: "pending", priority: "low" },
+    ]);
+  });
+
+  it("unifies todo calls inside restored sidechain (SubAgent) runs", () => {
+    const jsonl = [
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "task1", name: "task", input: { description: "Task: 检查" } }] } }),
+      JSON.stringify({ type: "user", isSidechain: true, message: { content: "做子任务" } }),
+      JSON.stringify({
+        type: "assistant",
+        isSidechain: true,
+        message: { content: [{ type: "tool_use", id: "tw9", name: "todo_write", input: { todos: [{ task: "子任务步骤", status: "completed" }] } }] },
+      }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.kind)).toEqual(["subagent"]);
+    const sub = blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.entries.map((b) => b.kind)).toEqual(["text", "plan"]);
   });
 });
 
@@ -2259,5 +2351,69 @@ describe("evictBlockPayloads (webview long-session memory bound)", () => {
     const twice = evictBlockPayloads(once, 1);
     expect(twice).toBe(once);
     expect(twice[0]).toBe(once[0]);
+  });
+
+  const heavy = (id: string, chars: number): ToolBlock => ({
+    ...tool(id),
+    output: "x".repeat(chars),
+    diff: null,
+  });
+
+  it("cuts the keep window by char budget on heavy-block sessions", () => {
+    // The probed bloat shape: few blocks, monster payloads — a pure block
+    // count would keep all of it (249 blocks / 23.4MB session, 2026-10).
+    const blocks: Block[] = Array.from({ length: 60 }, (_, i) => heavy(`t${i}`, 100_000));
+    const out = evictBlockPayloads(blocks, 200);
+    // 4M budget / 100K per block = 40 kept, the older 20 released.
+    expect(out.filter((b) => (b as ToolBlock).evicted)).toHaveLength(20);
+    expect((out[19] as ToolBlock).evicted).toBe(true);
+    expect((out[20] as ToolBlock).evicted).toBeUndefined();
+    expect((out[20] as ToolBlock).output).toBe("x".repeat(100_000));
+    const keptPayload = out
+      .slice(20)
+      .reduce((sum, b) => sum + payloadChars(b), 0);
+    expect(keptPayload).toBeLessThanOrEqual(EVICT_BUDGET_CHARS);
+  });
+
+  it("floors the keep window at minKeep even when monster blocks blow the budget", () => {
+    const blocks: Block[] = Array.from({ length: 30 }, (_, i) => heavy(`m${i}`, 1_000_000));
+    const out = evictBlockPayloads(blocks, 200);
+    // Budget would keep ~4, the floor keeps the 20 newest turns renderable.
+    expect(out.filter((b) => (b as ToolBlock).evicted)).toHaveLength(10);
+    expect((out[9] as ToolBlock).evicted).toBe(true);
+    expect((out[10] as ToolBlock).evicted).toBeUndefined();
+    // The floor is a parameter, not a magic number.
+    const tight = evictBlockPayloads(blocks, 200, EVICT_BUDGET_CHARS, 5);
+    expect(tight.filter((b) => (b as ToolBlock).evicted)).toHaveLength(25);
+  });
+
+  it("keeps the full block-count window when payloads are light", () => {
+    const blocks: Block[] = Array.from({ length: 250 }, (_, i) => tool(`l${i}`));
+    const out = evictBlockPayloads(blocks, 200);
+    expect(out.filter((b) => (b as ToolBlock).evicted)).toHaveLength(50);
+    expect((out[49] as ToolBlock).evicted).toBe(true);
+    expect((out[50] as ToolBlock).evicted).toBeUndefined();
+  });
+
+  it("payloadChars measures exactly what eviction releases", () => {
+    expect(payloadChars(tool("t"))).toBe("some output".length + 2);
+    expect(payloadChars({ kind: "thought", id: "th", text: "abc" })).toBe(3);
+    expect(payloadChars({ kind: "user", id: "u", text: "p", images: ["abcd", "ef"] })).toBe(6);
+    expect(
+      payloadChars({ kind: "compression", id: "c", notice: "n", summary: "sum", newTokenCount: 1 }),
+    ).toBe(3);
+    expect(payloadChars({ kind: "text", id: "x", text: "never released" })).toBe(0);
+    expect(
+      payloadChars({
+        kind: "subagent",
+        id: "sa",
+        agentId: null,
+        taskToolCallId: null,
+        title: "t",
+        status: "completed",
+        agentType: null,
+        entries: [tool("n"), { kind: "thought", id: "nt", text: "deep" }],
+      }),
+    ).toBe("some output".length + 2 + 4);
   });
 });

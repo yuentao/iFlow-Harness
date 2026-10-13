@@ -9,14 +9,12 @@ import {
   Focus,
   History,
   Loader2,
-  Moon,
   Pin,
   PinOff,
   Plus,
   RefreshCw,
   Search,
   Settings2,
-  Sun,
   Trash2,
   X,
 } from "lucide-react";
@@ -558,14 +556,6 @@ export function App() {
             >
               <Plus className="size-4" />
             </button>
-            <button
-              className={BTN_ICON}
-              title={dark ? t("切换到浅色主题") : t("切换到深色主题")}
-              aria-label={dark ? t("切换到浅色主题") : t("切换到深色主题")}
-              onClick={() => setManual((prev) => ((prev ?? (dark ? "dark" : "light")) === "dark" ? "light" : "dark"))}
-            >
-              {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-            </button>
             {/* Settings hub: profiles & credentials, MCP servers, approval
                 policies. The gear used to open a profile quick-switcher whose
                 list duplicated (and behaved differently from) the auth card's
@@ -592,6 +582,8 @@ export function App() {
           dismissible={!auth.needsSetup}
           busy={locked}
           auth={auth}
+          dark={dark}
+          onThemeChange={setManual}
         />
       )}
 

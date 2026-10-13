@@ -24,6 +24,17 @@ interface DiffRow {
 const CONTEXT_LINES = 3;
 
 /**
+ * Rendered-row cap for the diff body (long-session memory, second wave
+ * 2026-10): a whole-file change window cannot be folded by
+ * `collapseAroundChanges`, so a monster diff (minified-bundle edits reach the
+ * 256KB cap) used to put tens of thousands of row nodes into the DOM for
+ * EVERY mounted card. Render a bounded prefix; scrolling near the bottom of
+ * the scroll body — or the trailing button — loads more on demand.
+ */
+const INITIAL_RENDER_ROWS = 800;
+const RENDER_ROWS_STEP = 800;
+
+/**
  * Line-level diff renderer for structured tool diffs
  * (`{type:"diff", path, oldText, newText}` from `tool_call_update`).
  * LCS-based so edits show as paired -/+ lines like an editor gutter, then
@@ -88,8 +99,13 @@ export function DiffView({
     [diff, hunks, keep],
   );
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
-  // A new diff invalidates previous expand/collapse choices.
-  useEffect(() => setExpanded(new Set()), [diff]);
+  /** DOM row cap; grows as the user scrolls the diff body (see render). */
+  const [renderCap, setRenderCap] = useState(INITIAL_RENDER_ROWS);
+  // A new diff invalidates previous expand/collapse and row-cap choices.
+  useEffect(() => {
+    setExpanded(new Set());
+    setRenderCap(INITIAL_RENDER_ROWS);
+  }, [diff]);
 
   const rows = useMemo(
     () => collapseAroundChanges(fullRows, windows, expanded),
@@ -97,6 +113,10 @@ export function DiffView({
   );
   const addCount = rows.filter((r) => r.type === "add").length;
   const delCount = rows.filter((r) => r.type === "del").length;
+  // Bounded DOM prefix (see INITIAL_RENDER_ROWS): the full row list stays in
+  // the memo for folding/hunk math, only the rendered slice is capped.
+  const visibleRows = rows.slice(0, renderCap);
+  const hiddenRows = rows.length - visibleRows.length;
 
   const toggleGap = (win: number) => {
     setExpanded((prev) => {
@@ -129,8 +149,16 @@ export function DiffView({
           {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}
         </span>
       </div>
-      <div className={`diff-scroll mx-2.5 mb-2.5 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-[11px] leading-[1.7] ${maxHeightClass}`}>
-        {rows.map((row, i) =>
+      <div
+        className={`diff-scroll mx-2.5 mb-2.5 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-[11px] leading-[1.7] ${maxHeightClass}`}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
+            setRenderCap((c) => (c < rows.length ? c + RENDER_ROWS_STEP : c));
+          }
+        }}
+      >
+        {visibleRows.map((row, i) =>
           row.type === "hunk" ? (
             <button
               key={i}
@@ -178,8 +206,12 @@ export function DiffView({
                       ? `−${row.n}`
                       : `  ${row.n}`}
                 </span>
+                {/* pre-wrap + break-words: long lines (minified code, URLs)
+                    wrap inside the card instead of forcing a horizontal
+                    scrollbar; flex-1 min-w-0 lets the span shrink within the
+                    row so wrapping actually kicks in. */}
                 <span
-                  className={`ml-3 whitespace-pre text-foreground/90 ${
+                  className={`ml-3 min-w-0 flex-1 whitespace-pre-wrap break-words text-foreground/90 ${
                     row.reverted && row.type !== "same" ? "line-through" : ""
                   }`}
                 >
@@ -188,6 +220,16 @@ export function DiffView({
               </div>
             </div>
           ),
+        )}
+        {hiddenRows > 0 && (
+          <button
+            type="button"
+            className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+            onClick={() => setRenderCap((c) => c + RENDER_ROWS_STEP)}
+          >
+            <Ellipsis className="size-3 shrink-0" />
+            <span className="truncate">{t("加载剩余 {0} 行", hiddenRows)}</span>
+          </button>
         )}
       </div>
       {editable && hunkCount > 0 && (

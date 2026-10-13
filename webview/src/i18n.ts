@@ -42,8 +42,11 @@ const en: Record<string, string> = {
   "模型": "Model",
   "新会话": "New session",
   "API 凭据配置": "API credentials",
-  "切换到浅色主题": "Switch to light theme",
-  "切换到深色主题": "Switch to dark theme",
+  "主题": "Theme",
+  "浅色": "Light",
+  "深色": "Dark",
+  "浅色主题": "Light theme",
+  "深色主题": "Dark theme",
   "心流·驭光": "iFlow Harness",
   "连接中": "Connecting",
   "就绪": "Ready",
@@ -84,8 +87,8 @@ const en: Record<string, string> = {
   "执行中": "Running",
   "操作输出": "Output",
   // long-session memory eviction markers
-  "内容已释放": "Content released",
-  "附件图片已释放": "Attached images released",
+      "内容已释放": "Content released",
+      "加载剩余 {0} 行": "Load remaining {0} rows",  "附件图片已释放": "Attached images released",
   "为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留":
     "Released from webview memory to bound long-session usage; revert & export stay complete on the host",
   "为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录":

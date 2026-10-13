@@ -644,8 +644,18 @@ export function applyBlockPatch(
  * Only the WEBVIEW projection is trimmed: the host state stays complete
  * (revert / openDiff / export / transcript persistence all read it), and a
  * full snapshot on restore re-evicts deterministically. Blocks newer than
- * the last `keepRecent` entries are never touched (keepRecent exceeds the
- * max mount window, so every mounted card always has its payload).
+ * the keep window are never touched (the block cap exceeds the max mount
+ * window, so every mounted card of a normal session has its payload).
+ *
+ * TWO caps on the keep window, whichever binds first (second wave, 2026-10):
+ * a block COUNT (`keepRecent`) and a char BUDGET (`budgetChars`) measured by
+ * `payloadChars` over the tail. The count cap alone proved useless on the
+ * real bloat shape — a probed session had only 249 blocks but 23.4MB of
+ * payload (eight 590KB tool diffs at the 256KB cap × old+new), so "keep 200
+ * blocks" kept 22.2MB and the eviction was evicting nothing. The budget
+ * walks the tail newest-first and stops once the cumulative releasable
+ * payload would exceed it; `minKeep` floors the window so a session of only
+ * monster blocks still shows its newest turns.
  *
  * Pure and idempotent: already-evicted blocks carry no payload left, so a
  * second pass changes nothing and returns the SAME array/block references —
@@ -653,9 +663,56 @@ export function applyBlockPatch(
  * selectors or React memo. `evicted` marks the trimmed blocks so the UI can
  * render an honest "released" marker instead of an empty card.
  */
-export function evictBlockPayloads(blocks: readonly Block[], keepRecent: number): Block[] {
-  const keep = Math.max(0, Math.floor(keepRecent));
-  const cutoff = Math.max(0, blocks.length - keep);
+/** Char budget for the fully-kept tail (≈8MB of UTF-16 string heap). */
+export const EVICT_BUDGET_CHARS = 4_000_000;
+/** Tail blocks kept regardless of the budget (newest turns always render). */
+export const EVICT_MIN_KEEP = 20;
+
+/**
+ * Releasable payload size of one block in UTF-16 chars — exactly what
+ * `evictOneBlock` would free, so the budget walks the same metric it enforces
+ * (tool output + both diff texts, thought text, image data URLs, compression
+ * summary; recursive over SubAgent entries).
+ */
+export function payloadChars(block: Block): number {
+  switch (block.kind) {
+    case "tool":
+      return (
+        block.output.length +
+        (block.diff
+          ? (block.diff.oldText?.length ?? 0) + (block.diff.newText?.length ?? 0)
+          : 0)
+      );
+    case "thought":
+      return block.text.length;
+    case "user":
+      return block.images?.reduce((sum, url) => sum + url.length, 0) ?? 0;
+    case "compression":
+      return block.summary?.length ?? 0;
+    case "subagent":
+      return block.entries.reduce((sum, entry) => sum + payloadChars(entry), 0);
+    default:
+      return 0;
+  }
+}
+
+export function evictBlockPayloads(
+  blocks: readonly Block[],
+  keepRecent: number,
+  budgetChars: number = EVICT_BUDGET_CHARS,
+  minKeep: number = EVICT_MIN_KEEP,
+): Block[] {
+  const maxKeep = Math.max(0, Math.floor(keepRecent));
+  const floor = Math.min(blocks.length, Math.max(0, Math.floor(minKeep)));
+  let kept = 0;
+  let cum = 0;
+  while (kept < maxKeep && kept < blocks.length) {
+    const size = payloadChars(blocks[blocks.length - 1 - kept]!);
+    if (kept >= floor && cum + size > budgetChars) break;
+    cum += size;
+    kept++;
+  }
+  const cutoff = blocks.length - kept;
   if (cutoff === 0) return blocks as Block[];
   let changed = false;
   const out = blocks.slice();

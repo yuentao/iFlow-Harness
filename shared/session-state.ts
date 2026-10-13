@@ -24,6 +24,7 @@ import {
   type PendingPlanExitUi,
   type PendingProfileSwitchUi,
   type PendingQuestionsUi,
+  type PlanEntryUi,
   type SessionState,
   type SessionSummaryUi,
   type SessionUsageUi,
@@ -463,6 +464,43 @@ function appendAgentChunk(blocks: Block[], text: string): number | null {
   return first;
 }
 
+/**
+ * Todo-bookkeeping tools (todo_write / todo_read and the CLI's naming
+ * variants). Every successful todo_write is mirrored by the CLI into a
+ * `plan` session/update sent right after the completed tool_call_update
+ * (Wire behavior, CLI 0.5.19 bundle: AcpSession.handleTodoWriteToolResult
+ * maps rawInput.todos → {sessionUpdate:"plan",entries}), which renders as
+ * the unified TaskList card — a generic tool card for the same call is
+ * redundant noise, so the reducer drops it. todo_read only re-reads the
+ * same list (no plan update) and is dropped as pure bookkeeping.
+ */
+const TODO_TOOL_NAMES = new Set(["todowrite", "todoread", "todoupdate"]);
+function isTodoToolName(name: string | undefined): boolean {
+  if (!name) return false;
+  return TODO_TOOL_NAMES.has(name.toLowerCase().replace(/[-_\s]/g, ""));
+}
+
+/**
+ * todo_write's raw input carries the full list (`{todos:[{task,status,
+ * priority},…]}`). Mirror the CLI's plan-update mapping (bundle:
+ * handleTodoWriteToolResult — content=task||description, status defaults
+ * pending, priority defaults low) so transcripts restored from the CLI's
+ * jsonl render the same unified TaskList card as the live path. Null when
+ * the input carries no usable list — the call is then simply dropped.
+ */
+function planEntriesFromTodoInput(input: unknown): PlanEntryUi[] | null {
+  const todos = (input as { todos?: unknown } | undefined)?.todos;
+  if (!Array.isArray(todos)) return null;
+  return todos.map((item) => {
+    const todo = item as { task?: unknown; description?: unknown; status?: unknown; priority?: unknown };
+    return {
+      content: String(todo.task ?? todo.description ?? ""),
+      status: todo.status === "in_progress" || todo.status === "completed" ? todo.status : "pending",
+      priority: todo.priority === "high" || todo.priority === "medium" ? todo.priority : "low",
+    };
+  });
+}
+
 /** Apply one session update to a block list (top-level transcript or a
  * SubAgent's entries). Mutates the list. Returns the lowest mutated/appended
  * block index, or null when the update touched no block (P-1 change
@@ -479,6 +517,9 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
       // this notification and must be rendered.
       return update.content.type === "text" ? appendTextToLast(blocks, "user", update.content.text) ?? null : null;
     case "tool_call":
+      // Todo tools render ONLY as the unified TaskList card (see
+      // isTodoToolName) — never as a generic tool card.
+      if (isTodoToolName(update.toolName)) return null;
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -491,6 +532,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         diff: extractDiff(update.content),
       });
     case "tool_call_update":
+      if (isTodoToolName(update.toolName)) return null;
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -1552,6 +1594,14 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
             current.entries.push({ kind: "text", text: block.text });
           } else if (block?.type === "tool_use" && typeof block.id === "string") {
+            // Todo tools unify into the TaskList card (see isTodoToolName):
+            // todo_write renders as a plan block rebuilt from its raw input,
+            // todo_read is dropped — same as the live reducer path.
+            if (isTodoToolName(block.name)) {
+              const entries = planEntriesFromTodoInput(block.input);
+              if (entries) current.entries.push({ kind: "plan", entries });
+              continue;
+            }
             current.entries.push({
               kind: "tool",
               toolCallId: block.id,
@@ -1625,6 +1675,14 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
             ...(isSystemStatusText(block.text) ? { system: true } : {}),
           });
         } else if (block?.type === "tool_use" && typeof block.id === "string") {
+          // Todo tools unify into the TaskList card (see isTodoToolName):
+          // todo_write renders as a plan block rebuilt from its raw input,
+          // todo_read is dropped — same as the live reducer path.
+          if (isTodoToolName(block.name)) {
+            const entries = planEntriesFromTodoInput(block.input);
+            if (entries) blocks.push({ kind: "plan", entries });
+            continue;
+          }
           // The SubAgent-spawning `task` call renders as a SubAgent card and
           // adopts the sidechain run that follows it, if any.
           if (block.name === "task") {

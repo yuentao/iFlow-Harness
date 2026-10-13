@@ -1167,13 +1167,17 @@ const PENDING_TIMEOUT_MS = 10_000;
 /** Min interval between full re-sync requests (unanchorable blockPatch). */
 const RESYNC_THROTTLE_MS = 1_000;
 /**
- * Long-session memory bound (2026-10): the webview keeps FULL payloads only
- * for this many transcript-tail blocks; older blocks' heavy content (tool
- * output/diff, thought text, images, compression summaries) is released by
- * `evictBlockPayloads` and rendered with a "released" marker. Must exceed
- * MessageList's MAX_WINDOW (120 mounted blocks) so every mounted card always
- * has its payload; the host state stays complete regardless (revert /
- * export / persistence read the host, not this projection).
+ * Long-session memory bound (2026-10): the block-count cap of the webview's
+ * fully-kept transcript tail. Must exceed MessageList's MAX_WINDOW (120
+ * mounted blocks) so every mounted card of a NORMAL session has its payload.
+ * The count cap alone is not a memory bound — a probed bloat session had 249
+ * blocks but 23.4MB of payload (590KB tool diffs), so `evictBlockPayloads`
+ * also enforces a char BUDGET over the tail (EVICT_BUDGET_CHARS, with
+ * EVICT_MIN_KEEP newest blocks floored) and whichever cap binds first wins.
+ * Older blocks' heavy content (tool output/diff, thought text, images,
+ * compression summaries) is released and rendered with a "released" marker;
+ * the host state stays complete regardless (revert / export / persistence
+ * read the host, not this projection).
  */
 const EVICT_KEEP_BLOCKS = 200;
 
