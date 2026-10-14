@@ -18,6 +18,7 @@ import {
   Columns2,
   Eye,
   FilePen,
+  FileText,
   FolderInput,
   Globe,
   Loader2,
@@ -45,6 +46,7 @@ import type {
   ThoughtBlock,
   ToolBlock,
 } from "../../../shared/messages";
+import { isPlanMode, splitSystemPromptSections } from "../../../shared/messages";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -775,6 +777,106 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
 }
 
 /**
+ * Auto-injected-context card (first prompt of a session): what the model
+ * actually sees beyond the typed text — the assembled system instruction, the
+ * joined hierarchical memory, each context file, with FULL bodies (the
+ * CLI-side acp-context-report Mod surfaces them). Folded by default; the
+ * header alone lists what was injected.
+ */
+function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injected" }> }) {
+  const [open, setOpen] = useState(false);
+  const systemCount = block.items.filter((i) => i.kind === "system").length;
+  const memoryCount = block.items.filter((i) => i.kind === "memory").length;
+  const fileCount = block.items.filter((i) => i.kind === "context-file").length;
+  const evicted = block.evicted === true;
+  return (
+    <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
+      >
+        <Caret open={open} />
+        <span className="min-w-0 truncate">{block.notice}</span>
+        {block.tokens !== undefined && (
+          <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
+            ≈ {block.tokens.toLocaleString()} tokens
+          </span>
+        )}
+        {systemCount > 0 && <Chip tone="info">{t("系统提示词")}</Chip>}
+        {memoryCount > 0 && <Chip tone="muted">{t("记忆")}</Chip>}
+        {fileCount > 0 && (
+          <Chip tone="muted">
+            {t("上下文文件")} {fileCount}
+          </Chip>
+        )}
+      </button>
+      <Collapse open={open}>
+        <div className="border-t border-border/60 px-3 py-2">
+          {evicted && (
+            <div className="mb-2 text-[11px] opacity-60">
+              <Info className="mr-1 inline size-3" />
+              {t("内容已释放")}
+            </div>
+          )}
+          <div className="flex flex-col gap-3">
+            {block.items.map((item, idx) =>
+              item.kind === "system" && item.content ? (
+                <SystemPromptSections key={idx} content={item.content} />
+              ) : (
+                <div key={idx} className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">
+                    <span className="shrink-0">{item.label}</span>
+                    {item.path && (
+                      <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">{item.path}</span>
+                    )}
+                    <span className="shrink-0 text-muted-foreground">{t("{0} 字符", item.content.length)}</span>
+                  </div>
+                  {item.content && (
+                    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                      {item.content}
+                    </pre>
+                  )}
+                </div>
+              )
+            )}
+          </div>
+        </div>
+      </Collapse>
+    </div>
+  );
+}
+
+/** The system-prompt body, visually split at the CLI's hierarchical-memory
+ * markers: core instruction, global memory, then one segment per inlined
+ * context file. Splitting is pure display (the stored body stays verbatim). */
+function SystemPromptSections({ content }: { content: string }) {
+  const sections = useMemo(() => (content ? splitSystemPromptSections(content) : []), [content]);
+  if (sections.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-3">
+      {sections.map((s, i) => (
+        <div key={i} className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">
+            {s.kind === "context-file" ? (
+              <>
+                <FileText className="size-3 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate font-mono text-[10.5px]">{s.path}</span>
+              </>
+            ) : (
+              <span className="shrink-0">{s.kind === "core" ? t("核心提示词") : t("记忆")}</span>
+            )}
+            <span className="shrink-0 text-muted-foreground">{t("{0} 字符", s.content.length)}</span>
+          </div>
+          <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            {s.content}
+          </pre>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * Memoized per-block renderer (P4): the default shallow compare anchors on
  * the block reference. With P-1 block patches the unchanged prefix keeps its
  * references (`applyBlockPatch` reuses `blocks.slice(0, tailStart)`), so
@@ -874,6 +976,8 @@ const BlockView = memo(function BlockView({
       return <SubAgentCard block={block} />;
     case "compression":
       return <CompressionCard block={block} />;
+    case "injected":
+      return <InjectedContextCard block={block} />;
     case "plan":
       return <TaskList block={block} />;
   }
@@ -1214,6 +1318,23 @@ function MessageListInner({ state }: { state: SessionState }) {
     useChat.getState().send({ type: "regenerate" });
   };
 
+  // Context-occupancy warning (host persistent pill with the 立即压缩 action).
+  // When the sticky streaming pill is visible the warning MERGES into it
+  // (one indicator instead of two stacked pills); the Toasts stack then skips
+  // this toast. Selector returns a stable reference while the toast list is
+  // unchanged, so this only re-renders the list when a warning arrives/leaves.
+  const compressWarnToast = useChat((s) => s.toasts.find((x) => x.action?.actionId === "compress"));
+  const streamingPillVisible =
+    (state.status === "streaming" || state.initializing) &&
+    !state.pendingApproval &&
+    !state.replaying &&
+    visibleBlocks.length > 0;
+  // The warning only rides the pill during a real generating turn: during
+  // initializing the pill says 正在创建新会话, and during a compress turn it
+  // says 正在压缩 — telling the user to 建议压缩 while compressing is a lie.
+  const mergedWarn =
+    state.status === "streaming" && !state.compressing ? compressWarnToast : undefined;
+
   return (
     <div className="relative min-h-0 flex-1">
       <div className="message-scroll h-full overflow-y-auto px-3 pb-3.5 pt-3" ref={scrollRef} onScroll={onScroll}>
@@ -1333,20 +1454,45 @@ function MessageListInner({ state }: { state: SessionState }) {
               </div>
             </div>
           ))}
-          {(state.status === "streaming" || state.initializing) && !state.pendingApproval && !state.replaying && visibleBlocks.length > 0 && (
+          {streamingPillVisible && (
             // Sticky to the bottom of the scroll viewport so the indicator stays
             // visible even while new content streams in above it.
             // pointer-events-none: the composer's upward-opening mode dropdown
-            // expands into this area — the pill must not steal its clicks.
+            // expands into this area — the pill must not steal its clicks. The
+            // merged-warning variant re-enables pointer events for its button.
             // P2-19: sticky offset rides above a mounted pending card
             // (--pending-card-h) instead of being covered by it.
             <div
-              className="pointer-events-none sticky z-10 flex justify-center py-1.5"
+              className={`sticky z-10 flex justify-center py-1.5 ${mergedWarn ? "" : "pointer-events-none"}`}
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
             >
-              <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-[11.5px] font-medium text-primary-foreground shadow-lg">
+              <div
+                className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-[11.5px] font-medium shadow-lg ${
+                  mergedWarn ? "border border-warning/50 bg-warning/15 text-warning backdrop-blur-md" : "bg-primary text-primary-foreground"
+                }`}
+              >
                 <Loader2 className="size-3 animate-spin" />
-                {state.initializing ? t("正在创建新会话…") : t("正在生成")}
+                {state.initializing
+                  ? t("正在创建新会话…")
+                  : mergedWarn
+                    ? mergedWarn.message
+                    : state.compressing
+                      ? t("正在压缩")
+                      : isPlanMode(state.modes)
+                        ? t("正在规划")
+                        : t("正在生成")}
+                {mergedWarn?.action && (
+                  <button
+                    onClick={() =>
+                      useChat
+                        .getState()
+                        .send({ type: "toastAction", actionId: mergedWarn.action!.actionId, toastId: mergedWarn.toastId })
+                    }
+                    className="press ml-0.5 shrink-0 rounded-md border border-current/50 px-1.5 py-0.5 text-[11px] font-semibold opacity-90 transition-opacity hover:opacity-100"
+                  >
+                    {mergedWarn.action.label}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1381,7 +1527,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           {t("回到最新")}
         </button>
       )}
-      <Toasts />
+      <Toasts skipToastId={streamingPillVisible ? mergedWarn?.id : undefined} />
     </div>
   );
 }
@@ -1391,9 +1537,10 @@ function MessageListInner({ state }: { state: SessionState }) {
  * auto-dismiss on a timer and dismiss early on click; countdown retries and
  * display-only/persistent pills are not clickable — persistent ones stay
  * until the host removes them (dismissToast). */
-function Toasts() {
+function Toasts({ skipToastId }: { skipToastId?: number }) {
   const toasts = useChat((s) => s.toasts);
-  if (toasts.length === 0) return null;
+  const visible = skipToastId === undefined ? toasts : toasts.filter((x) => x.id !== skipToastId);
+  if (visible.length === 0) return null;
   return (
     // P2-19: bottom-anchored pending cards (approval / plan / question, z-30)
     // used to cover this stack. --pending-card-h (App's ResizeObserver on the

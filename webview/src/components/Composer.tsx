@@ -24,7 +24,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand } from "../../../shared/messages";
+import { collectUserPromptTexts, isPlanMode, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { CANVAS_BTN, ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
@@ -180,6 +180,12 @@ function QueueStrip() {
   // P1-8: the 3s armed pill was the product's second confirm language;
   // destructive actions now all share the modal ConfirmDialog.
   const [confirmClear, setConfirmClear] = useState(false);
+  // The strip collapses to a one-line summary by default: the transcript echo
+  // bubble (P1-11) already shows the queued content right above the streaming
+  // pill, so an always-expanded entry list stacked a second copy of the same
+  // text and crowded the bottom area mid-turn. Click the header to manage
+  // entries (interrupt / take back / reorder / delete).
+  const [expanded, setExpanded] = useState(false);
   if (queue.length === 0 && !paused) return null;
   const act = (action: "edit" | "delete" | "move" | "sendNow" | "resume" | "clear", id?: string, delta?: number): void => {
     send({ type: "queueAction", action, id, delta });
@@ -188,11 +194,22 @@ function QueueStrip() {
     "rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground";
   return (
     <div className="mb-1.5 overflow-hidden rounded-xl border border-border bg-surface/70 shadow-card">
-      <div className="flex items-center gap-1.5 border-b border-border/60 px-2.5 py-1">
-        <ListOrdered className="size-3 shrink-0 text-primary" />
-        <span className="text-[11px] font-medium text-foreground">
-          {t("队列 · {0} 条待发送", queue.length)}
-        </span>
+      <div className={`flex items-center gap-1.5 px-2.5 py-1 ${expanded && queue.length > 0 ? "border-b border-border/60" : ""}`}>
+        <button
+          type="button"
+          className="flex min-w-0 items-center gap-1.5 rounded disabled:cursor-default"
+          title={expanded ? t("收起") : t("展开")}
+          disabled={queue.length === 0}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <ListOrdered className="size-3 shrink-0 text-primary" />
+          <span className="text-[11px] font-medium text-foreground">
+            {t("队列 · {0} 条待发送", queue.length)}
+          </span>
+          {queue.length > 0 && (
+            <ChevronDown className={`size-3 shrink-0 text-muted-foreground transition-transform duration-150 ${expanded ? "rotate-180" : ""}`} />
+          )}
+        </button>
         {paused && (
           <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning">
             <AlertTriangle className="size-2.5" /> {t("已暂停")}
@@ -219,7 +236,7 @@ function QueueStrip() {
           )}
         </div>
       </div>
-      {queue.length > 0 && (
+      {expanded && queue.length > 0 && (
         <ul className="max-h-32 overflow-y-auto">
           {queue.map((q, i) => (
             <li
@@ -289,6 +306,7 @@ export function Composer() {
   const status = useChat((s) => s.state?.status ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  const compressing = useChat((s) => s.state?.compressing ?? false);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
@@ -1352,7 +1370,7 @@ export function Composer() {
         <textarea
           ref={taRef}
           value={text}
-                      placeholder={enqueueMode ? t("生成中 · Enter 排队发送") : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+                      placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {

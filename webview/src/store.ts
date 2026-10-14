@@ -208,6 +208,19 @@ function createMockHost(): HostApi {
       ],
     },
     {
+      kind: "injected",
+      notice: "本次请求自动注入了 1 项内容：系统提示词",
+      tokens: 28960,
+      items: [
+        {
+          kind: "system",
+          label: "系统提示词",
+          content:
+            "You are iFlow CLI, an interactive CLI agent...\n（mock：核心提示词，完整正文由 acp-context-report Mod 捕获）\n\n---\n\n--- Context from: AGENTS.md ---\n# AGENTS.md\n\n项目概览…（mock：层级上下文文件正文内嵌于系统提示词尾部）\n--- End of Context from: AGENTS.md ---",
+        },
+      ],
+    },
+    {
       kind: "compression",
       notice: "上下文已压缩：98134 → 7855 tokens",
       newTokenCount: 7855,
@@ -435,6 +448,7 @@ function createMockHost(): HostApi {
     pendingProfileSwitch: null as SessionState["pendingProfileSwitch"],
     replaying: false,
     initializing: false,
+    compressing: false,
   };
   // M3 demo: start unauthenticated so the setup banner shows; saved state
   // mirrors what the real host stores (masked, never the raw key).
@@ -1368,6 +1382,7 @@ export const useChat = create<ChatStore>((set, get) => ({
             displayOnly: msg.displayOnly,
             toastId: msg.toastId,
             persistent,
+            action: msg.action,
           },
         ],
       }));

@@ -31,8 +31,9 @@ import { QuestionCard } from "./components/QuestionCard";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
+import { isPlanMode } from "../../shared/messages";
 
-function statusChip(status: AgentStatus) {
+function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
     case "connecting":
       return (
@@ -53,7 +54,8 @@ function statusChip(status: AgentStatus) {
     case "streaming":
       return (
         <Chip tone="primary">
-          <Loader2 className="size-2.5 animate-spin" /> {t("生成中")}
+          <Loader2 className="size-2.5 animate-spin" />{" "}
+          {compressing ? t("正在压缩") : plan ? t("正在规划") : t("生成中")}
         </Chip>
       );
     case "error":
@@ -161,6 +163,8 @@ export function App() {
   const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  const compressing = useChat((s) => s.state?.compressing ?? false);
+  const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
@@ -255,14 +259,19 @@ export function App() {
     if (pendingQuestions) return t("有待回答问题需要回答");
     if (pendingProfileSwitch) return t("等待选择切换 API 配置的会话处理方式");
     if (status === "connecting") return t("正在连接 iFlow…");
-    if (status === "streaming") return t("正在生成回复…");
+    if (status === "streaming")
+      return compressing
+        ? t("正在压缩上下文…")
+        : isPlanMode(modes)
+          ? t("正在规划…")
+          : t("正在生成回复…");
     if (status === "idle") {
       if (errorMessage) return errorMessage;
       if (stopReason === "cancelled") return t("已停止生成");
       return t("已就绪");
     }
     return "";
-  }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions, pendingProfileSwitch]);
+  }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions, pendingProfileSwitch, compressing, modes]);
 
   // P0-3: connecting elapsed timer. A wedged handshake used to strand the
   // splash with no feedback and no escape hatch; the live seconds plus a
@@ -536,7 +545,7 @@ export function App() {
               <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
             </Chip>
           ) : (
-            statusChip(status)
+            statusChip(status, compressing, isPlanMode(modes))
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <button

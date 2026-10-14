@@ -8,13 +8,16 @@ import type {
   AuthUiState,
   Block,
   HostToWebview,
+  InjectedContextItem,
   SessionState,
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
 import {
   appendApprovalResolution,
+  appendInjectedContext,
   applySessionUpdate,
   attachSynthesizedDiff,
+  beginCompressTurn,
   beginUserPrompt,
   clearPendingQuestions,
   closeOpenSubAgents,
@@ -23,6 +26,7 @@ import {
   clearPendingPlanExit,
   clearPendingProfileSwitch,
   deleteUserMessageById,
+  endCompressTurn,
   markSubAgentStopped,
   markToolReverted,
   markToolHunkDecisions,
@@ -134,6 +138,14 @@ export class SessionStore {
 
   userPrompt(text: string, images?: string[], files?: { name: string; path: string }[]): number {
     const index = beginUserPrompt(this.state, text, images, files);
+    this.noteMutationIndex(index);
+    this.flush();
+    return index;
+  }
+
+  /** Insert the auto-injected-context card (first prompt of a session). */
+  injectedContext(items: InjectedContextItem[]): number {
+    const index = appendInjectedContext(this.state, items);
     this.noteMutationIndex(index);
     this.flush();
     return index;
@@ -411,6 +423,34 @@ export class SessionStore {
   /** True while `session/new` is in flight; the webview locks switches. */
   setInitializing(initializing: boolean): void {
     this.state.initializing = initializing;
+    this.flush();
+  }
+
+  /** True while a `/compress` turn runs (overflow / proactive / manual):
+   * the webview shows the streaming indicator as 正在压缩. Idempotent: a
+   * same-value call must not push — the manual/proactive paths pair this
+   * with beginCompressTurn and would otherwise emit a stale intermediate. */
+  setCompressing(compressing: boolean): void {
+    if (this.state.compressing === compressing) return;
+    this.state.compressing = compressing;
+    this.flush();
+  }
+
+  /**
+   * Open a host-driven `/compress` turn that records no user block (manual
+   * pill action / turn-end proactive): the session streams so the webview
+   * renders the 正在压缩 pill and the busy lock holds. The overflow retry
+   * path needs none of this — its original prompt already streamed.
+   */
+  beginCompressTurn(): void {
+    beginCompressTurn(this.state);
+    this.flush();
+  }
+
+  /** Failure-path close for `beginCompressTurn` (success goes through
+   * `promptCompleted` like any other turn). */
+  endCompressTurn(): void {
+    endCompressTurn(this.state);
     this.flush();
   }
 

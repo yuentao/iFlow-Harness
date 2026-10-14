@@ -10,6 +10,7 @@ import { SessionStore } from "../src/panel/store.js";
 import {
   applyBlockPatch,
   initialSessionState,
+  isPlanMode,
   type Block,
   type HostToWebview,
   type SessionState,
@@ -482,6 +483,75 @@ describe("SessionStore toast lifecycle (persistent display-only notices)", () =>
     expect(msg.type).toBe("dismissToast");
     if (msg.type !== "dismissToast") throw new Error("unreachable");
     expect(msg.toastId).toBe(id);
+  });
+});
+
+describe("SessionStore.setCompressing (metadata-only tail channel)", () => {
+  it("rides the blockPatch tail without re-sending blocks", () => {
+    const { store, messages } = makeStore();
+    store.markConnected(); // v1 full snapshot
+    store.userPrompt("问题");
+    store.pushSnapshot();
+    const before = messages.length;
+    store.setCompressing(true);
+    const msg = messages[before]!;
+    expect(msg.type).toBe("blockPatch");
+    if (msg.type !== "blockPatch") throw new Error("unreachable");
+    expect(msg.blocks).toEqual([]);
+    expect(msg.tail.compressing).toBe(true);
+    store.setCompressing(false);
+    const off = messages[before + 1]!;
+    if (off.type !== "blockPatch") throw new Error("unreachable");
+    expect(off.tail.compressing).toBe(false);
+    // Idempotent: a same-value call must not push (the manual/proactive
+    // paths pair this with beginCompressTurn's own flush).
+    const len = messages.length;
+    store.setCompressing(false);
+    expect(messages.length).toBe(len);
+  });
+});
+
+describe("SessionStore.beginCompressTurn / endCompressTurn (silent /compress turns)", () => {
+  it("flips status + compressing on the tail, then closes back to idle", () => {
+    const { store, messages } = makeStore();
+    store.markConnected(); // v1 full snapshot
+    store.userPrompt("问题");
+    store.pushSnapshot();
+    store.setCompressing(false);
+    store.promptCompleted("end_turn"); // back to idle like a settled turn
+    const before = messages.length;
+    store.beginCompressTurn();
+    const on = messages[before]!;
+    if (on.type !== "blockPatch") throw new Error("unreachable");
+    expect(on.blocks).toEqual([]);
+    expect(on.tail.status).toBe("streaming");
+    expect(on.tail.compressing).toBe(true);
+    store.endCompressTurn();
+    const off = messages[before + 1]!;
+    if (off.type !== "blockPatch") throw new Error("unreachable");
+    expect(off.tail.status).toBe("idle");
+  });
+});
+
+describe("isPlanMode", () => {
+  const modes = (currentModeId: string, availableModes: Array<{ id: string; kind?: string }>) => ({
+    currentModeId,
+    availableModes,
+  });
+
+  it("matches by kind regardless of id", () => {
+    expect(isPlanMode(modes("m-plan", [{ id: "m-plan", kind: "plan" }, { id: "m-smart", kind: "smart" }]))).toBe(true);
+    expect(isPlanMode(modes("m-smart", [{ id: "m-plan", kind: "plan" }, { id: "m-smart", kind: "smart" }]))).toBe(false);
+  });
+
+  it("falls back to the literal id when kind is absent", () => {
+    expect(isPlanMode(modes("plan", [{ id: "plan" }, { id: "default" }]))).toBe(true);
+    expect(isPlanMode(modes("default", [{ id: "plan" }, { id: "default" }]))).toBe(false);
+  });
+
+  it("null/unknown mode is not plan", () => {
+    expect(isPlanMode(null)).toBe(false);
+    expect(isPlanMode(modes("missing", [{ id: "plan", kind: "plan" }]))).toBe(false);
   });
 });
 

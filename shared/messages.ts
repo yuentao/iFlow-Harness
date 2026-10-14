@@ -208,7 +208,100 @@ export interface CompressionBlock extends BlockBase {
   newTokenCount: number | null;
 }
 
-export type Block = TextBlock | ThoughtBlock | UserBlock | ToolBlock | SubAgentBlock | CompressionBlock | PlanBlock;
+/** One entry of an InjectedContextBlock: a source auto-injected into the
+ * session's requests, with its FULL body (the panel promises complete
+ * transparency — the CLI-side acp-context-report Mod surfaces what the wire
+ * never carries). */
+export interface InjectedContextItem {
+  /** Source kind: the CLI's assembled system instruction, the joined
+   * hierarchical memory, or one context file (AGENTS.md/IFLOW.md/...). */
+  kind: "system" | "memory" | "context-file";
+  /** Display name, e.g. "系统提示词", "AGENTS.md". */
+  label: string;
+  /** Absolute path for file-backed sources (absent for the system prompt). */
+  path?: string;
+  /** Full body as the model receives it. */
+  content: string;
+}
+
+/**
+ * Auto-injected context explainer (inserted before the FIRST user prompt of
+ * a session): the CLI silently prepends its system instruction, the joined
+ * hierarchical memory and the context files to every request. The host
+ * reads the acp-context-report Mod's snapshot (IFLOW_HARNESS_CONTEXT_FILE,
+ * written at startChat — i.e. the moment the request context is assembled)
+ * and inserts this card so the user always sees exactly what the model saw.
+ * Folded by default; the header lists what was injected. Falls back to a
+ * disk-side collection (memory.md + context files, system prompt marked
+ * unavailable) when the bundled CLI carries no Mod (plain upstream CLI).
+ */
+export interface InjectedContextBlock extends BlockBase {
+  kind: "injected";
+  /** One-line summary, e.g. "本次请求自动注入了 3 项内容：系统提示词、记忆、1 个上下文文件". */
+  notice: string;
+  items: InjectedContextItem[];
+  /** Estimated tokens of ALL injected bodies (host-side BPE over the full
+   * content). Shown on the collapsed header so the user sees the fixed
+   * per-request cost without expanding; survives payload eviction. */
+  tokens?: number;
+}
+
+/** One visual segment of a system prompt (see splitSystemPromptSections). */
+export interface InjectedPromptSection {
+  /** "core" = the CLI's core instruction; "memory" = global memory.md body
+   * (between P0e's `---` separator and the first file block); "context-file"
+   * = one hierarchical context file inlined by the memory joiner. */
+  kind: "core" | "memory" | "context-file";
+  /** File path for context-file sections; "" for core/memory. */
+  path: string;
+  content: string;
+}
+
+/**
+ * Split the reported system prompt into visual sections. Pure display helper
+ * — the block still stores the single verbatim body (transparency promise);
+ * this only slices it for rendering. Format provenance (CLI 0.5.19 bundle):
+ *   - P0e returns `${core}\n\n---\n${userMemory.trim()}`
+ *   - the memory joiner Gva() emits one block per context file:
+ *     `--- Context from: <rel-path> ---\r\n<body>\r\n--- End of Context from: <rel-path> ---`
+ *     joined by blank lines; anything outside the markers is global memory.md.
+ * Text without markers (fallback-collected items, evicted bodies) returns a
+ * single core section, so callers can render uniformly.
+ */
+export function splitSystemPromptSections(text: string): InjectedPromptSection[] {
+  const first = text.indexOf("--- Context from:");
+  if (first === -1) return [{ kind: "core", path: "", content: text }];
+  // P0e's separator between the core prompt and the memory region: the last
+  // standalone `---` line before the first file marker.
+  const before = text.slice(0, first);
+  const sep = before.lastIndexOf("\n---\n");
+  const coreEnd = sep === -1 ? 0 : sep;
+  const sections: InjectedPromptSection[] = [];
+  const core = text.slice(0, coreEnd).trim();
+  if (core) sections.push({ kind: "core", path: "", content: core });
+  const re = /--- Context from: ([\s\S]*?) ---\r?\n([\s\S]*?)\r?\n--- End of Context from:[^\r\n]*---/g;
+  let lastEnd = sep === -1 ? 0 : sep + "\n---\n".length;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const lead = text.slice(lastEnd, m.index).trim();
+    if (lead) sections.push({ kind: "memory", path: "", content: lead });
+    sections.push({ kind: "context-file", path: m[1]!.trim(), content: m[2]! });
+    lastEnd = m.index + m[0].length;
+  }
+  const tail = text.slice(lastEnd).trim();
+  if (tail) sections.push({ kind: "core", path: "", content: tail });
+  return sections;
+}
+
+export type Block =
+  | TextBlock
+  | ThoughtBlock
+  | UserBlock
+  | ToolBlock
+  | SubAgentBlock
+  | CompressionBlock
+  | InjectedContextBlock
+  | PlanBlock;
 
 // ---------------------------------------------------------------------------
 // Full session state (owned by Extension Host store)
@@ -467,6 +560,10 @@ export interface SessionState {
   replaying: boolean;
   /** True while a new session is being created (host busy; UI locks switches). */
   initializing: boolean;
+  /** True while the host drives a `/compress` turn (overflow auto-compress,
+   * turn-end proactive compress, or the 立即压缩 pill action). The webview
+   * renders the streaming indicator as 正在压缩 instead of plain generating. */
+  compressing: boolean;
   /**
    * Monotonic counter of transcript-block mutations, stamped by the host on
    * every full snapshot. Anchors `blockPatch` messages (P-1 incremental
@@ -576,6 +673,7 @@ export function initialSessionState(): SessionState {
     activeSessionId: null,
     replaying: false,
     initializing: false,
+    compressing: false,
     usage: emptySessionUsage(),
     queue: [],
     queuePaused: false,
@@ -587,6 +685,20 @@ export function initialSessionState(): SessionState {
  * with no content yet shows ↑0 ↓0 rather than hiding the indicator). */
 export function emptySessionUsage(): SessionUsageUi {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+}
+
+/**
+ * Whether the session currently sits in Plan mode. Matched by the mode's
+ * `kind` (the CLI's semantic tag, probed CLI 0.5.19 `session/new` `_meta`);
+ * falls back to the literal id "plan" for agents that omit `kind`. Shared by
+ * host (status bar) and webview (streaming indicator wording) so both agree
+ * on when to say 规划 instead of 生成.
+ */
+export function isPlanMode(modes: SessionModeState | null | undefined): boolean {
+  if (!modes) return false;
+  const current = modes.availableModes.find((m) => m.id === modes.currentModeId);
+  if (!current) return false;
+  return current.kind === "plan" || (current.kind === undefined && current.id === "plan");
 }
 
 /** One fuzzy-search file hit for the @-mention popup (M5). */
@@ -681,6 +793,8 @@ export function payloadChars(block: Block): number {
       return block.images?.reduce((sum, url) => sum + url.length, 0) ?? 0;
     case "compression":
       return block.summary?.length ?? 0;
+    case "injected":
+      return block.items.reduce((sum, item) => sum + item.content.length, 0);
     case "subagent":
       return block.entries.reduce((sum, entry) => sum + payloadChars(entry), 0);
     default:
@@ -736,6 +850,14 @@ function evictOneBlock(block: Block): Block {
     case "compression": {
       if (block.summary === null) return block;
       return { ...block, summary: null, evicted: true };
+    }
+    case "injected": {
+      if (block.items.every((item) => item.content === "")) return block;
+      return {
+        ...block,
+        items: block.items.map((item) => ({ ...item, content: "" })),
+        evicted: true,
+      };
     }
     case "subagent": {
       let entriesChanged = false;

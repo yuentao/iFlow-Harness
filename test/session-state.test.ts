@@ -33,10 +33,13 @@ import {
   setSessions,
   beginReplay,
   endReplay,
+  beginCompressTurn,
+  endCompressTurn,
   parseTranscriptJsonl,
   toAgentPromptText,
+  appendInjectedContext,
 } from "../shared/session-state";
-import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, type Block, type SessionState, type ToolBlock } from "../shared/messages";
+import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, splitSystemPromptSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -2415,5 +2418,141 @@ describe("evictBlockPayloads (webview long-session memory bound)", () => {
         entries: [tool("n"), { kind: "thought", id: "nt", text: "deep" }],
       }),
     ).toBe("some output".length + 2 + 4);
+  });
+
+  it("releases injected-context bodies and counts them in the budget", () => {
+    const blocks: Block[] = [
+      {
+        kind: "injected",
+        id: "inj",
+        notice: "n",
+        tokens: 123,
+        items: [
+          { kind: "system", label: "系统提示词", content: "sys prompt body" },
+          { kind: "context-file", label: "AGENTS.md", path: "/w/AGENTS.md", content: "file body" },
+        ],
+      },
+      tool("keep"),
+    ];
+    expect(payloadChars(blocks[0]!)).toBe("sys prompt body".length + "file body".length);
+    const out = evictBlockPayloads(blocks, 1);
+    const inj = out[0] as Extract<Block, { kind: "injected" }>;
+    expect(inj.evicted).toBe(true);
+    expect(inj.items.every((i) => i.content === "")).toBe(true);
+    // The token chip on the collapsed header survives body eviction.
+    expect(inj.tokens).toBe(123);
+    // Identity survives eviction: labels/paths keep the card readable.
+    expect(inj.items[0]!.label).toBe("系统提示词");
+    expect(inj.items[1]!.path).toBe("/w/AGENTS.md");
+    expect(inj.notice).toBe("n");
+    // Idempotent: a second pass finds nothing to release.
+    expect(evictBlockPayloads(out, 1)).toBe(out);
+  });
+});
+
+describe("appendInjectedContext (auto-injected context card)", () => {
+  const items = () => [
+    { kind: "system" as const, label: "系统提示词", content: "full system prompt" },
+    { kind: "memory" as const, label: "记忆", content: "joined memory" },
+    { kind: "context-file" as const, label: "AGENTS.md", path: "/w/AGENTS.md", content: "# rules" },
+  ];
+
+  it("inserts BEFORE the first user block (the card reads as pre-request context)", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "hello");
+    const index = appendInjectedContext(state, items());
+    expect(state.blocks.map((b) => b.kind)).toEqual(["injected", "user"]);
+    expect(index).toBe(0);
+  });
+
+  it("appends when no user block exists yet", () => {
+    const state = initialSessionState();
+    const index = appendInjectedContext(state, items());
+    expect(state.blocks).toHaveLength(1);
+    expect(index).toBe(0);
+  });
+
+  it("composes the notice from the item kinds and mints a stable id", () => {
+    const state = initialSessionState();
+    appendInjectedContext(state, items());
+    const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
+    expect(block.id).toBeTruthy();
+    expect(block.notice).toContain("3");
+    expect(block.notice).toContain("系统提示词");
+    expect(block.notice).toContain("记忆");
+    expect(block.notice).toContain("1 个上下文文件");
+    expect(block.tokens).toBe(
+      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules"),
+    );
+  });
+
+  it("excludes injected bodies from the transcript token estimate", () => {
+    const state = initialSessionState();
+    appendInjectedContext(state, items());
+    beginUserPrompt(state, "hi");
+    const usage = estimateSessionUsage(state.blocks);
+    // Only the user turn counts; the injected system prompt/memory do not.
+    expect(usage.inputTokens).toBe(estimateTokens("hi"));
+  });
+});
+
+describe("splitSystemPromptSections (injected card visual segments)", () => {
+  // Wire format proven from the CLI 0.5.19 bundle: P0e joins core and memory
+  // with "\n\n---\n\n"; the memory joiner Gva emits "\r\n"-delimited blocks.
+  const prompt = [
+    "You are iFlow CLI...",
+    "",
+    "---",
+    "",
+    "global memory body",
+    "",
+    "--- Context from: AGENTS.md ---\r\n# repo rules\r\nmore rules\r\n--- End of Context from: AGENTS.md ---",
+    "",
+    "--- Context from: docs/IFLOW.md ---\r\nnested doc\r\n--- End of Context from: docs/IFLOW.md ---",
+  ].join("\n");
+
+  it("splits core, global memory and each context file", () => {
+    const sections = splitSystemPromptSections(prompt);
+    expect(sections.map((s) => s.kind)).toEqual(["core", "memory", "context-file", "context-file"]);
+    expect(sections[0]!.content).toBe("You are iFlow CLI...");
+    expect(sections[1]!.content).toBe("global memory body");
+    expect(sections[2]).toMatchObject({ path: "AGENTS.md", content: "# repo rules\r\nmore rules" });
+    expect(sections[3]).toMatchObject({ path: "docs/IFLOW.md", content: "nested doc" });
+  });
+
+  it("omits the memory segment when the prompt has no global memory", () => {
+    const noMemory = "core\n\n---\n\n--- Context from: A.md ---\nbody\n--- End of Context from: A.md ---";
+    expect(splitSystemPromptSections(noMemory).map((s) => s.kind)).toEqual(["core", "context-file"]);
+  });
+
+  it("returns a single core segment for marker-free bodies", () => {
+    expect(splitSystemPromptSections("plain fallback text")).toEqual([
+      { kind: "core", path: "", content: "plain fallback text" },
+    ]);
+  });
+});
+
+describe("beginCompressTurn / endCompressTurn (silent /compress bridge turns)", () => {
+  it("streams the session + stamps compressing without touching blocks", () => {
+    const state: SessionState = initialSessionState();
+    const blocksBefore = state.blocks;
+    beginCompressTurn(state);
+    expect(state.status).toBe("streaming");
+    expect(state.compressing).toBe(true);
+    expect(state.stopReason).toBeNull();
+    expect(state.errorMessage).toBeNull();
+    expect(state.blocks).toBe(blocksBefore);
+  });
+
+  it("endCompressTurn only closes a still-streaming session", () => {
+    const state: SessionState = initialSessionState();
+    beginCompressTurn(state);
+    endCompressTurn(state);
+    expect(state.status).toBe("idle");
+    // An errored/replaced state is never stomped back to idle.
+    const errored: SessionState = initialSessionState();
+    errored.status = "error";
+    endCompressTurn(errored);
+    expect(errored.status).toBe("error");
   });
 });

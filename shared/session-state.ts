@@ -19,6 +19,7 @@ import {
   initialSessionState,
   normalizeUserPromptText,
   type Block,
+  type InjectedContextItem,
   type ModelInfoUi,
   type PendingApprovalUi,
   type PendingPlanExitUi,
@@ -1045,6 +1046,44 @@ export function beginUserPrompt(
   return state.blocks.length - 1;
 }
 
+/**
+ * Insert the auto-injected-context card (first prompt of a session). The
+ * host collects the items (acp-context-report Mod snapshot, or the disk
+ * fallback when the bundled CLI carries no Mod) and this reducer composes
+ * the block with its one-line notice. Returns the inserted index for the
+ * store's `mutatedFrom` incremental path.
+ */
+export function appendInjectedContext(
+  state: SessionState,
+  items: InjectedContextItem[],
+): number {
+  const parts: string[] = [];
+  if (items.some((i) => i.kind === "system")) parts.push(l10n.t("系统提示词"));
+  if (items.some((i) => i.kind === "memory")) parts.push(l10n.t("记忆"));
+  const fileCount = items.filter((i) => i.kind === "context-file").length;
+  if (fileCount > 0) parts.push(l10n.t("{0} 个上下文文件", String(fileCount)));
+  const block: Block = {
+    kind: "injected",
+    id: nextBlockId(),
+    notice: l10n.t("本次请求自动注入了 {0} 项内容：{1}", String(items.length), parts.join("、")),
+    items,
+    // Fixed per-request overhead the model carries before the user's text —
+    // shown on the collapsed header (and kept after payload eviction).
+    tokens: items.reduce((sum, item) => sum + estimateTokens(item.content), 0),
+  };
+  // The host inserts this card asynchronously (it polls the Mod report), so
+  // it can arrive AFTER the user block it explains. Insert before the first
+  // user block — the card always reads as "here is what the model will see",
+  // never as a post-hoc annotation of the message.
+  const firstUser = state.blocks.findIndex((b) => b.kind === "user");
+  if (firstUser === -1) {
+    state.blocks.push(block);
+    return state.blocks.length - 1;
+  }
+  state.blocks.splice(firstUser, 0, block);
+  return firstUser;
+}
+
 /** CJK-aware fallback used only if the real tokenizer fails to load. */
 function heuristicTokens(text: string): number {
   const cjk = (text.match(/[　-鿿぀-ヿ＀-￯]/g) ?? []).length;
@@ -1083,6 +1122,11 @@ function blockText(block: Block): string {
       return block.entries.map(blockText).join("\n");
     case "compression":
       return "";
+    case "injected":
+      // Model-side fixed overhead (system prompt + memory), not conversation
+      // content — counting it would double-count what the usage estimate
+      // already attributes to the CLI's fixed per-request cost.
+      return "";
   }
 }
 
@@ -1103,6 +1147,7 @@ function blockText(block: Block): string {
  */
 function blockTokens(block: Block): number {
   if (block.kind === "compression") return 0;
+  if (block.kind === "injected") return 0;
   if (block.kind === "subagent") {
     let sum = 0;
     for (const e of block.entries) sum += blockTokens(e);
@@ -1268,6 +1313,9 @@ export function completePrompt(
   const closedFrom = closeOpenSubAgents(state.blocks);
   state.stopReason = stopReason;
   state.status = "idle";
+  // Turn over ⇒ no `/compress` in flight (belt-and-braces alongside the
+  // promptWithRetry finally clear; the flag must never strand the next turn).
+  state.compressing = false;
   return closedFrom;
 }
 
@@ -1440,6 +1488,36 @@ export function beginReplay(state: SessionState): void {
 export function endReplay(state: SessionState): void {
   state.replaying = false;
   state.status = "idle";
+}
+
+// --- silent host-driven `/compress` turns (no user block) ---------------------
+
+/**
+ * Open a host-driven `/compress` turn on an otherwise idle session (the
+ * warning-pill 立即压缩 action and the turn-end proactive compress — the
+ * overflow retry already streams from its original user prompt). Without a
+ * status flip the whole turn runs inside `idle`: the webview's streaming
+ * indicator never renders 正在压缩 and the busy lock lets a second prompt
+ * race the compression (2026-10-14 report). No block is recorded, so the
+ * patch stays tail-only.
+ */
+export function beginCompressTurn(state: SessionState): void {
+  state.status = "streaming";
+  state.compressing = true;
+  state.stopReason = null;
+  state.errorMessage = null;
+}
+
+/**
+ * Failure-path counterpart of `beginCompressTurn` (the success path ends the
+ * turn via `completePrompt` like any other turn). Only a still-streaming
+ * session returns to idle — never stomp an errored or replaced state. The
+ * flag clear is double insurance with `promptWithRetry`'s finally: the
+ * indicator must never outlive the turn.
+ */
+export function endCompressTurn(state: SessionState): void {
+  state.compressing = false;
+  if (state.status === "streaming") state.status = "idle";
 }
 
 // --- transcript restore (M4: CLI does not replay history on session/load) ----

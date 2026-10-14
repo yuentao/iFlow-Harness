@@ -102,6 +102,15 @@ function blockToMd(block: Block, indent = ""): string | null {
       ].join("\n");
     case "compression":
       return `---\n\n> **上下文压缩**：${redactSecrets(block.notice)}${block.summary ? `\n>\n> ${redactSecrets(block.summary).split("\n").join("\n> ")}` : ""}\n\n---`;
+    case "injected": {
+      const lines = [`---\n\n> **自动注入内容**：${redactSecrets(block.notice)}`];
+      for (const item of block.items) {
+        const where = item.path ? `（\`${redactSecrets(item.path)}\`）` : "";
+        lines.push(`>\n> **${redactSecrets(item.label)}**${where}\n>`);
+        lines.push(...redactSecrets(item.content).split("\n").map((l) => `> ${l}`));
+      }
+      return lines.join("\n");
+    }
     default:
       return null;
   }

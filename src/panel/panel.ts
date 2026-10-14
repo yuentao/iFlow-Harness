@@ -45,7 +45,8 @@ import type {
   ExitPlanModeRequest,
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import { isPlanMode } from "../../shared/messages.js";
 import {
   clearQueue as clearQueueUi,
   enqueuePrompt as enqueuePromptUi,
@@ -373,6 +374,13 @@ export class ChatPanel implements vscode.Disposable {
   private readonly statusBar: vscode.StatusBarItem;
   /** cwd the current ACP session was created with (base for relative paths). */
   private sessionCwd: string | null = null;
+  /**
+   * Freshness baseline for the Mod context report BEFORE the next session
+   * creation/load. The report is written at startChat (inside session/new /
+   * session/load), so the first prompt's baseline is THIS timestamp — a
+   * report written after it is the current session's startChat output.
+   */
+  private contextReportBaseline = 0;
   /** Awaiting user answers for `session/request_permission`, keyed by approval id. */
   private readonly pendingApprovals = new Map<
     string,
@@ -634,9 +642,15 @@ export class ChatPanel implements vscode.Disposable {
       case "connecting":
         text = `$(sync~spin) iFlow${model}`;
         break;
-      case "streaming":
-        text = `$(sync~spin) iFlow: ${vscode.l10n.t("生成中")}${model}`;
+      case "streaming": {
+        const label = state.compressing
+          ? vscode.l10n.t("正在压缩")
+          : isPlanMode(state.modes)
+            ? vscode.l10n.t("正在规划")
+            : vscode.l10n.t("生成中");
+        text = `$(sync~spin) iFlow: ${label}${model}`;
         break;
+      }
       case "error":
         text = `$(error) iFlow: ${vscode.l10n.t("出错")}${model}`;
         background = new vscode.ThemeColor("statusBarItem.errorBackground");
@@ -1559,6 +1573,12 @@ export class ChatPanel implements vscode.Disposable {
   private contextWarnToastId: number | null = null;
 
   private evaluateContextWarning(): void {
+    // A compress turn in flight must not re-arm the warning: the ratio still
+    // reads pre-compression high until the fold lands, and re-sending here is
+    // exactly what flashed the pill back right after the 立即压缩 click
+    // dismissed it (2026-10-14 report). Hysteresis exit owns dismissal once
+    // the compression settles; a failed one re-arms on the next push.
+    if (this.store.getState().compressing) return;
     const usage = this.store.getState().usage;
     const window = usage?.contextWindow ?? null;
     const used = usage?.contextUsed ?? 0;
@@ -1600,20 +1620,25 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Toast inline-action dispatch (currently only P0-6's compress action). */
   private handleToastAction(actionId: string, toastId?: number): void {
-    if (typeof toastId === "number") this.store.dismissToast(toastId);
     if (actionId === "compress") {
-      this.contextWarnActive = false;
-      void this.runCompressTurn();
+      // Warning-state bookkeeping and pill dismissal live inside
+      // runCompressTurn: a guard that early-returns (busy/no session) must
+      // leave the warning exactly as it was, otherwise the next push would
+      // re-arm a second pill while the first still renders.
+      void this.runCompressTurn(toastId);
+      return;
     }
+    if (typeof toastId === "number") this.store.dismissToast(toastId);
   }
 
   /**
    * Drive the `/compress` slash command on the active session (same bridge
    * the overflow path uses, but user-initiated from the warning pill). No
    * user block is recorded — the compression result surfaces as the usual
-   * collapsible CompressionBlock.
+   * collapsible CompressionBlock. `dismissToastId` removes the warning pill
+   * that carried this action, right as the compress turn opens.
    */
-  private async runCompressTurn(): Promise<void> {
+  private async runCompressTurn(dismissToastId?: number): Promise<void> {
     if (this.historySyncBusy) return;
     const state = this.store.getState();
     if (state.initializing || state.status === "streaming") return;
@@ -1622,6 +1647,16 @@ export class ChatPanel implements vscode.Disposable {
     const client = await this.ensureClient().catch(() => null);
     if (!client || this.disposed || this.client !== client) return;
     if (this.store.getState().sessionId !== sessionId) return;
+    // State-machine flip and pill removal move together, immediately before
+    // beginCompressTurn's flush: no push can observe the half-dismissed
+    // intermediate (the 2026-10-14 flicker).
+    this.contextWarnActive = false;
+    if (typeof dismissToastId === "number") this.store.dismissToast(dismissToastId);
+    // Stream the session for the duration of the turn: without this the
+    // whole `/compress` runs inside `idle` and the webview's 正在压缩 pill
+    // never renders (2026-10-14 report). Status flips via the reducer; the
+    // success path closes through promptCompleted like any other turn.
+    this.store.beginCompressTurn();
     try {
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
       if (this.store.getState().sessionId === sessionId) this.store.promptCompleted(result.stopReason, result.usage);
@@ -1629,6 +1664,9 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
       this.log.warn(`manual compress failed: ${errorMessage(error)}`);
       this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+      // The turn is over on the failure path too — leaving 状态 streaming
+      // would strand the panel in a phantom generating state.
+      this.store.endCompressTurn();
     }
   }
 
@@ -1676,6 +1714,11 @@ export class ChatPanel implements vscode.Disposable {
       const client = await this.ensureClient().catch(() => null);
       if (!client || this.disposed || this.client !== client) return;
       if (this.store.getState().sessionId !== sessionId) return;
+      // Same display-truth pairing as the manual path: the turn streams so
+      // the webview renders 正在压缩 (this session crept up on its window
+      // without ever tripping the reactive overflow, so nothing else set
+      // the flag), and the finally dismisses the waiting pill once over.
+      this.store.beginCompressTurn();
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
       this.store.promptCompleted(result.stopReason, result.usage);
@@ -1689,6 +1732,7 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
       this.log.warn(`turn-end auto-compress failed: ${errorMessage(error)}`);
       this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+      this.store.endCompressTurn();
     } finally {
       this.autoCompressInFlight = false;
       this.store.dismissToast(toastId);
@@ -3875,6 +3919,7 @@ export class ChatPanel implements vscode.Disposable {
       // meta/modes are used. The CLI owns that session's lifecycle (ACP-mode
       // sessions are not persisted and die with the CLI process); this is not
       // a leak.
+      this.contextReportBaseline = Date.now();
       const probe = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
       const probeMeta: NewSessionMeta | undefined = probe._meta;
       const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
@@ -4125,7 +4170,7 @@ export class ChatPanel implements vscode.Disposable {
         // can exclude it (the renamed binary only defeats name-based kills),
         // and switches on the CLI-side api-config-isolation patch — without
         // it (plain CLI / TUI / -p) the settings write-back is untouched.
-        { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1" }, requestTimeoutMs: 120_000, allowedRoots, wireTap: this.wireLog.tap },
+        { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() }, requestTimeoutMs: 120_000, allowedRoots, wireTap: this.wireLog.tap },
         {
           // A detached client (profile switch overlaps the new spawn with the
           // old child's teardown) must not leak its dying events into the
@@ -4542,6 +4587,116 @@ export class ChatPanel implements vscode.Disposable {
     return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "transcripts");
   }
 
+  // --- Auto-injected context transparency (acp-context-report Mod) ----------
+
+  /**
+   * Report file handed to the CLI as IFLOW_HARNESS_CONTEXT_FILE. The bundled
+   * fork's acp-context-report Mod atomically overwrites it on every
+   * startChat (session/new, session/load, approval-mode switch) with the
+   * FULL request context the ACP wire never carries: assembled system
+   * instruction, joined hierarchical memory, and every context file's path +
+   * content. One file per window; the panel reads it at the first prompt of a
+   * session, when the file holds exactly this session's startChat report.
+   */
+  private contextReportFile(): string {
+    return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "context-report.json");
+  }
+
+  private readContextReport(): { systemPrompt: string } | null {
+    try {
+      const raw = JSON.parse(readFileSync(this.contextReportFile(), "utf8")) as {
+        version?: number;
+        systemPrompt?: string | null;
+      };
+      if (raw.version !== 2) return null;
+      return typeof raw.systemPrompt === "string" ? { systemPrompt: raw.systemPrompt } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Collect what the model will see beyond the user's typed text. Mod report
+   * first (full body, byte-exact): the reported systemPrompt is the final
+   * systemInstruction, and P0e already appends the full joined hierarchical
+   * memory (global memory.md + every AGENTS.md/IFLOW.md with its body inline,
+   * probed) — one item covers prompt + memory + context files without
+   * duplicating the same bytes. Disk fallback when the bundled CLI carries no
+   * Mod (plain upstream CLI): ~/.iflow/memory.md plus the hierarchical
+   * AGENTS.md/IFLOW.md chain from the session cwd upward — the same files the
+   * CLI's hierarchical-memory loader reads (probed, CLI 0.5.19 bundle). The
+   * system prompt is honestly marked uncapturable in fallback; we never
+   * fabricate its body.
+   */
+  private collectInjectedContext(reportFresh: boolean): InjectedContextItem[] {
+    const report = reportFresh ? this.readContextReport() : null;
+    if (report) {
+      return [{ kind: "system", label: vscode.l10n.t("系统提示词"), content: report.systemPrompt }];
+    }
+    const items: InjectedContextItem[] = [];
+    items.push({
+      kind: "system",
+      label: vscode.l10n.t("系统提示词（未随会话捕获）"),
+      content: vscode.l10n.t("内置 CLI 未启用上下文报告（acp-context-report Mod），系统提示词正文无法透明展示。"),
+    });
+    try {
+      const mem = path.join(os.homedir(), ".iflow", "memory.md");
+      if (existsSync(mem)) {
+        items.push({ kind: "memory", label: vscode.l10n.t("记忆（~/.iflow/memory.md）"), path: mem, content: readFileSync(mem, "utf8") });
+      }
+    } catch {
+      /* best effort */
+    }
+    let dir = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    for (let depth = 0; dir && depth < 32; depth++) {
+      for (const name of ["AGENTS.md", "IFLOW.md"]) {
+        try {
+          const p = path.join(dir, name);
+          if (existsSync(p)) {
+            items.push({ kind: "context-file", label: name, path: p, content: readFileSync(p, "utf8") });
+          }
+        } catch {
+          /* best effort */
+        }
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return items;
+  }
+
+  /**
+   * Insert the injected-context card BEFORE the first user block so the user
+   * sees what the model sees the moment the request starts. The report file
+   * is written at session/new (startChat) — seconds before the user types —
+   * so the poll only covers the cold-start race and never delays a prompt
+   * meaningfully. `since` is the session-creation baseline
+   * (contextReportBaseline): the file survives session switches, so only a
+   * report written AFTER it is this session's startChat output; a stale file
+   * falls through to the disk collection rather than showing the previous
+   * session's system prompt.
+   */
+  private async insertInjectedContextCard(since: number): Promise<void> {
+    const file = this.contextReportFile();
+    const isFresh = (): boolean => {
+      try {
+        return statSync(file).mtimeMs > since;
+      } catch {
+        return false;
+      }
+    };
+    const deadline = Date.now() + 2_000;
+    while (!isFresh() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      if (this.disposed) return;
+    }
+    const items = this.collectInjectedContext(isFresh());
+    if (items.length === 0) return;
+    this.store.injectedContext(items);
+    void this.persistActiveTranscript();
+  }
+
   // --- Turn-level checkpoints (M3 P0-1) ------------------------------------------
 
   /**
@@ -4914,6 +5069,7 @@ export class ChatPanel implements vscode.Disposable {
     // to its full 10s timeout on every session start.
     const modelsPromise = this.queryLiveModels();
     const tNewSession = Date.now();
+    this.contextReportBaseline = tNewSession;
     const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
     this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
@@ -5065,6 +5221,13 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
+      // First turn of this session: show what the request auto-injects
+      // (system prompt / memory / context files) BEFORE the user bubble.
+      // Fire-and-forget — the card rides the next snapshot; a slow CLI
+      // startChat never delays the prompt.
+      if (!this.store.getState().blocks.some((b) => b.kind === "user")) {
+        void this.insertInjectedContextCard(this.contextReportBaseline);
+      }
       this.store.userPrompt(
         fullText,
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
@@ -5862,6 +6025,17 @@ export class ChatPanel implements vscode.Disposable {
         const blocks: ContentBlock[] = compressNext
           ? [{ type: "text", text: "/compress" }]
           : prompt;
+        // "Compressing" indicator: true for the overflow retry's /compress
+        // attempt AND for turns that ARE a /compress from the start
+        // (runCompressTurn pill action, maybeAutoCompressOnIdle). Cleared in
+        // the finally below and on every non-compress attempt.
+        {
+          const firstBlock = blocks[0];
+          const isCompressAttempt =
+            compressNext ||
+            (firstBlock?.type === "text" && firstBlock.text.trimStart() === "/compress");
+          this.store.setCompressing(isCompressAttempt);
+        }
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).
         this.turnHadAgentOutput = false;
@@ -5998,6 +6172,9 @@ export class ChatPanel implements vscode.Disposable {
       // The turn is over on every exit path — a post-rejection watchdog armed
       // mid-turn has nothing left to guard.
       this.clearPostRejectionWatchdog();
+      // The "正在压缩" indicator must never outlive the loop (a failed
+      // compress or a Stop mid-compress would otherwise strand the pill).
+      this.store.setCompressing(false);
     }
   }
 
