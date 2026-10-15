@@ -115,6 +115,7 @@ import { SessionStore } from "./store.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
 import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
+import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
 import { WireRingBuffer } from "./wire-log.js";
 
@@ -337,6 +338,12 @@ export interface PanelServices {
    * (the stub has no watcher API) and these are used instead.
    */
   watchers?: PanelWatcher[] | undefined;
+  /**
+   * Test hook: overrides the OS-notification transport (default: sendOsNotification
+   * spawning the vendored toast binaries). Injected so tests stay hermetic —
+   * the real path would pop a system toast on the machine running the suite.
+   */
+  osNotify?: (title: string, message: string) => Promise<boolean>;
 }
 
 /**
@@ -1264,13 +1271,13 @@ export class ChatPanel implements vscode.Disposable {
   // --- M1: OS notifications (P0-5) --------------------------------------------
 
   /**
-   * Native notification for a user-blocking event, gated on
+   * System-level notification for a user-blocking/attention event, gated on
    * setting × panel-visibility × window-focus (turnDone only) × per-kind
    * throttle (shared/notifications.ts). A visible panel already shows the
-   * card — the notification exists exactly for when the user switched to the
-   * editor and the agent is blocked. Returns whether it fired (informational
-   * since the chime became universal — the toast is additive, not an
-   * either/or with the sound cue).
+   * card — the notification exists exactly for when the user switched away.
+   * Delivery itself is fire-and-forget (native toast → in-IDE fallback, see
+   * deliverOsNotification); returns whether the gate fired (informational —
+   * the chime is universal, the toast is additive).
    */
   private notifyOs(event: OsNotifyEvent, text: string): boolean {
     const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
@@ -1284,11 +1291,31 @@ export class ChatPanel implements vscode.Disposable {
     });
     if (!gate.fire) return false;
     this.osNotifyGate = gate.gate;
+    void this.deliverOsNotification(text);
+    return true;
+  }
+
+  /**
+   * Toast transport policy: OS-level notification first (macOS terminal-notifier
+   * with vscode:// click-through, Windows SnoreToast — src/acp/os-notify.ts),
+   * in-IDE vscode.window.showInformationMessage ONLY as the fallback when the
+   * native path is unavailable (Linux, missing/failing binary). The in-IDE form
+   * keeps the "打开面板" pick; the macOS toast click-through rides the URI
+   * handler registered in extension.ts instead.
+   */
+  private async deliverOsNotification(text: string): Promise<void> {
+    const notify = this.services.osNotify ?? ((title: string, message: string) => sendOsNotification(this.context.extensionPath, title, message));
+    let fired = false;
+    try {
+      fired = await notify("iFlow", text);
+    } catch {
+      fired = false; // delivery must never break the flow that produced it
+    }
+    if (fired) return;
     const openLabel = vscode.l10n.t("打开面板");
     void vscode.window.showInformationMessage(text, openLabel).then((pick) => {
       if (pick === openLabel) this.openEditorTab();
     });
-    return true;
   }
 
   // --- M1: internal prompts (P1-5 enhance / P0-7 AI title) --------------------
@@ -5323,6 +5350,10 @@ export class ChatPanel implements vscode.Disposable {
       // remain diagnosable from the Output panel.
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
+      // M1 P0-5: an errored turn must announce itself to away users too —
+      // `turnFailed` is in the default approvals tier; the toast body is
+      // sanitized/truncated by the transport (error text can be long/ANSI).
+      this.notifyOs("turnFailed", vscode.l10n.t("iFlow 生成失败：{0}", errorMessage(error)));
       // M2 P0-3: a real failure pauses auto-dispatch — every queued message
       // would hit the same broken endpoint/CLI. The composer's queue strip
       // shows 继续/清空; dispatch resumes on `queueAction: resume`.
@@ -5403,6 +5434,8 @@ export class ChatPanel implements vscode.Disposable {
       }
       this.log.error(`regenerate failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
+      // Same failure announcement policy as sendPrompt (M1 P0-5).
+      this.notifyOs("turnFailed", vscode.l10n.t("iFlow 生成失败：{0}", errorMessage(error)));
       void this.persistActiveTranscript();
       void this.touchActiveSession();
       this.postSound("error");

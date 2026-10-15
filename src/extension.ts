@@ -62,6 +62,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // M1 P0-5: click-through for native macOS toasts (terminal-notifier `--open`
+  // carries vscode://yuentao.iflow-harness/openPanel — src/acp/os-notify.ts).
+  // SnoreToast on Windows has no click action, its toast is informational.
+  vscode.window.registerUriHandler({
+    handleUri: (uri) => {
+      if (uri.path === "/openPanel") void vscode.commands.executeCommand("iflow.openPanel");
+    },
+  });
+
   // M5: @iflow chat participant — text-only fallback into the same session.
   const participant = vscode.chat.createChatParticipant(
     "iflow.agent",

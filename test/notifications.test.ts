@@ -9,7 +9,7 @@ import {
 
 describe("osNotifyAllowed", () => {
   it("off blocks every event kind", () => {
-    for (const event of ["approval", "question", "plan", "longTool", "turnDone"] as const) {
+    for (const event of ["approval", "question", "plan", "longTool", "turnDone", "turnFailed"] as const) {
       expect(osNotifyAllowed(event, "off")).toBe(false);
     }
   });
@@ -18,12 +18,15 @@ describe("osNotifyAllowed", () => {
     expect(osNotifyAllowed("approval", "approvals")).toBe(true);
     expect(osNotifyAllowed("question", "approvals")).toBe(true);
     expect(osNotifyAllowed("plan", "approvals")).toBe(true);
+    // A hard failure is an attention event for away users by default (the
+    // queue pauses and retry decisions are theirs), like the blocking trio.
+    expect(osNotifyAllowed("turnFailed", "approvals")).toBe(true);
     expect(osNotifyAllowed("longTool", "approvals")).toBe(false);
     expect(osNotifyAllowed("turnDone", "approvals")).toBe(false);
   });
 
   it("all covers everything", () => {
-    for (const event of ["approval", "question", "plan", "longTool", "turnDone"] as const) {
+    for (const event of ["approval", "question", "plan", "longTool", "turnDone", "turnFailed"] as const) {
       expect(osNotifyAllowed(event, "all")).toBe(true);
     }
   });

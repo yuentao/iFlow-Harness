@@ -53,6 +53,22 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
   ];
 }
 
+/**
+ * PanelServices.osNotify test hook: whether the native toast transport "fires".
+ * Default false → the in-IDE showInformationMessage fallback is exercised; true
+ * covers the native path (macOS terminal-notifier / Windows SnoreToast). The
+ * real transport would pop a system toast on the suite's machine, so it is
+ * never spawned here — its wiring is pinned via this injection.
+ */
+let nativeFired = false;
+
+/** Toast delivery is async (native attempt → fallback), so tests must drain
+ * the microtask queue before asserting a toast landed. Fixed hop count beats
+ * vitest-internal timer APIs for determinism. */
+async function flushToastDelivery(): Promise<void> {
+  for (let hop = 0; hop < 10; hop += 1) await Promise.resolve();
+}
+
 type PanelInternals = {
   panelVisible: boolean;
   onSessionUpdate: (n: unknown) => void;
@@ -123,10 +139,11 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    nativeFired = false;
     (vscode.window as unknown as { state: { focused: boolean } }).state.focused = false;
     infoMessage = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined as never);
     setConfigOverrides({ osNotifications: "all" });
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers(), osNotify: async () => nativeFired });
     p = panel as unknown as PanelInternals;
     p.store.sessionStarted({ sessionId: "notify-session" });
     p.panelVisible = false;
@@ -147,11 +164,13 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     infoMessage.mockResolvedValue("打开面板" as never);
     const openSpy = vi.spyOn(p, "openEditorTab").mockImplementation(() => {});
     const pending = p.requestPermissionFromUser(permissionRequest);
-    expect(infoMessage).toHaveBeenCalledTimes(1);
-    expect(String(infoMessage.mock.calls[0]![0])).toContain("npm test");
-    // Unwind the pending card via its timeout, then flush the button's .then.
+    // Delivery is async (native-first → in-IDE fallback), so flush the
+    // microtasks by unwinding the card BEFORE asserting the toast landed.
     vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
     await pending;
+    await flushToastDelivery();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+    expect(String(infoMessage.mock.calls[0]![0])).toContain("npm test");
     expect(openSpy).toHaveBeenCalled();
   });
 
@@ -163,14 +182,15 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
       ...permissionRequest,
       toolCall: { ...permissionRequest.toolCall, title: script },
     });
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    await flushToastDelivery();
     expect(infoMessage).toHaveBeenCalledTimes(1);
     const msg = String(infoMessage.mock.calls[0]![0]);
     expect(msg).not.toContain("\n");
     expect(msg).toContain('python3 -c "print(1) print(1)');
     // 80-char summary + template wrapper stays a scannable single line.
     expect(msg.length).toBeLessThan(120);
-    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
-    await pending;
   });
 
   it("stays silent while the focused panel is visible (the card is already on screen)", async () => {
@@ -185,9 +205,10 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
   it("notifies when the panel is visible but its window is unfocused", async () => {
     p.panelVisible = true;
     const pending = p.requestPermissionFromUser(permissionRequest);
-    expect(infoMessage).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
     await pending;
+    await flushToastDelivery();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
   });
 
   it("throttles repeated approvals within the 5s window", async () => {
@@ -196,9 +217,10 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
       ...permissionRequest,
       toolCall: { ...permissionRequest.toolCall, toolCallId: "tool-2" },
     });
-    expect(infoMessage).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
     await Promise.all([first, second]);
+    await flushToastDelivery();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
   });
 
   it("regenerate completion notifies AND chimes when the user is away (cues are additive)", async () => {
@@ -244,6 +266,7 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     p.panelVisible = false;
     vi.advanceTimersByTime(31_000);
     p.onSessionUpdate(toolUpdate("completed"));
+    await flushToastDelivery();
     expect(infoMessage).toHaveBeenCalledTimes(1);
     expect(String(infoMessage.mock.calls[0]![0])).toContain("npm run build");
   });
@@ -269,6 +292,7 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     p.onSessionUpdate(toolUpdate("in_progress", "npm run build", true));
     vi.advanceTimersByTime(31_000);
     p.onSessionUpdate(toolUpdate("failed"));
+    await flushToastDelivery();
     expect(infoMessage).toHaveBeenCalledTimes(1);
     expect(String(infoMessage.mock.calls[0]![0])).toContain("长任务失败");
   });
@@ -292,5 +316,27 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
       },
     });
     expect(infoMessage).not.toHaveBeenCalled();
+  });
+
+  it("a native toast suppresses the in-IDE duplicate (fallback is fallback-only)", async () => {
+    nativeFired = true;
+    const pending = p.requestPermissionFromUser(permissionRequest);
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    await flushToastDelivery();
+    expect(infoMessage).not.toHaveBeenCalled();
+  });
+
+  it("a failed turn notifies turnFailed when the user is away", async () => {
+    // The failure chime alone is not a system-level cue — the errored turn
+    // must announce itself like the blocking trio (default approvals tier).
+    p.store.userPrompt("触发失败");
+    p.store.promptCompleted("end_turn"); // idle gate for regenerate
+    p.promptWithRetry = async () => {
+      throw new Error("boom");
+    };
+    await p.regenerate();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+    expect(String(infoMessage.mock.calls[0]![0])).toContain("生成失败");
   });
 });

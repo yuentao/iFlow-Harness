@@ -14,8 +14,9 @@
  *              trigger 3 is "整轮完成且窗口失焦": a finished turn must not
  *              ping a user who is merely reading code in another editor tab
  *              of a focused window). The blocking events (approval / question
- *              / plan) ignore focus — the agent is stuck waiting, so even a
- *              focused window with a hidden panel earns the interrupt.
+ *              / plan / turnFailed) ignore focus — the agent is stuck waiting
+ *              (or the turn died), so even a focused window with a hidden panel
+ *              earns the interrupt.
  *   throttle — the same event kind at most once per window (a burst of
  *              parallel tool approvals must not stack 10 native toasts)
  *
@@ -23,14 +24,16 @@
  * stays thin and the semantics are pinned by unit tests.
  */
 
-export type OsNotifyEvent = "approval" | "question" | "plan" | "longTool" | "turnDone";
+export type OsNotifyEvent = "approval" | "question" | "plan" | "longTool" | "turnDone" | "turnFailed";
 
 /** Same-kind burst suppression window. */
 export const OS_NOTIFY_THROTTLE_MS = 5_000;
 
 /** Events the `approvals` (default) tier covers: an agent is BLOCKED on the
- * user until answered, so these are the ones worth interrupting for. */
-const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question", "plan"]);
+ * user until answered, so these are the ones worth interrupting for — plus
+ * `turnFailed`, a hard failure the away user must learn about (the queue
+ * pauses and retry decisions are theirs). */
+const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question", "plan", "turnFailed"]);
 
 /** Setting tier allows this event kind? The `setting` values are the
  * `iflow.osNotifications` manifest enum: `off` / `approvals` / `all`. */
