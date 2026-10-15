@@ -1845,21 +1845,55 @@ describe("session usage split & real-time refresh", () => {
       expect(state.usage!.usageAuthoritative).toBeUndefined();
     });
 
-    it("the report expires once the transcript grows (next turn streams)", () => {
+    it("the anchor survives a growing transcript (occupancy = report + delta)", () => {
       const state = initialSessionState();
       beginUserPrompt(state, "问题");
       completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
       expect(state.usage!.usageAuthoritative).toBe(true);
-      // A new turn appends blocks — the reported number describes the model's
-      // context at the PREVIOUS turn end and must not mask the live estimate.
+      // A new turn appends blocks: the reported number still describes the
+      // model's context AT the anchor, and the appended blocks are the only
+      // thing that context gained since (the CLI replays assistant parts, so
+      // they genuinely re-enter the next request). Re-folding the whole
+      // transcript instead would drop back to the transcript's own biased
+      // total — the 2x mismatch against the provider's own fill meter.
       beginUserPrompt(state, "第二个问题");
       refreshSessionUsage(state);
-      expect(state.usage!.usageAuthoritative).toBeUndefined();
-      expect(state.usage!.contextUsed).toBeLessThan(61_000);
+      expect(state.usage!.contextUsed).toBe(61_000 + estimateTokens("第二个问题"));
+      // Part of the number is now estimated (the streamed delta) → honest flag.
+      expect(state.usage!.usageAuthoritative).toBe(false);
       // The next report lands and re-authorises the overlay.
       completePrompt(state, "end_turn", null, { lastRequestInputTokens: 62_000 });
       expect(state.usage!.contextUsed).toBe(62_000);
       expect(state.usage!.usageAuthoritative).toBe(true);
+    });
+
+    it("the reported completion replays into the next request (prefill term)", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } }));
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000, completionTokens: 4_300 });
+      // promptTokenCount covers only the request's INPUT; the CLI appends the
+      // generated text (thoughts included) to history, so the carried context
+      // at turn end is prompt + completion — and the blocks carrying that text
+      // sit inside the anchor, so the delta range must not add them again.
+      expect(state.usage!.contextUsed).toBe(65_300);
+      expect(state.usage!.usageAuthoritative).toBe(true);
+      expect(state.usageReport!.completionTokens).toBe(4_300);
+      expect(state.usageReport!.atBlockCount).toBe(state.blocks.length);
+    });
+
+    it("cache-read tokens surface as a split, never re-added to occupancy", () => {
+      const state = initialSessionState();
+      beginUserPrompt(state, "问题");
+      completePrompt(state, "end_turn", null, { lastRequestInputTokens: 136_000, cachedReadTokens: 96_000 });
+      const usage = state.usage!;
+      // Gateway `prompt_tokens` ALREADY folds cache hits in (fork bundle
+      // offset 3172990 maps it verbatim). Adding them again — the fork's own
+      // saveUsageMetadata commits that error at offset 3166865 — is what makes
+      // a 52% fill read as 100% and fire a spurious auto-compress.
+      expect(usage.contextUsed).toBe(136_000);
+      expect(usage.cacheReadTokens).toBe(96_000);
+      expect(usage.usageAuthoritative).toBe(true);
     });
 
     it("a compression card after the report expires it (fold floor is the CLI's own number)", () => {

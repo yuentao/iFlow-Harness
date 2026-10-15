@@ -216,11 +216,34 @@ export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refu
  * it only sees transcript blocks. Authoritative replacement for the occupancy
  * bar's `contextUsed`. Absent when the Mod is missing or the gateway never
  * emitted usage (BYOK proxies often swallow `stream_options.include_usage`) —
- * the host then keeps estimating. The input/output split and cross-turn
- * cumulative burn are a separate contract (roadmap P2-7 第二档, needs
- * per-request arrays), deliberately not carried here. */
+ * the host then keeps estimating.
+ *
+ * `cachedReadTokens` / `completionTokens` ride the SAME Mod at zero extra cost:
+ * the gateway's raw `usage` object already carries them (fork bundle offset
+ * 3172990 maps `usage.prompt_tokens`/`usage.completion_tokens` verbatim into
+ * `usageMetadata`, and cache hits come as `prompt_cache_hit_tokens` on the
+ * DeepSeek/Kimi shape or `cache_read_input_tokens` on the Anthropic shape).
+ * They stay optional because the currently shipped Mod build emits only the
+ * scalar — the host degrades wherever a field is missing.
+ *
+ * **Convention (pinned, fork bundle):** `lastRequestInputTokens` is the raw
+ * gateway `prompt_tokens`, which ALREADY counts cache-hit tokens. The host
+ * must NOT add `cachedReadTokens` on top of it. (The fork's own
+ * `saveUsageMetadata` — bundle offset 3166865 — does add
+ * `cache_creation_input_tokens + cache_read_input_tokens` onto
+ * `prompt_tokens`; that is the Anthropic-shaped generator path and never
+ * reaches this ACP field, but it is why the CLI's OWN compression figures
+ * double-count for gateways that fold cache into `prompt_tokens`.) */
 export interface TurnUsageReport {
   lastRequestInputTokens: number;
+  /** Prompt tokens served from the prompt cache — already inside
+   * `lastRequestInputTokens`, billed at the cheaper cached rate. Absent =
+   * gateway/Mod silent. */
+  cachedReadTokens?: number;
+  /** The final request's generated tokens (reasoning/thinking tokens
+   * included where the gateway folds them into `completion_tokens`). Absent
+   * = gateway/Mod silent. */
+  completionTokens?: number;
 }
 
 export interface PromptResponse {

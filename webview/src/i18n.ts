@@ -365,6 +365,7 @@ const en: Record<string, string> = {
   "当前上下文 {0} tokens（CLI 上报）· 输出 {1}（估算）":
     "Context {0} tokens (reported by the CLI) · output {1} (estimated)",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
+  "缓存读取 {0} tokens": "Cache read {0} tokens",
   "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",
   "该模型无单价记录，不显示成本": "No unit price recorded for this model — no cost shown",
   "上下文窗口占用": "Context window occupancy",

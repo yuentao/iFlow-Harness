@@ -102,6 +102,7 @@ function SessionUsageChip() {
   const estimated = useChat((s) => s.state?.usage?.estimated ?? false);
   const usageAuthoritative = useChat((s) => s.state?.usage?.usageAuthoritative ?? false);
   const estimatedCost = useChat((s) => s.state?.usage?.estimatedCost ?? null);
+  const cacheReadTokens = useChat((s) => s.state?.usage?.cacheReadTokens ?? 0);
   const bdUser = useChat((s) => s.state?.usage?.breakdown?.user ?? 0);
   const bdAssistant = useChat((s) => s.state?.usage?.breakdown?.assistant ?? 0);
   const bdTool = useChat((s) => s.state?.usage?.breakdown?.tool ?? 0);
@@ -129,8 +130,9 @@ function SessionUsageChip() {
             usageAuthoritative ? t("，占用为 CLI 上报值") : "",
           ),
           t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", bdUser.toLocaleString(), bdAssistant.toLocaleString(), bdTool.toLocaleString(), bdThought.toLocaleString()),
+          cacheReadTokens > 0 ? t("缓存读取 {0} tokens", cacheReadTokens.toLocaleString()) : "",
           estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(estimatedCost)) : t("该模型无单价记录，不显示成本"),
-        ].join("\n");
+        ].filter(Boolean).join("\n");
   return (
     <span
       title={hoverTitle}

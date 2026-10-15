@@ -120,12 +120,21 @@ async function handle(msg) {
       });
       // ACP_MOCK_USAGE: emulate the acp-usage-report Mod's authoritative
       // occupancy report on PromptResponse (iFlow extension point).
+      // ACP_MOCK_USAGE_DETAIL adds the widened breakdown the Mod can carry
+      // ({"cachedReadTokens":…,"completionTokens":…}).
       send({
         jsonrpc: "2.0",
         id: msg.id,
         result: {
           stopReason: "end_turn",
-          ...(process.env.ACP_MOCK_USAGE ? { usage: { lastRequestInputTokens: Number(process.env.ACP_MOCK_USAGE) } } : {}),
+          ...(process.env.ACP_MOCK_USAGE
+            ? {
+                usage: {
+                  lastRequestInputTokens: Number(process.env.ACP_MOCK_USAGE),
+                  ...(process.env.ACP_MOCK_USAGE_DETAIL ? JSON.parse(process.env.ACP_MOCK_USAGE_DETAIL) : {}),
+                },
+              }
+            : {}),
         },
       });
       break;

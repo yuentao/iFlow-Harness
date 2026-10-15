@@ -1302,12 +1302,25 @@ export function completePrompt(
   // Authoritative occupancy (acp-usage-report-refactor Mod): the turn's FINAL
   // request input = the context the model carried at turn end. Stamped before
   // the refresh so the overlay lands in the same snapshot; anchored to the
-  // current block count — the first new block (next turn, compression card)
-  // expires it and the fold estimate resumes. Without a report (Mod missing,
-  // gateway swallowed include_usage, cancelled turn), nothing changes and the
-  // host keeps estimating cumulative consumption from the transcript.
+  // current block count — later blocks are the ONLY thing that context gained
+  // since, so they add onto the anchor rather than throwing it away (a whole-
+  // transcript re-fold drifts 2x in agent-heavy sessions: SubAgent internals
+  // never re-enter the parent window and the fixed system prompt / tool-schema
+  // overhead is absent). `completionTokens` is that request's own output: the
+  // CLI appends it to history, so it replays into the NEXT request's prompt.
+  // Without a report (Mod missing, gateway swallowed include_usage, cancelled
+  // turn), nothing changes and the host keeps estimating from the transcript.
   if (turnUsage && typeof turnUsage.lastRequestInputTokens === "number" && turnUsage.lastRequestInputTokens > 0) {
-    state.usageReport = { lastRequestInputTokens: turnUsage.lastRequestInputTokens, atBlockCount: state.blocks.length };
+    state.usageReport = {
+      lastRequestInputTokens: turnUsage.lastRequestInputTokens,
+      atBlockCount: state.blocks.length,
+      ...(typeof turnUsage.cachedReadTokens === "number" && turnUsage.cachedReadTokens > 0
+        ? { cachedReadTokens: turnUsage.cachedReadTokens }
+        : {}),
+      ...(typeof turnUsage.completionTokens === "number" && turnUsage.completionTokens > 0
+        ? { completionTokens: turnUsage.completionTokens }
+        : {}),
+    };
   }
   refreshSessionUsage(state, usageCtx);
   const closedFrom = closeOpenSubAgents(state.blocks);
@@ -1346,14 +1359,42 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
   const next = estimateSessionUsage(state.blocks);
   // Authoritative occupancy overlay (acp-usage-report-refactor Mod): the last
   // reported turn's FINAL request input IS the model's carried context at that
-  // moment. Valid only while the transcript hasn't moved since (atBlockCount
-  // anchor): a new turn's streaming blocks or a fresh compression card change
-  // what the model carries, and the fold estimate (whose post-compression floor
-  // is the CLI's own newTokenCount — still authoritative) takes over.
+  // moment. The anchor survives a moving transcript — blocks appended AFTER it
+  // are the only thing that context gained since, so they add onto it (a
+  // whole-transcript re-fold instead drifts ~2x on agent-heavy sessions:
+  // SubAgent internals never re-enter the parent window, and the fixed
+  // system-prompt/tool-schema overhead is absent). `completionTokens` is that
+  // request's own output: the CLI appends it to history, so it replays into
+  // the NEXT request's prompt as prefill — the anchor's block count already
+  // includes the blocks carrying that text, so it is not double counted here.
+  // A completed compression card INSIDE the delta range supersedes the anchor
+  // outright: the fold's floor is the CLI's own newTokenCount (still
+  // authoritative). Residual bias: a SubAgent card streaming INSIDE the delta
+  // range counts its internals; the next turn-end report re-anchors and erases
+  // it.
   const report = state.usageReport;
-  if (report && report.atBlockCount === state.blocks.length && report.lastRequestInputTokens > 0) {
-    next.contextUsed = report.lastRequestInputTokens;
-    next.usageAuthoritative = true;
+  if (report && report.lastRequestInputTokens > 0 && report.atBlockCount <= state.blocks.length) {
+    let delta = 0;
+    let superseded = false;
+    for (let i = report.atBlockCount; i < state.blocks.length; i++) {
+      const b = state.blocks[i]!;
+      if (b.kind === "compression" && typeof b.newTokenCount === "number") {
+        superseded = true;
+        break;
+      }
+      delta += blockTokens(b);
+    }
+    if (!superseded) {
+      next.contextUsed = report.lastRequestInputTokens + (report.completionTokens ?? 0) + delta;
+      // The number stays CLI-sourced while nothing had to be estimated onto it.
+      next.usageAuthoritative = delta === 0;
+      if (report.cachedReadTokens !== undefined) {
+        // Already INSIDE lastRequestInputTokens — surfaced for the cost split,
+        // never added to occupancy again (the fork's own saveUsageMetadata
+        // does add it, which double-counts for cache-folding gateways).
+        next.cacheReadTokens = Math.min(report.cachedReadTokens, report.lastRequestInputTokens);
+      }
+    }
   }
   if (usageCtx) {
     next.contextWindow = usageCtx.contextWindow;
@@ -1365,6 +1406,7 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
     prev &&
     prev.inputTokens === next.inputTokens &&
     prev.outputTokens === next.outputTokens &&
+    prev.cacheReadTokens === next.cacheReadTokens &&
     prev.contextUsed === next.contextUsed &&
     prev.usageAuthoritative === next.usageAuthoritative &&
     prev.contextWindow === next.contextWindow &&
@@ -1438,6 +1480,11 @@ function clearTranscriptFields(state: SessionState): void {
   // M3 P0-1: checkpoints are transcript-scoped (anchored to user-block ids);
   // a wholesale transcript swap invalidates the whole index projection.
   state.checkpoints = [];
+  // The occupancy report anchor (atBlockCount) indexes the OUTGOING transcript —
+  // after a replay the restored blocks renumber everything, so a carried-over
+  // anchor would add the delta onto a foreign prompt count. The next turn end
+  // re-reports from the restored session.
+  state.usageReport = null;
 }
 
 export function newSessionState(state: SessionState): SessionState {

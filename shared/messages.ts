@@ -523,14 +523,34 @@ export interface UsageBreakdownUi {
 
 /** Authoritative context occupancy the CLI reported at the last turn end
  * (acp-usage-report-refactor Mod). `atBlockCount` is the transcript length when
- * the report landed — it anchors staleness: the number describes the model's
- * carried context AT that point, so any later block (a new turn's streaming
- * output, or a compression card) invalidates it and the fold estimate resumes.
- * Only `contextUsed` is overlaid from this; the input/output split stays
- * estimated (the wire carries no split — roadmap P2-7 第二档). */
+ * the report landed — it ANCHORS the number rather than expiring it: the report
+ * describes the model's carried context AT that point, and the blocks appended
+ * after it are the only thing that context gained since. The CLI replays
+ * assistant parts into every later request (thought text included — probed in
+ * a real `~/.iflow/acp/sessions/<id>.json` chatHistory), so those appended
+ * blocks re-enter the next request's input as prefill and add onto the anchor.
+ * A completed compression card INSIDE that delta range supersedes the anchor
+ * outright (the fold's floor is the CLI's own `newTokenCount`), and
+ * `deleteUserMessageById` truncates chatHistory in lockstep, so it clears the
+ * report explicitly. Re-folding the whole transcript instead drifts with the
+ * transcript's own biases (SubAgent internals never re-enter the parent
+ * window, the fixed system prompt + tool-schema overhead is absent).
+ * Only `contextUsed` (and the cache split) is overlaid from this; the
+ * input/output split stays estimated (the wire carries no split — roadmap
+ * P2-7 第二档). Transcript-scoped: cleared by `clearTranscriptFields`. */
 export interface TurnUsageState {
   lastRequestInputTokens: number;
   atBlockCount: number;
+  /** Prompt tokens already counted INSIDE `lastRequestInputTokens` (OpenAI-
+   * compat `prompt_tokens` folds cache hits in). Informational: occupancy
+   * must not add it again, cost would bill it at the cheaper cached rate. */
+  cachedReadTokens?: number;
+  /** That final request's generated tokens. They are NOT part of
+   * `lastRequestInputTokens` but the CLI appends them to history, so they
+   * replay into the NEXT request's prompt — occupancy adds this prefill term
+   * once, and the blocks carrying the same text are NOT double counted (the
+   * delta range starts after the anchor, which already includes them). */
+  completionTokens?: number;
 }
 
 export interface SessionState {

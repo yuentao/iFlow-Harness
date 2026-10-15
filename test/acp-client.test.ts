@@ -83,6 +83,31 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     expect(result.usage).toEqual({ lastRequestInputTokens: 61000 });
   });
 
+  it("passes the widened cache/completion breakdown through untouched", async () => {
+    // The widened acp-usage-report Mod carries the cache-read split and the
+    // final request's completion (the prefill term replayed into the next
+    // prompt). The client must not reshape or drop it — the host's anchored
+    // occupancy overlay reads all three fields off PromptResponse.usage.
+    const client = new AcpClient(
+      {
+        command: process.execPath,
+        args: [mockAgent],
+        cwd: here,
+        env: { ACP_MOCK_USAGE: "136000", ACP_MOCK_USAGE_DETAIL: '{"cachedReadTokens":164000,"completionTokens":4300}' },
+      },
+    );
+    clients.push(client);
+    await client.connect();
+    await client.newSession({ cwd: here, mcpServers: [] });
+    const result = await client.prompt({ sessionId: "mock-session-1", prompt: [{ type: "text", text: "hi" }] });
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({
+      lastRequestInputTokens: 136000,
+      cachedReadTokens: 164000,
+      completionTokens: 4300,
+    });
+  });
+
   it("routes server→client request_permission to the injected handler", async () => {
     const decisions: string[] = [];
     const client = createClient(undefined, {
