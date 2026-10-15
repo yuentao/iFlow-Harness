@@ -10,6 +10,7 @@ import type {
   SlashCommand,
   StopReason,
   TurnUsageReport,
+  McpToolView,
 } from "../src/acp/protocol.js";
 import { l10n } from "vscode";
 import { countTokens as gptCountTokens } from "gpt-tokenizer";
@@ -1112,6 +1113,32 @@ export function estimateTokens(text: string): number {
   } catch {
     return heuristicTokens(text);
   }
+}
+
+/**
+ * Estimated context tokens ONE MCP server injects into the model context.
+ * The CLI's generator turns every MCP tool into a function declaration
+ * (`{name, description, parametersJsonSchema}` — bundle: `bAo` builds
+ * `functionDeclarations` from the tool registry, and the whole set is set as
+ * `contents[].functionDeclarations` on every request), so the server's real
+ * cost is the serialized JSON of its tool declarations. Prompts are NOT
+ * counted: the registry exposes them on demand (getPromptsByServer), they
+ * never ride in the request's tool block. `schemaOmitted` tools (loader
+ * frame-cap degradation) keep name+description only — an honest floor.
+ * Same o200k_base tokenizer as the occupancy bar, so the two numbers stay
+ * comparable.
+ */
+export function estimateMcpContextTokens(tools: McpToolView[]): number {
+  let total = 0;
+  for (const tool of tools) {
+    const declaration = {
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+      ...(tool.schemaOmitted || tool.schema === undefined ? {} : { parameters: tool.schema }),
+    };
+    total += estimateTokens(JSON.stringify(declaration));
+  }
+  return total;
 }
 
 /** Flatten a block's human-readable text for token estimation. Compression

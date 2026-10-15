@@ -12,12 +12,19 @@ import type {
   ToolLocation,
   StopReason,
   UserQuestion,
+  McpStatusReport,
+  McpServerStatusView,
+  McpToolView,
+  McpPromptView,
 } from "../src/acp/protocol.js";
 import type { ApprovalRule } from "./approval-policy.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
 export type { SlashCommand, UserQuestion };
+// MCP status wire types (mcp-status-refactor Mod): the settings card renders
+// the per-server view and the detail sub-page consume tools/prompts directly.
+export type { McpStatusReport, McpServerStatusView, McpToolView, McpPromptView };
 // M4 P1-1: the approval-policy card edits these directly (the rule shape is
 // shared pure data, not session state — it never rides a snapshot).
 export type { ApprovalRule, ApprovalAction } from "./approval-policy.js";
@@ -905,6 +912,21 @@ function evictOneBlock(block: Block): Block {
   }
 }
 
+/**
+ * Host-enriched payload of the `mcpStatus` reply: the CLI report (mcp-status-
+ * refactor Mod) minus the availability envelope, with each server's injected-
+ * context length appended — `contextTokens` is a BPE estimate
+ * (shared/session-state.ts#estimateMcpContextTokens, the same o200k_base
+ * tokenizer as the occupancy bar) of the tool declarations this server puts
+ * into the model context. The CLI itself never estimates (no such source in
+ * the bundle), the host must not re-fetch schemas per render, so the host
+ * computes it once per reply.
+ */
+export interface McpStatusUi {
+  discoveryState?: string;
+  servers: Record<string, McpServerStatusView & { contextTokens?: number }>;
+}
+
 export type HostToWebview =
   | { type: "snapshot"; state: SessionState; locale?: string }
   /**
@@ -960,6 +982,13 @@ export type HostToWebview =
    * non-empty means the read/write failed (the dict is then the last-known or
    * best-effort value, not a confirmed save). */
   | { type: "mcpServers"; servers: Record<string, unknown>; error?: string }
+  /** Reply to `mcpStatus`: the live per-server connection view (state light,
+   * tool/prompt declarations, connection error, + host-computed contextTokens).
+   * `status` null = no channel — CLI not connected, the mcp-status Mod missing/
+   * disabled, or the query failed; the card then shows NO indicator rather than
+   * guessing. Deliberately a separate channel from `mcpServers` (config truth):
+   * a status refresh never touches the card's edit/save guards. */
+  | { type: "mcpStatus"; status: McpStatusUi | null }
   /** M4 P1-1: the approval pre-review rule table. `rules` are the user's
    * global rules (editable, persisted in globalState); `projectRules` come
    * from the workspace's `.iflow/approval.json` and are READ-ONLY here (the
@@ -1147,6 +1176,11 @@ export type WebviewToHost =
    * at worst lost, never silently merged). Host writes settings.json and
    * offers a hot restart. Reply: `mcpServers` with `error` on failure. */
   | { type: "saveMcpServers"; servers: Record<string, unknown> }
+  /** Ask the CLI for the live per-server MCP connection state (state light,
+   * declarations, error) — `_iflow/mcp/status` via the mcp-status-refactor Mod.
+   * Reply: `mcpStatus` (null when the CLI is not running or the Mod is
+   * missing/disabled). */
+  | { type: "mcpStatus" }
   /** M4 P1-1: approval-policy card opened — re-read the global table and the
    * workspace `.iflow/approval.json` (external tools may have rewritten it).
    * Reply: `approvalPolicy`. */

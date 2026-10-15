@@ -108,6 +108,34 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     });
   });
 
+  it("round-trips the MCP status report (mcp-status-refactor Mod extension)", async () => {
+    // The mock agent answers _iflow/mcp/status with a per-server view; the
+    // client must pass the report through untouched (the panel adds contextTokens
+    // host-side). ACP_MOCK_MCP_STATUS=off simulates a bundle without the Mod:
+    // the JSON-RPC error surfaces as a rejection so the panel degrades to
+    // "no indicator" rather than inventing a color.
+    const client = createClient(undefined, undefined, { ACP_MOCK_MCP_STATUS: "on" });
+    await client.connect();
+    const session = await client.newSession({ cwd: here, mcpServers: [] });
+    const report = await client.mcpStatus(session.sessionId);
+    expect(report.available).toBe(true);
+    expect(report.discoveryState).toBe("completed");
+    expect(report.servers.share.status).toBe("connected");
+    expect(report.servers.share.tools[0]?.name).toBe("share_echo");
+    expect(report.servers.broken.errorKind).toBe("spawn_failed");
+
+    const withoutMod = createClient(undefined, undefined, { ACP_MOCK_MCP_STATUS: "off" });
+    await withoutMod.connect();
+    const session2 = await withoutMod.newSession({ cwd: here, mcpServers: [] });
+    let threw = false;
+    try {
+      await withoutMod.mcpStatus(session2.sessionId);
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+
   it("routes server→client request_permission to the injected handler", async () => {
     const decisions: string[] = [];
     const client = createClient(undefined, {

@@ -1009,6 +1009,50 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "mcpStatus") {
+        const servers = mockMcpServers ?? (mockMcpServers = {
+          "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
+          "remote-example": { url: "https://mcp.example.com/mcp", type: "http" },
+        });
+        const statusServers: Record<string, unknown> = {};
+        for (const [name, rawConfig] of Object.entries(servers)) {
+          const config = rawConfig as Record<string, unknown> | undefined;
+          const connected = config?.command !== undefined && Object.keys(statusServers).length === 0;
+          statusServers[name] = connected
+            ? {
+                status: "connected",
+                toolCount: 2,
+                promptCount: 1,
+                tools: [
+                  { name: "navigate", description: "Navigate to a URL", schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
+                  { name: "click", description: "Click an element", schema: { type: "object", properties: { selector: { type: "string" } } } },
+                ],
+                prompts: [{ name: "help", description: "Usage help" }],
+                contextTokens: 180,
+              }
+            : {
+                status: "disconnected",
+                toolCount: 0,
+                promptCount: 0,
+                tools: [],
+                prompts: [],
+                error: "spawn ENOENT: command not found",
+                errorKind: "spawn_failed",
+                contextTokens: 0,
+              };
+        }
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent(
+                "message",
+                { data: { type: "mcpStatus", status: { discoveryState: "completed", servers: statusServers } } },
+              ),
+            ),
+          80,
+        );
+        return;
+      }
       if (m.type === "listApprovalPolicy" || m.type === "saveApprovalPolicy" || m.type === "dismissApprovalRuleDraft") {
         if (m.type === "saveApprovalPolicy") mockApprovalRules = m.rules;
         if (m.type === "dismissApprovalRuleDraft") mockApprovalDraft = null;
@@ -1411,6 +1455,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "stagedFiles" ||
       msg.type === "filesPicked" ||
       msg.type === "mcpServers" ||
+      msg.type === "mcpStatus" ||
       msg.type === "approvalPolicy" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||

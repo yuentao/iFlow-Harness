@@ -215,6 +215,34 @@ const en: Record<string, string> = {
   "配置直接读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。":
     "Config reads/writes the mcpServers field in ~/.iflow/settings.json directly; after saving, click Restart CLI in the footer to apply (the current session restores automatically).",
   "保存中…": "Saving…",
+  // MCP status indicators + detail sub-page
+  "状态未知": "Status unknown",
+  "已禁用": "Disabled",
+  "已屏蔽": "Blocked",
+  "已连接": "Connected",
+  "连接中…": "Connecting…",
+  "未连接": "Not connected",
+  "状态不可获取": "Status unavailable",
+  "连接状态不可获取（CLI 未连接或状态上报未启用）":
+    "Connection status unavailable (CLI not connected, or status reporting not enabled)",
+  "连接状态读取中…": "Reading connection status…",
+  "详情": "Details",
+  "MCP 服务器详情": "MCP server details",
+  "刷新": "Refresh",
+  "刷新中…": "Refreshing…",
+  "返回": "Back",
+  "工具声明注入模型上下文约 {0} tokens（估算）":
+    "Tool declarations inject ≈{0} tokens into the model context (estimated)",
+  "≈{0} tokens": "≈{0} tokens",
+  "连接失败：": "Connection failed:",
+  "该服务器当前暴露无工具与提示": "This server currently exposes no tools or prompts",
+  "工具声明读取中…": "Reading tool declarations…",
+  "工具声明不可获取（未连接或状态上报未启用）":
+    "Tool declarations unavailable (not connected, or status reporting not enabled)",
+  "工具 ({0})": "Tools ({0})",
+  "提示 ({0})": "Prompts ({0})",
+  "参数 schema": "Parameter schema",
+  "参数 schema 已省略（上报预算超限）": "Parameter schema omitted (report budget exceeded)",
   // profile-switch choice dialog
   "切换 API 配置": "Switch API profile",
   "取消切换": "Cancel the switch",

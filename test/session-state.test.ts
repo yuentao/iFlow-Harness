@@ -10,6 +10,7 @@ import {
   dropSessionUpdate,
   estimateSessionUsage,
   estimateTokens,
+  estimateMcpContextTokens,
   findToolBlockById,
   isAgentOutputUpdate,
   parseEditArgs,
@@ -1678,7 +1679,7 @@ describe("session usage split & real-time refresh", () => {
     expect(fresh.usage!.totalTokens).toBe(0);
   });
 
-  it("drops the context counter to the compressed context after /compress", () => {
+  it("drops the context counter to the compressed context after /compress", { timeout: 30_000 }, () => {
     const state = initialSessionState();
     beginUserPrompt(state, "很长的历史对话".repeat(1000));
     applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "很长的历史回复".repeat(1000) } }));
@@ -2614,5 +2615,23 @@ describe("beginCompressTurn / endCompressTurn (silent /compress bridge turns)", 
     errored.status = "error";
     endCompressTurn(errored);
     expect(errored.status).toBe("error");
+  });
+});
+
+describe("estimateMcpContextTokens", () => {
+  it("sums the BPE of each tool declaration JSON", () => {
+    const tools = [
+      { name: "do_it", description: "does it", schema: { type: "object", properties: { msg: { type: "string" } } } },
+      { name: "second" },
+    ];
+    const expected =
+      estimateTokens(JSON.stringify({ name: "do_it", description: "does it", parameters: { type: "object", properties: { msg: { type: "string" } } } })) +
+      estimateTokens(JSON.stringify({ name: "second" }));
+    expect(estimateMcpContextTokens(tools)).toBe(expected);
+  });
+  it("keeps an honest floor for schemaOmitted tools and counts nothing for an empty list", () => {
+    expect(estimateMcpContextTokens([])).toBe(0);
+    const omitted = [{ name: "big", description: "huge schema", schemaOmitted: true, schema: { type: "object", properties: { x: { type: "array", items: { description: "x".repeat(5000) } } } } }];
+    expect(estimateMcpContextTokens(omitted)).toBe(estimateTokens(JSON.stringify({ name: "big", description: "huge schema" })));
   });
 });

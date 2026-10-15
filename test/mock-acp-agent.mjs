@@ -158,6 +158,49 @@ async function handle(msg) {
       break;
     }
 
+    case "_iflow/mcp/status": {
+      // mcp-status-refactor Mod extension point. ACP_MOCK_MCP_STATUS=off
+      // simulates a bundle WITHOUT the Mod (methodNotFound error → the client
+      // throws → the panel degrades to no indicator); =disabled simulates the
+      // env opt-out answer {available:false}; default = a full report.
+      const mode = process.env.ACP_MOCK_MCP_STATUS;
+      if (mode === "off") {
+        send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Method not supported: ${msg.method}` } });
+        return;
+      }
+      if (mode === "disabled") {
+        send({ jsonrpc: "2.0", id: msg.id, result: { available: false, reason: "disabled", servers: {} } });
+        return;
+      }
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          available: true,
+          discoveryState: "completed",
+          servers: {
+            share: {
+              status: "connected",
+              toolCount: 1,
+              promptCount: 1,
+              tools: [{ name: "share_echo", description: "Echo it", schema: { type: "object", properties: { msg: { type: "string" } } } }],
+              prompts: [{ name: "help", description: "Usage" }],
+            },
+            broken: {
+              status: "disconnected",
+              toolCount: 0,
+              promptCount: 0,
+              tools: [],
+              prompts: [],
+              error: "spawn ENOENT: binary missing",
+              errorKind: "spawn_failed",
+            },
+          },
+        },
+      });
+      break;
+    }
+
     case "session/cancel":
       send({
         jsonrpc: "2.0",

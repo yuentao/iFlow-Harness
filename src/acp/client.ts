@@ -23,6 +23,7 @@ import {
   UserQuestionsResponse,
   ExitPlanModeRequest,
   ExitPlanModeResponse,
+  McpStatusReport,
 } from "./protocol.js";
 import { JsonRpcPeer, type WireTap } from "./jsonrpc.js";
 
@@ -251,6 +252,16 @@ export class AcpClient {
    */
   async cancelAgent(sessionId: string, agentId: string): Promise<{ stopped?: boolean; reason?: string }> {
     return (await this.peer!.request(AcpMethods.cancelAgent, { sessionId, agentId })) as { stopped?: boolean; reason?: string };
+  }
+
+  /**
+   * iFlow extension (mcp-status-refactor Mod): per-server MCP connection state
+   * + tool/prompt declarations (the same sources `/mcp list` renders). Throws
+   * when the Mod is missing (methodNotFound) or the CLI is torn down — the
+   * caller degrades to "no indicator", never a false green/red.
+   */
+  async mcpStatus(sessionId: string): Promise<McpStatusReport> {
+    return (await this.peer!.request(AcpMethods.mcpStatus, { sessionId })) as McpStatusReport;
   }
 
   /** Kill the agent process. Pending requests are rejected. */

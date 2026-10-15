@@ -427,11 +427,16 @@ describe("CheckpointManager (real shadow git)", () => {
     expect(path.isAbsolute(rel)).toBe(true);
     expect(rel.startsWith(path.resolve("J:\\ws", "snap").toLowerCase()) ||
            rel.toLowerCase().startsWith(path.resolve("J:\\ws", "snap").toLowerCase())).toBe(true);
-    // Two workspaces under one custom root never collide (prune safety).
-    const a = CheckpointManager.resolveCheckpointRoot("R:\\cp", "J:\\ws-a", def);
-    const b = CheckpointManager.resolveCheckpointRoot("R:\\cp", "J:\\ws-b", def);
+    // Two workspaces under one custom root never collide (prune safety). The
+    // fixture root must be absolute on the *current* platform: on POSIX a
+    // Windows drive letter ("R:\cp") is merely a relative name and joins
+    // under the workspace instead of staying the shared parent.
+    const customRoot = path.join(os.homedir(), "cp-root");
+    const a = CheckpointManager.resolveCheckpointRoot(customRoot, "J:\\ws-a", def);
+    const b = CheckpointManager.resolveCheckpointRoot(customRoot, "J:\\ws-b", def);
     expect(a).not.toBe(b);
-    expect(path.dirname(a)).toBe(path.dirname(b));
+    expect(path.dirname(a)).toBe(customRoot);
+    expect(path.dirname(b)).toBe(customRoot);
   });
 
   it("dirSizeBytes sums recursively and tolerates a missing dir", async () => {

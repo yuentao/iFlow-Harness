@@ -21,6 +21,9 @@ export const AcpMethods = {
   // iFlow extension (agent-cancel-refactor Mod in the vendored fork): stop a
   // single SubAgent by its wire agentId; answers {stopped, reason?}.
   cancelAgent: "_iflow/agent/cancel",
+  // iFlow extension (mcp-status-refactor Mod in the vendored fork): per-server
+  // MCP connection state + tool/prompt declarations; answers McpStatusReport.
+  mcpStatus: "_iflow/mcp/status",
   // Agent → Client
   sessionUpdate: "session/update",
   requestPermission: "session/request_permission",
@@ -394,4 +397,52 @@ export interface ExitPlanModeRequest {
 export interface ExitPlanModeResponse {
   approved: boolean;
   reason?: string;
+}
+
+/**
+ * Reply of the client→agent `_iflow/mcp/status` request (mcp-status-refactor
+ * Mod, iFlow extension). Mirrors what the CLI's own `/mcp list` renders in the
+ * TUI: per-server connection state from the `Djt` map `vk()` writes (the same
+ * source the slash command reads via `Ese(name)`), the discovery state (`Rjt()`,
+ * bE: not_started/in_progress/completed), tool + prompt counts, and the tool
+ * DECLARATIONS (name/description/schema — `/mcp list schema` prints
+ * `parametersJsonSchema ?? parameters`, the same pick the loader makes) so a
+ * client can show a detail view and estimate the context the server injects.
+ * `error`/`errorKind` come from the k2n connect-failure catch site (upstream
+ * only console.errors the text, so the capture point is the only source).
+ * `available:false` (with `reason` disabled/no_config/no_loader/probe_failed)
+ * means the Mod is missing or opted out — the client degrades to no indicator.
+ */
+export interface McpStatusReport {
+  available: boolean;
+  reason?: "disabled" | "no_config" | "no_loader" | "probe_failed" | string;
+  discoveryState?: "not_started" | "in_progress" | "completed" | "unknown" | string;
+  servers: Record<string, McpServerStatusView>;
+}
+
+export interface McpServerStatusView {
+  status: "connected" | "connecting" | "disconnected";
+  toolCount: number;
+  promptCount: number;
+  tools: McpToolView[];
+  prompts: McpPromptView[];
+  disabled?: boolean;
+  blocked?: boolean;
+  error?: string;
+  errorKind?: "spawn_failed" | "timeout" | "protocol_error" | "network_error" | "unknown" | string;
+}
+
+export interface McpToolView {
+  name: string;
+  description?: string;
+  /** Parameter schema as the CLI sees it (JSON-Schema or the legacy
+   * declaration shape). Absent when the tool carries none. */
+  schema?: unknown;
+  /** Schema dropped over the loader's 4MB per-server budget (frame-cap guard). */
+  schemaOmitted?: boolean;
+}
+
+export interface McpPromptView {
+  name: string;
+  description?: string;
 }

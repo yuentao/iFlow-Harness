@@ -44,8 +44,10 @@ import type {
   UserQuestionsResponse,
   ExitPlanModeRequest,
   ExitPlanModeResponse,
+  McpStatusReport,
+  McpServerStatusView,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode } from "../../shared/messages.js";
 import {
   clearQueue as clearQueueUi,
@@ -82,6 +84,7 @@ import {
   canStopSubAgent,
   beginReplay,
   clampSessionLabel,
+  estimateMcpContextTokens,
   dropSessionUpdate,
   endReplay,
   findCliHistoryCut,
@@ -1172,6 +1175,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "saveMcpServers":
         this.saveMcpServers(msg.servers);
+        break;
+      case "mcpStatus":
+        void this.sendMcpStatus();
         break;
       case "listApprovalPolicy":
         void this.sendApprovalPolicy();
@@ -3004,6 +3010,43 @@ export class ChatPanel implements vscode.Disposable {
       .then((choice) => {
         if (choice === restartLabel) void this.restartCli();
       });
+  }
+
+  /**
+   * MCP card asked for live connection state: query the CLI's `_iflow/mcp/status`
+   * (mcp-status-refactor Mod) and append the host-computed `contextTokens` per
+   * server — the BPE of the tool declarations the CLI injects into every request
+   * (the CLI itself has no such estimate, and re-tokenizing on the webview per
+   * render would be wasteful). Every failure mode degrades to `status: null`
+   * (CLI not running, Mod missing → methodNotFound, Mod disabled → available:false,
+   * session not started yet): the card shows NO indicator rather than a wrong one.
+   */
+  private async sendMcpStatus(): Promise<void> {
+    const client = this.client;
+    const sessionId = this.store.getState().sessionId;
+    if (!client || !sessionId) {
+      this.postToWebview({ type: "mcpStatus", status: null });
+      return;
+    }
+    let report: McpStatusReport | null = null;
+    try {
+      report = await client.mcpStatus(sessionId);
+    } catch (error) {
+      this.log.warn(`mcpStatus unavailable: ${errorMessage(error)}`);
+    }
+    if (!report || !report.available) {
+      this.postToWebview({ type: "mcpStatus", status: null });
+      return;
+    }
+    const servers: Record<string, McpServerStatusView & { contextTokens?: number }> = {};
+    for (const [name, view] of Object.entries(report.servers ?? {})) {
+      servers[name] = { ...view, contextTokens: estimateMcpContextTokens(view.tools ?? []) };
+    }
+    const status: McpStatusUi = {
+      discoveryState: report.discoveryState,
+      servers,
+    };
+    this.postToWebview({ type: "mcpStatus", status });
   }
 
   /**
