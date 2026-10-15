@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  OS_NOTIFY_CONTENT_COOLDOWN_MS,
   OS_NOTIFY_THROTTLE_MS,
   gateOsNotification,
   initOsNotifyGate,
@@ -9,7 +10,7 @@ import {
 
 describe("osNotifyAllowed", () => {
   it("off blocks every event kind", () => {
-    for (const event of ["approval", "question", "plan", "longTool", "turnDone", "turnFailed"] as const) {
+    for (const event of ["approval", "question", "plan", "turnDone", "turnFailed"] as const) {
       expect(osNotifyAllowed(event, "off")).toBe(false);
     }
   });
@@ -21,12 +22,11 @@ describe("osNotifyAllowed", () => {
     // A hard failure is an attention event for away users by default (the
     // queue pauses and retry decisions are theirs), like the blocking trio.
     expect(osNotifyAllowed("turnFailed", "approvals")).toBe(true);
-    expect(osNotifyAllowed("longTool", "approvals")).toBe(false);
     expect(osNotifyAllowed("turnDone", "approvals")).toBe(false);
   });
 
   it("all covers everything", () => {
-    for (const event of ["approval", "question", "plan", "longTool", "turnDone", "turnFailed"] as const) {
+    for (const event of ["approval", "question", "plan", "turnDone", "turnFailed"] as const) {
       expect(osNotifyAllowed(event, "all")).toBe(true);
     }
   });
@@ -123,18 +123,6 @@ describe("gateOsNotification", () => {
     }
   });
 
-  it("longTool ignores window focus (only turnDone is focus-gated)", () => {
-    const out = gateOsNotification({
-      event: "longTool",
-      setting: "all",
-      panelVisible: false,
-      windowFocused: true,
-      nowMs: 0,
-      gate: initOsNotifyGate(),
-    });
-    expect(out.fire).toBe(true);
-  });
-
   it("throttles the same event kind within the window", () => {
     const first = gateOsNotification({
       event: "approval",
@@ -201,7 +189,7 @@ describe("gateOsNotification", () => {
   it("does not consume the gate when the setting rejects the event", () => {
     const gate = initOsNotifyGate();
     const out = gateOsNotification({
-      event: "longTool",
+      event: "turnDone",
       setting: "approvals",
       panelVisible: false,
       windowFocused: false,
@@ -213,7 +201,7 @@ describe("gateOsNotification", () => {
     // The next call at the same timestamp still fires (nothing was stamped).
     expect(
       gateOsNotification({
-        event: "longTool",
+        event: "turnDone",
         setting: "all",
         panelVisible: false,
         windowFocused: false,
@@ -235,5 +223,78 @@ describe("gateOsNotification", () => {
     });
     expect(out.fire).toBe(false);
     expect(out.gate).toBe(gate);
+  });
+
+  it("suppresses the identical text within the content cooldown (retry-loop storm)", () => {
+    // User screenshot 2026-10-15: an agent retrying the same tool re-fired the
+    // identical 「等待审批：Write a.ts」 toast a dozen times, each >5s apart.
+    const first = gateOsNotification({
+      event: "approval",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+      contentKey: "iFlow 等待审批：Write a.ts",
+    });
+    expect(first.fire).toBe(true);
+    // Past the 5s throttle but inside the 60s content cooldown.
+    const repeat = gateOsNotification({
+      event: "approval",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: OS_NOTIFY_THROTTLE_MS * 3,
+      gate: first.gate,
+      contentKey: "iFlow 等待审批：Write a.ts",
+    });
+    expect(repeat.fire).toBe(false);
+    expect(repeat.gate).toBe(first.gate); // nothing stamped by the dropped call
+  });
+
+  it("fires the identical text again once the content cooldown elapsed", () => {
+    const first = gateOsNotification({
+      event: "approval",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+      contentKey: "same",
+    });
+    const later = gateOsNotification({
+      event: "approval",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: OS_NOTIFY_CONTENT_COOLDOWN_MS,
+      gate: first.gate,
+      contentKey: "same",
+    });
+    expect(later.fire).toBe(true);
+    expect(later.gate.lastContent?.atMs).toBe(OS_NOTIFY_CONTENT_COOLDOWN_MS);
+  });
+
+  it("different text is not subject to the content cooldown", () => {
+    const first = gateOsNotification({
+      event: "approval",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+      contentKey: "等待审批：Write a.ts",
+    });
+    const other = gateOsNotification({
+      event: "approval",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: OS_NOTIFY_THROTTLE_MS,
+      gate: first.gate,
+      contentKey: "等待审批：Write b.ts",
+    });
+    expect(other.fire).toBe(true);
+    expect(other.gate.lastContent?.text).toBe("等待审批：Write b.ts");
   });
 });

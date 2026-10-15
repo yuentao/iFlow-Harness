@@ -19,15 +19,29 @@
  *              earns the interrupt.
  *   throttle — the same event kind at most once per window (a burst of
  *              parallel tool approvals must not stack 10 native toasts)
+ *   content  — the same event kind with byte-identical text is additionally
+ *              cooled down for OS_NOTIFY_CONTENT_COOLDOWN_MS. Seconds-level
+ *              throttling only suppresses instantaneous bursts; an agent
+ *              retrying the same tool (reject/fail → re-request, staggered
+ *              >5s apart) re-notified the identical 「等待审批：Write a.ts」
+ *              line a dozen times into Notification Center (user screenshot
+ *              2026-10-15). A repeated identical toast carries no new
+ *              information — one per cooldown window is enough.
  *
  * The gate is a pure state machine over a `lastFiredAt` record so the host
  * stays thin and the semantics are pinned by unit tests.
  */
 
-export type OsNotifyEvent = "approval" | "question" | "plan" | "longTool" | "turnDone" | "turnFailed";
+export type OsNotifyEvent = "approval" | "question" | "plan" | "turnDone" | "turnFailed";
 
 /** Same-kind burst suppression window. */
 export const OS_NOTIFY_THROTTLE_MS = 5_000;
+
+/** Same-kind, same-text suppression window (see the content gate in
+ * `gateOsNotification`). Longer than the throttle on purpose: a retry loop
+ * re-asking for the same tool clears 5s easily, and every repeat was a new
+ * toast in the user's screenshot. */
+export const OS_NOTIFY_CONTENT_COOLDOWN_MS = 60_000;
 
 /** Events the `approvals` (default) tier covers: an agent is BLOCKED on the
  * user until answered, so these are the ones worth interrupting for — plus
@@ -46,6 +60,9 @@ export function osNotifyAllowed(event: OsNotifyEvent, setting: string): boolean 
 export interface OsNotifyGate {
   /** Per-event-kind epoch-ms of the last fired notification. */
   lastFiredAt: Partial<Record<OsNotifyEvent, number>>;
+  /** The last fired notification's event + exact text + timestamp — consulted
+   * by the content cooldown (identical text within the window is dropped). */
+  lastContent?: { event: OsNotifyEvent; text: string; atMs: number };
 }
 
 export function initOsNotifyGate(): OsNotifyGate {
@@ -87,6 +104,9 @@ export function gateOsNotification(args: {
   windowFocused: boolean;
   nowMs: number;
   gate: OsNotifyGate;
+  /** The exact notification text (the host passes the toast body). Enables
+   * the content cooldown; omitted = cooldown not consulted (throttle only). */
+  contentKey?: string;
 }): { fire: boolean; gate: OsNotifyGate } {
   if (isUserWatching(args.panelVisible, args.windowFocused)) return { fire: false, gate: args.gate };
   if (!osNotifyAllowed(args.event, args.setting)) return { fire: false, gate: args.gate };
@@ -95,8 +115,21 @@ export function gateOsNotification(args: {
   if (last !== undefined && args.nowMs - last < OS_NOTIFY_THROTTLE_MS) {
     return { fire: false, gate: args.gate };
   }
+  const lastContent = args.gate.lastContent;
+  if (
+    args.contentKey !== undefined &&
+    lastContent !== undefined &&
+    lastContent.event === args.event &&
+    lastContent.text === args.contentKey &&
+    args.nowMs - lastContent.atMs < OS_NOTIFY_CONTENT_COOLDOWN_MS
+  ) {
+    return { fire: false, gate: args.gate };
+  }
   return {
     fire: true,
-    gate: { lastFiredAt: { ...args.gate.lastFiredAt, [args.event]: args.nowMs } },
+    gate: {
+      lastFiredAt: { ...args.gate.lastFiredAt, [args.event]: args.nowMs },
+      lastContent: args.contentKey === undefined ? args.gate.lastContent : { event: args.event, text: args.contentKey, atMs: args.nowMs },
+    },
   };
 }

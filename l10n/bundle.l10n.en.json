@@ -108,8 +108,6 @@
   "iFlow 等待审批：{0}（{1} 秒后自动拒绝）": "iFlow is waiting for approval: {0} (auto-rejected in {1}s)",
   "iFlow 等待计划审批（{0} 秒后自动拒绝）": "iFlow is waiting for plan approval (auto-rejected in {0}s)",
   "iFlow 有问题需要你回答（{0} 秒后自动继续）": "iFlow has a question for you (continues in {0}s)",
-  "长任务已完成（运行 {0} 秒）：{1}": "Long task finished (ran {0}s): {1}",
-  "长任务失败（运行 {0} 秒）：{1}": "Long task failed (ran {0}s): {1}",
   "iFlow 已完成本轮回复": "iFlow finished this turn",
   "没有可增强的内容": "Nothing to enhance",
   "已有内部请求进行中，请稍后再试": "Another internal request is in progress — try again in a moment",

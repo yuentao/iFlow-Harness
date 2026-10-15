@@ -39,7 +39,7 @@ import {
   toAgentPromptText,
   appendInjectedContext,
 } from "../shared/session-state";
-import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, splitSystemPromptSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
+import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -2528,6 +2528,27 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     // Only the user turn counts; the injected system prompt/memory do not.
     expect(usage.inputTokens).toBe(estimateTokens("hi"));
   });
+
+  it("is idempotent: a second call skips when a card already exists", () => {
+    const state = initialSessionState();
+    appendInjectedContext(state, items());
+    expect(appendInjectedContext(state, items())).toBeNull();
+    expect(state.blocks.filter((b) => b.kind === "injected")).toHaveLength(1);
+  });
+
+  it("does not duplicate the card after deleting the first user message and re-sending", () => {
+    // The card lives BEFORE the first user block; deleteUserMessageById
+    // truncates FROM the user block, so the card survives while the user
+    // blocks vanish — the re-send must not insert a second card (user-reported
+    // duplicate injection cards).
+    const state = initialSessionState();
+    appendInjectedContext(state, items());
+    beginUserPrompt(state, "first");
+    deleteUserMessageById(state, (state.blocks[1] as { id: string }).id);
+    beginUserPrompt(state, "second");
+    expect(appendInjectedContext(state, items())).toBeNull();
+    expect(state.blocks.map((b) => b.kind)).toEqual(["injected", "user"]);
+  });
 });
 
 describe("splitSystemPromptSections (injected card visual segments)", () => {
@@ -2563,6 +2584,11 @@ describe("splitSystemPromptSections (injected card visual segments)", () => {
     expect(splitSystemPromptSections("plain fallback text")).toEqual([
       { kind: "core", path: "", content: "plain fallback text" },
     ]);
+  });
+
+  it("extractCorePrompt strips memory markers and context-file bodies", () => {
+    expect(extractCorePrompt(prompt)).toBe("You are iFlow CLI...");
+    expect(extractCorePrompt("plain fallback text")).toBe("plain fallback text");
   });
 });
 

@@ -293,6 +293,17 @@ export function splitSystemPromptSections(text: string): InjectedPromptSection[]
   return sections;
 }
 
+/** Extract the core instruction(s) from a reported system prompt (everything
+ * splitSystemPromptSections tags as Core; memory and inlined context files
+ * excluded). Developer-only channel: the host writes this to disk so the
+ * prompt can be iterated without surfacing its body in the user UI. */
+export function extractCorePrompt(text: string): string {
+  return splitSystemPromptSections(text)
+    .filter((s) => s.kind === "core")
+    .map((s) => s.content)
+    .join("\n\n---\n\n");
+}
+
 export type Block =
   | TextBlock
   | ThoughtBlock

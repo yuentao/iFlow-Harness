@@ -314,6 +314,7 @@ const en: Record<string, string> = {
       "核心提示词": "Core prompt",
       "记忆": "Memory",  "上下文文件": "Context files",
   "{0} 字符": "{0} chars",
+  "{0} 字节": "{0} bytes",
   "diff": "diff",
   // composer / message list (additional — new entries only)
   "复制": "Copy",

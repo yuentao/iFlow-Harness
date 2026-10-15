@@ -129,8 +129,8 @@ function toolUpdate(status: string, title?: string, initial = false, toolName?: 
  * approval-card trigger, the completion-cue policy on turn end (the chime is
  * universal — only `iflow.soundFeedback` gates it — while the turnDone toast
  * is additive per its own gate; the regenerate path shares the sendPrompt
- * policy), and the long-tool timer lifecycle (recorded regardless of
- * visibility, cleared on session switch).
+ * policy), and the removal of the mid-turn long-tool trigger (a tool terminal
+ * is never the turn's terminal — screenshot 2026-10-15).
  */
 describe("ChatPanel OS notifications (P0-5 wiring)", () => {
   let panel: ChatPanel;
@@ -223,6 +223,22 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(infoMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("drops the identical approval toast past the throttle but inside the content cooldown", async () => {
+    // User screenshot 2026-10-15: an agent retrying the same tool re-fired the
+    // byte-identical 「等待审批」 toast a dozen times, each >5s apart — the
+    // 5s throttle never caught them. The content cooldown (60s) must.
+    const first = p.requestPermissionFromUser(permissionRequest);
+    vi.advanceTimersByTime(10_000); // past the 5s throttle, inside the 60s cooldown
+    const second = p.requestPermissionFromUser({
+      ...permissionRequest,
+      toolCall: { ...permissionRequest.toolCall, toolCallId: "tool-9" },
+    });
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await Promise.all([first, second]);
+    await flushToastDelivery();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("regenerate completion notifies AND chimes when the user is away (cues are additive)", async () => {
     p.store.userPrompt("再试一次");
     p.store.promptCompleted("end_turn"); // back to idle — regenerate's gate
@@ -258,63 +274,24 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(sound).toHaveBeenCalledWith("done");
   });
 
-  it("a long tool that starts while the user watches still notifies after they switch away", async () => {
-    p.panelVisible = true;
+  it("a long execute tool finishing mid-turn never notifies — its terminal is not the turn's", async () => {
+    // User screenshot 2026-10-15: 「长任务已完成（运行 50 秒）：Shell」 while the
+    // panel still showed 正在生成 — the 2026-10-13 fix only excluded `task`,
+    // but ANY tool terminal lands mid-turn (the agent keeps going), so the
+    // whole longTool trigger is gone. Real completion is turnDone only.
     p.onSessionUpdate(toolUpdate("in_progress", "npm run build", true));
-    // The user switches to the editor mid-tool — recording must be
-    // unconditional (2026-10 fix), the notification-time gate re-checks.
     p.panelVisible = false;
     vi.advanceTimersByTime(31_000);
     p.onSessionUpdate(toolUpdate("completed"));
     await flushToastDelivery();
-    expect(infoMessage).toHaveBeenCalledTimes(1);
-    expect(String(infoMessage.mock.calls[0]![0])).toContain("npm run build");
-  });
-
-  it("a quick tool never notifies", async () => {
-    p.onSessionUpdate(toolUpdate("in_progress", "ls", true));
-    vi.advanceTimersByTime(1_000);
-    p.onSessionUpdate(toolUpdate("completed"));
     expect(infoMessage).not.toHaveBeenCalled();
   });
 
-  it("the SubAgent-spawning task tool never notifies — its terminal lands mid-turn", async () => {
-    // User report 2026-10-13: 「长任务已完成（运行 306 秒）：Task」 fired while
-    // the panel still showed 正在生成 — the subagent landing is NOT the user's
-    // task finishing; the parent agent keeps generating afterwards.
-    p.onSessionUpdate(toolUpdate("in_progress", "Task", true, "Task"));
-    vi.advanceTimersByTime(31_000);
-    p.onSessionUpdate(toolUpdate("completed", undefined, false, "Task"));
-    expect(infoMessage).not.toHaveBeenCalled();
-  });
-
-  it("a failed long tool is announced as failed, not completed", async () => {
+  it("a failed mid-turn tool never notifies either", async () => {
     p.onSessionUpdate(toolUpdate("in_progress", "npm run build", true));
     vi.advanceTimersByTime(31_000);
     p.onSessionUpdate(toolUpdate("failed"));
     await flushToastDelivery();
-    expect(infoMessage).toHaveBeenCalledTimes(1);
-    expect(String(infoMessage.mock.calls[0]![0])).toContain("长任务失败");
-  });
-
-  it("session switch clears long-tool timers so a same-id tool in the new session cannot misfire", async () => {
-    p.onSessionUpdate(toolUpdate("in_progress", "npm run build", true));
-    // Session replaced (new session / restore / hot re-auth) — the wiring is
-    // store.onStateReplaced → clearToolCaches.
-    p.store.replaceState({ ...p.store.getState(), sessionId: "notify-session-2" });
-    vi.advanceTimersByTime(31_000);
-    p.onSessionUpdate({
-      sessionId: "notify-session-2",
-      update: {
-        sessionUpdate: "tool_call_update",
-        toolCallId: "long-1",
-        kind: "execute",
-        status: "completed",
-        title: "npm run build",
-        content: [],
-        locations: [],
-      },
-    });
     expect(infoMessage).not.toHaveBeenCalled();
   });
 

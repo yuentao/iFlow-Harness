@@ -143,8 +143,9 @@ export class SessionStore {
     return index;
   }
 
-  /** Insert the auto-injected-context card (first prompt of a session). */
-  injectedContext(items: InjectedContextItem[]): number {
+  /** Insert the auto-injected-context card (first prompt of a session).
+   * Returns null when the transcript already carries a card (idempotent). */
+  injectedContext(items: InjectedContextItem[]): number | null {
     const index = appendInjectedContext(this.state, items);
     this.noteMutationIndex(index);
     this.flush();

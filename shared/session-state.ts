@@ -1051,12 +1051,21 @@ export function beginUserPrompt(
  * host collects the items (acp-context-report Mod snapshot, or the disk
  * fallback when the bundled CLI carries no Mod) and this reducer composes
  * the block with its one-line notice. Returns the inserted index for the
- * store's `mutatedFrom` incremental path.
+ * store's `mutatedFrom` incremental path, or null when the transcript
+ * already carries a card.
+ *
+ * Idempotent by design: the card lives BEFORE the first user block, and
+ * deleting/edit-resending that message truncates FROM the user block — the
+ * card survives while the user blocks vanish, so the host's "no user block
+ * yet" gate re-opens on the next send. Without this guard the resend inserts
+ * a second card (user-reported duplicates, differing only in token count).
+ * The guard also covers the fire-and-forget poll racing a concurrent insert.
  */
 export function appendInjectedContext(
   state: SessionState,
   items: InjectedContextItem[],
-): number {
+): number | null {
+  if (state.blocks.some((b) => b.kind === "injected")) return null;
   const parts: string[] = [];
   if (items.some((i) => i.kind === "system")) parts.push(l10n.t("系统提示词"));
   if (items.some((i) => i.kind === "memory")) parts.push(l10n.t("记忆"));
@@ -1444,9 +1453,11 @@ export function setMeta(
  */
 export const SESSION_LABEL_MAX = 48;
 
-/** Trim + hard-cap a label to SESSION_LABEL_MAX chars. */
+/** Trim + hard-cap a label to SESSION_LABEL_MAX chars (ellipsis included). */
 export function clampSessionLabel(text: string): string {
-  return text.trim().slice(0, SESSION_LABEL_MAX);
+  const trimmed = text.trim();
+  if (trimmed.length <= SESSION_LABEL_MAX) return trimmed;
+  return `${trimmed.slice(0, SESSION_LABEL_MAX - 1)}…`;
 }
 
 /**

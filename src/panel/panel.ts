@@ -46,7 +46,7 @@ import type {
   ExitPlanModeResponse,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { isPlanMode } from "../../shared/messages.js";
+import { extractCorePrompt, isPlanMode } from "../../shared/messages.js";
 import {
   clearQueue as clearQueueUi,
   enqueuePrompt as enqueuePromptUi,
@@ -87,13 +87,13 @@ import {
   findCliHistoryCut,
   findToolBlockById,
   isAgentOutputUpdate,
-  isTaskToolCall,
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
   parseEditArgs,
   parseToolFilePath,
   parseTranscriptJsonl,
   reassignBlockIds,
+  SESSION_LABEL_MAX,
   snapshotEditDiff,
   sortSessionSummaries,
   synthesizeEditDiff,
@@ -218,9 +218,6 @@ export function stripFileMentions(text: string): string {
     "$1$2",
   );
 }
-/** M1 P0-5: an execute-class tool still running after this long earns an OS
- * notification when it finally lands (only while the panel is hidden). */
-const LONG_TOOL_NOTIFY_MS = 30_000;
 /** OS toast text must stay ONE short line: `run_shell_command` titles carry
  * the WHOLE command — a 40-line python script flooded the native approval
  * toast verbatim (user report 2026-10-13). Collapse every whitespace run
@@ -499,15 +496,6 @@ export class ChatPanel implements vscode.Disposable {
   private panelVisible = false;
   /** M1 P0-5: pure gate state (throttle timestamps per event kind). */
   private osNotifyGate: OsNotifyGate = initOsNotifyGate();
-  /** M1 P0-5: toolCallId → start epoch + title of execute-class tools still
-   * running (recorded always; the notification-time gate re-checks
-   * visibility). The title rides only the initial tool_call (same wire trait
-   * as kind, probed CLI 0.5.19), so it must be captured there — otherwise
-   * the notification shows the raw toolCallId. Capped FIFO like toolArgs — a
-   * long execute-heavy session must not grow it unboundedly if terminal
-   * events are ever missed. */
-  private readonly runningToolStarts = new Map<string, { startedAt: number; title: string | null }>();
-  private static readonly RUNNING_TOOL_CAP = 128;
   /** M1: one internal prompt at a time (enhance and title generation share
    * the lane; a second request while one runs fails fast). */
   private internalPromptBusy = false;
@@ -1288,6 +1276,10 @@ export class ChatPanel implements vscode.Disposable {
       windowFocused: vscode.window.state.focused,
       nowMs: Date.now(),
       gate: this.osNotifyGate,
+      // Content cooldown: an agent retrying the same tool re-fires the
+      // byte-identical approval line every >5s (screenshot 2026-10-15);
+      // identical text within the cooldown window is dropped.
+      contentKey: text,
     });
     if (!gate.fire) return false;
     this.osNotifyGate = gate.gate;
@@ -1477,8 +1469,17 @@ export class ChatPanel implements vscode.Disposable {
     if (!firstUser || firstUser.kind !== "user") return;
     // Only replace the mechanical truncation form (or the untitled default)
     // — a label the user could not have produced mechanically is left alone.
+    // Labels persisted before the ellipsis was added to clampSessionLabel
+    // carry the bare 48-char slice; accept that form too so old sessions can
+    // still be titled.
     const mechanical = clampSessionLabel(firstUser.text);
-    if (target.label !== mechanical && target.label !== DEFAULT_SESSION_LABEL) return;
+    const legacyMechanical = firstUser.text.trim().slice(0, SESSION_LABEL_MAX);
+    if (
+      target.label !== mechanical &&
+      target.label !== legacyMechanical &&
+      target.label !== DEFAULT_SESSION_LABEL
+    )
+      return;
     // One lane: an in-flight internal prompt means this session gets no title
     // NOW — but the id is not registered yet, so the next turn's completion
     // retries (the busy check must come before the registration).
@@ -3605,59 +3606,6 @@ export class ChatPanel implements vscode.Disposable {
           this.preSnapshots.delete(update.toolCallId);
           this.toolArgs.delete(update.toolCallId);
         }
-        // M1 P0-5: long-running execute-class tools earn a native notification
-        // when they finally land AND the user is not watching the panel.
-        // `kind` rides only the initial tool_call (probed, CLI 0.5.19 — the
-        // update events omit it), so timing starts there (pending→in_progress
-        // drift is milliseconds). Record UNCONDITIONALLY: the common case is
-        // a tool that starts while the user watches and finishes after they
-        // switch away — gating the recording on current visibility would drop
-        // exactly those. The terminal event clears the entry either way; the
-        // notification itself re-passes the full gate (visibility may have
-        // changed mid-tool).
-        // The SubAgent-spawning `task` call is EXCLUDED: its terminal update
-        // lands MID-TURN — the parent keeps generating after the subagent
-        // returns — so the toast fired at subagent landing while the panel
-        // still showed 正在生成, reading as a premature "your task finished"
-        // (user report 2026-10-13: 「长任务已完成（运行 306 秒）：Task」 mid-turn;
-        // the opaque title "Task" reinforces the misreading). Subagent progress
-        // has its own card; real completion is trigger 3 (turnDone).
-        if (
-          update.sessionUpdate === "tool_call" &&
-          update.kind === "execute" &&
-          !isTaskToolCall(update) &&
-          update.status !== "completed" &&
-          update.status !== "failed"
-        ) {
-          if (this.runningToolStarts.size >= ChatPanel.RUNNING_TOOL_CAP) {
-            const oldest = this.runningToolStarts.keys().next().value;
-            if (oldest !== undefined) this.runningToolStarts.delete(oldest);
-          }
-          this.runningToolStarts.set(update.toolCallId, {
-            startedAt: Date.now(),
-            title: typeof update.title === "string" && update.title ? update.title : null,
-          });
-        } else if (update.status === "completed" || update.status === "failed") {
-          const entry = this.runningToolStarts.get(update.toolCallId);
-          if (entry !== undefined) {
-            this.runningToolStarts.delete(update.toolCallId);
-            if (Date.now() - entry.startedAt >= LONG_TOOL_NOTIFY_MS) {
-              const rawTitle =
-                (typeof update.title === "string" && update.title ? update.title : entry.title) ?? update.toolCallId;
-              const title = notifySummary(rawTitle);
-              const secs = Math.round((Date.now() - entry.startedAt) / 1000);
-              // A failed tool must never be announced as 已完成 — the parent
-              // agent usually keeps going (retry / recovery), so a "completed"
-              // toast for an errored tool is doubly wrong.
-              this.notifyOs(
-                "longTool",
-                update.status === "failed"
-                  ? vscode.l10n.t("长任务失败（运行 {0} 秒）：{1}", secs, title)
-                  : vscode.l10n.t("长任务已完成（运行 {0} 秒）：{1}", secs, title),
-              );
-            }
-          }
-        }
       }
     }
   }
@@ -3674,13 +3622,11 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /** Drop all transient per-tool-call caches (session switch / restore / hot
-   * re-auth): a stale snapshot or long-tool start timestamp from the previous
-   * session must never be compared against a same-id tool call in the new
-   * one. */
+   * re-auth): a stale snapshot from the previous session must never be
+   * compared against a same-id tool call in the new one. */
   private clearToolCaches(): void {
     this.preSnapshots.clear();
     this.toolArgs.clear();
-    this.runningToolStarts.clear();
   }
 
   /**
@@ -4658,6 +4604,7 @@ export class ChatPanel implements vscode.Disposable {
   private collectInjectedContext(reportFresh: boolean): InjectedContextItem[] {
     const report = reportFresh ? this.readContextReport() : null;
     if (report) {
+      this.exportCorePrompt(report.systemPrompt);
       return [{ kind: "system", label: vscode.l10n.t("系统提示词"), content: report.systemPrompt }];
     }
     const items: InjectedContextItem[] = [];
@@ -4694,6 +4641,27 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Developer-only channel: write the core instruction (the reported system
+   * prompt minus the joined memory / inlined context files, per
+   * extractCorePrompt) to `storageUri/core-prompt.md`, overwritten on every
+   * fresh Mod report. The UI deliberately hides the core body (byte count
+   * only); this file is how the prompt gets extracted for iteration without
+   * exposing it to users. Best-effort: a failed write never affects the card.
+   */
+  private exportCorePrompt(systemPrompt: string): void {
+    try {
+      const core = extractCorePrompt(systemPrompt);
+      if (!core) return;
+      const dir = (this.context.storageUri ?? this.context.globalStorageUri).fsPath;
+      void writeFile(path.join(dir, "core-prompt.md"), core, "utf8").catch(() => {
+        /* best effort */
+      });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
    * Insert the injected-context card BEFORE the first user block so the user
    * sees what the model sees the moment the request starts. The report file
    * is written at session/new (startChat) — seconds before the user types —
@@ -4720,7 +4688,8 @@ export class ChatPanel implements vscode.Disposable {
     }
     const items = this.collectInjectedContext(isFresh());
     if (items.length === 0) return;
-    this.store.injectedContext(items);
+    // Null = the reducer skipped (card already present) — nothing to persist.
+    if (this.store.injectedContext(items) === null) return;
     void this.persistActiveTranscript();
   }
 
@@ -5251,8 +5220,15 @@ export class ChatPanel implements vscode.Disposable {
       // First turn of this session: show what the request auto-injects
       // (system prompt / memory / context files) BEFORE the user bubble.
       // Fire-and-forget — the card rides the next snapshot; a slow CLI
-      // startChat never delays the prompt.
-      if (!this.store.getState().blocks.some((b) => b.kind === "user")) {
+      // startChat never delays the prompt. The injected-card check matters
+      // because deleting/edit-resending the first user message truncates
+      // FROM the user block — the card before it survives, and without this
+      // guard the next send would insert a duplicate.
+      const promptBlocks = this.store.getState().blocks;
+      if (
+        !promptBlocks.some((b) => b.kind === "user") &&
+        !promptBlocks.some((b) => b.kind === "injected")
+      ) {
         void this.insertInjectedContextCard(this.contextReportBaseline);
       }
       this.store.userPrompt(

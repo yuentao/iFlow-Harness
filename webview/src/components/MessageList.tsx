@@ -848,7 +848,10 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
 
 /** The system-prompt body, visually split at the CLI's hierarchical-memory
  * markers: core instruction, global memory, then one segment per inlined
- * context file. Splitting is pure display (the stored body stays verbatim). */
+ * context file. Splitting is pure display (the stored body stays verbatim).
+ * The core instruction's body is NOT rendered here — only its UTF-8 byte
+ * size; the developer-only export channel (panel's core-prompt.md write)
+ * surfaces the full text on disk for prompt iteration. */
 function SystemPromptSections({ content }: { content: string }) {
   const sections = useMemo(() => (content ? splitSystemPromptSections(content) : []), [content]);
   if (sections.length === 0) return null;
@@ -865,11 +868,17 @@ function SystemPromptSections({ content }: { content: string }) {
             ) : (
               <span className="shrink-0">{s.kind === "core" ? t("核心提示词") : t("记忆")}</span>
             )}
-            <span className="shrink-0 text-muted-foreground">{t("{0} 字符", s.content.length)}</span>
+            <span className="shrink-0 text-muted-foreground">
+              {s.kind === "core"
+                ? t("{0} 字节", new TextEncoder().encode(s.content).length)
+                : t("{0} 字符", s.content.length)}
+            </span>
           </div>
-          <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            {s.content}
-          </pre>
+          {s.kind !== "core" && (
+            <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {s.content}
+            </pre>
+          )}
         </div>
       ))}
     </div>
