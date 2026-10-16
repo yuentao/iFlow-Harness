@@ -94,6 +94,7 @@ async function handle(msg) {
           sessionUpdate: "tool_call_update",
           toolCallId: "tool-1",
           status: "completed",
+          args: { absolute_path: "/repo/a.ts" },
           content: [{ type: "content", content: { type: "text", text: "file body" } }],
         },
         { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello " } },

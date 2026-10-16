@@ -142,6 +142,64 @@ const LEGACY_RESOLUTION_NOTE = /^\*[^*\n]+ — [^*\n]+\*$/;
  */
 export const MAX_TOOL_OUTPUT_CHARS = 64 * 1024;
 
+/** Char cap for the formatted tool-args display line (audit view, not a
+ * transcript copy — the raw args stay out of memory entirely). */
+export const MAX_TOOL_INPUT_DISPLAY_CHARS = 4096;
+/** Per-string-value cap inside the compact JSON form (a whole-file `content`
+ * payload must never reach the webview). */
+const MAX_TOOL_INPUT_VALUE_CHARS = 300;
+
+function capToolInput(s: string): string {
+  return s.length > MAX_TOOL_INPUT_DISPLAY_CHARS
+    ? `${s.slice(0, MAX_TOOL_INPUT_DISPLAY_CHARS)}…`
+    : s;
+}
+
+/** Depth-bounded clone with per-string truncation before JSON.stringify. */
+function truncateArgValues(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") {
+    return value.length > MAX_TOOL_INPUT_VALUE_CHARS
+      ? `${value.slice(0, MAX_TOOL_INPUT_VALUE_CHARS)}…`
+      : value;
+  }
+  if (depth >= 3 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => truncateArgValues(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>).slice(0, 30)) {
+    out[key] = truncateArgValues(v, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * Format a tool's raw invocation args (wire `tool_call_update(in_progress).args`,
+ * probed CLI 0.5.19) into a display line so tool cards show WHAT was executed
+ * instead of just the tool name. Shell-style args (any object carrying a
+ * non-empty string `command` — run_shell_command in both the live wire and the
+ * Claude-shape jsonl) render as the bare command line; everything else becomes
+ * compact JSON with per-value truncation. Returns null when there is nothing
+ * worth showing (no args, empty object, unserializable).
+ */
+export function formatToolInput(args: unknown): string | null {
+  if (args === null || args === undefined) return null;
+  if (typeof args === "string") {
+    const text = args.trim();
+    return text ? capToolInput(text) : null;
+  }
+  if (typeof args !== "object") return null;
+  if (!Array.isArray(args)) {
+    const command = (args as { command?: unknown }).command;
+    if (typeof command === "string" && command.trim()) return capToolInput(command.trim());
+  }
+  try {
+    const json = JSON.stringify(truncateArgValues(args));
+    if (!json || json === "{}" || json === "[]") return null;
+    return capToolInput(json);
+  } catch {
+    return null;
+  }
+}
+
 /** Upsert the tool block for `patch.toolCallId`. Returns the index of the
  * mutated/appended block (P-1 change reporting). */
 function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
@@ -166,6 +224,9 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
         truncatedChars: output ? truncatedChars : block.truncatedChars,
         // A new update without a diff must not erase the previous diff.
         diff: patch.diff ?? block.diff,
+        // Args ride only the in_progress update; a later update without args
+        // must not erase the captured command/params.
+        input: patch.input ?? block.input,
         reverted: patch.diff ? false : block.reverted,
         // P0-2: per-hunk decisions anchor to the diff text they were derived
         // from — a new diff invalidates them exactly like the revert marker.
@@ -530,6 +591,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         toolKind: update.kind ?? "other",
         status: update.status ?? "pending",
         output: "",
+        input: formatToolInput(update.args),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
@@ -543,6 +605,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         toolKind: update.kind ?? "other",
         status: update.status ?? "pending",
         output: extractTextOutput(update.content),
+        input: formatToolInput(update.args),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
@@ -1752,7 +1815,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           text?: string;
           id?: string;
           name?: string;
-          input?: { description?: string; prompt?: string };
+          input?: { description?: string; prompt?: string; command?: string } & Record<string, unknown>;
         }>) {
           if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
             current.entries.push({ kind: "text", text: block.text });
@@ -1773,6 +1836,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
               toolKind: "other",
               status: "completed",
               output: "",
+              input: formatToolInput(block.input),
               locations: [],
               diff: null,
             });
@@ -1829,7 +1893,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
         text?: string;
         id?: string;
         name?: string;
-        input?: { description?: string; prompt?: string };
+        input?: { description?: string; prompt?: string; command?: string } & Record<string, unknown>;
       }>) {
         if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
           blocks.push({
@@ -1871,6 +1935,7 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
             toolKind: "other",
             status: "completed",
             output: "",
+            input: formatToolInput(block.input),
             locations: [],
             diff: null,
           });

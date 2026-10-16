@@ -130,6 +130,16 @@ export interface ToolBlock extends BlockBase {
   status: ToolCallStatus;
   output: string;
   /**
+   * Formatted display text of the tool's raw invocation args (wire
+   * `tool_call_update(in_progress).args`, probed CLI 0.5.19): shell/search
+   * cards showed only the tool name and users could not audit WHAT was
+   * executed. The host pre-formats (execute → the command line itself;
+   * otherwise compact JSON with per-value truncation) and caps the length,
+   * so raw args — which can carry a whole-file `content` payload — never
+   * linger in memory (pitfall #27 discipline). Null/absent = nothing to show.
+   */
+  input?: string | null;
+  /**
    * P-1 follow-up: present when `output` exceeded MAX_TOOL_OUTPUT_CHARS
    * (64K chars) and was capped — the number of dropped characters. The
    * webview surfaces it as a truncation notice on the output pane.

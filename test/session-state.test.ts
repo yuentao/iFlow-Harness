@@ -12,6 +12,7 @@ import {
   estimateTokens,
   estimateMcpContextTokens,
   findToolBlockById,
+  formatToolInput,
   isAgentOutputUpdate,
   parseEditArgs,
   parseToolFilePath,
@@ -810,6 +811,56 @@ describe("applySessionUpdate", () => {
     );
     applySessionUpdate(state, notify({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" }));
     expect(state.blocks[0]).toMatchObject({ output: "result" });
+  });
+
+  it("captures the shell command from tool args into input", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "sh1", toolName: "run_shell_command", kind: "execute", status: "pending" }));
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sh1",
+        status: "in_progress",
+        args: { command: "npm run build", description: "Build" },
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({ input: "npm run build" });
+    // completion update carries no args — the captured command must survive.
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call_update", toolCallId: "sh1", status: "completed", content: [{ type: "content", content: { type: "text", text: "ok" } }] }),
+    );
+    expect(state.blocks[0]).toMatchObject({ input: "npm run build", output: "ok" });
+  });
+
+  it("captures non-shell tool args as compact JSON in input", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "s1",
+        toolName: "search_file_content",
+        status: "in_progress",
+        args: { pattern: "foo", path: "/tmp" },
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({ input: JSON.stringify({ pattern: "foo", path: "/tmp" }) });
+  });
+
+  it("formatToolInput: extracts command, compacts JSON, truncates, and drops empties", () => {
+    expect(formatToolInput({ command: "ls -la" })).toBe("ls -la");
+    expect(formatToolInput({ pattern: "x" })).toBe('{"pattern":"x"}');
+    expect(formatToolInput(null)).toBeNull();
+    expect(formatToolInput(undefined)).toBeNull();
+    expect(formatToolInput({})).toBeNull();
+    expect(formatToolInput("raw text")).toBe("raw text");
+    // a whole-file content payload must be truncated, never passed through whole
+    const big = formatToolInput({ path: "a.ts", content: "x".repeat(10_000) });
+    expect(big).not.toBeNull();
+    expect(big!.length).toBeLessThan(1_000);
+    expect(big).toContain("…");
   });
 
   it("appends plan blocks and command updates", () => {

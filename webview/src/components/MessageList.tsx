@@ -166,6 +166,46 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
   );
 }
 
+/**
+ * The tool's concrete invocation args (shell command line / params JSON) so
+ * users can audit WHAT ran, not just which tool ran. Same lazy-mount
+ * discipline as OutputDetails (pitfall #27): folded bodies cost zero DOM.
+ * Skipped when the card title already carries the full command verbatim
+ * (CLI's "Running: <cmd>" titles) — no point duplicating it.
+ */
+function InputDetails({ input, title }: { input: string; title: string }) {
+  const [open, setOpen] = useState(false);
+  const [openedOnce, setOpenedOnce] = useState(false);
+  if (!input) return null;
+  if (title.includes(input)) return null;
+  const lineCount = input.trimEnd().split("\n").length;
+  const body = (
+    <pre className="mx-2.5 mb-2.5 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+      {input}
+    </pre>
+  );
+  if (lineCount < 3 && input.length < 120) {
+    return body;
+  }
+  return (
+    <>
+      <button
+        onClick={() => {
+          setOpenedOnce(true);
+          setOpen((v) => !v);
+        }}
+        className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+      >
+        <Caret open={open} />
+        {t("执行参数")}
+      </button>
+      <Collapse open={open}>
+        {openedOnce && body}
+      </Collapse>
+    </>
+  );
+}
+
 function ToolCard({ block }: { block: ToolBlock }) {
   const send = useChat((s) => s.send);
   const primary = block.locations[0];
@@ -245,6 +285,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
           }
         />
       )}
+      {!hasDiff && block.input && <InputDetails input={block.input} title={block.title} />}
       <OutputDetails output={block.output} truncatedChars={block.truncatedChars} />
     </div>
   );
@@ -434,7 +475,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
 
 function ReadOnlySubAgentEntry({ block }: { block: Block }) {
   if (block.kind === "subagent") return null; // Rendered once in the tree above.
-  if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} /></div><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
+  if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} /></div>{block.input && <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all opacity-80">{block.input}</pre>}<pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
   if (block.kind === "thought") return <div><Brain className="mr-1 inline size-3" />{block.evicted ? <span className="opacity-60">{t("内容已释放")}</span> : block.text}</div>;
   if (block.kind === "text" || block.kind === "user") return <Markdown text={block.text} />;
   if (block.kind === "plan") return <TaskList block={block} />;
@@ -1450,9 +1491,12 @@ function MessageListInner({ state }: { state: SessionState }) {
               pressing Enter mid-turn gives instant feedback IN the transcript
               (the QueueStrip sits above the composer and is easy to miss).
               Rides the host's queue array directly: an entry vanishes the
-              moment the host dequeues it, no client-side matching. */}
+              moment the host dequeues it, no client-side matching.
+              cv-block is NOT cosmetic: transcript rows pad +14px and fold
+              -14px of margin, so a bare wrapper here would butt against the
+              bubble above (measured 0px vs the 14px rhythm elsewhere). */}
           {(state.queue ?? []).map((q) => (
-            <div key={q.id} className="stream-in flex justify-end">
+            <div key={q.id} className="cv-block stream-in flex justify-end">
               <div className="flex max-w-[85%] items-start gap-1.5 rounded-2xl rounded-br-md border border-dashed border-border bg-surface/40 px-3 py-2 text-[13px] leading-relaxed text-muted-foreground">
                 <span className="min-w-0 whitespace-pre-wrap break-words opacity-70">
                   {q.text || t("（附件消息）")}

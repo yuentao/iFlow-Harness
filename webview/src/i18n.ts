@@ -88,6 +88,7 @@ const en: Record<string, string> = {
   "失败": "Failed",
   "执行中": "Running",
   "操作输出": "Output",
+  "执行参数": "Command",
   // long-session memory eviction markers
       "内容已释放": "Content released",
       "加载剩余 {0} 行": "Load remaining {0} rows",  "附件图片已释放": "Attached images released",
