@@ -281,9 +281,13 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
   it("drops the identical approval toast past the throttle but inside the content cooldown", async () => {
     // User screenshot 2026-10-15: an agent retrying the same tool re-fired the
     // byte-identical 「等待审批」 toast a dozen times, each >5s apart — the
-    // 5s throttle never caught them. The content cooldown (60s) must.
+    // 5s throttle never caught them. The content cooldown (60s) must. The
+    // retry is issued while card1 is still pending: card1's deferred toast
+    // fires at +1.5s (it still owns the slot then), and card2 — replacing the
+    // slot with the identical line past the 5s throttle but inside the 60s
+    // cooldown — must be dropped.
     const first = p.requestPermissionFromUser(permissionRequest);
-    vi.advanceTimersByTime(10_000); // past the 5s throttle, inside the 60s cooldown
+    vi.advanceTimersByTime(10_000); // toast1 fired at +1.5s; past the 5s throttle, inside the 60s cooldown
     const second = p.requestPermissionFromUser({
       ...permissionRequest,
       toolCall: { ...permissionRequest.toolCall, toolCallId: "tool-9" },
@@ -292,6 +296,25 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     await Promise.all([first, second]);
     await flushToastDelivery();
     expect(infoMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("parallel approval requests toast only for the card actually displayed", async () => {
+    // The CLI runs a turn's function calls in parallel (bundle: `A.map((R,P)=>
+    // this.runTool(...))` awaited via Promise.allSettled) — concurrent
+    // permission requests collide in the single pendingApproval slot. The
+    // replaced card must never announce itself (screenshot 2026-10-16: three
+    // 「等待审批 Write a.ts」 toasts while the panel held no card); only the
+    // card still owning the slot at toast time earns the OS line.
+    const first = p.requestPermissionFromUser(permissionRequest);
+    const second = p.requestPermissionFromUser({
+      ...permissionRequest,
+      toolCall: { ...permissionRequest.toolCall, toolCallId: "tool-2", title: "Write b.ts" },
+    });
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await Promise.all([first, second]);
+    await flushToastDelivery();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+    expect(String(infoMessage.mock.calls[0]![0])).toContain("Write b.ts");
   });
 
   it("regenerate completion notifies AND chimes when the user is away (cues are additive)", async () => {
@@ -359,16 +382,19 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(infoMessage).not.toHaveBeenCalled();
   });
 
-  it("a failed turn notifies turnFailed when the user is away", async () => {
-    // The failure chime alone is not a system-level cue — the errored turn
-    // must announce itself like the blocking trio (default approvals tier).
+  it("a failed turn earns no toast — the banner and the error chime carry it", async () => {
+    // Policy 2026-10-16 (user restated): OS reminders exist only for the four
+    // triggers — question/approval/plan card displayed, turn completed. A
+    // failed turn keeps its in-panel banner (markError) + the error chime,
+    // but never announces itself through the system toast.
     p.store.userPrompt("触发失败");
     p.store.promptCompleted("end_turn"); // idle gate for regenerate
     p.promptWithRetry = async () => {
       throw new Error("boom");
     };
+    const sound = vi.spyOn(p, "postSound");
     await p.regenerate();
-    expect(infoMessage).toHaveBeenCalledTimes(1);
-    expect(String(infoMessage.mock.calls[0]![0])).toContain("生成失败");
+    expect(infoMessage).not.toHaveBeenCalled();
+    expect(sound).toHaveBeenCalledWith("error");
   });
 });

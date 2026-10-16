@@ -1,6 +1,18 @@
 /**
  * M1 P0-5 — OS-level notification gating (pure, unit-testable).
  *
+ * Policy (user restated 2026-10-16): OS reminders exist for exactly four
+ * triggers — question card displayed, approval card displayed, plan-exit
+ * card displayed, turn completed. A failed turn keeps its in-panel banner +
+ * error chime but earns no toast (the old `turnFailed` event kind is gone,
+ * matching the setting description that never promised failure toasts).
+ * The host additionally defers card-event toasts and re-checks, when the
+ * toast fires, that the card still owns its webview pending slot: parallel
+ * permission requests (the CLI runs a turn's function calls through
+ * Promise.allSettled) replace each other's card in the single slot, and an
+ * invisible card must never announce itself (screenshot 2026-10-16: three
+ * 「等待审批 Write a.ts」 toasts with no card left in the panel).
+ *
  * The trigger decision is "is the user looking at the panel?": the host
  * judges via the webview panel's `visible` state (NOT document.hidden — the
  * webview keeps `retainContextWhenHidden`, so its document never reports
@@ -13,9 +25,9 @@
  *   focus    — turnDone additionally requires the window unfocused (roadmap
  *              trigger 3 is "整轮完成且窗口失焦": a finished turn must not
  *              ping a user who is merely reading code in another editor tab
- *              of a focused window). The blocking events (approval / question
- *              / plan / turnFailed) ignore focus — the agent is stuck waiting
- *              (or the turn died), so even a focused window with a hidden panel
+ *              of a focused window). The blocking card events (approval /
+ *              question / plan) ignore focus — the agent is stuck waiting
+ *              for that card, so even a focused window with a hidden panel
  *              earns the interrupt.
  *   throttle — the same event kind at most once per window (a burst of
  *              parallel tool approvals must not stack 10 native toasts)
@@ -32,7 +44,7 @@
  * stays thin and the semantics are pinned by unit tests.
  */
 
-export type OsNotifyEvent = "approval" | "question" | "plan" | "turnDone" | "turnFailed";
+export type OsNotifyEvent = "approval" | "question" | "plan" | "turnDone";
 
 /** Same-kind burst suppression window. */
 export const OS_NOTIFY_THROTTLE_MS = 5_000;
@@ -44,10 +56,11 @@ export const OS_NOTIFY_THROTTLE_MS = 5_000;
 export const OS_NOTIFY_CONTENT_COOLDOWN_MS = 60_000;
 
 /** Events the `approvals` (default) tier covers: an agent is BLOCKED on the
- * user until answered, so these are the ones worth interrupting for — plus
- * `turnFailed`, a hard failure the away user must learn about (the queue
- * pauses and retry decisions are theirs). */
-const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question", "plan", "turnFailed"]);
+ * user until the displayed card is answered, so these are the ones worth
+ * interrupting for. A failed turn is NOT here — policy 2026-10-16 keeps OS
+ * reminders to the four card/completion triggers (the queue pause and the
+ * in-panel banner + error chime still announce failures, just not via toast). */
+const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question", "plan"]);
 
 /** Setting tier allows this event kind? The `setting` values are the
  * `iflow.osNotifications` manifest enum: `off` / `approvals` / `all`. */

@@ -135,6 +135,15 @@ const URL_FETCH_TIMEOUT_MS = 10_000;
 const URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/** Re-check window for the deferred card toasts (policy 2026-10-16): the OS
+ * reminder for an approval / plan / question card is scheduled this long and
+ * fires only if the card still owns its webview pending slot when the check
+ * runs — parallel permission requests replace each other's card (CLI runs a
+ * turn's function calls through Promise.allSettled), and a card that has been
+ * replaced (or answered) must never announce itself (screenshot 2026-10-16).
+ * Short enough to stay instantaneous for the notification center, long enough
+ * to catch same-tick slot collisions. */
+const CARD_TOAST_CONFIRM_MS = 1_500;
 /**
  * Size cap for the approval card's diff preview (per side). The wire diff is
  * the tool's FULL old/new text — a whole-file rewrite of a large file would
@@ -1298,6 +1307,28 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Deferred card toast (policy 2026-10-16: OS reminders exist only while the
+   * question/approval/plan card is displayed). `cardStillDisplayed` answers
+   * "still pending AND still owning its webview slot" at FIRE time — the
+   * synchronous call site cannot see a same-tick slot replacement from a
+   * parallel permission request, but the deferred check does. A toast for an
+   * invisible card is what stranded the user (three 「等待审批」 toasts, no
+   * card in the panel); the short confirm delay costs an away user nothing,
+   * a notification is not an interaction.
+   */
+  private toastWhileDisplayed(
+    cardStillDisplayed: () => boolean,
+    event: OsNotifyEvent,
+    text: () => string,
+  ): void {
+    setTimeout(() => {
+      if (this.disposed) return;
+      if (!cardStillDisplayed()) return;
+      this.notifyOs(event, text());
+    }, CARD_TOAST_CONFIRM_MS);
+  }
+
+  /**
    * Toast transport policy: OS-level notification first (macOS terminal-notifier
    * with vscode:// click-through, Windows SnoreToast — src/acp/os-notify.ts),
    * in-IDE vscode.window.showInformationMessage ONLY as the fallback when the
@@ -2025,19 +2056,33 @@ export class ChatPanel implements vscode.Disposable {
       // the user through an OS notification. The wire agentId is preferred;
       // the transcript lookup covers permission requests whose toolCall omits
       // that extension field but whose nested tool call is already recorded.
+      // (Wire evidence, CLI 0.5.19 fork bundle: the permission request's toolCall
+      // carries only {toolCallId,status,title,content,locations,kind} — agentId
+      // never arrives on this channel, so the transcript lookup is the live path.)
       const isSubAgentApproval = Boolean(
         toolCall.agentId || isSubAgentToolCall(this.store.getState().blocks, toolCall.toolCallId),
       );
+      // Policy (user restated 2026-10-16): the OS reminder may fire only while
+      // an approval card is actually displayed. The pendingApproval slot holds
+      // ONE card, and the CLI executes a turn's function calls in parallel
+      // (bundle: `A.map((R,P)=>this.runTool(...))` awaited with Promise.allSettled)
+      // — concurrent permission requests replace each other's card in the slot.
+      // A replaced card is invisible yet still pending on the wire: it silently
+      // auto-rejected at 300s, the agent retried the same tool, and every retry
+      // re-toasted a line whose card was long gone (screenshot 2026-10-16: three
+      // 「等待审批 Write a.ts」 toasts, no card in the panel). Defer + re-check
+      // slot ownership at fire time instead of toasting blind.
       if (!isSubAgentApproval) {
-        // M1 P0-5: the agent is BLOCKED until the card is answered — when the
-        // panel is hidden this is the notification that matters most.
-        this.notifyOs(
+        this.toastWhileDisplayed(
+          () => this.pendingApprovals.has(id) &&
+            this.store.getState().pendingApproval?.id === approval.id,
           "approval",
-          vscode.l10n.t(
-            "iFlow 等待审批：{0}（{1} 秒后自动拒绝）",
-            notifySummary(approval.title || approval.toolName),
-            Math.round(APPROVAL_TIMEOUT_MS / 1000),
-          ),
+          () =>
+            vscode.l10n.t(
+              "iFlow 等待审批：{0}（{1} 秒后自动拒绝）",
+              notifySummary(approval.title || approval.toolName),
+              Math.round(APPROVAL_TIMEOUT_MS / 1000),
+            ),
         );
       }
     });
@@ -2154,10 +2199,14 @@ export class ChatPanel implements vscode.Disposable {
       }, APPROVAL_TIMEOUT_MS);
       this.pendingPlanExits.set(id, { resolve, timer });
       this.store.showPlanExit(pending);
-      // M1 P0-5: Plan approval blocks the agent too.
-      this.notifyOs(
+      // M1 P0-5 + policy 2026-10-16: Plan approval is the user's fourth OS
+      // trigger (card displayed) — same slot-mirror re-check as approvals so a
+      // replaced card never announces itself.
+      this.toastWhileDisplayed(
+        () => this.pendingPlanExits.has(id) &&
+          this.store.getState().pendingPlanExit?.id === pending.id,
         "plan",
-        vscode.l10n.t("iFlow 等待计划审批（{0} 秒后自动拒绝）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
+        () => vscode.l10n.t("iFlow 等待计划审批（{0} 秒后自动拒绝）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
       );
     });
   }
@@ -2242,10 +2291,13 @@ export class ChatPanel implements vscode.Disposable {
         deadline: now + APPROVAL_TIMEOUT_MS,
         timeoutMs: APPROVAL_TIMEOUT_MS,
       });
-      // M1 P0-5: the agent blocks on the answers too.
-      this.notifyOs(
+      // M1 P0-5 + policy 2026-10-16: the question card is an OS trigger only
+      // while it is the displayed card — same slot-mirror re-check as approvals.
+      this.toastWhileDisplayed(
+        () => this.pendingQuestions.has(id) &&
+          this.store.getState().pendingQuestions?.id === id,
         "question",
-        vscode.l10n.t("iFlow 有问题需要你回答（{0} 秒后自动继续）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
+        () => vscode.l10n.t("iFlow 有问题需要你回答（{0} 秒后自动继续）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
       );
     });
   }
@@ -5436,10 +5488,10 @@ export class ChatPanel implements vscode.Disposable {
       // remain diagnosable from the Output panel.
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
-      // M1 P0-5: an errored turn must announce itself to away users too —
-      // `turnFailed` is in the default approvals tier; the toast body is
-      // sanitized/truncated by the transport (error text can be long/ANSI).
-      this.notifyOs("turnFailed", vscode.l10n.t("iFlow 生成失败：{0}", errorMessage(error)));
+      // Policy 2026-10-16 (user restated): OS reminders exist for exactly the
+      // four triggers — question/approval/plan card displayed, turn completed.
+      // A failed turn keeps its in-panel banner (markError above) + the error
+      // chime (postSound below) but earns no system toast.
       // M2 P0-3: a real failure pauses auto-dispatch — every queued message
       // would hit the same broken endpoint/CLI. The composer's queue strip
       // shows 继续/清空; dispatch resumes on `queueAction: resume`.
@@ -5520,8 +5572,8 @@ export class ChatPanel implements vscode.Disposable {
       }
       this.log.error(`regenerate failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
-      // Same failure announcement policy as sendPrompt (M1 P0-5).
-      this.notifyOs("turnFailed", vscode.l10n.t("iFlow 生成失败：{0}", errorMessage(error)));
+      // Same failure policy as sendPrompt (policy 2026-10-16): banner + chime,
+      // no OS toast — the four card/completion triggers are the only ones.
       void this.persistActiveTranscript();
       void this.touchActiveSession();
       this.postSound("error");

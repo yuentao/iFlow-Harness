@@ -10,23 +10,23 @@ import {
 
 describe("osNotifyAllowed", () => {
   it("off blocks every event kind", () => {
-    for (const event of ["approval", "question", "plan", "turnDone", "turnFailed"] as const) {
+    for (const event of ["approval", "question", "plan", "turnDone"] as const) {
       expect(osNotifyAllowed(event, "off")).toBe(false);
     }
   });
 
-  it("approvals covers only the agent-blocking events", () => {
+  it("approvals covers only the agent-blocking card events", () => {
     expect(osNotifyAllowed("approval", "approvals")).toBe(true);
     expect(osNotifyAllowed("question", "approvals")).toBe(true);
     expect(osNotifyAllowed("plan", "approvals")).toBe(true);
-    // A hard failure is an attention event for away users by default (the
-    // queue pauses and retry decisions are theirs), like the blocking trio.
-    expect(osNotifyAllowed("turnFailed", "approvals")).toBe(true);
+    // Policy 2026-10-16: failed turns earn no toast at all (the `turnFailed`
+    // kind is gone from the type system) — the tier is exactly the trio of
+    // blocking cards, completion stays in the `all` tier only.
     expect(osNotifyAllowed("turnDone", "approvals")).toBe(false);
   });
 
   it("all covers everything", () => {
-    for (const event of ["approval", "question", "plan", "turnDone", "turnFailed"] as const) {
+    for (const event of ["approval", "question", "plan", "turnDone"] as const) {
       expect(osNotifyAllowed(event, "all")).toBe(true);
     }
   });
