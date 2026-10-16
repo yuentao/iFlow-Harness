@@ -67,6 +67,45 @@ const KIND_ICON: Record<string, typeof Eye> = {
   other: Wrench,
 };
 
+type ToolPresentation = {
+  label: string;
+  description: string;
+  icon: typeof Eye;
+  accent: string;
+};
+
+const TOOL_PRESENTATIONS: Record<string, ToolPresentation> = {
+  skill: { label: "技能任务", description: "调用一项专用能力", icon: Brain, accent: "skill" },
+  read_file: { label: "读取文件", description: "查看文件内容", icon: Eye, accent: "read" },
+  search_file_content: { label: "搜索文件", description: "在文件内容中查找信息", icon: Search, accent: "search" },
+  run_shell_command: { label: "执行命令", description: "在工作区运行一条命令", icon: Zap, accent: "execute" },
+  write_file: { label: "写入文件", description: "创建或更新文件内容", icon: FilePen, accent: "write" },
+  replace: { label: "替换内容", description: "按指定内容修改文件", icon: FileText, accent: "edit" },
+  readcommandoutput: { label: "读取命令结果", description: "查看命令执行后的输出", icon: FileText, accent: "output" },
+  image_read: { label: "分析图片", description: "读取并理解图片内容", icon: Globe, accent: "image" },
+};
+
+function normalizeToolName(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function toolPresentation(block: ToolBlock): ToolPresentation {
+  const exact = TOOL_PRESENTATIONS[normalizeToolName(block.toolName)];
+  if (exact) return {
+    ...exact,
+    label: t(exact.label),
+    description: t(exact.description),
+  };
+  const kind = block.toolKind.toLowerCase();
+  const fallback = {
+    label: kind === "read" ? "读取内容" : kind === "edit" ? "编辑内容" : kind === "search" ? "搜索内容" : kind === "execute" ? "执行操作" : "工具操作",
+    description: "正在处理一项工具任务",
+    icon: KIND_ICON[kind] ?? Wrench,
+    accent: kind || "other",
+  };
+  return { ...fallback, label: t(fallback.label), description: t(fallback.description) };
+}
+
 /**
  * Animated collapsible body: keeps children mounted and animates height via
  * the CSS grid-rows 0fr→1fr trick (no JS measurement, smooth both ways).
@@ -89,9 +128,8 @@ function Caret({ open, className = "size-3" }: { open: boolean; className?: stri
 }
 
 function StatusChip({ status }: { status: ToolBlock["status"] }) {
-  // W2: the localized chip text is rebuilt only when the status changes.
-  // key=status replays the chip-in animation on every status flip, and the
-  // muted→tone crossfade reads as "this just happened".
+  // Re-mounting the chip on status changes keeps the transition noticeable
+  // without animating the card contents or moving the audit details.
   const chip = useMemo(() => {
     if (status === "completed")
       return (
@@ -105,13 +143,18 @@ function StatusChip({ status }: { status: ToolBlock["status"] }) {
           <X className="size-2.5" /> {t("失败")}
         </Chip>
       );
+    if (status === "pending")
+      return (
+        <Chip tone="muted" className="chip-in">
+          <CircleDot className="size-2.5" /> {t("等待执行")}
+        </Chip>
+      );
     return (
       <Chip tone="primary" className="chip-in">
         <Loader2 className="size-2.5 animate-spin" /> {t("执行中")}
       </Chip>
     );
   }, [status]);
-  // key forces a remount on status flip → chip-in animation replays.
   return <span key={status} className="inline-flex">{chip}</span>;
 }
 
@@ -173,31 +216,82 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
  * Skipped when the card title already carries the full command verbatim
  * (CLI's "Running: <cmd>" titles) — no point duplicating it.
  */
+function summarizeToolInput(input: string): { label: string; value: string }[] | null {
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    const preferred = ["absolute_path", "path", "pattern", "context", "offset", "limit", "oldText", "newText", "command"];
+    const keys = [...preferred.filter((key) => key in record), ...Object.keys(record).filter((key) => !preferred.includes(key))];
+    return keys.slice(0, 6).flatMap((key) => {
+      const value = record[key];
+      if (value === undefined || value === null || value === "") return [];
+      const text = typeof value === "string" ? value : JSON.stringify(value);
+      return [{ label: key, value: text }];
+    });
+  } catch {
+    return null;
+  }
+}
+
 function InputDetails({ input, title }: { input: string; title: string }) {
   const [open, setOpen] = useState(false);
   const [openedOnce, setOpenedOnce] = useState(false);
   if (!input) return null;
   if (title.includes(input)) return null;
+  const summary = summarizeToolInput(input);
   const lineCount = input.trimEnd().split("\n").length;
   const body = (
-    <pre className="mx-2.5 mb-2.5 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+    <pre className="tool-card-raw mx-2.5 mb-2.5 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
       {input}
     </pre>
   );
+  if (summary && summary.length > 0) {
+    return (
+      <div className="tool-card-params">
+        <div className="tool-card-section-label">{t("执行参数")}</div>
+        <div className="tool-card-param-list">
+          {summary.map(({ label, value }) => (
+            <div className="tool-card-param" key={label}>
+              <span className="tool-card-param-key">{label}</span>
+              <span className="tool-card-param-value" title={value}>{value}</span>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => {
+            setOpenedOnce(true);
+            setOpen((v) => !v);
+          }}
+          className="tool-card-raw-toggle"
+        >
+          <Caret open={open} />
+          {open ? t("收起原始参数") : t("查看原始参数")}
+        </button>
+        <Collapse open={open}>
+          {openedOnce && body}
+        </Collapse>
+      </div>
+    );
+  }
   if (lineCount < 3 && input.length < 120) {
-    return body;
+    return <div className="tool-card-params"><div className="tool-card-section-label">{t("执行参数")}</div>{body}</div>;
   }
   return (
     <>
       <button
+        type="button"
+        aria-expanded={open}
         onClick={() => {
           setOpenedOnce(true);
           setOpen((v) => !v);
         }}
-        className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+        className="tool-card-raw-toggle"
       >
         <Caret open={open} />
-        {t("执行参数")}
+        {open ? t("收起原始参数") : t("查看原始参数")}
       </button>
       <Collapse open={open}>
         {openedOnce && body}
@@ -210,22 +304,23 @@ function ToolCard({ block }: { block: ToolBlock }) {
   const send = useChat((s) => s.send);
   const primary = block.locations[0];
   const hasDiff = block.diff !== null;
-  const Icon = KIND_ICON[block.toolKind] ?? Wrench;
+  const presentation = toolPresentation(block);
+  const Icon = presentation.icon;
   const completedWithDiff = block.status === "completed" && hasDiff && block.diff!.oldText !== null;
+  const title = presentation.label;
+  const detail = presentation.description;
 
   return (
-    <div className={`stream-in status-fade card-lift overflow-hidden rounded-xl border border-border bg-card shadow-card status-${block.status}`}>
+    <div className={`tool-card tool-card-${presentation.accent} stream-in status-fade card-lift overflow-hidden rounded-xl border border-border bg-card shadow-card status-${block.status}`}>
       <div className="flex items-center gap-2 px-3 py-2">
-        {/* Gradient tile behind the icon: gives dense tool cards a scannable
-            glyph instead of a bare stroke icon floating on the card bg. */}
-        <span className="tool-icon">
-          <Icon className="size-3 shrink-0 text-primary" />
+        <span className="tool-icon" title={detail}>
+          <Icon className="size-3 shrink-0" />
         </span>
-        {/* min-w-0 truncate: agent tool titles are uncapped on the wire
-            ("Running: <whole shell command>", task descriptions) — shrink-0
-            here pushed the status chip out of the card. */}
-        <span className="min-w-0 truncate text-[12px] font-semibold" title={block.title || block.toolName || block.toolKind}>
-          {block.title || block.toolName || block.toolKind}
+        <span className="min-w-0 truncate text-[12px] font-semibold" title={detail}>
+          {title}
+        </span>
+        <span className="tool-card-detail min-w-0 truncate text-[11px] text-muted-foreground" title={detail}>
+          {detail}
         </span>
         {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} toolCallId={block.toolCallId} />}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -1403,7 +1498,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               <div className="text-[14px] font-semibold text-foreground">
                 {t("准备好了，向 iFlow 提问吧")}
               </div>
-              <p className="max-w-[280px] text-[11.5px] leading-relaxed text-muted-foreground">
+              <p className="max-w-[300px] text-[11.5px] leading-relaxed text-muted-foreground">
                 {t("下发任务、粘贴代码上下文，或直接描述你想实现的功能")}
               </p>
               {/* P0-4: example prompts lower the first-message barrier — a

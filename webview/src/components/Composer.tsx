@@ -57,13 +57,6 @@ function imageMime(file: File): string {
   return `image/${ext}`;
 }
 
-/** Compact token count, e.g. 12345 → "12.3k", 1_500_000 → "1.5M". */
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
 /** USD estimate: sub-cent figures keep 4 decimals (a cheap model's turn is
  * well under a cent), everything else 2. */
 function formatCost(usd: number): string {
@@ -113,13 +106,15 @@ function SessionUsageChip() {
     pct === null ? "" : pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-primary/70";
   const hoverTitle =
     pct === null
-      ? t(
-          usageAuthoritative
-            ? "当前上下文 {0} tokens（CLI 上报）· 输出 {1}（估算）"
-            : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}",
-          (usageAuthoritative ? contextUsed : inputTokens).toLocaleString(),
-          outputTokens.toLocaleString(),
-        )
+      ? [
+          t(
+            usageAuthoritative
+              ? "当前上下文 {0} tokens（CLI 上报）"
+              : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）",
+            (usageAuthoritative ? contextUsed : inputTokens).toLocaleString(),
+          ),
+          t("输入 {0} tokens · 输出 {1} tokens", inputTokens.toLocaleString(), outputTokens.toLocaleString()),
+        ].join("\n")
       : [
           t(
             "上下文占用 {0} / {1}（{2}%{3}{4}）",
@@ -129,6 +124,7 @@ function SessionUsageChip() {
             estimated ? t("，窗口为估算值") : "",
             usageAuthoritative ? t("，占用为 CLI 上报值") : "",
           ),
+          t("输入 {0} tokens · 输出 {1} tokens", inputTokens.toLocaleString(), outputTokens.toLocaleString()),
           t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", bdUser.toLocaleString(), bdAssistant.toLocaleString(), bdTool.toLocaleString(), bdThought.toLocaleString()),
           cacheReadTokens > 0 ? t("缓存读取 {0} tokens", cacheReadTokens.toLocaleString()) : "",
           estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(estimatedCost)) : t("该模型无单价记录，不显示成本"),
@@ -138,17 +134,9 @@ function SessionUsageChip() {
       title={hoverTitle}
       className="flex shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
     >
-      <span className="flex items-center gap-0.5" title={t("当前上下文（用户消息与工具结果，压缩后重算）")}>
-        <ArrowUp className="size-2.5" />
-        {formatTokens(inputTokens)}
-      </span>
-      <span className="flex items-center gap-0.5" title={t("输出（回复与思考）")}>
-        <ArrowDown className="size-2.5" />
-        {formatTokens(outputTokens)}
-      </span>
       {pct !== null && (
-        <span className="ml-0.5 flex items-center gap-1" title={t("上下文窗口占用")}>
-          <span className="h-1 w-8 overflow-hidden rounded-full bg-border/70">
+        <span className="ml-0.5 flex items-center gap-1" title={hoverTitle}>
+          <span className="h-1 w-12 overflow-hidden rounded-full bg-border/70">
             <span className={`block h-full rounded-full transition-all duration-300 ${barTone}`} style={{ width: `${pct}%` }} />
           </span>
           <span className={pct >= 90 ? "text-destructive" : pct >= 70 ? "text-warning" : ""}>
