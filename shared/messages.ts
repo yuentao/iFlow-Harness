@@ -341,6 +341,9 @@ export interface ModelInfoUi {
   thinking?: boolean;
 }
 
+/** User-facing reasoning effort, mapped to iFlow's think configuration. */
+export type ThinkLevel = "auto" | "fast" | "balanced" | "deep";
+
 export type AgentStatus = "connecting" | "idle" | "streaming" | "error";
 
 /** One option of a pending `session/request_permission` call, as offered by the agent. */
@@ -591,6 +594,8 @@ export interface SessionState {
   commands: SlashCommand[];
   models: ModelInfoUi[];
   currentModelId: string | null;
+  /** Current user-facing reasoning effort for the active ACP session. */
+  thinkLevel: ThinkLevel;
   /** Non-null while the host awaits the user's answer for a tool approval. */
   pendingApproval: PendingApprovalUi | null;
   /** Non-null while the host awaits the user's confirmation to exit Plan mode. */
@@ -712,6 +717,7 @@ export function initialSessionState(): SessionState {
     commands: [],
     models: [],
     currentModelId: null,
+    thinkLevel: "auto",
     pendingApproval: null,
     pendingPlanExit: null,
     pendingQuestions: null,
@@ -1093,7 +1099,8 @@ export type WebviewToHost =
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }
-  /** Open a file location in the editor. `toolCallId` (when the chip belongs
+  | { type: "setThink"; level: ThinkLevel }
+  /** Open a file location in the editor; `toolCallId` (when the chip belongs
    * to a tool card with a diff) lets the host resolve a bare-basename wire
    * path via the same multi-candidate lookup as revert/openDiff (pitfall #6). */
   | { type: "openLocation"; path: string; line?: number | null; toolCallId?: string }

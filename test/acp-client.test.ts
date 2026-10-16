@@ -40,12 +40,29 @@ describe("AcpClient (integration with mock ACP agent)", () => {
     expect(init.authMethods).toHaveLength(1);
   });
 
+  it("round-trips thinking levels through session/set_think", async () => {
+    const client = createClient();
+    await client.connect();
+    const session = await client.newSession({ cwd: "/repo", mcpServers: [] });
+
+    await expect(client.setThink(session.sessionId, true, "ultrathink")).resolves.toEqual({
+      success: true,
+      currentThinkEnabled: true,
+      currentThinkConfig: "ultrathink",
+    });
+    await expect(client.setThink(session.sessionId, false)).resolves.toEqual({
+      success: true,
+      currentThinkEnabled: false,
+      currentThinkConfig: "think",
+    });
+  });
+
   it("creates a session and receives the full streaming prompt flow", async () => {
     const updates: SessionNotification[] = [];
     const client = createClient(undefined, { onSessionUpdate: (n) => updates.push(n) });
     await client.connect();
-
     const session = await client.newSession({ cwd: here, mcpServers: [] });
+
     expect(session.sessionId).toBe("mock-session-1");
     expect(session.modes?.currentModeId).toBe("default");
 

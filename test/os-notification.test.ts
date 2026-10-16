@@ -193,6 +193,61 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(msg.length).toBeLessThan(120);
   });
 
+  it("keeps SubAgent approvals in the panel without sending an OS notification", async () => {
+    const pending = p.requestPermissionFromUser({
+      ...permissionRequest,
+      toolCall: { ...permissionRequest.toolCall, agentId: "subagent-1" },
+    });
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    await flushToastDelivery();
+    expect(infoMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps an approval silent when the SubAgent identity is only in the transcript", async () => {
+    p.store.replaceState({
+      ...p.store.getState(),
+      blocks: [{
+        kind: "subagent",
+        id: "subagent-block",
+        agentId: "subagent-1",
+        taskToolCallId: "task-1",
+        title: "SubAgent",
+        status: "in_progress",
+        agentType: null,
+        entries: [{
+          kind: "tool",
+          id: "nested-tool",
+          toolCallId: permissionRequest.toolCall.toolCallId,
+          toolName: permissionRequest.toolCall.toolName,
+          title: permissionRequest.toolCall.title,
+          toolKind: "execute",
+          status: "in_progress",
+          output: "",
+          locations: [],
+          diff: null,
+        }],
+      }],
+    });
+    const pending = p.requestPermissionFromUser({
+      ...permissionRequest,
+      toolCall: { ...permissionRequest.toolCall, agentId: undefined },
+    });
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    await flushToastDelivery();
+    expect(infoMessage).not.toHaveBeenCalled();
+  });
+
+  it("still notifies for a main-agent approval while its turn is streaming", async () => {
+    p.store.userPrompt("正在生成");
+    const pending = p.requestPermissionFromUser(permissionRequest);
+    vi.advanceTimersByTime(APPROVAL_TIMEOUT_MS);
+    await pending;
+    await flushToastDelivery();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("stays silent while the focused panel is visible (the card is already on screen)", async () => {
     (vscode.window as unknown as { state: { focused: boolean } }).state.focused = true;
     p.panelVisible = true;

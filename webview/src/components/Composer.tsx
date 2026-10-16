@@ -24,7 +24,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { collectUserPromptTexts, isPlanMode, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand } from "../../../shared/messages";
+import { collectUserPromptTexts, isPlanMode, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { CANVAS_BTN, ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
@@ -303,6 +303,7 @@ export function Composer() {
   const modes = useChat((s) => s.state?.modes ?? null);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
+  const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
@@ -597,6 +598,7 @@ export function Composer() {
   // while an approval/question card is up. It is only locked before a session
   // exists (replay/init) or while another switch is in flight.
   const modeLocked = replaying || initializing || pending !== null;
+  const thinkLocked = replaying || initializing || pending !== null || hasPendingInteraction;
   const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
 
   // Slash-command popup: every command matching the typed prefix. While the
@@ -1616,6 +1618,60 @@ export function Composer() {
               )}
             </Dropdown>
           )}
+
+          {/* reasoning level dropdown — independent from permission mode; it
+              controls how much effort the active model spends on thinking */}
+          <Dropdown
+            direction="up"
+            menuClass="w-56 max-w-[calc(100vw-24px)]"
+            disabled={thinkLocked}
+            trigger={(open) => (
+              <button
+                aria-haspopup="menu"
+                aria-expanded={open}
+                className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
+                title={t("推理级别")}
+                disabled={thinkLocked}
+              >
+                <ListOrdered className="size-3 shrink-0 text-primary" />
+                <span className="@max-[440px]:hidden">{t(thinkLevel === "auto" ? "自动" : thinkLevel === "fast" ? "快速" : thinkLevel === "balanced" ? "平衡" : "深度")}</span>
+                <ChevronDown className="size-3 shrink-0 opacity-60 @max-[440px]:hidden" />
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                <div className="border-b border-border/60 px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                  {t("推理级别")}
+                </div>
+                {([
+                  ["auto", "自动", "模型自行决定思考投入"],
+                  ["fast", "快速", "优先响应速度"],
+                  ["balanced", "平衡", "平衡速度与分析能力"],
+                  ["deep", "深度", "适合复杂任务、规划和调试"],
+                ] as const satisfies ReadonlyArray<readonly [ThinkLevel, string, string]>).map(([level, label, desc]) => (
+                  <button
+                    key={level}
+                    role="menuitem"
+                    onClick={() => {
+                      if (level !== thinkLevel) {
+                        beginPending("think", level);
+                        send({ type: "setThink", level });
+                      }
+                      close();
+                    }}
+                    className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50"
+                  >
+                    <span className="text-[12px] text-foreground">
+                      {t(label)}
+                      {level === thinkLevel && <Check className="ml-1 inline size-3 text-primary" />}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">{t(desc)}</span>
+                  </button>
+                ))}
+              </>
+            )}
+          </Dropdown>
 
           {/* session token usage — input/output split, live-refreshed while
               streaming; its own component so the refresh re-renders only it */}

@@ -57,6 +57,21 @@ async function handle(msg) {
       });
       break;
 
+    case "session/set_think": {
+      const enabled = Boolean(msg.params?.thinkEnabled);
+      const config = msg.params?.thinkConfig ?? "think";
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          success: true,
+          currentThinkEnabled: enabled,
+          currentThinkConfig: config,
+        },
+      });
+      break;
+    }
+
     case "session/prompt": {
       if (process.env.ACP_MOCK_MODE === "timeout_prompt") return; // never respond
       const sessionId = msg.params.sessionId;

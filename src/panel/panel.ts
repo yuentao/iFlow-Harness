@@ -90,6 +90,7 @@ import {
   findCliHistoryCut,
   findToolBlockById,
   isAgentOutputUpdate,
+  isSubAgentToolCall,
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
   parseEditArgs,
@@ -1051,6 +1052,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "setModel":
         await this.setModel(msg.modelId);
+        break;
+      case "setThink":
+        await this.setThink(msg.level);
         break;
       case "openLocation": {
         // C1: webview FileRefs may carry session-relative paths — resolve
@@ -2017,16 +2021,25 @@ export class ChatPanel implements vscode.Disposable {
         timer,
       });
       this.store.showApproval(approval);
-      // M1 P0-5: the agent is BLOCKED until the card is answered — when the
-      // panel is hidden this is the notification that matters most.
-      this.notifyOs(
-        "approval",
-        vscode.l10n.t(
-          "iFlow 等待审批：{0}（{1} 秒后自动拒绝）",
-          notifySummary(approval.title || approval.toolName),
-          Math.round(APPROVAL_TIMEOUT_MS / 1000),
-        ),
+      // SubAgent approvals remain actionable in the panel, but must not wake
+      // the user through an OS notification. The wire agentId is preferred;
+      // the transcript lookup covers permission requests whose toolCall omits
+      // that extension field but whose nested tool call is already recorded.
+      const isSubAgentApproval = Boolean(
+        toolCall.agentId || isSubAgentToolCall(this.store.getState().blocks, toolCall.toolCallId),
       );
+      if (!isSubAgentApproval) {
+        // M1 P0-5: the agent is BLOCKED until the card is answered — when the
+        // panel is hidden this is the notification that matters most.
+        this.notifyOs(
+          "approval",
+          vscode.l10n.t(
+            "iFlow 等待审批：{0}（{1} 秒后自动拒绝）",
+            notifySummary(approval.title || approval.toolName),
+            Math.round(APPROVAL_TIMEOUT_MS / 1000),
+          ),
+        );
+      }
     });
   }
 
@@ -4019,6 +4032,7 @@ export class ChatPanel implements vscode.Disposable {
         const pushId = await this.validateModelForPush(modelsPromise, currentModelId, restoreCliModelId);
         if (pushId) await this.setModel(pushId);
       }
+      await this.applyThinkLevel(client, loadedId, this.store.getState().thinkLevel);
       this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
       await this.cleanupEmptySession(outgoingId);
       await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
@@ -4553,6 +4567,58 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       vscode.window.showWarningMessage(
         vscode.l10n.t("切换模型失败：{0}", errorMessage(error)),
+      );
+      this.store.pushSnapshot();
+    }
+  }
+
+  private async applyThinkLevel(client: AcpClient, sessionId: string, level: SessionState["thinkLevel"]): Promise<void> {
+    const thinkConfig = level === "fast" ? "think" : level === "balanced" ? "megathink" : level === "deep" ? "ultrathink" : undefined;
+    if (level === "auto") return;
+    try {
+      const resp = (await client.setThink(sessionId, true, thinkConfig)) as
+        | { success?: boolean; currentThinkEnabled?: boolean; currentThinkConfig?: string }
+        | undefined;
+      if (!resp?.success) {
+        this.log.warn(`failed to reapply think level ${level} after session switch`);
+      }
+    } catch (error) {
+      this.log.warn(`failed to reapply think level ${level}: ${errorMessage(error)}`);
+    }
+  }
+
+  private async setThink(level: SessionState["thinkLevel"]): Promise<void> {
+    if (this.historySyncBusy) return;
+    const sessionId = this.store.getState().sessionId;
+    if (!sessionId) {
+      vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪"));
+      return;
+    }
+    const thinkConfig = level === "fast" ? "think" : level === "balanced" ? "megathink" : level === "deep" ? "ultrathink" : undefined;
+    try {
+      const resp = (await this.client?.setThink(sessionId, level !== "auto", thinkConfig)) as
+        | { success?: boolean; currentThinkEnabled?: boolean; currentThinkConfig?: string }
+        | undefined;
+      if (resp?.success) {
+        const confirmed = resp.currentThinkEnabled === false
+          ? "auto"
+          : resp.currentThinkConfig === "ultrathink"
+            ? "deep"
+            : resp.currentThinkConfig === "megathink"
+              ? "balanced"
+              : resp.currentThinkConfig === "think"
+                ? "fast"
+                : level;
+        this.store.sessionMeta({ thinkLevel: confirmed });
+        return;
+      }
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("切换推理级别失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
+      );
+      this.store.pushSnapshot();
+    } catch (error) {
+      vscode.window.showWarningMessage(
+        vscode.l10n.t("切换推理级别失败：{0}", errorMessage(error)),
       );
       this.store.pushSnapshot();
     }
@@ -5172,6 +5238,7 @@ export class ChatPanel implements vscode.Disposable {
     ) {
       await this.setMode(configuredMode).catch(() => undefined);
     }
+    await this.applyThinkLevel(client, session.sessionId, this.store.getState().thinkLevel);
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
     } finally {

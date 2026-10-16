@@ -956,6 +956,16 @@ export function findToolBlockById(blocks: Block[], toolCallId: string): ToolBloc
   return null;
 }
 
+/** Whether a tool call is nested under a SubAgent card. */
+export function isSubAgentToolCall(blocks: Block[], toolCallId: string): boolean {
+  for (const block of blocks) {
+    if (block.kind !== "subagent") continue;
+    if (findToolBlockById(block.entries, toolCallId)) return true;
+    if (isSubAgentToolCall(block.entries, toolCallId)) return true;
+  }
+  return false;
+}
+
 /**
  * Attach a host-synthesized diff to a tool block that has none (the wire diff
  * always wins — a later structured update is never overwritten). Returns the
@@ -1524,6 +1534,7 @@ export function setMeta(
     modes?: SessionState["modes"];
     models?: ModelInfoUi[];
     currentModelId?: string | null;
+    thinkLevel?: SessionState["thinkLevel"];
     commands?: SlashCommand[];
   },
 ): void {
@@ -1531,6 +1542,7 @@ export function setMeta(
   if (meta.modes !== undefined) state.modes = meta.modes;
   if (meta.models !== undefined) state.models = meta.models;
   if (meta.currentModelId !== undefined) state.currentModelId = meta.currentModelId;
+  if (meta.thinkLevel !== undefined) state.thinkLevel = meta.thinkLevel;
   if (meta.commands !== undefined) state.commands = meta.commands;
 }
 
@@ -1601,6 +1613,7 @@ export function newSessionState(state: SessionState): SessionState {
   fresh.commands = state.commands;
   fresh.models = state.models;
   fresh.currentModelId = state.currentModelId;
+  fresh.thinkLevel = state.thinkLevel;
   // The recent-session list is workspace-scoped and must survive resets.
   fresh.sessions = state.sessions;
   fresh.activeSessionId = state.activeSessionId;

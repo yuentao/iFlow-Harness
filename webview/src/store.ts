@@ -443,6 +443,7 @@ function createMockHost(): HostApi {
       { id: "claude-opus-5", name: "claude-opus-5" },
     ],
     currentModelId: "glm-5.3-flash-free",
+    thinkLevel: "auto" as SessionState["thinkLevel"],
     // Demo token usage (mirrors the host-estimated SessionUsageUi shape) so
     // the usage chip next to the model dropdown is visible in mock mode.
     usage: {
@@ -815,6 +816,22 @@ function createMockHost(): HostApi {
       }
       if (m.type === "setModel") {
         demoMeta.currentModelId = m.modelId;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "setThink") {
+        demoMeta.thinkLevel = m.level;
         broadcast({
           type: "snapshot",
           state: {
@@ -1235,7 +1252,7 @@ const vscode: HostApi = typeof acquireVsCodeApi === "function" ? acquireVsCodeAp
  * after a failsafe timeout). While a lock is held every switch control is
  * disabled, so overlapping switches can't race the in-flight one.
  */
-export type PendingOpKind = "profile" | "model" | "mode";
+export type PendingOpKind = "profile" | "model" | "mode" | "think";
 
 interface PendingOp {
   kind: PendingOpKind;
@@ -1379,7 +1396,8 @@ export const useChat = create<ChatStore>((set, get) => ({
           (pending.kind === "profile" &&
             msg.state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
           (pending.kind === "model" && msg.state.currentModelId === pending.target) ||
-          (pending.kind === "mode" && msg.state.modes?.currentModeId === pending.target);
+          (pending.kind === "mode" && msg.state.modes?.currentModeId === pending.target) ||
+          (pending.kind === "think" && msg.state.thinkLevel === pending.target);
         if (confirmed) {
           if (pendingTimer) {
             clearTimeout(pendingTimer);
@@ -1410,7 +1428,8 @@ export const useChat = create<ChatStore>((set, get) => ({
           (pending.kind === "profile" &&
             state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
           (pending.kind === "model" && state.currentModelId === pending.target) ||
-          (pending.kind === "mode" && state.modes?.currentModeId === pending.target);
+          (pending.kind === "mode" && state.modes?.currentModeId === pending.target) ||
+          (pending.kind === "think" && state.thinkLevel === pending.target);
         if (confirmed) {
           if (pendingTimer) {
             clearTimeout(pendingTimer);
