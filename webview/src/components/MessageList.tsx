@@ -28,6 +28,7 @@ import {
   ListOrdered,
   Square,
   Pencil,
+  Plug,
   Search,
   Trash2,
   Undo2,
@@ -89,12 +90,36 @@ function normalizeToolName(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
+/**
+ * MCP tools arrive on the wire fully qualified as `serverName__toolName`
+ * (Wire behavior, probed CLI 0.5.19 bundle: `asFullyQualifiedTool()` builds
+ * `${serverName}__${serverToolName}` and the registry keys by that name).
+ * Built-in tools never carry a double underscore, so the separator is an
+ * unambiguous discriminator — the card gets its own icon/accent instead of
+ * hiding behind the generic "工具操作" fallback.
+ */
+function mcpToolParts(toolName: string): { server: string; tool: string } | null {
+  const sep = toolName.indexOf("__");
+  if (sep <= 0 || sep >= toolName.length - 2) return null;
+  return { server: toolName.slice(0, sep), tool: toolName.slice(sep + 2) };
+}
+
 function toolPresentation(block: ToolBlock): ToolPresentation {
   const exact = TOOL_PRESENTATIONS[normalizeToolName(block.toolName)];
   if (exact) return {
     ...exact,
     label: t(exact.label),
     description: t(exact.description),
+  };
+  const mcp = mcpToolParts(block.toolName);
+  if (mcp) return {
+    // The tool's own name is the label (dynamic, not an i18n key); the
+    // owning server rides in the subtitle so users can audit WHICH
+    // external MCP answered — e.g. firecrawl vs exa web fetchers.
+    label: mcp.tool,
+    description: `${t("MCP 外部工具")} · ${mcp.server}`,
+    icon: Plug,
+    accent: "mcp",
   };
   const kind = block.toolKind.toLowerCase();
   const fallback = {
@@ -248,15 +273,17 @@ function InputDetails({ input, title }: { input: string; title: string }) {
   );
   if (summary && summary.length > 0) {
     return (
-      <div className="tool-card-params">
-        <div className="tool-card-section-label">{t("执行参数")}</div>
-        <div className="tool-card-param-list">
-          {summary.map(({ label, value }) => (
-            <div className="tool-card-param" key={label}>
-              <span className="tool-card-param-key">{label}</span>
-              <span className="tool-card-param-value" title={value}>{value}</span>
-            </div>
-          ))}
+      <>
+        <div className="tool-card-params">
+          <div className="tool-card-section-label">{t("执行参数")}</div>
+          <div className="tool-card-param-list">
+            {summary.map(({ label, value }) => (
+              <div className="tool-card-param" key={label}>
+                <span className="tool-card-param-key">{label}</span>
+                <span className="tool-card-param-value" title={value}>{value}</span>
+              </div>
+            ))}
+          </div>
         </div>
         <button
           type="button"
@@ -273,7 +300,7 @@ function InputDetails({ input, title }: { input: string; title: string }) {
         <Collapse open={open}>
           {openedOnce && body}
         </Collapse>
-      </div>
+      </>
     );
   }
   if (lineCount < 3 && input.length < 120) {
@@ -309,6 +336,14 @@ function ToolCard({ block }: { block: ToolBlock }) {
   const completedWithDiff = block.status === "completed" && hasDiff && block.diff!.oldText !== null;
   const title = presentation.label;
   const detail = presentation.description;
+  // Execute-class (shell) cards ride the actual invocation in the subtitle so
+  // users can audit WHICH command is running while the spinner turns — the
+  // generic "在工作区运行一条命令" gloss alone hides it. Once the command
+  // COMPLETES we drop it from the title: the 执行参数 section already spells
+  // the command out, so repeating it up top is redundant clutter. Host
+  // pre-formats `input` to the command line for execute tools (formatToolInput).
+  const commandLine =
+    presentation.accent === "execute" && block.status !== "completed" ? (block.input ?? "") : "";
 
   return (
     <div className={`tool-card tool-card-${presentation.accent} stream-in status-fade card-lift overflow-hidden rounded-xl border border-border bg-card shadow-card status-${block.status}`}>
@@ -319,8 +354,11 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <span className="min-w-0 truncate text-[12px] font-semibold" title={detail}>
           {title}
         </span>
-        <span className="tool-card-detail min-w-0 truncate text-[11px] text-muted-foreground" title={detail}>
-          {detail}
+        <span
+          className={`tool-card-detail min-w-0 truncate text-[11px] ${commandLine ? "font-mono" : ""} text-muted-foreground`}
+          title={commandLine || detail}
+        >
+          {commandLine || detail}
         </span>
         {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} toolCallId={block.toolCallId} />}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">

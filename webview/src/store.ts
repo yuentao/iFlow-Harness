@@ -164,6 +164,18 @@ function createMockHost(): HostApi {
     },
     {
       kind: "tool",
+      toolCallId: "demo-mcp",
+      toolName: "firecrawl__web_fetch",
+      title: "firecrawl__web_fetch",
+      toolKind: "other",
+      status: "completed",
+      input: '{"url":"https://mcp.dev/introduction"}',
+      output: "Fetched 12,480 chars",
+      locations: [],
+      diff: null,
+    },
+    {
+      kind: "tool",
       toolCallId: "demo-1",
       toolName: "list_directory",
       title: "Listing J:\\git\\iFlow-chat",
