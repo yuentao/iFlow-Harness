@@ -17,10 +17,11 @@ import {
   errorMessage,
   isContextOverflowError,
   isRateLimitError,
+  isThinkingUnsupportedError,
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, updateCliSettings } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -614,6 +615,10 @@ export class ChatPanel implements vscode.Disposable {
         ) {
           this.syncCliSettingsToDisk();
         }
+        // Setting-owned thinking rules: re-merge into ~/.iflow/thinking-models.json
+        // on edit (additive, user DSL entries untouched; the CLI picks them up
+        // at its next startup — the toast in applyThinkingModelRules says so).
+        if (e.affectsConfiguration("iflow.thinkingModelRules")) this.applyThinkingModelRules();
         // M1 P0-6/P1-6: the usage resolver reads these fresh on every push —
         // one flush is enough to repaint the occupancy bar / cost chip.
         if (
@@ -4537,6 +4542,10 @@ export class ChatPanel implements vscode.Disposable {
     // existing user files are never overwritten, so running on every
     // connect is safe. Best effort — failures never block the connect.
     ensureIflowDefaultConfigs(path.join(this.context.extensionPath, "vendor", "iflow-defaults"));
+    // Sync the setting-owned thinking-capability rules into the (seeded)
+    // ~/.iflow/thinking-models.json right after seeding, so a first-ever
+    // connect lands the mainstream defaults next to the template rules.
+    this.applyThinkingModelRules();
     // Restore the exec bit on vendored binaries (ripgrep) — the VSIX zip
     // chain drops unix mode bits and the CLI's search tools then fail with
     // EACCES when spawning rg (seen on 1.2.3 / macOS).
@@ -4547,6 +4556,40 @@ export class ChatPanel implements vscode.Disposable {
       throw new Error(
         vscode.l10n.t("内置 iFlow CLI 缺失，扩展包不完整，请重新安装：{0}", errorMessage(error)),
       );
+    }
+  }
+
+  /**
+   * Merge the `iflow.thinkingModelRules` setting into the CLI's
+   * ~/.iflow/thinking-models.json — the file the vendored fork's
+   * thinking-model-loader reads AT CLI STARTUP (config rules take
+   * precedence over built-ins, first pattern match wins; enable path of
+   * session/set_think rejects models the table does not mark as
+   * thinking-capable). Additive only: missing patterns append, gate-only
+   * entries update in place when fields differ, entries with hand-authored
+   * request-DSL are NEVER clobbered, and unparseable existing JSON is kept
+   * with a warning. Toasts only when something actually changed, so
+   * repeat connects (warmStart included) stay quiet.
+   */
+  private applyThinkingModelRules(): void {
+    try {
+      const raw = vscode.workspace.getConfiguration("iflow").get<Array<unknown>>("thinkingModelRules", []);
+      const rules = sanitizeThinkingRules(raw);
+      if (rules.length === 0) return;
+      const result = applyThinkingRules(rules);
+      if (result.skippedInvalid) {
+        void vscode.window.showWarningMessage(
+          vscode.l10n.t("推理能力规则同步失败：~/.iflow/thinking-models.json 格式错误，已保留原文件"),
+        );
+        return;
+      }
+      if (result.added + result.changed > 0) {
+        void vscode.window.showInformationMessage(
+          vscode.l10n.t("已同步 {0} 推理能力规则到 ~/.iflow/thinking-models.json，生效下次会话启动", result.added + result.changed),
+        );
+      }
+    } catch {
+      // best effort — never block the connect path
     }
   }
 
@@ -4669,9 +4712,20 @@ export class ChatPanel implements vscode.Disposable {
       );
       this.store.pushSnapshot();
     } catch (error) {
-      vscode.window.showWarningMessage(
-        vscode.l10n.t("切换推理级别失败：{0}", errorMessage(error)),
-      );
+      if (isThinkingUnsupportedError(error)) {
+        // CLI setThink enable-path rejection: the model is not marked
+        // thinking-capable in its capability table (built-ins +
+        // ~/.iflow/thinking-models.json). The raw envelope ("Invalid
+        // request · {"details":…}") buries the actionable advice, so
+        // surface a friendly prompt — the dropdown's greyed options and
+        // iflow.thinkingModelRules tell the user which models DO support
+        // thinking. (Disable path never validates and never hits this.)
+        void vscode.window.showWarningMessage(vscode.l10n.t("当前模型不支持思考模式，请切换模型后重试"));
+      } else {
+        vscode.window.showWarningMessage(
+          vscode.l10n.t("切换推理级别失败：{0}", errorMessage(error)),
+        );
+      }
       this.store.pushSnapshot();
     }
   }
@@ -5065,6 +5119,36 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
+  /** Capability rules as stored in ~/.iflow/thinking-models.json (seeded
+   * template + user DSL + setting-synced entries), sanitized the loader's
+   * way (truthy pattern + boolean supportsThinking + compilable regex). */
+  private thinkingCapabilityRules(): ThinkingRuleEntry[] {
+    try {
+      const parsed = JSON.parse(readFileSync(thinkingRulesFilePath(), "utf8"));
+      return sanitizeThinkingRules(Array.isArray(parsed.models) ? parsed.models : []);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Annotate the dropdown with thinking capability (ModelInfoUi.thinking):
+   * first-match-wins case-insensitive regex over the rules file, same
+   * semantics as the CLI's thinking-model-loader. Unmatched ids stay
+   * unannotated — UNKNOWN, not "unsupported": the CLI's built-in table may
+   * still allow (or forbid) thinking, and a wrong guess is covered by the
+   * friendly setThink rejection toast, so the Composer only greys options
+   * when a rule explicitly says supportsThinking:false.
+   */
+  private withThinking(models: SessionState["models"]): SessionState["models"] {
+    const rules = this.thinkingCapabilityRules();
+    if (rules.length === 0) return models;
+    return models.map((m) => {
+      const verdict = thinkingForModelRules(m.id, rules);
+      return verdict === undefined ? m : { ...m, thinking: verdict };
+    });
+  }
+
   /**
    * Model dropdown opened (webview `refreshModels`): re-query the live list
    * and push it. A failed / empty query keeps the already-shown list — a
@@ -5081,7 +5165,7 @@ export class ChatPanel implements vscode.Disposable {
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
       models.unshift({ id: currentModelId, name: currentModelId });
     }
-    this.store.sessionMeta({ models });
+    this.store.sessionMeta({ models: this.withThinking(models) });
   }
 
   /**
@@ -5113,7 +5197,7 @@ export class ChatPanel implements vscode.Disposable {
           // endpoint failure (e.g. socket hang up).
           const currentModelId = state.currentModelId ?? fallbackModelId;
           this.store.sessionMeta({
-            models: currentModelId ? [{ id: currentModelId, name: currentModelId }] : [],
+            models: currentModelId ? this.withThinking([{ id: currentModelId, name: currentModelId }]) : [],
             ...(currentModelId ? { currentModelId } : {}),
           });
           return;
@@ -5124,7 +5208,7 @@ export class ChatPanel implements vscode.Disposable {
         if (currentModelId && !models.some((m) => m.id === currentModelId)) {
           models.unshift({ id: currentModelId, name: currentModelId });
         }
-        this.store.sessionMeta({ models, ...(currentModelId ? { currentModelId } : {}) });
+        this.store.sessionMeta({ models: this.withThinking(models), ...(currentModelId ? { currentModelId } : {}) });
       })
       .catch((error: unknown) => {
         // queryLiveModels swallows endpoint errors into []; only unexpected

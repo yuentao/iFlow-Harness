@@ -290,6 +290,7 @@ const en: Record<string, string> = {
   "优先响应速度": "Prioritize response speed",
   "平衡速度与分析能力": "Balance speed and analysis",
   "适合复杂任务、规划和调试": "For complex tasks, planning, and debugging",
+  "当前模型不支持思考模式": "Current model does not support thinking mode",
   "无匹配模型": "No matching models",
   "Tab 补全": "Tab to complete",
   "无匹配文件": "No matching files",

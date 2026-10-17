@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError, isRateLimitError, isTransientStreamError } from "../src/acp/jsonrpc.js";
+import { NdjsonParser, JsonRpcPeer, JsonRpcErrorCode, errorMessage, isContextOverflowError, isRateLimitError, isThinkingUnsupportedError, isTransientStreamError } from "../src/acp/jsonrpc.js";
 
 describe("errorMessage", () => {
   it("prefers Error.message", () => {
@@ -387,5 +387,34 @@ describe("JsonRpcPeer", () => {
     b.onRequest("x", () => ({}));
     await a.request("x");
     expect(wire.map((w) => w.dir)).toEqual(["out", "in", "out", "in"]);
+  });
+});
+
+describe("isThinkingUnsupportedError", () => {
+  it("matches the CLI setThink rejection envelope (message + data.details)", () => {
+    // Wire shape (probed, CLI 0.5.19 fork bundle setThink body):
+    // El.invalidRequest("Current model 'X' does not support thinking mode…")
+    expect(
+      isThinkingUnsupportedError({
+        code: -32600,
+        message: "Invalid request",
+        data: {
+          details:
+            "Current model 'PandoraCoder' does not support thinking mode. Please switch to a model that supports thinking (e.g., o1-preview, deepseek).",
+        },
+      }),
+    ).toBe(true);
+  });
+  it("matches an Error carrying the same text", () => {
+    expect(isThinkingUnsupportedError(new Error("Model qwen-max does not support thinking"))).toBe(true);
+  });
+  it("does not match rate-limit or transient envelopes", () => {
+    expect(
+      isThinkingUnsupportedError({
+        message: "Internal Error: 当前模型已达到平台速率限制",
+        data: { details: "rate limit" },
+      }),
+    ).toBe(false);
+    expect(isThinkingUnsupportedError(new Error("terminated"))).toBe(false);
   });
 });

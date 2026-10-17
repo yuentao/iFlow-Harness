@@ -3,12 +3,16 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  applyThinkingRules,
+  mergeThinkingRulesIntoFile,
   normalizeModelsUrl,
   parseModelsResponse,
   readActiveEndpoint,
   resolveActiveProfileName,
   retireStaleOAuthCreds,
+  sanitizeThinkingRules,
   settingsFilePath,
+  thinkingForModelRules,
   updateCliSettings,
 } from "../src/acp/models-query";
 
@@ -194,5 +198,153 @@ describe("retireStaleOAuthCreds", () => {
     writeFileSync(corrupt, "{not json", "utf8");
     expect(retireStaleOAuthCreds(1000, corrupt)).toBeNull();
     expect(existsSync(corrupt)).toBe(true);
+  });
+});
+
+describe("sanitizeThinkingRules", () => {
+  it("drops junk entries and dedupes by pattern (first wins)", () => {
+    expect(
+      sanitizeThinkingRules([
+        { pattern: "glm-", supportsThinking: true },
+        { pattern: "  ", supportsThinking: true },
+        { pattern: "no-flag" },
+        { pattern: "glm-", supportsThinking: false },
+        { pattern: "[", supportsThinking: true },
+        "junk",
+      ]),
+    ).toEqual([{ pattern: "glm-", supportsThinking: true }]);
+  });
+
+  it("filters unknown levels and clamps maxThinkingTokens", () => {
+    expect(
+      sanitizeThinkingRules([
+        {
+          pattern: "x",
+          supportsThinking: true,
+          supportedReasoningLevels: ["low", "ultra", "high"],
+          maxThinkingTokens: 1234.7,
+        },
+      ]),
+    ).toEqual([
+      {
+        pattern: "x",
+        supportsThinking: true,
+        supportedReasoningLevels: ["low", "high"],
+        maxThinkingTokens: 1234,
+      },
+    ]);
+  });
+});
+
+describe("thinkingForModelRules", () => {
+  it("first match wins, case-insensitively (loader semantics)", () => {
+    const rules = [
+      { pattern: "glm-", supportsThinking: true },
+      { pattern: "GLM-4", supportsThinking: false },
+    ];
+    expect(thinkingForModelRules("GLM-4.6-air", rules)).toBe(true);
+  });
+
+  it("a supportsThinking:false rule gives positive evidence", () => {
+    expect(thinkingForModelRules("PandoraCoder", [{ pattern: "PandoraCoder", supportsThinking: false }])).toBe(false);
+  });
+
+  it("returns undefined when nothing matches (unknown, not unsupported)", () => {
+    expect(thinkingForModelRules("mystery-model", [{ pattern: "^o[34]", supportsThinking: true }])).toBeUndefined();
+  });
+});
+
+describe("mergeThinkingRulesIntoFile", () => {
+  it("appends missing patterns and preserves other keys/rules", () => {
+    const existing = {
+      version: 1,
+      modelAliases: { a: "b" },
+      models: [{ pattern: "glm-", supportsThinking: true, thinkingRequest: { set: { x: 1 } } }],
+    };
+    const merged = mergeThinkingRulesIntoFile(existing, [{ pattern: "deepseek-r1", supportsThinking: true }]);
+    expect(merged!.file.modelAliases).toEqual({ a: "b" });
+    expect(merged!.added).toBe(1);
+    expect(merged!.changed).toBe(0);
+    expect(merged!.file.models).toEqual([
+      { pattern: "glm-", supportsThinking: true, thinkingRequest: { set: { x: 1 } } },
+      { pattern: "deepseek-r1", supportsThinking: true },
+    ]);
+  });
+
+  it("updates gate-only entries in place only when fields differ", () => {
+    const existing = { models: [{ pattern: "x", supportsThinking: true, supportedReasoningLevels: ["low"] }] };
+    const same = mergeThinkingRulesIntoFile(existing, [{ pattern: "x", supportsThinking: true, supportedReasoningLevels: ["low"] }]);
+    expect(same!.added + same!.changed).toBe(0);
+    const edited = mergeThinkingRulesIntoFile(existing, [{ pattern: "x", supportsThinking: true, supportedReasoningLevels: ["low", "high"] }]);
+    expect(edited!.changed).toBe(1);
+    expect(edited!.file.models).toEqual([{ pattern: "x", supportsThinking: true, supportedReasoningLevels: ["low", "high"] }]);
+    // Loader-default levels equivalence: absent array == ["low","medium","high"].
+    const defaulted = mergeThinkingRulesIntoFile(
+      { models: [{ pattern: "y", supportsThinking: true }] },
+      [{ pattern: "y", supportsThinking: true, supportedReasoningLevels: ["low", "medium", "high"] }],
+    );
+    expect(defaulted!.added + defaulted!.changed).toBe(0);
+  });
+
+  it("never touches DSL-bearing entries with the same pattern (no append, no replace)", () => {
+    const existing = { models: [{ pattern: "glm-", supportsThinking: true, nonThinkingRequest: { delete: ["thinking"] } }] };
+    const merged = mergeThinkingRulesIntoFile(existing, [{ pattern: "glm-", supportsThinking: false }]);
+    expect(merged!.added + merged!.changed).toBe(0);
+    expect(merged!.file.models).toEqual(existing.models);
+  });
+
+  it("returns null for non-object existing content (caller must not write)", () => {
+    expect(mergeThinkingRulesIntoFile("not json", [{ pattern: "x", supportsThinking: true }])).toBeNull();
+    expect(mergeThinkingRulesIntoFile([{ a: 1 }], [{ pattern: "x", supportsThinking: true }])).toBeNull();
+  });
+});
+
+describe("applyThinkingRules", () => {
+  it("creates a missing file carrying the sanitized rules", () => {
+    const file = path.join(tempDir, "thinking-create.json");
+    const result = applyThinkingRules([{ pattern: "^o[34]", supportsThinking: true }], file);
+    expect(result).toEqual({ added: 1, changed: 0, created: true });
+    const written = JSON.parse(readFileSync(file, "utf8"));
+    expect(written.models).toEqual([{ pattern: "^o[34]", supportsThinking: true }]);
+  });
+
+  it("merges into an existing template-like file, preserving its rules and keys", () => {
+    const file = path.join(tempDir, "thinking-merge.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ description: "tpl", version: 1, models: [{ pattern: "glm-", supportsThinking: true, thinkingRequest: { set: { a: 1 } } }] }),
+      "utf8",
+    );
+    const result = applyThinkingRules(
+      sanitizeThinkingRules([{ pattern: "deepseek-(r1|reasoner)", supportsThinking: true }]),
+      file,
+    );
+    expect(result).toEqual({ added: 1, changed: 0, created: false });
+    const written = JSON.parse(readFileSync(file, "utf8"));
+    expect(written.description).toBe("tpl");
+    expect(written.models).toEqual([
+      { pattern: "glm-", supportsThinking: true, thinkingRequest: { set: { a: 1 } } },
+      { pattern: "deepseek-(r1|reasoner)", supportsThinking: true },
+    ]);
+  });
+
+  it("skips unparseable existing JSON without touching the file", () => {
+    const file = path.join(tempDir, "thinking-corrupt.json");
+    writeFileSync(file, "{not json", "utf8");
+    const result = applyThinkingRules([{ pattern: "x", supportsThinking: true }], file);
+    expect(result.skippedInvalid).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe("{not json");
+  });
+
+  it("is a no-op when already in sync (no write churn on repeat connects)", () => {
+    const file = path.join(tempDir, "thinking-sync.json");
+    const rules = [{ pattern: "x", supportsThinking: true }];
+    writeFileSync(file, JSON.stringify({ models: rules }), "utf8");
+    const result = applyThinkingRules(rules, file);
+    expect(result).toEqual({ added: 0, changed: 0, created: false });
+  });
+
+  it("returns zeros for empty incoming (caller skips)", () => {
+    expect(applyThinkingRules([], path.join(tempDir, "thinking-none.json"))).toEqual({ added: 0, changed: 0, created: false });
   });
 });

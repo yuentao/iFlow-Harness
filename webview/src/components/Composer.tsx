@@ -304,6 +304,11 @@ export function Composer() {
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
   const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
+// Hard evidence only: thinking===false comes from an explicit
+// iflow.thinkingModelRules entry (supportsThinking:false) evaluated by the
+// host; unknown (undefined) stays ALLOWED — the CLI's own rejection is
+// friendly-toasted in setThink instead of pre-gated here.
+const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking === false;
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
@@ -1649,26 +1654,30 @@ export function Composer() {
                   ["fast", "快速", "优先响应速度"],
                   ["balanced", "平衡", "平衡速度与分析能力"],
                   ["deep", "深度", "适合复杂任务、规划和调试"],
-                ] as const satisfies ReadonlyArray<readonly [ThinkLevel, string, string]>).map(([level, label, desc]) => (
-                  <button
-                    key={level}
-                    role="menuitem"
-                    onClick={() => {
-                      if (level !== thinkLevel) {
-                        beginPending("think", level);
-                        send({ type: "setThink", level });
-                      }
-                      close();
-                    }}
-                    className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50"
-                  >
-                    <span className="text-[12px] text-foreground">
-                      {t(label)}
-                      {level === thinkLevel && <Check className="ml-1 inline size-3 text-primary" />}
-                    </span>
-                    <span className="text-[11px] text-muted-foreground">{t(desc)}</span>
-                  </button>
-                ))}
+                ] as const satisfies ReadonlyArray<readonly [ThinkLevel, string, string]>).map(([level, label, desc]) => {
+                  const blocked = thinkUnsupported && level !== "auto";
+                  return (
+                    <button
+                      key={level}
+                      role="menuitem"
+                      onClick={() => {
+                        if (level !== thinkLevel && !blocked) {
+                          beginPending("think", level);
+                          send({ type: "setThink", level });
+                        }
+                        close();
+                      }}
+                      title={blocked ? t("当前模型不支持思考模式") : undefined}
+                      className={`flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50 ${blocked ? "opacity-45" : ""}`}
+                    >
+                      <span className="text-[12px] text-foreground">
+                        {t(label)}
+                        {level === thinkLevel && <Check className="ml-1 inline size-3 text-primary" />}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">{t(desc)}</span>
+                    </button>
+                  );
+                })}
               </>
             )}
           </Dropdown>

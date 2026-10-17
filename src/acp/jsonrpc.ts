@@ -210,6 +210,32 @@ export function isRateLimitError(error: unknown): boolean {
 }
 
 /**
+ * The CLI's ACP `session/set_think` rejection when the active model lacks
+ * thinking capability.
+ *
+ * Wire behavior (probed, CLI 0.5.19 fork bundle, setThink method body): the
+ * ENABLE path checks `A2.supportsThinking(contentGeneratorConfig.model)` and
+ * throws `El.invalidRequest("Current model 'X' does not support thinking
+ * mode. Please switch to a model that supports thinking (e.g., …)")` —
+ * errorMessage() renders it as "Invalid request · {"details":"Current model
+ * …"}". The DISABLE path (thinkEnabled=false) never validates the model and
+ * always succeeds, so this signature only gates enabling. The same phrase
+ * also appears in the CLI's validateThinkingConfig warnings ("Model X does
+ * not support thinking") — one regex covers both.
+ */
+const THINKING_UNSUPPORTED_RE = /does not support thinking/i;
+
+/**
+ * Whether a thrown failure is the CLI refusing to enable thinking mode for
+ * the current model (see THINKING_UNSUPPORTED_RE). The panel swaps the raw
+ * JSON-RPC envelope for a friendly prompt ("switch to a thinking-capable
+ * model") because the envelope dump buries the actionable advice.
+ */
+export function isThinkingUnsupportedError(error: unknown): boolean {
+  return THINKING_UNSUPPORTED_RE.test(errorMessage(error));
+}
+
+/**
  * Mid-stream connection drops. Wire behavior (probed, CLI 0.5.19 bundle):
  * when the gateway kills the SSE response mid-stream (long requests from
  * very long sessions are the usual trigger), the bundled undici destroys the

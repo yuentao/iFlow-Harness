@@ -202,6 +202,67 @@
           "default": [],
           "description": "%iflow.configuration.costTable.description%"
         },
+        "iflow.thinkingModelRules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "Case-insensitive regex matched against model ids; first match wins"
+              },
+              "supportsThinking": {
+                "type": "boolean",
+                "description": "Whether the matched model supports thinking mode"
+              },
+              "supportedReasoningLevels": {
+                "type": "array",
+                "items": {
+                  "enum": ["low", "medium", "high"]
+                },
+                "description": "Reasoning levels the model supports (default: low/medium/high)"
+              },
+              "maxThinkingTokens": {
+                "type": "number",
+                "description": "Thinking-token ceiling (0 = CLI default)"
+              }
+            },
+            "required": ["pattern", "supportsThinking"]
+          },
+          "default": [
+            {
+              "pattern": "^o[134]",
+              "supportsThinking": true,
+              "supportedReasoningLevels": ["low", "medium", "high"]
+            },
+            {
+              "pattern": "deepseek-(r1|reasoner)",
+              "supportsThinking": true,
+              "supportedReasoningLevels": ["low", "medium", "high"]
+            },
+            {
+              "pattern": "gemini-[2-9]",
+              "supportsThinking": true,
+              "supportedReasoningLevels": ["low", "medium", "high"]
+            },
+            {
+              "pattern": "^qwen3",
+              "supportsThinking": true,
+              "supportedReasoningLevels": ["low", "medium", "high"]
+            },
+            {
+              "pattern": "kimi-k2\\.5",
+              "supportsThinking": true,
+              "supportedReasoningLevels": ["low", "medium", "high"]
+            },
+            {
+              "pattern": "grok-[34]",
+              "supportsThinking": true,
+              "supportedReasoningLevels": ["low", "medium", "high"]
+            }
+          ],
+          "description": "%iflow.configuration.thinkingModelRules.description%"
+        },
         "iflow.autoTitle": {
           "type": "boolean",
           "default": true,
