@@ -4250,6 +4250,27 @@ export class ChatPanel implements vscode.Disposable {
           : `spawning CLI: ${runtime} (renamed copy of ${node}) ${args.join(" ")} (cwd=${workspaceRoot})`,
       );
 
+      // System-prompt override shipped in the VSIX (prompts/system-prompt.md).
+      // The CLI reads IFLOW_SYSTEM_MD on every startChat (probed, CLI 0.5.19
+      // bundle: P0e() re-reads the file per session, session/load included), so
+      // a full replacement covers new AND restored sessions — unlike the wire
+      // settings.system_prompt, which the ACP adapter only applies on
+      // session/new. existsSync guard: the CLI throws on a missing override
+      // file, so never hand it a path that isn't there. The bundled file leans
+      // on the system-prompt-refactor MOD (vendor bundle, custom.12): its
+      // {{iflow:Environment Information}}/{{iflow:gitStatus}}/{{iflow:Git
+      // Repository}}/{{iflow:Sandbox}} tokens are spliced from the built-in
+      // template rendered moments earlier in the same startChat, so cwd / git
+      // remote + HEAD SHA / platform / OS version / date / current model name
+      // and the branch snapshot stay live. Without that MOD the file still
+      // works, only those sections freeze (no token -> byte-identical upstream
+      // behaviour). Windows-compat warning and user-memory are appended by the
+      // CLI after the file body (the `h`/`v` suffixes in P0e), so the override
+      // file only replaces the core template.
+      const systemPromptFile = path.join(this.context.extensionPath, "prompts", "system-prompt.md");
+      const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
+      if (existsSync(systemPromptFile)) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
+
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
         // 30-60s+ before its first initialize response.
@@ -4257,7 +4278,7 @@ export class ChatPanel implements vscode.Disposable {
         // can exclude it (the renamed binary only defeats name-based kills),
         // and switches on the CLI-side api-config-isolation patch — without
         // it (plain CLI / TUI / -p) the settings write-back is untouched.
-        { command: runtime, args, cwd: workspaceRoot, env: { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() }, requestTimeoutMs: 120_000, allowedRoots, wireTap: this.wireLog.tap },
+        { command: runtime, args, cwd: workspaceRoot, env: spawnEnv, requestTimeoutMs: 120_000, allowedRoots, wireTap: this.wireLog.tap },
         {
           // A detached client (profile switch overlaps the new spawn with the
           // old child's teardown) must not leak its dying events into the
