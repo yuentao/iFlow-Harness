@@ -728,6 +728,18 @@ textarea:focus-visible {
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 14%, transparent);
 }
 
+/* --- tool card header squeeze policy ------------------------------------- */
+/* The subtitle carries the live command line on execute cards; flexbox
+   shrinkage is proportional to flex-basis × shrink-factor, so the label
+   ("执行命令", 4 CJK glyphs) used to squeeze along with a long command —
+   even ~10px of squeeze ellipsizes it (user report 2026-10-17). Weight the
+   subtitle's shrink 1000× against the label's 1×: it eats ALL overflow
+   (min-width 0 + truncate ellipsizes it), and the label only truncates as
+   a last resort once the subtitle has collapsed. */
+.tool-card-detail {
+  flex-shrink: 1000;
+}
+
 /* Tool cards use a compact audit hierarchy: the invocation is scannable first,
    while the wire payload remains available on demand. */
 .tool-card-params {
