@@ -12,16 +12,21 @@
 // interactive TUI only (pseudo-terminal, devtools, terminal image rendering);
 // the ACP headless path never touches it. 182.7MB → 39.3MB.
 //
-// Usage: node scripts/vendor-cli.mjs [--version 0.5.19] [--from <tgz>] [--from-dir <dir>] [--force]
-//   --version   CLI version to pin (default: npm `latest` dist-tag, falling
-//               back to `custom` then PINNED below when the registry is
-//               unreachable)
+// Usage: node scripts/vendor-cli.mjs [--force]
+//        node scripts/vendor-cli.mjs (--version <v> | --from <tgz> | --from-dir <dir>) [--force]
+//   (no source flags)  DEFAULT since 2026-10-17: vendor from the LOCAL fork
+//                      checkout sitting next to this repo — ../iflow-fork
+//                      relative to this repo (J:\git\iflow-fork for
+//                      J:\git\iflow-harness), overridable via IFLOW_VENDOR_FORK_DIR.
+//                      The npm registry is NO LONGER consulted by default: the
+//                      local fork carries the injected *.loader.cjs Mod bundles
+//                      and leads anything published to the @yuentao npm scope.
+//   --version   opt back into the npm registry path and pin a version
 //   --from      use a local .tgz instead of `npm pack` (offline/air-gapped)
-//   --from-dir  vendor from an INSTALLED CLI directory instead of npm. Use
-//               this to carry local customizations the official tarball does
-//               not ship (e.g. injected *.loader.cjs bundles in bundle/).
+//   --from-dir  vendor from an INSTALLED CLI directory (same path the default
+//               takes; pass it to point at a different fork checkout).
 //               The dir already has node_modules, so npm install is skipped.
-//   --force     re-fetch even if vendor/iflow-cli already matches the version
+//   --force     re-copy even if vendor/iflow-cli already matches the version
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -49,19 +54,23 @@ const isSyncDenied = (name) =>
   SYNC_DEFAULT_DENYLIST.some((d) => name === d) || name.startsWith("oauth_creds");
 
 /**
- * Default npm source: the customized CLI fork (@yuentao scope) which carries
- * the locally injected *.loader.cjs bundles the official @iflow-ai tarball
- * does not ship. Version resolution chain (see below): dist-tags.latest →
- * dist-tags.custom → PINNED_VERSION. The author publishes new builds on
- * `latest` and may leave `custom` stale, so latest is checked first;
- * PINNED_VERSION is the last-resort offline fallback. --from / --from-dir
- * still override the npm source entirely.
+ * Default source (2026-10-17): the LOCAL fork checkout next to this repo —
+ * ../iflow-fork relative to REPO_ROOT (J:\git\iflow-fork for J:\git\iflow-harness;
+ * remote product/iflow-fork.git). It carries every injected *.loader.cjs Mod
+ * bundle and leads the published @yuentao npm scope, which lags behind
+ * (custom.12 is not on npm), so packaging no longer consults the registry by
+ * default. The npm path stays reachable via an explicit --version (registry
+ * acceptance checks / future publishes); --from / --from-dir still override
+ * the source entirely.
  */
+const DEFAULT_LOCAL_FORK_DIR = path.resolve(REPO_ROOT, "..", "iflow-fork");
 const NPM_PACKAGE = "@yuentao/iflow-cli";
-const PINNED_VERSION = "0.5.19-custom.3";
 
 // Directories/files pruned from the package, relative to the package root.
-const PRUNE_DIRS = ["scripts"];
+// `reverse/` exists only in a fork-checkout source (--from-dir path): it is
+// the deobfuscation workspace (reverse/*.readable.js ~230k lines + ANALYSIS.md),
+// never required at CLI runtime and must never ship in the VSIX.
+const PRUNE_DIRS = ["scripts", "reverse"];
 const PRUNE_GLOBS = (bundleDir) =>
   readdirSync(bundleDir)
     .filter((name) => name.endsWith(".vsix"))
@@ -129,46 +138,44 @@ let fromDir = argValue("--from-dir", null);
 const force = hasFlag("--force");
 
 if (fromTgz && fromDir) throw new Error("--from and --from-dir are mutually exclusive");
-if (fromDir) {
-  fromDir = path.resolve(fromDir);
-  if (!existsSync(path.join(fromDir, "package.json"))) {
-    throw new Error(`--from-dir is not an iflow-cli package (no package.json): ${fromDir}`);
+
+function adoptFromDir(dir) {
+  dir = path.resolve(dir);
+  if (!existsSync(path.join(dir, "package.json"))) {
+    throw new Error(`--from-dir is not an iflow-cli package (no package.json): ${dir}`);
   }
-  if (!existsSync(path.join(fromDir, "bundle", "entry.js"))) {
-    throw new Error(`--from-dir has no bundle/entry.js: ${fromDir}`);
+  if (!existsSync(path.join(dir, "bundle", "entry.js"))) {
+    throw new Error(`--from-dir has no bundle/entry.js: ${dir}`);
   }
-  version = JSON.parse(readFileSync(path.join(fromDir, "package.json"), "utf8")).version;
+  return dir;
 }
 
-// Default version: resolve the latest `custom` dist-tag from npm so a new
-// published build is picked up without manually bumping PINNED_VERSION.
-// Falls back to PINNED_VERSION when the registry is unreachable (offline),
-// keeping the air-gapped path working. Skipped for --from/--from-dir (local
-// sources) and explicit --version.
-if (!version && !fromTgz && !fromDir) {
-  // Resolution chain: latest → custom → PINNED. The fork author publishes
-  // new builds on `latest` but has left `custom` stale (custom was
-  // 0.5.19-custom.1 while latest was already 0.5.19-custom.2), so pinning
-  // to the custom tag vendored an out-of-date fork. Falls back through the
-  // chain when a tag is missing, and to PINNED_VERSION when the registry
-  // is unreachable (offline), keeping the air-gapped path working.
-  for (const tagField of ["dist-tags.latest", "dist-tags.custom"]) {
-    try {
-      const tag = runNpm(["view", NPM_PACKAGE, tagField], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
-      if (tag) {
-        version = tag;
-        console.log(`[vendor-cli] resolved ${tagField}: ${version}`);
-        break;
-      }
-    } catch {
-      // registry unreachable → next fallback
-    }
+if (fromDir) {
+  fromDir = adoptFromDir(fromDir);
+  version = JSON.parse(readFileSync(path.join(fromDir, "package.json"), "utf8")).version;
+} else if (!version && !fromTgz) {
+  // Default source: the local fork checkout, NOT the npm registry. The fork
+  // is the single source of truth for the injected Mod loader bundles;
+  // silently falling back to npm would vendor a fork that lags the local
+  // Mod injections — fail instead and make the operator fix the checkout.
+  const forkDir = process.env.IFLOW_VENDOR_FORK_DIR || DEFAULT_LOCAL_FORK_DIR;
+  if (!existsSync(path.join(forkDir, "package.json"))) {
+    throw new Error(
+      `no local CLI fork checkout at ${forkDir} — packaging vendors from ../iflow-fork, not npm. ` +
+      `Clone it next to this repo (git clone https://git.pandorastudio.cn/product/iflow-fork.git iflow-fork), ` +
+      `or point IFLOW_VENDOR_FORK_DIR / --from-dir at an installed fork, ` +
+      `or pass --version to opt back into the npm registry path.`,
+    );
   }
+  fromDir = adoptFromDir(forkDir);
+  version = JSON.parse(readFileSync(path.join(fromDir, "package.json"), "utf8")).version;
+  console.log(`[vendor-cli] default source: local fork ${fromDir} (${version})`);
 }
-version = version ?? PINNED_VERSION;
+
+// (npm dist-tag resolution removed 2026-10-17: the default source is the
+// local fork checkout above, whose version is read off its package.json;
+// the registry is consulted only with an explicit --version.)
+
 
 // --sync-defaults: refresh the repo's default rule configs from this
 // machine's ~/.iflow/ (run this after editing your local rules and before
@@ -309,6 +316,9 @@ try {
     console.log(`[vendor-cli] extracting ${path.basename(tgz)} ...`);
     execFileSync("tar", ["-xzf", tgz, "-C", work], { stdio: "inherit", windowsHide: true });
     pkgDir = path.join(work, "package");
+    // --from tarball without --version: the real version lives in the
+    // extracted package.json (logging + idempotency marker).
+    version = version ?? JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8")).version;
 
     // 2b. The npm tarball does NOT ship node_modules — install the CLI's
     // runtime deps in place first. --ignore-scripts skips the package's own

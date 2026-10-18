@@ -34,7 +34,7 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 | `shared/session-state.ts` | 纯会话状态 reducer(`applySessionUpdate`、SubAgent 归组、`parseTranscriptJsonl`、块 id 分配/回填、`toAgentPromptText`、BPE token 估算、MCP 编辑 diff 合成) |
 | `webview/src/` | React UI:`App.tsx`、`store.ts`(zustand + Web Audio 提示音 + `createMockHost`)、`i18n.ts`、`components/*`(10 个组件,Win12 风格亚克力材质) |
 | `scripts/harness.mjs` | M0 联调工具:驱动真实 CLI 跑 ACP 全流程,`--record` 录 wire 日志,`--probe` 探方法行为 |
-| `scripts/vendor-cli.mjs` | 内置 CLI 裁剪打包:`vendor:cli`(拉取+裁剪 CLI 进 `vendor/iflow-cli`)、`--sync-defaults`(同步本地默认规则到 `scripts/iflow-defaults/`) |
+| `scripts/vendor-cli.mjs` | 内置 CLI 裁剪打包:`vendor:cli`(自 2026-10-17 默认把本地 fork `../iflow-fork` 拷贝+裁剪进 `vendor/iflow-cli`,npm 拉取 only 显 `--version` opt-in)、`--sync-defaults`(同步本地默认规则到 `scripts/iflow-defaults/`) |
 | `scripts/generate-icon.mjs` | 由 SVG 生成 `media/icon.png`(@resvg/resvg-js),`npm run build` 首步调用 |
 | `scripts/read-changelog.mjs` | CI 用:从 CHANGELOG 顶部读版本号与摘要写入 GITHUB_OUTPUT |
 | `vendor/iflow-cli/` | 裁剪后的内置 CLI(~40MB,源为 `@yuentao/iflow-cli` 定制 fork),`package` 时进 VSIX |
@@ -49,7 +49,7 @@ npm test               # vitest run(单次,非 watch;当前 11 文件 / 271 用�
 npm run build          # icon + tsc + esbuild(host) + vite build webview
 npm run icon           # 仅重新生成 media/icon.png
 npm run webview:dev    # webview 增量构建(UI 迭代时用)
-npm run vendor:cli     # 拉取并裁剪 CLI 到 vendor/iflow-cli(详见下节)
+npm run vendor:cli     # 把本地 fork(../iflow-fork)拷贝+裁剪进 vendor/iflow-cli(npm 拉取不再默认,详见下节)
 npm run defaults:sync  # 把本机 ~/.iflow/ 的默认规则同步到 scripts/iflow-defaults/
 npm run harness        # 驱动真实 iFlow CLI 跑 ACP(需本机已装 CLI 或已 vendor)
 npm run package        # vendor:cli && build && vsce package --no-dependencies
@@ -62,6 +62,8 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 ## 内置 CLI(vendor,唯一执行体)
 
 `scripts/vendor-cli.mjs` 把 CLI 打进 VSIX。自 2026-10-07 起内置 fork 是面板**唯一**的 CLI 来源:扩展宿主不探测 PATH/npm/已知路径,没有 `iflow.cliPath` 设置,`resolveVendoredEntry` 缺失即抛错(定制 loader 补丁只在这个 bundle 里,跑官方包=静默丢补丁改变 agent 行为,宁可报错不兜底)。要点:
+
+- **Vendor source(2026-10-17 改)**:`vendor:cli` 默认把**本地 fork checkout** `../iflow-fork`(repo root 相对,即 J:\git\iflow-fork,remote `product/iflow-fork.git`)拷贝+裁剪进 `vendor/iflow-cli`,**npm 拉链不再默认**——定制 fork custom.12+ 未 npm publish,npm registry 永久滞后本地 Mod 注入,静退 npm 会 vendor 滞后 fork(硬 fail 缺 checkout,报错不兜底同理)。`IFLOW_VENDOR_FORK_DIR`/`--from-dir` 覆写源;显 `--version` 仍走 npm pack path(registry 验收/未来 publish)。**CI caveat**:release.yml 跑 `npm run package`,CI 环境里没有本地 fork checkout → release 打包要么跑本地或把 fork 进 CI 先 checkout。below 里反复 "**尚未发布 npm**——发布后 `npm run vendor:cli` 才能默认拉到,当前 vendor 经 `--from-dir` 装载本地产物" 现读:local 照 default source,Mod 注入随每次 package 自动带上。fork checkout 里 `reverse/`(deobfuscation workspace,reverse/*.readable.js ~23 万行)与 `.git` 照 prune/strip(npm tarball path never had them),PRUNE_DIRS 里 ["scripts","reverse"]。
 
 - **来源是定制 fork**:npm 源为 `@yuentao/iflow-cli@0.5.19-custom.3`(tag `custom`),带本地注入的 `*.loader.cjs` 定制 bundle——官方 `@iflow-ai` 包不含。loader 源码来自 [iFlow-Mods](https://github.com/yuentao/iFlow-Mods) Mod 仓库:patch 型 Mod(thinking-mode / multimodal-image / output-token-limit / kimi-request-override / context-window refactor)在 CLI 源码同一插入点以 1 行 require 注入 loader,monkey-patch 模型规则并外置到 `~/.iflow/*.json`;Mod 可用 [iFlow-Mod-Builder](https://github.com/yuentao/iFlow-Mod-Builder)(Tauri+Vue3 GUI)打包成 `.iflow-mod` 安装。`--from <tgz>` / `--from-dir <dir>` 可完全绕开 npm 源(离线/本地定制场景——`--from-dir` 正是装载带新 loader 的本地定制 CLI 的路径,`--from-dir` 自带 node_modules 会跳过安装;脚本会剔除源目录的 `.git` 防进 VSIX)。custom.3 新增 `mcp-background-loader.cjs`(方法体委托型,不经过 L950):CLI 0.5.19 在 `--experimental-acp` 下 `isNonInteractive` 为 true,`discoverAllTools` 走**同步** `await discoverAllMcpTools()` 分支且 MCP `connect()` 无超时——npx 型服务器在 npm registry 不可达时无限挂起、ACP initialize 握手永久卡死(交互 TUI 反而走后台分支不受影响);loader 让 ACP 场景改走 CLI 自带的 `startMcpDiscoveryInBackground()`(MCP 工具连接完成后陆续注册),`-p` 一次性模式保持同步,`IFLOW_MCP_BACKGROUND=0` 退回原行为。
 - **mcp-session-share Mod(ACP 进程内 MCP 连接池)**:CLI 0.5.19 的每个 ACP 会话(session/new 与 session/load 都算)各自 `newSessionConfig()` 新建 Config,`discoverAllMcpTools()` 为每个配置的 MCP server spawn 一整条 stdio 进程链(cmd→npx-cli→server→watchdog,Windows 上每 server 约 3 个 node);harness 恢复会话的 probe newSession+loadSession 让舰队翻倍,而 ACP 方法表没有 session/close,被丢弃 probe 会话的舰队常驻整个 CLI 生命周期(2026-10-05 实测:单窗口 4 个 npx server 遗留 58 个 node.exe)。Mod 把 `discoverAllMcpTools()` 包上进程级池(`globalThis.__iflowMcpShare`,key=server 名+配置指纹):首会话认领 spawn 权(claim)并登记;后续会话收养健康池内 client(重指向新会话的 toolRegistry/promptRegistry/workspaceContext/config 后仅 `discover()` 重放,零 spawn);指纹变化/client 状态非 connected/discover 抛错 → 驱逐走原 spawn 路径。claim 机制专为 background-loader 后台化后的并发交叠设计(probe 与 load 的 discovery 同时进行,无 claim 则都查空池都 spawn)。仅 `--experimental-acp` 生效,TUI 与 `-p` 一次性不受影响,`IFLOW_MCP_SESSION_SHARE=0|false` 关闭,loader 缺失回退原行为。**与其他 Mod 同标准交付**:源在 iFlowMods 仓库 `mcp-session-share-refactor/`(mod.json type=patch + code.js 单点替换 + `mcp-session-share-loader.cjs` → core + README),方法体委托型不经过 L950 插入点,`.iflow-mod` 安装包放 dist/(gitignored);注入体随定制 fork `@yuentao/iflow-cli` 的 bundle 发布,vendor-cli 直接拉取即带上,**harness 不再自造注入脚本**。验证(2026-10-05):同一 CLI 进程连开 2 会话,session1 舰队 9 进程、session2 增量 0、dispose 后清零。**改 CLI bundle 版本后必须在 iFlowMods 重新生成 code.js——锚点漂移会让构建脚本硬失败**。
