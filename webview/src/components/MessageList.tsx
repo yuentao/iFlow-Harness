@@ -954,8 +954,10 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
  * Auto-injected-context card (first prompt of a session): what the model
  * actually sees beyond the typed text — the assembled system instruction, the
  * joined hierarchical memory, each context file, with FULL bodies (the
- * CLI-side acp-context-report Mod surfaces them). Folded by default; the
- * header alone lists what was injected.
+ * CLI-side acp-context-report Mod surfaces them). MCP entries show only the
+ * server name: their declaration bodies still feed the token estimate, but the
+ * tool-by-tool detail is not surfaced here. Folded by default; the header alone
+ * lists what was injected.
  */
 function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injected" }> }) {
   const [open, setOpen] = useState(false);
@@ -964,7 +966,6 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   const fileCount = block.items.filter((i) => i.kind === "context-file").length;
   const mcpItems = block.items.filter((i) => i.kind === "mcp");
   const mcpCarried = mcpItems.filter((i) => i.connected !== false);
-  const mcpToolCount = mcpCarried.reduce((sum, i) => sum + (i.toolNames?.length ?? 0), 0);
   const mcpUnloaded = mcpItems.length - mcpCarried.length;
   const evicted = block.evicted === true;
   return (
@@ -987,9 +988,9 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
             {t("上下文文件")} {fileCount}
           </Chip>
         )}
-        {mcpToolCount > 0 && (
+        {mcpCarried.length > 0 && (
           <Chip tone="muted">
-            {t("MCP 工具")} {mcpToolCount}
+            {t("MCP 服务器")} {mcpCarried.length}
           </Chip>
         )}
         {mcpUnloaded > 0 && (
@@ -1011,35 +1012,13 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
               item.kind === "system" && item.content ? (
                 <SystemPromptSections key={idx} content={item.content} />
               ) : item.kind === "mcp" ? (
-                <div key={idx} className="min-w-0">
-                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">
-                    <Plug className="size-3 shrink-0 text-muted-foreground" />
-                    <span className="shrink-0">{item.label}</span>
-                    {item.connected === false ? (
-                      <Chip tone="warning">{t("未随请求注入")}</Chip>
-                    ) : (
-                      <span className="shrink-0 text-muted-foreground">
-                        {t("{0} 个工具", (item.toolNames ?? []).length)}
-                      </span>
-                    )}
-                  </div>
-                  {item.connected !== false && (item.toolNames ?? []).length > 0 && (
-                    <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
-                      {(item.toolNames ?? []).map((name) => (
-                        <span
-                          key={name}
-                          className="inline-block shrink-0 rounded bg-editor/60 px-1.5 py-[1px] font-mono text-[10.5px] text-muted-foreground"
-                        >
-                          {name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {item.content && (
-                    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                      {item.content}
-                    </pre>
-                  )}
+                <div
+                  key={idx}
+                  className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80"
+                >
+                  <Plug className="size-3 shrink-0 text-muted-foreground" />
+                  <span className="shrink-0">{item.label}</span>
+                  {item.connected === false && <Chip tone="warning">{t("未随请求注入")}</Chip>}
                 </div>
               ) : (
                 <div key={idx} className="min-w-0">

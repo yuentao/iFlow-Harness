@@ -103,6 +103,8 @@ function createMockHost(): HostApi {
   // Mock MCP dict: lazily seeded on first read, replaced wholesale on save
   // (mirrors the host's replace semantics).
   let mockMcpServers: Record<string, unknown> | undefined;
+  /** Mirrors the real host's mirrored extension settings (default on). */
+  const mockHostSettings = { nextStepSuggestions: true, autoCompressOnIdle: false };
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
   // the host's approvalPolicy message.
   let mockApprovalRules: ApprovalRule[] | undefined;
@@ -245,7 +247,7 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "本次请求自动注入了 3 项内容：系统提示词、3 个 MCP 工具、1 个 MCP 服务器未连接",
+      notice: "本次请求自动注入了 3 项内容：系统提示词、1 个 MCP 服务器、1 个 MCP 服务器未连接",
       tokens: 31240,
       items: [
         {
@@ -257,13 +259,12 @@ function createMockHost(): HostApi {
         {
           kind: "mcp",
           label: "apipost-mcp",
-          toolNames: ["create_api", "update_api", "list_projects"],
           content:
             '{"name":"create_api","description":"Create an API endpoint","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}\n' +
             '{"name":"update_api","description":"Modify an API endpoint","parameters":{"type":"object"}}\n' +
             '{"name":"list_projects","description":"List API projects","parameters":{"type":"object"}}',
         },
-        { kind: "mcp", label: "exa", content: "", toolNames: [], connected: false },
+        { kind: "mcp", label: "exa", content: "", connected: false },
       ],
     },
     {
@@ -398,11 +399,13 @@ function createMockHost(): HostApi {
       },
     });
   }
+  const mockNextSteps = ["继续实现上下文压缩", "运行测试", "查看改动"];
   function settleMockTurn(): void {
     if (mockTurnEndTimer !== null) {
       window.clearTimeout(mockTurnEndTimer);
       mockTurnEndTimer = null;
     }
+    demoMeta.nextStepSuggestions = mockHostSettings.nextStepSuggestions ? [...mockNextSteps] : [];
     if (mockQueuePaused || mockQueue.length === 0) {
       broadcastDemo("idle", "end_turn");
       return;
@@ -423,6 +426,7 @@ function createMockHost(): HostApi {
         ? { kind: "user", id: `demo-u-${Date.now()}`, text, images }
         : { kind: "user", id: `demo-u-${Date.now()}`, text },
     );
+    demoMeta.nextStepSuggestions = [];
     // Real host behavior: the newest session gets labeled by its first prompt.
     const current = demoMeta.sessions.find((s) => s.id === demoMeta.activeSessionId);
     if (current && (current.label === "（无标题会话）" || demoMeta.sessions[0] === current)) {
@@ -496,6 +500,7 @@ function createMockHost(): HostApi {
     replaying: false,
     initializing: false,
     compressing: false,
+    nextStepSuggestions: [...mockNextSteps],
   };
   // M3 demo: start unauthenticated so the setup banner shows; saved state
   // mirrors what the real host stores (masked, never the raw key).
@@ -549,6 +554,7 @@ function createMockHost(): HostApi {
       const m = msg as WebviewToHost;
       if (m.type === "ready") {
         broadcast({ type: "theme", kind: mockTheme });
+        broadcast({ type: "hostSettings", ...mockHostSettings });
         broadcast({
           type: "snapshot",
           state: {
@@ -561,6 +567,31 @@ function createMockHost(): HostApi {
             auth: authState,
           },
         });
+        return;
+      }
+      if (m.type === "setHostSettings") {
+        if (typeof m.nextStepSuggestions === "boolean") {
+          mockHostSettings.nextStepSuggestions = m.nextStepSuggestions;
+          if (!m.nextStepSuggestions) {
+            demoMeta.nextStepSuggestions = [];
+            broadcast({
+              type: "snapshot",
+              state: {
+                blocks: [...demoBlocks],
+                status: mockStatus,
+                errorMessage: null,
+                stopReason: mockStatus === "idle" ? "end_turn" : null,
+                ...demoMeta,
+                pendingApproval: activeApproval,
+                auth: authState,
+              },
+            });
+          }
+        }
+        if (typeof m.autoCompressOnIdle === "boolean") {
+          mockHostSettings.autoCompressOnIdle = m.autoCompressOnIdle;
+        }
+        broadcast({ type: "hostSettings", ...mockHostSettings });
         return;
       }
       if (m.type === "saveAuth") {
@@ -1346,6 +1377,14 @@ interface ChatStore {
   state: SessionState | null;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
+  /**
+   * Host-owned extension settings mirrored for the settings panel. VSCode
+   * configuration is the source of truth; the host pushes the effective
+   * values on ready and after every change. The optimistic local write in
+   * `updateHostSetting` keeps the switch responsive while the round trip runs.
+   */
+  hostSettings: { nextStepSuggestions: boolean; autoCompressOnIdle: boolean };
+  updateHostSetting: (patch: { nextStepSuggestions?: boolean; autoCompressOnIdle?: boolean }) => void;
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
   dismissToast: (id: number) => void;
@@ -1391,6 +1430,7 @@ import { setLocale } from "./i18n";
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
+  hostSettings: { nextStepSuggestions: true, autoCompressOnIdle: false },
   pending: null,
   promptSeq: 0,
   headerScrolled: false,
@@ -1462,6 +1502,15 @@ export const useChat = create<ChatStore>((set, get) => ({
         }
       }
       set({ state });
+      return;
+    }
+    if (msg.type === "hostSettings") {
+      set({
+        hostSettings: {
+          nextStepSuggestions: msg.nextStepSuggestions,
+          autoCompressOnIdle: msg.autoCompressOnIdle,
+        },
+      });
       return;
     }
     if (msg.type === "theme") {
@@ -1542,6 +1591,10 @@ export const useChat = create<ChatStore>((set, get) => ({
     }, PENDING_TIMEOUT_MS);
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+  updateHostSetting: (patch) => {
+    set((s) => ({ hostSettings: { ...s.hostSettings, ...patch } }));
+    get().send({ type: "setHostSettings", ...patch });
+  },
   send: (msg) => {
     // Debounce: identical messages fired within the window (double-clicks on
     // send / revert / switch buttons) are dropped.

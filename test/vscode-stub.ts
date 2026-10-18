@@ -140,12 +140,18 @@ class WorkspaceConfiguration {
   }
 }
 
-const configOverrides: Record<string, unknown> = {};
+const configOverrides: Record<string, unknown> = {
+  // Hermetic tests: panel integration tests drive real sendPrompt flows, and
+  // the turn-end predictor is a direct gateway call. Keep it off unless a test
+  // explicitly opts in — the production default (true) lives in package.json
+  // and in the panel's get() fallback.
+  nextStepSuggestions: false,
+};
 
 /** Test hook: set `iflow.*` configuration values returned by the stub. */
 export function setConfigOverrides(values: Record<string, unknown>): void {
   for (const key of Object.keys(configOverrides)) delete configOverrides[key];
-  Object.assign(configOverrides, values);
+  Object.assign(configOverrides, { nextStepSuggestions: false }, values);
 }
 
 export const workspace = {

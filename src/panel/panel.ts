@@ -95,6 +95,7 @@ import {
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
   parseEditArgs,
+  parseNextStepSuggestions,
   parseToolFilePath,
   parseTranscriptJsonl,
   reassignBlockIds,
@@ -211,6 +212,18 @@ const INTERNAL_PROMPT_TIMEOUT_MS = 180_000;
  * backoff pauses were observed well under this. Catches a mid-stream wedge
  * without waiting out the full wall-clock ceiling. */
 const INTERNAL_PROMPT_IDLE_MS = 90_000;
+/** Next-step prediction: another fire-and-forget internal prompt, but with a
+ * much tighter budget. The user turn already settled, so a slow gateway only
+ * delays the chips — it must never hold the panel in a pseudo-busy state.
+ * 25s ceiling / 12s idle keeps the extra call cheap and bounded. */
+const NEXT_STEP_TIMEOUT_MS = 25_000;
+const NEXT_STEP_IDLE_MS = 12_000;
+/** Hard cap on rendered candidates — more than three chips starts competing
+ * with the composer itself for attention. */
+const NEXT_STEP_MAX_SUGGESTIONS = 3;
+/** Per-side transcript budget fed to the predictor (user request / assistant
+ * reply). Keep the call small: this is a next-action guess, not a summary. */
+const NEXT_STEP_EXCERPT_CHARS = 6_000;
 /**
  * Neutralise `@path` file references in an internal-prompt draft (enhance /
  * AI title) by dropping the `@` and keeping the path text (user-reported
@@ -513,6 +526,10 @@ export class ChatPanel implements vscode.Disposable {
   /** M1: one internal prompt at a time (enhance and title generation share
    * the lane; a second request while one runs fails fast). */
   private internalPromptBusy = false;
+  /** Turn-end next-step prediction has its OWN lane: it is fire-and-forget
+   * and must neither block enhance/title nor be blocked by them (a title
+   * generation at the same turn end would otherwise swallow the prediction). */
+  private nextStepBusy = false;
   /** P1-5 anti-footgun: the in-flight enhance (requestId + abort + the
    * session it was started on). `cancelEnhance` aborts it; the reply is also
    * dropped when the requestId is stale or the session changed meanwhile. */
@@ -607,9 +624,9 @@ export class ChatPanel implements vscode.Disposable {
     // once the user picked a theme manually).
     this.context.subscriptions.push(
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
-      vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("iflow.auroraIntensity")) this.postTheme();
-        if (
+          vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration("iflow.auroraIntensity")) this.postTheme();
+            if (e.affectsConfiguration("iflow.nextStepSuggestions")) this.postHostSettings();        if (
           e.affectsConfiguration("iflow.language")
           || e.affectsConfiguration("iflow.approvalMode")
         ) {
@@ -1024,6 +1041,7 @@ export class ChatPanel implements vscode.Disposable {
         // CSS default until the setting is touched again. Re-post now that
         // `ready` proves the listener is live.
         this.postTheme();
+        this.postHostSettings();
         break;
       case "sendPrompt":
         await this.sendPrompt(msg.text, msg.images, msg.files, msg.contexts);
@@ -1188,6 +1206,22 @@ export class ChatPanel implements vscode.Disposable {
       case "openSettings":
         await vscode.commands.executeCommand("workbench.action.openSettings", "iflow");
         break;
+      case "setHostSettings": {
+        const config = vscode.workspace.getConfiguration("iflow");
+        for (const key of ["nextStepSuggestions", "autoCompressOnIdle"] as const) {
+          const value = msg[key];
+          if (typeof value !== "boolean") continue;
+          try {
+            await config.update(key, value, vscode.ConfigurationTarget.Global);
+          } catch (error) {
+            this.log.warn(`failed to update ${key}: ${errorMessage(error)}`);
+          }
+        }
+        // Turning suggestions off must also retract the chips already on screen.
+        if (msg.nextStepSuggestions === false) this.store.suggestNextSteps([]);
+        this.postHostSettings();
+        break;
+      }
       case "listMcpServers":
         this.sendMcpServers();
         break;
@@ -1257,6 +1291,18 @@ export class ChatPanel implements vscode.Disposable {
     const light = kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight;
     const auroraIntensity = vscode.workspace.getConfiguration("iflow").get<number>("auroraIntensity", 35);
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
+  }
+
+  /** Mirror the extension settings the settings panel renders. VSCode
+   * configuration stays authoritative; a direct edit in VSCode re-pushes via
+   * the onDidChangeConfiguration listener. */
+  private postHostSettings(): void {
+    const config = vscode.workspace.getConfiguration("iflow");
+    this.postToWebview({
+      type: "hostSettings",
+      nextStepSuggestions: config.get<boolean>("nextStepSuggestions", true),
+      autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
+    });
   }
 
   /**
@@ -1384,51 +1430,64 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed || this.internalPromptBusy) return null;
     this.internalPromptBusy = true;
     try {
-      // Endpoint: panel-owned credentials (SecretStorage) first — the same
-      // source the user session authenticates with; the CLI's settings.json
-      // profile is the fallback (terminal-configured gateway). Never rely on
-      // the CLI process env: internal prompts bypass it entirely now.
-      const endpoint = (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ?? (await loadCredentials(this.context.secrets).catch(() => null)) ?? readActiveEndpoint();
-      if (!endpoint || this.disposed) return null;
-      // Model: the panel's current selection (enhancement quality, pitfall #23
-      // — store value is authoritative); fall back to the profile's model.
-      const model = this.store.getState().currentModelId || endpoint.modelName;
-      if (!model) {
-        this.log.warn("internal prompt skipped: no model configured");
-        return null;
-      }
-      const panel = this;
-      const result = await streamChatCompletion(endpoint, model, text, {
-        timeoutMs: this.internalPromptTimeoutMs,
-        idleMs: this.internalPromptIdleMs,
-        signal: {
-          get aborted() {
-            return panel.disposed || (signal?.aborted ?? false);
-          },
-          // Forward the caller's synchronous-cancel hook (enhance uses it to
-          // release the busy lane the same tick a cancel arrives).
-          onAbort: signal?.onAbort,
-        },
-      });
-      if (this.disposed) return null;
-      // Partial-result salvage: on a slow gateway the ceiling can fire after
-      // the content already streamed (gateway-probed 2026-10-09: tencent/hy3
-      // streams the full rewrite at 60-75s but the turn stop arrives late).
-      // timeout/stalled salvage what streamed; a transport failure discards
-      // (its partial is not trustworthy) and a user cancel is silent.
-      const trimmed = result.text.trim();
-      const salvageable = result.reason === "complete" || result.reason === "timeout" || result.reason === "stalled";
-      if (salvageable && trimmed) {
-        if (result.reason !== "complete") {
-          this.log.info(`internal prompt salvaged (${result.reason}) with ${trimmed.length} chars`);
-        }
-        return trimmed;
-      }
-      this.log.info(`internal prompt ${result.reason === "cancelled" ? "cancelled" : `failed (${result.reason})`}`);
-      return null;
+      return await this.completeInternalPrompt(text, this.internalPromptTimeoutMs, this.internalPromptIdleMs, signal);
     } finally {
       this.internalPromptBusy = false;
     }
+  }
+
+  /** Shared body of every internal prompt: resolve the panel-owned endpoint
+   * and model, stream one direct completion, and apply the salvage policy.
+   * Callers own the busy lane and the request lifecycle. */
+  private async completeInternalPrompt(
+    text: string,
+    timeoutMs: number,
+    idleMs: number,
+    signal?: { aborted: boolean; onAbort?: (cancel: () => void) => void },
+  ): Promise<string | null> {
+    if (this.disposed) return null;
+    // Endpoint: panel-owned credentials (SecretStorage) first — the same
+    // source the user session authenticates with; the CLI's settings.json
+    // profile is the fallback (terminal-configured gateway). Never rely on
+    // the CLI process env: internal prompts bypass it entirely now.
+    const endpoint = (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ?? (await loadCredentials(this.context.secrets).catch(() => null)) ?? readActiveEndpoint();
+    if (!endpoint || this.disposed) return null;
+    // Model: the panel's current selection (enhancement quality, pitfall #23
+    // — store value is authoritative); fall back to the profile's model.
+    const model = this.store.getState().currentModelId || endpoint.modelName;
+    if (!model) {
+      this.log.warn("internal prompt skipped: no model configured");
+      return null;
+    }
+    const panel = this;
+    const result = await streamChatCompletion(endpoint, model, text, {
+      timeoutMs,
+      idleMs,
+      signal: {
+        get aborted() {
+          return panel.disposed || (signal?.aborted ?? false);
+        },
+        // Forward the caller's synchronous-cancel hook (enhance uses it to
+        // release the busy lane the same tick a cancel arrives).
+        onAbort: signal?.onAbort,
+      },
+    });
+    if (this.disposed) return null;
+    // Partial-result salvage: on a slow gateway the ceiling can fire after
+    // the content already streamed (gateway-probed 2026-10-09: tencent/hy3
+    // streams the full rewrite at 60-75s but the turn stop arrives late).
+    // timeout/stalled salvage what streamed; a transport failure discards
+    // (its partial is not trustworthy) and a user cancel is silent.
+    const trimmed = result.text.trim();
+    const salvageable = result.reason === "complete" || result.reason === "timeout" || result.reason === "stalled";
+    if (salvageable && trimmed) {
+      if (result.reason !== "complete") {
+        this.log.info(`internal prompt salvaged (${result.reason}) with ${trimmed.length} chars`);
+      }
+      return trimmed;
+    }
+    this.log.info(`internal prompt ${result.reason === "cancelled" ? "cancelled" : `failed (${result.reason})`}`);
+    return null;
   }
 
   /** P1-5: enhance the composer draft. Reply: `enhancedPrompt`. */
@@ -1547,6 +1606,83 @@ export class ChatPanel implements vscode.Disposable {
     await this.persistSessions(sessions, current.activeSessionId);
     // Keep the transcript file's label in sync with the new title.
     void this.persistActiveTranscript(true);
+  }
+
+  /**
+   * Turn-end next-step prediction: one dedicated model call against the same
+   * OpenAI-compatible endpoint the panel uses, completely outside the agent
+   * session. Isolation follows the internal-prompt discipline (no transcript
+   * block, no CLI chatHistory entry, no tool surface). Silent on every
+   * failure — a missing prediction must never turn a healthy turn red.
+   *
+   * Anti-stale anchoring: hold the last user block by REFERENCE plus the
+   * block count. A prediction that lands after a new user turn, a session
+   * swap, a rollback, or a `/compress` turn (status flips to streaming) is
+   * dropped instead of overwriting the new turn's state.
+   */
+  private async generateNextStepSuggestions(sessionId: string): Promise<void> {
+    if (this.disposed || this.nextStepBusy) return;
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return;
+    const state = this.store.getState();
+    if (state.sessionId !== sessionId) return;
+    const blocks = state.blocks;
+    let lastUserIndex = -1;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i]?.kind === "user") {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    if (lastUserIndex < 0) return;
+    const anchorUserBlock = blocks[lastUserIndex]!;
+    if (anchorUserBlock.kind !== "user") return;
+    const anchorBlockCount = blocks.length;
+    // Last-turn excerpt: the user request plus the assistant's closing text
+    // (walking backwards keeps the tail when the reply is long). Tool titles
+    // carry what the agent actually did when the turn produced no prose.
+    let reply = "";
+    const toolTitles: string[] = [];
+    for (let i = blocks.length - 1; i > lastUserIndex; i--) {
+      const block = blocks[i]!;
+      if (block.kind === "text" && reply.length < NEXT_STEP_EXCERPT_CHARS) {
+        reply = `${block.text}\n${reply}`;
+      } else if (block.kind === "tool" && toolTitles.length < 8) {
+        toolTitles.push(block.title);
+      }
+    }
+    const user = anchorUserBlock.text.slice(0, Math.floor(NEXT_STEP_EXCERPT_CHARS / 3)).trim();
+    const assistant = reply.slice(-Math.floor((NEXT_STEP_EXCERPT_CHARS * 2) / 3)).trim();
+    if (!user) return;
+    const template = vscode.l10n.t(
+      "你在对话结束后为用户生成下一步操作候选。根据下面的最近对话，推测用户接下来最可能想做的 3 个操作。\n要求：每条是一个可直接发送的简短指令（不超过 20 个字），使用与对话相同的语言，必须能从对话内容推断，不要泛泛而谈，也不要建议删除数据或执行危险命令。\n只输出 JSON 字符串数组，例如 [\"继续实现\",\"运行测试\",\"查看改动\"]，不要代码块、编号或解释。\n\n用户请求：\n",
+    );
+    const tools = toolTitles.length > 0 ? `\n\n本轮工具调用：${toolTitles.join("、")}` : "";
+    const prompt = `${template}${stripFileMentions(user)}\n\n助手回复（末尾节选）：\n${assistant}${tools}`;
+    this.nextStepBusy = true;
+    try {
+      const text = await this.completeInternalPrompt(prompt, NEXT_STEP_TIMEOUT_MS, NEXT_STEP_IDLE_MS);
+      if (!text || this.disposed) return;
+      const current = this.store.getState();
+      if (current.sessionId !== sessionId) return;
+      let currentLastUser: (typeof current.blocks)[number] | null = null;
+      for (let i = current.blocks.length - 1; i >= 0; i--) {
+        const block = current.blocks[i]!;
+        if (block.kind === "user") {
+          currentLastUser = block;
+          break;
+        }
+      }
+      // Only settle into the exact transcript the prediction was made for.
+      if (currentLastUser !== anchorUserBlock) return;
+      if (current.blocks.length !== anchorBlockCount || current.status !== "idle") return;
+      const suggestions = parseNextStepSuggestions(text, NEXT_STEP_MAX_SUGGESTIONS);
+      if (suggestions.length === 0) return;
+      // The user may have turned the feature off while the call was in flight.
+      if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return;
+      this.store.suggestNextSteps(suggestions);
+    } finally {
+      this.nextStepBusy = false;
+    }
   }
 
   // --- M1: session export (P0-7) -----------------------------------------------
@@ -1769,6 +1905,11 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async maybeAutoCompressOnIdle(sessionId: string): Promise<void> {
     if (this.disposed || this.autoCompressInFlight || this.historySyncBusy) return;
+    // Opt-in (default off): a turn-end compress adds a whole extra turn and
+    // rewrites the model's context, so the user must enable it explicitly in
+    // the settings panel. The reactive overflow path in promptWithRetry is
+    // unaffected — it only fires when the gateway rejects a turn.
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoCompressOnIdle", false) === false) return;
     const state = this.store.getState();
     if (state.sessionId !== sessionId) return;
     if (state.initializing || state.replaying || state.status !== "idle") return;
@@ -4914,7 +5055,6 @@ export class ChatPanel implements vscode.Disposable {
         items.push({
           kind: "mcp",
           label: name,
-          toolNames: tools.map((tool) => tool.name),
           // One compact JSON declaration per line — the same bytes the CLI
           // serializes into functionDeclarations.
           content: tools
@@ -4928,7 +5068,7 @@ export class ChatPanel implements vscode.Disposable {
             .join("\n"),
         });
       } else if (view.status !== "connected") {
-        items.push({ kind: "mcp", label: name, content: "", toolNames: [], connected: false });
+        items.push({ kind: "mcp", label: name, content: "", connected: false });
       }
     }
     return items;
@@ -5619,6 +5759,8 @@ export class ChatPanel implements vscode.Disposable {
         // M1 P0-7: the first completed turn is the AI-title window (no-op
         // unless the label is still the mechanical truncation).
         if (promptSessionId) void this.maybeGenerateAiTitle(promptSessionId);
+        // Turn-end next-step prediction (own lane; silent on failure).
+        if (promptSessionId) void this.generateNextStepSuggestions(promptSessionId);
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
@@ -5728,6 +5870,8 @@ export class ChatPanel implements vscode.Disposable {
       if (result.stopReason !== "cancelled") {
         this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
         this.postSound("done");
+        // Same turn-end next-step prediction as sendPrompt.
+        if (promptSessionId) void this.generateNextStepSuggestions(promptSessionId);
         // Same turn-end proactive compression policy as sendPrompt.
         await this.maybeAutoCompressOnIdle(promptSessionId);
       }

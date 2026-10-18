@@ -382,9 +382,7 @@ const en: Record<string, string> = {
       "系统提示词": "System prompt",
       "核心提示词": "Core prompt",
       "记忆": "Memory",  "上下文文件": "Context files",
-      "MCP 工具": "MCP tools",
       "MCP 未连接": "MCP not connected",
-      "{0} 个工具": "{0} tools",
       "未随请求注入": "Not injected with the request",
   "{0} 字符": "{0} chars",
   "{0} 字节": "{0} bytes",
@@ -451,6 +449,21 @@ const en: Record<string, string> = {
   "还原原始输入": "Restore the original input",
   "已增强输入（再次点击增强可还原）": "Prompt enhanced (click Enhance again to restore)",
   "已还原原始输入": "Original input restored",
+  // turn-end next-step suggestions + General settings tab
+  "通用": "General",
+  "下一步": "Next",
+  "AI 推测的下一步操作，点击填入输入框": "AI-predicted next actions — click to insert into the composer",
+  "关闭建议": "Dismiss suggestions",
+  "下一步建议": "Next-step suggestions",
+  "每轮回复完成后单独调用一次模型，推测可选的下一步操作并显示在输入框上方（会产生额外 token 消耗）。":
+    "After each completed turn, make one extra model call to predict likely next actions and show them above the composer (extra token usage).",
+  "默认开启。关闭后不再发起该模型调用，已显示的候选会被清除。":
+    "Enabled by default. When off, no extra call is made and any displayed candidates are cleared.",
+  "自动压缩上下文": "Auto-compress context",
+  "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮（会产生一次压缩轮次）。":
+    "After a turn settles, if context occupancy reaches 95%, compress the conversation before continuing the next turn (one extra compress turn).",
+  "默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。":
+    "Off by default. When disabled, compression still runs after the gateway reports context overflow, and the「立即压缩」action remains available.",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

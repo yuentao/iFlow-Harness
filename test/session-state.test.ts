@@ -38,6 +38,7 @@ import {
   beginCompressTurn,
   endCompressTurn,
   parseTranscriptJsonl,
+  parseNextStepSuggestions,
   toAgentPromptText,
   appendInjectedContext,
 } from "../shared/session-state";
@@ -2602,22 +2603,23 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     expect(state.blocks.map((b) => b.kind)).toEqual(["injected", "user"]);
   });
 
-  it("lists the MCP tool declarations the request carries", () => {
+  it("counts MCP servers (not their tools) in the notice", () => {
     // The CLI puts every connected server's tools into functionDeclarations on
-    // EVERY request (the wire never reports them, the mcp-status Mod does).
+    // EVERY request (the wire never reports them, the mcp-status Mod does);
+    // the card counts the server once and hides its tool-by-tool detail.
     const declarations = '{"name":"create_api"}\n{"name":"list_api"}';
     const withMcp = [
       ...items(),
-      { kind: "mcp", label: "apipost-mcp", toolNames: ["create_api", "list_api"], content: declarations },
-      // Not connected when the request started: no body, no tool names, 0
-      // tokens — the reducer must not claim its tools rode the request.
-      { kind: "mcp", label: "exa", content: "", toolNames: [], connected: false },
+      { kind: "mcp", label: "apipost-mcp", content: declarations },
+      // Not connected when the request started: no body, 0 tokens — the
+      // reducer must not claim its tools rode the request.
+      { kind: "mcp", label: "exa", content: "", connected: false },
     ];
     const state = initialSessionState();
     beginUserPrompt(state, "hi");
     appendInjectedContext(state, withMcp);
     const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
-    expect(block.notice).toContain("2 个 MCP 工具");
+    expect(block.notice).toContain("1 个 MCP 服务器、");
     expect(block.notice).toContain("1 个 MCP 服务器未连接");
     expect(block.tokens).toBe(
       estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules") +
@@ -2707,5 +2709,33 @@ describe("estimateMcpContextTokens", () => {
     expect(estimateMcpContextTokens([])).toBe(0);
     const omitted = [{ name: "big", description: "huge schema", schemaOmitted: true, schema: { type: "object", properties: { x: { type: "array", items: { description: "x".repeat(5000) } } } } }];
     expect(estimateMcpContextTokens(omitted)).toBe(estimateTokens(JSON.stringify({ name: "big", description: "huge schema" })));
+  });
+});
+
+describe("next-step suggestions", () => {
+  it("parses a bare JSON array", () => {
+    expect(parseNextStepSuggestions('["继续实现","运行测试"]')).toEqual(["继续实现", "运行测试"]);
+  });
+
+  it("unwraps a fenced JSON block with surrounding prose", () => {
+    const raw = '好的：\n```json\n["查看改动", "补充测试"]\n```\n以上。';
+    expect(parseNextStepSuggestions(raw)).toEqual(["查看改动", "补充测试"]);
+  });
+
+  it("falls back to numbered/bulleted lines and dedupes", () => {
+    const raw = "1. 继续实现\n2. 运行测试\n- 继续实现\n3. 提交代码";
+    expect(parseNextStepSuggestions(raw)).toEqual(["继续实现", "运行测试", "提交代码"]);
+  });
+
+  it("caps the list and drops overlong entries", () => {
+    expect(parseNextStepSuggestions(JSON.stringify(["a", "b", "c", "d"]), 3)).toEqual(["a", "b", "c"]);
+    expect(parseNextStepSuggestions(JSON.stringify(["x".repeat(121)]))).toEqual([]);
+  });
+
+  it("is cleared when a new user turn begins", () => {
+    const state = initialSessionState();
+    state.nextStepSuggestions = ["继续实现"];
+    beginUserPrompt(state, "下一步做什么？");
+    expect(state.nextStepSuggestions).toEqual([]);
   });
 });

@@ -32,6 +32,7 @@ import {
   markToolHunkDecisions,
   refreshSessionUsage,
   setMeta,
+  setNextStepSuggestions,
   setPendingApproval,
   setPendingPlanExit,
   setPendingProfileSwitch,
@@ -224,6 +225,13 @@ export class SessionStore {
    */
   setCheckpoints(checkpoints: SessionState["checkpoints"]): void {
     this.state.checkpoints = checkpoints;
+    this.flush();
+  }
+
+  /** Publish the turn-end next-step prediction. Non-blocks metadata, so it
+   * rides the blockPatch tail exactly like the queue/checkpoint projections. */
+  suggestNextSteps(suggestions: string[]): void {
+    setNextStepSuggestions(this.state, suggestions);
     this.flush();
   }
 

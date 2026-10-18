@@ -23,6 +23,8 @@
   "iflow.configuration.costTable.description": "会话成本估算的单价表，每行一条 `模型名=输入价,输出价`（USD/百万 token，如 `deepseek-v3=0.27,1.1`）。",
   "iflow.configuration.thinkingModelRules.description": "推理（思考)能力规则，每项 {pattern, supportsThinking, supportedReasoningLevels?, maxThinkingTokens?}。pattern 为不区分大小写正则，模型 id 首命中即生效；默认内置主流最新 thinking 模型条目（o1/o3/o4、deepseek-r1/reasoner、gemini-2.x、qwen3、kimi-k2.5、grok-3/4)。扩展把缺失条目同步 into ~/.iflow/thinking-models.json（生效下次会话启动，CLI 读取规则于启动)，用户手写 request-DSL 条目永不被覆写；supportsThinking:false 条目灰当前模型的推理下拉。",
   "iflow.configuration.autoTitle.description": "会话首轮完成后为其生成 AI 简短标题（每会话一次，一次轻量模型调用）。",
+  "iflow.configuration.nextStepSuggestions.description": "每轮回复完成后单独调用一次模型推测可选的下一步操作，以候选词形式显示在输入框上方（会产生额外 token 消耗）。",
+  "iflow.configuration.autoCompressOnIdle.description": "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮（默认关闭）。",
   "iflow.configuration.checkpoints.description": "每轮对话前把工作区快照到独立的影子 git 仓库，从而支持按轮回退文件改动。绝不触碰用户自己的 .git，非 git 目录同样可用。",
   "iflow.configuration.checkpointMaxFiles.description": "当会话工作区文件数超过该上限时关闭工作区快照（防止超大工作区拖慢面板）。",
   "iflow.configuration.checkpointMaxFileMB.description": "快照工作区时跳过大于该尺寸（MB）的文件——其改动不参与回退，影子仓库也保持小巧。未改动的文件跨轮共享存储，不会重复占用。0 = 不限大小。",

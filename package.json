@@ -268,6 +268,16 @@
           "default": true,
           "description": "%iflow.configuration.autoTitle.description%"
         },
+        "iflow.nextStepSuggestions": {
+          "type": "boolean",
+          "default": true,
+          "description": "%iflow.configuration.nextStepSuggestions.description%"
+        },
+        "iflow.autoCompressOnIdle": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.autoCompressOnIdle.description%"
+        },
         "iflow.checkpoints": {
           "type": "boolean",
           "default": true,

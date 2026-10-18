@@ -1117,7 +1117,55 @@ export function beginUserPrompt(
   state.status = "streaming";
   state.stopReason = null;
   state.errorMessage = null;
+  // The previous turn's prediction describes the previous turn — never let it
+  // sit above the composer while a new request is already in flight.
+  state.nextStepSuggestions = [];
   return state.blocks.length - 1;
+}
+
+/** Write the turn-end prediction projection (non-blocks metadata). */
+export function setNextStepSuggestions(state: SessionState, suggestions: string[]): void {
+  state.nextStepSuggestions = suggestions;
+}
+
+/** List markers the fallback path strips ("- foo", "1. foo", "2、foo"). */
+const SUGGESTION_MARKER = /^\s*(?:[-*•]|\d+[.)、])\s*/;
+
+/**
+ * Parse one next-step prediction. The prompt asks for a bare JSON array, but
+ * thinking models routinely wrap it in a ```json fence or prefix a sentence —
+ * dig the first JSON array out (fence first, whole reply second) and fall
+ * back to numbered/bulleted lines so a formatting drift does not throw the
+ * whole prediction away. Pure: trims markers, drops duplicates/overlong
+ * entries, caps the list.
+ */
+export function parseNextStepSuggestions(raw: string, max = 3): string[] {
+  const out: string[] = [];
+  const push = (value: unknown): void => {
+    if (typeof value !== "string") return;
+    const text = value.replace(SUGGESTION_MARKER, "").trim();
+    if (!text || text.length > 120 || out.includes(text)) return;
+    out.push(text);
+  };
+  const text = raw.trim();
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const sources = fence?.[1] ? [fence[1], text] : [text];
+  for (const source of sources) {
+    const start = source.indexOf("[");
+    const end = source.lastIndexOf("]");
+    if (start < 0 || end <= start) continue;
+    try {
+      const parsed: unknown = JSON.parse(source.slice(start, end + 1));
+      if (Array.isArray(parsed)) {
+        parsed.forEach(push);
+        return out.slice(0, Math.max(0, max));
+      }
+    } catch {
+      // Not JSON — try the next source, then the line fallback below.
+    }
+  }
+  for (const line of text.split(/\r?\n/)) push(line);
+  return out.slice(0, Math.max(0, max));
 }
 
 /**
@@ -1150,12 +1198,9 @@ export function appendInjectedContext(
   if (fileCount > 0) parts.push(l10n.t("{0} 个上下文文件", String(fileCount)));
   const mcpItems = items.filter((i) => i.kind === "mcp");
   if (mcpItems.length > 0) {
-    const carriedTools = mcpItems.reduce(
-      (sum, item) => sum + (item.connected === false ? 0 : item.toolNames?.length ?? 0),
-      0,
-    );
-    if (carriedTools > 0) parts.push(l10n.t("{0} 个 MCP 工具", String(carriedTools)));
     const unloaded = mcpItems.filter((i) => i.connected === false).length;
+    const carried = mcpItems.length - unloaded;
+    if (carried > 0) parts.push(l10n.t("{0} 个 MCP 服务器", String(carried)));
     if (unloaded > 0) parts.push(l10n.t("{0} 个 MCP 服务器未连接", String(unloaded)));
   }
   const block: Block = {
@@ -1606,6 +1651,9 @@ function clearTranscriptFields(state: SessionState): void {
   // M3 P0-1: checkpoints are transcript-scoped (anchored to user-block ids);
   // a wholesale transcript swap invalidates the whole index projection.
   state.checkpoints = [];
+  // Predicted next actions belong to the outgoing turn/session — a wholesale
+  // transcript swap invalidates them exactly like the checkpoint projection.
+  state.nextStepSuggestions = [];
   // The occupancy report anchor (atBlockCount) indexes the OUTGOING transcript —
   // after a replay the restored blocks renumber everything, so a carried-over
   // anchor would add the delta onto a foreign prompt count. The next turn end
@@ -2197,6 +2245,8 @@ export function deleteUserMessageById(state: SessionState, blockId: string): num
   // changed, so a reported occupancy is dead even if the block count happens
   // to land back on `atBlockCount` (the staleness anchor alone can't see this).
   state.usageReport = null;
+  // The prediction described the deleted tail — retract it with the content.
+  state.nextStepSuggestions = [];
   refreshSessionUsage(state);
   return index;
 }

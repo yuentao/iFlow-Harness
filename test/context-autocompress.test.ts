@@ -110,7 +110,7 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
   let dismissed: number[];
 
   beforeEach(async () => {
-    setConfigOverrides({ checkpoints: false });
+    setConfigOverrides({ checkpoints: false, autoCompressOnIdle: true });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-autocompress-storage-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
@@ -155,6 +155,15 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
     expect(prompt[0]!.text).toBe("/compress");
     expect(toasts[0]!.level).toBe("info");
     expect(dismissed).toEqual([7]);
+  });
+
+  it("is opt-in: without the setting (shipped default off) no turn-end compression runs", async () => {
+    // beforeEach enabled it — reset to the default (absent = false).
+    setConfigOverrides({ checkpoints: false });
+    setUsage(usage(1000, 990));
+    await p.maybeAutoCompressOnIdle("ac-session");
+    expect(compressCalls).toHaveLength(0);
+    expect(toasts).toHaveLength(0);
   });
 
   it("stays silent below 95% (the 90% warning pill owns that band)", async () => {
@@ -240,7 +249,7 @@ describe("sendPrompt turn-end wiring → proactive compress → queue order", ()
   let promptTexts: string[];
 
   beforeEach(async () => {
-    setConfigOverrides({ checkpoints: false });
+    setConfigOverrides({ checkpoints: false, autoCompressOnIdle: true });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-autocompress-e2e-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as typeof p;

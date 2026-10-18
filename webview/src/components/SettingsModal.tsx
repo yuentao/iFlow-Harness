@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sun, Trash2 } from "lucide-react";
+import { KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -21,7 +21,7 @@ import { ApprovalPolicySection } from "./ApprovalPolicyCard";
  * nav rail (left on wide viewports, top tab strip when narrow, via the
  * @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "mcp" | "policy";
+export type SettingsTab = "api" | "mcp" | "policy" | "general";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -67,6 +67,7 @@ export function SettingsModal({
     { id: "api", icon: KeyRound, label: t("API 配置") },
     { id: "mcp", icon: Server, label: t("MCP 服务器") },
     { id: "policy", icon: ShieldCheck, label: t("审批策略") },
+    { id: "general", icon: SlidersHorizontal, label: t("通用") },
   ];
   const tabTitle = TABS.find((x) => x.id === tab)?.label ?? "";
 
@@ -154,9 +155,84 @@ export function SettingsModal({
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "mcp" && <McpSection busy={busy} onHeader={setSectionHeader} />}
           {tab === "policy" && <ApprovalPolicySection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "general" && <GeneralSection />}
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+/**
+ * General behavior toggles mirrored from VSCode configuration. The host owns
+ * the authoritative values (`hostSettings` message); toggling is optimistic
+ * locally and confirmed by the host's echo.
+ */
+function GeneralSection() {
+  const settings = useChat((s) => s.hostSettings);
+  const updateHostSetting = useChat((s) => s.updateHostSetting);
+  return (
+    <div className="space-y-2">
+      <ToggleRow
+        label={t("下一步建议")}
+        description={t(
+          "每轮回复完成后单独调用一次模型，推测可选的下一步操作并显示在输入框上方（会产生额外 token 消耗）。",
+        )}
+        checked={settings.nextStepSuggestions}
+        onChange={(value) => updateHostSetting({ nextStepSuggestions: value })}
+      />
+      <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+        {t("默认开启。关闭后不再发起该模型调用，已显示的候选会被清除。")}
+      </p>
+      <ToggleRow
+        label={t("自动压缩上下文")}
+        description={t(
+          "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮（会产生一次压缩轮次）。",
+        )}
+        checked={settings.autoCompressOnIdle}
+        onChange={(value) => updateHostSetting({ autoCompressOnIdle: value })}
+      />
+      <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+        {t("默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。")}
+      </p>
+    </div>
+  );
+}
+
+/** One labeled switch row shared by the general settings toggles. */
+function ToggleRow({
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start gap-2.5 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] font-semibold text-foreground">{label}</div>
+        <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        className={`press relative mt-0.5 inline-flex h-[18px] w-[32px] shrink-0 items-center rounded-full border transition-colors duration-200 ${
+          checked ? "border-primary/50 bg-primary/70" : "border-border bg-border/70"
+        }`}
+        onClick={() => onChange(!checked)}
+      >
+        <span
+          className={`inline-block size-[12px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
+            checked ? "translate-x-[17px]" : "translate-x-[2px]"
+          }`}
+        />
+      </button>
+    </div>
   );
 }
 

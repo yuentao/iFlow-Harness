@@ -242,10 +242,9 @@ export interface InjectedContextItem {
   path?: string;
   /** Full body as the model receives it (MCP: one compact JSON declaration
    * per line, the same shape the CLI serializes into functionDeclarations).
+   * MCP bodies are hidden in the UI but still feed the card's token estimate.
    * Empty for servers whose tools never rode the request — never fabricated. */
   content: string;
-  /** MCP only: the tool NAMES this server injects (rendered as chips). */
-  toolNames?: string[];
   /** MCP only: false = the server had not finished connecting when the
    * request started, so its tools are NOT part of the request — shown as
    * unloaded and counted at 0 tokens. Absent = carried. */
@@ -671,6 +670,15 @@ export interface SessionState {
    * channel. Absent = checkpointing disabled / nothing captured yet.
    */
   checkpoints?: CheckpointUi[];
+  /**
+   * Next-step candidates predicted by one dedicated model call at the end of
+   * a turn (the host runs it directly against the OpenAI-compatible endpoint,
+   * outside the agent session). Non-blocks metadata: it rides the blockPatch
+   * tail and the webview renders the entries as chips above the composer.
+   * Cleared when a new user turn starts or the transcript is swapped, so a
+   * stale prediction never survives into another turn/session.
+   */
+  nextStepSuggestions?: string[];
 }
 
 export interface AuthUiState {
@@ -743,6 +751,7 @@ export function initialSessionState(): SessionState {
     queue: [],
     queuePaused: false,
     checkpoints: [],
+    nextStepSuggestions: [],
   };
 }
 
@@ -1029,6 +1038,11 @@ export type HostToWebview =
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
+  /** Extension settings mirrored into the settings panel. VSCode configuration
+   * is the source of truth; the host pushes this on `ready`, after every
+   * change made in the panel, and when the user edits the setting directly in
+   * VSCode. */
+  | { type: "hostSettings"; nextStepSuggestions: boolean; autoCompressOnIdle: boolean }
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
    * panel visibility; the webview only synthesizes on receipt. */
@@ -1195,6 +1209,10 @@ export type WebviewToHost =
   | { type: "restartCli" }
   /** Open the VSCode Settings UI filtered to the iFlow extension section. */
   | { type: "openSettings" }
+  /** Update mirrored extension settings from the settings panel. The host
+   * writes VSCode configuration (global scope) and echoes `hostSettings`
+   * with the effective values. Partial: omitted fields stay untouched. */
+  | { type: "setHostSettings"; nextStepSuggestions?: boolean; autoCompressOnIdle?: boolean }
   /** MCP management card opened: read the CURRENT `mcpServers` dict from
    * `~/.iflow/settings.json` (the CLI / external tools own that file — the
    * card must show disk truth, not a cached copy). Reply: `mcpServers`. */

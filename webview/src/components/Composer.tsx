@@ -18,6 +18,7 @@ import {
   Play,
   Search,
   SendHorizontal,
+  Sparkles,
   Square,
   Trash2,
   Wand2,
@@ -304,6 +305,8 @@ export function Composer() {
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
   const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
+  /** Turn-end model predictions; host metadata, cleared when a new turn starts. */
+  const suggestions = useChat((s) => s.state?.nextStepSuggestions);
 // Hard evidence only: thinking===false comes from an explicit
 // iflow.thinkingModelRules entry (supportsThinking:false) evaluated by the
 // host; unknown (undefined) stays ALLOWED — the CLI's own rejection is
@@ -333,6 +336,32 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const contextResolveSeq = useRef(0);
   const pendingContextResolves = useRef(new Set<number>());
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // Turn-end suggestions: local dismissal hides this batch until the next
+  // prediction arrives (the host stores each batch as a fresh array, so
+  // identity is the batch key).
+  const [suggestionsHidden, setSuggestionsHidden] = useState(false);
+  const lastSuggestionsRef = useRef<string[] | undefined>(undefined);
+  useEffect(() => {
+    if (lastSuggestionsRef.current !== suggestions) {
+      lastSuggestionsRef.current = suggestions;
+      setSuggestionsHidden(false);
+    }
+  }, [suggestions]);
+  /** Candidate-word semantics: insert at the caret (empty composer = plain
+   * fill) and keep focus in the textarea — never auto-send. */
+  const applySuggestion = (value: string): void => {
+    setSuggestionsHidden(true);
+    const ta = taRef.current;
+    const start = ta?.selectionStart ?? text.length;
+    const end = ta?.selectionEnd ?? text.length;
+    setText(`${text.slice(0, start)}${value}${text.slice(end)}`);
+    requestAnimationFrame(() => {
+      ta?.focus();
+      const caret = start + value.length;
+      ta?.setSelectionRange(caret, caret);
+    });
+  };
 
   // Drag-and-drop file attachment: dropping files/photos from the OS or editor
   // onto the composer routes them through the same staging paths as paste. The
@@ -1360,6 +1389,39 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 </button>
               );
             })}
+        </div>
+      )}
+
+      {/* Turn-end next-step suggestions: candidate-word chips from one
+          dedicated model call. Click inserts at the caret; the row can be
+          dismissed locally until the next prediction arrives. */}
+      {suggestions && suggestions.length > 0 && !suggestionsHidden && (
+        <div
+          className="mb-1.5 flex flex-wrap items-center gap-1.5"
+          aria-label={t("AI 推测的下一步操作，点击填入输入框")}
+        >
+          <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+            <Sparkles className="size-3 text-primary" />
+            {t("下一步")}
+          </span>
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              className="press inline-flex max-w-full items-center rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-[11px] text-foreground transition-colors hover:border-primary/60 hover:bg-primary/20"
+              title={t("AI 推测的下一步操作，点击填入输入框")}
+              onClick={() => applySuggestion(s)}
+            >
+              <span className="truncate">{s}</span>
+            </button>
+          ))}
+          <button
+            className="press ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            title={t("关闭建议")}
+            aria-label={t("关闭建议")}
+            onClick={() => setSuggestionsHidden(true)}
+          >
+            <X className="size-3" />
+          </button>
         </div>
       )}
 
