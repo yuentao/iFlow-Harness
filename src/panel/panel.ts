@@ -372,6 +372,38 @@ function asDefaultMode(value: unknown): (typeof DEFAULT_MODES)[number] {
     : "smart";
 }
 
+/** `iflow.theme` values — kept in sync with shared/messages.ts. */
+const UI_THEMES = ["auto", "light", "dark"] as const;
+function asUiTheme(value: unknown): (typeof UI_THEMES)[number] {
+  return UI_THEMES.includes(value as (typeof UI_THEMES)[number])
+    ? (value as (typeof UI_THEMES)[number])
+    : "auto";
+}
+
+/** `iflow.osNotifications` values. */
+const OS_NOTIFICATION_MODES = ["off", "approvals", "all"] as const;
+function asOsNotifications(value: unknown): (typeof OS_NOTIFICATION_MODES)[number] {
+  return OS_NOTIFICATION_MODES.includes(value as (typeof OS_NOTIFICATION_MODES)[number])
+    ? (value as (typeof OS_NOTIFICATION_MODES)[number])
+    : "approvals";
+}
+
+/** `iflow.language` values; empty = do not override the CLI's own value. */
+const CLI_LANGUAGES = ["", "zh-CN", "en-US"] as const;
+function asCliLanguage(value: unknown): (typeof CLI_LANGUAGES)[number] {
+  return CLI_LANGUAGES.includes(value as (typeof CLI_LANGUAGES)[number])
+    ? (value as (typeof CLI_LANGUAGES)[number])
+    : "";
+}
+
+/** `iflow.approvalMode` values; empty = do not override the CLI's own value. */
+const CLI_APPROVAL_MODES = ["", ...DEFAULT_MODES] as const;
+function asCliApprovalMode(value: unknown): (typeof CLI_APPROVAL_MODES)[number] {
+  return CLI_APPROVAL_MODES.includes(value as (typeof CLI_APPROVAL_MODES)[number])
+    ? (value as (typeof CLI_APPROVAL_MODES)[number])
+    : "";
+}
+
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
@@ -706,16 +738,9 @@ export class ChatPanel implements vscode.Disposable {
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
           vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration("iflow.auroraIntensity")) this.postTheme();
-            if (
-              e.affectsConfiguration("iflow.nextStepSuggestions")
-              || e.affectsConfiguration("iflow.autoMemoryCapture")
-              || e.affectsConfiguration("iflow.uiFontSize")
-              || e.affectsConfiguration("iflow.uiDensity")
-              || e.affectsConfiguration("iflow.soundFeedback")
-              || e.affectsConfiguration("iflow.defaultMode")
-            ) {
-              this.postHostSettings();
-            }
+            // Every mirrored setting lives in the same settings panel; a
+            // direct VSCode-side edit must repaint it too.
+            if (e.affectsConfiguration("iflow")) this.postHostSettings();
         if (
           e.affectsConfiguration("iflow.language")
           || e.affectsConfiguration("iflow.approvalMode")
@@ -1373,39 +1398,70 @@ export class ChatPanel implements vscode.Disposable {
         await vscode.commands.executeCommand("workbench.action.openSettings", "iflow");
         break;
       case "setHostSettings": {
-        const config = vscode.workspace.getConfiguration("iflow");
-        for (const key of ["nextStepSuggestions", "autoCompressOnIdle", "autoMemoryCapture", "soundFeedback"] as const) {
-          const value = msg[key];
-          if (typeof value !== "boolean") continue;
-          try {
-            await config.update(key, value, vscode.ConfigurationTarget.Global);
-          } catch (error) {
-            this.log.warn(`failed to update ${key}: ${errorMessage(error)}`);
-          }
+        // Panel edits always land in USER settings: ConfigurationTarget.Global
+        // is the scope VSCode Settings Sync carries across machines. Writing
+        // workspace/folder scope here would make them machine-local.
+        const writes: Array<[string, unknown]> = [];
+        if (typeof msg.nextStepSuggestions === "boolean") writes.push(["nextStepSuggestions", msg.nextStepSuggestions]);
+        if (typeof msg.autoCompressOnIdle === "boolean") writes.push(["autoCompressOnIdle", msg.autoCompressOnIdle]);
+        if (typeof msg.autoMemoryCapture === "boolean") writes.push(["autoMemoryCapture", msg.autoMemoryCapture]);
+        if (typeof msg.autoTitle === "boolean") writes.push(["autoTitle", msg.autoTitle]);
+        if (typeof msg.restoreLastSession === "boolean") writes.push(["restoreLastSession", msg.restoreLastSession]);
+        if (typeof msg.autoOpenPanel === "boolean") writes.push(["autoOpenPanel", msg.autoOpenPanel]);
+        if (typeof msg.warmStart === "boolean") writes.push(["warmStart", msg.warmStart]);
+        if (typeof msg.soundFeedback === "boolean") writes.push(["soundFeedback", msg.soundFeedback]);
+        if (typeof msg.checkpoints === "boolean") writes.push(["checkpoints", msg.checkpoints]);
+        if (msg.osNotifications !== undefined && OS_NOTIFICATION_MODES.includes(msg.osNotifications)) {
+          writes.push(["osNotifications", msg.osNotifications]);
         }
-        if (msg.uiFontSize !== undefined && UI_FONT_SIZES.includes(msg.uiFontSize)) {
-          try {
-            await config.update("uiFontSize", msg.uiFontSize, vscode.ConfigurationTarget.Global);
-          } catch (error) {
-            this.log.warn(`failed to update uiFontSize: ${errorMessage(error)}`);
-          }
-        }
-        if (msg.uiDensity !== undefined && UI_DENSITIES.includes(msg.uiDensity)) {
-          try {
-            await config.update("uiDensity", msg.uiDensity, vscode.ConfigurationTarget.Global);
-          } catch (error) {
-            this.log.warn(`failed to update uiDensity: ${errorMessage(error)}`);
-          }
+        if (msg.language !== undefined && CLI_LANGUAGES.includes(msg.language)) {
+          writes.push(["language", msg.language]);
         }
         if (msg.defaultMode !== undefined && DEFAULT_MODES.includes(msg.defaultMode)) {
-          try {
-            await config.update("defaultMode", msg.defaultMode, vscode.ConfigurationTarget.Global);
-          } catch (error) {
-            this.log.warn(`failed to update defaultMode: ${errorMessage(error)}`);
-          }
+          writes.push(["defaultMode", msg.defaultMode]);
         }
+        if (msg.approvalMode !== undefined && CLI_APPROVAL_MODES.includes(msg.approvalMode)) {
+          writes.push(["approvalMode", msg.approvalMode]);
+        }
+        if (msg.theme !== undefined && UI_THEMES.includes(msg.theme)) writes.push(["theme", msg.theme]);
+        if (msg.auroraIntensity !== undefined && Number.isFinite(msg.auroraIntensity)) {
+          writes.push(["auroraIntensity", Math.min(100, Math.max(0, Math.round(msg.auroraIntensity)))]);
+        }
+        if (msg.uiFontSize !== undefined && UI_FONT_SIZES.includes(msg.uiFontSize)) {
+          writes.push(["uiFontSize", msg.uiFontSize]);
+        }
+        if (msg.uiDensity !== undefined && UI_DENSITIES.includes(msg.uiDensity)) {
+          writes.push(["uiDensity", msg.uiDensity]);
+        }
+        if (typeof msg.nodePath === "string") writes.push(["nodePath", msg.nodePath]);
+        if (typeof msg.checkpointDir === "string") writes.push(["checkpointDir", msg.checkpointDir]);
+        if (msg.checkpointMaxFiles !== undefined && Number.isFinite(msg.checkpointMaxFiles) && msg.checkpointMaxFiles >= 1) {
+          writes.push(["checkpointMaxFiles", Math.trunc(msg.checkpointMaxFiles)]);
+        }
+        if (msg.checkpointMaxFileMB !== undefined && Number.isFinite(msg.checkpointMaxFileMB) && msg.checkpointMaxFileMB >= 0) {
+          writes.push(["checkpointMaxFileMB", Math.trunc(msg.checkpointMaxFileMB)]);
+        }
+        if (msg.checkpointMaxTurns !== undefined && Number.isFinite(msg.checkpointMaxTurns) && msg.checkpointMaxTurns >= 0) {
+          writes.push(["checkpointMaxTurns", Math.trunc(msg.checkpointMaxTurns)]);
+        }
+        if (msg.checkpointMaxSizeMB !== undefined && Number.isFinite(msg.checkpointMaxSizeMB) && msg.checkpointMaxSizeMB >= 0) {
+          writes.push(["checkpointMaxSizeMB", Math.trunc(msg.checkpointMaxSizeMB)]);
+        }
+        if (Array.isArray(msg.contextWindowOverrides) && msg.contextWindowOverrides.every((v) => typeof v === "string")) {
+          writes.push(["contextWindowOverrides", msg.contextWindowOverrides]);
+        }
+        if (Array.isArray(msg.costTable) && msg.costTable.every((v) => typeof v === "string")) {
+          writes.push(["costTable", msg.costTable]);
+        }
+        if (Array.isArray(msg.thinkingModelRules)) {
+          writes.push(["thinkingModelRules", sanitizeThinkingRules(msg.thinkingModelRules)]);
+        }
+        for (const [key, value] of writes) await this.writeUserSetting(key, value);
         // Turning suggestions off must also retract the chips already on screen.
         if (msg.nextStepSuggestions === false) this.store.suggestNextSteps([]);
+        // The theme message carries the aurora opacity; repaint immediately
+        // instead of waiting for the configuration listener round trip.
+        if (msg.auroraIntensity !== undefined) this.postTheme();
         this.postHostSettings();
         break;
       }
@@ -1525,20 +1581,53 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview({ type: "theme", kind: light ? "light" : "dark", auroraIntensity });
   }
 
-  /** Mirror the extension settings the settings panel renders. VSCode
+  /** Write one panel-owned setting to USER settings (the scope VSCode
+   * Settings Sync carries). Validation happens at the call site. */
+  private async writeUserSetting(key: string, value: unknown): Promise<void> {
+    try {
+      await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
+    } catch (error) {
+      this.log.warn(`failed to update ${key}: ${errorMessage(error)}`);
+    }
+  }
+
+  /** Mirror every extension setting the settings panel renders. VSCode
    * configuration stays authoritative; a direct edit in VSCode re-pushes via
    * the onDidChangeConfiguration listener. */
   private postHostSettings(): void {
     const config = vscode.workspace.getConfiguration("iflow");
+    const stringList = (key: string): string[] => {
+      const raw = config.get<unknown>(key, []);
+      return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+    };
     this.postToWebview({
       type: "hostSettings",
       nextStepSuggestions: config.get<boolean>("nextStepSuggestions", true),
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
       autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
+      autoTitle: config.get<boolean>("autoTitle", true),
+      restoreLastSession: config.get<boolean>("restoreLastSession", false),
+      autoOpenPanel: config.get<boolean>("autoOpenPanel", false),
+      warmStart: config.get<boolean>("warmStart", true),
+      soundFeedback: config.get<boolean>("soundFeedback", true),
+      osNotifications: asOsNotifications(config.get<string>("osNotifications", "approvals")),
+      language: asCliLanguage(config.get<string>("language", "")),
+      defaultMode: asDefaultMode(config.get<string>("defaultMode", "smart")),
+      approvalMode: asCliApprovalMode(config.get<string>("approvalMode", "")),
+      theme: asUiTheme(config.get<string>("theme", "auto")),
+      auroraIntensity: Math.min(100, Math.max(0, config.get<number>("auroraIntensity", 35))),
       uiFontSize: asUiFontSize(config.get<string>("uiFontSize", "standard")),
       uiDensity: asUiDensity(config.get<string>("uiDensity", "standard")),
-      soundFeedback: config.get<boolean>("soundFeedback", true),
-      defaultMode: asDefaultMode(config.get<string>("defaultMode", "smart")),
+      nodePath: config.get<string>("nodePath", ""),
+      checkpoints: config.get<boolean>("checkpoints", true),
+      checkpointMaxFiles: config.get<number>("checkpointMaxFiles", 50_000),
+      checkpointMaxFileMB: config.get<number>("checkpointMaxFileMB", 300),
+      checkpointDir: config.get<string>("checkpointDir", ""),
+      checkpointMaxTurns: config.get<number>("checkpointMaxTurns", 0),
+      checkpointMaxSizeMB: config.get<number>("checkpointMaxSizeMB", 0),
+      contextWindowOverrides: stringList("contextWindowOverrides"),
+      costTable: stringList("costTable"),
+      thinkingModelRules: sanitizeThinkingRules(config.get<unknown>("thinkingModelRules", [])),
     });
   }
 

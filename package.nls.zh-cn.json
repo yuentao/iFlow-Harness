@@ -15,6 +15,7 @@
   "iflow.configuration.warmStart.description": "窗口打开时即在后台启动 iFlow CLI，首次打开聊天面板无需等待（每个窗口约占用 100MB 内存）",
   "iflow.configuration.soundFeedback.description": "对话生成完成或失败时播放提示音",
   "iflow.configuration.auroraIntensity.description": "背景光斑强度（%）",
+  "iflow.configuration.theme.description": "面板主题：auto 跟随 VSCode 颜色主题；light/dark 固定为浅色/深色。写入用户设置，可随 VSCode 设置同步跨设备生效。",
   "iflow.configuration.uiFontSize.description": "面板字号：紧凑（11px 基准）、标准（约 12px，默认）、大（约 13px）。",
   "iflow.configuration.uiDensity.description": "面板密度：紧凑、标准（默认）、宽松。只影响内边距与间距，不改变字号。",
   "iflow.configuration.restoreLastSession.description": "面板启动时恢复上次使用的会话，而不是新建会话（无可恢复记录时自动回退为新建会话）",

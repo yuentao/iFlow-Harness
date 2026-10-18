@@ -2,8 +2,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { SettingsModal } from "../webview/src/components/SettingsModal";
-import type { AuthUiState } from "../shared/messages";
+import { SettingsModal, type SettingsTab } from "../webview/src/components/SettingsModal";
+import type { AuthUiState, HostSettingsUi } from "../shared/messages";
 
 const send = vi.hoisted(() => vi.fn());
 const updateHostSetting = vi.hoisted(() => vi.fn());
@@ -12,11 +12,30 @@ const hostSettings = vi.hoisted(() => ({
   nextStepSuggestions: true,
   autoCompressOnIdle: false,
   autoMemoryCapture: false,
-  uiFontSize: "standard" as const,
-  uiDensity: "standard" as const,
+  autoTitle: true,
+  restoreLastSession: false,
+  autoOpenPanel: false,
+  warmStart: true,
   soundFeedback: true,
-  defaultMode: "smart" as const,
-}));
+  osNotifications: "approvals",
+  language: "",
+  defaultMode: "smart",
+  approvalMode: "",
+  theme: "auto",
+  auroraIntensity: 35,
+  uiFontSize: "standard",
+  uiDensity: "standard",
+  nodePath: "",
+  checkpoints: true,
+  checkpointMaxFiles: 50000,
+  checkpointMaxFileMB: 300,
+  checkpointDir: "",
+  checkpointMaxTurns: 0,
+  checkpointMaxSizeMB: 0,
+  contextWindowOverrides: [],
+  costTable: [],
+  thinkingModelRules: [],
+} as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
   state: null as { pendingProfileSwitch: { id: string; profileName: string } | null } | null,
@@ -61,7 +80,7 @@ beforeEach(() => {
   act(() =>
     root.render(
       <SettingsModal
-        tab="general"
+        tab="appearance"
         onTabChange={() => {}}
         onDismiss={() => {}}
         dismissible
@@ -74,8 +93,6 @@ beforeEach(() => {
           importable: [],
           onboardingDismissed: false,
         } as AuthUiState}
-        dark
-        onThemeChange={() => {}}
       />,
     ),
   );
@@ -86,10 +103,77 @@ afterEach(() => {
   container.remove();
 });
 
-it("renders the font-size and density presets in General settings", () => {
+it("renders the font-size and density presets in Appearance settings", () => {
   expect(container.textContent).toContain("字号");
   expect(container.textContent).toContain("密度");
   expect(container.textContent).toContain("调整面板中文字的大小");
+});
+
+
+it("exposes the redesigned top-level categories", () => {
+  expect(container.textContent).toContain("账户与模型");
+  expect(container.textContent).toContain("对话");
+  expect(container.textContent).toContain("外观与交互");
+  expect(container.textContent).toContain("权限与审批");
+  expect(container.textContent).toContain("MCP 与工具");
+  expect(container.textContent).toContain("记忆与知识");
+  expect(container.textContent).toContain("运行与数据");
+});
+
+it("persists the theme choice through host settings", () => {
+  click("深色");
+  expect(updateHostSetting).toHaveBeenCalledWith({ theme: "dark" });
+});
+
+function renderTab(tab: SettingsTab, auth: AuthUiState) {
+  act(() => root.render(
+    <SettingsModal
+      tab={tab}
+      onTabChange={() => {}}
+      onDismiss={() => {}}
+      dismissible
+      busy={false}
+      auth={auth}
+    />,
+  ));
+}
+
+const BASIC_AUTH: AuthUiState = {
+  authenticated: true,
+  needsSetup: false,
+  saved: null,
+  profiles: [],
+  importable: [],
+  onboardingDismissed: false,
+};
+
+it("toggles auto-title in the Conversation tab", () => {
+  renderTab("chat", BASIC_AUTH);
+  expect(container.textContent).toContain("回合结束后");
+  const toggle = container.querySelector<HTMLButtonElement>('[aria-label="自动生成标题"]');
+  expect(toggle).toBeTruthy();
+  act(() => toggle!.click());
+  expect(updateHostSetting).toHaveBeenCalledWith({ autoTitle: false });
+});
+
+it("renders runtime groups and commits the Node path on blur", () => {
+  renderTab("runtime", BASIC_AUTH);
+  expect(container.textContent).toContain("检查点与存储");
+  expect(container.textContent).toContain("Node.js 路径");
+  const input = [...container.querySelectorAll<HTMLInputElement>("input")].find((el) =>
+    el.placeholder.includes("node.exe"),
+  );
+  expect(input).toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  act(() => {
+    setter.call(input, "C:/node/node.exe");
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  act(() => {
+    input!.focus();
+    input!.blur();
+  });
+  expect(updateHostSetting).toHaveBeenCalledWith({ nodePath: "C:/node/node.exe" });
 });
 
 it("sends the selected size/density to the host", () => {
@@ -120,11 +204,16 @@ function renderApiTab() {
       dismissible
       busy={false}
       auth={API_AUTH}
-      dark
-      onThemeChange={() => {}}
     />,
   ));
 }
+
+it("shows model metadata groups in the account tab", () => {
+  renderApiTab();
+  expect(container.textContent).toContain("模型元数据");
+  expect(container.textContent).toContain("上下文窗口覆写");
+  expect(container.textContent).toContain("思考模型规则");
+});
 
 it("shows a waiting label until the profile-switch choice is answered", () => {
   chat.pending = { kind: "profile", target: "B" };
@@ -157,8 +246,6 @@ function renderAuthTabWith(auth: AuthUiState) {
       dismissible={false}
       busy={false}
       auth={auth}
-      dark
-      onThemeChange={() => {}}
     />,
   ));
 }

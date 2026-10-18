@@ -3,6 +3,7 @@ import {
   applyBlockPatch,
   evictBlockPayloads,
   type ApprovalRule,
+  type HostSettingsUi,
   type HostToWebview,
   type KnowledgeDocUi,
   type MemoryCandidateUi,
@@ -11,7 +12,6 @@ import {
   type MemoryStateUi,
   type SessionState,
   type SessionSummaryUi,
-  type UiDefaultMode,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
@@ -46,6 +46,37 @@ function applyUiScale(fontSize: UiFontSize, density: UiDensity): void {
   style.setProperty("--ui-font-scale", String(UI_FONT_SCALES[fontSize] ?? UI_FONT_SCALES.standard));
   style.setProperty("--ui-density", String(UI_DENSITY_SCALES[density] ?? UI_DENSITY_SCALES.standard));
 }
+
+/** Package-default mirror used before the first hostSettings message and by
+ * the browser mock (the host pushes the effective values on ready). */
+const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
+  nextStepSuggestions: true,
+  autoCompressOnIdle: false,
+  autoMemoryCapture: true,
+  autoTitle: true,
+  restoreLastSession: false,
+  autoOpenPanel: false,
+  warmStart: true,
+  soundFeedback: true,
+  osNotifications: "approvals",
+  language: "",
+  defaultMode: "smart",
+  approvalMode: "",
+  theme: "auto",
+  auroraIntensity: 35,
+  uiFontSize: "standard",
+  uiDensity: "standard",
+  nodePath: "",
+  checkpoints: true,
+  checkpointMaxFiles: 50_000,
+  checkpointMaxFileMB: 300,
+  checkpointDir: "",
+  checkpointMaxTurns: 0,
+  checkpointMaxSizeMB: 0,
+  contextWindowOverrides: [],
+  costTable: [],
+  thinkingModelRules: [],
+};
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
 
@@ -136,23 +167,7 @@ function createMockHost(): HostApi {
   // (mirrors the host's replace semantics).
   let mockMcpServers: Record<string, unknown> | undefined;
   /** Mirrors the real host's mirrored extension settings (default on). */
-  const mockHostSettings: {
-    nextStepSuggestions: boolean;
-    autoCompressOnIdle: boolean;
-    autoMemoryCapture: boolean;
-    uiFontSize: UiFontSize;
-    uiDensity: UiDensity;
-    soundFeedback: boolean;
-    defaultMode: UiDefaultMode;
-  } = {
-    nextStepSuggestions: true,
-    autoCompressOnIdle: false,
-    autoMemoryCapture: true,
-    uiFontSize: "standard",
-    uiDensity: "standard",
-    soundFeedback: true,
-    defaultMode: "smart",
-  };
+  const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
   // the host's approvalPolicy message.
   let mockApprovalRules: ApprovalRule[] | undefined;
@@ -776,44 +791,25 @@ function createMockHost(): HostApi {
         return;
       }
       if (m.type === "setHostSettings") {
-        if (typeof m.nextStepSuggestions === "boolean") {
-          mockHostSettings.nextStepSuggestions = m.nextStepSuggestions;
-          if (!m.nextStepSuggestions) {
-            demoMeta.nextStepSuggestions = [];
-            broadcast({
-              type: "snapshot",
-              state: {
-                blocks: [...demoBlocks],
-                status: mockStatus,
-                errorMessage: null,
-                stopReason: mockStatus === "idle" ? "end_turn" : null,
-                ...demoMeta,
-                pendingApproval: activeApproval,
-                auth: authState,
-              },
-            });
-          }
+        const { type, ...patch } = m;
+        void type;
+        Object.assign(mockHostSettings, patch);
+        if (m.nextStepSuggestions === false) {
+          demoMeta.nextStepSuggestions = [];
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: [...demoBlocks],
+              status: mockStatus,
+              errorMessage: null,
+              stopReason: mockStatus === "idle" ? "end_turn" : null,
+              ...demoMeta,
+              pendingApproval: activeApproval,
+              auth: authState,
+            },
+          });
         }
-        if (typeof m.autoCompressOnIdle === "boolean") {
-          mockHostSettings.autoCompressOnIdle = m.autoCompressOnIdle;
-        }
-        if (typeof m.autoMemoryCapture === "boolean") {
-          mockHostSettings.autoMemoryCapture = m.autoMemoryCapture;
-        }
-        if (m.uiFontSize) {
-          mockHostSettings.uiFontSize = m.uiFontSize;
-          applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
-        }
-        if (m.uiDensity) {
-          mockHostSettings.uiDensity = m.uiDensity;
-          applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
-        }
-        if (typeof m.soundFeedback === "boolean") {
-          mockHostSettings.soundFeedback = m.soundFeedback;
-        }
-        if (m.defaultMode) {
-          mockHostSettings.defaultMode = m.defaultMode;
-        }
+        applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
         broadcast({ type: "hostSettings", ...mockHostSettings });
         return;
       }
@@ -1840,24 +1836,8 @@ interface ChatStore {
    * values on ready and after every change. The optimistic local write in
    * `updateHostSetting` keeps the switch responsive while the round trip runs.
    */
-  hostSettings: {
-    nextStepSuggestions: boolean;
-    autoCompressOnIdle: boolean;
-    autoMemoryCapture: boolean;
-    uiFontSize: UiFontSize;
-    uiDensity: UiDensity;
-    soundFeedback: boolean;
-    defaultMode: UiDefaultMode;
-  };
-  updateHostSetting: (patch: {
-    nextStepSuggestions?: boolean;
-    autoCompressOnIdle?: boolean;
-    autoMemoryCapture?: boolean;
-    uiFontSize?: UiFontSize;
-    uiDensity?: UiDensity;
-    soundFeedback?: boolean;
-    defaultMode?: UiDefaultMode;
-  }) => void;
+  hostSettings: HostSettingsUi;
+  updateHostSetting: (patch: Partial<HostSettingsUi>) => void;
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
   dismissToast: (id: number) => void;
@@ -1910,15 +1890,7 @@ import { setLocale } from "./i18n";
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
-  hostSettings: {
-    nextStepSuggestions: true,
-    autoCompressOnIdle: false,
-    autoMemoryCapture: true,
-    uiFontSize: "standard",
-    uiDensity: "standard",
-    soundFeedback: true,
-    defaultMode: "smart",
-  },
+  hostSettings: { ...DEFAULT_HOST_SETTINGS },
   pending: null,
   promptSeq: 0,
   headerScrolled: false,
@@ -2000,20 +1972,26 @@ export const useChat = create<ChatStore>((set, get) => ({
       return;
     }
     if (msg.type === "hostSettings") {
-      const uiFontSize = msg.uiFontSize ?? "standard";
-      const uiDensity = msg.uiDensity ?? "standard";
+      const { type, ...settings } = msg;
+      void type;
+      const uiFontSize = settings.uiFontSize ?? "standard";
+      const uiDensity = settings.uiDensity ?? "standard";
       applyUiScale(uiFontSize, uiDensity);
-      set({
-        hostSettings: {
-          nextStepSuggestions: msg.nextStepSuggestions,
-          autoCompressOnIdle: msg.autoCompressOnIdle,
-          autoMemoryCapture: msg.autoMemoryCapture,
-          uiFontSize,
-          uiDensity,
-          soundFeedback: msg.soundFeedback ?? true,
-          defaultMode: msg.defaultMode ?? "smart",
-        },
-      });
+      set((s) => ({ hostSettings: { ...s.hostSettings, ...settings, uiFontSize, uiDensity } }));
+      // One-shot migration: the old theme toggle stored the choice in
+      // localStorage. Now it is a synced setting; hand the legacy value to
+      // the host once and clear the key so it never overrides a config edit.
+      try {
+        const legacy = window.localStorage.getItem("iflow-theme");
+        if (legacy) {
+          window.localStorage.removeItem("iflow-theme");
+          if (settings.theme === "auto" && (legacy === "light" || legacy === "dark")) {
+            get().updateHostSetting({ theme: legacy });
+          }
+        }
+      } catch {
+        // localStorage can be unavailable in hardened webviews.
+      }
       return;
     }
     if (msg.type === "theme") {

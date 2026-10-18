@@ -154,6 +154,12 @@
           "maximum": 100,
           "description": "%iflow.configuration.auroraIntensity.description%"
         },
+        "iflow.theme": {
+          "type": "string",
+          "enum": ["auto", "light", "dark"],
+          "default": "auto",
+          "description": "%iflow.configuration.theme.description%"
+        },
         "iflow.uiFontSize": {
           "type": "string",
           "enum": [

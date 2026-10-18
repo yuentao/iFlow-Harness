@@ -10,16 +10,36 @@ import { beforeEach, expect, it, vi } from "vitest";
 const postMessage = vi.fn();
 (globalThis as { acquireVsCodeApi?: unknown }).acquireVsCodeApi = () => ({ postMessage });
 
+import type { HostSettingsUi } from "../shared/messages";
 const { useChat } = await import("../webview/src/store");
 
-const baseSettings = {
+const baseSettings: HostSettingsUi = {
   nextStepSuggestions: true,
   autoCompressOnIdle: false,
   autoMemoryCapture: false,
-  uiFontSize: "standard" as const,
-  uiDensity: "standard" as const,
+  autoTitle: true,
+  restoreLastSession: false,
+  autoOpenPanel: false,
+  warmStart: true,
   soundFeedback: true,
-  defaultMode: "smart" as const,
+  osNotifications: "approvals",
+  language: "",
+  defaultMode: "smart",
+  approvalMode: "",
+  theme: "auto",
+  auroraIntensity: 35,
+  uiFontSize: "standard",
+  uiDensity: "standard",
+  nodePath: "",
+  checkpoints: true,
+  checkpointMaxFiles: 50000,
+  checkpointMaxFileMB: 300,
+  checkpointDir: "",
+  checkpointMaxTurns: 0,
+  checkpointMaxSizeMB: 0,
+  contextWindowOverrides: [],
+  costTable: [],
+  thinkingModelRules: [],
 };
 
 beforeEach(() => {
@@ -67,3 +87,24 @@ it("sends sound and default-mode changes to the host", () => {
     .find((msg) => msg.type === "setHostSettings");
   expect(sent).toMatchObject({ type: "setHostSettings", soundFeedback: false, defaultMode: "plan" });
 });
+
+it("mirrors theme and advanced settings from the host", () => {
+  useChat.getState().applyHostMessage({
+    type: "hostSettings",
+    ...baseSettings,
+    theme: "dark",
+    nodePath: "/opt/node",
+  });
+  expect(useChat.getState().hostSettings.theme).toBe("dark");
+  expect(useChat.getState().hostSettings.nodePath).toBe("/opt/node");
+});
+
+it("sends theme changes to the host", () => {
+  useChat.getState().updateHostSetting({ theme: "light" });
+  expect(useChat.getState().hostSettings.theme).toBe("light");
+  const sent = postMessage.mock.calls
+    .map((call) => call[0] as { type?: string; theme?: string })
+    .find((msg) => msg.type === "setHostSettings");
+  expect(sent).toMatchObject({ type: "setHostSettings", theme: "light" });
+});
+

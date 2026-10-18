@@ -205,16 +205,15 @@ export function App() {
   // M4 P1-8: archived sessions live in a collapsed second section — they are
   // kept out of the default results until the user opens the section.
   const [showArchived, setShowArchived] = useState(false);
-  // Theme priority: the user's explicit toggle wins (persisted); otherwise
-  // follow the editor color theme pushed by the host; default light.
-  const [manual, setManual] = useState<"light" | "dark" | null>(
-    () => (localStorage.getItem("iflow-theme") as "light" | "dark" | null) ?? null,
-  );
-  const dark = manual ? manual === "dark" : editorTheme !== null ? editorTheme === "dark" : false;
+  // Theme priority: the synced `iflow.theme` setting wins; "auto" follows
+  // the editor color theme pushed by the host; default light.
+  const themeMode = useChat((s) => s.hostSettings.theme);
+  const updateHostSetting = useChat((s) => s.updateHostSetting);
+  const dark = themeMode === "auto" ? (editorTheme !== null ? editorTheme === "dark" : false) : themeMode === "dark";
+  const handleThemeChange = (mode: "light" | "dark") => updateHostSetting({ theme: mode });
   const firstThemeRun = useRef(true);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
-    if (manual) localStorage.setItem("iflow-theme", manual);
     // Smoothly animate the theme switch (colors only). Skip the initial mount
     // so the first paint doesn't flash a transition from the default theme.
     if (firstThemeRun.current) {
@@ -225,7 +224,7 @@ export function App() {
     root.classList.add("theme-anim");
     const id = window.setTimeout(() => root.classList.remove("theme-anim"), 320);
     return () => window.clearTimeout(id);
-  }, [dark, manual]);
+  }, [dark]);
 
   // Settings modal opened: refresh the profile list the same way the header
   // dropdown does, so the modal never shows a stale snapshot either.
@@ -652,8 +651,6 @@ export function App() {
           dismissible
           busy={locked}
           auth={auth}
-          dark={dark}
-          onThemeChange={setManual}
         />
       )}
 
@@ -661,7 +658,7 @@ export function App() {
         <OnboardingWizard
           auth={auth}
           dark={dark}
-          onThemeChange={setManual}
+          onThemeChange={handleThemeChange}
           onClose={() => setOnboardingOpen(false)}
           onOpenSettings={(tab) => setSettingsTab(tab)}
         />

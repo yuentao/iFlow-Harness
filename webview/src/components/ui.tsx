@@ -50,6 +50,7 @@ export function ModalShell({
   role = "dialog",
   initialFocus = "input",
   wide = false,
+  className,
   footer,
   children,
 }: {
@@ -62,6 +63,8 @@ export function ModalShell({
   role?: "dialog" | "alertdialog";
   initialFocus?: "input" | "first";
   wide?: boolean;
+  /** Extra class on the modal surface (e.g. the settings modal's width). */
+  className?: string;
   footer?: ReactNode;
   children: ReactNode;
 }) {
@@ -156,7 +159,7 @@ export function ModalShell({
         if (dismissible && e.target === e.currentTarget) onClose();
       }}
     >
-      <div className={`auth-modal acrylic-pop${wide ? " auth-modal-wide @container" : ""}`}>
+      <div className={`auth-modal acrylic-pop${wide ? " auth-modal-wide @container" : ""}${className ? ` ${className}` : ""}`}>
         <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           {onBack ? (
             <button

@@ -1574,6 +1574,13 @@ pre {
   flex: 1;
 }
 
+/* Settings modal only: wider than the generic wide dialog so grouped rows
+ * and segmented controls have breathing room. Other wide modals keep 560px. */
+.auth-modal-wide.settings-modal {
+  width: min(680px, calc(100vw - 32px));
+  height: min(640px, 86vh);
+}
+
 @media (max-width: 460px) {
   .auth-modal-wide .auth-modal-body {
     flex-direction: column;

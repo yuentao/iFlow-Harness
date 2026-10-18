@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Pencil, Plus, ShieldCheck, ShieldQuestion, ShieldX, Trash2 } from "lucide-react";
 import type { ApprovalAction, ApprovalRule } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -52,7 +52,7 @@ function parseList(value: string): string[] | undefined {
  * approval card arrives as `draft` and opens the editor pre-filled — the rule
  * is only persisted when the user names it and saves.
  */
-export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderSetter }) {
+export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: boolean; onHeader: SectionHeaderSetter; defaults?: ReactNode }) {
   const send = useChat((s) => s.send);
   const [rules, setRules] = useState<ApprovalRule[] | null>(null); // null = loading
   const [projectRules, setProjectRules] = useState<ApprovalRule[]>([]);
@@ -208,6 +208,7 @@ export function ApprovalPolicySection({ busy, onHeader }: { busy: boolean; onHea
     <>
       {editing === null && (
         <>
+          {defaults && <div className="mb-2.5">{defaults}</div>}
           {rules === null ? (
             <div className="py-4 text-center text-[12px] text-muted-foreground">{t("读取中…")}</div>
           ) : (

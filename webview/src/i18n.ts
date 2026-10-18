@@ -617,6 +617,92 @@ const en: Record<string, string> = {
   "紧凑": "Compact",
   "大": "Large",
   "宽松": "Comfortable",
+
+  // settings taxonomy + grouped settings (2026-10-18)
+  "账户与模型": "Account & models",
+  "外观与交互": "Appearance & interaction",
+  "权限与审批": "Permissions & approvals",
+  "MCP 与工具": "MCP & tools",
+  "记忆与知识": "Memory & knowledge",
+  "运行与数据": "Runtime & data",
+  "回合结束后": "After each turn",
+  "可能产生额外的模型调用": "May make extra model calls",
+  "自动生成标题": "Auto-generate titles",
+  "会话首轮完成后用当前模型生成简短标题（每会话一次，会产生一次轻量调用）。":
+    "Generate a short title with the current model after a session's first turn (once per session, one lightweight call).",
+  "主题与排版": "Theme & typography",
+  "跟随编辑器": "Follow editor",
+  "跟随编辑器主题，或固定为浅色/深色。设置写入用户 settings.json，可随 VSCode 设置同步。":
+    "Follow the editor theme, or pin light/dark. Stored in user settings.json and carried by VSCode Settings Sync.",
+  "极光强度": "Aurora intensity",
+  "背景光斑的不透明度（0–100）。": "Background aurora light-spot opacity (0–100).",
+  "提示与通知": "Sound & notifications",
+  "系统通知": "OS notifications",
+  "面板不可见时发送系统通知：审批/提问/计划阻塞时，或整轮完成时。":
+    "Send an OS notification while the panel is hidden: on blocking approvals/questions/plans, or when a turn completes.",
+  "仅审批/提问/计划": "Approvals, questions & plans",
+  "全部完成事件": "All completions",
+  "从不": "Never",
+  "面板默认权限模式": "Default panel approval mode",
+  "CLI 默认审批模式": "CLI default approval mode",
+  "写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启 CLI 生效。":
+    "Written to ~/.iflow/settings.json; independent of the panel default and applied after a CLI restart.",
+  "不覆写": "Do not override",
+  "启动与会话": "Startup & sessions",
+  "后台预热 CLI": "Warm up the CLI",
+  "窗口打开时在后台启动 CLI，首次打开面板无需等待（每窗口约 100MB 内存）。下次窗口启动生效。":
+    "Start the CLI in the background when a window opens so the first panel open is instant (about 100MB per window). Takes effect on the next window start.",
+  "恢复上次会话": "Restore last session",
+  "面板启动时恢复上次使用的会话；无可恢复记录时新建会话。":
+    "Restore the last used session when the panel starts; fall back to a new session when nothing is restorable.",
+  "启动时自动打开面板": "Open the panel on startup",
+  "VSCode 启动时自动打开聊天面板。下次启动生效。":
+    "Open the chat panel automatically when VSCode starts. Takes effect on the next start.",
+  "CLI 运行时": "CLI runtime",
+  "重启 CLI 生效": "Takes effect after a CLI restart",
+  "Node.js 路径": "Node.js path",
+  "留空自动探测；修改后重启 CLI 生效。": "Leave empty to auto-detect; restart the CLI after changing.",
+  "CLI 语言": "CLI language",
+  "写入 ~/.iflow/settings.json；修改后重启 CLI 生效。":
+    "Written to ~/.iflow/settings.json; takes effect after a CLI restart.",
+  "跟随 CLI": "Leave to the CLI",
+  "检查点与存储": "Checkpoints & storage",
+  "启用检查点": "Enable checkpoints",
+  "每轮对话前把工作区快照到独立的影子 git 仓库，以支持按轮回退。":
+    "Snapshot the workspace into a separate shadow git repo before each turn so file changes can be rolled back per turn.",
+  "最大文件数": "Max files",
+  "超过该文件数时关闭快照。": "Disable snapshots when the workspace has more files than this.",
+  "单文件上限（MB）": "Max file size (MB)",
+  "跳过大于该尺寸的文件；0 表示不限。": "Skip files larger than this; 0 means no limit.",
+  "保留轮数": "Turns to keep",
+  "每会话保留的快照轮数；0 表示不清理。": "Snapshot turns kept per session; 0 means no cleanup.",
+  "总大小上限（MB）": "Total size cap (MB)",
+  "所有会话快照的总磁盘上限；0 表示不限制。": "Total on-disk cap for all session snapshots; 0 means unlimited.",
+  "存储目录": "Storage directory",
+  "留空使用默认 workspaceStorage；支持 ~ 与相对路径。":
+    "Leave empty for the default workspaceStorage; supports ~ and relative paths.",
+  "同步与原始设置": "Sync & raw settings",
+  "需要直接编辑原始 JSON 时，可使用底部的「在 VSCode 设置中编辑…」；面板中的改动已写入同一份用户设置。":
+    "To edit the raw JSON directly, use「在 VSCode 设置中编辑…」at the bottom; panel changes already write to the same user settings.",
+  "这些设置写入 VSCode 用户 settings.json；开启 VSCode 设置同步后会跨设备同步。API Key 保存在 SecretStorage，不会同步。":
+    "These settings are written to your VSCode user settings.json and follow VSCode Settings Sync across machines. API keys stay in SecretStorage and are never synced.",
+  "MCP 服务器配置保存在 ~/.iflow/settings.json，由 CLI 读取；不随 VSCode 设置同步。":
+    "MCP server configuration lives in ~/.iflow/settings.json and is read by the CLI; it is not part of VSCode Settings Sync.",
+  "在 VSCode 设置中编辑…": "Edit in VSCode settings…",
+  "已写入用户 settings.json": "Saved to user settings.json",
+  "模型元数据": "Model metadata",
+  "上下文窗口覆写": "Context window overrides",
+  "每行「模型名=token数」（如「glm-4.6=200000」）；未知模型回退默认值。":
+    "One「model=tokenCount」per line (e.g.「glm-4.6=200000」); unknown models fall back to the default.",
+  "成本单价": "Unit prices",
+  "每行「模型名=输入价,输出价」（USD/百万 token，如「deepseek-v3=0.27,1.1」）。":
+    "One「model=inputPrice,outputPrice」per line (USD per million tokens, e.g.「deepseek-v3=0.27,1.1」).",
+  "思考模型规则": "Thinking model rules",
+  "JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启 CLI 生效。":
+    "JSON array of rules with pattern / supportsThinking; saved to ~/.iflow/thinking-models.json and applied after a CLI restart.",
+  "应用": "Apply",
+  "JSON 格式无效": "Invalid JSON",
+  "条目必须是数组": "The value must be an array",
   // F3 memory manager (Phase 1)
   "全局记忆": "Global memory",
   "项目记忆": "Project memory",

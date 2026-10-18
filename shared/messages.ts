@@ -1180,6 +1180,61 @@ export type UiDensity = "compact" | "standard" | "comfortable";
 /** Default session approval mode, mirrored from `iflow.defaultMode`. */
 export type UiDefaultMode = "default" | "smart" | "yolo" | "plan";
 
+/** Panel color theme, mirrored from `iflow.theme`. "auto" follows the editor. */
+export type UiThemeMode = "auto" | "light" | "dark";
+
+/** OS notification preset, mirrored from `iflow.osNotifications`. */
+export type UiOsNotifications = "off" | "approvals" | "all";
+
+/** CLI interface language written to ~/.iflow/settings.json; empty leaves it untouched. */
+export type UiCliLanguage = "" | "zh-CN" | "en-US";
+
+/** CLI default approval mode; empty leaves the CLI's own value untouched. */
+export type UiCliApprovalMode = "" | UiDefaultMode;
+
+/** One thinking-capability rule mirrored from `iflow.thinkingModelRules`. */
+export interface ThinkingModelRuleUi {
+  pattern: string;
+  supportsThinking: boolean;
+  supportedReasoningLevels?: string[];
+  maxThinkingTokens?: number;
+}
+
+/** Extension settings mirrored into the settings panel. VSCode configuration
+ * is the source of truth; the panel writes user settings
+ * (ConfigurationTarget.Global) so VSCode Settings Sync can carry them across
+ * machines. API keys stay in SecretStorage and never appear here. */
+export interface HostSettingsUi {
+  nextStepSuggestions: boolean;
+  autoCompressOnIdle: boolean;
+  autoMemoryCapture: boolean;
+  autoTitle: boolean;
+  restoreLastSession: boolean;
+  autoOpenPanel: boolean;
+  warmStart: boolean;
+  soundFeedback: boolean;
+  osNotifications: UiOsNotifications;
+  /** CLI UI language written to ~/.iflow/settings.json (restart required). */
+  language: UiCliLanguage;
+  defaultMode: UiDefaultMode;
+  /** CLI startup approval mode written to settings.json (restart required). */
+  approvalMode: UiCliApprovalMode;
+  theme: UiThemeMode;
+  auroraIntensity: number;
+  uiFontSize: UiFontSize;
+  uiDensity: UiDensity;
+  nodePath: string;
+  checkpoints: boolean;
+  checkpointMaxFiles: number;
+  checkpointMaxFileMB: number;
+  checkpointDir: string;
+  checkpointMaxTurns: number;
+  checkpointMaxSizeMB: number;
+  contextWindowOverrides: string[];
+  costTable: string[];
+  thinkingModelRules: ThinkingModelRuleUi[];
+}
+
 export type HostToWebview =
   | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
   /** A single file's turn changes were reverted; refetch the turn records. */
@@ -1281,24 +1336,7 @@ export type HostToWebview =
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
-  /** Extension settings mirrored into the settings panel. VSCode configuration
-   * is the source of truth; the host pushes this on `ready`, after every
-   * change made in the panel, and when the user edits the setting directly in
-   * VSCode. */
-  | {
-      type: "hostSettings";
-      nextStepSuggestions: boolean;
-      autoCompressOnIdle: boolean;
-      autoMemoryCapture: boolean;
-      /** `iflow.uiFontSize` — panel text size preset. */
-      uiFontSize: UiFontSize;
-      /** `iflow.uiDensity` — panel spacing density preset. */
-      uiDensity: UiDensity;
-      /** `iflow.soundFeedback` — completion/error chime on/off. */
-      soundFeedback: boolean;
-      /** `iflow.defaultMode` — approval mode applied to new sessions. */
-      defaultMode: UiDefaultMode;
-    }
+  | ({ type: "hostSettings" } & HostSettingsUi)
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
    * panel visibility; the webview only synthesizes on receipt. */
@@ -1476,18 +1514,10 @@ export type WebviewToHost =
   /** Open the VSCode Settings UI filtered to the iFlow extension section. */
   | { type: "openSettings" }
   /** Update mirrored extension settings from the settings panel. The host
-   * writes VSCode configuration (global scope) and echoes `hostSettings`
+   * validates each field, writes VSCode user settings (ConfigurationTarget
+   * .Global — the scope Settings Sync carries), and echoes `hostSettings`
    * with the effective values. Partial: omitted fields stay untouched. */
-  | {
-      type: "setHostSettings";
-      nextStepSuggestions?: boolean;
-      autoCompressOnIdle?: boolean;
-      autoMemoryCapture?: boolean;
-      uiFontSize?: UiFontSize;
-      uiDensity?: UiDensity;
-      soundFeedback?: boolean;
-      defaultMode?: UiDefaultMode;
-    }
+  | ({ type: "setHostSettings" } & Partial<HostSettingsUi>)
   /** MCP management card opened: read the CURRENT `mcpServers` dict from
    * `~/.iflow/settings.json` (the CLI / external tools own that file — the
    * card must show disk truth, not a cached copy). Reply: `mcpServers`. */
