@@ -729,13 +729,26 @@ textarea:focus-visible {
 }
 
 /* --- tool card header squeeze policy ------------------------------------- */
-/* The subtitle carries the live command line on execute cards; flexbox
-   shrinkage is proportional to flex-basis × shrink-factor, so the label
-   ("执行命令", 4 CJK glyphs) used to squeeze along with a long command —
-   even ~10px of squeeze ellipsizes it (user report 2026-10-17). Weight the
-   subtitle's shrink 1000× against the label's 1×: it eats ALL overflow
-   (min-width 0 + truncate ellipsizes it), and the label only truncates as
-   a last resort once the subtitle has collapsed. */
+/* The header row is icon + label + subtitle (+ optional FileRef chip) +
+   status chips, and every one of them competes for the same overflow. Two
+   squeeze traps, both measured in Chromium at a 430px panel (2026-10-17):
+   1. flexbox shrinks items proportionally to flex-basis × shrink-factor, so
+      a long command line squeezed the 4-glyph label alongside itself — only
+      ~10px of squeeze is needed before `min-w-0 + truncate` ellipsizes it
+      ("执行命令" → "执行…", the user report);
+   2. weighting the subtitle 1000× is NOT sufficient by itself: whenever the
+      subtitle has no shrink budget left (short description subtitle + a
+      wide `shrink-0` chip group, or a FileRef chip eating the overflow), the
+      label is squeezed even at a full-width panel.
+   Policy: the label is the row's anchor — it NEVER shrinks. A pathologically
+   long title (an MCP card's own tool name) is capped by max-width:100% and
+   ellipsized by truncate instead of pushing the row wide. Overflow is eaten
+   by the shrinkable parts, subtitle first (1000× so a command line dies
+   before a short file chip). */
+.tool-card-title {
+  flex-shrink: 0;
+  max-width: 100%;
+}
 .tool-card-detail {
   flex-shrink: 1000;
 }

@@ -351,7 +351,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <span className="tool-icon" title={detail}>
           <Icon className="size-3 shrink-0" />
         </span>
-        <span className="min-w-0 truncate text-[12px] font-semibold" title={detail}>
+        <span className="tool-card-title min-w-0 truncate text-[12px] font-semibold" title={detail}>
           {title}
         </span>
         <span
@@ -530,7 +530,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
         <span className="tool-icon">
           <Bot className={`size-3 shrink-0 ${accent.icon}`} />
         </span>
-        <span className="min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
+        <span className="tool-card-title min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
         {/* min-w-0 + clip: agentType comes from an uncapped regex capture of
             the task title; a pathological one gets clipped instead of evicting
             the status chip. */}
