@@ -428,12 +428,15 @@ const en: Record<string, string> = {
   "Tab 补全": "Tab to complete",
   "无匹配文件": "No matching files",
   "无匹配文件夹": "No matching folders",
-  "向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）":
-    "Ask iFlow… (/ commands · @ files · @/ folders · @problems · @git · @url:)",
+  "向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @terminal · @url:）":
+    "Ask iFlow… (/ commands · @ files · @/ folders · @problems · @git · @terminal · @url:)",
   "（见附件）": "(see attached files)",
   "（见附带的上下文）": "(see attached context)",
   "工作区诊断（Problems）": "Workspace diagnostics (Problems)",
   "Git 状态与变更": "Git status & changes",
+  "终端最近输出": "Recent terminal output",
+  "在终端中打开（预填命令，不自动执行）": "Open in terminal (prefills the command, does not run it)",
+  "在集成终端重跑该命令": "Re-run this command in the integrated terminal",
   "输入 URL 后回车附加": "Type a URL, then press Enter to attach",
   // M2 P0-3 message queue strip
   "队列 · {0} 条待发送": "Queue · {0} pending",

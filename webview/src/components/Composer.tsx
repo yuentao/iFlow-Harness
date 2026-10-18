@@ -20,6 +20,7 @@ import {
   SendHorizontal,
   Sparkles,
   Square,
+  SquareTerminal,
   Trash2,
   Wand2,
   X,
@@ -869,10 +870,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   }, [mentionQuery, text]);
 
   // --- M2 P0-4: extended @-mention sources ---------------------------------
-  // "@" files (original), "@/" folders, "@problems" / "@git" workspace
-  // snapshots, "@url:…" web pages. Keyword/url sources resolve through the
-  // host (resolveContext) and land as context cards — they never expand
-  // inline into the draft.
+  // "@" files (original), "@/" folders, "@problems" / "@git" / "@terminal"
+  // workspace snapshots, "@url:…" web pages. Keyword/url sources resolve
+  // through the host (resolveContext) and land as context cards — they never
+  // expand inline into the draft.
   const mentionKind: "file" | "folder" | "url" = mentionQuery === null
     ? "file"
     : mentionQuery.trim().toLowerCase().startsWith("url:")
@@ -880,12 +881,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       : mentionQuery.startsWith("/")
         ? "folder"
         : "file";
-  /** Keyword source rows (@problems / @git), shown only while the token is
-   * still a prefix of the keyword — once the user types past it the row
-   * disappears and plain file search takes over. */
-  const KEYWORD_SOURCES: ReadonlyArray<{ kind: "problems" | "git"; keyword: string; icon: typeof AlertTriangle }> = [
+  /** Keyword source rows (@problems / @git / @terminal), shown only while the
+   * token is still a prefix of the keyword — once the user types past it the
+   * row disappears and plain file search takes over. */
+  const KEYWORD_SOURCES: ReadonlyArray<{ kind: "problems" | "git" | "terminal"; keyword: string; icon: typeof AlertTriangle }> = [
     { kind: "problems", keyword: "problems", icon: AlertTriangle },
     { kind: "git", keyword: "git", icon: GitBranch },
+    { kind: "terminal", keyword: "terminal", icon: SquareTerminal },
   ];
   const sourceActions = useMemo(() => {
     if (mentionQuery === null) return [];
@@ -905,7 +907,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       kind: s.kind,
       keyword: s.keyword,
       icon: s.icon,
-      label: s.kind === "problems" ? t("工作区诊断（Problems）") : t("Git 状态与变更"),
+      label:
+        s.kind === "problems"
+          ? t("工作区诊断（Problems）")
+          : s.kind === "git"
+            ? t("Git 状态与变更")
+            : t("终端最近输出"),
       ready: raw === s.keyword,
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- KEYWORD_SOURCES is a module-level constant shape
@@ -943,8 +950,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     requestAnimationFrame(() => taRef.current?.focus());
   }
 
-  /** Attach @problems / @git as a context card (token consumed). */
-  function resolveKeywordContext(kind: "problems" | "git"): void {
+  /** Attach @problems / @git / @terminal as a context card (token consumed). */
+  function resolveKeywordContext(kind: "problems" | "git" | "terminal"): void {
     useChat.getState().send({
       type: "resolveContext",
       requestId: nextContextRequestId(),
@@ -1237,7 +1244,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                     ? AlertTriangle
                     : c.kind === "git"
                       ? GitBranch
-                      : Globe;
+                      : c.kind === "terminal"
+                        ? SquareTerminal
+                        : Globe;
             return (
               <div
                 key={c.id}
@@ -1344,8 +1353,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 }`}
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  if (a.kind === "problems" || a.kind === "git") resolveKeywordContext(a.kind);
-                  else attachUrlContext();
+                  if (a.kind === "url") attachUrlContext();
+                  else resolveKeywordContext(a.kind);
                 }}
               >
                 <Icon className="size-3.5 shrink-0 text-primary" />
@@ -1430,7 +1439,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         <textarea
           ref={taRef}
           value={text}
-                      placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+                      placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @terminal · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
@@ -1493,8 +1502,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 const srcCount = sourceActions.length;
                 if (mentionIndex < srcCount) {
                   const a = sourceActions[mentionIndex]!;
-                  if (a.kind === "problems" || a.kind === "git") resolveKeywordContext(a.kind);
-                  else attachUrlContext();
+                  if (a.kind === "url") attachUrlContext();
+                  else resolveKeywordContext(a.kind);
                 } else {
                   const hit = mentionHits[mentionIndex - srcCount];
                   if (hit) {

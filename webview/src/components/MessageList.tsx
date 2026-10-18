@@ -28,8 +28,10 @@ import {
   ListOrdered,
   Square,
   Pencil,
+  Play,
   Plug,
   Search,
+  SquareTerminal,
   Trash2,
   Undo2,
   Wrench,
@@ -364,6 +366,29 @@ function ToolCard({ block }: { block: ToolBlock }) {
         </span>
         {primary && !hasDiff && <FileRef path={primary.path} line={primary.line} toolCallId={block.toolCallId} />}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {/* 在终端中打开/重跑：CLI 自跑的 shell 随工具调用结束（长进程会被
+              其超时杀掉），交互/长驻命令属于真实集成终端——输出还能被
+              @terminal 持续订阅。预填不自动执行，重跑立即回车。 */}
+          {presentation.accent === "execute" && block.input && (
+            <>
+              <button
+                className="press rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+                title={t("在终端中打开（预填命令，不自动执行）")}
+                aria-label={t("在终端中打开（预填命令，不自动执行）")}
+                onClick={() => send({ type: "runInTerminal", toolCallId: block.toolCallId, execute: false })}
+              >
+                <SquareTerminal className="size-3.5" />
+              </button>
+              <button
+                className="press rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+                title={t("在集成终端重跑该命令")}
+                aria-label={t("在集成终端重跑该命令")}
+                onClick={() => send({ type: "runInTerminal", toolCallId: block.toolCallId, execute: true })}
+              >
+                <Play className="size-3.5" />
+              </button>
+            </>
+          )}
           {block.reverted && (
             <Chip tone="muted">
               <Undo2 className="size-2.5" /> {t("已回退")}

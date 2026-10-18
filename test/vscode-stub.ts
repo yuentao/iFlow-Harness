@@ -159,7 +159,68 @@ export const workspace = {
   getConfiguration: (_section?: string) => new WorkspaceConfiguration(configOverrides),
   createFileSystemWatcher: (_pattern: unknown) => new FileSystemWatcher(_pattern),
   onDidChangeConfiguration: () => new Disposable(),
+  asRelativePath: (p: string | { fsPath: string }) =>
+    (typeof p === "string" ? p : p.fsPath).replace(/\\/g, "/"),
 };
+
+export enum DiagnosticSeverity {
+  Error = 0,
+  Warning = 1,
+  Information = 2,
+  Hint = 3,
+}
+
+export interface StubDiagnostic {
+  severity: DiagnosticSeverity;
+  range: { start: { line: number } };
+  message: string;
+}
+
+/** Diagnostics stub: empty by default; tests can replace `getDiagnostics`. */
+export const languages: {
+  getDiagnostics: () => Array<[Uri, StubDiagnostic[]]>;
+  onDidChangeDiagnostics: () => Disposable;
+} = {
+  getDiagnostics: () => [],
+  onDidChangeDiagnostics: () => new Disposable(),
+};
+
+/** Terminal stub: created terminals are recorded so tests can assert on
+ * sendText calls (open/rerun in terminal). */
+export interface StubTerminal {
+  name: string;
+  exitStatus: undefined;
+  sentTexts: Array<{ text: string; shouldExecute: boolean }>;
+  shown: number;
+  show(): void;
+  sendText(text: string, shouldExecute?: boolean): void;
+}
+
+const stubTerminals: StubTerminal[] = [];
+
+function createStubTerminal(opts?: { name?: string; cwd?: string }): StubTerminal {
+  const terminal: StubTerminal = {
+    name: opts?.name ?? "terminal",
+    exitStatus: undefined,
+    sentTexts: [],
+    shown: 0,
+    show() {
+      this.shown++;
+    },
+    sendText(text: string, shouldExecute = true) {
+      this.sentTexts.push({ text, shouldExecute });
+    },
+  };
+  stubTerminals.push(terminal);
+  return terminal;
+}
+
+/** Test hook: drop all stub terminals (openInTerminal reuses by name). */
+export function resetStubTerminals(): void {
+  stubTerminals.length = 0;
+}
+
+export { stubTerminals };
 
 export const window = {
   createOutputChannel: (name: string) => new LogOutputChannel(name),
@@ -171,6 +232,11 @@ export const window = {
   showInformationMessage: () => Promise.resolve(undefined),
   showWarningMessage: () => Promise.resolve(undefined),
   showErrorMessage: () => Promise.resolve(undefined),
+  terminals: stubTerminals,
+  createTerminal: createStubTerminal,
+  onDidCloseTerminal: () => new Disposable(),
+  // No onDidStart/EndTerminalShellExecution: the recorder runtime-detects
+  // these and reports unavailable, which is the pre-1.93 production path.
 };
 
 export const env = {

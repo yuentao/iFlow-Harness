@@ -1734,6 +1734,7 @@ function createMockHost(): HostApi {
           folder: { label: m.query || "./", detail: "3 个子项", content: "- src/\n- package.json\n- README.md" },
           problems: { label: "工作区诊断", detail: "2 条", content: "src/App.tsx:\n  [错误] L10: 未找到名称 foo" },
           git: { label: "工作区 Git", detail: "status + diff", content: "状态（git status --porcelain）：\n  M src/App.tsx" },
+          terminal: { label: "终端最近输出", detail: "2 条命令", content: "$ npm run dev\n（J:\\proj · 仍在运行）\nVITE v8 ready in 320 ms\n\n---\n\n$ npm test\n（退出码 0）\nTests  32 passed" },
           url: { label: m.query, detail: "example.com", content: "示例网页正文（mock 抓取）" },
         };
         const b = bodies[m.kind] ?? { label: m.query, detail: "", content: "" };

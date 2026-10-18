@@ -155,6 +155,22 @@ function capToolInput(s: string): string {
     : s;
 }
 
+/**
+ * Recover a rerunnable shell command from a tool block's formatted `input`
+ * (the "在终端中打开/重跑" flow). Returns null when there is nothing safe to
+ * re-run: empty input, or a command that `capToolInput` truncated — the
+ * marker is exactly MAX+1 chars ending in "…" (a genuine command ending in
+ * "…" at exactly that length is vanishingly rare, and refusing is the safe
+ * direction: re-running half a command can be destructive).
+ */
+export function extractRerunnableCommand(input: string | null | undefined): string | null {
+  if (typeof input !== "string") return null;
+  const text = input.trim();
+  if (text === "") return null;
+  if (text.length === MAX_TOOL_INPUT_DISPLAY_CHARS + 1 && text.endsWith("…")) return null;
+  return text;
+}
+
 /** Depth-bounded clone with per-string truncation before JSON.stringify. */
 function truncateArgValues(value: unknown, depth = 0): unknown {
   if (typeof value === "string") {

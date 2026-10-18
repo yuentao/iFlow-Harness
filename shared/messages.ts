@@ -575,7 +575,7 @@ export interface CheckpointUi {
 }
 
 /** M2 P0-4 — context-source kinds the composer can attach. */
-export type ContextKind = "code" | "folder" | "problems" | "git" | "url";
+export type ContextKind = "code" | "folder" | "problems" | "git" | "url" | "terminal";
 
 /**
  * M2 P0-4 — one context card above the composer (generalizes the single
@@ -1457,6 +1457,12 @@ export type WebviewToHost =
   | { type: "restoreCheckpoint"; userBlockId: string; mode: "files" | "conversation" | "both" }
   /** M5: open the tool's change in VSCode's native diff editor. */
   | { type: "openDiff"; toolCallId: string; sessionId?: string }
+  /** Tool-card "在终端中打开/重跑": re-run the tool's shell command in a real
+   * integrated terminal. `execute: false` prefills the command without a
+   * trailing newline (the user presses Enter); `true` runs it immediately.
+   * The host re-extracts the command from its own tool-block state and
+   * refuses truncated/absent commands with a toast. */
+  | { type: "runInTerminal"; toolCallId: string; execute: boolean }
   | { type: "requestTurnChanges"; sessionId: string; userBlockId: string; requestId: string }
   /** Undo every recorded diff for one file in the latest completed turn. */
   | { type: "revertTurnFile"; sessionId: string; userBlockId: string; key: string }

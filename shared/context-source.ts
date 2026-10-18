@@ -28,6 +28,8 @@ export const CONTEXT_CHAR_LIMITS = {
   git: 32_000,
   /** Fetched URL text. */
   url: 64_000,
+  /** Recent integrated-terminal commands + output. */
+  terminal: 32_000,
 } as const;
 
 /** Hard-cap a string, appending a truncation marker the model can see. */
@@ -143,6 +145,46 @@ export function formatDiagnosticsReport(entries: readonly DiagnosticLineUi[]): s
     lines.push(`  [${e.severityLabel}] L${e.line}: ${e.message}`);
   }
   return lines.join("\n");
+}
+
+// --- @terminal ---------------------------------------------------------------
+
+/** One recorded integrated-terminal command (shape shared with the host's
+ * TerminalRecorder records — structural typing, no vscode dependency here). */
+export interface TerminalCommandEntryUi {
+  commandLine: string;
+  /** Working directory when shell integration reported one. */
+  cwd: string | null;
+  /** Tail-kept output (the recorder caps per record; `droppedChars` counts
+   * the evicted head). */
+  output: string;
+  droppedChars: number;
+  /** Null while running or when the shell didn't report one. */
+  exitCode: number | null;
+  /** True while the process still runs (dev-server style long commands —
+   * the recorder consumes output incrementally, so `output` keeps growing). */
+  running: boolean;
+}
+
+/**
+ * Compose the @terminal card body from recent command records (chronological
+ * order, oldest first). Each entry renders as `$ command` + a status/cwd meta
+ * line + the (tail of the) output. Pure so the report discipline is pinned by
+ * unit tests; the host caps the entry count before calling.
+ */
+export function buildTerminalReport(entries: readonly TerminalCommandEntryUi[]): string {
+  const sections: string[] = [];
+  for (const e of entries) {
+    const meta: string[] = [];
+    if (e.cwd) meta.push(e.cwd);
+    meta.push(e.running ? "仍在运行" : e.exitCode === null ? "已结束" : `退出码 ${e.exitCode}`);
+    const lines = [`$ ${e.commandLine}`, `（${meta.join(" · ")}）`];
+    if (e.droppedChars > 0) lines.push(`…（更早的输出已截断，共 ${e.droppedChars} 字符）`);
+    const body = e.output.trimEnd();
+    lines.push(body === "" ? "（无输出）" : body);
+    sections.push(lines.join("\n"));
+  }
+  return sections.join("\n\n---\n\n");
 }
 
 // --- @git ------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import path from "node:path";
 import { ChatPanel } from "./panel/panel.js";
+import { getTerminalRecorder } from "./panel/terminal.js";
 import { errorMessage } from "./acp/jsonrpc.js";
 
 /** R6: module-level reference so `deactivate` can await the CLI teardown. */
@@ -10,6 +11,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const chatPanel = new ChatPanel(context);
   panel = chatPanel;
   context.subscriptions.push(chatPanel);
+
+  // Terminal command capture for @terminal must not depend on the chat panel
+  // being opened — attach the recorder at activation (no-op on VS Code < 1.93
+  // or with shell integration disabled; @terminal then explains itself).
+  context.subscriptions.push({ dispose: () => getTerminalRecorder().dispose() });
+  getTerminalRecorder();
 
   // Warm start: spawn + initialize the CLI in the background right after
   // activation (onStartupFinished) so the first panel open reuses the live

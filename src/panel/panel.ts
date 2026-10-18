@@ -73,6 +73,7 @@ import {
   assembleContextSections,
   buildFolderListing,
   buildGitReport,
+  buildTerminalReport,
   decodeResponseText,
   extractHtmlText,
   formatDiagnosticsReport,
@@ -89,6 +90,7 @@ import {
   estimateMcpContextTokens,
   dropSessionUpdate,
   endReplay,
+  extractRerunnableCommand,
   findCliHistoryCut,
   findToolBlockById,
   isAgentOutputUpdate,
@@ -119,6 +121,7 @@ import {
   type ApprovalRule,
 } from "../../shared/approval-policy.js";
 import { SessionStore } from "./store.js";
+import { getTerminalRecorder, openInTerminal } from "./terminal.js";
 import { MemoryService } from "../memory/service.js";
 import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
@@ -137,6 +140,9 @@ const execFileAsync = promisify(execFileCb);
 /** M2 P0-4 @git: per-command timeout and combined output cap. */
 const GIT_CONTEXT_TIMEOUT_MS = 5_000;
 const GIT_CONTEXT_MAX_CHARS = 32_000;
+/** Diagnostics watch: settle window before comparing against the turn
+ * baseline — the agent's edit bursts fire many change events per second. */
+const DIAG_WATCH_DEBOUNCE_MS = 4_000;
 /** M2 P0-4 @url: fetch timeout / response cap / final text cap. */
 const URL_FETCH_TIMEOUT_MS = 10_000;
 const URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -700,6 +706,9 @@ export class ChatPanel implements vscode.Disposable {
       // M1 P0-6: occupancy-warning state machine (pure numeric compare per
       // push; toast/dismiss are post-only, no re-entrancy into the store).
       this.evaluateContextWarning();
+      // Diagnostics watch arms on the first streaming push of a turn and
+      // disarms when the turn settles (baseline + once-per-turn flag reset).
+      this.trackDiagnosticsWatch(state.status);
     };
     // M1 P0-6/P1-6: the store consults this on every usage refresh, so a
     // model switch or a settings edit lands on the occupancy bar without
@@ -761,6 +770,11 @@ export class ChatPanel implements vscode.Disposable {
           this.store.pushSnapshot();
         }
       }),
+    );
+    // Diagnostics watch: fires on every lint pass, but the evaluation only
+    // acts while a turn streams (armed/disarmed by trackDiagnosticsWatch).
+    this.context.subscriptions.push(
+      vscode.languages.onDidChangeDiagnostics(() => this.onDiagnosticsChanged()),
     );
     // P6: file-system changes invalidate the @-mention file-list cache.
     const watchRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.context.extensionUri;
@@ -856,6 +870,11 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllPendingQuestions("");
     this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
+    if (this.diagDebounce) {
+      clearTimeout(this.diagDebounce);
+      this.diagDebounce = null;
+    }
+    this.diagBaselineErrors = null;
     this.client = null;
     this.memory.dispose();
     this.editorPanel?.dispose();
@@ -1331,6 +1350,9 @@ export class ChatPanel implements vscode.Disposable {
       case "openDiff":
         if (msg.sessionId !== undefined && msg.sessionId !== this.store.getState().sessionId) break;
         await this.openToolDiff(msg.toolCallId);
+        break;
+      case "runInTerminal":
+        this.runToolInTerminal(msg.toolCallId, msg.execute);
         break;
       case "searchFiles":
         void this.searchWorkspaceFiles(msg.requestId, msg.query, msg.kind ?? "file");
@@ -2252,6 +2274,11 @@ export class ChatPanel implements vscode.Disposable {
     if (actionId === "memory-review") {
       if (typeof toastId === "number") this.store.dismissToast(toastId);
       this.memory.reviewCandidates();
+      return;
+    }
+    if (actionId === "queue-diagnostics") {
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      void this.sendDiagnosticsFix();
       return;
     }
     if (typeof toastId === "number") this.store.dismissToast(toastId);
@@ -6820,6 +6847,164 @@ export class ChatPanel implements vscode.Disposable {
         return vscode.l10n.t("工作区 Git 状态与变更：");
       case "url":
         return vscode.l10n.t("网页内容（{0}）：", ctx.label);
+      case "terminal":
+        return vscode.l10n.t("终端最近命令与输出（{0}）：", ctx.detail);
+    }
+  }
+
+  /**
+   * Shared @problems body builder: the resolveContext card and the
+   * diagnostics-watch "排队修复" action must inject the exact same report.
+   * Returns `{error}` when there is nothing to report (the card would be
+   * silently dropped by assembleContextSections otherwise).
+   */
+  private collectProblemsBody():
+    | { label: string; detail: string; content: string }
+    | { error: string } {
+    const SEVERITY_LABELS = [vscode.l10n.t("错误"), vscode.l10n.t("警告"), vscode.l10n.t("信息"), vscode.l10n.t("提示")];
+    const rows: { sev: number; path: string; line: number; message: string }[] = [];
+    for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+      const rel = vscode.workspace.asRelativePath(uri.fsPath, false).replace(/\\/g, "/");
+      for (const d of diags) {
+        rows.push({
+          sev: d.severity,
+          path: rel,
+          line: d.range.start.line + 1,
+          message: d.message.replace(/\s+/g, " ").trim(),
+        });
+      }
+    }
+    if (rows.length === 0) return { error: vscode.l10n.t("当前没有诊断信息") };
+    rows.sort((a, b) => a.sev - b.sev || a.path.localeCompare(b.path) || a.line - b.line);
+    const capped = rows.slice(0, 200);
+    let content = formatDiagnosticsReport(
+      capped.map((r) => ({
+        path: r.path,
+        line: r.line,
+        severityLabel: SEVERITY_LABELS[r.sev] ?? vscode.l10n.t("其他"),
+        message: r.message,
+      })),
+    );
+    if (rows.length > capped.length) {
+      content += `\n${vscode.l10n.t("…（共 {0} 条，仅列出前 200 条）", rows.length)}`;
+    }
+    return {
+      label: vscode.l10n.t("工作区诊断"),
+      detail: vscode.l10n.t("{0} 条", rows.length),
+      content,
+    };
+  }
+
+  /**
+   * Tool-card "在终端中打开/重跑": re-run the tool's shell command in a real
+   * integrated terminal. The CLI's own execution is not attachable (its child
+   * shell dies with the tool call, and dev-server style long processes are
+   * killed by its timeouts), so interactive/long-running commands belong in a
+   * user terminal — where the output also keeps streaming into the terminal
+   * recorder for @terminal. `execute: false` prefills without running.
+   */
+  private runToolInTerminal(toolCallId: string, execute: boolean): void {
+    const block = findToolBlockById(this.store.getState().blocks, toolCallId);
+    const isShell =
+      block !== null
+      && (block.toolKind === "execute" || block.toolName.trim().toLowerCase() === "run_shell_command");
+    if (!block || !isShell) {
+      this.store.sendToast("warning", vscode.l10n.t("该工具卡没有可重跑的命令"));
+      return;
+    }
+    const command = extractRerunnableCommand(block.input);
+    if (!command) {
+      this.store.sendToast("warning", vscode.l10n.t("命令缺失或过长已被截断，无法安全重跑"));
+      return;
+    }
+    const cwd = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    openInTerminal(command, cwd ?? undefined, execute);
+  }
+
+  // --- Diagnostics watch (评估结论 2026-10-19) ---------------------------------
+  // "诊断变化自动推送给进行中的会话" is protocol-impossible in the literal
+  // sense: ACP has no mid-turn injection channel — the CLI accepts exactly one
+  // session/prompt per turn, and a queued prompt only dispatches after the
+  // running turn settles. The feasible conservative form implemented here:
+  // while a turn streams, watch the workspace error-diagnostic count against
+  // the turn-start baseline (a rise is likely the agent's own half-finished
+  // edit); surface ONE sticky toast per turn whose action enqueues a fix
+  // request carrying a fresh @problems card (or sends it directly when the
+  // turn already ended). Never auto-send: silently injecting a prompt burns
+  // tokens and can derail the user's task.
+
+  /** Error-diagnostic count at turn start; null = no turn streaming. */
+  private diagBaselineErrors: number | null = null;
+  /** One toast per turn (the count keeps fluctuating while edits land). */
+  private diagNotifiedThisTurn = false;
+  private diagDebounce: ReturnType<typeof setTimeout> | null = null;
+
+  /** Called from store.onStateChange: arm/disarm the watch on status flips. */
+  private trackDiagnosticsWatch(status: string): void {
+    if (status === "streaming") {
+      if (this.diagBaselineErrors === null) {
+        this.diagBaselineErrors = this.countErrorDiagnostics();
+        this.diagNotifiedThisTurn = false;
+      }
+    } else if (this.diagBaselineErrors !== null) {
+      this.diagBaselineErrors = null;
+      this.diagNotifiedThisTurn = false;
+    }
+  }
+
+  private countErrorDiagnostics(): number {
+    let count = 0;
+    for (const [, diags] of vscode.languages.getDiagnostics()) {
+      for (const d of diags) {
+        if (d.severity === vscode.DiagnosticSeverity.Error) count++;
+      }
+    }
+    return count;
+  }
+
+  /** Debounced evaluation behind `vscode.languages.onDidChangeDiagnostics`. */
+  private onDiagnosticsChanged(): void {
+    if (this.disposed || this.diagBaselineErrors === null || this.diagNotifiedThisTurn) return;
+    if (this.diagDebounce) clearTimeout(this.diagDebounce);
+    this.diagDebounce = setTimeout(() => {
+      this.diagDebounce = null;
+      const baseline = this.diagBaselineErrors;
+      if (this.disposed || baseline === null || this.diagNotifiedThisTurn) return;
+      if (this.store.getState().status !== "streaming") return;
+      const now = this.countErrorDiagnostics();
+      if (now <= baseline) return;
+      this.diagNotifiedThisTurn = true;
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("检测到 {0} 条新增错误诊断（可能由本轮编辑引入）", now - baseline),
+        { sticky: true, action: { actionId: "queue-diagnostics", label: vscode.l10n.t("排队修复") } },
+      );
+    }, DIAG_WATCH_DEBOUNCE_MS);
+  }
+
+  /** Toast action: enqueue (streaming) or directly send (idle) a fix request
+   * carrying a fresh @problems card. */
+  private async sendDiagnosticsFix(): Promise<void> {
+    const res = this.collectProblemsBody();
+    if ("error" in res) {
+      this.store.sendToast("info", res.error);
+      return;
+    }
+    const text = vscode.l10n.t(
+      "请修复当前工作区的错误级诊断（见附加的诊断清单），完成后简要说明修复内容。",
+    );
+    const ctx: ContextRefUi = {
+      id: `ctx-diag-${Date.now().toString(36)}`,
+      kind: "problems",
+      label: res.label,
+      detail: res.detail,
+      content: res.content,
+    };
+    const status = this.store.getState().status;
+    if (status === "streaming" || status === "connecting") {
+      this.enqueuePrompt(text, undefined, undefined, [ctx]);
+    } else {
+      await this.sendPrompt(text, undefined, undefined, [ctx]);
     }
   }
 
@@ -6848,37 +7033,39 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       if (kind === "problems") {
-        const SEVERITY_LABELS = [vscode.l10n.t("错误"), vscode.l10n.t("警告"), vscode.l10n.t("信息"), vscode.l10n.t("提示")];
-        const rows: { sev: number; path: string; line: number; message: string }[] = [];
-        for (const [uri, diags] of vscode.languages.getDiagnostics()) {
-          const rel = vscode.workspace.asRelativePath(uri.fsPath, false).replace(/\\/g, "/");
-          for (const d of diags) {
-            rows.push({
-              sev: d.severity,
-              path: rel,
-              line: d.range.start.line + 1,
-              message: d.message.replace(/\s+/g, " ").trim(),
-            });
-          }
-        }
-        if (rows.length === 0) {
-          reply("", "", "", vscode.l10n.t("当前没有诊断信息"));
+        const res = this.collectProblemsBody();
+        if ("error" in res) {
+          reply("", "", "", res.error);
           return;
         }
-        rows.sort((a, b) => a.sev - b.sev || a.path.localeCompare(b.path) || a.line - b.line);
-        const capped = rows.slice(0, 200);
-        let body = formatDiagnosticsReport(
-          capped.map((r) => ({
-            path: r.path,
-            line: r.line,
-            severityLabel: SEVERITY_LABELS[r.sev] ?? vscode.l10n.t("其他"),
-            message: r.message,
-          })),
-        );
-        if (rows.length > capped.length) {
-          body += `\n${vscode.l10n.t("…（共 {0} 条，仅列出前 200 条）", rows.length)}`;
+        reply(res.label, res.detail, res.content);
+        return;
+      }
+      if (kind === "terminal") {
+        const recorder = getTerminalRecorder();
+        if (!recorder.isAvailable()) {
+          reply(
+            "",
+            "",
+            "",
+            vscode.l10n.t(
+              "终端输出捕获不可用：需要 VS Code ≥ 1.93 且启用终端 Shell Integration（terminal.integrated.shellIntegration.enabled）",
+            ),
+          );
+          return;
         }
-        reply(vscode.l10n.t("工作区诊断"), vscode.l10n.t("{0} 条", rows.length), body);
+        // Last 5 commands keep the card readable; the per-kind char cap in
+        // assembleContextSections bounds the injected size anyway.
+        const entries = recorder.snapshot().slice(-5);
+        if (entries.length === 0) {
+          reply("", "", "", vscode.l10n.t("尚无终端命令记录（在集成终端运行命令后重试）"));
+          return;
+        }
+        reply(
+          vscode.l10n.t("终端最近输出"),
+          vscode.l10n.t("{0} 条命令", entries.length),
+          buildTerminalReport(entries),
+        );
         return;
       }
       if (kind === "git") {
