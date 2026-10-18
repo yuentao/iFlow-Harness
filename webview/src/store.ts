@@ -245,8 +245,8 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "本次请求自动注入了 1 项内容：系统提示词",
-      tokens: 28960,
+      notice: "本次请求自动注入了 3 项内容：系统提示词、3 个 MCP 工具、1 个 MCP 服务器未连接",
+      tokens: 31240,
       items: [
         {
           kind: "system",
@@ -254,6 +254,16 @@ function createMockHost(): HostApi {
           content:
             "You are iFlow CLI, an interactive CLI agent...\n（mock：核心提示词，完整正文由 acp-context-report Mod 捕获）\n\n---\n\n--- Context from: AGENTS.md ---\n# AGENTS.md\n\n项目概览…（mock：层级上下文文件正文内嵌于系统提示词尾部）\n--- End of Context from: AGENTS.md ---",
         },
+        {
+          kind: "mcp",
+          label: "apipost-mcp",
+          toolNames: ["create_api", "update_api", "list_projects"],
+          content:
+            '{"name":"create_api","description":"Create an API endpoint","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}\n' +
+            '{"name":"update_api","description":"Modify an API endpoint","parameters":{"type":"object"}}\n' +
+            '{"name":"list_projects","description":"List API projects","parameters":{"type":"object"}}',
+        },
+        { kind: "mcp", label: "exa", content: "", toolNames: [], connected: false },
       ],
     },
     {

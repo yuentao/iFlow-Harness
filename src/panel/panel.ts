@@ -4877,6 +4877,64 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * MCP tool declarations the request carries: the CLI turns every connected
+   * server's tools into `functionDeclarations` on EVERY request (bundle:
+   * `bAo` builds them from the tool registry and the whole set rides
+   * `contents[].functionDeclarations`), and the ACP wire never reports them —
+   * the mcp-status Mod does. Query it at card-insert time and fold each server
+   * into one injected-context item, so the card's token total stays comparable
+   * with the MCP card's context chip (`estimateMcpContextTokens` uses the same
+   * declaration shape and the same o200k_base tokenizer).
+   *
+   * Honest degradation, same discipline as the MCP card's status lights: a
+   * server that had not finished connecting when the request started did NOT
+   * carry its tools, so it rides as a 0-token unloaded entry (no fabricated
+   * body, no invented tool names); a missing/disabled Mod (`available:false`)
+   * contributes nothing and the card stays exactly as honest as before. MCP
+   * discovery runs in the background (mcp-background-loader Mod), so at the
+   * FIRST prompt several servers can still report `connecting` — this card is
+   * a snapshot of that one request, the MCP settings card keeps live lights.
+   */
+  private async collectMcpContext(): Promise<InjectedContextItem[]> {
+    const client = this.client;
+    const sessionId = this.store.getState().sessionId;
+    if (!client || !sessionId) return [];
+    let report: McpStatusReport | null = null;
+    try {
+      report = await client.mcpStatus(sessionId);
+    } catch (error) {
+      this.log.warn(`injected card: mcpStatus unavailable: ${errorMessage(error)}`);
+      return [];
+    }
+    if (!report || !report.available) return [];
+    const items: InjectedContextItem[] = [];
+    for (const [name, view] of Object.entries(report.servers ?? {})) {
+      const tools = view.tools ?? [];
+      if (view.status === "connected" && tools.length > 0) {
+        items.push({
+          kind: "mcp",
+          label: name,
+          toolNames: tools.map((tool) => tool.name),
+          // One compact JSON declaration per line — the same bytes the CLI
+          // serializes into functionDeclarations.
+          content: tools
+            .map((tool) =>
+              JSON.stringify({
+                name: tool.name,
+                ...(tool.description ? { description: tool.description } : {}),
+                ...(tool.schemaOmitted || tool.schema === undefined ? {} : { parameters: tool.schema }),
+              }),
+            )
+            .join("\n"),
+        });
+      } else if (view.status !== "connected") {
+        items.push({ kind: "mcp", label: name, content: "", toolNames: [], connected: false });
+      }
+    }
+    return items;
+  }
+
+  /**
    * Developer-only channel: write the core instruction (the reported system
    * prompt minus the joined memory / inlined context files, per
    * extractCorePrompt) to `storageUri/core-prompt.md`, overwritten on every
@@ -4923,6 +4981,13 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) return;
     }
     const items = this.collectInjectedContext(isFresh());
+    // The same request also carries every connected MCP server's tool
+    // declarations (mcp-status Mod channel, best effort): fold them in so the
+    // card answers "which MCP tools did this request carry" next to the
+    // system prompt it already explains.
+    const mcpItems = await this.collectMcpContext();
+    if (this.disposed) return;
+    items.push(...mcpItems);
     if (items.length === 0) return;
     // Null = the reducer skipped (card already present) — nothing to persist.
     if (this.store.injectedContext(items) === null) return;

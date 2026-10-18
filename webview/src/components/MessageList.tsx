@@ -962,6 +962,10 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   const systemCount = block.items.filter((i) => i.kind === "system").length;
   const memoryCount = block.items.filter((i) => i.kind === "memory").length;
   const fileCount = block.items.filter((i) => i.kind === "context-file").length;
+  const mcpItems = block.items.filter((i) => i.kind === "mcp");
+  const mcpCarried = mcpItems.filter((i) => i.connected !== false);
+  const mcpToolCount = mcpCarried.reduce((sum, i) => sum + (i.toolNames?.length ?? 0), 0);
+  const mcpUnloaded = mcpItems.length - mcpCarried.length;
   const evicted = block.evicted === true;
   return (
     <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
@@ -983,6 +987,16 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
             {t("上下文文件")} {fileCount}
           </Chip>
         )}
+        {mcpToolCount > 0 && (
+          <Chip tone="muted">
+            {t("MCP 工具")} {mcpToolCount}
+          </Chip>
+        )}
+        {mcpUnloaded > 0 && (
+          <Chip tone="warning">
+            {t("MCP 未连接")} {mcpUnloaded}
+          </Chip>
+        )}
       </button>
       <Collapse open={open}>
         <div className="border-t border-border/60 px-3 py-2">
@@ -996,6 +1010,37 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
             {block.items.map((item, idx) =>
               item.kind === "system" && item.content ? (
                 <SystemPromptSections key={idx} content={item.content} />
+              ) : item.kind === "mcp" ? (
+                <div key={idx} className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">
+                    <Plug className="size-3 shrink-0 text-muted-foreground" />
+                    <span className="shrink-0">{item.label}</span>
+                    {item.connected === false ? (
+                      <Chip tone="warning">{t("未随请求注入")}</Chip>
+                    ) : (
+                      <span className="shrink-0 text-muted-foreground">
+                        {t("{0} 个工具", (item.toolNames ?? []).length)}
+                      </span>
+                    )}
+                  </div>
+                  {item.connected !== false && (item.toolNames ?? []).length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                      {(item.toolNames ?? []).map((name) => (
+                        <span
+                          key={name}
+                          className="inline-block shrink-0 rounded bg-editor/60 px-1.5 py-[1px] font-mono text-[10.5px] text-muted-foreground"
+                        >
+                          {name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {item.content && (
+                    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                      {item.content}
+                    </pre>
+                  )}
+                </div>
               ) : (
                 <div key={idx} className="min-w-0">
                   <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">

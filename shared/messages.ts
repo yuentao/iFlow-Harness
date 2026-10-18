@@ -231,14 +231,25 @@ export interface CompressionBlock extends BlockBase {
  * never carries). */
 export interface InjectedContextItem {
   /** Source kind: the CLI's assembled system instruction, the joined
-   * hierarchical memory, or one context file (AGENTS.md/IFLOW.md/...). */
-  kind: "system" | "memory" | "context-file";
-  /** Display name, e.g. "系统提示词", "AGENTS.md". */
+   * hierarchical memory, one context file (AGENTS.md/IFLOW.md/...), or one
+   * MCP server's tool declarations (the CLI turns every connected server's
+   * tools into `functionDeclarations` carried on EVERY request — the wire
+   * never reports them, the mcp-status Mod does). */
+  kind: "system" | "memory" | "context-file" | "mcp";
+  /** Display name, e.g. "系统提示词", "AGENTS.md", "apipost-mcp". */
   label: string;
   /** Absolute path for file-backed sources (absent for the system prompt). */
   path?: string;
-  /** Full body as the model receives it. */
+  /** Full body as the model receives it (MCP: one compact JSON declaration
+   * per line, the same shape the CLI serializes into functionDeclarations).
+   * Empty for servers whose tools never rode the request — never fabricated. */
   content: string;
+  /** MCP only: the tool NAMES this server injects (rendered as chips). */
+  toolNames?: string[];
+  /** MCP only: false = the server had not finished connecting when the
+   * request started, so its tools are NOT part of the request — shown as
+   * unloaded and counted at 0 tokens. Absent = carried. */
+  connected?: boolean;
 }
 
 /**

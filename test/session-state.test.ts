@@ -2601,6 +2601,29 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     expect(appendInjectedContext(state, items())).toBeNull();
     expect(state.blocks.map((b) => b.kind)).toEqual(["injected", "user"]);
   });
+
+  it("lists the MCP tool declarations the request carries", () => {
+    // The CLI puts every connected server's tools into functionDeclarations on
+    // EVERY request (the wire never reports them, the mcp-status Mod does).
+    const declarations = '{"name":"create_api"}\n{"name":"list_api"}';
+    const withMcp = [
+      ...items(),
+      { kind: "mcp", label: "apipost-mcp", toolNames: ["create_api", "list_api"], content: declarations },
+      // Not connected when the request started: no body, no tool names, 0
+      // tokens — the reducer must not claim its tools rode the request.
+      { kind: "mcp", label: "exa", content: "", toolNames: [], connected: false },
+    ];
+    const state = initialSessionState();
+    beginUserPrompt(state, "hi");
+    appendInjectedContext(state, withMcp);
+    const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
+    expect(block.notice).toContain("2 个 MCP 工具");
+    expect(block.notice).toContain("1 个 MCP 服务器未连接");
+    expect(block.tokens).toBe(
+      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules") +
+        estimateTokens(declarations),
+    );
+  });
 });
 
 describe("splitSystemPromptSections (injected card visual segments)", () => {

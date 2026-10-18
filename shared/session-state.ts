@@ -1123,7 +1123,10 @@ export function beginUserPrompt(
 /**
  * Insert the auto-injected-context card (first prompt of a session). The
  * host collects the items (acp-context-report Mod snapshot, or the disk
- * fallback when the bundled CLI carries no Mod) and this reducer composes
+ * fallback when the bundled CLI carries no Mod) PLUS the MCP tool
+ * declarations the request carries (mcp-status Mod, one item per server —
+ * the CLI turns every connected server's tools into functionDeclarations on
+ * EVERY request and the wire never reports them), and this reducer composes
  * the block with its one-line notice. Returns the inserted index for the
  * store's `mutatedFrom` incremental path, or null when the transcript
  * already carries a card.
@@ -1145,6 +1148,16 @@ export function appendInjectedContext(
   if (items.some((i) => i.kind === "memory")) parts.push(l10n.t("记忆"));
   const fileCount = items.filter((i) => i.kind === "context-file").length;
   if (fileCount > 0) parts.push(l10n.t("{0} 个上下文文件", String(fileCount)));
+  const mcpItems = items.filter((i) => i.kind === "mcp");
+  if (mcpItems.length > 0) {
+    const carriedTools = mcpItems.reduce(
+      (sum, item) => sum + (item.connected === false ? 0 : item.toolNames?.length ?? 0),
+      0,
+    );
+    if (carriedTools > 0) parts.push(l10n.t("{0} 个 MCP 工具", String(carriedTools)));
+    const unloaded = mcpItems.filter((i) => i.connected === false).length;
+    if (unloaded > 0) parts.push(l10n.t("{0} 个 MCP 服务器未连接", String(unloaded)));
+  }
   const block: Block = {
     kind: "injected",
     id: nextBlockId(),
