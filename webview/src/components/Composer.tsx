@@ -309,6 +309,8 @@ export function Composer() {
   const thinkLevel = useChat((s) => s.state?.thinkLevel ?? "auto");
   /** Turn-end model predictions; host metadata, cleared when a new turn starts. */
   const suggestions = useChat((s) => s.state?.nextStepSuggestions);
+  /** The prediction call is running: render the pill in the chips' slot. */
+  const suggestionsLoading = useChat((s) => s.state?.nextStepLoading ?? false);
 // Hard evidence only: thinking===false comes from an explicit
 // iflow.thinkingModelRules entry (supportsThinking:false) evaluated by the
 // host; unknown (undefined) stays ALLOWED — the CLI's own rejection is
@@ -351,9 +353,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     }
   }, [suggestions]);
   /** Candidate-word semantics: insert at the caret (empty composer = plain
-   * fill) and keep focus in the textarea — never auto-send. */
+   * fill) and keep focus in the textarea — never auto-send, and never retract
+   * the batch: the other candidates are still one click away. The row is
+   * retired by its close button or by the host when the user actually sends. */
   const applySuggestion = (value: string): void => {
-    setSuggestionsHidden(true);
     const ta = taRef.current;
     const start = ta?.selectionStart ?? text.length;
     const end = ta?.selectionEnd ?? text.length;
@@ -1402,9 +1405,23 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
 
+      {/* Turn-end prediction in flight: the pill sits in the chips' slot so
+          the wait is visible instead of the row appearing from nowhere. */}
+      {suggestionsLoading && (suggestions?.length ?? 0) === 0 && !suggestionsHidden && (
+        <div
+          className="mb-1.5 flex items-center gap-1 rounded-lg border border-primary/25 bg-primary/8 px-2 py-1 text-[11px] text-muted-foreground"
+          aria-label={t("预测下一步操作…")}
+        >
+          <Sparkles className="size-3 shrink-0 text-primary" />
+          <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+          <span className="min-w-0 flex-1 truncate">{t("预测下一步操作…")}</span>
+        </div>
+      )}
+
       {/* Turn-end next-step suggestions: candidate-word chips from one
-          dedicated model call. Click inserts at the caret; the row can be
-          dismissed locally until the next prediction arrives. */}
+          dedicated model call. Click inserts at the caret and keeps the rest
+          of the batch on screen; only the close button (or the host clearing
+          the batch when the user actually sends) retires the row. */}
       {suggestions && suggestions.length > 0 && !suggestionsHidden && (
         <div
           className="mb-1.5 flex flex-wrap items-center gap-1.5"

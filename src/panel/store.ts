@@ -32,6 +32,7 @@ import {
   markToolHunkDecisions,
   refreshSessionUsage,
   setMeta,
+  setNextStepLoading,
   setNextStepSuggestions,
   setPendingApproval,
   setPendingPlanExit,
@@ -232,6 +233,16 @@ export class SessionStore {
    * rides the blockPatch tail exactly like the queue/checkpoint projections. */
   suggestNextSteps(suggestions: string[]): void {
     setNextStepSuggestions(this.state, suggestions);
+    this.flush();
+  }
+
+  /** Announce that the prediction call is in flight (true) or has settled
+   * (false). Same tail channel as the chips: the WebView swaps its loading
+   * pill for the chips when the batch lands, and must never be left with a
+   * stuck spinner, so the host clears this on EVERY settle path — including
+   * a dropped/stale prediction. */
+  setNextStepLoading(loading: boolean): void {
+    setNextStepLoading(this.state, loading);
     this.flush();
   }
 

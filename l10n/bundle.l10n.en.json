@@ -214,6 +214,7 @@
   "已加入记忆，新建会话或恢复会话后生效":
     "Memory added. It takes effect in a new or restored session.",
   "立即重启 CLI": "Restart CLI now",
+  "正在提取长期记忆候选…": "Extracting long-term memory candidates…",
   "发现 {0} 条可记忆内容，是否追加到记忆？": "Found {0} memorizable item(s). Add to memory?",
   "追加记忆": "Add to memory",
   "会话已切换，记忆候选已丢弃": "The session changed; memory candidates were discarded",

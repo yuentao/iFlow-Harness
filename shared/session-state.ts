@@ -1167,12 +1167,20 @@ export function beginUserPrompt(
   // The previous turn's prediction describes the previous turn — never let it
   // sit above the composer while a new request is already in flight.
   state.nextStepSuggestions = [];
+  state.nextStepLoading = false;
   return state.blocks.length - 1;
 }
 
 /** Write the turn-end prediction projection (non-blocks metadata). */
 export function setNextStepSuggestions(state: SessionState, suggestions: string[]): void {
   state.nextStepSuggestions = suggestions;
+}
+
+/** Publish the "prediction in flight" flag (same non-blocks metadata channel
+ * as the chips): the composer renders a loading pill in the chips' slot so a
+ * slow dedicated model call is visible rather than invisible. */
+export function setNextStepLoading(state: SessionState, loading: boolean): void {
+  state.nextStepLoading = loading;
 }
 
 /** List markers the fallback path strips ("- foo", "1. foo", "2、foo"). */
@@ -1706,6 +1714,7 @@ function clearTranscriptFields(state: SessionState): void {
   // Predicted next actions belong to the outgoing turn/session — a wholesale
   // transcript swap invalidates them exactly like the checkpoint projection.
   state.nextStepSuggestions = [];
+  state.nextStepLoading = false;
   // The occupancy report anchor (atBlockCount) indexes the OUTGOING transcript —
   // after a replay the restored blocks renumber everything, so a carried-over
   // anchor would add the delta onto a foreign prompt count. The next turn end
@@ -2303,6 +2312,7 @@ export function deleteUserMessageById(state: SessionState, blockId: string): num
   state.usageReport = null;
   // The prediction described the deleted tail — retract it with the content.
   state.nextStepSuggestions = [];
+  state.nextStepLoading = false;
   refreshSessionUsage(state);
   return index;
 }

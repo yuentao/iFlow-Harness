@@ -600,6 +600,7 @@ const en: Record<string, string> = {
   "下一步": "Next",
   "AI 推测的下一步操作，点击填入输入框": "AI-predicted next actions — click to insert into the composer",
   "关闭建议": "Dismiss suggestions",
+  "预测下一步操作…": "Predicting next steps…",
   "下一步建议": "Next-step suggestions",
   "每轮回复完成后单独调用一次模型，推测可选的下一步操作并显示在输入框上方（会产生额外 token 消耗）。":
     "After each completed turn, make one extra model call to predict likely next actions and show them above the composer (extra token usage).",

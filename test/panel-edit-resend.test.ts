@@ -174,7 +174,9 @@ describe("ChatPanel edit & resend (P1-9 wiring)", () => {
     await flush();
 
     expect(restoreSpy).toHaveBeenCalledTimes(1);
-    expect(toasts).toHaveLength(0); // no degrade warning when a snapshot exists
+    // The degrade notice is a warning; turn-end housekeeping (memory
+    // extraction pill) rides info level and is not this check's subject.
+    expect(toasts.filter((toast) => toast.level === "warning")).toHaveLength(0);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.prompt[0]!.text).toContain("edited");
     calls[1]!.resolve({ stopReason: "end_turn" });

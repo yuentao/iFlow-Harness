@@ -762,6 +762,15 @@ export interface SessionState {
    * stale prediction never survives into another turn/session.
    */
   nextStepSuggestions?: string[];
+  /**
+   * True while the turn-end prediction is IN FLIGHT (the dedicated model call
+   * has started but its candidates have not landed). The composer renders this
+   * as a loading pill in the exact slot the chips will occupy, so a slow
+   * prediction is visible instead of "nothing happened". Same lifecycle rules
+   * as `nextStepSuggestions`: cleared when the call settles, when a new user
+   * turn starts, and on a wholesale transcript swap.
+   */
+  nextStepLoading?: boolean;
 }
 
 export interface AuthUiState {
@@ -851,6 +860,7 @@ export function initialSessionState(): SessionState {
     queuePaused: false,
     checkpoints: [],
     nextStepSuggestions: [],
+    nextStepLoading: false,
   };
 }
 

@@ -2092,6 +2092,7 @@ export class ChatPanel implements vscode.Disposable {
     const tools = toolTitles.length > 0 ? `\n\n本轮工具调用：${toolTitles.join("、")}` : "";
     const prompt = `${template}${stripFileMentions(user)}\n\n助手回复（末尾节选）：\n${assistant}${tools}`;
     this.nextStepBusy = true;
+    this.store.setNextStepLoading(true);
     try {
       const text = await this.completeInternalPrompt(prompt, NEXT_STEP_TIMEOUT_MS, NEXT_STEP_IDLE_MS);
       if (!text || this.disposed) return;
@@ -2115,6 +2116,9 @@ export class ChatPanel implements vscode.Disposable {
       this.store.suggestNextSteps(suggestions);
     } finally {
       this.nextStepBusy = false;
+      // Every settle path (parsed-empty, stale anchor, session switch, timeout)
+      // must retire the pill — a stuck spinner reads as "the model died".
+      if (!this.disposed) this.store.setNextStepLoading(false);
     }
   }
 

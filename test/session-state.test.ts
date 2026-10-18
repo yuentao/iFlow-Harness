@@ -39,6 +39,7 @@ import {
   endCompressTurn,
   parseTranscriptJsonl,
   parseNextStepSuggestions,
+  setNextStepLoading,
   toAgentPromptText,
   appendInjectedContext,
 } from "../shared/session-state";
@@ -2885,5 +2886,20 @@ describe("next-step suggestions", () => {
     state.nextStepSuggestions = ["继续实现"];
     beginUserPrompt(state, "下一步做什么？");
     expect(state.nextStepSuggestions).toEqual([]);
+  });
+
+  it("publishes an in-flight flag for the composer's loading pill", () => {
+    const state = initialSessionState();
+    setNextStepLoading(state, true);
+    expect(state.nextStepLoading).toBe(true);
+    setNextStepLoading(state, false);
+    expect(state.nextStepLoading).toBe(false);
+  });
+
+  it("clears the in-flight flag when a new user turn begins", () => {
+    const state = initialSessionState();
+    setNextStepLoading(state, true);
+    beginUserPrompt(state, "下一步做什么？");
+    expect(state.nextStepLoading).toBe(false);
   });
 });

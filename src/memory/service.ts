@@ -79,6 +79,8 @@ export interface MemoryServiceOptions {
       durationMs?: number;
       sticky?: boolean;
       action?: { actionId: string; label: string };
+      displayOnly?: boolean;
+      persistent?: boolean;
     },
   ) => unknown;
   /** Remove a previously posted toast (host-assigned id). */
@@ -157,6 +159,26 @@ export class MemoryService {
     if (this.toastId === null) return;
     this.options.dismissToast?.(this.toastId);
     this.toastId = null;
+  }
+
+  /** Loading pill for the in-flight turn-end extraction: displayOnly (the
+   * wait is not an interaction) + persistent (the WebView must not auto-drop
+   * it while the model call runs). Returns the host id for the finally
+   * dismissal; null on the direct-post fallback, which the WebView ages
+   * normally — same shape as the candidate toast's fallback. */
+  private sendExtractingToast(): number | null {
+    const message = vscode.l10n.t("正在提取长期记忆候选…");
+    if (this.options.sendToast) {
+      const toastId = this.options.sendToast("info", message, { displayOnly: true, persistent: true });
+      return typeof toastId === "number" ? toastId : null;
+    }
+    this.options.post({ type: "toast", level: "info", message, displayOnly: true, persistent: true });
+    return null;
+  }
+
+  private clearExtractingToast(toastId: number | null): void {
+    if (toastId === null) return;
+    this.options.dismissToast?.(toastId);
   }
 
   /** File-set changed but the session did not (e.g. a project memory file was
@@ -415,6 +437,7 @@ export class MemoryService {
     if (!blocks.some((block) => block.kind === "text" || block.kind === "user")) return;
     this.extractBusy = true;
     this.lastExtractAt = Date.now();
+    const extractingToastId = this.sendExtractingToast();
     try {
       const existing = await this.collectExistingFacts();
       const prompt = buildExtractionPrompt(blocks, existing, { maxInputChars: 6_000 });
@@ -441,6 +464,7 @@ export class MemoryService {
       this.options.log.warn(`memory extraction failed: ${messageOf(error)}`);
     } finally {
       this.extractBusy = false;
+      this.clearExtractingToast(extractingToastId);
     }
   }
 
