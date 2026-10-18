@@ -155,6 +155,8 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 陷阱:切换 provider 预设时,若新预设没有推荐模型,不能继承上一个网关的模型名,否则出现「新端点 + 旧模型」错配。
 - 全局快捷键安全约束：隐藏卡片（上层有 modal）、SELECT 聚焦、事件已 defaultPrevented 时不得响应，防止误触与快捷键穿模。
 - UI 说明组件约定：ui.tsx 的 HelpTip 通过 hover/focus/点击触发、role=tooltip，用于审批卡、Plan 卡、提问卡；操作行同时直接展示快捷键提示。
+- 项目发布流程：验证后，提交未提交改动（通常含对应测试）→ 新增 CHANGELOG 下一版本条目 → 同步 bump package.json → 提交 → push master + 同步 release branch（通常 fast-forward，触发 release CI）。
+- 项目版本同步约定：CHANGELOG 顶部版本与 package.json version 应保持一致；发布 commit 更新 both together.
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 
