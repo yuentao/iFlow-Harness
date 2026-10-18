@@ -2187,41 +2187,47 @@ export class ChatPanel implements vscode.Disposable {
    * - `autoCompressInFlight` keeps one compress turn at a time; a failed
    *   compression is logged + warned, never escalated to the error banner
    *   (the user's next real prompt still has the reactive overflow path).
+   *
+   * Returns true when a `/compress` turn actually ran. Callers use this to
+   * skip turn-end memory extraction: a compression turn must not trigger
+   * automatic memory capture (the user's next real turn still will).
    */
-  private async maybeAutoCompressOnIdle(sessionId: string): Promise<void> {
-    if (this.disposed || this.autoCompressInFlight || this.historySyncBusy) return;
+  private async maybeAutoCompressOnIdle(sessionId: string): Promise<boolean> {
+    if (this.disposed || this.autoCompressInFlight || this.historySyncBusy) return false;
     // Opt-in (default off): a turn-end compress adds a whole extra turn and
     // rewrites the model's context, so the user must enable it explicitly in
     // the settings panel. The reactive overflow path in promptWithRetry is
     // unaffected — it only fires when the gateway rejects a turn.
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoCompressOnIdle", false) === false) return;
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoCompressOnIdle", false) === false) return false;
     const state = this.store.getState();
-    if (state.sessionId !== sessionId) return;
-    if (state.initializing || state.replaying || state.status !== "idle") return;
-    if (state.pendingApproval || state.pendingPlanExit || state.pendingQuestions) return;
+    if (state.sessionId !== sessionId) return false;
+    if (state.initializing || state.replaying || state.status !== "idle") return false;
+    if (state.pendingApproval || state.pendingPlanExit || state.pendingQuestions) return false;
     const usage = state.usage;
     const window = usage?.contextWindow ?? null;
-    if (!usage || usage.estimated || window === null || window <= 0) return;
+    if (!usage || usage.estimated || window === null || window <= 0) return false;
     const ratio = (usage.contextUsed ?? 0) / window;
-    if (ratio < CONTEXT_AUTOCOMPRESS_RATIO) return;
+    if (ratio < CONTEXT_AUTOCOMPRESS_RATIO) return false;
     this.autoCompressInFlight = true;
     const toastId = this.store.sendToast(
       "info",
       vscode.l10n.t("上下文接近上限，自动压缩会话…"),
       { displayOnly: true, persistent: true },
     );
+    let compressed = false;
     try {
       const client = await this.ensureClient().catch(() => null);
-      if (!client || this.disposed || this.client !== client) return;
-      if (this.store.getState().sessionId !== sessionId) return;
+      if (!client || this.disposed || this.client !== client) return false;
+      if (this.store.getState().sessionId !== sessionId) return false;
       // Same display-truth pairing as the manual path: the turn streams so
       // the webview renders 正在压缩 (this session crept up on its window
       // without ever tripping the reactive overflow, so nothing else set
       // the flag), and the finally dismisses the waiting pill once over.
       this.store.beginCompressTurn();
       const result = await this.promptWithRetry(client, sessionId, [{ type: "text", text: "/compress" }]);
-      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return false;
       this.store.promptCompleted(result.stopReason, result.usage);
+      compressed = true;
       this.log.info(
         `turn-end auto-compress on session ${sessionId} (context ratio ${Math.round(ratio * 100)}%)`,
       );
@@ -2229,7 +2235,7 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       // The reactive overflow path still guards the next real prompt, so a
       // failed proactive compress is a warning, not an error banner.
-      if (this.disposed || this.store.getState().sessionId !== sessionId) return;
+      if (this.disposed || this.store.getState().sessionId !== sessionId) return false;
       this.log.warn(`turn-end auto-compress failed: ${errorMessage(error)}`);
       this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
       this.store.endCompressTurn();
@@ -2237,6 +2243,7 @@ export class ChatPanel implements vscode.Disposable {
       this.autoCompressInFlight = false;
       this.store.dismissToast(toastId);
     }
+    return compressed;
   }
 
 
@@ -3208,6 +3215,16 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showInformationMessage(vscode.l10n.t("已是本轮开始前的内容，无需撤销: {0}", chosen));
       this.postToWebview({ type: "turnFileReverted", sessionId, userBlockId, key });
       return;
+    }
+    const chained = edits.every((edit, index) =>
+      index === 0 || edit.diff!.oldText === edits[index - 1]!.diff!.newText);
+    if (edits.length > 1 && !chained && (currentText === null || currentText === lastNew)) {
+      const pick = await vscode.window.showWarningMessage(
+        vscode.l10n.t("本轮对该文件有 {0} 次修改记录且内容不连续，撤销将恢复到本轮开始前的内容。继续？", edits.length),
+        { modal: true },
+        vscode.l10n.t("仍然撤销"),
+      );
+      if (pick !== vscode.l10n.t("仍然撤销")) return;
     }
     if (currentText === null && lastNew !== null) {
       const pick = await vscode.window.showWarningMessage(
@@ -6013,6 +6030,10 @@ export class ChatPanel implements vscode.Disposable {
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return;
+    // A `/compress` turn is housekeeping, not conversation: it must not
+    // trigger automatic memory extraction. Auto-compression after a real turn
+    // is covered separately by maybeAutoCompressOnIdle's return value.
+    const isCompressTurn = !hasContexts && trimmed === "/compress";
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return;
@@ -6159,12 +6180,15 @@ export class ChatPanel implements vscode.Disposable {
       // Stop (cancelled) skips it — the user is steering, and firing a
       // compress turn right after they pressed Stop reads as "won't stop".
       // Awaited so a queued next message rides the SMALLER context.
+      let autoCompressed = false;
       if (result.stopReason !== "cancelled") {
-        await this.maybeAutoCompressOnIdle(promptSessionId);
+        autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
       }
       // F3 Phase 2: turn-end memory extraction (own lane, gated by
       // iflow.autoMemoryCapture). Fire-and-forget: never delays the queue.
-      if (result.stopReason !== "cancelled") {
+      // Compression turns (manual `/compress` or a turn-end auto-compress)
+      // never trigger extraction: they are housekeeping, not new conversation.
+      if (result.stopReason !== "cancelled" && !isCompressTurn && !autoCompressed) {
         void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
       }
       // M2 P0-3: the turn settled — the idle slot is free, feed it the next
@@ -6238,6 +6262,7 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     if (!lastUserText || !lastUserText.trim()) return;
+    const isCompressTurn = lastUserText.trim() === "/compress";
     this.cancelSeen = false;
     let promptSessionId: string | null = null;
     try {
@@ -6269,9 +6294,12 @@ export class ChatPanel implements vscode.Disposable {
         // Same turn-end next-step prediction as sendPrompt.
         if (promptSessionId) void this.generateNextStepSuggestions(promptSessionId);
         // Same turn-end proactive compression policy as sendPrompt.
-        await this.maybeAutoCompressOnIdle(promptSessionId);
-        // Same turn-end memory extraction policy as sendPrompt.
-        void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
+        const autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
+        // Same turn-end memory extraction policy as sendPrompt: compression
+        // turns must not trigger automatic memory capture.
+        if (!isCompressTurn && !autoCompressed) {
+          void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
+        }
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();

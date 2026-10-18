@@ -61,7 +61,7 @@ type PanelInternals = {
   ensureClient: () => Promise<unknown>;
   promptWithRetry: (client: unknown, sessionId: string, prompt: unknown) => Promise<{ stopReason: string }>;
   persistActiveTranscript: () => Promise<void>;
-  maybeAutoCompressOnIdle: (sessionId: string) => Promise<void>;
+  maybeAutoCompressOnIdle: (sessionId: string) => Promise<boolean>;
   store: {
     getState: () => {
       sessionId: string | null;
@@ -149,7 +149,8 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
 
   it("compresses at ≥95% with a real window, driving /compress + pill lifecycle", async () => {
     setUsage(usage(1000, 970));
-    await p.maybeAutoCompressOnIdle("ac-session");
+    const compressed = await p.maybeAutoCompressOnIdle("ac-session");
+    expect(compressed).toBe(true);
     expect(compressCalls).toHaveLength(1);
     const prompt = compressCalls[0]![0] as Array<{ type: string; text?: string }>;
     expect(prompt[0]!.text).toBe("/compress");
@@ -168,7 +169,8 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
 
   it("stays silent below 95% (the 90% warning pill owns that band)", async () => {
     setUsage(usage(1000, 940));
-    await p.maybeAutoCompressOnIdle("ac-session");
+    const compressed = await p.maybeAutoCompressOnIdle("ac-session");
+    expect(compressed).toBe(false);
     expect(compressCalls).toHaveLength(0);
     expect(toasts).toHaveLength(0);
   });
@@ -299,5 +301,88 @@ describe("sendPrompt turn-end wiring → proactive compress → queue order", ()
     const deadline = Date.now() + 2000;
     while (promptTexts.length < 3 && Date.now() < deadline) await flush();
     expect(promptTexts).toEqual(["first question", "/compress", "next question"]);
+  });
+});
+
+/**
+ * Compression is housekeeping, not conversation: neither a user-typed
+ * `/compress` turn nor a turn-end auto-compress may trigger the automatic
+ * memory extraction lane (the next real user turn still will).
+ */
+describe("turn-end memory extraction gating", () => {
+  type GateInternals = {
+    client: unknown;
+    panelVisible: boolean;
+    ensureClient: () => Promise<unknown>;
+    persistActiveTranscript: () => Promise<void>;
+    touchActiveSession: () => Promise<void>;
+    maybeGenerateAiTitle: (id: string) => Promise<void>;
+    generateNextStepSuggestions: (id: string) => Promise<void>;
+    promptWithRetry: (
+      client: unknown,
+      sessionId: string,
+      prompt: unknown,
+    ) => Promise<{ stopReason: string }>;
+    maybeAutoCompressOnIdle: (sessionId: string) => Promise<boolean>;
+    handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
+    memory: { maybeExtract: (...args: unknown[]) => Promise<void> };
+    store: {
+      getState: () => { status: string };
+      sessionStarted: (meta: { sessionId: string }) => void;
+    };
+  };
+
+  let panel: ChatPanel;
+  let p: GateInternals;
+  let storageDir: string;
+  let promptTexts: string[];
+  let extract: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    setConfigOverrides({ checkpoints: false, autoCompressOnIdle: true });
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-memory-gate-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as GateInternals;
+    promptTexts = [];
+    const fakeClient = {};
+    p.client = fakeClient;
+    p.ensureClient = async () => fakeClient;
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.maybeGenerateAiTitle = async () => {};
+    p.generateNextStepSuggestions = async () => {};
+    p.promptWithRetry = vi.fn(async (_c: unknown, _s: string, prompt: unknown) => {
+      const blocks = prompt as Array<{ type: string; text?: string }>;
+      promptTexts.push(blocks[0]?.text ?? "");
+      return { stopReason: "end_turn" };
+    }) as unknown as GateInternals["promptWithRetry"];
+    p.maybeAutoCompressOnIdle = vi.fn(async () => false) as unknown as GateInternals["maybeAutoCompressOnIdle"];
+    extract = vi.spyOn(p.memory, "maybeExtract").mockResolvedValue(undefined);
+    p.store.sessionStarted({ sessionId: "gate-session" });
+    p.store.getState().status = "idle";
+    p.panelVisible = true;
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await panel.dispose();
+    fs.rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  it("does not extract after a user-typed /compress turn", async () => {
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "/compress" });
+    expect(promptTexts).toEqual(["/compress"]);
+    expect(extract).not.toHaveBeenCalled();
+  });
+
+  it("does not extract after a turn-end auto-compress", async () => {
+    p.maybeAutoCompressOnIdle = vi.fn(async () => true) as unknown as GateInternals["maybeAutoCompressOnIdle"];
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "普通问题" });
+    expect(extract).not.toHaveBeenCalled();
+  });
+
+  it("still extracts after a normal turn", async () => {
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "普通问题" });
+    expect(extract).toHaveBeenCalledTimes(1);
   });
 });

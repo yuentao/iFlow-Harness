@@ -42,13 +42,15 @@ it("aggregates chained diffs into one file with net line counts", () => {
   expect(records[0]).toMatchObject({ path: "src/same.ts", toolCallId: "b", edits: 2, additions: 1, deletions: 1, canUndo: true });
 });
 
-it("disables undo for chained edits whose identity is only a basename", () => {
+it("keeps undo for chained edits whose identity is only a basename", () => {
   const blocks: Block[] = [
     { kind: "user", id: "u", text: "go" },
     tool("a", "same.ts", "a", "b"),
     tool("b", "same.ts", "b", "c"),
   ];
-  expect(collectTurnChanges(blocks, "u")[0]?.canUndo).toBe(false);
+  const record = collectTurnChanges(blocks, "u")[0]!;
+  expect(record.edits).toBe(2);
+  expect(record.canUndo).toBe(true);
 });
 
 it("splits same-basename files by location and keeps undo safe", () => {
@@ -87,13 +89,13 @@ it("marks only the turn with no later user message as latest", () => {
   expect(isLatestTurn(blocks, "missing")).toBe(false);
 });
 
-it("sums per-record counts when the diffs do not chain", () => {
+it("sums per-record counts when the diffs do not chain and still allows undo", () => {
   const blocks: Block[] = [
     { kind: "user", id: "u", text: "go" },
     tool("a", "same.ts", "a", "b"),
     tool("b", "same.ts", "x", "y"),
   ];
-  expect(collectTurnChanges(blocks, "u")[0]).toMatchObject({ edits: 2, additions: 2, deletions: 2, canUndo: false });
+  expect(collectTurnChanges(blocks, "u")[0]).toMatchObject({ edits: 2, additions: 2, deletions: 2, canUndo: true });
 });
 
 it("counts file creation and deletion without diff text", () => {

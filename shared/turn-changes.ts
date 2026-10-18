@@ -141,11 +141,6 @@ export function collectTurnChanges(blocks: readonly Block[], userBlockId: string
     }
     group.record.reverted = group.allReverted;
     group.record.partiallyReverted = !group.allReverted && group.anyPartiallyReverted;
-    // Multiple edits are only safely undoable as a file when they chain and
-    // the identity is not still a bare basename.
-    if (group.record.edits > 1 && (!group.chained || !/[\\/]/.test(group.record.key))) {
-      group.record.canUndo = false;
-    }
     return group.record;
   });
 }

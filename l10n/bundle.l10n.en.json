@@ -45,6 +45,7 @@
   "会话状态已变化，撤销已取消": "The session changed; undo was cancelled",
   "无法撤销：该文件缺少编辑前内容（可能是本轮新建的文件）": "Cannot undo: this file has no pre-edit content (it may have been created in this turn)",
   "文件内容与记录不一致（可能已被继续修改）。仍恢复到本轮开始前的内容？": "File content differs from the record (it may have been modified since). Restore the content from the start of this turn anyway?",
+  "本轮对该文件有 {0} 次修改记录且内容不连续，撤销将恢复到本轮开始前的内容。继续？": "This file has {0} recorded edits in this turn that do not line up sequentially. Undo will restore the content from the start of this turn. Continue?",
   "仍然撤销": "Undo Anyway",
   "已是本轮开始前的内容，无需撤销: {0}": "Already at this turn's starting content, nothing to undo: {0}",
   "已撤销本轮对该文件的全部修改: {0}": "Undid all changes to this file from this turn: {0}",
