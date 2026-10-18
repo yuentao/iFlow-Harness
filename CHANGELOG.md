@@ -3,6 +3,21 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [1.7.0] - 2026-10-19
+
+- 新增 记忆管理与项目知识库（F3 三阶段落地）：设置页「记忆」tab 读取并内联编辑 CLI 实际加载的全局与项目 AGENTS.md/IFLOW.md（按 ## iFlow Added Memories 追加/删除事实、新建项目记忆、token 成本展示、sha256 冲突检测，遗留 memory.md 只展示不注入）；助手消息行内「记住这条」与编辑器右键「记住选中内容」走 MemoryQuickAdd 弹窗（requestId 匹配自己的回包，防广播串包）；iflow.autoMemoryCapture（默认开）回合结束后用当前模型提取长期记忆候选（独立 lane 不阻塞 enhance/AI 标题、2 分钟限流、归一化去重 + 置信度 ≥0.6 + 最多 5 条），只进审阅对话框确认才写盘；项目知识库生成 .iflow/knowledge/index.md + manifest.json（2000 文件上限扫描、增量刷新仅变化时调模型、基线 hash 不匹配强制显式全量重建、注入托管块 @import 并遵循 contextFileName 遍历全部项目记忆文件防重复展开）
+- 新增 首次引导向导与提供商预设配置：OnboardingWizard 引导网关/凭据/模型首次配置，provider-presets 预设切换不继承旧网关模型名防「新端点 + 旧模型」错配
+- 新增 计划规格持久化与会话导航快捷键：Plan 卡计划落盘 .iflow/specs/ 供跨会话追溯；会话导航快捷键快速切换历史会话
+- 新增 终端工具卡增强与 @terminal 上下文及诊断变化推送：终端记录捕获注入上下文，@terminal 补全把当前终端内容带进 prompt，诊断变化实时推送
+- 新增 轮次变更摘要与设置面板重构：turn-changes 每轮结束汇总本轮文件变更；设置面板 7 个一级分类布局，新增主题与通知配置、字号/密度调节、下一步建议候选词与自动压缩开关
+- 新增 MCP 连接状态指示与详情子页：MCP 卡片行首状态圆点（connected 绿/connecting 蓝/disconnected 红）+ ≈N tokens 上下文 chip（真实 BPE 口径）+ 详情子页（错误框/transport/tools schema/prompts）+ 手动刷新；MCP 工具专属呈现（Plug 图标 + 服务器名副标题）与执行卡实时命令行展示；MCP 工具声明注入自动上下文卡（经 mcp-status 通道查询各 server 工具声明，未连接者诚实标注不伪造）
+- 新增 工具卡片语义化呈现与参数审计视图：按工具名映射标签/图标/强调色，执行参数结构化 key/value 摘要 + 原始参数懒挂载折叠；推理级别选择（自动/快速/平衡/深度）+ 思考能力规则同步（iflow.thinkingModelRules 设置与 ~/.iflow/thinking-models.json 双向同步，不支持思考的模型灰化推理级别）
+- 新增 OS 级系统通知投递与策略收敛：原生 toast 传输层（macOS terminal-notifier 带 vscode:// 点击穿透、Windows SnoreToast），原生不可用回退 IDE 内消息；通知收敛为审批/提问/计划卡与整轮完成四触发点 + 60s 内容冷却 + 1.5s 延迟复检槽位归属，修复并行权限请求碰撞产生幽灵通知；SubAgent 审批静默只留面板
+- 新增 上下文透明卡与压缩/规划状态指示：模型实际携带的 system prompt/记忆/context files 渲染成注入卡；压缩/规划进行中 pill；下一步预测 loading pill（in-flight 独立通道发布，settle 即清防 stuck spinner）
+- 新增 系统提示词覆写随包交付：spawnEnv 注入 IFLOW_SYSTEM_MD 指向 VSIX 内模板，{{iflow:Name}} token 由 system-prompt-refactor Mod 从内置模板 splice 回填，cwd/git HEAD/当前模型/分支快照保持 live，session/load 恢复会话同样覆写
+- 优化 上下文占用锚定语义与缓存读取拆分：lastRequestInputTokens 锚点 + 自身输出 prefill + 增量块三段口径（整份转录重折会漂移约 2 倍），缓存读取只作成本拆分不二次计入占用；vendor:cli 默认源改为本地 fork checkout ../iflow-fork（npm registry 永久滞后本地 Mod 注入，缺 checkout 硬 fail 报错不兜底）
+- 修复 工具卡片标题与副标题 flexbox 挤压截断（标题永不收缩 + 副标题高权重吞溢出）；审批卡片快捷键误授权（隐藏卡片/SELECT 聚焦/事件已 defaultPrevented 时不响应）；压缩轮次误触发记忆提取；文件撤销确认流程
+
 ## [1.6.0] - 2026-10-13
 
 - 新增 审批卡内嵌 Diff 预览：编辑类工具审批卡渲染只读 DiffView 的 pending diff（256KB 单侧上限，超限整体丢弃而非截半——半截 diff 是撒谎的 diff），用户批的是变更本身而非一个标题；放行按钮风险分层「允许一次」实心渐变主按钮 vs 「始终允许」描边+图标，不可肌肉记忆混淆
