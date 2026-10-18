@@ -149,6 +149,12 @@ export interface ToolBlock extends BlockBase {
   /** Present when the update carried a structured diff (`type: "diff"`). */
   diff: ToolDiffUi | null;
   /**
+   * Webview-only: set by `evictBlockPayloads` when it releases `diff` (the
+   * host keeps the full record). Lets the turn-review entry stay available
+   * for old turns whose diff payload is no longer in the webview state.
+   */
+  hadDiff?: boolean;
+  /**
    * C4: the tool succeeded but its change was reverted (UI-only marker).
    * Orthogonal to `status` — marking reverted tools as `failed` leaked the
    * "failed" aggregate into SubAgent cards nesting successful tools.
@@ -911,7 +917,7 @@ function evictOneBlock(block: Block): Block {
   switch (block.kind) {
     case "tool": {
       if (block.output === "" && block.diff === null) return block;
-      return { ...block, output: "", truncatedChars: undefined, diff: null, evicted: true };
+      return { ...block, output: "", truncatedChars: undefined, diff: null, hadDiff: block.hadDiff === true || block.diff !== null, evicted: true };
     }
     case "thought": {
       if (block.text === "") return block;
@@ -1059,7 +1065,29 @@ export interface MemoryStateUi {
   error?: string;
 }
 
+export type TurnChangeUi = Pick<ToolBlock, "toolCallId" | "title" | "status" | "reverted" | "partiallyReverted"> & {
+  /** Grouping/undo identity: location path when available, else diff path. */
+  key: string;
+  /** Display + open path from the latest recorded diff. */
+  path: string;
+  additions: number;
+  deletions: number;
+  /** Number of recorded tool diffs aggregated into this file entry. */
+  edits: number;
+  /** False when the first recorded diff has no pre-edit text (new/unknown file). */
+  canUndo: boolean;
+};
+
+/** Panel typography preset, mirrored from `iflow.uiFontSize`. */
+export type UiFontSize = "compact" | "standard" | "large";
+
+/** Panel spacing density preset, mirrored from `iflow.uiDensity`. */
+export type UiDensity = "compact" | "standard" | "comfortable";
+
 export type HostToWebview =
+  | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
+  /** A single file's turn changes were reverted; refetch the turn records. */
+  | { type: "turnFileReverted"; sessionId: string; userBlockId: string; key: string }
   | { type: "snapshot"; state: SessionState; locale?: string }
   /**
    * P-1 incremental snapshot: the transcript tail range plus the small
@@ -1092,6 +1120,10 @@ export type HostToWebview =
       /** Host owns the pill's lifetime (e.g. the auto-compress notice): the
        * webview never auto-dismisses it — only a matching `dismissToast` does. */
       persistent?: boolean;
+      /** Keep the pill until the user closes it or the host dismisses it.
+       * Unlike `persistent`, the webview renders a close control and lets the
+       * user dismiss it locally (auto-memory candidate notices). */
+      sticky?: boolean;
       /** Optional inline action button (M1 P0-6: "立即压缩" on the
        * context-warning pill). Clicking it sends `toastAction` with this id;
        * the host performs the action and owns pill removal (persistent
@@ -1157,7 +1189,16 @@ export type HostToWebview =
    * is the source of truth; the host pushes this on `ready`, after every
    * change made in the panel, and when the user edits the setting directly in
    * VSCode. */
-  | { type: "hostSettings"; nextStepSuggestions: boolean; autoCompressOnIdle: boolean; autoMemoryCapture: boolean }
+  | {
+      type: "hostSettings";
+      nextStepSuggestions: boolean;
+      autoCompressOnIdle: boolean;
+      autoMemoryCapture: boolean;
+      /** `iflow.uiFontSize` — panel text size preset. */
+      uiFontSize: UiFontSize;
+      /** `iflow.uiDensity` — panel spacing density preset. */
+      uiDensity: UiDensity;
+    }
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
    * panel visibility; the webview only synthesizes on receipt. */
@@ -1277,7 +1318,10 @@ export type WebviewToHost =
    */
   | { type: "restoreCheckpoint"; userBlockId: string; mode: "files" | "conversation" | "both" }
   /** M5: open the tool's change in VSCode's native diff editor. */
-  | { type: "openDiff"; toolCallId: string }
+  | { type: "openDiff"; toolCallId: string; sessionId?: string }
+  | { type: "requestTurnChanges"; sessionId: string; userBlockId: string; requestId: string }
+  /** Undo every recorded diff for one file in the latest completed turn. */
+  | { type: "revertTurnFile"; sessionId: string; userBlockId: string; key: string }
   /** M5: fuzzy-search workspace files for the @-mention popup. M2 P0-4:
    * `kind: "folder"` searches directories instead (the popup shows folder
    * paths; selecting one attaches a @folder context card). */
@@ -1327,7 +1371,14 @@ export type WebviewToHost =
   /** Update mirrored extension settings from the settings panel. The host
    * writes VSCode configuration (global scope) and echoes `hostSettings`
    * with the effective values. Partial: omitted fields stay untouched. */
-  | { type: "setHostSettings"; nextStepSuggestions?: boolean; autoCompressOnIdle?: boolean; autoMemoryCapture?: boolean }
+  | {
+      type: "setHostSettings";
+      nextStepSuggestions?: boolean;
+      autoCompressOnIdle?: boolean;
+      autoMemoryCapture?: boolean;
+      uiFontSize?: UiFontSize;
+      uiDensity?: UiDensity;
+    }
   /** MCP management card opened: read the CURRENT `mcpServers` dict from
    * `~/.iflow/settings.json` (the CLI / external tools own that file — the
    * card must show disk truth, not a cached copy). Reply: `mcpServers`. */

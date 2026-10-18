@@ -146,6 +146,30 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
   const send = (text: string): Promise<void> => p.handleWebviewMessage({ type: "sendPrompt", text });
   const queue = (): QueuedPromptUi[] => p.store.getState().queue ?? [];
 
+  it("returns host-owned turn diffs with correlation and rejects stale sessions", async () => {
+    const post = vi.spyOn(p, "postToWebview").mockImplementation(() => {});
+    p.store.replaceState({ ...p.store.getState(), status: "idle", blocks: [
+      { kind: "user", id: "u", text: "go" },
+      { kind: "tool", toolCallId: "edit", title: "edit", status: "completed", diff: { path: "a", oldText: "a", newText: "b" } },
+    ] });
+    const request = { type: "requestTurnChanges", sessionId: "q-session", userBlockId: "u", requestId: "r" };
+    await p.handleWebviewMessage(request);
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ type: "turnChanges", requestId: "r", userBlockId: "u", unavailable: false, records: [expect.objectContaining({ toolCallId: "edit" })] }));
+    await p.handleWebviewMessage({ ...request, sessionId: "old" });
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ unavailable: true, records: [] }));
+    const open = vi.fn();
+    Object.assign(p, { openToolDiff: open });
+    await p.handleWebviewMessage({ type: "openDiff", sessionId: "old", toolCallId: "edit" });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("routes single-file undo with its turn anchor", async () => {
+    const revert = vi.fn();
+    Object.assign(p, { revertTurnFile: revert });
+    await p.handleWebviewMessage({ type: "revertTurnFile", sessionId: "q-session", userBlockId: "u", key: "src/a.ts" });
+    expect(revert).toHaveBeenCalledWith("q-session", "u", "src/a.ts");
+  });
+
   it("Enter while streaming enqueues: no user block, no CLI call", async () => {
     const first = send("first turn");
     await flush();

@@ -70,6 +70,19 @@ export interface MemoryServiceOptions {
   /** Model name recorded in the manifest. */
   getModelName: () => string | null;
   post: (message: HostToWebview) => void;
+  /** Prefer SessionStore.sendToast (assigns toastId so action clicks can
+   * dismiss immediately); the direct `post` toast is the fallback. */
+  sendToast?: (
+    level: "info" | "warning" | "error",
+    message: string,
+    opts?: {
+      durationMs?: number;
+      sticky?: boolean;
+      action?: { actionId: string; label: string };
+    },
+  ) => unknown;
+  /** Remove a previously posted toast (host-assigned id). */
+  dismissToast?: (toastId: number) => void;
   openFile: (file: string) => void;
 }
 
@@ -120,6 +133,8 @@ export class MemoryService {
   private lastExtractAt = 0;
   /** Candidate batch awaiting the user's review (never written automatically). */
   private pendingCandidates: { sessionId: string | null; candidates: MemoryCandidateUi[] } | null = null;
+  /** Host-assigned id of the sticky candidate toast (null when absent). */
+  private toastId: number | null = null;
   private knowledgeJob: string | null = null;
 
   constructor(private readonly options: MemoryServiceOptions) {}
@@ -133,7 +148,15 @@ export class MemoryService {
   invalidate(): void {
     this.invalidateDiscovery();
     this.pendingCandidates = null;
+    this.dismissCandidateToast();
     this.lastExtractAt = 0;
+  }
+
+  /** Remove the sticky candidate toast from the webview (idempotent). */
+  private dismissCandidateToast(): void {
+    if (this.toastId === null) return;
+    this.options.dismissToast?.(this.toastId);
+    this.toastId = null;
   }
 
   /** File-set changed but the session did not (e.g. a project memory file was
@@ -147,6 +170,7 @@ export class MemoryService {
     this.discovered = [];
     this.tokenCache.clear();
     this.pendingCandidates = null;
+    this.dismissCandidateToast();
   }
 
   async sendState(requestId?: number): Promise<void> {
@@ -403,13 +427,15 @@ export class MemoryService {
         return;
       }
       this.pendingCandidates = { sessionId, candidates };
-      this.options.post({
-        type: "toast",
-        level: "info",
-        message: vscode.l10n.t("发现 {0} 条可记忆内容", candidates.length),
-        durationMs: 15_000,
-        action: { actionId: "memory-review", label: vscode.l10n.t("查看") },
-      });
+      const message = vscode.l10n.t("发现 {0} 条可记忆内容，是否追加到记忆？", candidates.length);
+      const action = { actionId: "memory-review", label: vscode.l10n.t("追加记忆") };
+      this.dismissCandidateToast();
+      if (this.options.sendToast) {
+        const toastId = this.options.sendToast("info", message, { sticky: true, action });
+        if (typeof toastId === "number") this.toastId = toastId;
+      } else {
+        this.options.post({ type: "toast", level: "info", message, sticky: true, action });
+      }
       this.options.log.info(`memory extraction: ${candidates.length} candidates`);
     } catch (error) {
       this.options.log.warn(`memory extraction failed: ${messageOf(error)}`);
@@ -425,6 +451,7 @@ export class MemoryService {
     const current = this.options.getSessionId();
     if (pending.sessionId && current !== pending.sessionId) {
       this.pendingCandidates = null;
+      this.dismissCandidateToast();
       return;
     }
     this.options.post({
@@ -495,6 +522,7 @@ export class MemoryService {
 
   dismissCandidates(_sessionId: string | null): void {
     this.pendingCandidates = null;
+    this.toastId = null;
   }
 
   private async collectExistingFacts(): Promise<string[]> {

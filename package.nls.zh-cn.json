@@ -15,6 +15,8 @@
   "iflow.configuration.warmStart.description": "窗口打开时即在后台启动 iFlow CLI，首次打开聊天面板无需等待（每个窗口约占用 100MB 内存）",
   "iflow.configuration.soundFeedback.description": "对话生成完成或失败时播放提示音",
   "iflow.configuration.auroraIntensity.description": "背景光斑强度（%）",
+  "iflow.configuration.uiFontSize.description": "面板字号：紧凑（11px 基准）、标准（约 12px，默认）、大（约 13px）。",
+  "iflow.configuration.uiDensity.description": "面板密度：紧凑、标准（默认）、宽松。只影响内边距与间距，不改变字号。",
   "iflow.configuration.restoreLastSession.description": "面板启动时恢复上次使用的会话，而不是新建会话（无可恢复记录时自动回退为新建会话）",
   "iflow.configuration.autoOpenPanel.description": "VSCode 启动时自动打开聊天面板",
   "iflow.configuration.language.description": "写入 `~/.iflow/settings.json` 的 iFlow CLI 界面语言。留空表示不修改 CLI 自身的值。重启 CLI 后生效。",

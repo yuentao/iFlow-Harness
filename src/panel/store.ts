@@ -269,6 +269,8 @@ export class SessionStore {
    * `displayOnly` renders the pill as display-only (no click-to-dismiss);
    * `persistent` keeps the pill until `dismissToast(toastId)` (the WebView
    * never auto-dismisses it — used for host-owned waits like auto-compress).
+   * `sticky` also skips the auto-dismiss timer, but the WebView renders a
+   * close control and the user may dismiss it locally (auto-memory notices).
    * Returns the host-assigned toast id. */
   private toastSeq = 0;
   sendToast(
@@ -279,6 +281,7 @@ export class SessionStore {
       countdownDeadline?: number;
       displayOnly?: boolean;
       persistent?: boolean;
+      sticky?: boolean;
       action?: { actionId: string; label: string };
     },
   ): number {
@@ -292,6 +295,7 @@ export class SessionStore {
       displayOnly: opts?.displayOnly,
       toastId,
       persistent: opts?.persistent,
+      sticky: opts?.sticky,
       action: opts?.action,
     });
     return toastId;

@@ -208,6 +208,31 @@ function GeneralSection() {
       <p className="text-[11px] leading-relaxed text-muted-foreground/85">
         {t("默认关闭。开启后每轮可能产生一次额外模型调用；自动提取只生成候选，不会自动写入。")}
       </p>
+      <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {t("界面")}
+      </div>
+      <ChoiceRow
+        label={t("字号")}
+        description={t("调整面板中文字的大小；标准档会把常用的 11px 小字提升到约 12px。")}
+        value={settings.uiFontSize}
+        options={[
+          { value: "compact", label: t("紧凑") },
+          { value: "standard", label: t("标准") },
+          { value: "large", label: t("大") },
+        ]}
+        onChange={(uiFontSize) => updateHostSetting({ uiFontSize })}
+      />
+      <ChoiceRow
+        label={t("密度")}
+        description={t("调整控件内边距与间距；不影响字号。")}
+        value={settings.uiDensity}
+        options={[
+          { value: "compact", label: t("紧凑") },
+          { value: "standard", label: t("标准") },
+          { value: "comfortable", label: t("宽松") },
+        ]}
+        onChange={(uiDensity) => updateHostSetting({ uiDensity })}
+      />
     </div>
   );
 }
@@ -246,6 +271,51 @@ function ToggleRow({
           }`}
         />
       </button>
+    </div>
+  );
+}
+
+/** One labeled segmented control row shared by the appearance presets. */
+function ChoiceRow<T extends string>({
+  label,
+  description,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="flex items-start gap-2.5 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+      <div className="min-w-0 flex-1">
+        <div className="text-[12px] font-semibold text-foreground">{label}</div>
+        <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+      </div>
+      <div
+        role="group"
+        aria-label={label}
+        className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-0.5"
+      >
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={value === option.value}
+            className={`press rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+              value === option.value
+                ? "bg-primary/15 font-semibold text-primary"
+                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+            }`}
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

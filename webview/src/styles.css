@@ -51,6 +51,16 @@
   color-scheme: light;
   --radius: 0.5rem;
 
+  /* Panel typography / density (iflow.uiFontSize / iflow.uiDensity). The
+     store writes these inline on <html> from the hostSettings message; the
+     fallbacks here match the "standard" preset so the first paint never
+     flashes the old compact sizing. Density only rescales Tailwind's spacing
+     token — text sizes are covered by the utility overrides at the end of
+     this file. */
+  --ui-font-scale: 1.1;
+  --ui-density: 1;
+  --spacing: calc(0.25rem * var(--ui-density));
+
   --background: oklch(1 0 0);
   --foreground: oklch(0.25 0.018 275);
 
@@ -299,7 +309,7 @@
     background: var(--wallpaper);
     color: var(--color-foreground);
     font-family: var(--font-sans);
-    font-size: 13px;
+    font-size: calc(13px * var(--ui-font-scale));
     -webkit-font-smoothing: antialiased;
     /* Selection policy: UI chrome (buttons, chips, titles, labels) must not
        paint a selection when dragged over. `user-select: auto` resolves to
@@ -762,7 +772,7 @@ textarea:focus-visible {
 .tool-card-section-label {
   margin-bottom: 5px;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-font-scale));
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -783,13 +793,17 @@ textarea:focus-visible {
 }
 .tool-card-param-key {
   color: var(--muted-foreground);
-  font: 10px/1.4 var(--font-mono);
+  font-family: var(--font-mono);
+  font-size: calc(10px * var(--ui-font-scale));
+  line-height: 1.4;
 }
 .tool-card-param-value {
   min-width: 0;
   overflow: hidden;
   color: var(--foreground);
-  font: 11px/1.4 var(--font-mono);
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--ui-font-scale));
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -802,7 +816,7 @@ textarea:focus-visible {
   margin-top: 6px;
   padding: 6px 12px 7px;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-font-scale));
   text-align: left;
 }
 .tool-card-raw-toggle:hover {
@@ -911,7 +925,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   border-radius: 13px;
-  font-size: 20px;
+  font-size: calc(20px * var(--ui-font-scale));
   filter: drop-shadow(0 6px 20px color-mix(in oklab, var(--primary) 30%, transparent));
 }
 
@@ -996,7 +1010,7 @@ pre {
   white-space: pre;
   overflow-wrap: normal;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ui-font-scale));
   line-height: 1.6;
 }
 
@@ -1013,7 +1027,7 @@ pre {
   right: 6px;
   z-index: 2;
   padding: 2px 8px;
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-font-scale));
   line-height: 1.4;
   color: var(--muted-foreground);
   background: color-mix(in oklab, var(--surface-2) 82%, transparent);
@@ -1080,7 +1094,7 @@ pre {
   left: 10px;
   z-index: 2;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-font-scale));
   line-height: 1.4;
   color: var(--muted-foreground);
   pointer-events: none;
@@ -1226,7 +1240,7 @@ pre {
 .md table {
   border-collapse: collapse;
   margin: 0.5em 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
 }
 
 .md th,
@@ -1458,14 +1472,14 @@ pre {
 }
 
 .splash-title {
-  font-size: 20px;
+  font-size: calc(20px * var(--ui-font-scale));
   font-weight: 800;
   letter-spacing: 0.02em;
 }
 
 .splash-sub {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--ui-font-scale));
   letter-spacing: 0.28em;
   text-transform: uppercase;
   color: var(--color-muted-foreground);
@@ -1473,7 +1487,7 @@ pre {
 
 .splash-hint {
   margin-top: 10px;
-  font-size: 12px;
+  font-size: calc(12px * var(--ui-font-scale));
   color: var(--color-muted-foreground);
 }
 
@@ -1581,4 +1595,41 @@ pre {
     opacity: 1;
     transform: none;
   }
+}
+
+/* --- font-size scale (iflow.uiFontSize) ---------------------------------
+   Tailwind's `text-[Npx]` utilities are emitted inside `@layer utilities`
+   with fixed lengths. These UNLAYERED rules win the cascade (unlayered
+   normal declarations outrank every layer) and multiply each size by the
+   `--ui-font-scale` the webview store writes from `hostSettings`. Keep this
+   list in sync when a new hard-coded text size appears in a component. */
+.text-\[9px\] {
+  font-size: calc(9px * var(--ui-font-scale));
+}
+.text-\[9\.5px\] {
+  font-size: calc(9.5px * var(--ui-font-scale));
+}
+.text-\[10px\] {
+  font-size: calc(10px * var(--ui-font-scale));
+}
+.text-\[10\.5px\] {
+  font-size: calc(10.5px * var(--ui-font-scale));
+}
+.text-\[11px\] {
+  font-size: calc(11px * var(--ui-font-scale));
+}
+.text-\[11\.5px\] {
+  font-size: calc(11.5px * var(--ui-font-scale));
+}
+.text-\[12px\] {
+  font-size: calc(12px * var(--ui-font-scale));
+}
+.text-\[12\.5px\] {
+  font-size: calc(12.5px * var(--ui-font-scale));
+}
+.text-\[13px\] {
+  font-size: calc(13px * var(--ui-font-scale));
+}
+.text-\[14px\] {
+  font-size: calc(14px * var(--ui-font-scale));
 }

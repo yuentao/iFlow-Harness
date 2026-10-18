@@ -15,6 +15,8 @@
   "iflow.configuration.warmStart.description": "Start the iFlow CLI in the background when the window opens, so the chat panel is ready instantly on first open (uses ~100MB memory per window)",
   "iflow.configuration.soundFeedback.description": "Play a short sound when a turn completes or fails",
   "iflow.configuration.auroraIntensity.description": "Background aurora light-spot intensity (%)",
+  "iflow.configuration.uiFontSize.description": "Panel text size: compact (11px baseline), standard (about 12px, default), large (about 13px).",
+  "iflow.configuration.uiDensity.description": "Panel spacing density: compact, standard (default), or comfortable. Affects padding and gaps only, not text size.",
   "iflow.configuration.restoreLastSession.description": "Restore the last used session when the panel starts, instead of opening a fresh session (falls back to a new session when nothing is restorable)",
   "iflow.configuration.autoOpenPanel.description": "Open the chat panel automatically when VSCode starts",
   "iflow.configuration.language.description": "iFlow CLI interface language written to `~/.iflow/settings.json`. Empty = leave the CLI's own value untouched. Takes effect after a CLI restart.",

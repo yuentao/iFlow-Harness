@@ -24,6 +24,16 @@ export function isEnglishLocale(): boolean {
 }
 
 const en: Record<string, string> = {
+  "本轮变更": "Changes this turn",
+  "1 个文件已更改": "1 file changed",
+  "{0} 个文件已更改": "{0} files changed",
+  "{0} 次修改": "{0} edits",
+  "仅列出已记录的工具差异文件，不保证覆盖全部磁盘修改或代表当前净变更。点击文件在编辑器中打开。": "Lists files with recorded tool diffs; may not cover all disk changes or the current net change. Click a file to open it in the editor.",
+  "在编辑器中打开": "Open in editor",
+  "撤销此文件的本轮修改": "Undo this file's changes from this turn",
+  "该轮次已不可用。": "This turn is no longer available.",
+  "正在读取本轮变更…": "Loading turn changes…",
+  "本轮没有可展示的变更记录；这不表示没有文件修改。": "No change records are available for this turn; files may still have changed.",
   // loading / topbar
   "连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）":
     "Connecting… (iFlow CLI startup can take 10+ seconds, longer with multiple MCP servers)",
@@ -472,6 +482,16 @@ const en: Record<string, string> = {
     "After a turn settles, if context occupancy reaches 95%, compress the conversation before continuing the next turn (one extra compress turn).",
   "默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。":
     "Off by default. When disabled, compression still runs after the gateway reports context overflow, and the「立即压缩」action remains available.",
+  "界面": "Interface",
+  "字号": "Font size",
+  "调整面板中文字的大小；标准档会把常用的 11px 小字提升到约 12px。":
+    "Adjusts text size in the panel; Standard raises the common 11px small text to about 12px.",
+  "密度": "Density",
+  "调整控件内边距与间距；不影响字号。":
+    "Adjusts control padding and spacing; does not change text size.",
+  "紧凑": "Compact",
+  "大": "Large",
+  "宽松": "Comfortable",
   // F3 memory manager (Phase 1)
   "全局记忆": "Global memory",
   "项目记忆": "Project memory",

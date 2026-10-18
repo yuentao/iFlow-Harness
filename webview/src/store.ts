@@ -11,13 +11,39 @@ import {
   type MemoryStateUi,
   type SessionState,
   type SessionSummaryUi,
+  type UiDensity,
+  type UiFontSize,
   type WebviewToHost,
 } from "../../shared/messages";
+import { collectTurnChanges } from "../../shared/turn-changes";
 
 declare const acquireVsCodeApi: () => { postMessage: (msg: unknown) => void };
 
 interface HostApi {
   postMessage: (msg: unknown) => void;
+}
+
+/**
+ * `iflow.uiFontSize` / `iflow.uiDensity` → CSS multipliers.
+ *
+ * Text sizes are hard-coded px utilities all over the panel, so the
+ * stylesheet redefines each `text-[Npx]` class as
+ * `calc(Npx * var(--ui-font-scale))`; density scales Tailwind's `--spacing`
+ * token instead. The defaults (and the CSS fallbacks) match the "standard"
+ * preset — it lifts the old 11px baseline to ~12px, addressing the
+ * readability concern that motivated the setting.
+ */
+const UI_FONT_SCALES: Record<UiFontSize, number> = { compact: 1, standard: 1.1, large: 1.2 };
+const UI_DENSITY_SCALES: Record<UiDensity, number> = {
+  compact: 0.94,
+  standard: 1,
+  comfortable: 1.08,
+};
+
+function applyUiScale(fontSize: UiFontSize, density: UiDensity): void {
+  const style = document.documentElement.style;
+  style.setProperty("--ui-font-scale", String(UI_FONT_SCALES[fontSize] ?? UI_FONT_SCALES.standard));
+  style.setProperty("--ui-density", String(UI_DENSITY_SCALES[density] ?? UI_DENSITY_SCALES.standard));
 }
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
@@ -109,10 +135,18 @@ function createMockHost(): HostApi {
   // (mirrors the host's replace semantics).
   let mockMcpServers: Record<string, unknown> | undefined;
   /** Mirrors the real host's mirrored extension settings (default on). */
-  const mockHostSettings = {
+  const mockHostSettings: {
+    nextStepSuggestions: boolean;
+    autoCompressOnIdle: boolean;
+    autoMemoryCapture: boolean;
+    uiFontSize: UiFontSize;
+    uiDensity: UiDensity;
+  } = {
     nextStepSuggestions: true,
     autoCompressOnIdle: false,
     autoMemoryCapture: false,
+    uiFontSize: "standard",
+    uiDensity: "standard",
   };
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
   // the host's approvalPolicy message.
@@ -700,6 +734,20 @@ function createMockHost(): HostApi {
         });
         return;
       }
+      if (m.type === "requestTurnChanges") {
+        broadcast({
+          type: "turnChanges",
+          sessionId: m.sessionId,
+          userBlockId: m.userBlockId,
+          requestId: m.requestId,
+          records:
+            m.sessionId === demoMeta.activeSessionId
+              ? collectTurnChanges(demoBlocks, m.userBlockId)
+              : [],
+          unavailable: false,
+        });
+        return;
+      }
       if (m.type === "setHostSettings") {
         if (typeof m.nextStepSuggestions === "boolean") {
           mockHostSettings.nextStepSuggestions = m.nextStepSuggestions;
@@ -724,6 +772,14 @@ function createMockHost(): HostApi {
         }
         if (typeof m.autoMemoryCapture === "boolean") {
           mockHostSettings.autoMemoryCapture = m.autoMemoryCapture;
+        }
+        if (m.uiFontSize) {
+          mockHostSettings.uiFontSize = m.uiFontSize;
+          applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
+        }
+        if (m.uiDensity) {
+          mockHostSettings.uiDensity = m.uiDensity;
+          applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
         }
         broadcast({ type: "hostSettings", ...mockHostSettings });
         return;
@@ -1671,6 +1727,9 @@ export interface ToastItem {
   /** Host owns this pill's lifetime (auto-compress notice): never auto-dismissed
    * by the WebView — removed only when the host sends `dismissToast`. */
   persistent?: boolean;
+  /** No auto-dismiss timer, but the user may close it locally (auto-memory
+   * candidate notice). Distinct from `persistent`, which renders non-clickable. */
+  sticky?: boolean;
   /** M1 P0-6: inline action button (e.g. 立即压缩 on the context-warning
    * pill). Clicking sends `toastAction` with the actionId + host toastId. */
   action?: { actionId: string; label: string };
@@ -1686,11 +1745,19 @@ interface ChatStore {
    * values on ready and after every change. The optimistic local write in
    * `updateHostSetting` keeps the switch responsive while the round trip runs.
    */
-  hostSettings: { nextStepSuggestions: boolean; autoCompressOnIdle: boolean; autoMemoryCapture: boolean };
+  hostSettings: {
+    nextStepSuggestions: boolean;
+    autoCompressOnIdle: boolean;
+    autoMemoryCapture: boolean;
+    uiFontSize: UiFontSize;
+    uiDensity: UiDensity;
+  };
   updateHostSetting: (patch: {
     nextStepSuggestions?: boolean;
     autoCompressOnIdle?: boolean;
     autoMemoryCapture?: boolean;
+    uiFontSize?: UiFontSize;
+    uiDensity?: UiDensity;
   }) => void;
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
@@ -1742,7 +1809,13 @@ import { setLocale } from "./i18n";
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
-  hostSettings: { nextStepSuggestions: true, autoCompressOnIdle: false, autoMemoryCapture: false },
+  hostSettings: {
+    nextStepSuggestions: true,
+    autoCompressOnIdle: false,
+    autoMemoryCapture: false,
+    uiFontSize: "standard",
+    uiDensity: "standard",
+  },
   pending: null,
   promptSeq: 0,
   headerScrolled: false,
@@ -1824,11 +1897,16 @@ export const useChat = create<ChatStore>((set, get) => ({
       return;
     }
     if (msg.type === "hostSettings") {
+      const uiFontSize = msg.uiFontSize ?? "standard";
+      const uiDensity = msg.uiDensity ?? "standard";
+      applyUiScale(uiFontSize, uiDensity);
       set({
         hostSettings: {
           nextStepSuggestions: msg.nextStepSuggestions,
           autoCompressOnIdle: msg.autoCompressOnIdle,
           autoMemoryCapture: msg.autoMemoryCapture,
+          uiFontSize,
+          uiDensity,
         },
       });
       return;
@@ -1849,6 +1927,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       const id = ++toastSeq;
       const countdownDeadline = msg.countdownDeadline;
       const persistent = msg.persistent === true;
+      const sticky = msg.sticky === true;
       set((s) => ({
         toasts: [
           ...s.toasts,
@@ -1860,15 +1939,17 @@ export const useChat = create<ChatStore>((set, get) => ({
             displayOnly: msg.displayOnly,
             toastId: msg.toastId,
             persistent,
+            sticky,
             action: msg.action,
           },
         ],
       }));
       // Persistent pills are host-owned (e.g. the auto-compress notice): they
-      // stay until the host sends `dismissToast`. Countdown toasts live until
-      // the host's deadline; others get a clamped default lifetime (5s, host
-      // may extend to 15s).
-      if (!persistent) {
+      // stay until the host sends `dismissToast`. Sticky pills (auto-memory
+      // candidates) also stay, but the user may close them locally. Countdown
+      // toasts live until the host's deadline; others get a clamped default
+      // lifetime (5s, host may extend to 15s).
+      if (!persistent && !sticky) {
         const duration = countdownDeadline !== undefined
           ? Math.max(0, countdownDeadline - Date.now())
           : Math.min(Math.max(msg.durationMs ?? 5000, 2000), 15_000);
@@ -1898,7 +1979,9 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "approvalPolicy" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
-      msg.type === "contextResolved"
+      msg.type === "contextResolved" ||
+      msg.type === "turnChanges" ||
+      msg.type === "turnFileReverted"
     ) {
       return;
     }
@@ -1918,6 +2001,8 @@ export const useChat = create<ChatStore>((set, get) => ({
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   updateHostSetting: (patch) => {
     set((s) => ({ hostSettings: { ...s.hostSettings, ...patch } }));
+    const next = get().hostSettings;
+    applyUiScale(next.uiFontSize, next.uiDensity);
     get().send({ type: "setHostSettings", ...patch });
   },
   send: (msg) => {

@@ -154,6 +154,26 @@
           "maximum": 100,
           "description": "%iflow.configuration.auroraIntensity.description%"
         },
+        "iflow.uiFontSize": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "standard",
+            "large"
+          ],
+          "default": "standard",
+          "description": "%iflow.configuration.uiFontSize.description%"
+        },
+        "iflow.uiDensity": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "standard",
+            "comfortable"
+          ],
+          "default": "standard",
+          "description": "%iflow.configuration.uiDensity.description%"
+        },
         "iflow.restoreLastSession": {
           "type": "boolean",
           "default": false,

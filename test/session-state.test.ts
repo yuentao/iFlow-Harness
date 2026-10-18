@@ -2371,6 +2371,8 @@ describe("evictBlockPayloads (webview long-session memory bound)", () => {
     expect(evicted.evicted).toBe(true);
     expect(evicted.output).toBe("");
     expect(evicted.diff).toBeNull();
+    // The turn-review entry must survive eviction (host still has the diff).
+    expect(evicted.hadDiff).toBe(true);
     expect(evicted.truncatedChars).toBeUndefined();
     // Identity markers survive — revert chips still render on evicted cards.
     expect(evicted.toolCallId).toBe("old");

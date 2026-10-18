@@ -475,6 +475,21 @@ describe("SessionStore toast lifecycle (persistent display-only notices)", () =>
     expect(t2.persistent).toBeUndefined();
   });
 
+  it("forwards sticky so the webview keeps the pill until the user closes it", () => {
+    const { store, messages } = makeStore();
+    const id = store.sendToast("info", "发现 1 条可记忆内容，是否追加到记忆？", {
+      sticky: true,
+      action: { actionId: "memory-review", label: "追加记忆" },
+    });
+    const msg = messages[0]!;
+    expect(msg.type).toBe("toast");
+    if (msg.type !== "toast") throw new Error("unreachable");
+    expect(msg.toastId).toBe(id);
+    expect(msg.sticky).toBe(true);
+    expect(msg.persistent).toBeUndefined();
+    expect(msg.durationMs).toBeUndefined();
+  });
+
   it("dismissToast posts a dismissToast carrying the toastId", () => {
     const { store, messages } = makeStore();
     const id = store.sendToast("info", "压缩中…", { displayOnly: true, persistent: true });

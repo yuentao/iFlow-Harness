@@ -483,6 +483,11 @@ describe("MemoryService", () => {
       (message) => message.type === "toast" && message.action?.actionId === "memory-review",
     );
     expect(toast).toBeTruthy();
+    if (!toast || toast.type !== "toast") throw new Error("no memory toast");
+    expect(toast.action?.label).toBe("追加记忆");
+    expect(toast.message).toContain("是否追加");
+    expect(toast.sticky).toBe(true);
+    expect(toast.durationMs).toBeUndefined();
     service.reviewCandidates();
     const review = messages.find((message) => message.type === "memoryCandidates");
     expect(review?.type).toBe("memoryCandidates");

@@ -53,6 +53,8 @@ import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown } from "./Markdown";
 import { DiffView } from "./DiffView";
+import { TurnChanges } from "./TurnChanges";
+import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
 import { Chip, ConfirmDialog, FileRef } from "./ui";
 import logo from "../assets/iflow.svg";
 
@@ -1225,6 +1227,7 @@ const EXAMPLE_PROMPTS = [
 ];
 
 function MessageListInner({ state }: { state: SessionState }) {
+  const turnsWithDiffs = useMemo(() => turnsWithChanges(state.blocks), [state.blocks]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const setHeaderScrolled = useChat((s) => s.setHeaderScrolled);
   // Everything inside the scroller (blocks + streaming indicator) lives in
@@ -1265,6 +1268,16 @@ function MessageListInner({ state }: { state: SessionState }) {
     () => (focusMode ? state.blocks.filter((b) => b.kind === "user" || (b.kind === "text" && !b.system)) : state.blocks),
     [state.blocks, focusMode],
   );
+  // Turn-review entry anchor: the user block that opened each rendered
+  // segment. Rendered at the segment's end so the entry stays visible at the
+  // bottom of the latest turn instead of scrolling away above a long reply.
+  const turnUserByIndex = useMemo(() => {
+    let current: string | undefined;
+    return visibleBlocks.map((block) => {
+      if (block.kind === "user") current = block.id;
+      return current;
+    });
+  }, [visibleBlocks]);
   // M3 P0-1: index the turn checkpoints by their anchor user-block id so each
   // user bubble can look up its own rollback entry in O(1).
   const checkpointByBlockId = useMemo(() => {
@@ -1605,6 +1618,8 @@ function MessageListInner({ state }: { state: SessionState }) {
           )}
           {visibleBlocks.slice(start).map((block, idx) => {
             const i = start + idx; // absolute index: stable across expansions
+            const turnId = turnUserByIndex[i];
+            const atTurnEnd = i === total - 1 || visibleBlocks[i + 1]?.kind === "user";
             return (
               <div key={block.id ?? `idx-${i}`} className="cv-block">
                 <BlockView
@@ -1628,6 +1643,9 @@ function MessageListInner({ state }: { state: SessionState }) {
         onRemember={onRemember}
         onEditingChange={handleEditingChange}
       />
+                {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state, turnId) && (
+                  <TurnChanges key={turnId} sessionId={state.sessionId!} userBlockId={turnId} />
+                )}
               </div>
             );
           })}
@@ -1755,7 +1773,8 @@ function MessageListInner({ state }: { state: SessionState }) {
  * rendered as a centered stack above the streaming indicator. Plain toasts
  * auto-dismiss on a timer and dismiss early on click; countdown retries and
  * display-only/persistent pills are not clickable — persistent ones stay
- * until the host removes them (dismissToast). */
+ * until the host removes them (dismissToast). Sticky pills (auto-memory
+ * candidates) never auto-dismiss but the user may close them. */
 function Toasts({ skipToastId }: { skipToastId?: number }) {
   const toasts = useChat((s) => s.toasts);
   const visible = skipToastId === undefined ? toasts : toasts.filter((x) => x.id !== skipToastId);
@@ -1769,7 +1788,7 @@ function Toasts({ skipToastId }: { skipToastId?: number }) {
       className="pointer-events-none absolute inset-x-0 z-20 flex flex-col items-center gap-1.5 px-3"
       style={{ bottom: "calc(3.5rem + var(--pending-card-h, 0px))" }}
     >
-      {toasts.map((t) => (
+      {visible.map((t) => (
         <ToastPill key={t.id} toast={t} />
       ))}
     </div>
@@ -1831,11 +1850,53 @@ function ToastPill({ toast }: { toast: ToastItem }) {
         {toast.action.label}
       </button>
     );
+  // Sticky pills (auto-memory candidates) stay until the user closes them or
+  // the host dismisses them. The message body and the explicit X both close;
+  // the action button remains a sibling (never nested in another button).
+  if (toast.sticky) {
+    return (
+      <div
+        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+      >
+        <button
+          type="button"
+          onClick={() => dismiss(toast.id)}
+          title={t("关闭")}
+          className="flex min-w-0 items-center gap-1.5 text-left"
+        >
+          {body}
+        </button>
+        {actionButton}
+        <button
+          type="button"
+          onClick={() => dismiss(toast.id)}
+          aria-label={t("关闭")}
+          title={t("关闭")}
+          className="ml-0.5 shrink-0 rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+    );
+  }
   // Display-only pills (countdown retries, host-flagged / persistent notices
   // like the context-overflow compress): the wait is owned by the host (it
   // dismisses the toast when the retry fires / the compress turn ends), so
   // clicking must not falsely imply the user can cancel or skip it.
   if (toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent) {
+    return (
+      <div
+        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+      >
+        {body}
+        {actionButton}
+      </div>
+    );
+  }
+  if (toast.action) {
+    // Normal toasts with an inline action must not be wrapped in the dismiss
+    // <button>: nesting the action button inside it is invalid HTML and the
+    // whole action silently disappears (memory-review toasts hit this path).
     return (
       <div
         className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}

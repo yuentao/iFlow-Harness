@@ -50,6 +50,7 @@ import type {
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode } from "../../shared/messages.js";
+import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
   enqueuePrompt as enqueuePromptUi,
@@ -339,6 +340,24 @@ const APPROVAL_POLICY_KEY = "iflow.approvalPolicy";
  * table so a repo can tighten (or loosen, within the hard-veto floor) the
  * user's rules. Read-only from the panel's side — never written back. */
 const APPROVAL_POLICY_PROJECT_FILE = ".iflow/approval.json";
+/** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
+const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
+/** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
+const UI_DENSITIES = ["compact", "standard", "comfortable"] as const;
+
+/** settings.json is user-editable — fall back to the default on a stale value. */
+function asUiFontSize(value: unknown): (typeof UI_FONT_SIZES)[number] {
+  return UI_FONT_SIZES.includes(value as (typeof UI_FONT_SIZES)[number])
+    ? (value as (typeof UI_FONT_SIZES)[number])
+    : "standard";
+}
+
+function asUiDensity(value: unknown): (typeof UI_DENSITIES)[number] {
+  return UI_DENSITIES.includes(value as (typeof UI_DENSITIES)[number])
+    ? (value as (typeof UI_DENSITIES)[number])
+    : "standard";
+}
+
 /** Cap on the per-workspace recent-session list. */
 const MAX_RECENT_SESSIONS = 20;
 /** Label until the first user prompt names the session. */
@@ -618,6 +637,8 @@ export class ChatPanel implements vscode.Disposable {
       runKnowledgePrompt: (prompt) => this.runKnowledgePrompt(prompt),
       getModelName: () => this.store.getState().currentModelId ?? null,
       post: (m) => this.postToWebview(m),
+      sendToast: (level, message, opts) => this.store.sendToast(level, message, opts),
+      dismissToast: (toastId) => this.store.dismissToast(toastId),
       openFile: (file) => {
         void vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
       },
@@ -669,6 +690,8 @@ export class ChatPanel implements vscode.Disposable {
             if (
               e.affectsConfiguration("iflow.nextStepSuggestions")
               || e.affectsConfiguration("iflow.autoMemoryCapture")
+              || e.affectsConfiguration("iflow.uiFontSize")
+              || e.affectsConfiguration("iflow.uiDensity")
             ) {
               this.postHostSettings();
             }
@@ -1248,7 +1271,19 @@ export class ChatPanel implements vscode.Disposable {
       case "restoreCheckpoint":
         await this.restoreCheckpoint(msg.userBlockId, msg.mode);
         break;
+      case "requestTurnChanges": {
+        const state = this.store.getState();
+        const available = state.sessionId === msg.sessionId && canReviewTurn(state, msg.userBlockId);
+        this.postToWebview({ type: "turnChanges", sessionId: msg.sessionId,
+          userBlockId: msg.userBlockId, requestId: msg.requestId,
+          records: available ? collectTurnChanges(state.blocks, msg.userBlockId) : [], unavailable: !available });
+        break;
+      }
+      case "revertTurnFile":
+        await this.revertTurnFile(msg.sessionId, msg.userBlockId, msg.key);
+        break;
       case "openDiff":
+        if (msg.sessionId !== undefined && msg.sessionId !== this.store.getState().sessionId) break;
         await this.openToolDiff(msg.toolCallId);
         break;
       case "searchFiles":
@@ -1313,6 +1348,20 @@ export class ChatPanel implements vscode.Disposable {
             await config.update(key, value, vscode.ConfigurationTarget.Global);
           } catch (error) {
             this.log.warn(`failed to update ${key}: ${errorMessage(error)}`);
+          }
+        }
+        if (msg.uiFontSize !== undefined && UI_FONT_SIZES.includes(msg.uiFontSize)) {
+          try {
+            await config.update("uiFontSize", msg.uiFontSize, vscode.ConfigurationTarget.Global);
+          } catch (error) {
+            this.log.warn(`failed to update uiFontSize: ${errorMessage(error)}`);
+          }
+        }
+        if (msg.uiDensity !== undefined && UI_DENSITIES.includes(msg.uiDensity)) {
+          try {
+            await config.update("uiDensity", msg.uiDensity, vscode.ConfigurationTarget.Global);
+          } catch (error) {
+            this.log.warn(`failed to update uiDensity: ${errorMessage(error)}`);
           }
         }
         // Turning suggestions off must also retract the chips already on screen.
@@ -1446,6 +1495,8 @@ export class ChatPanel implements vscode.Disposable {
       nextStepSuggestions: config.get<boolean>("nextStepSuggestions", true),
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
       autoMemoryCapture: config.get<boolean>("autoMemoryCapture", false),
+      uiFontSize: asUiFontSize(config.get<string>("uiFontSize", "standard")),
+      uiDensity: asUiDensity(config.get<string>("uiDensity", "standard")),
     });
   }
 
@@ -3076,6 +3127,135 @@ export class ChatPanel implements vscode.Disposable {
       // revert/diff-editor paths skip the basename-search fallback.
       this.store.toolDiffSynthesized(toolCallId, { ...diff, path: candidate });
       return;
+    }
+  }
+
+  /**
+   * Undo one file's changes in the LATEST completed turn by restoring the
+   * pre-edit text of its first recorded diff (the turn-start content).
+   * Multiple diffs grouped under the same location-aware identity are undone
+   * together.
+   *
+   * Safety: refuses during generation, on historical turns, when the first
+   * diff has no old text, or when the file has unsaved editor changes; asks
+   * before recreating a missing file or overwriting content that moved on.
+   * The disk is re-read immediately before writing, and session/status are
+   * revalidated after every dialog. Editor reloading is left to the file
+   * watcher — the dirty-buffer case was refused up front.
+   */
+  private async revertTurnFile(sessionId: string, userBlockId: string, key: string): Promise<void> {
+    const state = this.store.getState();
+    if (state.sessionId !== sessionId || !canReviewTurn(state, userBlockId)) return;
+    if (!isLatestTurn(state.blocks, userBlockId)) {
+      void vscode.window.showWarningMessage(vscode.l10n.t("仅可撤销最近一轮的文件修改"));
+      return;
+    }
+    if (state.status === "streaming" || state.status === "connecting") {
+      void vscode.window.showWarningMessage(vscode.l10n.t("当前正在生成，无法撤销文件修改"));
+      return;
+    }
+    const edits = collectTurnToolBlocks(state.blocks, userBlockId)
+      .filter((block) => block.diff && turnChangeKey(block) === key);
+    if (edits.length === 0) {
+      void vscode.window.showWarningMessage(vscode.l10n.t("本轮没有该文件的修改记录"));
+      return;
+    }
+    const first = edits[0]!;
+    const last = edits[edits.length - 1]!;
+    const oldText = first.diff!.oldText;
+    if (oldText === null) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("无法撤销：该文件缺少编辑前内容（可能是本轮新建的文件）"),
+      );
+      return;
+    }
+    const lastNew = last.diff!.newText;
+    const chosen =
+      lastNew === null && path.isAbsolute(last.diff!.path)
+        ? this.resolveAgentPathToAbsolute(last.diff!.path)
+        : await this.locateDiffFile(last);
+    if (!chosen) return;
+
+    const fileUri = vscode.Uri.file(chosen);
+    let currentText: string | null = null;
+    try {
+      currentText = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString("utf8");
+    } catch {
+      // Missing on disk: writing oldText recreates it.
+    }
+    const openDoc = vscode.workspace.textDocuments.find(
+      (d) => d.uri.fsPath.toLowerCase() === fileUri.fsPath.toLowerCase(),
+    );
+    if (openDoc?.isDirty) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("该文件在编辑器中有未保存的修改，请先保存或还原后再撤销"),
+      );
+      return;
+    }
+
+    const markReverted = (): void => {
+      // The store must still be the same session; a switch during a dialog
+      // must never stamp tool ids in the new transcript.
+      if (this.store.getState().sessionId !== sessionId) return;
+      for (const edit of edits) {
+        const current = findToolBlockById(this.store.getState().blocks, edit.toolCallId);
+        if (current && !current.reverted) this.store.toolReverted(edit.toolCallId);
+      }
+    };
+
+    if (currentText === oldText) {
+      markReverted();
+      void vscode.window.showInformationMessage(vscode.l10n.t("已是本轮开始前的内容，无需撤销: {0}", chosen));
+      this.postToWebview({ type: "turnFileReverted", sessionId, userBlockId, key });
+      return;
+    }
+    if (currentText === null && lastNew !== null) {
+      const pick = await vscode.window.showWarningMessage(
+        vscode.l10n.t("该文件当前不存在，撤销将按本轮开始前的内容重建。继续？"),
+        { modal: true },
+        vscode.l10n.t("重建文件"),
+      );
+      if (pick !== vscode.l10n.t("重建文件")) return;
+    }
+    if (currentText !== null && currentText !== lastNew) {
+      const pick = await vscode.window.showWarningMessage(
+        vscode.l10n.t("文件内容与记录不一致（可能已被继续修改）。仍恢复到本轮开始前的内容？"),
+        { modal: true },
+        vscode.l10n.t("仍然撤销"),
+      );
+      if (pick !== vscode.l10n.t("仍然撤销")) return;
+    }
+
+    // The dialogs (and locateDiffFile's picker) can wait indefinitely: abort
+    // if the file or session changed underneath us, instead of overwriting a
+    // newer state with a stale decision.
+    let latestText: string | null = null;
+    try {
+      latestText = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString("utf8");
+    } catch {
+      // Still missing.
+    }
+    if (latestText !== currentText) {
+      void vscode.window.showWarningMessage(vscode.l10n.t("文件在撤销确认期间被修改，请重试"));
+      return;
+    }
+    const after = this.store.getState();
+    if (after.sessionId !== sessionId || after.status === "streaming" || after.status === "connecting" ||
+        !isLatestTurn(after.blocks, userBlockId)) {
+      void vscode.window.showWarningMessage(vscode.l10n.t("会话状态已变化，撤销已取消"));
+      return;
+    }
+
+    try {
+      // Write through the VSCode file service so watchers stay consistent.
+      await vscode.workspace.fs.writeFile(fileUri, Buffer.from(oldText, "utf8"));
+      markReverted();
+      void vscode.window.showInformationMessage(vscode.l10n.t("已撤销本轮对该文件的全部修改: {0}", chosen));
+      this.postToWebview({ type: "turnFileReverted", sessionId, userBlockId, key });
+    } catch (error) {
+      vscode.window.showErrorMessage(
+        vscode.l10n.t("撤销文件修改失败: {0}", errorMessage(error)),
+      );
     }
   }
 
