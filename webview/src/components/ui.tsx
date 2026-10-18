@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, FileCode2, X } from "lucide-react";
+import { ArrowLeft, FileCode2, HelpCircle, X } from "lucide-react";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
@@ -303,6 +303,59 @@ export function Chip({
       className={`chip-fade inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[11px] font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
     >
       {children}
+    </span>
+  );
+}
+
+/**
+ * Small `?` help affordance: hover/focus opens a `role="tooltip"` bubble,
+ * click toggles it for touch. Use for concepts a card cannot explain inline
+ * (approval policy semantics, Plan-mode artifacts, shortcut hints) without
+ * stealing visual weight from the actual actions.
+ */
+export function HelpTip({
+  label,
+  children,
+  align = "right",
+  className = "",
+}: {
+  label: string;
+  children: ReactNode;
+  /** Which edge of the trigger the bubble aligns to. */
+  align?: "left" | "right";
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <span
+      className={`relative inline-flex shrink-0${className ? ` ${className}` : ""}`}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        aria-label={label}
+        aria-describedby={open ? id : undefined}
+        aria-expanded={open}
+        className="press inline-flex size-[18px] items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:text-foreground"
+        onClick={() => setOpen((value) => !value)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >
+        <HelpCircle className="size-3" />
+      </button>
+      {open && (
+        <span
+          id={id}
+          role="tooltip"
+          className={`absolute top-full z-50 mt-1 w-60 max-w-[calc(100vw-48px)] rounded-lg border border-border bg-card px-2.5 py-2 text-[11px] font-normal leading-relaxed text-foreground shadow-panel ${
+            align === "left" ? "left-0" : "right-0"
+          }`}
+        >
+          {children}
+        </span>
+      )}
     </span>
   );
 }

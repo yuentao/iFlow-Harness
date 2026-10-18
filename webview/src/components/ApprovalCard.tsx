@@ -3,7 +3,7 @@ import { Lock, ShieldCheck } from "lucide-react";
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { FileRef, CountdownBar } from "./ui";
+import { FileRef, CountdownBar, HelpTip } from "./ui";
 import { DiffView } from "./DiffView";
 
 const KIND_ORDER: Record<string, number> = {
@@ -66,6 +66,32 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   );
 
   const primary = approval.locations[0];
+  const allowOption = options.find((option) => option.kind.startsWith("allow"));
+  const rejectOption = options.find((option) => option.kind.startsWith("reject"));
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === "y" && allowOption) {
+        e.preventDefault();
+        e.stopPropagation();
+        setAnswered(true);
+        send({ type: "respondApproval", id: approval.id, optionId: allowOption.optionId });
+      } else if (key === "n") {
+        e.preventDefault();
+        e.stopPropagation();
+        setAnswered(true);
+        send({ type: "respondApproval", id: approval.id, optionId: rejectOption?.optionId ?? null });
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [answered, allowOption?.optionId, rejectOption?.optionId, approval.id, send]);
 
   return (
     <div
@@ -87,6 +113,21 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <ShieldCheck className="size-3.5 shrink-0 text-primary" />
         <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 请求执行工具")}</span>
+        <span className="ml-auto">
+          <HelpTip label={t("审批说明")} align="right">
+            <span className="block space-y-1">
+              <span className="block">
+                {t("允许会立即执行该工具；「始终允许」会在本次会话内记住该工具。")}
+              </span>
+              <span className="block">
+                {t("拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。")}
+              </span>
+              <span className="block font-mono text-[10.5px] text-muted-foreground">
+                {t("Y 允许 · N 拒绝 · Esc 取消")}
+              </span>
+            </span>
+          </HelpTip>
+        </span>
       </div>
       <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
         {/* break-words + scroll cap: the wire title is uncapped (whole shell
@@ -137,6 +178,9 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         >
           {t("取消")}
         </button>
+        <span className="ml-auto self-center text-[10.5px] text-muted-foreground/80">
+          {t("Y 允许 · N 拒绝 · Esc 取消")}
+        </span>
       </div>
     </div>
   );

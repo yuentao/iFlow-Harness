@@ -252,6 +252,31 @@ const en: Record<string, string> = {
   "默认权限模式": "Default approval mode",
   "新会话使用的权限模式；当前会话可用输入框下方的模式菜单切换。":
     "Approval mode for new sessions; switch the current session from the mode menu below the composer.",
+  "审批说明": "Approval help",
+  "允许会立即执行该工具；「始终允许」会在本次会话内记住该工具。":
+    "Allow runs the tool immediately; \"Always allow\" remembers it for this session.",
+  "拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。":
+    "Reject or cancel never runs it. Pre-review rules live in Settings → Approval policies.",
+  "Y 允许 · N 拒绝 · Esc 取消": "Y allow · N reject · Esc cancel",
+  "计划说明": "Plan help",
+  "Plan 模式只读分析与规划；批准后会退出 Plan 模式并开始执行。":
+    "Plan mode is read-only analysis and planning; approving exits Plan mode and starts execution.",
+  "批准的计划会保存到 .iflow/specs/ 以便留痕。":
+    "Approved plans are saved under .iflow/specs/ for later review.",
+  "编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。":
+    "Edits are sent to the agent only when you choose Re-plan; Approve executes the original plan.",
+  "Y 批准 · N 拒绝 · R 重新规划": "Y approve · N reject · R re-plan",
+  "提问说明": "Question help",
+  "agent 正在等待你的回答；卡片未回答前其他操作会被阻塞。":
+    "The agent is waiting for your answer; other actions stay blocked until this card is answered.",
+  "超时未回答会按未回答继续。": "If it times out, the agent continues as if unanswered.",
+  "快捷键": "Keyboard shortcuts",
+  "停止生成": "Stop generating",
+  "审批允许 / 拒绝": "Approve / reject",
+  "上一个 / 下一个会话": "Previous / next session",
+  "新建会话": "New session",
+  "聚焦输入框": "Focus the composer",
+  "切换 Focus 视图": "Toggle Focus view",
   "每轮回复后推测可选的下一步操作（会产生额外 token 消耗）。":
     "Suggest next steps after each reply (uses extra tokens).",
   "上下文占用达到 95% 时自动压缩会话。": "Compress the session automatically at 95% context usage.",

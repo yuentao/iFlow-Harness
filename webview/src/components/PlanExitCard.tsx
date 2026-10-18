@@ -3,7 +3,7 @@ import { ClipboardCheck, Pencil, Eye } from "lucide-react";
 import type { PendingPlanExitUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { CountdownBar } from "./ui";
+import { CountdownBar, HelpTip } from "./ui";
 import { Markdown } from "./Markdown";
 
 /**
@@ -50,6 +50,32 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     });
   };
 
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === "y") {
+        e.preventDefault();
+        e.stopPropagation();
+        answer(true);
+      } else if (key === "n") {
+        e.preventDefault();
+        e.stopPropagation();
+        answer(false);
+      } else if (key === "r") {
+        e.preventDefault();
+        e.stopPropagation();
+        answer(false, true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [answered, answer]);
+
   return (
     <div
       className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
@@ -69,32 +95,51 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <ClipboardCheck className="size-3.5 shrink-0 text-primary" />
         <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
-        <button
-          type="button"
-          disabled={answered}
-          aria-label={editing ? t("预览计划") : t("编辑计划")}
-          title={editing ? t("预览计划") : t("编辑计划")}
-          className="press ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-          onClick={() => setEditing((v) => !v)}
-        >
-          {editing ? <Eye className="size-3" /> : <Pencil className="size-3" />}
-          {editing ? t("预览") : t("编辑")}
-        </button>
+        <span className="ml-auto flex shrink-0 items-center gap-1">
+          <HelpTip label={t("计划说明")} align="right">
+            <span className="block space-y-1">
+              <span className="block">
+                {t("Plan 模式只读分析与规划；批准后会退出 Plan 模式并开始执行。")}
+              </span>
+              <span className="block">{t("批准的计划会保存到 .iflow/specs/ 以便留痕。")}</span>
+              <span className="block">{t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}</span>
+              <span className="block font-mono text-[10.5px] text-muted-foreground">
+                {t("Y 批准 · N 拒绝 · R 重新规划")}
+              </span>
+            </span>
+          </HelpTip>
+          <button
+            type="button"
+            disabled={answered}
+            aria-label={editing ? t("预览计划") : t("编辑计划")}
+            title={editing ? t("预览计划") : t("编辑计划")}
+            className="press flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            onClick={() => setEditing((v) => !v)}
+          >
+            {editing ? <Eye className="size-3" /> : <Pencil className="size-3" />}
+            {editing ? t("预览") : t("编辑")}
+          </button>
+        </span>
       </div>
       <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
         <p className="text-[11px] text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
         {editing ? (
-          <textarea
-            ref={textareaRef}
-            value={planText}
-            onChange={(e) => setPlanText(e.target.value)}
-            aria-label={t("编辑计划")}
-            spellCheck={false}
-            /* mono + generous height: the plan is source-like markdown the
-               user edits verbatim; min-height keeps short plans usable,
-               max-h-64 caps the shrink-0 card like the render mode. */
-            className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-[11px] leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
-          />
+          <>
+            <textarea
+              ref={textareaRef}
+              value={planText}
+              onChange={(e) => setPlanText(e.target.value)}
+              aria-label={t("编辑计划")}
+              spellCheck={false}
+              /* mono + generous height: the plan is source-like markdown the
+                 user edits verbatim; min-height keeps short plans usable,
+                 max-h-64 caps the shrink-0 card like the render mode. */
+              className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-[11px] leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
+            />
+            <p className="text-[10.5px] leading-relaxed text-muted-foreground/85">
+              {t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}
+            </p>
+          </>
         ) : (
           /* Markdown render + scroll cap: the plan text is uncapped (the
              agent's full plan); unbroken tokens used to punch through the
@@ -137,6 +182,9 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         >
           {t("重新规划")}
         </button>
+        <span className="ml-auto self-center text-[10.5px] text-muted-foreground/80">
+          {t("Y 批准 · N 拒绝 · R 重新规划")}
+        </span>
       </div>
     </div>
   );

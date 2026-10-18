@@ -564,6 +564,30 @@ function planEntriesFromTodoInput(input: unknown): PlanEntryUi[] | null {
   });
 }
 
+/**
+ * One live TaskList per turn: `todo_write` pushes a full plan snapshot on
+ * every call, so repeated updates must replace the current turn's card
+ * instead of stacking one snapshot per write. Crossing a user block (a new
+ * turn) starts a fresh card. Restored transcripts use the same rule, which
+ * also collapses historical snapshots down to the last one per turn.
+ */
+function upsertPlanEntries(
+  blocks: Block[],
+  entries: PlanEntryUi[],
+  create: () => Block,
+): number {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i]!;
+    if (block.kind === "user") break;
+    if (block.kind === "plan") {
+      blocks[i] = { ...block, entries };
+      return i;
+    }
+  }
+  blocks.push(create());
+  return blocks.length - 1;
+}
+
 /** Apply one session update to a block list (top-level transcript or a
  * SubAgent's entries). Mutates the list. Returns the lowest mutated/appended
  * block index, or null when the update touched no block (P-1 change
@@ -609,13 +633,18 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
-    case "plan":
-      blocks.push({
+    case "plan": {
+      const entries = update.entries.map((e) => ({
+        content: e.content,
+        status: e.status,
+        priority: e.priority,
+      }));
+      return upsertPlanEntries(blocks, entries, () => ({
         kind: "plan",
         id: nextBlockId(),
-        entries: update.entries.map((e) => ({ content: e.content, status: e.status, priority: e.priority })),
-      });
-      return blocks.length - 1;
+        entries,
+      }));
+    }
     default:
       return null;
   }
@@ -1904,7 +1933,9 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
             // todo_read is dropped — same as the live reducer path.
             if (isTodoToolName(block.name)) {
               const entries = planEntriesFromTodoInput(block.input);
-              if (entries) current.entries.push({ kind: "plan", entries });
+              if (entries) {
+                upsertPlanEntries(current.entries, entries, () => ({ kind: "plan", entries }));
+              }
               continue;
             }
             current.entries.push({
@@ -1986,7 +2017,9 @@ export function parseTranscriptJsonl(text: string): { blocks: Block[]; firstUser
           // todo_read is dropped — same as the live reducer path.
           if (isTodoToolName(block.name)) {
             const entries = planEntriesFromTodoInput(block.input);
-            if (entries) blocks.push({ kind: "plan", entries });
+            if (entries) {
+              upsertPlanEntries(blocks, entries, () => ({ kind: "plan", entries }));
+            }
             continue;
           }
           // The SubAgent-spawning `task` call renders as a SubAgent card and

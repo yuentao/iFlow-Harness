@@ -127,6 +127,7 @@ import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, reso
 import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
 import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
+import { planSpecContent, planSpecFileName } from "../../shared/plan-spec.js";
 import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
@@ -485,7 +486,12 @@ export class ChatPanel implements vscode.Disposable {
   /** Awaiting user confirmation for `_iflow/plan/exit`, keyed by plan-exit id. */
   private readonly pendingPlanExits = new Map<
     string,
-    { resolve: (response: ExitPlanModeResponse) => void; timer: NodeJS.Timeout }
+    {
+      resolve: (response: ExitPlanModeResponse) => void;
+      timer: NodeJS.Timeout;
+      /** Full plan text — persisted to `.iflow/specs/` on approval. */
+      plan: string;
+    }
   >();
   private planExitSeq = 0;
   /**
@@ -1269,7 +1275,7 @@ export class ChatPanel implements vscode.Disposable {
         this.handleApprovalResponse(msg.id, msg.optionId);
         break;
       case "respondPlanExit":
-        this.handlePlanExitResponse(msg.id, msg.approved, msg.reason, msg.replan === true);
+        await this.handlePlanExitResponse(msg.id, msg.approved, msg.reason, msg.replan === true);
         break;
       case "answerQuestions":
         this.handleQuestionAnswers(msg.id, msg.answers);
@@ -2671,7 +2677,7 @@ export class ChatPanel implements vscode.Disposable {
         this.store.planExitResolutionNote(vscode.l10n.t("计划审批超时，已自动拒绝"));
         this.armPostRejectionWatchdog();
       }, APPROVAL_TIMEOUT_MS);
-      this.pendingPlanExits.set(id, { resolve, timer });
+      this.pendingPlanExits.set(id, { resolve, timer, plan: pending.plan });
       this.store.showPlanExit(pending);
       // M1 P0-5 + policy 2026-10-16: Plan approval is the user's fourth OS
       // trigger (card displayed) — same slot-mirror re-check as approvals so a
@@ -2686,7 +2692,12 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /** Resolve a pending Plan-mode exit from the webview's answer. */
-  private handlePlanExitResponse(id: string, approved: boolean, reason?: string, replan = false): void {
+  private async handlePlanExitResponse(
+    id: string,
+    approved: boolean,
+    reason?: string,
+    replan = false,
+  ): Promise<void> {
     const pending = this.pendingPlanExits.get(id);
     if (!pending) return;
     this.pendingPlanExits.delete(id);
@@ -2696,15 +2707,23 @@ export class ChatPanel implements vscode.Disposable {
     // wrote in the card's edit mode — surface a truncated excerpt in the
     // resolution note so the transcript records what changed (the full text
     // goes to the agent via the resolve below; the note is display-only).
-    this.store.planExitResolutionNote(
-      replan
-        ? reason
-          ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
-          : vscode.l10n.t("重新规划")
-        : approved
-          ? vscode.l10n.t("已批准计划")
-          : reason ?? vscode.l10n.t("已拒绝计划"),
-    );
+    let note: string;
+    if (replan) {
+      note = reason
+        ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
+        : vscode.l10n.t("重新规划");
+    } else if (approved) {
+      // Approved plans are project artifacts: `.iflow/specs/<timestamp>-<slug>.md`.
+      // The write must not block approval — a failure is logged and the note
+      // simply omits the path.
+      const savedPath = await this.persistPlanSpec(pending.plan);
+      note = savedPath
+        ? vscode.l10n.t("已批准计划，已保存到 {0}", savedPath)
+        : vscode.l10n.t("已批准计划");
+    } else {
+      note = reason ?? vscode.l10n.t("已拒绝计划");
+    }
+    this.store.planExitResolutionNote(note);
     // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
     // its own after `_iflow/plan/exit` resolves — switch back explicitly on
     // BOTH approval and rejection (rejection must not strand the session in
@@ -2722,6 +2741,45 @@ export class ChatPanel implements vscode.Disposable {
       approved,
       reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),
     });
+  }
+
+  /**
+   * Persist an approved plan under the active workspace's `.iflow/specs/`.
+   * Returns the workspace-relative display path, or null when there is no
+   * workspace folder / the write fails (approval still proceeds).
+   */
+  private async persistPlanSpec(plan: string): Promise<string | null> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) return null;
+    const folder = folders.find((candidate) => candidate.uri.fsPath === this.sessionCwd) ?? folders[0]!;
+    const createdAt = new Date();
+    const fileName = planSpecFileName(plan, createdAt);
+    const dir = vscode.Uri.joinPath(folder.uri, ".iflow", "specs");
+    try {
+      await vscode.workspace.fs.createDirectory(dir);
+      let target = vscode.Uri.joinPath(dir, fileName);
+      // Timestamps are second-granular; keep two approvals in the same second
+      // from clobbering each other.
+      for (let n = 2; ; n += 1) {
+        try {
+          await vscode.workspace.fs.stat(target);
+        } catch {
+          break;
+        }
+        target = vscode.Uri.joinPath(dir, fileName.replace(/\.md$/, `-${n}.md`));
+      }
+      await vscode.workspace.fs.writeFile(
+        target,
+        Buffer.from(
+          planSpecContent(plan, { sessionId: this.store.getState().sessionId, createdAt }),
+          "utf8",
+        ),
+      );
+      return path.posix.join(".iflow", "specs", path.basename(target.fsPath));
+    } catch (error) {
+      this.log.warn(`failed to persist plan spec: ${errorMessage(error)}`);
+      return null;
+    }
   }
 
   /** Cancel every pending Plan exit (client died / replaced) without hanging the agent. */

@@ -3,7 +3,7 @@ import { HelpCircle, Check, Circle, CircleDot, Square, CheckSquare, Plus } from 
 import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { CountdownBar } from "./ui";
+import { CountdownBar, HelpTip } from "./ui";
 
 /**
  * When any option's description exceeds this length, the option row switches
@@ -96,6 +96,16 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <HelpCircle className="size-3.5 shrink-0 text-primary" />
         <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 需要你的回答")}</span>
+        <span className="ml-auto">
+          <HelpTip label={t("提问说明")} align="right">
+            <span className="block space-y-1">
+              <span className="block">
+                {t("agent 正在等待你的回答；卡片未回答前其他操作会被阻塞。")}
+              </span>
+              <span className="block">{t("超时未回答会按未回答继续。")}</span>
+            </span>
+          </HelpTip>
+        </span>
       </div>
       {/* Scroll cap (same discipline as ApprovalCard's max-h-40 title): the
           card is a bottom-anchored overlay, so uncapped question lists grew

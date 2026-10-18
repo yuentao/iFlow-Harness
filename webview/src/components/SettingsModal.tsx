@@ -252,6 +252,27 @@ function GeneralSection() {
         ]}
         onChange={(uiDensity) => updateHostSetting({ uiDensity })}
       />
+      <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {t("快捷键")}
+      </div>
+      <div className="space-y-1 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+        <ShortcutRow keys="Esc" label={t("停止生成")} />
+        <ShortcutRow keys="Y / N" label={t("审批允许 / 拒绝")} />
+        <ShortcutRow keys="Alt+← / Alt+→" label={t("上一个 / 下一个会话")} />
+        <ShortcutRow keys="Alt+N" label={t("新建会话")} />
+        <ShortcutRow keys="/" label={t("聚焦输入框")} />
+        <ShortcutRow keys="Ctrl/Cmd+Alt+F" label={t("切换 Focus 视图")} />
+      </div>
+    </div>
+  );
+}
+
+/** One keyboard-shortcut row in the settings cheat sheet. */
+function ShortcutRow({ keys, label }: { keys: string; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="shrink-0 font-mono text-[10.5px] text-foreground">{keys}</span>
+      <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">{label}</span>
     </div>
   );
 }

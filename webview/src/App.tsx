@@ -35,6 +35,7 @@ import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
 import type { AgentStatus, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
+import { adjacentSessionId } from "../../shared/session-nav";
 
 function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
@@ -328,6 +329,12 @@ export function App() {
 
   const focusMode = useChat((s) => s.focusMode);
   const toggleFocusMode = useChat((s) => s.toggleFocusMode);
+  // Shared gating for the header actions and the Alt+←/→ / Alt+N shortcuts:
+  // switching session / mode / model / profile mid-turn would desync the
+  // in-flight ACP request, and a profile switch is itself an optimistic lock.
+  const busy = status === "streaming" || replaying || initializing;
+  const switching = pending !== null;
+  const locked = busy || switching;
 
   // M1 P1-3: Ctrl/Cmd+Alt+F toggles Focus view from anywhere (also while the
   // composer has focus — Alt+F is not a text-editing chord). Declared BEFORE
@@ -341,6 +348,34 @@ export function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [toggleFocusMode]);
+
+  // Session navigation: Alt+←/→ cycles the non-archived history list,
+  // Alt+N starts a new session. Editable targets are skipped (Alt+Arrow is
+  // word navigation in a textarea; Alt+N can produce a character on some
+  // layouts), and overlays/busy states own the keys while they are open.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.isComposing || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      if (locked || settingsTab !== null || onboardingOpen) return;
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        const next = adjacentSessionId(sessions, activeSessionId, e.key === "ArrowLeft" ? -1 : 1);
+        if (!next || next === activeSessionId) return;
+        e.preventDefault();
+        send({ type: "loadSession", sessionId: next });
+        return;
+      }
+      if (e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        send({ type: "newSession" });
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [sessions, activeSessionId, locked, settingsTab, onboardingOpen, send]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode
@@ -393,13 +428,6 @@ export function App() {
   // dismissible (a user who skipped onboarding can still browse and close it).
   const settingsOpen = settingsTab !== null;
   const settingsTabValue: SettingsTab = settingsTab ?? "api";
-  // While the agent is streaming (or an approval blocks it), or while a new
-  // session / history restore is initializing, switching the session / mode /
-  // model / profile would desync the in-flight ACP request.
-  const busy = status === "streaming" || replaying || initializing;
-  // A profile switch is in flight (optimistic lock): disable every switcher.
-  const switching = pending !== null;
-  const locked = busy || switching;
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const sessionLabel =
     activeSession?.label ?? (activeSessionId ? t("当前会话") : t("会话历史"));

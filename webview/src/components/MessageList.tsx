@@ -674,7 +674,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
       <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
         <CircleDot className="size-3.5 text-primary" />
         {t("任务清单")}
-        <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+        <span aria-live="polite" className="ml-auto font-mono text-[11px] text-muted-foreground">
           {done} / {total}
         </span>
       </div>
