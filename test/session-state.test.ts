@@ -915,6 +915,83 @@ describe("todo tool unification (single TaskList card)", () => {
     expect(state.blocks).toEqual([]);
   });
 
+  it("upserts repeated plan updates into one TaskList within the same turn", () => {
+    const state = initialSessionState();
+    state.blocks.push({ kind: "user", text: "开始" });
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "plan", entries: [{ content: "步骤一", status: "pending" }] }),
+    );
+    const index = applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "plan",
+        entries: [
+          { content: "步骤一", status: "completed" },
+          { content: "步骤二", status: "in_progress" },
+        ],
+      }),
+    );
+
+    expect(state.blocks.filter((b) => b.kind === "plan")).toHaveLength(1);
+    expect(index).toBe(1);
+    const plan = state.blocks[1]!;
+    if (plan.kind !== "plan") throw new Error("expected plan");
+    expect(plan.entries.map((e) => e.status)).toEqual(["completed", "in_progress"]);
+  });
+
+  it("starts a new TaskList after a new user turn", () => {
+    const state = initialSessionState();
+    state.blocks.push({ kind: "user", text: "第一轮" });
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "plan", entries: [{ content: "旧步骤", status: "completed" }] }),
+    );
+    state.blocks.push({ kind: "user", text: "第二轮" });
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "plan", entries: [{ content: "新步骤", status: "pending" }] }),
+    );
+
+    const plans = state.blocks.filter((b) => b.kind === "plan");
+    expect(plans).toHaveLength(2);
+    const latest = plans[1]!;
+    if (latest.kind !== "plan") throw new Error("expected plan");
+    expect(latest.entries[0]?.content).toBe("新步骤");
+  });
+
+  it("collapses repeated restored todo_write snapshots per turn", () => {
+    const jsonl = [
+      JSON.stringify({ type: "user", message: { content: "开始" } }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "tw1",
+              name: "todo_write",
+              input: { todos: [{ task: "步骤一", status: "pending" }] },
+            },
+            {
+              type: "tool_use",
+              id: "tw2",
+              name: "todo_write",
+              input: { todos: [{ task: "步骤一", status: "completed" }] },
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+    const { blocks } = parseTranscriptJsonl(jsonl);
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "plan"]);
+    const plan = blocks[1]!;
+    if (plan.kind !== "plan") throw new Error("expected plan");
+    expect(plan.entries).toEqual([
+      { content: "步骤一", status: "completed", priority: "low" },
+    ]);
+  });
+
   it("keeps non-todo tool cards untouched", () => {
     const state = initialSessionState();
     applySessionUpdate(

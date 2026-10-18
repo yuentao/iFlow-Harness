@@ -2703,44 +2703,58 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingPlanExits.delete(id);
     clearTimeout(pending.timer);
     this.store.clearPlanExit(id);
-    // Replan with edited plan text: the reason IS the revised plan the user
-    // wrote in the card's edit mode — surface a truncated excerpt in the
-    // resolution note so the transcript records what changed (the full text
-    // goes to the agent via the resolve below; the note is display-only).
-    let note: string;
-    if (replan) {
-      note = reason
-        ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
-        : vscode.l10n.t("重新规划");
-    } else if (approved) {
-      // Approved plans are project artifacts: `.iflow/specs/<timestamp>-<slug>.md`.
-      // The write must not block approval — a failure is logged and the note
-      // simply omits the path.
-      const savedPath = await this.persistPlanSpec(pending.plan);
-      note = savedPath
-        ? vscode.l10n.t("已批准计划，已保存到 {0}", savedPath)
-        : vscode.l10n.t("已批准计划");
-    } else {
-      note = reason ?? vscode.l10n.t("已拒绝计划");
-    }
-    this.store.planExitResolutionNote(note);
-    // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
-    // its own after `_iflow/plan/exit` resolves — switch back explicitly on
-    // BOTH approval and rejection (rejection must not strand the session in
-    // plan mode either; the agent continues in the returned mode). Replan is
-    // the exception: it rejects the plan but keeps the session in plan mode
-    // so the agent can revise it.
-    if (!replan) {
-      const modes = this.store.getState().modes;
-      const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
-      const target = this.planReturnModeId ?? fallback ?? "smart";
-      this.planReturnModeId = null;
-      void this.setMode(target).catch(() => undefined);
-    }
-    pending.resolve({
+    // The agent is blocked on this response: compute it first and resolve in
+    // `finally`, so a note/mode/write failure can never leave the CLI waiting
+    // for the 5-minute timeout.
+    const response: ExitPlanModeResponse = {
       approved,
       reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),
-    });
+    };
+    try {
+      // Replan with edited plan text: the reason IS the revised plan the user
+      // wrote in the card's edit mode — surface a truncated excerpt in the
+      // resolution note so the transcript records what changed (the full text
+      // goes to the agent via the resolve below; the note is display-only).
+      let note: string;
+      if (replan) {
+        note = reason
+          ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
+          : vscode.l10n.t("重新规划");
+      } else if (approved) {
+        // Approved plans are project artifacts: `.iflow/specs/<timestamp>-<slug>.md`.
+        // The write must not block approval — a failure is logged and the note
+        // simply omits the path.
+        let savedPath: string | null = null;
+        try {
+          savedPath = await this.persistPlanSpec(pending.plan);
+        } catch (error) {
+          this.log.warn(`failed to persist plan spec: ${errorMessage(error)}`);
+        }
+        note = savedPath
+          ? vscode.l10n.t("已批准计划，已保存到 {0}", savedPath)
+          : vscode.l10n.t("已批准计划");
+      } else {
+        note = reason ?? vscode.l10n.t("已拒绝计划");
+      }
+      this.store.planExitResolutionNote(note);
+      // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
+      // its own after `_iflow/plan/exit` resolves — switch back explicitly on
+      // BOTH approval and rejection (rejection must not strand the session in
+      // plan mode either; the agent continues in the returned mode). Replan is
+      // the exception: it rejects the plan but keeps the session in plan mode
+      // so the agent can revise it.
+      if (!replan) {
+        const modes = this.store.getState().modes;
+        const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
+        const target = this.planReturnModeId ?? fallback ?? "smart";
+        this.planReturnModeId = null;
+        void this.setMode(target).catch(() => undefined);
+      }
+    } catch (error) {
+      this.log.warn(`failed to finish plan exit: ${errorMessage(error)}`);
+    } finally {
+      pending.resolve(response);
+    }
   }
 
   /**
@@ -2753,9 +2767,9 @@ export class ChatPanel implements vscode.Disposable {
     if (folders.length === 0) return null;
     const folder = folders.find((candidate) => candidate.uri.fsPath === this.sessionCwd) ?? folders[0]!;
     const createdAt = new Date();
-    const fileName = planSpecFileName(plan, createdAt);
     const dir = vscode.Uri.joinPath(folder.uri, ".iflow", "specs");
     try {
+      const fileName = planSpecFileName(plan, createdAt);
       await vscode.workspace.fs.createDirectory(dir);
       let target = vscode.Uri.joinPath(dir, fileName);
       // Timestamps are second-granular; keep two approvals in the same second
@@ -5329,13 +5343,13 @@ export class ChatPanel implements vscode.Disposable {
       const result = applyThinkingRules(rules);
       if (result.skippedInvalid) {
         void vscode.window.showWarningMessage(
-          vscode.l10n.t("推理能力规则同步失败：~/.iflow/thinking-models.json 格式错误，已保留原文件"),
+          vscode.l10n.t("思考能力规则同步失败：~/.iflow/thinking-models.json 格式错误，已保留原文件"),
         );
         return;
       }
       if (result.added + result.changed > 0) {
         void vscode.window.showInformationMessage(
-          vscode.l10n.t("已同步 {0} 推理能力规则到 ~/.iflow/thinking-models.json，生效下次会话启动", result.added + result.changed),
+          vscode.l10n.t("已同步 {0} 思考能力规则到 ~/.iflow/thinking-models.json，生效下次会话启动", result.added + result.changed),
         );
       }
     } catch {
@@ -5458,7 +5472,7 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       vscode.window.showWarningMessage(
-        vscode.l10n.t("切换推理级别失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
+        vscode.l10n.t("切换思考级别失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
       );
       this.store.pushSnapshot();
     } catch (error) {
@@ -5473,7 +5487,7 @@ export class ChatPanel implements vscode.Disposable {
         void vscode.window.showWarningMessage(vscode.l10n.t("当前模型不支持思考模式，请切换模型后重试"));
       } else {
         vscode.window.showWarningMessage(
-          vscode.l10n.t("切换推理级别失败：{0}", errorMessage(error)),
+          vscode.l10n.t("切换思考级别失败：{0}", errorMessage(error)),
         );
       }
       this.store.pushSnapshot();

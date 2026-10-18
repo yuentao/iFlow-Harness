@@ -1698,7 +1698,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 aria-haspopup="menu"
                 aria-expanded={open}
                 className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
-                title={t("推理级别")}
+                title={t("思考级别")}
                 disabled={thinkLocked}
               >
                 <ListOrdered className="size-3 shrink-0 text-primary" />
@@ -1710,7 +1710,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             {(close) => (
               <>
                 <div className="border-b border-border/60 px-3 py-2 text-[11px] font-medium text-muted-foreground">
-                  {t("推理级别")}
+                  {t("思考级别")}
                 </div>
                 {([
                   ["auto", "自动", "模型自行决定思考投入"],

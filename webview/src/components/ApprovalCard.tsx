@@ -66,14 +66,25 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   );
 
   const primary = approval.locations[0];
-  const allowOption = options.find((option) => option.kind.startsWith("allow"));
+  // Y is deliberately bound to allow_once ONLY: binding it to whichever allow
+  // variant comes first could silently grant an `allow_always` with one key.
+  const allowOption = options.find((option) => option.kind === "allow_once");
   const rejectOption = options.find((option) => option.kind.startsWith("reject"));
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      // A modal above this card (settings / confirm) owns the keyboard; the
+      // card is still mounted underneath and must not answer a hidden prompt.
+      if (document.querySelector(".auth-backdrop")) return;
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      if (
+        target
+        && (target.tagName === "INPUT"
+          || target.tagName === "TEXTAREA"
+          || target.tagName === "SELECT"
+          || target.isContentEditable)
+      ) {
         return;
       }
       const key = e.key.toLowerCase();
@@ -123,7 +134,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
                 {t("拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。")}
               </span>
               <span className="block font-mono text-[10.5px] text-muted-foreground">
-                {t("Y 允许 · N 拒绝 · Esc 取消")}
+                {t("Y 允许一次 · N 拒绝 · Esc 取消")}
               </span>
             </span>
           </HelpTip>
@@ -179,7 +190,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           {t("取消")}
         </button>
         <span className="ml-auto self-center text-[10.5px] text-muted-foreground/80">
-          {t("Y 允许 · N 拒绝 · Esc 取消")}
+          {t("Y 允许一次 · N 拒绝 · Esc 取消")}
         </span>
       </div>
     </div>

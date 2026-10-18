@@ -580,7 +580,9 @@ function upsertPlanEntries(
     const block = blocks[i]!;
     if (block.kind === "user") break;
     if (block.kind === "plan") {
-      blocks[i] = { ...block, entries };
+      const merged: Block = { ...block, entries };
+      recountBlockTokens(merged);
+      blocks[i] = merged;
       return i;
     }
   }

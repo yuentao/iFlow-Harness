@@ -256,8 +256,9 @@ function GeneralSection() {
         {t("快捷键")}
       </div>
       <div className="space-y-1 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
-        <ShortcutRow keys="Esc" label={t("停止生成")} />
+        <ShortcutRow keys="Esc" label={t("停止生成（审批卡中为取消/拒绝）")} />
         <ShortcutRow keys="Y / N" label={t("审批允许 / 拒绝")} />
+        <ShortcutRow keys="Y / N / R" label={t("计划批准 / 拒绝 / 重新规划")} />
         <ShortcutRow keys="Alt+← / Alt+→" label={t("上一个 / 下一个会话")} />
         <ShortcutRow keys="Alt+N" label={t("新建会话")} />
         <ShortcutRow keys="/" label={t("聚焦输入框")} />

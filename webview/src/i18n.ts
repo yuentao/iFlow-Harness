@@ -257,7 +257,7 @@ const en: Record<string, string> = {
     "Allow runs the tool immediately; \"Always allow\" remembers it for this session.",
   "拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。":
     "Reject or cancel never runs it. Pre-review rules live in Settings → Approval policies.",
-  "Y 允许 · N 拒绝 · Esc 取消": "Y allow · N reject · Esc cancel",
+  "Y 允许一次 · N 拒绝 · Esc 取消": "Y allow once · N reject · Esc cancel",
   "计划说明": "Plan help",
   "Plan 模式只读分析与规划；批准后会退出 Plan 模式并开始执行。":
     "Plan mode is read-only analysis and planning; approving exits Plan mode and starts execution.",
@@ -271,10 +271,10 @@ const en: Record<string, string> = {
     "The agent is waiting for your answer; other actions stay blocked until this card is answered.",
   "超时未回答会按未回答继续。": "If it times out, the agent continues as if unanswered.",
   "快捷键": "Keyboard shortcuts",
-  "停止生成": "Stop generating",
+  "停止生成（审批卡中为取消/拒绝）": "Stop generating (cancels/rejects on an approval card)",
   "审批允许 / 拒绝": "Approve / reject",
+  "计划批准 / 拒绝 / 重新规划": "Plan approve / reject / re-plan",
   "上一个 / 下一个会话": "Previous / next session",
-  "新建会话": "New session",
   "聚焦输入框": "Focus the composer",
   "切换 Focus 视图": "Toggle Focus view",
   "每轮回复后推测可选的下一步操作（会产生额外 token 消耗）。":
@@ -414,7 +414,7 @@ const en: Record<string, string> = {
   // composer
   "（见附图）": "(see attached image)",
   "移除": "Remove",
-  "推理级别": "Reasoning",
+  "思考级别": "Reasoning",
   "自动": "Auto",
   "快速": "Fast",
   "平衡": "Balanced",

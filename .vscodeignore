@@ -5,6 +5,8 @@
 src/**
 test/**
 docs/**
+# Workspace runtime data (knowledge index, .iflow/specs plans, approvals).
+.iflow/**
 scripts/**
 shared/**
 UI/**

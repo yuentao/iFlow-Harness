@@ -342,6 +342,7 @@ export function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "f" || !e.altKey || !(e.ctrlKey || e.metaKey) || e.isComposing) return;
+      if (document.querySelector(".auth-backdrop")) return;
       e.preventDefault();
       toggleFocusMode();
     };
@@ -360,7 +361,10 @@ export function App() {
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
         return;
       }
-      if (locked || settingsTab !== null || onboardingOpen) return;
+      if (locked || status === null || status === "connecting" || settingsTab !== null || onboardingOpen) return;
+      // ConfirmDialog / memory dialogs / profile-switch all mount ModalShell;
+      // never change sessions behind an open modal.
+      if (document.querySelector(".auth-backdrop")) return;
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         const next = adjacentSessionId(sessions, activeSessionId, e.key === "ArrowLeft" ? -1 : 1);
         if (!next || next === activeSessionId) return;
@@ -375,7 +379,7 @@ export function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId, locked, settingsTab, onboardingOpen, send]);
+  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode

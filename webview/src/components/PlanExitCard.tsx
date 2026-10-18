@@ -52,9 +52,17 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (answered || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      // A modal above this card owns the keyboard; don't answer a hidden plan.
+      if (document.querySelector(".auth-backdrop")) return;
       const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      if (
+        target
+        && (target.tagName === "INPUT"
+          || target.tagName === "TEXTAREA"
+          || target.tagName === "SELECT"
+          || target.isContentEditable)
+      ) {
         return;
       }
       const key = e.key.toLowerCase();

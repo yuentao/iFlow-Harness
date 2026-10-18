@@ -309,7 +309,7 @@ export function Chip({
 
 /**
  * Small `?` help affordance: hover/focus opens a `role="tooltip"` bubble,
- * click toggles it for touch. Use for concepts a card cannot explain inline
+ * click opens it for touch. Use for concepts a card cannot explain inline
  * (approval policy semantics, Plan-mode artifacts, shortcut hints) without
  * stealing visual weight from the actual actions.
  */
@@ -338,8 +338,8 @@ export function HelpTip({
         aria-label={label}
         aria-describedby={open ? id : undefined}
         aria-expanded={open}
-        className="press inline-flex size-[18px] items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:text-foreground"
-        onClick={() => setOpen((value) => !value)}
+        className="press inline-flex size-5 items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:text-foreground"
+        onClick={() => setOpen(true)}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
       >
