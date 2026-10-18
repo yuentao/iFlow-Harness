@@ -16,6 +16,7 @@ vendor/
 # Test fixtures (generated recordings)
 test/fixtures/*.ndjson
 test/fixtures/*.json
+test/fixtures/probe-memory-context.txt
 
 # UI verification screenshots (Playwright smoke runs, repo root only)
 /*.jpg

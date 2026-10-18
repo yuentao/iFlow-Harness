@@ -118,6 +118,9 @@ import {
   type ApprovalRule,
 } from "../../shared/approval-policy.js";
 import { SessionStore } from "./store.js";
+import { MemoryService } from "../memory/service.js";
+import { isWithin } from "../memory/files.js";
+import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
 import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
@@ -207,6 +210,14 @@ const EMPTY_RESPONSE_RETRY_DELAYS_MS = [3_000, 8_000];
  * whose enhanced text was in fact being produced. 180s + the idle abort
  * below covers slow-but-progressing turns while still reaping wedged ones. */
 const INTERNAL_PROMPT_TIMEOUT_MS = 180_000;
+/** Turn-end memory extraction is a small JSON task; shorter ceilings keep it
+ * from competing with the user's next turn on a slow gateway. */
+const MEMORY_EXTRACT_TIMEOUT_MS = 90_000;
+const MEMORY_EXTRACT_IDLE_MS = 45_000;
+/** Knowledge index generation summarizes a whole workspace; allow a longer
+ * turn while still bounding a wedged gateway. */
+const KNOWLEDGE_PROMPT_TIMEOUT_MS = 180_000;
+const KNOWLEDGE_PROMPT_IDLE_MS = 90_000;
 /** Abort an internal prompt whose session stream went silent for this long.
  * A healthy stream emits chunks every few seconds; the CLI's rate-limit
  * backoff pauses were observed well under this. Catches a mid-stream wedge
@@ -388,6 +399,8 @@ export class ChatPanel implements vscode.Disposable {
   private editorPanel: vscode.WebviewPanel | undefined;
   private client: AcpClient | null = null;
   private store: SessionStore;
+  /** F3 Phase 1: global/project memory files (read/edit, not the CLI agent). */
+  private readonly memory: MemoryService;
   private connecting: Promise<void> | null = null;
   /**
    * Handshake generation counter (P0-3 restart escape). restartCli bumps it
@@ -526,6 +539,11 @@ export class ChatPanel implements vscode.Disposable {
   /** M1: one internal prompt at a time (enhance and title generation share
    * the lane; a second request while one runs fails fast). */
   private internalPromptBusy = false;
+  /** F3 Phase 2: turn-end memory extraction has its own lane (it must not
+   * block enhance/title, and vice versa). */
+  private memoryPromptBusy = false;
+  /** F3 Phase 3: knowledge generation is user-initiated and long; own lane. */
+  private knowledgePromptBusy = false;
   /** Turn-end next-step prediction has its OWN lane: it is fire-and-forget
    * and must neither block enhance/title nor be blocked by them (a title
    * generation at the same turn end would otherwise swallow the prediction). */
@@ -585,6 +603,25 @@ export class ChatPanel implements vscode.Disposable {
     private readonly services: PanelServices = {},
   ) {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
+    this.memory = new MemoryService({
+      log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
+      getCwd: () => this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+      getWorkspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      getContextFileName: () =>
+        readCliSettings(path.join(os.homedir(), ".iflow", "settings.json"))?.contextFileName ?? null,
+      isAutoCaptureEnabled: () =>
+        vscode.workspace.getConfiguration("iflow").get<boolean>("autoMemoryCapture", false),
+      runPrompt: (prompt) => this.runMemoryPrompt(prompt),
+      getSessionId: () => this.store.getState().sessionId,
+      scanWorkspace: () => this.scanKnowledgeWorkspace(),
+      readWorkspaceFile: (file) => this.readKnowledgeFile(file),
+      runKnowledgePrompt: (prompt) => this.runKnowledgePrompt(prompt),
+      getModelName: () => this.store.getState().currentModelId ?? null,
+      post: (m) => this.postToWebview(m),
+      openFile: (file) => {
+        void vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
+      },
+    });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
     this.store.onStateChange = (state) => {
       this.updateStatusBar(state);
@@ -598,6 +635,9 @@ export class ChatPanel implements vscode.Disposable {
     this.store.getUsageContext = () => this.resolveUsageContext();
     this.store.onStateReplaced = () => {
       this.clearToolCaches();
+      // F3: a session swap can change cwd (multi-root / restored session), so
+      // the discovered global+project file list must be recomputed lazily.
+      this.memory.invalidate();
       // M2 P0-3: every wholesale state swap (new session / restore / hot
       // re-auth / restart) drops the queue — a queued prompt belongs to the
       // outgoing session only.
@@ -626,7 +666,13 @@ export class ChatPanel implements vscode.Disposable {
       vscode.window.onDidChangeActiveColorTheme(() => this.postTheme()),
           vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration("iflow.auroraIntensity")) this.postTheme();
-            if (e.affectsConfiguration("iflow.nextStepSuggestions")) this.postHostSettings();        if (
+            if (
+              e.affectsConfiguration("iflow.nextStepSuggestions")
+              || e.affectsConfiguration("iflow.autoMemoryCapture")
+            ) {
+              this.postHostSettings();
+            }
+        if (
           e.affectsConfiguration("iflow.language")
           || e.affectsConfiguration("iflow.approvalMode")
         ) {
@@ -742,6 +788,7 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
     this.client = null;
+    this.memory.dispose();
     this.editorPanel?.dispose();
     this.editorPanel = undefined;
     this.statusBar.dispose();
@@ -941,6 +988,57 @@ export class ChatPanel implements vscode.Disposable {
   addToContext(relPath: string, range: string, code: string): void {
     void vscode.commands.executeCommand("iflow.chatPanel.focus");
     this.postToWebview({ type: "setCodeContext", path: relPath, range, code });
+  }
+
+  /**
+   * Right-click "记住选中内容": append one fact to the global or project
+   * memory file. Native QuickPick/InputBox keep this usable with the panel
+   * closed; the rich editor lives in the settings memory tab.
+   */
+  async rememberSelection(relPath: string, range: string, code: string): Promise<void> {
+    const firstLine =
+      code
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) ?? "";
+    const suggestion = `${relPath}:${range} ${firstLine}`.trim().slice(0, 200);
+    const globalLabel = vscode.l10n.t("全局记忆");
+    const projectLabel = vscode.l10n.t("项目记忆");
+    const scopePick = await vscode.window.showQuickPick(
+      [
+        {
+          label: globalLabel,
+          description: vscode.l10n.t("跨项目生效（~/.iflow/AGENTS.md）"),
+        },
+        {
+          label: projectLabel,
+          description: vscode.l10n.t("仅当前项目（AGENTS.md）"),
+        },
+      ],
+      { placeHolder: vscode.l10n.t("这条记忆保存到哪里？") },
+    );
+    if (!scopePick) return;
+    const scope = scopePick.label === projectLabel ? "project" : "global";
+    const fact = await vscode.window.showInputBox({
+      prompt: vscode.l10n.t("描述要记住的偏好或约定（可编辑）"),
+      value: suggestion,
+      ignoreFocusOut: true,
+    });
+    if (!fact?.trim()) return;
+    const result = await this.memory.appendFact({ scope, fact });
+    if (!result.ok) {
+      void vscode.window.showWarningMessage(result.error ?? vscode.l10n.t("写入记忆失败"));
+      return;
+    }
+    const restart = vscode.l10n.t("立即重启 CLI");
+    void vscode.window
+      .showInformationMessage(
+        vscode.l10n.t("已加入记忆，新建会话或恢复会话后生效"),
+        restart,
+      )
+      .then((choice) => {
+        if (choice === restart) void this.restartCli();
+      });
   }
 
   /**
@@ -1208,7 +1306,7 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "setHostSettings": {
         const config = vscode.workspace.getConfiguration("iflow");
-        for (const key of ["nextStepSuggestions", "autoCompressOnIdle"] as const) {
+        for (const key of ["nextStepSuggestions", "autoCompressOnIdle", "autoMemoryCapture"] as const) {
           const value = msg[key];
           if (typeof value !== "boolean") continue;
           try {
@@ -1230,6 +1328,51 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "mcpStatus":
         void this.sendMcpStatus();
+        break;
+      case "listMemory":
+        void this.memory.sendState(msg.requestId);
+        break;
+      case "readMemoryFile":
+        void this.memory.readFile(msg.path);
+        break;
+      case "saveMemoryFile":
+        void this.memory.saveFile({
+          path: msg.path,
+          content: msg.content,
+          ...(msg.expectedHash !== undefined ? { expectedHash: msg.expectedHash } : {}),
+        });
+        break;
+      case "appendMemoryFact":
+        void this.memory.appendFact({
+          scope: msg.scope,
+          fact: msg.fact,
+          ...(msg.path ? { path: msg.path } : {}),
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+        });
+        break;
+      case "deleteMemoryFacts":
+        void this.memory.deleteFacts({ path: msg.path, factIds: msg.factIds });
+        break;
+      case "createProjectMemory":
+        void this.memory.createProjectMemory(msg.fileName);
+        break;
+      case "applyMemoryCandidates":
+        void this.memory.applyCandidates(msg.candidates, msg.sessionId);
+        break;
+      case "dismissMemoryCandidates":
+        this.memory.dismissCandidates(msg.sessionId);
+        break;
+      case "openMemoryFile":
+        void this.memory.openFile(msg.path);
+        break;
+      case "generateKnowledge":
+        void this.memory.generateKnowledge(msg.jobId, msg.mode ?? "incremental");
+        break;
+      case "setKnowledgeInjection":
+        void this.memory.setKnowledgeInjection(msg.path, msg.injected);
+        break;
+      case "openKnowledgeFile":
+        void this.memory.openKnowledgeFile(msg.path);
         break;
       case "listApprovalPolicy":
         void this.sendApprovalPolicy();
@@ -1302,6 +1445,7 @@ export class ChatPanel implements vscode.Disposable {
       type: "hostSettings",
       nextStepSuggestions: config.get<boolean>("nextStepSuggestions", true),
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
+      autoMemoryCapture: config.get<boolean>("autoMemoryCapture", false),
     });
   }
 
@@ -1419,6 +1563,91 @@ export class ChatPanel implements vscode.Disposable {
    * Instance fields (constants as defaults) so tests can inject small values. */
   private internalPromptTimeoutMs = INTERNAL_PROMPT_TIMEOUT_MS;
   private internalPromptIdleMs = INTERNAL_PROMPT_IDLE_MS;
+
+  /** F3 Phase 2: extraction completion on its own lane. Reuses the same
+   * endpoint/model resolution and salvage policy as enhance/title. */
+  private async runMemoryPrompt(text: string): Promise<string | null> {
+    if (this.disposed || this.memoryPromptBusy) return null;
+    this.memoryPromptBusy = true;
+    try {
+      return await this.completeInternalPrompt(
+        text,
+        MEMORY_EXTRACT_TIMEOUT_MS,
+        MEMORY_EXTRACT_IDLE_MS,
+      );
+    } finally {
+      this.memoryPromptBusy = false;
+    }
+  }
+
+  /** F3 Phase 3: knowledge-index completion on its own lane. */
+  private async runKnowledgePrompt(text: string): Promise<string | null> {
+    if (this.disposed || this.knowledgePromptBusy) return null;
+    this.knowledgePromptBusy = true;
+    try {
+      return await this.completeInternalPrompt(
+        text,
+        KNOWLEDGE_PROMPT_TIMEOUT_MS,
+        KNOWLEDGE_PROMPT_IDLE_MS,
+      );
+    } finally {
+      this.knowledgePromptBusy = false;
+    }
+  }
+
+  /** Workspace scan for the knowledge digest. Uses findFiles so .gitignore /
+   * search excludes apply; `.iflow` itself is skipped (knowledge is generated
+   * from source, not from its own output). */
+  private async scanKnowledgeWorkspace(): Promise<WorkspaceScan> {
+    const cwd = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const root = cwd
+      ? roots.find((candidate) => isWithin(candidate, cwd)) ?? cwd
+      : roots[0]
+        ? path.resolve(roots[0])
+        : null;
+    if (!root) return { files: [], truncated: false };
+    const limit = 2_000;
+    const uris = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(root, "**/*"),
+      "**/{node_modules,.git,dist,build,out,coverage,vendor,.next,.venv,target,__pycache__,.iflow}/**",
+      limit + 1,
+    );
+    const out: WorkspaceFile[] = [];
+    // Stat in small batches: 2000 concurrent vscode.workspace.fs.stat calls can
+    // swamp the extension host (and remote workspaces), while sequential calls
+    // take too long for a refresh.
+    const batchSize = 32;
+    for (let i = 0; i < uris.length; i += batchSize) {
+      const batch = uris.slice(i, i + batchSize);
+      const entries = await Promise.all(
+        batch.map(async (uri): Promise<WorkspaceFile | null> => {
+          const rel = path.relative(root, uri.fsPath).replace(/\\/g, "/");
+          if (!rel || rel.startsWith("../")) return null;
+          try {
+            const info = await vscode.workspace.fs.stat(uri);
+            if ((info.type & vscode.FileType.File) === 0) return null;
+            return { path: uri.fsPath, rel, size: info.size, mtimeMs: info.mtime };
+          } catch {
+            return null;
+          }
+        }),
+      );
+      for (const entry of entries) if (entry) out.push(entry);
+    }
+    out.sort((a, b) => a.rel.localeCompare(b.rel));
+    const truncated = uris.length > limit || out.length > limit;
+    return { files: out.slice(0, limit), truncated };
+  }
+
+  private async readKnowledgeFile(file: string): Promise<string | null> {
+    try {
+      const data = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
+      return Buffer.from(data).toString("utf8");
+    } catch {
+      return null;
+    }
+  }
 
   /** Run one internal prompt directly against the active endpoint; resolves
    * with the model's text (trimmed) or null on any failure. Never throws.
@@ -1836,6 +2065,11 @@ export class ChatPanel implements vscode.Disposable {
       // leave the warning exactly as it was, otherwise the next push would
       // re-arm a second pill while the first still renders.
       void this.runCompressTurn(toastId);
+      return;
+    }
+    if (actionId === "memory-review") {
+      if (typeof toastId === "number") this.store.dismissToast(toastId);
+      this.memory.reviewCandidates();
       return;
     }
     if (typeof toastId === "number") this.store.dismissToast(toastId);
@@ -4969,16 +5203,16 @@ export class ChatPanel implements vscode.Disposable {
    * Collect what the model will see beyond the user's typed text. Mod report
    * first (full body, byte-exact): the reported systemPrompt is the final
    * systemInstruction, and P0e already appends the full joined hierarchical
-   * memory (global memory.md + every AGENTS.md/IFLOW.md with its body inline,
-   * probed) — one item covers prompt + memory + context files without
-   * duplicating the same bytes. Disk fallback when the bundled CLI carries no
-   * Mod (plain upstream CLI): ~/.iflow/memory.md plus the hierarchical
-   * AGENTS.md/IFLOW.md chain from the session cwd upward — the same files the
-   * CLI's hierarchical-memory loader reads (probed, CLI 0.5.19 bundle). The
-   * system prompt is honestly marked uncapturable in fallback; we never
-   * fabricate its body.
+   * memory (every AGENTS.md/IFLOW.md with its body inline, probed) — one item
+   * covers prompt + memory + context files without duplicating the same
+   * bytes. Disk fallback when the bundled CLI carries no Mod (plain upstream
+   * CLI): MemoryService's discovered global + hierarchical files (the same
+   * files the CLI loader reads, CLI 0.5.19 probe). The system prompt is
+   * honestly marked uncapturable in fallback; we never fabricate its body.
+   * Legacy `memory.md` is deliberately excluded — it is NOT loaded by the
+   * current CLI (probe: test/fixtures/probe-memory.mjs).
    */
-  private collectInjectedContext(reportFresh: boolean): InjectedContextItem[] {
+  private async collectInjectedContext(reportFresh: boolean): Promise<InjectedContextItem[]> {
     const report = reportFresh ? this.readContextReport() : null;
     if (report) {
       this.exportCorePrompt(report.systemPrompt);
@@ -4990,30 +5224,7 @@ export class ChatPanel implements vscode.Disposable {
       label: vscode.l10n.t("系统提示词（未随会话捕获）"),
       content: vscode.l10n.t("内置 CLI 未启用上下文报告（acp-context-report Mod），系统提示词正文无法透明展示。"),
     });
-    try {
-      const mem = path.join(os.homedir(), ".iflow", "memory.md");
-      if (existsSync(mem)) {
-        items.push({ kind: "memory", label: vscode.l10n.t("记忆（~/.iflow/memory.md）"), path: mem, content: readFileSync(mem, "utf8") });
-      }
-    } catch {
-      /* best effort */
-    }
-    let dir = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    for (let depth = 0; dir && depth < 32; depth++) {
-      for (const name of ["AGENTS.md", "IFLOW.md"]) {
-        try {
-          const p = path.join(dir, name);
-          if (existsSync(p)) {
-            items.push({ kind: "context-file", label: name, path: p, content: readFileSync(p, "utf8") });
-          }
-        } catch {
-          /* best effort */
-        }
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
+    items.push(...(await this.memory.injectedContextItems()));
     return items;
   }
 
@@ -5120,7 +5331,7 @@ export class ChatPanel implements vscode.Disposable {
       await new Promise((r) => setTimeout(r, 200));
       if (this.disposed) return;
     }
-    const items = this.collectInjectedContext(isFresh());
+    const items = await this.collectInjectedContext(isFresh());
     // The same request also carries every connected MCP server's tool
     // declarations (mcp-status Mod channel, best effort): fold them in so the
     // card answers "which MCP tools did this request carry" next to the
@@ -5771,6 +5982,11 @@ export class ChatPanel implements vscode.Disposable {
       if (result.stopReason !== "cancelled") {
         await this.maybeAutoCompressOnIdle(promptSessionId);
       }
+      // F3 Phase 2: turn-end memory extraction (own lane, gated by
+      // iflow.autoMemoryCapture). Fire-and-forget: never delays the queue.
+      if (result.stopReason !== "cancelled") {
+        void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
+      }
       // M2 P0-3: the turn settled — the idle slot is free, feed it the next
       // queued message (no-op when the queue is empty). A user Stop
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
@@ -5874,6 +6090,8 @@ export class ChatPanel implements vscode.Disposable {
         if (promptSessionId) void this.generateNextStepSuggestions(promptSessionId);
         // Same turn-end proactive compression policy as sendPrompt.
         await this.maybeAutoCompressOnIdle(promptSessionId);
+        // Same turn-end memory extraction policy as sendPrompt.
+        void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();

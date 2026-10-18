@@ -30,7 +30,9 @@ import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
-import type { AgentStatus, SessionSummaryUi } from "../../shared/messages";
+import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
+import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
+import type { AgentStatus, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 
 function statusChip(status: AgentStatus, compressing = false, plan = false) {
@@ -176,6 +178,12 @@ export function App() {
   const pending = useChat((s) => s.pending);
   const send = useChat((s) => s.send);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  const memoryDraft = useChat((s) => s.memoryDraftRequest);
+  const clearMemoryDraft = useChat((s) => s.clearMemoryDraft);
+  const [memoryReview, setMemoryReview] = useState<{
+    sessionId: string | null;
+    candidates: MemoryCandidateUi[];
+  } | null>(null);
   // Delete keeps a modal confirm (the host delete is irreversible); the armed
   // session is held here so the dialog can render its label.
   const [confirmingDelete, setConfirmingDelete] = useState<SessionSummaryUi | null>(null);
@@ -217,8 +225,16 @@ export function App() {
   // loads the draft into the editor; here we only route visibility).
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      const msg = event.data as { type?: string; draft?: unknown };
+      const msg = event.data as {
+        type?: string;
+        draft?: unknown;
+        sessionId?: string | null;
+        candidates?: MemoryCandidateUi[];
+      };
       if (msg?.type === "approvalPolicy" && msg.draft) setSettingsTab("policy");
+      if (msg?.type === "memoryCandidates" && Array.isArray(msg.candidates) && msg.candidates.length > 0) {
+        setMemoryReview({ sessionId: msg.sessionId ?? null, candidates: msg.candidates });
+      }
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
@@ -600,6 +616,22 @@ export function App() {
           switch can be started from the header dropdown or the auth card's
           profile list, so it must stack above both — same fixed z-40 layer,
           later in the DOM wins). */}
+      {memoryDraft && (
+        <MemoryQuickAdd
+          request={memoryDraft}
+          onClose={() => clearMemoryDraft(memoryDraft.seq)}
+        />
+      )}
+
+      {memoryReview && (
+        <MemoryReviewDialog
+          key={memoryReview.candidates.map((candidate) => candidate.id).join("|")}
+          sessionId={memoryReview.sessionId}
+          candidates={memoryReview.candidates}
+          onClose={() => setMemoryReview(null)}
+        />
+      )}
+
       {pendingProfileSwitch && <ProfileSwitchCard pending={pendingProfileSwitch} />}
 
       {/* Pending-action cards (approval / plan-exit / question) float OVER the

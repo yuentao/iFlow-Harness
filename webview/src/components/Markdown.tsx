@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { useChat } from "../store";
+import { t } from "../i18n";
 import { escapeHtml, renderCodeBlock } from "../highlight";
 
 marked.setOptions({ gfm: true, breaks: true });
@@ -122,15 +123,20 @@ const CHECK_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 const REGEN_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
+const REMEMBER_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>';
 
 export function Markdown({
   text,
   showCopyIcon = false,
   onRegenerate,
+  onRemember,
 }: {
   text: string;
   showCopyIcon?: boolean;
   onRegenerate?: () => void;
+  /** "记住这条": the parent opens the quick-add dialog with this block text. */
+  onRemember?: (text: string) => void;
 }) {
   const send = useChat((s) => s.send);
   const ref = useRef<HTMLDivElement>(null);
@@ -267,8 +273,18 @@ export function Markdown({
 
     if (showCopyIcon) {
       const last = root.lastElementChild;
-      if (last && !last.querySelector(":scope > button[data-role='copy-msg']")) {
-        if (onRegenerateRef.current) {
+      if (last) {
+        if (onRememberRef.current && !last.querySelector(":scope > button[data-role='remember-msg']")) {
+          const remember = document.createElement("button");
+          remember.type = "button";
+          remember.className = "copy-msg-btn";
+          remember.dataset.role = "remember-msg";
+          remember.title = t("记住这条");
+          remember.setAttribute("aria-label", t("记住这条"));
+          remember.innerHTML = REMEMBER_ICON_SVG;
+          last.appendChild(remember);
+        }
+        if (onRegenerateRef.current && !last.querySelector(":scope > button[data-role='regen-msg']")) {
           const regen = document.createElement("button");
           regen.type = "button";
           regen.className = "copy-msg-btn";
@@ -278,14 +294,16 @@ export function Markdown({
           regen.innerHTML = REGEN_ICON_SVG;
           last.appendChild(regen);
         }
-        const icon = document.createElement("button");
-        icon.type = "button";
-        icon.className = "copy-msg-btn";
-        icon.dataset.role = "copy-msg";
-        icon.title = "复制";
-        icon.setAttribute("aria-label", "复制全文");
-        icon.innerHTML = COPY_ICON_SVG;
-        last.appendChild(icon);
+        if (!last.querySelector(":scope > button[data-role='copy-msg']")) {
+          const icon = document.createElement("button");
+          icon.type = "button";
+          icon.className = "copy-msg-btn";
+          icon.dataset.role = "copy-msg";
+          icon.title = "复制";
+          icon.setAttribute("aria-label", "复制全文");
+          icon.innerHTML = COPY_ICON_SVG;
+          last.appendChild(icon);
+        }
       }
     }
   };
@@ -356,11 +374,18 @@ export function Markdown({
   textRef.current = text;
   const onRegenerateRef = useRef(onRegenerate);
   onRegenerateRef.current = onRegenerate;
+  const onRememberRef = useRef(onRemember);
+  onRememberRef.current = onRemember;
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
+      const rememberBtn = target.closest<HTMLElement>("button[data-role='remember-msg']");
+      if (rememberBtn) {
+        onRememberRef.current?.(textRef.current);
+        return;
+      }
       const regenBtn = target.closest<HTMLElement>("button[data-role='regen-msg']");
       if (regenBtn) {
         // Trailing regenerate icon (latest turn only): re-runs the preceding
@@ -417,7 +442,11 @@ export function Markdown({
     const root = ref.current;
     if (!root) return;
     const observer = new MutationObserver(() => {
-      if (showCopyIcon && !root.querySelector("button[data-role='copy-msg']")) {
+      if (
+        showCopyIcon &&
+        (!root.querySelector("button[data-role='copy-msg']") ||
+          (onRememberRef.current && !root.querySelector("button[data-role='remember-msg']")))
+      ) {
         ensureInjected();
       }
     });

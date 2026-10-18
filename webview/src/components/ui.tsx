@@ -110,10 +110,11 @@ export function ModalShell({
       // Only the topmost open modal reacts (see modalStack).
       if (modalStack[modalStack.length - 1] !== stackToken.current) return;
       if (e.key === "Escape") {
-        if (!dismissible) return;
+        // A non-dismissible modal still owns ESC: swallow it so the global
+        // "Esc stops generation" shortcut cannot fire behind the modal.
         e.preventDefault();
         e.stopPropagation();
-        onClose();
+        if (dismissible) onClose();
         return;
       }
       if (e.key === "Tab") {

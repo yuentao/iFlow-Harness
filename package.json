@@ -68,6 +68,11 @@
         "category": "iFlow"
       },
       {
+        "command": "iflow.rememberSelection",
+        "title": "%command.rememberSelection.title%",
+        "category": "iFlow"
+      },
+      {
         "command": "iflow.restartCli",
         "title": "%command.restartCli.title%",
         "category": "iFlow"
@@ -103,6 +108,11 @@
         },
         {
           "command": "iflow.addSelectionToContext",
+          "when": "editorHasSelection",
+          "group": "9_iflow"
+        },
+        {
+          "command": "iflow.rememberSelection",
           "when": "editorHasSelection",
           "group": "9_iflow"
         }
@@ -278,6 +288,11 @@
           "default": false,
           "description": "%iflow.configuration.autoCompressOnIdle.description%"
         },
+        "iflow.autoMemoryCapture": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.autoMemoryCapture.description%"
+        },
         "iflow.checkpoints": {
           "type": "boolean",
           "default": true,
@@ -325,6 +340,7 @@
     "test": "vitest run",
     "lint:deps": "knip",
     "harness": "node scripts/harness.mjs",
+    "probe:memory": "node test/fixtures/probe-memory.mjs",
     "vendor:cli": "node scripts/vendor-cli.mjs",
     "defaults:sync": "node scripts/vendor-cli.mjs --sync-defaults",
     "package": "npm run vendor:cli -- --force && npm run build && vsce package --no-dependencies"

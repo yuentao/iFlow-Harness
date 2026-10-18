@@ -1102,6 +1102,7 @@ const BlockView = memo(function BlockView({
   checkpoint,
   isLastUser,
   onRegenerate,
+  onRemember,
   onEditingChange,
 }: {
   block: Block;
@@ -1121,6 +1122,8 @@ const BlockView = memo(function BlockView({
   onRegenerate: () => void;
   /** M4 P1-9: forwarded to UserMessage's inline editor (see there). */
   onEditingChange?: (blockId: string, editing: boolean) => void;
+  /** F3 Phase 2: open the quick-add memory dialog with this assistant text. */
+  onRemember?: (text: string) => void;
 }) {
   switch (block.kind) {
     case "user":
@@ -1170,6 +1173,7 @@ const BlockView = memo(function BlockView({
               text={block.text}
               showCopyIcon={canCopy}
               onRegenerate={isLatest && canCopy && canRegenerate ? onRegenerate : undefined}
+              onRemember={onRemember}
             />
           </div>
           </div>
@@ -1525,6 +1529,10 @@ function MessageListInner({ state }: { state: SessionState }) {
     useChat.getState().send({ type: "regenerate" });
   };
 
+  const onRemember = useCallback((text: string) => {
+    useChat.getState().requestMemoryDraft(text);
+  }, []);
+
   // Context-occupancy warning (host persistent pill with the 立即压缩 action).
   // When the sticky streaming pill is visible the warning MERGES into it
   // (one indicator instead of two stacked pills); the Toasts stack then skips
@@ -1617,6 +1625,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           !state.pendingPlanExit
         }
         onRegenerate={onRegenerate}
+        onRemember={onRemember}
         onEditingChange={handleEditingChange}
       />
               </div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react";
+import { Brain, KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -7,6 +7,7 @@ import { t } from "../i18n";
 import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, ModalShell, SAVE_BTN } from "./ui";
 import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
+import { MemorySection } from "./MemoryCard";
 
 /**
  * Unified settings modal — the single home for everything the gear opens:
@@ -21,7 +22,7 @@ import { ApprovalPolicySection } from "./ApprovalPolicyCard";
  * nav rail (left on wide viewports, top tab strip when narrow, via the
  * @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "mcp" | "policy" | "general";
+export type SettingsTab = "api" | "mcp" | "policy" | "memory" | "general";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -67,6 +68,7 @@ export function SettingsModal({
     { id: "api", icon: KeyRound, label: t("API 配置") },
     { id: "mcp", icon: Server, label: t("MCP 服务器") },
     { id: "policy", icon: ShieldCheck, label: t("审批策略") },
+    { id: "memory", icon: Brain, label: t("记忆") },
     { id: "general", icon: SlidersHorizontal, label: t("通用") },
   ];
   const tabTitle = TABS.find((x) => x.id === tab)?.label ?? "";
@@ -155,6 +157,7 @@ export function SettingsModal({
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "mcp" && <McpSection busy={busy} onHeader={setSectionHeader} />}
           {tab === "policy" && <ApprovalPolicySection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
           {tab === "general" && <GeneralSection />}
         </div>
       </div>
@@ -193,6 +196,17 @@ function GeneralSection() {
       />
       <p className="text-[11px] leading-relaxed text-muted-foreground/85">
         {t("默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。")}
+      </p>
+      <ToggleRow
+        label={t("自动提取记忆")}
+        description={t(
+          "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入。",
+        )}
+        checked={settings.autoMemoryCapture}
+        onChange={(value) => updateHostSetting({ autoMemoryCapture: value })}
+      />
+      <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+        {t("默认关闭。开启后每轮可能产生一次额外模型调用；自动提取只生成候选，不会自动写入。")}
       </p>
     </div>
   );

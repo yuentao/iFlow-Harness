@@ -390,6 +390,14 @@ const en: Record<string, string> = {
   // composer / message list (additional — new entries only)
   "复制": "Copy",
   "重新生成": "Regenerate",
+  "增量刷新": "Incremental refresh",
+  "增量更新": "incremental update",
+  "全量生成": "full generation",
+  "上次生成：{0} · {1} 个文件": "Last generated: {0} · {1} files",
+  "全量重建": "Full rebuild",
+  "只根据变化更新索引，无变化时不会调用模型":
+    "Update the index from changes only; no model call when nothing changed",
+  "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 iFlow…（首次启动或配置了多个 MCP server 时较久）":
     "Starting iFlow… (slower on first launch or with multiple MCP servers)",
   // P1: edit & resend, session search, aria-live announcements
@@ -464,6 +472,96 @@ const en: Record<string, string> = {
     "After a turn settles, if context occupancy reaches 95%, compress the conversation before continuing the next turn (one extra compress turn).",
   "默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。":
     "Off by default. When disabled, compression still runs after the gateway reports context overflow, and the「立即压缩」action remains available.",
+  // F3 memory manager (Phase 1)
+  "全局记忆": "Global memory",
+  "项目记忆": "Project memory",
+  "主文件": "Primary",
+  "自动发现": "Auto-discovered",
+  "遗留文件": "Legacy",
+  "已注入": "Injected",
+  "未注入": "Not injected",
+  "约 {0} tokens（BPE 估算）": "About {0} tokens (BPE estimate)",
+  "打开文件": "Open file",
+  "编辑记忆": "Edit memory",
+  "尚未创建": "Not created yet",
+  "更新于 {0}": "Updated {0}",
+  "当前 CLI 不会加载此文件": "The current CLI does not load this file",
+  "删除这条记忆": "Delete this memory",
+  "还有 {0} 条…": "{0} more…",
+  "记忆在新建会话或恢复会话时加载。当前会话需要重启 CLI 才会读取新内容。":
+    "Memory is loaded when a new session is created or a session is restored. The current session only sees new content after the CLI restarts.",
+  "重新加载": "Reload",
+  "{0} 字符 · ≈{1} tokens": "{0} chars · ≈{1} tokens",
+  "已保存 {0}": "Saved {0}",
+  "新建会话或重启 CLI 后生效": "Takes effect after a new session or CLI restart",
+  "以下是 CLI 每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。":
+    "These are the memory files the CLI injects into every request. Their content is sent to the model — do not store secrets here.",
+  "重新扫描": "Rescan",
+  "未打开工作区": "No workspace open",
+  "当前工作区没有可用的项目记忆文件": "No project memory files are available in this workspace",
+  "新建项目记忆": "New project memory",
+  "添加一条记忆": "Add a memory",
+  "全局": "Global",
+  "项目": "Project",
+  "例如：本项目的测试命令是 npm test；不要修改 vendor/ 下的文件。":
+    "e.g. This project's test command is npm test; do not modify files under vendor/.",
+  "写入中…": "Writing…",
+  "保存到{0}": "Save to {0}",
+  "保存后新建会话或重启 CLI 生效": "Takes effect after a new session or CLI restart",
+  "请先创建项目记忆文件": "Create a project memory file first",
+  "新建会话": "New session",
+  "重启 CLI 使记忆生效": "Restart CLI to apply memory",
+  "重启 CLI 并恢复当前会话，使记忆立即生效":
+    "Restart the CLI and restore the current session so memory applies immediately",
+  "记忆不会热更新到正在进行的会话。": "Memory is not hot-reloaded into an ongoing session.",
+  "文件已在磁盘上发生变化，请重新加载后再保存":
+    "The file changed on disk — reload before saving",
+  "保存失败": "Save failed",
+  "保存超时，请重试": "Save timed out — please retry",
+  "读取 {0}…": "Loading {0}…",
+  // F3 Phase 2: quick add + candidate review
+  "记住这条": "Remember this",
+  "保存到全局记忆": "Save to global memory",
+  "保存到项目记忆": "Save to project memory",
+  "要记住的内容（可编辑）": "What to remember (editable)",
+  "记忆会随每次请求发送给模型，请勿写入密钥。":
+    "Memory is sent to the model with every request — never store secrets here.",
+  "已加入记忆（新会话生效）": "Memory added (effective in a new session)",
+  "记忆候选": "Memory candidates",
+  "记忆作用域": "Memory scope",
+  "偏好": "Preference",
+  "约定": "Convention",
+  "决策": "Decision",
+  "陷阱": "Gotcha",
+  "保存选中（{0}）": "Save selected ({0})",
+  "全部忽略": "Ignore all",
+  "自动提取只生成候选，确认后才会写入记忆":
+    "Auto-extraction only produces candidates; nothing is written until you confirm",
+  "以下是模型从最近对话中提取的长期记忆候选。请勾选要保留的内容，并确认作用域。":
+    "These long-term memory candidates were extracted from the recent conversation. Check what to keep and confirm the scope.",
+  "自动提取记忆": "Auto-extract memories",
+  "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入。":
+    "After each turn, ask the current model for durable preference/convention candidates; nothing is written until you confirm.",
+  "默认关闭。开启后每轮可能产生一次额外模型调用；自动提取只生成候选，不会自动写入。":
+    "Off by default. When enabled, each turn may make one extra model call; extraction only produces candidates and never writes automatically.",
+  // F3 Phase 3: project knowledge
+  "项目知识库": "Project knowledge",
+  "{0} 篇文档": "{0} doc(s)",
+  "生成项目知识": "Generate project knowledge",
+  "尚未生成项目知识。点击「生成项目知识」分析当前工作区。":
+    "No project knowledge yet. Click “Generate project knowledge” to analyze this workspace.",
+  "取消注入": "Stop injecting",
+  "注入": "Inject",
+  "项目知识已注入约 {0} tokens，会随每次请求发送；建议只保留索引或精简文档。":
+    "Project knowledge injects about {0} tokens into every request; keep only the index or trim the docs.",
+  "导入位置：{0}": "Imported by: {0}",
+  "知识索引生成后写入 .iflow/knowledge/，通过项目记忆的 @ 导入注入；默认只在新建或恢复会话时生效。":
+    "The generated index lives in .iflow/knowledge/ and is injected through an @ import in project memory; it takes effect in a new or restored session.",
+  "正在扫描工作区…": "Scanning workspace…",
+  "正在生成知识索引…": "Generating knowledge index…",
+  "正在写入项目知识…": "Writing project knowledge…",
+  "正在生成…": "Generating…",
+  "生成失败": "Generation failed",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

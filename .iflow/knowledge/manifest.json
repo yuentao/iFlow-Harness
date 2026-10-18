@@ -1,0 +1,810 @@
+{
+  "version": 2,
+  "generatedAt": "2026-10-18T11:30:34.852Z",
+  "model": "deepseek-flash",
+  "mode": "full",
+  "docs": [
+    {
+      "path": "index.md",
+      "hash": "e86dff4f2e8c7d9124aed0391baa03ab7d51a4da260a6e37c936424ffcb18051",
+      "tokens": 2681
+    }
+  ],
+  "sources": [
+    {
+      "rel": ".github/workflows/ci.yml",
+      "size": 834,
+      "mtimeMs": 1789938912644
+    },
+    {
+      "rel": ".github/workflows/release.yml",
+      "size": 4741,
+      "mtimeMs": 1789938912654
+    },
+    {
+      "rel": ".gitignore",
+      "size": 703,
+      "mtimeMs": 1792312408448
+    },
+    {
+      "rel": ".vscode/launch.json",
+      "size": 321,
+      "mtimeMs": 1788635272188
+    },
+    {
+      "rel": ".vscode/tasks.json",
+      "size": 491,
+      "mtimeMs": 1788635272191
+    },
+    {
+      "rel": ".vscodeignore",
+      "size": 728,
+      "mtimeMs": 1789938912654
+    },
+    {
+      "rel": "AGENTS.md",
+      "size": 73595,
+      "mtimeMs": 1792323034839.5415
+    },
+    {
+      "rel": "CHANGELOG.md",
+      "size": 24318,
+      "mtimeMs": 1791921644674
+    },
+    {
+      "rel": "docs/images/approval-dark.png",
+      "size": 531682,
+      "mtimeMs": 1791916075344
+    },
+    {
+      "rel": "docs/images/approval-policy.png",
+      "size": 457107,
+      "mtimeMs": 1791916540248
+    },
+    {
+      "rel": "docs/images/diff-hunk.png",
+      "size": 428919,
+      "mtimeMs": 1791914627228
+    },
+    {
+      "rel": "docs/images/panel-dark.png",
+      "size": 540310,
+      "mtimeMs": 1791916014092
+    },
+    {
+      "rel": "docs/images/panel-light.png",
+      "size": 694101,
+      "mtimeMs": 1791914526915
+    },
+    {
+      "rel": "docs/images/plan-card.png",
+      "size": 505718,
+      "mtimeMs": 1791914740875
+    },
+    {
+      "rel": "docs/images/question-card.png",
+      "size": 468574,
+      "mtimeMs": 1791914422478
+    },
+    {
+      "rel": "docs/images/settings-modal.png",
+      "size": 375511,
+      "mtimeMs": 1791916128554
+    },
+    {
+      "rel": "docs/images/subagent-card.png",
+      "size": 460748,
+      "mtimeMs": 1791914577643
+    },
+    {
+      "rel": "esbuild.mjs",
+      "size": 1641,
+      "mtimeMs": 1792223129016
+    },
+    {
+      "rel": "iflow-harness-1.6.0.vsix",
+      "size": 22582867,
+      "mtimeMs": 1792322799557
+    },
+    {
+      "rel": "knip.json",
+      "size": 649,
+      "mtimeMs": 1789938912715
+    },
+    {
+      "rel": "l10n/bundle.l10n.en.json",
+      "size": 21897,
+      "mtimeMs": 1792322536144
+    },
+    {
+      "rel": "LICENSE",
+      "size": 1092,
+      "mtimeMs": 1788782457724
+    },
+    {
+      "rel": "media/icon.png",
+      "size": 6546,
+      "mtimeMs": 1792322771447
+    },
+    {
+      "rel": "media/iflow-title.svg",
+      "size": 2452,
+      "mtimeMs": 1788793293617
+    },
+    {
+      "rel": "media/iflow.svg",
+      "size": 2247,
+      "mtimeMs": 1788635125633
+    },
+    {
+      "rel": "package-lock.json",
+      "size": 337305,
+      "mtimeMs": 1792223279254
+    },
+    {
+      "rel": "package.json",
+      "size": 11324,
+      "mtimeMs": 1792312767275
+    },
+    {
+      "rel": "package.nls.json",
+      "size": 6002,
+      "mtimeMs": 1792312785717
+    },
+    {
+      "rel": "package.nls.zh-cn.json",
+      "size": 5643,
+      "mtimeMs": 1792312777122
+    },
+    {
+      "rel": "prompts/system-prompt.md",
+      "size": 31258,
+      "mtimeMs": 1792247686844
+    },
+    {
+      "rel": "README.md",
+      "size": 13039,
+      "mtimeMs": 1791918124294
+    },
+    {
+      "rel": "scripts/generate-icon.mjs",
+      "size": 1397,
+      "mtimeMs": 1789137015070
+    },
+    {
+      "rel": "scripts/harness.mjs",
+      "size": 7939,
+      "mtimeMs": 1791384937658
+    },
+    {
+      "rel": "scripts/iflow-defaults/kimi-request-overrides.json",
+      "size": 353,
+      "mtimeMs": 1786107368000
+    },
+    {
+      "rel": "scripts/iflow-defaults/multimodal-models.json",
+      "size": 942,
+      "mtimeMs": 1788461030932
+    },
+    {
+      "rel": "scripts/iflow-defaults/output-token-limits.json",
+      "size": 186,
+      "mtimeMs": 1790243392247
+    },
+    {
+      "rel": "scripts/iflow-defaults/stream-toolcall-repair.json",
+      "size": 181,
+      "mtimeMs": 1791384937658
+    },
+    {
+      "rel": "scripts/iflow-defaults/thinking-models.json",
+      "size": 2904,
+      "mtimeMs": 1791384937659
+    },
+    {
+      "rel": "scripts/iflow-defaults/web-search.json",
+      "size": 131,
+      "mtimeMs": 1792223129019
+    },
+    {
+      "rel": "scripts/read-changelog.mjs",
+      "size": 1615,
+      "mtimeMs": 1788805629865
+    },
+    {
+      "rel": "scripts/vendor-cli.mjs",
+      "size": 17629,
+      "mtimeMs": 1792263246760
+    },
+    {
+      "rel": "shared/approval-policy.ts",
+      "size": 14550,
+      "mtimeMs": 1791653170627
+    },
+    {
+      "rel": "shared/checkpoints.ts",
+      "size": 5065,
+      "mtimeMs": 1791803675548
+    },
+    {
+      "rel": "shared/context-source.ts",
+      "size": 10213,
+      "mtimeMs": 1791621204479
+    },
+    {
+      "rel": "shared/context-window.ts",
+      "size": 10150,
+      "mtimeMs": 1791709597619
+    },
+    {
+      "rel": "shared/export.ts",
+      "size": 7169,
+      "mtimeMs": 1792223129020
+    },
+    {
+      "rel": "shared/gpt-tokenizer.d.ts",
+      "size": 460,
+      "mtimeMs": 1789768831364
+    },
+    {
+      "rel": "shared/hunks.ts",
+      "size": 8295,
+      "mtimeMs": 1791648955670
+    },
+    {
+      "rel": "shared/messages.ts",
+      "size": 67567,
+      "mtimeMs": 1792322163036
+    },
+    {
+      "rel": "shared/notifications.ts",
+      "size": 7826,
+      "mtimeMs": 1792223129021
+    },
+    {
+      "rel": "shared/queue.ts",
+      "size": 2609,
+      "mtimeMs": 1791604060227
+    },
+    {
+      "rel": "shared/session-state.ts",
+      "size": 104321,
+      "mtimeMs": 1792308859388
+    },
+    {
+      "rel": "src/acp/auth.ts",
+      "size": 4341,
+      "mtimeMs": 1791181678151
+    },
+    {
+      "rel": "src/acp/cli-locator.ts",
+      "size": 15997,
+      "mtimeMs": 1791384937661
+    },
+    {
+      "rel": "src/acp/client.ts",
+      "size": 17294,
+      "mtimeMs": 1792223129023
+    },
+    {
+      "rel": "src/acp/complete.ts",
+      "size": 7568,
+      "mtimeMs": 1791564983571
+    },
+    {
+      "rel": "src/acp/jsonrpc.ts",
+      "size": 22981,
+      "mtimeMs": 1792223129032
+    },
+    {
+      "rel": "src/acp/models-query.ts",
+      "size": 19847,
+      "mtimeMs": 1792311345265
+    },
+    {
+      "rel": "src/acp/os-notify.ts",
+      "size": 8577,
+      "mtimeMs": 1792223129033
+    },
+    {
+      "rel": "src/acp/protocol.ts",
+      "size": 15316,
+      "mtimeMs": 1792223129041
+    },
+    {
+      "rel": "src/extension.ts",
+      "size": 5802,
+      "mtimeMs": 1792312751073
+    },
+    {
+      "rel": "src/memory/discovery.ts",
+      "size": 7183,
+      "mtimeMs": 1792312315969
+    },
+    {
+      "rel": "src/memory/extract.ts",
+      "size": 4884,
+      "mtimeMs": 1792313323333
+    },
+    {
+      "rel": "src/memory/files.ts",
+      "size": 7234,
+      "mtimeMs": 1792312111940
+    },
+    {
+      "rel": "src/memory/knowledge.ts",
+      "size": 13794,
+      "mtimeMs": 1792322309484
+    },
+    {
+      "rel": "src/memory/service.ts",
+      "size": 44527,
+      "mtimeMs": 1792322658687
+    },
+    {
+      "rel": "src/panel/attachments.ts",
+      "size": 3283,
+      "mtimeMs": 1791181678167
+    },
+    {
+      "rel": "src/panel/checkpoints.ts",
+      "size": 19548,
+      "mtimeMs": 1791880127839
+    },
+    {
+      "rel": "src/panel/panel.ts",
+      "size": 352171,
+      "mtimeMs": 1792322188162
+    },
+    {
+      "rel": "src/panel/store.ts",
+      "size": 21883,
+      "mtimeMs": 1792308717037
+    },
+    {
+      "rel": "src/panel/wire-log.ts",
+      "size": 4618,
+      "mtimeMs": 1791909891606
+    },
+    {
+      "rel": "test/acp-client.test.ts",
+      "size": 13333,
+      "mtimeMs": 1792223129048
+    },
+    {
+      "rel": "test/approval-diff-preview.test.ts",
+      "size": 4399,
+      "mtimeMs": 1791813321601
+    },
+    {
+      "rel": "test/approval-policy.test.ts",
+      "size": 10308,
+      "mtimeMs": 1791653194649
+    },
+    {
+      "rel": "test/approval-timeout.test.ts",
+      "size": 6041,
+      "mtimeMs": 1791384937663
+    },
+    {
+      "rel": "test/attachments.test.ts",
+      "size": 4641,
+      "mtimeMs": 1791181678179
+    },
+    {
+      "rel": "test/auth.test.ts",
+      "size": 4529,
+      "mtimeMs": 1791181678180
+    },
+    {
+      "rel": "test/checkpoints.test.ts",
+      "size": 21598,
+      "mtimeMs": 1792223129067
+    },
+    {
+      "rel": "test/composer-history.test.tsx",
+      "size": 4804,
+      "mtimeMs": 1791832360461
+    },
+    {
+      "rel": "test/context-autocompress.test.ts",
+      "size": 11869,
+      "mtimeMs": 1792309146095
+    },
+    {
+      "rel": "test/context-source.test.ts",
+      "size": 8045,
+      "mtimeMs": 1791622275325
+    },
+    {
+      "rel": "test/context-warning.test.ts",
+      "size": 6022,
+      "mtimeMs": 1791705285476
+    },
+    {
+      "rel": "test/context-window.test.ts",
+      "size": 8296,
+      "mtimeMs": 1791711544641
+    },
+    {
+      "rel": "test/error-boundary.test.tsx",
+      "size": 5412,
+      "mtimeMs": 1789768831611
+    },
+    {
+      "rel": "test/export.test.ts",
+      "size": 5604,
+      "mtimeMs": 1791435501840
+    },
+    {
+      "rel": "test/fixtures/acp-wire-2026-09-05T18-18-48-393Z.ndjson",
+      "size": 9889,
+      "mtimeMs": 1788632328395
+    },
+    {
+      "rel": "test/fixtures/acp-wire-2026-09-05T18-22-10-979Z.ndjson",
+      "size": 9889,
+      "mtimeMs": 1788632530981
+    },
+    {
+      "rel": "test/fixtures/m0-summary-2026-09-05T18-18-48-393Z.json",
+      "size": 1515,
+      "mtimeMs": 1788632328395
+    },
+    {
+      "rel": "test/fixtures/m0-summary-2026-09-05T18-22-10-979Z.json",
+      "size": 1559,
+      "mtimeMs": 1788632530982
+    },
+    {
+      "rel": "test/fixtures/probe-agent-cancel.mjs",
+      "size": 5146,
+      "mtimeMs": 1791751293609
+    },
+    {
+      "rel": "test/fixtures/probe-context-report.mjs",
+      "size": 4867,
+      "mtimeMs": 1792223129068
+    },
+    {
+      "rel": "test/fixtures/probe-gateway-sse.mjs",
+      "size": 3710,
+      "mtimeMs": 1791525012083
+    },
+    {
+      "rel": "test/fixtures/probe-mcp-status.mjs",
+      "size": 3831,
+      "mtimeMs": 1792223129068
+    },
+    {
+      "rel": "test/fixtures/probe-memory.mjs",
+      "size": 8901,
+      "mtimeMs": 1792311212693
+    },
+    {
+      "rel": "test/fixtures/probe-usage-report.mjs",
+      "size": 3592,
+      "mtimeMs": 1791788669063
+    },
+    {
+      "rel": "test/fixtures/probe-web-search.mjs",
+      "size": 4860,
+      "mtimeMs": 1792223129068
+    },
+    {
+      "rel": "test/fixtures/repro-approval-timeout.mjs",
+      "size": 4909,
+      "mtimeMs": 1791384937663
+    },
+    {
+      "rel": "test/fixtures/repro-internal-prompt.mjs",
+      "size": 3672,
+      "mtimeMs": 1791552653645
+    },
+    {
+      "rel": "test/fixtures/repro-run1.log",
+      "size": 2242,
+      "mtimeMs": 1791266283042
+    },
+    {
+      "rel": "test/fixtures/repro-run2.log",
+      "size": 1819,
+      "mtimeMs": 1791267642456
+    },
+    {
+      "rel": "test/fixtures/repro-run3-vendor.log",
+      "size": 2219,
+      "mtimeMs": 1791269848475
+    },
+    {
+      "rel": "test/hunks.test.ts",
+      "size": 6696,
+      "mtimeMs": 1791649082591
+    },
+    {
+      "rel": "test/internal-prompt.test.ts",
+      "size": 15353,
+      "mtimeMs": 1791565374906
+    },
+    {
+      "rel": "test/jsonrpc.test.ts",
+      "size": 18551,
+      "mtimeMs": 1792223129069
+    },
+    {
+      "rel": "test/markdown-highlight.test.ts",
+      "size": 3029,
+      "mtimeMs": 1789938912782
+    },
+    {
+      "rel": "test/mcp-card.test.tsx",
+      "size": 7745,
+      "mtimeMs": 1792223129083
+    },
+    {
+      "rel": "test/memory-discovery.test.ts",
+      "size": 3887,
+      "mtimeMs": 1792311528231
+    },
+    {
+      "rel": "test/memory-extract.test.ts",
+      "size": 3223,
+      "mtimeMs": 1792312975376
+    },
+    {
+      "rel": "test/memory-files.test.ts",
+      "size": 4305,
+      "mtimeMs": 1792311508347
+    },
+    {
+      "rel": "test/memory-knowledge.test.ts",
+      "size": 5266,
+      "mtimeMs": 1792321584210
+    },
+    {
+      "rel": "test/memory-service.test.ts",
+      "size": 21133,
+      "mtimeMs": 1792322547180
+    },
+    {
+      "rel": "test/mock-acp-agent.mjs",
+      "size": 9116,
+      "mtimeMs": 1792223129083
+    },
+    {
+      "rel": "test/models-query.test.ts",
+      "size": 15007,
+      "mtimeMs": 1792223129084
+    },
+    {
+      "rel": "test/notifications.test.ts",
+      "size": 9256,
+      "mtimeMs": 1792223129084
+    },
+    {
+      "rel": "test/os-notification.test.ts",
+      "size": 17065,
+      "mtimeMs": 1792223129093
+    },
+    {
+      "rel": "test/os-notify.test.ts",
+      "size": 3087,
+      "mtimeMs": 1792223129093
+    },
+    {
+      "rel": "test/panel-compress-warning.test.ts",
+      "size": 7555,
+      "mtimeMs": 1792223129093
+    },
+    {
+      "rel": "test/panel-dispose.test.ts",
+      "size": 11588,
+      "mtimeMs": 1791822880390
+    },
+    {
+      "rel": "test/panel-edit-resend.test.ts",
+      "size": 9814,
+      "mtimeMs": 1791695508530
+    },
+    {
+      "rel": "test/panel-queue.test.ts",
+      "size": 14963,
+      "mtimeMs": 1791757482065
+    },
+    {
+      "rel": "test/profile-switch-choice.test.ts",
+      "size": 18719,
+      "mtimeMs": 1791896753413
+    },
+    {
+      "rel": "test/queue.test.ts",
+      "size": 2743,
+      "mtimeMs": 1791612417171
+    },
+    {
+      "rel": "test/session-state.test.ts",
+      "size": 135529,
+      "mtimeMs": 1792308805206
+    },
+    {
+      "rel": "test/store-snapshot.test.ts",
+      "size": 27474,
+      "mtimeMs": 1792223129118
+    },
+    {
+      "rel": "test/transcripts/timeout-session.json",
+      "size": 285,
+      "mtimeMs": 1792322721132
+    },
+    {
+      "rel": "test/vscode-stub.ts",
+      "size": 5792,
+      "mtimeMs": 1792309127729
+    },
+    {
+      "rel": "test/wire-log.test.ts",
+      "size": 4194,
+      "mtimeMs": 1791909905165
+    },
+    {
+      "rel": "tsconfig.json",
+      "size": 440,
+      "mtimeMs": 1789768831650
+    },
+    {
+      "rel": "tsconfig.test.json",
+      "size": 185,
+      "mtimeMs": 1788630593905
+    },
+    {
+      "rel": "vitest.config.ts",
+      "size": 354,
+      "mtimeMs": 1789768831651
+    },
+    {
+      "rel": "webview/dist-serve.err.log",
+      "size": 0,
+      "mtimeMs": 1791827840926
+    },
+    {
+      "rel": "webview/dist-serve.log",
+      "size": 692,
+      "mtimeMs": 1791828135692
+    },
+    {
+      "rel": "webview/index.html",
+      "size": 545,
+      "mtimeMs": 1789768831367
+    },
+    {
+      "rel": "webview/src/App.tsx",
+      "size": 32899,
+      "mtimeMs": 1792312903265
+    },
+    {
+      "rel": "webview/src/assets/iflow.svg",
+      "size": 2247,
+      "mtimeMs": 1788635125633
+    },
+    {
+      "rel": "webview/src/components/ApprovalCard.tsx",
+      "size": 6818,
+      "mtimeMs": 1791813174588
+    },
+    {
+      "rel": "webview/src/components/ApprovalPolicyCard.tsx",
+      "size": 16599,
+      "mtimeMs": 1791832156445
+    },
+    {
+      "rel": "webview/src/components/Composer.tsx",
+      "size": 82077,
+      "mtimeMs": 1792308782125
+    },
+    {
+      "rel": "webview/src/components/DiffView.tsx",
+      "size": 16627,
+      "mtimeMs": 1791912988859
+    },
+    {
+      "rel": "webview/src/components/ErrorBoundary.tsx",
+      "size": 3826,
+      "mtimeMs": 1789768831688
+    },
+    {
+      "rel": "webview/src/components/Markdown.tsx",
+      "size": 19644,
+      "mtimeMs": 1792313619537
+    },
+    {
+      "rel": "webview/src/components/mcp-servers.ts",
+      "size": 1161,
+      "mtimeMs": 1791775588174
+    },
+    {
+      "rel": "webview/src/components/McpCard.tsx",
+      "size": 25595,
+      "mtimeMs": 1792223129142
+    },
+    {
+      "rel": "webview/src/components/MemoryCard.tsx",
+      "size": 31088,
+      "mtimeMs": 1792322232590
+    },
+    {
+      "rel": "webview/src/components/MemoryQuickAdd.tsx",
+      "size": 5420,
+      "mtimeMs": 1792313648693
+    },
+    {
+      "rel": "webview/src/components/MemoryReviewDialog.tsx",
+      "size": 5033,
+      "mtimeMs": 1792313820433
+    },
+    {
+      "rel": "webview/src/components/MessageList.tsx",
+      "size": 83683,
+      "mtimeMs": 1792313623136
+    },
+    {
+      "rel": "webview/src/components/PlanExitCard.tsx",
+      "size": 6986,
+      "mtimeMs": 1791826210237
+    },
+    {
+      "rel": "webview/src/components/ProfileSwitchCard.tsx",
+      "size": 4231,
+      "mtimeMs": 1791722600228
+    },
+    {
+      "rel": "webview/src/components/QuestionCard.tsx",
+      "size": 10558,
+      "mtimeMs": 1791831663540
+    },
+    {
+      "rel": "webview/src/components/SettingsModal.tsx",
+      "size": 21426,
+      "mtimeMs": 1792312813409
+    },
+    {
+      "rel": "webview/src/components/ui.tsx",
+      "size": 24504,
+      "mtimeMs": 1792313818515
+    },
+    {
+      "rel": "webview/src/highlight.ts",
+      "size": 1743,
+      "mtimeMs": 1791611434778
+    },
+    {
+      "rel": "webview/src/i18n.ts",
+      "size": 33656,
+      "mtimeMs": 1792321621436
+    },
+    {
+      "rel": "webview/src/main.tsx",
+      "size": 987,
+      "mtimeMs": 1789768831705
+    },
+    {
+      "rel": "webview/src/store.ts",
+      "size": 75564,
+      "mtimeMs": 1792320556588
+    },
+    {
+      "rel": "webview/src/styles.css",
+      "size": 47602,
+      "mtimeMs": 1792253550245
+    },
+    {
+      "rel": "webview/tsconfig.json",
+      "size": 357,
+      "mtimeMs": 1789768831712
+    },
+    {
+      "rel": "webview/vite.config.ts",
+      "size": 630,
+      "mtimeMs": 1789137015084
+    }
+  ]
+}

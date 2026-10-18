@@ -108,6 +108,9 @@ export interface CliSettingsShape {
   approvalMode?: string;
   /** MCP servers as a name → config dict; startup-only. */
   mcpServers?: Record<string, unknown>;
+  /** Memory context file name(s). The CLI's hierarchical loader accepts a
+   * string or an array; absent = AGENTS.md + IFLOW.md. */
+  contextFileName?: string | string[];
 }
 
 /** Raw CLI settings.json (apiProfiles are the user's named API configs). */

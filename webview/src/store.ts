@@ -4,6 +4,11 @@ import {
   evictBlockPayloads,
   type ApprovalRule,
   type HostToWebview,
+  type KnowledgeDocUi,
+  type MemoryCandidateUi,
+  type MemoryFileUi,
+  type MemoryScope,
+  type MemoryStateUi,
   type SessionState,
   type SessionSummaryUi,
   type WebviewToHost,
@@ -104,11 +109,137 @@ function createMockHost(): HostApi {
   // (mirrors the host's replace semantics).
   let mockMcpServers: Record<string, unknown> | undefined;
   /** Mirrors the real host's mirrored extension settings (default on). */
-  const mockHostSettings = { nextStepSuggestions: true, autoCompressOnIdle: false };
+  const mockHostSettings = {
+    nextStepSuggestions: true,
+    autoCompressOnIdle: false,
+    autoMemoryCapture: false,
+  };
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
   // the host's approvalPolicy message.
   let mockApprovalRules: ApprovalRule[] | undefined;
   let mockApprovalDraft: ApprovalRule | null | undefined;
+
+  // Mock memory files (F3): enough to exercise the tab in a browser — one
+  // global primary with structured facts, one project file, one legacy file.
+  const mockMemoryHome = "C:\\Users\\mock\\.iflow";
+  const mockMemoryRoot = "C:\\mock\\workspace";
+  const mockMemoryContent = new Map<string, string>([
+    [
+      `${mockMemoryHome}\\AGENTS.md`,
+      "# 用户记忆\n\n## 偏好\n\n## iFlow Added Memories\n- 回答使用中文\n- 先给出结论再展开\n",
+    ],
+    [
+      `${mockMemoryRoot}\\AGENTS.md`,
+      "# 项目记忆\n\n## 项目约定\n\n## 已知陷阱\n\n## iFlow Added Memories\n- 运行 npm test 验证改动\n",
+    ],
+    [`${mockMemoryHome}\\memory.md`, "# 旧版记忆\n\n- 这是不会注入的遗留内容\n"],
+  ]);
+  let mockKnowledgeDocs: KnowledgeDocUi[] = [];
+  let mockMemoryFiles: MemoryFileUi[] = [
+    {
+      path: `${mockMemoryHome}\\AGENTS.md`,
+      displayPath: "~/.iflow/AGENTS.md",
+      scope: "global",
+      role: "primary",
+      exists: true,
+      editable: true,
+      injected: true,
+      bytes: 70,
+      tokens: 30,
+      updatedAt: Date.now(),
+      hash: null,
+      facts: [
+        { id: "3:aaa", text: "回答使用中文" },
+        { id: "4:bbb", text: "先给出结论再展开" },
+      ],
+    },
+    {
+      path: `${mockMemoryRoot}\\AGENTS.md`,
+      displayPath: "AGENTS.md",
+      scope: "project",
+      role: "primary",
+      exists: true,
+      editable: true,
+      injected: true,
+      bytes: 80,
+      tokens: 36,
+      updatedAt: Date.now(),
+      hash: null,
+      facts: [{ id: "5:ccc", text: "运行 npm test 验证改动" }],
+    },
+    {
+      path: `${mockMemoryHome}\\memory.md`,
+      displayPath: "~/.iflow/memory.md",
+      scope: "global",
+      role: "legacy",
+      exists: true,
+      editable: true,
+      injected: false,
+      bytes: 40,
+      tokens: 18,
+      updatedAt: Date.now(),
+      hash: null,
+      facts: [],
+    },
+  ];
+  function mockMemoryState(): MemoryStateUi {
+    return {
+      home: mockMemoryHome,
+      cwd: mockMemoryRoot,
+      workspaceRoots: [mockMemoryRoot],
+      files: mockMemoryFiles,
+      globalPrimary:
+        mockMemoryFiles.find((f) => f.scope === "global" && f.role === "primary")?.path ?? null,
+      projectPrimary:
+        mockMemoryFiles.find((f) => f.scope === "project" && f.role === "primary")?.path ?? null,
+      knowledge: {
+        dir: `${mockMemoryRoot}\\.iflow\\knowledge`,
+        index: mockKnowledgeDocs.find((doc) => doc.path.endsWith("index.md")) ?? null,
+        docs: mockKnowledgeDocs,
+        managedBy: `${mockMemoryRoot}\\AGENTS.md`,
+        injectedTokens: mockKnowledgeDocs
+          .filter((doc) => doc.injected)
+          .reduce((sum, doc) => sum + doc.tokens, 0),
+      },
+    };
+  }
+  function mockFileFor(path: string): MemoryFileUi | undefined {
+    return mockMemoryFiles.find((f) => f.path === path);
+  }
+  function mockMemorySaved(
+    file: MemoryFileUi,
+    path = file.path,
+    requestId?: number,
+  ): HostToWebview {
+    mockMemoryFiles = mockMemoryFiles.map((f) => (f.path === file.path ? file : f));
+    return {
+      type: "memorySaved",
+      path,
+      ok: true,
+      file,
+      ...(requestId !== undefined ? { requestId } : {}),
+    };
+  }
+  function mockAppendFact(scope: MemoryScope, fact: string, path?: string): MemoryFileUi | undefined {
+    const target =
+      (path ? mockFileFor(path) : undefined) ??
+      mockMemoryFiles.find((f) => f.scope === scope && f.role === "primary");
+    if (!target) return undefined;
+    const content = mockMemoryContent.get(target.path) ?? "";
+    const next = content.includes("## iFlow Added Memories")
+      ? `${content.trimEnd()}\n- ${fact.trim()}\n`
+      : `${content.trimEnd()}\n\n## iFlow Added Memories\n- ${fact.trim()}\n`;
+    mockMemoryContent.set(target.path, next);
+    const file: MemoryFileUi = {
+      ...target,
+      exists: true,
+      bytes: next.length,
+      tokens: Math.max(1, Math.ceil(next.length / 4)),
+      updatedAt: Date.now(),
+      facts: [...(target.facts ?? []), { id: `${Date.now()}:mock`, text: fact.trim() }],
+    };
+    return file;
+  }
   const demoBlocks: SessionState["blocks"] = [
     {
       // Mirrors the editor right-click "加入 iFlow 上下文" draft so the
@@ -590,6 +721,9 @@ function createMockHost(): HostApi {
         }
         if (typeof m.autoCompressOnIdle === "boolean") {
           mockHostSettings.autoCompressOnIdle = m.autoCompressOnIdle;
+        }
+        if (typeof m.autoMemoryCapture === "boolean") {
+          mockHostSettings.autoMemoryCapture = m.autoMemoryCapture;
         }
         broadcast({ type: "hostSettings", ...mockHostSettings });
         return;
@@ -1080,6 +1214,175 @@ function createMockHost(): HostApi {
         );
         return;
       }
+      if (m.type === "toastAction" && m.actionId === "memory-review") {
+        const candidates: MemoryCandidateUi[] = [
+          {
+            id: "mock-cand-1",
+            text: "偏好：回答先给结论，再展开细节",
+            scope: "global",
+            category: "preference",
+            confidence: 0.92,
+          },
+          {
+            id: "mock-cand-2",
+            text: "项目约定：提交前运行 npm run typecheck",
+            scope: "project",
+            category: "convention",
+            confidence: 0.86,
+          },
+        ];
+        broadcast({ type: "memoryCandidates", sessionId: "mock-session", candidates });
+        return;
+      }
+      if (m.type === "listMemory") {
+        broadcast({ type: "memoryState", state: mockMemoryState() });
+        return;
+      }
+      if (m.type === "readMemoryFile") {
+        const file = mockFileFor(m.path);
+        broadcast({
+          type: "memoryFileContent",
+          path: m.path,
+          content: mockMemoryContent.get(m.path) ?? "",
+          hash: file ? file.hash : null,
+        });
+        return;
+      }
+      if (m.type === "saveMemoryFile") {
+        const file = mockFileFor(m.path);
+        if (!file) {
+          broadcast({ type: "memorySaved", path: m.path, ok: false, error: "mock: file not found" });
+          return;
+        }
+        mockMemoryContent.set(m.path, m.content);
+        const facts = m.content
+          .split("\n")
+          .filter((line) => /^\s*-\s+/.test(line))
+          .map((line, index) => ({ id: `${index}:mock`, text: line.replace(/^\s*-\s+/, "").trim() }));
+        broadcast(
+          mockMemorySaved({
+            ...file,
+            exists: true,
+            bytes: m.content.length,
+            tokens: Math.max(1, Math.ceil(m.content.length / 4)),
+            updatedAt: Date.now(),
+            facts,
+          }),
+        );
+        return;
+      }
+      if (m.type === "appendMemoryFact") {
+        const file = mockAppendFact(m.scope, m.fact, m.path);
+        if (file) broadcast(mockMemorySaved(file, file.path, m.requestId));
+        else {
+          broadcast({
+            type: "memorySaved",
+            path: m.path ?? "",
+            ok: false,
+            error: "mock: no target",
+            ...(m.requestId !== undefined ? { requestId: m.requestId } : {}),
+          });
+        }
+        return;
+      }
+      if (m.type === "deleteMemoryFacts") {
+        const file = mockFileFor(m.path);
+        if (!file) return;
+        const removed = new Set(m.factIds);
+        const facts = (file.facts ?? []).filter((fact) => !removed.has(fact.id));
+        const removedTexts = new Set(
+          (file.facts ?? []).filter((fact) => removed.has(fact.id)).map((fact) => `- ${fact.text}`),
+        );
+        const content = (mockMemoryContent.get(m.path) ?? "")
+          .split("\n")
+          .filter((line) => !removedTexts.has(line.trim()))
+          .join("\n");
+        mockMemoryContent.set(m.path, content);
+        broadcast(
+          mockMemorySaved({
+            ...file,
+            bytes: content.length,
+            tokens: Math.max(0, Math.ceil(content.length / 4)),
+            facts,
+          }),
+        );
+        return;
+      }
+      if (m.type === "applyMemoryCandidates") {
+        for (const candidate of m.candidates) mockAppendFact(candidate.scope, candidate.text);
+        broadcast({ type: "memoryState", state: mockMemoryState() });
+        return;
+      }
+      if (m.type === "dismissMemoryCandidates") return;
+      if (m.type === "createProjectMemory") {
+        const target = `${mockMemoryRoot}\\${m.fileName}`;
+        if (!mockFileFor(target)) {
+          const content = `# 项目记忆\n\n## 项目约定\n\n## 已知陷阱\n\n## iFlow Added Memories\n`;
+          mockMemoryContent.set(target, content);
+          mockMemoryFiles = [
+            ...mockMemoryFiles.map((file) =>
+              file.scope === "project" ? { ...file, role: "additional" as const } : file,
+            ),
+            {
+              path: target,
+              displayPath: m.fileName,
+              scope: "project",
+              role: "primary",
+              exists: true,
+              editable: true,
+              injected: true,
+              bytes: content.length,
+              tokens: Math.ceil(content.length / 4),
+              updatedAt: Date.now(),
+              hash: null,
+              facts: [],
+            },
+          ];
+        }
+        broadcast({ type: "memoryState", state: mockMemoryState() });
+        return;
+      }
+      if (m.type === "openMemoryFile") return;
+      if (m.type === "openKnowledgeFile") return;
+      if (m.type === "generateKnowledge") {
+        const jobId = m.jobId;
+        broadcast({ type: "knowledgeJob", jobId, stage: "scanning" });
+        window.setTimeout(() => broadcast({ type: "knowledgeJob", jobId, stage: "summarizing" }), 120);
+        window.setTimeout(() => {
+          broadcast({ type: "knowledgeJob", jobId, stage: "writing" });
+          const content = "# 项目知识索引\n\n## 概览\n\nmock：由工作区摘要生成的项目知识索引。\n\n## 常用命令\n\n- npm test\n";
+          mockKnowledgeDocs = [
+            {
+              path: `${mockMemoryRoot}\\.iflow\\knowledge\\index.md`,
+              displayPath: ".iflow/knowledge/index.md",
+              title: "项目知识索引",
+              injected: true,
+              bytes: content.length,
+              tokens: Math.ceil(content.length / 4),
+              updatedAt: Date.now(),
+              hash: null,
+            },
+          ];
+          const projectFile = `${mockMemoryRoot}\\AGENTS.md`;
+          const current = mockMemoryContent.get(projectFile) ?? "";
+          if (!current.includes("iflow-harness:knowledge:start")) {
+            mockMemoryContent.set(
+              projectFile,
+              `${current.trimEnd()}\n\n<!-- iflow-harness:knowledge:start -->\n## 项目知识库\n@.iflow/knowledge/index.md\n<!-- iflow-harness:knowledge:end -->\n`,
+            );
+          }
+          broadcast({ type: "knowledgeJob", jobId, stage: "done" });
+          broadcast({ type: "memoryState", state: mockMemoryState() });
+        }, 260);
+        return;
+      }
+      if (m.type === "setKnowledgeInjection") {
+        mockKnowledgeDocs = mockKnowledgeDocs.map((doc) =>
+          doc.path === m.path ? { ...doc, injected: m.injected } : doc,
+        );
+        broadcast({ type: "memoryState", state: mockMemoryState() });
+        return;
+      }
       if (m.type === "listMcpServers") {
         const reply = (servers: Record<string, unknown>) =>
           window.setTimeout(
@@ -1383,8 +1686,12 @@ interface ChatStore {
    * values on ready and after every change. The optimistic local write in
    * `updateHostSetting` keeps the switch responsive while the round trip runs.
    */
-  hostSettings: { nextStepSuggestions: boolean; autoCompressOnIdle: boolean };
-  updateHostSetting: (patch: { nextStepSuggestions?: boolean; autoCompressOnIdle?: boolean }) => void;
+  hostSettings: { nextStepSuggestions: boolean; autoCompressOnIdle: boolean; autoMemoryCapture: boolean };
+  updateHostSetting: (patch: {
+    nextStepSuggestions?: boolean;
+    autoCompressOnIdle?: boolean;
+    autoMemoryCapture?: boolean;
+  }) => void;
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
   dismissToast: (id: number) => void;
@@ -1420,6 +1727,11 @@ interface ChatStore {
   composerDraftRequest: { text: string; seq: number } | null;
   requestDraft: (text: string) => void;
   clearDraftRequest: (seq: number) => void;
+  /** F3 Phase 2: message action "记住这条" opens the quick-add dialog with
+   * this text. Null = dialog closed. */
+  memoryDraftRequest: { text: string; seq: number } | null;
+  requestMemoryDraft: (text: string) => void;
+  clearMemoryDraft: (seq: number) => void;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
   send: (msg: WebviewToHost) => void;
@@ -1430,7 +1742,7 @@ import { setLocale } from "./i18n";
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
-  hostSettings: { nextStepSuggestions: true, autoCompressOnIdle: false },
+  hostSettings: { nextStepSuggestions: true, autoCompressOnIdle: false, autoMemoryCapture: false },
   pending: null,
   promptSeq: 0,
   headerScrolled: false,
@@ -1444,6 +1756,13 @@ export const useChat = create<ChatStore>((set, get) => ({
     })),
   clearDraftRequest: (seq) =>
     set((s) => (s.composerDraftRequest?.seq === seq ? { composerDraftRequest: null } : s)),
+  memoryDraftRequest: null,
+  requestMemoryDraft: (text) =>
+    set((s) => ({
+      memoryDraftRequest: { text, seq: (s.memoryDraftRequest?.seq ?? 0) + 1 },
+    })),
+  clearMemoryDraft: (seq) =>
+    set((s) => (s.memoryDraftRequest?.seq === seq ? { memoryDraftRequest: null } : s)),
   toasts: [],
   applyHostMessage: (msg) => {
     // Snapshot & blockPatch update the store. Other message kinds (fileList,
@@ -1509,6 +1828,7 @@ export const useChat = create<ChatStore>((set, get) => ({
         hostSettings: {
           nextStepSuggestions: msg.nextStepSuggestions,
           autoCompressOnIdle: msg.autoCompressOnIdle,
+          autoMemoryCapture: msg.autoMemoryCapture,
         },
       });
       return;
@@ -1570,6 +1890,11 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "filesPicked" ||
       msg.type === "mcpServers" ||
       msg.type === "mcpStatus" ||
+      msg.type === "memoryState" ||
+      msg.type === "memorySaved" ||
+      msg.type === "memoryFileContent" ||
+      msg.type === "memoryCandidates" ||
+      msg.type === "knowledgeJob" ||
       msg.type === "approvalPolicy" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||

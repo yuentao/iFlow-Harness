@@ -963,6 +963,102 @@ export interface McpStatusUi {
   servers: Record<string, McpServerStatusView & { contextTokens?: number }>;
 }
 
+/**
+ * F3 memory manager (Phase 1): the CLI auto-injects global + hierarchical
+ * `AGENTS.md` / `IFLOW.md`, but the panel had no way to see or edit them. The
+ * host reads the same files (memoryHome() mirrors the loader's hardcoded
+ * `os.homedir()/.iflow`) and exposes them as an editable list.
+ *
+ * `injected` is the honest flag: only files the CLI's memory loader actually
+ * reads count (legacy `memory.md` is shown but never injected). A save takes
+ * effect on the next session/new or session/load; the current chat keeps its
+ * already-assembled system instruction.
+ */
+export type MemoryScope = "global" | "project";
+export type MemoryFileRole = "primary" | "additional" | "hierarchy" | "legacy";
+
+export interface MemoryFactUi {
+  /** Stable within one file revision (line + text hash). */
+  id: string;
+  text: string;
+}
+
+export type MemoryCategory = "preference" | "convention" | "decision" | "gotcha" | "other";
+
+/** One auto-extracted fact awaiting user confirmation. Never written until
+ * the user selects it in the review dialog. */
+export interface MemoryCandidateUi {
+  id: string;
+  text: string;
+  scope: MemoryScope;
+  category: MemoryCategory;
+  /** 0..1 model-reported confidence; the host drops < 0.6. */
+  confidence: number;
+}
+
+export interface MemoryFileUi {
+  path: string;
+  /** `~/.iflow/AGENTS.md` or a workspace-relative path. */
+  displayPath: string;
+  scope: MemoryScope;
+  role: MemoryFileRole;
+  exists: boolean;
+  editable: boolean;
+  injected: boolean;
+  bytes: number;
+  /** Host-side BPE estimate (shared/session-state.ts#estimateTokens). */
+  tokens: number;
+  updatedAt: number | null;
+  /** sha256 of the content; save requests echo this for conflict detection. */
+  hash: string | null;
+  /** Parsed `## iFlow Added Memories` entries (global/user memory). */
+  facts?: MemoryFactUi[];
+}
+
+export interface KnowledgeDocUi {
+  path: string;
+  /** Workspace-relative display path, e.g. `.iflow/knowledge/index.md`. */
+  displayPath: string;
+  title: string;
+  injected: boolean;
+  bytes: number;
+  tokens: number;
+  updatedAt: number | null;
+  hash: string | null;
+}
+
+export interface KnowledgeStateUi {
+  dir: string;
+  index: KnowledgeDocUi | null;
+  docs: KnowledgeDocUi[];
+  /** Project memory file whose managed block controls the imports. */
+  managedBy: string | null;
+  /** Sum of tokens for docs currently imported into the memory. */
+  injectedTokens: number;
+  /** A generation job is running in the host (survives settings re-open). */
+  generating?: boolean;
+  /** Last manifest summary, when `.iflow/knowledge/manifest.json` is readable. */
+  manifest?: {
+    generatedAt: string;
+    mode: "full" | "incremental";
+    sourceCount: number;
+    truncated?: boolean;
+  };
+}
+
+export interface MemoryStateUi {
+  /** Hardcoded CLI memory home (`~/.iflow`), independent of IFLOW_HOME. */
+  home: string;
+  cwd: string | null;
+  workspaceRoots: string[];
+  files: MemoryFileUi[];
+  globalPrimary: string | null;
+  projectPrimary: string | null;
+  /** F3 Phase 3: generated project knowledge (always workspace-local). */
+  knowledge?: KnowledgeStateUi;
+  error?: string;
+}
+
 export type HostToWebview =
   | { type: "snapshot"; state: SessionState; locale?: string }
   /**
@@ -1025,6 +1121,25 @@ export type HostToWebview =
    * guessing. Deliberately a separate channel from `mcpServers` (config truth):
    * a status refresh never touches the card's edit/save guards. */
   | { type: "mcpStatus"; status: McpStatusUi | null }
+  /** Reply to `listMemory`: global + project memory files with token/hash
+   * metadata. The memory card always opens on disk truth (the CLI and the
+   * agent's save_memory tool write the same files behind our back). */
+  | { type: "memoryState"; requestId?: number; state: MemoryStateUi }
+  /** Reply to a memory write: `conflict` means the file changed on disk since
+   * the card read it — the write did NOT happen and the caller must reload. */
+  | { type: "memorySaved"; path: string; ok: boolean; conflict?: boolean; file?: MemoryFileUi; error?: string; requestId?: number }
+  /** Reply to `readMemoryFile`: full body + hash for the inline editor. */
+  | { type: "memoryFileContent"; path: string; content: string; hash: string | null; error?: string }
+  /** Auto-extraction produced candidates and the user asked to review them
+   * (toast action). Nothing has been written yet. */
+  | { type: "memoryCandidates"; sessionId: string | null; candidates: MemoryCandidateUi[] }
+  /** Project-knowledge generation progress (fast path, no agent tools). */
+  | {
+      type: "knowledgeJob";
+      jobId: string;
+      stage: "scanning" | "summarizing" | "writing" | "done" | "error";
+      message?: string;
+    }
   /** M4 P1-1: the approval pre-review rule table. `rules` are the user's
    * global rules (editable, persisted in globalState); `projectRules` come
    * from the workspace's `.iflow/approval.json` and are READ-ONLY here (the
@@ -1042,7 +1157,7 @@ export type HostToWebview =
    * is the source of truth; the host pushes this on `ready`, after every
    * change made in the panel, and when the user edits the setting directly in
    * VSCode. */
-  | { type: "hostSettings"; nextStepSuggestions: boolean; autoCompressOnIdle: boolean }
+  | { type: "hostSettings"; nextStepSuggestions: boolean; autoCompressOnIdle: boolean; autoMemoryCapture: boolean }
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
    * panel visibility; the webview only synthesizes on receipt. */
@@ -1212,7 +1327,7 @@ export type WebviewToHost =
   /** Update mirrored extension settings from the settings panel. The host
    * writes VSCode configuration (global scope) and echoes `hostSettings`
    * with the effective values. Partial: omitted fields stay untouched. */
-  | { type: "setHostSettings"; nextStepSuggestions?: boolean; autoCompressOnIdle?: boolean }
+  | { type: "setHostSettings"; nextStepSuggestions?: boolean; autoCompressOnIdle?: boolean; autoMemoryCapture?: boolean }
   /** MCP management card opened: read the CURRENT `mcpServers` dict from
    * `~/.iflow/settings.json` (the CLI / external tools own that file — the
    * card must show disk truth, not a cached copy). Reply: `mcpServers`. */
@@ -1227,6 +1342,41 @@ export type WebviewToHost =
    * Reply: `mcpStatus` (null when the CLI is not running or the Mod is
    * missing/disabled). */
   | { type: "mcpStatus" }
+  /** Memory card opened / refreshed: read the current global and project
+   * `AGENTS.md` / `IFLOW.md` from disk. Reply: `memoryState`. */
+  | { type: "listMemory"; requestId?: number }
+  /** Load one memory file's full body for the inline editor. Reply:
+   * `memoryFileContent`. */
+  | { type: "readMemoryFile"; path: string }
+  /** Save one memory file. `expectedHash` is the sha256 from the last
+   * `memoryState`; a mismatch returns `memorySaved` with `conflict: true`
+   * and never overwrites. */
+  | { type: "saveMemoryFile"; path: string; content: string; expectedHash?: string | null }
+  /** Append one fact under `## iFlow Added Memories` (same format as the
+   * CLI's save_memory tool). `path` overrides the scope's primary file. */
+  | { type: "appendMemoryFact"; scope: MemoryScope; fact: string; path?: string; requestId?: number }
+  /** Remove parsed facts by id (global factual list). */
+  | { type: "deleteMemoryFacts"; path: string; factIds: string[] }
+  /** Create the missing project memory file at the session cwd. */
+  | { type: "createProjectMemory"; fileName: "AGENTS.md" | "IFLOW.md" }
+  /** Write the selected auto-extracted candidates (review dialog). `sessionId`
+   * guards against applying a stale review after a session switch. */
+  | { type: "applyMemoryCandidates"; sessionId: string | null; candidates: MemoryCandidateUi[] }
+  /** Drop pending candidates without writing. */
+  | { type: "dismissMemoryCandidates"; sessionId: string | null }
+  /** Generate/refresh the project knowledge index. `jobId` correlates the
+   * `knowledgeJob` stage updates so a stale job cannot unlock the UI.
+   * `mode: "incremental"` (default) reuses the previous index + source diff
+   * and falls back to a full rebuild when no valid base exists; `"full"`
+   * always re-analyzes the workspace. */
+  | { type: "generateKnowledge"; jobId: string; mode?: "incremental" | "full" }
+  /** Toggle one knowledge doc's `@` import in the managed block of the
+   * project memory file (no injection when false). */
+  | { type: "setKnowledgeInjection"; path: string; injected: boolean }
+  /** Open a knowledge doc in the editor. */
+  | { type: "openKnowledgeFile"; path: string }
+  /** Open a discovered memory file in the editor. */
+  | { type: "openMemoryFile"; path: string }
   /** M4 P1-1: approval-policy card opened — re-read the global table and the
    * workspace `.iflow/approval.json` (external tools may have rewritten it).
    * Reply: `approvalPolicy`. */
