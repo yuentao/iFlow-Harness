@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   applyThinkingRules,
+  cliImportCandidates,
   mergeThinkingRulesIntoFile,
   normalizeModelsUrl,
   parseModelsResponse,
@@ -158,6 +159,77 @@ describe("readActiveEndpoint", () => {
     expect(readActiveEndpoint(settingsFile({ selectedAuthType: "iflow" }))).toBeNull();
     expect(readActiveEndpoint(settingsFile({ selectedAuthType: "openai-compatible" }))).toBeNull();
     expect(readActiveEndpoint(path.join(tempDir, "missing.json"))).toBeNull();
+  });
+});
+
+describe("cliImportCandidates", () => {
+  it("returns named profiles that have all three fields", () => {
+    const candidates = cliImportCandidates(
+      {
+        apiProfiles: {
+          work: { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" },
+          incomplete: { baseUrl: "https://b.example.com/v1", apiKey: "sk-b" },
+        },
+      },
+      [],
+    );
+    expect(candidates).toEqual([
+      { name: "work", baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" },
+    ]);
+  });
+
+  it("skips profiles shadowed by an extension-owned name", () => {
+    const candidates = cliImportCandidates(
+      {
+        apiProfiles: {
+          work: { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" },
+        },
+      },
+      ["work"],
+    );
+    expect(candidates).toEqual([]);
+  });
+
+  it("includes the top-level endpoint only for openai-compatible auth", () => {
+    const settings = {
+      selectedAuthType: "openai-compatible",
+      baseUrl: "https://top.example.com/v1",
+      apiKey: "sk-top",
+      modelName: "m-top",
+    };
+    expect(cliImportCandidates(settings, [])).toEqual([
+      { name: "m-top", baseUrl: "https://top.example.com/v1", apiKey: "sk-top", modelName: "m-top" },
+    ]);
+    expect(cliImportCandidates({ ...settings, selectedAuthType: "iflow" }, [])).toEqual([]);
+  });
+
+  it("names the top-level candidate after currentApiProfile", () => {
+    const settings = {
+      selectedAuthType: "openai-compatible",
+      currentApiProfile: "终端默认",
+      baseUrl: "https://top.example.com/v1",
+      apiKey: "sk-top",
+      modelName: "m-top",
+    };
+    expect(cliImportCandidates(settings, [])[0]?.name).toBe("终端默认");
+  });
+
+  it("dedupes the same credential set, preferring the named profile", () => {
+    const raw = { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" };
+    const candidates = cliImportCandidates(
+      {
+        selectedAuthType: "openai-compatible",
+        currentApiProfile: "work",
+        apiProfiles: { work: raw },
+        ...raw,
+      },
+      [],
+    );
+    expect(candidates).toEqual([{ name: "work", ...raw }]);
+  });
+
+  it("returns no candidates without settings", () => {
+    expect(cliImportCandidates(null, [])).toEqual([]);
   });
 });
 

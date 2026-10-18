@@ -1193,9 +1193,14 @@ export function appendInjectedContext(
   if (state.blocks.some((b) => b.kind === "injected")) return null;
   const parts: string[] = [];
   if (items.some((i) => i.kind === "system")) parts.push(l10n.t("系统提示词"));
-  if (items.some((i) => i.kind === "memory")) parts.push(l10n.t("记忆"));
-  const fileCount = items.filter((i) => i.kind === "context-file").length;
-  if (fileCount > 0) parts.push(l10n.t("{0} 个上下文文件", String(fileCount)));
+  if (items.some((i) => i.kind === "memory")) parts.push(l10n.t("全局记忆"));
+  const fileCount = new Set([
+    ...items.filter((i) => i.kind === "context-file").map((i) => i.path ?? i.label),
+    ...items.filter((i) => i.kind === "knowledge" && i.from).map((i) => i.from!),
+  ]).size;
+  if (fileCount > 0) parts.push(l10n.t("{0} 个项目记忆文件", String(fileCount)));
+  const knowledgeCount = items.filter((i) => i.kind === "knowledge").length;
+  if (knowledgeCount > 0) parts.push(l10n.t("{0} 个知识库文档", String(knowledgeCount)));
   const mcpItems = items.filter((i) => i.kind === "mcp");
   if (mcpItems.length > 0) {
     const unloaded = mcpItems.filter((i) => i.connected === false).length;

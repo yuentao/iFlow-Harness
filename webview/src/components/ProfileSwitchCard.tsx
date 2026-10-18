@@ -26,6 +26,11 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
   const answer = (keepSession: boolean | null) => {
     if (answered) return;
     setAnswered(true);
+    // Cancelling aborts the whole switch host-side (no authenticate). Drop
+    // the optimistic row lock here too: the settings list keys its chip off
+    // `pending`, so without this it flips from "等待选择…" to
+    // "正在重新认证…" and stays disabled until the 10s timeout.
+    if (keepSession === null) useChat.getState().clearPending();
     send({ type: "respondProfileSwitch", id: pending.id, keepSession });
   };
 

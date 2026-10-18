@@ -42,7 +42,7 @@ import {
   toAgentPromptText,
   appendInjectedContext,
 } from "../shared/session-state";
-import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
+import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, splitReportedContextSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -1018,6 +1018,8 @@ describe("host-level transitions", () => {
       needsSetup: false,
       saved: { baseUrl: "https://x", modelName: "m", keyTail: "…1234" },
       profiles: [{ name: "BUZZ", source: "cli", baseUrl: "https://x", modelName: "m", keyTail: "…1234", active: true }],
+      importable: [],
+      onboardingDismissed: false,
     };
     const fresh = newSessionState(state);
     expect(fresh.auth).toEqual(state.auth);
@@ -2563,15 +2565,20 @@ describe("appendInjectedContext (auto-injected context card)", () => {
 
   it("composes the notice from the item kinds and mints a stable id", () => {
     const state = initialSessionState();
-    appendInjectedContext(state, items());
+    appendInjectedContext(state, [
+      ...items(),
+      { kind: "knowledge" as const, label: "项目知识库", path: ".iflow/knowledge/index.md", content: "# index" },
+    ]);
     const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
     expect(block.id).toBeTruthy();
-    expect(block.notice).toContain("3");
+    expect(block.notice).toContain("4");
     expect(block.notice).toContain("系统提示词");
-    expect(block.notice).toContain("记忆");
-    expect(block.notice).toContain("1 个上下文文件");
+    expect(block.notice).toContain("全局记忆");
+    expect(block.notice).toContain("1 个项目记忆文件");
+    expect(block.notice).toContain("1 个知识库文档");
     expect(block.tokens).toBe(
-      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules"),
+      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules") +
+        estimateTokens("# index"),
     );
   });
 
@@ -2628,6 +2635,23 @@ describe("appendInjectedContext (auto-injected context card)", () => {
         estimateTokens(declarations),
     );
   });
+
+  it("counts the host memory file of a knowledge-only body", () => {
+    const state = initialSessionState();
+    appendInjectedContext(state, [
+      { kind: "system" as const, label: "系统提示词", content: "core" },
+      {
+        kind: "knowledge" as const,
+        label: "项目知识库",
+        path: "/w/.iflow/knowledge/index.md",
+        from: "/w/AGENTS.md",
+        content: "# index",
+      },
+    ]);
+    const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
+    expect(block.notice).toContain("1 个项目记忆文件");
+    expect(block.notice).toContain("1 个知识库文档");
+  });
 });
 
 describe("splitSystemPromptSections (injected card visual segments)", () => {
@@ -2668,6 +2692,51 @@ describe("splitSystemPromptSections (injected card visual segments)", () => {
   it("extractCorePrompt strips memory markers and context-file bodies", () => {
     expect(extractCorePrompt(prompt)).toBe("You are iFlow CLI...");
     expect(extractCorePrompt("plain fallback text")).toBe("plain fallback text");
+  });
+
+  it("splits the report into global memory, project memory and knowledge docs", () => {
+    const report = [
+      "You are iFlow CLI...",
+      "",
+      "---",
+      "",
+      "global memory body",
+      "",
+      "--- Context from: AGENTS.md ---\r\n# repo rules\r\n<!-- Imported from: .iflow/knowledge/index.md -->\r\n# 项目知识索引\r\n<!-- End of import from: .iflow/knowledge/index.md -->\r\ntail rules\r\n--- End of Context from: AGENTS.md ---",
+      "",
+      "--- Context from: docs/IFLOW.md ---\r\nnested doc\r\n--- End of Context from: docs/IFLOW.md ---",
+    ].join("\n");
+    const sections = splitReportedContextSections(report);
+    expect(sections.map((s) => s.kind)).toEqual([
+      "system", "memory", "context-file", "knowledge", "context-file", "context-file",
+    ]);
+    expect(sections[2]).toMatchObject({ path: "AGENTS.md", content: "# repo rules" });
+    expect(sections[3]).toMatchObject({ path: ".iflow/knowledge/index.md", from: "AGENTS.md" });
+    expect(sections[3]!.content).toContain("# 项目知识索引");
+    expect(sections[4]).toMatchObject({ path: "AGENTS.md", content: "tail rules" });
+    expect(sections[5]).toMatchObject({ path: "docs/IFLOW.md", content: "nested doc" });
+  });
+
+  it("keeps non-knowledge imports inside project memory", () => {
+    const report = [
+      "core",
+      "",
+      "---",
+      "",
+      "--- Context from: AGENTS.md ---\n" +
+        "<!-- Imported from: docs/style.md -->\nstyle rules\n<!-- End of import from: docs/style.md -->\n" +
+        "--- End of Context from: AGENTS.md ---",
+    ].join("\n");
+    const sections = splitReportedContextSections(report);
+    expect(sections.map((s) => s.kind)).toEqual(["system", "context-file"]);
+    expect(sections[1]!.content).toContain("style rules");
+  });
+
+  it("splits the P0e separator even when no context-file markers exist", () => {
+    const sections = splitReportedContextSections("core text\n\n---\nglobal only body");
+    expect(sections.map((s) => s.kind)).toEqual(["system", "memory"]);
+    expect(sections[0]!.content).toBe("core text");
+    expect(sections[1]!.content).toBe("global only body");
   });
 });
 

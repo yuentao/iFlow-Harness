@@ -28,7 +28,7 @@
   "iflow.configuration.autoTitle.description": "会话首轮完成后为其生成 AI 简短标题（每会话一次，一次轻量模型调用）。",
   "iflow.configuration.nextStepSuggestions.description": "每轮回复完成后单独调用一次模型推测可选的下一步操作，以候选词形式显示在输入框上方（会产生额外 token 消耗）。",
   "iflow.configuration.autoCompressOnIdle.description": "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮（默认关闭）。",
-  "iflow.configuration.autoMemoryCapture.description": "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由用户确认后才会写入（默认关闭，会产生额外 token 消耗）。",
+  "iflow.configuration.autoMemoryCapture.description": "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由用户确认后才会写入（默认开启，会产生额外 token 消耗）。",
   "iflow.configuration.checkpoints.description": "每轮对话前把工作区快照到独立的影子 git 仓库，从而支持按轮回退文件改动。绝不触碰用户自己的 .git，非 git 目录同样可用。",
   "iflow.configuration.checkpointMaxFiles.description": "当会话工作区文件数超过该上限时关闭工作区快照（防止超大工作区拖慢面板）。",
   "iflow.configuration.checkpointMaxFileMB.description": "快照工作区时跳过大于该尺寸（MB）的文件——其改动不参与回退，影子仓库也保持小巧。未改动的文件跨轮共享存储，不会重复占用。0 = 不限大小。",

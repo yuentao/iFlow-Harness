@@ -21,7 +21,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, applyThinkingRules, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, cliImportCandidates, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -49,7 +49,7 @@ import type {
   McpServerStatusView,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { extractCorePrompt, isPlanMode } from "../../shared/messages.js";
+import { extractCorePrompt, isPlanMode, splitReportedContextSections } from "../../shared/messages.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
@@ -120,7 +120,7 @@ import {
 } from "../../shared/approval-policy.js";
 import { SessionStore } from "./store.js";
 import { MemoryService } from "../memory/service.js";
-import { isWithin } from "../memory/files.js";
+import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
@@ -330,6 +330,9 @@ const ACTIVE_SESSION_KEY = "iflow.activeSessionId";
 const WORKSPACE_PROFILE_KEY = "iflow.workspaceActiveProfile";
 /** workspaceState key: the last model selected in this workspace. */
 const WORKSPACE_MODEL_KEY = "iflow.workspaceActiveModel";
+/** workspaceState key: first-run wizard skipped/finished (never auto-open it
+ * again in this workspace once true). */
+const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
@@ -356,6 +359,16 @@ function asUiDensity(value: unknown): (typeof UI_DENSITIES)[number] {
   return UI_DENSITIES.includes(value as (typeof UI_DENSITIES)[number])
     ? (value as (typeof UI_DENSITIES)[number])
     : "standard";
+}
+
+/** `iflow.defaultMode` values — kept in sync with shared/messages.ts. */
+const DEFAULT_MODES = ["default", "smart", "yolo", "plan"] as const;
+
+/** settings.json / VSCode config is user-editable — fall back to `smart`. */
+function asDefaultMode(value: unknown): (typeof DEFAULT_MODES)[number] {
+  return DEFAULT_MODES.includes(value as (typeof DEFAULT_MODES)[number])
+    ? (value as (typeof DEFAULT_MODES)[number])
+    : "smart";
 }
 
 /** Cap on the per-workspace recent-session list. */
@@ -629,7 +642,7 @@ export class ChatPanel implements vscode.Disposable {
       getContextFileName: () =>
         readCliSettings(path.join(os.homedir(), ".iflow", "settings.json"))?.contextFileName ?? null,
       isAutoCaptureEnabled: () =>
-        vscode.workspace.getConfiguration("iflow").get<boolean>("autoMemoryCapture", false),
+        vscode.workspace.getConfiguration("iflow").get<boolean>("autoMemoryCapture", true),
       runPrompt: (prompt) => this.runMemoryPrompt(prompt),
       getSessionId: () => this.store.getState().sessionId,
       scanWorkspace: () => this.scanKnowledgeWorkspace(),
@@ -692,6 +705,8 @@ export class ChatPanel implements vscode.Disposable {
               || e.affectsConfiguration("iflow.autoMemoryCapture")
               || e.affectsConfiguration("iflow.uiFontSize")
               || e.affectsConfiguration("iflow.uiDensity")
+              || e.affectsConfiguration("iflow.soundFeedback")
+              || e.affectsConfiguration("iflow.defaultMode")
             ) {
               this.postHostSettings();
             }
@@ -1312,6 +1327,18 @@ export class ChatPanel implements vscode.Disposable {
       case "deleteProfile":
         await this.deleteProfile(msg.name);
         break;
+      case "importCliCredentials":
+        await this.importCliCredentials(msg.name);
+        break;
+      case "setOnboardingDismissed":
+        await this.context.workspaceState.update(ONBOARDING_DISMISSED_KEY, msg.dismissed === true);
+        this.store.setAuth(
+          await this.buildAuthState(
+            this.store.getState().auth.authenticated,
+            this.store.getState().auth.needsSetup,
+          ),
+        );
+        break;
       case "loadSession":
         await this.restoreSession(msg.sessionId);
         break;
@@ -1341,7 +1368,7 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "setHostSettings": {
         const config = vscode.workspace.getConfiguration("iflow");
-        for (const key of ["nextStepSuggestions", "autoCompressOnIdle", "autoMemoryCapture"] as const) {
+        for (const key of ["nextStepSuggestions", "autoCompressOnIdle", "autoMemoryCapture", "soundFeedback"] as const) {
           const value = msg[key];
           if (typeof value !== "boolean") continue;
           try {
@@ -1362,6 +1389,13 @@ export class ChatPanel implements vscode.Disposable {
             await config.update("uiDensity", msg.uiDensity, vscode.ConfigurationTarget.Global);
           } catch (error) {
             this.log.warn(`failed to update uiDensity: ${errorMessage(error)}`);
+          }
+        }
+        if (msg.defaultMode !== undefined && DEFAULT_MODES.includes(msg.defaultMode)) {
+          try {
+            await config.update("defaultMode", msg.defaultMode, vscode.ConfigurationTarget.Global);
+          } catch (error) {
+            this.log.warn(`failed to update defaultMode: ${errorMessage(error)}`);
           }
         }
         // Turning suggestions off must also retract the chips already on screen.
@@ -1494,9 +1528,11 @@ export class ChatPanel implements vscode.Disposable {
       type: "hostSettings",
       nextStepSuggestions: config.get<boolean>("nextStepSuggestions", true),
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
-      autoMemoryCapture: config.get<boolean>("autoMemoryCapture", false),
+      autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
       uiFontSize: asUiFontSize(config.get<string>("uiFontSize", "standard")),
       uiDensity: asUiDensity(config.get<string>("uiDensity", "standard")),
+      soundFeedback: config.get<boolean>("soundFeedback", true),
+      defaultMode: asDefaultMode(config.get<string>("defaultMode", "smart")),
     });
   }
 
@@ -3692,11 +3728,18 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * All known API profiles: extension-owned (SecretStorage, editable) merged
-   * with the CLI settings.json ones (read-only source, the user's existing
-   * configs). The active profile name drives the `active` flag.
+   * Everything the auth UI needs from one settings.json read:
+   *  - `profiles`: extension-owned (SecretStorage, editable) merged with the
+   *    CLI ones (read-only source, the user's existing configs); the active
+   *    name drives the `active` flag.
+   *  - `importable`: CLI credentials that are not extension-owned yet — the
+   *    onboarding "import existing config" candidates (masked key tail only;
+   *    the raw key stays in the host).
    */
-  private async buildProfileList(): Promise<AuthUiState["profiles"]> {
+  private async buildAuthLists(): Promise<{
+    profiles: AuthUiState["profiles"];
+    importable: AuthUiState["importable"];
+  }> {
     const extProfiles = await loadProfiles(this.context.secrets);
     const cli = readCliSettings();
     // Active-name resolution is CLI-first: settings.json is what the CLI
@@ -3726,7 +3769,13 @@ export class ChatPanel implements vscode.Disposable {
         push(name, "cli", { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName });
       }
     }
-    return list;
+    const importable = cliImportCandidates(cli, Object.keys(extProfiles)).map((candidate) => ({
+      name: candidate.name,
+      baseUrl: candidate.baseUrl,
+      modelName: candidate.modelName,
+      keyTail: maskKey(candidate.apiKey),
+    }));
+    return { profiles: list, importable };
   }
 
   private async buildAuthState(authenticated: boolean, needsSetup: boolean): Promise<AuthUiState> {
@@ -3735,11 +3784,17 @@ export class ChatPanel implements vscode.Disposable {
     // Resolve this workspace's profile first; the SecretStorage credentials
     // slot is shared by all windows and is not a per-panel source of truth.
     const creds = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
+    const { profiles, importable } = await this.buildAuthLists();
     return {
       authenticated,
       needsSetup,
       saved: creds ? this.maskOf(creds) : null,
-      profiles: await this.buildProfileList(),
+      profiles,
+      importable,
+      onboardingDismissed: this.context.workspaceState.get<boolean>(
+        ONBOARDING_DISMISSED_KEY,
+        false,
+      ),
     };
   }
 
@@ -3788,15 +3843,19 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     // User directive (2026-10-06): a profile switch must not silently drop
-    // the conversation — ask first. Only meaningful with a live session;
-    // without one the switch is just the initial connect. "Stay" reloads the
-    // SAME conversation via session/load under the new credentials — a live
-    // ACP session keeps the OLD endpoint after hot authenticate, only
-    // new/load rebuild config from the updated authOptions (bundle-verified,
-    // CLI 0.5.19, see reloadSessionUnderCreds).
-    const liveSessionId = this.store.getState().sessionId;
+    // the conversation — ask first. The live ACP session id is the usual
+    // signal, but a visible transcript must gate the switch too: sessionId
+    // is still null while the panel is connecting/restoring, and re-authing
+    // immediately would drop the conversation the user is looking at.
+    // "Stay" reloads the SAME conversation via session/load under the new
+    // credentials — a live ACP session keeps the OLD endpoint after hot
+    // authenticate, only new/load rebuild config from the updated authOptions
+    // (bundle-verified, CLI 0.5.19, see reloadSessionUnderCreds).
+    const state = this.store.getState();
+    const liveSessionId = state.sessionId;
+    const hasConversation = state.blocks.some((block) => block.kind === "user");
     let keepSession = false;
-    if (liveSessionId) {
+    if (liveSessionId || hasConversation) {
       const choice = await this.requestProfileSwitchChoice(name);
       // null = user cancelled the entire switch: no secret writes, no
       // settings.json pointer change, no reconnect. The dialog already
@@ -3826,6 +3885,40 @@ export class ChatPanel implements vscode.Disposable {
     const p = cli?.apiProfiles?.[name];
     if (!p?.baseUrl || !p?.apiKey || !p?.modelName) return null;
     return { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName };
+  }
+
+  /**
+   * Onboarding one-click import: copy a CLI-owned credential set into
+   * SecretStorage, then hand off to the normal activation path (workspace
+   * pointer + optional keep-session dialog + re-auth). The CLI file is never
+   * modified — the extension copy merely takes precedence from now on.
+   */
+  private async importCliCredentials(name: string): Promise<void> {
+    const profiles = await loadProfiles(this.context.secrets);
+    const candidate = cliImportCandidates(readCliSettings(), Object.keys(profiles)).find(
+      (item) => item.name === name,
+    );
+    if (!candidate) {
+      void vscode.window.showWarningMessage(vscode.l10n.t("未找到可导入的 CLI 配置: {0}", name));
+      const auth = this.store.getState().auth;
+      this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
+      return;
+    }
+    // Another window may have imported the same name in the meantime — never
+    // overwrite an existing extension profile.
+    let target = candidate.name;
+    for (let i = 2; profiles[target]; i += 1) target = `${candidate.name} (${i})`;
+    profiles[target] = {
+      baseUrl: candidate.baseUrl,
+      apiKey: candidate.apiKey,
+      modelName: candidate.modelName,
+    };
+    await saveProfiles(this.context.secrets, profiles);
+    // Refresh the list first so a cancelled switch dialog still shows the
+    // imported profile (activateProfile's cancel path only re-pushes state).
+    const auth = this.store.getState().auth;
+    this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
+    await this.activateProfile(target);
   }
 
   /** Resolve the active profile label for THIS window. */
@@ -3967,8 +4060,14 @@ export class ChatPanel implements vscode.Disposable {
         // keepSession: reload the SAME conversation in place under the new
         // credentials — the transcript never clears (seamless). Only the
         // CLI-side session object is rebuilt (session/load, same id).
-        if (keepSession && hotSessionId) {
-          const reloaded = await this.reloadSessionUnderCreds(hotSessionId, creds);
+        // When the live id is still null (connecting/restoring), the visible
+        // transcript belongs to activeSessionId — reload that one instead of
+        // silently falling through to a new session.
+        const keepId = keepSession
+          ? (this.store.getState().activeSessionId ?? hotSessionId)
+          : null;
+        if (keepId) {
+          const reloaded = await this.reloadSessionUnderCreds(keepId, creds);
           if (reloaded) {
             this.store.setAuth(await this.buildAuthState(true, false));
             this.log.info(
@@ -3987,7 +4086,7 @@ export class ChatPanel implements vscode.Disposable {
           // silently ineffective switch would be worse.
           this.log.warn("keep-session reload failed, falling back to a new session");
           if (this.discardedSessionIds.size >= DISCARDED_SESSION_IDS_CAP) this.discardedSessionIds.clear();
-          this.discardedSessionIds.add(hotSessionId);
+          this.discardedSessionIds.add(keepId);
         }
         // Tail rescue BEFORE the state swap (same rationale as below).
         void this.persistActiveTranscript();
@@ -5413,7 +5512,7 @@ export class ChatPanel implements vscode.Disposable {
     const report = reportFresh ? this.readContextReport() : null;
     if (report) {
       this.exportCorePrompt(report.systemPrompt);
-      return [{ kind: "system", label: vscode.l10n.t("系统提示词"), content: report.systemPrompt }];
+      return this.reportedContextItems(report.systemPrompt);
     }
     const items: InjectedContextItem[] = [];
     items.push({
@@ -5423,6 +5522,59 @@ export class ChatPanel implements vscode.Disposable {
     });
     items.push(...(await this.memory.injectedContextItems()));
     return items;
+  }
+
+  /**
+   * Turn the Mod's final system prompt into per-source card items. The join
+   * markers are the CLI's own (`--- Context from:` for every hierarchical
+   * memory file, `<!-- Imported from: -->` for `@import` expansions), so this
+   * is a display-level slice of bytes the model actually receives —
+   * global memory, project memory files and knowledge docs each get a row.
+   * Context files are classified by their resolved path: the CLI's memory
+   * home (`~/.iflow`, hardcoded in its loader) is global; everything else is
+   * project memory.
+   */
+  private reportedContextItems(systemPrompt: string): InjectedContextItem[] {
+    const cwd = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+    const home = memoryHome();
+    const items: InjectedContextItem[] = [];
+    for (const section of splitReportedContextSections(systemPrompt)) {
+      if (section.kind === "system") {
+        items.push({ kind: "system", label: vscode.l10n.t("系统提示词"), content: section.content });
+        continue;
+      }
+      if (section.kind === "memory") {
+        items.push({ kind: "memory", label: vscode.l10n.t("全局记忆"), content: section.content });
+        continue;
+      }
+      if (section.kind === "knowledge") {
+        const from = section.from ? this.resolveReportedPath(section.from, cwd) : "";
+        const abs = this.resolveReportedPath(section.path ?? "", from ? path.dirname(from) : cwd);
+        items.push({
+          kind: "knowledge",
+          label: vscode.l10n.t("项目知识库"),
+          ...(abs ? { path: abs } : {}),
+          ...(from ? { from } : {}),
+          content: section.content,
+        });
+        continue;
+      }
+      const abs = this.resolveReportedPath(section.path ?? "", cwd);
+      const global = abs ? isWithin(home, abs) : false;
+      items.push({
+        kind: global ? "memory" : "context-file",
+        label: global ? vscode.l10n.t("全局记忆") : path.basename(abs || section.path || ""),
+        ...(abs ? { path: abs } : {}),
+        content: section.content,
+      });
+    }
+    return items;
+  }
+
+  private resolveReportedPath(raw: string, base: string | null): string {
+    if (!raw) return "";
+    if (path.isAbsolute(raw)) return path.normalize(raw);
+    return base ? path.resolve(base, raw) : raw;
   }
 
   /**

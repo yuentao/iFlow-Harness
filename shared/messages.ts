@@ -236,16 +236,19 @@ export interface CompressionBlock extends BlockBase {
  * transparency — the CLI-side acp-context-report Mod surfaces what the wire
  * never carries). */
 export interface InjectedContextItem {
-  /** Source kind: the CLI's assembled system instruction, the joined
-   * hierarchical memory, one context file (AGENTS.md/IFLOW.md/...), or one
-   * MCP server's tool declarations (the CLI turns every connected server's
-   * tools into `functionDeclarations` carried on EVERY request — the wire
-   * never reports them, the mcp-status Mod does). */
-  kind: "system" | "memory" | "context-file" | "mcp";
+  /** Source kind: the CLI's assembled system instruction, the global memory
+   * body, one project memory file (AGENTS.md/IFLOW.md/...), one project
+   * knowledge document expanded from an `@.iflow/knowledge/...` import, or
+   * one MCP server's tool declarations (the CLI turns every connected
+   * server's tools into `functionDeclarations` carried on EVERY request —
+   * the wire never reports them, the mcp-status Mod does). */
+  kind: "system" | "memory" | "context-file" | "knowledge" | "mcp";
   /** Display name, e.g. "系统提示词", "AGENTS.md", "apipost-mcp". */
   label: string;
   /** Absolute path for file-backed sources (absent for the system prompt). */
   path?: string;
+  /** Knowledge only: the memory file this import was expanded from. */
+  from?: string;
   /** Full body as the model receives it (MCP: one compact JSON declaration
    * per line, the same shape the CLI serializes into functionDeclarations).
    * MCP bodies are hidden in the UI but still feed the card's token estimate.
@@ -324,6 +327,80 @@ export function splitSystemPromptSections(text: string): InjectedPromptSection[]
   const tail = text.slice(lastEnd).trim();
   if (tail) sections.push({ kind: "core", path: "", content: tail });
   return sections;
+}
+
+/** One source carried by the reported system prompt, ready for the
+ * auto-injected-context card. `path` is the context-file path as reported
+ * (relative to the session cwd) or the knowledge import spec; `from` is the
+ * project memory file a knowledge import was expanded into. */
+export interface ReportedContextSection {
+  kind: "system" | "memory" | "context-file" | "knowledge";
+  path?: string;
+  from?: string;
+  content: string;
+}
+
+const KNOWLEDGE_IMPORT_PATH = /(?:^|\/)\.iflow\/knowledge\//i;
+/** The CLI import processor (sfr in the bundle): inlines every `@import` as
+ * this marker pair. Backreference keeps nested imports inside the body. */
+const IMPORT_MARKER = /<!-- Imported from: ([\s\S]*?) -->\r?\n([\s\S]*?)\r?\n<!-- End of import from: \1 -->/g;
+
+function isKnowledgeImportPath(spec: string): boolean {
+  return KNOWLEDGE_IMPORT_PATH.test(spec.replace(/\\/g, "/").replace(/^\.\//, "").trim());
+}
+
+/**
+ * Slice the reported system prompt into card sources. The memory joiner
+ * already marks project memory files (`--- Context from: … ---`), and the
+ * import processor inlines knowledge-base imports inside those bodies; peel
+ * the latter out as `knowledge` sections so the card can show 全局记忆 /
+ * 项目记忆 / 项目知识库 separately. Display-level slicing only — the
+ * concatenated section bodies cover the same prompt bytes.
+ */
+export function splitReportedContextSections(text: string): ReportedContextSection[] {
+  const out: ReportedContextSection[] = [];
+  for (const section of splitSystemPromptSections(text)) {
+    if (section.kind === "core") {
+      out.push({ kind: "system", content: section.content });
+      continue;
+    }
+    if (section.kind === "memory") {
+      out.push({ kind: "memory", content: section.content });
+      continue;
+    }
+    const raw = section.content;
+    IMPORT_MARKER.lastIndex = 0;
+    let last = 0;
+    let found = false;
+    let match: RegExpExecArray | null;
+    while ((match = IMPORT_MARKER.exec(raw))) {
+      const spec = match[1]!.trim();
+      if (!isKnowledgeImportPath(spec)) continue;
+      found = true;
+      const before = raw.slice(last, match.index).trim();
+      if (before) out.push({ kind: "context-file", path: section.path, content: before });
+      out.push({ kind: "knowledge", path: spec, from: section.path, content: match[0] });
+      last = match.index + match[0].length;
+    }
+    if (!found) {
+      out.push({ kind: "context-file", path: section.path, content: raw });
+      continue;
+    }
+    const tail = raw.slice(last).trim();
+    if (tail) out.push({ kind: "context-file", path: section.path, content: tail });
+  }
+  // No context-file markers (no AGENTS.md/IFLOW.md at all): P0e still appends
+  // the joined user memory after `\n\n---\n`. Surface that trailing body as
+  // global memory instead of folding it into the system prompt.
+  if (out.length === 1 && out[0]!.kind === "system") {
+    const sep = out[0]!.content.lastIndexOf("\n\n---\n");
+    if (sep > 0) {
+      const core = out[0]!.content.slice(0, sep).trim();
+      const memory = out[0]!.content.slice(sep + "\n\n---\n".length).trim();
+      if (core && memory) return [{ kind: "system", content: core }, { kind: "memory", content: memory }];
+    }
+  }
+  return out;
 }
 
 /** Extract the core instruction(s) from a reported system prompt (everything
@@ -696,6 +773,22 @@ export interface AuthUiState {
   saved: { baseUrl: string; modelName: string; keyTail: string } | null;
   /** All known API profiles (extension-owned + read-only CLI ones), masked. */
   profiles: AuthProfileUi[];
+  /** Credentials found in the terminal CLI's settings.json that are not yet
+   * extension-owned — the onboarding "import existing config" candidates.
+   * Raw keys stay in the host; only the masked tail crosses the wire. */
+  importable: AuthImportCandidateUi[];
+  /** The user skipped or finished the first-run wizard (persisted per
+   * workspace). Once true the wizard never auto-opens again; the settings
+   * modal stays available as the long-term home for everything it covered. */
+  onboardingDismissed: boolean;
+}
+
+/** One importable `~/.iflow/settings.json` credential set (masked view). */
+export interface AuthImportCandidateUi {
+  name: string;
+  baseUrl: string;
+  modelName: string;
+  keyTail: string;
 }
 
 /**
@@ -747,7 +840,7 @@ export function initialSessionState(): SessionState {
     pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
-    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [] },
+    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], importable: [], onboardingDismissed: false },
     sessions: [],
     activeSessionId: null,
     replaying: false,
@@ -1084,6 +1177,9 @@ export type UiFontSize = "compact" | "standard" | "large";
 /** Panel spacing density preset, mirrored from `iflow.uiDensity`. */
 export type UiDensity = "compact" | "standard" | "comfortable";
 
+/** Default session approval mode, mirrored from `iflow.defaultMode`. */
+export type UiDefaultMode = "default" | "smart" | "yolo" | "plan";
+
 export type HostToWebview =
   | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
   /** A single file's turn changes were reverted; refetch the turn records. */
@@ -1198,6 +1294,10 @@ export type HostToWebview =
       uiFontSize: UiFontSize;
       /** `iflow.uiDensity` — panel spacing density preset. */
       uiDensity: UiDensity;
+      /** `iflow.soundFeedback` — completion/error chime on/off. */
+      soundFeedback: boolean;
+      /** `iflow.defaultMode` — approval mode applied to new sessions. */
+      defaultMode: UiDefaultMode;
     }
   /** Turn finished ("done") or failed ("error") — the webview plays a short
    * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
@@ -1348,6 +1448,13 @@ export type WebviewToHost =
   | { type: "activateProfile"; name: string }
   /** M3: delete an extension-owned profile. */
   | { type: "deleteProfile"; name: string }
+  /** Onboarding: copy a credential set detected in the terminal CLI's
+   * `~/.iflow/settings.json` into SecretStorage (extension-owned) and activate
+   * it. The raw key never leaves the host; `name` matches AuthImportCandidateUi. */
+  | { type: "importCliCredentials"; name: string }
+  /** First-run wizard finished or skipped. Persisted in workspaceState so the
+   * wizard never auto-opens again in this workspace. */
+  | { type: "setOnboardingDismissed"; dismissed: boolean }
   /** M4: load a persisted session by id (history replays into the transcript). */
   | { type: "loadSession"; sessionId: string }
   /** M4: forget a persisted session (switcher entry + transcript). */
@@ -1378,6 +1485,8 @@ export type WebviewToHost =
       autoMemoryCapture?: boolean;
       uiFontSize?: UiFontSize;
       uiDensity?: UiDensity;
+      soundFeedback?: boolean;
+      defaultMode?: UiDefaultMode;
     }
   /** MCP management card opened: read the CURRENT `mcpServers` dict from
    * `~/.iflow/settings.json` (the CLI / external tools own that file — the

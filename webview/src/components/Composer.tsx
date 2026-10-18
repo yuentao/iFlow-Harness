@@ -297,6 +297,7 @@ export function Composer() {
   const status = useChat((s) => s.state?.status ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  const needsSetup = useChat((s) => s.state?.auth.needsSetup ?? false);
   const compressing = useChat((s) => s.state?.compressing ?? false);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
@@ -623,7 +624,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
   const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
   const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
-  const sendBlocked = replaying || initializing || pending !== null;
+  const sendBlocked = replaying || initializing || pending !== null || needsSetup;
   /** Enter/发送 while a real turn streams → the host queues this message. */
   const enqueueMode = streaming && !replaying && !initializing;
   // The permission mode is a session-level setting the agent re-reads per turn

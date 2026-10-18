@@ -18,6 +18,8 @@ const baseSettings = {
   autoMemoryCapture: false,
   uiFontSize: "standard" as const,
   uiDensity: "standard" as const,
+  soundFeedback: true,
+  defaultMode: "smart" as const,
 };
 
 beforeEach(() => {
@@ -53,4 +55,15 @@ it("sends preset changes to the host and applies them optimistically", () => {
     .map((call) => call[0] as { type?: string; uiFontSize?: string; uiDensity?: string })
     .find((msg) => msg.type === "setHostSettings");
   expect(sent).toMatchObject({ type: "setHostSettings", uiFontSize: "compact", uiDensity: "compact" });
+});
+
+it("sends sound and default-mode changes to the host", () => {
+  useChat.getState().updateHostSetting({ soundFeedback: false, defaultMode: "plan" });
+
+  expect(useChat.getState().hostSettings.soundFeedback).toBe(false);
+  expect(useChat.getState().hostSettings.defaultMode).toBe("plan");
+  const sent = postMessage.mock.calls
+    .map((call) => call[0] as { type?: string; soundFeedback?: boolean; defaultMode?: string })
+    .find((msg) => msg.type === "setHostSettings");
+  expect(sent).toMatchObject({ type: "setHostSettings", soundFeedback: false, defaultMode: "plan" });
 });

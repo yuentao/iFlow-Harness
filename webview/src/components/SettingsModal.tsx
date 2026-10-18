@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Brain, KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react";
+import { Brain, Download, ExternalLink, KeyRound, Moon, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react";
 import type { AuthUiState } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
+import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, ModalShell, SAVE_BTN } from "./ui";
@@ -206,8 +207,26 @@ function GeneralSection() {
         onChange={(value) => updateHostSetting({ autoMemoryCapture: value })}
       />
       <p className="text-[11px] leading-relaxed text-muted-foreground/85">
-        {t("默认关闭。开启后每轮可能产生一次额外模型调用；自动提取只生成候选，不会自动写入。")}
+        {t("默认开启。关闭后不再发起该模型调用；自动提取只生成候选，不会自动写入。")}
       </p>
+      <ToggleRow
+        label={t("提示音")}
+        description={t("回复完成或失败时播放提示音。")}
+        checked={settings.soundFeedback}
+        onChange={(value) => updateHostSetting({ soundFeedback: value })}
+      />
+      <ChoiceRow
+        label={t("默认权限模式")}
+        description={t("新会话使用的权限模式；当前会话可用输入框下方的模式菜单切换。")}
+        value={settings.defaultMode}
+        options={[
+          { value: "smart", label: t("智能") },
+          { value: "default", label: t("标准") },
+          { value: "yolo", label: t("免确认") },
+          { value: "plan", label: t("规划") },
+        ]}
+        onChange={(defaultMode) => updateHostSetting({ defaultMode })}
+      />
       <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {t("界面")}
       </div>
@@ -338,10 +357,15 @@ function ApiConfigSection({
 }) {
   const send = useChat((s) => s.send);
   const switching = useChat((s) => s.pending?.kind === "profile");
+  const awaitingChoice = useChat((s) => s.state?.pendingProfileSwitch != null);
   // null = list view; { name } = editing an existing profile; { name: null } = new.
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [form, setForm] = useState({ profileName: "", baseUrl: "", apiKey: "", modelName: "" });
   const [formError, setFormError] = useState<string | null>(null);
+  // Selected onboarding preset (null = custom endpoint). Kept separate from
+  // the form so editing the URL by hand never silently re-labels the form.
+  const [presetId, setPresetId] = useState<string | null>(null);
+  const preset = presetId ? PROVIDER_PRESETS.find((p) => p.id === presetId) ?? null : null;
   // Modal delete confirm (same dialog as sessions / MCP rows — the host delete
   // is irreversible: the profile's key leaves SecretStorage for good).
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
@@ -355,21 +379,41 @@ function ApiConfigSection({
   const back = useCallback(() => {
     setEditing(null);
     setFormError(null);
+    setPresetId(null);
   }, []);
   const editingTitle = editing ? (editing.name ? t("编辑配置") : t("添加配置")) : null;
   useEffect(() => {
     onHeader(editingTitle ? { back, title: editingTitle } : null);
   }, [editingTitle, back, onHeader]);
 
-  function openNew() {
+  function applyPreset(next: ProviderPreset) {
+    setPresetId(next.id);
+    setForm((f) => {
+      // Replace a model that the previous preset filled in automatically;
+      // keep a model the user typed by hand.
+      const wasSuggested = preset?.models.includes(f.modelName.trim()) ?? false;
+      return {
+        ...f,
+        baseUrl: next.baseUrl,
+        modelName: next.models[0] ?? (wasSuggested ? "" : f.modelName),
+      };
+    });
+  }
+
+  function openNew(chosen?: ProviderPreset) {
     // Prefill from the active credentials — switching gateways usually means
-    // changing one field, not retyping everything.
+    // changing one field, not retyping everything. A preset wins when given,
+    // including its (possibly empty) model list: never pair a new endpoint
+    // with the previous gateway's model.
     setForm({
       profileName: "",
-      baseUrl: auth.saved?.baseUrl ?? "",
+      baseUrl: chosen?.baseUrl ?? auth.saved?.baseUrl ?? "",
       apiKey: "",
-      modelName: auth.saved?.modelName ?? "",
+      modelName: chosen ? (chosen.models[0] ?? "") : (auth.saved?.modelName ?? ""),
     });
+    setPresetId(
+      chosen?.id ?? (auth.saved?.baseUrl ? matchProviderPreset(auth.saved.baseUrl)?.id ?? null : null),
+    );
     setFormError(null);
     setEditing({ name: null });
   }
@@ -378,6 +422,7 @@ function ApiConfigSection({
     const p = auth.profiles.find((x) => x.name === name);
     if (!p) return;
     setForm({ profileName: p.name, baseUrl: p.baseUrl, apiKey: "", modelName: p.modelName });
+    setPresetId(matchProviderPreset(p.baseUrl)?.id ?? null);
     setFormError(null);
     setEditing({ name: p.name });
   }
@@ -412,6 +457,62 @@ function ApiConfigSection({
           <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warning">
             {t("这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。")}
           </p>
+        )}
+        <div className="space-y-1">
+          <div className="text-[11.5px] text-muted-foreground">{t("服务商预设")}</div>
+          <div className="flex flex-wrap gap-1">
+            {PROVIDER_PRESETS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={presetId === option.id}
+                className={`press rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-200 ${
+                  presetId === option.id
+                    ? "border-primary/50 bg-primary/10 font-semibold text-primary"
+                    : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                }`}
+                onClick={() => applyPreset(option)}
+              >
+                {option.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              aria-pressed={presetId === null}
+              className={`press rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-200 ${
+                presetId === null
+                  ? "border-primary/50 bg-primary/10 font-semibold text-primary"
+                  : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              }`}
+              onClick={() => setPresetId(null)}
+            >
+              {t("自定义")}
+            </button>
+          </div>
+        </div>
+        {preset && (
+          <div className="rounded-lg border border-border bg-surface/60 px-2.5 py-1.5">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">{t(preset.note)}</p>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {preset.keyUrl && (
+                <button
+                  className={BTN}
+                  onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}
+                >
+                  <ExternalLink className="mr-0.5 inline size-3 align-[-2px]" />
+                  {t("获取 API Key")}
+                </button>
+              )}
+              {preset.docsUrl && (
+                <button
+                  className={BTN}
+                  onClick={() => send({ type: "openExternal", uri: preset.docsUrl! })}
+                >
+                  {t("查看文档")}
+                </button>
+              )}
+            </div>
+          </div>
         )}
         <label className="flex flex-col gap-0.5">
           <span className="text-[11.5px] text-muted-foreground">{t("配置名称（可选，默认为模型名）")}</span>
@@ -453,6 +554,21 @@ function ApiConfigSection({
             onChange={(e) => setForm((f) => ({ ...f, modelName: e.target.value }))}
           />
         </label>
+        {preset && preset.models.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="text-[11px] text-muted-foreground">{t("常用模型")}</span>
+            {preset.models.map((model) => (
+              <button
+                key={model}
+                type="button"
+                className="press rounded-full border border-border px-2 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
+                onClick={() => setForm((f) => ({ ...f, modelName: model }))}
+              >
+                {model}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
           <button className={SAVE_BTN} disabled={busy} onClick={submit}>
             {t("保存并激活")}
@@ -471,25 +587,86 @@ function ApiConfigSection({
     );
   }
 
+  // Import is an onboarding shortcut: once this panel has working extension
+  // credentials, the CLI profiles below remain switchable but a permanent
+  // "import me" banner would just nag.
+  const showImport = auth.importable.length > 0 && (auth.needsSetup || auth.saved === null);
+
   return (
     <div className="space-y-2">
+      {showImport && (
+        <div className="rounded-xl border border-primary/30 bg-primary/5 px-2.5 py-2">
+          <div className="flex items-center gap-1.5 text-[12px] font-semibold text-foreground">
+            <Download className="size-3.5 shrink-0 text-primary" />
+            {t("检测到 iFlow CLI 已有凭据")}
+          </div>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            {t("可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。")}
+          </p>
+          <div className="mt-1.5 space-y-1">
+            {auth.importable.map((candidate) => (
+              <div
+                key={candidate.name}
+                className="flex items-center gap-1.5 rounded-lg border border-border bg-surface/60 px-2 py-1"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  <span className="text-[12px] font-semibold text-foreground">{candidate.name}</span>
+                  <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">
+                    {candidate.modelName} · {candidate.keyTail}
+                  </span>
+                </span>
+                <button
+                  className={`${SAVE_BTN} shrink-0 whitespace-nowrap`}
+                  disabled={busy}
+                  title={`${candidate.baseUrl} · ${candidate.modelName}（${candidate.keyTail}）`}
+                  onClick={() => {
+                    useChat.getState().beginPending("profile", candidate.name);
+                    send({ type: "importCliCredentials", name: candidate.name });
+                  }}
+                >
+                  {t("导入并激活")}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {auth.needsSetup && (
         <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warning">
-          {t("连接 iFlow 需要配置 API 凭据。")}
+          {t("连接 iFlow 需要配置 API 凭据")}
         </p>
       )}
       {switching && (
         <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <Chip tone="primary">{t("正在重新认证…")}</Chip>
+          <Chip tone="primary">{awaitingChoice ? t("等待选择…") : t("正在重新认证…")}</Chip>
         </p>
       )}
       {auth.profiles.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center">
-          <div className="text-[12px] text-muted-foreground">{t("尚未添加 API 配置")}</div>
-          <button className={`${SAVE_BTN} mt-2`} onClick={openNew}>
-            <Plus className="mr-0.5 inline size-3 align-[-2px]" />
-            {t("添加 API 配置")}
-          </button>
+        <div className="rounded-xl border border-dashed border-border px-3 py-4">
+          <div className="text-center text-[12px] font-semibold text-foreground">
+            {t("尚未添加 API 配置")}
+          </div>
+          <p className="mt-1 text-center text-[11px] leading-relaxed text-muted-foreground">
+            {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
+          </p>
+          <div className="mt-2 flex flex-wrap justify-center gap-1">
+            {PROVIDER_PRESETS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className="press rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:bg-accent/60 hover:text-foreground"
+                onClick={() => openNew(option)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 flex justify-center">
+            <button className={BTN} onClick={() => openNew()}>
+              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              {t("自定义配置")}
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-1.5">
@@ -553,7 +730,7 @@ function ApiConfigSection({
         </div>
       )}
       {auth.profiles.length > 0 && (
-        <button className={BTN} disabled={busy} onClick={openNew}>
+        <button className={BTN} disabled={busy} onClick={() => openNew()}>
           <Plus className="mr-0.5 inline size-3 align-[-2px]" />
           {t("添加配置")}
         </button>

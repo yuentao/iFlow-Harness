@@ -105,7 +105,9 @@ export function MemoryReviewDialog({
               </span>
               <span className="mt-1 flex flex-wrap items-center gap-1">
                 <Chip tone="muted">{categoryLabel(candidate.category)}</Chip>
-                <Chip tone="info">{Math.round(candidate.confidence * 100)}%</Chip>
+                <span title={t("模型对该候选的置信度（0–100%）")}>
+                  <Chip tone="info">{t("置信度 {0}%", Math.round(candidate.confidence * 100))}</Chip>
+                </span>
                 <select
                   aria-label={`${t("记忆作用域")}: ${candidate.text.slice(0, 40)}`}
                   className={`${INPUT} ml-auto w-auto py-0.5 text-[10.5px]`}

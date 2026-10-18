@@ -42,7 +42,14 @@ function makeState(activeSessionId: string, prompts: string[]): SessionState {
     pendingApproval: null,
     pendingPlanExit: null,
     pendingQuestions: null,
-    auth: { authenticated: true, needsSetup: false, saved: null, profiles: [] },
+    auth: {
+      authenticated: true,
+      needsSetup: false,
+      saved: null,
+      profiles: [],
+      importable: [],
+      onboardingDismissed: false,
+    },
     sessions: [],
     replaying: false,
     initializing: false,
@@ -132,5 +139,15 @@ describe("Composer keyboard interactions", () => {
     expect(container.textContent).toContain("无匹配文件");
     key(textarea, "ArrowUp");
     expect(textarea.value).toBe("@missing");
+  });
+
+  it("does not send while API credentials are not configured", () => {
+    state = makeState("s1", []);
+    state.auth = { ...state.auth, authenticated: false, needsSetup: true };
+    mocked.state = state;
+    const textarea = render();
+    change(textarea, "hello");
+    key(textarea, "Enter");
+    expect(mocked.send).not.toHaveBeenCalled();
   });
 });

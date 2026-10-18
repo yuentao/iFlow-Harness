@@ -185,6 +185,62 @@ export function readActiveEndpoint(settingsPath?: string): ActiveEndpoint | null
   return { baseUrl, apiKey, modelName };
 }
 
+/** A credential set from the CLI's settings.json that the panel can copy into
+ * SecretStorage in one click (host-side only — the raw key never leaves it). */
+export interface CliImportCandidate {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+}
+
+/**
+ * Detect credentials worth importing from the terminal CLI's config.
+ *
+ * Sources, in order:
+ *  1. Every named `apiProfiles` entry with all three fields (they are
+ *     openai-compatible by construction, even when the CLI currently uses
+ *     OAuth — the profile is still a valid endpoint the user configured).
+ *  2. The top-level endpoint when `selectedAuthType === "openai-compatible"`
+ *     (same gate as readActiveEndpoint), for configs written without a named
+ *     profile. Its name falls back to the active profile name → model → label.
+ *
+ * Entries whose name already exists in `existingNames` are skipped: the
+ * extension profile shadows them (buildProfileList drops the CLI duplicate),
+ * so there is nothing new to import. Duplicate credential sets are collapsed
+ * by baseUrl + apiKey + modelName.
+ */
+export function cliImportCandidates(
+  settings: CliSettingsShape | null,
+  existingNames: Iterable<string>,
+): CliImportCandidate[] {
+  if (!settings) return [];
+  const taken = new Set([...existingNames].map((name) => name.trim()).filter(Boolean));
+  const seen = new Set<string>();
+  const out: CliImportCandidate[] = [];
+
+  const push = (rawName: string | undefined, p: ProfileShape | CliSettingsShape) => {
+    const baseUrl = p.baseUrl?.trim();
+    const apiKey = p.apiKey?.trim();
+    const modelName = p.modelName?.trim();
+    if (!baseUrl || !apiKey || !modelName) return;
+    const name = rawName?.trim() || modelName;
+    if (!name || taken.has(name)) return;
+    const signature = `${baseUrl}\u0000${apiKey}\u0000${modelName}`;
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    out.push({ name, baseUrl, apiKey, modelName });
+  };
+
+  for (const [name, profile] of Object.entries(settings.apiProfiles ?? {})) {
+    push(name, profile);
+  }
+  if (settings.selectedAuthType === "openai-compatible") {
+    push(settings.currentApiProfile ?? settings.modelName, settings);
+  }
+  return out;
+}
+
 /**
  * `https://host/v1` → `https://host/v1/models` (idempotent, trims slashes).
  * User-typed profiles often omit the scheme (`api.host.com/v1`); default to

@@ -22,7 +22,7 @@ import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { isEnglishLocale, t } from "./i18n";
 import { copyText } from "./components/Markdown";
-import { BTN_ICON, Chip, ConfirmDialog, Dropdown } from "./components/ui";
+import { BTN, BTN_ICON, Chip, ConfirmDialog, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -30,6 +30,7 @@ import { PlanExitCard } from "./components/PlanExitCard";
 import { QuestionCard } from "./components/QuestionCard";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
 import type { AgentStatus, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
@@ -178,6 +179,18 @@ export function App() {
   const pending = useChat((s) => s.pending);
   const send = useChat((s) => s.send);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  // First-run wizard: auto-opens once per workspace. The host persists the
+  // skipped/completed flag (auth.onboardingDismissed), so a reload never
+  // nags again; the unauthenticated banner can reopen it deliberately.
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const onboardingAutoOpened = useRef(false);
+  useEffect(() => {
+    if (onboardingAutoOpened.current || !auth || settingsTab !== null) return;
+    if (auth.needsSetup && auth.saved === null && !auth.onboardingDismissed) {
+      onboardingAutoOpened.current = true;
+      setOnboardingOpen(true);
+    }
+  }, [auth, settingsTab]);
   const memoryDraft = useChat((s) => s.memoryDraftRequest);
   const clearMemoryDraft = useChat((s) => s.clearMemoryDraft);
   const [memoryReview, setMemoryReview] = useState<{
@@ -341,7 +354,7 @@ export function App() {
     return () => window.clearTimeout(id);
   }, [focusMode]);
 
-  if (status === null || status === "connecting") {
+  if ((status === null || status === "connecting") && !onboardingOpen) {
     // Full-screen brand splash until the session is fully initialized.
     // P0-3: a live elapsed counter turns a silent hang into a diagnosable
     // wait, and past the patience threshold the splash grows its own restart
@@ -375,10 +388,10 @@ export function App() {
     );
   }
 
-  // Unified settings modal: open when a tab is selected — or force-opened on
-  // the API tab while unauthenticated (credentials are mandatory; the modal
-  // stays non-dismissible until they're set, same rule as the old setup card).
-  const settingsOpen = settingsTab !== null || (auth?.needsSetup ?? false);
+  // Unified settings modal: opened explicitly from the gear / wizard. First-run
+  // credential setup lives in OnboardingWizard, so this modal is always
+  // dismissible (a user who skipped onboarding can still browse and close it).
+  const settingsOpen = settingsTab !== null;
   const settingsTabValue: SettingsTab = settingsTab ?? "api";
   // While the agent is streaming (or an approval blocks it), or while a new
   // session / history restore is initializing, switching the session / mode /
@@ -561,7 +574,7 @@ export function App() {
               <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
             </Chip>
           ) : (
-            statusChip(status, compressing, isPlanMode(modes))
+            statusChip(status ?? "connecting", compressing, isPlanMode(modes))
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <button
@@ -604,11 +617,21 @@ export function App() {
           tab={settingsTabValue}
           onTabChange={setSettingsTab}
           onDismiss={() => setSettingsTab(null)}
-          dismissible={!auth.needsSetup}
+          dismissible
           busy={locked}
           auth={auth}
           dark={dark}
           onThemeChange={setManual}
+        />
+      )}
+
+      {onboardingOpen && auth && (
+        <OnboardingWizard
+          auth={auth}
+          dark={dark}
+          onThemeChange={setManual}
+          onClose={() => setOnboardingOpen(false)}
+          onOpenSettings={(tab) => setSettingsTab(tab)}
         />
       )}
 
@@ -665,6 +688,18 @@ export function App() {
           </div>
         )}
       </div>
+
+      {auth?.needsSetup && !onboardingOpen && (
+        <div className="mx-3 mb-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warning">
+          <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
+          <button className={BTN} onClick={() => setSettingsTab("api")}>
+            {t("配置")}
+          </button>
+          <button className={BTN} onClick={() => setOnboardingOpen(true)}>
+            {t("重新运行引导")}
+          </button>
+        </div>
+      )}
 
       <Composer />
 

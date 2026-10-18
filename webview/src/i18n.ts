@@ -178,6 +178,102 @@ const en: Record<string, string> = {
   "API Key 不能为空": "API key is required",
   "模型名称不能为空": "Model name is required",
   "连接 iFlow 需要配置 API 凭据": "Connect to iFlow by configuring API credentials",
+  "服务商预设": "Provider presets",
+  "自定义": "Custom",
+  "获取 API Key": "Get an API key",
+  "查看文档": "Documentation",
+  "常用模型": "Suggested models",
+  "自定义配置": "Custom profile",
+  "选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。":
+    "Pick a provider preset to fill in the endpoint, or enter any OpenAI-compatible endpoint manually.",
+  "检测到 iFlow CLI 已有凭据": "Existing iFlow CLI credentials detected",
+  "可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。":
+    "Import them as extension profiles from ~/.iflow/settings.json; the key is stored in SecretStorage and managed by the panel.",
+  "导入并激活": "Import & activate",
+  "在 DeepSeek 开放平台创建 API Key；端点兼容 OpenAI 协议。":
+    "Create an API key on the DeepSeek platform; the endpoint is OpenAI-compatible.",
+  "在 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。":
+    "Create an API key on the Moonshot platform for Kimi models.",
+  "在智谱开放平台创建 API Key，使用 GLM 系列模型。":
+    "Create an API key on the Zhipu platform for GLM models.",
+  "在阿里云百炼控制台创建 API Key，使用通义千问系列模型。":
+    "Create an API key in the Alibaba Cloud Bailian console for Qwen models.",
+  "在硅基流动控制台创建 API Key，可访问多家开源模型。":
+    "Create an API key in the SiliconFlow console to access many open-source models.",
+  "在 OpenRouter 创建 API Key，可路由到多家供应商的模型。":
+    "Create an API key on OpenRouter to route to models from many providers.",
+  "本地 Ollama 不校验 API Key，填任意非空值（如 ollama）即可；请确认 Ollama 服务已启动。":
+    "Local Ollama does not check the API key — any non-empty value (e.g. ollama) works; make sure the Ollama service is running.",
+  // first-run onboarding wizard
+  "初始化引导": "Getting started",
+  "欢迎": "Welcome",
+  "连接模型": "Connect a model",
+  "选择模型": "Choose a model",
+  "使用偏好": "Preferences",
+  "第 {0} / {1} 步": "Step {0} of {1}",
+  "跳过引导": "Skip setup",
+  "开始配置": "Get started",
+  "上一步": "Back",
+  "稍后配置": "Later",
+  "保存并继续": "Save & continue",
+  "开始使用": "Start using",
+  "欢迎使用 心流·驭光": "Welcome to iFlow Harness",
+  "用一到两分钟完成最初配置。随时可以跳过，跳过后仍可从设置或面板提示重新配置。":
+    "Set things up in a minute or two. You can skip at any time and reconfigure later from settings or the panel prompt.",
+  "对话即工作台": "One panel for the whole job",
+  "流式对话、工具审批、逐块回滚都在一个面板里。":
+    "Streaming chat, tool approvals, and per-hunk rollback all live in one panel.",
+  "凭据只在本机": "Credentials stay local",
+  "API Key 存入 VSCode SecretStorage，不写入磁盘明文。":
+    "API keys are stored in VSCode SecretStorage, never as plaintext on disk.",
+  "随时可改": "Change anything later",
+  "服务商、模型、权限与界面偏好都能在设置中调整。":
+    "Provider, model, approval mode, and UI preferences can all be adjusted in settings.",
+  "尚未选择": "Not selected",
+  "尚未配置（可稍后在设置中完成）": "Not configured (finish later in settings)",
+  "选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。":
+    "Pick the default model. You can switch at any time from the model dropdown in the panel header.",
+  "正在连接 iFlow CLI 并获取模型列表…": "Connecting to iFlow CLI and fetching models…",
+  "尚未连接": "Not connected",
+  "暂无可用模型列表": "No models available yet",
+  "保存凭据后会自动获取模型；也可以稍后在模型下拉中选择。":
+    "Models are fetched automatically once credentials are saved — or pick one later from the dropdown.",
+  "可点击下方按钮重新获取。": "Use the button below to fetch again.",
+  "重新获取": "Fetch again",
+  "返回填写凭据": "Back to credentials",
+  "当前模型：{0}": "Current model: {0}",
+  "选择新会话默认的权限模式；点击选项后当前会话也会立即切换。之后可在设置 → 审批策略中细化规则。":
+    "Pick the default approval mode for new sessions; clicking an option also switches the current session. Fine-grained rules live in Settings → Approval policies.",
+  "初始化进度": "Setup progress",
+  "这些设置之后都能在齿轮 ⚙ 设置中随时修改。":
+    "Everything here can be changed later from the ⚙ settings.",
+  "提示音": "Sound",
+  "回复完成或失败时播放提示音。": "Play a cue when a reply finishes or fails.",
+  "默认权限模式": "Default approval mode",
+  "新会话使用的权限模式；当前会话可用输入框下方的模式菜单切换。":
+    "Approval mode for new sessions; switch the current session from the mode menu below the composer.",
+  "每轮回复后推测可选的下一步操作（会产生额外 token 消耗）。":
+    "Suggest next steps after each reply (uses extra tokens).",
+  "上下文占用达到 95% 时自动压缩会话。": "Compress the session automatically at 95% context usage.",
+  "每轮结束后提取长期偏好候选，确认后才写入。":
+    "Extract long-term preference candidates after each turn; nothing is written until you confirm.",
+  "调整面板中文字的大小。": "Adjust the panel text size.",
+  "调整控件内边距与间距，不影响字号。": "Adjust control padding and spacing without changing font size.",
+  "默认跟随编辑器主题，也可以固定为浅色或深色。":
+    "Follow the editor theme by default, or pin light/dark.",
+  "配置完成": "You're all set",
+  "可以开始对话了；所有设置都能随时在齿轮 ⚙ 中修改。":
+    "You can start chatting now; everything remains editable from the ⚙ settings.",
+  "连接": "Connection",
+  "默认模式": "Default mode",
+  "已开启": "On",
+  "已关闭": "Off",
+  "字号 / 密度": "Font / density",
+  "继续配置": "Continue configuring",
+  "这些高级能力可以稍后再设置。": "These advanced capabilities can be set up later.",
+  "尚未配置 API 凭据，无法开始对话。": "API credentials are not configured yet — chat is unavailable.",
+  "配置": "Configure",
+  "重新运行引导": "Run setup again",
   "收起": "Collapse",
   "展开": "Expand",
   "复制错误信息": "Copy error message",
@@ -207,6 +303,7 @@ const en: Record<string, string> = {
   "这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。":
     "This is a read-only CLI profile; saving creates an extension-owned profile with the same name that takes precedence.",
   "正在重新认证…": "Re-authenticating…",
+  "等待选择…": "Waiting for your choice…",
   "审批策略": "Approval policies",
   "审批规则": "Approval rule",
   "自动允许": "Auto-allow",
@@ -390,8 +487,11 @@ const en: Record<string, string> = {
   "显示更早 {0} 条": "Show {0} earlier steps",
   "上下文摘要": "Context summary",
       "系统提示词": "System prompt",
+  "自动注入": "Auto-injected",
       "核心提示词": "Core prompt",
       "记忆": "Memory",  "上下文文件": "Context files",
+      "{0} 个项目记忆文件": "{0} project memory file(s)",
+      "{0} 个知识库文档": "{0} knowledge doc(s)",
       "MCP 未连接": "MCP not connected",
       "未随请求注入": "Not injected with the request",
   "{0} 字符": "{0} chars",
@@ -549,6 +649,9 @@ const en: Record<string, string> = {
   "已加入记忆（新会话生效）": "Memory added (effective in a new session)",
   "记忆候选": "Memory candidates",
   "记忆作用域": "Memory scope",
+  "置信度 {0}%": "Confidence {0}%",
+  "模型对该候选的置信度（0–100%）":
+    "The model's confidence in this candidate (0–100%)",
   "偏好": "Preference",
   "约定": "Convention",
   "决策": "Decision",
@@ -562,8 +665,8 @@ const en: Record<string, string> = {
   "自动提取记忆": "Auto-extract memories",
   "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入。":
     "After each turn, ask the current model for durable preference/convention candidates; nothing is written until you confirm.",
-  "默认关闭。开启后每轮可能产生一次额外模型调用；自动提取只生成候选，不会自动写入。":
-    "Off by default. When enabled, each turn may make one extra model call; extraction only produces candidates and never writes automatically.",
+  "默认开启。关闭后不再发起该模型调用；自动提取只生成候选，不会自动写入。":
+    "Enabled by default. When off, no extra model call is made; extraction only produces candidates and never writes automatically.",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",

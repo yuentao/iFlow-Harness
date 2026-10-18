@@ -965,7 +965,11 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   const [open, setOpen] = useState(false);
   const systemCount = block.items.filter((i) => i.kind === "system").length;
   const memoryCount = block.items.filter((i) => i.kind === "memory").length;
-  const fileCount = block.items.filter((i) => i.kind === "context-file").length;
+  const fileCount = new Set([
+    ...block.items.filter((i) => i.kind === "context-file").map((i) => i.path ?? i.label),
+    ...block.items.filter((i) => i.kind === "knowledge" && i.from).map((i) => i.from!),
+  ]).size;
+  const knowledgeCount = block.items.filter((i) => i.kind === "knowledge").length;
   const mcpItems = block.items.filter((i) => i.kind === "mcp");
   const mcpCarried = mcpItems.filter((i) => i.connected !== false);
   const mcpUnloaded = mcpItems.length - mcpCarried.length;
@@ -974,20 +978,25 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
     <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} />
-        <span className="min-w-0 truncate">{block.notice}</span>
+        <span className="shrink-0 font-medium text-foreground/75">{t("自动注入")}</span>
         {block.tokens !== undefined && (
           <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
             ≈ {block.tokens.toLocaleString()} tokens
           </span>
         )}
         {systemCount > 0 && <Chip tone="info">{t("系统提示词")}</Chip>}
-        {memoryCount > 0 && <Chip tone="muted">{t("记忆")}</Chip>}
+        {memoryCount > 0 && <Chip tone="muted">{t("全局记忆")}</Chip>}
         {fileCount > 0 && (
           <Chip tone="muted">
-            {t("上下文文件")} {fileCount}
+            {t("项目记忆")} {fileCount}
+          </Chip>
+        )}
+        {knowledgeCount > 0 && (
+          <Chip tone="muted">
+            {t("项目知识库")} {knowledgeCount}
           </Chip>
         )}
         {mcpCarried.length > 0 && (
@@ -1562,6 +1571,16 @@ function MessageListInner({ state }: { state: SessionState }) {
   // says 正在压缩 — telling the user to 建议压缩 while compressing is a lie.
   const mergedWarn =
     state.status === "streaming" && !state.compressing ? compressWarnToast : undefined;
+  // The 立即压缩 action must not be offered while a turn owns the session:
+  // the host refuses concurrent compressions (runCompressTurn returns on
+  // streaming/initializing), so a visible button would only be a dead click
+  // during a long turn. The warning text stays informative either way.
+  const compressActionHidden =
+    state.status === "streaming"
+    || state.status === "connecting"
+    || state.compressing
+    || state.initializing
+    || state.replaying;
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -1696,11 +1715,12 @@ function MessageListInner({ state }: { state: SessionState }) {
             // visible even while new content streams in above it.
             // pointer-events-none: the composer's upward-opening mode dropdown
             // expands into this area — the pill must not steal its clicks. The
-            // merged-warning variant re-enables pointer events for its button.
+            // merged warning is non-interactive while a turn runs (its
+            // 立即压缩 action is hidden), so it stays click-through too.
             // P2-19: sticky offset rides above a mounted pending card
             // (--pending-card-h) instead of being covered by it.
             <div
-              className={`sticky z-10 flex justify-center py-1.5 ${mergedWarn ? "" : "pointer-events-none"}`}
+              className="sticky z-10 flex justify-center py-1.5 pointer-events-none"
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
             >
               <div
@@ -1718,18 +1738,6 @@ function MessageListInner({ state }: { state: SessionState }) {
                       : isPlanMode(state.modes)
                         ? t("正在规划")
                         : t("正在生成")}
-                {mergedWarn?.action && (
-                  <button
-                    onClick={() =>
-                      useChat
-                        .getState()
-                        .send({ type: "toastAction", actionId: mergedWarn.action!.actionId, toastId: mergedWarn.toastId })
-                    }
-                    className="press ml-0.5 shrink-0 rounded-md border border-current/50 px-1.5 py-0.5 text-[11px] font-semibold opacity-90 transition-opacity hover:opacity-100"
-                  >
-                    {mergedWarn.action.label}
-                  </button>
-                )}
               </div>
             </div>
           )}
@@ -1764,7 +1772,10 @@ function MessageListInner({ state }: { state: SessionState }) {
           {t("回到最新")}
         </button>
       )}
-      <Toasts skipToastId={streamingPillVisible ? mergedWarn?.id : undefined} />
+      <Toasts
+        skipToastId={streamingPillVisible ? mergedWarn?.id : undefined}
+        suppressCompressAction={compressActionHidden}
+      />
     </div>
   );
 }
@@ -1775,7 +1786,14 @@ function MessageListInner({ state }: { state: SessionState }) {
  * display-only/persistent pills are not clickable — persistent ones stay
  * until the host removes them (dismissToast). Sticky pills (auto-memory
  * candidates) never auto-dismiss but the user may close them. */
-function Toasts({ skipToastId }: { skipToastId?: number }) {
+function Toasts({
+  skipToastId,
+  suppressCompressAction,
+}: {
+  skipToastId?: number;
+  /** A turn owns the session: hide the 立即压缩 action (the host refuses it). */
+  suppressCompressAction?: boolean;
+}) {
   const toasts = useChat((s) => s.toasts);
   const visible = skipToastId === undefined ? toasts : toasts.filter((x) => x.id !== skipToastId);
   if (visible.length === 0) return null;
@@ -1789,7 +1807,7 @@ function Toasts({ skipToastId }: { skipToastId?: number }) {
       style={{ bottom: "calc(3.5rem + var(--pending-card-h, 0px))" }}
     >
       {visible.map((t) => (
-        <ToastPill key={t.id} toast={t} />
+        <ToastPill key={t.id} toast={t} suppressCompressAction={suppressCompressAction} />
       ))}
     </div>
   );
@@ -1798,7 +1816,13 @@ function Toasts({ skipToastId }: { skipToastId?: number }) {
 /** One toast pill. When `countdownDeadline` (host epoch-ms) is set, the live
  * countdown is anchored to that absolute deadline so the UI stays in sync with
  * the host's actual wait — no drift from the message round-trip latency. */
-function ToastPill({ toast }: { toast: ToastItem }) {
+function ToastPill({
+  toast,
+  suppressCompressAction,
+}: {
+  toast: ToastItem;
+  suppressCompressAction?: boolean;
+}) {
   const dismiss = useChat((s) => s.dismissToast);
   const [secs, setSecs] = useState(
     toast.countdownDeadline ? Math.ceil((toast.countdownDeadline - Date.now()) / 1000) : 0,
@@ -1837,10 +1861,13 @@ function ToastPill({ toast }: { toast: ToastItem }) {
     </>
   );
   // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button — the pill
-  // body stays non-clickable when host-owned (persistent/display-only), but
-  // the action must always be reachable.
+  // body stays non-clickable when host-owned (persistent/display-only). The
+  // compress action is suppressed while a turn owns the session (the host
+  // refuses concurrent compression), so it is reachable only when idle.
+  const actionHidden = suppressCompressAction && toast.action?.actionId === "compress";
   const actionButton =
-    toast.action && (
+    toast.action &&
+    !actionHidden && (
       <button
         onClick={() =>
           useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })

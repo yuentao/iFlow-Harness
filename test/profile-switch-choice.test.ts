@@ -96,6 +96,7 @@ type PanelInternals = {
   store: {
     getState: () => {
       sessionId: string | null;
+      activeSessionId: string | null;
       blocks: unknown[];
       status: string;
       currentModelId: string | null;
@@ -277,6 +278,50 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     expect(p.store.getState().pendingProfileSwitch).toBeNull();
     expect(p.client!.authenticate).toHaveBeenCalledTimes(1);
     expect(p.client!.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks before re-authenticating when a transcript exists but sessionId is still null", async () => {
+    await seedProfile();
+    p.client = makeFakeClient();
+    // Visible conversation while the panel is connecting/restoring: the ACP
+    // session id is not assigned yet. The switch must not silently re-auth.
+    p.store.userPrompt("hello");
+    p.store.getState().status = "idle";
+    p.queryLiveModels = async () => [];
+    p.refreshSessionList = async () => [];
+
+    const switching = p.activateProfile("B");
+    const id = await openDialog("B");
+    expect(p.client!.authenticate).not.toHaveBeenCalled();
+
+    await answer(id, false);
+    await switching;
+
+    expect(p.client!.authenticate).toHaveBeenCalledTimes(1);
+    expect(p.client!.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the visible transcript via activeSessionId when no live session exists yet", async () => {
+    await seedProfile();
+    p.client = makeFakeClient();
+    p.store.userPrompt("hello");
+    p.store.getState().activeSessionId = "keep-session";
+    p.store.getState().status = "idle";
+    p.queryLiveModels = async () => [];
+    p.refreshSessionList = async () => [];
+
+    const switching = p.activateProfile("B");
+    const id = await openDialog("B");
+    expect(p.client!.authenticate).not.toHaveBeenCalled();
+
+    await answer(id, true);
+    await switching;
+
+    expect(p.client!.authenticate).toHaveBeenCalledTimes(1);
+    expect(p.client!.loadSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "keep-session" }),
+    );
+    expect(p.client!.newSession).not.toHaveBeenCalled();
   });
 
   it("a failed keep-session reload degrades visibly to the new-session flow", async () => {

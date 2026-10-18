@@ -310,7 +310,7 @@
         },
         "iflow.autoMemoryCapture": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "%iflow.configuration.autoMemoryCapture.description%"
         },
         "iflow.checkpoints": {

@@ -11,6 +11,7 @@ import {
   type MemoryStateUi,
   type SessionState,
   type SessionSummaryUi,
+  type UiDefaultMode,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
@@ -141,12 +142,16 @@ function createMockHost(): HostApi {
     autoMemoryCapture: boolean;
     uiFontSize: UiFontSize;
     uiDensity: UiDensity;
+    soundFeedback: boolean;
+    defaultMode: UiDefaultMode;
   } = {
     nextStepSuggestions: true,
     autoCompressOnIdle: false,
-    autoMemoryCapture: false,
+    autoMemoryCapture: true,
     uiFontSize: "standard",
     uiDensity: "standard",
+    soundFeedback: true,
+    defaultMode: "smart",
   };
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
   // the host's approvalPolicy message.
@@ -412,14 +417,32 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "本次请求自动注入了 3 项内容：系统提示词、1 个 MCP 服务器、1 个 MCP 服务器未连接",
+      notice: "本次请求自动注入了 6 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、1 个 MCP 服务器、1 个 MCP 服务器未连接",
       tokens: 31240,
       items: [
         {
           kind: "system",
           label: "系统提示词",
           content:
-            "You are iFlow CLI, an interactive CLI agent...\n（mock：核心提示词，完整正文由 acp-context-report Mod 捕获）\n\n---\n\n--- Context from: AGENTS.md ---\n# AGENTS.md\n\n项目概览…（mock：层级上下文文件正文内嵌于系统提示词尾部）\n--- End of Context from: AGENTS.md ---",
+            "You are iFlow CLI, an interactive CLI agent...\n（mock：核心提示词，完整正文由 acp-context-report Mod 捕获）",
+        },
+        {
+          kind: "memory",
+          label: "全局记忆",
+          path: "C:\\Users\\mock\\.iflow\\AGENTS.md",
+          content: "## iFlow Added Memories\n- 偏好中文回复，代码注释用英文。\n（mock：全局记忆正文）",
+        },
+        {
+          kind: "context-file",
+          label: "AGENTS.md",
+          path: "J:\\git\\iflow-harness\\AGENTS.md",
+          content: "# AGENTS.md\n\n项目概览…（mock：项目记忆正文）",
+        },
+        {
+          kind: "knowledge",
+          label: "项目知识库",
+          path: "J:\\git\\iflow-harness\\.iflow\\knowledge\\index.md",
+          content: "# 项目知识索引\n\n## 概览\n…（mock：知识库正文，由 @.iflow/knowledge/index.md 展开）",
         },
         {
           kind: "mcp",
@@ -677,6 +700,10 @@ function createMockHost(): HostApi {
       { name: "BUZZ", source: "cli", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
       { name: "工作密钥", source: "extension", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
     ],
+    importable: [
+      { name: "终端默认", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock" },
+    ],
+    onboardingDismissed: false,
   };
   /** The profile named in the open switch dialog (respondProfileSwitch target). */
   let pendingSwitchTarget: string | null = null;
@@ -781,6 +808,12 @@ function createMockHost(): HostApi {
           mockHostSettings.uiDensity = m.uiDensity;
           applyUiScale(mockHostSettings.uiFontSize, mockHostSettings.uiDensity);
         }
+        if (typeof m.soundFeedback === "boolean") {
+          mockHostSettings.soundFeedback = m.soundFeedback;
+        }
+        if (m.defaultMode) {
+          mockHostSettings.defaultMode = m.defaultMode;
+        }
         broadcast({ type: "hostSettings", ...mockHostSettings });
         return;
       }
@@ -802,6 +835,8 @@ function createMockHost(): HostApi {
               .filter((p) => p.name !== name)
               .map((p) => ({ ...p, active: false })),
           ],
+          importable: authState.importable.filter((c) => c.name !== name),
+          onboardingDismissed: authState.onboardingDismissed,
         };
         // The new profile's model becomes the session's current model; the
         // model list refreshes like a live /models query on the new endpoint.
@@ -824,12 +859,72 @@ function createMockHost(): HostApi {
         });
         return;
       }
+      if (m.type === "importCliCredentials") {
+        const candidate = authState.importable.find((c) => c.name === m.name);
+        if (!candidate) return;
+        authState = {
+          authenticated: true,
+          needsSetup: false,
+          saved: { baseUrl: candidate.baseUrl, modelName: candidate.modelName, keyTail: candidate.keyTail },
+          profiles: [
+            {
+              name: candidate.name,
+              source: "extension",
+              baseUrl: candidate.baseUrl,
+              modelName: candidate.modelName,
+              keyTail: candidate.keyTail,
+              active: true,
+            },
+            ...authState.profiles
+              .filter((p) => p.name !== candidate.name)
+              .map((p) => ({ ...p, active: false })),
+          ],
+          importable: authState.importable.filter((c) => c.name !== m.name),
+          onboardingDismissed: authState.onboardingDismissed,
+        };
+        demoMeta.models = [
+          { id: candidate.modelName, name: candidate.modelName },
+          ...demoMeta.models.filter((x) => x.id !== candidate.modelName),
+        ];
+        demoMeta.currentModelId = candidate.modelName;
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "setOnboardingDismissed") {
+        authState = { ...authState, onboardingDismissed: m.dismissed };
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        return;
+      }
       if (m.type === "clearAuth") {
         authState = {
           authenticated: false,
           needsSetup: true,
           saved: null,
           profiles: authState.profiles.map((p) => ({ ...p, active: false })),
+          importable: authState.importable,
+          onboardingDismissed: authState.onboardingDismissed,
         };
         broadcast({
           type: "snapshot",
@@ -1751,6 +1846,8 @@ interface ChatStore {
     autoMemoryCapture: boolean;
     uiFontSize: UiFontSize;
     uiDensity: UiDensity;
+    soundFeedback: boolean;
+    defaultMode: UiDefaultMode;
   };
   updateHostSetting: (patch: {
     nextStepSuggestions?: boolean;
@@ -1758,6 +1855,8 @@ interface ChatStore {
     autoMemoryCapture?: boolean;
     uiFontSize?: UiFontSize;
     uiDensity?: UiDensity;
+    soundFeedback?: boolean;
+    defaultMode?: UiDefaultMode;
   }) => void;
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
@@ -1801,6 +1900,8 @@ interface ChatStore {
   clearMemoryDraft: (seq: number) => void;
   applyHostMessage: (msg: HostToWebview) => void;
   beginPending: (kind: PendingOpKind, target: string) => void;
+  /** Drop the optimistic switch lock (cancelled switch, aborted dialog). */
+  clearPending: () => void;
   send: (msg: WebviewToHost) => void;
 }
 
@@ -1812,9 +1913,11 @@ export const useChat = create<ChatStore>((set, get) => ({
   hostSettings: {
     nextStepSuggestions: true,
     autoCompressOnIdle: false,
-    autoMemoryCapture: false,
+    autoMemoryCapture: true,
     uiFontSize: "standard",
     uiDensity: "standard",
+    soundFeedback: true,
+    defaultMode: "smart",
   },
   pending: null,
   promptSeq: 0,
@@ -1907,6 +2010,8 @@ export const useChat = create<ChatStore>((set, get) => ({
           autoMemoryCapture: msg.autoMemoryCapture,
           uiFontSize,
           uiDensity,
+          soundFeedback: msg.soundFeedback ?? true,
+          defaultMode: msg.defaultMode ?? "smart",
         },
       });
       return;
@@ -1997,6 +2102,13 @@ export const useChat = create<ChatStore>((set, get) => ({
       pendingTimer = null;
       set({ pending: null });
     }, PENDING_TIMEOUT_MS);
+  },
+  clearPending: () => {
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+    set({ pending: null });
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   updateHostSetting: (patch) => {
