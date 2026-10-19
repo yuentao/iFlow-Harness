@@ -296,13 +296,17 @@ export function Chip({
   children,
   tone = "muted",
   className = "",
+  title,
 }: {
   children: ReactNode;
   tone?: "muted" | "success" | "warning" | "danger" | "primary" | "info";
   className?: string;
+  /** Optional hover explanation — a chip is too small to carry its own caveat. */
+  title?: string;
 }) {
   return (
     <span
+      title={title}
       className={`chip-fade inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[11px] font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
     >
       {children}

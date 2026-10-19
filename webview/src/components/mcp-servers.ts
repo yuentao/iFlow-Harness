@@ -1,5 +1,14 @@
 export interface McpEntry { name: string; json: string }
 
+/** Inverse of `entriesToServers`: a scope's on-disk dict as editable rows.
+ * Used to seed the card's draft on load, refresh and scope switch. */
+export function serversToEntries(servers: Record<string, unknown> | null | undefined): McpEntry[] {
+  return Object.entries(servers ?? {}).map(([name, config]) => ({
+    name,
+    json: JSON.stringify(config, null, 2),
+  }));
+}
+
 /** Own keys only, including legal server names such as __proto__ / constructor. */
 export function entriesToServers(entries: McpEntry[]): Record<string, unknown> {
   const servers: Record<string, unknown> = Object.create(null);

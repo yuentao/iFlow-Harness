@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
   applyThinkingRules,
@@ -8,7 +8,10 @@ import {
   mergeThinkingRulesIntoFile,
   normalizeModelsUrl,
   parseModelsResponse,
+  projectSettingsFor,
+  projectSettingsFilePath,
   readActiveEndpoint,
+  readMcpServers,
   resolveActiveProfileName,
   retireStaleOAuthCreds,
   sanitizeThinkingRules,
@@ -121,6 +124,50 @@ describe("updateCliSettings", () => {
 
   it("returns false for a missing/unreadable settings file", () => {
     expect(updateCliSettings({ language: "zh-CN" }, path.join(tempDir, "missing.json"))).toBe(false);
+  });
+});
+
+describe("project-scope MCP settings", () => {
+  const unique = (prefix: string): string => `${prefix}-${Math.random().toString(36).slice(2)}`;
+
+  it("points at <cwd>/.iflow/settings.json, and nowhere when cwd IS the home dir", () => {
+    const cwd = path.join(tempDir, unique("ws"));
+    expect(projectSettingsFilePath(cwd)).toBe(path.join(cwd, ".iflow", "settings.json"));
+    expect(projectSettingsFor(cwd)).toBe(path.join(cwd, ".iflow", "settings.json"));
+    expect(projectSettingsFor(null)).toBeNull();
+    // The CLI skips its Workspace file there too; without the guard we would
+    // write a "project" settings.json into the user's home directory.
+    expect(projectSettingsFor(homedir())).toBeNull();
+  });
+
+  it("creates the project file (and its .iflow dir) only with createIfMissing", () => {
+    const file = projectSettingsFilePath(path.join(tempDir, unique("proj")));
+    expect(existsSync(file)).toBe(false);
+    expect(updateCliSettings({ mcpServers: { a: { command: "node" } } }, file)).toBe(false);
+    expect(existsSync(file)).toBe(false);
+    expect(
+      updateCliSettings({ mcpServers: { a: { command: "node" } } }, file, { createIfMissing: true }),
+    ).toBe(true);
+    expect(JSON.parse(readFileSync(file, "utf8")).mcpServers.a.command).toBe("node");
+    expect(existsSync(`${file}.iflow-harness-tmp`)).toBe(false);
+  });
+
+  it("never clobbers a file that exists but cannot be parsed", () => {
+    const broken = path.join(tempDir, `${unique("broken")}.json`);
+    writeFileSync(broken, "{oops", "utf8");
+    expect(updateCliSettings({ mcpServers: {} }, broken, { createIfMissing: true })).toBe(false);
+    expect(readFileSync(broken, "utf8")).toBe("{oops");
+    expect(readMcpServers(broken)).toBeNull();
+  });
+
+  it("reads one scope's dict: absent file is empty, broken file is null", () => {
+    expect(readMcpServers(null)).toEqual({});
+    expect(readMcpServers(path.join(tempDir, "absent.json"))).toEqual({});
+    expect(readMcpServers(settingsFile({ mcpServers: { a: { command: "node" } }, language: "zh-CN" }))).toEqual({
+      a: { command: "node" },
+    });
+    // A settings file without the field is an empty dict, not an error.
+    expect(readMcpServers(settingsFile({ language: "zh-CN" }))).toEqual({});
   });
 });
 

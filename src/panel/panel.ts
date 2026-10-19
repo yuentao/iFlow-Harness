@@ -21,7 +21,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, applyThinkingRules, cliImportCandidates, queryModelIds, readActiveEndpoint, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, cliImportCandidates, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -48,8 +48,9 @@ import type {
   McpStatusReport,
   McpServerStatusView,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, splitReportedContextSections } from "../../shared/messages.js";
+import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
@@ -123,6 +124,7 @@ import {
 import { SessionStore } from "./store.js";
 import { getTerminalRecorder, openInTerminal } from "./terminal.js";
 import { MemoryService } from "../memory/service.js";
+import { AssetsService } from "../assets/service.js";
 import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
@@ -226,6 +228,11 @@ const MEMORY_EXTRACT_IDLE_MS = 45_000;
  * turn while still bounding a wedged gateway. */
 const KNOWLEDGE_PROMPT_TIMEOUT_MS = 180_000;
 const KNOWLEDGE_PROMPT_IDLE_MS = 90_000;
+/** F4 asset generation: a user-initiated single-file draft (frontmatter +
+ * body). Longer than memory extraction because a skill/agent body can run to
+ * a page, still tight enough that a wedged gateway cannot hold the dialog. */
+const ASSET_GEN_TIMEOUT_MS = 120_000;
+const ASSET_GEN_IDLE_MS = 60_000;
 /** Abort an internal prompt whose session stream went silent for this long.
  * A healthy stream emits chunks every few seconds; the CLI's rate-limit
  * backoff pauses were observed well under this. Catches a mid-stream wedge
@@ -472,6 +479,7 @@ export class ChatPanel implements vscode.Disposable {
   private store: SessionStore;
   /** F3 Phase 1: global/project memory files (read/edit, not the CLI agent). */
   private readonly memory: MemoryService;
+  private readonly assets: AssetsService;
   private connecting: Promise<void> | null = null;
   /**
    * Handshake generation counter (P0-3 restart escape). restartCli bumps it
@@ -620,6 +628,9 @@ export class ChatPanel implements vscode.Disposable {
   private memoryPromptBusy = false;
   /** F3 Phase 3: knowledge generation is user-initiated and long; own lane. */
   private knowledgePromptBusy = false;
+  /** F4: asset drafting is user-initiated from the settings dialog; own lane so
+   * it neither blocks nor is blocked by enhance/title/memory/knowledge. */
+  private assetGenBusy = false;
   /** Turn-end next-step prediction has its OWN lane: it is fire-and-forget
    * and must neither block enhance/title nor be blocked by them (a title
    * generation at the same turn end would otherwise swallow the prediction). */
@@ -699,6 +710,12 @@ export class ChatPanel implements vscode.Disposable {
       openFile: (file) => {
         void vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false });
       },
+    });
+    this.assets = new AssetsService({
+      log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
+      getCwd: () => this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+      getWorkspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      post: (m) => this.postToWebview(m),
     });
     this.store = new SessionStore({ post: (m) => this.postToWebview(m), language: vscode.env.language });
     this.store.onStateChange = (state) => {
@@ -877,6 +894,7 @@ export class ChatPanel implements vscode.Disposable {
     this.diagBaselineErrors = null;
     this.client = null;
     this.memory.dispose();
+    this.assets.dispose();
     this.editorPanel?.dispose();
     this.editorPanel = undefined;
     this.statusBar.dispose();
@@ -1491,10 +1509,39 @@ export class ChatPanel implements vscode.Disposable {
         this.sendMcpServers();
         break;
       case "saveMcpServers":
-        this.saveMcpServers(msg.servers);
+        this.saveMcpServers(msg.scope, msg.servers);
         break;
       case "mcpStatus":
         void this.sendMcpStatus();
+        break;
+      case "listAssets":
+        void this.assets.sendState(msg.requestId);
+        break;
+      case "readAsset":
+        void this.assets.readFile(msg.path, msg.requestId);
+        break;
+      case "saveAsset":
+        void this.assets.saveFile({
+          path: msg.path,
+          content: msg.content,
+          ...(msg.expectedHash !== undefined ? { expectedHash: msg.expectedHash } : {}),
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+        });
+        break;
+      case "createAsset":
+        void this.assets.createFile({
+          kind: msg.kind,
+          scope: msg.scope,
+          name: msg.name,
+          content: msg.content,
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+        });
+        break;
+      case "deleteAsset":
+        void this.assets.deleteFile(msg.path, msg.requestId);
+        break;
+      case "generateAsset":
+        void this.generateAsset(msg.requestId, msg.kind, msg.name, msg.requirement);
         break;
       case "listMemory":
         void this.memory.sendState(msg.requestId);
@@ -1802,6 +1849,57 @@ export class ChatPanel implements vscode.Disposable {
       );
     } finally {
       this.knowledgePromptBusy = false;
+    }
+  }
+
+  /**
+   * F4: draft one asset file (command / agent / skill) from a free-text
+   * requirement. Reply: `assetGenerated`.
+   *
+   * Own busy lane, and a direct gateway completion rather than an agent
+   * session (pitfall #26 — a plain text draft needs no tools, and the CLI's
+   * fixed ~61K-token input derails thinking models). The answer is normalized
+   * by shared/asset-gen.ts so the CLI's loader will actually pick the file up
+   * (fences stripped, required frontmatter keys guaranteed). NOTHING is
+   * written here: the draft only fills the card's editor, and the user's
+   * 「创建」 click is what reaches disk.
+   */
+  private async generateAsset(
+    requestId: number,
+    kind: AssetKind,
+    name: string,
+    requirement: string,
+  ): Promise<void> {
+    const reply = (content: string, error?: string): void => {
+      if (this.disposed) return;
+      this.postToWebview({
+        type: "assetGenerated",
+        requestId,
+        content,
+        ...(error !== undefined ? { error } : {}),
+      });
+    };
+    if (this.assetGenBusy) {
+      reply("", vscode.l10n.t("已有生成请求进行中，请稍后再试"));
+      return;
+    }
+    this.assetGenBusy = true;
+    try {
+      const raw = await this.completeInternalPrompt(
+        buildAssetGenPrompt(kind, name, requirement),
+        ASSET_GEN_TIMEOUT_MS,
+        ASSET_GEN_IDLE_MS,
+      );
+      if (this.disposed) return;
+      if (!raw) {
+        this.log.warn(`asset generation returned nothing (kind=${kind})`);
+        reply("", vscode.l10n.t("生成失败（网关无响应或未配置模型），请重试或直接手写内容"));
+        return;
+      }
+      this.log.info(`asset draft generated (kind=${kind}, ${raw.length} chars)`);
+      reply(normalizeGeneratedAsset(raw, kind, name));
+    } finally {
+      this.assetGenBusy = false;
     }
   }
 
@@ -3881,37 +3979,73 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** MCP card opened: reply with the CURRENT mcpServers dict from
-   * settings.json. A missing/absent field is an empty dict (a fresh CLI
-   * install simply has none), not an error. */
-  private sendMcpServers(): void {
-    const settings = readCliSettings();
-    if (!settings) {
-      this.postToWebview({
-        type: "mcpServers",
-        servers: {},
-        error: vscode.l10n.t("无法读取 {0}（文件缺失或不可读）", settingsFilePath()),
-      });
-      return;
-    }
-    this.postToWebview({ type: "mcpServers", servers: settings.mcpServers ?? {} });
+  /** The project root the CLI's Workspace-scope settings hang off (same
+   * resolution the asset/memory services use: session cwd first, then the
+   * first workspace folder). */
+  private mcpProjectCwd(): string | null {
+    return this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
   }
 
-  /** MCP card saved: replace the whole dict in settings.json (see the
-   * replace-semantics note on the WebviewToHost message), then offer the
-   * same hot-restart affordance as the language/approvalMode sync path —
-   * the CLI only reads mcpServers at startup. */
-  private saveMcpServers(servers: Record<string, unknown>): void {
-    if (!updateCliSettings({ mcpServers: servers })) {
+  /** Both MCP scopes as they stand on disk. `project` is null when there is no
+   * project scope at all (no cwd, or cwd IS the home dir — the CLI skips its
+   * Workspace file there too). `error` is only set for a file that EXISTS but
+   * could not be parsed: a missing project file is the normal case, and
+   * reporting it would put a red banner on every project without one. */
+  private readMcpScopes(): {
+    global: Record<string, unknown>;
+    project: Record<string, unknown> | null;
+    error?: string;
+  } {
+    const globalFile = settingsFilePath();
+    const projectFile = projectSettingsFor(this.mcpProjectCwd());
+    const global = readMcpServers(globalFile);
+    const project = projectFile ? readMcpServers(projectFile) : null;
+    const unreadable = [globalFile, projectFile].filter(
+      (file, i) => file && (i === 0 ? global === null : project === null),
+    );
+    return {
+      global: global ?? {},
+      project,
+      ...(unreadable.length > 0
+        ? { error: vscode.l10n.t("无法读取 {0}（文件缺失或不可读）", unreadable.join("、")) }
+        : {}),
+    };
+  }
+
+  /** MCP card opened: reply with the CURRENT mcpServers dicts of BOTH scopes.
+   * A missing/absent field is an empty dict (a fresh CLI install simply has
+   * none), not an error. */
+  private sendMcpServers(): void {
+    this.postToWebview({ type: "mcpServers", ...this.readMcpScopes() });
+  }
+
+  /** MCP card saved: replace the whole dict of ONE scope in that scope's
+   * settings.json (see the replace-semantics note on the WebviewToHost
+   * message), then offer the same hot-restart affordance as the
+   * language/approvalMode sync path — the CLI only reads mcpServers at
+   * startup. The project file is created when absent (the CLI's own
+   * `mcp add --scope project` does the same); the global file is not, so a
+   * broken global config surfaces instead of being silently rebuilt. */
+  private saveMcpServers(scope: McpScope, servers: Record<string, unknown>): void {
+    const file = scope === "global" ? settingsFilePath() : projectSettingsFor(this.mcpProjectCwd());
+    if (!file) {
       this.postToWebview({
         type: "mcpServers",
-        servers,
-        error: vscode.l10n.t("无法写入 {0}（文件缺失或不可读），MCP 配置未保存", settingsFilePath()),
+        ...this.readMcpScopes(),
+        error: vscode.l10n.t("无项目上下文（未打开工作区），无法保存项目级 MCP 配置"),
       });
       return;
     }
-    this.log.info(`MCP servers saved: ${Object.keys(servers).join(", ") || "(none)"}`);
-    this.postToWebview({ type: "mcpServers", servers });
+    if (!updateCliSettings({ mcpServers: servers }, file, { createIfMissing: scope === "project" })) {
+      this.postToWebview({
+        type: "mcpServers",
+        ...this.readMcpScopes(),
+        error: vscode.l10n.t("无法写入 {0}（文件缺失或不可读），MCP 配置未保存", file),
+      });
+      return;
+    }
+    this.log.info(`MCP servers saved (${scope}): ${Object.keys(servers).join(", ") || "(none)"}`);
+    this.sendMcpServers();
     const restartLabel = vscode.l10n.t("立即重启");
     void vscode.window
       .showInformationMessage(
@@ -6556,8 +6690,6 @@ export class ChatPanel implements vscode.Disposable {
         // M1 P0-7: the first completed turn is the AI-title window (no-op
         // unless the label is still the mechanical truncation).
         if (promptSessionId) void this.maybeGenerateAiTitle(promptSessionId);
-        // Turn-end next-step prediction (own lane; silent on failure).
-        if (promptSessionId) void this.generateNextStepSuggestions(promptSessionId);
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
@@ -6568,6 +6700,21 @@ export class ChatPanel implements vscode.Disposable {
       let autoCompressed = false;
       if (result.stopReason !== "cancelled") {
         autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
+      }
+      // Turn-end next-step prediction (own lane; silent on failure). Same
+      // housekeeping discipline as extraction: a compression turn — typed
+      // `/compress` or a turn-end auto-compress — must not seed 下一步
+      // candidates from housekeeping chatter (2026-10-19 report: chips like
+      // "查看压缩结果" after a compress turn). It is fired AFTER the
+      // auto-compress decision on purpose: pre-fold firing burned a call
+      // whose anchor the compression fold invalidates anyway.
+      if (
+        promptSessionId &&
+        result.stopReason !== "cancelled" &&
+        !isCompressTurn &&
+        !autoCompressed
+      ) {
+        void this.generateNextStepSuggestions(promptSessionId);
       }
       // F3 Phase 2: turn-end memory extraction (own lane, gated by
       // iflow.autoMemoryCapture). Fire-and-forget: never delays the queue.
@@ -6676,10 +6823,14 @@ export class ChatPanel implements vscode.Disposable {
       if (result.stopReason !== "cancelled") {
         this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
         this.postSound("done");
-        // Same turn-end next-step prediction as sendPrompt.
-        if (promptSessionId) void this.generateNextStepSuggestions(promptSessionId);
         // Same turn-end proactive compression policy as sendPrompt.
         const autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
+        // Same turn-end next-step prediction as sendPrompt, with the same
+        // housekeeping gate: a `/compress` turn or a turn-end auto-compress
+        // must not seed 下一步 candidates from compression chatter.
+        if (!isCompressTurn && !autoCompressed && promptSessionId) {
+          void this.generateNextStepSuggestions(promptSessionId);
+        }
         // Same turn-end memory extraction policy as sendPrompt: compression
         // turns must not trigger automatic memory capture.
         if (!isCompressTurn && !autoCompressed) {

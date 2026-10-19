@@ -1102,6 +1102,16 @@ export interface McpStatusUi {
 }
 
 /**
+ * MCP config scope. The CLI keeps two settings files and merges their
+ * `mcpServers` dicts (`{ ...user, ...workspace }`, probed CLI 0.5.19 bundle),
+ * so a project entry with the same name OVERRIDES the global one. `global` =
+ * `~/.iflow/settings.json` (the CLI's User scope), `project` =
+ * `<cwd>/.iflow/settings.json` (the CLI's Workspace scope, written by
+ * `iflow mcp add --scope project`).
+ */
+export type McpScope = "global" | "project";
+
+/**
  * F3 memory manager (Phase 1): the CLI auto-injects global + hierarchical
  * `AGENTS.md` / `IFLOW.md`, but the panel had no way to see or edit them. The
  * host reads the same files (memoryHome() mirrors the loader's hardcoded
@@ -1194,6 +1204,64 @@ export interface MemoryStateUi {
   projectPrimary: string | null;
   /** F3 Phase 3: generated project knowledge (always workspace-local). */
   knowledge?: KnowledgeStateUi;
+  error?: string;
+}
+
+/**
+ * F4 (2026-10-19): CLI user-level assets — custom slash commands, subagent
+ * definitions and skills. Contract probed from the vendor bundle (CLI 0.5.19,
+ * readable artifacts in iflow-fork `reverse/`):
+ *   - commands: FileCommandLoader globs `** /*.{toml,md}` (recursive) under
+ *     `join(Tn(),"commands")` and `join(projectRoot,".iflow","commands")`;
+ *     name = relative path minus extension, path segments joined with ":"
+ *     (each segment's own ":" replaced by "_"); `.md` = frontmatter
+ *     description + body prompt (or first `#` heading as description), `.toml`
+ *     = { prompt (required), description }.
+ *   - agents: AgentScanner scans TOP-LEVEL `*.md` only under
+ *     `join(Tn(),"agents")` / `join(root,".iflow","agents")`; frontmatter
+ *     `agent-type`/`name` (required), `description`, `when-to-use`,
+ *     `allowed-tools`/`tools` (comma list or `*`), body = system prompt.
+ *   - skills: SkillScanner scans `<dir>/SKILL.md` one level deep; frontmatter
+ *     `name` (required), `description`, `license`; global wins over project
+ *     for the same skill name (Map semantics — a project skill shadowed by a
+ *     global one is NOT loaded, we surface it flagged rather than hiding it).
+ * Harness injects no IFLOW_HOME, so the global dirs sit under the same
+ * hardcoded `os.homedir()/.iflow` as `memoryHome()`.
+ */
+export type AssetKind = "command" | "agent" | "skill";
+export type AssetScope = "global" | "project";
+
+export interface AssetUi {
+  kind: AssetKind;
+  scope: AssetScope;
+  /** Command name (":"-joined path form) / agent file basename / skill dir name. */
+  name: string;
+  /** The editable file itself (for skills: its SKILL.md, not the directory). */
+  path: string;
+  displayPath: string;
+  /** Parsed best-effort for display only — the CLI's zod validation is authoritative. */
+  description: string | null;
+  /** Agents only: allowed-tools list (`["*"]` = inherit everything); null = not parsed/absent. */
+  tools: string[] | null;
+  bytes: number;
+  updatedAt: number | null;
+  /** sha256 of the content; save requests echo this for conflict detection. */
+  hash: string | null;
+  editable: boolean;
+  /** Skills only: a project skill sharing a global skill's name — the CLI does
+   * NOT load it (global wins), the card flags it so the user is not misled. */
+  shadowed?: boolean;
+}
+
+export interface AssetsStateUi {
+  /** Hardcoded CLI asset home (`~/.iflow`), mirrors memoryHome(). */
+  home: string;
+  /** Session cwd — the project asset roots hang off it (CLI projectRoot). */
+  cwd: string | null;
+  workspaceRoots: string[];
+  commands: AssetUi[];
+  agents: AssetUi[];
+  skills: AssetUi[];
   error?: string;
 }
 
@@ -1331,11 +1399,26 @@ export type HostToWebview =
   /** Reply to `pickAttachments`: `images` are base64 attachment payloads,
    * `files` carry real disk paths (no staging needed). */
   | { type: "filesPicked"; images: { name: string; data: string; mimeType: string }[]; files: { name: string; path: string }[] }
-  /** Reply to `listMcpServers` / `saveMcpServers`: the current MCP server
-   * dict (name → config) as it stands on disk after the operation. `error`
-   * non-empty means the read/write failed (the dict is then the last-known or
-   * best-effort value, not a confirmed save). */
-  | { type: "mcpServers"; servers: Record<string, unknown>; error?: string }
+  /** Reply to `listMcpServers` / `saveMcpServers`: BOTH scopes' MCP server
+   * dicts (name → config) as they stand on disk after the operation, so the
+   * card can switch scope locally without another round trip. `error`
+   * non-empty means the read/write failed (the dicts are then the last-known
+   * or best-effort values, not a confirmed save).
+   *
+   * Wire behavior (probed, CLI 0.5.19 bundle): the settings manager loads the
+   * User file (`~/.iflow/settings.json`) and the Workspace file
+   * (`<cwd>/.iflow/settings.json`) and merges
+   * `mcpServers: { ...user, ...workspace }` — a project entry with the same
+   * name OVERRIDES the global one (the opposite of skills, where global wins).
+   * `project` is null when there is no project context (no session cwd), and
+   * the CLI also skips the workspace file when cwd resolves to the home dir. */
+  | {
+      type: "mcpServers";
+      global: Record<string, unknown>;
+      /** null = no project context (the scope tab is then disabled). */
+      project: Record<string, unknown> | null;
+      error?: string;
+    }
   /** Reply to `mcpStatus`: the live per-server connection view (state light,
    * tool/prompt declarations, connection error, + host-computed contextTokens).
    * `status` null = no channel — CLI not connected, the mcp-status Mod missing/
@@ -1343,6 +1426,32 @@ export type HostToWebview =
    * guessing. Deliberately a separate channel from `mcpServers` (config truth):
    * a status refresh never touches the card's edit/save guards. */
   | { type: "mcpStatus"; status: McpStatusUi | null }
+  /** Reply to `listAssets`: CLI user-level asset files (custom commands,
+   * subagent definitions, skills) as they stand on disk under the six asset
+   * roots (global `~/.iflow/{commands,agents,skills}` + project
+   * `<cwd>/.iflow/{...}`). Always re-read on open — the CLI and the agent's
+   * own tools write these files behind our back. */
+  | {
+      type: "assetsState";
+      requestId?: number;
+      state: AssetsStateUi;
+    }
+  /** Reply to `readAsset`: full body + hash for the inline editor. */
+  | { type: "assetContent"; path: string; content: string; hash: string | null; error?: string; requestId?: number }
+  /** Reply to `saveAsset` / `createAsset`: `conflict` means the file changed
+   * on disk since the card read it (or, for create, already exists) — the
+   * write did NOT happen and the caller must reload. `requestId` echoes the
+   * request so a concurrent write's ack cannot be mistaken for ours. */
+  | { type: "assetSaved"; path: string; ok: boolean; conflict?: boolean; error?: string; requestId?: number }
+  /** Reply to `deleteAsset`. Skills delete their SKILL.md (plus the skill
+   * directory when it ends up empty). */
+  | { type: "assetDeleted"; path: string; ok: boolean; error?: string; requestId?: number }
+  /** Reply to `generateAsset`: the drafted file body (frontmatter + markdown,
+   * code fences stripped and the kind's required frontmatter keys guaranteed
+   * by shared/asset-gen.ts#normalizeGeneratedAsset), or `error` when the
+   * gateway call failed / another generation is already in flight. This is a
+   * DRAFT for the editor — nothing was written to disk. */
+  | { type: "assetGenerated"; requestId: number; content: string; error?: string }
   /** Reply to `listMemory`: global + project memory files with token/hash
    * metadata. The memory card always opens on disk truth (the CLI and the
    * agent's save_memory tool write the same files behind our back). */
@@ -1563,15 +1672,17 @@ export type WebviewToHost =
    * .Global — the scope Settings Sync carries), and echoes `hostSettings`
    * with the effective values. Partial: omitted fields stay untouched. */
   | ({ type: "setHostSettings" } & Partial<HostSettingsUi>)
-  /** MCP management card opened: read the CURRENT `mcpServers` dict from
-   * `~/.iflow/settings.json` (the CLI / external tools own that file — the
-   * card must show disk truth, not a cached copy). Reply: `mcpServers`. */
+  /** MCP management card opened: read the CURRENT `mcpServers` dicts from BOTH
+   * settings files (`~/.iflow/settings.json` and `<cwd>/.iflow/settings.json`)
+   * — the CLI / external tools own those files, so the card must show disk
+   * truth, not a cached copy. Reply: `mcpServers`. */
   | { type: "listMcpServers" }
-  /** Save the full MCP server dict (replace semantics — the card edits a
-   * fresh copy read via `listMcpServers`, so a concurrent external write is
-   * at worst lost, never silently merged). Host writes settings.json and
-   * offers a hot restart. Reply: `mcpServers` with `error` on failure. */
-  | { type: "saveMcpServers"; servers: Record<string, unknown> }
+  /** Save one scope's full MCP server dict (replace semantics — the card edits
+   * a fresh copy read via `listMcpServers`, so a concurrent external write is
+   * at worst lost, never silently merged). The host writes that scope's
+   * settings.json (creating the project file when absent) and offers a hot
+   * restart. Reply: `mcpServers` with `error` on failure. */
+  | { type: "saveMcpServers"; scope: McpScope; servers: Record<string, unknown> }
   /** Ask the CLI for the live per-server MCP connection state (state light,
    * declarations, error) — `_iflow/mcp/status` via the mcp-status-refactor Mod.
    * Reply: `mcpStatus` (null when the CLI is not running or the Mod is
@@ -1608,6 +1719,29 @@ export type WebviewToHost =
   /** Toggle one knowledge doc's `@` import in the managed block of the
    * project memory file (no injection when false). */
   | { type: "setKnowledgeInjection"; path: string; injected: boolean }
+  /** F4: asset card opened / refreshed — re-scan the six CLI asset roots.
+   * Reply: `assetsState`. */
+  | { type: "listAssets"; requestId?: number }
+  /** Load one asset file's full body for the inline editor. Reply:
+   * `assetContent`. */
+  | { type: "readAsset"; path: string; requestId?: number }
+  /** Save one asset file (commands/agents `.md`, skills `SKILL.md`). `expectedHash`
+   * is the sha256 from the last `assetsState`; mismatch returns `assetSaved`
+   * with `conflict: true` and never overwrites. */
+  | { type: "saveAsset"; path: string; content: string; expectedHash?: string | null; requestId?: number }
+  /** Create a missing asset file. The host builds the path from kind/scope/name
+   * (never trusts a client-supplied new path); an existing target returns
+   * `assetSaved` with `conflict: true`. Reply: `assetSaved`. */
+  | { type: "createAsset"; kind: AssetKind; scope: AssetScope; name: string; content: string; requestId?: number }
+  /** F4: ask the model to draft one asset file from a free-text requirement.
+   * Runs as a direct gateway completion on its own busy lane (never an agent
+   * session — pitfall #26), and only fills the editor: NOTHING is written to
+   * disk until the user reviews the draft and clicks 创建. Reply:
+   * `assetGenerated`. */
+  | { type: "generateAsset"; kind: AssetKind; name: string; requirement: string; requestId: number }
+  /** Delete one asset file (skills: its SKILL.md + the skill directory when
+   * it ends up empty). Reply: `assetDeleted`. */
+  | { type: "deleteAsset"; path: string; requestId?: number }
   /** Open a knowledge doc in the editor. */
   | { type: "openKnowledgeFile"; path: string }
   /** Open a discovered memory file in the editor. */

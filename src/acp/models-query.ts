@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { get as httpGet } from "node:http";
@@ -9,6 +9,64 @@ import { errorMessage } from "./jsonrpc.js";
 export function settingsFilePath(): string {
   const home = process.env.IFLOW_HOME ?? path.join(homedir(), ".iflow");
   return path.join(home, "settings.json");
+}
+
+/**
+ * The CLI's Workspace-scope settings file for a project root.
+ *
+ * Wire behavior (probed, CLI 0.5.19 bundle): the settings manager builds
+ * `join(cwd, ".iflow", "settings.json")` and merges it OVER the User file
+ * (`mcpServers: { ...user, ...workspace }`), which is what `iflow mcp add
+ * --scope project` writes. Note the CLI deliberately skips this file when
+ * `realpath(cwd) === realpath(homedir())` — callers must apply the same guard
+ * (see panel.ts#projectSettingsFor) so we never write a "project" file into
+ * the user's home directory.
+ */
+export function projectSettingsFilePath(cwd: string): string {
+  return path.join(cwd, ".iflow", "settings.json");
+}
+
+/**
+ * The Workspace settings file for a project root, or null when there is no
+ * project scope at all.
+ *
+ * Mirrors the CLI's own guard (probed, CLI 0.5.19 bundle: the Workspace file is
+ * only read when `realpathSync(cwd) !== realpathSync(homedir())`) — without it,
+ * opening a window on the home directory would make us write a "project"
+ * settings.json straight into `~/.iflow`'s parent, i.e. duplicate the global
+ * file under a second name.
+ */
+export function projectSettingsFor(cwd: string | null): string | null {
+  if (!cwd) return null;
+  const home = homedir();
+  try {
+    if (realpathSync(cwd) === realpathSync(home)) return null;
+  } catch {
+    // An unreadable cwd falls back to a lexical compare (case-insensitive on
+    // Windows, where the home dir is often reached through a short path).
+    const same = process.platform === "win32"
+      ? path.resolve(cwd).toLowerCase() === path.resolve(home).toLowerCase()
+      : path.resolve(cwd) === path.resolve(home);
+    if (same) return null;
+  }
+  return projectSettingsFilePath(cwd);
+}
+
+/**
+ * Read one settings file's `mcpServers` dict.
+ *
+ * - `file === null` (no project scope) and a file that does not exist both
+ *   yield an empty dict — a project without `.iflow/settings.json` is the
+ *   normal case, not an error;
+ * - a file that EXISTS but cannot be parsed yields null, so the caller can
+ *   report it. Treating it as empty would let the next save replace the user's
+ *   whole (unreadable but real) config with our dict.
+ */
+export function readMcpServers(file: string | null): Record<string, unknown> | null {
+  if (!file) return {};
+  const settings = readCliSettings(file);
+  if (settings) return settings.mcpServers ?? {};
+  return existsSync(file) ? null : {};
 }
 
 /** OAuth credential cache location — same home resolution as settings.json. */
@@ -147,12 +205,25 @@ export function resolveActiveProfileName(
  * POSIX), so a concurrent external writer (cloud sync) can at worst lose our
  * patch — never its own content. Returns false (caller logs) when the file is
  * missing/unreadable.
+ *
+ * `createIfMissing` is for the project scope, whose `<cwd>/.iflow/settings.json`
+ * usually does not exist yet: the file is then created (directory included)
+ * from an empty object. An existing-but-unparseable file still returns false —
+ * we never overwrite content we could not read.
  */
-export function updateCliSettings(patch: Partial<CliSettingsShape>, settingsPath?: string): boolean {
+export function updateCliSettings(
+  patch: Partial<CliSettingsShape>,
+  settingsPath?: string,
+  options?: { createIfMissing?: boolean },
+): boolean {
   const file = settingsPath ?? settingsFilePath();
   try {
-    const settings = readCliSettings(file);
-    if (!settings) return false;
+    let settings = readCliSettings(file);
+    if (!settings) {
+      if (!options?.createIfMissing || existsSync(file)) return false;
+      mkdirSync(path.dirname(file), { recursive: true });
+      settings = {};
+    }
     Object.assign(settings, patch);
     const tmp = `${file}.iflow-harness-tmp`;
     writeFileSync(tmp, JSON.stringify(settings, null, 2), "utf8");

@@ -163,9 +163,21 @@ function createMockHost(): HostApi {
   const mockTheme: "dark" | "light" = window.matchMedia?.("(prefers-color-scheme: dark)").matches
     ? "dark"
     : "light";
-  // Mock MCP dict: lazily seeded on first read, replaced wholesale on save
-  // (mirrors the host's replace semantics).
-  let mockMcpServers: Record<string, unknown> | undefined;
+  // Mock MCP dicts: one per scope, lazily seeded on first read and replaced
+  // wholesale on save (mirrors the host's replace semantics). The project dict
+  // deliberately re-declares `chrome-devtools` so the browser demo exercises
+  // the CLI's merge rule (workspace overrides user for the same name).
+  let mockMcpGlobal: Record<string, unknown> | undefined;
+  let mockMcpProject: Record<string, unknown> | undefined;
+  const seedMockMcp = (): void => {
+    mockMcpGlobal ??= {
+      "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
+      "remote-example": { url: "https://mcp.example.com/mcp", type: "http" },
+    };
+    mockMcpProject ??= {
+      "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest", "--isolated"] },
+    };
+  };
   /** Mirrors the real host's mirrored extension settings (default on). */
   const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
@@ -1558,34 +1570,32 @@ function createMockHost(): HostApi {
         broadcast({ type: "memoryState", state: mockMemoryState() });
         return;
       }
-      if (m.type === "listMcpServers") {
-        const reply = (servers: Record<string, unknown>) =>
-          window.setTimeout(
-            () => window.dispatchEvent(new MessageEvent("message", { data: { type: "mcpServers", servers } })),
-            80,
-          );
-        reply(mockMcpServers ?? (mockMcpServers = {
-          "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
-          "remote-example": { url: "https://mcp.example.com/mcp", type: "http" },
-        }));
-        return;
-      }
-      if (m.type === "saveMcpServers") {
-        mockMcpServers = m.servers;
+      if (m.type === "listMcpServers" || m.type === "saveMcpServers") {
+        seedMockMcp();
+        if (m.type === "saveMcpServers") {
+          if (m.scope === "global") mockMcpGlobal = m.servers;
+          else mockMcpProject = m.servers;
+        }
         window.setTimeout(
           () =>
             window.dispatchEvent(
-              new MessageEvent("message", { data: { type: "mcpServers", servers: mockMcpServers ?? {} } }),
+              new MessageEvent("message", {
+                data: {
+                  type: "mcpServers",
+                  global: mockMcpGlobal ?? {},
+                  project: mockMcpProject ?? {},
+                },
+              }),
             ),
           80,
         );
         return;
       }
       if (m.type === "mcpStatus") {
-        const servers = mockMcpServers ?? (mockMcpServers = {
-          "chrome-devtools": { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
-          "remote-example": { url: "https://mcp.example.com/mcp", type: "http" },
-        });
+        seedMockMcp();
+        // The CLI connects the MERGED view (a project entry overrides the
+        // global one of the same name), so the mock status covers exactly that.
+        const servers = { ...(mockMcpGlobal ?? {}), ...(mockMcpProject ?? {}) };
         const statusServers: Record<string, unknown> = {};
         for (const [name, rawConfig] of Object.entries(servers)) {
           const config = rawConfig as Record<string, unknown> | undefined;
@@ -1622,6 +1632,141 @@ function createMockHost(): HostApi {
               ),
             ),
           80,
+        );
+        return;
+      }
+      if (m.type === "listAssets") {
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent(
+                "message",
+                {
+                  data: {
+                    type: "assetsState",
+                    requestId: m.requestId,
+                    state: {
+                      home: "C:\\Users\\demo\\.iflow",
+                      cwd: "C:\\demo\\project",
+                      workspaceRoots: ["C:\\demo\\project"],
+                      commands: [
+                        {
+                          kind: "command",
+                          scope: "global",
+                          name: "fix-tests",
+                          path: "C:\\Users\\demo\\.iflow\\commands\\fix-tests.md",
+                          displayPath: "~/.iflow/commands/fix-tests.md",
+                          description: "Run the tests and fix any failures",
+                          tools: null,
+                          bytes: 512,
+                          updatedAt: Date.now() - 86_400_000,
+                          hash: "a1b2c3",
+                          editable: true,
+                        },
+                      ],
+                      agents: [
+                        {
+                          kind: "agent",
+                          scope: "project",
+                          name: "docs-writer",
+                          path: "C:\\demo\\project\\.iflow\\agents\\docs-writer.md",
+                          displayPath: ".iflow/agents/docs-writer.md",
+                          description: "Writes and reviews docs pages",
+                          tools: ["Read", "WriteFile"],
+                          bytes: 1024,
+                          updatedAt: Date.now() - 3_600_000,
+                          hash: "d4e5f6",
+                          editable: true,
+                        },
+                      ],
+                      skills: [
+                        {
+                          kind: "skill",
+                          scope: "global",
+                          name: "pdf-forms",
+                          path: "C:\\Users\\demo\\.iflow\\skills\\pdf-forms\\SKILL.md",
+                          displayPath: "~/.iflow/skills/pdf-forms/SKILL.md",
+                          description: "Fill and flatten PDF forms",
+                          tools: null,
+                          bytes: 2048,
+                          updatedAt: Date.now() - 7_776_000,
+                          hash: "0f9e8d",
+                          editable: true,
+                        },
+                      ],
+                    },
+                  },
+                },
+              ),
+            ),
+          80,
+        );
+        return;
+      }
+      if (m.type === "readAsset") {
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent(
+                "message",
+                {
+                  data: {
+                    type: "assetContent",
+                    path: m.path,
+                    content: "---\ndescription: Demo asset\n---\n\nDemo content.\n",
+                    hash: "a1b2c3",
+                    requestId: m.requestId,
+                  },
+                },
+              ),
+            ),
+          80,
+        );
+        return;
+      }
+      if (m.type === "saveAsset" || m.type === "createAsset") {
+        const savedPath = m.type === "saveAsset" ? m.path : "";
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent(
+                "message",
+                { data: { type: "assetSaved", path: savedPath, ok: true, requestId: m.requestId } },
+              ),
+            ),
+          80,
+        );
+        return;
+      }
+      if (m.type === "deleteAsset") {
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", { data: { type: "assetDeleted", path: m.path, ok: true, requestId: m.requestId } }),
+            ),
+          80,
+        );
+        return;
+      }
+      if (m.type === "generateAsset") {
+        // Canned draft per kind (the real host streams this from the gateway);
+        // the requirement is echoed so the browser demo shows the fill-in.
+        const name = m.name.trim() || "generated";
+        const req = m.requirement.trim() || "（未填写需求）";
+        const body =
+          m.kind === "command"
+            ? `---\ndescription: ${req}\n---\n\n请针对以下需求执行：${req}\n\n参数：{{args}}\n`
+            : m.kind === "agent"
+              ? `---\nname: ${name}\ndescription: ${req}\nallowed-tools: Read, Grep, Glob\n---\n\n你是「${name}」子代理。职责：${req}\n`
+              : `---\nname: ${name}\ndescription: ${req}\n---\n\n# ${name}\n\n适用场景：${req}\n\n## 步骤\n\n1. 确认输入\n2. 执行\n3. 汇报结果\n`;
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", {
+                data: { type: "assetGenerated", requestId: m.requestId, content: body },
+              }),
+            ),
+          400,
         );
         return;
       }
@@ -2083,6 +2228,11 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "filesPicked" ||
       msg.type === "mcpServers" ||
       msg.type === "mcpStatus" ||
+      msg.type === "assetsState" ||
+      msg.type === "assetContent" ||
+      msg.type === "assetSaved" ||
+      msg.type === "assetDeleted" ||
+      msg.type === "assetGenerated" ||
       msg.type === "memoryState" ||
       msg.type === "memorySaved" ||
       msg.type === "memoryFileContent" ||

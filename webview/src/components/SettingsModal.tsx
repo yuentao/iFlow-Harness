@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, Download, ExternalLink, KeyRound, MessageSquare, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Trash2 } from "lucide-react";
+import { Brain, Database, Download, ExternalLink, KeyRound, MessageSquare, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
@@ -17,6 +17,7 @@ import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, ModalShell, SAVE_BTN } fr
 import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
+import { AssetSection } from "./AssetCard";
 
 /**
  * Unified settings modal — the single home for everything the gear opens:
@@ -30,7 +31,7 @@ import { MemorySection } from "./MemoryCard";
  * nav rail (left on wide viewports, top tab strip when narrow, via the
  * @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "chat" | "appearance" | "policy" | "mcp" | "memory" | "runtime";
+export type SettingsTab = "api" | "chat" | "appearance" | "policy" | "mcp" | "memory" | "assets" | "runtime";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -73,6 +74,7 @@ export function SettingsModal({
     { id: "policy", icon: ShieldCheck, label: t("权限与审批") },
     { id: "mcp", icon: Server, label: t("MCP 与工具") },
     { id: "memory", icon: Brain, label: t("记忆与知识") },
+    { id: "assets", icon: Sparkles, label: t("技能与命令") },
     { id: "runtime", icon: Database, label: t("运行与数据") },
   ];
   const tabTitle = TABS.find((x) => x.id === tab)?.label ?? "";
@@ -139,6 +141,7 @@ export function SettingsModal({
           )}
           {tab === "mcp" && <McpTab busy={busy} onHeader={setSectionHeader} />}
           {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "assets" && <AssetSection busy={busy} onHeader={setSectionHeader} />}
           {tab === "runtime" && <RuntimeSection />}
         </div>
       </div>

@@ -1,19 +1,20 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Check, ChevronRight, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useChat } from "../store";
-import { entriesToServers, sameMcpServers, type McpEntry } from "./mcp-servers";
+import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
+import { MCP_CATALOG, buildCatalogConfig } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, ConfirmDialog, SAVE_BTN } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, SAVE_BTN } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
-import type { McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
+import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
 /** Editor-state header override a section reports to the settings shell. */
 type SectionHeaderSetter = Dispatch<SetStateAction<SectionHeader | null>>;
 
-/** One MCP server entry as edited in the card: name + raw JSON body.
- * The JSON stays raw text (not parsed into fields) — the CLI's schema is
- * open-ended (command/args/env or url/headers/type, plus free-form
- * description/_lastModified), so a structurer form would drop unknown keys. */
+/** One MCP server entry as edited in the card: name + JSON body. The editor
+ * renders the common CLI schema fields (command/args/env, url/headers) as a
+ * form over the parsed object and merges each field edit back, so unknown
+ * keys (free-form description, type, _lastModified…) survive untouched. */
 type Entry = McpEntry;
 
 /** Parse an entry's JSON body; returns the parse error message or null. */
@@ -29,6 +30,164 @@ function validateEntry(entry: Entry): string | null {
     return t("配置必须是 JSON 对象");
   }
   return null;
+}
+
+/** Parse an entry's JSON body into a plain object (null when not an object). */
+function parseConfig(json: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Top-level keys the form edits; everything else is preserved verbatim. */
+const MCP_FORM_KEYS = new Set(["command", "args", "env", "url", "headers", "type", "description"]);
+
+/** Transport tabs shown in the editor; the selected tab is derived back. */
+const MCP_TRANSPORTS = ["stdio", "sse", "streamable-http"];
+
+/** Scope tabs. The CLI merges both settings files with the project (Workspace)
+ * entry winning per name, so each scope is edited on its own and clashes are
+ * flagged rather than silently merged. */
+const MCP_SCOPES: McpScope[] = ["global", "project"];
+
+/** File each scope writes, shown next to the tabs (display only). */
+const SCOPE_FILE: Record<McpScope, string> = {
+  global: "~/.iflow/settings.json",
+  project: "<工作区>/.iflow/settings.json",
+};
+
+/** Serialize after setting/clearing a top-level string field (blank clears). */
+function configWithField(obj: Record<string, unknown>, key: string, value: string): string {
+  const next = { ...obj };
+  if (value.trim()) next[key] = value;
+  else delete next[key];
+  return JSON.stringify(next, null, 2);
+}
+
+/** Display value of a string field for the form inputs. */
+function fieldOfConfig(config: Record<string, unknown>, key: string): string {
+  const value = config[key];
+  return typeof value === "string" ? value : "";
+}
+
+/** Which transport tab is active for this config. */
+function transportOfConfig(config: Record<string, unknown>): string {
+  const type = config.type;
+  if (type === "sse" || type === "streamable-http") return type;
+  if (typeof config.command === "string") return "stdio";
+  if (typeof config.url === "string") return "sse";
+  return "stdio";
+}
+
+/** Switch transport: drop the other branch's managed keys; remote carries
+ * `type` so the CLI can tell sse from streamable-http. */
+function configWithTransport(obj: Record<string, unknown>, kind: string): string {
+  const next = { ...obj };
+  if (kind === "stdio") {
+    delete next.url;
+    delete next.headers;
+    delete next.type;
+  } else {
+    delete next.command;
+    delete next.args;
+    delete next.env;
+    next.type = kind;
+  }
+  return JSON.stringify(next, null, 2);
+}
+
+/** Normalized args view for row rendering (non-string entries stringified). */
+function normalizeArgs(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((a) => String(a)) : [];
+}
+
+function configWithArgsList(obj: Record<string, unknown>, args: string[]): string {
+  const next = { ...obj };
+  if (args.length > 0) next.args = args;
+  else delete next.args;
+  return JSON.stringify(next, null, 2);
+}
+
+/** Set/remove/append one arg row. */
+function configWithArgSet(obj: Record<string, unknown>, index: number, value: string): string {
+  const args = normalizeArgs(obj.args);
+  if (index < args.length) args[index] = value;
+  else args.push(value);
+  return configWithArgsList(obj, args);
+}
+function configWithArgRemoved(obj: Record<string, unknown>, index: number): string {
+  const args = normalizeArgs(obj.args);
+  if (index < args.length) args.splice(index, 1);
+  return configWithArgsList(obj, args);
+}
+function configWithArgAdded(obj: Record<string, unknown>): string {
+  const args = normalizeArgs(obj.args);
+  args.push("");
+  return configWithArgsList(obj, args);
+}
+
+/** env/headers rows: `[key, value]` pairs (non-string values dropped). */
+function normalizePairs(value: unknown): [string, string][] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => typeof v === "string")
+    .map(([k, v]) => [k, v as string]);
+}
+
+function configWithPairs(obj: Record<string, unknown>, field: string, pairs: [string, string][]): string {
+  const next = { ...obj };
+  const map = Object.fromEntries(pairs);
+  if (Object.keys(map).length > 0) next[field] = map;
+  else delete next[field];
+  return JSON.stringify(next, null, 2);
+}
+
+/** Edit one `KEY=VALUE` row (first "=" splits; no "=" means key-only row). */
+function configWithPairSet(obj: Record<string, unknown>, field: string, index: number, text: string): string {
+  const pairs = normalizePairs(obj[field]);
+  const eq = text.indexOf("=");
+  const pair: [string, string] = eq <= 0 ? [text.trim(), ""] : [text.slice(0, eq).trim(), text.slice(eq + 1)];
+  if (index < pairs.length) pairs[index] = pair;
+  else pairs.push(pair);
+  return configWithPairs(obj, field, pairs);
+}
+function configWithPairRemoved(obj: Record<string, unknown>, field: string, index: number): string {
+  const pairs = normalizePairs(obj[field]);
+  if (index < pairs.length) pairs.splice(index, 1);
+  return configWithPairs(obj, field, pairs);
+}
+function configWithPairAdded(obj: Record<string, unknown>, field: string): string {
+  const pairs = normalizePairs(obj[field]);
+  pairs.push(["", ""]);
+  return configWithPairs(obj, field, pairs);
+}
+
+/** Drop abandoned empty rows (empty env/headers keys, empty args) when the
+ * editor closes, so half-added rows never reach disk. */
+function finalizeEntryJson(json: string): string {
+  const cfg = parseConfig(json) ?? {};
+  const next = { ...cfg };
+  for (const field of ["env", "headers"]) {
+    const value = next[field];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const kept = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).filter(([k]) => k !== ""),
+      );
+      if (Object.keys(kept).length > 0) next[field] = kept;
+      else delete next[field];
+    }
+  }
+  if (Array.isArray(next.args)) {
+    const args = (next.args as unknown[]).map((a) => String(a)).filter((a) => a !== "");
+    if (args.length > 0) next.args = args;
+    else delete next.args;
+  }
+  return JSON.stringify(next, null, 2);
 }
 
 /** Short transport summary for the list row: stdio command or remote URL. */
@@ -92,7 +251,38 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
   // Mod missing) → rows render a hollow dot instead of a wrong-colored one.
   const [status, setStatus] = useState<McpStatusUi | null | undefined>(undefined);
   const [refreshing, setRefreshing] = useState(false);
+  // 「模板目录」 browse + install form (values keyed by catalog field key;
+  // entryId indirection keeps the form serializable across setState).
+  const [catalogBrowse, setCatalogBrowse] = useState(false);
+  const [catalogForm, setCatalogForm] = useState<{ entryId: string; values: Record<string, string>; name: string } | null>(null);
+  /** Active scope tab. The CLI merges both settings files
+   * (`mcpServers: { ...user, ...workspace }`), so the card edits ONE scope at a
+   * time and flags cross-scope name clashes instead of pretending they merge. */
+  const [scope, setScope] = useState<McpScope>("global");
+  /** Mirror of `scope` for the message handler, whose closure only depends on
+   * `send` — reading the state there would yield the mount-time value and seed
+   * the wrong scope after a refresh. */
+  const scopeRef = useRef<McpScope>("global");
+  /** False when the host reports no project scope (no cwd, or cwd IS the home
+   * dir — the CLI skips its Workspace file there too). Disables the tab. */
+  const [projectAvailable, setProjectAvailable] = useState(false);
+  /** Per-scope drafts: an unsaved edit must survive a scope round trip. The
+   * ACTIVE scope's draft lives in `entries` (every editor handler writes it);
+   * the other one parks here until the user switches back. */
+  const drafts = useRef<{ global: Entry[] | null; project: Entry[] | null }>({
+    global: null,
+    project: null,
+  });
+  /** Disk truth per scope from the last reply. Seeds a scope switch and drives
+   * the override chips — never the editor's value (that is the draft). */
+  const disk = useRef<{ global: Record<string, unknown>; project: Record<string, unknown> | null }>({
+    global: {},
+    project: null,
+  });
   const pending = useRef<Record<string, unknown> | null>(null);
+  /** Which scope the in-flight save belongs to, so its echo is compared
+   * against the right dict (the reply always carries both). */
+  const pendingScope = useRef<McpScope | null>(null);
   const loaded = useRef(false);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -104,7 +294,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     const handler = (event: MessageEvent) => {
       const msg = event.data as {
         type?: string;
-        servers?: Record<string, unknown>;
+        global?: Record<string, unknown>;
+        project?: Record<string, unknown> | null;
         error?: string;
         status?: McpStatusUi | null;
       };
@@ -114,10 +305,17 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         return;
       }
       if (msg?.type !== "mcpServers") return;
+      // Disk truth for both scopes: seeds a later switch and drives the
+      // override chips. It never overwrites `entries` (the user's draft).
+      disk.current = { global: msg.global ?? {}, project: msg.project ?? null };
+      setProjectAvailable(msg.project !== null && msg.project !== undefined);
       if (pending.current) {
+        const savedScope = pendingScope.current ?? "global";
+        const echoed = savedScope === "project" ? msg.project ?? null : msg.global ?? null;
         // Failure is terminal too. Never replace local drafts with either reply.
-        if (!msg.error && (!msg.servers || !sameMcpServers(pending.current, msg.servers))) return;
+        if (!msg.error && (!echoed || !sameMcpServers(pending.current, echoed))) return;
         pending.current = null;
+        pendingScope.current = null;
         setSaving(false);
         if (msg.error) {
           setEditError(msg.error);
@@ -134,10 +332,12 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         setEntries([]);
         return;
       }
-      setEntries(Object.entries(msg.servers ?? {}).map(([name, config]) => ({
-        name,
-        json: JSON.stringify(config, null, 2),
-      })));
+      // Seed the ACTIVE scope (a refresh can arrive while the project tab is
+      // open, so this must not assume the mount-time default).
+      const active = scopeRef.current;
+      const seeded = serversToEntries(active === "project" ? msg.project : msg.global);
+      drafts.current[active] = seeded;
+      setEntries(seeded);
     };
     const request = () => {
       send({ type: "listMcpServers" });
@@ -167,9 +367,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               back: () => setDetail(null),
               title: t("MCP 服务器详情"),
             }
-          : null,
+          : catalogForm !== null
+            ? {
+                back: () => setCatalogForm(null),
+                title: t("安装 MCP 模板"),
+              }
+            : null,
     );
-  }, [editing, isNew, detail, onHeader]);
+  }, [editing, isNew, detail, catalogForm, onHeader]);
 
   function save() {
     if (!entries || pending.current || loadError || editing !== null) return;
@@ -183,8 +388,41 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     setEditError(null);
     setSavedFlash(false);
     pending.current = servers;
+    pendingScope.current = scope;
     setSaving(true);
-    send({ type: "saveMcpServers", servers });
+    send({ type: "saveMcpServers", scope, servers });
+  }
+
+  /** Switch the active scope WITHOUT a round trip — the last reply already
+   * carried both dicts. The outgoing draft parks in `drafts` so a
+   * look-at-the-other-scope detour never costs an unsaved edit. */
+  function switchScope(next: McpScope) {
+    if (next === scope || (next === "project" && !projectAvailable)) return;
+    drafts.current[scope] = entries;
+    const seeded =
+      drafts.current[next] ??
+      serversToEntries(next === "project" ? disk.current.project : disk.current.global);
+    drafts.current[next] = seeded;
+    scopeRef.current = next;
+    setScope(next);
+    setEntries(seeded);
+    setEditing(null);
+    setIsNew(false);
+    setDetail(null);
+    setConfirmDelete(null);
+    setEditError(null);
+    setSavedFlash(false);
+  }
+
+  /** Cross-scope name clash for one server. The CLI resolves it as
+   * `mcpServers: { ...user, ...workspace }` — the project entry wins — so both
+   * sides get flagged: otherwise the global row looks authoritative while the
+   * CLI is actually running the project one. */
+  function scopeClash(name: string): "overrides" | "overridden" | null {
+    if (!name) return null;
+    const other = scope === "project" ? disk.current.global : disk.current.project;
+    if (!other || !Object.hasOwn(other, name)) return null;
+    return scope === "project" ? "overrides" : "overridden";
   }
 
   // Re-read disk config + live status (e.g. after an external CLI edit or a
@@ -200,13 +438,127 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     setRefreshing(true);
   }
 
+  // Install a catalog template: the shared builder assembles the config from
+  // form values (missing required fields are a hard stop, unknown extra keys
+  // ignored). The entry lands as a LOCAL draft — 「保存」 still gates the disk
+  // write, same replace semantics as hand-added entries.
+  function installCatalog(): void {
+    if (!catalogForm || pending.current || saving) return;
+    const template = MCP_CATALOG.find((c) => c.id === catalogForm.entryId);
+    if (!template) {
+      setEditError(t("模板不存在"));
+      setCatalogForm(null);
+      return;
+    }
+    const name = catalogForm.name.trim() || template.name;
+    if (!name) {
+      setEditError(t("名称不能为空"));
+      return;
+    }
+    if ((entries ?? []).some((en) => en.name.trim() === name)) {
+      setEditError(t("名称重复：{0}", name));
+      return;
+    }
+    const built = buildCatalogConfig(template, catalogForm.values);
+    if (built.missing.length > 0) {
+      setEditError(t("请填写：{0}", built.missing.join(", ")));
+      return;
+    }
+    const idx = (entries ?? []).length;
+    setEntries([...(entries ?? []), { name, json: JSON.stringify(built.config, null, 2) }]);
+    setCatalogForm(null);
+    setCatalogBrowse(false);
+    setEditing(idx);
+    setIsNew(true);
+    setEditError(null);
+  }
+
   return (
     <>
       {loadError && <div className="text-[12px] text-destructive">{loadError}</div>}
 
-      {editing === null && detail === null && (
+      {editing === null && detail === null && catalogForm === null && (
         <>
-          {entries === null ? (
+          <div className="flex items-center gap-2">
+            <div
+              role="group"
+              aria-label={t("配置作用域")}
+              className="flex items-center gap-1 rounded-lg border border-border/70 bg-surface/40 px-1 py-1"
+            >
+              {MCP_SCOPES.map((candidate) => {
+                const disabled = candidate === "project" && !projectAvailable;
+                return (
+                  <button
+                    key={candidate}
+                    type="button"
+                    aria-current={candidate === scope ? "true" : undefined}
+                    disabled={disabled}
+                    title={
+                      disabled
+                        ? t("无项目上下文（未打开工作区）")
+                        : t("写入 {0}", SCOPE_FILE[candidate])
+                    }
+                    className={
+                      candidate === scope
+                        ? "press rounded-md bg-primary/18 px-2 py-0.5 text-[11.5px] font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
+                        : "press rounded-md px-2 py-0.5 text-[11.5px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                    }
+                    onClick={() => switchScope(candidate)}
+                  >
+                    {candidate === "global" ? t("全局") : t("项目")}
+                  </button>
+                );
+              })}
+            </div>
+            <span
+              className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground/75"
+              title={t("写入 {0}", SCOPE_FILE[scope])}
+            >
+              {SCOPE_FILE[scope]}
+            </span>
+          </div>
+
+          {catalogBrowse && catalogForm === null ? (
+            <div className="space-y-1.5">
+              {MCP_CATALOG.map((template) => {
+                const transport =
+                  template.transport === "url"
+                    ? template.url ?? ""
+                    : [template.command ?? "", ...(template.args ?? [])].filter(Boolean).join(" ");
+                return (
+                  <div key={template.id} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
+                    <div className="flex items-center gap-1.5">
+                      <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
+                        {template.title}
+                      </span>
+                      <button
+                        className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
+                        title={t("安装")}
+                        disabled={saving}
+                        onClick={() => {
+                          setCatalogForm({ entryId: template.id, values: {}, name: template.name });
+                          setEditError(null);
+                        }}
+                      >
+                        <Plus className="size-3.5" />
+                      </button>
+                    </div>
+                    {template.description && (
+                      <div className="truncate text-[11px] text-muted-foreground">{template.description}</div>
+                    )}
+                    <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted-foreground/80" title={transport}>
+                      {transport}
+                    </div>
+                    {template.docsUrl && (
+                      <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/60" title={t("官方文档")}>
+                        {template.docsUrl}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : entries === null ? (
             <div className="py-4 text-center text-[12px] text-muted-foreground">{t("读取中…")}</div>
           ) : entries.length === 0 && !loadError ? (
             <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center">
@@ -256,6 +608,18 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
                         {entry.name}
                       </span>
+                      {(() => {
+                        const clash = scopeClash(name);
+                        if (!clash) return null;
+                        return (
+                          <Chip
+                            tone={clash === "overrides" ? "warning" : "muted"}
+                            title={t("两级同名时 CLI 用项目级配置整体替换全局条目（不合并字段）")}
+                          >
+                            {clash === "overrides" ? t("覆盖全局") : t("被项目覆盖")}
+                          </Chip>
+                        );
+                      })()}
                       {view?.contextTokens !== undefined && (
                         <span
                           className="ml-1 shrink-0 text-[11px] font-mono text-muted-foreground"
@@ -314,7 +678,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               className={BTN}
               disabled={entries === null || !!loadError || saving}
               onClick={() => {
-                setEntries([...(entries ?? []), { name: "", json: '{\n  "command": "npx",\n  "args": ["-y", "…"]\n}' }]);
+                setEntries([...(entries ?? []), { name: "", json: "{}" }]);
                 setEditing(entries === null ? 0 : entries.length);
                 setIsNew(true);
                 setEditError(null);
@@ -328,6 +692,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </button>
             <button
               className={BTN}
+              disabled={busy || saving || entries === null || !!loadError}
+              onClick={() => setCatalogBrowse(!catalogBrowse)}
+            >
+              <Sparkles className="mr-0.5 inline size-3 align-[-2px]" />
+              {catalogBrowse ? t("返回列表") : t("模板目录")}
+            </button>
+            <button
+              className={BTN}
               disabled={busy || saving || (entries === null && !loadError)}
               onClick={refresh}
             >
@@ -337,9 +709,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             {editError && <span className="text-[12px] text-destructive">{editError}</span>}
           </div>
           <p className="text-[11px] leading-relaxed text-muted-foreground/85">
-            {t(
-              "配置直接读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。",
-            )}
+            {scope === "project"
+              ? t(
+                  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时 CLI 用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启 CLI」生效。",
+                )
+              : t(
+                  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。",
+                )}
           </p>
         </>
       )}
@@ -465,61 +841,356 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         </div>
       )}
 
-      {editing !== null && entries?.[editing] && (
-        <div className="space-y-2">
-          <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("名称")}</span>
-            <input
-              type="text"
-              className={INPUT}
-              value={entries[editing]!.name}
-              placeholder={t("如 chrome-devtools")}
-              onChange={(e) => {
-                const v = e.target.value;
-                setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, name: v } : en)) ?? null);
-                setSavedFlash(false);
-              }}
-            />
-          </label>
-          <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">
-              {t("配置 JSON（stdio：command/args/env；远程：url/headers/type）")}
-            </span>
-            <textarea
-              className={`${INPUT} min-h-40 resize-y font-mono text-[11.5px] leading-relaxed`}
-              spellCheck={false}
-              value={entries[editing]!.json}
-              onChange={(e) => {
-                const v = e.target.value;
-                setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: v } : en)) ?? null);
-                setSavedFlash(false);
-              }}
-            />
-          </label>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <button
-              className={SAVE_BTN}
-              onClick={() => {
-                const entry = entries[editing];
-                if (!entry) return;
-                const error = validateEntry(entry) ?? (entries.some((other, ii) => ii !== editing && other.name.trim() === entry.name.trim()) ? t("名称重复：{0}", entry.name.trim()) : null);
-                if (error) {
-                  setEditError(error);
-                  return;
-                }
-                setEditing(null);
-                setEditError(null);
-              }}
-            >
-              {t("完成")}
-            </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+      {editing !== null && entries?.[editing] && (() => {
+        const entry = entries[editing]!;
+        const config = parseConfig(entry.json) ?? {};
+        const transport = transportOfConfig(config);
+        const isStdio = transport === "stdio";
+        const args = normalizeArgs(config.args);
+        const envRows = normalizePairs(config.env);
+        const headerRows = normalizePairs(config.headers);
+        const extraKeys = Object.keys(config).filter((key) => !MCP_FORM_KEYS.has(key));
+        return (
+          <div className="space-y-3">
+            <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+              <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t("服务器信息")}
+                </h3>
+              </div>
+              <div className="divide-y divide-border/50">
+                <div className="flex flex-col gap-1 px-3 py-2.5">
+                  <span className="text-[11.5px] text-muted-foreground">
+                    {t("名称")}
+                    <span className="text-destructive">*</span>
+                  </span>
+                  <input
+                    type="text"
+                    className={INPUT}
+                    value={entry.name}
+                    placeholder={t("如 chrome-devtools")}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, name: v } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  />
+                </div>
+                <div className="flex flex-col gap-1 px-3 py-2.5">
+                  <span className="text-[11.5px] text-muted-foreground">{t("描述")}</span>
+                  <textarea
+                    className={`${INPUT} min-h-16 resize-y leading-relaxed`}
+                    value={fieldOfConfig(config, "description")}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithField(parseConfig(en.json) ?? {}, "description", v) } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+              <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {t("传输与运行")}
+                </h3>
+                <span className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground/75">
+                  {transport}
+                </span>
+              </div>
+              <div className="divide-y divide-border/50">
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <span className="mr-1 text-[11.5px] text-muted-foreground">{t("传输类型")}</span>
+                  <div
+                    role="group"
+                    aria-label={t("传输类型")}
+                    className="flex items-center gap-1 rounded-lg border border-border/70 bg-surface/40 px-1 py-1"
+                  >
+                    {MCP_TRANSPORTS.map((kind) => (
+                      <button
+                        key={kind}
+                        className={
+                          kind === transport
+                            ? "press rounded-md bg-primary/18 px-2 py-0.5 font-mono text-[11.5px] font-semibold text-primary"
+                            : "press rounded-md px-2 py-0.5 font-mono text-[11.5px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground"
+                        }
+                        title={kind}
+                        onClick={() => {
+                          setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithTransport(parseConfig(en.json) ?? {}, kind) } : en)) ?? null);
+                          setSavedFlash(false);
+                        }}
+                      >
+                        {kind}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+            {isStdio ? (
+              <>
+                <div className="flex flex-col gap-1 px-3 py-2.5">
+                  <span className="text-[11.5px] text-muted-foreground">
+                    {t("命令")}
+                    <span className="text-destructive">*</span>
+                  </span>
+                  <input
+                    type="text"
+                    className={INPUT}
+                    value={fieldOfConfig(config, "command")}
+                    placeholder="npx"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithField(parseConfig(en.json) ?? {}, "command", v) } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  />
+                </div>
+                <div className="flex flex-col gap-2 px-3 py-2.5">
+                  <span className="text-[11.5px] text-muted-foreground">{t("参数")}</span>
+                  {args.length > 0 && (
+                    <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
+                      {args.map((arg, ai) => (
+                        <div key={ai} className="flex items-center gap-2 px-2 py-1">
+                          <input
+                            type="text"
+                            className={`${INPUT} flex-1 font-mono text-[11.5px]`}
+                            value={arg}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgSet(parseConfig(en.json) ?? {}, ai, v) } : en)) ?? null);
+                              setSavedFlash(false);
+                            }}
+                          />
+                          <button
+                            data-variant="danger"
+                            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
+                            title={t("删除参数")}
+                            onClick={() => {
+                              setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgRemoved(parseConfig(en.json) ?? {}, ai) } : en)) ?? null);
+                              setSavedFlash(false);
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    className={BTN}
+                    onClick={() => {
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgAdded(parseConfig(en.json) ?? {}) } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  >
+                    <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                    {t("添加参数")}
+                  </button>
+                </div>
+                <div className="flex flex-col gap-2 px-3 py-2.5 pb-3">
+                  <span className="text-[11.5px] text-muted-foreground">{t("环境变量")}</span>
+                  {envRows.length > 0 && (
+                    <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
+                      {envRows.map(([keyName, keyValue], ri) => (
+                        <div key={ri} className="flex items-center gap-2 px-2 py-1">
+                          <input
+                            type="text"
+                            className={`${INPUT} flex-1 font-mono text-[11.5px]`}
+                            value={`${keyName}=${keyValue}`}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairSet(parseConfig(en.json) ?? {}, "env", ri, v) } : en)) ?? null);
+                              setSavedFlash(false);
+                            }}
+                          />
+                          <button
+                            data-variant="danger"
+                            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
+                            title={t("删除变量")}
+                            onClick={() => {
+                              setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairRemoved(parseConfig(en.json) ?? {}, "env", ri) } : en)) ?? null);
+                              setSavedFlash(false);
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    className={BTN}
+                    onClick={() => {
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "env") } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  >
+                    <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                    {t("添加变量")}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-col gap-1 px-3 py-2.5">
+                  <span className="text-[11.5px] text-muted-foreground">
+                    {t("服务 URL")}
+                    <span className="text-destructive">*</span>
+                  </span>
+                  <input
+                    type="text"
+                    className={INPUT}
+                    value={fieldOfConfig(config, "url")}
+                    placeholder="https://…"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithField(parseConfig(en.json) ?? {}, "url", v) } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  />
+                </div>
+                <div className="flex flex-col gap-2 px-3 py-2.5 pb-3">
+                  <span className="text-[11.5px] text-muted-foreground">{t("请求头")}</span>
+                  {headerRows.length > 0 && (
+                    <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
+                      {headerRows.map(([keyName, keyValue], ri) => (
+                        <div key={ri} className="flex items-center gap-2 px-2 py-1">
+                          <input
+                            type="text"
+                            className={`${INPUT} flex-1 font-mono text-[11.5px]`}
+                            value={`${keyName}=${keyValue}`}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairSet(parseConfig(en.json) ?? {}, "headers", ri, v) } : en)) ?? null);
+                              setSavedFlash(false);
+                            }}
+                          />
+                          <button
+                            data-variant="danger"
+                            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
+                            title={t("删除 header")}
+                            onClick={() => {
+                              setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairRemoved(parseConfig(en.json) ?? {}, "headers", ri) } : en)) ?? null);
+                              setSavedFlash(false);
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    className={BTN}
+                    onClick={() => {
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "headers") } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                  >
+                    <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                    {t("添加 header")}
+                  </button>
+                </div>
+                            </>
+                          )}
+                            </div>
+                          </section>
+                          {extraKeys.length > 0 && (              <div className="truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-[11px] leading-relaxed text-muted-foreground/85">
+                {t("额外字段保留：{0}", extraKeys.join(", "))}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                className={SAVE_BTN}
+                onClick={() => {
+                  const target = entries[editing];
+                  if (!target) return;
+                  let error = validateEntry(target);
+                  if (!error) {
+                    const cfg = parseConfig(target.json) ?? {};
+                    error = transportOfConfig(cfg) === "stdio"
+                      ? typeof cfg.command === "string" && cfg.command.trim() !== ""
+                        ? null
+                        : t("stdio 配置需 command field")
+                      : typeof cfg.url === "string" && cfg.url.trim() !== ""
+                        ? null
+                        : t("sse/streamable-http 配置需 url field");
+                  }
+                  if (!error && entries.some((other, ii) => ii !== editing && other.name.trim() === target.name.trim())) {
+                    error = t("名称重复：{0}", target.name.trim());
+                  }
+                  if (error) {
+                    setEditError(error);
+                    return;
+                  }
+                  setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: finalizeEntryJson(en.json) } : en)) ?? null);
+                  setEditing(null);
+                  setEditError(null);
+                }}
+              >
+                {t("完成")}
+              </button>
+              {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+              {t("编辑只改本地副本，点击「保存」才写入文件。")}
+            </p>
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
-            {t("编辑只改本地副本，点击「保存」才写入文件。")}
-          </p>
-        </div>
-      )}
+        );
+      })()}
+
+      {catalogForm !== null && (() => {
+        const template = MCP_CATALOG.find((c) => c.id === catalogForm.entryId);
+        if (!template) return null;
+        return (
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[12.5px] font-semibold text-foreground">{template.title}</span>
+              <span className="ml-1.5 text-[11px] text-muted-foreground">{t("安装模板")}</span>
+            </div>
+            <label className="flex flex-col gap-0.5">
+              <span className="text-[11.5px] text-muted-foreground">{t("名称")}</span>
+              <input
+                type="text"
+                className={INPUT}
+                value={catalogForm.name}
+                placeholder={template.name}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setCatalogForm((current) => (current ? { ...current, name: v } : null));
+                }}
+              />
+            </label>
+            {template.fields.map((field) => (
+              <label key={field.key} className="flex flex-col gap-0.5">
+                <span className="text-[11.5px] text-muted-foreground">{field.label}</span>
+                <input
+                  type="text"
+                  className={INPUT}
+                  value={catalogForm.values[field.key] ?? ""}
+                  placeholder={field.placeholder ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setCatalogForm((current) =>
+                      current ? { ...current, values: { ...current.values, [field.key]: v } } : null,
+                    );
+                  }}
+                />
+              </label>
+            ))}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button className={SAVE_BTN} onClick={installCatalog}>
+                {t("安装")}
+              </button>
+              {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+              {t("安装只把模板本地草稿，点击「保存」才写入文件。")}
+            </p>
+          </div>
+        );
+      })()}
 
       {confirmDelete !== null && entries?.[confirmDelete] && (
         <ConfirmDialog

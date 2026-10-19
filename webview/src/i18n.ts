@@ -384,16 +384,43 @@ const en: Record<string, string> = {
   "完成": "Done",
   "名称": "Name",
   "如 chrome-devtools": "e.g. chrome-devtools",
-  "配置 JSON（stdio：command/args/env；远程：url/headers/type）":
-    "Config JSON (stdio: command/args/env; remote: url/headers/type)",
+  "描述": "Description",
+  "传输类型": "Transport type",
+  "服务器信息": "Server info",
+  "传输与运行": "Transport & run",
+  "命令": "Command",
+  "参数": "Arguments",
+  "添加参数": "Add argument",
+  "删除参数": "Delete argument",
+  "环境变量": "Environment variables",
+  "添加变量": "Add variable",
+  "删除变量": "Delete variable",
+  "服务 URL": "Service URL",
+  "请求头": "Request headers",
+  "添加 header": "Add header",
+  "删除 header": "Delete header",
+  "stdio 配置需 command field": "stdio config needs a command field",
+  "sse/streamable-http 配置需 url field": "sse/streamable-http config needs a url field",
+  "额外字段保留：{0}": "Extra fields preserved: {0}",
   "名称不能为空": "Name cannot be empty",
   "JSON 格式不合法": "Invalid JSON",
   "配置必须是 JSON 对象": "Config must be a JSON object",
   "名称重复：{0}": "Duplicate name: {0}",
   "编辑只改本地副本，点击「保存」才写入文件。":
     "Editing only changes a local copy; click Save to write the file.",
-  "配置直接读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。":
-    "Config reads/writes the mcpServers field in ~/.iflow/settings.json directly; after saving, click Restart CLI in the footer to apply (the current session restores automatically).",
+  "安装只把模板本地草稿，点击「保存」才写入文件。":
+    "Installing keeps a local draft only; click Save to write the file.",
+  "配置作用域": "Config scope",
+  "无项目上下文（未打开工作区）": "No project context (no workspace open)",
+  "写入 {0}": "Writes to {0}",
+  "覆盖全局": "Overrides global",
+  "被项目覆盖": "Overridden by project",
+  "两级同名时 CLI 用项目级配置整体替换全局条目（不合并字段）":
+    "For a name present in both scopes the CLI replaces the global entry with the project one wholesale (fields are not merged)",
+  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。":
+    "The global scope reads/writes the mcpServers field in ~/.iflow/settings.json; after saving, click Restart CLI in the footer to apply (the current session restores automatically).",
+  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时 CLI 用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启 CLI」生效。":
+    "The project scope reads/writes the mcpServers field in <workspace>/.iflow/settings.json; for a name also present globally, the CLI replaces the global entry with the project one wholesale (fields are not merged). After saving, click Restart CLI in the footer to apply.",
   "保存中…": "Saving…",
   // MCP status indicators + detail sub-page
   "状态未知": "Status unknown",
