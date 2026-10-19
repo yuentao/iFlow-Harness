@@ -242,7 +242,7 @@ export function OnboardingWizard({
           {step !== "done" && (
             <button
               type="button"
-              className="press rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
+              className="press rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
               onClick={skip}
             >
               {t("跳过引导")}
@@ -280,7 +280,7 @@ export function OnboardingWizard({
       }
     >
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 px-3 pt-2.5">
+        <div className="flex items-center gap-2 px-3 pt-3">
           <div
             className="flex flex-1 items-center gap-1"
             role="progressbar"
@@ -299,17 +299,17 @@ export function OnboardingWizard({
               />
             ))}
           </div>
-          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground">
             {t("第 {0} / {1} 步", index + 1, STEPS.length)}
           </span>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {step === "welcome" && <WelcomeStep />}
 
           {step === "api" && (
             <div className="space-y-2">
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
+              <p className="text-ui-caption leading-relaxed text-muted-foreground">
                 {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
               </p>
               <div className="flex flex-wrap gap-1">
@@ -318,7 +318,7 @@ export function OnboardingWizard({
                     key={option.id}
                     type="button"
                     aria-pressed={presetId === option.id}
-                    className={`press rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-200 ${
+                    className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
                       presetId === option.id
                         ? "border-primary/50 bg-primary/10 font-semibold text-primary"
                         : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -331,7 +331,7 @@ export function OnboardingWizard({
                 <button
                   type="button"
                   aria-pressed={presetId === null}
-                  className={`press rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-200 ${
+                  className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
                     presetId === null
                       ? "border-primary/50 bg-primary/10 font-semibold text-primary"
                       : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -344,7 +344,7 @@ export function OnboardingWizard({
 
               {preset && (
                 <div className="rounded-lg border border-border bg-surface/60 px-2.5 py-1.5">
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">{t(preset.note)}</p>
+                  <p className="text-ui-caption leading-relaxed text-muted-foreground">{t(preset.note)}</p>
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {preset.keyUrl && (
                       <button className={BTN} onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}>
@@ -363,7 +363,7 @@ export function OnboardingWizard({
 
               {auth.importable.length > 0 && (
                 <div className="rounded-xl border border-primary/30 bg-primary/5 px-2.5 py-2">
-                  <div className="flex items-center gap-1.5 text-[12px] font-semibold text-foreground">
+                  <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
                     <KeyRound className="size-3.5 shrink-0 text-primary" />
                     {t("检测到 iFlow CLI 已有凭据")}
                   </div>
@@ -374,8 +374,8 @@ export function OnboardingWizard({
                         className="flex items-center gap-1.5 rounded-lg border border-border bg-surface/60 px-2 py-1"
                       >
                         <span className="min-w-0 flex-1 truncate">
-                          <span className="text-[12px] font-semibold text-foreground">{candidate.name}</span>
-                          <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">
+                          <span className="text-ui-label font-semibold text-foreground">{candidate.name}</span>
+                          <span className="ml-1.5 font-mono text-ui-caption text-muted-foreground">
                             {candidate.modelName} · {candidate.keyTail}
                           </span>
                         </span>
@@ -392,7 +392,7 @@ export function OnboardingWizard({
               )}
 
               <label className="flex flex-col gap-0.5">
-                <span className="text-[11.5px] text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
+                <span className="text-ui-caption text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
                 <input
                   type="text"
                   className={INPUT}
@@ -402,7 +402,7 @@ export function OnboardingWizard({
                 />
               </label>
               <label className="flex flex-col gap-0.5">
-                <span className="text-[11.5px] text-muted-foreground">API Key</span>
+                <span className="text-ui-caption text-muted-foreground">API Key</span>
                 <input
                   type="password"
                   className={INPUT}
@@ -412,7 +412,7 @@ export function OnboardingWizard({
                 />
               </label>
               <label className="flex flex-col gap-0.5">
-                <span className="text-[11.5px] text-muted-foreground">{t("模型名称")}</span>
+                <span className="text-ui-caption text-muted-foreground">{t("模型名称")}</span>
                 <input
                   type="text"
                   className={INPUT}
@@ -423,12 +423,12 @@ export function OnboardingWizard({
               </label>
               {preset && preset.models.length > 0 && (
                 <div className="flex flex-wrap items-center gap-1">
-                  <span className="text-[11px] text-muted-foreground">{t("常用模型")}</span>
+                  <span className="text-ui-caption text-muted-foreground">{t("常用模型")}</span>
                   {preset.models.map((model) => (
                     <button
                       key={model}
                       type="button"
-                      className="press rounded-full border border-border px-2 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
+                      className="press rounded-full border border-border px-2 py-0.5 font-mono text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
                       onClick={() => updateDraft({ modelName: model })}
                     >
                       {model}
@@ -437,11 +437,11 @@ export function OnboardingWizard({
                 </div>
               )}
               {apiError && (
-                <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+                <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-caption text-destructive">
                   {apiError}
                 </p>
               )}
-              <p className="flex items-start gap-1 text-[11px] leading-relaxed text-muted-foreground/85">
+              <p className="flex items-start gap-1 text-ui-caption leading-relaxed text-muted-foreground/85">
                 <Lock className="mt-0.5 size-3 shrink-0" />
                 {t("凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。")}
               </p>
@@ -450,24 +450,24 @@ export function OnboardingWizard({
 
           {step === "model" && (
             <div className="space-y-2">
-              <p className="text-[12px] leading-relaxed text-muted-foreground">
+              <p className="text-ui-label leading-relaxed text-muted-foreground">
                 {t("选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。")}
               </p>
               {models.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-border px-3 py-4 text-center">
-                  <div className="text-[12px] font-semibold text-foreground">
+                  <div className="text-ui-label font-semibold text-foreground">
                     {connecting
                       ? t("正在连接 iFlow CLI 并获取模型列表…")
                       : auth.needsSetup
                         ? t("尚未连接")
                         : t("暂无可用模型列表")}
                   </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="mt-1 text-ui-caption leading-relaxed text-muted-foreground">
                     {auth.needsSetup && !connecting
                       ? t("保存凭据后会自动获取模型；也可以稍后在模型下拉中选择。")
                       : t("可点击下方按钮重新获取。")}
                   </p>
-                  <div className="mt-1.5 flex justify-center gap-1.5">
+                  <div className="mt-2 flex justify-center gap-1.5">
                     <button className={BTN} onClick={() => send({ type: "refreshModels" })}>
                       {t("重新获取")}
                     </button>
@@ -493,10 +493,10 @@ export function OnboardingWizard({
                         onClick={() => chooseModel(model)}
                       >
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[12px] font-semibold text-foreground">
+                          <span className="block truncate text-ui-label font-semibold text-foreground">
                             {model.name || model.id}
                           </span>
-                          <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                          <span className="block truncate font-mono text-ui-caption text-muted-foreground">
                             {model.id}
                           </span>
                         </span>
@@ -507,11 +507,11 @@ export function OnboardingWizard({
                 </div>
               )}
               {apiSubmitted && errorMessage && (
-                <p className="whitespace-pre-wrap break-words rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
+                <p className="whitespace-pre-wrap break-words rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-ui-caption text-destructive">
                   {errorMessage}
                 </p>
               )}
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-ui-caption text-muted-foreground">
                 {t("当前模型：{0}", savedModelLabel)}
               </p>
             </div>
@@ -519,7 +519,7 @@ export function OnboardingWizard({
 
           {step === "mode" && (
             <div className="space-y-2">
-              <p className="text-[12px] leading-relaxed text-muted-foreground">
+              <p className="text-ui-label leading-relaxed text-muted-foreground">
                 {t("选择新会话默认的权限模式；点击选项后当前会话也会立即切换。之后可在设置 → 审批策略中细化规则。")}
               </p>
               <div className="space-y-1">
@@ -537,8 +537,8 @@ export function OnboardingWizard({
                       onClick={() => chooseMode(mode.id)}
                     >
                       <span className="min-w-0 flex-1">
-                        <span className="block text-[12px] font-semibold text-foreground">{display.label}</span>
-                        <span className="block text-[11px] leading-relaxed text-muted-foreground">
+                        <span className="block text-ui-label font-semibold text-foreground">{display.label}</span>
+                        <span className="block text-ui-caption leading-relaxed text-muted-foreground">
                           {display.desc}
                         </span>
                       </span>
@@ -552,7 +552,7 @@ export function OnboardingWizard({
 
           {step === "preferences" && (
             <div className="space-y-2">
-              <p className="text-[12px] leading-relaxed text-muted-foreground">
+              <p className="text-ui-label leading-relaxed text-muted-foreground">
                 {t("这些设置之后都能在齿轮 ⚙ 设置中随时修改。")}
               </p>
               <ToggleRow
@@ -601,10 +601,10 @@ export function OnboardingWizard({
                 ]}
                 onChange={(uiDensity) => updateHostSetting({ uiDensity })}
               />
-              <div className="flex items-start gap-2.5 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+              <div className="flex items-start gap-3 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
                 <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-semibold text-foreground">{t("主题")}</div>
-                  <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  <div className="text-ui-label font-semibold text-foreground">{t("主题")}</div>
+                  <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
                     {t("默认跟随编辑器主题，也可以固定为浅色或深色。")}
                   </p>
                 </div>
@@ -612,7 +612,7 @@ export function OnboardingWizard({
                   <button
                     type="button"
                     aria-pressed={!dark}
-                    className={`press rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+                    className={`press rounded-md px-2 py-1 text-ui-caption transition-colors duration-200 ${
                       !dark ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60"
                     }`}
                     onClick={() => onThemeChange("light")}
@@ -622,7 +622,7 @@ export function OnboardingWizard({
                   <button
                     type="button"
                     aria-pressed={dark}
-                    className={`press rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+                    className={`press rounded-md px-2 py-1 text-ui-caption transition-colors duration-200 ${
                       dark ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60"
                     }`}
                     onClick={() => onThemeChange("dark")}
@@ -638,12 +638,12 @@ export function OnboardingWizard({
             <div className="space-y-2">
               <div className="rounded-xl border border-primary/30 bg-primary/5 px-3 py-3 text-center">
                 <Sparkles className="mx-auto size-5 text-primary" />
-                <div className="mt-1 text-[13px] font-semibold text-foreground">{t("配置完成")}</div>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                <div className="mt-1 text-ui-body font-semibold text-foreground">{t("配置完成")}</div>
+                <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
                   {t("可以开始对话了；所有设置都能随时在齿轮 ⚙ 中修改。")}
                 </p>
               </div>
-              <div className="space-y-1 rounded-xl border border-border bg-surface/60 px-2.5 py-2 text-[11.5px]">
+              <div className="space-y-1 rounded-xl border border-border bg-surface/60 px-2.5 py-2 text-ui-caption">
                 <SummaryRow label={t("连接")} value={connectionLabel} />
                 <SummaryRow label={t("默认模式")} value={modeDisplay({ id: hostSettings.defaultMode, name: "" }).label} />
                 <SummaryRow
@@ -656,11 +656,11 @@ export function OnboardingWizard({
                 />
               </div>
               <div className="rounded-xl border border-dashed border-border px-2.5 py-2">
-                <div className="text-[11.5px] font-semibold text-foreground">{t("继续配置")}</div>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                <div className="text-ui-caption font-semibold text-foreground">{t("继续配置")}</div>
+                <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
                   {t("这些高级能力可以稍后再设置。")}
                 </p>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                <div className="mt-2 flex flex-wrap gap-1.5">
                   <button className={BTN} onClick={() => finish("mcp")}>{t("MCP 服务器")}</button>
                   <button className={BTN} onClick={() => finish("policy")}>{t("审批策略")}</button>
                   <button className={BTN} onClick={() => finish("memory")}>{t("记忆")}</button>
@@ -678,8 +678,8 @@ function WelcomeStep() {
   return (
     <div className="flex flex-col items-center text-center">
       <img src={logo} alt="" className="size-12" />
-      <h2 className="mt-2 text-[15px] font-semibold text-foreground">{t("欢迎使用 心流·驭光")}</h2>
-      <p className="mt-1 max-w-[380px] text-[11.5px] leading-relaxed text-muted-foreground">
+      <h2 className="mt-2 text-ui-title font-semibold text-foreground">{t("欢迎使用 心流·驭光")}</h2>
+      <p className="mt-1 max-w-[380px] text-ui-caption leading-relaxed text-muted-foreground">
         {t("用一到两分钟完成最初配置。随时可以跳过，跳过后仍可从设置或面板提示重新配置。")}
       </p>
       <div className="mt-3 grid w-full gap-1.5 text-left">
@@ -716,8 +716,8 @@ function WelcomePoint({
     <div className="flex items-start gap-2 rounded-lg border border-border bg-surface/60 px-2.5 py-1.5">
       <span className="mt-0.5 text-primary">{icon}</span>
       <span className="min-w-0">
-        <span className="block text-[12px] font-semibold text-foreground">{title}</span>
-        <span className="block text-[11px] leading-relaxed text-muted-foreground">{description}</span>
+        <span className="block text-ui-label font-semibold text-foreground">{title}</span>
+        <span className="block text-ui-caption leading-relaxed text-muted-foreground">{description}</span>
       </span>
     </div>
   );
@@ -735,10 +735,10 @@ function ToggleRow({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+    <div className="flex items-start gap-3 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
       <div className="min-w-0 flex-1">
-        <div className="text-[12px] font-semibold text-foreground">{label}</div>
-        <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+        <div className="text-ui-label font-semibold text-foreground">{label}</div>
+        <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">{description}</p>
       </div>
       <button
         type="button"
@@ -774,10 +774,10 @@ function ChoiceRow<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+    <div className="flex items-start gap-3 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
       <div className="min-w-0 flex-1">
-        <div className="text-[12px] font-semibold text-foreground">{label}</div>
-        <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+        <div className="text-ui-label font-semibold text-foreground">{label}</div>
+        <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">{description}</p>
       </div>
       <div
         role="group"
@@ -789,7 +789,7 @@ function ChoiceRow<T extends string>({
             key={option.value}
             type="button"
             aria-pressed={value === option.value}
-            className={`press rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+            className={`press rounded-md px-2 py-1 text-ui-caption transition-colors duration-200 ${
               value === option.value
                 ? "bg-primary/15 font-semibold text-primary"
                 : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"

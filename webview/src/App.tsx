@@ -9,6 +9,7 @@ import {
   Focus,
   History,
   Loader2,
+  Pencil,
   Pin,
   PinOff,
   Plus,
@@ -108,8 +109,8 @@ function ErrorToast({
     return () => window.clearTimeout(id);
   }, [copied]);
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-2.5 z-[5] flex justify-center px-3">
-      <div className="stream-in pointer-events-auto flex max-h-40 w-full max-w-[92%] items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/15 px-3.5 py-1.5 text-[12px] text-destructive shadow-card backdrop-blur-xl">
+    <div className="pointer-events-none absolute inset-x-0 top-3 z-[5] flex justify-center px-3">
+      <div className="stream-in pointer-events-auto flex max-h-40 w-full max-w-[92%] items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/15 px-4 py-1.5 text-ui-label text-destructive shadow-card backdrop-blur-xl">
         <div className="min-w-0 flex-1">
           <div
             className={`select-text break-words ${expanded ? "max-h-28 overflow-y-auto" : "line-clamp-1"}`}
@@ -119,14 +120,14 @@ function ErrorToast({
           </div>
           {isLong && (
             <button
-              className="press mt-0.5 rounded text-[11px] font-medium text-destructive/90 underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
+              className="press mt-0.5 rounded text-ui-caption font-medium text-destructive/90 underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
               onClick={() => setExpanded((v) => !v)}
             >
               {expanded ? t("收起") : t("展开")}
             </button>
           )}
           {advice && (
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-destructive/90">
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-destructive/90">
               <span className="select-text">{t(advice.hint)}</span>
               {advice.openSettingsTab && (
                 <button
@@ -153,7 +154,7 @@ function ErrorToast({
           {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
         </button>
         <button
-          className="press shrink-0 rounded-md border border-destructive/40 px-1.5 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-100"
+          className="press shrink-0 rounded-md border border-destructive/40 px-1.5 py-0.5 text-ui-caption font-semibold transition-opacity hover:opacity-100"
           title={t("重启 CLI 并重试（会话自动恢复）")}
           onClick={() => send({ type: "restartCli" })}
         >
@@ -227,6 +228,10 @@ export function App() {
   // session is held here so the dialog can render its label.
   const [confirmingDelete, setConfirmingDelete] = useState<SessionSummaryUi | null>(null);
   const [sessionQuery, setSessionQuery] = useState("");
+  // Inline rename: the id being edited and its draft label. Kept in App so the
+  // dropdown's close callback can drop a half-typed name.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   // M4 P1-8: archived sessions live in a collapsed second section — they are
   // kept out of the default results until the user opens the section.
   const [showArchived, setShowArchived] = useState(false);
@@ -440,7 +445,7 @@ export function App() {
           <div className="splash-hint mt-2 flex flex-col items-center gap-2">
             <span>{t("等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达")}</span>
             <button
-              className="press rounded-lg border border-border bg-surface/80 px-3 py-1 text-[11.5px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
+              className="press rounded-lg border border-border bg-surface/80 px-3 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
               onClick={() => send({ type: "restartCli" })}
             >
               {t("重启 CLI")}
@@ -478,14 +483,17 @@ export function App() {
           {/* session switcher */}
           {sessions.length > 0 ? (
             <Dropdown
-              menuClass="w-72 max-h-64 flex flex-col"
+              menuClass="w-[20rem] max-w-[calc(100vw_-_24px)] max-h-[20rem] flex flex-col"
               wrapperClass="min-w-0 flex-1"
               disabled={locked}
+              onOpenChange={(open) => {
+                if (!open) setRenamingId(null);
+              }}
               trigger={(open) => (
                 <button
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  className={`card-lift press flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-left text-[11px] shadow-card hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
+                  className={`card-lift press flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-left text-ui-caption shadow-card hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
                     open ? "bg-surface-2 ring-1 ring-primary/30" : ""
                   }`}
                   title={t("历史会话（选择后恢复该会话上下文）")}
@@ -499,18 +507,18 @@ export function App() {
             >
               {(close) => (
                 <>
-                  <div className="shrink-0 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <div className="shrink-0 px-3 py-1.5 text-ui-caption uppercase tracking-wider text-muted-foreground">
                     {t("会话历史")}
                   </div>
                   <div className="shrink-0 px-2 pb-2">
-                    <div className="flex items-center gap-2.5 rounded-lg border border-border bg-editor/60 px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
+                    <div className="flex items-center gap-3 rounded-lg border border-border bg-editor/60 px-3 py-1.5 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
                       <Search className="size-3.5 shrink-0 text-muted-foreground" />
                       <input
                         autoFocus
                         value={sessionQuery}
                         onChange={(e) => setSessionQuery(e.target.value)}
                         placeholder={t("搜索会话…")}
-                        className="w-full min-w-0 bg-transparent text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground/80"
+                        className="w-full min-w-0 bg-transparent text-ui-body text-foreground outline-none placeholder:text-muted-foreground/80"
                       />
                     </div>
                   </div>
@@ -519,7 +527,7 @@ export function App() {
                       <button
                         role="menuitem"
                         onClick={close}
-                        className="flex w-full shrink-0 items-center px-3 py-1.5 text-left text-[12px] text-foreground hover:bg-accent/60"
+                        className="flex w-full shrink-0 items-center px-3 py-1.5 text-left text-ui-label text-foreground hover:bg-accent/60"
                       >
                         {t("当前会话")}
                       </button>
@@ -537,8 +545,52 @@ export function App() {
                       const deletable = s.id !== activeSessionId && !locked;
                       const flag = (pinned: boolean, archived: boolean) =>
                         send({ type: "setSessionFlags", sessionId: s.id, pinned, archived });
+                      if (renamingId === s.id) {
+                        const commit = () => {
+                          const label = renameDraft.trim();
+                          if (label) send({ type: "renameSession", sessionId: s.id, label });
+                          setRenamingId(null);
+                        };
+                        return (
+                          <div key={s.id} className="flex w-full items-center gap-1 px-3 py-1.5">
+                            <input
+                              autoFocus
+                              value={renameDraft}
+                              aria-label={t("会话名称")}
+                              onChange={(e) => setRenameDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  commit();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setRenamingId(null);
+                                }
+                              }}
+                              className="min-w-0 flex-1 rounded-md border border-border bg-editor px-2 py-1 text-ui-body text-foreground outline-none transition-colors focus:border-primary/50"
+                            />
+                            <button
+                              role="menuitem"
+                              className="press shrink-0 rounded-md p-1.5 text-primary transition-colors hover:bg-accent/60"
+                              title={t("保存")}
+                              onClick={commit}
+                            >
+                              <Check className="size-3.5" />
+                            </button>
+                            <button
+                              role="menuitem"
+                              className="press shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+                              title={t("取消")}
+                              onClick={() => setRenamingId(null)}
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          </div>
+                        );
+                      }
                       return (
-                        <div key={s.id} className="flex w-full items-center px-3 py-1.5 hover:bg-accent/60">
+                        <div key={s.id} className="flex w-full items-center gap-0.5 px-3 py-1.5 hover:bg-accent/60">
                           <button
                             role="menuitem"
                             className="flex min-w-0 flex-1 flex-col items-start text-left"
@@ -547,45 +599,56 @@ export function App() {
                               close();
                             }}
                           >
-                            <span className="flex w-full items-center gap-2 text-[12px] text-foreground">
-                              {!!s.pinned && <Pin className="size-3 shrink-0 text-primary/80" />}
+                            <span className="flex w-full items-center gap-2 text-ui-body text-foreground">
+                              {!!s.pinned && <Pin className="size-3.5 shrink-0 text-primary/80" />}
                               <span className="truncate">{s.label}</span>
                               {s.id === activeSessionId && (
-                                <Check className="ml-auto size-3 shrink-0 text-primary" />
+                                <Check className="ml-auto size-3.5 shrink-0 text-primary" />
                               )}
                             </span>
-                            <span className="font-mono text-[11px] text-muted-foreground">
+                            <span className="font-mono text-ui-caption text-muted-foreground">
                               {formatSessionTime(s.updatedAt)}
                             </span>
                           </button>
                           <button
                             role="menuitem"
-                            className="shrink-0 p-0.5 text-muted-foreground opacity-60 hover:opacity-100 hover:text-foreground"
-                            title={s.pinned ? t("取消置顶") : t("置顶")}
-                            onClick={() => flag(!s.pinned, !!s.archived)}
+                            className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
+                            title={t("重命名")}
+                            onClick={() => {
+                              setRenamingId(s.id);
+                              setRenameDraft(s.label);
+                            }}
                           >
-                            {s.pinned ? <PinOff className="size-3" /> : <Pin className="size-3" />}
+                            <Pencil className="size-3.5" />
                           </button>
                           <button
                             role="menuitem"
-                            className="shrink-0 p-0.5 text-muted-foreground opacity-60 hover:opacity-100 hover:text-foreground"
+                            className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
+                            title={s.pinned ? t("取消置顶") : t("置顶")}
+                            onClick={() => flag(!s.pinned, !!s.archived)}
+                          >
+                            {s.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+                          </button>
+                          <button
+                            role="menuitem"
+                            className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
                             title={s.archived ? t("取消归档") : t("归档")}
                             onClick={() => flag(!!s.pinned, !s.archived)}
                           >
-                            {s.archived ? <ArchiveRestore className="size-3" /> : <Archive className="size-3" />}
+                            {s.archived ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
                           </button>
                           {deletable && (
                             <button
                               role="menuitem"
                               data-variant="danger"
-                              className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-60 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
+                              className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
                               title={t("删除会话 {0}", s.label)}
                               onClick={() => {
                                 close();
                                 setConfirmingDelete(s);
                               }}
                             >
-                              <Trash2 className="size-3" />
+                              <Trash2 className="size-3.5" />
                             </button>
                           )}
                         </div>
@@ -596,7 +659,7 @@ export function App() {
                         {activeList.map(renderRow)}
                         {archivedList.length > 0 && (
                           <button
-                            className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[11px] uppercase tracking-wider text-muted-foreground hover:bg-accent/40"
+                            className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-ui-caption uppercase tracking-wider text-muted-foreground hover:bg-accent/40"
                             onClick={() => setShowArchived((v) => !v)}
                           >
                             {showArchived ? (
@@ -616,7 +679,7 @@ export function App() {
               )}
             </Dropdown>
           ) : (
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-muted-foreground shadow-card">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-muted-foreground shadow-card">
               <History className="size-3 shrink-0 text-primary" />
               <span className="truncate">{t("会话历史")}</span>
             </div>
@@ -722,7 +785,7 @@ export function App() {
         <MessageList />
         {focusMode && focusHint && (
           <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-[11px] text-muted-foreground shadow-card">
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card">
               <Focus className="size-3 shrink-0" />
               {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
             </div>
@@ -749,7 +812,7 @@ export function App() {
       </div>
 
       {auth?.needsSetup && !onboardingOpen && (
-        <div className="mx-3 mb-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warning">
+        <div className="mx-3 mb-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
           <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
           <button className={BTN} onClick={() => setSettingsTab("api")}>
             {t("配置")}

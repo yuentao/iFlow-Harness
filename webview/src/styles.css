@@ -52,14 +52,33 @@
   --radius: 0.5rem;
 
   /* Panel typography / density (iflow.uiFontSize / iflow.uiDensity). The
-     store writes these inline on <html> from the hostSettings message; the
-     fallbacks here match the "standard" preset so the first paint never
-     flashes the old compact sizing. Density only rescales Tailwind's spacing
-     token — text sizes are covered by the utility overrides at the end of
-     this file. */
-  --ui-font-scale: 1.1;
+     store writes the scale inline on <html>; the fallbacks here match the
+     "standard" preset. Every text node uses one of the five semantic sizes
+     below — components must not hard-code px sizes. Density only rescales
+     Tailwind's spacing token. */
+  --ui-font-scale: 1;
   --ui-density: 1;
   --spacing: calc(0.25rem * var(--ui-density));
+
+  /* Semantic type ramp. These derived values multiply at use time, so a live
+     font-size preset change re-resolves every class without a rebuild. */
+  --ui-font-display: calc(20px * var(--ui-font-scale));
+  --ui-font-title: calc(16px * var(--ui-font-scale));
+  --ui-font-body: calc(14px * var(--ui-font-scale));
+  --ui-font-label: calc(13px * var(--ui-font-scale));
+  --ui-font-caption: calc(12px * var(--ui-font-scale));
+  --ui-font-micro: calc(11px * var(--ui-font-scale));
+
+  /* Layout spacing scale (4px grid). Tailwind's --spacing already scales
+     utilities; these variables cover plain-CSS paddings/gaps that used to be
+     fixed px and therefore ignored the density preset. Compact control
+     internals may still use 2/6/10px as optical exceptions. */
+  --space-2xs: calc(2px * var(--ui-density));
+  --space-xs: calc(4px * var(--ui-density));
+  --space-sm: calc(8px * var(--ui-density));
+  --space-md: calc(12px * var(--ui-density));
+  --space-lg: calc(16px * var(--ui-density));
+  --space-xl: calc(24px * var(--ui-density));
 
   --background: oklch(1 0 0);
   --foreground: oklch(0.25 0.018 275);
@@ -309,7 +328,7 @@
     background: var(--wallpaper);
     color: var(--color-foreground);
     font-family: var(--font-sans);
-    font-size: calc(13px * var(--ui-font-scale));
+    font-size: var(--ui-font-body);
     -webkit-font-smoothing: antialiased;
     /* Selection policy: UI chrome (buttons, chips, titles, labels) must not
        paint a selection when dragged over. `user-select: auto` resolves to
@@ -341,22 +360,26 @@
     display: none;
   }
 
+  /* Overlay-style scrollbars: the track keeps its (narrow) gutter so content
+     does not reflow, but the thumb stays fully transparent until the user is
+     actually scrolling (html.scrolling is toggled by the capture listener in
+     main.tsx for ~700ms after the last scroll event). */
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-thumb {
-    background: color-mix(in oklab, var(--foreground) 14%, transparent);
+    background: transparent;
     border-radius: 999px;
-    border: 3px solid transparent;
+    border: 2px solid transparent;
     background-clip: content-box;
   }
-  ::-webkit-scrollbar-thumb:hover {
-    background: color-mix(in oklab, var(--foreground) 28%, transparent);
+  html.scrolling ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--foreground) 16%, transparent);
     background-clip: content-box;
   }
-  ::-webkit-scrollbar-thumb:active {
-    background: color-mix(in oklab, var(--primary) 55%, transparent);
+  html.scrolling ::-webkit-scrollbar-thumb:active {
+    background: color-mix(in oklab, var(--primary) 48%, transparent);
     background-clip: content-box;
   }
   ::-webkit-scrollbar-track,
@@ -367,7 +390,10 @@
   /* Firefox */
   * {
     scrollbar-width: thin;
-    scrollbar-color: color-mix(in oklab, var(--foreground) 20%, transparent) transparent;
+    scrollbar-color: transparent transparent;
+  }
+  html.scrolling * {
+    scrollbar-color: color-mix(in oklab, var(--foreground) 16%, transparent) transparent;
   }
 }
 
@@ -375,7 +401,7 @@
 .message-scroll,
 .diff-scroll {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklab, var(--foreground) 20%, transparent) transparent;
+  scrollbar-color: transparent transparent;
   /* Disable native scroll anchoring: when a large chunk lands in one commit,
      Chromium adjusts scrollTop on its own to keep its anchor node in view,
      firing a scroll event that onScroll reads as "user scrolled up" — killing
@@ -750,13 +776,14 @@ textarea:focus-visible {
       subtitle has no shrink budget left (short description subtitle + a
       wide `shrink-0` chip group, or a FileRef chip eating the overflow), the
       label is squeezed even at a full-width panel.
-   Policy: the label is the row's anchor — it NEVER shrinks. A pathologically
-   long title (an MCP card's own tool name) is capped by max-width:100% and
-   ellipsized by truncate instead of pushing the row wide. Overflow is eaten
-   by the shrinkable parts, subtitle first (1000× so a command line dies
-   before a short file chip). */
+   Policy: the label is the row's anchor — it yields only as a LAST resort.
+   The subtitle keeps a 1000× shrink factor, so a long command line dies
+   before a short title; once the subtitle is exhausted, the title may
+   shrink and truncate rather than push the shrink-0 status/action chips out
+   of the card (measured on the 480/300px subagent header). */
 .tool-card-title {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
   max-width: 100%;
 }
 .tool-card-detail {
@@ -767,34 +794,34 @@ textarea:focus-visible {
    while the wire payload remains available on demand. */
 .tool-card-params {
   border-top: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
-  padding: 8px 10px 0;
+  padding: var(--space-sm) var(--space-md) 0;
 }
 .tool-card-section-label {
-  margin-bottom: 5px;
+  margin-bottom: var(--space-xs);
   color: var(--muted-foreground);
-  font-size: calc(10px * var(--ui-font-scale));
+  font-size: var(--ui-font-micro);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 .tool-card-param-list {
   display: grid;
-  gap: 3px;
+  gap: var(--space-xs);
 }
 .tool-card-param {
   display: grid;
   grid-template-columns: minmax(72px, max-content) minmax(0, 1fr);
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: baseline;
   min-width: 0;
   border-radius: 6px;
-  padding: 4px 6px;
+  padding: var(--space-xs) var(--space-sm);
   background: color-mix(in oklab, var(--editor) 68%, transparent);
 }
 .tool-card-param-key {
   color: var(--muted-foreground);
   font-family: var(--font-mono);
-  font-size: calc(10px * var(--ui-font-scale));
+  font-size: var(--ui-font-micro);
   line-height: 1.4;
 }
 .tool-card-param-value {
@@ -802,7 +829,7 @@ textarea:focus-visible {
   overflow: hidden;
   color: var(--foreground);
   font-family: var(--font-mono);
-  font-size: calc(11px * var(--ui-font-scale));
+  font-size: var(--ui-font-caption);
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -811,12 +838,12 @@ textarea:focus-visible {
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-xs);
   border-top: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
-  margin-top: 6px;
-  padding: 6px 12px 7px;
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
   color: var(--muted-foreground);
-  font-size: calc(10px * var(--ui-font-scale));
+  font-size: var(--ui-font-micro);
   text-align: left;
 }
 .tool-card-raw-toggle:hover {
@@ -832,7 +859,7 @@ textarea:focus-visible {
    the voice, and a hover rail lets the eye track the response column. */
 .assistant-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: flex-start;
 }
 
@@ -870,8 +897,8 @@ textarea:focus-visible {
   /* Negative margin + matching padding: the glow band wraps the text with
      breathing room and rounded corners WITHOUT shifting the text layout
      (net box size is unchanged). */
-  margin: -4px -8px;
-  padding: 4px 8px;
+  margin: calc(var(--space-xs) * -1) calc(var(--space-sm) * -1);
+  padding: var(--space-xs) var(--space-sm);
   border-radius: 12px;
   background-image: linear-gradient(
     90deg,
@@ -905,10 +932,10 @@ textarea:focus-visible {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: var(--space-md);
   margin: 0 auto;
   max-width: 340px;
-  padding: 40px 24px;
+  padding: 40px var(--space-xl);
   text-align: center;
   border-radius: 16px;
   border: 1px solid var(--border);
@@ -925,7 +952,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   border-radius: 13px;
-  font-size: calc(20px * var(--ui-font-scale));
+  font-size: var(--ui-font-display);
   filter: drop-shadow(0 6px 20px color-mix(in oklab, var(--primary) 30%, transparent));
 }
 
@@ -1002,7 +1029,7 @@ pre {
 .md pre {
   background: var(--editor);
   border: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: var(--space-sm) var(--space-md);
   border-radius: 8px;
   overflow-x: auto;
   /* Fenced source is scanned sideways, not read as prose: keep the original
@@ -1010,7 +1037,7 @@ pre {
   white-space: pre;
   overflow-wrap: normal;
   font-family: var(--font-mono);
-  font-size: calc(11.5px * var(--ui-font-scale));
+  font-size: var(--ui-font-caption);
   line-height: 1.6;
 }
 
@@ -1026,8 +1053,8 @@ pre {
   top: 6px;
   right: 6px;
   z-index: 2;
-  padding: 2px 8px;
-  font-size: calc(10px * var(--ui-font-scale));
+  padding: var(--space-2xs) var(--space-sm);
+  font-size: var(--ui-font-micro);
   line-height: 1.4;
   color: var(--muted-foreground);
   background: color-mix(in oklab, var(--surface-2) 82%, transparent);
@@ -1094,7 +1121,7 @@ pre {
   left: 10px;
   z-index: 2;
   font-family: var(--font-mono);
-  font-size: calc(10px * var(--ui-font-scale));
+  font-size: var(--ui-font-micro);
   line-height: 1.4;
   color: var(--muted-foreground);
   pointer-events: none;
@@ -1108,7 +1135,7 @@ pre {
   display: flex;
   justify-content: center;
   overflow-x: auto;
-  padding: 4px 0;
+  padding: var(--space-xs) 0;
 }
 .mermaid-block[data-state="done"] svg {
   max-width: 100%;
@@ -1240,13 +1267,13 @@ pre {
 .md table {
   border-collapse: collapse;
   margin: 0.5em 0;
-  font-size: calc(12px * var(--ui-font-scale));
+  font-size: var(--ui-font-label);
 }
 
 .md th,
 .md td {
   border: 1px solid var(--border);
-  padding: 3px 8px;
+  padding: var(--space-xs) var(--space-sm);
 }
 
 .md th {
@@ -1255,7 +1282,7 @@ pre {
 
 .md blockquote {
   margin: 0.5em 0;
-  padding: 2px 10px;
+  padding: var(--space-2xs) var(--space-md);
   border-left: 2px solid var(--color-primary);
   color: var(--color-muted-foreground);
 }
@@ -1293,16 +1320,6 @@ pre {
   border-radius: 6px;
   max-height: 280px;
   overflow-y: auto;
-}
-
-.user-bubble .md pre::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.user-bubble .md pre::-webkit-scrollbar-thumb {
-  background: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
-  border-radius: 4px;
 }
 
 /* --- composer: attached code-context card (editor right-click) ------------- */
@@ -1460,7 +1477,7 @@ pre {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: var(--space-lg);
   background: var(--color-background);
 }
 
@@ -1472,22 +1489,22 @@ pre {
 }
 
 .splash-title {
-  font-size: calc(20px * var(--ui-font-scale));
+  font-size: var(--ui-font-display);
   font-weight: 800;
   letter-spacing: 0.02em;
 }
 
 .splash-sub {
   font-family: var(--font-mono);
-  font-size: calc(10px * var(--ui-font-scale));
+  font-size: var(--ui-font-micro);
   letter-spacing: 0.28em;
   text-transform: uppercase;
   color: var(--color-muted-foreground);
 }
 
 .splash-hint {
-  margin-top: 10px;
-  font-size: calc(12px * var(--ui-font-scale));
+  margin-top: var(--space-md);
+  font-size: var(--ui-font-label);
   color: var(--color-muted-foreground);
 }
 
@@ -1604,39 +1621,26 @@ pre {
   }
 }
 
-/* --- font-size scale (iflow.uiFontSize) ---------------------------------
-   Tailwind's `text-[Npx]` utilities are emitted inside `@layer utilities`
-   with fixed lengths. These UNLAYERED rules win the cascade (unlayered
-   normal declarations outrank every layer) and multiply each size by the
-   `--ui-font-scale` the webview store writes from `hostSettings`. Keep this
-   list in sync when a new hard-coded text size appears in a component. */
-.text-\[9px\] {
-  font-size: calc(9px * var(--ui-font-scale));
+/* --- semantic type scale (iflow.uiFontSize) ------------------------------
+   One ramp for the whole webview. Components use these classes (or the
+   --ui-font-* variables in plain CSS) instead of arbitrary text-[Npx]
+   utilities. The derived values above multiply by --ui-font-scale, so a
+   preset change stays live without a rebuild. */
+.text-ui-display {
+  font-size: var(--ui-font-display);
 }
-.text-\[9\.5px\] {
-  font-size: calc(9.5px * var(--ui-font-scale));
+.text-ui-title {
+  font-size: var(--ui-font-title);
 }
-.text-\[10px\] {
-  font-size: calc(10px * var(--ui-font-scale));
+.text-ui-body {
+  font-size: var(--ui-font-body);
 }
-.text-\[10\.5px\] {
-  font-size: calc(10.5px * var(--ui-font-scale));
+.text-ui-label {
+  font-size: var(--ui-font-label);
 }
-.text-\[11px\] {
-  font-size: calc(11px * var(--ui-font-scale));
+.text-ui-caption {
+  font-size: var(--ui-font-caption);
 }
-.text-\[11\.5px\] {
-  font-size: calc(11.5px * var(--ui-font-scale));
-}
-.text-\[12px\] {
-  font-size: calc(12px * var(--ui-font-scale));
-}
-.text-\[12\.5px\] {
-  font-size: calc(12.5px * var(--ui-font-scale));
-}
-.text-\[13px\] {
-  font-size: calc(13px * var(--ui-font-scale));
-}
-.text-\[14px\] {
-  font-size: calc(14px * var(--ui-font-scale));
+.text-ui-micro {
+  font-size: var(--ui-font-micro);
 }

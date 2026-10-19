@@ -46,8 +46,8 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
       onClose={() => answer(null)}
       initialFocus="first"
     >
-      <div className="space-y-2.5 px-3 py-2.5">
-        <p className="text-[12px] leading-relaxed text-foreground/90">
+      <div className="space-y-3 px-3 py-3">
+        <p className="text-ui-label leading-relaxed text-foreground/90">
           {t("切换到 API 配置「{0}」后，当前对话如何处理？", pending.profileName)}
         </p>
         <button
@@ -60,8 +60,8 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
         >
           <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-primary" />
           <span className="min-w-0">
-            <span className="block text-[12px] font-semibold text-foreground">{t("停留在当前会话")}</span>
-            <span className="block text-[11px] leading-relaxed text-muted-foreground">
+            <span className="block text-ui-label font-semibold text-foreground">{t("停留在当前会话")}</span>
+            <span className="block text-ui-caption leading-relaxed text-muted-foreground">
               {t("保留当前对话，改用新配置继续")}
             </span>
           </span>
@@ -75,8 +75,8 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
         >
           <PlusCircle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
           <span className="min-w-0">
-            <span className="block text-[12px] font-semibold text-foreground">{t("开启新会话")}</span>
-            <span className="block text-[11px] leading-relaxed text-muted-foreground">
+            <span className="block text-ui-label font-semibold text-foreground">{t("开启新会话")}</span>
+            <span className="block text-ui-caption leading-relaxed text-muted-foreground">
               {t("以新配置开始新对话")}
             </span>
           </span>
@@ -88,7 +88,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
           type="button"
           disabled={answered}
           aria-label={t("取消切换")}
-          className="press rounded-lg border border-border px-2.5 py-1 text-[11px] text-muted-foreground transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg border border-border px-2.5 py-1 text-ui-caption text-muted-foreground transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(null)}
         >
           {t("取消")}

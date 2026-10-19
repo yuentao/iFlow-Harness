@@ -6,6 +6,22 @@ import "./styles.css";
 
 setupHostListener();
 
+// Overlay scrollbars: keep the thumb hidden until the user actually scrolls.
+// Scroll events do not bubble, so listen in the capture phase; the debounce
+// covers element-level and document-level scrollers alike.
+let scrollIdleTimer: number | undefined;
+document.addEventListener(
+  "scroll",
+  () => {
+    document.documentElement.classList.add("scrolling");
+    window.clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = window.setTimeout(() => {
+      document.documentElement.classList.remove("scrolling");
+    }, 700);
+  },
+  { capture: true, passive: true },
+);
+
 // Wire behavior (probed, browser): Ctrl/Cmd+A inside a webview panel runs the
 // browser's select-all and sweeps the entire transcript into one selection.
 // Block it globally, but let inputs (composer textarea etc.) keep native

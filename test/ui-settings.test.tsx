@@ -106,7 +106,7 @@ afterEach(() => {
 it("renders the font-size and density presets in Appearance settings", () => {
   expect(container.textContent).toContain("字号");
   expect(container.textContent).toContain("密度");
-  expect(container.textContent).toContain("调整面板中文字的大小");
+  expect(container.textContent).toContain("调整面板整体字号");
 });
 
 

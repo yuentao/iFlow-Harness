@@ -90,21 +90,21 @@ export function MemoryQuickAdd({
           <button className={BTN} disabled={saving} onClick={onClose}>
             {t("取消")}
           </button>
-          <span className="ml-auto text-[10.5px] text-muted-foreground">
+          <span className="ml-auto text-ui-micro text-muted-foreground">
             {t("保存后新建会话或重启 CLI 生效")}
           </span>
         </div>
       }
     >
-      <div className="space-y-2 px-3 py-2.5">
+      <div className="space-y-2 px-3 py-3">
         {done && (
-          <div className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-[11px] text-success">
+          <div className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-caption text-success">
             <Check className="size-3 shrink-0" />
             {t("已加入记忆（新会话生效）")}
           </div>
         )}
         {error && (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-caption text-destructive">
             {error}
           </div>
         )}
@@ -125,12 +125,12 @@ export function MemoryQuickAdd({
           >
             {t("项目")}
           </button>
-          <span className="ml-1 text-[10.5px] text-muted-foreground">
+          <span className="ml-1 text-ui-micro text-muted-foreground">
             {scope === "global" ? t("保存到全局记忆") : t("保存到项目记忆")}
           </span>
         </div>
         <label className="flex flex-col gap-0.5">
-          <span className="text-[11.5px] text-muted-foreground">{t("要记住的内容（可编辑）")}</span>
+          <span className="text-ui-caption text-muted-foreground">{t("要记住的内容（可编辑）")}</span>
           <textarea
             className={`${INPUT} min-h-[120px] w-full resize-y`}
             value={fact}
@@ -138,7 +138,7 @@ export function MemoryQuickAdd({
             onChange={(event) => setFact(event.target.value)}
           />
         </label>
-        <p className="text-[10.5px] leading-relaxed text-muted-foreground/85">
+        <p className="text-ui-micro leading-relaxed text-muted-foreground/85">
           {t("记忆会随每次请求发送给模型，请勿写入密钥。")}
         </p>
       </div>

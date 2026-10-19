@@ -174,7 +174,7 @@ export function ModalShell({
           ) : (
             icon
           )}
-          <span className="min-w-0 truncate text-[12px] font-semibold">{title}</span>
+          <span className="min-w-0 truncate text-ui-title font-semibold">{title}</span>
           {dismissible && (
             <button
               type="button"
@@ -248,7 +248,7 @@ export function CountdownBar({
         />
       </div>
       <span
-        className={`shrink-0 font-mono text-[11px] tabular-nums transition-colors duration-300 ${textClass}`}
+        className={`shrink-0 font-mono text-ui-caption tabular-nums transition-colors duration-300 ${textClass}`}
       >
         {formatCountdown(remainingMs)}
       </span>
@@ -297,19 +297,23 @@ export function Chip({
   tone = "muted",
   className = "",
   title,
+  truncate = false,
 }: {
   children: ReactNode;
   tone?: "muted" | "success" | "warning" | "danger" | "primary" | "info";
   className?: string;
   /** Optional hover explanation — a chip is too small to carry its own caveat. */
   title?: string;
+  /** Let the chip shrink and ellipsize its label. Use for dynamic values in
+   * tight rows (e.g. a subagent type); static chips keep their shrink-0. */
+  truncate?: boolean;
 }) {
   return (
     <span
       title={title}
-      className={`chip-fade inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-[2px] text-[11px] font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
+      className={`chip-fade inline-flex ${truncate ? "min-w-0" : "shrink-0"} items-center gap-1 rounded-full px-2 py-0.5 text-ui-caption font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
     >
-      {children}
+      {truncate ? <span className="truncate">{children}</span> : children}
     </span>
   );
 }
@@ -356,7 +360,7 @@ export function HelpTip({
         <span
           id={id}
           role="tooltip"
-          className={`absolute top-full z-50 mt-1 w-60 max-w-[calc(100vw-48px)] rounded-lg border border-border bg-card px-2.5 py-2 text-[11px] font-normal leading-relaxed text-foreground shadow-panel ${
+          className={`absolute top-full z-50 mt-1 w-60 max-w-[calc(100vw-48px)] rounded-lg border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-panel ${
             align === "left" ? "left-0" : "right-0"
           }`}
         >
@@ -376,16 +380,16 @@ export function HelpTip({
  * so a family-wide change is a single edit.
  */
 export const BTN_INPUT =
-  "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-[12.5px] text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
+  "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-ui-body text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
 export const BTN =
-  "press rounded-lg border border-border bg-editor px-2.5 py-1 text-[11px] font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
+  "press rounded-lg border border-border bg-editor px-2.5 py-1 text-ui-caption font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
 export const SAVE_BTN =
-  "press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
+  "press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
 /** Canvas-surface chip button (composer controls): lifts like transcript
  * cards. whitespace-nowrap: a narrow panel must never squeeze a label into
  * vertical text (e.g. 智/能 stacked) — the row wraps instead (flex-wrap). */
 export const CANVAS_BTN =
-  "card-lift press inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-surface/80 px-2 py-1 text-[11px] text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
+  "card-lift press inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
 /** Compact icon-only button (header cluster). */
 export const BTN_ICON =
   "rounded-md p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40";
@@ -395,7 +399,7 @@ export function FileRef({ path, line, toolCallId }: { path: string; line?: numbe
   const send = useChat((s) => s.send);
   return (
     <button
-      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm font-mono text-[11px] text-info underline decoration-info/30 underline-offset-2 hover:decoration-info"
+      className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm font-mono text-ui-caption text-info underline decoration-info/30 underline-offset-2 hover:decoration-info"
       title={path}
       onClick={(e) => {
         e.preventDefault();
@@ -446,12 +450,12 @@ export function ConfirmDialog({
 }) {
   return createPortal(
     <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog">
-      <div className="px-3.5 py-3 text-[12px] leading-relaxed text-foreground/90">{message}</div>
+      <div className="px-4 py-3 text-ui-label leading-relaxed text-foreground/90">{message}</div>
       <div className="flex items-center justify-end gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2">
         <button
           data-autofocus
           type="button"
-          className="press rounded-lg border border-border bg-editor px-3 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-accent"
+          className="press rounded-lg border border-border bg-editor px-3 py-1 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
           onClick={onCancel}
         >
           {t("取消")}
@@ -463,7 +467,7 @@ export function ConfirmDialog({
                 type="button"
                 title={a.title}
                 disabled={a.disabled}
-                className={`press rounded-lg border px-3 py-1 text-[11.5px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`press rounded-lg border px-3 py-1 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                   a.variant === "primary"
                     ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
                     : a.variant === "danger"
@@ -478,7 +482,7 @@ export function ConfirmDialog({
           : (
             <button
               type="button"
-              className="press rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1 text-[11.5px] font-semibold text-destructive transition-colors hover:bg-destructive/20"
+              className="press rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
               onClick={onConfirm}
             >
               {confirmLabel ?? t("删除")}

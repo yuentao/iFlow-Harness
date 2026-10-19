@@ -144,13 +144,13 @@ export function DiffView({
       <div className="flex items-center gap-2 px-3 py-2">
         <FileCode2 className="size-3.5 shrink-0 text-primary" />
         <FileRef path={diff.path} toolCallId={toolCallId} />
-        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px]">
+        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-ui-caption">
           {addCount > 0 && <span className="text-diff-add-fg">+{addCount}</span>}
           {delCount > 0 && <span className="text-diff-del-fg">−{delCount}</span>}
         </span>
       </div>
       <div
-        className={`diff-scroll mx-2.5 mb-2.5 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-[11px] leading-[1.7] ${maxHeightClass}`}
+        className={`diff-scroll mx-3 mb-3 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-ui-caption leading-[1.7] ${maxHeightClass}`}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
@@ -163,7 +163,7 @@ export function DiffView({
             <button
               key={i}
               type="button"
-              className="flex w-full items-center gap-1.5 px-3 py-0.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+              className="flex w-full items-center gap-1.5 px-3 py-0.5 text-left text-ui-caption text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
               title={expanded.has(row.win ?? -1) ? t("收起") : t("展开上下文")}
               aria-expanded={expanded.has(row.win ?? -1)}
               onClick={() => toggleGap(row.win ?? -1)}
@@ -224,7 +224,7 @@ export function DiffView({
         {hiddenRows > 0 && (
           <button
             type="button"
-            className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+            className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-ui-caption text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
             onClick={() => setRenderCap((c) => c + RENDER_ROWS_STEP)}
           >
             <Ellipsis className="size-3 shrink-0" />
@@ -235,7 +235,7 @@ export function DiffView({
       {editable && hunkCount > 0 && (
         <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2">
           <button
-            className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
+            className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
             disabled={!dirty || hunkActions?.busy}
             title={t("将回退的块恢复为编辑前内容，保留其余改动")}
             onClick={() => hunkActions?.onApply([...keep])}
@@ -244,7 +244,7 @@ export function DiffView({
           </button>
           {dirty && (
             <button
-              className="press inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+              className="press inline-flex items-center gap-1 text-ui-caption text-muted-foreground transition-colors hover:text-foreground"
               onClick={() => setKeep(new Array(hunkCount).fill(true))}
             >
               <Undo2 className="size-2.5" /> {t("全部保留")}
@@ -271,7 +271,7 @@ function HunkHeader({
 }) {
   return (
     <div
-      className={`flex items-center gap-2 border-y border-border/40 px-3 py-0.5 text-[11px] ${
+      className={`flex items-center gap-2 border-y border-border/40 px-3 py-0.5 text-ui-caption ${
         kept ? "bg-surface/50 text-muted-foreground" : "bg-diff-del/40 text-diff-del-fg"
       }`}
     >

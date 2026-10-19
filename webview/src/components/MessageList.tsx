@@ -215,13 +215,13 @@ function OutputDetails({
   const display = overDisplayCap ? output.slice(0, MAX_TOOL_OUTPUT_DISPLAY_CHARS) : output;
   const truncated =
     truncatedChars && truncatedChars > 0 ? (
-      <span className="ml-1.5 shrink-0 font-mono text-[11px] text-warning">
+      <span className="ml-1.5 shrink-0 font-mono text-ui-caption text-warning">
         {t("已截断 {0} 字符", truncatedChars.toLocaleString())}
       </span>
     ) : null;
   const recoverRow =
     truncatedChars || overDisplayCap ? (
-      <div className="flex items-center gap-3 px-3 pb-1.5 text-[11px]">
+      <div className="flex items-center gap-3 px-3 pb-1.5 text-ui-caption">
         {overDisplayCap && !truncatedChars && (
           <span className="font-mono text-muted-foreground">
             {t("仅渲染前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
@@ -249,7 +249,7 @@ function OutputDetails({
   if (lineCount < 3) {
     return (
       <>
-        <pre className="mx-2.5 mb-2.5 rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+        <pre className="mx-3 mb-3 rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
           {display}
           {truncated}
         </pre>
@@ -264,7 +264,7 @@ function OutputDetails({
           setOpenedOnce(true);
           setOpen((v) => !v);
         }}
-        className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-ui-caption text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} />
         {t("操作输出")}
@@ -273,7 +273,7 @@ function OutputDetails({
       {recoverRow}
       <Collapse open={open}>
         {openedOnce && (
-          <pre className="mx-2.5 mb-2.5 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          <pre className="mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
             {display}
           </pre>
         )}
@@ -315,7 +315,7 @@ function InputDetails({ input, title }: { input: string; title: string }) {
   const summary = summarizeToolInput(input);
   const lineCount = input.trimEnd().split("\n").length;
   const body = (
-    <pre className="tool-card-raw mx-2.5 mb-2.5 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+    <pre className="tool-card-raw mx-3 mb-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
       {input}
     </pre>
   );
@@ -399,11 +399,11 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <span className="tool-icon" title={detail}>
           <Icon className="size-3 shrink-0" />
         </span>
-        <span className="tool-card-title min-w-0 truncate text-[12px] font-semibold" title={detail}>
+        <span className="tool-card-title min-w-0 truncate text-ui-label font-semibold" title={detail}>
           {title}
         </span>
         <span
-          className={`tool-card-detail min-w-0 truncate text-[11px] ${commandLine ? "font-mono" : ""} text-muted-foreground`}
+          className={`tool-card-detail min-w-0 truncate text-ui-caption ${commandLine ? "font-mono" : ""} text-muted-foreground`}
           title={commandLine || detail}
         >
           {commandLine || detail}
@@ -470,14 +470,14 @@ function ToolCard({ block }: { block: ToolBlock }) {
               {completedWithDiff && (
                 <>
                   <button
-                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
+                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
                     title={t("将该文件恢复为编辑前内容")}
                     onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
                   >
                     <Undo2 className="size-3" /> {t("回退此改动")}
                   </button>
                   <button
-                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
+                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
                     title={t("在 VSCode diff 视图中查看该变更")}
                     onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
                   >
@@ -590,7 +590,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
     ) : s === "in_progress" ? (
       <Loader2 className="size-3.5 shrink-0 animate-spin text-info" />
     ) : (
-      <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
+      <span className="mt-1 size-3 shrink-0 rounded-full border border-border" />
     );
 
   const accent = agentAccent(block.agentType);
@@ -601,13 +601,15 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
         <span className="tool-icon">
           <Bot className={`size-3 shrink-0 ${accent.icon}`} />
         </span>
-        <span className="tool-card-title min-w-0 truncate text-[12px] font-semibold">{localizeStepTitle(block.title)}</span>
+        <span className="tool-card-title min-w-0 truncate text-ui-label font-semibold">{localizeStepTitle(block.title)}</span>
         {/* min-w-0 + clip: agentType comes from an uncapped regex capture of
             the task title; a pathological one gets clipped instead of evicting
             the status chip. */}
         {block.agentType && (
-          <span className="flex min-w-0 items-center overflow-hidden">
-            <Chip tone="muted">{block.agentType}</Chip>
+          <span className="flex max-w-[9rem] shrink-0 items-center overflow-hidden @max-[380px]:hidden">
+            <Chip tone="muted" truncate title={block.agentType} className="max-w-full">
+              {block.agentType}
+            </Chip>
           </span>
         )}
         <span className="ml-auto shrink-0">{statusChip}</span>
@@ -619,7 +621,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
           </button>
         )}
       </div>
-      <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-ui-caption text-muted-foreground">
         <span title={t("子代理 token 为转录估算，包含子代理")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
@@ -627,9 +629,9 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
       </div>
       {block.entries.length > 0 && (
         <div className="border-t border-border/60 px-3 py-2">
-          <ul className="space-y-1.5">
+          <ul className="space-y-2">
             {visible.map((t2) => (
-              <li key={t2.toolCallId} className="flex items-center gap-2 text-[12px]">
+              <li key={t2.toolCallId} className="flex items-center gap-2 text-ui-label">
                 {stepIcon(t2.status)}
                 <span className={`min-w-0 truncate ${t2.status === "completed" ? "text-muted-foreground" : "text-foreground"}`}>
                   {localizeStepTitle(t2.title || t2.toolName)}
@@ -638,7 +640,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
             ))}
           </ul>
           {children.length > 0 && (
-            <div className="mt-2 space-y-1.5 border-l border-border/70 pl-2">
+            <div className="mt-2 space-y-2 border-l border-border/70 pl-2">
               {children.map((child) => <SubAgentCard key={child.id ?? child.agentId} block={child} />)}
             </div>
           )}
@@ -647,7 +649,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
               setTranscriptMounted(true);
               setTranscriptOpen((v) => !v);
             }}
-            className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            className="mt-2 flex items-center gap-1 text-ui-caption text-muted-foreground hover:text-foreground"
           >
             {transcriptOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
             {transcriptOpen ? t("收起") : t("只读转录")}
@@ -657,7 +659,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
                 read-only transcript used to pin every nested entry's output
                 in the DOM — hundreds of entries per SubAgent card. */}
             {transcriptMounted && (
-              <div className="mt-1 space-y-1 border-l border-border/50 pl-2 text-[11px] text-muted-foreground">
+              <div className="mt-1 space-y-1 border-l border-border/50 pl-2 text-ui-caption text-muted-foreground">
                 {block.entries.map((entry, index) => <ReadOnlySubAgentEntry key={entry.id ?? `${entry.kind}-${index}`} block={entry} />)}
               </div>
             )}
@@ -665,7 +667,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
           {overflow && (
             <button
               onClick={() => setExpanded((v) => !v)}
-              className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              className="mt-2 flex items-center gap-1 text-ui-caption text-muted-foreground hover:text-foreground"
             >
               {expanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
               {expanded ? t("收起") : t("显示更早 {0} 条", String(hiddenCount))}
@@ -717,17 +719,17 @@ function ThoughtCard({
           userTouched.current = true;
           setOpen((v) => !v);
         }}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} className="size-3.5" />
         <Brain className="size-3.5 text-primary" />
         {t("思考过程")}
         {block.evicted && (
-          <span className="text-[10px] text-muted-foreground/70">{t("内容已释放")}</span>
+          <span className="text-ui-micro text-muted-foreground/70">{t("内容已释放")}</span>
         )}
       </button>
       <Collapse open={open}>
-        <div className="border-t border-border/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
+        <div className="border-t border-border/60 px-3 py-2 text-ui-label leading-relaxed text-muted-foreground">
           <Markdown text={block.text} />
         </div>
       </Collapse>
@@ -745,15 +747,15 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   // inert. Stale clicks (block gone) are dropped host-side silently.
   const tickable = Boolean(block.id);
   return (
-    <div className="stream-in card-lift rounded-xl border border-border bg-card px-3 py-2.5 shadow-card">
-      <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
+    <div className="stream-in card-lift rounded-xl border border-border bg-card px-3 py-3 shadow-card">
+      <div className="mb-2 flex items-center gap-2 text-ui-label font-semibold">
         <CircleDot className="size-3.5 text-primary" />
         {t("任务清单")}
-        <span aria-live="polite" className="ml-auto font-mono text-[11px] text-muted-foreground">
+        <span aria-live="polite" className="ml-auto font-mono text-ui-caption text-muted-foreground">
           {done} / {total}
         </span>
       </div>
-      <ul className="space-y-1.5">
+      <ul className="space-y-2">
         {block.entries.map((entry, i) => {
           const clickable = tickable && block.id && entry.status !== "in_progress";
           const label = (
@@ -763,7 +765,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
               ) : entry.status === "in_progress" ? (
                 <Loader2 className="size-3.5 shrink-0 translate-y-[1px] animate-spin text-primary" />
               ) : (
-                <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
+                <span className="mt-1 size-3 shrink-0 rounded-full border border-border" />
               )}
               <span className={`min-w-0 break-words ${entry.status === "completed" ? "text-muted-foreground line-through" : "text-foreground"}`}>
                 {entry.content}
@@ -771,7 +773,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
             </>
           );
           return (
-            <li key={i} className={`flex items-start gap-2 text-[12px] status-${entry.status ?? "pending"}`}>
+            <li key={i} className={`flex items-start gap-2 text-ui-label status-${entry.status ?? "pending"}`}>
               {clickable ? (
                 <button
                   type="button"
@@ -863,14 +865,14 @@ function UserMessage({
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
-      <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-[13px] leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
+      <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-ui-body leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
         {draft !== null ? (
           /* M4 P1-9 inline editor: re-sending truncates this turn and
              everything after it (checkpoint restore first when available),
              so the editor replaces the bubble rather than cloning it. */
           <div className="w-full min-w-[280px]" onClick={(e) => e.stopPropagation()}>
             <textarea
-              className="max-h-64 min-h-16 w-full resize-y rounded-lg border border-border bg-panel/80 px-2 py-1.5 text-[13px] leading-relaxed text-foreground outline-none focus:border-primary/60"
+              className="max-h-64 min-h-16 w-full resize-y rounded-lg border border-border bg-panel/80 px-2 py-1.5 text-ui-body leading-relaxed text-foreground outline-none focus:border-primary/60"
               value={draft}
               rows={Math.min(12, Math.max(3, draft.split("\n").length + 1))}
               onChange={(e) => setDraft(e.target.value)}
@@ -884,18 +886,18 @@ function UserMessage({
                 }
               }}
             />
-            <div className="mt-1.5 flex items-center justify-end gap-1.5">
-              <span className="mr-auto text-[11px] text-muted-foreground">
+            <div className="mt-2 flex items-center justify-end gap-1.5">
+              <span className="mr-auto text-ui-caption text-muted-foreground">
                 {checkpoint && !checkpoint.partial ? t("重发将先回滚该轮文件变更并删除其后的对话") : t("重发将删除该消息及其后所有对话")}
               </span>
               <button
-                className="press rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                className="press rounded-md px-2 py-0.5 text-ui-caption font-medium text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
                 onClick={cancelEdit}
               >
                 {t("取消")}
               </button>
               <button
-                className="press rounded-md bg-primary px-2.5 py-0.5 text-[11px] font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+                className="press rounded-md bg-primary px-2.5 py-0.5 text-ui-caption font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
                 disabled={!draft.trim()}
                 title={t("重发")}
                 onClick={submitEdit}
@@ -908,7 +910,7 @@ function UserMessage({
           <>
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
+          <div className="mt-2 flex flex-wrap gap-1.5">
             {block.images.map((src, i) => (
               <img
                 key={i}
@@ -922,7 +924,7 @@ function UserMessage({
           </div>
         )}
         {block.evicted && (!block.images || block.images.length === 0) && (
-          <div className="mt-1.5">
+          <div className="mt-2">
             <span title={t("为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录")}>
               <Chip tone="muted">{t("附件图片已释放")}</Chip>
             </span>
@@ -931,7 +933,7 @@ function UserMessage({
         {/* subtle inner highlight so the bubble reads as a solid plane */}
         <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-inner" />
         {(canDelete || showRollback) && (
-          <div className="absolute -top-2.5 right-1 z-10 flex items-center gap-1">
+          <div className="absolute -top-3 right-1 z-10 flex items-center gap-1">
             {showRollback && (
               <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
                 <button
@@ -1027,7 +1029,7 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
       <button
         onClick={() => hasSummary && setOpen((v) => !v)}
         disabled={!hasSummary}
-        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] ${
+        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-ui-label ${
           hasSummary ? "text-muted-foreground hover:text-foreground" : "text-muted-foreground"
         }`}
       >
@@ -1037,7 +1039,7 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
       </button>
       <Collapse open={open && hasSummary}>
         <div className="border-t border-border/60 px-3 py-2">
-          <div className="max-h-64 overflow-y-auto text-[12px] leading-relaxed text-muted-foreground">
+          <div className="max-h-64 overflow-y-auto text-ui-label leading-relaxed text-muted-foreground">
             {block.summary !== null && <Markdown text={block.summary} />}
           </div>
         </div>
@@ -1072,12 +1074,12 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
     <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-[12px] text-muted-foreground hover:text-foreground"
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} />
         <span className="shrink-0 font-medium text-foreground/75">{t("自动注入")}</span>
         {block.tokens !== undefined && (
-          <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
+          <span className="shrink-0 font-mono text-ui-micro text-muted-foreground">
             ≈ {block.tokens.toLocaleString()} tokens
           </span>
         )}
@@ -1107,7 +1109,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
       <Collapse open={open}>
         <div className="border-t border-border/60 px-3 py-2">
           {evicted && (
-            <div className="mb-2 text-[11px] opacity-60">
+            <div className="mb-2 text-ui-caption opacity-60">
               <Info className="mr-1 inline size-3" />
               {t("内容已释放")}
             </div>
@@ -1119,7 +1121,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
               ) : item.kind === "mcp" ? (
                 <div
                   key={idx}
-                  className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80"
+                  className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption font-medium text-foreground/80"
                 >
                   <Plug className="size-3 shrink-0 text-muted-foreground" />
                   <span className="shrink-0">{item.label}</span>
@@ -1127,15 +1129,15 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
                 </div>
               ) : (
                 <div key={idx} className="min-w-0">
-                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption font-medium text-foreground/80">
                     <span className="shrink-0">{item.label}</span>
                     {item.path && (
-                      <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">{item.path}</span>
+                      <span className="min-w-0 truncate font-mono text-ui-micro text-muted-foreground">{item.path}</span>
                     )}
                     <span className="shrink-0 text-muted-foreground">{t("{0} 字符", item.content.length)}</span>
                   </div>
                   {item.content && (
-                    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
                       {item.content}
                     </pre>
                   )}
@@ -1162,11 +1164,11 @@ function SystemPromptSections({ content }: { content: string }) {
     <div className="flex flex-col gap-3">
       {sections.map((s, i) => (
         <div key={i} className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-medium text-foreground/80">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption font-medium text-foreground/80">
             {s.kind === "context-file" ? (
               <>
                 <FileText className="size-3 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 truncate font-mono text-[10.5px]">{s.path}</span>
+                <span className="min-w-0 truncate font-mono text-ui-micro">{s.path}</span>
               </>
             ) : (
               <span className="shrink-0">{s.kind === "core" ? t("核心提示词") : t("记忆")}</span>
@@ -1178,7 +1180,7 @@ function SystemPromptSections({ content }: { content: string }) {
             </span>
           </div>
           {s.kind !== "core" && (
-            <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
               {s.content}
             </pre>
           )}
@@ -1251,7 +1253,7 @@ const BlockView = memo(function BlockView({
       // copy/regenerate actions (it is not an assistant reply).
       if (block.system) {
         return (
-          <div className="system-note stream-in pl-0.5 text-[12px] leading-relaxed text-muted-foreground">
+          <div className="system-note stream-in pl-0.5 text-ui-label leading-relaxed text-muted-foreground">
             <Markdown text={block.text} />
           </div>
         );
@@ -1267,7 +1269,7 @@ const BlockView = memo(function BlockView({
               painted a full-width rectangular band behind the avatar (no
               radius/padding) and read as a disjointed stripe. */}
           <div
-            className={`assistant-body text-[13px] leading-relaxed text-foreground/90 ${
+            className={`assistant-body text-ui-body leading-relaxed text-foreground/90 ${
               isLatest && turnActive ? "stream-shimmer" : ""
             }`}
           >
@@ -1678,7 +1680,7 @@ function MessageListInner({ state }: { state: SessionState }) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div className="message-scroll h-full overflow-y-auto px-3 pb-3.5 pt-3" ref={scrollRef} onScroll={onScroll}>
+      <div className="message-scroll h-full overflow-y-auto px-3 pb-4 pt-3" ref={scrollRef} onScroll={onScroll}>
         {/* --pending-card-h: height of the floating approval/question/plan card
             overlay (set by App's ResizeObserver on the shared wrapper). The
             card floats over this scroller, so the content reserves its height
@@ -1691,10 +1693,10 @@ function MessageListInner({ state }: { state: SessionState }) {
                 {/* Real brand mark, consistent with the header logo */}
                 <img src={logo} alt="" className="size-6" />
               </div>
-              <div className="text-[14px] font-semibold text-foreground">
+              <div className="text-ui-title font-semibold text-foreground">
                 {t("准备好了，向 iFlow 提问吧")}
               </div>
-              <p className="max-w-[300px] text-[11.5px] leading-relaxed text-muted-foreground">
+              <p className="max-w-[300px] text-ui-caption leading-relaxed text-muted-foreground">
                 {t("下发任务、粘贴代码上下文，或直接描述你想实现的功能")}
               </p>
               {/* P0-4: example prompts lower the first-message barrier — a
@@ -1703,14 +1705,14 @@ function MessageListInner({ state }: { state: SessionState }) {
                 {EXAMPLE_PROMPTS.map((ex) => (
                   <button
                     key={ex}
-                    className="card-lift press rounded-xl border border-border bg-card/80 px-3 py-1.5 text-left text-[11.5px] text-foreground/90 shadow-card transition-colors hover:border-primary/40 hover:bg-surface-2"
+                    className="card-lift press rounded-xl border border-border bg-card/80 px-3 py-1.5 text-left text-ui-caption text-foreground/90 shadow-card transition-colors hover:border-primary/40 hover:bg-surface-2"
                     onClick={() => useChat.getState().requestDraft(t(ex))}
                   >
                     {t(ex)}
                   </button>
                 ))}
               </div>
-              <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground/80">
+              <p className="mt-3 text-ui-caption leading-relaxed text-muted-foreground/80">
                 {t("/ 命令 · @ 文件 · @problems · @git · 粘贴文件添加附件")}
               </p>
             </div>
@@ -1722,7 +1724,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             <div ref={sentinelRef} className="flex justify-center">
               <button
                 onClick={expandOlder}
-                className="card-lift press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-colors hover:bg-surface hover:text-foreground"
+                className="card-lift press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-colors hover:bg-surface hover:text-foreground"
               >
                 <ChevronUp className="size-3" />
                 {t("展开更早 {0} 条消息", start)}
@@ -1768,7 +1770,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             // rhythm (right-aligned user bubbles alternating with left
             // assistant lines, varied widths) so "more coming" reads as
             // conversation, not a striped table; purely decorative.
-            <div aria-hidden="true" className="pointer-events-none mt-3 flex flex-col gap-2.5 opacity-60">
+            <div aria-hidden="true" className="pointer-events-none mt-3 flex flex-col gap-3 opacity-60">
               {Array.from({ length: Math.min(8, Math.max(5, Math.ceil(total / 4))) }, (_, i) => {
                 const row = SKELETON_ROWS[i % SKELETON_ROWS.length]!;
                 return (
@@ -1794,11 +1796,11 @@ function MessageListInner({ state }: { state: SessionState }) {
               bubble above (measured 0px vs the 14px rhythm elsewhere). */}
           {(state.queue ?? []).map((q) => (
             <div key={q.id} className="cv-block stream-in flex justify-end">
-              <div className="flex max-w-[85%] items-start gap-1.5 rounded-2xl rounded-br-md border border-dashed border-border bg-surface/40 px-3 py-2 text-[13px] leading-relaxed text-muted-foreground">
+              <div className="flex max-w-[85%] items-start gap-1.5 rounded-2xl rounded-br-md border border-dashed border-border bg-surface/40 px-3 py-2 text-ui-body leading-relaxed text-muted-foreground">
                 <span className="min-w-0 whitespace-pre-wrap break-words opacity-70">
                   {q.text || t("（附件消息）")}
                 </span>
-                <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-1.5 py-[1px] text-[11px] font-medium text-primary">
+                <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-full bg-primary/15 px-1.5 py-px text-ui-caption font-medium text-primary">
                   <ListOrdered className="size-2.5" /> {t("排队中")}
                 </span>
               </div>
@@ -1818,7 +1820,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
             >
               <div
-                className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-[11.5px] font-medium shadow-lg ${
+                className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-ui-caption font-medium shadow-lg ${
                   mergedWarn ? "border border-warning/50 bg-warning/15 text-warning backdrop-blur-md" : "bg-primary text-primary-foreground"
                 }`}
               >
@@ -1844,7 +1846,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               className="pointer-events-none sticky z-10 flex justify-center py-1.5"
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
             >
-              <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-[11.5px] font-medium text-primary-foreground shadow-lg">
+              <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-ui-caption font-medium text-primary-foreground shadow-lg">
                 <Loader2 className="size-3 animate-spin" />
                 {t("正在恢复历史会话…")}
               </div>
@@ -1854,7 +1856,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       </div>
       {showJump && !editingBlockId && (
         <button
-          className="card-lift press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-foreground shadow-card hover:bg-surface-2"
+          className="card-lift press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card hover:bg-surface-2"
           style={{ bottom: "calc(0.75rem + var(--pending-card-h, 0px))" }}
           onClick={() => {
             stickToBottom.current = true;
@@ -1966,7 +1968,7 @@ function ToastPill({
         onClick={() =>
           useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
         }
-        className="ml-1 shrink-0 rounded-md border border-current/40 px-1.5 py-0.5 text-[11px] font-semibold opacity-90 transition-opacity hover:opacity-100"
+        className="ml-1 shrink-0 rounded-md border border-current/40 px-1.5 py-0.5 text-ui-caption font-semibold opacity-90 transition-opacity hover:opacity-100"
       >
         {toast.action.label}
       </button>
@@ -1977,7 +1979,7 @@ function ToastPill({
   if (toast.sticky) {
     return (
       <div
-        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-ui-caption shadow-card backdrop-blur-md ${tone}`}
       >
         <button
           type="button"
@@ -2007,7 +2009,7 @@ function ToastPill({
   if (toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent) {
     return (
       <div
-        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-ui-caption shadow-card backdrop-blur-md ${tone}`}
       >
         {body}
         {actionButton}
@@ -2020,7 +2022,7 @@ function ToastPill({
     // whole action silently disappears (memory-review toasts hit this path).
     return (
       <div
-        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+        className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-ui-caption shadow-card backdrop-blur-md ${tone}`}
       >
         {body}
         {actionButton}
@@ -2030,7 +2032,7 @@ function ToastPill({
   return (
     <button
       onClick={() => dismiss(toast.id)}
-      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] shadow-card backdrop-blur-md ${tone}`}
+      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-ui-caption shadow-card backdrop-blur-md ${tone}`}
     >
       {body}
     </button>

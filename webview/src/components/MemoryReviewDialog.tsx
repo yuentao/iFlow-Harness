@@ -75,14 +75,14 @@ export function MemoryReviewDialog({
           <button className={BTN} onClick={() => close(true)}>
             {t("全部忽略")}
           </button>
-          <span className="ml-auto text-[10.5px] text-muted-foreground">
+          <span className="ml-auto text-ui-micro text-muted-foreground">
             {t("自动提取只生成候选，确认后才会写入记忆")}
           </span>
         </div>
       }
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2.5">
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3">
+        <p className="text-ui-caption leading-relaxed text-muted-foreground">
           {t("以下是模型从最近对话中提取的长期记忆候选。请勾选要保留的内容，并确认作用域。")}
         </p>
         {candidates.map((candidate) => (
@@ -100,7 +100,7 @@ export function MemoryReviewDialog({
               }
             />
             <span className="min-w-0 flex-1">
-              <span className="block break-words text-[12px] leading-relaxed text-foreground">
+              <span className="block break-words text-ui-label leading-relaxed text-foreground">
                 {candidate.text}
               </span>
               <span className="mt-1 flex flex-wrap items-center gap-1">
@@ -110,7 +110,7 @@ export function MemoryReviewDialog({
                 </span>
                 <select
                   aria-label={`${t("记忆作用域")}: ${candidate.text.slice(0, 40)}`}
-                  className={`${INPUT} ml-auto w-auto py-0.5 text-[10.5px]`}
+                  className={`${INPUT} ml-auto w-auto py-0.5 text-ui-micro`}
                   value={scopes[candidate.id] ?? candidate.scope}
                   onChange={(event) =>
                     setScopes((current) => ({

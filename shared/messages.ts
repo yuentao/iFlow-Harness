@@ -1654,6 +1654,9 @@ export type WebviewToHost =
   /** M4 P1-8: toggle a session's pinned / archived flags (persisted with the
    * session index; the switcher renders archived ones in a second section). */
   | { type: "setSessionFlags"; sessionId: string; pinned: boolean; archived: boolean }
+  /** Rename a session's switcher label (persisted with the index and the
+   * extension transcript, so a later restore keeps the user's title). */
+  | { type: "renameSession"; sessionId: string; label: string }
   /** Re-read the API profile list (SecretStorage + CLI settings.json) when the
    * profile dropdown / auth card opens — external tools rewrite settings.json
    * behind our back, so the shown list must be recomputed on open. */

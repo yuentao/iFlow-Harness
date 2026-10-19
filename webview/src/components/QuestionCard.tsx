@@ -95,7 +95,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <HelpCircle className="size-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 需要你的回答")}</span>
+        <span className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 需要你的回答")}</span>
         <span className="ml-auto">
           <HelpTip label={t("提问说明")} align="right">
             <span className="block space-y-1">
@@ -114,15 +114,15 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
           The cap is viewport-relative minus fixed slack for the editor
           header + Composer + this card's own chrome, so only the questions
           scroll while title / countdown / actions stay visible. */}
-      <div className="max-h-[max(140px,calc(100vh-240px))] space-y-3 overflow-y-auto px-3 py-2.5 text-[12px]">
+      <div className="max-h-[max(140px,calc(100vh-240px))] space-y-3 overflow-y-auto px-3 py-3 text-ui-label">
         {pending.questions.map((q) => {
           const picks = selected[q.header] ?? new Set<string>();
           const isCustomOpen = customOpen[q.header] ?? false;
           const vertical = q.options.some((opt) => (opt.description?.length ?? 0) > LONG_DESCRIPTION_CHARS);
           return (
             <div key={q.header}>
-              <p className="mb-1.5 flex items-start gap-1.5 leading-snug">
-                <span className="mt-px shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+              <p className="mb-2 flex items-start gap-1.5 leading-snug">
+                <span className="mt-px shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-ui-caption font-medium text-primary">
                   {q.header}
                 </span>
                 <span className="min-w-0 text-foreground/90">{q.question}</span>
@@ -143,7 +143,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                       disabled={answered}
                       title={opt.description}
                       aria-label={opt.description ? t("{0}：{1}", opt.label, opt.description) : opt.label}
-                      className={`press flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                      className={`press flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                         vertical ? "w-full" : "max-w-[min(260px,100%)]"
                       } ${
                         active
@@ -168,7 +168,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 })}
                 <button
                   disabled={answered}
-                  className={`press flex items-center gap-1.5 rounded-lg border px-2.5 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+                  className={`press flex items-center gap-1.5 rounded-lg border px-2.5 text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
                     vertical ? `w-full justify-start py-1.5 ${isCustomOpen ? "" : "border-dashed"}` : "py-1"
                   } ${
                     isCustomOpen || custom[q.header]?.trim()
@@ -186,7 +186,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
               {isCustomOpen && (
                 <input
                   autoFocus
-                  className="mt-1.5 w-full rounded-lg border border-border bg-editor px-2 py-1 text-[11px] outline-none placeholder:text-muted-foreground focus:border-primary/50"
+                  className="mt-2 w-full rounded-lg border border-border bg-editor px-2 py-1 text-ui-caption outline-none placeholder:text-muted-foreground focus:border-primary/50"
                   placeholder={t("输入自定义回答，回车确认")}
                   value={custom[q.header] ?? ""}
                   onChange={(e) => setCustom((p) => ({ ...p, [q.header]: e.target.value }))}
@@ -196,7 +196,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 />
               )}
               {q.multiSelect && picks.size > 1 && (
-                <p className="mt-1 text-[11px] text-muted-foreground">
+                <p className="mt-1 text-ui-caption text-muted-foreground">
                   {t("已选 {0} 项", picks.size)}
                 </p>
               )}
@@ -209,7 +209,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         <button
           disabled={answered}
           aria-label={t("提交回答")}
-          className="press flex items-center gap-1 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
+          className="press flex items-center gap-1 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
           onClick={submit}
         >
           <Check className="size-3" />
@@ -218,7 +218,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         <button
           disabled={answered}
           aria-label={t("跳过提问")}
-          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={dismiss}
         >
           {t("跳过")}

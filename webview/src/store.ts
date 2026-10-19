@@ -27,18 +27,17 @@ interface HostApi {
 /**
  * `iflow.uiFontSize` / `iflow.uiDensity` → CSS multipliers.
  *
- * Text sizes are hard-coded px utilities all over the panel, so the
- * stylesheet redefines each `text-[Npx]` class as
- * `calc(Npx * var(--ui-font-scale))`; density scales Tailwind's `--spacing`
- * token instead. The defaults (and the CSS fallbacks) match the "standard"
- * preset — it lifts the old 11px baseline to ~12px, addressing the
- * readability concern that motivated the setting.
+ * Text sizes come from the semantic ramp in styles.css (title 16 / body 14 /
+ * label 13 / caption 12 / micro 11), each multiplied by `--ui-font-scale`.
+ * Standard is the 1.0 baseline; compact and large preserve the previous
+ * effective sizes without producing fractional author px. Density scales
+ * Tailwind's `--spacing` token instead.
  */
-const UI_FONT_SCALES: Record<UiFontSize, number> = { compact: 1, standard: 1.1, large: 1.2 };
+const UI_FONT_SCALES: Record<UiFontSize, number> = { compact: 0.92, standard: 1, large: 1.1 };
 const UI_DENSITY_SCALES: Record<UiDensity, number> = {
-  compact: 0.94,
+  compact: 0.92,
   standard: 1,
-  comfortable: 1.08,
+  comfortable: 1.12,
 };
 
 function applyUiScale(fontSize: UiFontSize, density: UiDensity): void {
@@ -1334,6 +1333,24 @@ function createMockHost(): HostApi {
           else delete next.archived;
           return next;
         });
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [...demoBlocks],
+            status: "idle",
+            errorMessage: null,
+            stopReason: "end_turn",
+            ...demoMeta,
+            pendingApproval: activeApproval,
+            auth: authState,
+          },
+        });
+        return;
+      }
+      if (m.type === "renameSession") {
+        demoMeta.sessions = demoMeta.sessions.map((s) =>
+          s.id === m.sessionId ? { ...s, label: m.label.trim() || s.label } : s,
+        );
         broadcast({
           type: "snapshot",
           state: {

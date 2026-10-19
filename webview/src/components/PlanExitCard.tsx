@@ -102,7 +102,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <ClipboardCheck className="size-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
+        <span className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           <HelpTip label={t("计划说明")} align="right">
             <span className="block space-y-1">
@@ -111,7 +111,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
               </span>
               <span className="block">{t("批准的计划会保存到 .iflow/specs/ 以便留痕。")}</span>
               <span className="block">{t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}</span>
-              <span className="block font-mono text-[10.5px] text-muted-foreground">
+              <span className="block font-mono text-ui-micro text-muted-foreground">
                 {t("Y 批准 · N 拒绝 · R 重新规划")}
               </span>
             </span>
@@ -121,7 +121,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
             disabled={answered}
             aria-label={editing ? t("预览计划") : t("编辑计划")}
             title={editing ? t("预览计划") : t("编辑计划")}
-            className="press flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            className="press flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             onClick={() => setEditing((v) => !v)}
           >
             {editing ? <Eye className="size-3" /> : <Pencil className="size-3" />}
@@ -129,8 +129,8 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           </button>
         </span>
       </div>
-      <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
-        <p className="text-[11px] text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
+      <div className="space-y-2 px-3 py-3 text-ui-label">
+        <p className="text-ui-caption text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
         {editing ? (
           <>
             <textarea
@@ -142,9 +142,9 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
               /* mono + generous height: the plan is source-like markdown the
                  user edits verbatim; min-height keeps short plans usable,
                  max-h-64 caps the shrink-0 card like the render mode. */
-              className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-[11px] leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
+              className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-ui-caption leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
             />
-            <p className="text-[10.5px] leading-relaxed text-muted-foreground/85">
+            <p className="text-ui-micro leading-relaxed text-muted-foreground/85">
               {t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}
             </p>
           </>
@@ -169,7 +169,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         <button
           disabled={answered}
           aria-label={t("批准计划")}
-          className="press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(true)}
         >
           {t("批准计划")}
@@ -177,7 +177,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         <button
           disabled={answered}
           aria-label={t("拒绝计划")}
-          className="press rounded-lg border border-destructive/40 px-2.5 py-1 text-[11px] text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg border border-destructive/40 px-2.5 py-1 text-ui-caption text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false)}
         >
           {t("拒绝计划")}
@@ -185,12 +185,12 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         <button
           disabled={answered}
           aria-label={t("重新规划")}
-          className="press rounded-lg border border-primary/40 px-2.5 py-1 text-[11px] text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg border border-primary/40 px-2.5 py-1 text-ui-caption text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false, true)}
         >
           {t("重新规划")}
         </button>
-        <span className="ml-auto self-center text-[10.5px] text-muted-foreground/80">
+        <span className="ml-auto self-center text-ui-micro text-muted-foreground/80">
           {t("Y 批准 · N 拒绝 · R 重新规划")}
         </span>
       </div>

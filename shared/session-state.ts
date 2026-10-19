@@ -1727,6 +1727,26 @@ export function clampSessionLabel(text: string): string {
 }
 
 /**
+ * Rename one session in the switcher index. Returns the original array when
+ * the id is unknown or the label is unchanged, so callers can skip a persist.
+ * Flags and timestamps are preserved — a rename is not activity.
+ */
+export function renameSessionSummary(
+  sessions: readonly SessionSummaryUi[],
+  sessionId: string,
+  label: string,
+): readonly SessionSummaryUi[] {
+  const next = clampSessionLabel(label);
+  if (!next) return sessions;
+  const index = sessions.findIndex((s) => s.id === sessionId);
+  const target = index >= 0 ? sessions[index] : undefined;
+  if (!target || target.label === next) return sessions;
+  const updated = [...sessions];
+  updated[index] = { ...target, label: next };
+  return updated;
+}
+
+/**
  * M4 P1-8: canonical switcher order — pinned first, then newest activity.
  * The host sorts before EVERY persist so the stored index and the rendered
  * list can never drift; archived entries keep their place here (the switcher

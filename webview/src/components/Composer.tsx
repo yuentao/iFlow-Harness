@@ -134,7 +134,7 @@ function SessionUsageChip() {
   return (
     <span
       title={hoverTitle}
-      className="flex shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
+      className="flex shrink-0 items-center gap-1 font-mono text-ui-caption tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
     >
       {pct !== null && (
         <span className="ml-0.5 flex items-center gap-1" title={hoverTitle}>
@@ -185,7 +185,7 @@ function QueueStrip() {
   const miniBtn =
     "rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground";
   return (
-    <div className="mb-1.5 overflow-hidden rounded-xl border border-border bg-surface/70 shadow-card">
+    <div className="mb-2 overflow-hidden rounded-xl border border-border bg-surface/70 shadow-card">
       <div className={`flex items-center gap-1.5 px-2.5 py-1 ${expanded && queue.length > 0 ? "border-b border-border/60" : ""}`}>
         <button
           type="button"
@@ -195,7 +195,7 @@ function QueueStrip() {
           onClick={() => setExpanded((v) => !v)}
         >
           <ListOrdered className="size-3 shrink-0 text-primary" />
-          <span className="text-[11px] font-medium text-foreground">
+          <span className="text-ui-caption font-medium text-foreground">
             {t("队列 · {0} 条待发送", queue.length)}
           </span>
           {queue.length > 0 && (
@@ -203,14 +203,14 @@ function QueueStrip() {
           )}
         </button>
         {paused && (
-          <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning">
+          <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-ui-caption text-warning">
             <AlertTriangle className="size-2.5" /> {t("已暂停")}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
           {paused && queue.length > 0 && (
             <button
-              className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/25"
+              className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/15 px-1.5 py-0.5 text-ui-caption font-medium text-primary hover:bg-primary/25"
               title={t("继续依序发送队列")}
               onClick={() => act("resume")}
             >
@@ -219,7 +219,7 @@ function QueueStrip() {
           )}
           {queue.length > 0 && (
             <button
-              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-destructive"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-ui-caption text-muted-foreground hover:text-destructive"
               title={t("清空队列")}
               onClick={() => setConfirmClear(true)}
             >
@@ -235,12 +235,12 @@ function QueueStrip() {
               key={q.id}
               className="group flex items-center gap-1.5 border-b border-border/40 px-2.5 py-1 last:border-b-0 hover:bg-accent/30"
             >
-              <span className="w-4 shrink-0 text-right font-mono text-[11px] text-muted-foreground/80">{i + 1}</span>
-              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground" title={q.text}>
+              <span className="w-4 shrink-0 text-right font-mono text-ui-caption text-muted-foreground/80">{i + 1}</span>
+              <span className="min-w-0 flex-1 truncate text-ui-caption text-foreground" title={q.text}>
                 {q.text || t("（附件消息）")}
               </span>
               {q.attachments.length > 0 && (
-                <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[9px] text-muted-foreground">
+                <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-ui-micro text-muted-foreground">
                   {t("附件 {0}", q.attachments.length)}
                 </span>
               )}
@@ -1205,17 +1205,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       {/* M2 P0-3: queued-message strip (own subscription to state.queue). */}
       <QueueStrip />
       {dragOver && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-primary/5 text-[12px] font-medium text-primary">
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-primary/5 text-ui-label font-medium text-primary">
           {t("拖放文件以添加附件")}
         </div>
       )}
       {/* non-image attachment chips + rejected-file note */}
       {attachments.length > 0 && (
-        <div className="mb-1.5 flex flex-wrap gap-1.5">
+        <div className="mb-2 flex flex-wrap gap-1.5">
           {attachments.map((f) => (
             <span
               key={f.id}
-              className="card-lift inline-flex max-w-[min(260px,100%)] items-center gap-1 rounded-lg border border-border bg-surface/80 px-1.5 py-1 text-[11px] text-foreground shadow-card"
+              className="card-lift inline-flex max-w-[min(260px,100%)] items-center gap-1 rounded-lg border border-border bg-surface/80 px-1.5 py-1 text-ui-caption text-foreground shadow-card"
               title={f.path}
             >
               <FileText className="size-3 shrink-0 text-primary" />
@@ -1231,12 +1231,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           ))}
         </div>
       )}
-      {note && <div className="mb-1.5 px-0.5 text-[11px] text-warning">{note}</div>}
+      {note && <div className="mb-2 px-0.5 text-ui-caption text-warning">{note}</div>}
       {/* M2 P0-4 context cards: right-click selection + @folder/@problems/
           @git/@url. Each card is removable; the host assembles every card
           into a titled fenced section ahead of the typed text at send time. */}
       {contexts.length > 0 && (
-        <div className="mb-1.5 flex flex-col gap-1.5">
+        <div className="mb-2 flex flex-col gap-1.5">
           {contexts.map((c) => {
             const Icon =
               c.kind === "code"
@@ -1257,11 +1257,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               >
                 <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
                   <Icon className="size-3.5 shrink-0 text-primary" />
-                  <span className="truncate font-mono text-[11px] text-foreground" title={c.label}>
+                  <span className="truncate font-mono text-ui-caption text-foreground" title={c.label}>
                     {c.label}
                   </span>
                   {c.detail && (
-                    <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-[11px] text-muted-foreground">
+                    <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-ui-caption text-muted-foreground">
                       {c.detail}
                     </span>
                   )}
@@ -1274,11 +1274,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   </button>
                 </div>
                 {c.kind === "code" ? (
-                  <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-[11.5px] leading-[1.6] text-foreground/90">
+                  <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-ui-caption leading-[1.6] text-foreground/90">
                     {c.content}
                   </pre>
                 ) : (
-                  <pre className="max-h-24 overflow-auto whitespace-pre-wrap px-2.5 py-1.5 font-mono text-[11px] leading-[1.55] text-muted-foreground">
+                  <pre className="max-h-24 overflow-auto whitespace-pre-wrap px-2.5 py-1.5 font-mono text-ui-caption leading-[1.55] text-muted-foreground">
                     {c.content}
                   </pre>
                 )}
@@ -1288,7 +1288,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
       {images.length > 0 && (
-        <div className="mb-1.5 flex flex-wrap gap-1.5">
+        <div className="mb-2 flex flex-wrap gap-1.5">
           {images.map((img, i) => (
             <span
               key={i}
@@ -1319,7 +1319,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             <button
               key={c.name}
               ref={i === cmdIndex ? cmdActiveRef : undefined}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label ${
                 i === cmdIndex ? "bg-accent/70" : "hover:bg-accent/50"
               }`}
               onMouseDown={(e) => e.preventDefault()}
@@ -1329,9 +1329,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               }}
             >
               <span className="font-mono text-primary">/{c.name}</span>
-              <span className="truncate text-[11px] text-muted-foreground">{c.description}</span>
+              <span className="truncate text-ui-caption text-muted-foreground">{c.description}</span>
               {i === cmdIndex && (
-                <kbd className="ml-auto rounded border border-border px-1 font-mono text-[9px] text-muted-foreground">
+                <kbd className="ml-auto rounded border border-border px-1 font-mono text-ui-micro text-muted-foreground">
                   {t("Tab 补全")}
                 </kbd>
               )}
@@ -1351,7 +1351,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               <button
                 key={`src-${a.kind}`}
                 ref={i === mentionIndex ? mentionActiveRef : undefined}
-                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] ${
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label ${
                   i === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
                 }`}
                 onMouseDown={(e) => {
@@ -1361,15 +1361,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 }}
               >
                 <Icon className="size-3.5 shrink-0 text-primary" />
-                <span className="font-mono text-[11px] text-primary">
+                <span className="font-mono text-ui-caption text-primary">
                   @{a.kind === "url" ? `url:${a.label}` : a.keyword}
                 </span>
-                <span className="truncate text-[11px] text-muted-foreground">{a.label}</span>
+                <span className="truncate text-ui-caption text-muted-foreground">{a.label}</span>
               </button>
             );
           })}
           {mentionKind !== "url" && mentionHits.length === 0 && sourceActions.length === 0 && (
-            <div className="px-3 py-1.5 text-[12px] text-muted-foreground">
+            <div className="px-3 py-1.5 text-ui-label text-muted-foreground">
               {mentionKind === "folder" ? t("无匹配文件夹") : t("无匹配文件")}
             </div>
           )}
@@ -1380,7 +1380,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <button
                   key={hit.path}
                   ref={idx === mentionIndex ? mentionActiveRef : undefined}
-                  className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-[12px] ${
+                  className={`flex w-full items-baseline gap-1 px-3 py-1.5 text-left text-ui-label ${
                     idx === mentionIndex ? "bg-accent/70" : "hover:bg-accent/50"
                   }`}
                   onMouseDown={(e) => {
@@ -1391,7 +1391,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 >
                   {mentionKind === "folder" && <FolderIcon className="size-3 shrink-0 self-center text-primary" />}
                   {hit.path.split("/").slice(0, -1).join("/") && (
-                    <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                    <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
                       {hit.path.split("/").slice(0, -1).join("/")}/
                     </span>
                   )}
@@ -1409,7 +1409,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the wait is visible instead of the row appearing from nowhere. */}
       {suggestionsLoading && (suggestions?.length ?? 0) === 0 && !suggestionsHidden && (
         <div
-          className="mb-1.5 flex items-center gap-1 rounded-lg border border-primary/25 bg-primary/8 px-2 py-1 text-[11px] text-muted-foreground"
+          className="mb-2 flex items-center gap-1 rounded-lg border border-primary/25 bg-primary/8 px-2 py-1 text-ui-caption text-muted-foreground"
           aria-label={t("预测下一步操作…")}
         >
           <Sparkles className="size-3 shrink-0 text-primary" />
@@ -1424,17 +1424,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the batch when the user actually sends) retires the row. */}
       {suggestions && suggestions.length > 0 && !suggestionsHidden && (
         <div
-          className="mb-1.5 flex flex-wrap items-center gap-1.5"
+          className="mb-2 flex flex-wrap items-center gap-1.5"
           aria-label={t("AI 推测的下一步操作，点击填入输入框")}
         >
-          <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+          <span className="inline-flex shrink-0 items-center gap-1 text-ui-caption text-muted-foreground">
             <Sparkles className="size-3 text-primary" />
             {t("下一步")}
           </span>
           {suggestions.map((s) => (
             <button
               key={s}
-              className="press inline-flex max-w-full items-center rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-[11px] text-foreground transition-colors hover:border-primary/60 hover:bg-primary/20"
+              className="press inline-flex max-w-full items-center rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-ui-caption text-foreground transition-colors hover:border-primary/60 hover:bg-primary/20"
               title={t("AI 推测的下一步操作，点击填入输入框")}
               onClick={() => applySuggestion(s)}
             >
@@ -1457,7 +1457,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           ref={taRef}
           value={text}
                       placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @terminal · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
-          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-2.5 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
+          className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
               setHistIndex(-1);
@@ -1558,7 +1558,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             status (shrinks via truncate / icon-only degradation), right =
             actions at a constant anchor. No flex-wrap: wrapping used to drop
             buttons to a second line and drift the send key's position. */}
-        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-1.5">
+        <div className="flex shrink-0 items-center gap-1.5 px-2 pb-2 pt-2">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {/* permission mode dropdown */}
           {modes && currentMode && (
@@ -1597,13 +1597,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                         }}
                         className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50"
                       >
-                        <span className="text-[12px] text-foreground">
+                        <span className="text-ui-label text-foreground">
                           {view.label}
                           {m.id === modes.currentModeId && (
                             <Check className="ml-1 inline size-3 text-primary" />
                           )}
                         </span>
-                        <span className="text-[11px] text-muted-foreground">{view.desc}</span>
+                        <span className="text-ui-caption text-muted-foreground">{view.desc}</span>
                       </button>
                     );
                   })}
@@ -1652,13 +1652,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   {/* fuzzy search box: matches name and id; sticky so it stays
                       visible while the list scrolls */}
                   <div className="sticky top-0 z-10 border-b border-border/60 bg-panel/50 p-1.5 backdrop-blur-md">
-                    <div className="flex items-center gap-2.5 rounded-lg border border-border bg-editor px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
+                    <div className="flex items-center gap-3 rounded-lg border border-border bg-editor px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
                       <Search className="size-3.5 shrink-0 text-muted-foreground" />
                       <input
                         autoFocus
                         value={modelQuery}
                         placeholder={t("搜索模型…")}
-                        className="w-full min-w-0 bg-transparent font-mono text-[11px] text-foreground outline-none placeholder:text-muted-foreground/80"
+                        className="w-full min-w-0 bg-transparent font-mono text-ui-caption text-foreground outline-none placeholder:text-muted-foreground/80"
                         onChange={(e) => setModelQuery(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === "ArrowDown") {
@@ -1682,7 +1682,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                     </div>
                   </div>
                   {filteredModels.length === 0 && (
-                    <div className="px-3 py-2 text-[12px] text-muted-foreground">{t("无匹配模型")}</div>
+                    <div className="px-3 py-2 text-ui-label text-muted-foreground">{t("无匹配模型")}</div>
                   )}
                   {filteredModels.map(({ m }, i) => (
                     <button
@@ -1696,7 +1696,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                         }
                         close();
                       }}
-                      className={`flex w-full items-center px-3 py-1.5 text-left font-mono text-[11px] ${
+                      className={`flex w-full items-center px-3 py-1.5 text-left font-mono text-ui-caption ${
                         i === modelIndex ? "bg-accent/70" : "hover:bg-accent/50"
                       }`}
                     >
@@ -1735,7 +1735,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           >
             {(close) => (
               <>
-                <div className="border-b border-border/60 px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                <div className="border-b border-border/60 px-3 py-2 text-ui-caption font-medium text-muted-foreground">
                   {t("思考级别")}
                 </div>
                 {([
@@ -1759,11 +1759,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                       title={blocked ? t("当前模型不支持思考模式") : undefined}
                       className={`flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50 ${blocked ? "opacity-45" : ""}`}
                     >
-                      <span className="text-[12px] text-foreground">
+                      <span className="text-ui-label text-foreground">
                         {t(label)}
                         {level === thinkLevel && <Check className="ml-1 inline size-3 text-primary" />}
                       </span>
-                      <span className="text-[11px] text-muted-foreground">{t(desc)}</span>
+                      <span className="text-ui-caption text-muted-foreground">{t(desc)}</span>
                     </button>
                   );
                 })}
@@ -1805,7 +1805,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 textarea's enqueueMode placeholder says so). */}
             {canStop ? (
               <button
-                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-3 py-1 text-[11px] font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95"
+                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-3 py-1 text-ui-caption font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95"
                 title={t("停止生成")}
                 onClick={() => send({ type: "cancel" })}
               >
@@ -1815,8 +1815,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               <button
                 className={
                   enqueueMode
-                    ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/50 bg-primary/15 px-3 py-1 text-[11px] font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-                    : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-[11px] font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                    ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/50 bg-primary/15 px-3 py-1 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                    : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
                 }
                 title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
                 disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}

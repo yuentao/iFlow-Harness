@@ -371,19 +371,50 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
 
   return (
     <>
-      {loadError && <div className="text-[12px] text-destructive">{loadError}</div>}
+      {loadError && <div className="text-ui-body text-destructive">{loadError}</div>}
 
       {editing === null && detail === null && creating === null && confirmDelete === null && (
         <>
+          <div className="flex flex-wrap items-center gap-2 border-b border-border/50 pb-3">
+            <button
+              className={BTN}
+              disabled={state === null || !!loadError || saving}
+              onClick={() => {
+                closeCreate();
+                setCreating({ kind: "command", scope: "global", name: "", body: templateBody("command", "") });
+                setEditError(null);
+              }}
+            >
+              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              {t("新建")}
+            </button>
+            <button
+              className={BTN}
+              disabled={saving || (state === null && !loadError)}
+              onClick={refresh}
+            >
+              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+              {refreshing ? t("刷新中…") : t("刷新")}
+            </button>
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+            {conflict && (
+              <span className="ml-auto text-ui-label text-warning">
+                {t("磁盘文件已被别写入，请刷新后再编辑")}
+              </span>
+            )}
+            {savedFlash && !saving && (
+              <span className="ml-auto text-ui-label text-success">{savedFlash}</span>
+            )}
+          </div>
           {state === null ? (
-            <div className="py-4 text-center text-[12px] text-muted-foreground">{t("扫描中…")}</div>
+            <div className="py-4 text-center text-ui-body text-muted-foreground">{t("扫描中…")}</div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-4">
               {groups.map((group) => (
-                <div key={group.title} className="space-y-1.5">
-                  <div className="text-[11.5px] font-semibold text-foreground">{group.title}</div>
+                <div key={group.title} className="space-y-2">
+                  <div className="text-ui-label font-semibold text-foreground">{group.title}</div>
                   {group.items.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-border px-2 py-1.5 text-center text-[11px] text-muted-foreground">
+                    <div className="rounded-lg border border-dashed border-border px-2 py-1.5 text-center text-ui-label text-muted-foreground">
                       {t("尚未定义")}
                     </div>
                   ) : (
@@ -398,7 +429,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                               {scopeLabel(item.scope)}
                             </Chip>
                             <span
-                              className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-foreground"
+                              className="min-w-0 flex-1 truncate font-mono text-ui-body font-semibold text-foreground"
                               title={item.displayPath}
                             >
                               {item.name}
@@ -443,11 +474,11 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                             )}
                           </div>
                           {item.description && (
-                            <div className="truncate text-[11px] text-muted-foreground" title={item.description}>
+                            <div className="truncate text-ui-label text-muted-foreground" title={item.description}>
                               {item.description}
                             </div>
                           )}
-                          <div className="mt-1 text-[10.5px] font-mono text-muted-foreground/80">
+                          <div className="mt-1 text-ui-caption font-mono text-muted-foreground/80">
                             {fmtBytes(item.bytes)} · {fmtTime(item.updatedAt)}
                             {item.tools ? ` · ${t("工具")}: ${item.tools.join(", ")}` : ""}
                           </div>
@@ -460,38 +491,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-            <button
-              className={BTN}
-              disabled={state === null || !!loadError || saving}
-              onClick={() => {
-                closeCreate();
-                setCreating({ kind: "command", scope: "global", name: "", body: templateBody("command", "") });
-                setEditError(null);
-              }}
-            >
-              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
-              {t("新建")}
-            </button>
-            <button
-              className={BTN}
-              disabled={saving || (state === null && !loadError)}
-              onClick={refresh}
-            >
-              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
-              {refreshing ? t("刷新中…") : t("刷新")}
-            </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
-            {conflict && (
-              <span className="ml-auto text-[11px] text-warning">
-                {t("磁盘文件已被别写入，请刷新后再编辑")}
-              </span>
-            )}
-            {savedFlash && !saving && (
-              <span className="ml-auto text-[11px] text-success">{savedFlash}</span>
-            )}
-          </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+          <p className="text-ui-body leading-relaxed text-muted-foreground/85">
             {t(
               "扫描与编辑直接读写 ~/.iflow 与 <cwd>/.iflow 的 commands / agents / skills 目录（与 CLI 加载语义：命令递归 .md/.toml，子代理顶层 .md，技能 <目录>/SKILL.md）；当前会话已固定记忆，恢复会话后生效。",
             )}
@@ -502,16 +502,16 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
       {detail !== null && (
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-[12px] font-semibold text-foreground">
+            <span className="text-ui-body font-semibold text-foreground">
               {detail.path.split(/[\\/]/).slice(-2).join("/")}
             </span>
             <Chip tone="muted">{t("详情")}</Chip>
           </div>
           {detailContent === null ? (
-            <div className="py-3 text-center text-[11.5px] text-muted-foreground">{t("读取中…")}</div>
+            <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
           ) : (
             <pre
-              className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre-wrap break-all"
+              className="max-h-48 overflow-y-auto rounded-md bg-muted/8 px-2 py-1.5 font-mono text-ui-label leading-snug whitespace-pre-wrap break-all"
               title={t("文件内容")}
             >
               {detailContent}
@@ -548,12 +548,12 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
       {editing !== null && (
         <div className="space-y-2">
           {editLoading !== null ? (
-            <div className="py-3 text-center text-[11.5px] text-muted-foreground">{t("读取中…")}</div>
+            <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
           ) : (
             <label className="flex flex-col gap-0.5">
-              <span className="text-[11.5px] text-muted-foreground">{t("文件内容（markdown + frontmatter）")}</span>
+              <span className="text-ui-label text-muted-foreground">{t("文件内容（markdown + frontmatter）")}</span>
               <textarea
-                className={`${INPUT} min-h-40 resize-y font-mono text-[11.5px] leading-relaxed`}
+                className={`${INPUT} min-h-40 resize-y font-mono text-ui-label leading-relaxed`}
                 spellCheck={false}
                 value={editing.content}
                 onChange={(e) => {
@@ -569,14 +569,14 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             <button className={SAVE_BTN} disabled={editLoading !== null} onClick={saveEditing}>
               {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
             </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
-              <span className="text-[11px] text-warning">
+              <span className="text-ui-label text-warning">
                 {t("磁盘文件已被别写入，请刷新后再编辑")}
               </span>
             )}
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+          <p className="text-ui-label leading-relaxed text-muted-foreground/85">
             {t("保存前对 hash，磁盘漂移即回 conflict（不覆盖）。")}
           </p>
         </div>
@@ -590,7 +590,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 key={kind}
                 type="button"
                 aria-current={creating.kind === kind ? "true" : undefined}
-                className={`press shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium transition-colors duration-150 ${
+                className={`press shrink-0 rounded-lg px-2 py-1 text-ui-label font-medium transition-colors duration-150 ${
                   creating.kind === kind
                     ? "bg-primary/15 font-semibold text-primary"
                     : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -616,7 +616,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 type="button"
                 aria-current={creating.scope === scope ? "true" : undefined}
                 disabled={scope === "project" && state?.cwd === null}
-                className={`press shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium transition-colors duration-150 ${
+                className={`press shrink-0 rounded-lg px-2 py-1 text-ui-label font-medium transition-colors duration-150 ${
                   creating.scope === scope
                     ? "bg-primary/15 font-semibold text-primary"
                     : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -630,7 +630,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             ))}
           </div>
           <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("名称")}</span>
+            <span className="text-ui-label text-muted-foreground">{t("名称")}</span>
             <input
               type="text"
               className={INPUT}
@@ -652,7 +652,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           </label>
           <div className="rounded-lg border border-border/70 bg-surface/40 px-2 py-1.5">
             <label className="flex flex-col gap-0.5">
-              <span className="text-[11.5px] text-muted-foreground">{t("需求描述（用于 AI 生成）")}</span>
+              <span className="text-ui-label text-muted-foreground">{t("需求描述（用于 AI 生成）")}</span>
               <textarea
                 className={`${INPUT} min-h-16 resize-y leading-relaxed`}
                 value={genRequirement}
@@ -663,18 +663,18 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 }}
               />
             </label>
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
               <button className={BTN} disabled={generating || saving} onClick={generateBody}>
                 <Sparkles className="mr-0.5 inline size-3 align-[-2px]" />
                 {generating ? t("生成中…") : t("AI 生成内容")}
               </button>
-              {genError && <span className="text-[12px] text-destructive">{genError}</span>}
+              {genError && <span className="text-ui-body text-destructive">{genError}</span>}
             </div>
           </div>
           <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("内容（frontmatter 模板，可直接改）")}</span>
+            <span className="text-ui-label text-muted-foreground">{t("内容（frontmatter 模板，可直接改）")}</span>
             <textarea
-              className={`${INPUT} min-h-40 resize-y font-mono text-[11.5px] leading-relaxed`}
+              className={`${INPUT} min-h-40 resize-y font-mono text-ui-label leading-relaxed`}
               spellCheck={false}
               value={creating.body}
               onChange={(e) => {
@@ -688,14 +688,14 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             <button className={SAVE_BTN} disabled={generating} onClick={createAsset}>
               {saving ? t("创建中…") : savedFlash ? t("已创建") : t("创建")}
             </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
-              <span className="text-[11px] text-warning">
+              <span className="text-ui-label text-warning">
                 {t("同名资产已存在，直接编辑它")}
               </span>
             )}
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+          <p className="text-ui-label leading-relaxed text-muted-foreground/85">
             {t("Host 拼路径从类型/作用域/名称（只字母数字-_），同名即回 conflict（不覆盖）。AI 生成只填充上方内容，点「创建」才写入文件。")}
           </p>
         </div>

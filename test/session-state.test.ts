@@ -17,6 +17,7 @@ import {
   parseEditArgs,
   parseToolFilePath,
   refreshSessionUsage,
+  renameSessionSummary,
   snapshotEditDiff,
   sortSessionSummaries,
   synthesizeEditDiff,
@@ -1675,6 +1676,22 @@ describe("session switcher (M4)", () => {
     expect(sorted.map((s) => s.id)).toEqual(["pin-new", "pin-old", "new", "arch-new", "old"]);
     // Immutable: the stored index and the caller's array never alias mutations.
     expect(input.map((s) => s.id)).toEqual(["old", "pin-old", "new", "arch-new", "pin-new"]);
+  });
+
+  it("renameSessionSummary: updates the label, keeps flags and stamps", () => {
+    const input = [
+      { id: "a", label: "旧标题", updatedAt: 100, pinned: true, archived: true },
+      { id: "b", label: "另一个", updatedAt: 200 },
+    ];
+    const renamed = renameSessionSummary(input, "a", "  新标题  ");
+    expect(renamed).not.toBe(input);
+    expect(renamed[0]).toEqual({ id: "a", label: "新标题", updatedAt: 100, pinned: true, archived: true });
+    expect(renamed[1]).toBe(input[1]);
+    // Unknown id / unchanged label / empty label are no-ops (same reference),
+    // so the host can skip a persist.
+    expect(renameSessionSummary(input, "missing", "x")).toBe(input);
+    expect(renameSessionSummary(input, "a", "旧标题")).toBe(input);
+    expect(renameSessionSummary(input, "a", "   ")).toBe(input);
   });
 });
 

@@ -475,7 +475,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
 
   return (
     <>
-      {loadError && <div className="text-[12px] text-destructive">{loadError}</div>}
+      {loadError && <div className="text-ui-body text-destructive">{loadError}</div>}
 
       {editing === null && detail === null && catalogForm === null && (
         <>
@@ -500,8 +500,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }
                     className={
                       candidate === scope
-                        ? "press rounded-md bg-primary/18 px-2 py-0.5 text-[11.5px] font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
-                        : "press rounded-md px-2 py-0.5 text-[11.5px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                        ? "press rounded-md bg-primary/18 px-2 py-0.5 text-ui-label font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
+                        : "press rounded-md px-2 py-0.5 text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
                     }
                     onClick={() => switchScope(candidate)}
                   >
@@ -511,15 +511,51 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               })}
             </div>
             <span
-              className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground/75"
+              className="ml-auto min-w-0 truncate font-mono text-ui-caption text-muted-foreground/75"
               title={t("写入 {0}", SCOPE_FILE[scope])}
             >
               {SCOPE_FILE[scope]}
             </span>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2 border-b border-border/50 pb-3">
+            <button
+              className={BTN}
+              disabled={entries === null || !!loadError || saving}
+              onClick={() => {
+                setEntries([...(entries ?? []), { name: "", json: "{}" }]);
+                setEditing(entries === null ? 0 : entries.length);
+                setIsNew(true);
+                setEditError(null);
+              }}
+            >
+              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              {t("添加")}
+            </button>
+            <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
+              {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
+            </button>
+            <button
+              className={BTN}
+              disabled={busy || saving || entries === null || !!loadError}
+              onClick={() => setCatalogBrowse(!catalogBrowse)}
+            >
+              <Sparkles className="mr-0.5 inline size-3 align-[-2px]" />
+              {catalogBrowse ? t("返回列表") : t("模板目录")}
+            </button>
+            <button
+              className={BTN}
+              disabled={busy || saving || (entries === null && !loadError)}
+              onClick={refresh}
+            >
+              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+              {refreshing ? t("刷新中…") : t("刷新")}
+            </button>
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+          </div>
+
           {catalogBrowse && catalogForm === null ? (
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {MCP_CATALOG.map((template) => {
                 const transport =
                   template.transport === "url"
@@ -528,7 +564,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 return (
                   <div key={template.id} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
                     <div className="flex items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
+                      <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
                         {template.title}
                       </span>
                       <button
@@ -544,13 +580,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       </button>
                     </div>
                     {template.description && (
-                      <div className="truncate text-[11px] text-muted-foreground">{template.description}</div>
+                      <div className="truncate text-ui-label text-muted-foreground">{template.description}</div>
                     )}
-                    <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted-foreground/80" title={transport}>
+                    <div className="mt-0.5 truncate font-mono text-ui-caption text-muted-foreground/80" title={transport}>
                       {transport}
                     </div>
                     {template.docsUrl && (
-                      <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/60" title={t("官方文档")}>
+                      <div className="mt-0.5 truncate font-mono text-ui-caption text-muted-foreground/60" title={t("官方文档")}>
                         {template.docsUrl}
                       </div>
                     )}
@@ -559,13 +595,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               })}
             </div>
           ) : entries === null ? (
-            <div className="py-4 text-center text-[12px] text-muted-foreground">{t("读取中…")}</div>
+            <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
           ) : entries.length === 0 && !loadError ? (
             <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center">
-              <div className="text-[12px] text-muted-foreground">{t("尚未配置 MCP 服务器")}</div>
+              <div className="text-ui-body text-muted-foreground">{t("尚未配置 MCP 服务器")}</div>
             </div>
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {(entries ?? []).map((entry, i) => {
                 const name = entry.name.trim();
                 const view = status?.servers[name];
@@ -605,7 +641,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           title={dotTitle}
                         />
                       )}
-                      <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-foreground">
+                      <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
                         {entry.name}
                       </span>
                       {(() => {
@@ -622,7 +658,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       })()}
                       {view?.contextTokens !== undefined && (
                         <span
-                          className="ml-1 shrink-0 text-[11px] font-mono text-muted-foreground"
+                          className="ml-1 shrink-0 text-ui-label font-mono text-muted-foreground"
                           title={t("工具声明注入模型上下文约 {0} tokens（估算）", fmtTokens(view.contextTokens))}
                         >
                           ≈{fmtTokens(view.contextTokens)}
@@ -663,7 +699,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       )}
                     </div>
                     {transport && (
-                      <div className="truncate font-mono text-[11px] text-muted-foreground" title={transport}>
+                      <div className="truncate font-mono text-ui-label text-muted-foreground" title={transport}>
                         {transport}
                       </div>
                     )}
@@ -673,42 +709,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-            <button
-              className={BTN}
-              disabled={entries === null || !!loadError || saving}
-              onClick={() => {
-                setEntries([...(entries ?? []), { name: "", json: "{}" }]);
-                setEditing(entries === null ? 0 : entries.length);
-                setIsNew(true);
-                setEditError(null);
-              }}
-            >
-              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
-              {t("添加")}
-            </button>
-            <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
-              {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
-            </button>
-            <button
-              className={BTN}
-              disabled={busy || saving || entries === null || !!loadError}
-              onClick={() => setCatalogBrowse(!catalogBrowse)}
-            >
-              <Sparkles className="mr-0.5 inline size-3 align-[-2px]" />
-              {catalogBrowse ? t("返回列表") : t("模板目录")}
-            </button>
-            <button
-              className={BTN}
-              disabled={busy || saving || (entries === null && !loadError)}
-              onClick={refresh}
-            >
-              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
-              {refreshing ? t("刷新中…") : t("刷新")}
-            </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
-          </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+          <p className="text-ui-body leading-relaxed text-muted-foreground/85">
             {scope === "project"
               ? t(
                   "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时 CLI 用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启 CLI」生效。",
@@ -734,14 +735,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             return (
               <div className="space-y-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[12.5px] font-semibold text-foreground">{entry.name}</span>
+                  <span className="text-ui-body font-semibold text-foreground">{entry.name}</span>
                   <span
                     className={
                       view?.status === "connected"
-                        ? "ml-1.5 shrink-0 rounded-full bg-success/15 border border-success/50 px-1.5 py-[1px] text-[11px] font-medium text-success"
+                        ? "ml-1.5 shrink-0 rounded-full bg-success/15 border border-success/50 px-1.5 py-px text-ui-label font-medium text-success"
                         : view?.status === "connecting"
-                          ? "ml-1.5 shrink-0 rounded-full bg-info/15 border border-info/50 px-1.5 py-[1px] text-[11px] font-medium text-info"
-                          : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-[1px] text-[11px] font-medium text-muted-foreground"
+                          ? "ml-1.5 shrink-0 rounded-full bg-info/15 border border-info/50 px-1.5 py-px text-ui-label font-medium text-info"
+                          : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-px text-ui-label font-medium text-muted-foreground"
                     }
                     title={view ? statusLabel(view) + (view.error ? ` — ${view.error}` : "") : t("连接状态不可获取（CLI 未连接或状态上报未启用）")}
                   >
@@ -749,7 +750,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   </span>
                   {view?.contextTokens !== undefined && (
                     <span
-                      className="ml-1.5 shrink-0 text-[11px] font-mono text-muted-foreground"
+                      className="ml-1.5 shrink-0 text-ui-label font-mono text-muted-foreground"
                       title={t("工具声明注入模型上下文约 {0} tokens（估算）", fmtTokens(view.contextTokens))}
                     >
                       ≈{fmtTokens(view.contextTokens)} tokens
@@ -757,20 +758,20 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   )}
                 </div>
                 {view?.error && (
-                  <div className="rounded-lg border border-destructive/50 bg-destructive/8 px-2 py-1.5 text-[11.5px] text-destructive" title={view.error}>
+                  <div className="rounded-lg border border-destructive/50 bg-destructive/8 px-2 py-1.5 text-ui-label text-destructive" title={view.error}>
                     {t("连接失败：")}
                     <span className="font-mono">{view.error}</span>
                     {view.errorKind ? ` (${view.errorKind})` : ""}
                   </div>
                 )}
                 {transport && (
-                  <div className="truncate font-mono text-[11px] text-muted-foreground" title={transport}>
+                  <div className="truncate font-mono text-ui-label text-muted-foreground" title={transport}>
                     {transport}
                   </div>
                 )}
 
                 {tools.length === 0 && prompts.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-[11.5px] text-muted-foreground">
+                  <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
                     {view
                       ? view.toolCount + view.promptCount === 0
                         ? t("该服务器当前暴露无工具与提示")
@@ -781,27 +782,27 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   <div className="space-y-2">
                     {tools.length > 0 && (
                       <>
-                        <div className="text-[11.5px] font-semibold text-foreground">{t("工具 ({0})", String(tools.length))}</div>
+                        <div className="text-ui-label font-semibold text-foreground">{t("工具 ({0})", String(tools.length))}</div>
                         {tools.map((tool, ti) => (
                           <div key={ti} className="rounded-lg border border-border px-2 py-1.5 shadow-card">
                             <div className="flex items-center gap-1.5">
-                              <span className="shrink-0 font-mono text-[11.5px] font-semibold text-foreground">{tool.name}</span>
+                              <span className="shrink-0 font-mono text-ui-label font-semibold text-foreground">{tool.name}</span>
                               {tool.description && (
-                                <span className="ml-1.5 flex-1 truncate text-[11px] text-muted-foreground" title={tool.description}>
+                                <span className="ml-1.5 flex-1 truncate text-ui-label text-muted-foreground" title={tool.description}>
                                   {tool.description}
                                 </span>
                               )}
                             </div>
                             {tool.schema !== undefined && !tool.schemaOmitted && (
                               <pre
-                                className="mt-1.5 max-h-24 overflow-y-auto rounded-md bg-muted/8 px-1.5 py-1 font-mono text-[10.5px] leading-snug whitespace-pre-wrap break-all"
+                                className="mt-2 max-h-24 overflow-y-auto rounded-md bg-muted/8 px-1.5 py-1 font-mono text-ui-caption leading-snug whitespace-pre-wrap break-all"
                                 title={t("参数 schema")}
                               >
                                 {JSON.stringify(tool.schema, null, 2)}
                               </pre>
                             )}
                             {tool.schemaOmitted && (
-                              <div className="mt-1 text-[10.5px] text-muted-foreground/80">{t("参数 schema 已省略（上报预算超限）")}</div>
+                              <div className="mt-1 text-ui-caption text-muted-foreground/80">{t("参数 schema 已省略（上报预算超限）")}</div>
                             )}
                           </div>
                         ))}
@@ -809,12 +810,12 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     )}
                     {prompts.length > 0 && (
                       <>
-                        <div className="text-[11.5px] font-semibold text-foreground">{t("提示 ({0})", String(prompts.length))}</div>
+                        <div className="text-ui-label font-semibold text-foreground">{t("提示 ({0})", String(prompts.length))}</div>
                         {prompts.map((prompt, pi) => (
                           <div key={pi} className="flex items-center gap-1.5">
-                            <span className="shrink-0 font-mono text-[11.5px] text-foreground">{prompt.name}</span>
+                            <span className="shrink-0 font-mono text-ui-label text-foreground">{prompt.name}</span>
                             {prompt.description && (
-                              <span className="ml-1.5 flex-1 truncate text-[11px] text-muted-foreground" title={prompt.description}>
+                              <span className="ml-1.5 flex-1 truncate text-ui-label text-muted-foreground" title={prompt.description}>
                                 {prompt.description}
                               </span>
                             )}
@@ -854,13 +855,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           <div className="space-y-3">
             <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
               <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
-                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <h3 className="text-ui-label font-semibold uppercase tracking-wider text-muted-foreground">
                   {t("服务器信息")}
                 </h3>
               </div>
               <div className="divide-y divide-border/50">
-                <div className="flex flex-col gap-1 px-3 py-2.5">
-                  <span className="text-[11.5px] text-muted-foreground">
+                <div className="flex flex-col gap-1 px-3 py-3">
+                  <span className="text-ui-label text-muted-foreground">
                     {t("名称")}
                     <span className="text-destructive">*</span>
                   </span>
@@ -876,8 +877,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </div>
-                <div className="flex flex-col gap-1 px-3 py-2.5">
-                  <span className="text-[11.5px] text-muted-foreground">{t("描述")}</span>
+                <div className="flex flex-col gap-1 px-3 py-3">
+                  <span className="text-ui-label text-muted-foreground">{t("描述")}</span>
                   <textarea
                     className={`${INPUT} min-h-16 resize-y leading-relaxed`}
                     value={fieldOfConfig(config, "description")}
@@ -893,16 +894,16 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
 
             <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
               <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
-                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <h3 className="text-ui-label font-semibold uppercase tracking-wider text-muted-foreground">
                   {t("传输与运行")}
                 </h3>
-                <span className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground/75">
+                <span className="ml-auto min-w-0 truncate font-mono text-ui-caption text-muted-foreground/75">
                   {transport}
                 </span>
               </div>
               <div className="divide-y divide-border/50">
                 <div className="flex items-center gap-2 px-3 py-2">
-                  <span className="mr-1 text-[11.5px] text-muted-foreground">{t("传输类型")}</span>
+                  <span className="mr-1 text-ui-label text-muted-foreground">{t("传输类型")}</span>
                   <div
                     role="group"
                     aria-label={t("传输类型")}
@@ -913,8 +914,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         key={kind}
                         className={
                           kind === transport
-                            ? "press rounded-md bg-primary/18 px-2 py-0.5 font-mono text-[11.5px] font-semibold text-primary"
-                            : "press rounded-md px-2 py-0.5 font-mono text-[11.5px] text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground"
+                            ? "press rounded-md bg-primary/18 px-2 py-0.5 font-mono text-ui-label font-semibold text-primary"
+                            : "press rounded-md px-2 py-0.5 font-mono text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground"
                         }
                         title={kind}
                         onClick={() => {
@@ -929,8 +930,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 </div>
             {isStdio ? (
               <>
-                <div className="flex flex-col gap-1 px-3 py-2.5">
-                  <span className="text-[11.5px] text-muted-foreground">
+                <div className="flex flex-col gap-1 px-3 py-3">
+                  <span className="text-ui-label text-muted-foreground">
                     {t("命令")}
                     <span className="text-destructive">*</span>
                   </span>
@@ -946,15 +947,15 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </div>
-                <div className="flex flex-col gap-2 px-3 py-2.5">
-                  <span className="text-[11.5px] text-muted-foreground">{t("参数")}</span>
+                <div className="flex flex-col gap-2 px-3 py-3">
+                  <span className="text-ui-label text-muted-foreground">{t("参数")}</span>
                   {args.length > 0 && (
                     <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {args.map((arg, ai) => (
                         <div key={ai} className="flex items-center gap-2 px-2 py-1">
                           <input
                             type="text"
-                            className={`${INPUT} flex-1 font-mono text-[11.5px]`}
+                            className={`${INPUT} flex-1 font-mono text-ui-label`}
                             value={arg}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -988,15 +989,15 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     {t("添加参数")}
                   </button>
                 </div>
-                <div className="flex flex-col gap-2 px-3 py-2.5 pb-3">
-                  <span className="text-[11.5px] text-muted-foreground">{t("环境变量")}</span>
+                <div className="flex flex-col gap-2 px-3 py-3 pb-3">
+                  <span className="text-ui-label text-muted-foreground">{t("环境变量")}</span>
                   {envRows.length > 0 && (
                     <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {envRows.map(([keyName, keyValue], ri) => (
                         <div key={ri} className="flex items-center gap-2 px-2 py-1">
                           <input
                             type="text"
-                            className={`${INPUT} flex-1 font-mono text-[11.5px]`}
+                            className={`${INPUT} flex-1 font-mono text-ui-label`}
                             value={`${keyName}=${keyValue}`}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1033,8 +1034,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               </>
             ) : (
               <>
-                <div className="flex flex-col gap-1 px-3 py-2.5">
-                  <span className="text-[11.5px] text-muted-foreground">
+                <div className="flex flex-col gap-1 px-3 py-3">
+                  <span className="text-ui-label text-muted-foreground">
                     {t("服务 URL")}
                     <span className="text-destructive">*</span>
                   </span>
@@ -1050,15 +1051,15 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     }}
                   />
                 </div>
-                <div className="flex flex-col gap-2 px-3 py-2.5 pb-3">
-                  <span className="text-[11.5px] text-muted-foreground">{t("请求头")}</span>
+                <div className="flex flex-col gap-2 px-3 py-3 pb-3">
+                  <span className="text-ui-label text-muted-foreground">{t("请求头")}</span>
                   {headerRows.length > 0 && (
                     <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {headerRows.map(([keyName, keyValue], ri) => (
                         <div key={ri} className="flex items-center gap-2 px-2 py-1">
                           <input
                             type="text"
-                            className={`${INPUT} flex-1 font-mono text-[11.5px]`}
+                            className={`${INPUT} flex-1 font-mono text-ui-label`}
                             value={`${keyName}=${keyValue}`}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1096,7 +1097,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           )}
                             </div>
                           </section>
-                          {extraKeys.length > 0 && (              <div className="truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-[11px] leading-relaxed text-muted-foreground/85">
+                          {extraKeys.length > 0 && (              <div className="truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-ui-label leading-relaxed text-muted-foreground/85">
                 {t("额外字段保留：{0}", extraKeys.join(", "))}
               </div>
             )}
@@ -1131,9 +1132,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               >
                 {t("完成")}
               </button>
-              {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+              {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+            <p className="text-ui-label leading-relaxed text-muted-foreground/85">
               {t("编辑只改本地副本，点击「保存」才写入文件。")}
             </p>
           </div>
@@ -1146,11 +1147,11 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         return (
           <div className="space-y-2">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[12.5px] font-semibold text-foreground">{template.title}</span>
-              <span className="ml-1.5 text-[11px] text-muted-foreground">{t("安装模板")}</span>
+              <span className="text-ui-body font-semibold text-foreground">{template.title}</span>
+              <span className="ml-1.5 text-ui-label text-muted-foreground">{t("安装模板")}</span>
             </div>
             <label className="flex flex-col gap-0.5">
-              <span className="text-[11.5px] text-muted-foreground">{t("名称")}</span>
+              <span className="text-ui-label text-muted-foreground">{t("名称")}</span>
               <input
                 type="text"
                 className={INPUT}
@@ -1164,7 +1165,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </label>
             {template.fields.map((field) => (
               <label key={field.key} className="flex flex-col gap-0.5">
-                <span className="text-[11.5px] text-muted-foreground">{field.label}</span>
+                <span className="text-ui-label text-muted-foreground">{field.label}</span>
                 <input
                   type="text"
                   className={INPUT}
@@ -1183,9 +1184,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               <button className={SAVE_BTN} onClick={installCatalog}>
                 {t("安装")}
               </button>
-              {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+              {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+            <p className="text-ui-label leading-relaxed text-muted-foreground/85">
               {t("安装只把模板本地草稿，点击「保存」才写入文件。")}
             </p>
           </div>

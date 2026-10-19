@@ -69,16 +69,16 @@ export function TurnChanges({ sessionId, userBlockId }: {
     <section className="mt-2 overflow-hidden rounded-xl border border-border bg-card/70 shadow-card" aria-label={t("本轮变更")}>
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <FilePen className="size-3.5 shrink-0 text-info" />
-        <span className="text-[11.5px] font-semibold text-foreground">
+        <span className="text-ui-caption font-semibold text-foreground">
           {records === null || unavailable ? t("本轮变更") : records.length === 1 ? t("1 个文件已更改") : t("{0} 个文件已更改", records.length)}
         </span>
-        {!!records?.length && <span className="flex items-center gap-1.5 font-mono text-[10.5px]">
+        {!!records?.length && <span className="flex items-center gap-1.5 font-mono text-ui-micro">
           <span className="text-diff-add-fg">+{additions}</span>
           <span className="text-diff-del-fg">−{deletions}</span>
         </span>}
       </div>
-      <div className="space-y-2 p-2.5">
-        {(unavailable || !records?.length) && <div role="status" className="text-[10.5px] text-muted-foreground">
+      <div className="space-y-2 p-3">
+        {(unavailable || !records?.length) && <div role="status" className="text-ui-micro text-muted-foreground">
           {unavailable ? t("该轮次已不可用。") : records === null ? t("正在读取本轮变更…") : t("本轮没有可展示的变更记录；这不表示没有文件修改。")}
         </div>}
         {!!records?.length && <ul className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border/60">
@@ -90,14 +90,14 @@ export function TurnChanges({ sessionId, userBlockId }: {
               onClick={() => useChat.getState().send({ type: "openLocation", path: item.path, toolCallId: item.toolCallId })}
             >
               <FileCode2 className="size-3.5 shrink-0 text-info" />
-              <span className="min-w-0 flex-1 truncate text-[11px]">
+              <span className="min-w-0 flex-1 truncate text-ui-caption">
                 <span className="text-foreground">{baseName(item.path)}</span>
-                {dirName(item.key) && <span className="ml-1.5 text-[10px] text-muted-foreground">{dirName(item.key)}</span>}
+                {dirName(item.key) && <span className="ml-1.5 text-ui-micro text-muted-foreground">{dirName(item.key)}</span>}
               </span>
-              {(item.reverted || item.partiallyReverted || item.edits > 1) && <span className="shrink-0 text-[9.5px] text-muted-foreground">
+              {(item.reverted || item.partiallyReverted || item.edits > 1) && <span className="shrink-0 text-ui-micro text-muted-foreground">
                 {item.reverted ? t("已回退") : item.partiallyReverted ? t("部分回退") : t("{0} 次修改", item.edits)}
               </span>}
-              <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
+              <span className="flex shrink-0 items-center gap-1.5 font-mono text-ui-micro">
                 <span className="text-diff-add-fg">+{item.additions}</span>
                 <span className="text-diff-del-fg">−{item.deletions}</span>
               </span>
@@ -112,7 +112,7 @@ export function TurnChanges({ sessionId, userBlockId }: {
             </button>}
           </li>)}
         </ul>}
-        {!!records?.length && <p className="text-[10px] leading-relaxed text-muted-foreground">
+        {!!records?.length && <p className="text-ui-micro leading-relaxed text-muted-foreground">
           {t("仅列出已记录的工具差异文件，不保证覆盖全部磁盘修改或代表当前净变更。点击文件在编辑器中打开。")}
         </p>}
       </div>

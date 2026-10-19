@@ -103,6 +103,7 @@ import {
   parseToolFilePath,
   parseTranscriptJsonl,
   reassignBlockIds,
+  renameSessionSummary,
   SESSION_LABEL_MAX,
   snapshotEditDiff,
   sortSessionSummaries,
@@ -1418,6 +1419,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "setSessionFlags":
         this.setSessionFlags(msg.sessionId, msg.pinned, msg.archived);
+        break;
+      case "renameSession":
+        await this.renameSession(msg.sessionId, msg.label);
         break;
       case "refreshAuth": {
         // Dropdown/card opened: recompute the profile list fresh (SecretStorage
@@ -4898,6 +4902,34 @@ export class ChatPanel implements vscode.Disposable {
     });
     this.store.setSessions(sessions, state.activeSessionId);
     void this.persistSessions(sessions, state.activeSessionId ?? state.sessionId);
+  }
+
+  /**
+   * Rename a session from the switcher. The label lives in the persisted index
+   * AND in the extension transcript; restoreSession re-derives the label from
+   * the transcript, so updating only the index would silently revert the
+   * rename on the next restore.
+   */
+  private async renameSession(sessionId: string, label: string): Promise<void> {
+    const state = this.store.getState();
+    const renamed = renameSessionSummary(state.sessions, sessionId, label);
+    if (renamed === state.sessions) return;
+    const sessions = [...renamed];
+    this.store.setSessions(sessions, state.activeSessionId);
+    await this.persistSessions(sessions, state.activeSessionId ?? state.sessionId);
+    const nextLabel = sessions.find((s) => s.id === sessionId)?.label;
+    if (!nextLabel) return;
+    // Active session: force a transcript write so its stored label matches.
+    const liveId = state.activeSessionId ?? state.sessionId;
+    if (sessionId === liveId && state.blocks.length > 0) {
+      void this.persistActiveTranscript(true);
+      return;
+    }
+    // Inactive session: rewrite that transcript's label in place.
+    const transcript = await this.readTranscript(sessionId);
+    if (transcript) {
+      await this.enqueueTranscriptWrite(sessionId, () => this.serializeTranscript(nextLabel, transcript.blocks));
+    }
   }
 
   /**

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, Download, ExternalLink, KeyRound, MessageSquare, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, Database, Download, ExternalLink, KeyRound, MessageSquare, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
@@ -63,8 +63,12 @@ export function SettingsModal({
   // The active section reports {back, title} when it opens a sub-editor; the
   // shell swaps its header accordingly. Reset on tab switch (sections remount).
   const [sectionHeader, setSectionHeader] = useState<SectionHeader | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setSectionHeader(null);
+    // Each tab is an independent page — carrying the previous scroll offset
+    // into it drops the user mid-list with the title out of view.
+    if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [tab]);
 
   const TABS: Array<{ id: SettingsTab; icon: typeof KeyRound; label: string }> = [
@@ -107,32 +111,33 @@ export function SettingsModal({
             <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
             {t("重启 CLI")}
           </button>
-          <span className="ml-auto hidden text-[10.5px] text-muted-foreground @min-[520px]:inline">
+          <span className="ml-auto hidden text-ui-caption text-muted-foreground @min-[520px]:inline">
             {t("已写入用户 settings.json")}
           </span>
         </div>
       }
     >
       <div className="auth-modal-body flex min-h-0 flex-1 flex-col @min-[460px]:flex-row">
-        <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 p-1.5 @min-[460px]:w-[150px] @min-[460px]:flex-col @min-[460px]:overflow-visible @min-[460px]:border-b-0 @min-[460px]:border-r">
+        <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:flex-col @min-[460px]:overflow-visible @min-[460px]:border-b-0 @min-[460px]:border-r">
           {TABS.map(({ id, icon: Icon, label }) => (
             <button
               key={id}
               type="button"
               aria-current={tab === id ? "page" : undefined}
-              className={`press flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-left text-[11.5px] transition-all duration-200 ${
+              data-autofocus={tab === id ? "true" : undefined}
+              className={`press flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-ui-body transition-all duration-200 ${
                 tab === id
                   ? "bg-primary/10 font-semibold text-primary"
                   : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
               }`}
               onClick={() => onTabChange(id)}
             >
-              <Icon className="size-3.5 shrink-0" />
+              <Icon className="size-4 shrink-0" />
               {label}
             </button>
           ))}
         </nav>
-        <div className="min-w-0 flex-1 overflow-y-auto px-3 py-3 @min-[460px]:px-3.5">
+        <div ref={contentRef} className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5">
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "chat" && <ChatSection />}
           {tab === "appearance" && <AppearanceSection />}
@@ -154,12 +159,36 @@ export function SettingsModal({
 function SettingsGroup({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
-      <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
-        {hint && <span className="ml-auto min-w-0 truncate text-[10.5px] text-muted-foreground/75">{hint}</span>}
+      <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-4 py-3">
+        <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
+        {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
       </div>
       <div className="divide-y divide-border/50">{children}</div>
     </section>
+  );
+}
+
+/** Collapsible SettingsGroup for advanced, rarely-touched fields. Keeping
+ * these closed by default is what stops a tab from reading as a dense wall of
+ * inputs; the summary keeps the same header rhythm as SettingsGroup. */
+function SettingsDisclosure({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <details className="group overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+      <summary className="flex cursor-pointer list-none items-center gap-2 bg-surface/40 px-4 py-3 [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90" />
+        <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
+        {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
+      </summary>
+      <div className="divide-y divide-border/50 border-t border-border/60">{children}</div>
+    </details>
   );
 }
 
@@ -177,11 +206,11 @@ function SettingRow({
   wideControl?: boolean;
 }) {
   return (
-    <div className="flex flex-col gap-2 px-3 py-2.5 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-4">
+    <div className="flex flex-col gap-3 px-4 py-4 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-5">
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium leading-snug text-foreground">{label}</div>
+        <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
         {description && (
-          <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{description}</p>
+          <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">{description}</p>
         )}
       </div>
       <div className={wideControl ? "w-full shrink-0 @min-[600px]:w-auto" : "shrink-0"}>{control}</div>
@@ -253,7 +282,7 @@ function ChoiceRow<T extends string>({
               key={option.value || option.label}
               type="button"
               aria-pressed={value === option.value}
-              className={`press rounded-md px-2 py-1 text-[11px] transition-colors duration-200 ${
+              className={`press rounded-md px-2.5 py-1.5 text-ui-label transition-colors duration-200 ${
                 value === option.value
                   ? "bg-primary/15 font-semibold text-primary"
                   : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -332,7 +361,7 @@ function NumberRow({
               if (e.key === "Enter") e.currentTarget.blur();
             }}
           />
-          {unit && <span className="shrink-0 text-[11px] text-muted-foreground">{unit}</span>}
+          {unit && <span className="shrink-0 text-ui-caption text-muted-foreground">{unit}</span>}
         </div>
       }
     />
@@ -375,7 +404,7 @@ function TextRow({
       control={
         <input
           type="text"
-          className={`${INPUT} w-full font-mono text-[11.5px] @min-[600px]:w-64`}
+          className={`${INPUT} w-full font-mono text-ui-caption @min-[600px]:w-64`}
           value={draft}
           aria-label={label}
           placeholder={placeholder}
@@ -427,11 +456,11 @@ function LinesRow({
     if (normalized !== serialized) onCommit(next);
   };
   return (
-    <div className="px-3 py-2.5">
-      <div className="text-[12.5px] font-medium leading-snug text-foreground">{label}</div>
-      <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{description}</p>
+    <div className="px-4 py-4">
+      <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
+      <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">{description}</p>
       <textarea
-        className={`${INPUT} mt-1.5 w-full resize-y font-mono text-[11.5px] leading-relaxed`}
+        className={`${INPUT} mt-2 w-full resize-y font-mono text-ui-label leading-relaxed`}
         rows={rows}
         value={draft}
         aria-label={label}
@@ -483,13 +512,13 @@ function JsonRulesRow({
     }
   }
   return (
-    <div className="px-3 py-2.5">
-      <div className="text-[12.5px] font-medium leading-snug text-foreground">{t("思考模型规则")}</div>
-      <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+    <div className="px-4 py-4">
+      <div className="text-ui-body font-medium leading-snug text-foreground">{t("思考模型规则")}</div>
+      <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">
         {t("JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启 CLI 生效。")}
       </p>
       <textarea
-        className={`${INPUT} mt-1.5 w-full resize-y font-mono text-[11.5px] leading-relaxed`}
+        className={`${INPUT} mt-2 w-full resize-y font-mono text-ui-label leading-relaxed`}
         rows={6}
         value={draft}
         aria-label={t("思考模型规则")}
@@ -500,11 +529,11 @@ function JsonRulesRow({
           setDirty(true);
         }}
       />
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <button className={BTN} onClick={apply}>
           {t("应用")}
         </button>
-        {error && <span className="text-[11.5px] text-destructive">{error}</span>}
+        {error && <span className="text-ui-caption text-destructive">{error}</span>}
       </div>
     </div>
   );
@@ -553,7 +582,7 @@ function RangeRow({
               if (e.key.startsWith("Arrow")) commit();
             }}
           />
-          <span className="w-9 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">{draft}%</span>
+          <span className="w-9 shrink-0 text-right text-ui-caption tabular-nums text-muted-foreground">{draft}%</span>
         </div>
       }
     />
@@ -565,7 +594,7 @@ function ChatSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-4">
       <SettingsGroup title={t("回合结束后")} hint={t("可能产生额外的模型调用")}>
         <ToggleRow
           label={t("下一步建议")}
@@ -617,7 +646,7 @@ function AppearanceSection() {
     { value: "all", label: t("全部完成事件") },
   ];
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-4">
       <SettingsGroup title={t("主题与排版")}>
         <ChoiceRow
           label={t("主题")}
@@ -628,7 +657,7 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("字号")}
-          description={t("调整面板中文字的大小；标准档会把常用的 11px 小字提升到约 12px。")}
+          description={t("调整面板整体字号；标准为基准，紧凑约 0.92×，大约 1.1×。")}
           value={settings.uiFontSize}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -639,7 +668,7 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("密度")}
-          description={t("调整控件内边距与间距；不影响字号。")}
+          description={t("调整控件内边距与间距；标准为基准，紧凑约 0.92×，宽松约 1.12×。不影响字号。")}
           value={settings.uiDensity}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -671,7 +700,7 @@ function AppearanceSection() {
         />
       </SettingsGroup>
       <SettingsGroup title={t("快捷键")}>
-        <div className="space-y-1 px-3 py-2.5">
+        <div className="space-y-2 px-4 py-4">
           <ShortcutRow keys="Esc" label={t("停止生成（审批卡中为取消/拒绝）")} />
           <ShortcutRow keys="Y / N" label={t("审批允许 / 拒绝")} />
           <ShortcutRow keys="Y / N / R" label={t("计划批准 / 拒绝 / 重新规划")} />
@@ -732,8 +761,8 @@ function RuntimeSection() {
     { value: "en-US", label: "English" },
   ];
   return (
-    <div className="space-y-2.5">
-      <p className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-[11.5px] leading-relaxed text-muted-foreground">
+    <div className="space-y-4">
+      <p className="rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
         {t(
           "这些设置写入 VSCode 用户 settings.json；开启 VSCode 设置同步后会跨设备同步。API Key 保存在 SecretStorage，不会同步。",
         )}
@@ -820,8 +849,8 @@ function RuntimeSection() {
         />
       </SettingsGroup>
       <SettingsGroup title={t("同步与原始设置")}>
-        <div className="px-3 py-2.5">
-          <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+        <div className="px-3 py-3">
+          <p className="text-ui-caption leading-relaxed text-muted-foreground">
             {t(
               "需要直接编辑原始 JSON 时，可使用底部的「在 VSCode 设置中编辑…」；面板中的改动已写入同一份用户设置。",
             )}
@@ -835,8 +864,8 @@ function RuntimeSection() {
 /** MCP servers live in the CLI's settings file, not in VSCode settings. */
 function McpTab({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderDispatch }) {
   return (
-    <div className="space-y-2.5">
-      <p className="rounded-lg border border-border bg-surface/60 px-3 py-2 text-[11.5px] leading-relaxed text-muted-foreground">
+    <div className="space-y-4">
+      <p className="rounded-xl border border-border bg-surface/60 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
         {t("MCP 服务器配置保存在 ~/.iflow/settings.json，由 CLI 读取；不随 VSCode 设置同步。")}
       </p>
       <McpSection busy={busy} onHeader={onHeader} />
@@ -847,9 +876,9 @@ function McpTab({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderDisp
 /** One keyboard-shortcut row in the settings cheat sheet. */
 function ShortcutRow({ keys, label }: { keys: string; label: string }) {
   return (
-    <div className="flex items-center gap-2">
-      <span className="shrink-0 font-mono text-[10.5px] text-foreground">{keys}</span>
-      <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">{label}</span>
+    <div className="flex items-center gap-3">
+      <span className="shrink-0 font-mono text-ui-caption text-foreground">{keys}</span>
+      <span className="min-w-0 flex-1 text-ui-label text-muted-foreground">{label}</span>
     </div>
   );
 }
@@ -970,19 +999,19 @@ function ApiConfigSection({
     return (
       <div className="space-y-2">
         {editing.name && editingProfile?.source === "cli" && (
-          <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warning">
+          <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
             {t("这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。")}
           </p>
         )}
         <div className="space-y-1">
-          <div className="text-[11.5px] text-muted-foreground">{t("服务商预设")}</div>
+          <div className="text-ui-caption text-muted-foreground">{t("服务商预设")}</div>
           <div className="flex flex-wrap gap-1">
             {PROVIDER_PRESETS.map((option) => (
               <button
                 key={option.id}
                 type="button"
                 aria-pressed={presetId === option.id}
-                className={`press rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-200 ${
+                className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
                   presetId === option.id
                     ? "border-primary/50 bg-primary/10 font-semibold text-primary"
                     : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -995,7 +1024,7 @@ function ApiConfigSection({
             <button
               type="button"
               aria-pressed={presetId === null}
-              className={`press rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-200 ${
+              className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
                 presetId === null
                   ? "border-primary/50 bg-primary/10 font-semibold text-primary"
                   : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -1008,7 +1037,7 @@ function ApiConfigSection({
         </div>
         {preset && (
           <div className="rounded-lg border border-border bg-surface/60 px-2.5 py-1.5">
-            <p className="text-[11px] leading-relaxed text-muted-foreground">{t(preset.note)}</p>
+            <p className="text-ui-caption leading-relaxed text-muted-foreground">{t(preset.note)}</p>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {preset.keyUrl && (
                 <button
@@ -1031,7 +1060,7 @@ function ApiConfigSection({
           </div>
         )}
         <label className="flex flex-col gap-0.5">
-          <span className="text-[11.5px] text-muted-foreground">{t("配置名称（可选，默认为模型名）")}</span>
+          <span className="text-ui-caption text-muted-foreground">{t("配置名称（可选，默认为模型名）")}</span>
           <input
             type="text"
             className={INPUT}
@@ -1041,7 +1070,7 @@ function ApiConfigSection({
           />
         </label>
         <label className="flex flex-col gap-0.5">
-          <span className="text-[11.5px] text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
+          <span className="text-ui-caption text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
           <input
             type="text"
             className={INPUT}
@@ -1051,7 +1080,7 @@ function ApiConfigSection({
           />
         </label>
         <label className="flex flex-col gap-0.5">
-          <span className="text-[11.5px] text-muted-foreground">API Key</span>
+          <span className="text-ui-caption text-muted-foreground">API Key</span>
           <input
             type="password"
             className={INPUT}
@@ -1061,7 +1090,7 @@ function ApiConfigSection({
           />
         </label>
         <label className="flex flex-col gap-0.5">
-          <span className="text-[11.5px] text-muted-foreground">{t("模型名称")}</span>
+          <span className="text-ui-caption text-muted-foreground">{t("模型名称")}</span>
           <input
             type="text"
             className={INPUT}
@@ -1072,12 +1101,12 @@ function ApiConfigSection({
         </label>
         {preset && preset.models.length > 0 && (
           <div className="flex flex-wrap items-center gap-1">
-            <span className="text-[11px] text-muted-foreground">{t("常用模型")}</span>
+            <span className="text-ui-caption text-muted-foreground">{t("常用模型")}</span>
             {preset.models.map((model) => (
               <button
                 key={model}
                 type="button"
-                className="press rounded-full border border-border px-2 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
+                className="press rounded-full border border-border px-2 py-0.5 font-mono text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
                 onClick={() => setForm((f) => ({ ...f, modelName: model }))}
               >
                 {model}
@@ -1092,9 +1121,9 @@ function ApiConfigSection({
           <button className={BTN} onClick={back}>
             {t("取消")}
           </button>
-          {formError && <span className="text-[12px] text-destructive">{formError}</span>}
+          {formError && <span className="text-ui-label text-destructive">{formError}</span>}
         </div>
-        <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+        <p className="text-ui-caption leading-relaxed text-muted-foreground/85">
           {t(
             "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。",
           )}
@@ -1112,22 +1141,22 @@ function ApiConfigSection({
     <div className="space-y-2">
       {showImport && (
         <div className="rounded-xl border border-primary/30 bg-primary/5 px-2.5 py-2">
-          <div className="flex items-center gap-1.5 text-[12px] font-semibold text-foreground">
+          <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
             <Download className="size-3.5 shrink-0 text-primary" />
             {t("检测到 iFlow CLI 已有凭据")}
           </div>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+          <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
             {t("可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。")}
           </p>
-          <div className="mt-1.5 space-y-1">
+          <div className="mt-2 space-y-1">
             {auth.importable.map((candidate) => (
               <div
                 key={candidate.name}
                 className="flex items-center gap-1.5 rounded-lg border border-border bg-surface/60 px-2 py-1"
               >
                 <span className="min-w-0 flex-1 truncate">
-                  <span className="text-[12px] font-semibold text-foreground">{candidate.name}</span>
-                  <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">
+                  <span className="text-ui-label font-semibold text-foreground">{candidate.name}</span>
+                  <span className="ml-1.5 font-mono text-ui-caption text-muted-foreground">
                     {candidate.modelName} · {candidate.keyTail}
                   </span>
                 </span>
@@ -1148,21 +1177,30 @@ function ApiConfigSection({
         </div>
       )}
       {auth.needsSetup && (
-        <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warning">
+        <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
           {t("连接 iFlow 需要配置 API 凭据")}
         </p>
       )}
       {switching && (
-        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-ui-caption text-muted-foreground">
           <Chip tone="primary">{awaitingChoice ? t("等待选择…") : t("正在重新认证…")}</Chip>
         </p>
       )}
+      {auth.profiles.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 pb-0.5">
+          <button className={BTN} disabled={busy} onClick={() => openNew()}>
+            <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+            {t("添加配置")}
+          </button>
+          <span className="text-ui-caption text-muted-foreground">{t("点击配置即可切换并重新认证")}</span>
+        </div>
+      )}
       {auth.profiles.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border px-3 py-4">
-          <div className="text-center text-[12px] font-semibold text-foreground">
+          <div className="text-center text-ui-label font-semibold text-foreground">
             {t("尚未添加 API 配置")}
           </div>
-          <p className="mt-1 text-center text-[11px] leading-relaxed text-muted-foreground">
+          <p className="mt-1 text-center text-ui-caption leading-relaxed text-muted-foreground">
             {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
           </p>
           <div className="mt-2 flex flex-wrap justify-center gap-1">
@@ -1170,7 +1208,7 @@ function ApiConfigSection({
               <button
                 key={option.id}
                 type="button"
-                className="press rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:bg-accent/60 hover:text-foreground"
+                className="press rounded-full border border-border px-2 py-0.5 text-ui-caption text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:bg-accent/60 hover:text-foreground"
                 onClick={() => openNew(option)}
               >
                 {option.label}
@@ -1185,7 +1223,7 @@ function ApiConfigSection({
           </div>
         </div>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           {auth.profiles.map((p) => (
             <div
               key={p.name}
@@ -1213,12 +1251,12 @@ function ApiConfigSection({
                 />
                 <span className="min-w-0">
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate text-[12px] font-semibold text-foreground">{p.name}</span>
+                    <span className="truncate text-ui-label font-semibold text-foreground">{p.name}</span>
                     <Chip tone={p.source === "extension" ? "muted" : "info"}>
                       {p.source === "extension" ? t("扩展") : t("CLI")}
                     </Chip>
                   </span>
-                  <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                  <span className="block truncate font-mono text-ui-caption text-muted-foreground">
                     {p.modelName} · {p.keyTail}
                   </span>
                 </span>
@@ -1245,17 +1283,11 @@ function ApiConfigSection({
           ))}
         </div>
       )}
-      {auth.profiles.length > 0 && (
-        <button className={BTN} disabled={busy} onClick={() => openNew()}>
-          <Plus className="mr-0.5 inline size-3 align-[-2px]" />
-          {t("添加配置")}
-        </button>
-      )}
-      <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+      <p className="text-ui-label leading-relaxed text-muted-foreground/85">
         {t("点击配置即切换并重新认证会话；来自 iFlow CLI 的配置为只读，可切换但不可在此删除。")}
       </p>
 
-      <SettingsGroup title={t("模型元数据")}>
+      <SettingsDisclosure title={t("模型元数据")} hint={t("高级，可选填")}>
         <LinesRow
           label={t("上下文窗口覆写")}
           description={t("每行「模型名=token数」（如「glm-4.6=200000」）；未知模型回退默认值。")}
@@ -1274,7 +1306,7 @@ function ApiConfigSection({
           value={settings.thinkingModelRules}
           onCommit={(thinkingModelRules) => updateHostSetting({ thinkingModelRules })}
         />
-      </SettingsGroup>
+      </SettingsDisclosure>
 
       {confirmingDelete && (
         <ConfirmDialog

@@ -145,14 +145,14 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
       >
         <div className="flex items-center gap-1.5">
           <ActionIcon action={rule.action} />
-          <span className={`min-w-0 flex-1 truncate text-[12px] font-semibold ${rule.enabled ? "text-foreground" : "text-muted-foreground/80 line-through"}`}>
+          <span className={`min-w-0 flex-1 truncate text-ui-body font-semibold ${rule.enabled ? "text-foreground" : "text-muted-foreground/80 line-through"}`}>
             {rule.label}
           </span>
-          <span className="shrink-0 text-[11px] text-muted-foreground">{t(ACTION_LABEL[rule.action])}</span>
+          <span className="shrink-0 text-ui-label text-muted-foreground">{t(ACTION_LABEL[rule.action])}</span>
           {!readOnly && (
             <>
               <label
-                className="shrink-0 cursor-pointer text-[11px] text-muted-foreground"
+                className="shrink-0 cursor-pointer text-ui-label text-muted-foreground"
                 title={rule.enabled ? t("点击停用") : t("点击启用")}
               >
                 <input
@@ -192,12 +192,12 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
         </div>
         <div className="flex items-center gap-2">
           {summary && (
-            <div className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground" title={summary}>
+            <div className="min-w-0 flex-1 truncate font-mono text-ui-label text-muted-foreground" title={summary}>
               {summary}
             </div>
           )}
           {!readOnly && typeof rule.hits === "number" && rule.hits > 0 && (
-            <div className="shrink-0 text-[11px] text-muted-foreground/80">{t("命中 {0} 次", rule.hits)}</div>
+            <div className="shrink-0 text-ui-label text-muted-foreground/80">{t("命中 {0} 次", rule.hits)}</div>
           )}
         </div>
       </div>
@@ -208,19 +208,19 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
     <>
       {editing === null && (
         <>
-          {defaults && <div className="mb-2.5">{defaults}</div>}
+          {defaults && <div className="mb-3">{defaults}</div>}
           {rules === null ? (
-            <div className="py-4 text-center text-[12px] text-muted-foreground">{t("读取中…")}</div>
+            <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {rules.length === 0 && projectRules.length === 0 && (
                 <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center">
-                  <div className="text-[12px] text-muted-foreground">{t("尚未配置审批规则")}</div>
+                  <div className="text-ui-body text-muted-foreground">{t("尚未配置审批规则")}</div>
                 </div>
               )}
               {rules.map((rule) => renderRow(rule, false))}
               {projectRules.length > 0 && (
-                <div className="pt-1 text-[11px] text-muted-foreground">{t("项目规则（只读）")}</div>
+                <div className="pt-1 text-ui-label text-muted-foreground">{t("项目规则（只读）")}</div>
               )}
               {projectRules.map((rule) => renderRow(rule, true))}
             </div>
@@ -244,9 +244,9 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             <button className={SAVE_BTN} disabled={busy || rules === null || savedFlash} onClick={save}>
               {savedFlash ? t("已保存") : t("保存")}
             </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+          <p className="text-ui-label leading-relaxed text-muted-foreground/85">
             {t(
               "审批请求按顺序匹配规则（项目规则优先），首条命中即生效：自动允许 / 自动拒绝 / 弹卡。内置硬底线：rm、git push 等破坏性命令永不被自动允许，命中时仍弹卡确认。",
             )}
@@ -257,7 +257,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
       {editing && (
         <div className="space-y-2">
           <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("规则名称")}</span>
+            <span className="text-ui-label text-muted-foreground">{t("规则名称")}</span>
             <input
               type="text"
               className={INPUT}
@@ -270,7 +270,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             />
           </label>
           <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("动作")}</span>
+            <span className="text-ui-label text-muted-foreground">{t("动作")}</span>
             <select
               className={INPUT}
               value={editing.rule.action}
@@ -291,7 +291,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 <button
                   key={kind}
                   type="button"
-                  className={`press rounded-full border px-2 py-0.5 font-mono text-[11px] transition-all duration-200 ${
+                  className={`press rounded-full border px-2 py-0.5 font-mono text-ui-label transition-all duration-200 ${
                     active
                       ? "border-primary/50 bg-primary/15 text-foreground"
                       : "border-border text-muted-foreground hover:border-primary/30"
@@ -313,7 +313,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             })}
           </div>
           <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("路径通配（相对会话目录）")}</span>
+            <span className="text-ui-label text-muted-foreground">{t("路径通配（相对会话目录）")}</span>
             <input
               type="text"
               className={`${INPUT} font-mono`}
@@ -327,7 +327,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             />
           </label>
           <label className="flex flex-col gap-0.5">
-            <span className="text-[11.5px] text-muted-foreground">{t("命令首词（逗号分隔，仅执行类）")}</span>
+            <span className="text-ui-label text-muted-foreground">{t("命令首词（逗号分隔，仅执行类）")}</span>
             <input
               type="text"
               className={`${INPUT} font-mono`}
@@ -341,7 +341,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           </label>
           <div className="flex flex-wrap gap-2">
             <label className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="text-[11.5px] text-muted-foreground">{t("MCP 服务器名")}</span>
+              <span className="text-ui-label text-muted-foreground">{t("MCP 服务器名")}</span>
               <input
                 type="text"
                 className={INPUT}
@@ -353,7 +353,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               />
             </label>
             <label className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="text-[11.5px] text-muted-foreground">{t("工具名（精确匹配）")}</span>
+              <span className="text-ui-label text-muted-foreground">{t("工具名（精确匹配）")}</span>
               <input
                 type="text"
                 className={`${INPUT} font-mono`}
@@ -369,9 +369,9 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             <button className={BTN} onClick={() => closeEditor(true)}>
               {t("完成")}
             </button>
-            {editError && <span className="text-[12px] text-destructive">{editError}</span>}
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground/85">
+          <p className="text-ui-label leading-relaxed text-muted-foreground/85">
             {t("维度全部留空将匹配所有请求（谨慎）；编辑只改本地副本，点击「保存」才生效。")}
           </p>
         </div>

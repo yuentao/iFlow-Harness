@@ -157,6 +157,12 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - UI 说明组件约定：ui.tsx 的 HelpTip 通过 hover/focus/点击触发、role=tooltip，用于审批卡、Plan 卡、提问卡；操作行同时直接展示快捷键提示。
 - 项目发布流程：验证后，提交未提交改动（通常含对应测试）→ 新增 CHANGELOG 下一版本条目 → 同步 bump package.json → 提交 → push master + 同步 release branch（通常 fast-forward，触发 release CI）。
 - 项目版本同步约定：CHANGELOG 顶部版本与 package.json version 应保持一致；发布 commit 更新 both together.
+- 设置面板视觉规范：字号阶梯统一为行标签 13px / 说明 12px / 分组标题 11.5px；降低信息密度，各分区主操作（新建/刷新/添加配置）置于列表上方，模型元数据等次要内容默认收起。
+- UI 改动的验收方式：在 mock webview 中用 frontend-tester 逐项点击验证（焦点、滚动、布局、交互），除单测/typecheck 外作为前端行为验收环节。
+- webview 字号系统统一为 5 档语义 token：text-ui-title 16px / text-ui-body 14px / text-ui-label 13px / text-ui-caption 12px / text-ui-micro 11px，另有 display 20px 用于启动页/空状态品牌图形；禁止再新增任意 text-[Npx] 字号。
+- 字号缩放变量 --ui-font-scale 默认 1.0，三档预设为紧凑 0.92 / 标准 1 / 大 1.1；按原有效尺寸映射，避免半像素字号。
+- 设置页字号层级：标题 16px / 侧栏与行标签 14px / 说明 13px / 分组标题 12px / 辅助信息 11px；弹窗标题 16px。
+- 样式表中字号缩放应使用语义字号变量，body 基准 14px；不再使用 calc(Npx * var(--ui-font-scale)) 的写法。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

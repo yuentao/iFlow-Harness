@@ -187,11 +187,15 @@ const en: Record<string, string> = {
   "归档": "Archive",
   "取消归档": "Unarchive",
   "已归档（{0}）": "Archived ({0})",
+  "重命名": "Rename",
+  "会话名称": "Session name",
   // composer
   "发送": "Send",
   "停止": "Stop",
   // settings modal (unified: API profiles / MCP / approval policies)
   "设置": "Settings",
+  "高级，可选填": "Advanced (optional)",
+  "点击配置即可切换并重新认证": "Click a profile to switch and re-authenticate",
   "API 配置": "API profiles",
   "已保存（{0}）— 留空保持不变": "saved (…{0}) — leave empty to keep",
   "Base URL 必须以 http:// 或 https:// 开头": "Base URL must start with http:// or https://",

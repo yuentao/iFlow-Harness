@@ -123,7 +123,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <ShieldCheck className="size-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 truncate text-[12px] font-semibold">{t("iFlow 请求执行工具")}</span>
+        <span className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 请求执行工具")}</span>
         <span className="ml-auto">
           <HelpTip label={t("审批说明")} align="right">
             <span className="block space-y-1">
@@ -133,27 +133,27 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
               <span className="block">
                 {t("拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。")}
               </span>
-              <span className="block font-mono text-[10.5px] text-muted-foreground">
+              <span className="block font-mono text-ui-micro text-muted-foreground">
                 {t("Y 允许一次 · N 拒绝 · Esc 取消")}
               </span>
             </span>
           </HelpTip>
         </span>
       </div>
-      <div className="space-y-1.5 px-3 py-2.5 text-[12px]">
+      <div className="space-y-2 px-3 py-3 text-ui-label">
         {/* break-words + scroll cap: the wire title is uncapped (whole shell
             commands / descriptions); unbroken tokens used to punch through
             the card border, long ones grew the shrink-0 card unbounded. */}
         <p className="max-h-40 select-text overflow-y-auto break-words text-foreground/90">
           {approval.toolName && (
-            <code className="mr-1.5 rounded bg-editor px-1.5 py-0.5 font-mono text-[11px]">
+            <code className="mr-1.5 rounded bg-editor px-1.5 py-0.5 font-mono text-ui-caption">
               {approval.toolName}
             </code>
           )}
           {approval.title}
         </p>
         {primary && (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-ui-caption text-muted-foreground">
             <FileRef path={primary.path} line={primary.line} />
           </p>
         )}
@@ -174,7 +174,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
             key={opt.optionId}
             disabled={answered}
             aria-label={approval.toolName ? t("{0}（{1}）", opt.name, approval.toolName) : opt.name}
-            className={`press inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
+            className={`press inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
             onClick={() => answer(opt.optionId)}
           >
             {opt.kind === "allow_always" && <Lock className="size-3 shrink-0" />}
@@ -184,12 +184,12 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         <button
           disabled={answered}
           aria-label={t("取消审批")}
-          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(null)}
         >
           {t("取消")}
         </button>
-        <span className="ml-auto self-center text-[10.5px] text-muted-foreground/80">
+        <span className="ml-auto self-center text-ui-micro text-muted-foreground/80">
           {t("Y 允许一次 · N 拒绝 · Esc 取消")}
         </span>
       </div>

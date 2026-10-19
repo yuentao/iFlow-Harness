@@ -57,8 +57,8 @@ it("applies hostSettings presets to the CSS scale variables", () => {
   });
 
   const style = document.documentElement.style;
-  expect(style.getPropertyValue("--ui-font-scale")).toBe("1.2");
-  expect(style.getPropertyValue("--ui-density")).toBe("1.08");
+  expect(style.getPropertyValue("--ui-font-scale")).toBe("1.1");
+  expect(style.getPropertyValue("--ui-density")).toBe("1.12");
   expect(useChat.getState().hostSettings.uiFontSize).toBe("large");
   expect(useChat.getState().hostSettings.uiDensity).toBe("comfortable");
 });
@@ -67,8 +67,8 @@ it("sends preset changes to the host and applies them optimistically", () => {
   useChat.getState().updateHostSetting({ uiFontSize: "compact", uiDensity: "compact" });
 
   const style = document.documentElement.style;
-  expect(style.getPropertyValue("--ui-font-scale")).toBe("1");
-  expect(style.getPropertyValue("--ui-density")).toBe("0.94");
+  expect(style.getPropertyValue("--ui-font-scale")).toBe("0.92");
+  expect(style.getPropertyValue("--ui-density")).toBe("0.92");
   expect(useChat.getState().hostSettings.uiFontSize).toBe("compact");
 
   const sent = postMessage.mock.calls
