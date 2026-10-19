@@ -49,11 +49,11 @@ import type {
   ThoughtBlock,
   ToolBlock,
 } from "../../../shared/messages";
-import { isPlanMode, splitSystemPromptSections } from "../../../shared/messages";
+import { isPlanMode, MAX_TOOL_OUTPUT_DISPLAY_CHARS, splitSystemPromptSections } from "../../../shared/messages";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { Markdown } from "./Markdown";
+import { Markdown, copyText } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
@@ -187,7 +187,17 @@ function StatusChip({ status }: { status: ToolBlock["status"] }) {
   return <span key={status} className="inline-flex">{chip}</span>;
 }
 
-function OutputDetails({ output, truncatedChars }: { output: string; truncatedChars?: number }) {
+function OutputDetails({
+  output,
+  truncatedChars,
+  blockId,
+}: {
+  output: string;
+  truncatedChars?: number;
+  /** Stable block id (P4) — enables the host-side full-output export. */
+  blockId?: string;
+}) {
+  const send = useChat((s) => s.send);
   const [open, setOpen] = useState(false);
   // Collapse keeps its children MOUNTED for the height animation — so a
   // folded tool output used to pin its whole text (up to 64K chars) in the
@@ -197,21 +207,54 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
   // zero DOM beyond the toggle row.
   const [openedOnce, setOpenedOnce] = useState(false);
   if (!output) return null;
-  const truncation =
+  // 3.5 ②: the store keeps up to 512K chars; render at most the display cap
+  // so one monster output cannot balloon the DOM (pitfall #27). Everything
+  // stored — including what this pane cuts — stays recoverable via the
+  // copy-full / open-as-file row below.
+  const overDisplayCap = output.length > MAX_TOOL_OUTPUT_DISPLAY_CHARS;
+  const display = overDisplayCap ? output.slice(0, MAX_TOOL_OUTPUT_DISPLAY_CHARS) : output;
+  const truncated =
     truncatedChars && truncatedChars > 0 ? (
       <span className="ml-1.5 shrink-0 font-mono text-[11px] text-warning">
         {t("已截断 {0} 字符", truncatedChars.toLocaleString())}
       </span>
+    ) : null;
+  const recoverRow =
+    truncatedChars || overDisplayCap ? (
+      <div className="flex items-center gap-3 px-3 pb-1.5 text-[11px]">
+        {overDisplayCap && !truncatedChars && (
+          <span className="font-mono text-muted-foreground">
+            {t("仅渲染前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
+          </span>
+        )}
+        <button
+          className="text-muted-foreground hover:text-foreground"
+          onClick={() => void copyText(output)}
+        >
+          {t("复制全部")}
+        </button>
+        {blockId && (
+          <button
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => send({ type: "exportToolOutput", blockId })}
+          >
+            {t("查看完整输出")}
+          </button>
+        )}
+      </div>
     ) : null;
   // Fewer than 3 lines: show inline — a toggle around two short lines is
   // chrome, not utility. The fold only pays off once content is tall.
   const lineCount = output.trimEnd().split("\n").length;
   if (lineCount < 3) {
     return (
-      <pre className="mx-2.5 mb-2.5 rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-        {output}
-        {truncation}
-      </pre>
+      <>
+        <pre className="mx-2.5 mb-2.5 rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {display}
+          {truncated}
+        </pre>
+        {recoverRow}
+      </>
     );
   }
   return (
@@ -225,12 +268,13 @@ function OutputDetails({ output, truncatedChars }: { output: string; truncatedCh
       >
         <Caret open={open} />
         {t("操作输出")}
-        {truncation}
+        {truncated}
       </button>
+      {recoverRow}
       <Collapse open={open}>
         {openedOnce && (
           <pre className="mx-2.5 mb-2.5 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            {output}
+            {display}
           </pre>
         )}
       </Collapse>
@@ -446,7 +490,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
         />
       )}
       {!hasDiff && block.input && <InputDetails input={block.input} title={block.title} />}
-      <OutputDetails output={block.output} truncatedChars={block.truncatedChars} />
+      <OutputDetails output={block.output} truncatedChars={block.truncatedChars} blockId={block.id} />
     </div>
   );
 }
@@ -692,8 +736,14 @@ function ThoughtCard({
 }
 
 function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
+  const send = useChat((s) => s.send);
   const total = block.entries.length;
   const done = block.entries.filter((e) => e.status === "completed").length;
+  // 3.5 ①: a seeded plan card is checkable by the user even when the agent
+  // never drives the todo tool. in_progress items are the agent's claim —
+  // ticking those would fight the agent's own bookkeeping, so they stay
+  // inert. Stale clicks (block gone) are dropped host-side silently.
+  const tickable = Boolean(block.id);
   return (
     <div className="stream-in card-lift rounded-xl border border-border bg-card px-3 py-2.5 shadow-card">
       <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
@@ -704,20 +754,39 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
         </span>
       </div>
       <ul className="space-y-1.5">
-        {block.entries.map((entry, i) => (
-          <li key={i} className={`flex items-start gap-2 text-[12px] status-${entry.status ?? "pending"}`}>
-            {entry.status === "completed" ? (
-              <CheckCircle2 className="size-3.5 shrink-0 translate-y-[1px] text-success" />
-            ) : entry.status === "in_progress" ? (
-              <Loader2 className="size-3.5 shrink-0 translate-y-[1px] animate-spin text-primary" />
-            ) : (
-              <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
-            )}
-            <span className={`min-w-0 break-words ${entry.status === "completed" ? "text-muted-foreground line-through" : "text-foreground"}`}>
-              {entry.content}
-            </span>
-          </li>
-        ))}
+        {block.entries.map((entry, i) => {
+          const clickable = tickable && block.id && entry.status !== "in_progress";
+          const label = (
+            <>
+              {entry.status === "completed" ? (
+                <CheckCircle2 className="size-3.5 shrink-0 translate-y-[1px] text-success" />
+              ) : entry.status === "in_progress" ? (
+                <Loader2 className="size-3.5 shrink-0 translate-y-[1px] animate-spin text-primary" />
+              ) : (
+                <span className="mt-[3px] size-3 shrink-0 rounded-full border border-border" />
+              )}
+              <span className={`min-w-0 break-words ${entry.status === "completed" ? "text-muted-foreground line-through" : "text-foreground"}`}>
+                {entry.content}
+              </span>
+            </>
+          );
+          return (
+            <li key={i} className={`flex items-start gap-2 text-[12px] status-${entry.status ?? "pending"}`}>
+              {clickable ? (
+                <button
+                  type="button"
+                  className="flex min-w-0 items-start gap-2 text-left"
+                  title={entry.status === "completed" ? t("取消勾选") : t("标记完成")}
+                  onClick={() => send({ type: "togglePlanItem", blockId: block.id!, index: i })}
+                >
+                  {label}
+                </button>
+              ) : (
+                label
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

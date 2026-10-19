@@ -139,8 +139,16 @@ const LEGACY_RESOLUTION_NOTE = /^\*[^*\n]+ — [^*\n]+\*$/;
  * Diff payloads are NOT capped: revert matches the disk content against
  * `diff.newText` verbatim (panel.probeRevertCandidate), truncation there
  * would silently break the revert flow.
+ *
+ * 3.5 ② (2026-10-19): the store cap is now 8× the webview DISPLAY cap
+ * (`MAX_TOOL_OUTPUT_DISPLAY_CHARS`, in shared/messages.ts). The CLI itself
+ * does not truncate ACP tool output (bundle probe: no 65536-style cap in
+ * the vendored fork; the NDJSON 8MB frame is the only wire bound), so the
+ * full text genuinely reaches the host — the display cap only bounds DOM,
+ * while copy-full / open-as-file actions recover the rest. Beyond the
+ * store cap the tail is still lost (honest `truncatedChars` notice).
  */
-export const MAX_TOOL_OUTPUT_CHARS = 64 * 1024;
+export const MAX_TOOL_OUTPUT_STORE_CHARS = 512 * 1024;
 
 /** Char cap for the formatted tool-args display line (audit view, not a
  * transcript copy — the raw args stay out of memory entirely). */
@@ -221,9 +229,9 @@ export function formatToolInput(args: unknown): string | null {
 function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
   let output = patch.output || "";
   let truncatedChars: number | undefined;
-  if (output.length > MAX_TOOL_OUTPUT_CHARS) {
-    truncatedChars = output.length - MAX_TOOL_OUTPUT_CHARS;
-    output = output.slice(0, MAX_TOOL_OUTPUT_CHARS);
+  if (output.length > MAX_TOOL_OUTPUT_STORE_CHARS) {
+    truncatedChars = output.length - MAX_TOOL_OUTPUT_STORE_CHARS;
+    output = output.slice(0, MAX_TOOL_OUTPUT_STORE_CHARS);
   }
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
@@ -604,6 +612,44 @@ function upsertPlanEntries(
   }
   blocks.push(create());
   return blocks.length - 1;
+}
+
+/** Seed the turn's TaskList from an approved Plan-mode plan (3.5 ①: the
+ * card otherwise only appears once the agent itself calls the todo tool,
+ * so after approval the round had no task-level progress view). Reuses the
+ * todo-tool merge rule — one live card per turn, and a later `todo_write`
+ * replaces the seeded items (the agent's own bookkeeping wins). Returns
+ * null for an empty list (nothing to seed). */
+export function addPlanChecklist(blocks: Block[], entries: PlanEntryUi[]): number | null {
+  if (entries.length === 0) return null;
+  return upsertPlanEntries(blocks, entries, () => ({ kind: "plan", id: nextBlockId(), entries }));
+}
+
+/** Tick/untick one checklist entry by stable block id (P4) — the user-side
+ * progress control (the plan card is checkable even when the agent never
+ * drives the todo tool). Only flips `pending`/`completed`; an `in_progress`
+ * item completing is the agent's claim and stays untouched. Returns the
+ * mutated index, or null when the block/entry is not addressable (stale
+ * webview state after a truncation — the card re-renders from the next
+ * snapshot and the click is simply dropped). */
+export function setPlanEntryStatus(
+  blocks: Block[],
+  blockId: string,
+  index: number,
+): number | null {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i]!;
+    if (block.kind !== "plan" || block.id !== blockId) continue;
+    const entry = block.entries[index];
+    if (!entry || entry.status === "in_progress") return null;
+    const nextStatus = entry.status === "completed" ? "pending" : "completed";
+    blocks[i] = {
+      ...block,
+      entries: block.entries.map((e, j) => (j === index ? { ...e, status: nextStatus } : e)),
+    };
+    return i;
+  }
+  return null;
 }
 
 /** Apply one session update to a block list (top-level transcript or a

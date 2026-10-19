@@ -13,6 +13,7 @@ import type {
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
 import {
+  addPlanChecklist,
   appendApprovalResolution,
   appendInjectedContext,
   applySessionUpdate,
@@ -38,9 +39,11 @@ import {
   setPendingPlanExit,
   setPendingProfileSwitch,
   setPendingQuestions,
+  setPlanEntryStatus,
   setSessions,
 } from "../../shared/session-state.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, ToolDiffUi } from "../../shared/messages.js";
+import { classifyErrorAdvice } from "../../shared/error-advice.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, PlanEntryUi, ToolDiffUi } from "../../shared/messages.js";
 import type { UsageContext } from "../../shared/session-state.js";
 
 export class SessionStore {
@@ -125,10 +128,28 @@ export class SessionStore {
   markError(message: string): void {
     this.state.status = "error";
     this.state.errorMessage = message;
+    // 3.6: structured next-step guidance for the toast (null when no
+    // category matches — the raw message stands alone, never a wrong guess).
+    this.state.errorAdvice = classifyErrorAdvice(message);
     // An errored turn is over too (prompt reject, CLI process death): close
     // any SubAgent card still open, or its zombie interval swallows every
     // later top-level event into the card.
     this.noteMutationIndex(closeOpenSubAgents(this.state.blocks));
+    this.flush();
+  }
+
+  /** 3.5 ①: seed the turn's TaskList from an approved plan (panel calls this
+   * on plan approval). Returns the card index, null when nothing seeded. */
+  seedPlanChecklist(entries: PlanEntryUi[]): number | null {
+    const index = addPlanChecklist(this.state.blocks, entries);
+    this.noteMutationIndex(index);
+    this.flush();
+    return index;
+  }
+
+  /** 3.5 ①: user tick/untick of one checklist item; stale ids drop silently. */
+  togglePlanItem(blockId: string, index: number): void {
+    this.noteMutationIndex(setPlanEntryStatus(this.state.blocks, blockId, index));
     this.flush();
   }
 

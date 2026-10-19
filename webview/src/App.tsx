@@ -33,7 +33,7 @@ import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
-import type { AgentStatus, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
+import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
 
@@ -86,7 +86,18 @@ function formatSessionTime(ts: number): string {
  * when the text is actually long), a copy button (Clipboard API with the
  * textarea fallback from Markdown.tsx), plus the P0-3 retry/dismiss.
  */
-function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+function ErrorToast({
+  message,
+  advice,
+  onOpenSettings,
+  onDismiss,
+}: {
+  message: string;
+  /** 3.6: structured next-step guidance from the host (null → message only). */
+  advice: ErrorAdviceUi | null;
+  onOpenSettings: (tab: "api" | "runtime") => void;
+  onDismiss: () => void;
+}) {
   const send = useChat((s) => s.send);
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -113,6 +124,19 @@ function ErrorToast({ message, onDismiss }: { message: string; onDismiss: () => 
             >
               {expanded ? t("收起") : t("展开")}
             </button>
+          )}
+          {advice && (
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-destructive/90">
+              <span className="select-text">{t(advice.hint)}</span>
+              {advice.openSettingsTab && (
+                <button
+                  className="press rounded font-semibold underline decoration-destructive/30 underline-offset-2 hover:opacity-100"
+                  onClick={() => onOpenSettings(advice.openSettingsTab!)}
+                >
+                  {advice.openSettingsTab === "api" ? t("打开 API 设置") : t("打开运行时设置")}
+                </button>
+              )}
+            </div>
           )}
         </div>
         <button
@@ -161,6 +185,7 @@ export function App() {
   // subscribes to `state` itself) re-renders while blocks stream.
   const status = useChat((s) => s.state?.status ?? null);
   const errorMessage = useChat((s) => s.state?.errorMessage ?? null);
+  const errorAdvice = useChat((s) => s.state?.errorAdvice ?? null);
   const stopReason = useChat((s) => s.state?.stopReason ?? null);
   const auth = useChat((s) => s.state?.auth ?? null);
   const sessions = useChat((s) => s.state?.sessions ?? EMPTY_SESSIONS);
@@ -704,7 +729,12 @@ export function App() {
           </div>
         )}
         {errorMessage && dismissedError !== errorMessage && (
-          <ErrorToast message={errorMessage} onDismiss={() => setDismissedError(errorMessage)} />
+          <ErrorToast
+            message={errorMessage}
+            advice={errorAdvice}
+            onOpenSettings={(tab) => setSettingsTab(tab)}
+            onDismiss={() => setDismissedError(errorMessage)}
+          />
         )}
         {(pendingApproval || pendingPlanExit || pendingQuestions) && (
           <div

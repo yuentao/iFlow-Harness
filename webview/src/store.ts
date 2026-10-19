@@ -327,6 +327,7 @@ function createMockHost(): HostApi {
     { kind: "thought", text: "用户想了解仓库结构，先列出目录。" },
     {
       kind: "tool",
+      id: "demo-shell-block",
       toolCallId: "demo-shell",
       toolName: "run_shell_command",
       title: "run_shell_command",
@@ -334,6 +335,7 @@ function createMockHost(): HostApi {
       status: "completed",
       input: 'npm run build 2>&1 | tail -20 && cd webview && npx tsc --noEmit',
       output: "Stdout: build ok\nStderr: (empty)\nExit Code: 0",
+      truncatedChars: 4096,
       locations: [],
       diff: null,
     },
@@ -501,7 +503,7 @@ function createMockHost(): HostApi {
         "```",
       ].join("\n"),
     },
-    { kind: "plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
+    { kind: "plan", id: "demo-plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
   const demoApproval: SessionState["pendingApproval"] = {
     id: "perm-demo-1",
@@ -1241,6 +1243,32 @@ function createMockHost(): HostApi {
             },
           });
         }, 700);
+        return;
+      }
+      if (m.type === "togglePlanItem") {
+        // Mirror the real host's setPlanEntryStatus: flip pending↔completed,
+        // in_progress stays the agent's claim, stale ids drop silently.
+        const block = demoBlocks.find((b) => b.kind === "plan" && b.id === m.blockId);
+        if (block && block.kind === "plan") {
+          const entry = block.entries[m.index];
+          if (entry && entry.status !== "in_progress") {
+            block.entries = block.entries.map((e, j) =>
+              j === m.index ? { ...e, status: e.status === "completed" ? "pending" : "completed" } : e,
+            );
+            broadcast({
+              type: "snapshot",
+              state: {
+                blocks: [...demoBlocks],
+                status: "idle",
+                errorMessage: null,
+                stopReason: "end_turn",
+                ...demoMeta,
+                pendingApproval: activeApproval,
+                auth: authState,
+              },
+            });
+          }
+        }
         return;
       }
       if (m.type === "deleteUserMessage") {

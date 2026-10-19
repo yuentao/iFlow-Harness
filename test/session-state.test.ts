@@ -42,6 +42,9 @@ import {
   setNextStepLoading,
   toAgentPromptText,
   appendInjectedContext,
+  addPlanChecklist,
+  setPlanEntryStatus,
+  MAX_TOOL_OUTPUT_STORE_CHARS,
 } from "../shared/session-state";
 import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, splitReportedContextSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
@@ -1053,6 +1056,83 @@ describe("todo tool unification (single TaskList card)", () => {
   });
 });
 
+describe("plan checklist seeding & ticking (3.5 ①)", () => {
+  it("seeds a plan card and a later todo_write replaces the seeded items", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "go");
+    const index = addPlanChecklist(state.blocks, [
+      { content: "步骤一", status: "pending" },
+      { content: "步骤二", status: "pending" },
+    ]);
+    expect(index).toBe(1);
+    expect(state.blocks[1]).toMatchObject({ kind: "plan", entries: [{ content: "步骤一" }, { content: "步骤二" }] });
+    // The agent's own bookkeeping wins: the adapter maps a todo_write to a
+    // `plan` update, which merges into the SAME card (one live card per turn)
+    // with its own items.
+    applySessionUpdate(state, notify({
+      sessionUpdate: "plan",
+      entries: [{ content: "步骤一", status: "completed" }],
+    }));
+    expect(state.blocks.filter((b) => b.kind === "plan")).toHaveLength(1);
+    const plan = state.blocks[1]!;
+    if (plan.kind !== "plan") throw new Error("expected plan");
+    expect(plan.entries).toEqual([{ content: "步骤一", status: "completed" }]);
+  });
+
+  it("seeding is idempotent per turn (re-approval merges into the same card)", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "go");
+    addPlanChecklist(state.blocks, [{ content: "A", status: "pending" }, { content: "B", status: "pending" }]);
+    addPlanChecklist(state.blocks, [{ content: "C", status: "pending" }]);
+    expect(state.blocks.filter((b) => b.kind === "plan")).toHaveLength(1);
+    const plan = state.blocks[1]!;
+    if (plan.kind !== "plan") throw new Error("expected plan");
+    expect(plan.entries.map((e) => e.content)).toEqual(["C"]);
+  });
+
+  it("empty entry list seeds nothing", () => {
+    const state = initialSessionState();
+    expect(addPlanChecklist(state.blocks, [])).toBeNull();
+    expect(state.blocks).toHaveLength(0);
+  });
+
+  it("toggling flips pending↔completed and leaves in_progress untouched", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "go");
+    addPlanChecklist(state.blocks, [
+      { content: "A", status: "pending" },
+      { content: "B", status: "in_progress" },
+    ]);
+    const plan = state.blocks[1]!;
+    if (plan.kind !== "plan" || !plan.id) throw new Error("expected plan with id");
+    const id = plan.id;
+
+    expect(setPlanEntryStatus(state.blocks, id, 0)).toBe(1);
+    let after = state.blocks[1]!;
+    if (after.kind !== "plan") throw new Error("expected plan");
+    expect(after.entries[0]!.status).toBe("completed");
+
+    // in_progress is the agent's claim — a user click is dropped.
+    expect(setPlanEntryStatus(state.blocks, id, 1)).toBeNull();
+
+    // untick flips back
+    setPlanEntryStatus(state.blocks, id, 0);
+    after = state.blocks[1]!;
+    if (after.kind !== "plan") throw new Error("expected plan");
+    expect(after.entries[0]!.status).toBe("pending");
+  });
+
+  it("stale block ids and out-of-range indices drop silently", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "go");
+    addPlanChecklist(state.blocks, [{ content: "A", status: "pending" }]);
+    expect(setPlanEntryStatus(state.blocks, "missing-id", 0)).toBeNull();
+    const plan = state.blocks[1]!;
+    if (plan.kind !== "plan" || !plan.id) throw new Error("expected plan with id");
+    expect(setPlanEntryStatus(state.blocks, plan.id, 99)).toBeNull();
+  });
+});
+
 describe("host-level transitions", () => {
   it("user → streaming → idle lifecycle", () => {
     const state = initialSessionState();
@@ -1619,9 +1699,9 @@ describe("estimateTokens", () => {
 });
 
 describe("tool output truncation (P0-2)", () => {
-  it("caps output at MAX_TOOL_OUTPUT_CHARS and records truncatedChars", () => {
+  it("caps output at MAX_TOOL_OUTPUT_STORE_CHARS and records truncatedChars", () => {
     const state = initialSessionState();
-    const big = "y".repeat(64 * 1024 + 100);
+    const big = "y".repeat(MAX_TOOL_OUTPUT_STORE_CHARS + 100);
     applySessionUpdate(state, notify({
       sessionUpdate: "tool_call_update",
       toolCallId: "t1",
@@ -1633,7 +1713,7 @@ describe("tool output truncation (P0-2)", () => {
     }));
     const tool = state.blocks[0]!;
     if (tool.kind !== "tool") throw new Error("expected tool block");
-    expect(tool.output.length).toBe(64 * 1024);
+    expect(tool.output.length).toBe(MAX_TOOL_OUTPUT_STORE_CHARS);
     expect(tool.truncatedChars).toBe(100);
   });
 

@@ -146,6 +146,26 @@ const en: Record<string, string> = {
   "将回退的块恢复为编辑前内容，保留其余改动": "Restore reverted hunks to their pre-edit content, keeping the rest",
   "文件对比": "File diff",
   "任务清单": "Task list",
+  "已截断 {0} 字符": "Truncated {0} chars",
+  "仅渲染前 {0} 字符": "Rendering first {0} chars only",
+  "复制全部": "Copy all",
+  "查看完整输出": "View full output",
+  "标记完成": "Mark done",
+  "取消勾选": "Uncheck",
+  "打开 API 设置": "Open API settings",
+  "打开运行时设置": "Open runtime settings",
+  "检查 API Key 是否有效、账户余额/额度是否充足，或在设置中切换到其他 API 配置后重试":
+    "Check that the API key is valid and the account has remaining balance/quota, or switch to another API profile in Settings and retry",
+  "本机网络或代理不可达，检查网络连接与代理设置后点击重试":
+    "The local network or proxy is unreachable — check connectivity/proxy settings, then hit retry",
+  "当前模型可能已下架或不支持该能力，在设置中重新选择可用模型后重试":
+    "The current model may be delisted or lacks this capability — pick an available model in Settings and retry",
+  "扩展包不完整或内置 CLI 文件被安全软件删除，重新安装扩展后重启窗口即可恢复":
+    "The extension package is incomplete or the bundled CLI was removed by security software — reinstall the extension and reload the window",
+  "平台速率限制持续触发，可稍候片刻再重试，或在设置中切换到其他模型 / API 配置":
+    "The platform rate limit keeps triggering — wait a moment and retry, or switch to another model / API profile in Settings",
+  "上下文已超出模型上限且自动压缩未能恢复，可发送 /compress 再次压缩，或开启新会话后继续":
+    "Context exceeded the model limit and auto-compression did not recover it — send /compress to compact again, or start a new session",
   "运行中": "Running",
   "子代理": "Subagent",
   "停止此子代理": "Stop this subagent",

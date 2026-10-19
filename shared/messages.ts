@@ -121,6 +121,12 @@ export interface UserBlock extends BlockBase {
   images?: string[];
 }
 
+/** Webview DOM cap for one tool-output pane (3.5 ②). The host store keeps
+ * up to `MAX_TOOL_OUTPUT_STORE_CHARS` (512K, shared/session-state.ts); this
+ * constant only bounds what the collapsed output <pre> renders. Copy-full /
+ * open-as-file recover everything the store kept beyond it. */
+export const MAX_TOOL_OUTPUT_DISPLAY_CHARS = 64 * 1024;
+
 export interface ToolBlock extends BlockBase {
   kind: "tool";
   toolCallId: string;
@@ -140,9 +146,12 @@ export interface ToolBlock extends BlockBase {
    */
   input?: string | null;
   /**
-   * P-1 follow-up: present when `output` exceeded MAX_TOOL_OUTPUT_CHARS
-   * (64K chars) and was capped — the number of dropped characters. The
-   * webview surfaces it as a truncation notice on the output pane.
+   * P-1 follow-up: present when `output` exceeded the host STORE cap
+   * (`MAX_TOOL_OUTPUT_STORE_CHARS`, 512K, shared/session-state.ts) and was
+   * capped — the number of dropped characters. The webview renders at most
+   * `MAX_TOOL_OUTPUT_DISPLAY_CHARS` (64K) and surfaces both facts: a
+   * truncation notice plus copy-full / open-as-file actions that recover
+   * everything the store kept (3.5 ②).
    */
   truncatedChars?: number;
   locations: ToolLocation[];
@@ -771,6 +780,26 @@ export interface SessionState {
    * turn starts, and on a wholesale transcript swap.
    */
   nextStepLoading?: boolean;
+  /**
+   * 3.6 (2026-10-19): structured next-step guidance attached when the host
+   * marks the session errored (shared/error-advice.ts classifies the raw
+   * message). The ErrorToast renders `hint` as a guidance line and, when
+   * `openSettingsTab` is set, a button that jumps to that settings tab.
+   * Cleared whenever the status leaves `error`.
+   */
+  errorAdvice?: ErrorAdviceUi | null;
+}
+
+/**
+ * 3.6: next-step guidance for an error state. `kind` lets the UI pick an
+ * icon/affordance; `hint` is the localized one-line suggestion (Chinese
+ * source string, translated via the webview i18n dictionary);
+ * `openSettingsTab` names the settings tab that fixes it, when one does.
+ */
+export interface ErrorAdviceUi {
+  kind: "auth" | "network" | "model" | "cli" | "rateLimit" | "overflow";
+  hint: string;
+  openSettingsTab?: "api" | "runtime";
 }
 
 export interface AuthUiState {
@@ -1611,7 +1640,16 @@ export type WebviewToHost =
   /** M1 P0-6: a toast's inline action button was clicked (see the `toast`
    * message's `action`). The host dispatches on `actionId` (e.g. "compress"
    * drives the /compress bridge) and dismisses the pill. */
-  | { type: "toastAction"; actionId: string; toastId?: number };
+  | { type: "toastAction"; actionId: string; toastId?: number }
+  /** 3.5 ①: the user ticked/unticked one item of a plan checklist card
+   * (`PlanBlock` seeded at plan approval). `blockId` is the stable block id
+   * (P4), `index` the entry position; the host flips pending↔completed via
+   * `setPlanEntryStatus` and drops stale clicks silently. */
+  | { type: "togglePlanItem"; blockId: string; index: number }
+  /** 3.5 ②: "查看完整输出" on a truncated tool card — the host writes the
+   * block's FULL stored output (up to the 512K store cap) to a temp file
+   * and opens it in the editor. `blockId` is the stable block id (P4). */
+  | { type: "exportToolOutput"; blockId: string };
 
 // ---------------------------------------------------------------------------
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the

@@ -130,7 +130,7 @@ import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, reso
 import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
 import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
-import { planSpecContent, planSpecFileName } from "../../shared/plan-spec.js";
+import { planSpecContent, planSpecFileName, planChecklistEntries } from "../../shared/plan-spec.js";
 import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
@@ -1572,6 +1572,12 @@ export class ChatPanel implements vscode.Disposable {
       case "toastAction":
         this.handleToastAction(msg.actionId, msg.toastId);
         break;
+      case "togglePlanItem":
+        this.store.togglePlanItem(msg.blockId, msg.index);
+        break;
+      case "exportToolOutput":
+        await this.exportToolOutput(msg.blockId);
+        break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
         // commit can send message kinds this host does not know; without a
@@ -2853,6 +2859,13 @@ export class ChatPanel implements vscode.Disposable {
         note = savedPath
           ? vscode.l10n.t("已批准计划，已保存到 {0}", savedPath)
           : vscode.l10n.t("已批准计划");
+        // 3.5 ①: give the approved round a task-level progress view from the
+        // start — the TaskList otherwise only appears once the agent itself
+        // calls the todo tool. Parser returns null for plans without a
+        // usable item list (a one-item card is noise); a later todo_write
+        // still replaces the seeded items (the agent's bookkeeping wins).
+        const checklist = planChecklistEntries(pending.plan);
+        if (checklist) this.store.seedPlanChecklist(checklist);
       } else {
         note = reason ?? vscode.l10n.t("已拒绝计划");
       }
@@ -3190,6 +3203,34 @@ export class ChatPanel implements vscode.Disposable {
     }
     const title = `${path.basename(chosen)} (${block.toolName || "edit"})`;
     await vscode.commands.executeCommand("vscode.diff", tmpUri, vscode.Uri.file(chosen), title);
+  }
+
+  /**
+   * 3.5 ②: "查看完整输出" — write a tool block's FULL stored output (up to
+   * the 512K store cap) to a temp file and open it in the editor, same
+   * temp-file pattern as `openToolDiff`. The webview renders every stored
+   * char up to the display cap, so this recovers what the collapsed pane
+   * scrolls past; beyond the store cap the honest `truncatedChars` notice
+   * stays on the card. Stale block ids (old snapshot after a transcript
+   * swap) drop the click silently.
+   */
+  private async exportToolOutput(blockId: string): Promise<void> {
+    const block = this.store.getState().blocks.find(
+      (b): b is ToolBlock => b.kind === "tool" && b.id === blockId,
+    );
+    if (!block) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const slug = (block.title || block.toolName || "tool").replace(/[^\w.-]+/g, "-").slice(0, 40);
+    const tmpUri = vscode.Uri.file(path.join(os.tmpdir(), `iflow-output-${stamp}-${slug}.txt`));
+    try {
+      await vscode.workspace.fs.writeFile(tmpUri, Buffer.from(block.output, "utf8"));
+      const doc = await vscode.workspace.openTextDocument(tmpUri);
+      await vscode.window.showTextDocument(doc, { preview: true });
+    } catch (error) {
+      void vscode.window.showErrorMessage(
+        vscode.l10n.t("导出工具输出失败: {0}", errorMessage(error)),
+      );
+    }
   }
 
   /**

@@ -127,37 +127,6 @@
 
 > **安全与信任边界**：iFlow 的执行类工具（`run_shell_command` 等）运行在本机真实 shell 中，可以读写会话目录之外的任意路径——审批卡是「告知 + 同意」，不是沙箱隔离。请在信任的项目中使用；处理不信任的代码库时，建议在容器 / 虚拟机中运行 VSCode。扩展侧的 `fs/read_text_file` / `fs/write_text_file` 回调已做目录边界校验（允许范围 = 会话目录 + 所有已打开工作区根；`..` 上逃与指向范围外的绝对路径会被拒绝），但这只封住了协议层通道，不替代操作系统级隔离。
 
-## 开发
-
-```bash
-npm install
-npm run build         # icon + tsc 类型产出 + esbuild 打包 host + vite 构建 webview
-npm run typecheck     # host 与 webview 双侧类型检查
-npm test              # vitest（30 文件 / 557 用例，含 mock ACP agent 集成测试，不依赖真实 CLI/API）
-npm run harness       # 驱动真实 CLI 走 ACP 全流程（--record 录制 wire 日志、--probe 探方法行为）
-npm run vendor:cli    # 拉取并裁剪 iFlow CLI 到 vendor/（package 时自动执行）
-npm run defaults:sync # 同步本机 ~/.iflow/ 默认规则到 scripts/iflow-defaults/（发布前）
-npm run package       # vendor:cli + build + vsce 打包 → .vsix（含内置 CLI）
-```
-
-- F5 调试：`.vscode/launch.json` 提供扩展调试配置（Extension Development Host）；启动前先 `npm run build`，且本地至少跑过一次 `npm run vendor:cli`（`main` 指向 `./dist/extension.cjs`，内置 CLI 缺失扩展会直接报错）
-- 浏览器调试 webview：`npx vite build webview` 后用任意静态服务器打开 `webview/dist`（内置 mock host，含审批 / 提问 / Plan 卡与用量演示，无需 VSCode）
-- webview 增量构建：`npm run webview:dev`；webview 侧类型检查：`cd webview && npx tsc --noEmit`
-- 新增 UI 文案请走 i18n：host 用 `vscode.l10n.t`（英文加 `l10n/bundle.l10n.en.json`），manifest 用 `%key%`（补 `package.nls*.json`），webview 用 `src/i18n.ts` 字典
-
-## 发布
-
-`CHANGELOG.md` 是版本的唯一来源：CI 从顶部 `## [x.y.z] - date` 标题读取版本号写入 `package.json`，其下条目作为发布摘要。新增版本时**同时更新 CHANGELOG 与 `package.json` 的 version 到同一版本号**再提交，否则 CI 会把版本覆写回 CHANGELOG 里的旧号。
-
-- `ci.yml`：release 分支的 push 与 PR 触发，三平台矩阵（ubuntu / windows / macos）跑 typecheck → test → build
-- `release.yml`：仅 release 分支（或手动触发）：读 CHANGELOG 版本与摘要写入 `package.json` → `npm run package`（内置 CLI 一起打进 `.vsix`）→ 打 tag `v*` 建 GitHub release 并附 `.vsix`（用原生 `gh` CLI 三态幂等处理：已存在 draft 则发布、已发布仅刷新 asset、不存在则新建）
-
-## 架构
-
-三层单向数据流：`webview/`（React 投影）← 节流快照 / 增量 blockPatch ← `shared/`（纯 reducer）← ACP 事件 ← `src/`（Extension Host）← NDJSON ← iFlow CLI 子进程。状态只存在于 Extension Host，WebView 只渲染快照。
-
-架构细节、开发约定与已知陷阱详见 [AGENTS.md](AGENTS.md)。
-
 ## License
 
 [MIT](LICENSE)
