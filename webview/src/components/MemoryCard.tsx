@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   AlertTriangle,
-  BookOpen,
   Check,
   ExternalLink,
   FileText,
@@ -14,7 +13,7 @@ import {
 import type { KnowledgeDocUi, MemoryFileUi, MemoryScope, MemoryStateUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, SAVE_BTN } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, SAVE_BTN, SettingsDisclosure } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -449,258 +448,269 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
         <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
       ) : (
         <>
-          <section className="space-y-2">
-            <div className="flex items-center gap-1.5">
-              <span className="text-ui-body font-semibold text-foreground">{t("全局记忆")}</span>
-              <span className="min-w-0 truncate font-mono text-ui-caption text-muted-foreground">{state.home}</span>
-              <button
-                className="press ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-                title={t("重新扫描")}
-                disabled={busy || saving}
-                onClick={refresh}
-              >
-                <RefreshCw className="size-3.5" />
-              </button>
-            </div>
-            {globalFiles.map(renderFile)}
-          </section>
-
-          <section className="space-y-2">
-            <div className="flex items-center gap-1.5">
-              <span className="text-ui-body font-semibold text-foreground">{t("项目记忆")}</span>
-              <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
-                {state.cwd ?? t("未打开工作区")}
-              </span>
-            </div>
-            {projectFiles.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
-                {t("当前工作区没有可用的项目记忆文件")}
-              </div>
-            ) : (
-              projectFiles.map(renderFile)
-            )}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                className={BTN}
-                disabled={busy || saving || !state.cwd}
-                onClick={() => {
-                  setCreating((v) => !v);
-                  setLoadError(null);
-                }}
-              >
-                <Plus className="size-3.5" />
-                {t("新建项目记忆")}
-              </button>
-              {creating && (
-                <>
-                  <button
-                    className={SAVE_BTN}
-                    disabled={saving}
-                    onClick={() => {
-                      createProject("AGENTS.md");
-                      setCreating(false);
-                    }}
-                  >
-                    AGENTS.md
-                  </button>
-                  <button
-                    className={BTN}
-                    disabled={saving}
-                    onClick={() => {
-                      createProject("IFLOW.md");
-                      setCreating(false);
-                    }}
-                  >
-                    IFLOW.md
-                  </button>
-                </>
-              )}
-            </div>
-          </section>
-
-          <section className="space-y-2 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <BookOpen className="size-3.5 shrink-0 text-primary" />
-              <span className="text-ui-body font-semibold text-foreground">{t("项目知识库")}</span>
-              {knowledge && knowledge.docs.length > 0 && (
-                <Chip tone="muted">{t("{0} 篇文档", knowledge.docs.length)}</Chip>
-              )}
-              {knowledge?.index ? (
-                <div className="ml-auto flex flex-wrap items-center gap-1.5">
-                  <button
-                    className={BTN}
-                    disabled={busy || saving || knowledgeBusy || !state.cwd}
-                    title={t("只根据变化更新索引，无变化时不会调用模型")}
-                    onClick={() => generateKnowledge("incremental")}
-                  >
-                    <RefreshCw className="size-3.5" />
-                    {t("增量刷新")}
-                  </button>
-                  <button
-                    className={BTN}
-                    disabled={busy || saving || knowledgeBusy || !state.cwd}
-                    title={t("重新分析整个工作区并覆盖索引")}
-                    onClick={() => generateKnowledge("full")}
-                  >
-                    {t("全量重建")}
-                  </button>
-                </div>
-              ) : (
+          {/* 4.7: 文件列表 / 快速追加 / 知识库 三块用 disclosure 分开，
+              块头保留主操作，避免长列表把关键按钮埋到底部。 */}
+          <SettingsDisclosure title={t("记忆文件")} defaultOpen>
+            <section className="space-y-2 px-4 py-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-ui-body font-semibold text-foreground">{t("全局记忆")}</span>
+                <span className="min-w-0 truncate font-mono text-ui-caption text-muted-foreground">{state.home}</span>
                 <button
-                  className={`${BTN} ml-auto`}
-                  disabled={busy || saving || knowledgeBusy || !state.cwd}
-                  onClick={() => generateKnowledge("full")}
+                  className="press ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                  title={t("重新扫描")}
+                  disabled={busy || saving}
+                  onClick={refresh}
                 >
                   <RefreshCw className="size-3.5" />
-                  {t("生成项目知识")}
                 </button>
+              </div>
+              {globalFiles.map(renderFile)}
+            </section>
+
+            <section className="space-y-2 px-4 py-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-ui-body font-semibold text-foreground">{t("项目记忆")}</span>
+                <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
+                  {state.cwd ?? t("未打开工作区")}
+                </span>
+              </div>
+              {projectFiles.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
+                  {t("当前工作区没有可用的项目记忆文件")}
+                </div>
+              ) : (
+                projectFiles.map(renderFile)
               )}
-            </div>
-            {knowledge?.dir && (
-              <div className="truncate font-mono text-ui-caption text-muted-foreground" title={knowledge.dir}>
-                {knowledge.dir}
-              </div>
-            )}
-            {knowledge?.manifest && (
-              <div className="text-ui-caption text-muted-foreground">
-                {t(
-                  "上次生成：{0} · {1} 个文件",
-                  knowledge.manifest.mode === "incremental" ? t("增量更新") : t("全量生成"),
-                  `${knowledge.manifest.sourceCount}${knowledge.manifest.truncated ? "+" : ""}`,
-                )}
-              </div>
-            )}
-            {knowledgeGenerating && (
-              <div className="text-ui-label text-muted-foreground">
-                {knowledgeStageMessage ?? (knowledgeStage ? knowledgeStageLabel(knowledgeStage) : t("正在生成…"))}
-              </div>
-            )}
-            {knowledgeError && (
-              <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label text-destructive">
-                {knowledgeError}
-              </div>
-            )}
-            {!knowledge?.index ? (
-              <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
-                {t("尚未生成项目知识。点击「生成项目知识」分析当前工作区。")}
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {knowledge.docs.map((doc) => (
-                  <div
-                    key={doc.path}
-                    className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border px-2 py-1.5"
-                  >
-                    <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-ui-body font-semibold text-foreground">
-                        {doc.title}
-                      </span>
-                      <span className="block truncate font-mono text-ui-caption text-muted-foreground">
-                        {doc.displayPath}
-                      </span>
-                    </span>
-                    <Chip tone={doc.injected ? "info" : "muted"}>
-                      {doc.injected ? t("已注入") : t("未注入")}
-                    </Chip>
-                    <span
-                      className="shrink-0 font-mono text-ui-caption text-muted-foreground"
-                      title={t("约 {0} tokens（BPE 估算）", doc.tokens)}
-                    >
-                      ≈{fmtTokens(doc.tokens)} tokens
-                    </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  className={BTN}
+                  disabled={busy || saving || !state.cwd}
+                  onClick={() => {
+                    setCreating((v) => !v);
+                    setLoadError(null);
+                  }}
+                >
+                  <Plus className="size-3.5" />
+                  {t("新建项目记忆")}
+                </button>
+                {creating && (
+                  <>
                     <button
-                      className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-                      title={t("打开文件")}
-                      disabled={busy || knowledgeBusy}
-                      onClick={() => openKnowledge(doc)}
+                      className={SAVE_BTN}
+                      disabled={saving}
+                      onClick={() => {
+                        createProject("AGENTS.md");
+                        setCreating(false);
+                      }}
                     >
-                      <ExternalLink className="size-3.5" />
+                      AGENTS.md
                     </button>
                     <button
                       className={BTN}
-                      disabled={busy || saving || knowledgeBusy}
-                      onClick={() => toggleKnowledge(doc)}
+                      disabled={saving}
+                      onClick={() => {
+                        createProject("IFLOW.md");
+                        setCreating(false);
+                      }}
                     >
-                      {doc.injected ? t("取消注入") : t("注入")}
+                      IFLOW.md
                     </button>
-                  </div>
-                ))}
+                  </>
+                )}
               </div>
-            )}
-            {knowledge && knowledge.injectedTokens > 8_000 && (
-              <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
-                <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                <span>
-                  {t("项目知识已注入约 {0} tokens，会随每次请求发送；建议只保留索引或精简文档。", knowledge.injectedTokens)}
+            </section>
+          </SettingsDisclosure>
+
+          <SettingsDisclosure
+            title={t("项目知识库")}
+            defaultOpen
+            header={
+              <>
+                {knowledge && knowledge.docs.length > 0 && (
+                  <Chip tone="muted">{t("{0} 篇文档", knowledge.docs.length)}</Chip>
+                )}
+                {knowledge?.index ? (
+                  <>
+                    <button
+                      className={BTN}
+                      disabled={busy || saving || knowledgeBusy || !state.cwd}
+                      title={t("只根据变化更新索引，无变化时不会调用模型")}
+                      onClick={() => generateKnowledge("incremental")}
+                    >
+                      <RefreshCw className="size-3.5" />
+                      {t("增量刷新")}
+                    </button>
+                    <button
+                      className={BTN}
+                      disabled={busy || saving || knowledgeBusy || !state.cwd}
+                      title={t("重新分析整个工作区并覆盖索引")}
+                      onClick={() => generateKnowledge("full")}
+                    >
+                      {t("全量重建")}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className={BTN}
+                    disabled={busy || saving || knowledgeBusy || !state.cwd}
+                    onClick={() => generateKnowledge("full")}
+                  >
+                    <RefreshCw className="size-3.5" />
+                    {t("生成项目知识")}
+                  </button>
+                )}
+              </>
+            }
+          >
+            <div className="space-y-2 px-4 py-3">
+              {knowledge?.dir && (
+                <div className="truncate font-mono text-ui-caption text-muted-foreground" title={knowledge.dir}>
+                  {knowledge.dir}
+                </div>
+              )}
+              {knowledge?.manifest && (
+                <div className="text-ui-caption text-muted-foreground">
+                  {t(
+                    "上次生成：{0} · {1} 个文件",
+                    knowledge.manifest.mode === "incremental" ? t("增量更新") : t("全量生成"),
+                    `${knowledge.manifest.sourceCount}${knowledge.manifest.truncated ? "+" : ""}`,
+                  )}
+                </div>
+              )}
+              {knowledgeGenerating && (
+                <div className="text-ui-label text-muted-foreground">
+                  {knowledgeStageMessage ?? (knowledgeStage ? knowledgeStageLabel(knowledgeStage) : t("正在生成…"))}
+                </div>
+              )}
+              {knowledgeError && (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-ui-label text-destructive">
+                  {knowledgeError}
+                </div>
+              )}
+              {!knowledge?.index ? (
+                <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
+                  {t("尚未生成项目知识。点击「生成项目知识」分析当前工作区。")}
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {knowledge.docs.map((doc) => (
+                    <div
+                      key={doc.path}
+                      className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border px-2 py-1.5"
+                    >
+                      <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-ui-body font-semibold text-foreground">
+                          {doc.title}
+                        </span>
+                        <span className="block truncate font-mono text-ui-caption text-muted-foreground">
+                          {doc.displayPath}
+                        </span>
+                      </span>
+                      <Chip tone={doc.injected ? "info" : "muted"}>
+                        {doc.injected ? t("已注入") : t("未注入")}
+                      </Chip>
+                      <span
+                        className="shrink-0 font-mono text-ui-caption text-muted-foreground"
+                        title={t("约 {0} tokens（BPE 估算）", doc.tokens)}
+                      >
+                        ≈{fmtTokens(doc.tokens)} tokens
+                      </span>
+                      <button
+                        className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                        title={t("打开文件")}
+                        disabled={busy || knowledgeBusy}
+                        onClick={() => openKnowledge(doc)}
+                      >
+                        <ExternalLink className="size-3.5" />
+                      </button>
+                      <button
+                        className={BTN}
+                        disabled={busy || saving || knowledgeBusy}
+                        onClick={() => toggleKnowledge(doc)}
+                      >
+                        {doc.injected ? t("取消注入") : t("注入")}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {knowledge && knowledge.injectedTokens > 8_000 && (
+                <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
+                  <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                  <span>
+                    {t("项目知识已注入约 {0} tokens，会随每次请求发送；建议只保留索引或精简文档。", knowledge.injectedTokens)}
+                  </span>
+                </div>
+              )}
+              {knowledge?.managedBy && (
+                <div className="truncate text-ui-caption text-muted-foreground" title={knowledge.managedBy}>
+                  {t("导入位置：{0}", knowledge.managedBy)}
+                </div>
+              )}
+              <p className="text-ui-caption leading-relaxed text-muted-foreground/85">
+                {t("知识索引生成后写入 .iflow/knowledge/，通过项目记忆的 @ 导入注入；默认只在新建或恢复会话时生效。")}
+              </p>
+            </div>
+          </SettingsDisclosure>
+
+          <SettingsDisclosure title={t("快速追加")}>
+            <div className="space-y-2 px-4 py-3">
+              <div className="text-ui-body font-semibold text-foreground">{t("添加一条记忆")}</div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className={`${BTN} ${factScope === "global" ? "border-primary/50 text-primary" : ""}`}
+                  aria-pressed={factScope === "global"}
+                  onClick={() => setFactScope("global")}
+                >
+                  {t("全局")}
+                </button>
+                <button
+                  type="button"
+                  className={`${BTN} ${factScope === "project" ? "border-primary/50 text-primary" : ""}`}
+                  aria-pressed={factScope === "project"}
+                  onClick={() => setFactScope("project")}
+                >
+                  {t("项目")}
+                </button>
+                {writableTargets.length > 1 && (
+                  <select
+                    className={`${INPUT} ml-auto max-w-[55%]`}
+                    value={factTarget}
+                    onChange={(e) => setFactTarget(e.target.value)}
+                  >
+                    {writableTargets.map((file) => (
+                      <option key={file.path} value={file.path}>
+                        {file.displayPath}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <textarea
+                className={`${INPUT} min-h-[58px] w-full resize-y`}
+                value={factText}
+                placeholder={t("例如：本项目的测试命令是 npm test；不要修改 vendor/ 下的文件。")}
+                onChange={(e) => setFactText(e.target.value)}
+              />
+              <div className="flex items-center gap-1.5">
+                <button
+                  className={SAVE_BTN}
+                  disabled={busy || saving || !factText.trim() || writableTargets.length === 0}
+                  onClick={appendFact}
+                >
+                  <Plus className="size-3.5" />
+                  {saving ? t("写入中…") : t("保存到{0}", scopeLabel(factScope))}
+                </button>
+                <span className="text-ui-caption text-muted-foreground">
+                  {writableTargets.length === 0
+                    ? t("请先创建项目记忆文件")
+                    : t("保存后新建会话或重启 CLI 生效")}
                 </span>
               </div>
-            )}
-            {knowledge?.managedBy && (
-              <div className="truncate text-ui-caption text-muted-foreground" title={knowledge.managedBy}>
-                {t("导入位置：{0}", knowledge.managedBy)}
-              </div>
-            )}
-            <p className="text-ui-caption leading-relaxed text-muted-foreground/85">
-              {t("知识索引生成后写入 .iflow/knowledge/，通过项目记忆的 @ 导入注入；默认只在新建或恢复会话时生效。")}
-            </p>
-          </section>
-
-          <section className="space-y-2 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
-            <div className="text-ui-body font-semibold text-foreground">{t("添加一条记忆")}</div>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                className={`${BTN} ${factScope === "global" ? "border-primary/50 text-primary" : ""}`}
-                aria-pressed={factScope === "global"}
-                onClick={() => setFactScope("global")}
-              >
-                {t("全局")}
-              </button>
-              <button
-                type="button"
-                className={`${BTN} ${factScope === "project" ? "border-primary/50 text-primary" : ""}`}
-                aria-pressed={factScope === "project"}
-                onClick={() => setFactScope("project")}
-              >
-                {t("项目")}
-              </button>
-              {writableTargets.length > 1 && (
-                <select
-                  className={`${INPUT} ml-auto max-w-[55%]`}
-                  value={factTarget}
-                  onChange={(e) => setFactTarget(e.target.value)}
-                >
-                  {writableTargets.map((file) => (
-                    <option key={file.path} value={file.path}>
-                      {file.displayPath}
-                    </option>
-                  ))}
-                </select>
-              )}
             </div>
-            <textarea
-              className={`${INPUT} min-h-[58px] w-full resize-y`}
-              value={factText}
-              placeholder={t("例如：本项目的测试命令是 npm test；不要修改 vendor/ 下的文件。")}
-              onChange={(e) => setFactText(e.target.value)}
-            />
-            <div className="flex items-center gap-1.5">
-              <button
-                className={SAVE_BTN}
-                disabled={busy || saving || !factText.trim() || writableTargets.length === 0}
-                onClick={appendFact}
-              >
-                <Plus className="size-3.5" />
-                {saving ? t("写入中…") : t("保存到{0}", scopeLabel(factScope))}
-              </button>
-              <span className="text-ui-caption text-muted-foreground">
-                {writableTargets.length === 0
-                  ? t("请先创建项目记忆文件")
-                  : t("保存后新建会话或重启 CLI 生效")}
-              </span>
-            </div>
-          </section>
+          </SettingsDisclosure>
 
           <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
             <button className={BTN} disabled={busy} onClick={() => send({ type: "newSession" })}>

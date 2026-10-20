@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Check, ChevronRight, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { Check, ChevronRight, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, SAVE_BTN } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, SAVE_BTN } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
@@ -535,8 +535,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
               {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
             </button>
+            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+          </div>
+
+          {/* Secondary actions: catalog browsing and refresh are conveniences,
+              not the primary flow — they must not read as peers of 添加/保存. */}
+          <div className="flex flex-wrap items-center gap-3 border-b border-border/50 pb-3">
             <button
-              className={BTN}
+              className="press inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
               disabled={busy || saving || entries === null || !!loadError}
               onClick={() => setCatalogBrowse(!catalogBrowse)}
             >
@@ -544,14 +550,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               {catalogBrowse ? t("返回列表") : t("模板目录")}
             </button>
             <button
-              className={BTN}
+              className="press inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
               disabled={busy || saving || (entries === null && !loadError)}
               onClick={refresh}
             >
               <RefreshCw className="size-3.5" />
               {refreshing ? t("刷新中…") : t("刷新")}
             </button>
-            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </div>
 
           {catalogBrowse && catalogForm === null ? (
@@ -688,14 +693,39 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         <Pencil className="size-3.5" />
                       </button>
                       {!saving && !loadError && (
-                        <button
-                          data-variant="danger"
-                          className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
-                          title={t("删除 {0}", entry.name)}
-                          onClick={() => setConfirmDelete(i)}
+                        <Dropdown
+                          align="right"
+                          menuClass="w-[9rem]"
+                          trigger={(open) => (
+                            <button
+                              type="button"
+                              aria-haspopup="menu"
+                              aria-expanded={open}
+                              aria-label={t("服务器 {0} 的操作", entry.name)}
+                              title={t("更多操作")}
+                              className={`press ml-1 shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground ${
+                                open ? "bg-accent/60 text-foreground" : ""
+                              }`}
+                            >
+                              <MoreHorizontal className="size-3.5" />
+                            </button>
+                          )}
                         >
-                          <Trash2 className="size-3.5" />
-                        </button>
+                          {(close) => (
+                            <button
+                              role="menuitem"
+                              data-variant="danger"
+                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-destructive hover:bg-destructive/10"
+                              onClick={() => {
+                                close();
+                                setConfirmDelete(i);
+                              }}
+                            >
+                              <Trash2 className="size-3.5 shrink-0" />
+                              {t("删除")}
+                            </button>
+                          )}
+                        </Dropdown>
                       )}
                     </div>
                     {transport && (

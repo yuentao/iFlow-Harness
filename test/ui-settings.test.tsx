@@ -120,6 +120,18 @@ it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("运行与数据");
 });
 
+it("groups the eight tabs under four named sections", () => {
+  for (const group of ["账户", "工作方式", "扩展", "系统"]) {
+    expect(container.textContent).toContain(group);
+  }
+  // The nav is a real tablist with roving tabindex, not a flat button row.
+  const tablist = container.querySelector('[role="tablist"]');
+  expect(tablist).toBeTruthy();
+  const tabs = container.querySelectorAll('[role="tab"]');
+  expect(tabs).toHaveLength(8);
+  expect([...tabs].filter((el) => el.getAttribute("tabindex") === "0")).toHaveLength(1);
+});
+
 it("persists the theme choice through host settings", () => {
   click("深色");
   expect(updateHostSetting).toHaveBeenCalledWith({ theme: "dark" });
@@ -158,8 +170,16 @@ it("toggles auto-title in the Conversation tab", () => {
 
 it("renders runtime groups and commits the Node path on blur", () => {
   renderTab("runtime", BASIC_AUTH);
-  expect(container.textContent).toContain("检查点与存储");
+  expect(container.textContent).toContain("检查点");
   expect(container.textContent).toContain("Node.js 路径");
+  // Node path / checkpoint limits moved into the 高级 disclosure (4.7).
+  const toggle = [...container.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")].find((b) =>
+    b.textContent?.includes("高级"),
+  );
+  expect(toggle).toBeTruthy();
+  expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+  act(() => toggle!.click());
+  expect(toggle!.getAttribute("aria-expanded")).toBe("true");
   const input = [...container.querySelectorAll<HTMLInputElement>("input")].find((el) =>
     el.placeholder.includes("node.exe"),
   );

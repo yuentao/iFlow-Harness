@@ -93,6 +93,10 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
   const [creating, setCreating] = useState<{ kind: AssetKind; scope: AssetScope; name: string; body: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // 4.7: three parallel lists (commands / agents / skills) read as three
+  // unrelated sections. A segmented control keeps one list on screen with the
+  // kind as the axis — same data, one place.
+  const [kind, setKind] = useState<AssetKind>("command");
   // AI drafting (F4): the requirement only feeds the prompt, and the reply
   // fills the body — nothing is written until the user clicks 创建.
   const [genRequirement, setGenRequirement] = useState("");
@@ -361,12 +365,20 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
     setRefreshing(true);
   }
 
-  const groups: Array<{ title: string; items: AssetUi[] }> = state
-    ? [
-        { title: t("自定义命令"), items: state.commands },
-        { title: t("子代理定义"), items: state.agents },
-        { title: t("技能"), items: state.skills },
-      ]
+  // 4.7: three parallel lists (commands / agents / skills) read as three
+  // unrelated sections. A segmented control keeps one list on screen with the
+  // kind as the axis — same data, one place.
+  const KIND_TABS: Array<{ kind: AssetKind; label: string }> = [
+    { kind: "command", label: t("命令") },
+    { kind: "agent", label: t("子代理") },
+    { kind: "skill", label: t("技能") },
+  ];
+  const items: AssetUi[] = state
+    ? kind === "command"
+      ? state.commands
+      : kind === "agent"
+        ? state.agents
+        : state.skills
     : [];
 
   return (
@@ -381,7 +393,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               disabled={state === null || !!loadError || saving}
               onClick={() => {
                 closeCreate();
-                setCreating({ kind: "command", scope: "global", name: "", body: templateBody("command", "") });
+                setCreating({ kind, scope: "global", name: "", body: templateBody(kind, "") });
                 setEditError(null);
               }}
             >
@@ -409,85 +421,101 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           {state === null ? (
             <div className="py-4 text-center text-ui-body text-muted-foreground">{t("扫描中…")}</div>
           ) : (
-            <div className="space-y-4">
-              {groups.map((group) => (
-                <div key={group.title} className="space-y-2">
-                  <div className="text-ui-label font-semibold text-foreground">{group.title}</div>
-                  {group.items.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-border px-2 py-1.5 text-center text-ui-label text-muted-foreground">
-                      {t("尚未定义")}
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      {group.items.map((item) => (
-                        <div
-                          key={item.path}
-                          className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card"
-                        >
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <Chip tone={item.scope === "global" ? "primary" : "info"}>
-                              {scopeLabel(item.scope)}
-                            </Chip>
-                            <span
-                              className="min-w-0 flex-1 truncate font-mono text-ui-body font-semibold text-foreground"
-                              title={item.displayPath}
-                            >
-                              {item.name}
-                            </span>
-                            {item.shadowed && (
-                              <Chip tone="warning">{t("全局同名遮蔽")}</Chip>
-                            )}
-                            <button
-                              className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                              title={t("详情")}
-                              disabled={saving || !!loadError}
-                              onClick={() => {
-                                setDetail({ path: item.path, hash: item.hash });
-                                setDetailContent(null);
-                                setEditError(null);
-                                requestOpen(item.path, "detail");
-                              }}
-                            >
-                              <ChevronRight className="size-3.5" />
-                            </button>
-                            <button
-                              className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                              title={t("编辑")}
-                              disabled={saving || !!loadError || !item.editable}
-                              onClick={() => {
-                                setEditing({ path: item.path, content: "", hash: null });
-                                setEditError(null);
-                                requestOpen(item.path, "edit");
-                              }}
-                            >
-                              <Pencil className="size-3.5" />
-                            </button>
-                            {!saving && !loadError && (
-                              <button
-                                data-variant="danger"
-                                className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
-                                title={t("删除 {0}", item.name)}
-                                onClick={() => setConfirmDelete(item.path)}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </button>
-                            )}
-                          </div>
-                          {item.description && (
-                            <div className="truncate text-ui-label text-muted-foreground" title={item.description}>
-                              {item.description}
-                            </div>
-                          )}
-                          <div className="mt-1 text-ui-caption font-mono text-muted-foreground/80">
-                            {fmtBytes(item.bytes)} · {fmtTime(item.updatedAt)}
-                            {item.tools ? ` · ${t("工具")}: ${item.tools.join(", ")}` : ""}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+            <div className="space-y-3">
+              <div
+                role="group"
+                aria-label={t("资产类型")}
+                className="flex flex-wrap items-center gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-0.5"
+              >
+                {KIND_TABS.map((tab) => (
+                  <button
+                    key={tab.kind}
+                    type="button"
+                    aria-pressed={kind === tab.kind}
+                    className={`press rounded-md px-2.5 py-1.5 text-ui-label transition-colors duration-200 ${
+                      kind === tab.kind
+                        ? "bg-primary/15 font-semibold text-primary"
+                        : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                    }`}
+                    onClick={() => setKind(tab.kind)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              {items.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-2 py-1.5 text-center text-ui-label text-muted-foreground">
+                  {t("尚未定义")}
                 </div>
-              ))}
+              ) : (
+                <div className="space-y-1">
+                  {items.map((item) => (
+                    <div
+                      key={item.path}
+                      className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card"
+                    >
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <Chip tone={item.scope === "global" ? "primary" : "info"}>
+                          {scopeLabel(item.scope)}
+                        </Chip>
+                        <span
+                          className="min-w-0 flex-1 truncate font-mono text-ui-body font-semibold text-foreground"
+                          title={item.displayPath}
+                        >
+                          {item.name}
+                        </span>
+                        {item.shadowed && (
+                          <Chip tone="warning">{t("全局同名遮蔽")}</Chip>
+                        )}
+                        <button
+                          className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
+                          title={t("详情")}
+                          disabled={saving || !!loadError}
+                          onClick={() => {
+                            setDetail({ path: item.path, hash: item.hash });
+                            setDetailContent(null);
+                            setEditError(null);
+                            requestOpen(item.path, "detail");
+                          }}
+                        >
+                          <ChevronRight className="size-3.5" />
+                        </button>
+                        <button
+                          className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
+                          title={t("编辑")}
+                          disabled={saving || !!loadError || !item.editable}
+                          onClick={() => {
+                            setEditing({ path: item.path, content: "", hash: null });
+                            setEditError(null);
+                            requestOpen(item.path, "edit");
+                          }}
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                        {!saving && !loadError && (
+                          <button
+                            data-variant="danger"
+                            className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
+                            title={t("删除 {0}", item.name)}
+                            onClick={() => setConfirmDelete(item.path)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        )}
+                      </div>
+                      {item.description && (
+                        <div className="truncate text-ui-label text-muted-foreground" title={item.description}>
+                          {item.description}
+                        </div>
+                      )}
+                      <div className="mt-1 text-ui-caption font-mono text-muted-foreground/80">
+                        {fmtBytes(item.bytes)} · {fmtTime(item.updatedAt)}
+                        {item.tools ? ` · ${t("工具")}: ${item.tools.join(", ")}` : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

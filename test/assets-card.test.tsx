@@ -162,16 +162,27 @@ afterEach(() => {
   container.remove();
 });
 
-it("lists the three asset groups with scope chips and metadata", () => {
+it("lists assets through a segmented kind control with scope chips and metadata", () => {
   stateReply([CMD], [AGENT], [SKILL]);
-  expect(container.textContent).toContain("自定义命令");
-  expect(container.textContent).toContain("子代理定义");
+  // 4.7: one list driven by a segmented control instead of three parallel lists.
+  expect(container.textContent).toContain("命令");
+  expect(container.textContent).toContain("子代理");
   expect(container.textContent).toContain("技能");
+  // The command kind is active by default → only its entries are listed.
   expect(container.textContent).toContain("fix-tests");
-  expect(container.textContent).toContain("全局");
+  expect(container.textContent).not.toContain("docs-writer");
+  expect(container.textContent).not.toContain("pdf");
+  expect(container.textContent).toContain("512B");
+  // Switching the segment swaps the list.
+  click("子代理");
+  expect(container.textContent).toContain("docs-writer");
+  expect(container.textContent).not.toContain("fix-tests");
   expect(container.textContent).toContain("项目");
   expect(container.textContent).toContain("Read, Grep");
-  expect(container.textContent).toContain("512B");
+  click("技能");
+  expect(container.textContent).toContain("pdf");
+  expect(container.textContent).not.toContain("docs-writer");
+  expect(container.textContent).toContain("全局");
 });
 
 it("edits an asset file through the read → textarea → hash-guarded save loop", () => {

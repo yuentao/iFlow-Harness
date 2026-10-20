@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, FileCode2, HelpCircle, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, FileCode2, HelpCircle, X } from "lucide-react";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
@@ -723,5 +723,86 @@ export function Dropdown({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * One grouped settings card: header + divided rows. Replaces the old
+ * per-row card wall so long tabs stay scannable.
+ */
+export function SettingsGroup({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
+      <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-4 py-3">
+        <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
+        {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
+      </div>
+      <div className="divide-y divide-border/50">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * Collapsible SettingsGroup for advanced, rarely-touched fields. Keeping
+ * these closed by default is what stops a tab from reading as a dense wall of
+ * inputs; the summary keeps the same header rhythm as SettingsGroup.
+ *
+ * Controlled disclosure (aria-expanded + a toggle button) instead of
+ * <details>: the header may carry primary actions (e.g. 「生成项目知识」) and
+ * interactive elements inside a <summary> are an accessibility violation.
+ * The body stays mounted (just hidden) so form drafts survive a collapse.
+ */
+export function SettingsDisclosure({
+  title,
+  hint,
+  header,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  hint?: string;
+  /** Primary action(s) rendered in the header row (block header). */
+  header?: ReactNode;
+  children: ReactNode;
+  /** Open on first render (used for blocks that hold the primary action). */
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = useId();
+  return (
+    <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
+      <div className="flex items-center gap-2 bg-surface/40 px-4 py-3">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((v) => !v)}
+          className="press flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <ChevronRight
+            className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${open ? "rotate-90" : ""}`}
+          />
+          <h3 className="truncate text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+            {title}
+          </h3>
+        </button>
+        {hint && <span className="shrink-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
+        {header && <div className="flex shrink-0 flex-wrap items-center gap-1.5">{header}</div>}
+      </div>
+      <div
+        id={bodyId}
+        className={open ? "divide-y divide-border/50 border-t border-border/60" : "hidden"}
+      >
+        {children}
+      </div>
+    </section>
   );
 }

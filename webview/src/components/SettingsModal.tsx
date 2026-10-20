@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, ChevronRight, Database, Download, ExternalLink, KeyRound, MessageSquare, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SetStateAction } from "react";
+import { Brain, Database, Download, ExternalLink, KeyRound, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
@@ -13,7 +13,7 @@ import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, ModalShell, SAVE_BTN } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, HelpTip, ModalShell, SAVE_BTN, SettingsDisclosure, SettingsGroup } from "./ui";
 import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
@@ -64,6 +64,9 @@ export function SettingsModal({
   // shell swaps its header accordingly. Reset on tab switch (sections remount).
   const [sectionHeader, setSectionHeader] = useState<SectionHeader | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  // Roving-tabindex nav: every tab button stays mounted, so the refs are
+  // always live and an arrow key can focus the newly-active one right away.
+  const tabRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement | null>>>({});
   useEffect(() => {
     setSectionHeader(null);
     // Each tab is an independent page — carrying the previous scroll offset
@@ -71,17 +74,47 @@ export function SettingsModal({
     if (contentRef.current) contentRef.current.scrollTop = 0;
   }, [tab]);
 
-  const TABS: Array<{ id: SettingsTab; icon: typeof KeyRound; label: string }> = [
-    { id: "api", icon: KeyRound, label: t("账户与模型") },
-    { id: "chat", icon: MessageSquare, label: t("对话") },
-    { id: "appearance", icon: Palette, label: t("外观与交互") },
-    { id: "policy", icon: ShieldCheck, label: t("权限与审批") },
-    { id: "mcp", icon: Server, label: t("MCP 与工具") },
-    { id: "memory", icon: Brain, label: t("记忆与知识") },
-    { id: "assets", icon: Sparkles, label: t("技能与命令") },
-    { id: "runtime", icon: Database, label: t("运行与数据") },
+  // 4.7: eight peer tabs read as a flat wall. Group them into four named
+  // sections (Apple-System-Settings style) — nothing is hidden, the user
+  // just sees 4 groups first, then 1–3 items each.
+  const TAB_GROUPS: Array<{ label: string; tabs: Array<{ id: SettingsTab; icon: typeof KeyRound; label: string }> }> = [
+    { label: t("账户"), tabs: [{ id: "api", icon: KeyRound, label: t("账户与模型") }] },
+    {
+      label: t("工作方式"),
+      tabs: [
+        { id: "chat", icon: MessageSquare, label: t("对话") },
+        { id: "appearance", icon: Palette, label: t("外观与交互") },
+        { id: "policy", icon: ShieldCheck, label: t("权限与审批") },
+      ],
+    },
+    {
+      label: t("扩展"),
+      tabs: [
+        { id: "mcp", icon: Server, label: t("MCP 与工具") },
+        { id: "memory", icon: Brain, label: t("记忆与知识") },
+        { id: "assets", icon: Sparkles, label: t("技能与命令") },
+      ],
+    },
+    { label: t("系统"), tabs: [{ id: "runtime", icon: Database, label: t("运行与数据") }] },
   ];
+  const ALL_TABS = TAB_GROUPS.flatMap((g) => g.tabs.map((x) => x.id));
+  const TABS = TAB_GROUPS.flatMap((g) => g.tabs);
   const tabTitle = TABS.find((x) => x.id === tab)?.label ?? "";
+
+  const onNavKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    const at = ALL_TABS.indexOf(tab);
+    if (at < 0) return;
+    let next = -1;
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (at + 1) % ALL_TABS.length;
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (at - 1 + ALL_TABS.length) % ALL_TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = ALL_TABS.length - 1;
+    else return;
+    event.preventDefault();
+    const id = ALL_TABS[next]!;
+    onTabChange(id);
+    tabRefs.current[id]?.focus();
+  };
 
   return (
     <ModalShell
@@ -96,11 +129,17 @@ export function SettingsModal({
       dismissible={dismissible}
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
-          <button className={BTN} onClick={() => send({ type: "openSettings" })}>
+          <HelpTip label={t("设置如何保存")} align="left">
+            {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在 CLI 配置文件，重启 CLI 生效。")}
+          </HelpTip>
+          <button
+            className="press text-ui-caption text-muted-foreground underline-offset-2 transition-colors duration-200 hover:text-foreground hover:underline"
+            onClick={() => send({ type: "openSettings" })}
+          >
             {t("在 VSCode 设置中编辑…")}
           </button>
           <button
-            className={BTN}
+            className={`${BTN} ml-auto`}
             disabled={busy}
             title={t("重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
             onClick={() => {
@@ -111,33 +150,64 @@ export function SettingsModal({
             <RefreshCw className="size-3.5" />
             {t("重启 CLI")}
           </button>
-          <span className="ml-auto hidden text-ui-caption text-muted-foreground @min-[520px]:inline">
-            {t("已写入用户 settings.json")}
-          </span>
         </div>
       }
     >
       <div className="auth-modal-body flex min-h-0 flex-1 flex-col @min-[460px]:flex-row">
-        <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:flex-col @min-[460px]:overflow-visible @min-[460px]:border-b-0 @min-[460px]:border-r">
-          {TABS.map(({ id, icon: Icon, label }) => (
-            <button
-              key={id}
-              type="button"
-              aria-current={tab === id ? "page" : undefined}
-              data-autofocus={tab === id ? "true" : undefined}
-              className={`press flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-ui-body transition-all duration-200 ${
-                tab === id
-                  ? "bg-primary/10 font-semibold text-primary"
-                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              }`}
-              onClick={() => onTabChange(id)}
+        <nav
+          role="tablist"
+          aria-label={t("设置分区")}
+          onKeyDown={onNavKeyDown}
+          className="flex shrink-0 flex-col gap-2 border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:gap-2.5 @min-[460px]:overflow-visible @min-[460px]:border-b-0 @min-[460px]:border-r"
+        >
+          {TAB_GROUPS.map((group) => (
+            <div
+              key={group.label}
+              role="group"
+              aria-label={group.label}
+              className="flex flex-wrap items-center gap-1 @min-[460px]:flex-col @min-[460px]:items-stretch @min-[460px]:gap-0.5"
             >
-              <Icon className="size-4 shrink-0" />
-              {label}
-            </button>
+              <div
+                aria-hidden="true"
+                className="shrink-0 whitespace-nowrap rounded-md bg-accent/40 px-1.5 py-0.5 text-ui-micro font-semibold tracking-[0.08em] text-muted-foreground/70 @min-[460px]:rounded-none @min-[460px]:bg-transparent @min-[460px]:px-2.5 @min-[460px]:py-1.5"
+              >
+                {group.label}
+              </div>
+              {group.tabs.map(({ id, icon: Icon, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  id={`settings-tab-${id}`}
+                  aria-selected={tab === id}
+                  aria-current={tab === id ? "page" : undefined}
+                  tabIndex={tab === id ? 0 : -1}
+                  data-autofocus={tab === id ? "true" : undefined}
+                  ref={(el) => {
+                    tabRefs.current[id] = el;
+                  }}
+                  aria-controls="settings-panel"
+                  className={`press flex grow basis-[calc(50%_-_2px)] items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-ui-body transition-all duration-200 @min-[460px]:grow-0 @min-[460px]:basis-auto ${
+                    tab === id
+                      ? "bg-primary/10 font-semibold text-primary"
+                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                  }`}
+                  onClick={() => onTabChange(id)}
+                >
+                  <Icon className="size-4 shrink-0" />
+                  {label}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
-        <div ref={contentRef} className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5">
+        <div
+          ref={contentRef}
+          id="settings-panel"
+          role="tabpanel"
+          aria-label={tabTitle}
+          className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5"
+        >
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "chat" && <ChatSection />}
           {tab === "appearance" && <AppearanceSection />}
@@ -154,53 +224,20 @@ export function SettingsModal({
   );
 }
 
-/** One grouped settings card: header + divided rows. Replaces the old
- * per-row card wall so long tabs stay scannable. */
-function SettingsGroup({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
-  return (
-    <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
-      <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-4 py-3">
-        <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
-        {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
-      </div>
-      <div className="divide-y divide-border/50">{children}</div>
-    </section>
-  );
-}
-
-/** Collapsible SettingsGroup for advanced, rarely-touched fields. Keeping
- * these closed by default is what stops a tab from reading as a dense wall of
- * inputs; the summary keeps the same header rhythm as SettingsGroup. */
-function SettingsDisclosure({
-  title,
-  hint,
-  children,
-}: {
-  title: string;
-  hint?: string;
-  children: ReactNode;
-}) {
-  return (
-    <details className="group overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
-      <summary className="flex cursor-pointer list-none items-center gap-2 bg-surface/40 px-4 py-3 [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90" />
-        <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
-        {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
-      </summary>
-      <div className="divide-y divide-border/50 border-t border-border/60">{children}</div>
-    </details>
-  );
-}
-
-/** One label/description/control row inside a SettingsGroup. */
+/** One label/description/control row inside a SettingsGroup. `description`
+ * stays a short (≤40 char) "what does this change" line; long technical
+ * caveats (restart-to-apply, write path, token cost) go in `detail`, surfaced
+ * as an ⓘ tooltip so the row doesn't read as a paragraph. */
 function SettingRow({
   label,
   description,
+  detail,
   control,
   wideControl = false,
 }: {
   label: string;
   description?: string;
+  detail?: string;
   control: ReactNode;
   /** Let the control fill the row on narrow viewports (inputs/segmented). */
   wideControl?: boolean;
@@ -208,7 +245,14 @@ function SettingRow({
   return (
     <div className="flex flex-col gap-3 px-4 py-4 @min-[600px]:flex-row @min-[600px]:items-start @min-[600px]:gap-5">
       <div className="min-w-0 flex-1">
-        <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-ui-body font-medium leading-snug text-foreground">{label}</span>
+          {detail && (
+            <HelpTip label={t("详细说明")} align="left">
+              {detail}
+            </HelpTip>
+          )}
+        </div>
         {description && (
           <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">{description}</p>
         )}
@@ -225,14 +269,14 @@ function Switch({ checked, label, onChange }: { checked: boolean; label: string;
       role="switch"
       aria-checked={checked}
       aria-label={label}
-      className={`press relative mt-0.5 inline-flex h-[18px] w-[32px] shrink-0 items-center rounded-full border transition-colors duration-200 ${
+      className={`press relative mt-0.5 inline-flex h-[20px] w-[36px] shrink-0 items-center rounded-full border transition-colors duration-200 ${
         checked ? "border-primary/50 bg-primary/70" : "border-border bg-border/70"
       }`}
       onClick={() => onChange(!checked)}
     >
       <span
-        className={`inline-block size-[12px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
-          checked ? "translate-x-[17px]" : "translate-x-[2px]"
+        className={`inline-block size-[14px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
+          checked ? "translate-x-[19px]" : "translate-x-[2px]"
         }`}
       />
     </button>
@@ -242,26 +286,30 @@ function Switch({ checked, label, onChange }: { checked: boolean; label: string;
 function ToggleRow({
   label,
   description,
+  detail,
   checked,
   onChange,
 }: {
   label: string;
   description: string;
+  detail?: string;
   checked: boolean;
   onChange: (value: boolean) => void;
 }) {
-  return <SettingRow label={label} description={description} control={<Switch checked={checked} label={label} onChange={onChange} />} />;
+  return <SettingRow label={label} description={description} detail={detail} control={<Switch checked={checked} label={label} onChange={onChange} />} />;
 }
 
 function ChoiceRow<T extends string>({
   label,
   description,
+  detail,
   value,
   options,
   onChange,
 }: {
   label: string;
   description: string;
+  detail?: string;
   value: T;
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
@@ -271,6 +319,7 @@ function ChoiceRow<T extends string>({
       wideControl
       label={label}
       description={description}
+      detail={detail}
       control={
         <div
           role="group"
@@ -301,6 +350,7 @@ function ChoiceRow<T extends string>({
 function NumberRow({
   label,
   description,
+  detail,
   value,
   min,
   max,
@@ -310,6 +360,7 @@ function NumberRow({
 }: {
   label: string;
   description: string;
+  detail?: string;
   value: number;
   min: number;
   max?: number;
@@ -341,6 +392,7 @@ function NumberRow({
       wideControl
       label={label}
       description={description}
+      detail={detail}
       control={
         <div className="flex items-center gap-1.5">
           <input
@@ -371,12 +423,14 @@ function NumberRow({
 function TextRow({
   label,
   description,
+  detail,
   value,
   placeholder,
   onCommit,
 }: {
   label: string;
   description: string;
+  detail?: string;
   value: string;
   placeholder?: string;
   onCommit: (value: string) => void;
@@ -401,6 +455,7 @@ function TextRow({
       wideControl
       label={label}
       description={description}
+      detail={detail}
       control={
         <input
           type="text"
@@ -589,24 +644,38 @@ function RangeRow({
   );
 }
 
-/** Chat / turn-end behavior. */
+/** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
+ * turn-end one — it moved to its own 会话 group so the group name stays
+ * accurate. Descriptions are trimmed to one short line; the cost/threshold
+ * caveats live in the ⓘ tooltip. */
 function ChatSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   return (
     <div className="space-y-4">
+      <SettingsGroup title={t("会话")}>
+        <ToggleRow
+          label={t("自动生成标题")}
+          description={t("会话首轮完成后自动生成简短标题。")}
+          detail={t("每会话一次，会产生一次轻量模型调用。")}
+          checked={settings.autoTitle}
+          onChange={(autoTitle) => update({ autoTitle })}
+        />
+      </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("可能产生额外的模型调用")}>
         <ToggleRow
           label={t("下一步建议")}
-          description={t(
-            "每轮回复完成后单独调用一次模型推测下一步操作，显示在输入框上方（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。",
+          description={t("回复完成后推测下一步操作，显示在输入框上方。")}
+          detail={t(
+            "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。",
           )}
           checked={settings.nextStepSuggestions}
           onChange={(nextStepSuggestions) => update({ nextStepSuggestions })}
         />
         <ToggleRow
           label={t("自动压缩上下文")}
-          description={t(
+          description={t("上下文占用达到阈值时自动压缩会话。")}
+          detail={t(
             "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。",
           )}
           checked={settings.autoCompressOnIdle}
@@ -614,17 +683,12 @@ function ChatSection() {
         />
         <ToggleRow
           label={t("自动提取记忆")}
-          description={t(
+          description={t("回复完成后提取可长期保留的偏好候选。")}
+          detail={t(
             "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入（会产生额外 token）。",
           )}
           checked={settings.autoMemoryCapture}
           onChange={(autoMemoryCapture) => update({ autoMemoryCapture })}
-        />
-        <ToggleRow
-          label={t("自动生成标题")}
-          description={t("会话首轮完成后用当前模型生成简短标题（每会话一次，会产生一次轻量调用）。")}
-          checked={settings.autoTitle}
-          onChange={(autoTitle) => update({ autoTitle })}
         />
       </SettingsGroup>
     </div>
@@ -650,14 +714,16 @@ function AppearanceSection() {
       <SettingsGroup title={t("主题与排版")}>
         <ChoiceRow
           label={t("主题")}
-          description={t("跟随编辑器主题，或固定为浅色/深色。设置写入用户 settings.json，可随 VSCode 设置同步。")}
+          description={t("跟随编辑器主题，或固定为浅色/深色。")}
+          detail={t("设置写入用户 settings.json，可随 VSCode 设置同步。")}
           value={settings.theme}
           options={themeOptions}
           onChange={(theme) => update({ theme })}
         />
         <ChoiceRow
           label={t("字号")}
-          description={t("调整面板整体字号；标准为基准，紧凑约 0.92×，大约 1.1×。")}
+          description={t("调整面板整体字号。")}
+          detail={t("标准为基准，紧凑约 0.92×，大约 1.1×。")}
           value={settings.uiFontSize}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -668,7 +734,8 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("密度")}
-          description={t("调整控件内边距与间距；标准为基准，紧凑约 0.92×，宽松约 1.12×。不影响字号。")}
+          description={t("调整控件内边距与间距。")}
+          detail={t("标准为基准，紧凑约 0.92×，宽松约 1.12×。不影响字号。")}
           value={settings.uiDensity}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -676,12 +743,6 @@ function AppearanceSection() {
             { value: "comfortable", label: t("宽松") },
           ]}
           onChange={(uiDensity) => update({ uiDensity })}
-        />
-        <RangeRow
-          label={t("极光强度")}
-          description={t("背景光斑的不透明度（0–100）。")}
-          value={settings.auroraIntensity}
-          onCommit={(auroraIntensity) => update({ auroraIntensity })}
         />
       </SettingsGroup>
       <SettingsGroup title={t("提示与通知")}>
@@ -693,7 +754,8 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("系统通知")}
-          description={t("面板不可见时发送系统通知：审批/提问/计划阻塞时，或整轮完成时。")}
+          description={t("面板不可见时发送系统通知。")}
+          detail={t("审批/提问/计划阻塞时，或整轮完成时发送。")}
           value={settings.osNotifications}
           options={notificationOptions}
           onChange={(osNotifications) => update({ osNotifications })}
@@ -710,6 +772,14 @@ function AppearanceSection() {
           <ShortcutRow keys="Ctrl/Cmd+Alt+F" label={t("切换 Focus 视图")} />
         </div>
       </SettingsGroup>
+      <SettingsDisclosure title={t("高级外观")} hint={t("可选")}>
+        <RangeRow
+          label={t("极光强度")}
+          description={t("背景光斑的不透明度（0–100）。")}
+          value={settings.auroraIntensity}
+          onCommit={(auroraIntensity) => update({ auroraIntensity })}
+        />
+      </SettingsDisclosure>
     </div>
   );
 }
@@ -732,22 +802,28 @@ function PermissionDefaults() {
     { value: "plan", label: t("规划") },
   ];
   return (
-    <SettingsGroup title={t("默认模式")}>
-      <ChoiceRow
-        label={t("面板默认权限模式")}
-        description={t("新会话使用的权限模式；当前会话可用输入框下方的模式菜单切换。")}
-        value={settings.defaultMode}
-        options={defaultModeOptions}
-        onChange={(defaultMode) => update({ defaultMode })}
-      />
-      <ChoiceRow
-        label={t("CLI 默认审批模式")}
-        description={t("写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启 CLI 生效。")}
-        value={settings.approvalMode}
-        options={approvalOptions}
-        onChange={(approvalMode) => update({ approvalMode })}
-      />
-    </SettingsGroup>
+    <div className="space-y-4">
+      <SettingsGroup title={t("默认模式")}>
+        <ChoiceRow
+          label={t("面板默认权限模式")}
+          description={t("新会话使用的权限模式。")}
+          detail={t("当前会话可用输入框下方的模式菜单切换。")}
+          value={settings.defaultMode}
+          options={defaultModeOptions}
+          onChange={(defaultMode) => update({ defaultMode })}
+        />
+      </SettingsGroup>
+      <SettingsDisclosure title={t("CLI 兼容")} hint={t("重启 CLI 生效")}>
+        <ChoiceRow
+          label={t("CLI 默认审批模式")}
+          description={t("写入 CLI 配置的启动审批模式。")}
+          detail={t("写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启 CLI 生效。")}
+          value={settings.approvalMode}
+          options={approvalOptions}
+          onChange={(approvalMode) => update({ approvalMode })}
+        />
+      </SettingsDisclosure>
+    </div>
   );
 }
 
@@ -762,54 +838,45 @@ function RuntimeSection() {
   ];
   return (
     <div className="space-y-4">
-      <p className="rounded-lg border border-primary/25 bg-primary/5 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
-        {t(
-          "这些设置写入 VSCode 用户 settings.json；开启 VSCode 设置同步后会跨设备同步。API Key 保存在 SecretStorage，不会同步。",
-        )}
-      </p>
       <SettingsGroup title={t("启动与会话")}>
         <ToggleRow
           label={t("后台预热 CLI")}
-          description={t("窗口打开时在后台启动 CLI，首次打开面板无需等待（每窗口约 100MB 内存）。下次窗口启动生效。")}
+          description={t("窗口打开时预热 CLI，首次打开面板无需等待。")}
+          detail={t("每窗口约 100MB 内存；下次窗口启动生效。")}
           checked={settings.warmStart}
           onChange={(warmStart) => update({ warmStart })}
         />
         <ToggleRow
           label={t("恢复上次会话")}
-          description={t("面板启动时恢复上次使用的会话；无可恢复记录时新建会话。")}
+          description={t("面板启动时恢复上次使用的会话。")}
+          detail={t("无可恢复记录时新建会话。")}
           checked={settings.restoreLastSession}
           onChange={(restoreLastSession) => update({ restoreLastSession })}
         />
         <ToggleRow
           label={t("启动时自动打开面板")}
-          description={t("VSCode 启动时自动打开聊天面板。下次启动生效。")}
+          description={t("VSCode 启动时自动打开聊天面板。")}
+          detail={t("下次启动生效。")}
           checked={settings.autoOpenPanel}
           onChange={(autoOpenPanel) => update({ autoOpenPanel })}
         />
       </SettingsGroup>
-      <SettingsGroup title={t("CLI 运行时")} hint={t("重启 CLI 生效")}>
-        <TextRow
-          label={t("Node.js 路径")}
-          description={t("留空自动探测；修改后重启 CLI 生效。")}
-          value={settings.nodePath}
-          placeholder="C:\\Program Files\\nodejs\\node.exe"
-          onCommit={(nodePath) => update({ nodePath })}
-        />
-        <ChoiceRow
-          label={t("CLI 语言")}
-          description={t("写入 ~/.iflow/settings.json；修改后重启 CLI 生效。")}
-          value={settings.language}
-          options={languageOptions}
-          onChange={(language) => update({ language })}
-        />
-      </SettingsGroup>
-      <SettingsGroup title={t("检查点与存储")}>
+      <SettingsGroup title={t("检查点")}>
         <ToggleRow
           label={t("启用检查点")}
-          description={t("每轮对话前把工作区快照到独立的影子 git 仓库，以支持按轮回退。")}
+          description={t("每轮对话前快照工作区，支持按轮回退。")}
+          detail={t("快照写入独立的影子 git 仓库，不触碰你的 .git。")}
           checked={settings.checkpoints}
           onChange={(checkpoints) => update({ checkpoints })}
         />
+        <div className="px-4 py-4">
+          <div className="text-ui-body font-medium leading-snug text-foreground">{t("磁盘占用")}</div>
+          <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">
+            {t("快照保存在工作区存储中；容量上限等参数在「高级」中调整。")}
+          </p>
+        </div>
+      </SettingsGroup>
+      <SettingsDisclosure title={t("高级")} hint={t("检查点限额与 CLI 运行时")}>
         <NumberRow
           label={t("最大文件数")}
           description={t("超过该文件数时关闭快照。")}
@@ -842,35 +909,36 @@ function RuntimeSection() {
         />
         <TextRow
           label={t("存储目录")}
-          description={t("留空使用默认 workspaceStorage；支持 ~ 与相对路径。")}
+          description={t("留空使用默认工作区存储。")}
+          detail={t("留空使用默认 workspaceStorage；支持 ~ 与相对路径。")}
           value={settings.checkpointDir}
           placeholder="~/.iflow/checkpoints"
           onCommit={(checkpointDir) => update({ checkpointDir })}
         />
-      </SettingsGroup>
-      <SettingsGroup title={t("同步与原始设置")}>
-        <div className="px-3 py-3">
-          <p className="text-ui-caption leading-relaxed text-muted-foreground">
-            {t(
-              "需要直接编辑原始 JSON 时，可使用底部的「在 VSCode 设置中编辑…」；面板中的改动已写入同一份用户设置。",
-            )}
-          </p>
-        </div>
-      </SettingsGroup>
+        <TextRow
+          label={t("Node.js 路径")}
+          description={t("留空自动探测。")}
+          detail={t("修改后重启 CLI 生效。")}
+          value={settings.nodePath}
+          placeholder="C:\\Program Files\\nodejs\\node.exe"
+          onCommit={(nodePath) => update({ nodePath })}
+        />
+        <ChoiceRow
+          label={t("CLI 语言")}
+          description={t("CLI 界面的显示语言。")}
+          detail={t("写入 ~/.iflow/settings.json；修改后重启 CLI 生效。")}
+          value={settings.language}
+          options={languageOptions}
+          onChange={(language) => update({ language })}
+        />
+      </SettingsDisclosure>
     </div>
   );
 }
 
 /** MCP servers live in the CLI's settings file, not in VSCode settings. */
 function McpTab({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderDispatch }) {
-  return (
-    <div className="space-y-4">
-      <p className="rounded-lg border border-border bg-surface/60 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
-        {t("MCP 服务器配置保存在 ~/.iflow/settings.json，由 CLI 读取；不随 VSCode 设置同步。")}
-      </p>
-      <McpSection busy={busy} onHeader={onHeader} />
-    </div>
-  );
+  return <McpSection busy={busy} onHeader={onHeader} />;
 }
 
 /** One keyboard-shortcut row in the settings cheat sheet. */
@@ -1261,24 +1329,56 @@ function ApiConfigSection({
                   </span>
                 </span>
               </button>
-              <button
-                className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-                title={t("编辑 {0}", p.name)}
+              <Dropdown
+                align="right"
+                menuClass="w-[10rem]"
                 disabled={busy}
-                onClick={() => openEdit(p.name)}
+                trigger={(open) => (
+                  <button
+                    type="button"
+                    aria-haspopup="menu"
+                    aria-expanded={open}
+                    aria-label={t("配置 {0} 的操作", p.name)}
+                    title={t("更多操作")}
+                    disabled={busy}
+                    className={`press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40 ${
+                      open ? "bg-accent/60 text-foreground" : ""
+                    }`}
+                  >
+                    <MoreHorizontal className="size-3.5" />
+                  </button>
+                )}
               >
-                <Pencil className="size-3.5" />
-              </button>
-              {p.source === "extension" && (
-                <button
-                  data-variant="danger"
-                  className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
-                  title={t("删除 {0}", p.name)}
-                  onClick={() => setConfirmingDelete(p.name)}
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
-              )}
+                {(close) => (
+                  <>
+                    <button
+                      role="menuitem"
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-foreground hover:bg-accent/60"
+                      onClick={() => {
+                        close();
+                        openEdit(p.name);
+                      }}
+                    >
+                      <Pencil className="size-3.5 shrink-0" />
+                      {t("编辑")}
+                    </button>
+                    {p.source === "extension" && (
+                      <button
+                        role="menuitem"
+                        data-variant="danger"
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-destructive hover:bg-destructive/10"
+                        onClick={() => {
+                          close();
+                          setConfirmingDelete(p.name);
+                        }}
+                      >
+                        <Trash2 className="size-3.5 shrink-0" />
+                        {t("删除")}
+                      </button>
+                    )}
+                  </>
+                )}
+              </Dropdown>
             </div>
           ))}
         </div>
