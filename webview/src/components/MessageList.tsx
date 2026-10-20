@@ -429,7 +429,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
         <span className="tool-icon" title={detail}>
           <Icon className="size-3 shrink-0" />
         </span>
-        <span className="tool-card-title min-w-0 truncate text-ui-label font-semibold" title={detail}>
+        <span className="tool-card-label text-ui-label font-semibold" title={detail}>
           {title}
         </span>
         <span

@@ -783,18 +783,28 @@ textarea:focus-visible {
       subtitle has no shrink budget left (short description subtitle + a
       wide `shrink-0` chip group, or a FileRef chip eating the overflow), the
       label is squeezed even at a full-width panel.
-   Policy: the label is the row's anchor — it yields only as a LAST resort.
-   The subtitle keeps a 1000× shrink factor, so a long command line dies
-   before a short title; once the subtitle is exhausted, the title may
-   shrink and truncate rather than push the shrink-0 status/action chips out
-   of the card (measured on the 480/300px subagent header). */
+   Policy (revised 2026-10-20): ToolCard labels are short static strings
+   ("执行命令", "读取文件", …) and the user wants them ALWAYS fully visible —
+   proportional squeeze still ellipsized "执行命令" → "执行…" once the subtitle
+   hit zero budget, so the ToolCard title is now hard-fixed
+   (`.tool-card-label`: shrink 0, no truncate) and the subtitle absorbs the
+   entire squeeze. On pathologically narrow panels the shrink-0 chips may
+   clip instead of the title — deliberate trade.
+   `.tool-card-title` (SubAgent header) keeps the old last-resort squeeze:
+   task titles are unbounded free text and must still be able to truncate
+   rather than evict the status chip. */
 .tool-card-title {
   flex-shrink: 1;
   min-width: 0;
   max-width: 100%;
 }
+.tool-card-label {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .tool-card-detail {
   flex-shrink: 1000;
+  min-width: 0;
 }
 
 /* Tool cards use a compact audit hierarchy: the invocation is scannable first,
