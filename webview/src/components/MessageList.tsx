@@ -741,154 +741,7 @@ function ThoughtCard({
   );
 }
 
-/**
- * UI-audit 4.3/4.4 (P0) — 工具活动组. Consecutive SETTLED tool/thought/subagent
- * blocks collapse into one summary line ("执行了 6 个工具 · 修改 2 个文件 ·
- * 1 个失败"), cutting ~10 tool-call cards worth of height 50–70%. Expanding
- * shows compact rows (14px icon + verb + target + status dot); clicking a row
- * swaps in the EXISTING full card one level deeper — every audit affordance
- * (params / output / diff / actions) survives, nothing is deleted. Failed rows
- * come pre-expanded: failures must be louder than the successes they hide
- * among. In-progress blocks never join a group (see `groupable`), so the busy
- * signal and pending-approval cards stay visible as full cards.
- */
-function groupable(block: Block): boolean {
-  if (block.kind === "thought") return true;
-  if (block.kind === "tool" || block.kind === "subagent")
-    return block.status === "completed" || block.status === "failed";
-  return false;
-}
 
-/** UI-audit 4.3 P0: split the rendered range into activity segments. Consecutive
- * groupable blocks merge into one ActivityGroup; the streaming tail (liveIndex)
- * never joins a group, and singleton segments fall back to plain BlockView. */
-function segmentBlocks(blocks: Block[], from: number, to: number, liveIndex: number) {
-  const out: { from: number; to: number; grouped: boolean }[] = [];
-  let i = from;
-  while (i < to) {
-    if (i !== liveIndex && groupable(blocks[i])) {
-      const j0 = i;
-      let j = i + 1;
-      while (j < to && j !== liveIndex && groupable(blocks[j])) j++;
-      out.push({ from: j0, to: j, grouped: j - j0 >= 2 });
-      i = j;
-    } else {
-      out.push({ from: i, to: i + 1, grouped: false });
-      i++;
-    }
-  }
-  return out;
-}
-
-function ActivityGroup({ blocks, turnActive }: {
-  blocks: Block[];
-  turnActive: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  // User override: once they toggle the group, stop auto-opening it.
-  const touched = useRef(false);
-  const toolCount = blocks.filter((b) => b.kind === "tool" || b.kind === "subagent").length;
-  const fileCount = blocks.filter((b) => b.kind === "tool" && b.diff !== null).length;
-  const failCount = blocks.filter((b) => (b.kind === "tool" || b.kind === "subagent") && b.status === "failed").length;
-  useEffect(() => {
-    if (failCount > 0 && !touched.current) setOpen(true);
-  }, [failCount]);
-  const summary = [
-    t("执行了 {0} 个工具", String(toolCount)),
-    ...(fileCount > 0 ? [t("修改 {0} 个文件", String(fileCount))] : []),
-    ...(failCount > 0 ? [t("{0} 个失败", String(failCount))] : []),
-  ].join(" · ");
-  return (
-    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border bg-card shadow-card">
-      <button
-        onClick={() => {
-          touched.current = true;
-          setOpen((v) => !v);
-        }}
-        aria-expanded={open}
-        title={t("工具活动")}
-        className="press w-full flex items-center gap-2 px-3 py-1.5 text-left rounded-lg transition-colors hover:bg-surface"
-      >
-        <Caret open={open} className="size-3" />
-        <span className="min-w-0 truncate text-ui-label text-muted-foreground">{summary}</span>
-        {failCount > 0 && (
-          <Chip tone="danger" className="ml-auto shrink-0">
-            <X className="size-2.5" /> {t("失败")}
-          </Chip>
-        )}
-      </button>
-      <Collapse open={open}>
-        <div className="border-t border-border/60 px-3 py-2 space-y-2">
-          {blocks.map((b, i) => <ActivityRow key={b.id ?? `i-${i}`} block={b} turnActive={turnActive} />)}
-        </div>
-      </Collapse>
-    </div>
-  );
-}
-
-function ActivityRow({ block, turnActive }: { block: Block; turnActive: boolean }) {
-  const failed = (block.kind === "tool" || block.kind === "subagent") && block.status === "failed";
-  const [expanded, setExpanded] = useState(false);
-  const st =
-    block.kind === "tool" || block.kind === "subagent" ? block.status : "";
-  // 失败行默认展开 (audit 4.4): the full card with the error is the answer.
-  useEffect(() => {
-    if (failed) setExpanded(true);
-  }, [failed]);
-  let label = "";
-  let target = "";
-  const Icon: typeof Eye =
-    block.kind === "tool" ? toolPresentation(block).icon
-    : block.kind === "subagent" ? Bot
-    : Brain;
-  if (block.kind === "tool") {
-    label = toolPresentation(block).label;
-    target = block.locations[0]?.path ?? block.input ?? "";
-  } else if (block.kind === "subagent") {
-    label = localizeStepTitle(block.title);
-    const nested = block.entries.filter((b) => b.kind === "tool");
-    const done = nested.filter((b) => b.status === "completed" || b.status === "failed").length;
-    target = nested.length > 0 ? `${done}/${nested.length}` : "";
-  } else {
-    // Thought: "思考了 12s" when the host carried lifecycle timestamps.
-    label =
-      block.startedAt !== undefined && block.completedAt !== undefined
-        ? t("思考了 {0}s", String(Math.max(0, Math.round((block.completedAt - block.startedAt) / 1000))))
-        : t("思考过程");
-  }
-  return (
-    <>
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 py-1 text-left rounded-md transition-colors hover:bg-surface"
-      >
-        <Caret open={expanded} className="size-2.5" />
-        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 truncate text-ui-label text-foreground">{label}</span>
-        {target && <span className="ml-1.5 max-w-[45%] truncate font-mono text-ui-caption text-muted-foreground">{target}</span>}
-        {st === "completed" && <CheckCircle2 className="ml-auto shrink-0 size-3 text-success" />}
-        {st === "failed" && <XCircle className="ml-auto shrink-0 size-3 text-destructive" />}
-      </button>
-      <Collapse open={expanded}>
-        {/* Lazy mount (pitfall #27 discipline): a folded row costs zero DOM
-            beyond the compact line; the full card appears only on open. */}
-        {expanded && (
-          <BlockView
-            block={block}
-            isLatest={false}
-            turnActive={turnActive}
-            canCopy={false}
-            canRegenerate={false}
-            canDelete={false}
-            checkpoint={undefined}
-            showAvatar={true}
-            onRegenerate={() => {}}
-          />
-        )}
-      </Collapse>
-    </>
-  );
-}
 
 function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   const send = useChat((s) => s.send);
@@ -1435,7 +1288,9 @@ const BlockView = memo(function BlockView({
                   floats (absolute) so a hidden bar reserves no height. The
                   18px drop keeps its top edge inside the last line's leading
                   (22.75px line box on 14px text) instead of clipping
-                  descenders, and reaches only 4px into the next block's box. */}
+                  descenders, and stays inside the .cv-block wrapper's 20px
+                  bottom clip allowance — at the old 14px allowance paint
+                  containment sheared 4px off the buttons' bottom edge. */}
               {canCopy && (
                 <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-[18px] items-center gap-0.5 rounded-md bg-card px-1 opacity-0 shadow-card outline-1 outline-[color:var(--border)] transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                   <button
@@ -1794,14 +1649,6 @@ function MessageListInner({ state }: { state: SessionState }) {
   const turnActive =
     state.status === "streaming" && !state.replaying && !state.initializing;
 
-  // UI-audit 4.3 P0: render segments. Consecutive settled tool/thought/subagent
-  // blocks collapse into one ActivityGroup line; the streaming tail block never
-  // joins a group so the live card (and pending-approval card) stays full-size.
-  const segments = useMemo(
-    () => segmentBlocks(visibleBlocks, start, total, turnActive ? total - 1 : -1),
-    [visibleBlocks, start, total, turnActive],
-  );
-
   // Last user prompt + a regenerate handler: the webview sends a host-backed
   // `regenerate` message; the host re-runs the preceding user prompt (it owns
   // transcript state, so it extracts the text rather than the webview).
@@ -1912,43 +1759,38 @@ function MessageListInner({ state }: { state: SessionState }) {
               </button>
             </div>
           )}
-          {segments.map((seg) => {
-            const end = seg.to - 1;
-            const turnId = turnUserByIndex[end];
-            const atTurnEnd = end === total - 1 || visibleBlocks[end + 1]?.kind === "user";
-            const first = visibleBlocks[seg.from];
-            const prev = seg.from > 0 ? visibleBlocks[seg.from - 1] : undefined;
+          {visibleBlocks.slice(start).map((block, offset) => {
+            const index = start + offset;
+            const turnId = turnUserByIndex[index];
+            const atTurnEnd = index === total - 1 || visibleBlocks[index + 1]?.kind === "user";
+            const prev = index > 0 ? visibleBlocks[index - 1] : undefined;
             const showAvatar =
               prev === undefined ||
               prev.kind !== "text" ||
               (prev.kind === "text" && prev.system === true);
             return (
-              <div key={first.id ?? `idx-${seg.from}`} className="cv-block">
-                {seg.grouped ? (
-                  <ActivityGroup blocks={visibleBlocks.slice(seg.from, seg.to)} turnActive={turnActive} />
-                ) : (
-                  <BlockView
-                    block={first}
-                    isLatest={end === total - 1}
-                    turnActive={turnActive}
-                    canCopy={!state.replaying}
-                    canRegenerate={canRegenerate && end === total - 1}
-                    checkpoint={first.kind === "user" && first.id ? checkpointByBlockId.get(first.id) : undefined}
-                    showAvatar={showAvatar}
-                    canDelete={
-                      !state.replaying &&
-                      !state.initializing &&
-                      state.status !== "connecting" &&
-                      state.status !== "streaming" &&
-                      !state.pendingApproval &&
-                      !state.pendingQuestions &&
-                      !state.pendingPlanExit
-                    }
-                    onRegenerate={onRegenerate}
-                    onRemember={onRemember}
-                    onEditingChange={handleEditingChange}
-                  />
-                )}
+              <div key={block.id ?? `idx-${index}`} className="cv-block">
+                <BlockView
+                  block={block}
+                  isLatest={index === total - 1}
+                  turnActive={turnActive}
+                  canCopy={!state.replaying}
+                  canRegenerate={canRegenerate && index === total - 1}
+                  checkpoint={block.kind === "user" && block.id ? checkpointByBlockId.get(block.id) : undefined}
+                  showAvatar={showAvatar}
+                  canDelete={
+                    !state.replaying &&
+                    !state.initializing &&
+                    state.status !== "connecting" &&
+                    state.status !== "streaming" &&
+                    !state.pendingApproval &&
+                    !state.pendingQuestions &&
+                    !state.pendingPlanExit
+                  }
+                  onRegenerate={onRegenerate}
+                  onRemember={onRemember}
+                  onEditingChange={handleEditingChange}
+                />
                 {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state, turnId) && (
                   <TurnChanges key={turnId} sessionId={state.sessionId!} userBlockId={turnId} />
                 )}

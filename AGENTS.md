@@ -178,6 +178,8 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 项目自定义 `.shadow-card` 直接设置 `box-shadow`，会覆盖 Tailwind `ring`（ring 也编译为 box-shadow），导致边框消失；需要不占布局高度的边框时改用 `outline`（outline 不走 box-shadow，也不参与高度计算）。
 - 面板模式与 CLI 模式必须单一权威：每轮 prompt（含重新生成）拿到 sessionId 后，先调用 assertModeForPrompt 把面板保存的模式推给 CLI，再发送；CLI 侧同值推送为 no-op，失败只记日志不挡发送。
 - 当 Stop 确实打断 Plan 退出卡时，session/cancel 之后必须立即重推当前模式，把打断瞬间产生的模式漂移当场拉回；cancelAllPlanExits 应返回被取消的 Plan 退出请求数，供判断是否发生打断。
+- 调试 webview 构建产物时使用 `npm run webview:serve`（`scripts/serve-webview.mjs`，默认端口 8791、目录 `webview/dist`），作为长期保留的静态服务入口。
+- Vite 构建产物不能直接用 `file://` 打开，因为产物以绝对路径引用 `/assets/...`，在本地文件协议下会被 CORS 拒绝导致空白页；调试时应走 HTTP 静态服务器。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

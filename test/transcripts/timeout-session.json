@@ -1,1 +1,0 @@
-{"label":"（无标题会话）","blocks":[{"kind":"user","text":"run something","id":"b5","tokens":2},{"kind":"text","id":"b6","text":"*run_shell_command — 审批超时，已自动拒绝*","system":true,"tokens":16},{"kind":"text","text":"命令被取消了","id":"b7","tokens":5}]}

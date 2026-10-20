@@ -360,6 +360,7 @@
     "icon": "node scripts/generate-icon.mjs",
     "build": "npm run icon && tsc -p tsconfig.json && node esbuild.mjs && vite build webview",
     "webview:dev": "vite build webview --watch",
+    "webview:serve": "node scripts/serve-webview.mjs",
     "typecheck": "npm run typecheck:host && npm run typecheck:webview",
     "typecheck:host": "tsc -p tsconfig.json --noEmit",
     "typecheck:webview": "tsc -p webview/tsconfig.json --noEmit",

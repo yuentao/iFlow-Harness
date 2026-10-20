@@ -1343,24 +1343,42 @@ pre {
    shadow's reach, and cancel the layout effect with an equal negative margin
    (adjacent wrappers: +14px padding, -14px folded margin, +14px padding → the
    original 12px space-y-3 gap becomes 14px; contain-intrinsic-size grows to
-   match the padded box). */
+   match the padded box).
+
+   BOTTOM allowance is 20px, not 14px: an assistant text block's hover action
+   bar floats 18px below the body (absolute bottom-0 + translate-y-[18px]), and
+   paint containment would CUT its bottom 4px (measured in the mock webview:
+   bar bottom sat 4px outside the wrapper box, buttons visibly sheared). The
+   extra 6px is folded back with an equal negative bottom margin, so the
+   content-to-content rhythm stays 14px (collapsed sibling margin between two
+   wrappers: 12px space-y-3 + (-20px) = -8 → next wrapper's top sits at
+   content bottom + 12, its content at +26 → same 14px gap as before). */
 .cv-block {
   content-visibility: auto;
-  contain-intrinsic-size: auto 92px;
+  contain-intrinsic-size: auto 98px;
   /* Vertical-only padding/negative margin: the shadow spread is vertical, and
      a horizontal -14px would exceed the scroller's px-3 (12px) padding box,
      forcing a horizontal scrollbar on the transcript. */
-  padding: 14px 2px;
-  margin: -14px -2px;
+  padding: 14px 2px 20px;
+  margin: -14px -2px -20px;
 }
 
 /* content-visibility:auto implies paint containment, i.e. every .cv-block is
    its own stacking context — a descendant z-index cannot lift a row above a
-   LATER sibling block. The user bubble's hover action bar hangs ~12px below
-   the bubble, which lands inside the next wrapper's 14px top padding (the
-   +14/-14 fold puts that wrapper's box flush against the bubble bottom): the
-   bar is visible but the next block would swallow its clicks. Raise the
-   hovered block itself so the revealed toolbar stays interactive. */
+   LATER sibling block. The hover action bars hang below their block (user
+   bubble 12px, assistant body 18px), and the +20/-20 bottom fold makes every
+   wrapper's border box overlap the NEXT block's top 6px of content: the bar
+   is visible there, but the next block would swallow its clicks. So the
+   wrapper must never eat a hit test (pointer-events:none, restored on its
+   block content) — interactivity belongs to the block itself, and :hover still
+   propagates along the hit element's ancestor chain to raise the hovered
+   block above later siblings. */
+.cv-block {
+  pointer-events: none;
+}
+.cv-block > * {
+  pointer-events: auto;
+}
 .cv-block:hover {
   position: relative;
   z-index: 1;
