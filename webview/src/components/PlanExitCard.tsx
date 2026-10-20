@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useId } from "react";
 import { ClipboardCheck, Pencil, Eye } from "lucide-react";
 import type { PendingPlanExitUi } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -19,6 +19,8 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
   // disabled until the host's next snapshot removes the card. Prevents
   // double-fire on rapid clicks.
   const [answered, setAnswered] = useState(false);
+  const titleId = useId();
+  const descId = useId();
   // Plan body render/edit modes: the agent's plan is markdown, rendered via
   // the shared Markdown component; 编辑计划 switches to a textarea draft so
   // the user can revise it before 重新规划 (the edited text rides the
@@ -29,7 +31,13 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
   const actionsRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
-    actionsRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    // W4 + milestone 14 §4.5 (P0 safety): the actions row used to autofocus
+    // its FIRST button, which is 批准计划 — so a card that appeared mid-stream
+    // would start executing on a stray Enter. The safe side (拒绝计划) owns the
+    // initial focus via data-autofocus; approving takes a click or a Tab.
+    const row = actionsRef.current;
+    if (!row) return;
+    (row.querySelector<HTMLElement>("[data-autofocus]") ?? row.querySelector<HTMLButtonElement>("button"))?.focus();
   }, []);
   useEffect(() => {
     if (editing) textareaRef.current?.focus();
@@ -88,7 +96,8 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     <div
       className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
       role="alertdialog"
-      aria-label={t("iFlow 请求退出 Plan 模式")}
+      aria-labelledby={titleId}
+      aria-describedby={descId}
       onKeyDown={(e) => {
         // Escape means "reject" — consistent with the card's dismissal
         // semantics (the host treats a missing answer as rejected too).
@@ -102,7 +111,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <ClipboardCheck className="size-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
+        <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           <HelpTip label={t("计划说明")} align="right">
             <span className="block space-y-1">
@@ -111,9 +120,8 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
               </span>
               <span className="block">{t("批准的计划会保存到 .iflow/specs/ 以便留痕。")}</span>
               <span className="block">{t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}</span>
-              <span className="block font-mono text-ui-micro text-muted-foreground">
-                {t("Y 批准 · N 拒绝 · R 重新规划")}
-              </span>
+              {/* The shortcut line rides once in the actions row below;
+                  duplicating it here put the same hint in two places. */}
             </span>
           </HelpTip>
           <button
@@ -129,29 +137,26 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           </button>
         </span>
       </div>
-      <div className="space-y-2 px-3 py-3 text-ui-label">
+      <div id={descId} className="space-y-2 px-3 py-3 text-ui-label">
         <p className="text-ui-caption text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
         {editing ? (
-          <>
-            <textarea
-              ref={textareaRef}
-              value={planText}
-              onChange={(e) => setPlanText(e.target.value)}
-              aria-label={t("编辑计划")}
-              spellCheck={false}
-              /* mono + generous height: the plan is source-like markdown the
-                 user edits verbatim; min-height keeps short plans usable,
-                 max-h-64 caps the shrink-0 card like the render mode. */
-              className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-ui-caption leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
-            />
-            <p className="text-ui-micro leading-relaxed text-muted-foreground/85">
-              {t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}
-            </p>
-          </>
+          <textarea
+            ref={textareaRef}
+            value={planText}
+            onChange={(e) => setPlanText(e.target.value)}
+            aria-label={t("编辑计划")}
+            spellCheck={false}
+            /* mono + generous height: the plan is source-like markdown the
+               user edits verbatim; min-height keeps short plans usable,
+               max-h-64 caps the shrink-0 card like the render mode. The
+               edit-scope caveat lives in the tooltip, not repeated here —
+               the edit-mode primary button says it outright. */
+            className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-ui-caption leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
+          />
         ) : (
           /* Markdown render + scroll cap: the plan text is uncapped (the
-             agent's full plan); unbroken tokens used to punch through the
-             card border, long ones grew the shrink-0 card unbounded. The
+             agent's full plan); unbroken tokens used to punch through
+             the card border, long ones grew the shrink-0 card unbounded. The
              cap now lives on the wrapper so the .md table/pre scroll rules
              stay intact inside. */
           <div className="max-h-48 overflow-y-auto rounded-lg border border-border/60 bg-editor/60 p-2">
@@ -159,7 +164,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           </div>
         )}
       </div>
-      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} />
+      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动拒绝")} />
       <div
         ref={actionsRef}
         role="group"
@@ -176,6 +181,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         </button>
         <button
           disabled={answered}
+          data-autofocus
           aria-label={t("拒绝计划")}
           className="press inline-flex h-6 items-center justify-center rounded-md border border-destructive/40 px-2.5 text-ui-caption text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false)}
@@ -184,11 +190,11 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         </button>
         <button
           disabled={answered}
-          aria-label={t("重新规划")}
+          aria-label={editing ? t("保存并重新规划") : t("重新规划")}
           className="press inline-flex h-6 items-center justify-center rounded-md border border-primary/40 px-2.5 text-ui-caption text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false, true)}
         >
-          {t("重新规划")}
+          {editing ? t("保存并重新规划") : t("重新规划")}
         </button>
         <span className="ml-auto self-center text-ui-micro text-muted-foreground/80">
           {t("Y 批准 · N 拒绝 · R 重新规划")}

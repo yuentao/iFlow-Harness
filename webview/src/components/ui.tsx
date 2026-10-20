@@ -226,17 +226,33 @@ export function formatCountdown(remainingMs: number): string {
  * Auto-expiry indicator for approval/question cards: a thin proportional bar
  * plus the remaining time. Turns warning (≤60s) then destructive (≤15s) so
  * the user can see at a glance that a card is about to auto-answer.
+ *
+ * Progressive disclosure: a strip that shrinks every second for five minutes
+ * manufactures urgency on a decision that is not actually time-critical. While
+ * the window is still minutes away it is replaced by one muted caption line
+ * (pass `quietLabel`, e.g. t("自动拒绝")); the bar only joins in the final
+ * minute, where reading it changes what the user does next.
  */
 export function CountdownBar({
   deadline,
   timeoutMs,
+  quietLabel,
 }: {
   deadline: number;
   timeoutMs: number;
+  /** Translated auto-action phrase for the quiet line (t("自动拒绝") etc.). */
+  quietLabel?: string;
 }) {
   const { remainingMs, ratio } = useCountdown(deadline, timeoutMs);
   const urgent = remainingMs <= 15_000;
   const warning = remainingMs <= 60_000;
+  if (quietLabel && !warning) {
+    return (
+      <p className="px-3 pb-2 text-ui-caption leading-snug text-muted-foreground/70">
+        {t("约 {0} 分钟后{1}", Math.ceil(remainingMs / 60_000), quietLabel)}
+      </p>
+    );
+  }
   const barColor = urgent ? "bg-destructive" : warning ? "bg-warning" : "bg-primary";
   const textClass = urgent ? "text-destructive" : warning ? "text-warning" : "text-muted-foreground";
   return (

@@ -292,6 +292,7 @@ const en: Record<string, string> = {
   "拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。":
     "Reject or cancel never runs it. Pre-review rules live in Settings → Approval policies.",
   "Y 允许一次 · N 拒绝 · Esc 取消": "Y allow once · N reject · Esc cancel",
+  "Y 允许一次 · N/Esc 拒绝": "Y allow once · N/Esc reject",
   "计划说明": "Plan help",
   "Plan 模式只读分析与规划；批准后会退出 Plan 模式并开始执行。":
     "Plan mode is read-only analysis and planning; approving exits Plan mode and starts execution.",
@@ -304,6 +305,24 @@ const en: Record<string, string> = {
   "agent 正在等待你的回答；卡片未回答前其他操作会被阻塞。":
     "The agent is waiting for your answer; other actions stay blocked until this card is answered.",
   "超时未回答会按未回答继续。": "If it times out, the agent continues as if unanswered.",
+  // pending-card convergence (milestone 14 §4.5)
+  "约 {0} 分钟后{1}": "{1} in about {0} min",
+  "自动继续": "Auto-continue",
+  "允许一次": "Allow once",
+  "始终允许": "Always allow",
+  "拒绝": "Reject",
+  "始终拒绝": "Always reject",
+  "iFlow 请求执行": "iFlow wants to",
+  "读取": "read",
+  "写入": "write",
+  "搜索": "search",
+  "执行": "execute",
+  "移动": "move",
+  "读取网页": "fetch a page",
+  "不回答并继续": "Continue without answering",
+  "回车只确认该输入；「提交回答」按钮或 Ctrl/Cmd + 回车提交整卡。":
+    "Enter confirms just that field; the Submit answer button or Ctrl/Cmd+Enter commits the whole card.",
+  "保存并重新规划": "Save and re-plan",
   "快捷键": "Keyboard shortcuts",
   "停止生成（审批卡中为取消/拒绝）": "Stop generating (cancels/rejects on an approval card)",
   "审批允许 / 拒绝": "Approve / reject",

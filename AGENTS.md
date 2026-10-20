@@ -176,6 +176,8 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 下拉菜单/浮层需做视口夹取；窄屏右对齐菜单应通过 align=right 向内侧展开，避免负坐标或超出视口。
 - 空状态示例提示应做成明确可点击的 chip：带边框、卡片底色、轻阴影、左侧 Sparkles 图标，整行 hover 反馈，点击区高度约 28px；不要用裸文字按钮。
 - 项目自定义 `.shadow-card` 直接设置 `box-shadow`，会覆盖 Tailwind `ring`（ring 也编译为 box-shadow），导致边框消失；需要不占布局高度的边框时改用 `outline`（outline 不走 box-shadow，也不参与高度计算）。
+- 面板模式与 CLI 模式必须单一权威：每轮 prompt（含重新生成）拿到 sessionId 后，先调用 assertModeForPrompt 把面板保存的模式推给 CLI，再发送；CLI 侧同值推送为 no-op，失败只记日志不挡发送。
+- 当 Stop 确实打断 Plan 退出卡时，session/cancel 之后必须立即重推当前模式，把打断瞬间产生的模式漂移当场拉回；cancelAllPlanExits 应返回被取消的 Plan 退出请求数，供判断是否发生打断。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

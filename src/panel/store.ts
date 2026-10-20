@@ -32,6 +32,7 @@ import {
   markToolReverted,
   markToolHunkDecisions,
   refreshSessionUsage,
+  resolveExitPlanModeBlock,
   setMeta,
   setNextStepLoading,
   setNextStepSuggestions,
@@ -373,6 +374,17 @@ export class SessionStore {
   /** Visual marker recording the user's Plan-exit decision (the card is transient). */
   planExitResolutionNote(resolution: string): void {
     this.noteMutationIndex(appendApprovalResolution(this.state, "plan", resolution));
+    this.flush();
+  }
+
+  /**
+   * Settle the pending `exit_plan_mode` tool call when the Plan card answers —
+   * the CLI never sends a terminal update for that call, so without this the
+   * block lingers at 等待执行 until the turn-end sweep mislabels an approved
+   * plan's call as failed.
+   */
+  resolveExitPlanModeBlock(approved: boolean): void {
+    this.noteMutationIndex(resolveExitPlanModeBlock(this.state.blocks, approved));
     this.flush();
   }
 

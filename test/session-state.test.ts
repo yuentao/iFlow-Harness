@@ -29,6 +29,8 @@ import {
   setPendingApproval,
   clearPendingApproval,
   closeOpenSubAgents,
+  closeOpenToolBlocks,
+  resolveExitPlanModeBlock,
   markSubAgentStopped,
   deleteUserMessageById,
   findCliHistoryCut,
@@ -644,6 +646,74 @@ describe("closeOpenSubAgents (zombie interval after a killed turn)", () => {
     );
     expect(closeOpenSubAgents(state.blocks)).toBe(2);
     expect(state.blocks.map((b) => (b.kind === "subagent" ? b.status : "-"))).toEqual(["-", "completed", "failed", "failed"]);
+  });
+});
+
+describe("closeOpenToolBlocks (tool cards parked at 等待执行 by a killed turn)", () => {
+  it("completePrompt force-closes pending/in_progress tool blocks as failed", () => {
+    const state: SessionState = initialSessionState();
+    // Wire shape of the residual state: the CLI stamps tool_call(pending) when
+    // the functionCall streams, then PLAN-rejects / settles exit_plan_mode
+    // without ever sending a terminal tool_call_update.
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "w-1", toolName: "write_file", title: "替换内容", kind: "edit", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "x-1", toolName: "exit_plan_mode", title: "退出计划", kind: "other", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "r-1", toolName: "read_file", title: "读", kind: "read", status: "completed" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "g-1", toolName: "glob", title: "找", kind: "search", status: "in_progress" }));
+
+    const closedFrom = completePrompt(state, "end_turn");
+    expect(closedFrom).toBe(0);
+    const statuses = state.blocks.map((b) => (b.kind === "tool" ? b.status : "-"));
+    expect(statuses).toEqual(["failed", "failed", "completed", "failed"]);
+  });
+
+  it("returns null when every tool block is already terminal", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "r-ok", toolName: "read_file", title: "读", kind: "read", status: "completed" }));
+    expect(closeOpenToolBlocks(state.blocks)).toBeNull();
+    expect(completePrompt(state, "end_turn")).toBeNull();
+  });
+
+  it("recurses into SubAgent entries and reports the owning card's index", () => {
+    const state: SessionState = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "task-1", toolName: "task", title: "任务", kind: "other", status: "in_progress" }));
+    applySessionUpdate(
+      state,
+      notify({ sessionUpdate: "tool_call", toolCallId: "n-pend", toolName: "write_file", title: "写", kind: "edit", status: "pending" }, "agent-1"),
+    );
+    const closedFrom = completePrompt(state, "cancelled");
+    expect(closedFrom).toBe(0);
+    const sub = state.blocks[0]!;
+    if (sub.kind !== "subagent") throw new Error("expected subagent");
+    expect(sub.status).toBe("failed");
+    const nested = sub.entries.find((b) => b.kind === "tool");
+    if (nested?.kind !== "tool") throw new Error("expected nested tool");
+    expect(nested.status).toBe("failed");
+  });
+});
+
+describe("resolveExitPlanModeBlock (Plan-card settle of the exit_plan_mode call)", () => {
+  function seedPlanCalls(state: SessionState): void {
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "ep-1", toolName: "exit_plan_mode", title: "退出计划", kind: "other", status: "pending" }));
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "ep-2", toolName: "exit_plan_mode", title: "退出计划", kind: "other", status: "pending" }));
+  }
+
+  it("approves the LATEST pending exit_plan_mode call as completed", () => {
+    const state: SessionState = initialSessionState();
+    seedPlanCalls(state);
+    const mutated = resolveExitPlanModeBlock(state.blocks, true);
+    expect(mutated).toBe(1);
+    expect(state.blocks.map((b) => (b.kind === "tool" ? b.status : "-"))).toEqual(["pending", "completed"]);
+  });
+
+  it("rejects as failed and returns null when no pending call is recorded", () => {
+    const state: SessionState = initialSessionState();
+    seedPlanCalls(state);
+    expect(resolveExitPlanModeBlock(state.blocks, false)).toBe(1);
+    expect(state.blocks[1]!.kind === "tool" && state.blocks[1]!.status).toBe("failed");
+    // One call per answer: a second answer settles the remaining earlier
+    // pending call; only then do further answers find nothing.
+    expect(resolveExitPlanModeBlock(state.blocks, false)).toBe(0);
+    expect(resolveExitPlanModeBlock(state.blocks, false)).toBeNull();
   });
 });
 

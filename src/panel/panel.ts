@@ -2827,13 +2827,24 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Shared complete user-stop chain: unblock cards, suppress retries/watchdog. */
   private cancelCurrentTurn(): void {
+    const client = this.client;
     this.cancelAllApprovals(vscode.l10n.t("用户取消"));
-    this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
+    const skippedPlanExits = this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
     this.cancelSeen = true;
     this.clearPostRejectionWatchdog();
     const sessionId = this.store.getState().sessionId;
-    if (sessionId) this.client?.cancel(sessionId);
+    if (!sessionId) return;
+    client?.cancel(sessionId);
+    // Stopping a Plan-exit card must leave the session in the mode the panel
+    // shows. `session/set_mode` has no echo notification, so nothing would
+    // notice the CLI drifting out of Plan mode here — the user-reported
+    // symptom was the composer still saying 计划 while the agent had already
+    // gained write access (session 439fd54b). Re-assert the stored mode; a
+    // push of the mode the CLI already holds is a no-op on its side.
+    if (skippedPlanExits > 0 && client) {
+      void this.assertModeForPrompt(client, sessionId);
+    }
   }
 
   private cancelAllApprovals(reason: string): void {
@@ -2902,6 +2913,7 @@ export class ChatPanel implements vscode.Disposable {
         // Resolve FIRST — see the approval-timeout comment above.
         resolve({ approved: false, reason: vscode.l10n.t("超时未确认，已拒绝") });
         this.store.clearPlanExit(id);
+        this.store.resolveExitPlanModeBlock(false);
         this.store.planExitResolutionNote(vscode.l10n.t("计划审批超时，已自动拒绝"));
         this.armPostRejectionWatchdog();
       }, APPROVAL_TIMEOUT_MS);
@@ -2931,6 +2943,12 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingPlanExits.delete(id);
     clearTimeout(pending.timer);
     this.store.clearPlanExit(id);
+    // The CLI never sends a terminal update for the exit_plan_mode call itself
+    // (bundle: handleExitPlanMode returns a functionResponse only) — settle it
+    // here so the card doesn't linger at 等待执行 until the turn-end sweep
+    // mislabels an approved plan's call as failed. Replan answered
+    // success:false too, so it settles as failed like a rejection.
+    this.store.resolveExitPlanModeBlock(approved);
     // The agent is blocked on this response: compute it first and resolve in
     // `finally`, so a note/mode/write failure can never leave the CLI waiting
     // for the 5-minute timeout.
@@ -3032,14 +3050,17 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /** Cancel every pending Plan exit (client died / replaced) without hanging the agent. */
-  private cancelAllPlanExits(reason: string): void {
+  private cancelAllPlanExits(reason: string): number {
+    const cancelled = this.pendingPlanExits.size;
     for (const [id, pending] of this.pendingPlanExits) {
       clearTimeout(pending.timer);
       this.store.clearPlanExit(id);
+      this.store.resolveExitPlanModeBlock(false);
       this.store.planExitResolutionNote(reason);
       pending.resolve({ approved: false, reason });
     }
     this.pendingPlanExits.clear();
+    return cancelled;
   }
 
   // --- User questions flow (_iflow/user/questions, ask_user_question tool) ----
@@ -5689,6 +5710,34 @@ export class ChatPanel implements vscode.Disposable {
   // currentModelId}` and the agent does NOT emit `current_mode_update`, so the
   // response must be written back into the store or the dropdown snaps back.
 
+  /**
+   * Push the panel's authoritative mode to the CLI before a turn starts.
+   *
+   * The CLI keeps the mode only in `Config.approvalMode` and never notifies us
+   * (no `current_mode_update`), so the panel's copy is an optimistic echo that
+   * nothing used to re-sync. Two drift faces were observed in real sessions:
+   * - stopping a pending Plan-exit card left the composer showing 计划 while
+   *   the CLI had left Plan mode, so the agent silently gained write access
+   *   (session 439fd54b: the next "继续" turn's `replace`/`write_file` all
+   *   completed even though `write_file` had just been rejected with
+   *   "Cannot execute write_file in PLAN mode");
+   * - after approving a plan the CLI could stay in Plan mode while the panel
+   *   showed the return mode (same transcript family: every edit rejected).
+   *
+   * Pushing the stored mode right before each prompt makes the CLI follow what
+   * the user sees; pushing the mode it already holds is a no-op CLI-side. A
+   * failure here must never block the prompt — the turn still runs as before.
+   */
+  private async assertModeForPrompt(client: AcpClient, sessionId: string): Promise<void> {
+    const modeId = this.store.getState().modes?.currentModeId;
+    if (!modeId) return;
+    try {
+      await client.setMode(sessionId, modeId);
+    } catch (error) {
+      this.log.warn(`mode re-assert failed (${modeId}): ${errorMessage(error)}`);
+    }
+  }
+
   private async setMode(modeId: string): Promise<void> {
     if (this.historySyncBusy) return;
     const sessionId = this.store.getState().sessionId;
@@ -6652,6 +6701,11 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
+      // The CLI's mode is invisible to us (no `current_mode_update`), so a
+      // drift introduced by a Plan-exit interrupt would otherwise surface as
+      // the agent silently writing while the composer still says 计划 — make
+      // the CLI follow the mode the user sees before every turn.
+      await this.assertModeForPrompt(client, promptSessionId);
       // First turn of this session: show what the request auto-injects
       // (system prompt / memory / context files) BEFORE the user bubble.
       // Fire-and-forget — the card rides the next snapshot; a slow CLI
@@ -6838,6 +6892,9 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
+      // Same turn-start mode sync as sendPrompt: a regenerated turn must obey
+      // the mode the composer shows, not a possibly drifted CLI copy.
+      await this.assertModeForPrompt(client, promptSessionId);
       const prompt: ContentBlock[] = [
         { type: "text", text: toAgentPromptText(lastUserText.trim(), this.store.getState().commands) },
       ];

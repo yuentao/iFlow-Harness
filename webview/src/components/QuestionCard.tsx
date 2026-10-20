@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useId } from "react";
 import { HelpCircle, Check, Circle, CircleDot, Square, CheckSquare, Plus } from "lucide-react";
 import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
 import { useChat } from "../store";
@@ -27,6 +27,8 @@ const LONG_DESCRIPTION_CHARS = 30;
 export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
   const send = useChat((s) => s.send);
   const [answered, setAnswered] = useState(false);
+  const titleId = useId();
+  const descId = useId();
   // Per-question selection state: header → Set<label>, plus free text.
   const [selected, setSelected] = useState<Record<string, Set<string>>>(() => ({}));
   const [custom, setCustom] = useState<Record<string, string>>({});
@@ -91,11 +93,12 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
     <div
       className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
       role="alertdialog"
-      aria-label={t("iFlow 提问")}
+      aria-labelledby={titleId}
+      aria-describedby={descId}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <HelpCircle className="size-3.5 shrink-0 text-primary" />
-        <span className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 需要你的回答")}</span>
+        <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 需要你的回答")}</span>
         <span className="ml-auto">
           <HelpTip label={t("提问说明")} align="right">
             <span className="block space-y-1">
@@ -103,18 +106,19 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 {t("agent 正在等待你的回答；卡片未回答前其他操作会被阻塞。")}
               </span>
               <span className="block">{t("超时未回答会按未回答继续。")}</span>
+              {/* Milestone 14 §4.5: Enter used to submit the WHOLE card from
+                  inside one free-text field, so a two-question ask fired on
+                  the first Enter. The keystroke now closes that one field;
+                  the whole card commits deliberately (button or Ctrl/Cmd+Enter). */}
+              <span className="block">{t("回车只确认该输入；「提交回答」按钮或 Ctrl/Cmd + 回车提交整卡。")}</span>
             </span>
           </HelpTip>
         </span>
       </div>
-      {/* Scroll cap (same discipline as ApprovalCard's max-h-40 title): the
-          card is a bottom-anchored overlay, so uncapped question lists grew
-          it past the viewport — the header got covered and the submit row
-          pushed off-screen (multi-question asks with long descriptions).
-          The cap is viewport-relative minus fixed slack for the editor
-          header + Composer + this card's own chrome, so only the questions
-          scroll while title / countdown / actions stay visible. */}
-      <div className="max-h-[max(140px,calc(100vh-240px))] space-y-3 overflow-y-auto px-3 py-3 text-ui-label">
+      <div
+        id={descId}
+        className="max-h-[max(140px,calc(100vh-240px))] space-y-3 overflow-y-auto px-3 py-3 text-ui-label"
+      >
         {pending.questions.map((q) => {
           const picks = selected[q.header] ?? new Set<string>();
           const isCustomOpen = customOpen[q.header] ?? false;
@@ -191,7 +195,16 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                   value={custom[q.header] ?? ""}
                   onChange={(e) => setCustom((p) => ({ ...p, [q.header]: e.target.value }))}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") submit();
+                    // IME-safe (same discipline as the Composer textarea): a
+                    // composition-confirming Enter must not act at all.
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    // Milestone 14 §4.5: Enter commits THIS answer and folds the
+                    // field back so the card shows the typed text; it does not
+                    // answer every question at once. The whole card commits
+                    // deliberately (提交回答 button, or Ctrl/Cmd + Enter).
+                    if (e.key !== "Enter") return;
+                    if (e.ctrlKey || e.metaKey) submit();
+                    else setCustomOpen((p) => ({ ...p, [q.header]: false }));
                   }}
                 />
               )}
@@ -204,7 +217,7 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
           );
         })}
       </div>
-      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} />
+      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动继续")} />
       <div ref={actionsRef} role="group" aria-label={t("回答操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         <button
           disabled={answered}
@@ -217,11 +230,11 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         </button>
         <button
           disabled={answered}
-          aria-label={t("跳过提问")}
+          aria-label={t("不回答并继续")}
           className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={dismiss}
         >
-          {t("跳过")}
+          {t("不回答并继续")}
         </button>
       </div>
     </div>
