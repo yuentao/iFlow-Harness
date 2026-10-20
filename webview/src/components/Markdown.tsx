@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { useChat } from "../store";
-import { t } from "../i18n";
 import { escapeHtml, renderCodeBlock } from "../highlight";
 
 marked.setOptions({ gfm: true, breaks: true });
@@ -115,28 +114,17 @@ export function copyText(text: string): Promise<void> {
 // Links open in the system browser via the host (VSCode webviews cannot
 // navigate themselves). Intercept clicks here.
 
-// Trailing copy icon appended inline to the markdown's last element — follows
-// the text end like a tiny action icon instead of an overlay/extra row.
-const COPY_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
-const CHECK_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-const REGEN_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
-const REMEMBER_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>';
-
+// UI-audit 4.3: the message-level actions (copy / regenerate / remember) no
+// longer ride the text end — the parent renders ONE hover/focus action bar
+// per message. Markdown keeps only the code-block copy button and the
+// streaming caret appended to the last element.
 export function Markdown({
   text,
-  showCopyIcon = false,
-  onRegenerate,
-  onRemember,
+  streamCaret = false,
 }: {
   text: string;
-  showCopyIcon?: boolean;
-  onRegenerate?: () => void;
-  /** "记住这条": the parent opens the quick-add dialog with this block text. */
-  onRemember?: (text: string) => void;
+  /** Streaming tail: append a thin caret at the text end ("still writing"). */
+  streamCaret?: boolean;
 }) {
   const send = useChat((s) => s.send);
   const ref = useRef<HTMLDivElement>(null);
@@ -271,40 +259,15 @@ export function Markdown({
       wrap.appendChild(table);
     });
 
-    if (showCopyIcon) {
+    if (streamCaret) {
       const last = root.lastElementChild;
-      if (last) {
-        if (onRememberRef.current && !last.querySelector(":scope > button[data-role='remember-msg']")) {
-          const remember = document.createElement("button");
-          remember.type = "button";
-          remember.className = "copy-msg-btn";
-          remember.dataset.role = "remember-msg";
-          remember.title = t("记住这条");
-          remember.setAttribute("aria-label", t("记住这条"));
-          remember.innerHTML = REMEMBER_ICON_SVG;
-          last.appendChild(remember);
-        }
-        if (onRegenerateRef.current && !last.querySelector(":scope > button[data-role='regen-msg']")) {
-          const regen = document.createElement("button");
-          regen.type = "button";
-          regen.className = "copy-msg-btn";
-          regen.dataset.role = "regen-msg";
-          regen.title = "重新生成";
-          regen.setAttribute("aria-label", "重新生成");
-          regen.innerHTML = REGEN_ICON_SVG;
-          last.appendChild(regen);
-        }
-        if (!last.querySelector(":scope > button[data-role='copy-msg']")) {
-          const icon = document.createElement("button");
-          icon.type = "button";
-          icon.className = "copy-msg-btn";
-          icon.dataset.role = "copy-msg";
-          icon.title = "复制";
-          icon.setAttribute("aria-label", "复制全文");
-          icon.innerHTML = COPY_ICON_SVG;
-          last.appendChild(icon);
-        }
+      if (last && !last.querySelector(":scope > .stream-caret")) {
+        const caret = document.createElement("span");
+        caret.className = "stream-caret";
+        last.appendChild(caret);
       }
+    } else {
+      root.querySelectorAll(".stream-caret").forEach((el) => el.remove());
     }
   };
 
@@ -370,46 +333,11 @@ export function Markdown({
   // copy button (past and future), instead of a per-button listener plus a
   // fresh querySelectorAll pass on every html change during streaming. The
   // delegated handler reads the sibling <pre> at click time.
-  const textRef = useRef(text);
-  textRef.current = text;
-  const onRegenerateRef = useRef(onRegenerate);
-  onRegenerateRef.current = onRegenerate;
-  const onRememberRef = useRef(onRemember);
-  onRememberRef.current = onRemember;
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      const rememberBtn = target.closest<HTMLElement>("button[data-role='remember-msg']");
-      if (rememberBtn) {
-        onRememberRef.current?.(textRef.current);
-        return;
-      }
-      const regenBtn = target.closest<HTMLElement>("button[data-role='regen-msg']");
-      if (regenBtn) {
-        // Trailing regenerate icon (latest turn only): re-runs the preceding
-        // user prompt via the host callback.
-        onRegenerateRef.current?.();
-        return;
-      }
-      const msgBtn = target.closest<HTMLElement>("button[data-role='copy-msg']");
-      if (msgBtn) {
-        // Trailing message icon: copies the whole block text (same payload as
-        // the old button); swaps to a check icon briefly for feedback.
-        void copyText(textRef.current).then(
-          () => {
-            msgBtn.innerHTML = CHECK_ICON_SVG;
-            msgBtn.classList.add("copied");
-            window.setTimeout(() => {
-              msgBtn.innerHTML = COPY_ICON_SVG;
-              msgBtn.classList.remove("copied");
-            }, 1500);
-          },
-          () => undefined,
-        );
-        return;
-      }
       const btn = target.closest<HTMLElement>("button[data-role='copy-code']");
       if (!btn) return;
       const code = btn.parentElement?.querySelector("pre code")?.textContent ?? "";
@@ -433,7 +361,7 @@ export function Markdown({
   }, []);
 
   // MutationObserver guard: React rewrites dangerouslySetInnerHTML whenever
-  // the html string differs, wiping the injected icons; the per-render
+  // the html string differs, wiping the injected caret; the per-render
   // ensure misses wipes that land between renders (React.memo(BlockView)
   // skips re-renders, so no effect runs to re-inject). Observe the container
   // and re-inject on any childList wipe — the ensure is idempotent so this
@@ -442,17 +370,11 @@ export function Markdown({
     const root = ref.current;
     if (!root) return;
     const observer = new MutationObserver(() => {
-      if (
-        showCopyIcon &&
-        (!root.querySelector("button[data-role='copy-msg']") ||
-          (onRememberRef.current && !root.querySelector("button[data-role='remember-msg']")))
-      ) {
-        ensureInjected();
-      }
+      if (streamCaret && !root.querySelector(".stream-caret")) ensureInjected();
     });
     observer.observe(root, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [showCopyIcon]);
+  }, [streamCaret]);
 
   return (
     <div

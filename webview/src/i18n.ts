@@ -20,6 +20,7 @@ function isEnglish(): boolean {
 
 const en: Record<string, string> = {
   "本轮变更": "Changes this turn",
+  "变更说明": "Changes-this-turn help",
   "1 个文件已更改": "1 file changed",
   "{0} 个文件已更改": "{0} files changed",
   "{0} 次修改": "{0} edits",
@@ -188,6 +189,16 @@ const en: Record<string, string> = {
   "会话操作": "Session actions",
   "搜索会话": "Search sessions",
   "昨天": "Yesterday",
+  // UI-audit 4.3: activity group header, action bar, quiet empty state
+  "执行了 {0} 个工具": "Executed {0} tool(s)",
+  "修改 {0} 个文件": "Modified {0} file(s)",
+  "{0} 个失败": "{0} failed",
+  "工具活动": "Tool activity",
+  "思考了 {0}s": "Thought for {0}s",
+  "回滚本轮": "Roll back this turn",
+  "回滚本轮（文件与对话）": "Roll back this turn (files and conversation)",
+  "有什么可以帮你?": "What can I help with?",
+  "输入 / 查看命令 · @  引用文件": "Type / for commands, @ to reference files",
   // composer
   "发送": "Send",
   "停止": "Stop",

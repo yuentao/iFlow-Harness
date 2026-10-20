@@ -889,8 +889,7 @@ textarea:focus-visible {
   min-width: 0;
 }
 
-/* Streaming capture: a soft shimmer running across the last text block's
-   bottom edge reads as "still writing" without a blocking spinner. */
+/* Restore skeleton (P2-16): travelling glow on placeholder bars. */
 @keyframes shimmer {
   0% {
     background-position: -200% 0;
@@ -900,21 +899,37 @@ textarea:focus-visible {
   }
 }
 
-.stream-shimmer {
-  /* Negative margin + matching padding: the glow band wraps the text with
-     breathing room and rounded corners WITHOUT shifting the text layout
-     (net box size is unchanged). */
-  margin: calc(var(--space-xs) * -1) calc(var(--space-sm) * -1);
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: var(--radius-overlay);
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    color-mix(in oklab, var(--primary) 22%, transparent) 50%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.6s linear infinite;
+/* Streaming signal (UI-audit 4.3 P1): the full-width shimmer band painted a
+   stripe behind the reading column and competed with the status pill — the
+   "still writing" signal is now a thin caret appended to the text end
+   (injected by Markdown as an empty `.stream-caret` span, drawn entirely by
+   CSS below: a 2px rounded bar sized in em so it follows the body font and
+   never depends on a block glyph's font metrics). */
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.15em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background-color: var(--color-primary);
+  animation: caret-breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes caret-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* UI-audit 4.3 P1: follow-on assistant blocks in the same turn skip the
+   brand avatar and indent to the body column (avatar 22px + row gap). */
+.assistant-continuation {
+  padding-left: 30px;
 }
 
 /* Restore skeleton (P2-16): same travelling glow as .stream-shimmer but
@@ -932,8 +947,8 @@ textarea:focus-visible {
 }
 
 /* --- empty state (first-run transcript) ------------------------------------ */
-/* A centered brand panel with a soft aurora glow; reads as an invitation
-   rather than an error message. */
+/* UI-audit 4.3 P1: quiet empty state — no bordered glowing panel, no floating
+   logo, no card shadows. Logo 32px + one sentence + example lines + hint. */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -942,39 +957,16 @@ textarea:focus-visible {
   gap: var(--space-md);
   margin: 0 auto;
   max-width: 340px;
-  padding: 40px var(--space-xl);
+  padding: var(--space-xl);
   text-align: center;
-  border-radius: var(--radius-overlay);
-  border: 1px solid var(--border);
-  background: color-mix(in oklab, var(--card) 60%, transparent);
-  box-shadow:
-    var(--shadow-card),
-    0 0 48px -10px color-mix(in oklab, var(--primary) 28%, transparent);
 }
 
 .empty-state-logo {
-  width: 44px;
-  height: 44px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-overlay);
-  font-size: var(--ui-font-display);
-  filter: drop-shadow(0 6px 20px color-mix(in oklab, var(--primary) 30%, transparent));
-}
-
-@keyframes float-soft {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-3px);
-  }
-}
-
-.empty-state-logo {
-  animation: float-soft 3.6s var(--ease-out-expo) infinite;
 }
 
 /* --- monospace text panes (tool output, subagent log, code context) ------- */
@@ -1360,6 +1352,18 @@ pre {
      forcing a horizontal scrollbar on the transcript. */
   padding: 14px 2px;
   margin: -14px -2px;
+}
+
+/* content-visibility:auto implies paint containment, i.e. every .cv-block is
+   its own stacking context — a descendant z-index cannot lift a row above a
+   LATER sibling block. The user bubble's hover action bar hangs ~12px below
+   the bubble, which lands inside the next wrapper's 14px top padding (the
+   +14/-14 fold puts that wrapper's box flush against the bubble bottom): the
+   bar is visible but the next block would swallow its clicks. Raise the
+   hovered block itself so the revealed toolbar stays interactive. */
+.cv-block:hover {
+  position: relative;
+  z-index: 1;
 }
 
 @media (prefers-reduced-motion: reduce) {

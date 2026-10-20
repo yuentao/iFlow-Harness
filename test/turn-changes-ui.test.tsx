@@ -52,6 +52,23 @@ it("renders a changed-files summary and opens a file in the editor", () => {
   act(() => undo[1]!.click());
   expect(send).toHaveBeenLastCalledWith({ type: "revertTurnFile", sessionId: "s", userBlockId: "u", key: "src/second.ts" });
 });
+it("rolls back the whole turn from the footer", () => {
+  act(() => useChat.setState({ state: {
+    ...useChat.getState().state!,
+    checkpoints: [{ userBlockId: "u", turnIndex: 0, sha: "abc", createdAt: 1, partial: false, label: "go" }],
+  } }));
+  reply({ records: [record("tool", "src/file.ts", 3, 1)] });
+  const rollbackBtn = container.querySelector<HTMLButtonElement>('button[aria-label="回滚本轮"]');
+  expect(rollbackBtn).toBeTruthy();
+  act(() => rollbackBtn!.click());
+  const dialog = document.body.querySelector('[role="alertdialog"]');
+  expect(dialog).toBeTruthy();
+  const both = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === "全部");
+  expect(both).toBeTruthy();
+  act(() => both!.click());
+  expect(send).toHaveBeenLastCalledWith({ type: "restoreCheckpoint", userBlockId: "u", mode: "both" });
+  expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+});
 it("hides undo when unsafe and on historical turns", () => {
   reply({ records: [record("safe", "safe.ts", 1, 0), record("created", "created.ts", 2, 0, 1, false)] });
   expect(container.querySelectorAll('button[aria-label="撤销此文件的本轮修改"]')).toHaveLength(1);
@@ -65,6 +82,9 @@ it("translates the changed-files summary", () => {
   setLocale("en");
   reply({ records: [record("tool", "src/file.ts", 3, 1)] });
   expect(container.textContent).toContain("1 file changed");
+  const help = container.querySelector<HTMLButtonElement>('button[aria-label="Changes-this-turn help"]');
+  expect(help).toBeTruthy();
+  act(() => help!.click());
   expect(container.textContent).toContain("Click a file to open it in the editor.");
   expect(container.querySelector("ul button")?.getAttribute("title")).toContain("Open in editor");
 });

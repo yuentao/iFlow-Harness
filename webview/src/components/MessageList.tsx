@@ -10,12 +10,14 @@ import {
 } from "react";
 import {
   Brain,
+  Bookmark,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   CircleDot,
   Columns2,
+  Copy,
   Eye,
   FilePen,
   FileText,
@@ -30,7 +32,9 @@ import {
   Pencil,
   Play,
   Plug,
+  RefreshCw,
   Search,
+  Sparkles,
   SquareTerminal,
   Trash2,
   Undo2,
@@ -737,6 +741,155 @@ function ThoughtCard({
   );
 }
 
+/**
+ * UI-audit 4.3/4.4 (P0) — 工具活动组. Consecutive SETTLED tool/thought/subagent
+ * blocks collapse into one summary line ("执行了 6 个工具 · 修改 2 个文件 ·
+ * 1 个失败"), cutting ~10 tool-call cards worth of height 50–70%. Expanding
+ * shows compact rows (14px icon + verb + target + status dot); clicking a row
+ * swaps in the EXISTING full card one level deeper — every audit affordance
+ * (params / output / diff / actions) survives, nothing is deleted. Failed rows
+ * come pre-expanded: failures must be louder than the successes they hide
+ * among. In-progress blocks never join a group (see `groupable`), so the busy
+ * signal and pending-approval cards stay visible as full cards.
+ */
+function groupable(block: Block): boolean {
+  if (block.kind === "thought") return true;
+  if (block.kind === "tool" || block.kind === "subagent")
+    return block.status === "completed" || block.status === "failed";
+  return false;
+}
+
+/** UI-audit 4.3 P0: split the rendered range into activity segments. Consecutive
+ * groupable blocks merge into one ActivityGroup; the streaming tail (liveIndex)
+ * never joins a group, and singleton segments fall back to plain BlockView. */
+function segmentBlocks(blocks: Block[], from: number, to: number, liveIndex: number) {
+  const out: { from: number; to: number; grouped: boolean }[] = [];
+  let i = from;
+  while (i < to) {
+    if (i !== liveIndex && groupable(blocks[i])) {
+      const j0 = i;
+      let j = i + 1;
+      while (j < to && j !== liveIndex && groupable(blocks[j])) j++;
+      out.push({ from: j0, to: j, grouped: j - j0 >= 2 });
+      i = j;
+    } else {
+      out.push({ from: i, to: i + 1, grouped: false });
+      i++;
+    }
+  }
+  return out;
+}
+
+function ActivityGroup({ blocks, turnActive }: {
+  blocks: Block[];
+  turnActive: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  // User override: once they toggle the group, stop auto-opening it.
+  const touched = useRef(false);
+  const toolCount = blocks.filter((b) => b.kind === "tool" || b.kind === "subagent").length;
+  const fileCount = blocks.filter((b) => b.kind === "tool" && b.diff !== null).length;
+  const failCount = blocks.filter((b) => (b.kind === "tool" || b.kind === "subagent") && b.status === "failed").length;
+  useEffect(() => {
+    if (failCount > 0 && !touched.current) setOpen(true);
+  }, [failCount]);
+  const summary = [
+    t("执行了 {0} 个工具", String(toolCount)),
+    ...(fileCount > 0 ? [t("修改 {0} 个文件", String(fileCount))] : []),
+    ...(failCount > 0 ? [t("{0} 个失败", String(failCount))] : []),
+  ].join(" · ");
+  return (
+    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border bg-card shadow-card">
+      <button
+        onClick={() => {
+          touched.current = true;
+          setOpen((v) => !v);
+        }}
+        aria-expanded={open}
+        title={t("工具活动")}
+        className="press w-full flex items-center gap-2 px-3 py-1.5 text-left rounded-lg transition-colors hover:bg-surface"
+      >
+        <Caret open={open} className="size-3" />
+        <span className="min-w-0 truncate text-ui-label text-muted-foreground">{summary}</span>
+        {failCount > 0 && (
+          <Chip tone="danger" className="ml-auto shrink-0">
+            <X className="size-2.5" /> {t("失败")}
+          </Chip>
+        )}
+      </button>
+      <Collapse open={open}>
+        <div className="border-t border-border/60 px-3 py-2 space-y-2">
+          {blocks.map((b, i) => <ActivityRow key={b.id ?? `i-${i}`} block={b} turnActive={turnActive} />)}
+        </div>
+      </Collapse>
+    </div>
+  );
+}
+
+function ActivityRow({ block, turnActive }: { block: Block; turnActive: boolean }) {
+  const failed = (block.kind === "tool" || block.kind === "subagent") && block.status === "failed";
+  const [expanded, setExpanded] = useState(false);
+  const st =
+    block.kind === "tool" || block.kind === "subagent" ? block.status : "";
+  // 失败行默认展开 (audit 4.4): the full card with the error is the answer.
+  useEffect(() => {
+    if (failed) setExpanded(true);
+  }, [failed]);
+  let label = "";
+  let target = "";
+  const Icon: typeof Eye =
+    block.kind === "tool" ? toolPresentation(block).icon
+    : block.kind === "subagent" ? Bot
+    : Brain;
+  if (block.kind === "tool") {
+    label = toolPresentation(block).label;
+    target = block.locations[0]?.path ?? block.input ?? "";
+  } else if (block.kind === "subagent") {
+    label = localizeStepTitle(block.title);
+    const nested = block.entries.filter((b) => b.kind === "tool");
+    const done = nested.filter((b) => b.status === "completed" || b.status === "failed").length;
+    target = nested.length > 0 ? `${done}/${nested.length}` : "";
+  } else {
+    // Thought: "思考了 12s" when the host carried lifecycle timestamps.
+    label =
+      block.startedAt !== undefined && block.completedAt !== undefined
+        ? t("思考了 {0}s", String(Math.max(0, Math.round((block.completedAt - block.startedAt) / 1000))))
+        : t("思考过程");
+  }
+  return (
+    <>
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 py-1 text-left rounded-md transition-colors hover:bg-surface"
+      >
+        <Caret open={expanded} className="size-2.5" />
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 truncate text-ui-label text-foreground">{label}</span>
+        {target && <span className="ml-1.5 max-w-[45%] truncate font-mono text-ui-caption text-muted-foreground">{target}</span>}
+        {st === "completed" && <CheckCircle2 className="ml-auto shrink-0 size-3 text-success" />}
+        {st === "failed" && <XCircle className="ml-auto shrink-0 size-3 text-destructive" />}
+      </button>
+      <Collapse open={expanded}>
+        {/* Lazy mount (pitfall #27 discipline): a folded row costs zero DOM
+            beyond the compact line; the full card appears only on open. */}
+        {expanded && (
+          <BlockView
+            block={block}
+            isLatest={false}
+            turnActive={turnActive}
+            canCopy={false}
+            canRegenerate={false}
+            canDelete={false}
+            checkpoint={undefined}
+            showAvatar={true}
+            onRegenerate={() => {}}
+          />
+        )}
+      </Collapse>
+    </>
+  );
+}
+
 function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   const send = useChat((s) => s.send);
   const total = block.entries.length;
@@ -798,16 +951,12 @@ function UserMessage({
   block,
   canDelete,
   checkpoint,
-  isLastUser,
   onEditingChange,
 }: {
   block: Extract<Block, { kind: "user" }>;
   canDelete: boolean;
   /** This turn's workspace checkpoint (M3 P0-1); absent → no rollback entry. */
   checkpoint?: CheckpointUi;
-  /** P1-5: the newest user bubble shows its action icons at full opacity —
-   * rollback is a headline capability and must not hide behind hover. */
-  isLastUser: boolean;
   /** Reports inline-editor open/close so the parent can hide the floating
    * "jump to latest" pill (z-20, bottom-right) while editing — a near-bottom
    * bubble's editor action row would otherwise sit under the pill. Stable
@@ -815,13 +964,13 @@ function UserMessage({
   onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   const send = useChat((s) => s.send);
-  // P1-5: action icons ride at 40% instead of vanishing (opacity-0 made the
-  // rollback/edit/delete affordances undiscoverable); hover lifts to 100, and
-  // the newest bubble is always fully visible.
-  const actionBtnClass = (danger = false) =>
-    `press shrink-0 rounded-md border border-border bg-panel/90 p-1 text-muted-foreground shadow-card backdrop-blur-md transition-all hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
-      isLastUser ? "opacity-100" : "opacity-40"
-    } group-hover:opacity-100${danger ? " hover:bg-destructive/10 hover:text-destructive" : ""}`;
+  // UI-audit 4.3 P1: ONE hover/focus action bar per message (copy / edit /
+  // delete / rollback) inside the bubble, hidden until hover/focus — the old
+  // floating icon row (40% visible forever) competed with the reading flow.
+  const barBtnClass = (danger = false) =>
+    `press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground${
+      danger ? " hover:bg-destructive/10 hover:text-destructive" : ""
+    }`;
   // P1-8: rollback moved from an inline armed pill-row to the shared
   // ConfirmDialog (three-action variant) — delete already uses the dialog,
   // and one dangerous-action language across the product beats three.
@@ -861,7 +1010,7 @@ function UserMessage({
     send({ type: "editAndResend", blockId: block.id, text });
   };
   return (
-    <div className="stream-in flex justify-end">
+    <div className="stream-in relative flex justify-end hover:z-10">
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
@@ -932,38 +1081,51 @@ function UserMessage({
         )}
         {/* subtle inner highlight so the bubble reads as a solid plane */}
         <div className="pointer-events-none absolute inset-0 rounded-2xl rounded-br-lg shadow-inner" />
+        {/* UI-audit 4.3 P1 / hover bar: absolutely positioned so a hidden bar
+            never reserves layout space (a 26px dead strip at every bubble
+            bottom). translate-y-3 lands it exactly over the bubble's 8px
+            bottom padding + the 12px transcript gap — no overlap with the next
+            block, and revealing it cannot grow the content (the scroll anchor
+            ResizeObserver would otherwise jump to bottom). */}
         {(canDelete || showRollback) && (
-          <div className="absolute -top-3 right-1 z-10 flex items-center gap-1">
-            {showRollback && (
-              <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                <button
-                  className={actionBtnClass()}
-                  title={t("回滚到此轮之前")}
-                  onClick={() => setConfirmRollback(true)}
-                >
-                  <History className="size-3" />
-                </button>
-              </div>
-            )}
+          <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-3 items-center gap-0.5 rounded-md border border-border bg-card px-1 opacity-0 shadow-card transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+            <button
+              className={barBtnClass()}
+              title={t("复制")}
+              aria-label={t("复制")}
+              onClick={() => void copyText(block.text)}
+            >
+              <Copy className="size-3" />
+            </button>
             {canDelete && block.id && (
-              <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                <button
-                  className={actionBtnClass()}
-                  title={t("编辑并重发该消息")}
-                  onClick={() => (editing ? cancelEdit() : startEdit())}
-                >
-                  <Pencil className="size-3" />
-                </button>
-              </div>
+              <button
+                className={barBtnClass()}
+                title={t("编辑并重发该消息")}
+                aria-label={t("编辑并重发该消息")}
+                onClick={() => (editing ? cancelEdit() : startEdit())}
+              >
+                <Pencil className="size-3" />
+              </button>
             )}
             {canDelete && block.id && (
               <button
                 data-variant="danger"
-                className={actionBtnClass(true)}
+                className={barBtnClass(true)}
                 title={t("删除该消息及其后所有内容")}
+                aria-label={t("删除该消息及其后所有内容")}
                 onClick={() => setConfirmDelete(true)}
               >
                 <Trash2 className="size-3" />
+              </button>
+            )}
+            {showRollback && (
+              <button
+                className={barBtnClass()}
+                title={t("回滚到此轮之前")}
+                aria-label={t("回滚到此轮之前")}
+                onClick={() => setConfirmRollback(true)}
+              >
+                <History className="size-3" />
               </button>
             )}
           </div>
@@ -1207,7 +1369,7 @@ const BlockView = memo(function BlockView({
   canRegenerate,
   canDelete,
   checkpoint,
-  isLastUser,
+  showAvatar,
   onRegenerate,
   onRemember,
   onEditingChange,
@@ -1216,7 +1378,7 @@ const BlockView = memo(function BlockView({
   isLatest: boolean;
   turnActive: boolean;
   /** False while replaying (history restore) — the replay placeholder is a
-   * text block and must not grow copy/regenerate icons. */
+   * text block and must not grow copy/regenerate actions. */
   canCopy: boolean;
   canRegenerate: boolean;
   /** Deleting is only offered on a settled transcript (not replaying /
@@ -1224,8 +1386,8 @@ const BlockView = memo(function BlockView({
   canDelete: boolean;
   /** This turn's checkpoint (user blocks only, M3 P0-1). */
   checkpoint?: CheckpointUi;
-  /** P1-5: newest user bubble keeps its action icons visible. */
-  isLastUser: boolean;
+  /** UI-audit 4.3 P1: brand avatar only on speaker switch / turn start. */
+  showAvatar: boolean;
   onRegenerate: () => void;
   /** M4 P1-9: forwarded to UserMessage's inline editor (see there). */
   onEditingChange?: (blockId: string, editing: boolean) => void;
@@ -1239,7 +1401,6 @@ const BlockView = memo(function BlockView({
           block={block}
           canDelete={canDelete}
           checkpoint={checkpoint}
-          isLastUser={isLastUser}
           onEditingChange={onEditingChange}
         />
       );
@@ -1260,29 +1421,54 @@ const BlockView = memo(function BlockView({
       }
       return (
         <div className="stream-in group">
-          <div className="assistant-row">
-            <span className="assistant-avatar">
-              {/* Real brand mark, consistent with the header logo */}
-              <img src={logo} alt="" className="size-3.5" />
-            </span>
-          {/* Shimmer rides the BODY column, not the whole row: on the row it
-              painted a full-width rectangular band behind the avatar (no
-              radius/padding) and read as a disjointed stripe. */}
-          <div
-            className={`assistant-body text-ui-body leading-relaxed text-foreground/90 ${
-              isLatest && turnActive ? "stream-shimmer" : ""
-            }`}
-          >
-            {/* Trailing inline action icons follow the text end: regenerate
-                (latest turn, idle) rides beside copy — no overlay on the
-                message, no extra row. */}
-            <Markdown
-              text={block.text}
-              showCopyIcon={canCopy}
-              onRegenerate={isLatest && canCopy && canRegenerate ? onRegenerate : undefined}
-              onRemember={onRemember}
-            />
-          </div>
+          <div className={`assistant-row ${showAvatar ? "" : "assistant-continuation"}`}>
+            {showAvatar && (
+              <span className="assistant-avatar">
+                {/* Real brand mark, consistent with the header logo */}
+                <img src={logo} alt="" className="size-3.5" />
+              </span>
+            )}
+            <div className="assistant-body relative text-ui-body leading-relaxed text-foreground/90">
+              <Markdown text={block.text} streamCaret={isLatest && turnActive} />
+              {/* UI-audit 4.3 P1: ONE hover/focus action bar per message (copy /
+                  regenerate / remember) — no icons welded to the text end. It
+                  floats (absolute) so a hidden bar reserves no height. The
+                  18px drop keeps its top edge inside the last line's leading
+                  (22.75px line box on 14px text) instead of clipping
+                  descenders, and reaches only 4px into the next block's box. */}
+              {canCopy && (
+                <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-[18px] items-center gap-0.5 rounded-md bg-card px-1 opacity-0 shadow-card outline-1 outline-[color:var(--border)] transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                  <button
+                    className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                    title={t("复制")}
+                    aria-label={t("复制")}
+                    onClick={() => void copyText(block.text)}
+                  >
+                    <Copy className="size-3" />
+                  </button>
+                  {isLatest && canCopy && canRegenerate && (
+                    <button
+                      className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                      title={t("重新生成")}
+                      aria-label={t("重新生成")}
+                      onClick={onRegenerate}
+                    >
+                      <RefreshCw className="size-3" />
+                    </button>
+                  )}
+                  {onRemember && (
+                    <button
+                      className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                      title={t("记住这条")}
+                      aria-label={t("记住这条")}
+                      onClick={() => onRemember?.(block.text)}
+                    >
+                      <Bookmark className="size-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       );
@@ -1392,17 +1578,6 @@ function MessageListInner({ state }: { state: SessionState }) {
   }, [state.checkpoints]);
   const total = visibleBlocks.length;
   const start = Math.min(windowStart, total);
-  // P1-5: index (within the RENDERED visibleBlocks, which focusMode may have
-  // filtered — user blocks always survive that filter) of the newest user
-  // bubble whose action icons stay visible. total-keyed: user blocks are
-  // append-only, same invariant as lastUserText.
-  const lastUserIndex = useMemo(() => {
-    for (let i = total - 1; i >= 0; i--) {
-      if (visibleBlocks[i]?.kind === "user") return i;
-    }
-    return -1;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- see lastUserText
-  }, [total]);
   const sentinelRef = useRef<HTMLDivElement>(null);
   // Scroll compensation for expansion: expandOlder() records the
   // distance-from-bottom (scrollHeight - scrollTop); the layout effect
@@ -1619,6 +1794,14 @@ function MessageListInner({ state }: { state: SessionState }) {
   const turnActive =
     state.status === "streaming" && !state.replaying && !state.initializing;
 
+  // UI-audit 4.3 P0: render segments. Consecutive settled tool/thought/subagent
+  // blocks collapse into one ActivityGroup line; the streaming tail block never
+  // joins a group so the live card (and pending-approval card) stays full-size.
+  const segments = useMemo(
+    () => segmentBlocks(visibleBlocks, start, total, turnActive ? total - 1 : -1),
+    [visibleBlocks, start, total, turnActive],
+  );
+
   // Last user prompt + a regenerate handler: the webview sends a host-backed
   // `regenerate` message; the host re-runs the preceding user prompt (it owns
   // transcript state, so it extracts the text rather than the webview).
@@ -1691,29 +1874,27 @@ function MessageListInner({ state }: { state: SessionState }) {
             <div className="empty-state stream-in">
               <div className="empty-state-logo">
                 {/* Real brand mark, consistent with the header logo */}
-                <img src={logo} alt="" className="size-6" />
+                <img src={logo} alt="" className="size-8" />
               </div>
+              {/* UI-audit 4.3 P1: quiet empty state — one sentence, three plain
+                  example lines, one bottom hint; no glow panel, no float. */}
               <div className="text-ui-title font-semibold text-foreground">
-                {t("准备好了，向 iFlow 提问吧")}
+                {t("有什么可以帮你?")}
               </div>
-              <p className="max-w-[300px] text-ui-caption leading-relaxed text-muted-foreground">
-                {t("下发任务、粘贴代码上下文，或直接描述你想实现的功能")}
-              </p>
-              {/* P0-4: example prompts lower the first-message barrier — a
-                  click fills the composer (never clobbers a typed draft). */}
-              <div className="mt-3 flex max-w-[300px] flex-col items-stretch gap-1.5">
+              <div className="mt-3 flex flex-col items-stretch gap-1.5">
                 {EXAMPLE_PROMPTS.map((ex) => (
                   <button
                     key={ex}
-                    className="card-lift press rounded-lg border border-border bg-card/80 px-3 py-1.5 text-left text-ui-caption text-foreground/90 shadow-card transition-colors hover:border-primary/40 hover:bg-surface-2"
+                    className="press inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-colors hover:bg-surface hover:text-foreground"
                     onClick={() => useChat.getState().requestDraft(t(ex))}
                   >
-                    {t(ex)}
+                    <Sparkles className="size-3 shrink-0 text-primary/70" />
+                    <span className="truncate">{t(ex)}</span>
                   </button>
                 ))}
               </div>
               <p className="mt-3 text-ui-caption leading-relaxed text-muted-foreground/80">
-                {t("/ 命令 · @ 文件/文件夹 · @problems · @git · @terminal · @url:")}
+                {t("输入 / 查看命令 · @  引用文件")}
               </p>
             </div>
           )}
@@ -1731,33 +1912,43 @@ function MessageListInner({ state }: { state: SessionState }) {
               </button>
             </div>
           )}
-          {visibleBlocks.slice(start).map((block, idx) => {
-            const i = start + idx; // absolute index: stable across expansions
-            const turnId = turnUserByIndex[i];
-            const atTurnEnd = i === total - 1 || visibleBlocks[i + 1]?.kind === "user";
+          {segments.map((seg) => {
+            const end = seg.to - 1;
+            const turnId = turnUserByIndex[end];
+            const atTurnEnd = end === total - 1 || visibleBlocks[end + 1]?.kind === "user";
+            const first = visibleBlocks[seg.from];
+            const prev = seg.from > 0 ? visibleBlocks[seg.from - 1] : undefined;
+            const showAvatar =
+              prev === undefined ||
+              prev.kind !== "text" ||
+              (prev.kind === "text" && prev.system === true);
             return (
-              <div key={block.id ?? `idx-${i}`} className="cv-block">
-                <BlockView
-        block={block}
-        isLatest={i === total - 1}
-        turnActive={turnActive}
-        canCopy={!state.replaying}
-        canRegenerate={canRegenerate && i === total - 1}
-        checkpoint={block.kind === "user" && block.id ? checkpointByBlockId.get(block.id) : undefined}
-        isLastUser={i === lastUserIndex}
-        canDelete={
-          !state.replaying &&
-          !state.initializing &&
-          state.status !== "connecting" &&
-          state.status !== "streaming" &&
-          !state.pendingApproval &&
-          !state.pendingQuestions &&
-          !state.pendingPlanExit
-        }
-        onRegenerate={onRegenerate}
-        onRemember={onRemember}
-        onEditingChange={handleEditingChange}
-      />
+              <div key={first.id ?? `idx-${seg.from}`} className="cv-block">
+                {seg.grouped ? (
+                  <ActivityGroup blocks={visibleBlocks.slice(seg.from, seg.to)} turnActive={turnActive} />
+                ) : (
+                  <BlockView
+                    block={first}
+                    isLatest={end === total - 1}
+                    turnActive={turnActive}
+                    canCopy={!state.replaying}
+                    canRegenerate={canRegenerate && end === total - 1}
+                    checkpoint={first.kind === "user" && first.id ? checkpointByBlockId.get(first.id) : undefined}
+                    showAvatar={showAvatar}
+                    canDelete={
+                      !state.replaying &&
+                      !state.initializing &&
+                      state.status !== "connecting" &&
+                      state.status !== "streaming" &&
+                      !state.pendingApproval &&
+                      !state.pendingQuestions &&
+                      !state.pendingPlanExit
+                    }
+                    onRegenerate={onRegenerate}
+                    onRemember={onRemember}
+                    onEditingChange={handleEditingChange}
+                  />
+                )}
                 {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state, turnId) && (
                   <TurnChanges key={turnId} sessionId={state.sessionId!} userBlockId={turnId} />
                 )}

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { FileCode2, FilePen, Undo2 } from "lucide-react";
+import { FileCode2, FilePen, History, Undo2 } from "lucide-react";
 import type { HostToWebview, TurnChangeUi } from "../../../shared/messages";
 import { canReviewTurn, isLatestTurn } from "../../../shared/turn-changes";
+import { ConfirmDialog, HelpTip } from "./ui";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
@@ -34,6 +35,7 @@ export function TurnChanges({ sessionId, userBlockId }: {
   const [records, setRecords] = useState<TurnChangeUi[] | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const [confirmRollback, setConfirmRollback] = useState(false);
   const state = useChat((s) => s.state);
   const valid = state?.sessionId === sessionId && canReviewTurn(state, userBlockId);
   useEffect(() => {
@@ -65,8 +67,18 @@ export function TurnChanges({ sessionId, userBlockId }: {
   const additions = records?.reduce((sum, item) => sum + item.additions, 0) ?? 0;
   const deletions = records?.reduce((sum, item) => sum + item.deletions, 0) ?? 0;
   const latest = isLatestTurn(state.blocks, userBlockId);
+  // UI-audit 4.3 P1: turn rollback lives in this footer; the user bubble keeps
+  // 复制/编辑/删除 only. Same three-action ConfirmDialog and restoreCheckpoint
+  // message as the per-turn user block.
+  const checkpoint = state.checkpoints?.find((c) => c.userBlockId === userBlockId);
+  const canRollbackFiles = !!checkpoint && !checkpoint.partial;
+  const rollback = (mode: "files" | "conversation" | "both") => {
+    setConfirmRollback(false);
+    useChat.getState().send({ type: "restoreCheckpoint", userBlockId, mode });
+  };
   return (
-    <section className="mt-2 overflow-hidden rounded-lg border border-border bg-card/70 shadow-card" aria-label={t("本轮变更")}>
+    <>
+    <section className="mt-2 rounded-lg border border-border bg-card/70 shadow-card" aria-label={t("本轮变更")}>
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <FilePen className="size-3.5 shrink-0 text-info" />
         <span className="text-ui-caption font-semibold text-foreground">
@@ -76,6 +88,7 @@ export function TurnChanges({ sessionId, userBlockId }: {
           <span className="text-diff-add-fg">+{additions}</span>
           <span className="text-diff-del-fg">−{deletions}</span>
         </span>}
+        {!!records?.length && <HelpTip label={t("变更说明")} className="ml-auto">{t("仅列出已记录的工具差异文件，不保证覆盖全部磁盘修改或代表当前净变更。点击文件在编辑器中打开。")}</HelpTip>}
       </div>
       <div className="space-y-2 p-3">
         {(unavailable || !records?.length) && <div role="status" className="text-ui-micro text-muted-foreground">
@@ -112,10 +125,48 @@ export function TurnChanges({ sessionId, userBlockId }: {
             </button>}
           </li>)}
         </ul>}
-        {!!records?.length && <p className="text-ui-micro leading-relaxed text-muted-foreground">
-          {t("仅列出已记录的工具差异文件，不保证覆盖全部磁盘修改或代表当前净变更。点击文件在编辑器中打开。")}
-        </p>}
+        {!!records?.length && latest && checkpoint && (
+          <button
+            className="press shrink-0 rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+            title={t("回滚本轮")}
+            aria-label={t("回滚本轮")}
+            onClick={() => setConfirmRollback(true)}
+          >
+            <History className="size-3" />
+          </button>
+        )}
       </div>
     </section>
+      {confirmRollback && (
+        <ConfirmDialog
+          title={t("回滚到此轮之前")}
+          message={
+            canRollbackFiles
+              ? t("选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。")
+              : t("该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。")
+          }
+          onCancel={() => setConfirmRollback(false)}
+          actions={[
+            {
+              label: t("文件"),
+              title: canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件"),
+              disabled: !canRollbackFiles,
+              onClick: () => rollback("files"),
+            },
+            {
+              label: t("对话"),
+              title: t("仅删除该消息及其后所有对话"),
+              onClick: () => rollback("conversation"),
+            },
+            {
+              label: t("全部"),
+              title: canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件"),
+              variant: "primary",
+              onClick: () => rollback("both"),
+            },
+          ]}
+        />
+      )}
+    </>
   );
 }

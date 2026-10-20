@@ -174,6 +174,8 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 按钮体系约定：共享按钮基元分两档高度，常规/工具栏按钮 28px，卡片内密集操作 24px；图标按钮 28×28；审批卡、Plan 卡、提问卡、ConfirmDialog 的操作按钮用 24px。
 - 图标尺寸约定：内联图标统一 14px，工具栏图标 16px，展示型图标 20px；按钮内图标用 flex gap 排版，不再用 mr/align 手工偏移。
 - 下拉菜单/浮层需做视口夹取；窄屏右对齐菜单应通过 align=right 向内侧展开，避免负坐标或超出视口。
+- 空状态示例提示应做成明确可点击的 chip：带边框、卡片底色、轻阴影、左侧 Sparkles 图标，整行 hover 反馈，点击区高度约 28px；不要用裸文字按钮。
+- 项目自定义 `.shadow-card` 直接设置 `box-shadow`，会覆盖 Tailwind `ring`（ring 也编译为 box-shadow），导致边框消失；需要不占布局高度的边框时改用 `outline`（outline 不走 box-shadow，也不参与高度计算）。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 
