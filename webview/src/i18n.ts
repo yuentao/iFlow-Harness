@@ -241,29 +241,16 @@ const en: Record<string, string> = {
     "Local Ollama does not check the API key — any non-empty value (e.g. ollama) works; make sure the Ollama service is running.",
   // first-run onboarding wizard
   "初始化引导": "Getting started",
-  "欢迎": "Welcome",
-  "连接模型": "Connect a model",
+  "连接 iFlow": "Connect iFlow",
   "选择模型": "Choose a model",
-  "使用偏好": "Preferences",
   "第 {0} / {1} 步": "Step {0} of {1}",
-  "跳过引导": "Skip setup",
-  "开始配置": "Get started",
+  "稍后设置": "Set up later",
   "上一步": "Back",
-  "稍后配置": "Later",
   "保存并继续": "Save & continue",
   "开始使用": "Start using",
   "欢迎使用 心流·驭光": "Welcome to iFlow Harness",
-  "用一到两分钟完成最初配置。随时可以跳过，跳过后仍可从设置或面板提示重新配置。":
-    "Set things up in a minute or two. You can skip at any time and reconfigure later from settings or the panel prompt.",
-  "对话即工作台": "One panel for the whole job",
-  "流式对话、工具审批、逐块回滚都在一个面板里。":
-    "Streaming chat, tool approvals, and per-hunk rollback all live in one panel.",
-  "凭据只在本机": "Credentials stay local",
-  "API Key 存入 VSCode SecretStorage，不写入磁盘明文。":
-    "API keys are stored in VSCode SecretStorage, never as plaintext on disk.",
-  "随时可改": "Change anything later",
-  "服务商、模型、权限与界面偏好都能在设置中调整。":
-    "Provider, model, approval mode, and UI preferences can all be adjusted in settings.",
+  "连接模型服务后即可开始对话；其他设置都能在 ⚙ 中修改。":
+    "Connect a model provider to start chatting; everything else stays editable in the ⚙ settings.",
   "尚未选择": "Not selected",
   "尚未配置（可稍后在设置中完成）": "Not configured (finish later in settings)",
   "选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。":
@@ -280,8 +267,6 @@ const en: Record<string, string> = {
   "选择新会话默认的权限模式；点击选项后当前会话也会立即切换。之后可在设置 → 审批策略中细化规则。":
     "Pick the default approval mode for new sessions; clicking an option also switches the current session. Fine-grained rules live in Settings → Approval policies.",
   "初始化进度": "Setup progress",
-  "这些设置之后都能在齿轮 ⚙ 设置中随时修改。":
-    "Everything here can be changed later from the ⚙ settings.",
   "提示音": "Sound",
   "回复完成或失败时播放提示音。": "Play a cue when a reply finishes or fails.",
   "默认权限模式": "Default approval mode",
@@ -331,25 +316,13 @@ const en: Record<string, string> = {
   "上一个 / 下一个会话": "Previous / next session",
   "聚焦输入框": "Focus the composer",
   "切换 Focus 视图": "Toggle Focus view",
-  "每轮回复后推测可选的下一步操作（会产生额外 token 消耗）。":
-    "Suggest next steps after each reply (uses extra tokens).",
-  "上下文占用达到 95% 时自动压缩会话。": "Compress the session automatically at 95% context usage.",
-  "每轮结束后提取长期偏好候选，确认后才写入。":
-    "Extract long-term preference candidates after each turn; nothing is written until you confirm.",
-  "调整面板中文字的大小。": "Adjust the panel text size.",
-  "调整控件内边距与间距，不影响字号。": "Adjust control padding and spacing without changing font size.",
-  "默认跟随编辑器主题，也可以固定为浅色或深色。":
-    "Follow the editor theme by default, or pin light/dark.",
   "配置完成": "You're all set",
-  "可以开始对话了；所有设置都能随时在齿轮 ⚙ 中修改。":
-    "You can start chatting now; everything remains editable from the ⚙ settings.",
+  "可以开始对话了；其余设置在 ⚙ 中随时可改。":
+    "You can start chatting now; the rest stays editable in the ⚙ settings.",
   "连接": "Connection",
   "默认模式": "Default mode",
-  "已开启": "On",
-  "已关闭": "Off",
-  "字号 / 密度": "Font / density",
   "继续配置": "Continue configuring",
-  "这些高级能力可以稍后再设置。": "These advanced capabilities can be set up later.",
+  "这些能力可以稍后再设置。": "These capabilities can be set up later.",
   "尚未配置 API 凭据，无法开始对话。": "API credentials are not configured yet — chat is unavailable.",
   "配置": "Configure",
   "重新运行引导": "Run setup again",

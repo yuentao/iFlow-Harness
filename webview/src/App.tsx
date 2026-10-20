@@ -246,9 +246,7 @@ export function App() {
   // Theme priority: the synced `iflow.theme` setting wins; "auto" follows
   // the editor color theme pushed by the host; default light.
   const themeMode = useChat((s) => s.hostSettings.theme);
-  const updateHostSetting = useChat((s) => s.updateHostSetting);
   const dark = themeMode === "auto" ? (editorTheme !== null ? editorTheme === "dark" : false) : themeMode === "dark";
-  const handleThemeChange = (mode: "light" | "dark") => updateHostSetting({ theme: mode });
   const firstThemeRun = useRef(true);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -811,8 +809,6 @@ export function App() {
       {onboardingOpen && auth && (
         <OnboardingWizard
           auth={auth}
-          dark={dark}
-          onThemeChange={handleThemeChange}
           onClose={() => setOnboardingOpen(false)}
           onOpenSettings={(tab) => setSettingsTab(tab)}
         />

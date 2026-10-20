@@ -1,42 +1,34 @@
-import { useState, type ReactNode } from "react";
-import {
-  ArrowRight,
-  Check,
-  ExternalLink,
-  KeyRound,
-  Lock,
-  MessageSquare,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-} from "lucide-react";
-import type {
-  AuthUiState,
-  ModelInfoUi,
-  UiDefaultMode,
-  UiDensity,
-  UiFontSize,
-} from "../../../shared/messages";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowRight, Check, ExternalLink, KeyRound, Lock, Search, Sparkles } from "lucide-react";
+import type { AuthUiState, ModelInfoUi, UiDefaultMode } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, ModalShell, SAVE_BTN } from "./ui";
+import { BTN, BTN_INPUT as INPUT, fuzzyScore, ModalShell, SAVE_BTN } from "./ui";
 import type { SettingsTab } from "./SettingsModal";
 import logo from "../assets/iflow.svg";
 
 /**
  * First-run wizard. Deliberately NOT the settings modal: a new user gets one
- * decision per screen, a visible progress bar, and a skip door on every step.
+ * decision per screen, a visible progress bar, and a single escape door.
  * The settings modal remains the long-term home for everything here (and the
- * deeper MCP / approval-policy / memory editors).
+ * deeper MCP / approval-policy / memory / appearance editors).
+ *
+ * UI-audit 4.8: welcome merged into the connect step (one header line instead
+ * of three marketing cards) and the preferences step moved out entirely — theme
+ * and font size now ship with sane defaults, and the done step links to
+ * Settings → Appearance. Four steps: connect → model → mode → done.
  */
 
-type Step = "welcome" | "api" | "model" | "mode" | "preferences" | "done";
+type Step = "connect" | "model" | "mode" | "done";
 
-const STEPS: Step[] = ["welcome", "api", "model", "mode", "preferences", "done"];
+const STEPS: Step[] = ["connect", "model", "mode", "done"];
 
 const EMPTY_MODELS: ModelInfoUi[] = [];
+
+/** Search only earns a row once the catalog is long enough to need it. */
+const MODEL_SEARCH_MIN = 8;
 
 const MODE_FALLBACK: Array<{ id: string; name: string }> = [
   { id: "smart", name: "" },
@@ -51,30 +43,14 @@ function isDefaultMode(value: string): value is UiDefaultMode {
   return (DEFAULT_MODES as readonly string[]).includes(value);
 }
 
-function fontSizeLabel(value: UiFontSize): string {
-  if (value === "compact") return t("紧凑");
-  if (value === "large") return t("大");
-  return t("标准");
-}
-
-function densityLabel(value: UiDensity): string {
-  if (value === "compact") return t("紧凑");
-  if (value === "comfortable") return t("宽松");
-  return t("标准");
-}
-
 function stepTitle(step: Step): string {
   switch (step) {
-    case "welcome":
-      return t("欢迎");
-    case "api":
-      return t("连接模型");
+    case "connect":
+      return t("连接 iFlow");
     case "model":
       return t("选择模型");
     case "mode":
       return t("权限模式");
-    case "preferences":
-      return t("使用偏好");
     case "done":
       return t("完成");
   }
@@ -82,15 +58,10 @@ function stepTitle(step: Step): string {
 
 export function OnboardingWizard({
   auth,
-  dark,
-  onThemeChange,
   onClose,
   onOpenSettings,
 }: {
   auth: AuthUiState;
-  /** Effective theme (manual choice ?? editor theme). */
-  dark: boolean;
-  onThemeChange: (mode: "light" | "dark") => void;
   onClose: () => void;
   onOpenSettings: (tab: SettingsTab) => void;
 }) {
@@ -105,7 +76,7 @@ export function OnboardingWizard({
   const hostSettings = useChat((s) => s.hostSettings);
   const updateHostSetting = useChat((s) => s.updateHostSetting);
 
-  const [step, setStep] = useState<Step>("welcome");
+  const [step, setStep] = useState<Step>("connect");
   const index = STEPS.indexOf(step);
 
   // --- API step state -------------------------------------------------------
@@ -121,6 +92,37 @@ export function OnboardingWizard({
   const [apiSubmitted, setApiSubmitted] = useState(false);
   const preset = presetId ? (PROVIDER_PRESETS.find((p) => p.id === presetId) ?? null) : null;
   const connecting = status === "connecting" || initializing;
+
+  // Initial focus lands on the first field that still needs typing (audit 4.8:
+  // "API 步初始焦点放在第一个空输入"), not on the primary button — otherwise
+  // the whole form has to be reached with Shift+Tab. Later steps move focus to
+  // the primary action instead of leaving it on a field that just disappeared.
+  const [connectFocus] = useState<"baseUrl" | "apiKey" | "modelName" | "primary">(() => {
+    if (!(auth.saved?.baseUrl ?? "").trim()) return "baseUrl";
+    if (!auth.saved) return "apiKey";
+    if (!(auth.saved?.modelName ?? "").trim()) return "modelName";
+    return "primary";
+  });
+  const baseUrlRef = useRef<HTMLInputElement>(null);
+  const apiKeyRef = useRef<HTMLInputElement>(null);
+  const modelNameRef = useRef<HTMLInputElement>(null);
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (step !== "connect") {
+      primaryRef.current?.focus();
+      return;
+    }
+    const target =
+      connectFocus === "baseUrl"
+        ? baseUrlRef
+        : connectFocus === "apiKey"
+          ? apiKeyRef
+          : connectFocus === "modelName"
+            ? modelNameRef
+            : null;
+    (target?.current ?? primaryRef.current)?.focus();
+    // Mount + step change only: re-focusing on every keystroke would fight the caret.
+  }, [step, connectFocus]);
 
   function updateDraft(patch: Partial<typeof draft>) {
     setDraft((f) => ({ ...f, ...patch }));
@@ -178,6 +180,20 @@ export function OnboardingWizard({
   }
 
   // --- Model step -----------------------------------------------------------
+  const [modelQuery, setModelQuery] = useState("");
+  const visibleModels = useMemo(() => {
+    const q = modelQuery.trim();
+    if (!q) return models;
+    return models
+      .map((model) => ({
+        model,
+        score: Math.max(fuzzyScore(q, model.name) ?? -1, fuzzyScore(q, model.id) ?? -1),
+      }))
+      .filter((entry) => entry.score >= 0)
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.model);
+  }, [modelQuery, models]);
+
   function chooseModel(model: ModelInfoUi) {
     if (model.id === currentModelId) return;
     useChat.getState().beginPending("model", model.id);
@@ -185,6 +201,8 @@ export function OnboardingWizard({
   }
 
   // --- Navigation -----------------------------------------------------------
+  // Single escape door (audit 4.8): one "稍后设置" instead of a global skip plus
+  // an API-step "稍后配置".
   function skip() {
     send({ type: "setOnboardingDismissed", dismissed: true });
     onClose();
@@ -198,19 +216,13 @@ export function OnboardingWizard({
 
   function advance() {
     switch (step) {
-      case "welcome":
-        setStep("api");
-        break;
-      case "api":
+      case "connect":
         saveCredentials();
         break;
       case "model":
         setStep("mode");
         break;
       case "mode":
-        setStep("preferences");
-        break;
-      case "preferences":
         setStep("done");
         break;
       case "done":
@@ -245,7 +257,7 @@ export function OnboardingWizard({
               className="press rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
               onClick={skip}
             >
-              {t("跳过引导")}
+              {t("稍后设置")}
             </button>
           )}
           <div className="ml-auto flex items-center gap-1.5">
@@ -254,25 +266,18 @@ export function OnboardingWizard({
                 {t("上一步")}
               </button>
             )}
-            {step === "api" && (
-              <button type="button" className={BTN} onClick={() => setStep("model")}>
-                {t("稍后配置")}
-              </button>
-            )}
             <button
               type="button"
-              data-autofocus
+              ref={primaryRef}
               className={SAVE_BTN}
-              disabled={step === "api" && apiSubmitted && connecting}
+              disabled={step === "connect" && apiSubmitted && connecting}
               onClick={advance}
             >
               {step === "done"
                 ? t("开始使用")
-                : step === "welcome"
-                  ? t("开始配置")
-                  : step === "api"
-                    ? t("保存并继续")
-                    : t("下一步")}
+                : step === "connect"
+                  ? t("保存并继续")
+                  : t("下一步")}
               {step !== "done" && <ArrowRight className="size-3.5" />}
             </button>
           </div>
@@ -305,10 +310,18 @@ export function OnboardingWizard({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          {step === "welcome" && <WelcomeStep />}
-
-          {step === "api" && (
+          {step === "connect" && (
             <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <img src={logo} alt="" className="size-8 shrink-0" />
+                <div className="min-w-0">
+                  <h2 className="text-ui-label font-semibold text-foreground">{t("欢迎使用 心流·驭光")}</h2>
+                  <p className="text-ui-caption leading-relaxed text-muted-foreground">
+                    {t("连接模型服务后即可开始对话；其他设置都能在 ⚙ 中修改。")}
+                  </p>
+                </div>
+              </div>
+
               <p className="text-ui-caption leading-relaxed text-muted-foreground">
                 {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
               </p>
@@ -396,6 +409,7 @@ export function OnboardingWizard({
                 <input
                   type="text"
                   className={INPUT}
+                  ref={baseUrlRef}
                   value={draft.baseUrl}
                   placeholder="https://api.example.com/v1"
                   onChange={(e) => updateDraft({ baseUrl: e.target.value })}
@@ -406,6 +420,7 @@ export function OnboardingWizard({
                 <input
                   type="password"
                   className={INPUT}
+                  ref={apiKeyRef}
                   value={draft.apiKey}
                   placeholder={auth.saved?.keyTail ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…"}
                   onChange={(e) => updateDraft({ apiKey: e.target.value })}
@@ -416,6 +431,7 @@ export function OnboardingWizard({
                 <input
                   type="text"
                   className={INPUT}
+                  ref={modelNameRef}
                   value={draft.modelName}
                   placeholder={t("如 glm-5.3-flash-free")}
                   onChange={(e) => updateDraft({ modelName: e.target.value })}
@@ -472,39 +488,59 @@ export function OnboardingWizard({
                       {t("重新获取")}
                     </button>
                     {auth.needsSetup && (
-                      <button className={BTN} onClick={() => setStep("api")}>
+                      <button className={BTN} onClick={() => setStep("connect")}>
                         {t("返回填写凭据")}
                       </button>
                     )}
                   </div>
                 </div>
               ) : (
-                <div className="space-y-1">
-                  {models.map((model) => {
-                    const active = model.id === currentModelId;
-                    return (
-                      <button
-                        key={model.id}
-                        type="button"
-                        aria-pressed={active}
-                        className={`card-lift flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left shadow-card transition-colors duration-200 ${
-                          active ? "border-primary/50 bg-primary/10" : "border-border hover:bg-accent/40"
-                        }`}
-                        onClick={() => chooseModel(model)}
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-ui-label font-semibold text-foreground">
-                            {model.name || model.id}
+                <>
+                  {/* Search appears only for long catalogs (same rule as the
+                      composer's model menu) and stays pinned above the list. */}
+                  {models.length > MODEL_SEARCH_MIN && (
+                    <div className="flex items-center gap-2 rounded-lg border border-border bg-editor px-2 py-1 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
+                      <Search className="size-3.5 shrink-0 text-muted-foreground" />
+                      <input
+                        value={modelQuery}
+                        placeholder={t("搜索模型…")}
+                        className="w-full min-w-0 bg-transparent font-mono text-ui-caption text-foreground outline-none placeholder:text-muted-foreground/80"
+                        onChange={(e) => setModelQuery(e.target.value)}
+                      />
+                    </div>
+                  )}
+                  <div className="max-h-[min(50vh,20rem)] space-y-1 overflow-y-auto">
+                    {visibleModels.length === 0 && (
+                      <div className="px-2 py-3 text-center text-ui-label text-muted-foreground">
+                        {t("无匹配模型")}
+                      </div>
+                    )}
+                    {visibleModels.map((model) => {
+                      const active = model.id === currentModelId;
+                      return (
+                        <button
+                          key={model.id}
+                          type="button"
+                          aria-pressed={active}
+                          className={`card-lift flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left shadow-card transition-colors duration-200 ${
+                            active ? "border-primary/50 bg-primary/10" : "border-border hover:bg-accent/40"
+                          }`}
+                          onClick={() => chooseModel(model)}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-ui-label font-semibold text-foreground">
+                              {model.name || model.id}
+                            </span>
+                            <span className="block truncate font-mono text-ui-caption text-muted-foreground">
+                              {model.id}
+                            </span>
                           </span>
-                          <span className="block truncate font-mono text-ui-caption text-muted-foreground">
-                            {model.id}
-                          </span>
-                        </span>
-                        {active && <Check className="size-3.5 shrink-0 text-primary" />}
-                      </button>
-                    );
-                  })}
-                </div>
+                          {active && <Check className="size-3.5 shrink-0 text-primary" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
               )}
               {apiSubmitted && errorMessage && (
                 <p className="whitespace-pre-wrap break-words rounded-lg border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-ui-caption text-destructive">
@@ -550,117 +586,26 @@ export function OnboardingWizard({
             </div>
           )}
 
-          {step === "preferences" && (
-            <div className="space-y-2">
-              <p className="text-ui-label leading-relaxed text-muted-foreground">
-                {t("这些设置之后都能在齿轮 ⚙ 设置中随时修改。")}
-              </p>
-              <ToggleRow
-                label={t("提示音")}
-                description={t("回复完成或失败时播放提示音。")}
-                checked={hostSettings.soundFeedback}
-                onChange={(value) => updateHostSetting({ soundFeedback: value })}
-              />
-              <ToggleRow
-                label={t("下一步建议")}
-                description={t("每轮回复后推测可选的下一步操作（会产生额外 token 消耗）。")}
-                checked={hostSettings.nextStepSuggestions}
-                onChange={(value) => updateHostSetting({ nextStepSuggestions: value })}
-              />
-              <ToggleRow
-                label={t("自动压缩上下文")}
-                description={t("上下文占用达到 95% 时自动压缩会话。")}
-                checked={hostSettings.autoCompressOnIdle}
-                onChange={(value) => updateHostSetting({ autoCompressOnIdle: value })}
-              />
-              <ToggleRow
-                label={t("自动提取记忆")}
-                description={t("每轮结束后提取长期偏好候选，确认后才写入。")}
-                checked={hostSettings.autoMemoryCapture}
-                onChange={(value) => updateHostSetting({ autoMemoryCapture: value })}
-              />
-              <ChoiceRow
-                label={t("字号")}
-                description={t("调整面板中文字的大小。")}
-                value={hostSettings.uiFontSize}
-                options={[
-                  { value: "compact", label: t("紧凑") },
-                  { value: "standard", label: t("标准") },
-                  { value: "large", label: t("大") },
-                ]}
-                onChange={(uiFontSize) => updateHostSetting({ uiFontSize })}
-              />
-              <ChoiceRow
-                label={t("密度")}
-                description={t("调整控件内边距与间距，不影响字号。")}
-                value={hostSettings.uiDensity}
-                options={[
-                  { value: "compact", label: t("紧凑") },
-                  { value: "standard", label: t("标准") },
-                  { value: "comfortable", label: t("宽松") },
-                ]}
-                onChange={(uiDensity) => updateHostSetting({ uiDensity })}
-              />
-              <div className="flex items-start gap-3 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
-                <div className="min-w-0 flex-1">
-                  <div className="text-ui-label font-semibold text-foreground">{t("主题")}</div>
-                  <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
-                    {t("默认跟随编辑器主题，也可以固定为浅色或深色。")}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-0.5">
-                  <button
-                    type="button"
-                    aria-pressed={!dark}
-                    className={`press rounded-md px-2 py-1 text-ui-caption transition-colors duration-200 ${
-                      !dark ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60"
-                    }`}
-                    onClick={() => onThemeChange("light")}
-                  >
-                    {t("浅色")}
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={dark}
-                    className={`press rounded-md px-2 py-1 text-ui-caption transition-colors duration-200 ${
-                      dark ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60"
-                    }`}
-                    onClick={() => onThemeChange("dark")}
-                  >
-                    {t("深色")}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
           {step === "done" && (
             <div className="space-y-2">
               <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-3 text-center">
                 <Sparkles className="mx-auto size-5 text-primary" />
                 <div className="mt-1 text-ui-body font-semibold text-foreground">{t("配置完成")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
-                  {t("可以开始对话了；所有设置都能随时在齿轮 ⚙ 中修改。")}
+                  {t("可以开始对话了；其余设置在 ⚙ 中随时可改。")}
                 </p>
               </div>
               <div className="space-y-1 rounded-lg border border-border bg-surface/60 px-2.5 py-2 text-ui-caption">
                 <SummaryRow label={t("连接")} value={connectionLabel} />
                 <SummaryRow label={t("默认模式")} value={modeDisplay({ id: hostSettings.defaultMode, name: "" }).label} />
-                <SummaryRow
-                  label={t("提示音")}
-                  value={hostSettings.soundFeedback ? t("已开启") : t("已关闭")}
-                />
-                <SummaryRow
-                  label={t("字号 / 密度")}
-                  value={`${fontSizeLabel(hostSettings.uiFontSize)} / ${densityLabel(hostSettings.uiDensity)}`}
-                />
               </div>
               <div className="rounded-lg border border-dashed border-border px-2.5 py-2">
                 <div className="text-ui-caption font-semibold text-foreground">{t("继续配置")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
-                  {t("这些高级能力可以稍后再设置。")}
+                  {t("这些能力可以稍后再设置。")}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
+                  <button className={BTN} onClick={() => finish("appearance")}>{t("外观与交互")}</button>
                   <button className={BTN} onClick={() => finish("mcp")}>{t("MCP 服务器")}</button>
                   <button className={BTN} onClick={() => finish("policy")}>{t("审批策略")}</button>
                   <button className={BTN} onClick={() => finish("memory")}>{t("记忆")}</button>
@@ -671,136 +616,6 @@ export function OnboardingWizard({
         </div>
       </div>
     </ModalShell>
-  );
-}
-
-function WelcomeStep() {
-  return (
-    <div className="flex flex-col items-center text-center">
-      <img src={logo} alt="" className="size-12" />
-      <h2 className="mt-2 text-ui-title font-semibold text-foreground">{t("欢迎使用 心流·驭光")}</h2>
-      <p className="mt-1 max-w-[380px] text-ui-caption leading-relaxed text-muted-foreground">
-        {t("用一到两分钟完成最初配置。随时可以跳过，跳过后仍可从设置或面板提示重新配置。")}
-      </p>
-      <div className="mt-3 grid w-full gap-1.5 text-left">
-        <WelcomePoint
-          icon={<MessageSquare className="size-3.5" />}
-          title={t("对话即工作台")}
-          description={t("流式对话、工具审批、逐块回滚都在一个面板里。")}
-        />
-        <WelcomePoint
-          icon={<ShieldCheck className="size-3.5" />}
-          title={t("凭据只在本机")}
-          description={t("API Key 存入 VSCode SecretStorage，不写入磁盘明文。")}
-        />
-        <WelcomePoint
-          icon={<SlidersHorizontal className="size-3.5" />}
-          title={t("随时可改")}
-          description={t("服务商、模型、权限与界面偏好都能在设置中调整。")}
-        />
-      </div>
-    </div>
-  );
-}
-
-function WelcomePoint({
-  icon,
-  title,
-  description,
-}: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex items-start gap-2 rounded-lg border border-border bg-surface/60 px-2.5 py-1.5">
-      <span className="mt-0.5 text-primary">{icon}</span>
-      <span className="min-w-0">
-        <span className="block text-ui-label font-semibold text-foreground">{title}</span>
-        <span className="block text-ui-caption leading-relaxed text-muted-foreground">{description}</span>
-      </span>
-    </div>
-  );
-}
-
-function ToggleRow({
-  label,
-  description,
-  checked,
-  onChange,
-}: {
-  label: string;
-  description: string;
-  checked: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <div className="flex items-start gap-3 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
-      <div className="min-w-0 flex-1">
-        <div className="text-ui-label font-semibold text-foreground">{label}</div>
-        <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">{description}</p>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        className={`press relative mt-0.5 inline-flex h-[18px] w-[32px] shrink-0 items-center rounded-full border transition-colors duration-200 ${
-          checked ? "border-primary/50 bg-primary/70" : "border-border bg-border/70"
-        }`}
-        onClick={() => onChange(!checked)}
-      >
-        <span
-          className={`inline-block size-[12px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
-            checked ? "translate-x-[17px]" : "translate-x-[2px]"
-          }`}
-        />
-      </button>
-    </div>
-  );
-}
-
-function ChoiceRow<T extends string>({
-  label,
-  description,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  description: string;
-  value: T;
-  options: Array<{ value: T; label: string }>;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div className="flex items-start gap-3 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
-      <div className="min-w-0 flex-1">
-        <div className="text-ui-label font-semibold text-foreground">{label}</div>
-        <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">{description}</p>
-      </div>
-      <div
-        role="group"
-        aria-label={label}
-        className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-0.5"
-      >
-        {options.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={value === option.value}
-            className={`press rounded-md px-2 py-1 text-ui-caption transition-colors duration-200 ${
-              value === option.value
-                ? "bg-primary/15 font-semibold text-primary"
-                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-            }`}
-            onClick={() => onChange(option.value)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }
 
