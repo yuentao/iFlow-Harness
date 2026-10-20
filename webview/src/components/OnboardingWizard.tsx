@@ -273,7 +273,7 @@ export function OnboardingWizard({
                   : step === "api"
                     ? t("保存并继续")
                     : t("下一步")}
-              {step !== "done" && <ArrowRight className="ml-1 inline size-3" />}
+              {step !== "done" && <ArrowRight className="size-3.5" />}
             </button>
           </div>
         </div>
@@ -348,7 +348,7 @@ export function OnboardingWizard({
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {preset.keyUrl && (
                       <button className={BTN} onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}>
-                        <ExternalLink className="mr-0.5 inline size-3 align-[-2px]" />
+                        <ExternalLink className="size-3.5" />
                         {t("获取 API Key")}
                       </button>
                     )}
@@ -362,7 +362,7 @@ export function OnboardingWizard({
               )}
 
               {auth.importable.length > 0 && (
-                <div className="rounded-xl border border-primary/30 bg-primary/5 px-2.5 py-2">
+                <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
                   <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
                     <KeyRound className="size-3.5 shrink-0 text-primary" />
                     {t("检测到 iFlow CLI 已有凭据")}
@@ -454,7 +454,7 @@ export function OnboardingWizard({
                 {t("选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。")}
               </p>
               {models.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border px-3 py-4 text-center">
+                <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center">
                   <div className="text-ui-label font-semibold text-foreground">
                     {connecting
                       ? t("正在连接 iFlow CLI 并获取模型列表…")
@@ -601,7 +601,7 @@ export function OnboardingWizard({
                 ]}
                 onChange={(uiDensity) => updateHostSetting({ uiDensity })}
               />
-              <div className="flex items-start gap-3 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+              <div className="flex items-start gap-3 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
                 <div className="min-w-0 flex-1">
                   <div className="text-ui-label font-semibold text-foreground">{t("主题")}</div>
                   <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
@@ -636,14 +636,14 @@ export function OnboardingWizard({
 
           {step === "done" && (
             <div className="space-y-2">
-              <div className="rounded-xl border border-primary/30 bg-primary/5 px-3 py-3 text-center">
+              <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-3 text-center">
                 <Sparkles className="mx-auto size-5 text-primary" />
                 <div className="mt-1 text-ui-body font-semibold text-foreground">{t("配置完成")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
                   {t("可以开始对话了；所有设置都能随时在齿轮 ⚙ 中修改。")}
                 </p>
               </div>
-              <div className="space-y-1 rounded-xl border border-border bg-surface/60 px-2.5 py-2 text-ui-caption">
+              <div className="space-y-1 rounded-lg border border-border bg-surface/60 px-2.5 py-2 text-ui-caption">
                 <SummaryRow label={t("连接")} value={connectionLabel} />
                 <SummaryRow label={t("默认模式")} value={modeDisplay({ id: hostSettings.defaultMode, name: "" }).label} />
                 <SummaryRow
@@ -655,7 +655,7 @@ export function OnboardingWizard({
                   value={`${fontSizeLabel(hostSettings.uiFontSize)} / ${densityLabel(hostSettings.uiDensity)}`}
                 />
               </div>
-              <div className="rounded-xl border border-dashed border-border px-2.5 py-2">
+              <div className="rounded-lg border border-dashed border-border px-2.5 py-2">
                 <div className="text-ui-caption font-semibold text-foreground">{t("继续配置")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
                   {t("这些高级能力可以稍后再设置。")}
@@ -735,7 +735,7 @@ function ToggleRow({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+    <div className="flex items-start gap-3 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
       <div className="min-w-0 flex-1">
         <div className="text-ui-label font-semibold text-foreground">{label}</div>
         <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">{description}</p>
@@ -774,7 +774,7 @@ function ChoiceRow<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+    <div className="flex items-start gap-3 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
       <div className="min-w-0 flex-1">
         <div className="text-ui-label font-semibold text-foreground">{label}</div>
         <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">{description}</p>

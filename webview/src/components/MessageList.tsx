@@ -394,7 +394,7 @@ function ToolCard({ block }: { block: ToolBlock }) {
     presentation.accent === "execute" && block.status !== "completed" ? (block.input ?? "") : "";
 
   return (
-    <div className={`tool-card tool-card-${presentation.accent} stream-in status-fade card-lift overflow-hidden rounded-xl border border-border bg-card shadow-card status-${block.status}`}>
+    <div className={`tool-card tool-card-${presentation.accent} stream-in status-fade card-lift overflow-hidden rounded-lg border border-border bg-card shadow-card status-${block.status}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="tool-icon" title={detail}>
           <Icon className="size-3 shrink-0" />
@@ -596,7 +596,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const accent = agentAccent(block.agentType);
 
   return (
-    <div className={`stream-in status-fade card-lift overflow-hidden rounded-xl border bg-card shadow-card ${accent.border}`}>
+    <div className={`stream-in status-fade card-lift overflow-hidden rounded-lg border bg-card shadow-card ${accent.border}`}>
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="tool-icon">
           <Bot className={`size-3 shrink-0 ${accent.icon}`} />
@@ -713,7 +713,7 @@ function ThoughtCard({
     return () => clearTimeout(timer);
   }, [done]);
   return (
-    <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/70 bg-panel/60 shadow-card">
+    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/70 bg-panel/60 shadow-card">
       <button
         onClick={() => {
           userTouched.current = true;
@@ -747,7 +747,7 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   // inert. Stale clicks (block gone) are dropped host-side silently.
   const tickable = Boolean(block.id);
   return (
-    <div className="stream-in card-lift rounded-xl border border-border bg-card px-3 py-3 shadow-card">
+    <div className="stream-in card-lift rounded-lg border border-border bg-card px-3 py-3 shadow-card">
       <div className="mb-2 flex items-center gap-2 text-ui-label font-semibold">
         <CircleDot className="size-3.5 text-primary" />
         {t("任务清单")}
@@ -865,7 +865,7 @@ function UserMessage({
       {/* user-bubble scopes the attached-code-context styling (styles.css):
           fenced blocks here read as right-clicked source context, not as
           model output. */}
-      <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-ui-body leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
+      <div className="user-bubble group relative max-w-[85%] rounded-2xl rounded-br-lg px-3 py-2 text-ui-body leading-relaxed text-foreground shadow-card" style={{ backgroundImage: "var(--gradient-user)" }}>
         {draft !== null ? (
           /* M4 P1-9 inline editor: re-sending truncates this turn and
              everything after it (checkpoint restore first when available),
@@ -931,7 +931,7 @@ function UserMessage({
           </div>
         )}
         {/* subtle inner highlight so the bubble reads as a solid plane */}
-        <div className="pointer-events-none absolute inset-0 rounded-2xl shadow-inner" />
+        <div className="pointer-events-none absolute inset-0 rounded-2xl rounded-br-lg shadow-inner" />
         {(canDelete || showRollback) && (
           <div className="absolute -top-3 right-1 z-10 flex items-center gap-1">
             {showRollback && (
@@ -1025,7 +1025,7 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
   const [open, setOpen] = useState(false);
   const hasSummary = block.summary !== null;
   return (
-    <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
+    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
       <button
         onClick={() => hasSummary && setOpen((v) => !v)}
         disabled={!hasSummary}
@@ -1071,7 +1071,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   const mcpUnloaded = mcpItems.length - mcpCarried.length;
   const evicted = block.evicted === true;
   return (
-    <div className="stream-in card-lift overflow-hidden rounded-xl border border-border/60 bg-card shadow-card">
+    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
@@ -1705,7 +1705,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                 {EXAMPLE_PROMPTS.map((ex) => (
                   <button
                     key={ex}
-                    className="card-lift press rounded-xl border border-border bg-card/80 px-3 py-1.5 text-left text-ui-caption text-foreground/90 shadow-card transition-colors hover:border-primary/40 hover:bg-surface-2"
+                    className="card-lift press rounded-lg border border-border bg-card/80 px-3 py-1.5 text-left text-ui-caption text-foreground/90 shadow-card transition-colors hover:border-primary/40 hover:bg-surface-2"
                     onClick={() => useChat.getState().requestDraft(t(ex))}
                   >
                     {t(ex)}
@@ -1713,7 +1713,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                 ))}
               </div>
               <p className="mt-3 text-ui-caption leading-relaxed text-muted-foreground/80">
-                {t("/ 命令 · @ 文件 · @problems · @git · 粘贴文件添加附件")}
+                {t("/ 命令 · @ 文件/文件夹 · @problems · @git · @terminal · @url:")}
               </p>
             </div>
           )}
@@ -1777,7 +1777,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                   <div key={`skel-${i}`} className={`flex ${row.align === "end" ? "justify-end" : "justify-start"}`}>
                     <div
                       className={`${row.h} skeleton-bar ${
-                        row.align === "end" ? "rounded-2xl rounded-br-md" : "rounded-lg"
+                        row.align === "end" ? "rounded-2xl rounded-br-lg" : "rounded-lg"
                       } bg-surface/70`}
                       style={{ width: row.w }}
                     />
@@ -1796,7 +1796,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               bubble above (measured 0px vs the 14px rhythm elsewhere). */}
           {(state.queue ?? []).map((q) => (
             <div key={q.id} className="cv-block stream-in flex justify-end">
-              <div className="flex max-w-[85%] items-start gap-1.5 rounded-2xl rounded-br-md border border-dashed border-border bg-surface/40 px-3 py-2 text-ui-body leading-relaxed text-muted-foreground">
+              <div className="flex max-w-[85%] items-start gap-1.5 rounded-2xl rounded-br-lg border border-dashed border-border bg-surface/40 px-3 py-2 text-ui-body leading-relaxed text-muted-foreground">
                 <span className="min-w-0 whitespace-pre-wrap break-words opacity-70">
                   {q.text || t("（附件消息）")}
                 </span>

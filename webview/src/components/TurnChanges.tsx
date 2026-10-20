@@ -66,7 +66,7 @@ export function TurnChanges({ sessionId, userBlockId }: {
   const deletions = records?.reduce((sum, item) => sum + item.deletions, 0) ?? 0;
   const latest = isLatestTurn(state.blocks, userBlockId);
   return (
-    <section className="mt-2 overflow-hidden rounded-xl border border-border bg-card/70 shadow-card" aria-label={t("本轮变更")}>
+    <section className="mt-2 overflow-hidden rounded-lg border border-border bg-card/70 shadow-card" aria-label={t("本轮变更")}>
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
         <FilePen className="size-3.5 shrink-0 text-info" />
         <span className="text-ui-caption font-semibold text-foreground">

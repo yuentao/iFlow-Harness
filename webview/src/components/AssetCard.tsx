@@ -385,7 +385,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 setEditError(null);
               }}
             >
-              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              <Plus className="size-3.5" />
               {t("新建")}
             </button>
             <button
@@ -393,7 +393,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               disabled={saving || (state === null && !loadError)}
               onClick={refresh}
             >
-              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+              <RefreshCw className="size-3.5" />
               {refreshing ? t("刷新中…") : t("刷新")}
             </button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
@@ -525,7 +525,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 setDetailContent(null);
               }}
             >
-              <Check className="mr-0.5 inline size-3 align-[-2px]" />
+              <Check className="size-3.5" />
               {t("返回")}
             </button>
             {detailContent !== null && (
@@ -665,7 +665,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             </label>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               <button className={BTN} disabled={generating || saving} onClick={generateBody}>
-                <Sparkles className="mr-0.5 inline size-3 align-[-2px]" />
+                <Sparkles className="size-3.5" />
                 {generating ? t("生成中…") : t("AI 生成内容")}
               </button>
               {genError && <span className="text-ui-body text-destructive">{genError}</span>}

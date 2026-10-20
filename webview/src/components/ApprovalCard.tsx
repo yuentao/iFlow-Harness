@@ -174,17 +174,17 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
             key={opt.optionId}
             disabled={answered}
             aria-label={approval.toolName ? t("{0}（{1}）", opt.name, approval.toolName) : opt.name}
-            className={`press inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
+            className={`press inline-flex h-6 items-center justify-center gap-1 rounded-md px-2.5 text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
             onClick={() => answer(opt.optionId)}
           >
-            {opt.kind === "allow_always" && <Lock className="size-3 shrink-0" />}
+            {opt.kind === "allow_always" && <Lock className="size-3.5 shrink-0" />}
             {opt.name}
           </button>
         ))}
         <button
           disabled={answered}
           aria-label={t("取消审批")}
-          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(null)}
         >
           {t("取消")}

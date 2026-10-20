@@ -18,11 +18,6 @@ function isEnglish(): boolean {
   return (current ?? "zh-cn").toLowerCase().startsWith("en");
 }
 
-/** True when the current locale is English (used for brand-name display). */
-export function isEnglishLocale(): boolean {
-  return isEnglish();
-}
-
 const en: Record<string, string> = {
   "本轮变更": "Changes this turn",
   "1 个文件已更改": "1 file changed",
@@ -189,6 +184,10 @@ const en: Record<string, string> = {
   "已归档（{0}）": "Archived ({0})",
   "重命名": "Rename",
   "会话名称": "Session name",
+  // UI-audit 4.2: session row ⋯ action menu + Intl date labels
+  "会话操作": "Session actions",
+  "搜索会话": "Search sessions",
+  "昨天": "Yesterday",
   // composer
   "发送": "Send",
   "停止": "Stop",
@@ -479,8 +478,7 @@ const en: Record<string, string> = {
   "Tab 补全": "Tab to complete",
   "无匹配文件": "No matching files",
   "无匹配文件夹": "No matching folders",
-  "向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @terminal · @url:）":
-    "Ask iFlow… (/ commands · @ files · @/ folders · @problems · @git · @terminal · @url:)",
+  "向 iFlow 提问…": "Ask iFlow…",
   "（见附件）": "(see attached files)",
   "（见附带的上下文）": "(see attached context)",
   "工作区诊断（Problems）": "Workspace diagnostics (Problems)",
@@ -551,8 +549,8 @@ const en: Record<string, string> = {
   "帮我梳理这个仓库的结构与核心模块": "Walk me through this repository's structure and core modules",
   "给核心模块补充单元测试": "Add unit tests to the core modules",
   "分析这个报错的可能原因并给出修复方案": "Analyze this error's likely causes and propose a fix",
-  "/ 命令 · @ 文件 · @problems · @git · 粘贴文件添加附件":
-    "/ commands · @ files · @problems · @git · paste to attach",
+  "/ 命令 · @ 文件/文件夹 · @problems · @git · @terminal · @url:":
+    "/ commands · @ files/folders · @problems · @git · @terminal · @url:",
   // P0-3: splash patience line & error toast actions
   "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
     "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
@@ -587,8 +585,9 @@ const en: Record<string, string> = {
   "只根据变化更新索引，无变化时不会调用模型":
     "Update the index from changes only; no model call when nothing changed",
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
-  "正在启动 iFlow…（首次启动或配置了多个 MCP server 时较久）":
-    "Starting iFlow… (slower on first launch or with multiple MCP servers)",
+  "正在启动 iFlow…": "Starting iFlow…",
+  "首次启动或配置了多个 MCP server 时较久":
+    "Slower on first launch or with multiple MCP servers",
   // P1: edit & resend, session search, aria-live announcements
   "编辑并重发": "Edit & resend",
   "搜索会话…": "Search sessions…",

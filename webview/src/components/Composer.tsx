@@ -134,7 +134,7 @@ function SessionUsageChip() {
   return (
     <span
       title={hoverTitle}
-      className="flex shrink-0 items-center gap-1 font-mono text-ui-caption tabular-nums text-muted-foreground/80 @max-[380px]:hidden"
+      className="flex shrink-0 items-center gap-1 font-mono text-ui-caption tabular-nums text-muted-foreground/80 @max-[620px]:hidden"
     >
       {pct !== null && (
         <span className="ml-0.5 flex items-center gap-1" title={hoverTitle}>
@@ -185,7 +185,7 @@ function QueueStrip() {
   const miniBtn =
     "rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground";
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-border bg-surface/70 shadow-card">
+    <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface/70 shadow-card">
       <div className={`flex items-center gap-1.5 px-2.5 py-1 ${expanded && queue.length > 0 ? "border-b border-border/60" : ""}`}>
         <button
           type="button"
@@ -194,7 +194,7 @@ function QueueStrip() {
           disabled={queue.length === 0}
           onClick={() => setExpanded((v) => !v)}
         >
-          <ListOrdered className="size-3 shrink-0 text-primary" />
+          <ListOrdered className="size-3.5 shrink-0 text-primary" />
           <span className="text-ui-caption font-medium text-foreground">
             {t("队列 · {0} 条待发送", queue.length)}
           </span>
@@ -1205,7 +1205,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       {/* M2 P0-3: queued-message strip (own subscription to state.queue). */}
       <QueueStrip />
       {dragOver && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-primary/5 text-ui-label font-medium text-primary">
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg bg-primary/5 text-ui-label font-medium text-primary">
           {t("拖放文件以添加附件")}
         </div>
       )}
@@ -1253,7 +1253,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             return (
               <div
                 key={c.id}
-                className="code-context-card card-lift overflow-hidden rounded-xl border border-border bg-editor shadow-card"
+                className="code-context-card card-lift overflow-hidden rounded-lg border border-border bg-editor shadow-card"
               >
                 <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
                   <Icon className="size-3.5 shrink-0 text-primary" />
@@ -1452,11 +1452,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
+      <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-editor/60 shadow-card transition-all duration-300 focus-within:border-primary/50 focus-within:shadow-focus">
         <textarea
           ref={taRef}
           value={text}
-                      placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…（/ 命令 · @ 文件 · @/ 文件夹 · @problems · @git · @terminal · @url:）")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+                      placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
@@ -1574,9 +1574,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   title={t("权限模式")}
                   disabled={modeLocked}
                 >
-                  <Zap className="size-3 shrink-0 text-primary" />
+                  <Zap className="size-3.5 shrink-0 text-primary" />
                   <span className="@max-[340px]:hidden">{currentMode ? modeDisplay(currentMode).label : ""}</span>
-                  <ChevronDown className="size-3 shrink-0 opacity-60 @max-[340px]:hidden" />
+                  <ChevronDown className="size-3.5 shrink-0 opacity-60 @max-[340px]:hidden" />
                 </button>
               )}
             >
@@ -1640,10 +1640,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   title={t("模型")}
                   disabled={controlsLocked}
                 >
-                  <span className="max-w-[130px] truncate @max-[440px]:max-w-[84px] @max-[340px]:max-w-[72px]">
+                  <span className="max-w-[130px] truncate @max-[520px]:max-w-[84px] @max-[340px]:max-w-[60px]">
                     {currentModelId ?? models[0]!.id}
                   </span>
-                  <ChevronDown className="size-3 shrink-0 opacity-60" />
+                  <ChevronDown className="size-3.5 shrink-0 opacity-60" />
                 </button>
               )}
             >
@@ -1713,10 +1713,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             </Dropdown>
           )}
 
+          <div className="shrink-0 @max-[270px]:hidden">
           {/* reasoning level dropdown — independent from permission mode; it
               controls how much effort the active model spends on thinking */}
           <Dropdown
             direction="up"
+            align="right"
             menuClass="w-56 max-w-[calc(100vw-24px)]"
             disabled={thinkLocked}
             trigger={(open) => (
@@ -1727,9 +1729,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 title={t("思考级别")}
                 disabled={thinkLocked}
               >
-                <ListOrdered className="size-3 shrink-0 text-primary" />
-                <span className="@max-[440px]:hidden">{t(thinkLevel === "auto" ? "自动" : thinkLevel === "fast" ? "快速" : thinkLevel === "balanced" ? "平衡" : "深度")}</span>
-                <ChevronDown className="size-3 shrink-0 opacity-60 @max-[440px]:hidden" />
+                <ListOrdered className="size-3.5 shrink-0 text-primary" />
+                <span className="@max-[640px]:hidden">{t(thinkLevel === "auto" ? "自动" : thinkLevel === "fast" ? "快速" : thinkLevel === "balanced" ? "平衡" : "深度")}</span>
+                <ChevronDown className="size-3.5 shrink-0 opacity-60 @max-[640px]:hidden" />
               </button>
             )}
           >
@@ -1770,6 +1772,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               </>
             )}
           </Dropdown>
+          </div>
 
           {/* session token usage — input/output split, live-refreshed while
               streaming; its own component so the refresh re-renders only it */}
@@ -1778,7 +1781,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
 
           <div className="flex shrink-0 items-center gap-1.5">
             <button
-              className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""}`}
+              className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""} @max-[340px]:hidden`}
               title={
                 enhancing
                   ? t("正在增强，点击取消")
@@ -1789,7 +1792,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               disabled={!enhancing && (controlsLocked || (!text.trim() && enhanceOriginal.current === null))}
               onClick={enhance}
             >
-              {enhancing ? <Loader2 className="size-3 animate-spin" /> : <Wand2 className="size-3" />}
+              {enhancing ? <Loader2 className="size-3.5 animate-spin" /> : <Wand2 className="size-3.5" />}
             </button>
             <button
               className={CANVAS_BTN}
@@ -1797,7 +1800,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               disabled={controlsLocked}
               onClick={() => send({ type: "pickAttachments" })}
             >
-              <Paperclip className="size-3" />
+              <Paperclip className="size-3.5" />
             </button>
             {/* P1-7: stop and send share ONE slot (swap in place) — the old
                 separate stop button made the primary action area jump every
@@ -1805,24 +1808,24 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 textarea's enqueueMode placeholder says so). */}
             {canStop ? (
               <button
-                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-3 py-1 text-ui-caption font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95"
+                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-surface h-7 px-3 text-ui-caption font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95"
                 title={t("停止生成")}
                 onClick={() => send({ type: "cancel" })}
               >
-                <Square className="size-3" /> <span className="@max-[340px]:hidden">{t("停止")}</span>
+                <Square className="size-3.5" /> <span className="@max-[340px]:hidden">{t("停止")}</span>
               </button>
             ) : (
               <button
                 className={
                   enqueueMode
-                    ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/50 bg-primary/15 px-3 py-1 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-                    : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-gradient-to-b from-primary to-primary/90 px-3 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                    ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 h-7 px-3 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
+                    : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-gradient-to-b from-primary to-primary/90 h-7 px-3 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
                 }
                 title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
                 disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
                 onClick={submit}
               >
-                {enqueueMode ? <ListOrdered className="size-3" /> : <SendHorizontal className="size-3" />}{" "}
+                {enqueueMode ? <ListOrdered className="size-3.5" /> : <SendHorizontal className="size-3.5" />}{" "}
                 <span className="@max-[340px]:hidden">{enqueueMode ? t("排队") : t("发送")}</span>
               </button>
             )}

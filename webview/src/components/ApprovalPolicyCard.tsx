@@ -214,7 +214,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           ) : (
             <div className="space-y-2">
               {rules.length === 0 && projectRules.length === 0 && (
-                <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center">
+                <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center">
                   <div className="text-ui-body text-muted-foreground">{t("尚未配置审批规则")}</div>
                 </div>
               )}
@@ -238,7 +238,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 setEditError(null);
               }}
             >
-              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              <Plus className="size-3.5" />
               {t("添加")}
             </button>
             <button className={SAVE_BTN} disabled={busy || rules === null || savedFlash} onClick={save}>

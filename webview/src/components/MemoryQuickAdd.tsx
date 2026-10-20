@@ -84,7 +84,7 @@ export function MemoryQuickAdd({
       footer={
         <div className="flex items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <button className={SAVE_BTN} disabled={!fact.trim() || saving || done} onClick={save}>
-            <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+            <Plus className="size-3.5" />
             {saving ? t("写入中…") : t("保存")}
           </button>
           <button className={BTN} disabled={saving} onClick={onClose}>

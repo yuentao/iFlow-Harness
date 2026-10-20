@@ -1,27 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive,
-  ArchiveRestore,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
+  Ellipsis,
   Focus,
-  History,
   Loader2,
-  Pencil,
   Pin,
-  PinOff,
   Plus,
   RefreshCw,
   Search,
   Settings2,
-  Trash2,
   X,
 } from "lucide-react";
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
-import { isEnglishLocale, t } from "./i18n";
+import { t } from "./i18n";
 import { copyText } from "./components/Markdown";
 import { BTN, BTN_ICON, Chip, ConfirmDialog, Dropdown } from "./components/ui";
 import { MessageList } from "./components/MessageList";
@@ -46,16 +41,12 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
           <Loader2 className="size-2.5 animate-spin" /> {t("连接中")}
         </Chip>
       );
+    // UI-audit 4.2 P0: idle shows NO chip — VSCode's status bar already carries
+    // the agent state, and a permanent "ready" pill with an infinite ping was
+    // pure decoration stealing attention from the transcript. Busy/error states
+    // still announce themselves.
     case "idle":
-      return (
-        <Chip tone="success">
-          <span className="relative flex size-1.5">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
-            <span className="relative inline-flex size-1.5 rounded-full bg-success" />
-          </span>
-          {t("就绪")}
-        </Chip>
-      );
+      return null;
     case "streaming":
       return (
         <Chip tone="primary">
@@ -72,12 +63,23 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
   }
 }
 
+// UI-audit 4.2 P2: platform-conventional dates via Intl (locale follows the
+// webview runtime): today "14:32", yesterday "昨天", same year "10月18日",
+// older "2025年10月18日". Formatters are built once at module load.
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const fullFmt = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" });
+
 function formatSessionTime(ts: number): string {
   const d = new Date(ts);
   const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  // Calendar-day distance (DST-safe: rounded on a noon-anchored diff).
+  const dayDiff = Math.round((now.getTime() - d.getTime()) / 86_400_000);
+  const sameYear = d.getFullYear() === now.getFullYear();
+  if (d.toDateString() === now.toDateString()) return timeFmt.format(d);
+  if (dayDiff === 1) return t("昨天");
+  if (sameYear) return dayFmt.format(d);
+  return fullFmt.format(d);
 }
 
 /**
@@ -232,6 +234,12 @@ export function App() {
   // dropdown's close callback can drop a half-typed name.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // UI-audit 4.2: session-menu progressive disclosure. `expandedRowId` is the
+  // row whose ⋯ action list is currently shown (click ⋯ again to collapse);
+  // `searchExpanded` reveals the search input after its icon was clicked —
+  // small lists (≤8 sessions) keep the search compact. Both reset on close.
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  const [searchExpanded, setSearchExpanded] = useState(false);
   // M4 P1-8: archived sessions live in a collapsed second section — they are
   // kept out of the default results until the user opens the section.
   const [showArchived, setShowArchived] = useState(false);
@@ -424,20 +432,29 @@ export function App() {
 
   if ((status === null || status === "connecting") && !onboardingOpen) {
     // Full-screen brand splash until the session is fully initialized.
-    // P0-3: a live elapsed counter turns a silent hang into a diagnosable
-    // wait, and past the patience threshold the splash grows its own restart
-    // escape (the host's handshake timeout eventually markErrors, but that
-    // can take 2 minutes — the user shouldn't have to stare at a spinner).
-    const impatient = connectingElapsed >= 45;
+    // UI-audit 4.1: static logo + title + thin progress line (fill tracks
+    // elapsed against a 60s budget, replacing the infinite shimmer); the
+    // elapsed seconds only appear after 3s, and the restart escape only
+    // grows past a 30s patience threshold (the host's handshake timeout
+    // eventually markErrors, but that can take 2 minutes — the user
+    // shouldn't have to stare at a spinner).
+    const impatient = connectingElapsed >= 30;
     return (
       <div className="splash">
         <img src={logo} alt="" className="splash-logo" />
         <div className="splash-title">{t("心流·驭光")}</div>
-        {!isEnglishLocale() && <div className="splash-sub">iFlow Harness</div>}
-        <div className="splash-bar" />
-        <div className="splash-hint">
-          {t("正在启动 iFlow…（首次启动或配置了多个 MCP server 时较久）")}
-          {status === "connecting" && (
+        <div className="splash-bar">
+          <div
+            className="splash-bar-fill"
+            style={{ width: `${Math.min(connectingElapsed / 60, 1) * 100}%` }}
+          />
+        </div>
+        <div
+          className="splash-hint"
+          title={t("首次启动或配置了多个 MCP server 时较久")}
+        >
+          {t("正在启动 iFlow…")}
+          {status === "connecting" && connectingElapsed >= 3 && (
             <span className="ml-1 font-mono tabular-nums opacity-70">{connectingElapsed}s</span>
           )}
         </div>
@@ -487,21 +504,24 @@ export function App() {
               wrapperClass="min-w-0 flex-1"
               disabled={locked}
               onOpenChange={(open) => {
-                if (!open) setRenamingId(null);
+                if (!open) {
+                  setRenamingId(null);
+                  setExpandedRowId(null);
+                  setSearchExpanded(false);
+                }
               }}
               trigger={(open) => (
                 <button
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  className={`card-lift press flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-left text-ui-caption shadow-card hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
-                    open ? "bg-surface-2 ring-1 ring-primary/30" : ""
+                  className={`press flex h-7 min-w-0 flex-1 items-center gap-1 rounded-sm px-2 text-left text-ui-label font-medium hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40 ${
+                    open ? "bg-surface-2" : ""
                   }`}
                   title={t("历史会话（选择后恢复该会话上下文）")}
                   disabled={locked}
                 >
-                  <History className="size-3 shrink-0 text-primary" />
                   <span className="truncate text-foreground">{sessionLabel}</span>
-                  <ChevronDown className="ml-auto size-3 shrink-0 opacity-60" />
+                  <ChevronDown className="ml-auto size-3.5 shrink-0 opacity-60" />
                 </button>
               )}
             >
@@ -510,18 +530,36 @@ export function App() {
                   <div className="shrink-0 px-3 py-1.5 text-ui-caption uppercase tracking-wider text-muted-foreground">
                     {t("会话历史")}
                   </div>
-                  <div className="shrink-0 px-2 pb-2">
-                    <div className="flex items-center gap-3 rounded-lg border border-border bg-editor/60 px-3 py-1.5 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
-                      <Search className="size-3.5 shrink-0 text-muted-foreground" />
-                      <input
-                        autoFocus
-                        value={sessionQuery}
-                        onChange={(e) => setSessionQuery(e.target.value)}
-                        placeholder={t("搜索会话…")}
-                        className="w-full min-w-0 bg-transparent text-ui-body text-foreground outline-none placeholder:text-muted-foreground/80"
-                      />
-                    </div>
-                  </div>
+                  {(() => {
+                    if (sessions.length <= 8 && !searchExpanded)
+                      return (
+                        <div className="shrink-0 px-2 pb-1.5 flex items-center">
+                          <button
+                            role="menuitem"
+                            aria-label={t("搜索会话")}
+                            title={t("搜索会话")}
+                            className="press rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+                            onClick={() => setSearchExpanded(true)}
+                          >
+                            <Search className="size-3.5" />
+                          </button>
+                        </div>
+                      );
+                    return (
+                      <div className="shrink-0 px-2 pb-2">
+                        <div className="flex items-center gap-3 rounded-md border border-border bg-editor/60 px-3 py-1.5 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
+                          <Search className="size-3.5 shrink-0 text-muted-foreground" />
+                          <input
+                            autoFocus
+                            value={sessionQuery}
+                            onChange={(e) => setSessionQuery(e.target.value)}
+                            placeholder={t("搜索会话…")}
+                            className="w-full min-w-0 bg-transparent text-ui-body text-foreground outline-none placeholder:text-muted-foreground/80"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {activeSessionId &&
                     !sessions.some((s) => s.id === activeSessionId) && (
                       <button
@@ -574,6 +612,7 @@ export function App() {
                               role="menuitem"
                               className="press shrink-0 rounded-md p-1.5 text-primary transition-colors hover:bg-accent/60"
                               title={t("保存")}
+                              aria-label={t("保存")}
                               onClick={commit}
                             >
                               <Check className="size-3.5" />
@@ -582,6 +621,7 @@ export function App() {
                               role="menuitem"
                               className="press shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
                               title={t("取消")}
+                              aria-label={t("取消")}
                               onClick={() => setRenamingId(null)}
                             >
                               <X className="size-3.5" />
@@ -590,66 +630,92 @@ export function App() {
                         );
                       }
                       return (
-                        <div key={s.id} className="flex w-full items-center gap-0.5 px-3 py-1.5 hover:bg-accent/60">
-                          <button
-                            role="menuitem"
-                            className="flex min-w-0 flex-1 flex-col items-start text-left"
-                            onClick={() => {
-                              send({ type: "loadSession", sessionId: s.id });
-                              close();
-                            }}
-                          >
-                            <span className="flex w-full items-center gap-2 text-ui-body text-foreground">
-                              {!!s.pinned && <Pin className="size-3.5 shrink-0 text-primary/80" />}
-                              <span className="truncate">{s.label}</span>
-                              {s.id === activeSessionId && (
-                                <Check className="ml-auto size-3.5 shrink-0 text-primary" />
-                              )}
-                            </span>
-                            <span className="font-mono text-ui-caption text-muted-foreground">
-                              {formatSessionTime(s.updatedAt)}
-                            </span>
-                          </button>
-                          <button
-                            role="menuitem"
-                            className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                            title={t("重命名")}
-                            onClick={() => {
-                              setRenamingId(s.id);
-                              setRenameDraft(s.label);
-                            }}
-                          >
-                            <Pencil className="size-3.5" />
-                          </button>
-                          <button
-                            role="menuitem"
-                            className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                            title={s.pinned ? t("取消置顶") : t("置顶")}
-                            onClick={() => flag(!s.pinned, !!s.archived)}
-                          >
-                            {s.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
-                          </button>
-                          <button
-                            role="menuitem"
-                            className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                            title={s.archived ? t("取消归档") : t("归档")}
-                            onClick={() => flag(!!s.pinned, !s.archived)}
-                          >
-                            {s.archived ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
-                          </button>
-                          {deletable && (
+                        <div key={s.id} className="group flex w-full shrink-0 flex-col rounded-md hover:bg-accent/60">
+                          <div className="flex w-full items-center gap-1 px-3 py-1.5">
                             <button
                               role="menuitem"
-                              data-variant="danger"
-                              className="press shrink-0 rounded-md p-1.5 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
-                              title={t("删除会话 {0}", s.label)}
+                              className="flex min-w-0 flex-1 flex-col items-start text-left"
                               onClick={() => {
+                                send({ type: "loadSession", sessionId: s.id });
                                 close();
-                                setConfirmingDelete(s);
                               }}
                             >
-                              <Trash2 className="size-3.5" />
+                              <span className="flex w-full items-center gap-2 text-ui-body text-foreground">
+                                {!!s.pinned && <Pin className="size-3.5 shrink-0 text-primary/80" />}
+                                <span className="truncate">{s.label}</span>
+                                {s.id === activeSessionId && (
+                                  <Check className="ml-auto size-3.5 shrink-0 text-primary" />
+                                )}
+                              </span>
+                              <span className="font-mono text-ui-caption text-muted-foreground">
+                                {formatSessionTime(s.updatedAt)}
+                              </span>
                             </button>
+                            {expandedRowId === s.id ? null : (
+                              <button
+                                role="menuitem"
+                                aria-label={t("会话操作")}
+                                title={t("会话操作")}
+                                className="press shrink-0 rounded-md p-1.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                                onClick={() => setExpandedRowId(s.id)}
+                              >
+                                <Ellipsis className="size-3.5" />
+                              </button>
+                            )}
+                          </div>
+                          {expandedRowId === s.id && (
+                            <div className="flex w-full items-center gap-1 px-3 py-1 flex-wrap">
+                              <button
+                                role="menuitem"
+                                className="press shrink-0 rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+                                title={t("重命名")}
+                                onClick={() => {
+                                  setRenamingId(s.id);
+                                  setRenameDraft(s.label);
+                                }}
+                              >
+                                {t("重命名")}
+                              </button>
+                              <button
+                                role="menuitem"
+                                className="press shrink-0 rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+                                title={s.pinned ? t("取消置顶") : t("置顶")}
+                                onClick={() => flag(!s.pinned, !!s.archived)}
+                              >
+                                {s.pinned ? t("取消置顶") : t("置顶")}
+                              </button>
+                              <button
+                                role="menuitem"
+                                className="press shrink-0 rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+                                title={s.archived ? t("取消归档") : t("归档")}
+                                onClick={() => flag(!!s.pinned, !s.archived)}
+                              >
+                                {s.archived ? t("取消归档") : t("归档")}
+                              </button>
+                              {deletable && (
+                                <button
+                                  role="menuitem"
+                                  data-variant="danger"
+                                  className="press shrink-0 rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                                  title={t("删除会话 {0}", s.label)}
+                                  onClick={() => {
+                                    close();
+                                    setConfirmingDelete(s);
+                                  }}
+                                >
+                                  {t("删除会话")}
+                                </button>
+                              )}
+                              <button
+                                role="menuitem"
+                                aria-label={t("会话操作")}
+                                title={t("会话操作")}
+                                className="press shrink-0 rounded-md p-1.5 opacity-60 transition-opacity text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                                onClick={() => setExpandedRowId(null)}
+                              >
+                                <Ellipsis className="size-3.5" />
+                              </button>
+                            </div>
                           )}
                         </div>
                       );
@@ -679,9 +745,8 @@ export function App() {
               )}
             </Dropdown>
           ) : (
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-muted-foreground shadow-card">
-              <History className="size-3 shrink-0 text-primary" />
-              <span className="truncate">{t("会话历史")}</span>
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-sm px-2 text-ui-label font-medium text-muted-foreground">
+              {t("会话历史")}
             </div>
           )}
           {replaying ? (
@@ -708,6 +773,7 @@ export function App() {
             <button
               className={BTN_ICON}
               title={t("新会话")}
+              aria-label={t("新会话")}
               disabled={locked}
               onClick={() => send({ type: "newSession" })}
             >

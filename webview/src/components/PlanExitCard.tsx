@@ -121,10 +121,10 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
             disabled={answered}
             aria-label={editing ? t("预览计划") : t("编辑计划")}
             title={editing ? t("预览计划") : t("编辑计划")}
-            className="press flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            className="press inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             onClick={() => setEditing((v) => !v)}
           >
-            {editing ? <Eye className="size-3" /> : <Pencil className="size-3" />}
+            {editing ? <Eye className="size-3.5" /> : <Pencil className="size-3.5" />}
             {editing ? t("预览") : t("编辑")}
           </button>
         </span>
@@ -169,7 +169,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         <button
           disabled={answered}
           aria-label={t("批准计划")}
-          className="press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
+          className="press inline-flex h-6 items-center justify-center rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(true)}
         >
           {t("批准计划")}
@@ -177,7 +177,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         <button
           disabled={answered}
           aria-label={t("拒绝计划")}
-          className="press rounded-lg border border-destructive/40 px-2.5 py-1 text-ui-caption text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40"
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-destructive/40 px-2.5 text-ui-caption text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false)}
         >
           {t("拒绝计划")}
@@ -185,7 +185,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         <button
           disabled={answered}
           aria-label={t("重新规划")}
-          className="press rounded-lg border border-primary/40 px-2.5 py-1 text-ui-caption text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-primary/40 px-2.5 text-ui-caption text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false, true)}
         >
           {t("重新规划")}

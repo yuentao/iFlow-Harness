@@ -7,10 +7,11 @@
  */
 
 @theme inline {
-  --radius-sm: calc(var(--radius) - 3px);
-  --radius-md: calc(var(--radius) - 1px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --radius-sm: var(--radius-inner);
+  --radius-md: var(--radius-control);
+  --radius-lg: var(--radius-card);
+  --radius-xl: var(--radius-overlay);
+  --radius-2xl: var(--radius-bubble);
   /* Latin glyphs resolve to Inter (variable, optical sizing); CJK falls
      through to Source Han Sans (思源黑体), then platform fallbacks. */
   --font-sans: "Inter", "Helvetica Neue", Helvetica, "Source Han Sans SC",
@@ -49,7 +50,13 @@
 
 :root {
   color-scheme: light;
-  --radius: 0.5rem;
+  /* Radius scale: inner 4 / small control 6 / card & regular control 8 /
+     overlay 12 / message bubble 16. Nested corners step down one level. */
+  --radius-inner: 4px;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-overlay: 12px;
+  --radius-bubble: 16px;
 
   /* Panel typography / density (iflow.uiFontSize / iflow.uiDensity). The
      store writes the scale inline on <html>; the fallbacks here match the
@@ -759,7 +766,7 @@ textarea:focus-visible {
   width: 24px;
   height: 24px;
   flex-shrink: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-control);
   background-image: var(--gradient-tool-icon);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 14%, transparent);
 }
@@ -814,7 +821,7 @@ textarea:focus-visible {
   gap: var(--space-sm);
   align-items: baseline;
   min-width: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   padding: var(--space-xs) var(--space-sm);
   background: color-mix(in oklab, var(--editor) 68%, transparent);
 }
@@ -899,7 +906,7 @@ textarea:focus-visible {
      (net box size is unchanged). */
   margin: calc(var(--space-xs) * -1) calc(var(--space-sm) * -1);
   padding: var(--space-xs) var(--space-sm);
-  border-radius: 12px;
+  border-radius: var(--radius-overlay);
   background-image: linear-gradient(
     90deg,
     transparent 0%,
@@ -937,7 +944,7 @@ textarea:focus-visible {
   max-width: 340px;
   padding: 40px var(--space-xl);
   text-align: center;
-  border-radius: 16px;
+  border-radius: var(--radius-overlay);
   border: 1px solid var(--border);
   background: color-mix(in oklab, var(--card) 60%, transparent);
   box-shadow:
@@ -951,7 +958,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 13px;
+  border-radius: var(--radius-overlay);
   font-size: var(--ui-font-display);
   filter: drop-shadow(0 6px 20px color-mix(in oklab, var(--primary) 30%, transparent));
 }
@@ -1030,7 +1037,7 @@ pre {
   background: var(--editor);
   border: 1px solid var(--border);
   padding: var(--space-sm) var(--space-md);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   overflow-x: auto;
   /* Fenced source is scanned sideways, not read as prose: keep the original
      single-line-per-row behavior (the global `pre` rule above wraps). */
@@ -1059,7 +1066,7 @@ pre {
   color: var(--muted-foreground);
   background: color-mix(in oklab, var(--surface-2) 82%, transparent);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   opacity: 0;
   transition:
@@ -1090,7 +1097,7 @@ pre {
   color: var(--muted-foreground);
   opacity: 0.55;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-inner);
   background: transparent;
   cursor: pointer;
   transition:
@@ -1151,7 +1158,7 @@ pre {
   background: var(--editor);
   border: 1px solid var(--border);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-inner);
 }
 
 /* Pseudo code-blocks (Markdown.tsx `.code-lines`): the model wrapped every
@@ -1317,7 +1324,7 @@ pre {
    scroll cap so a large selection doesn't stretch the bubble. */
 .user-bubble .md pre {
   border-left: 2px solid color-mix(in oklab, var(--primary) 60%, transparent);
-  border-radius: 6px;
+  border-radius: var(--radius-card);
   max-height: 280px;
   overflow-y: auto;
 }
@@ -1485,7 +1492,6 @@ pre {
   width: 64px;
   height: 64px;
   filter: drop-shadow(0 8px 24px color-mix(in oklab, var(--primary) 40%, transparent));
-  animation: splash-pulse 1.8s var(--ease-out-expo) infinite;
 }
 
 .splash-title {
@@ -1494,57 +1500,28 @@ pre {
   letter-spacing: 0.02em;
 }
 
-.splash-sub {
-  font-family: var(--font-mono);
-  font-size: var(--ui-font-micro);
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-  color: var(--color-muted-foreground);
-}
-
 .splash-hint {
   margin-top: var(--space-md);
   font-size: var(--ui-font-label);
   color: var(--color-muted-foreground);
 }
 
+/* UI-audit 4.1: thin progress line whose fill width is set inline from the
+   elapsed-seconds timer (60s budget) — one data-driven indicator, no
+   infinite shimmer. */
 .splash-bar {
   width: 180px;
-  height: 3px;
+  height: 2px;
   border-radius: 999px;
   overflow: hidden;
-  background: color-mix(in oklab, var(--foreground) 10%, transparent);
+  background: color-mix(in oklab, var(--foreground) 12%, transparent);
 }
 
-.splash-bar::after {
-  content: "";
-  display: block;
+.splash-bar-fill {
   height: 100%;
-  width: 40%;
   border-radius: 999px;
   background: var(--color-primary);
-  animation: splash-slide 1.2s ease-in-out infinite;
-}
-
-@keyframes splash-pulse {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 1;
-  }
-  50% {
-    transform: scale(1.06);
-    opacity: 0.85;
-  }
-}
-
-@keyframes splash-slide {
-  0% {
-    transform: translateX(-120%);
-  }
-  100% {
-    transform: translateX(320%);
-  }
+  transition: width 0.2s var(--ease-out-expo);
 }
 
 /* --- auth modal (centered dialog over a dimmed backdrop) --- */
@@ -1565,7 +1542,7 @@ pre {
   width: min(400px, calc(100vw - 32px));
   max-height: 78vh;
   overflow-y: auto;
-  border-radius: 14px;
+  border-radius: var(--radius-overlay);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-panel);
   animation: modal-in 0.28s var(--ease-out-expo);

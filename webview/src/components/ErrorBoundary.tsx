@@ -78,7 +78,7 @@ export class ErrorBoundary extends Component<Props, State> {
     }
     return (
       <div className="relative min-h-0 flex-1">
-        <div className="stream-in mx-auto mt-6 flex max-w-[420px] flex-col items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-5 text-center">
+        <div className="stream-in mx-auto mt-6 flex max-w-[420px] flex-col items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-5 text-center">
           <AlertTriangle className="size-5 text-warning" />
           <div className="text-ui-body font-semibold text-foreground">{t("消息区渲染异常")}</div>
           <p className="text-ui-caption leading-relaxed text-muted-foreground">

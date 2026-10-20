@@ -529,7 +529,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 setEditError(null);
               }}
             >
-              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              <Plus className="size-3.5" />
               {t("添加")}
             </button>
             <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
@@ -540,7 +540,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               disabled={busy || saving || entries === null || !!loadError}
               onClick={() => setCatalogBrowse(!catalogBrowse)}
             >
-              <Sparkles className="mr-0.5 inline size-3 align-[-2px]" />
+              <Sparkles className="size-3.5" />
               {catalogBrowse ? t("返回列表") : t("模板目录")}
             </button>
             <button
@@ -548,7 +548,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               disabled={busy || saving || (entries === null && !loadError)}
               onClick={refresh}
             >
-              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+              <RefreshCw className="size-3.5" />
               {refreshing ? t("刷新中…") : t("刷新")}
             </button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
@@ -597,7 +597,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           ) : entries === null ? (
             <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
           ) : entries.length === 0 && !loadError ? (
-            <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center">
+            <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center">
               <div className="text-ui-body text-muted-foreground">{t("尚未配置 MCP 服务器")}</div>
             </div>
           ) : (
@@ -835,7 +835,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 setDetail(null);
               }}
             >
-              <Check className="mr-0.5 inline size-3 align-[-2px]" />
+              <Check className="size-3.5" />
               {t("返回")}
             </button>
           </div>
@@ -853,7 +853,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
         const extraKeys = Object.keys(config).filter((key) => !MCP_FORM_KEYS.has(key));
         return (
           <div className="space-y-3">
-            <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+            <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
               <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
                 <h3 className="text-ui-label font-semibold uppercase tracking-wider text-muted-foreground">
                   {t("服务器信息")}
@@ -892,7 +892,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               </div>
             </section>
 
-            <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+            <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
               <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-3 py-1.5">
                 <h3 className="text-ui-label font-semibold uppercase tracking-wider text-muted-foreground">
                   {t("传输与运行")}
@@ -985,7 +985,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   >
-                    <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                    <Plus className="size-3.5" />
                     {t("添加参数")}
                   </button>
                 </div>
@@ -1027,7 +1027,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   >
-                    <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                    <Plus className="size-3.5" />
                     {t("添加变量")}
                   </button>
                 </div>
@@ -1089,7 +1089,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   >
-                    <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                    <Plus className="size-3.5" />
                     {t("添加 header")}
                   </button>
                 </div>

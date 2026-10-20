@@ -163,6 +163,17 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 字号缩放变量 --ui-font-scale 默认 1.0，三档预设为紧凑 0.92 / 标准 1 / 大 1.1；按原有效尺寸映射，避免半像素字号。
 - 设置页字号层级：标题 16px / 侧栏与行标签 14px / 说明 13px / 分组标题 12px / 辅助信息 11px；弹窗标题 16px。
 - 样式表中字号缩放应使用语义字号变量，body 基准 14px；不再使用 calc(Npx * var(--ui-font-scale)) 的写法。
+- 布局间距 token 为 2/4/8/12/16/24px，并随 --ui-density 缩放；密度预设为紧凑 0.92 / 标准 1 / 宽松 1.12，普通 CSS 的固定 padding/gap 也应响应密度设置。
+- 结构间距归一化约定：卡片/弹窗正文 py-3、设置行 py-4、列表/卡片堆叠 space-y-2、区块 gap-3、转录底部 pb-4、Composer 输入区 py-3 与操作行 pt-2；避免 py-[1px]、py-[2px]、mt-[3px] 等任意值。
+- 子代理卡头部布局应优先保证状态 chip 完整可见：窄屏时先收缩/隐藏 agentType chip 和标题，避免状态 chip 被推出卡片或出现横向溢出。
+- 控件内部的光学间距保留 2/6/10px（chip、图标与文字、紧凑按钮等），不强行归入 2/4/8/12/16/24 的布局间距网格，以免牺牲可读性与点击区。
+- Composer 占位符应保持简短单行（如「向 iFlow 提问…」），不承载功能清单；完整功能提示放到空状态底部。
+- 项目圆角体系为五档语义 token：inner 4px / control 6px / card 8px / overlay 12px / bubble 16px；Tailwind rounded-sm/md/lg/xl/2xl 分别映射 4/6/8/12/16px，嵌套元素按外大内小降一级。
+- 圆角应用约定：工具卡/设置分组/转录卡等卡片表面用 8px；下拉、浮层、审批/Plan/提问卡、设置弹窗用 12px；按钮/输入框/ConfirmDialog/发送停止排队用 6px；用户消息气泡 16px，右下内角 8px，内部高光层同步。
+- VSCode 桌面端点击区尺寸约定：以鼠标/键盘为主，不必所有目标都做到 44px；行内操作约 28px、卡片按钮 28–32px，触控场景再用 @media (pointer: coarse) 放大。
+- 按钮体系约定：共享按钮基元分两档高度，常规/工具栏按钮 28px，卡片内密集操作 24px；图标按钮 28×28；审批卡、Plan 卡、提问卡、ConfirmDialog 的操作按钮用 24px。
+- 图标尺寸约定：内联图标统一 14px，工具栏图标 16px，展示型图标 20px；按钮内图标用 flex gap 排版，不再用 mr/align 手工偏移。
+- 下拉菜单/浮层需做视口夹取；窄屏右对齐菜单应通过 align=right 向内侧展开，避免负坐标或超出视口。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

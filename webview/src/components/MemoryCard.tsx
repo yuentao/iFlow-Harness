@@ -406,7 +406,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
         />
         <div className="flex flex-wrap items-center gap-1.5">
           <button className={SAVE_BTN} disabled={busy || saving} onClick={saveEdit}>
-            <Save className="mr-0.5 inline size-3 align-[-2px]" />
+            <Save className="size-3.5" />
             {saving ? t("保存中…") : t("保存")}
           </button>
           <button className={BTN} onClick={back}>
@@ -473,7 +473,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               </span>
             </div>
             {projectFiles.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
+              <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
                 {t("当前工作区没有可用的项目记忆文件")}
               </div>
             ) : (
@@ -488,7 +488,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                   setLoadError(null);
                 }}
               >
-                <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                <Plus className="size-3.5" />
                 {t("新建项目记忆")}
               </button>
               {creating && (
@@ -518,7 +518,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
             </div>
           </section>
 
-          <section className="space-y-2 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+          <section className="space-y-2 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
             <div className="flex flex-wrap items-center gap-1.5">
               <BookOpen className="size-3.5 shrink-0 text-primary" />
               <span className="text-ui-body font-semibold text-foreground">{t("项目知识库")}</span>
@@ -533,7 +533,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                     title={t("只根据变化更新索引，无变化时不会调用模型")}
                     onClick={() => generateKnowledge("incremental")}
                   >
-                    <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+                    <RefreshCw className="size-3.5" />
                     {t("增量刷新")}
                   </button>
                   <button
@@ -551,7 +551,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                   disabled={busy || saving || knowledgeBusy || !state.cwd}
                   onClick={() => generateKnowledge("full")}
                 >
-                  <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+                  <RefreshCw className="size-3.5" />
                   {t("生成项目知识")}
                 </button>
               )}
@@ -581,7 +581,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               </div>
             )}
             {!knowledge?.index ? (
-              <div className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
+              <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
                 {t("尚未生成项目知识。点击「生成项目知识」分析当前工作区。")}
               </div>
             ) : (
@@ -646,7 +646,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
             </p>
           </section>
 
-          <section className="space-y-2 rounded-xl border border-border bg-surface/60 px-2.5 py-2 shadow-card">
+          <section className="space-y-2 rounded-lg border border-border bg-surface/60 px-2.5 py-2 shadow-card">
             <div className="text-ui-body font-semibold text-foreground">{t("添加一条记忆")}</div>
             <div className="flex items-center gap-1">
               <button
@@ -691,7 +691,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 disabled={busy || saving || !factText.trim() || writableTargets.length === 0}
                 onClick={appendFact}
               >
-                <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+                <Plus className="size-3.5" />
                 {saving ? t("写入中…") : t("保存到{0}", scopeLabel(factScope))}
               </button>
               <span className="text-ui-caption text-muted-foreground">
@@ -712,7 +712,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               title={t("重启 CLI 并恢复当前会话，使记忆立即生效")}
               onClick={() => send({ type: "restartCli" })}
             >
-              <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+              <RefreshCw className="size-3.5" />
               {t("重启 CLI 使记忆生效")}
             </button>
             <span className="text-ui-caption text-muted-foreground">{t("记忆不会热更新到正在进行的会话。")}</span>

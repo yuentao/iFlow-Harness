@@ -108,7 +108,7 @@ export function SettingsModal({
               onDismiss();
             }}
           >
-            <RefreshCw className="mr-0.5 inline size-3 align-[-2px]" />
+            <RefreshCw className="size-3.5" />
             {t("重启 CLI")}
           </button>
           <span className="ml-auto hidden text-ui-caption text-muted-foreground @min-[520px]:inline">
@@ -158,7 +158,7 @@ export function SettingsModal({
  * per-row card wall so long tabs stay scannable. */
 function SettingsGroup({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+    <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
       <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-4 py-3">
         <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
         {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
@@ -181,7 +181,7 @@ function SettingsDisclosure({
   children: ReactNode;
 }) {
   return (
-    <details className="group overflow-hidden rounded-xl border border-border bg-surface/60 shadow-card">
+    <details className="group overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
       <summary className="flex cursor-pointer list-none items-center gap-2 bg-surface/40 px-4 py-3 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90" />
         <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
@@ -762,7 +762,7 @@ function RuntimeSection() {
   ];
   return (
     <div className="space-y-4">
-      <p className="rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
+      <p className="rounded-lg border border-primary/25 bg-primary/5 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
         {t(
           "这些设置写入 VSCode 用户 settings.json；开启 VSCode 设置同步后会跨设备同步。API Key 保存在 SecretStorage，不会同步。",
         )}
@@ -865,7 +865,7 @@ function RuntimeSection() {
 function McpTab({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderDispatch }) {
   return (
     <div className="space-y-4">
-      <p className="rounded-xl border border-border bg-surface/60 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
+      <p className="rounded-lg border border-border bg-surface/60 px-4 py-3 text-ui-label leading-relaxed text-muted-foreground">
         {t("MCP 服务器配置保存在 ~/.iflow/settings.json，由 CLI 读取；不随 VSCode 设置同步。")}
       </p>
       <McpSection busy={busy} onHeader={onHeader} />
@@ -1044,7 +1044,7 @@ function ApiConfigSection({
                   className={BTN}
                   onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}
                 >
-                  <ExternalLink className="mr-0.5 inline size-3 align-[-2px]" />
+                  <ExternalLink className="size-3.5" />
                   {t("获取 API Key")}
                 </button>
               )}
@@ -1140,7 +1140,7 @@ function ApiConfigSection({
   return (
     <div className="space-y-2">
       {showImport && (
-        <div className="rounded-xl border border-primary/30 bg-primary/5 px-2.5 py-2">
+        <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
           <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
             <Download className="size-3.5 shrink-0 text-primary" />
             {t("检测到 iFlow CLI 已有凭据")}
@@ -1189,14 +1189,14 @@ function ApiConfigSection({
       {auth.profiles.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 pb-0.5">
           <button className={BTN} disabled={busy} onClick={() => openNew()}>
-            <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+            <Plus className="size-3.5" />
             {t("添加配置")}
           </button>
           <span className="text-ui-caption text-muted-foreground">{t("点击配置即可切换并重新认证")}</span>
         </div>
       )}
       {auth.profiles.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border px-3 py-4">
+        <div className="rounded-lg border border-dashed border-border px-3 py-4">
           <div className="text-center text-ui-label font-semibold text-foreground">
             {t("尚未添加 API 配置")}
           </div>
@@ -1217,7 +1217,7 @@ function ApiConfigSection({
           </div>
           <div className="mt-2 flex justify-center">
             <button className={BTN} onClick={() => openNew()}>
-              <Plus className="mr-0.5 inline size-3 align-[-2px]" />
+              <Plus className="size-3.5" />
               {t("自定义配置")}
             </button>
           </div>

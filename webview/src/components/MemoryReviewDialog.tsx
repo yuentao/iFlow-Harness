@@ -69,7 +69,7 @@ export function MemoryReviewDialog({
       footer={
         <div className="flex items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <button className={SAVE_BTN} disabled={selectedCount === 0 || applied} onClick={save}>
-            <Check className="mr-0.5 inline size-3 align-[-2px]" />
+            <Check className="size-3.5" />
             {t("保存选中（{0}）", selectedCount)}
           </button>
           <button className={BTN} onClick={() => close(true)}>

@@ -209,16 +209,16 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         <button
           disabled={answered}
           aria-label={t("提交回答")}
-          className="press flex items-center gap-1 rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
+          className="press inline-flex h-6 items-center justify-center gap-1 rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
           onClick={submit}
         >
-          <Check className="size-3" />
+          <Check className="size-3.5" />
           {t("提交回答")}
         </button>
         <button
           disabled={answered}
           aria-label={t("跳过提问")}
-          className="press rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
           onClick={dismiss}
         >
           {t("跳过")}

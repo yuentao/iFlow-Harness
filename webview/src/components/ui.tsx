@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft, FileCode2, HelpCircle, X } from "lucide-react";
 import { useChat } from "../store";
@@ -360,7 +360,7 @@ export function HelpTip({
         <span
           id={id}
           role="tooltip"
-          className={`absolute top-full z-50 mt-1 w-60 max-w-[calc(100vw-48px)] rounded-lg border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-panel ${
+          className={`absolute top-full z-50 mt-1 w-60 max-w-[calc(100vw-48px)] rounded-xl border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-panel ${
             align === "left" ? "left-0" : "right-0"
           }`}
         >
@@ -380,19 +380,28 @@ export function HelpTip({
  * so a family-wide change is a single edit.
  */
 export const BTN_INPUT =
-  "rounded-lg border border-border bg-editor px-2.5 py-1.5 text-ui-body text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
+  "rounded-md border border-border bg-editor px-2.5 py-1.5 text-ui-body text-foreground outline-none transition-all duration-200 placeholder:text-muted-foreground/80 focus:border-primary/50 focus:shadow-focus";
+/** Regular secondary button (28px). */
 export const BTN =
-  "press rounded-lg border border-border bg-editor px-2.5 py-1 text-ui-caption font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
+  "press inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-border bg-editor px-2.5 text-ui-caption font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
+/** Compact secondary button (24px) for dense card action rows. */
+export const BTN_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 rounded-md border border-border bg-editor px-2 text-ui-caption font-medium text-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent disabled:pointer-events-none disabled:opacity-40";
+/** Regular primary button (28px). */
 export const SAVE_BTN =
-  "press rounded-lg bg-gradient-to-b from-primary to-primary/90 px-2.5 py-1 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
-/** Canvas-surface chip button (composer controls): lifts like transcript
+  "press inline-flex h-7 items-center justify-center gap-1.5 rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
+/** Canvas-surface chip button (composer controls, 28px): lifts like transcript
  * cards. whitespace-nowrap: a narrow panel must never squeeze a label into
  * vertical text (e.g. 智/能 stacked) — the row wraps instead (flex-wrap). */
 export const CANVAS_BTN =
-  "card-lift press inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
-/** Compact icon-only button (header cluster). */
+  "card-lift press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-surface/80 px-2 text-ui-caption text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
+/** Compact icon-only button (header cluster, 28×28). */
 export const BTN_ICON =
-  "rounded-md p-1.5 text-muted-foreground hover:bg-surface hover:text-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40";
+  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-surface hover:text-foreground active:scale-95 disabled:pointer-events-none disabled:opacity-40";
+/** Icon scale: 14px inline controls, 16px toolbar buttons, 20px empty states. */
+export const ICON_INLINE = "size-3.5";
+export const ICON_TOOLBAR = "size-4";
+export const ICON_DISPLAY = "size-5";
 
 /** Clickable file reference that opens the location in the editor. */
 export function FileRef({ path, line, toolCallId }: { path: string; line?: number | null; toolCallId?: string }) {
@@ -455,7 +464,7 @@ export function ConfirmDialog({
         <button
           data-autofocus
           type="button"
-          className="press rounded-lg border border-border bg-editor px-3 py-1 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-editor px-3 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
           onClick={onCancel}
         >
           {t("取消")}
@@ -467,7 +476,7 @@ export function ConfirmDialog({
                 type="button"
                 title={a.title}
                 disabled={a.disabled}
-                className={`press rounded-lg border px-3 py-1 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`press inline-flex h-6 items-center justify-center rounded-md border px-3 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                   a.variant === "primary"
                     ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
                     : a.variant === "danger"
@@ -482,7 +491,7 @@ export function ConfirmDialog({
           : (
             <button
               type="button"
-              className="press rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-1 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
+              className="press inline-flex h-6 items-center justify-center rounded-md border border-destructive/50 bg-destructive/10 px-3 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
               onClick={onConfirm}
             >
               {confirmLabel ?? t("删除")}
@@ -591,6 +600,39 @@ export function Dropdown({
     if (menuRef.current?.querySelector("input, textarea")) return;
     focusMenuItem(getMenuItems(), 0);
   }, [open]);
+
+  // Keep the menu inside the viewport. Right-aligned menus near a narrow panel
+  // edge (thinking level at 300px) used to start left of x=0. Shift the
+  // absolutely positioned menu with margin-left — not transform — so the
+  // dropdown-in animation keeps working.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    const anchor = ref.current;
+    if (!menu || !anchor) return;
+    const clamp = () => {
+      const width = menu.offsetWidth;
+      const rect = anchor.getBoundingClientRect();
+      const margin = 8;
+      const viewport = document.documentElement.clientWidth;
+      const preferred = align === "right" ? rect.right - width : rect.left;
+      const target = Math.max(margin, Math.min(preferred, viewport - margin - width));
+      // Position relative to the wrapper's padding box and drop the class's
+      // `right-0` anchor; margin-left is ignored on a right-anchored absolute box.
+      menu.style.left = `${target - rect.left}px`;
+      menu.style.right = "auto";
+    };
+    clamp();
+    window.addEventListener("resize", clamp);
+    const observer = new ResizeObserver(clamp);
+    observer.observe(menu);
+    return () => {
+      window.removeEventListener("resize", clamp);
+      observer.disconnect();
+      menu.style.left = "";
+      menu.style.right = "";
+    };
+  }, [open, align]);
 
   function onMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>): void {
     const ae = document.activeElement as HTMLElement | null;
