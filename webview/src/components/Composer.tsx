@@ -3,8 +3,11 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Brain,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   FileCode,
   FileText,
   Folder as FolderIcon,
@@ -26,7 +29,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { collectUserPromptTexts, isPlanMode, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
+import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { CANVAS_BTN, ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
@@ -43,6 +46,40 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+
+/** UI-audit 4.6: context cards collapse to one-line chips; beyond this many
+ * the rest fold behind a "+N" chip so a stack of sources cannot eat the
+ * composer's height. */
+const CONTEXT_CHIP_MAX = 3;
+
+/** UI-audit 4.6: the model menu only grows a search row past this many models
+ * — a five-entry catalog does not need a filter box above it. */
+const MODEL_SEARCH_MIN = 8;
+
+/** Reasoning levels (label + one-line description), rendered as a section at
+ * the bottom of the model menu. */
+const THINK_LEVELS = [
+  ["auto", "自动", "模型自行决定思考投入"],
+  ["fast", "快速", "优先响应速度"],
+  ["balanced", "平衡", "平衡速度与分析能力"],
+  ["deep", "深度", "适合复杂任务、规划和调试"],
+] as const satisfies ReadonlyArray<readonly [ThinkLevel, string, string]>;
+
+/** Icon per context-card source kind — shared by the collapsed chip row and
+ * the expanded preview header. */
+function contextIcon(kind: ContextRefUi["kind"]): typeof FileCode {
+  return kind === "code"
+    ? FileCode
+    : kind === "folder"
+      ? FolderIcon
+      : kind === "problems"
+        ? AlertTriangle
+        : kind === "git"
+          ? GitBranch
+          : kind === "terminal"
+            ? SquareTerminal
+            : Globe;
+}
 
 function isImageFile(file: File): boolean {
   // Clipboard files may carry an empty MIME type — fall back to the extension.
@@ -73,14 +110,16 @@ const EMPTY_MODELS: ModelInfoUi[] = [];
 const EMPTY_QUEUE: QueuedPromptUi[] = [];
 
 /**
- * Session token usage chip — subscribes to the usage NUMBERS as primitives
- * (postMessage re-clones the usage object on every patch, so an object
- * selector would re-render on every blockPatch; primitives only move when
- * the host's throttled real-time refresh actually changes them) — the live
- * streaming refresh re-renders ONLY this small label, not the whole Composer.
- * The host zeroes usage at session start, so the chip shows ↑0 ↓0 from the
- * first paint; it hides only when the field is absent entirely (older hosts).
- * Sits right of the model dropdown it counts.
+ * Session token usage, read as PRIMITIVE selectors — postMessage re-clones the
+ * usage object on every patch, so an object selector would re-render on every
+ * blockPatch (up to 12.5/s while streaming); primitives only move when the
+ * host's throttled real-time refresh actually changes a number. Both consumers
+ * below are tiny leaf components, so the live refresh never re-renders the
+ * whole Composer.
+ *
+ * The host zeroes usage at session start, so the readout shows real numbers
+ * from the first paint; it hides only when the field is absent entirely (older
+ * hosts).
  *
  * M1 P0-6: when the host resolves a context window for the active model, the
  * chip grows a mini occupancy bar (post-compression context / window, hover
@@ -88,7 +127,7 @@ const EMPTY_QUEUE: QueuedPromptUi[] = [];
  * M1 P1-6: an estimated cost (unit price × cached token sums) rides along
  * when a price is known for the model.
  */
-function SessionUsageChip() {
+function useUsage() {
   const hasUsage = useChat((s) => s.state?.usage != null);
   const inputTokens = useChat((s) => s.state?.usage?.inputTokens ?? 0);
   const outputTokens = useChat((s) => s.state?.usage?.outputTokens ?? 0);
@@ -102,53 +141,97 @@ function SessionUsageChip() {
   const bdAssistant = useChat((s) => s.state?.usage?.breakdown?.assistant ?? 0);
   const bdTool = useChat((s) => s.state?.usage?.breakdown?.tool ?? 0);
   const bdThought = useChat((s) => s.state?.usage?.breakdown?.thought ?? 0);
-  if (!hasUsage) return null;
-  const pct = contextWindow && contextWindow > 0 ? Math.min(100, Math.round((contextUsed / contextWindow) * 100)) : null;
-  const barTone =
-    pct === null ? "" : pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-primary/70";
-  const hoverTitle =
-    pct === null
-      ? [
-          t(
-            usageAuthoritative
-              ? "当前上下文 {0} tokens（CLI 上报）"
-              : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）",
-            (usageAuthoritative ? contextUsed : inputTokens).toLocaleString(),
-          ),
-          t("输入 {0} tokens · 输出 {1} tokens", inputTokens.toLocaleString(), outputTokens.toLocaleString()),
-        ].join("\n")
-      : [
-          t(
-            "上下文占用 {0} / {1}（{2}%{3}{4}）",
-            contextUsed.toLocaleString(),
-            (contextWindow as number).toLocaleString(),
-            pct,
-            estimated ? t("，窗口为估算值") : "",
-            usageAuthoritative ? t("，占用为 CLI 上报值") : "",
-          ),
-          t("输入 {0} tokens · 输出 {1} tokens", inputTokens.toLocaleString(), outputTokens.toLocaleString()),
-          t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", bdUser.toLocaleString(), bdAssistant.toLocaleString(), bdTool.toLocaleString(), bdThought.toLocaleString()),
-          cacheReadTokens > 0 ? t("缓存读取 {0} tokens", cacheReadTokens.toLocaleString()) : "",
-          estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(estimatedCost)) : t("该模型无单价记录，不显示成本"),
-        ].filter(Boolean).join("\n");
+  const pct =
+    contextWindow && contextWindow > 0
+      ? Math.min(100, Math.round((contextUsed / contextWindow) * 100))
+      : null;
+  return {
+    hasUsage,
+    inputTokens,
+    outputTokens,
+    contextWindow,
+    contextUsed,
+    pct,
+    estimated,
+    usageAuthoritative,
+    estimatedCost,
+    cacheReadTokens,
+    bdUser,
+    bdAssistant,
+    bdTool,
+    bdThought,
+  };
+}
+
+type Usage = ReturnType<typeof useUsage>;
+
+function usageBarTone(pct: number): string {
+  return pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-primary/70";
+}
+
+/** Full breakdown, shared by the chip's tooltip and the menu summary. */
+function usageTooltip(u: Usage): string {
+  return u.pct === null
+    ? [
+        t(
+          u.usageAuthoritative
+            ? "当前上下文 {0} tokens（CLI 上报）"
+            : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）",
+          (u.usageAuthoritative ? u.contextUsed : u.inputTokens).toLocaleString(),
+        ),
+        t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
+      ].join("\n")
+    : [
+        t(
+          "上下文占用 {0} / {1}（{2}%{3}{4}）",
+          u.contextUsed.toLocaleString(),
+          (u.contextWindow as number).toLocaleString(),
+          u.pct,
+          u.estimated ? t("，窗口为估算值") : "",
+          u.usageAuthoritative ? t("，占用为 CLI 上报值") : "",
+        ),
+        t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
+        t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", u.bdUser.toLocaleString(), u.bdAssistant.toLocaleString(), u.bdTool.toLocaleString(), u.bdThought.toLocaleString()),
+        u.cacheReadTokens > 0 ? t("缓存读取 {0} tokens", u.cacheReadTokens.toLocaleString()) : "",
+        u.estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(u.estimatedCost)) : t("该模型无单价记录，不显示成本"),
+      ]
+        .filter(Boolean)
+        .join("\n");
+}
+
+/**
+ * Compact occupancy readout embedded in the model trigger (UI-audit 4.6:
+ * model + usage are ONE chip — the row used to carry both separately). Hover
+ * carries the full breakdown; the always-available session detail lives in the
+ * status-bar tooltip (a menu section was tried here first and was unreachable
+ * behind a gateway's long model list).
+ */
+function SessionUsageChip() {
+  const u = useUsage();
+  if (!u.hasUsage) return null;
+  const hoverTitle = usageTooltip(u);
   return (
     <span
       title={hoverTitle}
       className="flex shrink-0 items-center gap-1 font-mono text-ui-caption tabular-nums text-muted-foreground/80 @max-[620px]:hidden"
     >
-      {pct !== null && (
-        <span className="ml-0.5 flex items-center gap-1" title={hoverTitle}>
+      {u.pct !== null && (
+        <span className="ml-0.5 flex items-center gap-1">
           <span className="h-1 w-12 overflow-hidden rounded-full bg-border/70">
-            <span className={`block h-full rounded-full transition-all duration-300 ${barTone}`} style={{ width: `${pct}%` }} />
+            <span
+              className={`block h-full rounded-full transition-all duration-300 ${usageBarTone(u.pct)}`}
+              style={{ width: `${u.pct}%` }}
+            />
           </span>
-          <span className={pct >= 90 ? "text-destructive" : pct >= 70 ? "text-warning" : ""}>
-            {estimated ? "≈" : ""}{pct}%
+          <span className={u.pct >= 90 ? "text-destructive" : u.pct >= 70 ? "text-warning" : ""}>
+            {u.estimated ? "≈" : ""}
+            {u.pct}%
           </span>
         </span>
       )}
-      {estimatedCost !== null && (
+      {u.estimatedCost !== null && (
         <span className="ml-0.5 opacity-80" title={t("预估成本（token 估算 × 公开单价，仅供参考）")}>
-          {formatCost(estimatedCost)}
+          {formatCost(u.estimatedCost)}
         </span>
       )}
     </span>
@@ -182,8 +265,10 @@ function QueueStrip() {
   const act = (action: "edit" | "delete" | "move" | "sendNow" | "resume" | "clear", id?: string, delta?: number): void => {
     send({ type: "queueAction", action, id, delta });
   };
+  // UI-audit 4.6: 24px hit area (the icons stay 14px) — 12px targets were
+  // easy to miss in a dense row.
   const miniBtn =
-    "rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground";
+    "inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-35";
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface/70 shadow-card">
       <div className={`flex items-center gap-1.5 px-2.5 py-1 ${expanded && queue.length > 0 ? "border-b border-border/60" : ""}`}>
@@ -244,19 +329,19 @@ function QueueStrip() {
                   {t("附件 {0}", q.attachments.length)}
                 </span>
               )}
-              <span className="flex shrink-0 items-center gap-0.5 opacity-40 transition-opacity group-hover:opacity-100">
+              <span className="flex shrink-0 items-center gap-0.5 opacity-40 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                 <button className={miniBtn} title={t("打断并立即发送")} onClick={() => act("sendNow", q.id)}>
-                  <Play className="size-3" />
+                  <Play className="size-3.5" />
                 </button>
                 <button
                   className={miniBtn}
                   title={t("取回编辑")}
                   onClick={() => send({ type: "queueAction", action: "edit", id: q.id, requestId: ++queueEditSeqGlobal.current })}
                 >
-                  <Pencil className="size-3" />
+                  <Pencil className="size-3.5" />
                 </button>
                 <button className={miniBtn} title={t("上移")} disabled={i === 0} onClick={() => act("move", q.id, -1)}>
-                  <ArrowUp className="size-3" />
+                  <ArrowUp className="size-3.5" />
                 </button>
                 <button
                   className={miniBtn}
@@ -264,10 +349,10 @@ function QueueStrip() {
                   disabled={i === queue.length - 1}
                   onClick={() => act("move", q.id, 1)}
                 >
-                  <ArrowDown className="size-3" />
+                  <ArrowDown className="size-3.5" />
                 </button>
                 <button className={miniBtn} title={t("删除")} onClick={() => act("delete", q.id)}>
-                  <X className="size-3" />
+                  <X className="size-3.5" />
                 </button>
               </span>
             </li>
@@ -299,7 +384,6 @@ export function Composer() {
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
   const needsSetup = useChat((s) => s.state?.auth.needsSetup ?? false);
-  const compressing = useChat((s) => s.state?.compressing ?? false);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
@@ -330,6 +414,19 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
    * @folder/@problems/@git/@url). Generalizes the old single code card;
    * each card is removable, the host assembles all of them at send time. */
   const [contexts, setContexts] = useState<ContextRefUi[]>([]);
+  /** UI-audit 4.6: chips are collapsed by default; this is the one card whose
+   * preview is open (null = none). */
+  const [expandedContextId, setExpandedContextId] = useState<string | null>(null);
+  /** "+N" chip: reveal the sources beyond CONTEXT_CHIP_MAX. */
+  const [showAllContexts, setShowAllContexts] = useState(false);
+  /** The card whose preview is open — a removed id simply collapses it. */
+  const expandedContext = contexts.find((c) => c.id === expandedContextId) ?? null;
+
+  /** Remove a context source (the host re-assembles the rest at send time). */
+  function removeContext(id: string): void {
+    setContexts((prev) => prev.filter((x) => x.id !== id));
+    setExpandedContextId((cur) => (cur === id ? null : cur));
+  }
   const contextSeq = useRef(0);
   const stageSeq = useRef(0);
   const attachSeq = useRef(0);
@@ -637,8 +734,16 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // while an approval/question card is up. It is only locked before a session
   // exists (replay/init) or while another switch is in flight.
   const modeLocked = replaying || initializing || pending !== null;
-  const thinkLocked = replaying || initializing || pending !== null || hasPendingInteraction;
   const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
+  /** UI-audit 4.6: the trigger shows the display name (matching the menu rows);
+   * an unknown / delisted id falls back to the raw id so the chip never lies
+   * about what is actually selected. */
+  const currentModelName =
+    models.find((m) => m.id === currentModelId)?.name ??
+    currentModelId ??
+    models[0]?.name ??
+    models[0]?.id ??
+    "";
 
   // Slash-command popup: every command matching the typed prefix. While the
   // popup is open, Enter/Tab complete the selected command instead of sending.
@@ -664,6 +769,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const [modelIndex, setModelIndex] = useState(0);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const currentModelRef = useRef<HTMLButtonElement | null>(null);
+  /** UI-audit 4.6 (revised): reasoning level sits in a sticky footer of the
+   * model menu (the row is always reachable, unlike a section appended after a
+   * gateway's hundred-model list). Clicking it swaps the footer for the four
+   * levels instead of stacking another section. Reset whenever the menu
+   * closes, and focus moves into the panel when it opens (Dropdown only
+   * focuses at open time). */
+  const [thinkPanel, setThinkPanel] = useState(false);
+  const thinkPanelRef = useRef<HTMLDivElement | null>(null);
+  const thinkRowRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (thinkPanel) thinkPanelRef.current?.querySelector<HTMLElement>("button")?.focus();
+  }, [thinkPanel]);
   const filteredModels = useMemo(() => {
     const q = modelQuery.trim();
     if (!q) return models.map((m) => ({ m, score: 0 }));
@@ -689,13 +806,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     }
   }, [modelMenuOpen, modelQuery, models]);
 
-  const [note, setNote] = useState<string | null>(null);
-  const noteTimer = useRef<number | undefined>(undefined);
-
-  function showNote(message: string): void {
-    setNote(message);
-    window.clearTimeout(noteTimer.current);
-    noteTimer.current = window.setTimeout(() => setNote(null), 5000);
+  // UI-audit 4.6: the inline note row was a fourth notification surface next to
+  // host toasts / the error pill / the auth banner. Local notices now ride the
+  // shared toast stack (store.notify), so there is one place to look; only
+  // field-level validation would stay inline (the composer has none).
+  const notify = useChat((s) => s.notify);
+  function showNote(message: string, level: "info" | "warning" | "error" = "warning"): void {
+    notify(message, level);
   }
 
   // M1 P1-5 Enhance Prompt: hand the draft to the host (one internal prompt,
@@ -735,7 +852,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     // While a rewrite is in flight the wand becomes a cancel button.
     if (enhancePending.current) {
       cancelInflight();
-      showNote(t("已取消增强"));
+      showNote(t("已取消增强"), "info");
       return;
     }
     const value = text.trim();
@@ -744,7 +861,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     if (enhanceOriginal.current !== null) {
       setText(enhanceOriginal.current);
       enhanceOriginal.current = null;
-      showNote(t("已还原原始输入"));
+      showNote(t("已还原原始输入"), "info");
       return;
     }
     enhancePending.current = true;
@@ -775,7 +892,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         return;
       }
       setText(msg.text);
-      showNote(t("已增强输入（再次点击增强可还原）"));
+      showNote(t("已增强输入（再次点击增强可还原）"), "info");
       requestAnimationFrame(() => taRef.current?.focus());
     };
     window.addEventListener("message", handler);
@@ -1218,73 +1335,117 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               className="card-lift inline-flex max-w-[min(260px,100%)] items-center gap-1 rounded-lg border border-border bg-surface/80 px-1.5 py-1 text-ui-caption text-foreground shadow-card"
               title={f.path}
             >
-              <FileText className="size-3 shrink-0 text-primary" />
+              <FileText className="size-3.5 shrink-0 text-primary" />
               <span className="truncate">{f.name}</span>
               <button
-                className="ml-0.5 rounded p-0.5 text-muted-foreground hover:text-destructive"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-destructive"
                 title={t("移除")}
+                aria-label={t("移除")}
                 onClick={() => removeAttachment(f.id)}
               >
-                <X className="size-3" />
+                <X className="size-3.5" />
               </button>
             </span>
           ))}
         </div>
       )}
-      {note && <div className="mb-2 px-0.5 text-ui-caption text-warning">{note}</div>}
-      {/* M2 P0-4 context cards: right-click selection + @folder/@problems/
-          @git/@url. Each card is removable; the host assembles every card
-          into a titled fenced section ahead of the typed text at send time. */}
+      {/* M2 P0-4 context sources: right-click selection + @folder/@problems/
+          @git/@url; the host assembles every card into a titled fenced section
+          ahead of the typed text at send time.
+          UI-audit 4.6: collapsed to one-line chips (icon + name + range + size)
+          — the raw <pre> used to dominate the composer once a few sources were
+          attached. Click a chip for the preview; at most CONTEXT_CHIP_MAX chips
+          show, the rest fold into "+N". */}
       {contexts.length > 0 && (
         <div className="mb-2 flex flex-col gap-1.5">
-          {contexts.map((c) => {
-            const Icon =
-              c.kind === "code"
-                ? FileCode
-                : c.kind === "folder"
-                  ? FolderIcon
-                  : c.kind === "problems"
-                    ? AlertTriangle
-                    : c.kind === "git"
-                      ? GitBranch
-                      : c.kind === "terminal"
-                        ? SquareTerminal
-                        : Globe;
-            return (
-              <div
-                key={c.id}
-                className="code-context-card card-lift overflow-hidden rounded-lg border border-border bg-editor shadow-card"
-              >
-                <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
-                  <Icon className="size-3.5 shrink-0 text-primary" />
-                  <span className="truncate font-mono text-ui-caption text-foreground" title={c.label}>
-                    {c.label}
-                  </span>
-                  {c.detail && (
-                    <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-ui-caption text-muted-foreground">
-                      {c.detail}
-                    </span>
-                  )}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(showAllContexts ? contexts : contexts.slice(0, CONTEXT_CHIP_MAX)).map((c) => {
+              const Icon = contextIcon(c.kind);
+              const open = expandedContextId === c.id;
+              return (
+                <span
+                  key={c.id}
+                  className={`inline-flex max-w-full items-center gap-0.5 rounded-lg border bg-surface/80 py-0.5 pl-1.5 pr-0.5 text-ui-caption shadow-card transition-colors ${
+                    open ? "border-primary/50" : "border-border hover:bg-surface-2"
+                  }`}
+                >
                   <button
-                    className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
+                    type="button"
+                    className="flex min-w-0 items-center gap-1.5 rounded text-left text-foreground"
+                    aria-expanded={open}
+                    title={open ? t("收起") : t("展开上下文")}
+                    onClick={() => setExpandedContextId(open ? null : c.id)}
+                  >
+                    <Icon className="size-3.5 shrink-0 text-primary" />
+                    <span className="max-w-[150px] truncate font-mono" title={c.label}>
+                      {c.label}
+                    </span>
+                    {c.detail && (
+                      <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-ui-micro text-muted-foreground">
+                        {c.detail}
+                      </span>
+                    )}
+                    <span className="shrink-0 font-mono text-ui-micro tabular-nums text-muted-foreground/80">
+                      {t("{0} 字符", c.content.length.toLocaleString())}
+                    </span>
+                    <ChevronDown
+                      className={`size-3 shrink-0 text-muted-foreground transition-transform duration-150 ${open ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-destructive"
                     title={t("移除")}
-                    onClick={() => setContexts((prev) => prev.filter((x) => x.id !== c.id))}
+                    aria-label={t("移除")}
+                    onClick={() => removeContext(c.id)}
                   >
                     <X className="size-3.5" />
                   </button>
-                </div>
-                {c.kind === "code" ? (
-                  <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-ui-caption leading-[1.6] text-foreground/90">
-                    {c.content}
-                  </pre>
-                ) : (
-                  <pre className="max-h-24 overflow-auto whitespace-pre-wrap px-2.5 py-1.5 font-mono text-ui-caption leading-[1.55] text-muted-foreground">
-                    {c.content}
-                  </pre>
-                )}
+                </span>
+              );
+            })}
+            {contexts.length > CONTEXT_CHIP_MAX && (
+              <button
+                type="button"
+                className="press inline-flex h-6 shrink-0 items-center rounded-lg border border-border bg-surface/80 px-2 font-mono text-ui-caption text-muted-foreground shadow-card transition-colors hover:bg-surface-2 hover:text-foreground"
+                title={showAllContexts ? t("收起") : t("展开全部 {0} 张上下文卡", contexts.length)}
+                onClick={() => setShowAllContexts((v) => !v)}
+              >
+                {showAllContexts ? t("收起") : `+${contexts.length - CONTEXT_CHIP_MAX}`}
+              </button>
+            )}
+          </div>
+          {expandedContext && (
+            <div className="code-context-card overflow-hidden rounded-lg border border-border bg-editor shadow-card">
+              <div className="flex items-center gap-1.5 border-b border-border/70 bg-surface/60 px-2.5 py-1.5">
+                {(() => {
+                  const Icon = contextIcon(expandedContext.kind);
+                  return <Icon className="size-3.5 shrink-0 text-primary" />;
+                })()}
+                <span className="truncate font-mono text-ui-caption text-foreground" title={expandedContext.label}>
+                  {expandedContext.label}
+                </span>
+                <button
+                  type="button"
+                  className="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                  title={t("收起")}
+                  aria-label={t("收起")}
+                  onClick={() => setExpandedContextId(null)}
+                >
+                  <ChevronDown className="size-3.5 rotate-180" />
+                </button>
               </div>
-            );
-          })}
+              {expandedContext.kind === "code" ? (
+                <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-ui-caption leading-[1.6] text-foreground/90">
+                  {expandedContext.content}
+                </pre>
+              ) : (
+                <pre className="max-h-24 overflow-auto whitespace-pre-wrap px-2.5 py-1.5 font-mono text-ui-caption leading-[1.55] text-muted-foreground">
+                  {expandedContext.content}
+                </pre>
+              )}
+            </div>
+          )}
         </div>
       )}
       {images.length > 0 && (
@@ -1301,11 +1462,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <ImageIcon className="size-4 text-muted-foreground" />
               )}
               <button
-                className="absolute right-0 top-0 flex size-4 items-center justify-center rounded-bl-[4px] bg-black/55 text-white hover:bg-black/75"
+                className="absolute right-0 top-0 flex size-6 items-center justify-center rounded-bl-lg bg-black/55 text-white transition-colors hover:bg-black/75"
                 title={t("移除")}
+                aria-label={t("移除")}
                 onClick={() => removeImage(i)}
               >
-                <X className="size-2.5" />
+                <X className="size-3.5" />
               </button>
             </span>
           ))}
@@ -1409,11 +1571,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           the wait is visible instead of the row appearing from nowhere. */}
       {suggestionsLoading && (suggestions?.length ?? 0) === 0 && !suggestionsHidden && (
         <div
-          className="mb-2 flex items-center gap-1 rounded-lg border border-primary/25 bg-primary/8 px-2 py-1 text-ui-caption text-muted-foreground"
+          className="mb-2 flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-muted-foreground shadow-card"
           aria-label={t("预测下一步操作…")}
         >
-          <Sparkles className="size-3 shrink-0 text-primary" />
-          <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+          <Loader2 className="size-3 shrink-0 animate-spin" />
           <span className="min-w-0 flex-1 truncate">{t("预测下一步操作…")}</span>
         </div>
       )}
@@ -1428,13 +1589,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           aria-label={t("AI 推测的下一步操作，点击填入输入框")}
         >
           <span className="inline-flex shrink-0 items-center gap-1 text-ui-caption text-muted-foreground">
-            <Sparkles className="size-3 text-primary" />
-            {t("下一步")}
+            <Sparkles className="size-3" />
+            {t("建议")}
           </span>
-          {suggestions.map((s) => (
+          {/* UI-audit 4.6: neutral chips (primary used to compete with the send
+              button for attention) and at most 3 candidates. */}
+          {suggestions.slice(0, 3).map((s) => (
             <button
               key={s}
-              className="press inline-flex max-w-full items-center rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-ui-caption text-foreground transition-colors hover:border-primary/60 hover:bg-primary/20"
+              className="press inline-flex max-w-full items-center rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-foreground shadow-card transition-colors hover:bg-surface-2"
               title={t("AI 推测的下一步操作，点击填入输入框")}
               onClick={() => applySuggestion(s)}
             >
@@ -1442,12 +1605,12 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             </button>
           ))}
           <button
-            className="press ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            className="press ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
             title={t("关闭建议")}
             aria-label={t("关闭建议")}
             onClick={() => setSuggestionsHidden(true)}
           >
-            <X className="size-3" />
+            <X className="size-3.5" />
           </button>
         </div>
       )}
@@ -1456,7 +1619,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         <textarea
           ref={taRef}
           value={text}
-                      placeholder={enqueueMode ? (compressing ? t("压缩中 · Enter 排队发送") : isPlanMode(modes) ? t("规划中 · Enter 排队发送") : t("生成中 · Enter 排队发送")) : t("向 iFlow 提问…")}          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+          placeholder={enqueueMode ? t("排队发送（Enter）") : t("向 iFlow 提问…")}
+          rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
             if (histIndex >= 0 && e.target.value !== histEntryRef.current) {
@@ -1614,20 +1778,26 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
 
           {/* model dropdown — refreshed at open time: the host re-queries
               GET {baseUrl}/models, so newly added gateway models show up
-              without restarting the session */}
+              without restarting the session.
+              UI-audit 4.6: ONE chip carries model + usage (occupancy bar and
+              cost ride the trigger; the full breakdown lives in the status-bar
+              tooltip, NOT in this menu), and the reasoning level is a sticky
+              footer row here instead of its own control. The trigger shows the
+              display NAME — it used to show the raw id while the menu listed
+              names, so the two disagreed. */}
           {models.length > 0 && (
             <Dropdown
               direction="up"
-              menuClass="w-56 max-w-[calc(100vw-24px)] max-h-64 overflow-y-auto"
+              menuClass="w-60 max-w-[calc(100vw-24px)] max-h-[min(60vh,22rem)] overflow-y-auto"
               disabled={controlsLocked}
               onOpenChange={(o) => {
                 setModelMenuOpen(o);
+                setThinkPanel(false);
                 if (o) {
                   send({ type: "refreshModels" });
                   // keyboard highlight starts on the active model, not the top
-                    const idx = currentModelId
-                      ? models.findIndex((m) => m.id === currentModelId)
-                      : -1;                  setModelIndex(idx >= 0 ? idx : 0);
+                  const idx = currentModelId ? models.findIndex((m) => m.id === currentModelId) : -1;
+                  setModelIndex(idx >= 0 ? idx : 0);
                 } else {
                   setModelQuery("");
                 }
@@ -1636,13 +1806,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <button
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  className={`${CANVAS_BTN} min-w-0 font-mono${open ? " bg-surface-2" : ""}`}
+                  className={`${CANVAS_BTN} min-w-0${open ? " bg-surface-2" : ""}`}
                   title={t("模型")}
                   disabled={controlsLocked}
                 >
                   <span className="max-w-[130px] truncate @max-[520px]:max-w-[84px] @max-[340px]:max-w-[60px]">
-                    {currentModelId ?? models[0]!.id}
+                    {currentModelName}
                   </span>
+                  <SessionUsageChip />
                   <ChevronDown className="size-3.5 shrink-0 opacity-60" />
                 </button>
               )}
@@ -1650,7 +1821,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               {(close) => (
                 <>
                   {/* fuzzy search box: matches name and id; sticky so it stays
-                      visible while the list scrolls */}
+                      visible while the list scrolls. UI-audit 4.6: only worth a
+                      row once the catalog is long enough to need filtering. */}
+                  {models.length > MODEL_SEARCH_MIN && (
                   <div className="sticky top-0 z-10 border-b border-border/60 bg-panel/50 p-1.5 backdrop-blur-md">
                     <div className="flex items-center gap-3 rounded-lg border border-border bg-editor px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
                       <Search className="size-3.5 shrink-0 text-muted-foreground" />
@@ -1681,6 +1854,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                       />
                     </div>
                   </div>
+                  )}
                   {filteredModels.length === 0 && (
                     <div className="px-3 py-2 text-ui-label text-muted-foreground">{t("无匹配模型")}</div>
                   )}
@@ -1696,104 +1870,129 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                         }
                         close();
                       }}
-                      className={`flex w-full items-center px-3 py-1.5 text-left font-mono text-ui-caption ${
+                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${
                         i === modelIndex ? "bg-accent/70" : "hover:bg-accent/50"
                       }`}
                     >
-                      <span className="truncate" title={m.name}>
-                        {m.name}
+                      {/* UI-audit 4.6: primary line = friendly name, secondary =
+                          the raw id. Gateways reuse display names, so the id is
+                          what actually disambiguates two entries. */}
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate text-ui-label text-foreground" title={m.name}>
+                          {m.name}
+                        </span>
+                        <span className="truncate font-mono text-ui-micro text-muted-foreground/80" title={m.id}>
+                          {m.id}
+                        </span>
                       </span>
                       {m.id === currentModelId && (
                         <Check className="ml-auto size-3 shrink-0 text-primary" />
                       )}
                     </button>
                   ))}
+
+                  {/* UI-audit 4.6 (revised 2026-10-20): the reasoning level is a
+                      STICKY footer row, never a section appended after the
+                      list — some gateways expose dozens of models, so anything
+                      at the end of a long scrolling list is unreachable.
+                      Clicking the row swaps the footer for the four levels. */}
+                  <div className="sticky bottom-0 z-10 border-t border-border/60 bg-panel/60 backdrop-blur-md">
+                    {thinkPanel ? (
+                      <div
+                        ref={thinkPanelRef}
+                        className="py-1"
+                        onKeyDown={(e) => {
+                          if (e.key !== "Escape") return;
+                          // Esc backs out one level (panel → row) instead of
+                          // dismissing the whole model menu; stopPropagation
+                          // keeps Dropdown's document-level Escape closer out.
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setThinkPanel(false);
+                          requestAnimationFrame(() => thinkRowRef.current?.focus());
+                        }}
+                      >
+                        <button
+                          role="menuitem"
+                          className="flex w-full items-center gap-1 px-3 py-1 text-left text-ui-caption text-muted-foreground hover:bg-accent/50"
+                          onClick={() => {
+                            setThinkPanel(false);
+                            // the clicked node disappears: hand focus back to
+                            // the row that replaces it.
+                            requestAnimationFrame(() => thinkRowRef.current?.focus());
+                          }}
+                        >
+                          <ChevronLeft className="size-3.5 shrink-0" />
+                          <span>{t("思考级别")}</span>
+                        </button>
+                        {THINK_LEVELS.map(([level, label, desc]) => {
+                          const blocked = thinkUnsupported && level !== "auto";
+                          return (
+                            <button
+                              key={level}
+                              role="menuitem"
+                              onClick={() => {
+                                if (level !== thinkLevel && !blocked) {
+                                  beginPending("think", level);
+                                  send({ type: "setThink", level });
+                                }
+                                close();
+                              }}
+                              title={blocked ? t("当前模型不支持思考模式") : undefined}
+                              className={`flex w-full flex-col items-start px-3 py-1 text-left hover:bg-accent/50 ${blocked ? "opacity-45" : ""}`}
+                            >
+                              <span className="text-ui-label text-foreground">
+                                {t(label)}
+                                {level === thinkLevel && <Check className="ml-1 inline size-3 text-primary" />}
+                              </span>
+                              <span className="text-ui-caption text-muted-foreground">{t(desc)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <button
+                        role="menuitem"
+                        ref={thinkRowRef}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/50"
+                        onClick={() => setThinkPanel(true)}
+                      >
+                        <Brain className="size-3.5 shrink-0 text-primary" />
+                        <span className="text-ui-label text-foreground">{t("思考级别")}</span>
+                        <span className="ml-auto flex items-center gap-1 text-ui-caption text-muted-foreground">
+                          {t(THINK_LEVELS.find(([level]) => level === thinkLevel)?.[1] ?? "自动")}
+                          <ChevronRight className="size-3.5 shrink-0 opacity-60" />
+                        </span>
+                      </button>
+                    )}
+                  </div>
                 </>
               )}
             </Dropdown>
           )}
 
-          <div className="shrink-0 @max-[270px]:hidden">
-          {/* reasoning level dropdown — independent from permission mode; it
-              controls how much effort the active model spends on thinking */}
-          <Dropdown
-            direction="up"
-            align="right"
-            menuClass="w-56 max-w-[calc(100vw-24px)]"
-            disabled={thinkLocked}
-            trigger={(open) => (
-              <button
-                aria-haspopup="menu"
-                aria-expanded={open}
-                className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
-                title={t("思考级别")}
-                disabled={thinkLocked}
-              >
-                <ListOrdered className="size-3.5 shrink-0 text-primary" />
-                <span className="@max-[640px]:hidden">{t(thinkLevel === "auto" ? "自动" : thinkLevel === "fast" ? "快速" : thinkLevel === "balanced" ? "平衡" : "深度")}</span>
-                <ChevronDown className="size-3.5 shrink-0 opacity-60 @max-[640px]:hidden" />
-              </button>
-            )}
-          >
-            {(close) => (
-              <>
-                <div className="border-b border-border/60 px-3 py-2 text-ui-caption font-medium text-muted-foreground">
-                  {t("思考级别")}
-                </div>
-                {([
-                  ["auto", "自动", "模型自行决定思考投入"],
-                  ["fast", "快速", "优先响应速度"],
-                  ["balanced", "平衡", "平衡速度与分析能力"],
-                  ["deep", "深度", "适合复杂任务、规划和调试"],
-                ] as const satisfies ReadonlyArray<readonly [ThinkLevel, string, string]>).map(([level, label, desc]) => {
-                  const blocked = thinkUnsupported && level !== "auto";
-                  return (
-                    <button
-                      key={level}
-                      role="menuitem"
-                      onClick={() => {
-                        if (level !== thinkLevel && !blocked) {
-                          beginPending("think", level);
-                          send({ type: "setThink", level });
-                        }
-                        close();
-                      }}
-                      title={blocked ? t("当前模型不支持思考模式") : undefined}
-                      className={`flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50 ${blocked ? "opacity-45" : ""}`}
-                    >
-                      <span className="text-ui-label text-foreground">
-                        {t(label)}
-                        {level === thinkLevel && <Check className="ml-1 inline size-3 text-primary" />}
-                      </span>
-                      <span className="text-ui-caption text-muted-foreground">{t(desc)}</span>
-                    </button>
-                  );
-                })}
-              </>
-            )}
-          </Dropdown>
-          </div>
-
-          {/* session token usage — input/output split, live-refreshed while
-              streaming; its own component so the refresh re-renders only it */}
-          <SessionUsageChip />
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
-            <button
-              className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""} @max-[340px]:hidden`}
-              title={
-                enhancing
-                  ? t("正在增强，点击取消")
-                  : enhanceOriginal.current !== null
-                    ? t("还原原始输入")
-                    : t("增强提示词（AI 改写为更清晰的请求）")
-              }
-              disabled={!enhancing && (controlsLocked || (!text.trim() && enhanceOriginal.current === null))}
-              onClick={enhance}
-            >
-              {enhancing ? <Loader2 className="size-3.5 animate-spin" /> : <Wand2 className="size-3.5" />}
-            </button>
+            {/* UI-audit 4.6: the wand only appears once there is something to
+                enhance (or a rewrite to undo) — an always-present disabled
+                button just widened the row. */}
+            {(text.trim() !== "" || enhancing || enhanceOriginal.current !== null) && (
+              <button
+                className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""}`}
+                title={
+                  enhancing
+                    ? t("正在增强，点击取消")
+                    : enhanceOriginal.current !== null
+                      ? t("还原原始输入")
+                      : t("增强提示词（AI 改写为更清晰的请求）")
+                }
+                disabled={!enhancing && (controlsLocked || (!text.trim() && enhanceOriginal.current === null))}
+                onClick={enhance}
+              >
+                {enhancing ? <Loader2 className="size-3.5 animate-spin" /> : <Wand2 className="size-3.5" />}
+              </button>
+            )}
             <button
               className={CANVAS_BTN}
               title={t("添加附件")}

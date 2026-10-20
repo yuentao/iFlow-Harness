@@ -494,8 +494,14 @@ export class ChatPanel implements vscode.Disposable {
   private disposed = false;
   /** Diagnostics trail visible in the Output panel (helps locate connect issues). */
   private readonly log: vscode.LogOutputChannel;
-  /** M5: agent status at a glance (idle / streaming / approval / error + model). */
+  /** M5: agent status at a glance (idle / streaming / approval / error + model).
+   * Its tooltip doubles as the session-info entry for usage: the composer's
+   * model chip only carries the compact occupancy bar, so the full breakdown
+   * (context / split / cache / cost) lives here, one hover away. */
   private readonly statusBar: vscode.StatusBarItem;
+  /** Last rendered tooltip text — the status bar is refreshed on every state
+   * push, and rebuilding the Markdown for identical numbers is pure churn. */
+  private statusBarTooltipText = "";
   /** cwd the current ACP session was created with (base for relative paths). */
   private sessionCwd: string | null = null;
   /**
@@ -844,6 +850,64 @@ export class ChatPanel implements vscode.Disposable {
       this.statusBar.text = text;
       this.statusBar.backgroundColor = background;
     }
+    const tip = this.statusBarTooltip(state);
+    if (tip !== this.statusBarTooltipText) {
+      this.statusBarTooltipText = tip;
+      this.statusBar.tooltip = tip;
+    }
+  }
+
+  /**
+   * Status-bar hover content: launcher hint plus the session's token usage.
+   * UI-audit 4.6 moved the usage breakdown out of the composer (a section
+   * appended to the model menu was unreachable behind a gateway's long model
+   * list); the status bar is always visible, so its tooltip is the on-demand
+   * "session info" view. Plain strings in StatusBarItem.tooltip render as
+   * Markdown.
+   */
+  private statusBarTooltip(state: SessionState): string {
+    const base = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
+    const u = state.usage;
+    if (!u || u.totalTokens <= 0) return base;
+    const used = u.contextUsed ?? u.inputTokens;
+    const rows: string[] = [];
+    if (u.contextWindow) {
+      const pct = Math.min(100, Math.round((used / u.contextWindow) * 100));
+      rows.push(
+        vscode.l10n.t(
+          "上下文 {0} / {1}（{2}%）",
+          used.toLocaleString(),
+          u.contextWindow.toLocaleString(),
+          `${u.estimated ? "≈" : ""}${pct}`,
+        ),
+      );
+    } else {
+      rows.push(vscode.l10n.t("上下文约 {0} tokens", used.toLocaleString()));
+    }
+    rows.push(
+      vscode.l10n.t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
+    );
+    if (u.cacheReadTokens > 0) {
+      rows.push(vscode.l10n.t("缓存读取 {0} tokens", u.cacheReadTokens.toLocaleString()));
+    }
+    if (u.breakdown) {
+      rows.push(
+        vscode.l10n.t(
+          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}",
+          u.breakdown.user.toLocaleString(),
+          u.breakdown.assistant.toLocaleString(),
+          u.breakdown.tool.toLocaleString(),
+          u.breakdown.thought.toLocaleString(),
+        ),
+      );
+    }
+    if (u.estimatedCost !== null && u.estimatedCost !== undefined) {
+      const cost = u.estimatedCost > 0 && u.estimatedCost < 0.01
+        ? `$${u.estimatedCost.toFixed(4)}`
+        : `$${u.estimatedCost.toFixed(2)}`;
+      rows.push(vscode.l10n.t("预估成本 {0}（按公开单价估算）", cost));
+    }
+    return `${base}\n\n**${vscode.l10n.t("会话用量")}**\n\n${rows.map((r) => `- ${r}`).join("\n")}`;
   }
 
   /**

@@ -5,12 +5,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "../webview/src/components/Composer";
 import type { SessionState } from "../shared/messages";
 
-const mocked = vi.hoisted(() => ({ send: vi.fn(), state: undefined as SessionState | undefined }));
+const mocked = vi.hoisted(() => ({
+  send: vi.fn(),
+  notify: vi.fn(),
+  state: undefined as SessionState | undefined,
+}));
 const useChat = vi.hoisted(() =>
   Object.assign(
-    <T,>(selector: (s: { state: SessionState | undefined; pending: null; send: typeof mocked.send; beginPending: ReturnType<typeof vi.fn> }) => T) =>
-      selector({ state: mocked.state, pending: null, send: mocked.send, beginPending: vi.fn() }),
-    { getState: () => ({ state: mocked.state, send: mocked.send }) },
+    <T,>(
+      selector: (s: {
+        state: SessionState | undefined;
+        pending: null;
+        send: typeof mocked.send;
+        beginPending: ReturnType<typeof vi.fn>;
+        notify: typeof mocked.notify;
+      }) => T,
+    ) => selector({ state: mocked.state, pending: null, send: mocked.send, beginPending: vi.fn(), notify: mocked.notify }),
+    { getState: () => ({ state: mocked.state, send: mocked.send, notify: mocked.notify }) },
   ),
 );
 let state: SessionState;

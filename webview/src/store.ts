@@ -343,10 +343,9 @@ function createMockHost(): HostApi {
       toolName: "run_shell_command",
       title: "run_shell_command",
       toolKind: "execute",
-      status: "completed",
-      input: 'npm run build 2>&1 | tail -20 && cd webview && npx tsc --noEmit',
-      output: "Stdout: build ok\nStderr: (empty)\nExit Code: 0",
-      truncatedChars: 4096,
+      status: "in_progress",
+      input: "npm run webview:serve",
+      output: Array.from({ length: 80 }, (_, i) => `VITE v8.0.0  ready in ${120 + i} ms`).join("\n"),
       locations: [],
       diff: null,
     },
@@ -1985,6 +1984,8 @@ let lastSentKey = "";
 let lastSentAt = 0;
 let lastResyncAt = 0;
 let toastSeq = 0;
+/** Lifetime of a WebView-local notice (UI-audit 4.9: transient, ~4s). */
+const LOCAL_TOAST_MS = 4000;
 
 /** Ask the host for a full snapshot (P-1: a blockPatch we cannot anchor). */
 function requestResync(): void {
@@ -2032,6 +2033,11 @@ interface ChatStore {
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
   dismissToast: (id: number) => void;
+  /** WebView-local transient notice. UI-audit 4.6: the composer's inline note
+   * was a fourth notification surface next to host toasts / the error pill /
+   * the auth banner — local notices now ride the same toast stack, so there is
+   * one place to look. Auto-dismissed after LOCAL_TOAST_MS. */
+  notify: (message: string, level?: ToastItem["level"]) => void;
   /** Optimistic switch lock, null when idle (see PendingOp). */
   pending: PendingOp | null;
   /**
@@ -2285,6 +2291,13 @@ export const useChat = create<ChatStore>((set, get) => ({
     set({ pending: null });
   },
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+  notify: (message, level = "info") => {
+    // Local notices share the host toast stack (one notification surface) and
+    // the same id sequence, so dismissToast works for both.
+    const id = ++toastSeq;
+    set((s) => ({ toasts: [...s.toasts, { id, level, message }] }));
+    setTimeout(() => get().dismissToast(id), LOCAL_TOAST_MS);
+  },
   updateHostSetting: (patch) => {
     set((s) => ({ hostSettings: { ...s.hostSettings, ...patch } }));
     const next = get().hostSettings;

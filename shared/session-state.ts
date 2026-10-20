@@ -236,6 +236,14 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]!;
     if (block.kind === "tool" && block.toolCallId === patch.toolCallId) {
+      // Long-running shell commands stream their output as
+      // tool_call_update(in_progress) frames. A frame that reaches the
+      // webview after the terminal update (send ordering across the NDJSON
+      // pipe) must neither resurrect the spinner nor replace the final
+      // output with its tail slice.
+      if (patch.status === "in_progress" && (block.status === "completed" || block.status === "failed")) {
+        return i;
+      }
       // `patch` carries no `id` key (creation sites below omit it), so the
       // spread keeps the existing block's id stable across updates. A patch
       // bringing a NEW diff means the file was edited again — the stale

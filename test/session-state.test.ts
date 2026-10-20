@@ -889,6 +889,71 @@ describe("applySessionUpdate", () => {
     expect(state.blocks[0]).toMatchObject({ output: "result" });
   });
 
+  it("streams a running shell command's output through in_progress updates", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "sh1",
+        toolName: "run_shell_command",
+        kind: "execute",
+        status: "in_progress",
+        args: { command: "npm run webview:serve" },
+      }),
+    );
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sh1",
+        status: "in_progress",
+        content: [{ type: "content", content: { type: "text", text: "VITE v8 ready" } }],
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({ status: "in_progress", output: "VITE v8 ready" });
+    // Every live frame carries the cumulative tail, not a delta — replace it.
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sh1",
+        status: "in_progress",
+        content: [
+          { type: "content", content: { type: "text", text: "VITE v8 ready\nLocal: http://localhost:5173/" } },
+        ],
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({
+      status: "in_progress",
+      output: "VITE v8 ready\nLocal: http://localhost:5173/",
+    });
+  });
+
+  it("drops a live in_progress frame that lands after the terminal update", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "sh1", toolName: "run_shell_command", kind: "execute", status: "pending" }));
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sh1",
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: "full output" } }],
+      }),
+    );
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sh1",
+        status: "in_progress",
+        content: [{ type: "content", content: { type: "text", text: "late tail" } }],
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({ status: "completed", output: "full output" });
+  });
+
   it("captures the shell command from tool args into input", () => {
     const state = initialSessionState();
     applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "sh1", toolName: "run_shell_command", kind: "execute", status: "pending" }));

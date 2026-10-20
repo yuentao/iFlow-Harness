@@ -195,11 +195,14 @@ function OutputDetails({
   output,
   truncatedChars,
   blockId,
+  live = false,
 }: {
   output: string;
   truncatedChars?: number;
   /** Stable block id (P4) — enables the host-side full-output export. */
   blockId?: string;
+  /** Tool still running with streamed output (long-running shell command). */
+  live?: boolean;
 }) {
   const send = useChat((s) => s.send);
   const [open, setOpen] = useState(false);
@@ -210,6 +213,22 @@ function OutputDetails({
   // it stays mounted so the close animation still plays. Never opened =
   // zero DOM beyond the toggle row.
   const [openedOnce, setOpenedOnce] = useState(false);
+  // A running command's output arrives as ~1s tool_call_update frames; show it
+  // without a click (and follow the tail), but only auto-open once — a manual
+  // collapse must stick.
+  const autoOpened = useRef(false);
+  const bodyRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    if (!live || autoOpened.current || !output) return;
+    autoOpened.current = true;
+    setOpenedOnce(true);
+    setOpen(true);
+  }, [live, output]);
+  useEffect(() => {
+    if (!live || !open) return;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [live, open, output]);
   if (!output) return null;
   // 3.5 ②: the store keeps up to 512K chars; render at most the display cap
   // so one monster output cannot balloon the DOM (pitfall #27). Everything
@@ -253,7 +272,10 @@ function OutputDetails({
   if (lineCount < 3) {
     return (
       <>
-        <pre className="mx-3 mb-3 rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
+        <pre
+          ref={bodyRef}
+          className="mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+        >
           {display}
           {truncated}
         </pre>
@@ -271,13 +293,17 @@ function OutputDetails({
         className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-ui-caption text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} />
-        {t("操作输出")}
+        {live && <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-hidden />}
+        {live ? t("实时输出") : t("操作输出")}
         {truncated}
       </button>
       {recoverRow}
       <Collapse open={open}>
         {openedOnce && (
-          <pre className="mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
+          <pre
+            ref={bodyRef}
+            className="mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+          >
             {display}
           </pre>
         )}
@@ -494,7 +520,12 @@ function ToolCard({ block }: { block: ToolBlock }) {
         />
       )}
       {!hasDiff && block.input && <InputDetails input={block.input} title={block.title} />}
-      <OutputDetails output={block.output} truncatedChars={block.truncatedChars} blockId={block.id} />
+      <OutputDetails
+        output={block.output}
+        truncatedChars={block.truncatedChars}
+        blockId={block.id}
+        live={block.status === "in_progress"}
+      />
     </div>
   );
 }

@@ -180,6 +180,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 当 Stop 确实打断 Plan 退出卡时，session/cancel 之后必须立即重推当前模式，把打断瞬间产生的模式漂移当场拉回；cancelAllPlanExits 应返回被取消的 Plan 退出请求数，供判断是否发生打断。
 - 调试 webview 构建产物时使用 `npm run webview:serve`（`scripts/serve-webview.mjs`，默认端口 8791、目录 `webview/dist`），作为长期保留的静态服务入口。
 - Vite 构建产物不能直接用 `file://` 打开，因为产物以绝对路径引用 `/assets/...`，在本地文件协议下会被 CORS 拒绝导致空白页；调试时应走 HTTP 静态服务器。
+- Webview 改动后除 typecheck 与测试外，还应运行 npx vite build 验证构建产物。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 
