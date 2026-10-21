@@ -134,6 +134,27 @@ function toneOf(root: HTMLElement, needle: string): string | undefined {
   return undefined;
 }
 
+/** Full class list of the closest rounded surface around the text — lets the
+ * pins assert the whole floating-overlay species (radius + shadow token), not
+ * just the corner. jsdom applies no CSS, so the species is pinned by classes. */
+function surfaceClasses(root: HTMLElement, needle: string): string {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    if (node.textContent?.includes(needle)) {
+      let el = node.parentElement;
+      while (el) {
+        const cls = el.className || "";
+        if (cls.includes("rounded-full") || cls.includes("rounded-xl") || cls.includes("rounded-lg")) return cls;
+        el = el.parentElement;
+      }
+      return "";
+    }
+    node = walker.nextNode();
+  }
+  return "";
+}
+
 describe("MessageList — the countdown retry rides the streaming pill", () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -193,6 +214,9 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     // Exactly one surface carries the message (no stacked indicators).
     expect(text.split(RATE_LIMIT).length - 1).toBe(1);
     expect(toneOf(container, RATE_LIMIT)).toBe("rounded-full");
+    // Floating overlay species: the capsule drop must be the float token —
+    // --shadow-panel's -24px spread collapses on a ~30px pill (invisible shadow).
+    expect(surfaceClasses(container, RATE_LIMIT)).toContain("shadow-float");
     // The pill keeps the live countdown.
     expect(container.querySelector(".rounded-full")?.textContent ?? "").toMatch(/\d+s/);
   });
@@ -201,7 +225,38 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     render(streamingState("idle"), [countdownToast()]);
     const text = container.textContent ?? "";
     expect(text.split(RATE_LIMIT).length - 1).toBe(1);
-    expect(toneOf(container, RATE_LIMIT)).toBe("rounded-xl");
+    // Bottom floating chips are capsules (streaming pill / jump-to-latest), so
+    // a stack pill must round the same way — the mismatch read as "wrong radius".
+    expect(toneOf(container, RATE_LIMIT)).toBe("rounded-full");
+    expect(surfaceClasses(container, RATE_LIMIT)).toContain("shadow-float");
+  });
+
+  it("lifts the toast stack above the bottom band so the pair never overlaps", () => {
+    // The retry wins the merge; the context warning keeps its own slot. The
+    // band is sticky, so with a short transcript it sits at the CONTENT end —
+    // a fixed stack offset overlapped it (user screenshot 2026-10-21).
+    const warn = countdownToast({
+      id: 7,
+      message: COMPRESS_WARN,
+      countdownDeadline: undefined,
+      action: { actionId: "compress", label: "立即压缩" },
+    });
+    render(streamingState("streaming"), [warn, countdownToast({ id: 8 })]);
+    const stack = container.querySelector(".absolute.inset-x-0") as HTMLElement;
+    // 2.5rem = the band's pinned bottom edge (1.5rem above the overlay bottom)
+    // + a 1rem gap; 1.5rem would leave the stack flush against the band.
+    expect(stack.style.bottom).toContain("--stream-pill-h");
+    expect(stack.style.bottom).toContain("2.5rem");
+    expect(toneOf(container, COMPRESS_WARN)).toBe("rounded-full");
+    // The warning pill is the one the user reported as shadow-less: it must carry
+    // the same floating-overlay drop as the band pill next to it.
+    expect(surfaceClasses(container, COMPRESS_WARN)).toContain("shadow-float");
+  });
+
+  it("keeps the fixed clearance when no bottom band is on screen", () => {
+    render(streamingState("idle"), [countdownToast()]);
+    const stack = container.querySelector(".absolute.inset-x-0") as HTMLElement;
+    expect(stack.style.bottom).toContain("3.5rem");
   });
 
   it("renders memory candidates as a decision card with previews and one forward channel", () => {
@@ -234,6 +289,10 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     const ignore = buttons.find((b) => b.textContent?.includes("忽略"));
     expect(primary?.className).toContain("h-6");
     expect(ignore?.className).toContain("h-6");
+    // Both buttons ride the button species (shadow-btn); shadow-card's third
+    // layer (-12px spread) collapses on a 24px-tall button.
+    expect(primary?.className).toContain("shadow-btn");
+    expect(ignore?.className).toContain("shadow-btn");
     expect(card.querySelector('[aria-label="关闭"]')?.className).toContain("size-6");
     expect(card.textContent).toContain("确认后才会写入记忆");
     // Buttons stay siblings: nesting the action inside a dismiss button used to
@@ -257,8 +316,12 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     render(streamingState("idle"), [
       { id: 6, level: "info", message: "正在提取长期记忆候选…", displayOnly: true, persistent: true, toastId: 10 },
     ]);
-    const pill = container.querySelector(".rounded-xl")!;
+    const pill = container.querySelector(".rounded-full")!;
     expect(pill.querySelector(".animate-spin")).not.toBeNull();
+    // Same floating-overlay species as every other toast: capsule radius plus the
+    // float drop (acrylic-pop alone carried the panel-sized drop, invisible here).
+    expect(pill.className).toContain("shadow-float");
+    expect(pill.className).toContain("acrylic-pop");
     // The host owns this pill's lifecycle — clicking must not imply a cancel.
     expect(pill.querySelector("button")).toBeNull();
   });

@@ -187,6 +187,9 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 错误横幅展开态采用“正文独占整行、操作行下移”的响应式布局，以保证 320/480px 窄屏下正文可读且无横向溢出。
 - 流式生成期间，限流或流中断倒计时通知合并进 sticky“生成中”pill，并从底部 toast stack 跳过；带不可执行 action 的通知不得合并，host 倒计时继续以绝对 deadline 驱动。
 - 设置面板返回交互统一为单一通道：所有子页（详情/编辑/表单/目录浏览）均通过壳层 header 的返回箭头返回；底部操作区不再放置「返回」按钮，只保留推进流操作（如编辑、保存）。
+- 通知 toast 栈不能使用固定 bottom，否则可能与 sticky 生成中 pill 重叠；需通过 ResizeObserver 将通知带高度镜像到 --stream-pill-h，并计算栈底为 2.5rem + --pending-card-h + --stream-pill-h，保留 1rem 间距。
+- 负 spread 阴影 token（--shadow-panel 0 24px 60px -24px、--shadow-card 第三层 -12px）适合大面板/卡片，但用在约 24–38px 高的浮层胶囊或按钮上会塌陷成不可见投影；浮层应使用 spread 收在自身高度内的 --shadow-float。
+- Tailwind v4 中 shadow-panel 会被解析为 shadow 颜色修饰符而只输出 --tw-shadow-color；自定义浮层阴影需要在 styles.css 中显式写 .shadow-panel/.shadow-float 规则，且 float 这类 utility 不在 @theme inline 时必须手动补规则。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

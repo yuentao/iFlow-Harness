@@ -1792,8 +1792,37 @@ function MessageListInner({ state }: { state: SessionState }) {
     || state.initializing
     || state.replaying;
 
+  // The bottom notification band (streaming pill / restore-history pill) is
+  // sticky: when the transcript is SHORTER than the viewport it falls back to
+  // its natural position at the content end — ~16px above the viewport bottom,
+  // i.e. HIGHER than a fixed toast offset. A hardcoded stack offset therefore
+  // collided with it (user screenshot 2026-10-21: the context-warning pill sat
+  // on top of the merged retry pill). Mirror the band's real height into
+  // --stream-pill-h (same pattern as App's --pending-card-h) so the toast stack
+  // rides above it whatever position the band actually occupies.
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const bandRef = useRef<HTMLDivElement>(null);
+  const bandVisible = streamingPillVisible || state.replaying;
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const band = bandRef.current;
+    if (!bandVisible || !band) {
+      overlay.style.removeProperty("--stream-pill-h");
+      return;
+    }
+    const apply = () => overlay.style.setProperty("--stream-pill-h", `${band.offsetHeight}px`);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(band);
+    return () => ro.disconnect();
+    // Both flags are listed: the band element swaps between the streaming and
+    // restore wrappers while `bandVisible` stays true, so the observer must be
+    // re-attached to the newly mounted element.
+  }, [streamingPillVisible, state.replaying]);
+
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative min-h-0 flex-1" ref={overlayRef}>
       <div className="message-scroll h-full overflow-y-auto px-3 pb-4 pt-3" ref={scrollRef} onScroll={onScroll}>
         {/* --pending-card-h: height of the floating approval/question/plan card
             overlay (set by App's ResizeObserver on the shared wrapper). The
@@ -1836,7 +1865,7 @@ function MessageListInner({ state }: { state: SessionState }) {
             <div ref={sentinelRef} className="flex justify-center">
               <button
                 onClick={expandOlder}
-                className="card-lift press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-colors hover:bg-surface hover:text-foreground"
+                className="press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption text-muted-foreground shadow-float transition-colors hover:bg-surface hover:text-foreground"
               >
                 <ChevronUp className="size-3" />
                 {t("展开更早 {0} 条消息", start)}
@@ -1935,9 +1964,10 @@ function MessageListInner({ state }: { state: SessionState }) {
             <div
               className="sticky z-10 flex justify-center py-1.5 pointer-events-none"
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
+              ref={bandRef}
             >
               <div
-                className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-ui-caption font-medium shadow-lg ${
+                className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-ui-caption font-medium shadow-float ${
                   mergedNotice ? "border border-warning/50 bg-warning/15 text-warning backdrop-blur-md" : "bg-primary text-primary-foreground"
                 }`}
               >
@@ -1969,8 +1999,9 @@ function MessageListInner({ state }: { state: SessionState }) {
             <div
               className="pointer-events-none sticky z-10 flex justify-center py-1.5"
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
+              ref={bandRef}
             >
-              <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-ui-caption font-medium text-primary-foreground shadow-lg">
+              <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-ui-caption font-medium text-primary-foreground shadow-float">
                 <Loader2 className="size-3 animate-spin" />
                 {t("正在恢复历史会话…")}
               </div>
@@ -1980,7 +2011,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       </div>
       {showJump && !editingBlockId && (
         <button
-          className="card-lift press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card hover:bg-surface-2"
+          className="press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-float hover:bg-surface-2"
           style={{ bottom: "calc(0.75rem + var(--pending-card-h, 0px))" }}
           onClick={() => {
             stickToBottom.current = true;
@@ -1995,6 +2026,7 @@ function MessageListInner({ state }: { state: SessionState }) {
       <Toasts
         skipToastId={mergedNotice?.id}
         suppressCompressAction={compressActionHidden}
+        rideBand={bandVisible}
       />
     </div>
   );
@@ -2009,10 +2041,14 @@ function MessageListInner({ state }: { state: SessionState }) {
 function Toasts({
   skipToastId,
   suppressCompressAction,
+  rideBand,
 }: {
   skipToastId?: number;
   /** A turn owns the session: hide the 立即压缩 action (the host refuses it). */
   suppressCompressAction?: boolean;
+  /** A sticky bottom band (生成中 / 恢复历史 pill) is on screen: the stack must
+   * ride above it, using its measured height (--stream-pill-h). */
+  rideBand?: boolean;
 }) {
   const toasts = useChat((s) => s.toasts);
   const visible = skipToastId === undefined ? toasts : toasts.filter((x) => x.id !== skipToastId);
@@ -2022,9 +2058,20 @@ function Toasts({
     // used to cover this stack. --pending-card-h (App's ResizeObserver on the
     // shared wrapper) lifts the stack above the card, same pattern as the
     // jump pill.
+    // --stream-pill-h keeps the band clear: the band is sticky, so with a short
+    // transcript it sits at the CONTENT end (higher than the viewport-bottom
+    // offset a fixed clearance would assume), and when pinned its bottom edge is
+    // already 1.5rem above the overlay bottom (the scroller's pb-4 + its own
+    // 0.5rem offset) — a hardcoded 3.5rem overlapped a wrapped band by ~12px
+    // (user screenshot 2026-10-21). 2.5rem = that 1.5rem + a 1rem gap.
+    // Without a band, 3.5rem is enough to clear the jump-to-latest chip.
     <div
       className="pointer-events-none absolute inset-x-0 z-20 flex flex-col items-center gap-1.5 px-3"
-      style={{ bottom: "calc(3.5rem + var(--pending-card-h, 0px))" }}
+      style={{
+        bottom: rideBand
+          ? "calc(2.5rem + var(--pending-card-h, 0px) + var(--stream-pill-h, 0px))"
+          : "calc(3.5rem + var(--pending-card-h, 0px))",
+      }}
     >
       {visible.map((t) => (
         <ToastPill key={t.id} toast={t} suppressCompressAction={suppressCompressAction} />
@@ -2117,7 +2164,7 @@ function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number)
         )}
         <button
           onClick={() => dismiss(toast.id)}
-          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground"
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:bg-surface-2 hover:text-foreground"
         >
           {t("忽略")}
         </button>
@@ -2127,10 +2174,13 @@ function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number)
   );
 }
 
-/** One toast pill — overlay species, not a transcript card: 12px radius, the
- * acrylic popup surface (near-opaque tint + inner edge + panel shadow) for
- * quiet notices, the primary accent for decision pills (same family as the
- * approval card), 13px body and 24px controls so it never reads as a footnote.
+/** One toast pill — overlay species, not a transcript card: the bottom floating
+ * chip family (streaming pill / jump-to-latest / expand-older are capsules), so
+ * it rounds full rather than taking the 12px card radius — a pill sitting next
+ * to the merged streaming pill must read as one species. The acrylic popup
+ * surface (near-opaque tint + inner edge + panel shadow) for quiet notices, the
+ * primary accent for decision pills (same family as the approval card), 13px
+ * body and 24px controls so it never reads as a footnote.
  * A host-owned info wait spins (Loader2) like the streaming pill rather than
  * showing a static icon; tone carries the level. */
 function ToastPill({
@@ -2157,12 +2207,12 @@ function ToastPill({
           : TOAST_ACTION_ICON[toast.action?.actionId ?? ""] ?? Info;
   const tone =
     toast.level === "error"
-      ? "border-destructive/45 bg-destructive/15 text-destructive shadow-panel backdrop-blur-md"
+      ? "border-destructive/45 bg-destructive/15 text-destructive shadow-float backdrop-blur-md"
       : toast.level === "warning"
-        ? "border-warning/45 bg-warning/15 text-warning shadow-panel backdrop-blur-md"
+        ? "border-warning/45 bg-warning/15 text-warning shadow-float backdrop-blur-md"
         : toast.sticky
-          ? "acrylic-pop border-primary/45 text-foreground card-lift"
-          : "acrylic-pop border-border text-foreground";
+          ? "acrylic-pop border-primary/45 text-foreground shadow-float"
+          : "acrylic-pop border-border text-foreground shadow-float";
   const body = (
     <>
       <Icon
@@ -2217,7 +2267,7 @@ function ToastPill({
     || !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || toast.action);
   return (
     <div
-      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-xl px-3 py-2 text-ui-label leading-snug ${tone}`}
+      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-full px-3 py-2 text-ui-label leading-snug ${tone}`}
     >
       {clickable ? (
         <button

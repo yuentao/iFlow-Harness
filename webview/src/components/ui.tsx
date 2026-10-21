@@ -444,7 +444,7 @@ export function HelpTip({
             role="tooltip"
             onMouseEnter={enterHover}
             onMouseLeave={leaveHover}
-            className="fixed z-50 w-60 max-w-[calc(100vw-16px)] rounded-xl border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-panel"
+            className="fixed z-50 w-60 max-w-[calc(100vw-16px)] rounded-xl border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-float"
           >
             {children}
           </span>,

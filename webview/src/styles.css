@@ -155,6 +155,13 @@
     color-mix(in oklab, var(--primary) 4%, transparent)
   );
   --shadow-panel: 0 24px 60px -24px oklch(0.35 0.03 275 / 15%);
+  /* Floating overlay species: toast pills, the sticky bottom band, jump-to-latest
+     / expand-older chips, tooltips. `--shadow-panel` cannot serve them: its
+     -24px spread shrinks the shadow rect by 48px in total, so on a 30-38px-tall
+     capsule the rect collapses and the projection disappears entirely (user
+     screenshot 2026-10-22: the context-warning pill and the memory-extraction
+     pill read as flat inline text). Spread stays inside the capsule's own height. */
+  --shadow-float: 0 1px 2px oklch(0.2 0.02 275 / 8%), 0 6px 16px -6px oklch(0.35 0.03 275 / 14%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent),
     0 10px 32px -16px color-mix(in oklab, var(--primary) 18%, transparent);
   /* Card shadow (always on, not hover-gated). Two real traps verified in the
@@ -274,6 +281,9 @@
     color-mix(in oklab, var(--primary) 6%, transparent)
   );
   --shadow-panel: 0 24px 60px -24px oklch(0.1 0.02 285 / 40%);
+  /* Dark counterpart of the light `--shadow-float` (see the :root block): the
+     floating overlay family needs a drop that survives a ~30px capsule. */
+  --shadow-float: 0 1px 2px oklch(0.05 0.02 285 / 28%), 0 6px 16px -6px oklch(0.05 0.02 285 / 45%);
   --shadow-glow: 0 0 0 1px color-mix(in oklab, var(--primary) 23%, transparent),
     0 10px 32px -12px color-mix(in oklab, var(--primary) 28%, transparent);
   --shadow-card: 0 1px 2px oklch(0.1 0.02 285 / 18%), 0 4px 12px oklch(0.1 0.02 285 / 15%),
@@ -600,7 +610,25 @@ header.acrylic.header-scrolled {
 .shadow-card {
   box-shadow: var(--shadow-card);
 }
-.shadow-btn {
+/* Same trap as `shadow-card`: `panel` is also a color token, so Tailwind parses
+   `shadow-panel` as a shadow-COLOR modifier and emits only
+   `--tw-shadow-color: var(--panel)` — verified in the built CSS, no box-shadow.
+   That left the warning/error toast pills (and the HelpTip) floating with no
+   drop shadow, reading as flat inline text rather than an overlay. */
+  .shadow-panel {
+    box-shadow: var(--shadow-panel);
+  }
+  /* Floating capsule family (toast pills, sticky band, bottom chips). `float` is
+     not a color token, but the token lives outside @theme inline, so Tailwind
+     generates no utility — the explicit rule is required, same as .shadow-card.
+     On acrylic surfaces the inset rim from .acrylic-pop must survive: that rule
+     carries the panel-sized drop, which collapses on a ~30px capsule. */
+  .shadow-float {
+    box-shadow: var(--shadow-float);
+  }
+  .acrylic-pop.shadow-float {
+    box-shadow: inset 0 0 0 1px var(--acrylic-edge), var(--shadow-float);
+  }.shadow-btn {
   box-shadow: var(--shadow-btn);
 }
 .shadow-btn-hover {
