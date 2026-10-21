@@ -1012,18 +1012,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const sourceActions = useMemo(() => {
     if (mentionQuery === null) return [];
     const raw = mentionQuery.trim().toLowerCase();
-    if (raw.startsWith("url:")) {
-      const target = mentionQuery.trim().slice(4).trim();
-      return [{
-        kind: "url" as const,
-        keyword: "",
-        icon: Globe,
-        label: target || t("输入 URL 后回车附加"),
-        ready: target !== "",
-      }];
-    }
     if (raw.startsWith("/")) return []; // folder mode: hits only
-    return KEYWORD_SOURCES.filter((s) => s.keyword.startsWith(raw)).map((s) => ({
+    const rows: Array<{
+      kind: "problems" | "git" | "terminal" | "url";
+      keyword: string;
+      icon: typeof AlertTriangle;
+      label: string;
+      ready: boolean;
+    }> = KEYWORD_SOURCES.filter((s) => s.keyword.startsWith(raw)).map((s) => ({
       kind: s.kind,
       keyword: s.keyword,
       icon: s.icon,
@@ -1035,6 +1031,19 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             : t("终端最近输出"),
       ready: raw === s.keyword,
     }));
+    // The URL row is discoverable from a bare "@" too (and while typing
+    // "u…url:"): list it whenever the token is still a prefix of "url:".
+    if (raw.startsWith("url:") || "url:".startsWith(raw)) {
+      const target = raw.startsWith("url:") ? mentionQuery.trim().slice(4).trim() : "";
+      rows.push({
+        kind: "url",
+        keyword: "",
+        icon: Globe,
+        label: target || t("输入 URL 后回车附加"),
+        ready: target !== "",
+      });
+    }
+    return rows;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- KEYWORD_SOURCES is a module-level constant shape
   }, [mentionQuery]);
   /** Rows the keyboard navigates: source actions first, then file/folder hits. */
@@ -1088,10 +1097,27 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     requestAnimationFrame(() => taRef.current?.focus());
   }
 
-  /** Attach @url:<target> as a context card (host fetches + extracts text). */
+  /** Attach @url:<target> as a context card (host fetches + extracts text).
+   * With no target yet (row picked from a bare "@"), seed the draft with
+   * "@url:" and keep the popup in URL mode instead of silently doing nothing. */
   function attachUrlContext(): void {
     const target = mentionQuery!.trim().slice(4).trim();
-    if (!target) return;
+    if (!target) {
+      const ta = taRef.current;
+      if (!ta || mentionToken === null) return;
+      const caret = ta.selectionStart ?? text.length;
+      const { at } = mentionToken;
+      const next = `${text.slice(0, at)}@url:${text.slice(caret)}`;
+      setText(next);
+      setMentionHits([]);
+      const pos = at + 5;
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+        updateMentionFromCaret(next);
+      });
+      return;
+    }
     useChat.getState().send({
       type: "resolveContext",
       requestId: nextContextRequestId(),

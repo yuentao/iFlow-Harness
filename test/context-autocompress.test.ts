@@ -261,7 +261,9 @@ describe("sendPrompt turn-end wiring → proactive compress → queue order", ()
     p.ensureClient = async () => fakeClient;
     p.persistActiveTranscript = async () => {};
     (p as unknown as { touchActiveSession: () => Promise<void> }).touchActiveSession = async () => {};
-    (p as unknown as { maybeGenerateAiTitle: (id: string) => Promise<void> }).maybeGenerateAiTitle = async () => {};
+    (p as unknown as {
+      runTurnFollowup: (id: string, opts: { allowTitle: boolean; conversationTasks: boolean }) => Promise<void>;
+    }).runTurnFollowup = async () => {};
     p.promptWithRetry = vi.fn(async (_c: unknown, _s: string, prompt: unknown) => {
       const blocks = prompt as Array<{ type: string; text?: string }>;
       promptTexts.push(blocks[0]?.text ?? "");
@@ -306,18 +308,22 @@ describe("sendPrompt turn-end wiring → proactive compress → queue order", ()
 
 /**
  * Compression is housekeeping, not conversation: neither a user-typed
- * `/compress` turn nor a turn-end auto-compress may trigger the automatic
- * memory extraction lane (the next real user turn still will).
+ * `/compress` turn nor a turn-end auto-compress may feed the conversation
+ * tasks of the merged turn-end request (next-step chips / memory candidates).
+ * The title task is not conversation-derived, so it stays allowed — it only
+ * replaces a still-mechanical session label.
  */
-describe("turn-end memory extraction gating", () => {
+describe("turn-end follow-up gating", () => {
   type GateInternals = {
     client: unknown;
     panelVisible: boolean;
     ensureClient: () => Promise<unknown>;
     persistActiveTranscript: () => Promise<void>;
     touchActiveSession: () => Promise<void>;
-    maybeGenerateAiTitle: (id: string) => Promise<void>;
-    generateNextStepSuggestions: (id: string) => Promise<void>;
+    runTurnFollowup: (
+      sessionId: string,
+      opts: { allowTitle: boolean; conversationTasks: boolean },
+    ) => Promise<void>;
     promptWithRetry: (
       client: unknown,
       sessionId: string,
@@ -325,7 +331,6 @@ describe("turn-end memory extraction gating", () => {
     ) => Promise<{ stopReason: string }>;
     maybeAutoCompressOnIdle: (sessionId: string) => Promise<boolean>;
     handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
-    memory: { maybeExtract: (...args: unknown[]) => Promise<void> };
     store: {
       getState: () => { status: string };
       sessionStarted: (meta: { sessionId: string }) => void;
@@ -336,29 +341,30 @@ describe("turn-end memory extraction gating", () => {
   let p: GateInternals;
   let storageDir: string;
   let promptTexts: string[];
-  let extract: ReturnType<typeof vi.spyOn>;
+  let followups: Array<{ sessionId: string; opts: { allowTitle: boolean; conversationTasks: boolean } }>;
 
   beforeEach(async () => {
     setConfigOverrides({ checkpoints: false, autoCompressOnIdle: true });
-    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-memory-gate-"));
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-followup-gate-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as GateInternals;
     promptTexts = [];
+    followups = [];
     const fakeClient = {};
     p.client = fakeClient;
     p.ensureClient = async () => fakeClient;
     p.persistActiveTranscript = async () => {};
     p.touchActiveSession = async () => {};
-    p.maybeGenerateAiTitle = async () => {};
-    p.generateNextStepSuggestions = async () => {};
+    p.runTurnFollowup = async (sessionId, opts) => {
+      followups.push({ sessionId, opts });
+    };
     p.promptWithRetry = vi.fn(async (_c: unknown, _s: string, prompt: unknown) => {
       const blocks = prompt as Array<{ type: string; text?: string }>;
       promptTexts.push(blocks[0]?.text ?? "");
       return { stopReason: "end_turn" };
     }) as unknown as GateInternals["promptWithRetry"];
     p.maybeAutoCompressOnIdle = vi.fn(async () => false) as unknown as GateInternals["maybeAutoCompressOnIdle"];
-    extract = vi.spyOn(p.memory, "maybeExtract").mockResolvedValue(undefined);
-    p.store.sessionStarted({ sessionId: "gate-session" });
+    p.store.sessionStarted({ sessionId: "followup-gate-session" });
     p.store.getState().status = "idle";
     p.panelVisible = true;
   });
@@ -369,108 +375,26 @@ describe("turn-end memory extraction gating", () => {
     fs.rmSync(storageDir, { recursive: true, force: true });
   });
 
-  it("does not extract after a user-typed /compress turn", async () => {
+  it("keeps only the title task after a user-typed /compress turn", async () => {
     await p.handleWebviewMessage({ type: "sendPrompt", text: "/compress" });
     expect(promptTexts).toEqual(["/compress"]);
-    expect(extract).not.toHaveBeenCalled();
+    expect(followups).toEqual([
+      { sessionId: "followup-gate-session", opts: { allowTitle: true, conversationTasks: false } },
+    ]);
   });
 
-  it("does not extract after a turn-end auto-compress", async () => {
+  it("keeps only the title task when the turn-end auto-compress ran", async () => {
     p.maybeAutoCompressOnIdle = vi.fn(async () => true) as unknown as GateInternals["maybeAutoCompressOnIdle"];
     await p.handleWebviewMessage({ type: "sendPrompt", text: "普通问题" });
-    expect(extract).not.toHaveBeenCalled();
+    expect(followups).toEqual([
+      { sessionId: "followup-gate-session", opts: { allowTitle: true, conversationTasks: false } },
+    ]);
   });
 
-  it("still extracts after a normal turn", async () => {
+  it("runs the whole batch after a normal turn", async () => {
     await p.handleWebviewMessage({ type: "sendPrompt", text: "普通问题" });
-    expect(extract).toHaveBeenCalledTimes(1);
-  });
-});
-
-/**
- * Next-step prediction follows the same housekeeping discipline as memory
- * extraction: neither a user-typed `/compress` turn nor a turn-end auto-compress
- * may fire the prediction call (2026-10-19 report: chips like "查看压缩结果" /
- * "继续压缩其他文件" seeded from a compress turn read as conversation). A
- * normal turn still predicts.
- */
-describe("turn-end next-step prediction gating", () => {
-  type PredictionGateInternals = {
-    client: unknown;
-    panelVisible: boolean;
-    ensureClient: () => Promise<unknown>;
-    persistActiveTranscript: () => Promise<void>;
-    touchActiveSession: () => Promise<void>;
-    maybeGenerateAiTitle: (id: string) => Promise<void>;
-    generateNextStepSuggestions: (id: string) => Promise<void>;
-    promptWithRetry: (
-      client: unknown,
-      sessionId: string,
-      prompt: unknown,
-    ) => Promise<{ stopReason: string }>;
-    maybeAutoCompressOnIdle: (sessionId: string) => Promise<boolean>;
-    handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
-    memory: { maybeExtract: (...args: unknown[]) => Promise<void> };
-    store: {
-      getState: () => { status: string };
-      sessionStarted: (meta: { sessionId: string }) => void;
-    };
-  };
-
-  let panel: ChatPanel;
-  let p: PredictionGateInternals;
-  let storageDir: string;
-  let promptTexts: string[];
-  let predictions: number;
-
-  beforeEach(async () => {
-    setConfigOverrides({ checkpoints: false, autoCompressOnIdle: true });
-    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-prediction-gate-"));
-    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
-    p = panel as unknown as PredictionGateInternals;
-    promptTexts = [];
-    predictions = 0;
-    const fakeClient = {};
-    p.client = fakeClient;
-    p.ensureClient = async () => fakeClient;
-    p.persistActiveTranscript = async () => {};
-    p.touchActiveSession = async () => {};
-    p.maybeGenerateAiTitle = async () => {};
-    p.generateNextStepSuggestions = async () => {
-      predictions++;
-    };
-    p.promptWithRetry = vi.fn(async (_c: unknown, _s: string, prompt: unknown) => {
-      const blocks = prompt as Array<{ type: string; text?: string }>;
-      promptTexts.push(blocks[0]?.text ?? "");
-      return { stopReason: "end_turn" };
-    }) as unknown as PredictionGateInternals["promptWithRetry"];
-    p.maybeAutoCompressOnIdle = vi.fn(async () => false) as unknown as PredictionGateInternals["maybeAutoCompressOnIdle"];
-    vi.spyOn(p.memory, "maybeExtract").mockResolvedValue(undefined);
-    p.store.sessionStarted({ sessionId: "prediction-gate-session" });
-    p.store.getState().status = "idle";
-    p.panelVisible = true;
-  });
-
-  afterEach(async () => {
-    vi.restoreAllMocks();
-    await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
-  });
-
-  it("does not predict after a user-typed /compress turn", async () => {
-    await p.handleWebviewMessage({ type: "sendPrompt", text: "/compress" });
-    expect(promptTexts).toEqual(["/compress"]);
-    expect(predictions).toBe(0);
-  });
-
-  it("does not predict when the turn-end auto-compress ran", async () => {
-    p.maybeAutoCompressOnIdle = vi.fn(async () => true) as unknown as PredictionGateInternals["maybeAutoCompressOnIdle"];
-    await p.handleWebviewMessage({ type: "sendPrompt", text: "普通问题" });
-    expect(predictions).toBe(0);
-  });
-
-  it("still predicts after a normal turn", async () => {
-    await p.handleWebviewMessage({ type: "sendPrompt", text: "普通问题" });
-    expect(predictions).toBe(1);
+    expect(followups).toEqual([
+      { sessionId: "followup-gate-session", opts: { allowTitle: true, conversationTasks: true } },
+    ]);
   });
 });

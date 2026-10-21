@@ -148,7 +148,10 @@ it("opens the detail sub-page with declarations, error and back header", () => {
   expect(container.textContent).toContain("do_it");
   expect(container.querySelector("pre")?.textContent).toContain("properties");
   expect(container.textContent).toContain("network timeout");
-  click("返回");
+  // Back is the shell header arrow (no bottom 「返回」 button anymore).
+  const lastHeader = header.mock.calls.at(-1)![0];
+  expect(lastHeader).not.toBeNull();
+  act(() => lastHeader!.back());
   expect(header.mock.calls.some(([h]) => h === null)).toBe(true);
 });
 it("refresh re-reads disk config and status without a second save in flight", () => {
@@ -162,6 +165,8 @@ it("refresh re-reads disk config and status without a second save in flight", ()
 it("browse the template catalog and install a form-filled entry as a local draft", () => {
   reply({ existing: { command: "node" } });
   click("模板目录");
+  expect(header.mock.calls.some(([h]) => h !== null && h.title === "模板目录")).toBe(true);
+  expect(container.textContent).not.toContain("返回列表");
   expect(container.textContent).toContain("Filesystem");
   expect(container.textContent).toContain("@modelcontextprotocol/server-filesystem");
   clickTitle("安装");

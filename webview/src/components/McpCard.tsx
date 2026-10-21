@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Check, ChevronRight, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { ChevronRight, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, SAVE_BTN, ActionRow, Field, FieldLabel, Hint, ToolbarRow } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, SAVE_BTN, ActionRow, Field, FieldLabel, GHOST_BTN, Hint, SecondaryRow, Segmented, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
@@ -372,9 +372,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 back: () => setCatalogForm(null),
                 title: t("安装 MCP 模板"),
               }
-            : null,
+            : catalogBrowse
+              ? {
+                  back: () => setCatalogBrowse(false),
+                  title: t("模板目录"),
+                }
+              : null,
     );
-  }, [editing, isNew, detail, catalogForm, onHeader]);
+  }, [editing, isNew, detail, catalogForm, catalogBrowse, onHeader]);
 
   function save() {
     if (!entries || pending.current || loadError || editing !== null) return;
@@ -480,36 +485,20 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
       {editing === null && detail === null && catalogForm === null && (
         <>
           <div className="flex items-center gap-2">
-            <div
-              role="group"
-              aria-label={t("配置作用域")}
-              className="flex items-center gap-1 rounded-lg border border-border/70 bg-surface/40 px-1 py-1"
-            >
-              {MCP_SCOPES.map((candidate) => {
-                const disabled = candidate === "project" && !projectAvailable;
-                return (
-                  <button
-                    key={candidate}
-                    type="button"
-                    aria-current={candidate === scope ? "true" : undefined}
-                    disabled={disabled}
-                    title={
-                      disabled
-                        ? t("无项目上下文（未打开工作区）")
-                        : t("写入 {0}", SCOPE_FILE[candidate])
-                    }
-                    className={
-                      candidate === scope
-                        ? "press rounded-md bg-primary/18 px-2 py-0.5 text-ui-label font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
-                        : "press rounded-md px-2 py-0.5 text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-                    }
-                    onClick={() => switchScope(candidate)}
-                  >
-                    {candidate === "global" ? t("全局") : t("项目")}
-                  </button>
-                );
-              })}
-            </div>
+            <Segmented
+              ariaLabel={t("配置作用域")}
+              value={scope}
+              onChange={switchScope}
+              options={MCP_SCOPES.map((candidate) => ({
+                value: candidate,
+                label: candidate === "global" ? t("全局") : t("项目"),
+                disabled: candidate === "project" && !projectAvailable,
+                title:
+                  candidate === "project" && !projectAvailable
+                    ? t("无项目上下文（未打开工作区）")
+                    : t("写入 {0}", SCOPE_FILE[candidate]),
+              }))}
+            />
             <span
               className="ml-auto min-w-0 truncate font-mono text-ui-caption text-muted-foreground/75"
               title={t("写入 {0}", SCOPE_FILE[scope])}
@@ -518,46 +507,53 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </span>
           </div>
 
-          <ToolbarRow>
-            <button
-              className={BTN}
-              disabled={entries === null || !!loadError || saving}
-              onClick={() => {
-                setEntries([...(entries ?? []), { name: "", json: "{}" }]);
-                setEditing(entries === null ? 0 : entries.length);
-                setIsNew(true);
-                setEditError(null);
-              }}
-            >
-              <Plus className="size-3.5" />
-              {t("添加")}
-            </button>
-            <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
-              {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
-            </button>
-            {editError && <span className="text-ui-body text-destructive">{editError}</span>}
-          </ToolbarRow>
+          {/* Catalog browsing is a sub-page (shell header carries the back
+              arrow) — the list-page toolbar/secondary rows do not belong to
+              it, and the entry button only ever *opens* the catalog. */}
+          {!catalogBrowse && (
+            <>
+              <ToolbarRow>
+                <button
+                  className={BTN}
+                  disabled={entries === null || !!loadError || saving}
+                  onClick={() => {
+                    setEntries([...(entries ?? []), { name: "", json: "{}" }]);
+                    setEditing(entries === null ? 0 : entries.length);
+                    setIsNew(true);
+                    setEditError(null);
+                  }}
+                >
+                  <Plus className="size-3.5" />
+                  {t("添加")}
+                </button>
+                <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
+                  {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
+                </button>
+                {editError && <span className="text-ui-body text-destructive">{editError}</span>}
+              </ToolbarRow>
 
-          {/* Secondary actions: catalog browsing and refresh are conveniences,
-              not the primary flow — they must not read as peers of 添加/保存. */}
-          <div className="mt-2 flex flex-wrap items-center gap-3 border-b border-border/50 pb-3">
-            <button
-              className="press inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-              disabled={busy || saving || entries === null || !!loadError}
-              onClick={() => setCatalogBrowse(!catalogBrowse)}
-            >
-              <Sparkles className="size-3.5" />
-              {catalogBrowse ? t("返回列表") : t("模板目录")}
-            </button>
-            <button
-              className="press inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-              disabled={busy || saving || (entries === null && !loadError)}
-              onClick={refresh}
-            >
-              <RefreshCw className="size-3.5" />
-              {refreshing ? t("刷新中…") : t("刷新")}
-            </button>
-          </div>
+              {/* Secondary actions: catalog browsing and refresh are conveniences,
+                  not the primary flow — they must not read as peers of 添加/保存. */}
+              <SecondaryRow>
+                <button
+                  className={GHOST_BTN}
+                  disabled={busy || saving || entries === null || !!loadError}
+                  onClick={() => setCatalogBrowse(true)}
+                >
+                  <Sparkles className="size-3.5" />
+                  {t("模板目录")}
+                </button>
+                <button
+                  className={GHOST_BTN}
+                  disabled={busy || saving || (entries === null && !loadError)}
+                  onClick={refresh}
+                >
+                  <RefreshCw className="size-3.5" />
+                  {refreshing ? t("刷新中…") : t("刷新")}
+                </button>
+              </SecondaryRow>
+            </>
+          )}
 
           {catalogBrowse && catalogForm === null ? (
             <div className="mt-2 space-y-2">
@@ -858,17 +854,6 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               </div>
             );
           })()}
-          <ActionRow>
-            <button
-              className={BTN}
-              onClick={() => {
-                setDetail(null);
-              }}
-            >
-              <Check className="size-3.5" />
-              {t("返回")}
-            </button>
-          </ActionRow>
         </div>
       )}
 

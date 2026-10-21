@@ -1,23 +1,40 @@
 import { describe, it, expect } from "vitest";
 import type { Block } from "../shared/messages.js";
 import {
-  buildExtractionPrompt,
+  buildExtractionConversation,
   normalizeFact,
   parseCandidates,
 } from "../src/memory/extract.js";
 
-describe("memory extraction prompt", () => {
-  it("includes recent user/assistant text and existing facts", () => {
+describe("memory extraction conversation excerpt", () => {
+  it("keeps recent user/assistant text and skips tool blocks", () => {
     const blocks: Block[] = [
       { kind: "user", text: "以后用 pnpm 安装依赖" },
       { kind: "text", text: "好的，我会记住。" },
       { kind: "tool", toolCallId: "t1", toolName: "x", title: "x", toolKind: "other", status: "completed" } as Block,
     ];
-    const prompt = buildExtractionPrompt(blocks, ["回答使用中文"]);
-    expect(prompt).toContain("用户：以后用 pnpm 安装依赖");
-    expect(prompt).toContain("助手：好的，我会记住。");
-    expect(prompt).toContain("- 回答使用中文");
-    expect(prompt).toContain('"facts"');
+    const conversation = buildExtractionConversation(blocks);
+    expect(conversation).toContain("用户：以后用 pnpm 安装依赖");
+    expect(conversation).toContain("助手：好的，我会记住。");
+    expect(conversation).not.toContain("t1");
+  });
+
+  it("clips an overlong block to its tail within the budget", () => {
+    const blocks: Block[] = [
+      { kind: "user", text: "开头".repeat(400) },
+      { kind: "text", text: "结尾结论" },
+    ];
+    const conversation = buildExtractionConversation(blocks, { maxInputChars: 200 });
+    expect(conversation).toContain("结尾结论");
+    expect(conversation.length).toBeLessThanOrEqual(240);
+  });
+
+  it("skips system notices and returns empty for a transcript without prose", () => {
+    const blocks: Block[] = [
+      { kind: "text", text: "正在压缩聊天历史…", system: true } as Block,
+      { kind: "tool", toolCallId: "t2", toolName: "x", title: "x", toolKind: "other", status: "completed" } as Block,
+    ];
+    expect(buildExtractionConversation(blocks)).toBe("");
   });
 });
 

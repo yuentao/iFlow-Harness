@@ -1241,6 +1241,23 @@ export function setNextStepLoading(state: SessionState, loading: boolean): void 
 const SUGGESTION_MARKER = /^\s*(?:[-*•]|\d+[.)、])\s*/;
 
 /**
+ * Normalize candidate suggestion strings: strip list markers, drop empty /
+ * overlong / duplicate entries, cap the list. Shared by the standalone
+ * next-step parser and the merged turn-end envelope parser.
+ */
+export function sanitizeSuggestions(values: readonly unknown[], max = 3): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const text = value.replace(SUGGESTION_MARKER, "").trim();
+    if (!text || text.length > 120 || out.includes(text)) continue;
+    out.push(text);
+    if (out.length >= Math.max(0, max)) break;
+  }
+  return out;
+}
+
+/**
  * Parse one next-step prediction. The prompt asks for a bare JSON array, but
  * thinking models routinely wrap it in a ```json fence or prefix a sentence —
  * dig the first JSON array out (fence first, whole reply second) and fall
@@ -1249,13 +1266,6 @@ const SUGGESTION_MARKER = /^\s*(?:[-*•]|\d+[.)、])\s*/;
  * entries, caps the list.
  */
 export function parseNextStepSuggestions(raw: string, max = 3): string[] {
-  const out: string[] = [];
-  const push = (value: unknown): void => {
-    if (typeof value !== "string") return;
-    const text = value.replace(SUGGESTION_MARKER, "").trim();
-    if (!text || text.length > 120 || out.includes(text)) return;
-    out.push(text);
-  };
   const text = raw.trim();
   const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
   const sources = fence?.[1] ? [fence[1], text] : [text];
@@ -1265,16 +1275,12 @@ export function parseNextStepSuggestions(raw: string, max = 3): string[] {
     if (start < 0 || end <= start) continue;
     try {
       const parsed: unknown = JSON.parse(source.slice(start, end + 1));
-      if (Array.isArray(parsed)) {
-        parsed.forEach(push);
-        return out.slice(0, Math.max(0, max));
-      }
+      if (Array.isArray(parsed)) return sanitizeSuggestions(parsed, max);
     } catch {
       // Not JSON — try the next source, then the line fallback below.
     }
   }
-  for (const line of text.split(/\r?\n/)) push(line);
-  return out.slice(0, Math.max(0, max));
+  return sanitizeSuggestions(text.split(/\r?\n/), max);
 }
 
 /**

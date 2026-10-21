@@ -48,7 +48,7 @@ import type {
   McpStatusReport,
   McpServerStatusView,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, splitReportedContextSections } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
@@ -99,7 +99,6 @@ import {
   MAX_SYNTH_DIFF_CHARS,
   newSessionState,
   parseEditArgs,
-  parseNextStepSuggestions,
   parseToolFilePath,
   parseTranscriptJsonl,
   reassignBlockIds,
@@ -134,6 +133,13 @@ import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotify
 import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
 import { planSpecContent, planSpecFileName, planChecklistEntries } from "../../shared/plan-spec.js";
+import {
+  buildFollowupPrompt,
+  parseFollowupResponse,
+  type FollowupInput,
+  type FollowupNextStepsInput,
+  type FollowupTaskKind,
+} from "../../shared/turn-followup.js";
 import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
@@ -251,6 +257,18 @@ const NEXT_STEP_MAX_SUGGESTIONS = 3;
 /** Per-side transcript budget fed to the predictor (user request / assistant
  * reply). Keep the call small: this is a next-action guess, not a summary. */
 const NEXT_STEP_EXCERPT_CHARS = 6_000;
+/** First user request fed to the title task — enough to name the topic, short
+ * enough that a long pasted dump cannot inflate the merged prompt. */
+const TITLE_REQUEST_MAX_CHARS = 2_000;
+/** Per-task ceilings for the merged turn-end request. The request runs with
+ * the LOOSEST ceiling among the tasks it actually carries: a title-only call
+ * keeps the 180s window, a next-step-only call stays at 25s, and a batch that
+ * includes memory extraction gets memory's 90s window. */
+const FOLLOWUP_CEILINGS: Record<FollowupTaskKind, { timeoutMs: number; idleMs: number }> = {
+  title: { timeoutMs: INTERNAL_PROMPT_TIMEOUT_MS, idleMs: INTERNAL_PROMPT_IDLE_MS },
+  nextSteps: { timeoutMs: NEXT_STEP_TIMEOUT_MS, idleMs: NEXT_STEP_IDLE_MS },
+  memory: { timeoutMs: MEMORY_EXTRACT_TIMEOUT_MS, idleMs: MEMORY_EXTRACT_IDLE_MS },
+};
 /**
  * Neutralise `@path` file references in an internal-prompt draft (enhance /
  * AI title) by dropping the `@` and keeping the path text (user-reported
@@ -627,21 +645,19 @@ export class ChatPanel implements vscode.Disposable {
   private panelVisible = false;
   /** M1 P0-5: pure gate state (throttle timestamps per event kind). */
   private osNotifyGate: OsNotifyGate = initOsNotifyGate();
-  /** M1: one internal prompt at a time (enhance and title generation share
-   * the lane; a second request while one runs fails fast). */
+  /** M1: one internal prompt at a time (the user-initiated enhance call; a
+   * second request while one runs fails fast). */
   private internalPromptBusy = false;
-  /** F3 Phase 2: turn-end memory extraction has its own lane (it must not
-   * block enhance/title, and vice versa). */
-  private memoryPromptBusy = false;
+  /** Turn-end follow-up: ONE merged request for AI title + next-step
+   * prediction + memory extraction. Their old three lanes meant a settled turn
+   * could fire three gateway calls regardless of how many features were on.
+   * Knowledge and asset drafting keep their own lanes (user-initiated, long). */
+  private followupBusy = false;
   /** F3 Phase 3: knowledge generation is user-initiated and long; own lane. */
   private knowledgePromptBusy = false;
   /** F4: asset drafting is user-initiated from the settings dialog; own lane so
-   * it neither blocks nor is blocked by enhance/title/memory/knowledge. */
+   * it neither blocks nor is blocked by enhance/followup/knowledge. */
   private assetGenBusy = false;
-  /** Turn-end next-step prediction has its OWN lane: it is fire-and-forget
-   * and must neither block enhance/title nor be blocked by them (a title
-   * generation at the same turn end would otherwise swallow the prediction). */
-  private nextStepBusy = false;
   /** P1-5 anti-footgun: the in-flight enhance (requestId + abort + the
    * session it was started on). `cancelEnhance` aborts it; the reply is also
    * dropped when the requestId is stale or the session changed meanwhile. */
@@ -705,7 +721,6 @@ export class ChatPanel implements vscode.Disposable {
         readCliSettings(path.join(os.homedir(), ".iflow", "settings.json"))?.contextFileName ?? null,
       isAutoCaptureEnabled: () =>
         vscode.workspace.getConfiguration("iflow").get<boolean>("autoMemoryCapture", true),
-      runPrompt: (prompt) => this.runMemoryPrompt(prompt),
       getSessionId: () => this.store.getState().sessionId,
       scanWorkspace: () => this.scanKnowledgeWorkspace(),
       readWorkspaceFile: (file) => this.readKnowledgeFile(file),
@@ -1871,7 +1886,7 @@ export class ChatPanel implements vscode.Disposable {
     });
   }
 
-  // --- M1: internal prompts (P1-5 enhance / P0-7 AI title) --------------------
+  // --- M1: internal prompts (P1-5 enhance / turn-end follow-up batch) ----
   //
   // Isolation discipline: an internal prompt must NOT enter the transcript,
   // the CLI chatHistory of the user session, or the regenerate chain.
@@ -1888,22 +1903,6 @@ export class ChatPanel implements vscode.Disposable {
    * Instance fields (constants as defaults) so tests can inject small values. */
   private internalPromptTimeoutMs = INTERNAL_PROMPT_TIMEOUT_MS;
   private internalPromptIdleMs = INTERNAL_PROMPT_IDLE_MS;
-
-  /** F3 Phase 2: extraction completion on its own lane. Reuses the same
-   * endpoint/model resolution and salvage policy as enhance/title. */
-  private async runMemoryPrompt(text: string): Promise<string | null> {
-    if (this.disposed || this.memoryPromptBusy) return null;
-    this.memoryPromptBusy = true;
-    try {
-      return await this.completeInternalPrompt(
-        text,
-        MEMORY_EXTRACT_TIMEOUT_MS,
-        MEMORY_EXTRACT_IDLE_MS,
-      );
-    } finally {
-      this.memoryPromptBusy = false;
-    }
-  }
 
   /** F3 Phase 3: knowledge-index completion on its own lane. */
   private async runKnowledgePrompt(text: string): Promise<string | null> {
@@ -2163,73 +2162,145 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * P0-7: one-shot AI title for a session whose label is still the
-   * first-message truncation. Silent on every failure (the old label stays);
-   * `titledSessionIds` records attempts, so a failure never retries in a
-   * storm and success is likewise once-per-session.
+   * Turn-end follow-up: ONE merged internal request covering whichever
+   * conveniences are enabled — AI title, next-step prediction and memory
+   * extraction. They used to be three separate gateway calls fired from the
+   * same completion point, so a settled turn burned up to three model calls
+   * regardless of how many settings were on; the reply is one JSON envelope
+   * split back apart here (shared/turn-followup.ts).
+   *
+   * Isolation follows the internal-prompt discipline (pitfall #26): direct
+   * endpoint call, no transcript block, no CLI chatHistory entry, no tool
+   * surface. Silent on every failure — a missing title, chip batch or memory
+   * candidate must never turn a healthy turn red.
+   *
+   * `allowTitle` is false on a regenerated turn (title generation stays a
+   * first-send concern, as before). `conversationTasks` gates the two
+   * conversation-derived tasks: a `/compress` turn or a turn-end auto-compress
+   * is housekeeping, not new conversation, and must not seed 下一步 chips or
+   * memory candidates from compression chatter (2026-10-19 report).
    */
-  private async maybeGenerateAiTitle(sessionId: string): Promise<void> {
-    if (this.disposed || this.titledSessionIds.has(sessionId)) return;
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoTitle", true) === false) return;
+  private async runTurnFollowup(
+    sessionId: string,
+    opts: { allowTitle: boolean; conversationTasks: boolean },
+  ): Promise<void> {
+    // Lane discipline: an in-flight enhance means the whole batch is skipped
+    // NOW — the title id is NOT registered, so the next turn's completion
+    // retries it (the busy check must come before the registration).
+    if (this.disposed || this.followupBusy || this.internalPromptBusy) return;
     const state = this.store.getState();
-    if (state.sessionId !== sessionId && state.activeSessionId !== sessionId) return;
-    const target = state.sessions.find((s) => s.id === sessionId);
-    if (!target) return;
-    const firstUser = state.blocks.find((b) => b.kind === "user");
-    if (!firstUser || firstUser.kind !== "user") return;
-    // Only replace the mechanical truncation form (or the untitled default)
-    // — a label the user could not have produced mechanically is left alone.
-    // Labels persisted before the ellipsis was added to clampSessionLabel
-    // carry the bare 48-char slice; accept that form too so old sessions can
-    // still be titled.
-    const mechanical = clampSessionLabel(firstUser.text);
-    const legacyMechanical = firstUser.text.trim().slice(0, SESSION_LABEL_MAX);
-    if (
-      target.label !== mechanical &&
-      target.label !== legacyMechanical &&
-      target.label !== DEFAULT_SESSION_LABEL
-    )
-      return;
-    // One lane: an in-flight internal prompt means this session gets no title
-    // NOW — but the id is not registered yet, so the next turn's completion
-    // retries (the busy check must come before the registration).
-    if (this.internalPromptBusy) return;
-    this.titledSessionIds.add(sessionId);
-    const template = vscode.l10n.t(
-      "用 6 到 10 个字概括下面这条用户请求的主题，使用与其相同的语言。这是一次纯文本概括任务——不要调用任何工具、不要读取文件或执行请求里描述的操作。只输出标题文本本身，不要引号、句读或解释。\n\n请求：\n",
-    );
-    const summary = await this.runInternalPrompt(template + stripFileMentions(firstUser.text).slice(0, 2000));
-    if (!summary || this.disposed) return;
-    const title = clampSessionLabel(summary.split("\n")[0] ?? "");
-    if (!title) return;
-    const current = this.store.getState();
-    if (current.sessionId !== sessionId && current.activeSessionId !== sessionId) return;
-    const entry = current.sessions.find((s) => s.id === sessionId);
-    if (!entry) return;
-    const sessions = current.sessions.map((s) => (s.id === sessionId ? { ...s, label: title } : s));
-    this.store.setSessions(sessions, current.activeSessionId);
-    await this.persistSessions(sessions, current.activeSessionId);
-    // Keep the transcript file's label in sync with the new title.
-    void this.persistActiveTranscript(true);
+    if (state.sessionId !== sessionId) return;
+    const blocks = state.blocks;
+
+    const input: FollowupInput = {};
+    const tasks: FollowupTaskKind[] = [];
+    const titleTask = opts.allowTitle ? this.titleTaskFor(sessionId) : null;
+    if (titleTask) {
+      input.title = { request: titleTask.request };
+      tasks.push("title");
+      this.titledSessionIds.add(sessionId);
+    }
+    const prediction = opts.conversationTasks ? this.nextStepTaskFor(sessionId) : null;
+    if (prediction) {
+      input.nextSteps = prediction.input;
+      tasks.push("nextSteps");
+    }
+    let memory: { conversation: string; existingFacts: string[] } | null = null;
+    if (opts.conversationTasks && this.memory.isExtractionEligible(sessionId, blocks)) {
+      memory = await this.memory.buildExtractionInput(blocks);
+      if (memory) {
+        input.memory = memory;
+        tasks.push("memory");
+      }
+    }
+    if (tasks.length === 0) return;
+
+    const ceiling = this.followupCeiling(tasks);
+    // The extraction rate-limit slot is taken only once the batch is really
+    // going out — a gated or empty batch must not consume the 2-minute window.
+    const extractingToastId = memory ? this.memory.beginExtraction() : null;
+    this.followupBusy = true;
+    if (prediction) this.store.setNextStepLoading(true);
+    try {
+      const raw = await this.completeInternalPrompt(
+        buildFollowupPrompt(input),
+        ceiling.timeoutMs,
+        ceiling.idleMs,
+      );
+      if (!raw || this.disposed) return;
+      const result = parseFollowupResponse(raw, tasks, NEXT_STEP_MAX_SUGGESTIONS);
+      if (titleTask) await this.applyFollowupTitle(sessionId, titleTask, result.title);
+      if (prediction) this.applyFollowupSuggestions(sessionId, prediction, result.nextSteps);
+      if (memory) this.memory.applyExtractionResult(raw, sessionId, memory.existingFacts);
+    } finally {
+      this.followupBusy = false;
+      // Every settle path (empty reply, stale anchor, session switch, timeout)
+      // must retire the pill — a stuck spinner reads as "the model died".
+      if (prediction && !this.disposed) this.store.setNextStepLoading(false);
+      this.memory.finishExtraction(extractingToastId);
+    }
+  }
+
+  /** Ceiling for a merged batch: the loosest window among the tasks it carries. */
+  private followupCeiling(tasks: readonly FollowupTaskKind[]): { timeoutMs: number; idleMs: number } {
+    let timeoutMs = 0;
+    let idleMs = 0;
+    for (const task of tasks) {
+      timeoutMs = Math.max(timeoutMs, FOLLOWUP_CEILINGS[task].timeoutMs);
+      idleMs = Math.max(idleMs, FOLLOWUP_CEILINGS[task].idleMs);
+    }
+    return { timeoutMs, idleMs };
   }
 
   /**
-   * Turn-end next-step prediction: one dedicated model call against the same
-   * OpenAI-compatible endpoint the panel uses, completely outside the agent
-   * session. Isolation follows the internal-prompt discipline (no transcript
-   * block, no CLI chatHistory entry, no tool surface). Silent on every
-   * failure — a missing prediction must never turn a healthy turn red.
-   *
-   * Anti-stale anchoring: hold the last user block by REFERENCE plus the
-   * block count. A prediction that lands after a new user turn, a session
-   * swap, a rollback, or a `/compress` turn (status flips to streaming) is
-   * dropped instead of overwriting the new turn's state.
+   * P0-7 title task input: eligible only while the session label is still the
+   * mechanical first-message truncation (or the untitled default) — a label the
+   * user could not have produced mechanically is left alone. Labels persisted
+   * before the ellipsis was added to clampSessionLabel carry the bare 48-char
+   * slice; accept that form too so old sessions can still be titled.
    */
-  private async generateNextStepSuggestions(sessionId: string): Promise<void> {
-    if (this.disposed || this.nextStepBusy) return;
-    if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return;
+  private titleTaskFor(
+    sessionId: string,
+  ): { request: string; mechanicalLabel: string; legacyMechanical: string } | null {
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("autoTitle", true) === false) return null;
+    if (this.titledSessionIds.has(sessionId)) return null;
     const state = this.store.getState();
-    if (state.sessionId !== sessionId) return;
+    if (state.sessionId !== sessionId && state.activeSessionId !== sessionId) return null;
+    const target = state.sessions.find((s) => s.id === sessionId);
+    if (!target) return null;
+    const firstUser = state.blocks.find((b) => b.kind === "user");
+    if (!firstUser || firstUser.kind !== "user") return null;
+    const mechanicalLabel = clampSessionLabel(firstUser.text);
+    const legacyMechanical = firstUser.text.trim().slice(0, SESSION_LABEL_MAX);
+    if (
+      target.label !== mechanicalLabel &&
+      target.label !== legacyMechanical &&
+      target.label !== DEFAULT_SESSION_LABEL
+    ) {
+      return null;
+    }
+    return {
+      request: stripFileMentions(firstUser.text).slice(0, TITLE_REQUEST_MAX_CHARS),
+      mechanicalLabel,
+      legacyMechanical,
+    };
+  }
+
+  /**
+   * Next-step task input: the last-turn excerpt (user request plus the
+   * assistant's closing text — walking backwards keeps the tail when the reply
+   * is long; tool titles carry what the agent actually did when the turn
+   * produced no prose). Anti-stale anchoring: hold the last user block by
+   * REFERENCE plus the block count.
+   */
+  private nextStepTaskFor(sessionId: string): {
+    input: FollowupNextStepsInput;
+    anchorUserBlock: Block;
+    anchorBlockCount: number;
+  } | null {
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return null;
+    const state = this.store.getState();
+    if (state.sessionId !== sessionId) return null;
     const blocks = state.blocks;
     let lastUserIndex = -1;
     for (let i = blocks.length - 1; i >= 0; i--) {
@@ -2238,13 +2309,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       }
     }
-    if (lastUserIndex < 0) return;
+    if (lastUserIndex < 0) return null;
     const anchorUserBlock = blocks[lastUserIndex]!;
-    if (anchorUserBlock.kind !== "user") return;
-    const anchorBlockCount = blocks.length;
-    // Last-turn excerpt: the user request plus the assistant's closing text
-    // (walking backwards keeps the tail when the reply is long). Tool titles
-    // carry what the agent actually did when the turn produced no prose.
+    if (anchorUserBlock.kind !== "user") return null;
     let reply = "";
     const toolTitles: string[] = [];
     for (let i = blocks.length - 1; i > lastUserIndex; i--) {
@@ -2257,41 +2324,68 @@ export class ChatPanel implements vscode.Disposable {
     }
     const user = anchorUserBlock.text.slice(0, Math.floor(NEXT_STEP_EXCERPT_CHARS / 3)).trim();
     const assistant = reply.slice(-Math.floor((NEXT_STEP_EXCERPT_CHARS * 2) / 3)).trim();
-    if (!user) return;
-    const template = vscode.l10n.t(
-      "你在对话结束后为用户生成下一步操作候选。根据下面的最近对话，推测用户接下来最可能想做的 3 个操作。\n要求：每条是一个可直接发送的简短指令（不超过 20 个字），使用与对话相同的语言，必须能从对话内容推断，不要泛泛而谈，也不要建议删除数据或执行危险命令。\n只输出 JSON 字符串数组，例如 [\"继续实现\",\"运行测试\",\"查看改动\"]，不要代码块、编号或解释。\n\n用户请求：\n",
-    );
-    const tools = toolTitles.length > 0 ? `\n\n本轮工具调用：${toolTitles.join("、")}` : "";
-    const prompt = `${template}${stripFileMentions(user)}\n\n助手回复（末尾节选）：\n${assistant}${tools}`;
-    this.nextStepBusy = true;
-    this.store.setNextStepLoading(true);
-    try {
-      const text = await this.completeInternalPrompt(prompt, NEXT_STEP_TIMEOUT_MS, NEXT_STEP_IDLE_MS);
-      if (!text || this.disposed) return;
-      const current = this.store.getState();
-      if (current.sessionId !== sessionId) return;
-      let currentLastUser: (typeof current.blocks)[number] | null = null;
-      for (let i = current.blocks.length - 1; i >= 0; i--) {
-        const block = current.blocks[i]!;
-        if (block.kind === "user") {
-          currentLastUser = block;
-          break;
-        }
-      }
-      // Only settle into the exact transcript the prediction was made for.
-      if (currentLastUser !== anchorUserBlock) return;
-      if (current.blocks.length !== anchorBlockCount || current.status !== "idle") return;
-      const suggestions = parseNextStepSuggestions(text, NEXT_STEP_MAX_SUGGESTIONS);
-      if (suggestions.length === 0) return;
-      // The user may have turned the feature off while the call was in flight.
-      if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return;
-      this.store.suggestNextSteps(suggestions);
-    } finally {
-      this.nextStepBusy = false;
-      // Every settle path (parsed-empty, stale anchor, session switch, timeout)
-      // must retire the pill — a stuck spinner reads as "the model died".
-      if (!this.disposed) this.store.setNextStepLoading(false);
+    if (!user) return null;
+    return {
+      input: { user: stripFileMentions(user), assistant, toolTitles },
+      anchorUserBlock,
+      anchorBlockCount: blocks.length,
+    };
+  }
+
+  /** Apply the merged reply's title, re-checking the session and the label. */
+  private async applyFollowupTitle(
+    sessionId: string,
+    task: { mechanicalLabel: string; legacyMechanical: string },
+    title: string | null,
+  ): Promise<void> {
+    if (!title || this.disposed) return;
+    const label = clampSessionLabel(title);
+    if (!label) return;
+    const current = this.store.getState();
+    if (current.sessionId !== sessionId && current.activeSessionId !== sessionId) return;
+    const entry = current.sessions.find((s) => s.id === sessionId);
+    if (!entry) return;
+    // The user may have renamed the session while the call was in flight:
+    // only the mechanical form we asked to replace is overwritten.
+    if (
+      entry.label !== task.mechanicalLabel &&
+      entry.label !== task.legacyMechanical &&
+      entry.label !== DEFAULT_SESSION_LABEL
+    ) {
+      return;
     }
+    const sessions = current.sessions.map((s) => (s.id === sessionId ? { ...s, label } : s));
+    this.store.setSessions(sessions, current.activeSessionId);
+    await this.persistSessions(sessions, current.activeSessionId);
+    // Keep the transcript file's label in sync with the new title.
+    void this.persistActiveTranscript(true);
+  }
+
+  /** Apply the merged reply's chips, dropping them when the transcript moved. */
+  private applyFollowupSuggestions(
+    sessionId: string,
+    prediction: { anchorUserBlock: Block; anchorBlockCount: number },
+    suggestions: string[],
+  ): void {
+    if (suggestions.length === 0) return;
+    const current = this.store.getState();
+    if (current.sessionId !== sessionId) return;
+    let currentLastUser: (typeof current.blocks)[number] | null = null;
+    for (let i = current.blocks.length - 1; i >= 0; i--) {
+      const block = current.blocks[i]!;
+      if (block.kind === "user") {
+        currentLastUser = block;
+        break;
+      }
+    }
+    // Only settle into the exact transcript the prediction was made for: a
+    // reply that lands after a new user turn, a session swap, a rollback or a
+    // `/compress` turn (status flips to streaming) is dropped.
+    if (currentLastUser !== prediction.anchorUserBlock) return;
+    if (current.blocks.length !== prediction.anchorBlockCount || current.status !== "idle") return;
+    // The user may have turned the feature off while the call was in flight.
+    if (vscode.workspace.getConfiguration("iflow").get<boolean>("nextStepSuggestions", true) === false) return;
+    this.store.suggestNextSteps(suggestions);
   }
 
   // --- M1: session export (P0-7) -----------------------------------------------
@@ -6837,9 +6931,6 @@ export class ChatPanel implements vscode.Disposable {
         // ready.
         this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
         this.postSound("done");
-        // M1 P0-7: the first completed turn is the AI-title window (no-op
-        // unless the label is still the mechanical truncation).
-        if (promptSessionId) void this.maybeGenerateAiTitle(promptSessionId);
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
@@ -6851,27 +6942,20 @@ export class ChatPanel implements vscode.Disposable {
       if (result.stopReason !== "cancelled") {
         autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
       }
-      // Turn-end next-step prediction (own lane; silent on failure). Same
-      // housekeeping discipline as extraction: a compression turn — typed
-      // `/compress` or a turn-end auto-compress — must not seed 下一步
+      // Turn-end follow-up (ONE merged request: AI title + next-step chips +
+      // memory candidates; silent on failure, fire-and-forget so it never
+      // delays the queue). The housekeeping discipline still applies to the
+      // conversation-derived tasks: a compression turn — typed `/compress` or
+      // a turn-end auto-compress — must not seed 下一步 chips or memory
       // candidates from housekeeping chatter (2026-10-19 report: chips like
-      // "查看压缩结果" after a compress turn). It is fired AFTER the
-      // auto-compress decision on purpose: pre-fold firing burned a call
-      // whose anchor the compression fold invalidates anyway.
-      if (
-        promptSessionId &&
-        result.stopReason !== "cancelled" &&
-        !isCompressTurn &&
-        !autoCompressed
-      ) {
-        void this.generateNextStepSuggestions(promptSessionId);
-      }
-      // F3 Phase 2: turn-end memory extraction (own lane, gated by
-      // iflow.autoMemoryCapture). Fire-and-forget: never delays the queue.
-      // Compression turns (manual `/compress` or a turn-end auto-compress)
-      // never trigger extraction: they are housekeeping, not new conversation.
-      if (result.stopReason !== "cancelled" && !isCompressTurn && !autoCompressed) {
-        void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
+      // "查看压缩结果" after a compress turn). The batch is fired AFTER the
+      // auto-compress decision on purpose: pre-fold firing burned a call whose
+      // anchor the compression fold invalidates anyway.
+      if (promptSessionId && result.stopReason !== "cancelled") {
+        void this.runTurnFollowup(promptSessionId, {
+          allowTitle: true,
+          conversationTasks: !isCompressTurn && !autoCompressed,
+        });
       }
       // M2 P0-3: the turn settled — the idle slot is free, feed it the next
       // queued message (no-op when the queue is empty). A user Stop
@@ -6978,16 +7062,16 @@ export class ChatPanel implements vscode.Disposable {
         this.postSound("done");
         // Same turn-end proactive compression policy as sendPrompt.
         const autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
-        // Same turn-end next-step prediction as sendPrompt, with the same
-        // housekeeping gate: a `/compress` turn or a turn-end auto-compress
-        // must not seed 下一步 candidates from compression chatter.
-        if (!isCompressTurn && !autoCompressed && promptSessionId) {
-          void this.generateNextStepSuggestions(promptSessionId);
-        }
-        // Same turn-end memory extraction policy as sendPrompt: compression
-        // turns must not trigger automatic memory capture.
-        if (!isCompressTurn && !autoCompressed) {
-          void this.memory.maybeExtract(promptSessionId, this.store.getState().blocks);
+        // Same turn-end follow-up batch as sendPrompt (one merged request),
+        // with the same housekeeping gate: a `/compress` turn or a turn-end
+        // auto-compress must not seed 下一步 chips or memory candidates from
+        // compression chatter. No title task — a regenerated turn is not the
+        // first-turn title window.
+        if (promptSessionId) {
+          void this.runTurnFollowup(promptSessionId, {
+            allowTitle: false,
+            conversationTasks: !isCompressTurn && !autoCompressed,
+          });
         }
       }
       void this.persistActiveTranscript();

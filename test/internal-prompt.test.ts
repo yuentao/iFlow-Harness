@@ -5,6 +5,10 @@ import { ChatPanel } from "../src/panel/panel.js";
 import { stripFileMentions } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type * as vscode from "vscode";
+import { setConfigOverrides, workspace } from "./vscode-stub.js";
+import { clampSessionLabel } from "../shared/session-state.js";
+import { buildFollowupPrompt, parseFollowupResponse } from "../shared/turn-followup.js";
+import type { Block } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -359,5 +363,240 @@ describe("ChatPanel enhance cancellation & session isolation", () => {
     await running;
     const msg = posted.find((m) => m.type === "enhancedPrompt");
     expect(msg?.text).toBe("正常回填");
+  });
+});
+
+// --- merged turn-end follow-up (title + next steps + memory in ONE call) ------
+
+describe("turn-followup prompt & envelope (pure)", () => {
+  it("lists only the requested keys and sections", () => {
+    const prompt = buildFollowupPrompt({
+      nextSteps: { user: "修一下登录报错", assistant: "已修复并跑了测试", toolTitles: ["run_shell_command"] },
+    });
+    expect(prompt).toContain('"nextSteps"');
+    expect(prompt).not.toContain('"title"');
+    expect(prompt).not.toContain('"facts"');
+    expect(prompt).toContain("【下一步】");
+    expect(prompt).not.toContain("【标题】");
+    expect(prompt).toContain("本轮工具调用：run_shell_command");
+  });
+
+  it("parses a fenced envelope and keeps the raw reply for the memory task", () => {
+    const raw = '```json\n{"title":"重构登录流程","nextSteps":["跑测试"]}\n```';
+    const result = parseFollowupResponse(raw, ["title", "nextSteps", "memory"]);
+    expect(result.title).toBe("重构登录流程");
+    expect(result.nextSteps).toEqual(["跑测试"]);
+    expect(result.memoryRaw).toContain("重构登录流程");
+  });
+
+  it("falls back to per-key digging when the envelope is malformed", () => {
+    const raw = '{"title":"登录改用 PKCE", "nextSteps": ["继续实现", "运行测试"], broken';
+    const result = parseFollowupResponse(raw, ["title", "nextSteps"]);
+    expect(result.title).toBe("登录改用 PKCE");
+    expect(result.nextSteps).toEqual(["继续实现", "运行测试"]);
+  });
+
+  it("never fabricates a part from a non-JSON reply", () => {
+    const result = parseFollowupResponse("好的，我来看看这几点。", ["title", "nextSteps"]);
+    expect(result.title).toBeNull();
+    expect(result.nextSteps).toEqual([]);
+  });
+
+  it("keeps a part absent when its task was not requested", () => {
+    const raw = JSON.stringify({ title: "标题内容", nextSteps: ["继续"] });
+    expect(parseFollowupResponse(raw, ["nextSteps"]).title).toBeNull();
+    expect(parseFollowupResponse(raw, ["title"]).nextSteps).toEqual([]);
+    expect(parseFollowupResponse(raw, ["title"]).memoryRaw).toBeNull();
+  });
+});
+
+describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
+  type SessionEntry = { id: string; label: string; updatedAt: number };
+  type FollowupInternals = {
+    runTurnFollowup: (
+      sessionId: string,
+      opts: { allowTitle: boolean; conversationTasks: boolean },
+    ) => Promise<void>;
+    enhancePrompt: (requestId: number, text: string) => Promise<void>;
+    store: {
+      getState: () => {
+        sessionId: string;
+        activeSessionId: string | null;
+        sessions: SessionEntry[];
+        blocks: Block[];
+        status: string;
+        nextStepSuggestions?: string[];
+        nextStepLoading?: boolean;
+      };
+      sessionStarted: (meta: { sessionId: string }) => void;
+      setSessions: (sessions: SessionEntry[], activeSessionId?: string | null) => void;
+    };
+    memory: {
+      isExtractionEligible: (sessionId: string, blocks: Block[]) => boolean;
+      buildExtractionInput: (blocks: Block[]) => Promise<{ conversation: string; existingFacts: string[] } | null>;
+      beginExtraction: () => number | null;
+      finishExtraction: (toastId: number | null) => void;
+      applyExtractionResult: (raw: string, sessionId: string, existingFacts: readonly string[]) => void;
+    };
+    titledSessionIds: Set<string>;
+    persistSessions: (sessions: unknown, activeSessionId: string | null) => Promise<void>;
+    persistActiveTranscript: (labelSync?: boolean) => Promise<void>;
+  };
+
+  const SESSION_ID = "followup-session";
+  const FIRST_REQUEST = "把登录流程改成 PKCE，并补上测试";
+
+  let panel: ChatPanel;
+  let p: FollowupInternals;
+
+  beforeEach(() => {
+    completionMock.state.calls = [];
+    queueCompletion({ text: "", reason: "failed" });
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: true,
+      nextStepSuggestions: true,
+      autoMemoryCapture: true,
+    });
+    panel = makePanel().panel;
+    p = panel as unknown as FollowupInternals;
+    // Persistence is fs-bound in production; these tests assert the store only.
+    p.persistSessions = async () => {};
+    p.persistActiveTranscript = async () => {};
+    // Mirror the real service gates: the auto-capture setting plus the session
+    // id, without touching the real ~/.iflow discovery.
+    vi.spyOn(p.memory, "isExtractionEligible").mockImplementation((sessionId) =>
+      p.store.getState().sessionId === sessionId &&
+      workspace.getConfiguration("iflow").get<boolean>("autoMemoryCapture", true),
+    );
+    vi.spyOn(p.memory, "buildExtractionInput").mockResolvedValue({
+      conversation: "用户：把登录流程改成 PKCE，并补上测试",
+      existingFacts: [],
+    });
+    vi.spyOn(p.memory, "beginExtraction").mockReturnValue(null);
+    vi.spyOn(p.memory, "finishExtraction").mockImplementation(() => {});
+    vi.spyOn(p.memory, "applyExtractionResult").mockImplementation(() => {});
+    p.store.sessionStarted({ sessionId: SESSION_ID });
+    p.store.getState().blocks.push(
+      { kind: "user", text: FIRST_REQUEST },
+      { kind: "text", text: "已改完，测试通过。" },
+    );
+    p.store.getState().status = "idle";
+    // A still-mechanical label is the only one the title task may replace.
+    p.store.setSessions([{ id: SESSION_ID, label: clampSessionLabel(FIRST_REQUEST), updatedAt: 1 }], SESSION_ID);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    setConfigOverrides({});
+    await panel.dispose();
+  });
+
+  it("fires ONE call carrying every enabled task and dispatches all three parts", async () => {
+    queueCompletion({
+      text: JSON.stringify({
+        title: "登录改用 PKCE",
+        nextSteps: ["运行测试", "查看改动"],
+        facts: [{ text: "项目统一用 pnpm 安装依赖", scope: "global", category: "convention", confidence: 0.9 }],
+      }),
+      reason: "complete",
+    });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+
+    expect(completionMock.state.calls).toHaveLength(1);
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).toContain("【标题】");
+    expect(sent).toContain("【下一步】");
+    expect(sent).toContain("【长期记忆】");
+    expect(sent).toContain('"facts"');
+
+    expect(p.store.getState().sessions[0]?.label).toBe("登录改用 PKCE");
+    expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试", "查看改动"]);
+    expect(p.store.getState().nextStepLoading).toBe(false);
+    expect(p.memory.applyExtractionResult).toHaveBeenCalledTimes(1);
+    expect(p.memory.beginExtraction).toHaveBeenCalledTimes(1);
+    expect(p.memory.finishExtraction).toHaveBeenCalledTimes(1);
+    expect(p.titledSessionIds.has(SESSION_ID)).toBe(true);
+  });
+
+  it("asks for exactly the enabled tasks", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      nextStepSuggestions: true,
+      autoMemoryCapture: false,
+    });
+    queueCompletion({ text: JSON.stringify({ nextSteps: ["运行测试"] }), reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+
+    expect(completionMock.state.calls).toHaveLength(1);
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).toContain("【下一步】");
+    expect(sent).not.toContain("【标题】");
+    expect(sent).not.toContain("【长期记忆】");
+    expect(p.store.getState().sessions[0]?.label).toBe(clampSessionLabel(FIRST_REQUEST));
+    expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试"]);
+    expect(p.memory.applyExtractionResult).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when no task is eligible", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      nextStepSuggestions: false,
+      autoMemoryCapture: false,
+    });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+    expect(completionMock.state.calls).toHaveLength(0);
+    expect(p.memory.beginExtraction).not.toHaveBeenCalled();
+  });
+
+  it("skips the whole batch while an enhance is in flight, and retries the title next turn", async () => {
+    let release: (v: CompletionResult) => void = () => {};
+    queueCompletion(() => new Promise((resolve) => (release = resolve)));
+    const enhance = p.enhancePrompt(9, "帮我写个周报");
+    await vi.waitFor(() => expect(completionMock.state.calls).toHaveLength(1));
+
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+    expect(completionMock.state.calls).toHaveLength(1);
+    // Not registered: the next turn's completion still gets a title attempt.
+    expect(p.titledSessionIds.has(SESSION_ID)).toBe(false);
+
+    release({ text: "改写完成", reason: "complete" });
+    await enhance;
+    queueCompletion({ text: JSON.stringify({ title: "登录改用 PKCE" }), reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+    expect(completionMock.state.calls).toHaveLength(2);
+    expect(p.store.getState().sessions[0]?.label).toBe("登录改用 PKCE");
+  });
+
+  it("drops the chips when the transcript moved while the call was in flight", async () => {
+    queueCompletion(async () => {
+      // A new user turn landed while the merged request was running.
+      p.store.getState().blocks.push({ kind: "user", text: "换个问题" });
+      return { text: JSON.stringify({ nextSteps: ["运行测试"] }), reason: "complete" };
+    });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: false, conversationTasks: true });
+    expect(p.store.getState().nextStepSuggestions).toEqual([]);
+    expect(p.store.getState().nextStepLoading).toBe(false);
+  });
+
+  it("runs with the loosest ceiling among the tasks it carries", async () => {
+    queueCompletion({ text: "{}", reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+    const batch = completionMock.state.calls[0];
+    expect(batch?.timeoutMs).toBe(180_000);
+    expect(batch?.idleMs).toBe(90_000);
+
+    completionMock.state.calls = [];
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      nextStepSuggestions: true,
+      autoMemoryCapture: false,
+    });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: false, conversationTasks: true });
+    expect(completionMock.state.calls[0]?.timeoutMs).toBe(25_000);
+    expect(completionMock.state.calls[0]?.idleMs).toBe(12_000);
   });
 });

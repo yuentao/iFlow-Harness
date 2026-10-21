@@ -45,6 +45,7 @@ export function ModalShell({
   icon,
   onClose,
   onBack,
+  onEscape,
   dismissible = true,
   ariaLabel,
   role = "dialog",
@@ -58,6 +59,8 @@ export function ModalShell({
   icon?: ReactNode;
   onClose: () => void;
   onBack?: (() => void) | null;
+  /** Overrides ESC (e.g. settings sub-pages: Esc goes back, not close). */
+  onEscape?: () => void;
   dismissible?: boolean;
   ariaLabel: string;
   role?: "dialog" | "alertdialog";
@@ -117,7 +120,8 @@ export function ModalShell({
         // "Esc stops generation" shortcut cannot fire behind the modal.
         e.preventDefault();
         e.stopPropagation();
-        if (dismissible) onClose();
+        if (onEscape) onEscape();
+        else if (dismissible) onClose();
         return;
       }
       if (e.key === "Tab") {
@@ -143,9 +147,9 @@ export function ModalShell({
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-    // onClose closes over section state (e.g. the choice dialog's answered
-    // flag); re-registering keeps the closure current.
-  }, [dismissible, onClose]);
+    // onClose/onEscape close over section state (e.g. the settings shell's
+    // sectionHeader); re-registering keeps the closures current.
+  }, [dismissible, onClose, onEscape]);
 
   return (
     <div
@@ -477,6 +481,10 @@ export const CANVAS_BTN =
 /** Compact icon-only button (header cluster, 28×28). */
 export const BTN_ICON =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-surface hover:text-foreground active:scale-95 disabled:pointer-events-none disabled:opacity-40";
+/** Ghost convenience button for the secondary row (catalog / refresh): quieter
+ * than BTN — caption text, no border, must not read as a peer of the primary. */
+export const GHOST_BTN =
+  "press inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
 /** Icon scale: 14px inline controls, 16px toolbar buttons, 20px empty states. */
 export const ICON_INLINE = "size-3.5";
 export const ICON_TOOLBAR = "size-4";
@@ -510,6 +518,58 @@ export function ToolbarRow({ children, className = "" }: { children: ReactNode; 
   return (
     <div className={`mt-2 flex flex-wrap items-center gap-2 border-b border-border/50 pb-3${className ? ` ${className}` : ""}`}>
       {children}
+    </div>
+  );
+}
+
+/** Secondary convenience-action row under a primary toolbar (catalog /
+ * refresh): quieter than ToolbarRow — wider optical gap for ghost buttons,
+ * still closes with a divider. */
+export function SecondaryRow({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`mt-2 flex flex-wrap items-center gap-3 border-b border-border/50 pb-3${className ? ` ${className}` : ""}`}>
+      {children}
+    </div>
+  );
+}
+
+/** Segmented axis selector at the top of a settings section (MCP scope /
+ * asset kind). One home for the two cards' tab strips so surface, padding and
+ * active-state stay in lockstep; options may carry `disabled`/`title`. */
+export function Segmented<T extends string>({
+  ariaLabel,
+  options,
+  value,
+  onChange,
+}: {
+  ariaLabel: string;
+  options: Array<{ value: T; label: ReactNode; disabled?: boolean; title?: string }>;
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="flex shrink-0 items-center gap-1 rounded-lg border border-border/70 bg-surface/40 px-1 py-1"
+    >
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-current={option.value === value ? "true" : undefined}
+          disabled={option.disabled}
+          title={option.title}
+          className={
+            option.value === value
+              ? "press rounded-md whitespace-nowrap bg-primary/18 px-2 py-0.5 text-ui-label font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
+              : "press rounded-md whitespace-nowrap px-2 py-0.5 text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          }
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+        </button>
+      ))}
     </div>
   );
 }

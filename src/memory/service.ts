@@ -14,7 +14,7 @@ import type {
 } from "../../shared/messages.js";
 import { estimateTokens } from "../../shared/session-state.js";
 import { discoverMemoryFiles, type DiscoveredMemoryFile } from "./discovery.js";
-import { buildExtractionPrompt, parseCandidates } from "./extract.js";
+import { buildExtractionConversation, parseCandidates } from "./extract.js";
 import {
   appendFact,
   deleteFacts,
@@ -57,8 +57,6 @@ export interface MemoryServiceOptions {
   getContextFileName: () => string | string[] | null;
   /** `iflow.autoMemoryCapture` at call time (VSCode configuration is truth). */
   isAutoCaptureEnabled: () => boolean;
-  /** One direct endpoint completion for extraction (never the CLI agent). */
-  runPrompt: (prompt: string) => Promise<string | null>;
   /** Current session id, used to drop stale extraction results. */
   getSessionId: () => string | null;
   /** Workspace scan for knowledge generation (panel uses findFiles). */
@@ -131,7 +129,8 @@ export class MemoryService {
   /** path → (content hash, token estimate). Large AGENTS.md files are
    * re-tokenized only when their content actually changes. */
   private readonly tokenCache = new Map<string, { hash: string; tokens: number }>();
-  private extractBusy = false;
+  /** Rate-limit slot for turn-end extraction; stamped by `beginExtraction`
+   * (only when the merged request actually runs), reset by `invalidate()`. */
   private lastExtractAt = 0;
   /** Candidate batch awaiting the user's review (never written automatically). */
   private pendingCandidates: { sessionId: string | null; candidates: MemoryCandidateUi[] } | null = null;
@@ -423,49 +422,68 @@ export class MemoryService {
   }
 
   /**
-   * Turn-end auto-extraction. Gated by `iflow.autoMemoryCapture`, a 2-minute
-   * interval, a single in-flight extraction, and the originating session id
-   * (a session switch drops the result). The model output is parsed strictly
-   * and only stored as pending candidates — nothing is written until the user
-   * confirms in the review dialog.
+   * Turn-end extraction gate: `iflow.autoMemoryCapture`, the originating
+   * session id, the 2-minute interval and a transcript that actually carries
+   * conversation. Consumes NO rate-limit slot — the merged turn-end request may
+   * be skipped by the panel's own lane, and a skipped attempt must not burn the
+   * interval (the next real turn still extracts).
    */
-  async maybeExtract(sessionId: string, blocks: readonly Block[]): Promise<void> {
-    if (this.disposed || this.extractBusy) return;
-    if (!this.options.isAutoCaptureEnabled()) return;
-    if (this.options.getSessionId() !== sessionId) return;
-    if (Date.now() - this.lastExtractAt < EXTRACT_MIN_INTERVAL_MS) return;
-    if (!blocks.some((block) => block.kind === "text" || block.kind === "user")) return;
-    this.extractBusy = true;
+  isExtractionEligible(sessionId: string, blocks: readonly Block[]): boolean {
+    if (this.disposed || !this.options.isAutoCaptureEnabled()) return false;
+    if (this.options.getSessionId() !== sessionId) return false;
+    if (Date.now() - this.lastExtractAt < EXTRACT_MIN_INTERVAL_MS) return false;
+    return blocks.some((block) => block.kind === "text" || block.kind === "user");
+  }
+
+  /** Memory section inputs for the merged turn-end prompt: existing facts (for
+   * the "don't repeat" list AND post-hoc dedupe) plus the transcript excerpt.
+   * Null when there is nothing to feed the model. */
+  async buildExtractionInput(
+    blocks: readonly Block[],
+  ): Promise<{ conversation: string; existingFacts: string[] } | null> {
+    const conversation = buildExtractionConversation(blocks, { maxInputChars: 6_000 });
+    if (!conversation) return null;
+    const existingFacts = await this.collectExistingFacts();
+    return { conversation, existingFacts };
+  }
+
+  /** The merged request is about to run: take the rate-limit slot and show the
+   * loading pill. Returns the host toast id for `finishExtraction`. */
+  beginExtraction(): number | null {
     this.lastExtractAt = Date.now();
-    const extractingToastId = this.sendExtractingToast();
-    try {
-      const existing = await this.collectExistingFacts();
-      const prompt = buildExtractionPrompt(blocks, existing, { maxInputChars: 6_000 });
-      const raw = await this.options.runPrompt(prompt);
-      if (!raw || this.disposed || this.options.getSessionId() !== sessionId) return;
-      const allowProject = Boolean(this.options.getCwd() ?? this.options.getWorkspaceRoots()[0]);
-      const candidates = parseCandidates(raw, { existingFacts: existing, allowProject });
-      if (candidates.length === 0) {
-        this.options.log.info("memory extraction produced no candidates");
-        return;
-      }
-      this.pendingCandidates = { sessionId, candidates };
-      const message = vscode.l10n.t("发现 {0} 条可记忆内容，是否追加到记忆？", candidates.length);
-      const action = { actionId: "memory-review", label: vscode.l10n.t("追加记忆") };
-      this.dismissCandidateToast();
-      if (this.options.sendToast) {
-        const toastId = this.options.sendToast("info", message, { sticky: true, action });
-        if (typeof toastId === "number") this.toastId = toastId;
-      } else {
-        this.options.post({ type: "toast", level: "info", message, sticky: true, action });
-      }
-      this.options.log.info(`memory extraction: ${candidates.length} candidates`);
-    } catch (error) {
-      this.options.log.warn(`memory extraction failed: ${messageOf(error)}`);
-    } finally {
-      this.extractBusy = false;
-      this.clearExtractingToast(extractingToastId);
+    return this.sendExtractingToast();
+  }
+
+  /** Retire the loading pill — every settle path (success, empty, failure)
+   * must call it, or the WebView sits on a stuck spinner. */
+  finishExtraction(toastId: number | null): void {
+    this.clearExtractingToast(toastId);
+  }
+
+  /**
+   * Feed the merged reply's `facts` array through the strict parser and queue
+   * the candidates. Nothing is written until the user confirms in the review
+   * dialog; a session swap or a disposed panel drops the batch.
+   */
+  applyExtractionResult(raw: string, sessionId: string, existingFacts: readonly string[]): void {
+    if (this.disposed || this.options.getSessionId() !== sessionId) return;
+    const allowProject = Boolean(this.options.getCwd() ?? this.options.getWorkspaceRoots()[0]);
+    const candidates = parseCandidates(raw, { existingFacts, allowProject });
+    if (candidates.length === 0) {
+      this.options.log.info("memory extraction produced no candidates");
+      return;
     }
+    this.pendingCandidates = { sessionId, candidates };
+    const message = vscode.l10n.t("发现 {0} 条可记忆内容，是否追加到记忆？", candidates.length);
+    const action = { actionId: "memory-review", label: vscode.l10n.t("追加记忆") };
+    this.dismissCandidateToast();
+    if (this.options.sendToast) {
+      const toastId = this.options.sendToast("info", message, { sticky: true, action });
+      if (typeof toastId === "number") this.toastId = toastId;
+    } else {
+      this.options.post({ type: "toast", level: "info", message, sticky: true, action });
+    }
+    this.options.log.info(`memory extraction: ${candidates.length} candidates`);
   }
 
   /** Toast action: show the pending candidate batch in the review dialog. */

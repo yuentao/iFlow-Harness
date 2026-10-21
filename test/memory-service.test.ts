@@ -30,7 +30,6 @@ function makeService(
     getWorkspaceRoots: () => (cwd ? [cwd] : []),
     getContextFileName: () => null,
     isAutoCaptureEnabled: () => false,
-    runPrompt: async () => null,
     getSessionId: () => null,
     scanWorkspace: async () => ({ files: [], truncated: false }),
     readWorkspaceFile: async () => null,
@@ -455,36 +454,46 @@ describe("MemoryService", () => {
     ).toBe(1);
   });
 
-  it("extracts candidates, reviews, and applies selected facts", async () => {
+  it("gates extraction, feeds the merged prompt, and queues reviewed candidates", async () => {
     const home = tempDir("iflow-mem-home-");
     const root = tempDir("iflow-mem-ws-");
     const sessionId = "session-1";
     const { service, messages } = makeService(home, root, {
       isAutoCaptureEnabled: () => true,
       getSessionId: () => sessionId,
-      runPrompt: async () =>
-        JSON.stringify({
-          facts: [
-            {
-              text: "以后用 pnpm 安装依赖",
-              scope: "global",
-              category: "preference",
-              confidence: 0.9,
-            },
-          ],
-        }),
     });
     const blocks: Block[] = [
       { kind: "user", text: "以后用 pnpm 安装依赖" },
       { kind: "text", text: "好的，记住了。" },
     ];
-    await service.maybeExtract(sessionId, blocks);
+    expect(service.isExtractionEligible(sessionId, blocks)).toBe(true);
+    expect(service.isExtractionEligible("other-session", blocks)).toBe(false);
+
+    const input = await service.buildExtractionInput(blocks);
+    expect(input?.conversation).toContain("用户：以后用 pnpm 安装依赖");
+    expect(input?.existingFacts).toEqual([]);
+
+    const toastId = service.beginExtraction();
+    // The rate-limit slot is taken by the batch that actually runs: a later
+    // turn inside the 2-minute window must not extract again.
+    expect(service.isExtractionEligible(sessionId, blocks)).toBe(false);
     const loadingPill = messages.find(
       (message) => message.type === "toast" && message.displayOnly === true,
     );
     if (!loadingPill || loadingPill.type !== "toast") throw new Error("no loading pill");
     expect(loadingPill.persistent).toBe(true);
     expect(loadingPill.message).toContain("提取");
+    service.finishExtraction(toastId);
+
+    service.applyExtractionResult(
+      JSON.stringify({
+        facts: [
+          { text: "以后用 pnpm 安装依赖", scope: "global", category: "preference", confidence: 0.9 },
+        ],
+      }),
+      sessionId,
+      input?.existingFacts ?? [],
+    );
     const toast = messages.find(
       (message) => message.type === "toast" && message.action?.actionId === "memory-review",
     );
@@ -504,7 +513,7 @@ describe("MemoryService", () => {
     expect(readFileSync(path.join(home, "AGENTS.md"), "utf8")).toContain("- 以后用 pnpm 安装依赖");
   });
 
-  it("wraps the run in a host-owned loading pill retired on every settle path", async () => {
+  it("retires the loading pill on every settle path and drops stale replies", () => {
     const home = tempDir("iflow-mem-home-");
     const root = tempDir("iflow-mem-ws-");
     const sessionId = "session-1";
@@ -529,20 +538,25 @@ describe("MemoryService", () => {
         dismissed.push(toastId);
       },
     });
-    const blocks: Block[] = [
-      { kind: "user", text: "以后用 pnpm 安装依赖" },
-      { kind: "text", text: "好的，记住了。" },
-    ];
-    await service.maybeExtract(sessionId, blocks);
+    const toastId = service.beginExtraction();
     const pill = messages.find(
       (message) => message.type === "toast" && message.displayOnly === true,
     );
     if (!pill || pill.type !== "toast") throw new Error("no loading pill");
     expect(pill.persistent).toBe(true);
     expect(pill.message).toContain("提取");
-    // The default runPrompt stub returns null: the finally must still retire
-    // the pill, otherwise the WebView would sit on a stuck spinner forever.
+    // A failed or empty merged reply still has to retire the pill, otherwise
+    // the WebView sits on a stuck spinner forever.
+    service.finishExtraction(toastId);
     expect(dismissed).toEqual([1]);
     expect(messages.some((message) => message.type === "toast" && message.action)).toBe(false);
+
+    // The user switched sessions while the merged request was in flight.
+    service.applyExtractionResult(
+      JSON.stringify({ facts: [{ text: "另一会话的长期约定内容", scope: "global", confidence: 0.9 }] }),
+      "other-session",
+      [],
+    );
+    expect(messages.some((message) => message.type === "memoryCandidates")).toBe(false);
   });
 });

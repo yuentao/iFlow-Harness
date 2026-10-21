@@ -102,6 +102,13 @@ export function SettingsModal({
   const tabTitle = TABS.find((x) => x.id === tab)?.label ?? "";
 
   const onNavKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    // Sub-editor open: ArrowLeft goes back to the list (same channel as the
+    // header back arrow); the other arrows keep tab navigation.
+    if (sectionHeader && event.key === "ArrowLeft") {
+      event.preventDefault();
+      sectionHeader.back();
+      return;
+    }
     const at = ALL_TABS.indexOf(tab);
     if (at < 0) return;
     let next = -1;
@@ -126,6 +133,12 @@ export function SettingsModal({
       icon={<Settings2 className="size-3.5 shrink-0 text-primary" />}
       onBack={sectionHeader?.back ?? null}
       onClose={onDismiss}
+      onEscape={() => {
+        // Sub-editor open → Esc goes back to the list (matches the header
+        // arrow); only the plain tab view closes, and never when mandatory.
+        if (sectionHeader) sectionHeader.back();
+        else if (dismissible) onDismiss();
+      }}
       dismissible={dismissible}
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">

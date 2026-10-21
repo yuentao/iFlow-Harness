@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { Check, ChevronRight, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { ChevronRight, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import type {
   AssetKind,
   AssetScope,
@@ -8,7 +8,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, SAVE_BTN, ActionRow, Field, Hint, ToolbarRow } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, SAVE_BTN, ActionRow, Field, GHOST_BTN, Hint, SecondaryRow, Segmented, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -387,6 +387,12 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
 
       {editing === null && detail === null && creating === null && confirmDelete === null && (
         <>
+          <Segmented
+            ariaLabel={t("资产类型")}
+            value={kind}
+            onChange={setKind}
+            options={KIND_TABS.map((tab) => ({ value: tab.kind, label: tab.label }))}
+          />
           <ToolbarRow>
             <button
               className={BTN}
@@ -400,14 +406,6 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               <Plus className="size-3.5" />
               {t("新建")}
             </button>
-            <button
-              className={BTN}
-              disabled={saving || (state === null && !loadError)}
-              onClick={refresh}
-            >
-              <RefreshCw className="size-3.5" />
-              {refreshing ? t("刷新中…") : t("刷新")}
-            </button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="ml-auto text-ui-label text-warning">
@@ -418,31 +416,20 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               <span className="ml-auto text-ui-label text-success">{savedFlash}</span>
             )}
           </ToolbarRow>
+          <SecondaryRow>
+            <button
+              className={GHOST_BTN}
+              disabled={saving || (state === null && !loadError)}
+              onClick={refresh}
+            >
+              <RefreshCw className="size-3.5" />
+              {refreshing ? t("刷新中…") : t("刷新")}
+            </button>
+          </SecondaryRow>
           {state === null ? (
             <div className="py-4 text-center text-ui-body text-muted-foreground">{t("扫描中…")}</div>
           ) : (
-            <div className="mt-2 space-y-3">
-              <div
-                role="group"
-                aria-label={t("资产类型")}
-                className="flex flex-wrap items-center gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-0.5"
-              >
-                {KIND_TABS.map((tab) => (
-                  <button
-                    key={tab.kind}
-                    type="button"
-                    aria-pressed={kind === tab.kind}
-                    className={`press rounded-md px-2.5 py-1.5 text-ui-label transition-colors duration-200 ${
-                      kind === tab.kind
-                        ? "bg-primary/15 font-semibold text-primary"
-                        : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                    }`}
-                    onClick={() => setKind(tab.kind)}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+            <div className="mt-2 space-y-2">
               {items.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border px-2 py-1.5 text-center text-ui-label text-muted-foreground">
                   {t("尚未定义")}
@@ -545,18 +532,8 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               {detailContent}
             </pre>
           )}
-          <ActionRow>
-            <button
-              className={BTN}
-              onClick={() => {
-                setDetail(null);
-                setDetailContent(null);
-              }}
-            >
-              <Check className="size-3.5" />
-              {t("返回")}
-            </button>
-            {detailContent !== null && (
+          {detailContent !== null && (
+            <ActionRow>
               <button
                 className={BTN}
                 onClick={() => {
@@ -568,8 +545,8 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               >
                 {t("编辑")}
               </button>
-            )}
-          </ActionRow>
+            </ActionRow>
+          )}
         </div>
       )}
 

@@ -26,10 +26,14 @@ export function normalizeFact(text: string): string {
     .trim();
 }
 
-/** Build the strict JSON-only extraction prompt. */
-export function buildExtractionPrompt(
+/**
+ * Transcript excerpt for the memory task: the newest blocks, clipped to the
+ * byte budget, as `用户：… / 助手：…` lines. The instruction text and the JSON
+ * envelope spec live in the merged turn-end prompt (shared/turn-followup.ts),
+ * so this stays a pure data builder.
+ */
+export function buildExtractionConversation(
   blocks: readonly Block[],
-  existingFacts: readonly string[],
   limits: ExtractLimits = {},
 ): string {
   const maxInput = limits.maxInputChars ?? 6_000;
@@ -49,29 +53,7 @@ export function buildExtractionPrompt(
     lines.unshift(`${block.kind === "user" ? "用户" : "助手"}：${clipped}`);
     used += clipped.length;
   }
-  const existing = existingFacts
-    .map((f) => `- ${f.trim()}`)
-    .filter((f) => f.length > 2)
-    .slice(0, 60)
-    .join("\n");
-  return [
-    "你在为一个编码助手整理跨会话长期记忆。",
-    "只提取稳定、可复用、对以后任务有帮助的信息：",
-    "- 用户偏好（语言、风格、工具、沟通方式）",
-    "- 项目约定（架构、目录、测试方式、依赖管理）",
-    "- 已确认的技术决策",
-    "- 反复踩到的陷阱",
-    "不要提取：一次性任务细节、代码正文、密钥、临时路径、未确认的猜测。",
-    "",
-    "已有记忆（不要重复）：",
-    existing || "（无）",
-    "",
-    "最近对话：",
-    lines.join("\n") || "（无）",
-    "",
-    "只输出 JSON，不要 markdown 代码围栏、不要解释：",
-    '{"facts":[{"text":"...","scope":"global|project","category":"preference|convention|decision|gotcha|other","confidence":0.0}]}',
-  ].join("\n");
+  return lines.join("\n");
 }
 
 export interface ParseCandidateOptions extends ExtractLimits {

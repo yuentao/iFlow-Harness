@@ -122,6 +122,7 @@ function toneOf(root: HTMLElement, needle: string): string | undefined {
       let el = node.parentElement;
       while (el) {
         const cls = el.className || "";
+        if (cls.includes("rounded-xl")) return "rounded-xl";
         if (cls.includes("rounded-lg")) return "rounded-lg";
         if (cls.includes("rounded-full")) return "rounded-full";
         el = el.parentElement;
@@ -200,6 +201,49 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     render(streamingState("idle"), [countdownToast()]);
     const text = container.textContent ?? "";
     expect(text.split(RATE_LIMIT).length - 1).toBe(1);
-    expect(toneOf(container, RATE_LIMIT)).toBe("rounded-lg");
+    expect(toneOf(container, RATE_LIMIT)).toBe("rounded-xl");
+  });
+
+  it("renders a memory proposal as an overlay pill with the memory icon and 24px controls", () => {
+    render(streamingState("idle"), [
+      {
+        id: 5,
+        level: "info",
+        message: "发现 2 条可记忆内容，是否追加到记忆？",
+        sticky: true,
+        toastId: 9,
+        action: { actionId: "memory-review", label: "追加记忆" },
+      },
+    ]);
+    const pill = container.querySelector(".rounded-xl")!;
+    // Overlay species (same family as the dropdowns / approval card), not a
+    // transcript card: acrylic surface, primary accent, 13px body.
+    expect(pill.className).toContain("acrylic-pop");
+    expect(pill.className).toContain("border-primary/45");
+    expect(pill.className).toContain("text-ui-label");
+    expect(pill.querySelector(".lucide-brain")).not.toBeNull();
+    const action = [...pill.querySelectorAll("button")].find((b) => b.textContent?.includes("追加记忆"));
+    expect(action?.className).toContain("h-6");
+    expect(pill.querySelector('[aria-label="关闭"]')?.className).toContain("size-6");
+    // Nesting the action inside the dismiss button used to swallow it entirely.
+    expect(pill.querySelector("button button")).toBeNull();
+    act(() => {
+      action!.click();
+    });
+    expect(store.current.send).toHaveBeenCalledWith({
+      type: "toastAction",
+      actionId: "memory-review",
+      toastId: 9,
+    });
+  });
+
+  it("spins the host-owned extraction wait instead of a static info dot", () => {
+    render(streamingState("idle"), [
+      { id: 6, level: "info", message: "正在提取长期记忆候选…", displayOnly: true, persistent: true, toastId: 10 },
+    ]);
+    const pill = container.querySelector(".rounded-xl")!;
+    expect(pill.querySelector(".animate-spin")).not.toBeNull();
+    // The host owns this pill's lifecycle — clicking must not imply a cancel.
+    expect(pill.querySelector("button")).toBeNull();
   });
 });
