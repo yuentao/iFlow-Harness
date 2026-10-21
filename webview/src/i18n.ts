@@ -885,6 +885,10 @@ const en: Record<string, string> = {
     "Memory is sent to the model with every request — never store secrets here.",
   "已加入记忆（新会话生效）": "Memory added (effective in a new session)",
   "记忆候选": "Memory candidates",
+  "iFlow 建议沉淀记忆": "iFlow suggests saving memories",
+  "查看并确认": "Review and confirm",
+  "忽略": "Dismiss",
+  "确认后才会写入记忆": "Nothing is written until you confirm",
   "记忆作用域": "Memory scope",
   "置信度 {0}%": "Confidence {0}%",
   "模型对该候选的置信度（0–100%）":

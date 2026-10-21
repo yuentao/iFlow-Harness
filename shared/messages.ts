@@ -1388,6 +1388,10 @@ export type HostToWebview =
        * semantics unchanged — a non-persistent action pill still
        * auto-dismisses). */
       action?: { actionId: string; label: string };
+      /** Preview lines for a decision-card notice (auto-memory candidates): the
+       * card shows WHAT would be written before the review dialog opens. The
+       * host caps the list; absence keeps the plain pill rendering. */
+      preview?: { text: string; scope: MemoryScope }[];
     }
   | { type: "dismissToast"; toastId: number }
   /** Reply to `searchFiles` (matched by requestId, newest wins in the UI). */

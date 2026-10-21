@@ -499,9 +499,10 @@ describe("MemoryService", () => {
     );
     expect(toast).toBeTruthy();
     if (!toast || toast.type !== "toast") throw new Error("no memory toast");
-    expect(toast.action?.label).toBe("追加记忆");
-    expect(toast.message).toContain("是否追加");
+    expect(toast.action?.label).toBe("查看并确认");
+    expect(toast.message).toBe("发现 1 条可记忆内容");
     expect(toast.sticky).toBe(true);
+    expect(toast.preview).toEqual([{ text: "以后用 pnpm 安装依赖", scope: "global" }]);
     expect(toast.durationMs).toBeUndefined();
     service.reviewCandidates();
     const review = messages.find((message) => message.type === "memoryCandidates");

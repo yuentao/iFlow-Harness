@@ -2062,6 +2062,71 @@ const TOAST_ACTION_ICON: Record<string, typeof Info> = {
   "memory-review": Brain,
 };
 
+/** Decision-card species for a sticky notice that carries previews (the
+ * auto-memory candidate batch): the approval-card family — eyebrow + title,
+ * the lines that would be written, and one actions row. The primary button is
+ * the ONLY forward channel (it opens the review dialog); 「忽略」and the header
+ * X retire the notice, so no second affordance competes with the decision. */
+function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number) => void }) {
+  const previews = toast.preview ?? [];
+  return (
+    <div className="acrylic glow-ring card-lift pointer-events-auto stream-in w-full max-w-[min(100%,34rem)] rounded-xl border border-primary/45">
+      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+        <Brain className={`${ICON_INLINE} shrink-0 text-primary`} />
+        <span className="block min-w-0 flex-1 space-y-0.5">
+          <span className="block text-ui-micro tracking-wide text-muted-foreground/85">
+            {t("iFlow 建议沉淀记忆")}
+          </span>
+          <span className="block truncate text-ui-label font-semibold leading-tight">{toast.message}</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => dismiss(toast.id)}
+          aria-label={t("关闭")}
+          title={t("关闭")}
+          className="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-surface hover:text-foreground active:scale-95"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+      {previews.length > 0 && (
+        <div className="space-y-1 px-3 py-2">
+          {previews.map((item, index) => (
+            <div key={index} className="flex items-start gap-1.5">
+              <Chip tone={item.scope === "project" ? "primary" : "muted"}>
+                {item.scope === "project" ? t("项目") : t("全局")}
+              </Chip>
+              <span className="min-w-0 flex-1 break-words text-ui-caption leading-relaxed text-foreground/90">
+                {item.text}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 px-3 py-2">
+        {toast.action && (
+          <button
+            onClick={() =>
+              useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
+            }
+            className="press inline-flex h-6 items-center justify-center gap-1 rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105"
+          >
+            <Check className="size-3.5 shrink-0" />
+            {toast.action.label}
+          </button>
+        )}
+        <button
+          onClick={() => dismiss(toast.id)}
+          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground"
+        >
+          {t("忽略")}
+        </button>
+        <span className="ml-auto text-ui-micro text-muted-foreground/80">{t("确认后才会写入记忆")}</span>
+      </div>
+    </div>
+  );
+}
+
 /** One toast pill — overlay species, not a transcript card: 12px radius, the
  * acrylic popup surface (near-opaque tint + inner edge + panel shadow) for
  * quiet notices, the primary accent for decision pills (same family as the
@@ -2076,6 +2141,11 @@ function ToastPill({
   suppressCompressAction?: boolean;
 }) {
   const dismiss = useChat((s) => s.dismissToast);
+  // A preview-bearing sticky notice is a decision, not a status line: it gets
+  // the card species (what would be written + one explicit confirm channel).
+  if (toast.sticky && toast.preview && toast.preview.length > 0) {
+    return <ToastCard toast={toast} dismiss={dismiss} />;
+  }
   const waiting = toast.level === "info" && toast.displayOnly;
   const Icon =
     toast.level === "warning"

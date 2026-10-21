@@ -204,37 +204,53 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     expect(toneOf(container, RATE_LIMIT)).toBe("rounded-xl");
   });
 
-  it("renders a memory proposal as an overlay pill with the memory icon and 24px controls", () => {
+  it("renders memory candidates as a decision card with previews and one forward channel", () => {
     render(streamingState("idle"), [
       {
         id: 5,
         level: "info",
-        message: "发现 2 条可记忆内容，是否追加到记忆？",
+        message: "发现 3 条可记忆内容",
         sticky: true,
         toastId: 9,
-        action: { actionId: "memory-review", label: "追加记忆" },
+        action: { actionId: "memory-review", label: "查看并确认" },
+        preview: [
+          { text: "以后用 pnpm 安装依赖", scope: "global" },
+          { text: "提交前跑 npm run typecheck", scope: "project" },
+        ],
       },
     ]);
-    const pill = container.querySelector(".rounded-xl")!;
-    // Overlay species (same family as the dropdowns / approval card), not a
-    // transcript card: acrylic surface, primary accent, 13px body.
-    expect(pill.className).toContain("acrylic-pop");
-    expect(pill.className).toContain("border-primary/45");
-    expect(pill.className).toContain("text-ui-label");
-    expect(pill.querySelector(".lucide-brain")).not.toBeNull();
-    const action = [...pill.querySelectorAll("button")].find((b) => b.textContent?.includes("追加记忆"));
-    expect(action?.className).toContain("h-6");
-    expect(pill.querySelector('[aria-label="关闭"]')?.className).toContain("size-6");
-    // Nesting the action inside the dismiss button used to swallow it entirely.
-    expect(pill.querySelector("button button")).toBeNull();
+    const card = container.querySelector(".z-20")!.querySelector(".rounded-xl")!;
+    // Approval-card family, not a pill: acrylic surface + primary accent.
+    expect(card.className).toContain("acrylic");
+    expect(card.className).toContain("border-primary/45");
+    expect(card.textContent).toContain("iFlow 建议沉淀记忆");
+    expect(card.textContent).toContain("发现 3 条可记忆内容");
+    expect(card.textContent).toContain("以后用 pnpm 安装依赖");
+    expect(card.textContent).toContain("全局");
+    expect(card.textContent).toContain("项目");
+    expect(card.querySelector(".lucide-brain")).not.toBeNull();
+    const buttons = [...card.querySelectorAll("button")];
+    const primary = buttons.find((b) => b.textContent?.includes("查看并确认"));
+    const ignore = buttons.find((b) => b.textContent?.includes("忽略"));
+    expect(primary?.className).toContain("h-6");
+    expect(ignore?.className).toContain("h-6");
+    expect(card.querySelector('[aria-label="关闭"]')?.className).toContain("size-6");
+    expect(card.textContent).toContain("确认后才会写入记忆");
+    // Buttons stay siblings: nesting the action inside a dismiss button used to
+    // swallow the whole action.
+    expect(card.querySelector("button button")).toBeNull();
     act(() => {
-      action!.click();
+      primary!.click();
     });
     expect(store.current.send).toHaveBeenCalledWith({
       type: "toastAction",
       actionId: "memory-review",
       toastId: 9,
     });
+    act(() => {
+      ignore!.click();
+    });
+    expect(store.current.dismissToast).toHaveBeenCalledWith(5);
   });
 
   it("spins the host-owned extraction wait instead of a static info dot", () => {

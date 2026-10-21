@@ -44,7 +44,7 @@ import {
   setSessions,
 } from "../../shared/session-state.js";
 import { classifyErrorAdvice } from "../../shared/error-advice.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, PlanEntryUi, ToolDiffUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, PlanEntryUi, MemoryScope, ToolDiffUi } from "../../shared/messages.js";
 import type { UsageContext } from "../../shared/session-state.js";
 
 export class SessionStore {
@@ -316,6 +316,8 @@ export class SessionStore {
       persistent?: boolean;
       sticky?: boolean;
       action?: { actionId: string; label: string };
+      /** Preview lines for a decision-card notice (see `HostToWebview` toast). */
+      preview?: { text: string; scope: MemoryScope }[];
     },
   ): number {
     const toastId = ++this.toastSeq;
@@ -330,6 +332,7 @@ export class SessionStore {
       persistent: opts?.persistent,
       sticky: opts?.sticky,
       action: opts?.action,
+      preview: opts?.preview,
     });
     return toastId;
   }

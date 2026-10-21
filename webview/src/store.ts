@@ -2016,6 +2016,9 @@ export interface ToastItem {
   /** M1 P0-6: inline action button (e.g. 立即压缩 on the context-warning
    * pill). Clicking sends `toastAction` with the actionId + host toastId. */
   action?: { actionId: string; label: string };
+  /** Decision-card notices (auto-memory candidates) list what would be written
+   * before the review dialog opens; absent = plain pill. */
+  preview?: { text: string; scope: "global" | "project" }[];
 }
 
 interface ChatStore {
@@ -2221,6 +2224,7 @@ export const useChat = create<ChatStore>((set, get) => ({
             persistent,
             sticky,
             action: msg.action,
+            preview: msg.preview,
           },
         ],
       }));

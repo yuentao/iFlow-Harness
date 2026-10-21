@@ -79,6 +79,8 @@ export interface MemoryServiceOptions {
       action?: { actionId: string; label: string };
       displayOnly?: boolean;
       persistent?: boolean;
+      /** Decision-card notices list what would be written (see `toast` wire). */
+      preview?: { text: string; scope: MemoryScope }[];
     },
   ) => unknown;
   /** Remove a previously posted toast (host-assigned id). */
@@ -474,14 +476,22 @@ export class MemoryService {
       return;
     }
     this.pendingCandidates = { sessionId, candidates };
-    const message = vscode.l10n.t("发现 {0} 条可记忆内容，是否追加到记忆？", candidates.length);
-    const action = { actionId: "memory-review", label: vscode.l10n.t("追加记忆") };
+    // The card owns the decision: the title states what was found, the preview
+    // lines show what would be written, the buttons ask the question.
+    const message = vscode.l10n.t("发现 {0} 条可记忆内容", candidates.length);
+    // `memory-review` only opens the review dialog — nothing is written until
+    // the user saves there, so the label must not promise an immediate write.
+    const action = { actionId: "memory-review", label: vscode.l10n.t("查看并确认") };
+    const preview = candidates.slice(0, 3).map((candidate) => ({
+      text: candidate.text.length > 90 ? `${candidate.text.slice(0, 89)}…` : candidate.text,
+      scope: candidate.scope,
+    }));
     this.dismissCandidateToast();
     if (this.options.sendToast) {
-      const toastId = this.options.sendToast("info", message, { sticky: true, action });
+      const toastId = this.options.sendToast("info", message, { sticky: true, action, preview });
       if (typeof toastId === "number") this.toastId = toastId;
     } else {
-      this.options.post({ type: "toast", level: "info", message, sticky: true, action });
+      this.options.post({ type: "toast", level: "info", message, sticky: true, action, preview });
     }
     this.options.log.info(`memory extraction: ${candidates.length} candidates`);
   }
