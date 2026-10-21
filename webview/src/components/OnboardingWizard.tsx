@@ -386,9 +386,9 @@ export function OnboardingWizard({
                         key={candidate.name}
                         className="flex items-center gap-1.5 rounded-lg border border-border bg-surface/60 px-2 py-1"
                       >
-                        <span className="min-w-0 flex-1 truncate">
+                        <span className="min-w-0 flex-1">
                           <span className="text-ui-label font-semibold text-foreground">{candidate.name}</span>
-                          <span className="ml-1.5 font-mono text-ui-caption text-muted-foreground">
+                          <span className="ml-1.5 min-w-0 truncate font-mono text-ui-caption text-muted-foreground">
                             {candidate.modelName} · {candidate.keyTail}
                           </span>
                         </span>

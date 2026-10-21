@@ -335,10 +335,14 @@ export function Chip({
 }
 
 /**
- * Small `?` help affordance: hover/focus opens a `role="tooltip"` bubble,
- * click opens it for touch. Use for concepts a card cannot explain inline
- * (approval policy semantics, Plan-mode artifacts, shortcut hints) without
- * stealing visual weight from the actual actions.
+ * Small `?` help affordance: hover/focus opens a `role="tooltip"` bubble.
+ * The bubble is portaled to document.body and placed in viewport coordinates
+ * (clamped inside the viewport, flipping above the trigger when the bottom
+ * edge runs out) — cards, settings groups and scroll containers all carry
+ * overflow-hidden clips that sheared the old in-subtree absolute bubble at
+ * card/panel edges (the acrylic layers also trap a plain `fixed` descendant,
+ * same reason ConfirmDialog portals). No click semantics: hover already
+ * opens, and the icon is a reading aid, not an action.
  */
 export function HelpTip({
   label,
@@ -354,36 +358,95 @@ export function HelpTip({
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const bubbleRef = useRef<HTMLSpanElement>(null);
+  // Hover is tracked on BOTH the trigger and the bubble: after the portal the
+  // bubble is not a descendant of the trigger, so a plain boolean would close
+  // the bubble the moment the reader's cursor crossed onto it. The count keeps
+  // it open while the cursor wanders between the two.
+  const hoverCount = useRef(0);
+  const enterHover = () => {
+    hoverCount.current += 1;
+    setOpen(true);
+  };
+  const leaveHover = () => {
+    hoverCount.current = Math.max(0, hoverCount.current - 1);
+    if (hoverCount.current === 0) setOpen(false);
+  };
+
+  // Viewport placement in fixed coordinates (Dropdown's clamp pattern, plus a
+  // vertical flip): the bubble must survive sitting near any panel edge.
+  const place = () => {
+    const trigger = triggerRef.current;
+    const bubble = bubbleRef.current;
+    if (!trigger || !bubble) return;
+    const margin = 8;
+    const gap = 6;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const rect = trigger.getBoundingClientRect();
+    const w = bubble.offsetWidth;
+    const h = bubble.offsetHeight;
+    let left = align === "left" ? rect.left : rect.right - w;
+    left = Math.max(margin, Math.min(left, vw - margin - w));
+    let top = rect.bottom + gap;
+    // Not enough room below: flip above the trigger, then clamp so a bubble
+    // taller than the viewport still shows its head.
+    if (top + h > vh - margin) top = Math.max(margin, rect.top - gap - h);
+    bubble.style.left = `${left}px`;
+    bubble.style.top = `${top}px`;
+  };
+
+  // Re-anchor while the panel re-flows/scrolls under an open bubble.
+  useLayoutEffect(() => {
+    if (!open) return;
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place);
+    const observer = new ResizeObserver(place);
+    if (triggerRef.current) observer.observe(triggerRef.current);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place);
+      observer.disconnect();
+    };
+  }, [open, align]);
+
   return (
-    <span
-      className={`relative inline-flex shrink-0${className ? ` ${className}` : ""}`}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
-      <button
-        type="button"
-        aria-label={label}
-        aria-describedby={open ? id : undefined}
-        aria-expanded={open}
-        className="press inline-flex size-5 items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:text-foreground"
-        onClick={() => setOpen(true)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
+    <>
+      <span
+        ref={triggerRef}
+        onMouseEnter={enterHover}
+        onMouseLeave={leaveHover}
+        className={`relative inline-flex shrink-0${className ? ` ${className}` : ""}`}
       >
-        <HelpCircle className="size-3" />
-      </button>
-      {open && (
-        <span
-          id={id}
-          role="tooltip"
-          className={`absolute top-full z-50 mt-1 w-60 max-w-[calc(100vw-48px)] rounded-xl border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-panel ${
-            align === "left" ? "left-0" : "right-0"
-          }`}
+        <button
+          type="button"
+          aria-label={label}
+          aria-describedby={open ? id : undefined}
+          aria-expanded={open}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setOpen(hoverCount.current > 0)}
+          className="inline-flex size-5 items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:text-foreground"
         >
-          {children}
-        </span>
-      )}
-    </span>
+          <HelpCircle className="size-3" />
+        </button>
+      </span>
+      {open &&
+        createPortal(
+          <span
+            ref={bubbleRef}
+            id={id}
+            role="tooltip"
+            onMouseEnter={enterHover}
+            onMouseLeave={leaveHover}
+            className="fixed z-50 w-60 max-w-[calc(100vw-16px)] rounded-xl border border-border bg-card px-2.5 py-2 text-ui-caption font-normal leading-relaxed text-foreground shadow-panel"
+          >
+            {children}
+          </span>,
+          document.body,
+        )}
+    </>
   );
 }
 
