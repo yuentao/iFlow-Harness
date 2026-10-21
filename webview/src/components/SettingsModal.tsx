@@ -13,7 +13,7 @@ import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, HelpTip, ModalShell, SAVE_BTN, SettingsDisclosure, SettingsGroup } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, HelpTip, ModalShell, SAVE_BTN, SettingsDisclosure, SettingsGroup, ActionRow, Field, Hint } from "./ui";
 import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
@@ -253,9 +253,7 @@ function SettingRow({
             </HelpTip>
           )}
         </div>
-        {description && (
-          <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">{description}</p>
-        )}
+        {description && <Hint className="mt-1">{description}</Hint>}
       </div>
       <div className={wideControl ? "w-full shrink-0 @min-[600px]:w-auto" : "shrink-0"}>{control}</div>
     </div>
@@ -513,7 +511,7 @@ function LinesRow({
   return (
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
-      <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">{description}</p>
+      <Hint className="mt-1">{description}</Hint>
       <textarea
         className={`${INPUT} mt-2 w-full resize-y font-mono text-ui-label leading-relaxed`}
         rows={rows}
@@ -569,9 +567,9 @@ function JsonRulesRow({
   return (
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{t("思考模型规则")}</div>
-      <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">
+      <Hint className="mt-1">
         {t("JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启 CLI 生效。")}
-      </p>
+      </Hint>
       <textarea
         className={`${INPUT} mt-2 w-full resize-y font-mono text-ui-label leading-relaxed`}
         rows={6}
@@ -584,12 +582,12 @@ function JsonRulesRow({
           setDirty(true);
         }}
       />
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <ActionRow className="mt-2">
         <button className={BTN} onClick={apply}>
           {t("应用")}
         </button>
         {error && <span className="text-ui-caption text-destructive">{error}</span>}
-      </div>
+      </ActionRow>
     </div>
   );
 }
@@ -871,9 +869,9 @@ function RuntimeSection() {
         />
         <div className="px-4 py-4">
           <div className="text-ui-body font-medium leading-snug text-foreground">{t("磁盘占用")}</div>
-          <p className="mt-1 text-ui-label leading-relaxed text-muted-foreground">
+          <Hint className="mt-1">
             {t("快照保存在工作区存储中；容量上限等参数在「高级」中调整。")}
-          </p>
+          </Hint>
         </div>
       </SettingsGroup>
       <SettingsDisclosure title={t("高级")} hint={t("检查点限额与 CLI 运行时")}>
@@ -1065,7 +1063,7 @@ function ApiConfigSection({
 
   if (editing) {
     return (
-      <div className="space-y-2">
+      <div className="space-y-3">
         {editing.name && editingProfile?.source === "cli" && (
           <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
             {t("这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。")}
@@ -1106,7 +1104,7 @@ function ApiConfigSection({
         {preset && (
           <div className="rounded-lg border border-border bg-surface/60 px-2.5 py-1.5">
             <p className="text-ui-caption leading-relaxed text-muted-foreground">{t(preset.note)}</p>
-            <div className="mt-1 flex flex-wrap gap-1.5">
+            <ActionRow className="mt-1">
               {preset.keyUrl && (
                 <button
                   className={BTN}
@@ -1124,11 +1122,10 @@ function ApiConfigSection({
                   {t("查看文档")}
                 </button>
               )}
-            </div>
+            </ActionRow>
           </div>
         )}
-        <label className="flex flex-col gap-0.5">
-          <span className="text-ui-caption text-muted-foreground">{t("配置名称（可选，默认为模型名）")}</span>
+        <Field label={t("配置名称（可选，默认为模型名）")}>
           <input
             type="text"
             className={INPUT}
@@ -1136,9 +1133,8 @@ function ApiConfigSection({
             placeholder={t("如 BUZZ、工作密钥…")}
             onChange={(e) => setForm((f) => ({ ...f, profileName: e.target.value }))}
           />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-ui-caption text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
+        </Field>
+        <Field label={t("Base URL（OpenAI 兼容）")}>
           <input
             type="text"
             className={INPUT}
@@ -1146,9 +1142,8 @@ function ApiConfigSection({
             placeholder="https://api.example.com/v1"
             onChange={(e) => setForm((f) => ({ ...f, baseUrl: e.target.value }))}
           />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-ui-caption text-muted-foreground">API Key</span>
+        </Field>
+        <Field label="API Key">
           <input
             type="password"
             className={INPUT}
@@ -1156,9 +1151,8 @@ function ApiConfigSection({
             placeholder={keyPlaceholder}
             onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
           />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-ui-caption text-muted-foreground">{t("模型名称")}</span>
+        </Field>
+        <Field label={t("模型名称")}>
           <input
             type="text"
             className={INPUT}
@@ -1166,7 +1160,7 @@ function ApiConfigSection({
             placeholder={t("如 glm-5.3-flash-free")}
             onChange={(e) => setForm((f) => ({ ...f, modelName: e.target.value }))}
           />
-        </label>
+        </Field>
         {preset && preset.models.length > 0 && (
           <div className="flex flex-wrap items-center gap-1">
             <span className="text-ui-caption text-muted-foreground">{t("常用模型")}</span>
@@ -1182,7 +1176,7 @@ function ApiConfigSection({
             ))}
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+        <ActionRow>
           <button className={SAVE_BTN} disabled={busy} onClick={submit}>
             {t("保存并激活")}
           </button>
@@ -1190,12 +1184,12 @@ function ApiConfigSection({
             {t("取消")}
           </button>
           {formError && <span className="text-ui-label text-destructive">{formError}</span>}
-        </div>
-        <p className="text-ui-caption leading-relaxed text-muted-foreground/85">
+        </ActionRow>
+        <Hint>
           {t(
             "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。",
           )}
-        </p>
+        </Hint>
       </div>
     );
   }
@@ -1206,17 +1200,17 @@ function ApiConfigSection({
   const showImport = auth.importable.length > 0 && (auth.needsSetup || auth.saved === null);
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       {showImport && (
         <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
           <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
             <Download className="size-3.5 shrink-0 text-primary" />
             {t("检测到 iFlow CLI 已有凭据")}
           </div>
-          <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
+          <Hint className="mt-1">
             {t("可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。")}
-          </p>
-          <div className="mt-2 space-y-1">
+          </Hint>
+          <div className="mt-2 space-y-2">
             {auth.importable.map((candidate) => (
               <div
                 key={candidate.name}
@@ -1255,7 +1249,7 @@ function ApiConfigSection({
         </p>
       )}
       {auth.profiles.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 pb-0.5">
+        <div className="flex flex-wrap items-center gap-2">
           <button className={BTN} disabled={busy} onClick={() => openNew()}>
             <Plus className="size-3.5" />
             {t("添加配置")}
@@ -1268,10 +1262,10 @@ function ApiConfigSection({
           <div className="text-center text-ui-label font-semibold text-foreground">
             {t("尚未添加 API 配置")}
           </div>
-          <p className="mt-1 text-center text-ui-caption leading-relaxed text-muted-foreground">
+          <Hint className="mt-1 text-center">
             {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
-          </p>
-          <div className="mt-2 flex flex-wrap justify-center gap-1">
+          </Hint>
+          <ActionRow className="mt-2 justify-center">
             {PROVIDER_PRESETS.map((option) => (
               <button
                 key={option.id}
@@ -1282,13 +1276,13 @@ function ApiConfigSection({
                 {option.label}
               </button>
             ))}
-          </div>
-          <div className="mt-2 flex justify-center">
+          </ActionRow>
+          <ActionRow className="mt-2 justify-center">
             <button className={BTN} onClick={() => openNew()}>
               <Plus className="size-3.5" />
               {t("自定义配置")}
             </button>
-          </div>
+          </ActionRow>
         </div>
       ) : (
         <div className="space-y-2">
@@ -1383,9 +1377,9 @@ function ApiConfigSection({
           ))}
         </div>
       )}
-      <p className="text-ui-label leading-relaxed text-muted-foreground/85">
+      <Hint>
         {t("点击配置即切换并重新认证会话；来自 iFlow CLI 的配置为只读，可切换但不可在此删除。")}
-      </p>
+      </Hint>
 
       <SettingsDisclosure title={t("模型元数据")} hint={t("高级，可选填")}>
         <LinesRow

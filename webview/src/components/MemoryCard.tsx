@@ -13,7 +13,7 @@ import {
 import type { KnowledgeDocUi, MemoryFileUi, MemoryScope, MemoryStateUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, SAVE_BTN, SettingsDisclosure } from "./ui";
+import { BTN, BTN_INPUT as INPUT, Chip, SAVE_BTN, SettingsDisclosure, ActionRow, Hint } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -377,8 +377,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           <div className="truncate font-mono text-ui-caption" title={editing.path}>
             {editing.path}
           </div>
-          <div className="mt-0.5">{t("记忆在新建会话或恢复会话时加载。当前会话需要重启 CLI 才会读取新内容。")}</div>
-        </div>
+                      <Hint className="mt-1">{t("记忆在新建会话或恢复会话时加载。当前会话需要重启 CLI 才会读取新内容。")}</Hint>        </div>
         {conflict && (
           <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
             <AlertTriangle className="mt-0.5 size-3 shrink-0" />
@@ -403,7 +402,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           spellCheck={false}
           onChange={(e) => setEditing((current) => (current ? { ...current, content: e.target.value } : current))}
         />
-        <div className="flex flex-wrap items-center gap-1.5">
+        <ActionRow>
           <button className={SAVE_BTN} disabled={busy || saving} onClick={saveEdit}>
             <Save className="size-3.5" />
             {saving ? t("保存中…") : t("保存")}
@@ -414,7 +413,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           <span className="text-ui-caption text-muted-foreground">
             {t("{0} 字符 · ≈{1} tokens", editing.content.length, fmtTokens(Math.ceil(editing.content.length / 4)))}
           </span>
-        </div>
+        </ActionRow>
       </div>
     );
   }
@@ -481,7 +480,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               ) : (
                 projectFiles.map(renderFile)
               )}
-              <div className="flex flex-wrap items-center gap-1.5">
+              <ActionRow>
                 <button
                   className={BTN}
                   disabled={busy || saving || !state.cwd}
@@ -517,7 +516,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                     </button>
                   </>
                 )}
-              </div>
+              </ActionRow>
             </section>
           </SettingsDisclosure>
 
@@ -592,7 +591,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                   {t("尚未生成项目知识。点击「生成项目知识」分析当前工作区。")}
                 </div>
               ) : (
-                <div className="space-y-1">
+                <div className="space-y-2">
                   {knowledge.docs.map((doc) => (
                     <div
                       key={doc.path}
@@ -648,9 +647,9 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                   {t("导入位置：{0}", knowledge.managedBy)}
                 </div>
               )}
-              <p className="text-ui-caption leading-relaxed text-muted-foreground/85">
+              <Hint>
                 {t("知识索引生成后写入 .iflow/knowledge/，通过项目记忆的 @ 导入注入；默认只在新建或恢复会话时生效。")}
-              </p>
+              </Hint>
             </div>
           </SettingsDisclosure>
 

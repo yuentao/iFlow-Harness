@@ -482,6 +482,68 @@ export const ICON_INLINE = "size-3.5";
 export const ICON_TOOLBAR = "size-4";
 export const ICON_DISPLAY = "size-5";
 
+/*
+ * Layout primitives for the settings surface. The five cards had drifted
+ * copies of the same species — hint paragraphs in three sizes/offsets, action
+ * rows in two gaps, field captions re-typed in every form. Same convergence
+ * as the button family above: one home, call sites import. Components own the
+ * species structure (wrap/gap/leading/typography); the stacking offset stays
+ * contextual (`mt-*` or the parent `space-y` stack) so call sites never set a
+ * same-property override against the base class.
+ */
+/** Explanatory paragraph under a list/form section. */
+export function Hint({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <p className={`text-ui-label leading-relaxed text-muted-foreground/85${className ? ` ${className}` : ""}`}>
+      {children}
+    </p>
+  );
+}
+
+/** Button row under a list or at the end of a form (wrap + 6px optical gap). */
+export function ActionRow({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`flex flex-wrap items-center gap-1.5${className ? ` ${className}` : ""}`}>{children}</div>;
+}
+
+/** Action row that closes a tab section with a divider (MCP / asset toolbars). */
+export function ToolbarRow({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`mt-2 flex flex-wrap items-center gap-2 border-b border-border/50 pb-3${className ? ` ${className}` : ""}`}>
+      {children}
+    </div>
+  );
+}
+
+/** Field caption line (13px muted); `required` appends the red asterisk. */
+export function FieldLabel({ required = false, children }: { required?: boolean; children: ReactNode }) {
+  return (
+    <span className="text-ui-label text-muted-foreground">
+      {children}
+      {required && <span className="text-destructive">*</span>}
+    </span>
+  );
+}
+
+/** Form field: caption + a single control. `className` adds flex/grid participation. */
+export function Field({
+  label,
+  required = false,
+  className = "",
+  children,
+}: {
+  label: ReactNode;
+  required?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className={`flex flex-col gap-1${className ? ` ${className}` : ""}`}>
+      <FieldLabel required={required}>{label}</FieldLabel>
+      {children}
+    </label>
+  );
+}
+
 /** Clickable file reference that opens the location in the editor. */
 export function FileRef({ path, line, toolCallId }: { path: string; line?: number | null; toolCallId?: string }) {
   const send = useChat((s) => s.send);

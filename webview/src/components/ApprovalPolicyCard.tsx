@@ -3,7 +3,7 @@ import { Pencil, Plus, ShieldCheck, ShieldQuestion, ShieldX, Trash2 } from "luci
 import type { ApprovalAction, ApprovalRule } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, ConfirmDialog, SAVE_BTN } from "./ui";
+import { BTN, BTN_INPUT as INPUT, ConfirmDialog, SAVE_BTN, ActionRow, Field, Hint } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -226,7 +226,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+          <ActionRow className="mt-2">
             <button
               className={BTN}
               disabled={rules === null}
@@ -245,19 +245,18 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               {savedFlash ? t("已保存") : t("保存")}
             </button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
-          </div>
-          <p className="text-ui-label leading-relaxed text-muted-foreground/85">
+          </ActionRow>
+          <Hint className="mt-2">
             {t(
               "审批请求按顺序匹配规则（项目规则优先），首条命中即生效：自动允许 / 自动拒绝 / 弹卡。内置硬底线：rm、git push 等破坏性命令永不被自动允许，命中时仍弹卡确认。",
             )}
-          </p>
+          </Hint>
         </>
       )}
 
       {editing && (
         <div className="space-y-2">
-          <label className="flex flex-col gap-0.5">
-            <span className="text-ui-label text-muted-foreground">{t("规则名称")}</span>
+          <Field label={t("规则名称")}>
             <input
               type="text"
               className={INPUT}
@@ -268,9 +267,8 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 setEditing({ ...editing, rule: { ...editing.rule, label: v } });
               }}
             />
-          </label>
-          <label className="flex flex-col gap-0.5">
-            <span className="text-ui-label text-muted-foreground">{t("动作")}</span>
+          </Field>
+          <Field label={t("动作")}>
             <select
               className={INPUT}
               value={editing.rule.action}
@@ -283,7 +281,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               <option value="deny">{t("自动拒绝")}</option>
               <option value="ask">{t("弹卡确认")}</option>
             </select>
-          </label>
+          </Field>
           <div className="flex flex-wrap gap-1">
             {KINDS.map((kind) => {
               const active = editing.rule.kinds?.includes(kind) ?? false;
@@ -312,8 +310,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               );
             })}
           </div>
-          <label className="flex flex-col gap-0.5">
-            <span className="text-ui-label text-muted-foreground">{t("路径通配（相对会话目录）")}</span>
+          <Field label={t("路径通配（相对会话目录）")}>
             <input
               type="text"
               className={`${INPUT} font-mono`}
@@ -325,9 +322,8 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 setEditing({ ...editing, rule: { ...editing.rule, path: v || undefined } });
               }}
             />
-          </label>
-          <label className="flex flex-col gap-0.5">
-            <span className="text-ui-label text-muted-foreground">{t("命令首词（逗号分隔，仅执行类）")}</span>
+          </Field>
+          <Field label={t("命令首词（逗号分隔，仅执行类）")}>
             <input
               type="text"
               className={`${INPUT} font-mono`}
@@ -338,10 +334,9 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 setEditing({ ...editing, rule: { ...editing.rule, commands: parseList(e.target.value) } });
               }}
             />
-          </label>
+          </Field>
           <div className="flex flex-wrap gap-2">
-            <label className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="text-ui-label text-muted-foreground">{t("MCP 服务器名")}</span>
+            <Field label={t("MCP 服务器名")} className="min-w-0 flex-1">
               <input
                 type="text"
                 className={INPUT}
@@ -351,9 +346,8 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                   setEditing({ ...editing, rule: { ...editing.rule, server: v || undefined } });
                 }}
               />
-            </label>
-            <label className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="text-ui-label text-muted-foreground">{t("工具名（精确匹配）")}</span>
+            </Field>
+            <Field label={t("工具名（精确匹配）")} className="min-w-0 flex-1">
               <input
                 type="text"
                 className={`${INPUT} font-mono`}
@@ -363,17 +357,17 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                   setEditing({ ...editing, rule: { ...editing.rule, tool: v || undefined } });
                 }}
               />
-            </label>
+            </Field>
           </div>
-          <div className="flex flex-wrap items-center gap-1.5">
+          <ActionRow>
             <button className={BTN} onClick={() => closeEditor(true)}>
               {t("完成")}
             </button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
-          </div>
-          <p className="text-ui-label leading-relaxed text-muted-foreground/85">
+          </ActionRow>
+          <Hint>
             {t("维度全部留空将匹配所有请求（谨慎）；编辑只改本地副本，点击「保存」才生效。")}
-          </p>
+          </Hint>
         </div>
       )}
 
