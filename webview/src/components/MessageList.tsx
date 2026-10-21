@@ -1403,6 +1403,57 @@ const EXAMPLE_PROMPTS = [
   "分析这个报错的可能原因并给出修复方案",
 ];
 
+/**
+ * UI-audit 4.9: which host notice rides the sticky streaming pill.
+ *
+ * The rate-limit / stream-interrupt retries push a countdown toast while the
+ * same turn keeps the 生成中 pill up — two stacked "something is happening"
+ * indicators. The countdown rides the pill itself (message + live seconds)
+ * and is skipped in the bottom toast stack, so the pair collapses into one.
+ * The context-occupancy warning (立即压缩) merges the same way.
+ *
+ * Rules:
+ * - Only a real generating turn may borrow the pill: during `initializing`
+ *   the pill says 正在创建新会话, and during a compress turn it says 正在压缩.
+ * - The pill must be on screen (a pending card or an empty transcript hides
+ *   it) — a hidden pill must never swallow the toast.
+ * - The countdown toast wins over the compress warning; the warning then
+ *   keeps its own slot in the toast stack.
+ * - The countdown toast with the LATEST deadline wins: consecutive retries
+ *   overlap for a few ms (the next toast can arrive before the webview's
+ *   deadline timer drops the previous one) — taking the first match would
+ *   show the stale "第 1/3 次" message with a 0s countdown.
+ * - A toast with an action other than 立即压缩 is never merged — the pill
+ *   renders no action button, so the action would have no entry point.
+ */
+export function pickStreamingNotice(
+  toasts: ToastItem[],
+  turn: {
+    status: SessionState["status"];
+    compressing: boolean;
+    initializing: boolean;
+    /** Is the sticky pill actually on screen? */
+    pillVisible: boolean;
+  },
+): ToastItem | undefined {
+  if (!turn.pillVisible) return undefined;
+  if (turn.status !== "streaming" || turn.compressing || turn.initializing) return undefined;
+  let countdown: ToastItem | undefined;
+  let warning: ToastItem | undefined;
+  for (const t of toasts) {
+    const actionId = t.action?.actionId;
+    // The 立即压缩 action is suppressed while a turn owns the session
+    // (compressActionHidden) — the warning text still rides the pill.
+    if (actionId !== undefined && actionId !== "compress") continue;
+    if (t.countdownDeadline !== undefined) {
+      if (!countdown || t.countdownDeadline > (countdown.countdownDeadline ?? 0)) countdown = t;
+    } else if (actionId === "compress" && !warning) {
+      warning = t;
+    }
+  }
+  return countdown ?? warning;
+}
+
 function MessageListInner({ state }: { state: SessionState }) {
   const turnsWithDiffs = useMemo(() => turnsWithChanges(state.blocks), [state.blocks]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1712,22 +1763,24 @@ function MessageListInner({ state }: { state: SessionState }) {
     useChat.getState().requestMemoryDraft(text);
   }, []);
 
-  // Context-occupancy warning (host persistent pill with the 立即压缩 action).
-  // When the sticky streaming pill is visible the warning MERGES into it
-  // (one indicator instead of two stacked pills); the Toasts stack then skips
-  // this toast. Selector returns a stable reference while the toast list is
-  // unchanged, so this only re-renders the list when a warning arrives/leaves.
-  const compressWarnToast = useChat((s) => s.toasts.find((x) => x.action?.actionId === "compress"));
   const streamingPillVisible =
     (state.status === "streaming" || state.initializing) &&
     !state.pendingApproval &&
     !state.replaying &&
     visibleBlocks.length > 0;
-  // The warning only rides the pill during a real generating turn: during
-  // initializing the pill says 正在创建新会话, and during a compress turn it
-  // says 正在压缩 — telling the user to 建议压缩 while compressing is a lie.
-  const mergedWarn =
-    state.status === "streaming" && !state.compressing ? compressWarnToast : undefined;
+  // UI-audit 4.9: the host notices that may RIDE the sticky streaming pill
+  // instead of stacking a second indicator above it — the compress warning
+  // (pre-existing) and the rate-limit / stream-interrupt countdown retries
+  // (new). The picked notice is skipped in the Toasts stack, so exactly one
+  // indicator is on screen. Rules live in pickStreamingNotice.
+  const mergedNotice = useChat((s) =>
+    pickStreamingNotice(s.toasts, {
+      status: state.status,
+      compressing: state.compressing,
+      initializing: state.initializing,
+      pillVisible: streamingPillVisible,
+    }),
+  );
   // The 立即压缩 action must not be offered while a turn owns the session:
   // the host refuses concurrent compressions (runCompressTurn returns on
   // streaming/initializing), so a visible button would only be a dead click
@@ -1885,14 +1938,21 @@ function MessageListInner({ state }: { state: SessionState }) {
             >
               <div
                 className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-ui-caption font-medium shadow-lg ${
-                  mergedWarn ? "border border-warning/50 bg-warning/15 text-warning backdrop-blur-md" : "bg-primary text-primary-foreground"
+                  mergedNotice ? "border border-warning/50 bg-warning/15 text-warning backdrop-blur-md" : "bg-primary text-primary-foreground"
                 }`}
               >
                 <Loader2 className="size-3 animate-spin" />
                 {state.initializing
                   ? t("正在创建新会话…")
-                  : mergedWarn
-                    ? mergedWarn.message
+                  : mergedNotice
+                    ? (
+                      <>
+                        {mergedNotice.message}
+                        {mergedNotice.countdownDeadline !== undefined && (
+                          <CountdownSeconds deadline={mergedNotice.countdownDeadline} />
+                        )}
+                      </>
+                    )
                     : state.compressing
                       ? t("正在压缩")
                       : isPlanMode(state.modes)
@@ -1933,7 +1993,7 @@ function MessageListInner({ state }: { state: SessionState }) {
         </button>
       )}
       <Toasts
-        skipToastId={streamingPillVisible ? mergedWarn?.id : undefined}
+        skipToastId={mergedNotice?.id}
         suppressCompressAction={compressActionHidden}
       />
     </div>
@@ -1973,23 +2033,12 @@ function Toasts({
   );
 }
 
-/** One toast pill. When `countdownDeadline` (host epoch-ms) is set, the live
- * countdown is anchored to that absolute deadline so the UI stays in sync with
- * the host's actual wait — no drift from the message round-trip latency. */
-function ToastPill({
-  toast,
-  suppressCompressAction,
-}: {
-  toast: ToastItem;
-  suppressCompressAction?: boolean;
-}) {
-  const dismiss = useChat((s) => s.dismissToast);
-  const [secs, setSecs] = useState(
-    toast.countdownDeadline ? Math.ceil((toast.countdownDeadline - Date.now()) / 1000) : 0,
-  );
+/** Live countdown chip ("Ns"), anchored to the host's absolute epoch deadline
+ * so the UI never drifts from message round-trip latency. Shared by the toast
+ * stack pills and the streaming pill's merged countdown (UI-audit 4.9). */
+function CountdownSeconds({ deadline }: { deadline: number }) {
+  const [secs, setSecs] = useState(Math.ceil((deadline - Date.now()) / 1000));
   useEffect(() => {
-    if (toast.countdownDeadline === undefined) return;
-    const deadline = toast.countdownDeadline;
     let last = -1;
     const tick = () => {
       const left = Math.max(0, deadline - Date.now());
@@ -2002,7 +2051,19 @@ function ToastPill({
     tick();
     const iv = setInterval(tick, 250);
     return () => clearInterval(iv);
-  }, [toast.countdownDeadline]);
+  }, [deadline]);
+  return <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>;
+}
+
+/** One toast pill. */
+function ToastPill({
+  toast,
+  suppressCompressAction,
+}: {
+  toast: ToastItem;
+  suppressCompressAction?: boolean;
+}) {
+  const dismiss = useChat((s) => s.dismissToast);
   const tone =
     toast.level === "error"
       ? "border-destructive/40 bg-destructive/15 text-destructive"
@@ -2015,9 +2076,7 @@ function ToastPill({
       {toast.level === "error" && <XCircle className="size-3.5 shrink-0" />}
       {toast.level === "info" && <Info className="size-3.5 shrink-0 text-primary" />}
       <span className="break-words text-left">{toast.message}</span>
-      {toast.countdownDeadline !== undefined && (
-        <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>
-      )}
+      {toast.countdownDeadline !== undefined && <CountdownSeconds deadline={toast.countdownDeadline} />}
     </>
   );
   // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button — the pill

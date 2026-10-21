@@ -13,12 +13,13 @@ import {
   Search,
   Settings2,
   X,
+  XCircle,
 } from "lucide-react";
 import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { t } from "./i18n";
 import { copyText } from "./components/Markdown";
-import { BTN, BTN_ICON, Chip, ConfirmDialog, Dropdown } from "./components/ui";
+import { BTN, BTN_ICON, Chip, ConfirmDialog, Dropdown, SAVE_BTN } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -83,13 +84,14 @@ function formatSessionTime(ts: number): string {
 }
 
 /**
- * P1-9: the error toast used to be a dead-end scroll box — CLI errors are
- * often multi-line JSON dumps you could neither read fully nor take with
- * you. Now: collapsed to one line by default with an expand toggle (only
- * when the text is actually long), a copy button (Clipboard API with the
- * textarea fallback from Markdown.tsx), plus the P0-3 retry/dismiss.
+ * UI-audit 4.9: the error surface belongs to the persistent-banner tier (the
+ * same layer as the unauthenticated banner, right under the header). The old
+ * floating overlay hid the first transcript message and packed four
+ * affordances into one dense pill. Now: one line + one primary action (重试)
+ * + 详情; the full dump, the copy button (P1-9) and the host advice hint
+ * (3.6) ride the details panel.
  */
-function ErrorToast({
+function ErrorBanner({
   message,
   advice,
   onOpenSettings,
@@ -105,73 +107,110 @@ function ErrorToast({
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const isLong = message.length > 90 || message.includes("\n");
+  // 详情 is only offered when there IS something to reveal: a long dump or
+  // the host advice hint. A short message without advice has nothing to
+  // expand — the copy action then stays in the action row (P1-9 keeps the
+  // error text copyable in every case).
+  const hasDetails = isLong || advice !== null;
   useEffect(() => {
     if (!copied) return;
     const id = window.setTimeout(() => setCopied(false), 2000);
     return () => window.clearTimeout(id);
   }, [copied]);
+  const copyButton = (
+    <button
+      className="press inline-flex items-center gap-1 rounded underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
+      title={copied ? t("已复制") : t("复制错误信息")}
+      onClick={() => {
+        void copyText(message).then(
+          () => setCopied(true),
+          () => {},
+        );
+      }}
+    >
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+      {copied ? t("已复制") : t("复制")}
+    </button>
+  );
+  const detailButton = (
+    <button
+      className="press shrink-0 rounded text-ui-caption font-medium text-destructive/90 underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
+      onClick={() => setExpanded((v) => !v)}
+    >
+      {expanded ? t("收起") : t("详情")}
+    </button>
+  );
+  // 重试 is the banner's ONE primary action — it wears the project's primary
+  // button style (gradient + shadow-btn, same family as 允许一次 / 保存并继续),
+  // not the neutral secondary BTN.
+  const retryButton = (
+    <button
+      className={`${SAVE_BTN} shrink-0`}
+      title={t("重启 CLI 并重试（会话自动恢复）")}
+      onClick={() => send({ type: "restartCli" })}
+    >
+      <RefreshCw className="size-3.5" />
+      {t("重试")}
+    </button>
+  );
+  const closeButton = (
+    <button
+      className="press inline-flex size-7 shrink-0 items-center justify-center rounded-md opacity-80 transition-opacity hover:opacity-100"
+      title={t("关闭")}
+      aria-label={t("关闭")}
+      onClick={onDismiss}
+    >
+      <X className="size-3.5" />
+    </button>
+  );
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-3 z-[5] flex justify-center px-3">
-      <div className="stream-in pointer-events-auto flex max-h-40 w-full max-w-[92%] items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/15 px-4 py-1.5 text-ui-label text-destructive shadow-card backdrop-blur-xl">
-        <div className="min-w-0 flex-1">
-          <div
-            className={`select-text break-words ${expanded ? "max-h-28 overflow-y-auto" : "line-clamp-1"}`}
-            title={isLong && !expanded ? message : undefined}
-          >
-            {message}
-          </div>
-          {isLong && (
-            <button
-              className="press mt-0.5 rounded text-ui-caption font-medium text-destructive/90 underline decoration-destructive/30 underline-offset-2 transition-opacity hover:opacity-100"
-              onClick={() => setExpanded((v) => !v)}
-            >
-              {expanded ? t("收起") : t("展开")}
-            </button>
-          )}
-          {advice && (
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-destructive/90">
-              <span className="select-text">{t(advice.hint)}</span>
-              {advice.openSettingsTab && (
-                <button
-                  className="press rounded font-semibold underline decoration-destructive/30 underline-offset-2 hover:opacity-100"
-                  onClick={() => onOpenSettings(advice.openSettingsTab!)}
-                >
-                  {advice.openSettingsTab === "api" ? t("打开 API 设置") : t("打开运行时设置")}
-                </button>
-              )}
+    <div className="stream-in mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/15 px-2.5 py-1.5 text-ui-caption leading-relaxed text-destructive">
+      {expanded ? (
+        // Expanded: the dump owns the FULL width (the action row squeezed it
+        // into a 2-word column on narrow panels) and the actions move to their
+        // own row underneath.
+        <>
+          <div className="flex w-full min-w-0 items-start gap-2">
+            <XCircle className="mt-0.5 size-3.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="select-text max-h-28 break-words overflow-y-auto">{message}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-destructive/90">
+                {copyButton}
+                {advice && (
+                  <>
+                    <span className="select-text">{t(advice.hint)}</span>
+                    {advice.openSettingsTab && (
+                      <button
+                        className="press rounded font-semibold underline decoration-destructive/30 underline-offset-2 hover:opacity-100"
+                        onClick={() => onOpenSettings(advice.openSettingsTab!)}
+                      >
+                        {advice.openSettingsTab === "api" ? t("打开 API 设置") : t("打开运行时设置")}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-        <button
-          className="press shrink-0 rounded p-0.5 opacity-80 transition-opacity hover:opacity-100"
-          title={copied ? t("已复制") : t("复制错误信息")}
-          aria-label={t("复制错误信息")}
-          onClick={() => {
-            void copyText(message).then(
-              () => setCopied(true),
-              () => {},
-            );
-          }}
-        >
-          {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-        </button>
-        <button
-          className="press shrink-0 rounded-md border border-destructive/40 px-1.5 py-0.5 text-ui-caption font-semibold transition-opacity hover:opacity-100"
-          title={t("重启 CLI 并重试（会话自动恢复）")}
-          onClick={() => send({ type: "restartCli" })}
-        >
-          <RefreshCw className="mr-0.5 inline size-2.5 align-[-1px]" />
-          {t("重试")}
-        </button>
-        <button
-          className="press shrink-0 rounded p-0.5 opacity-80 transition-opacity hover:opacity-100"
-          title={t("关闭")}
-          aria-label={t("关闭")}
-          onClick={onDismiss}
-        >
-          <X className="size-3" />
-        </button>
-      </div>
+          </div>
+          <div className="flex w-full items-center gap-2">
+            {detailButton}
+            {retryButton}
+            {closeButton}
+          </div>
+        </>
+      ) : (
+        <>
+          <XCircle className="size-3.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="select-text line-clamp-1 break-words" title={isLong ? message : undefined}>
+              {message}
+            </div>
+          </div>
+          {hasDetails ? detailButton : copyButton}
+          {retryButton}
+          {closeButton}
+        </>
+      )}
     </div>
   );
 }
@@ -358,7 +397,7 @@ export function App() {
     return () => clearInterval(iv);
   }, [status]);
 
-  // The error toast is host-owned (errorMessage rides the snapshot); a local
+  // The error banner is host-owned (errorMessage rides the snapshot); a local
   // dismiss hides it until a DIFFERENT error arrives.
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
@@ -795,6 +834,31 @@ export function App() {
         </div>
       </header>
 
+      {/* UI-audit 4.9: persistent notification tier — one inline banner row
+          under the header for everything that needs handling (errors, missing
+          credentials). Replaces the floating ErrorToast over the transcript
+          and the composer-side auth banner, so there is a single place to
+          look; transient notices keep riding the toast stack below. */}
+      {errorMessage && dismissedError !== errorMessage && (
+        <ErrorBanner
+          message={errorMessage}
+          advice={errorAdvice}
+          onOpenSettings={(tab) => setSettingsTab(tab)}
+          onDismiss={() => setDismissedError(errorMessage)}
+        />
+      )}
+      {auth?.needsSetup && !onboardingOpen && (
+        <div className="mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
+          <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
+          <button className={BTN} onClick={() => setSettingsTab("api")}>
+            {t("配置")}
+          </button>
+          <button className={BTN} onClick={() => setOnboardingOpen(true)}>
+            {t("重新运行引导")}
+          </button>
+        </div>
+      )}
+
       {settingsOpen && auth && (
         <SettingsModal
           tab={settingsTabValue}
@@ -853,14 +917,6 @@ export function App() {
             </div>
           </div>
         )}
-        {errorMessage && dismissedError !== errorMessage && (
-          <ErrorToast
-            message={errorMessage}
-            advice={errorAdvice}
-            onOpenSettings={(tab) => setSettingsTab(tab)}
-            onDismiss={() => setDismissedError(errorMessage)}
-          />
-        )}
         {(pendingApproval || pendingPlanExit || pendingQuestions) && (
           <div
             ref={pendingOverlayRef}
@@ -872,18 +928,6 @@ export function App() {
           </div>
         )}
       </div>
-
-      {auth?.needsSetup && !onboardingOpen && (
-        <div className="mx-3 mb-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-          <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
-          <button className={BTN} onClick={() => setSettingsTab("api")}>
-            {t("配置")}
-          </button>
-          <button className={BTN} onClick={() => setOnboardingOpen(true)}>
-            {t("重新运行引导")}
-          </button>
-        </div>
-      )}
 
       <Composer />
 

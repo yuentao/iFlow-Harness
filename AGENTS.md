@@ -181,6 +181,9 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 调试 webview 构建产物时使用 `npm run webview:serve`（`scripts/serve-webview.mjs`，默认端口 8791、目录 `webview/dist`），作为长期保留的静态服务入口。
 - Vite 构建产物不能直接用 `file://` 打开，因为产物以绝对路径引用 `/assets/...`，在本地文件协议下会被 CORS 拒绝导致空白页；调试时应走 HTTP 静态服务器。
 - Webview 改动后除 typecheck 与测试外，还应运行 npx vite build 验证构建产物。
+- 通知系统按层级统一：Composer note 通过 notify 进入共用 toast stack；host toast 保留底部自动消失；错误与未配置凭据提示作为 header 下方的同一层 inline banner，不再以悬浮层遮挡转录。
+- 错误横幅展开态采用“正文独占整行、操作行下移”的响应式布局，以保证 320/480px 窄屏下正文可读且无横向溢出。
+- 流式生成期间，限流或流中断倒计时通知合并进 sticky“生成中”pill，并从底部 toast stack 跳过；带不可执行 action 的通知不得合并，host 倒计时继续以绝对 deadline 驱动。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 
