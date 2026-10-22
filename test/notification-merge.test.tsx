@@ -253,6 +253,38 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     expect(surfaceClasses(container, COMPRESS_WARN)).toContain("shadow-float");
   });
 
+  it("wears the pill's tone on the action button (no grey chip on a notice)", () => {
+    // The 立即压缩 action used to wear the neutral secondary button — a grey
+    // chip floating on an amber notice, which read as an unrelated control.
+    const warn = countdownToast({
+      id: 7,
+      message: COMPRESS_WARN,
+      countdownDeadline: undefined,
+      action: { actionId: "compress", label: "立即压缩" },
+    });
+    render(streamingState("idle"), [warn]);
+    const action = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("立即压缩"));
+    expect(action).toBeTruthy();
+    expect(action!.className).toContain("text-warning");
+    expect(action!.className).toContain("border-warning");
+    expect(action!.className).not.toContain("bg-editor");
+  });
+
+  it("wears the error tone on the action button of an error notice", () => {
+    render(streamingState("idle"), [
+      {
+        id: 9,
+        level: "error",
+        message: "网关拒绝了本次请求",
+        action: { actionId: "retry", label: "重试" },
+      },
+    ]);
+    const action = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("重试"));
+    expect(action).toBeTruthy();
+    expect(action!.className).toContain("text-destructive");
+    expect(action!.className).not.toContain("bg-editor");
+  });
+
   it("keeps the fixed clearance when no bottom band is on screen", () => {
     render(streamingState("idle"), [countdownToast()]);
     const stack = container.querySelector(".absolute.inset-x-0") as HTMLElement;

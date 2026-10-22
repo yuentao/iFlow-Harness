@@ -833,10 +833,10 @@ export function App() {
       {auth?.needsSetup && !onboardingOpen && (
         <div className="mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
           <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
-          <Button onClick={() => setSettingsTab("api")}>
+          <Button variant="warning-soft" size="sm" onClick={() => setSettingsTab("api")}>
             {t("配置")}
           </Button>
-          <Button onClick={() => setOnboardingOpen(true)}>
+          <Button variant="warning-soft" size="sm" onClick={() => setOnboardingOpen(true)}>
             {t("重新运行引导")}
           </Button>
         </div>
