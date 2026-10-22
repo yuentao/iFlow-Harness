@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import { Select } from "../webview/src/components/ui";
+import { Select, TextArea, TextInput } from "../webview/src/components/ui";
 
 /** jsdom ships neither ResizeObserver nor scrollIntoView; the Dropdown clamp
  * and menu-item focus only need the members to exist. */
@@ -18,6 +18,8 @@ if (!("ResizeObserver" in globalThis)) {
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
+/** React 19 refuses `act()` unless the environment declares itself act-capable. */
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 /** jsdom has no layout, so `offsetParent` is always null and the kit's
  * visibility filter (menu items, focusable scan) would drop everything. */
 Object.defineProperty(HTMLElement.prototype, "offsetParent", {
@@ -60,6 +62,10 @@ function sourceFiles(): Array<{ rel: string; content: string }> {
 }
 
 const files = sourceFiles();
+
+/** The kit stylesheet is the single home for browser-chrome resets (spin
+ * buttons, autofill tint, caret/selection) and the grip species. */
+const kitCss = readFileSync(join(WEBVIEW_SRC, "styles.css"), "utf8");
 
 /** Strips comments so a doc comment mentioning a forbidden shape is not a hit. */
 function codeOnly(content: string): string {
@@ -121,6 +127,72 @@ describe("ui kit guard", () => {
     // (the .acrylic-pop.shadow-float rule keeps the inset rim). Modal panels and
     // header pills are not trigger-anchored, so they keep the panel drop.
     const hits = violations(/acrylic-pop(?!.*shadow-float).*dropdown-in/, () => false);
+    expect(hits).toEqual([]);
+  });
+
+  it("resets the browser's field chrome in the kit stylesheet", () => {
+    // Chromium paints decorations a class string cannot override; the kit owns
+    // them in styles.css so no field can fall back to browser styling.
+    expect(kitCss).toMatch(/input\[type="number"\]::-webkit-inner-spin-button/);
+    expect(kitCss).toMatch(/input:-webkit-autofill/);
+    expect(kitCss).toMatch(/caret-color:\s*var\(--primary\)/);
+    expect(kitCss).toMatch(/textarea::selection/);
+    expect(kitCss).toMatch(/\.ui-resize\s*\{/);
+  });
+
+  it("keeps multiline resizing owned by the kit grip", () => {
+    // Call sites must not re-declare a browser resize affordance.
+    const hits = violations(/resize-(none|y|x|both)/, (rel) => rel === CONTROL_HOME || rel === STAGE_TEXTAREA);
+    expect(hits).toEqual([]);
+    const kit = files.find((f) => f.rel === CONTROL_HOME)!.content;
+    expect(kit).toContain("resize-none");
+    expect(kit).toContain("ui-resize");
+    // The grip rides a grid overlay (`content-start`), so it stays on the
+    // textarea's own corner even when an outer grid stretches the wrapper.
+    expect(kit).toContain("content-start");
+  });
+
+  it("keeps the button family single-line", () => {
+    // Button is a fixed-height species (28/24px). A two-line body (icon +
+    // title + description) belongs to OptionCard / MenuItem — padding
+    // overrides on a fixed-height button make the content overflow its own
+    // border (the profile-switch dialog did exactly that).
+    const hits: string[] = [];
+    for (const file of files) {
+      if (file.rel === CONTROL_HOME) continue;
+      const lines = codeOnly(file.content).split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (!/<Button[\s>]/.test(lines[i] ?? "")) continue;
+        let body = "";
+        for (let j = i; j < Math.min(lines.length, i + 12); j++) {
+          const line = lines[j] ?? "";
+          body += `${line}\n`;
+          if (line.includes("/>") || line.includes("</Button>")) break;
+        }
+        for (const line of body.split("\n")) {
+          if (/className=/.test(line) && /\bpy-/.test(line)) {
+            hits.push(`${file.rel}:${i + 1}: ${line.trim().slice(0, 90)}`);
+          }
+        }
+      }
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it("keeps credential fields on the kit reveal toggle", () => {
+    // Chromium's password reveal button cannot be restyled, so any password
+    // field must opt into the kit's `revealable` toggle.
+    const hits: string[] = [];
+    for (const file of files) {
+      if (file.rel === CONTROL_HOME) continue;
+      const lines = codeOnly(file.content).split("\n");
+      lines.forEach((line, i) => {
+        if (!/type="password"/.test(line)) return;
+        if (!lines.slice(i, i + 4).join("\n").includes("revealable")) {
+          hits.push(`${file.rel}:${i + 1}: ${line.trim().slice(0, 90)}`);
+        }
+      });
+    }
     expect(hits).toEqual([]);
   });
 
@@ -225,6 +297,77 @@ describe("select overlay", () => {
     expect(onChange).toHaveBeenCalledWith("deny");
     expect(container.querySelector("[role='menu']")).toBeNull();
     expect(trigger!.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+});
+
+/**
+ * Behaviour half: multiline fields resize with the kit grip (Chromium's corner
+ * handle is suppressed via `resize-none`), and credential fields reveal through
+ * the kit icon button instead of the browser's unstyleable toggle.
+ */
+describe("field chrome", () => {
+  it("resizes with the kit grip instead of the browser handle", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(createElement(TextArea, { "aria-label": "记忆文件内容", value: "正文", onChange: () => {} }));
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(textarea.className).toContain("resize-none");
+    const grip = container.querySelector<HTMLDivElement>(".ui-resize");
+    expect(grip).toBeTruthy();
+    expect(grip!.getAttribute("aria-hidden")).toBe("true");
+
+    act(() => {
+      grip!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientY: 100 }));
+      window.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientY: 140 }));
+    });
+    // jsdom reports a 0-height rect, so the clamp floor (40px) is the result.
+    expect(textarea.style.height).toBe("40px");
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+      window.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientY: 200 }));
+    });
+    expect(textarea.style.height).toBe("40px");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("reveals a credential field through the kit toggle", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(TextInput, {
+          type: "password",
+          revealable: true,
+          "aria-label": "API Key",
+          value: "sk-secret",
+          onChange: () => {},
+        }),
+      );
+    });
+
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    expect(input.type).toBe("password");
+    const toggle = container.querySelector<HTMLButtonElement>("button[aria-label='显示密码']");
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute("title")).toBe("显示密码");
+
+    act(() => toggle!.click());
+    expect(input.type).toBe("text");
+    expect(container.querySelector("button[aria-label='隐藏密码']")).toBeTruthy();
+    expect(container.querySelector("button[aria-label='显示密码']")).toBeNull();
 
     act(() => root.unmount());
     container.remove();

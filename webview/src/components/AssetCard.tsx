@@ -555,7 +555,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             <Field label={t("文件内容（markdown + frontmatter）")}>
               <TextArea
                 mono
-                className="min-h-40 resize-y text-ui-label leading-relaxed"
+                className="min-h-40 text-ui-label leading-relaxed"
                 spellCheck={false}
                 value={editing.content}
                 onChange={(e) => {
@@ -636,7 +636,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           <div className="rounded-lg border border-border/70 bg-surface/40 px-2 py-1.5">
             <Field label={t("需求描述（用于 AI 生成）")}>
               <TextArea
-                className="min-h-16 resize-y leading-relaxed"
+                className="min-h-16 leading-relaxed"
                 value={genRequirement}
                 placeholder={t("如：检查本次改动的类型错误并给出修复步骤")}
                 onChange={(e) => {
@@ -660,7 +660,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           <Field label={t("内容（frontmatter 模板，可直接改）")}>
             <TextArea
               mono
-              className="min-h-40 resize-y text-ui-label leading-relaxed"
+              className="min-h-40 text-ui-label leading-relaxed"
               spellCheck={false}
               value={creating.body}
               onChange={(e) => {

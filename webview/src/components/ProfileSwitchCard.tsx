@@ -3,7 +3,7 @@ import { ArrowLeftRight, MessageSquare, PlusCircle } from "lucide-react";
 import type { PendingProfileSwitchUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, ICON_INLINE, ModalShell } from "./ui";
+import { Button, ICON_INLINE, ModalShell, OptionCard, OptionGroup } from "./ui";
 
 /**
  * Profile-switch choice dialog: a custom centered modal (same acrylic form
@@ -47,37 +47,32 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
         <p className="text-ui-label leading-relaxed text-foreground/90">
           {t("切换到 API 配置「{0}」后，当前对话如何处理？", pending.profileName)}
         </p>
-        <Button
-          variant="outline-primary"
-          disabled={answered}
-          data-autofocus
-          aria-label={t("停留在当前会话")}
-          className="w-full items-start justify-start rounded-lg bg-primary/10 px-2.5 py-2 hover:bg-primary/15"
-          icon={<MessageSquare className={`${ICON_INLINE} mt-0.5 shrink-0 text-primary`} />}
-          onClick={() => answer(true)}
-        >
-          <span className="min-w-0">
-            <span className="block text-ui-label font-semibold text-foreground">{t("停留在当前会话")}</span>
-            <span className="block text-ui-caption leading-relaxed text-muted-foreground">
-              {t("保留当前对话，改用新配置继续")}
-            </span>
-          </span>
-        </Button>
-        <Button
-          variant="canvas"
-          disabled={answered}
-          aria-label={t("开启新会话")}
-          className="w-full items-start justify-start rounded-lg px-2.5 py-2 hover:border-destructive/40 hover:bg-destructive/10"
-          icon={<PlusCircle className={`${ICON_INLINE} mt-0.5 shrink-0 text-muted-foreground`} />}
-          onClick={() => answer(false)}
-        >
-          <span className="min-w-0">
-            <span className="block text-ui-label font-semibold text-foreground">{t("开启新会话")}</span>
-            <span className="block text-ui-caption leading-relaxed text-muted-foreground">
-              {t("以新配置开始新对话")}
-            </span>
-          </span>
-        </Button>
+        {/* Option rows (not Button): the two-line body needs a card that grows
+            with its content — the button species is a fixed 28px tall and
+            overflowed its own border. */}
+        <OptionGroup ariaLabel={t("切换 API 配置")} className="space-y-2">
+          <OptionCard
+            checked={false}
+            emphasis
+            disabled={answered}
+            ariaLabel={t("停留在当前会话")}
+            className="w-full"
+            icon={<MessageSquare className={`${ICON_INLINE} mt-0.5 shrink-0 text-primary`} />}
+            label={<span className="text-ui-label font-semibold">{t("停留在当前会话")}</span>}
+            description={t("保留当前对话，改用新配置继续")}
+            onClick={() => answer(true)}
+          />
+          <OptionCard
+            checked={false}
+            disabled={answered}
+            ariaLabel={t("开启新会话")}
+            className="w-full"
+            icon={<PlusCircle className={`${ICON_INLINE} mt-0.5 shrink-0 text-muted-foreground`} />}
+            label={<span className="text-ui-label font-semibold">{t("开启新会话")}</span>}
+            description={t("以新配置开始新对话")}
+            onClick={() => answer(false)}
+          />
+        </OptionGroup>
       </div>
 
       <div className="flex items-center justify-end gap-1.5 border-t border-border/60 px-3 py-2">

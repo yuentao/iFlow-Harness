@@ -881,7 +881,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 </Field>
                 <Field className="px-3 py-3" label={t("描述")}>
                   <TextArea
-                    className="min-h-16 resize-y leading-relaxed"
+                    className="min-h-16 leading-relaxed"
                     value={fieldOfConfig(config, "description")}
                     onChange={(e) => {
                       const v = e.target.value;

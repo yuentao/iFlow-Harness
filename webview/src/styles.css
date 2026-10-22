@@ -733,6 +733,77 @@ textarea:focus-visible {
   box-shadow: var(--shadow-focus);
 }
 
+/* --- kit controls: native form chrome reset -------------------------------- */
+/* Chromium paints field decorations that a class string cannot override: number
+   spin buttons, the autofill tint, the caret and the text selection highlight.
+   Kill/replace them here (one home) so every kit field reads in the panel's own
+   language. Keyboard stepping (↑/↓) on number inputs stays intact. */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Chrome's autofill background ignores the field's own `bg-editor`; the inset
+   fill plus a near-infinite transition is the documented workaround. The focus
+   glow is re-attached so an autofilled field still lights up like its peers. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover {
+  box-shadow: inset 0 0 0 1000px var(--editor);
+  -webkit-text-fill-color: var(--foreground);
+  caret-color: var(--primary);
+  transition: background-color 100000s ease-in-out 0s;
+}
+input:-webkit-autofill:focus {
+  box-shadow: inset 0 0 0 1000px var(--editor), var(--shadow-focus);
+  -webkit-text-fill-color: var(--foreground);
+  caret-color: var(--primary);
+  transition: background-color 100000s ease-in-out 0s;
+}
+
+/* Caret and selection follow the accent instead of the browser default. */
+input,
+textarea {
+  caret-color: var(--primary);
+}
+input::selection,
+textarea::selection {
+  background: color-mix(in oklab, var(--primary) 28%, transparent);
+}
+
+/* Kit resize grip (multiline fields): the browser's corner handle is a native
+   artifact, so the kit draws its own — same language as the composer's top-edge
+   drag handle. Two hairline diagonals in the field's own corner (mouse-only,
+   decorative; the call site renders it aria-hidden). */
+.ui-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  cursor: ns-resize;
+  touch-action: none;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--foreground) 34%, transparent) 0 1px,
+    transparent 1px 3px
+  );
+  background-size: 6px 6px;
+  background-position: right bottom;
+  background-repeat: no-repeat;
+  opacity: 0.55;
+  transition: opacity 0.2s ease;
+}
+.ui-resize:hover {
+  opacity: 1;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--primary) 70%, transparent) 0 1px,
+    transparent 1px 3px
+  );
+}
+
 /* --- collapsible card bodies (Collapse component, MessageList) ------------- */
 /* grid-rows 0fr→1fr trick: animates to unknown content height without JS
    measurement. Children stay mounted (smooth both directions) and hidden

@@ -393,6 +393,7 @@ export function OnboardingWizard({
               <Field label="API Key">
                 <TextInput
                   type="password"
+                  revealable
                   mono
                   ref={apiKeyRef}
                   value={draft.apiKey}

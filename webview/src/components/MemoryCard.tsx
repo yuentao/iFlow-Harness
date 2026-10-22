@@ -398,7 +398,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
         <TextArea
           mono
           aria-label={t("记忆文件内容")}
-          className="min-h-[220px] w-full resize-y text-ui-label leading-relaxed"
+          className="min-h-[220px] w-full text-ui-label leading-relaxed"
           value={editing.content}
           spellCheck={false}
           onChange={(e) => setEditing((current) => (current ? { ...current, content: e.target.value } : current))}
@@ -677,7 +677,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               </div>
               <TextArea
                 aria-label={t("要记住的内容")}
-                className="min-h-[58px] w-full resize-y"
+                className="min-h-[58px] w-full"
                 value={factText}
                 placeholder={t("例如：本项目的测试命令是 npm test；不要修改 vendor/ 下的文件。")}
                 onChange={(e) => setFactText(e.target.value)}

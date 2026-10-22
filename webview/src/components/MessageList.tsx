@@ -907,6 +907,7 @@ function UserMessage({
           <div className="w-full min-w-[280px]" onClick={(e) => e.stopPropagation()}>
             <TextArea
               className="max-h-64 min-h-16 w-full leading-relaxed"
+              resizable={false}
               value={draft}
               rows={Math.min(12, Math.max(3, draft.split("\n").length + 1))}
               aria-label={t("编辑消息")}

@@ -999,6 +999,7 @@ function ApiConfigSection({
         <Field label="API Key">
           <TextInput
             type="password"
+            revealable
             mono
             value={form.apiKey}
             placeholder={keyPlaceholder}

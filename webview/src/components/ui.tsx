@@ -7,6 +7,8 @@ import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type Ref,
   type TextareaHTMLAttributes,
@@ -22,6 +24,8 @@ import {
   ChevronRight,
   Circle,
   CircleDot,
+  Eye,
+  EyeOff,
   FileCode2,
   HelpCircle,
   Info,
@@ -528,7 +532,19 @@ export const BTN_EMPHASIS_SM =
 export const PRIMARY_SOFT =
   "press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 px-3 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
 export const PRIMARY_SOFT_SM =
-  "press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 px-2.5 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
+  "press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 px-2 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
+/** Warning-toned soft button (28px): the action inside a warning pill / banner
+ * — the tone follows the surface it sits on, so the action never reads as an
+ * unrelated grey chip on an amber notice. */
+export const WARNING_SOFT =
+  "press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-warning/55 bg-warning/20 px-2.5 text-ui-caption font-semibold text-warning transition-all duration-200 hover:bg-warning/30 disabled:pointer-events-none disabled:opacity-40";
+export const WARNING_SOFT_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-warning/55 bg-warning/20 px-2 text-ui-caption font-semibold text-warning transition-all duration-200 hover:bg-warning/30 disabled:pointer-events-none disabled:opacity-40";
+/** Destructive-toned soft button (28px): the action inside an error pill. */
+export const DANGER_SOFT =
+  "press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-destructive/55 bg-destructive/20 px-2.5 text-ui-caption font-semibold text-destructive transition-all duration-200 hover:bg-destructive/30 disabled:pointer-events-none disabled:opacity-40";
+export const DANGER_SOFT_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-destructive/55 bg-destructive/20 px-2 text-ui-caption font-semibold text-destructive transition-all duration-200 hover:bg-destructive/30 disabled:pointer-events-none disabled:opacity-40";
 /** Ghost convenience button for the secondary row (catalog / refresh): quieter
  * than BTN — caption text, no border, must not read as a peer of the primary. */
 export const GHOST_BTN =
@@ -1108,7 +1124,11 @@ export type ButtonVariant =
    * carried by border + text, the fill only appears on hover, so a card never
    * reads as three shouting buttons. */
   | "outline-primary"
-  | "outline-danger";
+  | "outline-danger"
+  /** Tone-following soft variants: an action that sits inside a warning or
+   * error surface wears that surface's tone instead of the neutral grey. */
+  | "warning-soft"
+  | "danger-soft";
 /** `md` = 28px (regular / toolbar), `sm` = 24px (dense card action rows). */
 export type ButtonSize = "md" | "sm";
 
@@ -1131,6 +1151,8 @@ const BUTTON_CLASSES: Record<ButtonVariant, { md: string; sm: string }> = {
   "primary-soft": { md: PRIMARY_SOFT, sm: PRIMARY_SOFT_SM },
   "outline-primary": { md: OUTLINE_PRIMARY, sm: OUTLINE_PRIMARY_SM },
   "outline-danger": { md: OUTLINE_DANGER, sm: OUTLINE_DANGER_SM },
+  "warning-soft": { md: WARNING_SOFT, sm: WARNING_SOFT_SM },
+  "danger-soft": { md: DANGER_SOFT, sm: DANGER_SOFT_SM },
 };
 
 /**
@@ -1254,29 +1276,48 @@ function useCommitDraft(
   };
 }
 
-/** Live text field (form draft). `mono` for paths/URLs/JSON-ish values. */
+/** Live text field (form draft). `mono` for paths/URLs/JSON-ish values.
+ * `revealable` moves the password reveal off Chromium's built-in toggle (which
+ * CSS cannot restyle) onto the kit's icon button. */
 export function TextInput({
   mono = false,
   invalid = false,
+  revealable = false,
   className = "",
   ref,
   ...rest
 }: InputHTMLAttributes<HTMLInputElement> & {
   mono?: boolean;
   invalid?: boolean;
+  /** Kit reveal toggle for credential fields (call site supplies `type`). */
+  revealable?: boolean;
   ref?: Ref<HTMLInputElement>;
 }) {
-  return (
+  const [shown, setShown] = useState(false);
+  const field = (
     <input
-      type="text"
       ref={ref}
       spellCheck={false}
       aria-invalid={invalid || undefined}
-      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${invalid ? " border-destructive/60" : ""}${
-        className ? ` ${className}` : ""
-      }`}
       {...rest}
+      type={revealable && shown ? "text" : (rest.type ?? "text")}
+      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${invalid ? " border-destructive/60" : ""}${
+        revealable ? " pr-8" : ""
+      }${className ? ` ${className}` : ""}`}
     />
+  );
+  if (!revealable) return field;
+  return (
+    <div className="relative">
+      {field}
+      <IconButton
+        icon={shown ? <EyeOff className={ICON_INLINE} /> : <Eye className={ICON_INLINE} />}
+        label={shown ? t("隐藏密码") : t("显示密码")}
+        size="sm"
+        className="absolute right-0.5 top-1/2 -translate-y-1/2"
+        onClick={() => setShown((current) => !current)}
+      />
+    </div>
   );
 }
 
@@ -1382,20 +1423,82 @@ export function CommitNumberInput({
   );
 }
 
+/** Multiline chrome shared by the kit's textareas: height adjustment is the
+ * kit's own grip (`.ui-resize`) instead of Chromium's corner handle, so a drag
+ * writes an explicit height and `resize-none` keeps the browser out of the
+ * painting. Mouse-only and decorative. */
+function FieldTextarea({
+  resizable = true,
+  className = "",
+  style,
+  ref,
+  ...rest
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  resizable?: boolean;
+  ref?: Ref<HTMLTextAreaElement>;
+}) {
+  const boxRef = useRef<HTMLTextAreaElement | null>(null);
+  const [height, setHeight] = useState<number | null>(null);
+  const attachRef = (el: HTMLTextAreaElement | null) => {
+    boxRef.current = el;
+    if (typeof ref === "function") ref(el);
+    else if (ref) (ref as MutableRefObject<HTMLTextAreaElement | null>).current = el;
+  };
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const originY = event.clientY;
+    const base = height ?? boxRef.current?.getBoundingClientRect().height ?? 0;
+    const move = (e: PointerEvent) => {
+      const next = Math.max(40, Math.min(window.innerHeight - 120, base + (e.clientY - originY)));
+      setHeight(next);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  };
+  return (
+    /* grid + content-start: the row keeps the textarea's own height even when an
+       outer grid stretches this wrapper, so the grip always lands on the
+       textarea's own bottom-right corner instead of the wrapper's. */
+    <div className="relative grid content-start">
+      <textarea
+        ref={attachRef}
+        className={`w-full resize-none col-start-1 row-start-1${className ? ` ${className}` : ""}`}
+        style={height !== null ? { ...style, height } : style}
+        {...rest}
+      />
+      {resizable ? (
+        <div
+          className="ui-resize col-start-1 row-start-1 self-end justify-self-end"
+          aria-hidden="true"
+          onPointerDown={startDrag}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 /** Live multi-line field. */
 export function TextArea({
   mono = false,
   invalid = false,
+  resizable = true,
   className = "",
   ref,
   ...rest
 }: TextareaHTMLAttributes<HTMLTextAreaElement> & {
   mono?: boolean;
   invalid?: boolean;
+  /** Off for editors that size themselves (the inline message editor). */
+  resizable?: boolean;
   ref?: Ref<HTMLTextAreaElement>;
 }) {
   return (
-    <textarea
+    <FieldTextarea
+      resizable={resizable}
       ref={ref}
       spellCheck={false}
       aria-invalid={invalid || undefined}
@@ -1415,6 +1518,7 @@ export function CommitTextArea({
   mono = false,
   label,
   rows = 3,
+  resizable = true,
   className = "",
   ...rest
 }: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange"> & {
@@ -1423,15 +1527,17 @@ export function CommitTextArea({
   normalize?: (v: string) => string;
   mono?: boolean;
   label: string;
+  resizable?: boolean;
 }) {
   const field = useCommitDraft(value, normalize, onCommit);
   return (
-    <textarea
+    <FieldTextarea
+      resizable={resizable}
       rows={rows}
       spellCheck={false}
       aria-label={label}
       value={field.draft}
-      className={`${BTN_INPUT} resize-y${mono ? " font-mono" : ""}${className ? ` ${className}` : ""}`}
+      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${className ? ` ${className}` : ""}`}
       onFocus={field.onFocus}
       onBlur={field.onBlur}
       onChange={(e) => field.setDraft(e.target.value)}
@@ -1828,7 +1934,10 @@ export function OptionGroup({
   );
 }
 
-/** One option inside an OptionGroup: indicator + label + optional description. */
+/** One option inside an OptionGroup: indicator + label + optional description.
+ * `emphasis` marks the recommended row of a one-shot choice (primary outline +
+ * light fill) without claiming a persisted selection; `ariaLabel` keeps the
+ * accessible name exact when the visible label and description differ. */
 export function OptionCard({
   type = "radio",
   checked,
@@ -1839,6 +1948,8 @@ export function OptionCard({
   icon,
   onClick,
   className = "",
+  ariaLabel,
+  emphasis = false,
 }: {
   type?: "radio" | "checkbox";
   checked: boolean;
@@ -1850,6 +1961,10 @@ export function OptionCard({
   icon?: ReactNode;
   onClick: () => void;
   className?: string;
+  /** Explicit accessible name (defaults to the visible label + description). */
+  ariaLabel?: string;
+  /** Primary-tinted row for the recommended option of a one-shot choice. */
+  emphasis?: boolean;
 }) {
   const Indicator =
     type === "checkbox" ? (checked ? CheckSquare : Square) : checked ? CircleDot : Circle;
@@ -1858,13 +1973,16 @@ export function OptionCard({
       type="button"
       role={type === "checkbox" ? "checkbox" : "radio"}
       aria-checked={checked}
+      aria-label={ariaLabel}
       disabled={disabled}
       title={title}
       onClick={onClick}
       className={`press flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-ui-caption transition-all duration-200 shadow-card disabled:pointer-events-none disabled:opacity-40 ${
         checked
           ? "border-primary/60 bg-primary/10 shadow-card"
-          : "border-border bg-surface/80 hover:border-primary/30 hover:bg-surface-2"
+          : emphasis
+            ? "border-primary/40 bg-primary/10"
+            : "border-border bg-surface/80 hover:border-primary/30 hover:bg-surface-2"
       }${className ? ` ${className}` : ""}`}
     >
       {icon ?? (
@@ -2206,13 +2324,22 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
   // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button; the
   // compress action is suppressed while a turn owns the session.
   const actionHidden = suppressCompressAction && toast.action?.actionId === "compress";
+  // The action wears the pill's tone: a neutral grey chip on an amber notice
+  // reads as an unrelated control (the 立即压缩 button on the context warning).
+  const actionVariant: ButtonVariant = toast.sticky
+    ? "primary"
+    : toast.level === "warning"
+      ? "warning-soft"
+      : toast.level === "error"
+        ? "danger-soft"
+        : "secondary";
   const actionButton =
     toast.action &&
     !actionHidden && (
       <Button
-        variant={toast.sticky ? "primary" : "secondary"}
+        variant={actionVariant}
         size="sm"
-        className={toast.sticky ? "" : "border-current/45 font-medium opacity-90 hover:opacity-100"}
+        className={actionVariant === "secondary" ? "border-current/45 font-medium opacity-90 hover:opacity-100" : ""}
         onClick={() =>
           useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
         }

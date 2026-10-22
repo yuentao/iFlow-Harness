@@ -562,6 +562,8 @@ const en: Record<string, string> = {
   "展开上下文": "Expand context",
   "拖放文件以添加附件": "Drop files to attach",
   "拖拽调整高度": "Drag to resize",
+  "显示密码": "Show password",
+  "隐藏密码": "Hide password",
   "展开更早 {0} 条消息": "Show {0} earlier messages",
   "显示更早 {0} 条": "Show {0} earlier steps",
   "上下文摘要": "Context summary",
