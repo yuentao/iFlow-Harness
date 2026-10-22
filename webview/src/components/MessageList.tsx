@@ -1787,14 +1787,15 @@ function MessageListInner({ state }: { state: SessionState }) {
     || state.initializing
     || state.replaying;
 
-  // The bottom notification band (streaming pill / restore-history pill) is
-  // sticky: when the transcript is SHORTER than the viewport it falls back to
-  // its natural position at the content end — ~16px above the viewport bottom,
-  // i.e. HIGHER than a fixed toast offset. A hardcoded stack offset therefore
-  // collided with it (user screenshot 2026-10-21: the context-warning pill sat
-  // on top of the merged retry pill). Mirror the band's real height into
-  // --stream-pill-h (same pattern as App's --pending-card-h) so the toast stack
-  // rides above it whatever position the band actually occupies.
+  // The bottom notification band (streaming pill / restore-history pill) floats
+  // ABOVE the transcript: it is absolute in the overlay, not sticky inside the
+  // scroll flow. A sticky band gets pinned at the scroller's padding edge and
+  // lifts INTO the newest message — measured 2026-10-22, the pill covered ~28px
+  // of the last bubble's bottom. The band's height plus a breathing gap is
+  // mirrored into --stream-pill-h, which the content's bottom padding AND the
+  // toast stack both ride above, so the newest message and the notices never
+  // sit under the band whatever the scroll position (user screenshot 2026-10-21:
+  // the context-warning pill sat on top of the merged retry pill).
   const overlayRef = useRef<HTMLDivElement>(null);
   const bandRef = useRef<HTMLDivElement>(null);
   const bandVisible = streamingPillVisible || state.replaying;
@@ -1806,7 +1807,10 @@ function MessageListInner({ state }: { state: SessionState }) {
       overlay.style.removeProperty("--stream-pill-h");
       return;
     }
-    const apply = () => overlay.style.setProperty("--stream-pill-h", `${band.offsetHeight}px`);
+    // +12px breathing: the same var drives the content's bottom padding, so the
+    // newest message keeps a visible gap from the pill instead of butt-touching
+    // it. The toast stack rides on the same var.
+    const apply = () => overlay.style.setProperty("--stream-pill-h", `${band.offsetHeight + 12}px`);
     apply();
     const ro = new ResizeObserver(apply);
     ro.observe(band);
@@ -1823,8 +1827,17 @@ function MessageListInner({ state }: { state: SessionState }) {
             overlay (set by App's ResizeObserver on the shared wrapper). The
             card floats over this scroller, so the content reserves its height
             as bottom padding — otherwise the newest message would sit
-            permanently under the card. */}
-        <div ref={contentRef} className="space-y-3" style={{ paddingBottom: "var(--pending-card-h, 0px)" }}>
+            permanently under the card. --stream-pill-h does the same for the
+            floating bottom band (height + breathing gap, set above): the pill
+            floats over the scroller's bottom edge, so the content reserves its
+            clearance here and the newest message keeps a visible gap from it. */}
+        <div
+          ref={contentRef}
+          className="space-y-3"
+          style={{
+            paddingBottom: "calc(0.25rem + var(--pending-card-h, 0px) + var(--stream-pill-h, 0px))",
+          }}
+        >
           {visibleBlocks.length === 0 && !state.replaying && (
             <div className="empty-state stream-in">
               <div className="empty-state-logo">
@@ -1948,59 +1961,61 @@ function MessageListInner({ state }: { state: SessionState }) {
               </div>
             </div>
           ))}
-          {streamingPillVisible && (
-            // Sticky to the bottom of the scroll viewport so the indicator stays
-            // visible even while new content streams in above it.
-            // pointer-events-none: the composer's upward-opening mode dropdown
-            // expands into this area — the pill must not steal its clicks. The
-            // merged warning is non-interactive while a turn runs (its
-            // 立即压缩 action is hidden), so it stays click-through too.
-            // P2-19: sticky offset rides above a mounted pending card
-            // (--pending-card-h) instead of being covered by it.
-            <div
-              className="sticky z-10 flex justify-center py-1.5 pointer-events-none"
-              style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
-              ref={bandRef}
-            >
-              <FloatPill tone={mergedNotice ? "warning" : "primary"} size="sm">
-                <Loader2 className="size-3 animate-spin" />
-                {state.initializing
-                  ? t("正在创建新会话…")
-                  : mergedNotice
-                    ? (
-                      <>
-                        {mergedNotice.message}
-                        {mergedNotice.countdownDeadline !== undefined && (
-                          <CountdownSeconds deadline={mergedNotice.countdownDeadline} />
-                        )}
-                      </>
-                    )
-                    : state.compressing
-                      ? t("正在压缩")
-                      : isPlanMode(state.modes)
-                        ? t("正在规划")
-                        : t("正在生成")}
-              </FloatPill>
-            </div>
-          )}
-          {state.replaying && (
-            // History restore indicator — dedicated UI (not a transcript block),
-            // so it never mixes with the restored content or grows copy icons.
-            // P2-19: rides above a mounted pending card, same as the streaming
-            // pill.
-            <div
-              className="pointer-events-none sticky z-10 flex justify-center py-1.5"
-              style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
-              ref={bandRef}
-            >
-              <FloatPill tone="primary" size="sm">
-                <Loader2 className="size-3 animate-spin" />
-                {t("正在恢复历史会话…")}
-              </FloatPill>
-            </div>
-          )}
         </div>
       </div>
+      {streamingPillVisible && (
+        // Floating band ABOVE the transcript (absolute in the overlay, not
+        // sticky in the scroll flow): pinned sticky lifted the band INTO the
+        // newest bubble; the content now reserves its clearance via
+        // --stream-pill-h. Stays visible while new content streams above it.
+        // pointer-events-none: the composer's upward-opening mode dropdown
+        // expands into this area — the pill must not steal its clicks. The
+        // merged warning is non-interactive while a turn runs (its
+        // 立即压缩 action is hidden), so it stays click-through too.
+        // P2-19: offset rides above a mounted pending card
+        // (--pending-card-h) instead of being covered by it.
+        <div
+          className="absolute inset-x-0 z-10 flex justify-center py-1.5 pointer-events-none"
+          style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
+          ref={bandRef}
+        >
+          <FloatPill tone={mergedNotice ? "warning" : "primary"} size="sm">
+            <Loader2 className="size-3 animate-spin" />
+            {state.initializing
+              ? t("正在创建新会话…")
+              : mergedNotice
+                ? (
+                  <>
+                    {mergedNotice.message}
+                    {mergedNotice.countdownDeadline !== undefined && (
+                      <CountdownSeconds deadline={mergedNotice.countdownDeadline} />
+                    )}
+                  </>
+                )
+                : state.compressing
+                  ? t("正在压缩")
+                  : isPlanMode(state.modes)
+                    ? t("正在规划")
+                    : t("正在生成")}
+          </FloatPill>
+        </div>
+      )}
+      {state.replaying && (
+        // History restore indicator — dedicated UI (not a transcript block),
+        // so it never mixes with the restored content or grows copy icons.
+        // P2-19: rides above a mounted pending card, same as the streaming
+        // pill.
+        <div
+          className="pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1.5"
+          style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
+          ref={bandRef}
+        >
+          <FloatPill tone="primary" size="sm">
+            <Loader2 className="size-3 animate-spin" />
+            {t("正在恢复历史会话…")}
+          </FloatPill>
+        </div>
+      )}
       {showJump && !editingBlockId && (
         <FloatChip
           className="jump-pulse absolute right-4 z-20"

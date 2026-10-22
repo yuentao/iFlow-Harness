@@ -233,8 +233,9 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
 
   it("lifts the toast stack above the bottom band so the pair never overlaps", () => {
     // The retry wins the merge; the context warning keeps its own slot. The
-    // band is sticky, so with a short transcript it sits at the CONTENT end —
-    // a fixed stack offset overlapped it (user screenshot 2026-10-21).
+    // band floats above the transcript (absolute in the overlay) and its
+    // height + breathing gap is mirrored into --stream-pill-h — a fixed stack
+    // offset overlapped it (user screenshot 2026-10-21).
     const warn = countdownToast({
       id: 7,
       message: COMPRESS_WARN,
@@ -242,9 +243,9 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
       action: { actionId: "compress", label: "立即压缩" },
     });
     render(streamingState("streaming"), [warn, countdownToast({ id: 8 })]);
-    const stack = container.querySelector(".absolute.inset-x-0") as HTMLElement;
-    // 2.5rem = the band's pinned bottom edge (1.5rem above the overlay bottom)
-    // + a 1rem gap; 1.5rem would leave the stack flush against the band.
+    const stack = container.querySelector(".absolute.inset-x-0.z-20") as HTMLElement;
+    // 2.5rem above the band's bottom offset (0.5rem) leaves a clear gap even
+    // with the band's mirrored height folded into --stream-pill-h.
     expect(stack.style.bottom).toContain("--stream-pill-h");
     expect(stack.style.bottom).toContain("2.5rem");
     expect(toneOf(container, COMPRESS_WARN)).toBe("rounded-full");
@@ -287,7 +288,7 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
 
   it("keeps the fixed clearance when no bottom band is on screen", () => {
     render(streamingState("idle"), [countdownToast()]);
-    const stack = container.querySelector(".absolute.inset-x-0") as HTMLElement;
+    const stack = container.querySelector(".absolute.inset-x-0.z-20") as HTMLElement;
     expect(stack.style.bottom).toContain("3.5rem");
   });
 
