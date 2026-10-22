@@ -1208,9 +1208,9 @@ pre {
 }
 
 .md pre {
-  /* No plate behind the rows: the code sits directly on the card surface and
-     the syntax tokens carry the only color (the --syn-* palette). */
-  background: transparent;
+  /* A tinted plate behind the rows keeps fenced source readable as its own
+     surface; the syntax tokens carry the color (the --syn-* palette). */
+  background: var(--editor);
   border: 1px solid var(--border);
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-card);
@@ -1222,6 +1222,13 @@ pre {
   font-family: var(--font-mono);
   font-size: var(--ui-font-caption);
   line-height: 1.6;
+}
+
+/* Thought transcripts quote code as reference material inside a card that is
+   already tinted, so the plate reads as a nested panel. Drop only the plate
+   here — border, padding, wrap and token colors stay exactly as above. */
+.thought-body .md pre {
+  background: transparent;
 }
 
 /* Fenced code blocks get a copy button injected by Markdown.tsx into a

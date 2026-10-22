@@ -765,7 +765,7 @@ function ThoughtCard({
         )}
       </button>
       <Collapse open={open}>
-        <div className="border-t border-border/60 px-3 py-2 text-ui-label leading-relaxed text-muted-foreground">
+        <div className="thought-body border-t border-border/60 px-3 py-2 text-ui-label leading-relaxed text-muted-foreground">
           <Markdown text={block.text} />
         </div>
       </Collapse>

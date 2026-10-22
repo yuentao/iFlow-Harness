@@ -94,9 +94,8 @@ describe("renderCodeBlock", () => {
 
 /**
  * Behaviour half: the Markdown component's code fences keep the syntax
- * highlighting, and the stylesheet gives every markdown code block the
- * agreed treatment — no plate behind the rows (the tokens carry the only
- * color) and soft-wrapped lines instead of a horizontal scroll.
+ * highlighting, and the stylesheet keeps the tinted plate on ordinary fences
+ * while the thought card opts out of it — only the plate, nothing else.
  */
 describe("Markdown code fences", () => {
   const FENCE = "```ts\nconst n: number = 1;\n```";
@@ -111,17 +110,30 @@ describe("Markdown code fences", () => {
     return container;
   };
 
+  const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
+
   it("keeps the syntax highlighting", () => {
     const container = render();
     expect(container.querySelector("pre code .hljs-keyword")).toBeTruthy();
     expect(container.querySelector("pre code .hljs-number")).toBeTruthy();
   });
 
-  it("drops the row plate and soft-wraps every markdown code block", () => {
-    const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
+  it("keeps the plate and the soft wrap on ordinary code blocks", () => {
     const rule = css.match(/\.md pre\s*\{([^}]*)\}/)?.[1] ?? "";
-    expect(rule).toMatch(/background:\s*transparent/);
+    expect(rule).toMatch(/background:\s*var\(--editor\)/);
     expect(rule).toMatch(/white-space:\s*pre-wrap/);
     expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it("drops only the plate inside the thought card", () => {
+    const scoped = css.match(/\.thought-body \.md pre\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(scoped).toMatch(/background:\s*transparent/);
+    // The opt-out must not touch border/padding/wrap/typography.
+    expect(scoped).not.toMatch(/border|padding|white-space|overflow|font/);
+    const list = readFileSync(
+      join(__dirname, "..", "webview", "src", "components", "MessageList.tsx"),
+      "utf8",
+    );
+    expect(list).toContain('className="thought-body ');
   });
 });
