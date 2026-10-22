@@ -216,6 +216,14 @@ function createMockHost(): HostApi {
       facts: [
         { id: "3:aaa", text: "回答使用中文" },
         { id: "4:bbb", text: "先给出结论再展开" },
+        {
+          id: "6:ccc",
+          text: "验证流程：`npx vitest run <测试文件>` 跑定向单测，`npm run typecheck` 分别检查 host 与 webview，`npm test` 跑全量；提交前按此顺序验证并在汇报中列出结果。任何「CLI 行为」的假设都应在代码注释里标注验证来源（版本 + 实测方式）。",
+        },
+        {
+          id: "7:ddd",
+          text: "陷阱：切换 provider 预设时，若新预设没有推荐模型，不能继承上一个网关的模型名，否则出现「新端点 + 旧模型」错配。全局快捷键在隐藏卡片、SELECT 聚焦或事件已 defaultPrevented 时不得响应。",
+        },
       ],
     },
     {
@@ -335,7 +343,13 @@ function createMockHost(): HostApi {
           ),
       ],
     },
-    { kind: "thought", text: "用户想了解仓库结构，先列出目录。" },
+    {
+      kind: "thought",
+      // Demo thought carries a fence: the card renders code with syntax colors
+      // on a transparent plate and soft-wrapped lines, so the mock snapshot
+      // shows that treatment.
+      text: "用户想了解仓库结构，先列出目录。\n\n```tsx\nconst rows = items.map((item) => ({ key: item.id, label: item.displayPath, value: item.path }));\n```",
+    },
     {
       kind: "tool",
       id: "demo-shell-block",

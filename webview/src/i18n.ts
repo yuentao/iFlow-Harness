@@ -847,6 +847,10 @@ const en: Record<string, string> = {
   "当前 CLI 不会加载此文件": "The current CLI does not load this file",
   "删除这条记忆": "Delete this memory",
   "还有 {0} 条…": "{0} more…",
+  "{0} 条记忆": "{0} memories",
+  "收起记忆列表": "Collapse memory list",
+  "展开全文": "Expand full text",
+  "收起全文": "Collapse full text",
   "记忆在新建会话或恢复会话时加载。当前会话需要重启 CLI 才会读取新内容。":
     "Memory is loaded when a new session is created or a session is restored. The current session only sees new content after the CLI restarts.",
   "重新加载": "Reload",

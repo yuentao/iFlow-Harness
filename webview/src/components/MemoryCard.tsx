@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type 
 import {
   AlertTriangle,
   Check,
+  ChevronRight,
   ExternalLink,
   FileText,
   Pencil,
@@ -10,7 +11,7 @@ import {
   Save,
   Trash2,
 } from "lucide-react";
-import type { KnowledgeDocUi, MemoryFileUi, MemoryScope, MemoryStateUi } from "../../../shared/messages";
+import type { KnowledgeDocUi, MemoryFactUi, MemoryFileUi, MemoryScope, MemoryStateUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { ActionRow, Button, Chip, Hint, ICON_INLINE, IconButton, Segmented, Select, SettingsDisclosure, TextArea } from "./ui";
@@ -50,6 +51,160 @@ function knowledgeStageLabel(stage: string | null): string {
     case "writing": return t("正在写入项目知识…");
     default: return "";
   }
+}
+
+/** Auto-extracted facts are long technical paragraphs; past this count the
+ * list collapses to a summary row so the settings page stays scannable. */
+const FACT_COLLAPSE_THRESHOLD = 3;
+
+/** One memory fact. Clamped to two lines until the row text is clicked;
+ * the delete affordance stays on its own channel (never toggles expansion).
+ * `index > 0` draws the separator line — `divide-y` utilities are not emitted
+ * by this build's Tailwind pipeline (probed via dist CSS, 2026-10-22). */
+function FactRow({
+  fact,
+  index,
+  editable,
+  busy,
+  saving,
+  onDelete,
+}: {
+  fact: MemoryFactUi;
+  index: number;
+  editable: boolean;
+  busy: boolean;
+  saving: boolean;
+  onDelete: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <li className={`group flex items-start gap-2 px-1 py-1.5 ${index > 0 ? "border-t border-border/40" : ""}`}>
+      <span className="mt-2 size-1 shrink-0 rounded-full bg-primary/60" />
+      <button
+        type="button"
+        aria-expanded={expanded}
+        title={expanded ? t("收起全文") : t("展开全文")}
+        onClick={() => setExpanded((v) => !v)}
+        className="min-w-0 flex-1 text-left text-ui-body leading-relaxed text-foreground/85 hover:text-foreground"
+      >
+        <span className={`break-words ${expanded ? "" : "line-clamp-2"}`}>{fact.text}</span>
+      </button>
+      <IconButton
+        icon={<Trash2 className={ICON_INLINE} />}
+        label={t("删除这条记忆")}
+        size="sm"
+        tone="danger"
+        className="opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"
+        disabled={busy || saving || !editable}
+        onClick={onDelete}
+      />
+    </li>
+  );
+}
+
+function MemoryFileCard({
+  file,
+  busy,
+  saving,
+  onOpen,
+  onEdit,
+  onDeleteFact,
+}: {
+  file: MemoryFileUi;
+  busy: boolean;
+  saving: boolean;
+  onOpen: (file: MemoryFileUi) => void;
+  onEdit: (file: MemoryFileUi) => void;
+  onDeleteFact: (file: MemoryFileUi, id: string) => void;
+}) {
+  const [factsOpen, setFactsOpen] = useState(false);
+  const label = roleLabel(file);
+  const isLegacy = file.role === "legacy";
+  const facts = file.facts ?? [];
+  const collapsible = facts.length > FACT_COLLAPSE_THRESHOLD;
+  // NOTE: keep the ternary outside the JSX expression container — TS 7's
+  // parser mis-ends `{...}` containers holding parenthesized nested JSX
+  // ternaries (probed with minimal repro, 2026-10-22).
+  const factsSection =
+    facts.length === 0
+      ? null
+      : collapsible && !factsOpen
+        ? <button
+            type="button"
+            aria-expanded={false}
+            onClick={() => setFactsOpen(true)}
+            className="mt-1.5 flex items-center gap-1.5 rounded-md px-1 py-1 text-ui-caption text-muted-foreground hover:bg-surface hover:text-foreground"
+          >
+            <ChevronRight className={ICON_INLINE} />
+            <span>{t("{0} 条记忆", facts.length)}</span>
+          </button>
+        : <>
+            <ul className="mt-1.5">
+              {facts.slice(0, 20).map((fact, index) => (
+                <FactRow
+                  key={fact.id}
+                  fact={fact}
+                  index={index}
+                  editable={file.editable}
+                  busy={busy}
+                  saving={saving}
+                  onDelete={() => onDeleteFact(file, fact.id)}
+                />
+              ))}
+              {facts.length > 20 && (
+                <li className="px-1 py-1 text-ui-caption text-muted-foreground">{t("还有 {0} 条…", facts.length - 20)}</li>
+              )}
+            </ul>
+            {collapsible && (
+              <button
+                type="button"
+                aria-expanded={true}
+                onClick={() => setFactsOpen(false)}
+                className="mt-1 flex items-center gap-1.5 rounded-md px-1 py-1 text-ui-caption text-muted-foreground hover:bg-surface hover:text-foreground"
+              >
+                <ChevronRight className={`${ICON_INLINE} rotate-90`} />
+                <span>{t("收起记忆列表")}</span>
+              </button>
+            )}
+          </>;
+  return (
+    <div className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <FileText className={`${ICON_INLINE} shrink-0 text-muted-foreground`} />
+        <span className="min-w-0 flex-1 truncate font-mono text-ui-label text-foreground" title={file.path}>
+          {file.displayPath}
+        </span>
+        {label && <Chip tone={isLegacy ? "warning" : file.role === "primary" ? "primary" : "muted"}>{label}</Chip>}
+        {/* The caveat belongs to the injection chip, not a separate grey line. */}
+        <Chip
+          tone={file.injected ? "info" : "warning"}
+          title={file.injected ? undefined : t("当前 CLI 不会加载此文件")}
+        >
+          {file.injected ? t("已注入") : t("未注入")}
+        </Chip>
+        <IconButton
+          icon={<ExternalLink className={ICON_INLINE} />}
+          label={t("打开文件")}
+          size="sm"
+          disabled={busy || saving || !file.exists}
+          onClick={() => onOpen(file)}
+        />
+        <IconButton
+          icon={<Pencil className={ICON_INLINE} />}
+          label={t("编辑")}
+          size="sm"
+          disabled={busy || saving || !file.editable}
+          onClick={() => onEdit(file)}
+        />
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
+        <span>{file.exists ? t("{0} 字节", file.bytes) : t("尚未创建")}</span>
+        {file.updatedAt && <span>{t("更新于 {0}", formatTime(file.updatedAt))}</span>}
+        <span title={t("约 {0} tokens（BPE 估算）", file.tokens)}>≈{fmtTokens(file.tokens)} tokens</span>
+      </div>
+      {factsSection}
+    </div>
+  );
 }
 
 /**
@@ -305,70 +460,6 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
     // The host replies with a fresh memoryState; clear the spinner there.
   }
 
-  function renderFile(file: MemoryFileUi) {
-    const label = roleLabel(file);
-    const isLegacy = file.role === "legacy";
-    return (
-      <div key={file.path} className="card-lift rounded-lg border border-border px-2 py-1.5 shadow-card">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate font-mono text-ui-label text-foreground" title={file.path}>
-            {file.displayPath}
-          </span>
-          {label && <Chip tone={isLegacy ? "warning" : file.role === "primary" ? "primary" : "muted"}>{label}</Chip>}
-          <Chip tone={file.injected ? "info" : "muted"}>{file.injected ? t("已注入") : t("未注入")}</Chip>
-          <span
-            className="shrink-0 font-mono text-ui-caption text-muted-foreground"
-            title={t("约 {0} tokens（BPE 估算）", file.tokens)}
-          >
-            ≈{fmtTokens(file.tokens)} tokens
-          </span>
-          <IconButton
-            icon={<ExternalLink className={ICON_INLINE} />}
-            label={t("打开文件")}
-            size="sm"
-            disabled={busy || saving || !file.exists}
-            onClick={() => open(file)}
-          />
-          <IconButton
-            icon={<Pencil className={ICON_INLINE} />}
-            label={t("编辑")}
-            size="sm"
-            disabled={busy || saving || !file.editable}
-            onClick={() => startEdit(file)}
-          />
-        </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
-          <span>{file.exists ? t("{0} 字节", file.bytes) : t("尚未创建")}</span>
-          {file.updatedAt && <span>{t("更新于 {0}", formatTime(file.updatedAt))}</span>}
-          {!file.injected && <span className="text-warning">{t("当前 CLI 不会加载此文件")}</span>}
-        </div>
-        {file.facts && file.facts.length > 0 && (
-          <ul className="mt-2 space-y-0.5">
-            {file.facts.slice(0, 20).map((fact) => (
-              <li key={fact.id} className="group flex items-start gap-1 rounded-md px-1 py-0.5 text-ui-label text-foreground/85">
-                <span className="mt-0.5 size-1 shrink-0 rounded-full bg-primary/60" />
-                <span className="min-w-0 flex-1 break-words">{fact.text}</span>
-                <IconButton
-                  icon={<Trash2 className={ICON_INLINE} />}
-                  label={t("删除这条记忆")}
-                  size="sm"
-                  tone="danger"
-                  className="opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"
-                  disabled={busy || saving || !file.editable}
-                  onClick={() => removeFact(file, fact.id)}
-                />
-              </li>
-            ))}
-            {file.facts.length > 20 && (
-              <li className="px-1 text-ui-caption text-muted-foreground">{t("还有 {0} 条…", file.facts.length - 20)}</li>
-            )}
-          </ul>
-        )}
-      </div>
-    );
-  }
-
   if (editing) {
     return (
       <div className="space-y-2">
@@ -463,7 +554,17 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                   onClick={refresh}
                 />
               </div>
-              {globalFiles.map(renderFile)}
+              {globalFiles.map((file) => (
+                <MemoryFileCard
+                  key={file.path}
+                  file={file}
+                  busy={busy}
+                  saving={saving}
+                  onOpen={open}
+                  onEdit={startEdit}
+                  onDeleteFact={removeFact}
+                />
+              ))}
             </section>
 
             <section className="space-y-2 px-4 py-3">
@@ -478,7 +579,17 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                   {t("当前工作区没有可用的项目记忆文件")}
                 </div>
               ) : (
-                projectFiles.map(renderFile)
+                projectFiles.map((file) => (
+                  <MemoryFileCard
+                    key={file.path}
+                    file={file}
+                    busy={busy}
+                    saving={saving}
+                    onOpen={open}
+                    onEdit={startEdit}
+                    onDeleteFact={removeFact}
+                  />
+                ))
               )}
               <ActionRow>
                 <Button

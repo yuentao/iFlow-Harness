@@ -1159,8 +1159,8 @@ textarea::selection {
    hashes); plain `word-break` alone leaves them intact. `overflow-x: hidden`
    drops the dead horizontal scrollbar that pre-wrap makes unreachable.
    Fenced markdown code blocks are unaffected: `.md pre` below has higher
-   specificity (0,1,1 vs 0,0,1) and re-declares `white-space: pre` so genuine
-   source lines keep their horizontal scroll. */
+   specificity (0,1,1 vs 0,0,1) and re-declares the wrap/break behavior so
+   genuine source lines keep their own rhythm (soft wrap, no forced scroll). */
 pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1208,15 +1208,17 @@ pre {
 }
 
 .md pre {
-  background: var(--editor);
+  /* No plate behind the rows: the code sits directly on the card surface and
+     the syntax tokens carry the only color (the --syn-* palette). */
+  background: transparent;
   border: 1px solid var(--border);
   padding: var(--space-sm) var(--space-md);
   border-radius: var(--radius-card);
   overflow-x: auto;
-  /* Fenced source is scanned sideways, not read as prose: keep the original
-     single-line-per-row behavior (the global `pre` rule above wraps). */
-  white-space: pre;
-  overflow-wrap: normal;
+  /* Source lines wrap instead of scrolling the block sideways — a narrow
+     panel must never hide the tail of a line. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: var(--ui-font-caption);
   line-height: 1.6;

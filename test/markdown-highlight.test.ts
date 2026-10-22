@@ -1,5 +1,24 @@
-import { describe, it, expect } from "vitest";
+// @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { act } from "react";
+import { describe, it, expect, vi } from "vitest";
 import { renderCodeBlock } from "../webview/src/highlight";
+import { Markdown } from "../webview/src/components/Markdown";
+
+const send = vi.hoisted(() => vi.fn());
+const useChat = vi.hoisted(() =>
+  Object.assign(
+    (selector: (state: { send: typeof send }) => unknown) => selector({ send }),
+    { getState: () => ({ send }) },
+  ),
+);
+vi.mock("../webview/src/store", () => ({ useChat }));
+
+/** React 19 refuses `act()` unless the environment declares itself act-capable. */
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
  * Fenced code block highlighting (webview/src/highlight.ts): known languages
@@ -70,5 +89,39 @@ describe("renderCodeBlock", () => {
     const out = html as string;
     expect(out).toContain('class="hljs"');
     expect(out).toContain("plain &lt;text&gt;");
+  });
+});
+
+/**
+ * Behaviour half: the Markdown component's code fences keep the syntax
+ * highlighting, and the stylesheet gives every markdown code block the
+ * agreed treatment — no plate behind the rows (the tokens carry the only
+ * color) and soft-wrapped lines instead of a horizontal scroll.
+ */
+describe("Markdown code fences", () => {
+  const FENCE = "```ts\nconst n: number = 1;\n```";
+
+  const render = (): HTMLElement => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(createElement(Markdown, { text: FENCE }));
+    });
+    return container;
+  };
+
+  it("keeps the syntax highlighting", () => {
+    const container = render();
+    expect(container.querySelector("pre code .hljs-keyword")).toBeTruthy();
+    expect(container.querySelector("pre code .hljs-number")).toBeTruthy();
+  });
+
+  it("drops the row plate and soft-wraps every markdown code block", () => {
+    const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
+    const rule = css.match(/\.md pre\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(rule).toMatch(/background:\s*transparent/);
+    expect(rule).toMatch(/white-space:\s*pre-wrap/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
   });
 });
