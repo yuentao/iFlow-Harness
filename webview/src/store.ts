@@ -10,12 +10,14 @@ import {
   type MemoryFileUi,
   type MemoryScope,
   type MemoryStateUi,
+  type ModelMetadataStateUi,
   type SessionState,
   type SessionSummaryUi,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
 } from "../../shared/messages";
+import { normalizeModelId } from "../../shared/context-window";
 import { collectTurnChanges } from "../../shared/turn-changes";
 
 declare const acquireVsCodeApi: () => { postMessage: (msg: unknown) => void };
@@ -179,6 +181,8 @@ function createMockHost(): HostApi {
   };
   /** Mirrors the real host's mirrored extension settings (default on). */
   const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
+  /** 「联网补充模型数据」 mock: one in-flight timer (cancel clears it). */
+  let mockMetadataTimer: number | null = null;
   // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
   // the host's approvalPolicy message.
   let mockApprovalRules: ApprovalRule[] | undefined;
@@ -1858,6 +1862,66 @@ function createMockHost(): HostApi {
         mockEnhanceTimers.set(m.requestId, timer);
         return;
       }
+      if (m.type === "fetchModelMetadata") {
+        // Mock web-search metadata fetch: searching → canned rows appended to
+        // the three tables (the real host dedups against existing rows and
+        // only appends validated ones), then done with the counts.
+        broadcast({ type: "modelMetadataState", state: "searching" });
+        if (mockMetadataTimer) window.clearTimeout(mockMetadataTimer);
+        mockMetadataTimer = window.setTimeout(() => {
+          mockMetadataTimer = null;
+          // Same dedup rule as the host: a model already present in the table
+          // is never appended twice (repeated clicks would otherwise stack
+          // identical rows).
+          const seenWindows = new Set(
+            mockHostSettings.contextWindowOverrides.map((row) => normalizeModelId(row.split("=")[0])),
+          );
+          const windowRows = ["glm-4.6=200000", "deepseek-v3.2-ex=128000"].filter((row) => {
+            const key = normalizeModelId(row.split("=")[0]);
+            if (!key || seenWindows.has(key)) return false;
+            seenWindows.add(key);
+            return true;
+          });
+          const seenCosts = new Set(mockHostSettings.costTable.map((row) => normalizeModelId(row.split("=")[0])));
+          const costRows = ["glm-4.6=0.6,2.4"].filter((row) => {
+            const key = normalizeModelId(row.split("=")[0]);
+            if (!key || seenCosts.has(key)) return false;
+            seenCosts.add(key);
+            return true;
+          });
+          const rulePattern = "^glm-4\\.6$";
+          const ruleCovered = mockHostSettings.thinkingModelRules.some(
+            (rule) => rule.supportsThinking && new RegExp(rule.pattern, "i").test("glm-4.6"),
+          );
+          mockHostSettings.contextWindowOverrides = [...mockHostSettings.contextWindowOverrides, ...windowRows];
+          mockHostSettings.costTable = [...mockHostSettings.costTable, ...costRows];
+          if (!ruleCovered) {
+            mockHostSettings.thinkingModelRules = [
+              ...mockHostSettings.thinkingModelRules,
+              { pattern: rulePattern, supportsThinking: true },
+            ];
+          }
+          broadcast({ type: "hostSettings", ...mockHostSettings });
+          broadcast({
+            type: "modelMetadataState",
+            state: "done",
+            added: {
+              windows: windowRows.length,
+              costs: costRows.length,
+              rules: ruleCovered ? 0 : 1,
+            },
+          });
+        }, 900);
+        return;
+      }
+      if (m.type === "cancelModelMetadata") {
+        if (mockMetadataTimer) {
+          window.clearTimeout(mockMetadataTimer);
+          mockMetadataTimer = null;
+        }
+        broadcast({ type: "modelMetadataState", state: "idle" });
+        return;
+      }
       if (m.type === "cancelEnhance") {
         // Mirror the real host: an aborted enhancement never replies.
         const timer = mockEnhanceTimers.get(m.requestId);
@@ -2047,6 +2111,11 @@ interface ChatStore {
    */
   hostSettings: HostSettingsUi;
   updateHostSetting: (patch: Partial<HostSettingsUi>) => void;
+  /** Lifecycle of the settings-panel 「联网补充模型数据」 web-search fetch
+   * (see `modelMetadataState`). WebView-local mirror of the host lane: the
+   * button shows the spinner while `searching` and the inline error on
+   * `error`; appended rows arrive via the following `hostSettings` refresh. */
+  modelMetadata: ModelMetadataStateUi;
   /** Transient host notices (auto-dismissed); see applyHostMessage toast case. */
   toasts: ToastItem[];
   dismissToast: (id: number) => void;
@@ -2105,6 +2174,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
+  modelMetadata: { state: "idle" },
   pending: null,
   promptSeq: 0,
   headerScrolled: false,
@@ -2206,6 +2276,10 @@ export const useChat = create<ChatStore>((set, get) => ({
       } catch {
         // localStorage can be unavailable in hardened webviews.
       }
+      return;
+    }
+    if (msg.type === "modelMetadataState") {
+      set({ modelMetadata: { state: msg.state, added: msg.added, error: msg.error } });
       return;
     }
     if (msg.type === "theme") {

@@ -40,6 +40,7 @@ const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
   state: null as { pendingProfileSwitch: { id: string; profileName: string } | null } | null,
 }));
+const modelMetadata = vi.hoisted(() => ({ state: "idle" as "idle" | "searching" | "done" | "error" }));
 
 vi.mock("../webview/src/store", () => ({
   useChat: Object.assign(
@@ -47,10 +48,11 @@ vi.mock("../webview/src/store", () => ({
       send: typeof send;
       updateHostSetting: typeof updateHostSetting;
       hostSettings: typeof hostSettings;
+      modelMetadata: typeof modelMetadata;
       pending: typeof chat.pending;
       state: typeof chat.state;
     }) => unknown) =>
-      selector({ send, updateHostSetting, hostSettings, ...chat }),
+      selector({ send, updateHostSetting, hostSettings, modelMetadata, ...chat }),
     { getState: () => ({ beginPending }) },
   ),
 }));
@@ -235,6 +237,22 @@ it("shows model metadata groups in the account tab", () => {
   expect(container.textContent).toContain("思考模型规则");
 });
 
+it("the metadata fetch button starts the web-search fetch", () => {
+  renderApiTab();
+  click("联网补充模型数据");
+  expect(send).toHaveBeenCalledWith({ type: "fetchModelMetadata" });
+});
+
+it("shows the busy label and stop control while the fetch is searching", () => {
+  modelMetadata.state = "searching";
+  renderApiTab();
+  expect(container.textContent).toContain("正在联网检索…");
+  expect(container.textContent).not.toContain("联网补充模型数据");
+  click("停止检索");
+  expect(send).toHaveBeenCalledWith({ type: "cancelModelMetadata" });
+  modelMetadata.state = "idle";
+});
+
 it("shows a waiting label until the profile-switch choice is answered", () => {
   chat.pending = { kind: "profile", target: "B" };
   chat.state = { pendingProfileSwitch: { id: "pswitch-1", profileName: "B" } };
@@ -327,7 +345,7 @@ it("hides the CLI import card once extension credentials exist", () => {
     ],
     onboardingDismissed: false,
   });
-  expect(container.textContent).not.toContain("检测到 iFlow CLI 已有凭据");
+  expect(container.textContent).not.toContain("检测到内核已有凭据");
 });
 
 it("opens provider documentation from the preset guidance", () => {
@@ -364,7 +382,7 @@ it("sends an import command for detected CLI credentials", () => {
     ],
     onboardingDismissed: false,
   });
-  expect(container.textContent).toContain("检测到 iFlow CLI 已有凭据");
+  expect(container.textContent).toContain("检测到内核已有凭据");
   click("导入并激活");
   expect(beginPending).toHaveBeenCalledWith("profile", "终端默认");
   expect(send).toHaveBeenCalledWith({ type: "importCliCredentials", name: "终端默认" });

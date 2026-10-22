@@ -174,7 +174,7 @@ function usageTooltip(u: Usage): string {
     ? [
         t(
           u.usageAuthoritative
-            ? "当前上下文 {0} tokens（CLI 上报）"
+            ? "当前上下文 {0} tokens（内核上报）"
             : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）",
           (u.usageAuthoritative ? u.contextUsed : u.inputTokens).toLocaleString(),
         ),
@@ -187,7 +187,7 @@ function usageTooltip(u: Usage): string {
           (u.contextWindow as number).toLocaleString(),
           u.pct,
           u.estimated ? t("，窗口为估算值") : "",
-          u.usageAuthoritative ? t("，占用为 CLI 上报值") : "",
+          u.usageAuthoritative ? t("，占用为内核上报值") : "",
         ),
         t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
         t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", u.bdUser.toLocaleString(), u.bdAssistant.toLocaleString(), u.bdTool.toLocaleString(), u.bdThought.toLocaleString()),

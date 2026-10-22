@@ -214,6 +214,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - OptionCard 用于单次选择中的多行选项，可用 emphasis 表达推荐态，并用 ariaLabel 提供与可见文案不同的可访问名。
 - 新增 UI kit 导出时，ui-kit-guard 的导出清单必须按源码实际声明精确匹配，并确保守卫改动与源码一起提交。
 - 按钮需跟随所在表面的语义色：警告表面用 warning-soft，错误表面用 danger-soft；中性表面用 secondary/canvas，粘性决策卡保留 primary。
+- ACP 无 session/close；一次性辅助会话结束需删除 CLI 会话状态文件，会话对象随 CLI 进程生命周期驻留，代价与 probe 会话相同。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

@@ -214,14 +214,15 @@ export class AcpClient {
     return (await this.peer!.request(AcpMethods.loadSession, request, this.options.requestTimeoutMs ?? 120_000)) as NewSessionResponse;
   }
 
-  async prompt(request: PromptRequest): Promise<PromptResponse> {
+  async prompt(request: PromptRequest, timeoutMs?: number): Promise<PromptResponse> {
     // R1 (final): no timeout by default — agent tasks can legitimately run
     // for hours. Cancellation is user-driven (`session/cancel`); a positive
-    // `promptTimeoutMs` opt-in re-enables the guard.
+    // `promptTimeoutMs` opt-in re-enables the guard. A per-call override
+    // covers throwaway turns (metadata fetch) that must not run forever.
     return (await this.peer!.request(
       AcpMethods.prompt,
       request,
-      this.options.promptTimeoutMs ?? 0,
+      timeoutMs ?? this.options.promptTimeoutMs ?? 0,
     )) as PromptResponse;
   }
 

@@ -353,7 +353,7 @@ export function OnboardingWizard({
                 <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
                   <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
                     <KeyRound className="size-3.5 shrink-0 text-primary" />
-                    {t("检测到 iFlow CLI 已有凭据")}
+                    {t("检测到内核已有凭据")}
                   </div>
                   <div className="mt-1 space-y-1">
                     {auth.importable.map((candidate) => (
@@ -441,7 +441,7 @@ export function OnboardingWizard({
                 <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center">
                   <div className="text-ui-label font-semibold text-foreground">
                     {connecting
-                      ? t("正在连接 iFlow CLI 并获取模型列表…")
+                      ? t("正在连接内核并获取模型列表…")
                       : auth.needsSetup
                         ? t("尚未连接")
                         : t("暂无可用模型列表")}

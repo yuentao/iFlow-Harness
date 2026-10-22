@@ -629,7 +629,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 const dotTitle =
                   view === undefined
                     ? status === null
-                      ? t("连接状态不可获取（CLI 未连接或状态上报未启用）")
+                      ? t("连接状态不可获取（内核未连接或状态上报未启用）")
                       : t("连接状态读取中…")
                     : statusLabel(view) + (view.error ? ` — ${view.error}` : "");
                 return (
@@ -650,7 +650,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         return (
                           <Chip
                             tone={clash === "overrides" ? "warning" : "muted"}
-                            title={t("两级同名时 CLI 用项目级配置整体替换全局条目（不合并字段）")}
+                            title={t("两级同名时内核用项目级配置整体替换全局条目（不合并字段）")}
                           >
                             {clash === "overrides" ? t("覆盖全局") : t("被项目覆盖")}
                           </Chip>
@@ -731,10 +731,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           <Hint className="mt-2">
             {scope === "project"
               ? t(
-                  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时 CLI 用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启 CLI」生效。",
+                  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时内核用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启内核」生效。",
                 )
               : t(
-                  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。",
+                  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启内核」生效（当前会话自动恢复）。",
                 )}
           </Hint>
         </>
@@ -763,7 +763,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           ? "ml-1.5 shrink-0 rounded-full bg-info/15 border border-info/50 px-1.5 py-px text-ui-label font-medium text-info"
                           : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-px text-ui-label font-medium text-muted-foreground"
                     }
-                    title={view ? statusLabel(view) + (view.error ? ` — ${view.error}` : "") : t("连接状态不可获取（CLI 未连接或状态上报未启用）")}
+                    title={view ? statusLabel(view) + (view.error ? ` — ${view.error}` : "") : t("连接状态不可获取（内核未连接或状态上报未启用）")}
                   >
                     {view ? statusLabel(view) : t("状态不可获取")}
                   </span>
@@ -1173,7 +1173,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
       {confirmDelete !== null && entries?.[confirmDelete] && (
         <ConfirmDialog
           title={t("删除 MCP 服务器")}
-          message={t("确定删除「{0}」吗？保存后将从 CLI 配置中移除。", entries[confirmDelete]!.name)}
+          message={t("确定删除「{0}」吗？保存后将从内核配置中移除。", entries[confirmDelete]!.name)}
           onConfirm={() => {
             setEntries((current) => current?.filter((_, j) => j !== confirmDelete) ?? null);
             setSavedFlash(false);

@@ -31,8 +31,8 @@ const en: Record<string, string> = {
   "正在读取本轮变更…": "Loading turn changes…",
   "本轮没有可展示的变更记录；这不表示没有文件修改。": "No change records are available for this turn; files may still have changed.",
   // loading / topbar
-  "连接中…（iFlow CLI 启动可能需要十几秒，配置了多个 MCP server 时更久）":
-    "Connecting… (iFlow CLI startup can take 10+ seconds, longer with multiple MCP servers)",
+  "连接中…（内核启动可能需要十几秒，配置了多个 MCP server 时更久）":
+    "Connecting… (Core startup can take 10+ seconds, longer with multiple MCP servers)",
   "历史会话（选择后恢复该会话上下文）": "Recent sessions (pick one to restore its context)",
   "当前会话": "Current session",
   "API 配置（点击切换后重新认证）": "API profile (click to switch, re-authenticates)",
@@ -157,8 +157,8 @@ const en: Record<string, string> = {
     "The local network or proxy is unreachable — check connectivity/proxy settings, then hit retry",
   "当前模型可能已下架或不支持该能力，在设置中重新选择可用模型后重试":
     "The current model may be delisted or lacks this capability — pick an available model in Settings and retry",
-  "扩展包不完整或内置 CLI 文件被安全软件删除，重新安装扩展后重启窗口即可恢复":
-    "The extension package is incomplete or the bundled CLI was removed by security software — reinstall the extension and reload the window",
+  "扩展包不完整或内核文件被安全软件删除，重新安装扩展后重启窗口即可恢复":
+    "The extension package is incomplete or the bundled Core was removed by security software — reinstall the extension and reload the window",
   "平台速率限制持续触发，可稍候片刻再重试，或在设置中切换到其他模型 / API 配置":
     "The platform rate limit keeps triggering — wait a moment and retry, or switch to another model / API profile in Settings",
   "上下文已超出模型上限且自动压缩未能恢复，可发送 /compress 再次压缩，或开启新会话后继续":
@@ -221,7 +221,7 @@ const en: Record<string, string> = {
   "自定义配置": "Custom profile",
   "选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。":
     "Pick a provider preset to fill in the endpoint, or enter any OpenAI-compatible endpoint manually.",
-  "检测到 iFlow CLI 已有凭据": "Existing iFlow CLI credentials detected",
+  "检测到内核已有凭据": "Existing Core credentials detected",
   "可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。":
     "Import them as extension profiles from ~/.iflow/settings.json; the key is stored in SecretStorage and managed by the panel.",
   "导入并激活": "Import & activate",
@@ -255,7 +255,7 @@ const en: Record<string, string> = {
   "尚未配置（可稍后在设置中完成）": "Not configured (finish later in settings)",
   "选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。":
     "Pick the default model. You can switch at any time from the model dropdown in the panel header.",
-  "正在连接 iFlow CLI 并获取模型列表…": "Connecting to iFlow CLI and fetching models…",
+  "正在连接内核并获取模型列表…": "Connecting to Core and fetching models…",
   "尚未连接": "Not connected",
   "暂无可用模型列表": "No models available yet",
   "保存凭据后会自动获取模型；也可以稍后在模型下拉中选择。":
@@ -331,7 +331,7 @@ const en: Record<string, string> = {
   "复制错误信息": "Copy error message",
   "已复制": "Copied",
   "扩展": "Extension",
-  "CLI": "CLI",
+  "内核": "Core",
   "删除 {0}": "Delete {0}",
   "编辑 {0}": "Edit {0}",
   "添加 API 配置": "Add API profile",
@@ -345,15 +345,15 @@ const en: Record<string, string> = {
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
   "保存并激活": "Save & activate",
   "打开 VSCode 设置…": "Open VSCode Settings…",
-  "重启 CLI": "Restart CLI",
-  "重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
-    "Restart the CLI process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
-  "点击配置即切换并重新认证会话；来自 iFlow CLI 的配置为只读，可切换但不可在此删除。":
-    "Click a profile to switch and re-authenticate the session. Profiles imported from the iFlow CLI are read-only: you can switch to them but not delete them here.",
+  "重启内核": "Restart Core",
+  "重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
+    "Restart the Core process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
+  "点击配置即切换并重新认证会话；来自内核的配置为只读，可切换但不可在此删除。":
+    "Click a profile to switch and re-authenticate the session. Profiles imported from the Core are read-only: you can switch to them but not delete them here.",
   "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。":
     "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving re-authenticates the session via openai-compatible.",
-  "这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。":
-    "This is a read-only CLI profile; saving creates an extension-owned profile with the same name that takes precedence.",
+  "这是只读的内核配置；保存将另存为同名的扩展配置并优先使用它。":
+    "This is a read-only Core profile; saving creates an extension-owned profile with the same name that takes precedence.",
   "正在重新认证…": "Re-authenticating…",
   "等待选择…": "Waiting for your choice…",
   "审批策略": "Approval policies",
@@ -422,12 +422,12 @@ const en: Record<string, string> = {
   "写入 {0}": "Writes to {0}",
   "覆盖全局": "Overrides global",
   "被项目覆盖": "Overridden by project",
-  "两级同名时 CLI 用项目级配置整体替换全局条目（不合并字段）":
-    "For a name present in both scopes the CLI replaces the global entry with the project one wholesale (fields are not merged)",
-  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启 CLI」生效（当前会话自动恢复）。":
-    "The global scope reads/writes the mcpServers field in ~/.iflow/settings.json; after saving, click Restart CLI in the footer to apply (the current session restores automatically).",
-  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时 CLI 用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启 CLI」生效。":
-    "The project scope reads/writes the mcpServers field in <workspace>/.iflow/settings.json; for a name also present globally, the CLI replaces the global entry with the project one wholesale (fields are not merged). After saving, click Restart CLI in the footer to apply.",
+  "两级同名时内核用项目级配置整体替换全局条目（不合并字段）":
+    "For a name present in both scopes the Core replaces the global entry with the project one wholesale (fields are not merged)",
+  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启内核」生效（当前会话自动恢复）。":
+    "The global scope reads/writes the mcpServers field in ~/.iflow/settings.json; after saving, click Restart Core in the footer to apply (the current session restores automatically).",
+  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时内核用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启内核」生效。":
+    "The project scope reads/writes the mcpServers field in <workspace>/.iflow/settings.json; for a name also present globally, the Core replaces the global entry with the project one wholesale (fields are not merged). After saving, click Restart Core in the footer to apply.",
   "保存中…": "Saving…",
   // MCP status indicators + detail sub-page
   "状态未知": "Status unknown",
@@ -437,8 +437,8 @@ const en: Record<string, string> = {
   "连接中…": "Connecting…",
   "未连接": "Not connected",
   "状态不可获取": "Status unavailable",
-  "连接状态不可获取（CLI 未连接或状态上报未启用）":
-    "Connection status unavailable (CLI not connected, or status reporting not enabled)",
+  "连接状态不可获取（内核未连接或状态上报未启用）":
+    "Connection status unavailable (Core not connected, or status reporting not enabled)",
   "连接状态读取中…": "Reading connection status…",
   "详情": "Details",
   "MCP 服务器详情": "MCP server details",
@@ -517,8 +517,8 @@ const en: Record<string, string> = {
   "确定删除配置「{0}」吗？其密钥将从 SecretStorage 中永久移除。":
     "Delete profile \"{0}\"? Its key will be permanently removed from SecretStorage.",
   "确定删除规则「{0}」吗？保存后生效。": "Delete rule \"{0}\"? Takes effect after saving.",
-  "确定删除「{0}」吗？保存后将从 CLI 配置中移除。":
-    "Delete \"{0}\"? It will be removed from the CLI configuration when saved.",
+  "确定删除「{0}」吗？保存后将从内核配置中移除。":
+    "Delete \"{0}\"? It will be removed from the Core configuration when saved.",
   "输入框非空，已放弃回填（队列条目仍在）":
     "Composer is not empty — refill dropped (the queue entry is still there)",
   "排队发送 (Enter)": "Queue (Enter)",
@@ -529,7 +529,7 @@ const en: Record<string, string> = {
   "{0} 个文件暂存失败，已跳过": "Failed to stage {0} file(s) — skipped",
   "停止生成": "Stop generating",
   "发送 (Enter)": "Send (Enter)",
-  "当前上下文 {0} tokens（CLI 上报）": "Current context {0} tokens (reported by CLI)",
+  "当前上下文 {0} tokens（内核上报）": "Current context {0} tokens (reported by Core)",
   "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）":
     "Current context ≈ {0} tokens (host estimate; recomputed from the compressed context after compression)",
   "输入 {0} tokens · 输出 {1} tokens": "Input {0} tokens · output {1} tokens",
@@ -556,7 +556,7 @@ const en: Record<string, string> = {
   // P0-3: splash patience line & error toast actions
   "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
     "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
-  "重启 CLI 并重试（会话自动恢复）": "Restart the CLI and retry (the session restores automatically)",
+  "重启内核并重试（会话自动恢复）": "Restart the Core and retry (the session restores automatically)",
   "关闭": "Dismiss",
   "回到最新": "Jump to latest",
   "展开上下文": "Expand context",
@@ -633,9 +633,9 @@ const en: Record<string, string> = {
   "退出 Focus 视图（Ctrl+Alt+F）": "Exit Focus view (Ctrl+Alt+F)",
   "上下文占用 {0} / {1}（{2}%{3}{4}）": "Context {0} / {1} ({2}%{3}{4})",
   "，窗口为估算值": ", window is an estimate",
-  "，占用为 CLI 上报值": ", occupancy reported by the CLI",
-  "当前上下文 {0} tokens（CLI 上报）· 输出 {1}（估算）":
-    "Context {0} tokens (reported by the CLI) · output {1} (estimated)",
+  "，占用为内核上报值": ", occupancy reported by the Core",
+  "当前上下文 {0} tokens（内核上报）· 输出 {1}（估算）":
+    "Context {0} tokens (reported by the Core) · output {1} (estimated)",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
   "缓存读取 {0} tokens": "Cache read {0} tokens",
   "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",
@@ -691,8 +691,8 @@ const en: Record<string, string> = {
   "系统": "System",
   "设置分区": "Settings sections",
   "设置如何保存": "How settings are saved",
-  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在 CLI 配置文件，重启 CLI 生效。":
-    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API keys stay in SecretStorage and are never synced. MCP, language and approval mode live in the CLI config and apply after a CLI restart.",
+  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在内核配置文件，重启内核生效。":
+    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API keys stay in SecretStorage and are never synced. MCP, language and approval mode live in the Core config and apply after a Core restart.",
   "详细说明": "Details",
   "会话": "Session",
   "会话首轮完成后自动生成简短标题。": "Generate a short title after a session's first turn.",
@@ -720,10 +720,10 @@ const en: Record<string, string> = {
   "可选": "Optional",
   "新会话使用的权限模式。": "The permission mode new sessions start with.",
   "当前会话可用输入框下方的模式菜单切换。": "Switch the current session's mode from the menu below the composer.",
-  "CLI 兼容": "CLI compatibility",
-  "写入 CLI 配置的启动审批模式。": "The approval mode the CLI starts with.",
-  "窗口打开时预热 CLI，首次打开面板无需等待。":
-    "Warm up the CLI when a window opens so the first panel open is instant.",
+  "内核兼容": "Core compatibility",
+  "写入内核配置的启动审批模式。": "The approval mode the Core starts with.",
+  "窗口打开时预热内核，首次打开面板无需等待。":
+    "Warm up the Core when a window opens so the first panel open is instant.",
   "每窗口约 100MB 内存；下次窗口启动生效。": "About 100MB per window; takes effect on the next window start.",
   "面板启动时恢复上次使用的会话。": "Restore the last used session when the panel starts.",
   "无可恢复记录时新建会话。": "Falls back to a new session when nothing is restorable.",
@@ -738,11 +738,11 @@ const en: Record<string, string> = {
   "快照保存在工作区存储中；容量上限等参数在「高级」中调整。":
     "Snapshots live in the workspace storage; adjust the limits under「Advanced」.",
   "高级": "Advanced",
-  "检查点限额与 CLI 运行时": "Checkpoint limits & CLI runtime",
+  "检查点限额与内核运行时": "Checkpoint limits & Core runtime",
   "留空使用默认工作区存储。": "Leave empty for the default workspace storage.",
   "留空自动探测。": "Leave empty to auto-detect.",
-  "修改后重启 CLI 生效。": "Takes effect after a CLI restart.",
-  "CLI 界面的显示语言。": "The display language of the CLI.",
+  "修改后重启内核生效。": "Takes effect after a Core restart.",
+  "内核的显示语言。": "The display language of the Core.",
   "配置 {0} 的操作": "Actions for {0}",
   "服务器 {0} 的操作": "Actions for server {0}",
   "更多操作": "More actions",
@@ -772,28 +772,28 @@ const en: Record<string, string> = {
   "全部完成事件": "All completions",
   "从不": "Never",
   "面板默认权限模式": "Default panel approval mode",
-  "CLI 默认审批模式": "CLI default approval mode",
-  "写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启 CLI 生效。":
-    "Written to ~/.iflow/settings.json; independent of the panel default and applied after a CLI restart.",
+  "内核默认审批模式": "Core default approval mode",
+  "写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启内核生效。":
+    "Written to ~/.iflow/settings.json; independent of the panel default and applied after a Core restart.",
   "不覆写": "Do not override",
   "启动与会话": "Startup & sessions",
-  "后台预热 CLI": "Warm up the CLI",
-  "窗口打开时在后台启动 CLI，首次打开面板无需等待（每窗口约 100MB 内存）。下次窗口启动生效。":
-    "Start the CLI in the background when a window opens so the first panel open is instant (about 100MB per window). Takes effect on the next window start.",
+  "后台预热内核": "Warm up the Core",
+  "窗口打开时在后台启动内核，首次打开面板无需等待（每窗口约 100MB 内存）。下次窗口启动生效。":
+    "Start the Core in the background when a window opens so the first panel open is instant (about 100MB per window). Takes effect on the next window start.",
   "恢复上次会话": "Restore last session",
   "面板启动时恢复上次使用的会话；无可恢复记录时新建会话。":
     "Restore the last used session when the panel starts; fall back to a new session when nothing is restorable.",
   "启动时自动打开面板": "Open the panel on startup",
   "VSCode 启动时自动打开聊天面板。下次启动生效。":
     "Open the chat panel automatically when VSCode starts. Takes effect on the next start.",
-  "CLI 运行时": "CLI runtime",
-  "重启 CLI 生效": "Takes effect after a CLI restart",
+  "内核运行时": "Core runtime",
+  "重启内核生效": "Takes effect after a Core restart",
   "Node.js 路径": "Node.js path",
-  "留空自动探测；修改后重启 CLI 生效。": "Leave empty to auto-detect; restart the CLI after changing.",
-  "CLI 语言": "CLI language",
-  "写入 ~/.iflow/settings.json；修改后重启 CLI 生效。":
-    "Written to ~/.iflow/settings.json; takes effect after a CLI restart.",
-  "跟随 CLI": "Leave to the CLI",
+  "留空自动探测；修改后重启内核生效。": "Leave empty to auto-detect; restart the Core after changing.",
+  "内核语言": "Core language",
+  "写入 ~/.iflow/settings.json；修改后重启内核生效。":
+    "Written to ~/.iflow/settings.json; takes effect after a Core restart.",
+  "跟随内核": "Leave to the Core",
   "检查点与存储": "Checkpoints & storage",
   "启用检查点": "Enable checkpoints",
   "每轮对话前把工作区快照到独立的影子 git 仓库，以支持按轮回退。":
@@ -814,8 +814,8 @@ const en: Record<string, string> = {
     "To edit the raw JSON directly, use「在 VSCode 设置中编辑…」at the bottom; panel changes already write to the same user settings.",
   "这些设置写入 VSCode 用户 settings.json；开启 VSCode 设置同步后会跨设备同步。API Key 保存在 SecretStorage，不会同步。":
     "These settings are written to your VSCode user settings.json and follow VSCode Settings Sync across machines. API keys stay in SecretStorage and are never synced.",
-  "MCP 服务器配置保存在 ~/.iflow/settings.json，由 CLI 读取；不随 VSCode 设置同步。":
-    "MCP server configuration lives in ~/.iflow/settings.json and is read by the CLI; it is not part of VSCode Settings Sync.",
+  "MCP 服务器配置保存在 ~/.iflow/settings.json，由内核读取；不随 VSCode 设置同步。":
+    "MCP server configuration lives in ~/.iflow/settings.json and is read by the Core; it is not part of VSCode Settings Sync.",
   "在 VSCode 设置中编辑…": "Edit in VSCode settings…",
   "已写入用户 settings.json": "Saved to user settings.json",
   "模型元数据": "Model metadata",
@@ -826,11 +826,18 @@ const en: Record<string, string> = {
   "每行「模型名=输入价,输出价」（USD/百万 token，如「deepseek-v3=0.27,1.1」）。":
     "One「model=inputPrice,outputPrice」per line (USD per million tokens, e.g.「deepseek-v3=0.27,1.1」).",
   "思考模型规则": "Thinking model rules",
-  "JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启 CLI 生效。":
-    "JSON array of rules with pattern / supportsThinking; saved to ~/.iflow/thinking-models.json and applied after a CLI restart.",
+  "JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启内核生效。":
+    "JSON array of rules with pattern / supportsThinking; saved to ~/.iflow/thinking-models.json and applied after a Core restart.",
   "应用": "Apply",
   "JSON 格式无效": "Invalid JSON",
   "条目必须是数组": "The value must be an array",
+  "由 AI 联网检索最新模型资料与当前 API 配置中的模型，追加到下方表格（不覆盖已有条目）。":
+    "AI web-searches the newest model data plus your API profile's models and appends validated rows below (existing rows are never overwritten).",
+  "联网检索模型资料并追加，不覆盖已有条目。":
+    "Web-searches model data and appends it (existing rows are never overwritten).",
+  "联网补充模型数据": "Fetch model data online",
+  "正在联网检索…": "Searching online…",
+  "停止检索": "Stop search",
   // F3 memory manager (Phase 1)
   "全局记忆": "Global memory",
   "项目记忆": "Project memory",
@@ -844,21 +851,21 @@ const en: Record<string, string> = {
   "编辑记忆": "Edit memory",
   "尚未创建": "Not created yet",
   "更新于 {0}": "Updated {0}",
-  "当前 CLI 不会加载此文件": "The current CLI does not load this file",
+  "当前内核不会加载此文件": "The current Core does not load this file",
   "删除这条记忆": "Delete this memory",
   "还有 {0} 条…": "{0} more…",
   "{0} 条记忆": "{0} memories",
   "收起记忆列表": "Collapse memory list",
   "展开全文": "Expand full text",
   "收起全文": "Collapse full text",
-  "记忆在新建会话或恢复会话时加载。当前会话需要重启 CLI 才会读取新内容。":
-    "Memory is loaded when a new session is created or a session is restored. The current session only sees new content after the CLI restarts.",
+  "记忆在新建会话或恢复会话时加载。当前会话需要重启内核才会读取新内容。":
+    "Memory is loaded when a new session is created or a session is restored. The current session only sees new content after the Core restarts.",
   "重新加载": "Reload",
   "{0} 字符 · ≈{1} tokens": "{0} chars · ≈{1} tokens",
   "已保存 {0}": "Saved {0}",
-  "新建会话或重启 CLI 后生效": "Takes effect after a new session or CLI restart",
-  "以下是 CLI 每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。":
-    "These are the memory files the CLI injects into every request. Their content is sent to the model — do not store secrets here.",
+  "新建会话或重启内核后生效": "Takes effect after a new session or Core restart",
+  "以下是内核每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。":
+    "These are the memory files the Core injects into every request. Their content is sent to the model — do not store secrets here.",
   "重新扫描": "Rescan",
   "未打开工作区": "No workspace open",
   "当前工作区没有可用的项目记忆文件": "No project memory files are available in this workspace",
@@ -870,12 +877,12 @@ const en: Record<string, string> = {
     "e.g. This project's test command is npm test; do not modify files under vendor/.",
   "写入中…": "Writing…",
   "保存到{0}": "Save to {0}",
-  "保存后新建会话或重启 CLI 生效": "Takes effect after a new session or CLI restart",
+  "保存后新建会话或重启内核生效": "Takes effect after a new session or Core restart",
   "请先创建项目记忆文件": "Create a project memory file first",
   "新建会话": "New session",
-  "重启 CLI 使记忆生效": "Restart CLI to apply memory",
-  "重启 CLI 并恢复当前会话，使记忆立即生效":
-    "Restart the CLI and restore the current session so memory applies immediately",
+  "重启内核使记忆生效": "Restart Core to apply memory",
+  "重启内核并恢复当前会话，使记忆立即生效":
+    "Restart the Core and restore the current session so memory applies immediately",
   "记忆不会热更新到正在进行的会话。": "Memory is not hot-reloaded into an ongoing session.",
   "文件已在磁盘上发生变化，请重新加载后再保存":
     "The file changed on disk — reload before saving",

@@ -10,7 +10,7 @@ import { inspect, promisify } from "node:util";
 import { execFile as execFileCb } from "node:child_process";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename, stat } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import {
@@ -140,6 +140,12 @@ import {
   type FollowupNextStepsInput,
   type FollowupTaskKind,
 } from "../../shared/turn-followup.js";
+import {
+  buildModelMetadataPrompt,
+  parseModelMetadata,
+  pickMetadataModel,
+  planMetadataAdditions,
+} from "../../shared/model-metadata.js";
 import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
@@ -240,6 +246,24 @@ const KNOWLEDGE_PROMPT_IDLE_MS = 90_000;
  * a page, still tight enough that a wedged gateway cannot hold the dialog. */
 const ASSET_GEN_TIMEOUT_MS = 120_000;
 const ASSET_GEN_IDLE_MS = 60_000;
+/** 「联网补充模型数据」: one throwaway agent turn doing several web_search
+ * rounds (official docs + pricing pages per model, plus the newest market
+ * releases). Multi-round search + thinking needs a generous ceiling, but a
+ * wedged gateway must not hold the throwaway session open forever; the idle
+ * watchdog reaps mid-turn wedges (search rounds emit updates every few s). */
+const MODEL_METADATA_TIMEOUT_MS = 240_000;
+const MODEL_METADATA_IDLE_MS = 75_000;
+/** State of the in-flight 「联网补充模型数据」 turn: the throwaway session id,
+ * the client it runs on, the answer text accumulated by `onSessionUpdate`,
+ * and the ceiling/idle timers. `idleResolve` is wired by `runMetadataTurn`. */
+interface MetadataSession {
+  sessionId: string;
+  client: AcpClient;
+  text: string;
+  overallTimer?: ReturnType<typeof setTimeout>;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  idleResolve?: () => void;
+}
 /** Abort an internal prompt whose session stream went silent for this long.
  * A healthy stream emits chunks every few seconds; the CLI's rate-limit
  * backoff pauses were observed well under this. Catches a mid-stream wedge
@@ -662,6 +686,16 @@ export class ChatPanel implements vscode.Disposable {
    * session it was started on). `cancelEnhance` aborts it; the reply is also
    * dropped when the requestId is stale or the session changed meanwhile. */
   private pendingEnhance: { requestId: number; cancel: () => void; sessionId: string | null } | null = null;
+  /** 「联网补充模型数据」: own busy lane (user-initiated, long — same class
+   * as knowledge/asset drafting). The throwaway session holds only the
+   * answer text (accumulated from its agent_message_chunks); its timers
+   * bound the turn and `idleResolve` fires the idle watchdog from
+   * `onSessionUpdate`. */
+  private metadataBusy = false;
+  private metadataSession: MetadataSession | null = null;
+  /** Instance fields (constants as defaults) so tests can inject small values. */
+  private metadataTimeoutMs = MODEL_METADATA_TIMEOUT_MS;
+  private metadataIdleMs = MODEL_METADATA_IDLE_MS;
   /** M1 P0-6: true while the ≥90% occupancy warning pill is shown (the
    * state machine fires once per entry into the warn zone). */
   private contextWarnActive = false;
@@ -1216,7 +1250,7 @@ export class ChatPanel implements vscode.Disposable {
       void vscode.window.showWarningMessage(result.error ?? vscode.l10n.t("写入记忆失败"));
       return;
     }
-    const restart = vscode.l10n.t("立即重启 CLI");
+    const restart = vscode.l10n.t("立即重启内核");
     void vscode.window
       .showInformationMessage(
         vscode.l10n.t("已加入记忆，新建会话或恢复会话后生效"),
@@ -1596,6 +1630,12 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "mcpStatus":
         void this.sendMcpStatus();
+        break;
+      case "fetchModelMetadata":
+        void this.fetchModelMetadata();
+        break;
+      case "cancelModelMetadata":
+        this.cancelModelMetadata();
         break;
       case "listAssets":
         void this.assets.sendState(msg.requestId);
@@ -2159,6 +2199,199 @@ export class ChatPanel implements vscode.Disposable {
     if (pending?.requestId !== requestId) return;
     this.pendingEnhance = null;
     pending.cancel();
+  }
+
+  // --- 「联网补充模型数据」 (settings-panel web-search fetch) ------------------
+  //
+  // Unlike the pure-text internal prompts (pitfall #26 fourth wave), this
+  // task genuinely needs a tool surface — `web_search` — so it runs on a
+  // THROWAWAY agent session instead of a direct completion:
+  //   session/new (mcpServers: [] → no MCP fleet; web_search is a core tool)
+  //   → set_mode default (never inherits plan/YOLO from the panel)
+  //   → set_model to a live-list-verified id (pitfall #25: a delisted push
+  //     would fail with model_not_found) → prompt with ceiling + idle watchdog.
+  // Session discipline mirrors the pre-2026-10 internal-session guards:
+  // updates never enter the transcript (accumulated in onSessionUpdate),
+  // permission/questions/plan-exit auto-refused. The CLI has no session/close,
+  // so the abandoned session object lives in the CLI process until restart
+  // (same accepted cost as restore probe sessions); its state file is deleted.
+  // Only validated rows are APPENDED (shared/model-metadata.ts dedup); a
+  // cancelled turn writes nothing.
+
+  private async fetchModelMetadata(): Promise<void> {
+    if (this.disposed) return;
+    if (this.metadataBusy) {
+      this.store.sendToast("info", vscode.l10n.t("已有联网检索进行中，请稍后再试"));
+      return;
+    }
+    // Endpoint: panel-owned credentials first (same chain as internal prompts).
+    const endpoint =
+      (await this.resolveWorkspaceHandshakeCreds().catch(() => null))
+      ?? (await loadCredentials(this.context.secrets).catch(() => null))
+      ?? readActiveEndpoint();
+    if (!endpoint) {
+      this.postToWebview({ type: "modelMetadataState", state: "error", error: vscode.l10n.t("未配置 API 凭据，无法联网检索模型数据") });
+      return;
+    }
+    this.metadataBusy = true;
+    this.postToWebview({ type: "modelMetadataState", state: "searching" });
+    this.store.sendToast("info", vscode.l10n.t("正在联网检索模型数据…"));
+    let meta: MetadataSession | null = null;
+    try {
+      const liveIds = await queryModelIds(endpoint, 12_000).catch(() => [] as string[]);
+      const ids = [...new Set(
+        [endpoint.modelName, this.store.getState().currentModelId, ...liveIds].filter((id): id is string => Boolean(id)),
+      )];
+      if (ids.length === 0) throw new Error(vscode.l10n.t("当前 API 配置未返回模型列表"));
+      const client = await this.ensureClient();
+      if (this.disposed || this.client !== client) throw new Error("CLI unavailable");
+      const cwd = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+      const created = await client.newSession({ cwd, mcpServers: [] });
+      meta = { sessionId: created.sessionId, client, text: "" };
+      this.metadataSession = meta;
+      await client.setMode(meta.sessionId, "default").catch((error: unknown) => {
+        this.log.warn(`metadata session set_mode failed: ${errorMessage(error)}`);
+      });
+      const pushId = pickMetadataModel(this.store.getState().currentModelId, endpoint.modelName, liveIds);
+      if (pushId) {
+        await client.setModel(meta.sessionId, pushId).catch((error: unknown) => {
+          this.log.warn(`metadata session set_model failed: ${errorMessage(error)}`);
+        });
+      }
+      const reason = await this.runMetadataTurn(meta, buildModelMetadataPrompt(ids));
+      if (this.disposed) return;
+      if (this.client !== meta.client) {
+        // Profile switch / CLI restart mid-turn: the answer belongs to a dead
+        // endpoint — write nothing.
+        this.log.warn("metadata fetch discarded: CLI was replaced mid-turn");
+        this.postToWebview({ type: "modelMetadataState", state: "idle" });
+        return;
+      }
+      if (reason === "cancelled") {
+        this.postToWebview({ type: "modelMetadataState", state: "idle" });
+        this.store.sendToast("info", vscode.l10n.t("联网检索已取消"));
+        return;
+      }
+      // Timeout/idle salvage: rows the search already confirmed are still real
+      // data; an unparsed (or absent) envelope never fabricates anything.
+      const entries = parseModelMetadata(meta.text);
+      if (entries.length === 0) {
+        const reasonText = reason === "timeout"
+          ? vscode.l10n.t("联网检索超时，已停止")
+          : reason === "idle"
+            ? vscode.l10n.t("联网检索中断（模型无响应），已停止")
+            : vscode.l10n.t("联网检索未返回可解析的数据");
+        this.postToWebview({ type: "modelMetadataState", state: "error", error: reasonText });
+        this.store.sendToast("error", reasonText);
+        return;
+      }
+      const cfg = vscode.workspace.getConfiguration("iflow");
+      const existingRules = sanitizeThinkingRules(cfg.get<unknown>("thinkingModelRules", []));
+      const additions = planMetadataAdditions(entries, {
+        contextWindowOverrides: cfg.get<string[]>("contextWindowOverrides", []),
+        costTable: cfg.get<string[]>("costTable", []),
+        thinkingModelRules: existingRules,
+      });
+      if (additions.total > 0) {
+        await this.writeUserSetting("contextWindowOverrides", [...cfg.get<string[]>("contextWindowOverrides", []), ...additions.windows]);
+        await this.writeUserSetting("costTable", [...cfg.get<string[]>("costTable", []), ...additions.costs]);
+        await this.writeUserSetting("thinkingModelRules", [...existingRules, ...additions.rules]);
+        // The thinkingModelRules write triggers the config listener, which
+        // re-merges ~/.iflow/thinking-models.json and toasts the sync result.
+        this.postHostSettings();
+      }
+      const doneText = additions.total > 0
+        ? vscode.l10n.t("已补充模型元数据：上下文窗口 {0} 条、成本单价 {1} 条、思考规则 {2} 条", additions.windows.length, additions.costs.length, additions.rules.length)
+        : vscode.l10n.t("联网检索完成，未发现可补充的新数据");
+      this.postToWebview({
+        type: "modelMetadataState",
+        state: "done",
+        added: { windows: additions.windows.length, costs: additions.costs.length, rules: additions.rules.length },
+      });
+      this.store.sendToast("info", doneText);
+      this.log.info(`metadata fetch (${reason}): +${additions.windows.length} windows, +${additions.costs.length} costs, +${additions.rules.length} rules`);
+    } catch (error) {
+      if (this.disposed) return;
+      const text = errorMessage(error);
+      this.postToWebview({ type: "modelMetadataState", state: "error", error: vscode.l10n.t("联网检索失败：{0}", text) });
+      this.store.sendToast("error", vscode.l10n.t("联网检索失败：{0}", text));
+      this.log.warn(`metadata fetch failed: ${text}`);
+    } finally {
+      if (meta) this.finishMetadataSession(meta);
+      this.metadataBusy = false;
+    }
+  }
+
+  /** Run the metadata turn under a wall-clock ceiling AND an idle watchdog
+   * (re-armed by every session update). On expiry the throwaway turn is
+   * cancelled server-side; the accumulated text decides salvage in the caller.
+   * Never throws — the reason tells the caller what happened. */
+  private async runMetadataTurn(meta: MetadataSession, promptText: string): Promise<"complete" | "timeout" | "idle" | "cancelled" | "failed"> {
+    let wakeIdle: () => void = () => {};
+    const idle = new Promise<"idle">((resolve) => {
+      wakeIdle = () => resolve("idle");
+    });
+    meta.idleResolve = wakeIdle;
+    const overall = new Promise<"timeout">((resolve) => {
+      meta.overallTimer = setTimeout(() => resolve("timeout"), this.metadataTimeoutMs);
+    });
+    this.armMetadataIdleTimer(meta);
+    try {
+      const settled = await Promise.race([
+        meta.client
+          .prompt({ sessionId: meta.sessionId, prompt: [{ type: "text", text: promptText }] }, this.metadataTimeoutMs + 10_000)
+          .then((response) => (response.stopReason === "cancelled" ? "cancelled" : "complete"))
+          .catch(() => "failed" as const),
+        overall,
+        idle,
+      ]);
+      if (settled === "timeout" || settled === "idle") {
+        // The CLI keeps running the turn after a client-side timeout — pull it
+        // back (session/cancel) so the throwaway session stops spending tokens.
+        try {
+          meta.client.cancel(meta.sessionId);
+        } catch {
+          // peer already torn down; nothing to cancel
+        }
+      }
+      return settled;
+    } finally {
+      if (meta.overallTimer) clearTimeout(meta.overallTimer);
+      if (meta.idleTimer) clearTimeout(meta.idleTimer);
+      meta.idleResolve = undefined;
+    }
+  }
+
+  private armMetadataIdleTimer(meta: MetadataSession): void {
+    if (meta.idleTimer) clearTimeout(meta.idleTimer);
+    meta.idleTimer = setTimeout(() => meta.idleResolve?.(), this.metadataIdleMs);
+  }
+
+  /** Detach the throwaway session: clear timers, drop the guard slot, and
+   * delete the CLI's session-state file (prompt's finally wrote it by now).
+   * The session object itself cannot be closed — ACP has no session/close. */
+  private finishMetadataSession(meta: MetadataSession): void {
+    if (this.metadataSession === meta) this.metadataSession = null;
+    if (meta.overallTimer) clearTimeout(meta.overallTimer);
+    if (meta.idleTimer) clearTimeout(meta.idleTimer);
+    meta.idleResolve = undefined;
+    try {
+      unlinkSync(acpSessionFilePath(meta.sessionId));
+    } catch {
+      // never written (turn died early) or already gone — nothing to clean
+    }
+  }
+
+  /** Settings-panel 「停止检索」: cancel the in-flight turn; the fetch's
+   * cancelled branch settles the UI state and the finally cleans up. */
+  private cancelModelMetadata(): void {
+    const meta = this.metadataSession;
+    if (!meta) return;
+    try {
+      meta.client.cancel(meta.sessionId);
+    } catch {
+      // peer already torn down — the fetch's finally still runs
+    }
   }
 
   /**
@@ -4084,7 +4317,7 @@ export class ChatPanel implements vscode.Disposable {
     if (Object.keys(patch).length === 0) return;
     if (!updateCliSettings(patch)) {
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("无法写入 {0}（文件缺失或不可读），CLI 配置未同步", settingsFilePath()),
+        vscode.l10n.t("无法写入 {0}（文件缺失或不可读），内核配置未同步", settingsFilePath()),
       );
       return;
     }
@@ -4092,7 +4325,7 @@ export class ChatPanel implements vscode.Disposable {
     const restartLabel = vscode.l10n.t("立即重启");
     void vscode.window
       .showInformationMessage(
-        vscode.l10n.t("已写入 CLI 配置，重启 CLI 后生效"),
+        vscode.l10n.t("已写入内核配置，重启内核后生效"),
         restartLabel,
       )
       .then((choice) => {
@@ -4114,7 +4347,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (state.status === "streaming" || state.initializing) {
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("正在生成中，请等待完成或先停止，再重启 CLI"),
+        vscode.l10n.t("正在生成中，请等待完成或先停止，再重启内核"),
       );
       return;
     }
@@ -4125,8 +4358,8 @@ export class ChatPanel implements vscode.Disposable {
       // iflow.restoreLastSession.
       this.restartRestoreId = outgoingId;
     }
-    this.cancelAllApprovals(vscode.l10n.t("CLI 已重启"));
-    this.cancelAllPlanExits(vscode.l10n.t("CLI 已重启，计划审批已跳过"));
+    this.cancelAllApprovals(vscode.l10n.t("内核已重启"));
+    this.cancelAllPlanExits(vscode.l10n.t("内核已重启，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Tail rescue BEFORE the state swap (same rationale as the profile
     // switch): the in-memory blocks are discarded by replaceState below.
@@ -4232,7 +4465,7 @@ export class ChatPanel implements vscode.Disposable {
     const restartLabel = vscode.l10n.t("立即重启");
     void vscode.window
       .showInformationMessage(
-        vscode.l10n.t("已写入 CLI 配置，重启 CLI 后生效"),
+        vscode.l10n.t("已写入内核配置，重启内核后生效"),
         restartLabel,
       )
       .then((choice) => {
@@ -4449,7 +4682,7 @@ export class ChatPanel implements vscode.Disposable {
       (item) => item.name === name,
     );
     if (!candidate) {
-      void vscode.window.showWarningMessage(vscode.l10n.t("未找到可导入的 CLI 配置: {0}", name));
+      void vscode.window.showWarningMessage(vscode.l10n.t("未找到可导入的内核配置: {0}", name));
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
       return;
@@ -4861,6 +5094,20 @@ export class ChatPanel implements vscode.Disposable {
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
     if (this.discardedSessionIds.delete(n.sessionId)) return;
+    // 「联网补充模型数据」 throwaway session: its updates never enter the
+    // transcript. Keep only the answer text (the JSON envelope source) and
+    // re-arm the idle watchdog — every chunk/tool update proves the turn is
+    // alive. SubAgent adapter events (sentinel sessionId) are NOT matched
+    // here; the prompt forbids spawning subagents, and while the user turn
+    // is idle the shared drop guard reaps them anyway (pitfall #10 chain).
+    const meta = this.metadataSession;
+    if (meta && meta.sessionId === n.sessionId) {
+      if (n.update.sessionUpdate === "agent_message_chunk" && n.update.content.type === "text") {
+        meta.text += n.update.content.text;
+      }
+      this.armMetadataIdleTimer(meta);
+      return;
+    }
     // Everything else is the pure guard chain (shared/session-state.ts
     // dropSessionUpdate): reset-window drops (incl. sessionId-less updates,
     // which slipped through the earlier id-only guards — user-reported leak
@@ -5211,7 +5458,7 @@ export class ChatPanel implements vscode.Disposable {
     if (init && !init.agentCapabilities.loadSession) {
       this.log.warn("loadSession capability not declared by CLI");
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("当前 iFlow CLI 不支持会话恢复（loadSession 能力未声明）"),
+        vscode.l10n.t("当前内核不支持会话恢复（loadSession 能力未声明）"),
       );
       return false;
     }
@@ -5268,7 +5515,7 @@ export class ChatPanel implements vscode.Disposable {
       if (restored.blocks.length === 0) {
         restored.blocks.push({
           kind: "text",
-          text: vscode.l10n.t("已恢复会话上下文（CLI 未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。"),
+          text: vscode.l10n.t("已恢复会话上下文（内核未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。"),
         });
       }
       // Structural isolation (user directive): a restored transcript carries
@@ -5560,10 +5807,10 @@ export class ChatPanel implements vscode.Disposable {
             // — the next persist point (prompt completion) will never run.
             void this.persistActiveTranscript();
             this.client = null;
-            this.cancelAllApprovals(vscode.l10n.t("CLI 进程已退出"));
-            this.cancelAllPlanExits(vscode.l10n.t("CLI 进程已退出，计划审批已跳过"));
-            this.cancelAllPendingQuestions(vscode.l10n.t("CLI 进程已退出，提问已跳过"));
-            this.store.markError(vscode.l10n.t("iFlow CLI 进程已退出，重新打开面板可重试"));
+            this.cancelAllApprovals(vscode.l10n.t("内核进程已退出"));
+            this.cancelAllPlanExits(vscode.l10n.t("内核进程已退出，计划审批已跳过"));
+            this.cancelAllPendingQuestions(vscode.l10n.t("内核进程已退出，提问已跳过"));
+            this.store.markError(vscode.l10n.t("内核进程已退出，重新打开面板可重试"));
             // Async failure — the user is likely in the editor; cue it.
             this.postSound("error");
           },
@@ -5571,6 +5818,14 @@ export class ChatPanel implements vscode.Disposable {
             // Dying client's approval cards would hang on the fresh state —
             // auto-cancel instead (the process is being torn down anyway).
             if (this.client !== client || this.disposed) {
+              return { outcome: { outcome: "cancelled" } as const };
+            }
+            // The metadata fetch runs on a throwaway session: no approval card
+            // may ever appear for it. `web_search` is read-only and asks for no
+            // permission (the Mod's engine chain only does fetches), so
+            // anything that DOES ask is a prompt violation — refuse it.
+            if (this.metadataSession?.sessionId === req.sessionId) {
+              this.log.warn(`metadata session asked permission for "${req.toolCall.toolName ?? "?"}" — auto-cancelled`);
               return { outcome: { outcome: "cancelled" } as const };
             }
             // M4 P1-1: the rule table answers matching requests without a card.
@@ -5590,6 +5845,7 @@ export class ChatPanel implements vscode.Disposable {
           },
           onUserQuestions: (req: UserQuestionsRequest) => {
             if (this.client !== client) return Promise.resolve({ answers: {} });
+            if (this.metadataSession?.sessionId === req.sessionId) return Promise.resolve({ answers: {} });
             return this.userQuestionsFromAgent(req);
           },
           onExitPlanMode: async (req: ExitPlanModeRequest) => {
@@ -5599,6 +5855,9 @@ export class ChatPanel implements vscode.Disposable {
             // looking, so it can't be dismissed by a stray click the way a
             // native popup could (which silently rejected and stranded Plan mode).
             if (this.client !== client) return { approved: false, reason: "client busy" };
+            if (this.metadataSession?.sessionId === req.sessionId) {
+              return { approved: false, reason: "metadata fetch session: plan mode is not used" };
+            }
             return this.requestPlanExitFromUser(req);
           },
         },
@@ -5824,7 +6083,7 @@ export class ChatPanel implements vscode.Disposable {
       return resolveVendoredEntry(this.context.extensionPath);
     } catch (error) {
       throw new Error(
-        vscode.l10n.t("内置 iFlow CLI 缺失，扩展包不完整，请重新安装：{0}", errorMessage(error)),
+        vscode.l10n.t("内核缺失，扩展包不完整，请重新安装：{0}", errorMessage(error)),
       );
     }
   }
@@ -6124,7 +6383,7 @@ export class ChatPanel implements vscode.Disposable {
     items.push({
       kind: "system",
       label: vscode.l10n.t("系统提示词（未随会话捕获）"),
-      content: vscode.l10n.t("内置 CLI 未启用上下文报告（acp-context-report Mod），系统提示词正文无法透明展示。"),
+      content: vscode.l10n.t("内核未启用上下文报告（acp-context-report Mod），系统提示词正文无法透明展示。"),
     });
     items.push(...(await this.memory.injectedContextItems()));
     return items;
@@ -6505,7 +6764,7 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       const message = errorMessage(error);
       this.log.warn(
-        vscode.l10n.t("模型列表查询失败（不回退 CLI 内置目录）: {0}", message),
+        vscode.l10n.t("模型列表查询失败（不回退内置目录）: {0}", message),
       );
       return [];
     }
@@ -6605,7 +6864,7 @@ export class ChatPanel implements vscode.Disposable {
       .catch((error: unknown) => {
         // queryLiveModels swallows endpoint errors into []; only unexpected
         // storage failures reject — never let them become unhandled.
-        this.log.warn(vscode.l10n.t("模型列表查询失败（不回退 CLI 内置目录）: {0}", errorMessage(error)));
+        this.log.warn(vscode.l10n.t("模型列表查询失败（不回退内置目录）: {0}", errorMessage(error)));
       });
   }
 

@@ -4,7 +4,7 @@ import { classifyErrorAdvice } from "../shared/error-advice";
 describe("classifyErrorAdvice (3.6)", () => {
   it("classifies the bundled-CLI-missing banner as cli → runtime settings", () => {
     const advice = classifyErrorAdvice(
-      "内置 iFlow CLI 缺失，扩展包不完整，请重新安装：ENOENT: no such file or directory",
+      "内核缺失，扩展包不完整，请重新安装：ENOENT: no such file or directory",
     );
     expect(advice).not.toBeNull();
     expect(advice!.kind).toBe("cli");

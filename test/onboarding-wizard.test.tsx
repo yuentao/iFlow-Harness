@@ -185,7 +185,7 @@ it("imports a detected CLI credential and advances", () => {
       },
     ],
   });
-  expect(container.textContent).toContain("检测到 iFlow CLI 已有凭据");
+  expect(container.textContent).toContain("检测到内核已有凭据");
   click("导入并激活");
   expect(beginPending).toHaveBeenCalledWith("profile", "终端默认");
   expect(send).toHaveBeenCalledWith({ type: "importCliCredentials", name: "终端默认" });

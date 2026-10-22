@@ -178,7 +178,7 @@ function MemoryFileCard({
         {/* The caveat belongs to the injection chip, not a separate grey line. */}
         <Chip
           tone={file.injected ? "info" : "warning"}
-          title={file.injected ? undefined : t("当前 CLI 不会加载此文件")}
+          title={file.injected ? undefined : t("当前内核不会加载此文件")}
         >
           {file.injected ? t("已注入") : t("未注入")}
         </Chip>
@@ -467,7 +467,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           <div className="truncate font-mono text-ui-caption" title={editing.path}>
             {editing.path}
           </div>
-                      <Hint className="mt-1">{t("记忆在新建会话或恢复会话时加载。当前会话需要重启 CLI 才会读取新内容。")}</Hint>        </div>
+                      <Hint className="mt-1">{t("记忆在新建会话或恢复会话时加载。当前会话需要重启内核才会读取新内容。")}</Hint>        </div>
         {conflict && (
           <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
             <AlertTriangle className="mt-0.5 size-3 shrink-0" />
@@ -521,7 +521,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
         <div className="flex items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-ui-label text-success">
           <Check className="size-3 shrink-0" />
           <span className="min-w-0 flex-1">{savedFlash}</span>
-          <span className="text-success/80">{t("新建会话或重启 CLI 后生效")}</span>
+          <span className="text-success/80">{t("新建会话或重启内核后生效")}</span>
         </div>
       )}
       {editLoading && (
@@ -531,7 +531,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
       )}
 
       <div className="rounded-lg border border-border/70 bg-surface/60 px-2.5 py-1.5 text-ui-label leading-relaxed text-muted-foreground">
-        {t("以下是 CLI 每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。")}
+        {t("以下是内核每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。")}
       </div>
 
       {state === null ? (
@@ -805,7 +805,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 <span className="text-ui-caption text-muted-foreground">
                   {writableTargets.length === 0
                     ? t("请先创建项目记忆文件")
-                    : t("保存后新建会话或重启 CLI 生效")}
+                    : t("保存后新建会话或重启内核生效")}
                 </span>
               </div>
             </div>
@@ -819,10 +819,10 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               variant="secondary"
               icon={<RefreshCw className={ICON_INLINE} />}
               disabled={busy}
-              title={t("重启 CLI 并恢复当前会话，使记忆立即生效")}
+              title={t("重启内核并恢复当前会话，使记忆立即生效")}
               onClick={() => send({ type: "restartCli" })}
             >
-              {t("重启 CLI 使记忆生效")}
+              {t("重启内核使记忆生效")}
             </Button>
             <span className="text-ui-caption text-muted-foreground">{t("记忆不会热更新到正在进行的会话。")}</span>
           </div>

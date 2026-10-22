@@ -98,7 +98,7 @@ export function MemoryQuickAdd({
             {t("取消")}
           </Button>
           <span className="ml-auto text-ui-micro text-muted-foreground">
-            {t("保存后新建会话或重启 CLI 生效")}
+            {t("保存后新建会话或重启内核生效")}
           </span>
         </div>
       }

@@ -20,9 +20,9 @@
  */
 import type { ErrorAdviceUi } from "./messages.js";
 
-/** `内置 iFlow CLI 缺失，扩展包不完整，请重新安装：…` (l10n source) plus the
+/** `内核缺失，扩展包不完整，请重新安装：…` (l10n source) plus the
  * raw ENOENT/Cannot-find-module shapes the loader can surface. */
-const CLI_RE = /内置 iFlow CLI 缺失|扩展包不完整|Cannot find module.*entry\.js|ENOENT.*(?:vendor[\\/]+iflow-cli|entry\.js)/i;
+const CLI_RE = /内核缺失|扩展包不完整|Cannot find module.*entry\.js|ENOENT.*(?:vendor[\\/]+iflow-cli|entry\.js)/i;
 
 /** Gateway context-overflow phrasings (subset of jsonrpc's CONTEXT_OVERFLOW_RE). */
 const OVERFLOW_RE = new RegExp(
@@ -121,7 +121,7 @@ export function classifyErrorAdvice(message: string): ErrorAdviceUi | null {
   if (CLI_RE.test(message)) {
     return {
       kind: "cli",
-      hint: "扩展包不完整或内置 CLI 文件被安全软件删除，重新安装扩展后重启窗口即可恢复",
+      hint: "扩展包不完整或内核文件被安全软件删除，重新安装扩展后重启窗口即可恢复",
       openSettingsTab: "runtime",
     };
   }

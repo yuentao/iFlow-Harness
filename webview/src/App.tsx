@@ -149,7 +149,7 @@ function ErrorBanner({
       variant="danger-soft"
       className="shrink-0"
       icon={<RefreshCw className={ICON_INLINE} />}
-      title={t("重启 CLI 并重试（会话自动恢复）")}
+      title={t("重启内核并重试（会话自动恢复）")}
       onClick={() => send({ type: "restartCli" })}
     >
       {t("重试")}
@@ -497,7 +497,7 @@ export function App() {
               className="press rounded-lg border border-border bg-surface/80 px-3 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
               onClick={() => send({ type: "restartCli" })}
             >
-              {t("重启 CLI")}
+              {t("重启内核")}
             </button>
           </div>
         )}

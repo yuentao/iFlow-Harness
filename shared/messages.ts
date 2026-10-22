@@ -1307,6 +1307,16 @@ export interface ThinkingModelRuleUi {
   maxThinkingTokens?: number;
 }
 
+/** Lifecycle of the 「联网补充模型数据」 web-search fetch (settings panel).
+ * `done` carries how many rows were APPENDED to each metadata table (zero
+ * across the board means the search found nothing new to add); `error` is the
+ * user-visible reason on failure. `idle` = cancelled, lane free again. */
+export interface ModelMetadataStateUi {
+  state: "idle" | "searching" | "done" | "error";
+  added?: { windows: number; costs: number; rules: number };
+  error?: string;
+}
+
 /** Extension settings mirrored into the settings panel. VSCode configuration
  * is the source of truth; the panel writes user settings
  * (ConfigurationTarget.Global) so VSCode Settings Sync can carry them across
@@ -1506,7 +1516,12 @@ export type HostToWebview =
   /** Reply to {@link WebviewToHost resolveContext} (M2 P0-4): the host read
    * the source and returns the (truncated) card body. `error` non-empty
    * means resolution failed (the composer shows the reason as a note). */
-  | { type: "contextResolved"; requestId: number; kind: ContextKind; label: string; detail: string; content: string; error?: string };
+  | { type: "contextResolved"; requestId: number; kind: ContextKind; label: string; detail: string; content: string; error?: string }
+  /** Lifecycle of the settings-panel 「联网补充模型数据」 fetch: the host runs
+   * one throwaway agent turn (web_search only) and reports searching / done /
+   * error / idle (cancelled). On `done` the appended rows are already written
+   * to the settings, so the following `hostSettings` refresh carries them. */
+  | ({ type: "modelMetadataState" } & ModelMetadataStateUi);
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -1695,6 +1710,15 @@ export type WebviewToHost =
    * Reply: `mcpStatus` (null when the CLI is not running or the Mod is
    * missing/disabled). */
   | { type: "mcpStatus" }
+  /** Settings-panel 「联网补充模型数据」: run one throwaway agent turn that
+   * web-searches the newest model data plus this profile's live `/models`
+   * list, then APPEND validated rows to the three metadata tables. Reply:
+   * `modelMetadataState` (searching → done/error; busy lane refuses a second
+   * concurrent fetch). */
+  | { type: "fetchModelMetadata" }
+  /** Abort the in-flight metadata fetch (its agent turn is cancelled, nothing
+   * is written). Reply: `modelMetadataState` with state `idle`. */
+  | { type: "cancelModelMetadata" }
   /** Memory card opened / refreshed: read the current global and project
    * `AGENTS.md` / `IFLOW.md` from disk. Reply: `memoryState`. */
   | { type: "listMemory"; requestId?: number }

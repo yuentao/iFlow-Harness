@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, Download, ExternalLink, KeyRound, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Database, Download, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
@@ -144,7 +144,7 @@ export function SettingsModal({
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <HelpTip label={t("设置如何保存")} align="left">
-            {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在 CLI 配置文件，重启 CLI 生效。")}
+            {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在内核配置文件，重启内核生效。")}
           </HelpTip>
           <Button
             variant="ghost"
@@ -157,13 +157,13 @@ export function SettingsModal({
             className="ml-auto"
             disabled={busy}
             icon={<RefreshCw className={ICON_INLINE} />}
-            title={t("重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
+            title={t("重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();
             }}
           >
-            {t("重启 CLI")}
+            {t("重启内核")}
           </Button>
         </div>
       }
@@ -470,7 +470,7 @@ function JsonRulesRow({
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{t("思考模型规则")}</div>
       <Hint className="mt-1">
-        {t("JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启 CLI 生效。")}
+        {t("JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启内核生效。")}
       </Hint>
       <TextArea
         mono
@@ -693,11 +693,11 @@ function PermissionDefaults() {
           onChange={(defaultMode) => update({ defaultMode })}
         />
       </SettingsGroup>
-      <SettingsDisclosure title={t("CLI 兼容")} hint={t("重启 CLI 生效")}>
+      <SettingsDisclosure title={t("内核兼容")} hint={t("重启内核生效")}>
         <ChoiceRow
-          label={t("CLI 默认审批模式")}
-          description={t("写入 CLI 配置的启动审批模式。")}
-          detail={t("写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启 CLI 生效。")}
+          label={t("内核默认审批模式")}
+          description={t("写入内核配置的启动审批模式。")}
+          detail={t("写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启内核生效。")}
           value={settings.approvalMode}
           options={approvalOptions}
           onChange={(approvalMode) => update({ approvalMode })}
@@ -712,7 +712,7 @@ function RuntimeSection() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   const languageOptions: Array<{ value: UiCliLanguage; label: string }> = [
-    { value: "", label: t("跟随 CLI") },
+    { value: "", label: t("跟随内核") },
     { value: "zh-CN", label: "中文" },
     { value: "en-US", label: "English" },
   ];
@@ -720,8 +720,8 @@ function RuntimeSection() {
     <div className="space-y-4">
       <SettingsGroup title={t("启动与会话")}>
         <ToggleRow
-          label={t("后台预热 CLI")}
-          description={t("窗口打开时预热 CLI，首次打开面板无需等待。")}
+          label={t("后台预热内核")}
+          description={t("窗口打开时预热内核，首次打开面板无需等待。")}
           detail={t("每窗口约 100MB 内存；下次窗口启动生效。")}
           checked={settings.warmStart}
           onChange={(warmStart) => update({ warmStart })}
@@ -756,7 +756,7 @@ function RuntimeSection() {
           </Hint>
         </div>
       </SettingsGroup>
-      <SettingsDisclosure title={t("高级")} hint={t("检查点限额与 CLI 运行时")}>
+      <SettingsDisclosure title={t("高级")} hint={t("检查点限额与内核运行时")}>
         <NumberRow
           label={t("最大文件数")}
           description={t("超过该文件数时关闭快照。")}
@@ -798,15 +798,15 @@ function RuntimeSection() {
         <TextRow
           label={t("Node.js 路径")}
           description={t("留空自动探测。")}
-          detail={t("修改后重启 CLI 生效。")}
+          detail={t("修改后重启内核生效。")}
           value={settings.nodePath}
           placeholder="C:\\Program Files\\nodejs\\node.exe"
           onCommit={(nodePath) => update({ nodePath })}
         />
         <ChoiceRow
-          label={t("CLI 语言")}
-          description={t("CLI 界面的显示语言。")}
-          detail={t("写入 ~/.iflow/settings.json；修改后重启 CLI 生效。")}
+          label={t("内核语言")}
+          description={t("内核的显示语言。")}
+          detail={t("写入 ~/.iflow/settings.json；修改后重启内核生效。")}
           value={settings.language}
           options={languageOptions}
           onChange={(language) => update({ language })}
@@ -849,6 +849,7 @@ function ApiConfigSection({
   const send = useChat((s) => s.send);
   const settings = useChat((s) => s.hostSettings);
   const updateHostSetting = useChat((s) => s.updateHostSetting);
+  const metadata = useChat((s) => s.modelMetadata);
   const switching = useChat((s) => s.pending?.kind === "profile");
   const awaitingChoice = useChat((s) => s.state?.pendingProfileSwitch != null);
   // null = list view; { name } = editing an existing profile; { name: null } = new.
@@ -948,7 +949,7 @@ function ApiConfigSection({
       <div className="space-y-3">
         {editing.name && editingProfile?.source === "cli" && (
           <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-            {t("这是只读的 CLI 配置；保存将另存为同名的扩展配置并优先使用它。")}
+            {t("这是只读的内核配置；保存将另存为同名的扩展配置并优先使用它。")}
           </p>
         )}
         <div className="space-y-1">
@@ -1058,7 +1059,7 @@ function ApiConfigSection({
         <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
           <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
             <Download className="size-3.5 shrink-0 text-primary" />
-            {t("检测到 iFlow CLI 已有凭据")}
+            {t("检测到内核已有凭据")}
           </div>
           <Hint className="mt-1">
             {t("可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。")}
@@ -1163,7 +1164,7 @@ function ApiConfigSection({
                   <span className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-ui-label font-semibold text-foreground">{p.name}</span>
                     <Chip tone={p.source === "extension" ? "muted" : "info"}>
-                      {p.source === "extension" ? t("扩展") : t("CLI")}
+                      {p.source === "extension" ? t("扩展") : t("内核")}
                     </Chip>
                   </span>
                   <span className="block truncate font-mono text-ui-caption text-muted-foreground">
@@ -1226,10 +1227,36 @@ function ApiConfigSection({
         </div>
       )}
       <Hint>
-        {t("点击配置即切换并重新认证会话；来自 iFlow CLI 的配置为只读，可切换但不可在此删除。")}
+        {t("点击配置即切换并重新认证会话；来自内核的配置为只读，可切换但不可在此删除。")}
       </Hint>
 
       <SettingsDisclosure title={t("模型元数据")} hint={t("高级，可选填")}>
+        <div className="px-4 py-3">
+          <div className="flex flex-wrap items-start gap-x-2 gap-y-1.5">
+            <Button
+              variant="secondary"
+              disabled={metadata.state === "searching"}
+              title={t("由 AI 联网检索最新模型资料与当前 API 配置中的模型，追加到下方表格（不覆盖已有条目）。")}
+              icon={metadata.state === "searching"
+                ? <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                : <Globe className={ICON_INLINE} />}
+              onClick={() => send({ type: "fetchModelMetadata" })}
+            >
+              {metadata.state === "searching" ? t("正在联网检索…") : t("联网补充模型数据")}
+            </Button>
+            {metadata.state === "searching" && (
+              <Button variant="secondary" onClick={() => send({ type: "cancelModelMetadata" })}>
+                {t("停止检索")}
+              </Button>
+            )}
+            <p className="min-w-[13rem] flex-1 text-ui-caption leading-relaxed text-muted-foreground">
+              {t("联网检索模型资料并追加，不覆盖已有条目。")}
+            </p>
+          </div>
+          {metadata.state === "error" && metadata.error && (
+            <p className="mt-1 text-ui-caption text-destructive">{metadata.error}</p>
+          )}
+        </div>
         <LinesRow
           label={t("上下文窗口覆写")}
           description={t("每行「模型名=token数」（如「glm-4.6=200000」）；未知模型回退默认值。")}

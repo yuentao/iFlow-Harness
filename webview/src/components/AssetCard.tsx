@@ -505,7 +505,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
 
           <Hint className="mt-2">
             {t(
-              "扫描与编辑直接读写 ~/.iflow 与 <cwd>/.iflow 的 commands / agents / skills 目录（与 CLI 加载语义：命令递归 .md/.toml，子代理顶层 .md，技能 <目录>/SKILL.md）；当前会话已固定记忆，恢复会话后生效。",
+              "扫描与编辑直接读写 ~/.iflow 与 <cwd>/.iflow 的 commands / agents / skills 目录（与内核加载语义：命令递归 .md/.toml，子代理顶层 .md，技能 <目录>/SKILL.md）；当前会话已固定记忆，恢复会话后生效。",
             )}
           </Hint>
         </>
