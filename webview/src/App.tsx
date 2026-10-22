@@ -19,7 +19,7 @@ import logo from "./assets/iflow.svg";
 import { useChat } from "./store";
 import { t } from "./i18n";
 import { copyText } from "./components/Markdown";
-import { BTN, BTN_ICON, Chip, ConfirmDialog, Dropdown, SAVE_BTN } from "./components/ui";
+import { Button, Chip, ConfirmDialog, Dropdown, ICON_INLINE, ICON_TOOLBAR, IconButton, SearchInput, TextInput } from "./components/ui";
 import { MessageList } from "./components/MessageList";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -142,26 +142,20 @@ function ErrorBanner({
   );
   // 重试 is the banner's ONE primary action — it wears the project's primary
   // button style (gradient + shadow-btn, same family as 允许一次 / 保存并继续),
-  // not the neutral secondary BTN.
+  // not the neutral secondary button.
   const retryButton = (
-    <button
-      className={`${SAVE_BTN} shrink-0`}
+    <Button
+      variant="primary"
+      className="shrink-0"
+      icon={<RefreshCw className={ICON_INLINE} />}
       title={t("重启 CLI 并重试（会话自动恢复）")}
       onClick={() => send({ type: "restartCli" })}
     >
-      <RefreshCw className="size-3.5" />
       {t("重试")}
-    </button>
+    </Button>
   );
   const closeButton = (
-    <button
-      className="press inline-flex size-7 shrink-0 items-center justify-center rounded-md opacity-80 transition-opacity hover:opacity-100"
-      title={t("关闭")}
-      aria-label={t("关闭")}
-      onClick={onDismiss}
-    >
-      <X className="size-3.5" />
-    </button>
+    <IconButton icon={<X className={ICON_INLINE} />} label={t("关闭")} onClick={onDismiss} />
   );
   return (
     <div className="stream-in mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/15 px-2.5 py-1.5 text-ui-caption leading-relaxed text-destructive">
@@ -584,16 +578,13 @@ export function App() {
                       );
                     return (
                       <div className="shrink-0 px-2 pb-2">
-                        <div className="flex items-center gap-3 rounded-md border border-border bg-editor/60 px-3 py-1.5 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
-                          <Search className="size-3.5 shrink-0 text-muted-foreground" />
-                          <input
-                            autoFocus
-                            value={sessionQuery}
-                            onChange={(e) => setSessionQuery(e.target.value)}
-                            placeholder={t("搜索会话…")}
-                            className="w-full min-w-0 bg-transparent text-ui-body text-foreground outline-none placeholder:text-muted-foreground/80"
-                          />
-                        </div>
+                        <SearchInput
+                          autoFocus
+                          ariaLabel={t("搜索会话")}
+                          placeholder={t("搜索会话…")}
+                          value={sessionQuery}
+                          onChange={setSessionQuery}
+                        />
                       </div>
                     );
                   })()}
@@ -628,10 +619,11 @@ export function App() {
                         };
                         return (
                           <div key={s.id} className="flex w-full items-center gap-1 px-3 py-1.5">
-                            <input
+                            <TextInput
                               autoFocus
-                              value={renameDraft}
                               aria-label={t("会话名称")}
+                              className="min-w-0 flex-1"
+                              value={renameDraft}
                               onChange={(e) => setRenameDraft(e.target.value)}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") {
@@ -643,26 +635,22 @@ export function App() {
                                   setRenamingId(null);
                                 }
                               }}
-                              className="min-w-0 flex-1 rounded-md border border-border bg-editor px-2 py-1 text-ui-body text-foreground outline-none transition-colors focus:border-primary/50"
                             />
-                            <button
+                            <IconButton
                               role="menuitem"
-                              className="press shrink-0 rounded-md p-1.5 text-primary transition-colors hover:bg-accent/60"
-                              title={t("保存")}
-                              aria-label={t("保存")}
+                              icon={<Check className={ICON_INLINE} />}
+                              label={t("保存")}
+                              size="sm"
+                              tone="primary"
                               onClick={commit}
-                            >
-                              <Check className="size-3.5" />
-                            </button>
-                            <button
+                            />
+                            <IconButton
                               role="menuitem"
-                              className="press shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
-                              title={t("取消")}
-                              aria-label={t("取消")}
+                              icon={<X className={ICON_INLINE} />}
+                              label={t("取消")}
+                              size="sm"
                               onClick={() => setRenamingId(null)}
-                            >
-                              <X className="size-3.5" />
-                            </button>
+                            />
                           </div>
                         );
                       }
@@ -798,38 +786,33 @@ export function App() {
             statusChip(status ?? "connecting", compressing, isPlanMode(modes))
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
-            <button
-              className={`${BTN_ICON}${focusMode ? " bg-accent/60 text-primary ring-1 ring-primary/30" : ""}`}
+            <IconButton
+              icon={<Focus className={ICON_TOOLBAR} />}
+              label={t("Focus 视图")}
               title={focusMode ? t("退出 Focus 视图（Ctrl+Alt+F）") : t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
-              aria-label={t("Focus 视图")}
               aria-pressed={focusMode}
+              tone={focusMode ? "primary" : "default"}
+              className={focusMode ? "bg-accent/60 ring-1 ring-primary/30" : ""}
               onClick={toggleFocusMode}
-            >
-              <Focus className="size-4" />
-            </button>
-            <button
-              className={BTN_ICON}
-              title={t("新会话")}
-              aria-label={t("新会话")}
+            />
+            <IconButton
+              icon={<Plus className={ICON_TOOLBAR} />}
+              label={t("新会话")}
               disabled={locked}
               onClick={() => send({ type: "newSession" })}
-            >
-              <Plus className="size-4" />
-            </button>
+            />
             {/* Settings hub: profiles & credentials, MCP servers, approval
                 policies. The gear used to open a profile quick-switcher whose
                 list duplicated (and behaved differently from) the auth card's
                 — now it opens the unified settings modal directly. Never
                 disabled: browsing settings mid-turn is safe, and every
                 mutating control inside gates itself on `busy`. */}
-            <button
-              className={`${BTN_ICON}${auth?.authenticated ? "" : " text-warning"}`}
-              title={t("设置")}
-              aria-label={t("设置")}
+            <IconButton
+              icon={<Settings2 className={ICON_TOOLBAR} />}
+              label={t("设置")}
+              className={auth?.authenticated ? "" : "text-warning"}
               onClick={() => setSettingsTab("api")}
-            >
-              <Settings2 className="size-4" />
-            </button>
+            />
           </div>
         </div>
       </header>
@@ -850,12 +833,12 @@ export function App() {
       {auth?.needsSetup && !onboardingOpen && (
         <div className="mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
           <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
-          <button className={BTN} onClick={() => setSettingsTab("api")}>
+          <Button onClick={() => setSettingsTab("api")}>
             {t("配置")}
-          </button>
-          <button className={BTN} onClick={() => setOnboardingOpen(true)}>
+          </Button>
+          <Button onClick={() => setOnboardingOpen(true)}>
             {t("重新运行引导")}
-          </button>
+          </Button>
         </div>
       )}
 

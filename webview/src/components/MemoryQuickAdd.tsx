@@ -3,13 +3,15 @@ import { Brain, Check, Plus } from "lucide-react";
 import type { MemoryScope } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, ModalShell, SAVE_BTN } from "./ui";
+import { Button, Field, ICON_INLINE, ModalShell, Segmented, TextArea } from "./ui";
 
 /**
  * F3 Phase 2 — "记住这条" quick-add dialog. Prefilled with the assistant
- * message text (editable, capped), scope toggle global/project, writes via the
- * same host `appendMemoryFact` path as the settings card. The host's
- * `memorySaved` reply is the acknowledgement; failure keeps the dialog open.
+ * message text (editable, capped), scope selector (the shared segmented
+ * control), writes via the same host `appendMemoryFact` path as the settings
+ * card. The host's `memorySaved` reply is the acknowledgement — matched by
+ * `requestId` so another card's write can never masquerade as this ack (trap
+ * #29); failure keeps the dialog open.
  */
 export function MemoryQuickAdd({
   request,
@@ -77,19 +79,24 @@ export function MemoryQuickAdd({
   return (
     <ModalShell
       title={t("记住这条")}
-      icon={<Brain className="size-3.5 shrink-0 text-primary" />}
+      icon={<Brain className={`${ICON_INLINE} shrink-0 text-primary`} />}
       ariaLabel={t("记住这条")}
       dismissible={!saving}
       onClose={onClose}
       footer={
         <div className="flex items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
-          <button className={SAVE_BTN} disabled={!fact.trim() || saving || done} onClick={save}>
-            <Plus className="size-3.5" />
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Plus className={ICON_INLINE} />}
+            disabled={!fact.trim() || saving || done}
+            onClick={save}
+          >
             {saving ? t("写入中…") : t("保存")}
-          </button>
-          <button className={BTN} disabled={saving} onClick={onClose}>
+          </Button>
+          <Button variant="secondary" size="sm" disabled={saving} onClick={onClose}>
             {t("取消")}
-          </button>
+          </Button>
           <span className="ml-auto text-ui-micro text-muted-foreground">
             {t("保存后新建会话或重启 CLI 生效")}
           </span>
@@ -109,35 +116,27 @@ export function MemoryQuickAdd({
           </div>
         )}
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            className={`${BTN} ${scope === "global" ? "border-primary/50 text-primary" : ""}`}
-            aria-pressed={scope === "global"}
-            onClick={() => setScope("global")}
-          >
-            {t("全局")}
-          </button>
-          <button
-            type="button"
-            className={`${BTN} ${scope === "project" ? "border-primary/50 text-primary" : ""}`}
-            aria-pressed={scope === "project"}
-            onClick={() => setScope("project")}
-          >
-            {t("项目")}
-          </button>
+          <Segmented
+            ariaLabel={t("记忆作用域")}
+            value={scope}
+            options={[
+              { value: "global", label: t("全局") },
+              { value: "project", label: t("项目") },
+            ]}
+            onChange={setScope}
+          />
           <span className="ml-1 text-ui-micro text-muted-foreground">
             {scope === "global" ? t("保存到全局记忆") : t("保存到项目记忆")}
           </span>
         </div>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-ui-caption text-muted-foreground">{t("要记住的内容（可编辑）")}</span>
-          <textarea
-            className={`${INPUT} min-h-[120px] w-full resize-y`}
+        <Field label={t("要记住的内容（可编辑）")}>
+          <TextArea
+            aria-label={t("要记住的内容")}
+            className="min-h-[120px] w-full"
             value={fact}
-            spellCheck={false}
             onChange={(event) => setFact(event.target.value)}
           />
-        </label>
+        </Field>
         <p className="text-ui-micro leading-relaxed text-muted-foreground/85">
           {t("记忆会随每次请求发送给模型，请勿写入密钥。")}
         </p>

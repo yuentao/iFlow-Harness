@@ -1,7 +1,37 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type Ref,
+  type TextareaHTMLAttributes,
+} from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, ChevronRight, FileCode2, HelpCircle, X } from "lucide-react";
-import { useChat } from "../store";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Brain,
+  Check,
+  CheckSquare,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  CircleDot,
+  FileCode2,
+  HelpCircle,
+  Info,
+  Loader2,
+  Search,
+  Square,
+  X,
+  XCircle,
+} from "lucide-react";
+import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 
 /* Shared visual primitives ported from the UI reference design. */
@@ -173,7 +203,7 @@ export function ModalShell({
               aria-label={t("返回列表")}
               onClick={onBack}
             >
-              <ArrowLeft className="size-3.5" />
+              <ArrowLeft className={ICON_INLINE} />
             </button>
           ) : (
             icon
@@ -187,7 +217,7 @@ export function ModalShell({
               aria-label={t("收起")}
               onClick={onClose}
             >
-              <X className="size-3.5" />
+              <X className={ICON_INLINE} />
             </button>
           )}
         </div>
@@ -457,7 +487,8 @@ export function HelpTip({
 /*
  * P2-18 shared button primitives. The settings surface used to re-declare
  * byte-identical INPUT/BTN/SAVE_BTN strings in three files (Composer had its
- * own CANVAS_BTN variant, the header its BTN_ICON) — four definitions whose
+ * own CANVAS_BTN variant, the header its own icon-button cluster — now the
+ * IconButton component) — four definitions whose
  * radius/padding/disabled-state semantics drifted every visual tweak. One
  * home now; call sites import (aliasing INPUT where their local name is kept)
  * so a family-wide change is a single edit.
@@ -478,9 +509,26 @@ export const SAVE_BTN =
  * vertical text (e.g. 智/能 stacked) — the row wraps instead (flex-wrap). */
 export const CANVAS_BTN =
   "card-lift press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-surface/80 px-2 text-ui-caption text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
-/** Compact icon-only button (header cluster, 28×28). */
-export const BTN_ICON =
-  "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-surface hover:text-foreground active:scale-95 disabled:pointer-events-none disabled:opacity-40";
+/** Canvas-surface chip button, dense 24px variant (card action rows). */
+export const CANVAS_BTN_SM =
+  "card-lift press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-border bg-surface/80 px-2 text-ui-caption text-foreground shadow-card hover:bg-surface-2 transition-colors disabled:pointer-events-none disabled:opacity-40";
+/** Composer-family chip surface (attachments, suggestions, "+N"): card radius
+ * with the canvas fill and the card shadow, so a chip reads as a small card
+ * rather than a button competing with the send slot. */
+export const CANVAS_CHIP =
+  "press inline-flex max-w-full items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-40";
+/** Strong surface button (28px): occupies the composer's swapped stop slot —
+ * same weight as the send button but neutral, never primary. */
+export const BTN_EMPHASIS =
+  "press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-surface px-3 text-ui-caption font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
+export const BTN_EMPHASIS_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-border bg-surface px-2.5 text-ui-caption font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
+/** Primary-tinted soft button (28px): the queue slot — primary colour carried
+ * by border + fill at 15%, so it reads as a secondary commitment to primary. */
+export const PRIMARY_SOFT =
+  "press inline-flex h-7 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 px-3 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
+export const PRIMARY_SOFT_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 px-2.5 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40";
 /** Ghost convenience button for the secondary row (catalog / refresh): quieter
  * than BTN — caption text, no border, must not read as a peer of the primary. */
 export const GHOST_BTN =
@@ -535,7 +583,10 @@ export function SecondaryRow({ children, className = "" }: { children: ReactNode
 
 /** Segmented axis selector at the top of a settings section (MCP scope /
  * asset kind). One home for the two cards' tab strips so surface, padding and
- * active-state stay in lockstep; options may carry `disabled`/`title`. */
+ * active-state stay in lockstep; options may carry `disabled`/`title`.
+ * Radio semantics: one tab stop on the selected option, Arrow/Home/End move the
+ * selection (disabled options skipped), so screen readers announce which axis
+ * is active instead of reading four unlabeled buttons. */
 export function Segmented<T extends string>({
   ariaLabel,
   options,
@@ -547,19 +598,28 @@ export function Segmented<T extends string>({
   value: T;
   onChange: (value: T) => void;
 }) {
+  const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const selectable = options.filter((option) => !option.disabled).map((option) => option.value);
+  const onKeyDown = rovingTabKeyDown<T>(selectable, value, onChange, (id) => refs.current[id]?.focus());
   return (
     <div
-      role="group"
+      role="radiogroup"
       aria-label={ariaLabel}
       className="flex shrink-0 items-center gap-1 rounded-lg border border-border/70 bg-surface/40 px-1 py-1"
     >
       {options.map((option) => (
         <button
           key={option.value}
+          ref={(el) => {
+            refs.current[option.value] = el;
+          }}
           type="button"
-          aria-current={option.value === value ? "true" : undefined}
+          role="radio"
+          aria-checked={option.value === value}
+          tabIndex={option.value === value ? 0 : -1}
           disabled={option.disabled}
           title={option.title}
+          onKeyDown={onKeyDown}
           className={
             option.value === value
               ? "press rounded-md whitespace-nowrap bg-primary/18 px-2 py-0.5 text-ui-label font-semibold text-primary disabled:pointer-events-none disabled:opacity-40"
@@ -782,7 +842,7 @@ export function Dropdown({
     if (!menuRef.current) return [];
     return Array.from(
       menuRef.current.querySelectorAll<HTMLElement>(
-        '[role="menuitem"]:not([data-variant="danger"]), button.menu-item',
+        '[role="menuitem"]:not([data-variant="danger"]), [role="menuitemradio"]:not([data-variant="danger"]), [role="menuitemcheckbox"]:not([data-variant="danger"]), button.menu-item',
       ),
     ).filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
   }
@@ -799,7 +859,11 @@ export function Dropdown({
     if (!open) return;
     // Don't yank focus into the menu if it owns a search input.
     if (menuRef.current?.querySelector("input, textarea")) return;
-    focusMenuItem(getMenuItems(), 0);
+    // Value pickers (menuitemradio) start on the active choice — same anchor as
+    // the model menu's highlight; plain action menus still start at the top.
+    const items = getMenuItems();
+    const checked = menuRef.current?.querySelector('[aria-checked="true"]') as HTMLElement | null;
+    focusMenuItem(items, checked && items.includes(checked) ? items.indexOf(checked) : 0);
   }, [open]);
 
   // Keep the menu inside the viewport. Right-aligned menus near a narrow panel
@@ -989,5 +1053,1220 @@ export function SettingsDisclosure({
         {children}
       </div>
     </section>
+  );
+}
+
+/* ============================================================================
+ * Control kit — the project's interface language for interactive controls.
+ *
+ * One home for every control species (button / field / switch / checkbox /
+ * radio / toggle chip / slider / tab / floating capsule / toast). Call sites
+ * import these instead of re-typing class strings: the drift that this kit
+ * removes is visual (radius, height, disabled state, focus ring) and semantic
+ * (role, aria, keyboard path, commit timing), both of which used to be
+ * re-invented per card.
+ *
+ * Design-language contract (enforced by test/ui-kit-guard.test.ts):
+ * - Radius: control 6 (`rounded-md`), overlay 12 (`rounded-xl`), capsule
+ *   `rounded-full`; nested corners step down one level.
+ * - Type: the five semantic sizes only (`text-ui-*`); never `text-[Npx]`.
+ * - Height: 28px (regular / toolbar) and 24px (dense card rows); icon buttons
+ *   28×28 and 24×24.
+ * - Colour: oklch tokens only — selected = `primary/10–18`, danger =
+ *   `destructive/10–15`, muted text = `muted-foreground`. Never a literal.
+ * - Focus: the global `:focus-visible` ring (`--shadow-focus`); small fields
+ *   inside a wrapper use the inset `--shadow-focus-soft` instead.
+ * - Disabled: `pointer-events-none + opacity-40`, everywhere, no exceptions.
+ * - Motion: `.press` feedback, `--ease-out-expo` settle, `stream-in` /
+ *   `dropdown-in` entrances.
+ * - Icons: `ICON_INLINE` / `ICON_TOOLBAR` / `ICON_DISPLAY`, laid out with
+ *   flex gap (no manual margins).
+ * - Copy: `t()` from i18n; `aria-label` and `title` carry the same wording.
+ * ========================================================================== */
+
+/** Primary button, dense 24px variant (card action rows). */
+export const SAVE_BTN_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40";
+/** Destructive button (regular 28px / dense 24px). */
+export const BTN_DANGER =
+  "press inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-destructive/50 bg-destructive/10 px-2.5 text-ui-caption font-semibold text-destructive transition-all duration-200 hover:bg-destructive/20 disabled:pointer-events-none disabled:opacity-40";
+export const BTN_DANGER_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 rounded-md border border-destructive/50 bg-destructive/10 px-2.5 text-ui-caption font-semibold text-destructive transition-all duration-200 hover:bg-destructive/20 disabled:pointer-events-none disabled:opacity-40";
+
+export type ButtonVariant =
+  | "primary"
+  | "secondary"
+  | "ghost"
+  | "danger"
+  | "canvas"
+  /** Composer send-slot pair: the stop slot stays neutral but carries the same
+   * optical weight as the send button; the queue slot is a primary commitment
+   * at 15% fill instead of a second gradient. */
+  | "emphasis"
+  | "primary-soft"
+  /** Outline variants for pending-card action rows: the semantic colour is
+   * carried by border + text, the fill only appears on hover, so a card never
+   * reads as three shouting buttons. */
+  | "outline-primary"
+  | "outline-danger";
+/** `md` = 28px (regular / toolbar), `sm` = 24px (dense card action rows). */
+export type ButtonSize = "md" | "sm";
+
+const OUTLINE_PRIMARY =
+  "press inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-primary/40 px-2.5 text-ui-caption font-medium text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40";
+const OUTLINE_PRIMARY_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 rounded-md border border-primary/40 px-2.5 text-ui-caption font-medium text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40";
+const OUTLINE_DANGER =
+  "press inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-destructive/40 px-2.5 text-ui-caption font-medium text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40";
+const OUTLINE_DANGER_SM =
+  "press inline-flex h-6 items-center justify-center gap-1 rounded-md border border-destructive/40 px-2.5 text-ui-caption font-medium text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40";
+
+const BUTTON_CLASSES: Record<ButtonVariant, { md: string; sm: string }> = {
+  primary: { md: SAVE_BTN, sm: SAVE_BTN_SM },
+  secondary: { md: BTN, sm: BTN_SM },
+  danger: { md: BTN_DANGER, sm: BTN_DANGER_SM },
+  ghost: { md: GHOST_BTN, sm: GHOST_BTN },
+  canvas: { md: CANVAS_BTN, sm: CANVAS_BTN_SM },
+  emphasis: { md: BTN_EMPHASIS, sm: BTN_EMPHASIS_SM },
+  "primary-soft": { md: PRIMARY_SOFT, sm: PRIMARY_SOFT_SM },
+  "outline-primary": { md: OUTLINE_PRIMARY, sm: OUTLINE_PRIMARY_SM },
+  "outline-danger": { md: OUTLINE_DANGER, sm: OUTLINE_DANGER_SM },
+};
+
+/**
+ * The one button primitive. `icon` renders before the label with the shared
+ * optical gap; omit `children` for an icon-only button (then `aria-label` is
+ * mandatory — use IconButton). Every state (disabled, press, focus ring) is
+ * owned here so a family-wide change is a single edit.
+ */
+export function Button({
+  variant = "secondary",
+  size = "md",
+  icon,
+  className = "",
+  children,
+  ref,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: ReactNode;
+  ref?: Ref<HTMLButtonElement>;
+}) {
+  const base = BUTTON_CLASSES[variant][size];
+  return (
+    <button type="button" ref={ref} className={`${base}${className ? ` ${className}` : ""}`} {...rest}>
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+/** Icon-only button: 28×28 (header cluster) or 24×24 (dense card rows). */
+export function IconButton({
+  icon,
+  label,
+  size = "md",
+  tone = "default",
+  className = "",
+  ref,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  icon: ReactNode;
+  /** Accessible name; also used as the hover tooltip. */
+  label: string;
+  size?: "md" | "sm";
+  tone?: "default" | "danger" | "primary";
+  ref?: Ref<HTMLButtonElement>;
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "hover:bg-destructive/10 hover:text-destructive"
+      : tone === "primary"
+        ? "text-primary hover:bg-accent/60"
+        : "hover:bg-surface hover:text-foreground";
+  return (
+    <button
+      type="button"
+      ref={ref}
+      aria-label={label}
+      title={label}
+      className={`inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 active:scale-95 disabled:pointer-events-none disabled:opacity-40 ${
+        size === "sm" ? "size-6" : "size-7"
+      } ${toneClass}${className ? ` ${className}` : ""}`}
+      {...rest}
+    >
+      {icon}
+    </button>
+  );
+}
+
+/* --- fields -----------------------------------------------------------------
+ * Two species, named by their commit timing:
+ * - `*Input` / `TextArea`: live controlled (form drafts the user edits before
+ *   an explicit save).
+ * - `Commit*`: local draft, committed on blur / Enter, normalised before the
+ *   host write. The draft survives an external echo while focused (a host
+ *   round-trip must not overwrite what the user is typing), and the committed
+ *   text is always shown normalised so the field never displays a value that
+ *   was silently dropped.
+ * Enter commits and is IME-safe: a composition-confirming Enter must not act.
+ * -------------------------------------------------------------------------- */
+
+function isImeEnter(e: ReactKeyboardEvent<HTMLInputElement | HTMLTextAreaElement>): boolean {
+  return e.nativeEvent.isComposing || e.keyCode === 229;
+}
+
+function useCommitDraft(
+  value: string,
+  normalize: (v: string) => string,
+  onCommit: (v: string) => void,
+) {
+  const [draft, setDraft] = useState(() => normalize(value));
+  const focused = useRef(false);
+  const last = useRef(value);
+  useEffect(() => {
+    if (last.current === value) return;
+    last.current = value;
+    if (!focused.current) setDraft(normalize(value));
+  }, [value, normalize]);
+  const commit = () => {
+    const next = normalize(draft);
+    setDraft(next);
+    if (next !== value) onCommit(next);
+  };
+  return {
+    draft,
+    setDraft,
+    commit,
+    onFocus: () => {
+      focused.current = true;
+    },
+    onBlur: () => {
+      focused.current = false;
+      commit();
+    },
+    onKeyDown: (e: ReactKeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (e.key !== "Enter" || isImeEnter(e)) return;
+      e.preventDefault();
+      e.currentTarget.blur();
+    },
+  };
+}
+
+/** Live text field (form draft). `mono` for paths/URLs/JSON-ish values. */
+export function TextInput({
+  mono = false,
+  invalid = false,
+  className = "",
+  ref,
+  ...rest
+}: InputHTMLAttributes<HTMLInputElement> & {
+  mono?: boolean;
+  invalid?: boolean;
+  ref?: Ref<HTMLInputElement>;
+}) {
+  return (
+    <input
+      type="text"
+      ref={ref}
+      spellCheck={false}
+      aria-invalid={invalid || undefined}
+      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${invalid ? " border-destructive/60" : ""}${
+        className ? ` ${className}` : ""
+      }`}
+      {...rest}
+    />
+  );
+}
+
+/** Text field with blur/Enter commit (settings rows writing host settings). */
+export function CommitTextInput({
+  value,
+  onCommit,
+  normalize = (v) => v.trim(),
+  mono = false,
+  label,
+  className = "",
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange"> & {
+  value: string;
+  onCommit: (value: string) => void;
+  normalize?: (v: string) => string;
+  mono?: boolean;
+  /** Accessible name (rows usually have a visible label already). */
+  label: string;
+}) {
+  const field = useCommitDraft(value, normalize, onCommit);
+  return (
+    <input
+      type="text"
+      spellCheck={false}
+      aria-label={label}
+      value={field.draft}
+      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${className ? ` ${className}` : ""}`}
+      onFocus={field.onFocus}
+      onBlur={field.onBlur}
+      onChange={(e) => field.setDraft(e.target.value)}
+      onKeyDown={field.onKeyDown}
+      {...rest}
+    />
+  );
+}
+
+/** Numeric field with blur/Enter commit; out-of-range input is clamped,
+ * non-numeric input reverts to the stored value (never a silent 0). */
+export function CommitNumberInput({
+  value,
+  min,
+  max,
+  step = 1,
+  unit,
+  label,
+  className = "",
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  label: string;
+  className?: string;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const focused = useRef(false);
+  const last = useRef(value);
+  useEffect(() => {
+    if (last.current === value) return;
+    last.current = value;
+    if (!focused.current) setDraft(String(value));
+  }, [value]);
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const next = Math.trunc(Math.max(min, Math.min(max ?? Number.POSITIVE_INFINITY, parsed)));
+    setDraft(String(next));
+    if (next !== value) onCommit(next);
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="number"
+        aria-label={label}
+        min={min}
+        max={max}
+        step={step}
+        value={draft}
+        className={`${BTN_INPUT}${className ? ` ${className}` : ""}`}
+        onFocus={() => {
+          focused.current = true;
+        }}
+        onBlur={() => {
+          focused.current = false;
+          commit();
+        }}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || isImeEnter(e)) return;
+          e.preventDefault();
+          e.currentTarget.blur();
+        }}
+      />
+      {unit && <span className="shrink-0 text-ui-caption text-muted-foreground">{unit}</span>}
+    </div>
+  );
+}
+
+/** Live multi-line field. */
+export function TextArea({
+  mono = false,
+  invalid = false,
+  className = "",
+  ref,
+  ...rest
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  mono?: boolean;
+  invalid?: boolean;
+  ref?: Ref<HTMLTextAreaElement>;
+}) {
+  return (
+    <textarea
+      ref={ref}
+      spellCheck={false}
+      aria-invalid={invalid || undefined}
+      className={`${BTN_INPUT}${mono ? " font-mono" : ""}${invalid ? " border-destructive/60" : ""}${
+        className ? ` ${className}` : ""
+      }`}
+      {...rest}
+    />
+  );
+}
+
+/** Multi-line field with blur commit. */
+export function CommitTextArea({
+  value,
+  onCommit,
+  normalize = (v) => v.trim(),
+  mono = false,
+  label,
+  rows = 3,
+  className = "",
+  ...rest
+}: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange"> & {
+  value: string;
+  onCommit: (value: string) => void;
+  normalize?: (v: string) => string;
+  mono?: boolean;
+  label: string;
+}) {
+  const field = useCommitDraft(value, normalize, onCommit);
+  return (
+    <textarea
+      rows={rows}
+      spellCheck={false}
+      aria-label={label}
+      value={field.draft}
+      className={`${BTN_INPUT} resize-y${mono ? " font-mono" : ""}${className ? ` ${className}` : ""}`}
+      onFocus={field.onFocus}
+      onBlur={field.onBlur}
+      onChange={(e) => field.setDraft(e.target.value)}
+      {...rest}
+    />
+  );
+}
+
+/** Line-list field (one entry per line): blank lines are dropped on commit and
+ * the textarea mirrors the stored form so dropped lines never stay on screen. */
+export function LinesCommitTextArea({
+  value,
+  onCommit,
+  label,
+  rows = 3,
+  placeholder,
+  className = "",
+}: {
+  value: string[];
+  onCommit: (value: string[]) => void;
+  label: string;
+  rows?: number;
+  placeholder?: string;
+  className?: string;
+}) {
+  const serialized = value.join("\n");
+  return (
+    <CommitTextArea
+      label={label}
+      rows={rows}
+      placeholder={placeholder}
+      mono
+      className={`leading-relaxed${className ? ` ${className}` : ""}`}
+      value={serialized}
+      normalize={(v) =>
+        v
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .join("\n")
+      }
+      onCommit={(next) => onCommit(next.split("\n").filter(Boolean))}
+    />
+  );
+}
+
+/**
+ * Overlay menu row — the home of the menu-item language (mode/model menus,
+ * custom selects). Optional leading icon, optional caption description, and a
+ * trailing check for the active choice. Value pickers get `role="menuitemradio"`
+ * + `aria-checked` so screen readers announce the current selection; action
+ * rows stay `menuitem`. Danger rows carry `data-variant="danger"` (the
+ * Dropdown keyboard nav skips them, matching the destructive-first rule).
+ */
+export function MenuItem({
+  selected = false,
+  description,
+  icon,
+  danger = false,
+  disabled = false,
+  className = "",
+  onClick,
+  children,
+}: {
+  selected?: boolean;
+  description?: string;
+  icon?: ReactNode;
+  danger?: boolean;
+  disabled?: boolean;
+  className?: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role={selected ? "menuitemradio" : "menuitem"}
+      aria-checked={selected ? true : undefined}
+      data-variant={danger ? "danger" : undefined}
+      disabled={disabled}
+      onClick={onClick}
+      className={`flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+        danger ? "hover:bg-destructive/10" : "hover:bg-accent/50"
+      }${className ? ` ${className}` : ""}`}
+    >
+      {icon ? (
+        <span className={`mt-0.5 shrink-0 ${danger ? "text-destructive" : "text-muted-foreground"}`}>{icon}</span>
+      ) : null}
+      <span className="min-w-0 flex-1">
+        <span className={`flex items-center gap-1 text-ui-label ${danger ? "text-destructive" : "text-foreground"}`}>
+          <span className="truncate">{children}</span>
+          {selected ? <Check className={`${ICON_INLINE} shrink-0 text-primary`} /> : null}
+        </span>
+        {description ? <span className="block text-ui-caption text-muted-foreground">{description}</span> : null}
+      </span>
+    </button>
+  );
+}
+
+export type SelectOption = { value: string; label: string; description?: string; disabled?: boolean };
+
+/**
+ * Value picker rendered as an overlay menu (the acrylic menu the mode dropdown
+ * uses) instead of a native `<select>`: the OS popup ignores the panel's overlay
+ * language (radius, acrylic surface, selection check, secondary captions).
+ * Trigger keeps the text-field chrome (`BTN_INPUT`) at the two control heights;
+ * the menu is at least as wide as the field and viewport-clamped by Dropdown.
+ */
+export function Select({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+  size = "md",
+  disabled = false,
+  align = "left",
+  direction = "down",
+  className = "",
+  wrapperClass = "",
+  menuClass = "",
+}: {
+  options: SelectOption[];
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+  size?: "md" | "sm";
+  disabled?: boolean;
+  align?: "left" | "right";
+  direction?: "down" | "up";
+  className?: string;
+  wrapperClass?: string;
+  menuClass?: string;
+}) {
+  const current = options.find((option) => option.value === value);
+  return (
+    <Dropdown
+      align={align}
+      direction={direction}
+      disabled={disabled}
+      wrapperClass={wrapperClass}
+      menuClass={`min-w-full max-w-[calc(100vw_-_24px)]${menuClass ? ` ${menuClass}` : ""}`}
+      trigger={(open) => (
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={ariaLabel}
+          title={ariaLabel}
+          disabled={disabled}
+          className={`${BTN_INPUT} inline-flex ${size === "sm" ? "h-6" : "h-7"} w-full min-w-0 items-center gap-1.5 disabled:pointer-events-none disabled:opacity-40${
+            open ? " border-primary/50" : ""
+          }${className ? ` ${className}` : ""}`}
+        >
+          <span
+            className={`min-w-0 flex-1 truncate text-left${size === "sm" ? " text-ui-caption" : ""}`}
+          >
+            {current?.label ?? ""}
+          </span>
+          <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60`} />
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          {options.map((option) => (
+            <MenuItem
+              key={option.value}
+              selected={option.value === value}
+              description={option.description}
+              disabled={option.disabled ?? false}
+              onClick={() => {
+                if (option.value !== value) onChange(option.value);
+                close();
+              }}
+            >
+              {option.label}
+            </MenuItem>
+          ))}
+        </>
+      )}
+    </Dropdown>
+  );
+}
+
+/** Search field embedded in menus/lists: transparent inside a bordered
+ * wrapper, focus feedback is the wrapper's inset ring (`--shadow-focus-soft`),
+ * not an outward ring on the bare input. */
+export function SearchInput({
+  value,
+  onChange,
+  placeholder,
+  ariaLabel,
+  mono = false,
+  icon = true,
+  autoFocus = false,
+  className = "",
+  onKeyDown,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  ariaLabel: string;
+  mono?: boolean;
+  icon?: boolean;
+  autoFocus?: boolean;
+  className?: string;
+  onKeyDown?: (e: ReactKeyboardEvent<HTMLInputElement>) => void;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2 rounded-md border border-border bg-editor/60 px-2.5 py-1.5 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft${
+        className ? ` ${className}` : ""
+      }`}
+    >
+      {icon && <Search className="size-3.5 shrink-0 text-muted-foreground" />}
+      <input
+        type="text"
+        autoFocus={autoFocus}
+        spellCheck={false}
+        aria-label={ariaLabel}
+        value={value}
+        placeholder={placeholder}
+        className={`w-full min-w-0 bg-transparent text-ui-body text-foreground outline-none placeholder:text-muted-foreground/80${
+          mono ? " font-mono text-ui-caption" : ""
+        }`}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+      />
+    </div>
+  );
+}
+
+/* --- selection -------------------------------------------------------------- */
+
+/** Switch (role=switch): 20×36 track, 14px knob. The visible label lives in
+ * the row; the control carries only the accessible name. */
+export function Switch({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+  className = "",
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  label: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      className={`press relative mt-0.5 inline-flex h-[20px] w-[36px] shrink-0 items-center rounded-full border transition-colors duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+        checked ? "border-primary/50 bg-primary/70" : "border-border bg-border/70"
+      }${className ? ` ${className}` : ""}`}
+      onClick={() => onChange(!checked)}
+    >
+      <span
+        className={`inline-block size-[14px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
+          checked ? "translate-x-[19px]" : "translate-x-[2px]"
+        }`}
+      />
+    </button>
+  );
+}
+
+/** Checkbox: a native input (keyboard + screen-reader semantics) drawn with
+ * `.ui-checkbox` so the box matches the radius/colour system instead of the
+ * browser's accent colour. `label` renders as adjacent text; without it the
+ * control is labelled by `ariaLabel`. */
+export function Checkbox({
+  checked,
+  onChange,
+  ariaLabel,
+  label,
+  title,
+  disabled = false,
+  className = "",
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  ariaLabel?: string;
+  /** Visible adjacent text (wraps the input in a clickable label). */
+  label?: string;
+  title?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const box = (
+    <input
+      type="checkbox"
+      className={`ui-checkbox shrink-0${disabled ? " disabled:pointer-events-none disabled:opacity-40" : ""}${
+        className ? ` ${className}` : ""
+      }`}
+      checked={checked}
+      disabled={disabled}
+      title={label ? undefined : title}
+      aria-label={label ? undefined : ariaLabel}
+      onChange={(e) => onChange(e.target.checked)}
+    />
+  );
+  if (!label) return box;
+  return (
+    <label
+      className={`inline-flex shrink-0 cursor-pointer items-center gap-1 text-ui-label text-muted-foreground${
+        disabled ? " pointer-events-none opacity-40" : ""
+      }`}
+      title={title}
+    >
+      {box}
+      <span>{label}</span>
+    </label>
+  );
+}
+
+/** Pill control. With `active` it is a toggle (`aria-pressed`); without it it
+ * is a quiet pill action (preset entries, model shortcuts) that advances a
+ * form rather than holding a state. */
+export function ToggleChip({
+  active,
+  mono = false,
+  className = "",
+  children,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; mono?: boolean }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 disabled:pointer-events-none disabled:opacity-40 ${
+        active
+          ? "border-primary/50 bg-primary/10 font-semibold text-primary"
+          : "border-border text-muted-foreground hover:border-primary/40 hover:bg-accent/60 hover:text-foreground"
+      }${mono ? " font-mono" : ""}${className ? ` ${className}` : ""}`}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Radio / checkbox option group (question cards). Arrow keys move focus among
+ * enabled options (Home/End jump to the ends); Enter/Space select through the
+ * option's own button handler. `multi` swaps radiogroup → group semantics
+ * (checkboxes keep per-item tabindex, no roving selection).
+ */
+export function OptionGroup({
+  ariaLabel,
+  multi = false,
+  className = "",
+  children,
+}: {
+  ariaLabel: string;
+  multi?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") return;
+    const items = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? []);
+    if (items.length === 0) return;
+    const at = document.activeElement instanceof HTMLButtonElement ? items.indexOf(document.activeElement) : -1;
+    let next = -1;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") next = at < 0 ? 0 : (at + 1) % items.length;
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = at < 0 ? items.length - 1 : (at - 1 + items.length) % items.length;
+    else if (e.key === "Home") next = 0;
+    else next = items.length - 1;
+    e.preventDefault();
+    items[next]?.focus();
+  };
+  return (
+    <div
+      ref={ref}
+      role={multi ? "group" : "radiogroup"}
+      aria-label={ariaLabel}
+      className={className}
+      onKeyDown={onKeyDown}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** One option inside an OptionGroup: indicator + label + optional description. */
+export function OptionCard({
+  type = "radio",
+  checked,
+  disabled = false,
+  label,
+  description,
+  title,
+  icon,
+  onClick,
+  className = "",
+}: {
+  type?: "radio" | "checkbox";
+  checked: boolean;
+  disabled?: boolean;
+  label: ReactNode;
+  description?: ReactNode;
+  title?: string;
+  /** Domain icon replacing the radio/checkbox indicator (role/aria stay). */
+  icon?: ReactNode;
+  onClick: () => void;
+  className?: string;
+}) {
+  const Indicator =
+    type === "checkbox" ? (checked ? CheckSquare : Square) : checked ? CircleDot : Circle;
+  return (
+    <button
+      type="button"
+      role={type === "checkbox" ? "checkbox" : "radio"}
+      aria-checked={checked}
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+      className={`press flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-ui-caption transition-all duration-200 shadow-card disabled:pointer-events-none disabled:opacity-40 ${
+        checked
+          ? "border-primary/60 bg-primary/10 shadow-card"
+          : "border-border bg-surface/80 hover:border-primary/30 hover:bg-surface-2"
+      }${className ? ` ${className}` : ""}`}
+    >
+      {icon ?? (
+        <Indicator
+          className={`mt-px size-3.5 shrink-0 ${checked ? "text-primary" : "text-muted-foreground/80"}`}
+        />
+      )}
+      <span className="min-w-0">
+        <span className={`block font-medium leading-tight ${checked ? "text-primary" : "text-foreground"}`}>
+          {label}
+        </span>
+        {description && <span className="mt-0.5 block leading-snug text-muted-foreground">{description}</span>}
+      </span>
+    </button>
+  );
+}
+
+/** Slider (range): 4px track with a primary-filled portion, 14px knob. Commit
+ * timing matches the settings rows — live during drag, written on pointerup /
+ * blur / arrow key, so a drag never fires a host write per pixel. */
+export function Slider({
+  value,
+  min = 0,
+  max = 100,
+  step = 1,
+  label,
+  format,
+  onCommit,
+  className = "",
+}: {
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  label: string;
+  /** Value readout (e.g. `(v) => `${v}%`); omit for none. */
+  format?: (value: number) => ReactNode;
+  onCommit: (value: number) => void;
+  className?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const last = useRef(value);
+  useEffect(() => {
+    if (last.current === value) return;
+    last.current = value;
+    setDraft(value);
+  }, [value]);
+  const commit = () => {
+    if (draft !== value) onCommit(draft);
+  };
+  const pct = max > min ? ((draft - min) / (max - min)) * 100 : 0;
+  return (
+    <div className={`flex w-full items-center gap-2${className ? ` ${className}` : ""}`}>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={draft}
+        aria-label={label}
+        className="ui-slider w-full"
+        style={{ background: `linear-gradient(to right, var(--primary) ${pct}%, var(--border) ${pct}%)` }}
+        onChange={(e) => setDraft(Number(e.target.value))}
+        onPointerUp={commit}
+        onBlur={commit}
+        onKeyUp={(e) => {
+          if (e.key.startsWith("Arrow")) commit();
+        }}
+      />
+      {format && (
+        <span className="w-9 shrink-0 text-right text-ui-caption tabular-nums text-muted-foreground">
+          {format(draft)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* --- tabs -------------------------------------------------------------------
+ * Tabs are page navigation (role=tablist + roving tabindex); in-page selection
+ * uses Segmented / ToggleChip instead. Keep the two semantics separate — the
+ * audit finding was one feature with two entry points.
+ * ------------------------------------------------------------------------- */
+
+export function TabButton({
+  active,
+  icon,
+  children,
+  onActivate,
+  id,
+  controls,
+  refCallback,
+  className = "",
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  active: boolean;
+  icon?: ReactNode;
+  children: ReactNode;
+  onActivate: () => void;
+  id?: string;
+  /** id of the panel this tab controls. */
+  controls?: string;
+  refCallback?: (el: HTMLButtonElement | null) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={id}
+      aria-selected={active}
+      aria-current={active ? "page" : undefined}
+      aria-controls={controls}
+      // Roving tabindex: only the active tab is in the Tab chain; arrows move
+      // between the rest (see rovingTabKeyDown).
+      tabIndex={active ? 0 : -1}
+      ref={refCallback}
+      onClick={onActivate}
+      className={`press flex items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-ui-body transition-all duration-200 ${
+        active ? "bg-primary/10 font-semibold text-primary" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+      }${className ? ` ${className}` : ""}`}
+      {...rest}
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+/** Roving-tabindex keyboard handler for a tablist (Arrow/Home/End). */
+export function rovingTabKeyDown<T extends string>(
+  tabs: T[],
+  active: T,
+  onSelect: (tab: T) => void,
+  focus: (tab: T) => void,
+): (e: ReactKeyboardEvent<HTMLElement>) => void {
+  return (e) => {
+    const at = tabs.indexOf(active);
+    if (at < 0) return;
+    let next = -1;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") next = (at + 1) % tabs.length;
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = (at - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    const id = tabs[next]!;
+    onSelect(id);
+    focus(id);
+  };
+}
+
+/* --- floating capsules + toasts ----------------------------------------------
+ * The bottom floating family (streaming pill / jump-to-latest / expand-older /
+ * toast pills) is one species: `rounded-full` + `--shadow-float`. `--shadow-panel`
+ * collapses on a ~30px capsule (its -24px spread shrinks the rect by 48px), so
+ * pills must never use it.
+ * -------------------------------------------------------------------------- */
+
+export type FloatTone = "neutral" | "primary" | "warning" | "danger" | "decision";
+
+const FLOAT_TONES: Record<FloatTone, string> = {
+  neutral: "acrylic-pop border border-border text-foreground shadow-float",
+  primary: "bg-primary text-primary-foreground shadow-float",
+  warning: "border border-warning/50 bg-warning/15 text-warning shadow-float backdrop-blur-md",
+  danger: "border border-destructive/45 bg-destructive/15 text-destructive shadow-float backdrop-blur-md",
+  decision: "acrylic-pop border-primary/45 text-foreground shadow-float",
+};
+
+export function FloatPill({
+  tone = "neutral",
+  size = "md",
+  className = "",
+  children,
+}: {
+  tone?: FloatTone;
+  /** `md` = 13px body (toast), `sm` = 12px caption (streaming band). */
+  size?: "md" | "sm";
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`inline-flex items-center gap-2 rounded-full shadow-float ${
+        size === "md" ? "px-3 py-2 text-ui-label leading-snug" : "px-4 py-1.5 text-ui-caption font-medium"
+      } ${FLOAT_TONES[tone]}${className ? ` ${className}` : ""}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Interactive floating chip (jump-to-latest / expand-older). */
+export function FloatChip({
+  children,
+  className = "",
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      type="button"
+      className={`press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-float hover:bg-surface-2${
+        className ? ` ${className}` : ""
+      }`}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Live countdown chip ("Ns"), anchored to the host's absolute epoch deadline
+ * so the UI never drifts from message round-trip latency. Shared by the toast
+ * stack pills and the streaming pill's merged countdown. */
+export function CountdownSeconds({ deadline }: { deadline: number }) {
+  const [secs, setSecs] = useState(Math.ceil((deadline - Date.now()) / 1000));
+  useEffect(() => {
+    let last = -1;
+    const tick = () => {
+      const left = Math.max(0, deadline - Date.now());
+      const s = Math.ceil(left / 1000);
+      if (s !== last) {
+        last = s;
+        setSecs(s);
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 250);
+    return () => clearInterval(iv);
+  }, [deadline]);
+  return <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>;
+}
+
+/** Domain icon for a sticky notice that asks for a decision, so the pill reads
+ * as its own species instead of a generic info dot. */
+const TOAST_ACTION_ICON: Record<string, typeof Info> = {
+  "memory-review": Brain,
+};
+
+/** Decision-card species for a sticky notice that carries previews (the
+ * auto-memory candidate batch): the approval-card family — eyebrow + title,
+ * the lines that would be written, and one actions row. The primary button is
+ * the ONLY forward channel; 「忽略」and the header X retire the notice, so no
+ * second affordance competes with the decision. */
+function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number) => void }) {
+  const previews = toast.preview ?? [];
+  return (
+    <div className="acrylic glow-ring card-lift pointer-events-auto stream-in w-full max-w-[min(100%,34rem)] rounded-xl border border-primary/45">
+      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+        <Brain className={`${ICON_INLINE} shrink-0 text-primary`} />
+        <span className="block min-w-0 flex-1 space-y-0.5">
+          <span className="block text-ui-micro tracking-wide text-muted-foreground/85">
+            {t("iFlow 建议沉淀记忆")}
+          </span>
+          <span className="block truncate text-ui-label font-semibold leading-tight">{toast.message}</span>
+        </span>
+        <IconButton
+          icon={<X className={ICON_INLINE} />}
+          label={t("关闭")}
+          size="sm"
+          className="ml-auto"
+          onClick={() => dismiss(toast.id)}
+        />
+      </div>
+      {previews.length > 0 && (
+        <div className="space-y-1 px-3 py-2">
+          {previews.map((item, index) => (
+            <div key={index} className="flex items-start gap-1.5">
+              <Chip tone={item.scope === "project" ? "primary" : "muted"}>
+                {item.scope === "project" ? t("项目") : t("全局")}
+              </Chip>
+              <span className="min-w-0 flex-1 break-words text-ui-caption leading-relaxed text-foreground/90">
+                {item.text}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 px-3 py-2">
+        {toast.action && (
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<Check className={`${ICON_INLINE} shrink-0`} />}
+            onClick={() =>
+              useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
+            }
+          >
+            {toast.action.label}
+          </Button>
+        )}
+        <Button variant="secondary" size="sm" onClick={() => dismiss(toast.id)}>
+          {t("忽略")}
+        </Button>
+        <span className="ml-auto text-ui-micro text-muted-foreground/80">{t("确认后才会写入记忆")}</span>
+      </div>
+    </div>
+  );
+}
+
+/** One toast pill — overlay species, not a transcript card: the bottom
+ * floating capsule family, so it rounds full rather than taking the 12px card
+ * radius. Click semantics: sticky pills close on the message body, plain
+ * toasts dismiss on click, and host-owned waits (countdown / display-only /
+ * persistent) stay non-clickable because the host owns their lifecycle. An
+ * actionable pill is never wrapped in the dismiss button — nesting buttons is
+ * invalid HTML and used to swallow the whole action. */
+function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppressCompressAction?: boolean }) {
+  const dismiss = useChat((s) => s.dismissToast);
+  // A preview-bearing sticky notice is a decision, not a status line.
+  if (toast.sticky && toast.preview && toast.preview.length > 0) {
+    return <ToastCard toast={toast} dismiss={dismiss} />;
+  }
+  const waiting = toast.level === "info" && toast.displayOnly;
+  const Icon =
+    toast.level === "warning"
+      ? AlertTriangle
+      : toast.level === "error"
+        ? XCircle
+        : waiting
+          ? Loader2
+          : TOAST_ACTION_ICON[toast.action?.actionId ?? ""] ?? Info;
+  const tone: FloatTone =
+    toast.level === "error"
+      ? "danger"
+      : toast.level === "warning"
+        ? "warning"
+        : toast.sticky
+          ? "decision"
+          : "neutral";
+  const body = (
+    <>
+      <Icon
+        className={`${ICON_INLINE} shrink-0 ${waiting || toast.level === "info" ? "text-primary" : ""} ${waiting ? "animate-spin" : ""}`}
+      />
+      <span className="break-words text-left">{toast.message}</span>
+      {toast.countdownDeadline !== undefined && <CountdownSeconds deadline={toast.countdownDeadline} />}
+    </>
+  );
+  // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button; the
+  // compress action is suppressed while a turn owns the session.
+  const actionHidden = suppressCompressAction && toast.action?.actionId === "compress";
+  const actionButton =
+    toast.action &&
+    !actionHidden && (
+      <Button
+        variant={toast.sticky ? "primary" : "secondary"}
+        size="sm"
+        className={toast.sticky ? "" : "border-current/45 font-medium opacity-90 hover:opacity-100"}
+        onClick={() =>
+          useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
+        }
+      >
+        {toast.action.label}
+      </Button>
+    );
+  const clickable =
+    toast.sticky || !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || toast.action);
+  return (
+    <FloatPill tone={tone} className="pointer-events-auto stream-in max-w-[92%]">
+      {clickable ? (
+        <button
+          type="button"
+          onClick={() => dismiss(toast.id)}
+          title={toast.sticky ? t("关闭") : undefined}
+          className="flex min-w-0 items-center gap-1.5 text-left"
+        >
+          {body}
+        </button>
+      ) : (
+        <span className="flex min-w-0 items-center gap-1.5 text-left">{body}</span>
+      )}
+      {actionButton}
+      {toast.sticky ? (
+        <IconButton icon={<X className={ICON_INLINE} />} label={t("关闭")} size="sm" onClick={() => dismiss(toast.id)} />
+      ) : null}
+    </FloatPill>
+  );
+}
+
+/** Transient host notices, rendered as a centered stack above the streaming
+ * indicator. Bottom-anchored pending cards (approval / plan / question) and the
+ * sticky band are cleared via `--pending-card-h` / `--stream-pill-h`; the stack
+ * bottom is computed from those measured heights, never a fixed offset. */
+export function ToastStack({
+  skipToastId,
+  suppressCompressAction,
+  rideBand,
+}: {
+  skipToastId?: number;
+  /** A turn owns the session: hide the 立即压缩 action (the host refuses it). */
+  suppressCompressAction?: boolean;
+  /** A sticky bottom band is on screen: the stack rides above it. */
+  rideBand?: boolean;
+}) {
+  const toasts = useChat((s) => s.toasts);
+  const visible = skipToastId === undefined ? toasts : toasts.filter((x) => x.id !== skipToastId);
+  if (visible.length === 0) return null;
+  return (
+    <div
+      className="pointer-events-none absolute inset-x-0 z-20 flex flex-col items-center gap-1.5 px-3"
+      style={{
+        bottom: rideBand
+          ? "calc(2.5rem + var(--pending-card-h, 0px) + var(--stream-pill-h, 0px))"
+          : "calc(3.5rem + var(--pending-card-h, 0px))",
+      }}
+    >
+      {visible.map((toast) => (
+        <ToastPill key={toast.id} toast={toast} suppressCompressAction={suppressCompressAction} />
+      ))}
+    </div>
   );
 }

@@ -3,7 +3,7 @@ import { Lock, ShieldCheck } from "lucide-react";
 import type { PendingApprovalUi, PermissionOptionUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { FileRef, CountdownBar, HelpTip } from "./ui";
+import { Button, type ButtonVariant, CountdownBar, FileRef, HelpTip, ICON_INLINE } from "./ui";
 import { DiffView } from "./DiffView";
 
 const KIND_ORDER: Record<string, number> = {
@@ -14,21 +14,17 @@ const KIND_ORDER: Record<string, number> = {
 };
 
 /**
- * Visual risk tiering per option kind: a ONE-TIME allow is the primary action
- * (solid gradient), while an ALWAYS allow changes the safety boundary for the
- * whole session — it renders as a secondary outlined button with a lock glyph
- * so the two can never be conflated by muscle memory (visual audit P0-2).
+ * Visual risk tiering per option kind, expressed as kit Button variants: a
+ * ONE-TIME allow is the primary action (solid gradient), while an ALWAYS allow
+ * changes the safety boundary for the whole session — it stays outlined (plus
+ * a permanent light fill) with a lock glyph so the two can never be conflated
+ * by muscle memory (visual audit P0-2).
  */
-function optionClass(kind: PermissionOptionUi["kind"]): string {
-  if (kind === "allow_once")
-    return "bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn hover:shadow-btn-hover hover:brightness-105";
-  if (kind === "allow_always")
-    return "border border-primary/40 bg-primary/10 font-medium text-primary hover:bg-primary/20";
-  if (kind.startsWith("allow"))
-    return "bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn hover:shadow-btn-hover hover:brightness-105";
-  if (kind.startsWith("reject"))
-    return "border border-destructive/40 text-destructive hover:bg-destructive/10";
-  return "border border-border bg-surface/80 text-foreground hover:bg-surface-2 shadow-card";
+function optionButton(kind: PermissionOptionUi["kind"]): { variant: ButtonVariant; className?: string } {
+  if (kind === "allow_always") return { variant: "outline-primary", className: "bg-primary/10 hover:bg-primary/20" };
+  if (kind.startsWith("allow")) return { variant: "primary" };
+  if (kind.startsWith("reject")) return { variant: "outline-danger" };
+  return { variant: "canvas" };
 }
 
 /**
@@ -226,31 +222,35 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         {options.map((opt) => {
           const label = OPTION_LABEL[opt.kind] ?? opt.name;
           const isSafeSide = rejectOption?.optionId === opt.optionId;
+          const { variant, className } = optionButton(opt.kind);
           return (
-            <button
+            <Button
               key={opt.optionId}
+              variant={variant}
+              size="sm"
               disabled={answered}
               data-autofocus={isSafeSide ? true : undefined}
               title={OPTION_LABEL[opt.kind] ? opt.name : undefined}
               aria-label={approval.toolName ? t("{0}（{1}）", label, approval.toolName) : label}
-              className={`press inline-flex h-6 items-center justify-center gap-1 rounded-md px-2.5 text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${optionClass(opt.kind)}`}
+              className={className}
+              icon={opt.kind === "allow_always" ? <Lock className={`${ICON_INLINE} shrink-0`} /> : undefined}
               onClick={() => answer(opt.optionId)}
             >
-              {opt.kind === "allow_always" && <Lock className="size-3.5 shrink-0" />}
               {label}
-            </button>
+            </Button>
           );
         })}
         {!rejectOption && (
-          <button
+          <Button
+            variant="canvas"
+            size="sm"
             disabled={answered}
             data-autofocus
             aria-label={t("取消审批")}
-            className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             onClick={() => answer(null)}
           >
             {t("取消")}
-          </button>
+          </Button>
         )}
         <span className="ml-auto self-center text-ui-micro text-muted-foreground/80">
           {rejectOption ? t("Y 允许一次 · N/Esc 拒绝") : t("Y 允许一次 · N 拒绝 · Esc 取消")}

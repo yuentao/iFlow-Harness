@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, useId } from "react";
-import { HelpCircle, Check, Circle, CircleDot, Square, CheckSquare, Plus } from "lucide-react";
+import { HelpCircle, Check, Plus } from "lucide-react";
 import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { CountdownBar, HelpTip } from "./ui";
+import { Button, CountdownBar, HelpTip, ICON_INLINE, OptionCard, OptionGroup, TextInput } from "./ui";
 
 /**
  * When any option's description exceeds this length, the option row switches
@@ -15,9 +15,10 @@ const LONG_DESCRIPTION_CHARS = 30;
 
 /**
  * ask_user_question card (iFlow `_iflow/user/questions`). One section per
- * question: option buttons (radio for single-select, toggle for
- * multiSelect), plus a free-text "Other" field. Answers are keyed by the
- * question's `header` — the wire contract the CLI's tool bridge expects.
+ * question: option cards (radio for single-select, checkbox for multiSelect)
+ * in a shared OptionGroup — proper radiogroup/checkboxgroup semantics plus
+ * arrow-key navigation — plus a free-text 「其他」 field. Answers are keyed by
+ * the question's `header` — the wire contract the CLI's tool bridge expects.
  * Dismissing answers nothing: the agent proceeds with "no answer".
  *
  * Note: like ApprovalCard, questions arrive mid-prompt (status is
@@ -131,67 +132,48 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
                 </span>
                 <span className="min-w-0 text-foreground/90">{q.question}</span>
               </p>
-              <div className={vertical ? "grid gap-1.5" : "flex flex-wrap gap-1.5"}>
-                {q.options.map((opt) => {
-                  const active = picks.has(opt.label);
-                  const Indicator = q.multiSelect
-                    ? active
-                      ? CheckSquare
-                      : Square
-                    : active
-                      ? CircleDot
-                      : Circle;
-                  return (
-                    <button
-                      key={opt.label}
-                      disabled={answered}
-                      title={opt.description}
-                      aria-label={opt.description ? t("{0}：{1}", opt.label, opt.description) : opt.label}
-                      className={`press flex items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
-                        vertical ? "w-full" : "max-w-[min(260px,100%)]"
-                      } ${
-                        active
-                          ? "border-primary/60 bg-primary/10 shadow-card"
-                          : "border-border bg-surface/80 shadow-card hover:border-primary/30 hover:bg-surface-2"
-                      }`}
-                      onClick={() => toggle(q.header, opt.label, q.multiSelect)}
-                    >
-                      <Indicator
-                        className={`mt-px size-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground/80"}`}
-                      />
-                      <span className="min-w-0">
-                        <span className={`block font-medium leading-tight ${active ? "text-primary" : "text-foreground"}`}>
-                          {opt.label}
-                        </span>
-                        {opt.description && (
-                          <span className="mt-0.5 block leading-snug text-muted-foreground">{opt.description}</span>
-                        )}
-                      </span>
-                    </button>
-                  );
-                })}
-                <button
+              <OptionGroup
+                ariaLabel={q.question}
+                multi={q.multiSelect}
+                className={vertical ? "grid gap-1.5" : "flex flex-wrap gap-1.5"}
+              >
+                {q.options.map((opt) => (
+                  <OptionCard
+                    key={opt.label}
+                    type={q.multiSelect ? "checkbox" : "radio"}
+                    checked={picks.has(opt.label)}
+                    disabled={answered}
+                    title={opt.description}
+                    label={opt.label}
+                    description={opt.description}
+                    className={vertical ? "w-full" : "max-w-[min(260px,100%)]"}
+                    onClick={() => toggle(q.header, opt.label, q.multiSelect)}
+                  />
+                ))}
+                <Button
+                  variant="canvas"
                   disabled={answered}
-                  className={`press flex items-center gap-1.5 rounded-lg border px-2.5 text-ui-caption transition-all duration-200 disabled:pointer-events-none disabled:opacity-40 ${
-                    vertical ? `w-full justify-start py-1.5 ${isCustomOpen ? "" : "border-dashed"}` : "py-1"
+                  aria-label={t("填写自定义回答")}
+                  icon={<Plus className={`${ICON_INLINE} shrink-0`} />}
+                  className={`justify-start rounded-lg px-2.5 ${vertical ? "" : "py-1"} ${
+                    isCustomOpen || custom[q.header]?.trim() ? "" : "border-dashed"
                   } ${
                     isCustomOpen || custom[q.header]?.trim()
                       ? "border-primary/60 bg-primary/10 text-primary"
-                      : "border-border bg-surface/80 text-muted-foreground shadow-card hover:border-primary/30 hover:text-foreground"
+                      : "text-muted-foreground"
                   }`}
                   onClick={() => setCustomOpen((p) => ({ ...p, [q.header]: !p[q.header] }))}
-                  aria-label={t("填写自定义回答")}
                 >
-                  <Plus className="size-3.5 shrink-0" />
                   {t("其他")}
                   {vertical && <span className="text-muted-foreground/80">{t("自定义回答")}</span>}
-                </button>
-              </div>
+                </Button>
+              </OptionGroup>
               {isCustomOpen && (
-                <input
+                <TextInput
                   autoFocus
-                  className="mt-2 w-full rounded-lg border border-border bg-editor px-2 py-1 text-ui-caption outline-none placeholder:text-muted-foreground focus:border-primary/50"
+                  aria-label={`${t("自定义回答")}: ${q.header}`}
                   placeholder={t("输入自定义回答，回车确认")}
+                  className="mt-2 w-full"
                   value={custom[q.header] ?? ""}
                   onChange={(e) => setCustom((p) => ({ ...p, [q.header]: e.target.value }))}
                   onKeyDown={(e) => {
@@ -219,23 +201,19 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
       </div>
       <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动继续")} />
       <div ref={actionsRef} role="group" aria-label={t("回答操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
-        <button
+        <Button
+          variant="primary"
+          size="sm"
           disabled={answered}
           aria-label={t("提交回答")}
-          className="press inline-flex h-6 items-center justify-center gap-1 rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
+          icon={<Check className={ICON_INLINE} />}
           onClick={submit}
         >
-          <Check className="size-3.5" />
           {t("提交回答")}
-        </button>
-        <button
-          disabled={answered}
-          aria-label={t("不回答并继续")}
-          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-card transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-          onClick={dismiss}
-        >
+        </Button>
+        <Button variant="secondary" size="sm" disabled={answered} aria-label={t("不回答并继续")} onClick={dismiss}>
           {t("不回答并继续")}
-        </button>
+        </Button>
       </div>
     </div>
   );

@@ -13,7 +13,7 @@ import {
 import type { KnowledgeDocUi, MemoryFileUi, MemoryScope, MemoryStateUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, SAVE_BTN, SettingsDisclosure, ActionRow, Hint } from "./ui";
+import { ActionRow, Button, Chip, Hint, ICON_INLINE, IconButton, Segmented, Select, SettingsDisclosure, TextArea } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -323,22 +323,20 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           >
             ≈{fmtTokens(file.tokens)} tokens
           </span>
-          <button
-            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-            title={t("打开文件")}
+          <IconButton
+            icon={<ExternalLink className={ICON_INLINE} />}
+            label={t("打开文件")}
+            size="sm"
             disabled={busy || saving || !file.exists}
             onClick={() => open(file)}
-          >
-            <ExternalLink className="size-3.5" />
-          </button>
-          <button
-            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-            title={t("编辑")}
+          />
+          <IconButton
+            icon={<Pencil className={ICON_INLINE} />}
+            label={t("编辑")}
+            size="sm"
             disabled={busy || saving || !file.editable}
             onClick={() => startEdit(file)}
-          >
-            <Pencil className="size-3.5" />
-          </button>
+          />
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
           <span>{file.exists ? t("{0} 字节", file.bytes) : t("尚未创建")}</span>
@@ -351,14 +349,15 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               <li key={fact.id} className="group flex items-start gap-1 rounded-md px-1 py-0.5 text-ui-label text-foreground/85">
                 <span className="mt-0.5 size-1 shrink-0 rounded-full bg-primary/60" />
                 <span className="min-w-0 flex-1 break-words">{fact.text}</span>
-                <button
-                  className="press shrink-0 rounded p-0.5 text-muted-foreground opacity-60 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-                  title={t("删除这条记忆")}
+                <IconButton
+                  icon={<Trash2 className={ICON_INLINE} />}
+                  label={t("删除这条记忆")}
+                  size="sm"
+                  tone="danger"
+                  className="opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"
                   disabled={busy || saving || !file.editable}
                   onClick={() => removeFact(file, fact.id)}
-                >
-                  <Trash2 className="size-3" />
-                </button>
+                />
               </li>
             ))}
             {file.facts.length > 20 && (
@@ -396,20 +395,21 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
             </div>
           </div>
         )}
-        <textarea
-          className={`${INPUT} min-h-[220px] w-full resize-y font-mono text-ui-label leading-relaxed`}
+        <TextArea
+          mono
+          aria-label={t("记忆文件内容")}
+          className="min-h-[220px] w-full resize-y text-ui-label leading-relaxed"
           value={editing.content}
           spellCheck={false}
           onChange={(e) => setEditing((current) => (current ? { ...current, content: e.target.value } : current))}
         />
         <ActionRow>
-          <button className={SAVE_BTN} disabled={busy || saving} onClick={saveEdit}>
-            <Save className="size-3.5" />
+          <Button variant="primary" icon={<Save className={ICON_INLINE} />} disabled={busy || saving} onClick={saveEdit}>
             {saving ? t("保存中…") : t("保存")}
-          </button>
-          <button className={BTN} onClick={back}>
+          </Button>
+          <Button variant="secondary" onClick={back}>
             {t("取消")}
-          </button>
+          </Button>
           <span className="text-ui-caption text-muted-foreground">
             {t("{0} 字符 · ≈{1} tokens", editing.content.length, fmtTokens(Math.ceil(editing.content.length / 4)))}
           </span>
@@ -454,14 +454,14 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               <div className="flex items-center gap-1.5">
                 <span className="text-ui-body font-semibold text-foreground">{t("全局记忆")}</span>
                 <span className="min-w-0 truncate font-mono text-ui-caption text-muted-foreground">{state.home}</span>
-                <button
-                  className="press ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-                  title={t("重新扫描")}
+                <IconButton
+                  icon={<RefreshCw className={ICON_INLINE} />}
+                  label={t("重新扫描")}
+                  size="sm"
+                  className="ml-auto"
                   disabled={busy || saving}
                   onClick={refresh}
-                >
-                  <RefreshCw className="size-3.5" />
-                </button>
+                />
               </div>
               {globalFiles.map(renderFile)}
             </section>
@@ -481,21 +481,21 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 projectFiles.map(renderFile)
               )}
               <ActionRow>
-                <button
-                  className={BTN}
+                <Button
+                  variant="secondary"
+                  icon={<Plus className={ICON_INLINE} />}
                   disabled={busy || saving || !state.cwd}
                   onClick={() => {
                     setCreating((v) => !v);
                     setLoadError(null);
                   }}
                 >
-                  <Plus className="size-3.5" />
                   {t("新建项目记忆")}
-                </button>
+                </Button>
                 {creating && (
                   <>
-                    <button
-                      className={SAVE_BTN}
+                    <Button
+                      variant="primary"
                       disabled={saving}
                       onClick={() => {
                         createProject("AGENTS.md");
@@ -503,9 +503,9 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                       }}
                     >
                       AGENTS.md
-                    </button>
-                    <button
-                      className={BTN}
+                    </Button>
+                    <Button
+                      variant="secondary"
                       disabled={saving}
                       onClick={() => {
                         createProject("IFLOW.md");
@@ -513,7 +513,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                       }}
                     >
                       IFLOW.md
-                    </button>
+                    </Button>
                   </>
                 )}
               </ActionRow>
@@ -530,33 +530,33 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 )}
                 {knowledge?.index ? (
                   <>
-                    <button
-                      className={BTN}
+                    <Button
+                      variant="secondary"
+                      icon={<RefreshCw className={ICON_INLINE} />}
                       disabled={busy || saving || knowledgeBusy || !state.cwd}
                       title={t("只根据变化更新索引，无变化时不会调用模型")}
                       onClick={() => generateKnowledge("incremental")}
                     >
-                      <RefreshCw className="size-3.5" />
                       {t("增量刷新")}
-                    </button>
-                    <button
-                      className={BTN}
+                    </Button>
+                    <Button
+                      variant="secondary"
                       disabled={busy || saving || knowledgeBusy || !state.cwd}
                       title={t("重新分析整个工作区并覆盖索引")}
                       onClick={() => generateKnowledge("full")}
                     >
                       {t("全量重建")}
-                    </button>
+                    </Button>
                   </>
                 ) : (
-                  <button
-                    className={BTN}
+                  <Button
+                    variant="secondary"
+                    icon={<RefreshCw className={ICON_INLINE} />}
                     disabled={busy || saving || knowledgeBusy || !state.cwd}
                     onClick={() => generateKnowledge("full")}
                   >
-                    <RefreshCw className="size-3.5" />
                     {t("生成项目知识")}
-                  </button>
+                  </Button>
                 )}
               </>
             }
@@ -597,7 +597,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                       key={doc.path}
                       className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border px-2 py-1.5"
                     >
-                      <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                      <FileText className={`${ICON_INLINE} shrink-0 text-muted-foreground`} />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-ui-body font-semibold text-foreground">
                           {doc.title}
@@ -615,21 +615,20 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                       >
                         ≈{fmtTokens(doc.tokens)} tokens
                       </span>
-                      <button
-                        className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-                        title={t("打开文件")}
+                      <IconButton
+                        icon={<ExternalLink className={ICON_INLINE} />}
+                        label={t("打开文件")}
+                        size="sm"
                         disabled={busy || knowledgeBusy}
                         onClick={() => openKnowledge(doc)}
-                      >
-                        <ExternalLink className="size-3.5" />
-                      </button>
-                      <button
-                        className={BTN}
+                      />
+                      <Button
+                        variant="secondary"
                         disabled={busy || saving || knowledgeBusy}
                         onClick={() => toggleKnowledge(doc)}
                       >
                         {doc.injected ? t("取消注入") : t("注入")}
-                      </button>
+                      </Button>
                     </div>
                   ))}
                 </div>
@@ -656,52 +655,42 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           <SettingsDisclosure title={t("快速追加")}>
             <div className="space-y-2 px-4 py-3">
               <div className="text-ui-body font-semibold text-foreground">{t("添加一条记忆")}</div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  className={`${BTN} ${factScope === "global" ? "border-primary/50 text-primary" : ""}`}
-                  aria-pressed={factScope === "global"}
-                  onClick={() => setFactScope("global")}
-                >
-                  {t("全局")}
-                </button>
-                <button
-                  type="button"
-                  className={`${BTN} ${factScope === "project" ? "border-primary/50 text-primary" : ""}`}
-                  aria-pressed={factScope === "project"}
-                  onClick={() => setFactScope("project")}
-                >
-                  {t("项目")}
-                </button>
+              <div className="flex items-center gap-2">
+                <Segmented
+                  ariaLabel={t("记忆作用域")}
+                  value={factScope}
+                  onChange={(scope) => setFactScope(scope)}
+                  options={[
+                    { value: "global", label: t("全局") },
+                    { value: "project", label: t("项目") },
+                  ]}
+                />
                 {writableTargets.length > 1 && (
-                  <select
-                    className={`${INPUT} ml-auto max-w-[55%]`}
+                  <Select
+                    ariaLabel={t("写入目标文件")}
+                    wrapperClass="ml-auto min-w-0 flex-1"
                     value={factTarget}
-                    onChange={(e) => setFactTarget(e.target.value)}
-                  >
-                    {writableTargets.map((file) => (
-                      <option key={file.path} value={file.path}>
-                        {file.displayPath}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(path) => setFactTarget(path)}
+                    options={writableTargets.map((file) => ({ value: file.path, label: file.displayPath }))}
+                  />
                 )}
               </div>
-              <textarea
-                className={`${INPUT} min-h-[58px] w-full resize-y`}
+              <TextArea
+                aria-label={t("要记住的内容")}
+                className="min-h-[58px] w-full resize-y"
                 value={factText}
                 placeholder={t("例如：本项目的测试命令是 npm test；不要修改 vendor/ 下的文件。")}
                 onChange={(e) => setFactText(e.target.value)}
               />
               <div className="flex items-center gap-1.5">
-                <button
-                  className={SAVE_BTN}
+                <Button
+                  variant="primary"
+                  icon={<Plus className={ICON_INLINE} />}
                   disabled={busy || saving || !factText.trim() || writableTargets.length === 0}
                   onClick={appendFact}
                 >
-                  <Plus className="size-3.5" />
                   {saving ? t("写入中…") : t("保存到{0}", scopeLabel(factScope))}
-                </button>
+                </Button>
                 <span className="text-ui-caption text-muted-foreground">
                   {writableTargets.length === 0
                     ? t("请先创建项目记忆文件")
@@ -712,18 +701,18 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           </SettingsDisclosure>
 
           <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
-            <button className={BTN} disabled={busy} onClick={() => send({ type: "newSession" })}>
+            <Button variant="secondary" disabled={busy} onClick={() => send({ type: "newSession" })}>
               {t("新建会话")}
-            </button>
-            <button
-              className={BTN}
+            </Button>
+            <Button
+              variant="secondary"
+              icon={<RefreshCw className={ICON_INLINE} />}
               disabled={busy}
               title={t("重启 CLI 并恢复当前会话，使记忆立即生效")}
               onClick={() => send({ type: "restartCli" })}
             >
-              <RefreshCw className="size-3.5" />
               {t("重启 CLI 使记忆生效")}
-            </button>
+            </Button>
             <span className="text-ui-caption text-muted-foreground">{t("记忆不会热更新到正在进行的会话。")}</span>
           </div>
         </>

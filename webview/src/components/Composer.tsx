@@ -19,7 +19,6 @@ import {
   Paperclip,
   Pencil,
   Play,
-  Search,
   SendHorizontal,
   Sparkles,
   Square,
@@ -32,7 +31,7 @@ import {
 import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { CANVAS_BTN, ConfirmDialog, Dropdown, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, MenuItem, SearchInput, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -266,9 +265,8 @@ function QueueStrip() {
     send({ type: "queueAction", action, id, delta });
   };
   // UI-audit 4.6: 24px hit area (the icons stay 14px) — 12px targets were
-  // easy to miss in a dense row.
-  const miniBtn =
-    "inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-35";
+  // easy to miss in a dense row. Row actions use IconButton (sm), header
+  // actions use the dense Button variants.
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface/70 shadow-card">
       <div className={`flex items-center gap-1.5 px-2.5 py-1 ${expanded && queue.length > 0 ? "border-b border-border/60" : ""}`}>
@@ -294,22 +292,27 @@ function QueueStrip() {
         )}
         <div className="ml-auto flex items-center gap-1">
           {paused && queue.length > 0 && (
-            <button
-              className="inline-flex items-center gap-1 rounded-md border border-primary/50 bg-primary/15 px-1.5 py-0.5 text-ui-caption font-medium text-primary hover:bg-primary/25"
+            <Button
+              variant="primary-soft"
+              size="sm"
+              icon={<Play className={ICON_INLINE} />}
               title={t("继续依序发送队列")}
               onClick={() => act("resume")}
             >
-              <Play className="size-2.5" /> {t("继续")}
-            </button>
+              {t("继续")}
+            </Button>
           )}
           {queue.length > 0 && (
-            <button
-              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-ui-caption text-muted-foreground hover:text-destructive"
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Trash2 className={ICON_INLINE} />}
+              className="hover:text-destructive"
               title={t("清空队列")}
               onClick={() => setConfirmClear(true)}
             >
-              <Trash2 className="size-2.5" /> {t("清空")}
-            </button>
+              {t("清空")}
+            </Button>
           )}
         </div>
       </div>
@@ -330,30 +333,39 @@ function QueueStrip() {
                 </span>
               )}
               <span className="flex shrink-0 items-center gap-0.5 opacity-40 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                <button className={miniBtn} title={t("打断并立即发送")} onClick={() => act("sendNow", q.id)}>
-                  <Play className="size-3.5" />
-                </button>
-                <button
-                  className={miniBtn}
-                  title={t("取回编辑")}
+                <IconButton
+                  icon={<Play className={ICON_INLINE} />}
+                  label={t("打断并立即发送")}
+                  size="sm"
+                  onClick={() => act("sendNow", q.id)}
+                />
+                <IconButton
+                  icon={<Pencil className={ICON_INLINE} />}
+                  label={t("取回编辑")}
+                  size="sm"
                   onClick={() => send({ type: "queueAction", action: "edit", id: q.id, requestId: ++queueEditSeqGlobal.current })}
-                >
-                  <Pencil className="size-3.5" />
-                </button>
-                <button className={miniBtn} title={t("上移")} disabled={i === 0} onClick={() => act("move", q.id, -1)}>
-                  <ArrowUp className="size-3.5" />
-                </button>
-                <button
-                  className={miniBtn}
-                  title={t("下移")}
+                />
+                <IconButton
+                  icon={<ArrowUp className={ICON_INLINE} />}
+                  label={t("上移")}
+                  size="sm"
+                  disabled={i === 0}
+                  onClick={() => act("move", q.id, -1)}
+                />
+                <IconButton
+                  icon={<ArrowDown className={ICON_INLINE} />}
+                  label={t("下移")}
+                  size="sm"
                   disabled={i === queue.length - 1}
                   onClick={() => act("move", q.id, 1)}
-                >
-                  <ArrowDown className="size-3.5" />
-                </button>
-                <button className={miniBtn} title={t("删除")} onClick={() => act("delete", q.id)}>
-                  <X className="size-3.5" />
-                </button>
+                />
+                <IconButton
+                  icon={<X className={ICON_INLINE} />}
+                  label={t("删除")}
+                  size="sm"
+                  tone="danger"
+                  onClick={() => act("delete", q.id)}
+                />
               </span>
             </li>
           ))}
@@ -1363,14 +1375,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             >
               <FileText className="size-3.5 shrink-0 text-primary" />
               <span className="truncate">{f.name}</span>
-              <button
-                className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-destructive"
-                title={t("移除")}
-                aria-label={t("移除")}
+              <IconButton
+                icon={<X className={ICON_INLINE} />}
+                label={t("移除")}
+                size="sm"
+                tone="danger"
                 onClick={() => removeAttachment(f.id)}
-              >
-                <X className="size-3.5" />
-              </button>
+              />
             </span>
           ))}
         </div>
@@ -1418,22 +1429,20 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                       className={`size-3 shrink-0 text-muted-foreground transition-transform duration-150 ${open ? "rotate-180" : ""}`}
                     />
                   </button>
-                  <button
-                    type="button"
-                    className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-destructive"
-                    title={t("移除")}
-                    aria-label={t("移除")}
+                  <IconButton
+                    icon={<X className={ICON_INLINE} />}
+                    label={t("移除")}
+                    size="sm"
+                    tone="danger"
                     onClick={() => removeContext(c.id)}
-                  >
-                    <X className="size-3.5" />
-                  </button>
+                  />
                 </span>
               );
             })}
             {contexts.length > CONTEXT_CHIP_MAX && (
               <button
                 type="button"
-                className="press inline-flex h-6 shrink-0 items-center rounded-lg border border-border bg-surface/80 px-2 font-mono text-ui-caption text-muted-foreground shadow-card transition-colors hover:bg-surface-2 hover:text-foreground"
+                className={`${CANVAS_CHIP} shrink-0 font-mono text-muted-foreground hover:text-foreground`}
                 title={showAllContexts ? t("收起") : t("展开全部 {0} 张上下文卡", contexts.length)}
                 onClick={() => setShowAllContexts((v) => !v)}
               >
@@ -1451,15 +1460,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 <span className="truncate font-mono text-ui-caption text-foreground" title={expandedContext.label}>
                   {expandedContext.label}
                 </span>
-                <button
-                  type="button"
-                  className="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                  title={t("收起")}
-                  aria-label={t("收起")}
+                <IconButton
+                  icon={<ChevronDown className={`${ICON_INLINE} rotate-180`} />}
+                  label={t("收起")}
+                  size="sm"
+                  className="ml-auto"
                   onClick={() => setExpandedContextId(null)}
-                >
-                  <ChevronDown className="size-3.5 rotate-180" />
-                </button>
+                />
               </div>
               {expandedContext.kind === "code" ? (
                 <pre className="max-h-40 overflow-auto px-2.5 py-2 font-mono text-ui-caption leading-[1.6] text-foreground/90">
@@ -1623,21 +1630,20 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           {suggestions.slice(0, 3).map((s) => (
             <button
               key={s}
-              className="press inline-flex max-w-full items-center rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-foreground shadow-card transition-colors hover:bg-surface-2"
+              className={CANVAS_CHIP}
               title={t("AI 推测的下一步操作，点击填入输入框")}
               onClick={() => applySuggestion(s)}
             >
               <span className="truncate">{s}</span>
             </button>
           ))}
-          <button
-            className="press ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-            title={t("关闭建议")}
-            aria-label={t("关闭建议")}
+          <IconButton
+            icon={<X className={ICON_INLINE} />}
+            label={t("关闭建议")}
+            size="sm"
+            className="ml-auto"
             onClick={() => setSuggestionsHidden(true)}
-          >
-            <X className="size-3.5" />
-          </button>
+          />
         </div>
       )}
 
@@ -1757,17 +1763,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               menuClass="w-56 max-w-[calc(100vw_-_24px)]"
               disabled={modeLocked}
               trigger={(open) => (
-                <button
+                <Button
+                  variant="canvas"
+                  icon={<Zap className={`${ICON_INLINE} shrink-0 text-primary`} />}
+                  className={`${open ? "bg-surface-2" : ""}`}
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  className={`${CANVAS_BTN}${open ? " bg-surface-2" : ""}`}
                   title={t("权限模式")}
                   disabled={modeLocked}
                 >
-                  <Zap className="size-3.5 shrink-0 text-primary" />
                   <span className="@max-[340px]:hidden">{currentMode ? modeDisplay(currentMode).label : ""}</span>
-                  <ChevronDown className="size-3.5 shrink-0 opacity-60 @max-[340px]:hidden" />
-                </button>
+                  <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60 @max-[340px]:hidden`} />
+                </Button>
               )}
             >
               {(close) => (
@@ -1775,9 +1782,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   {modes.availableModes.map((m) => {
                     const view = modeDisplay(m);
                     return (
-                      <button
+                      <MenuItem
                         key={m.id}
-                        role="menuitem"
+                        selected={m.id === modes.currentModeId}
+                        description={view.desc}
                         onClick={() => {
                           if (m.id !== modes.currentModeId) {
                             beginPending("mode", m.id);
@@ -1785,16 +1793,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                           }
                           close();
                         }}
-                        className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-accent/50"
                       >
-                        <span className="text-ui-label text-foreground">
-                          {view.label}
-                          {m.id === modes.currentModeId && (
-                            <Check className="ml-1 inline size-3 text-primary" />
-                          )}
-                        </span>
-                        <span className="text-ui-caption text-muted-foreground">{view.desc}</span>
-                      </button>
+                        {view.label}
+                      </MenuItem>
                     );
                   })}
                 </>
@@ -1829,10 +1830,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 }
               }}
               trigger={(open) => (
-                <button
+                <Button
+                  variant="canvas"
+                  className={`min-w-0${open ? " bg-surface-2" : ""}`}
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  className={`${CANVAS_BTN} min-w-0${open ? " bg-surface-2" : ""}`}
                   title={t("模型")}
                   disabled={controlsLocked}
                 >
@@ -1840,8 +1842,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                     {currentModelName}
                   </span>
                   <SessionUsageChip />
-                  <ChevronDown className="size-3.5 shrink-0 opacity-60" />
-                </button>
+                  <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60`} />
+                </Button>
               )}
             >
               {(close) => (
@@ -1851,34 +1853,32 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                       row once the catalog is long enough to need filtering. */}
                   {models.length > MODEL_SEARCH_MIN && (
                   <div className="sticky top-0 z-10 border-b border-border/60 bg-panel/50 p-1.5 backdrop-blur-md">
-                    <div className="flex items-center gap-3 rounded-lg border border-border bg-editor px-3 py-2 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
-                      <Search className="size-3.5 shrink-0 text-muted-foreground" />
-                      <input
-                        autoFocus
-                        value={modelQuery}
-                        placeholder={t("搜索模型…")}
-                        className="w-full min-w-0 bg-transparent font-mono text-ui-caption text-foreground outline-none placeholder:text-muted-foreground/80"
-                        onChange={(e) => setModelQuery(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "ArrowDown") {
-                            e.preventDefault();
-                            setModelIndex((i) => Math.min(filteredModels.length - 1, i + 1));
-                          } else if (e.key === "ArrowUp") {
-                            e.preventDefault();
-                            setModelIndex((i) => Math.max(0, i - 1));
-                          } else if (e.key === "Enter") {
-                            const hit = filteredModels[modelIndex];
-                            if (!hit) return;
-                            e.preventDefault();
-                            if (hit.m.id !== currentModelId) {
-                              beginPending("model", hit.m.id);
-                              send({ type: "setModel", modelId: hit.m.id });
-                            }
-                            close();
+                    <SearchInput
+                      autoFocus
+                      mono
+                      value={modelQuery}
+                      onChange={setModelQuery}
+                      placeholder={t("搜索模型…")}
+                      ariaLabel={t("搜索模型…")}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setModelIndex((i) => Math.min(filteredModels.length - 1, i + 1));
+                        } else if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setModelIndex((i) => Math.max(0, i - 1));
+                        } else if (e.key === "Enter") {
+                          const hit = filteredModels[modelIndex];
+                          if (!hit) return;
+                          e.preventDefault();
+                          if (hit.m.id !== currentModelId) {
+                            beginPending("model", hit.m.id);
+                            send({ type: "setModel", modelId: hit.m.id });
                           }
-                        }}
-                      />
-                    </div>
+                          close();
+                        }
+                      }}
+                    />
                   </div>
                   )}
                   {filteredModels.length === 0 && (
@@ -2004,8 +2004,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 enhance (or a rewrite to undo) — an always-present disabled
                 button just widened the row. */}
             {(text.trim() !== "" || enhancing || enhanceOriginal.current !== null) && (
-              <button
-                className={`${CANVAS_BTN}${enhanceOriginal.current !== null ? " text-primary" : ""}`}
+              <Button
+                variant="canvas"
+                icon={enhancing ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Wand2 className={ICON_INLINE} />}
+                className={enhanceOriginal.current !== null ? "text-primary" : ""}
+                aria-label={enhancing ? t("取消增强") : t("增强提示词")}
                 title={
                   enhancing
                     ? t("正在增强，点击取消")
@@ -2015,44 +2018,39 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 }
                 disabled={!enhancing && (controlsLocked || (!text.trim() && enhanceOriginal.current === null))}
                 onClick={enhance}
-              >
-                {enhancing ? <Loader2 className="size-3.5 animate-spin" /> : <Wand2 className="size-3.5" />}
-              </button>
+              />
             )}
-            <button
-              className={CANVAS_BTN}
+            <Button
+              variant="canvas"
+              icon={<Paperclip className={ICON_INLINE} />}
+              aria-label={t("添加附件")}
               title={t("添加附件")}
               disabled={controlsLocked}
               onClick={() => send({ type: "pickAttachments" })}
-            >
-              <Paperclip className="size-3.5" />
-            </button>
+            />
             {/* P1-7: stop and send share ONE slot (swap in place) — the old
                 separate stop button made the primary action area jump every
                 time a turn started/ended. Queuing stays on Enter (the
                 textarea's enqueueMode placeholder says so). */}
             {canStop ? (
-              <button
-                className="press inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-surface h-7 px-3 text-ui-caption font-semibold text-foreground shadow-btn transition-all duration-200 hover:bg-surface-2 active:brightness-95"
+              <Button
+                variant="emphasis"
+                icon={<Square className={ICON_INLINE} />}
                 title={t("停止生成")}
                 onClick={() => send({ type: "cancel" })}
               >
-                <Square className="size-3.5" /> <span className="@max-[340px]:hidden">{t("停止")}</span>
-              </button>
+                <span className="@max-[340px]:hidden">{t("停止")}</span>
+              </Button>
             ) : (
-              <button
-                className={
-                  enqueueMode
-                    ? "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/50 bg-primary/15 h-7 px-3 text-ui-caption font-semibold text-primary shadow-btn transition-all duration-200 hover:bg-primary/25 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-                    : "press inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-gradient-to-b from-primary to-primary/90 h-7 px-3 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 active:brightness-95 disabled:pointer-events-none disabled:opacity-40"
-                }
+              <Button
+                variant={enqueueMode ? "primary-soft" : "primary"}
+                icon={enqueueMode ? <ListOrdered className={ICON_INLINE} /> : <SendHorizontal className={ICON_INLINE} />}
                 title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
                 disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
                 onClick={submit}
               >
-                {enqueueMode ? <ListOrdered className="size-3.5" /> : <SendHorizontal className="size-3.5" />}{" "}
                 <span className="@max-[340px]:hidden">{enqueueMode ? t("排队") : t("发送")}</span>
-              </button>
+              </Button>
             )}
           </div>
         </div>

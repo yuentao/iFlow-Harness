@@ -29,11 +29,14 @@ let state: SessionState;
 
 vi.mock("../webview/src/store", () => ({ useChat }));
 vi.mock("../webview/src/i18n", () => ({ t: (s: string) => s, modeDisplay: () => ({ label: "mode", desc: "" }) }));
-vi.mock("../webview/src/components/ui", () => ({
-  CANVAS_BTN: "",
-  Dropdown: ({ trigger, children }: { trigger: (open: boolean) => ReactNode; children: ReactNode }) => <>{trigger(false)}{children}</>,
-  fuzzyScore: () => 0,
-}));
+vi.mock("../webview/src/components/ui", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../webview/src/components/ui")>();
+  return {
+    ...actual,
+    Dropdown: ({ trigger, children }: { trigger: (open: boolean) => ReactNode; children: ReactNode }) => <>{trigger(false)}{children}</>,
+    fuzzyScore: () => 0,
+  };
+});
 
 let root: Root;
 let container: HTMLDivElement;

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Check, ExternalLink, KeyRound, Lock, Search, Sparkles } from "lucide-react";
+import { ArrowRight, ExternalLink, KeyRound, Lock, Sparkles } from "lucide-react";
 import type { AuthUiState, ModelInfoUi, UiDefaultMode } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, fuzzyScore, ModalShell, SAVE_BTN } from "./ui";
+import { Button, Field, ICON_DISPLAY, ICON_INLINE, ModalShell, OptionCard, OptionGroup, SearchInput, TextInput, ToggleChip, fuzzyScore } from "./ui";
 import type { SettingsTab } from "./SettingsModal";
 import logo from "../assets/iflow.svg";
 
@@ -245,31 +245,26 @@ export function OnboardingWizard({
       wide
       ariaLabel={t("初始化引导")}
       title={stepTitle(step)}
-      icon={<Sparkles className="size-3.5 shrink-0 text-primary" />}
+      icon={<Sparkles className={`${ICON_INLINE} shrink-0 text-primary`} />}
       onClose={skip}
       dismissible={false}
       initialFocus="first"
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           {step !== "done" && (
-            <button
-              type="button"
-              className="press rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
-              onClick={skip}
-            >
+            <Button variant="ghost" onClick={skip}>
               {t("稍后设置")}
-            </button>
+            </Button>
           )}
           <div className="ml-auto flex items-center gap-1.5">
             {index > 0 && step !== "done" && (
-              <button type="button" className={BTN} onClick={back}>
+              <Button onClick={back}>
                 {t("上一步")}
-              </button>
+              </Button>
             )}
-            <button
-              type="button"
+            <Button
+              variant="primary"
               ref={primaryRef}
-              className={SAVE_BTN}
               disabled={step === "connect" && apiSubmitted && connecting}
               onClick={advance}
             >
@@ -279,7 +274,7 @@ export function OnboardingWizard({
                   ? t("保存并继续")
                   : t("下一步")}
               {step !== "done" && <ArrowRight className="size-3.5" />}
-            </button>
+            </Button>
           </div>
         </div>
       }
@@ -327,32 +322,13 @@ export function OnboardingWizard({
               </p>
               <div className="flex flex-wrap gap-1">
                 {PROVIDER_PRESETS.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    aria-pressed={presetId === option.id}
-                    className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
-                      presetId === option.id
-                        ? "border-primary/50 bg-primary/10 font-semibold text-primary"
-                        : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                    }`}
-                    onClick={() => applyPreset(option)}
-                  >
+                  <ToggleChip key={option.id} active={presetId === option.id} onClick={() => applyPreset(option)}>
                     {option.label}
-                  </button>
+                  </ToggleChip>
                 ))}
-                <button
-                  type="button"
-                  aria-pressed={presetId === null}
-                  className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
-                    presetId === null
-                      ? "border-primary/50 bg-primary/10 font-semibold text-primary"
-                      : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                  }`}
-                  onClick={() => setPresetId(null)}
-                >
+                <ToggleChip active={presetId === null} onClick={() => setPresetId(null)}>
                   {t("自定义")}
-                </button>
+                </ToggleChip>
               </div>
 
               {preset && (
@@ -360,15 +336,14 @@ export function OnboardingWizard({
                   <p className="text-ui-caption leading-relaxed text-muted-foreground">{t(preset.note)}</p>
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {preset.keyUrl && (
-                      <button className={BTN} onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}>
-                        <ExternalLink className="size-3.5" />
+                      <Button icon={<ExternalLink className={ICON_INLINE} />} onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}>
                         {t("获取 API Key")}
-                      </button>
+                      </Button>
                     )}
                     {preset.docsUrl && (
-                      <button className={BTN} onClick={() => send({ type: "openExternal", uri: preset.docsUrl! })}>
+                      <Button onClick={() => send({ type: "openExternal", uri: preset.docsUrl! })}>
                         {t("查看文档")}
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -392,63 +367,55 @@ export function OnboardingWizard({
                             {candidate.modelName} · {candidate.keyTail}
                           </span>
                         </span>
-                        <button
-                          className={`${SAVE_BTN} shrink-0 whitespace-nowrap`}
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          className="shrink-0 whitespace-nowrap"
                           onClick={() => importCredentials(candidate.name)}
                         >
                           {t("导入并激活")}
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              <label className="flex flex-col gap-0.5">
-                <span className="text-ui-caption text-muted-foreground">{t("Base URL（OpenAI 兼容）")}</span>
-                <input
-                  type="text"
-                  className={INPUT}
+              <Field label={t("Base URL（OpenAI 兼容）")}>
+                <TextInput
+                  mono
                   ref={baseUrlRef}
-                  value={draft.baseUrl}
                   placeholder="https://api.example.com/v1"
+                  value={draft.baseUrl}
                   onChange={(e) => updateDraft({ baseUrl: e.target.value })}
                 />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="text-ui-caption text-muted-foreground">API Key</span>
-                <input
+              </Field>
+              <Field label="API Key">
+                <TextInput
                   type="password"
-                  className={INPUT}
+                  mono
                   ref={apiKeyRef}
                   value={draft.apiKey}
                   placeholder={auth.saved?.keyTail ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…"}
                   onChange={(e) => updateDraft({ apiKey: e.target.value })}
                 />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className="text-ui-caption text-muted-foreground">{t("模型名称")}</span>
-                <input
-                  type="text"
-                  className={INPUT}
+              </Field>
+              <Field label={t("模型名称")}>
+                <TextInput
+                  mono
                   ref={modelNameRef}
                   value={draft.modelName}
                   placeholder={t("如 glm-5.3-flash-free")}
                   onChange={(e) => updateDraft({ modelName: e.target.value })}
                 />
-              </label>
+              </Field>
               {preset && preset.models.length > 0 && (
                 <div className="flex flex-wrap items-center gap-1">
                   <span className="text-ui-caption text-muted-foreground">{t("常用模型")}</span>
                   {preset.models.map((model) => (
-                    <button
-                      key={model}
-                      type="button"
-                      className="press rounded-full border border-border px-2 py-0.5 font-mono text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
-                      onClick={() => updateDraft({ modelName: model })}
-                    >
+                    <ToggleChip key={model} mono active={draft.modelName.trim() === model} onClick={() => updateDraft({ modelName: model })}>
                       {model}
-                    </button>
+                    </ToggleChip>
                   ))}
                 </div>
               )}
@@ -484,13 +451,13 @@ export function OnboardingWizard({
                       : t("可点击下方按钮重新获取。")}
                   </p>
                   <div className="mt-2 flex justify-center gap-1.5">
-                    <button className={BTN} onClick={() => send({ type: "refreshModels" })}>
+                    <Button onClick={() => send({ type: "refreshModels" })}>
                       {t("重新获取")}
-                    </button>
+                    </Button>
                     {auth.needsSetup && (
-                      <button className={BTN} onClick={() => setStep("connect")}>
+                      <Button onClick={() => setStep("connect")}>
                         {t("返回填写凭据")}
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -499,47 +466,34 @@ export function OnboardingWizard({
                   {/* Search appears only for long catalogs (same rule as the
                       composer's model menu) and stays pinned above the list. */}
                   {models.length > MODEL_SEARCH_MIN && (
-                    <div className="flex items-center gap-2 rounded-lg border border-border bg-editor px-2 py-1 transition-colors duration-200 focus-within:border-primary/40 focus-within:shadow-focus-soft">
-                      <Search className="size-3.5 shrink-0 text-muted-foreground" />
-                      <input
-                        value={modelQuery}
-                        placeholder={t("搜索模型…")}
-                        className="w-full min-w-0 bg-transparent font-mono text-ui-caption text-foreground outline-none placeholder:text-muted-foreground/80"
-                        onChange={(e) => setModelQuery(e.target.value)}
-                      />
-                    </div>
+                    <SearchInput
+                      mono
+                      ariaLabel={t("搜索模型")}
+                      placeholder={t("搜索模型…")}
+                      value={modelQuery}
+                      onChange={setModelQuery}
+                    />
                   )}
-                  <div className="max-h-[min(50vh,20rem)] space-y-1 overflow-y-auto">
+                  <OptionGroup
+                    ariaLabel={t("可用模型")}
+                    className="max-h-[min(50vh,20rem)] space-y-1 overflow-y-auto"
+                  >
                     {visibleModels.length === 0 && (
                       <div className="px-2 py-3 text-center text-ui-label text-muted-foreground">
                         {t("无匹配模型")}
                       </div>
                     )}
-                    {visibleModels.map((model) => {
-                      const active = model.id === currentModelId;
-                      return (
-                        <button
-                          key={model.id}
-                          type="button"
-                          aria-pressed={active}
-                          className={`card-lift flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left shadow-card transition-colors duration-200 ${
-                            active ? "border-primary/50 bg-primary/10" : "border-border hover:bg-accent/40"
-                          }`}
-                          onClick={() => chooseModel(model)}
-                        >
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-ui-label font-semibold text-foreground">
-                              {model.name || model.id}
-                            </span>
-                            <span className="block truncate font-mono text-ui-caption text-muted-foreground">
-                              {model.id}
-                            </span>
-                          </span>
-                          {active && <Check className="size-3.5 shrink-0 text-primary" />}
-                        </button>
-                      );
-                    })}
-                  </div>
+                    {visibleModels.map((model) => (
+                      <OptionCard
+                        key={model.id}
+                        checked={model.id === currentModelId}
+                        label={model.name || model.id}
+                        description={model.id}
+                        className="w-full"
+                        onClick={() => chooseModel(model)}
+                      />
+                    ))}
+                  </OptionGroup>
                 </>
               )}
               {apiSubmitted && errorMessage && (
@@ -558,38 +512,28 @@ export function OnboardingWizard({
               <p className="text-ui-label leading-relaxed text-muted-foreground">
                 {t("选择新会话默认的权限模式；点击选项后当前会话也会立即切换。之后可在设置 → 审批策略中细化规则。")}
               </p>
-              <div className="space-y-1">
+              <OptionGroup ariaLabel={t("默认权限模式")} className="space-y-1">
                 {modeOptions.map((mode) => {
                   const display = modeDisplay(mode);
-                  const active = mode.id === hostSettings.defaultMode;
                   return (
-                    <button
+                    <OptionCard
                       key={mode.id}
-                      type="button"
-                      aria-pressed={active}
-                      className={`card-lift flex w-full items-start gap-2 rounded-lg border px-2.5 py-1.5 text-left shadow-card transition-colors duration-200 ${
-                        active ? "border-primary/50 bg-primary/10" : "border-border hover:bg-accent/40"
-                      }`}
+                      checked={mode.id === hostSettings.defaultMode}
+                      label={display.label}
+                      description={display.desc}
+                      className="w-full"
                       onClick={() => chooseMode(mode.id)}
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-ui-label font-semibold text-foreground">{display.label}</span>
-                        <span className="block text-ui-caption leading-relaxed text-muted-foreground">
-                          {display.desc}
-                        </span>
-                      </span>
-                      {active && <Check className="mt-0.5 size-3.5 shrink-0 text-primary" />}
-                    </button>
+                    />
                   );
                 })}
-              </div>
+              </OptionGroup>
             </div>
           )}
 
           {step === "done" && (
             <div className="space-y-2">
               <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-3 text-center">
-                <Sparkles className="mx-auto size-5 text-primary" />
+                <Sparkles className={`mx-auto ${ICON_DISPLAY} text-primary`} />
                 <div className="mt-1 text-ui-body font-semibold text-foreground">{t("配置完成")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
                   {t("可以开始对话了；其余设置在 ⚙ 中随时可改。")}
@@ -605,10 +549,10 @@ export function OnboardingWizard({
                   {t("这些能力可以稍后再设置。")}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  <button className={BTN} onClick={() => finish("appearance")}>{t("外观与交互")}</button>
-                  <button className={BTN} onClick={() => finish("mcp")}>{t("MCP 服务器")}</button>
-                  <button className={BTN} onClick={() => finish("policy")}>{t("审批策略")}</button>
-                  <button className={BTN} onClick={() => finish("memory")}>{t("记忆")}</button>
+                  <Button onClick={() => finish("appearance")}>{t("外观与交互")}</Button>
+                  <Button onClick={() => finish("mcp")}>{t("MCP 服务器")}</Button>
+                  <Button onClick={() => finish("policy")}>{t("审批策略")}</Button>
+                  <Button onClick={() => finish("memory")}>{t("记忆")}</Button>
                 </div>
               </div>
             </div>

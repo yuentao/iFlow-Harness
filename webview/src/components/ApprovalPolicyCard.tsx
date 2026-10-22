@@ -3,7 +3,19 @@ import { Pencil, Plus, ShieldCheck, ShieldQuestion, ShieldX, Trash2 } from "luci
 import type { ApprovalAction, ApprovalRule } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, ConfirmDialog, SAVE_BTN, ActionRow, Field, Hint } from "./ui";
+import {
+  ActionRow,
+  Button,
+  Checkbox,
+  ConfirmDialog,
+  Field,
+  Hint,
+  ICON_INLINE,
+  IconButton,
+  Select,
+  TextInput,
+  ToggleChip,
+} from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -151,24 +163,18 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           <span className="shrink-0 text-ui-label text-muted-foreground">{t(ACTION_LABEL[rule.action])}</span>
           {!readOnly && (
             <>
-              <label
-                className="shrink-0 cursor-pointer text-ui-label text-muted-foreground"
+              <Checkbox
+                label={t("启用")}
                 title={rule.enabled ? t("点击停用") : t("点击启用")}
-              >
-                <input
-                  type="checkbox"
-                  className="mr-0.5 align-[-1px] accent-[var(--color-primary)]"
-                  checked={rule.enabled}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setRules((prev) => (prev ?? []).map((r) => (r.id === rule.id ? { ...r, enabled: checked } : r)));
-                  }}
-                />
-                {t("启用")}
-              </label>
-              <button
-                className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                title={t("编辑")}
+                checked={rule.enabled}
+                onChange={(checked) =>
+                  setRules((prev) => (prev ?? []).map((r) => (r.id === rule.id ? { ...r, enabled: checked } : r)))
+                }
+              />
+              <IconButton
+                icon={<Pencil className={ICON_INLINE} />}
+                label={t("编辑")}
+                size="sm"
                 onClick={() => {
                   setEditing({
                     rule: { ...rule },
@@ -176,17 +182,14 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                   });
                   setEditError(null);
                 }}
-              >
-                <Pencil className="size-3.5" />
-              </button>
-              <button
-                data-variant="danger"
-                className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
-                title={t("删除 {0}", rule.label)}
+              />
+              <IconButton
+                icon={<Trash2 className={ICON_INLINE} />}
+                label={t("删除 {0}", rule.label)}
+                size="sm"
+                tone="danger"
                 onClick={() => setConfirmDelete(rule.id)}
-              >
-                <Trash2 className="size-3.5" />
-              </button>
+              />
             </>
           )}
         </div>
@@ -227,8 +230,8 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           )}
 
           <ActionRow className="mt-2">
-            <button
-              className={BTN}
+            <Button
+              icon={<Plus className={ICON_INLINE} />}
               disabled={rules === null}
               onClick={() => {
                 setEditing({
@@ -238,12 +241,11 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 setEditError(null);
               }}
             >
-              <Plus className="size-3.5" />
               {t("添加")}
-            </button>
-            <button className={SAVE_BTN} disabled={busy || rules === null || savedFlash} onClick={save}>
+            </Button>
+            <Button variant="primary" disabled={busy || rules === null || savedFlash} onClick={save}>
               {savedFlash ? t("已保存") : t("保存")}
-            </button>
+            </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </ActionRow>
           <Hint className="mt-2">
@@ -257,9 +259,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
       {editing && (
         <div className="space-y-2">
           <Field label={t("规则名称")}>
-            <input
-              type="text"
-              className={INPUT}
+            <TextInput
               value={editing.rule.label}
               placeholder={t("如 允许读取 src 下文件")}
               onChange={(e) => {
@@ -269,54 +269,45 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             />
           </Field>
           <Field label={t("动作")}>
-            <select
-              className={INPUT}
+            <Select
+              ariaLabel={t("动作")}
+              options={[
+                { value: "allow", label: t("自动允许") },
+                { value: "deny", label: t("自动拒绝") },
+                { value: "ask", label: t("弹卡确认") },
+              ]}
               value={editing.rule.action}
-              onChange={(e) => {
-                const action = e.target.value as ApprovalAction;
-                setEditing({ ...editing, rule: { ...editing.rule, action } });
+              onChange={(action) => {
+                setEditing({ ...editing, rule: { ...editing.rule, action: action as ApprovalAction } });
               }}
-            >
-              <option value="allow">{t("自动允许")}</option>
-              <option value="deny">{t("自动拒绝")}</option>
-              <option value="ask">{t("弹卡确认")}</option>
-            </select>
+            />
           </Field>
           <div className="flex flex-wrap gap-1">
-            {KINDS.map((kind) => {
-              const active = editing.rule.kinds?.includes(kind) ?? false;
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  className={`press rounded-full border px-2 py-0.5 font-mono text-ui-label transition-all duration-200 ${
-                    active
-                      ? "border-primary/50 bg-primary/15 text-foreground"
-                      : "border-border text-muted-foreground hover:border-primary/30"
-                  }`}
-                  onClick={() => {
-                    const kinds = new Set(editing.rule.kinds ?? []);
-                    if (kinds.has(kind)) kinds.delete(kind);
-                    else kinds.add(kind);
-                    const list = KINDS.filter((k) => kinds.has(k));
-                    setEditing({
-                      ...editing,
-                      rule: { ...editing.rule, kinds: list.length > 0 ? list : undefined },
-                    });
-                  }}
-                >
-                  {kind}
-                </button>
-              );
-            })}
+            {KINDS.map((kind) => (
+              <ToggleChip
+                key={kind}
+                mono
+                active={editing.rule.kinds?.includes(kind) ?? false}
+                onClick={() => {
+                  const kinds = new Set(editing.rule.kinds ?? []);
+                  if (kinds.has(kind)) kinds.delete(kind);
+                  else kinds.add(kind);
+                  const list = KINDS.filter((k) => kinds.has(k));
+                  setEditing({
+                    ...editing,
+                    rule: { ...editing.rule, kinds: list.length > 0 ? list : undefined },
+                  });
+                }}
+              >
+                {kind}
+              </ToggleChip>
+            ))}
           </div>
           <Field label={t("路径通配（相对会话目录）")}>
-            <input
-              type="text"
-              className={`${INPUT} font-mono`}
+            <TextInput
+              mono
               value={editing.rule.path ?? ""}
               placeholder="src/**/*.ts"
-              spellCheck={false}
               onChange={(e) => {
                 const v = e.target.value.trim();
                 setEditing({ ...editing, rule: { ...editing.rule, path: v || undefined } });
@@ -324,12 +315,10 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             />
           </Field>
           <Field label={t("命令首词（逗号分隔，仅执行类）")}>
-            <input
-              type="text"
-              className={`${INPUT} font-mono`}
+            <TextInput
+              mono
               value={(editing.rule.commands ?? []).join(", ")}
               placeholder="git, npm"
-              spellCheck={false}
               onChange={(e) => {
                 setEditing({ ...editing, rule: { ...editing.rule, commands: parseList(e.target.value) } });
               }}
@@ -337,9 +326,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           </Field>
           <div className="flex flex-wrap gap-2">
             <Field label={t("MCP 服务器名")} className="min-w-0 flex-1">
-              <input
-                type="text"
-                className={INPUT}
+              <TextInput
                 value={editing.rule.server ?? ""}
                 onChange={(e) => {
                   const v = e.target.value.trim();
@@ -348,9 +335,8 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               />
             </Field>
             <Field label={t("工具名（精确匹配）")} className="min-w-0 flex-1">
-              <input
-                type="text"
-                className={`${INPUT} font-mono`}
+              <TextInput
+                mono
                 value={editing.rule.tool ?? ""}
                 onChange={(e) => {
                   const v = e.target.value.trim();
@@ -360,9 +346,9 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             </Field>
           </div>
           <ActionRow>
-            <button className={BTN} onClick={() => closeEditor(true)}>
+            <Button onClick={() => closeEditor(true)}>
               {t("完成")}
-            </button>
+            </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </ActionRow>
           <Hint>

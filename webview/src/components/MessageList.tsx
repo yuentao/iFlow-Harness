@@ -41,7 +41,6 @@ import {
   Wrench,
   X,
   XCircle,
-  AlertTriangle,
   Info,
   Zap,
 } from "lucide-react";
@@ -61,7 +60,7 @@ import { Markdown, copyText } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
-import { Chip, ConfirmDialog, FileRef, ICON_INLINE } from "./ui";
+import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, TextArea, ToastStack } from "./ui";
 import logo from "../assets/iflow.svg";
 
 const KIND_ICON: Record<string, typeof Eye> = {
@@ -445,22 +444,18 @@ function ToolCard({ block }: { block: ToolBlock }) {
               @terminal 持续订阅。预填不自动执行，重跑立即回车。 */}
           {presentation.accent === "execute" && block.input && (
             <>
-              <button
-                className="press rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-                title={t("在终端中打开（预填命令，不自动执行）")}
-                aria-label={t("在终端中打开（预填命令，不自动执行）")}
+              <IconButton
+                icon={<SquareTerminal className={ICON_INLINE} />}
+                label={t("在终端中打开（预填命令，不自动执行）")}
+                size="sm"
                 onClick={() => send({ type: "runInTerminal", toolCallId: block.toolCallId, execute: false })}
-              >
-                <SquareTerminal className="size-3.5" />
-              </button>
-              <button
-                className="press rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-                title={t("在集成终端重跑该命令")}
-                aria-label={t("在集成终端重跑该命令")}
+              />
+              <IconButton
+                icon={<Play className={ICON_INLINE} />}
+                label={t("在集成终端重跑该命令")}
+                size="sm"
                 onClick={() => send({ type: "runInTerminal", toolCallId: block.toolCallId, execute: true })}
-              >
-                <Play className="size-3.5" />
-              </button>
+              />
             </>
           )}
           {block.reverted && (
@@ -499,20 +494,24 @@ function ToolCard({ block }: { block: ToolBlock }) {
             <>
               {completedWithDiff && (
                 <>
-                  <button
-                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
+                  <Button
+                    variant="canvas"
+                    className="rounded-lg"
+                    icon={<Undo2 className="size-3" />}
                     title={t("将该文件恢复为编辑前内容")}
                     onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
                   >
-                    <Undo2 className="size-3" /> {t("回退此改动")}
-                  </button>
-                  <button
-                    className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
+                    {t("回退此改动")}
+                  </Button>
+                  <Button
+                    variant="canvas"
+                    className="rounded-lg"
+                    icon={<Columns2 className="size-3" />}
                     title={t("在 VSCode diff 视图中查看该变更")}
                     onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
                   >
-                    <Columns2 className="size-3" /> {t("文件对比")}
-                  </button>
+                    {t("文件对比")}
+                  </Button>
                 </>
               )}
             </>
@@ -649,11 +648,13 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
         )}
         <span className="ml-auto shrink-0">{statusChip}</span>
         {canStop && (
-          <button className="press shrink-0 rounded p-1 text-muted-foreground hover:text-destructive"
-            title={t("停止此子代理")} aria-label={t("停止此子代理")}
-            onClick={() => send({ type: "stopSubagent", sessionId: state!.sessionId!, agentId: block.agentId })}>
-            <Square className="size-3" />
-          </button>
+          <IconButton
+            icon={<Square className="size-3" />}
+            label={t("停止此子代理")}
+            size="sm"
+            tone="danger"
+            onClick={() => send({ type: "stopSubagent", sessionId: state!.sessionId!, agentId: block.agentId })}
+          />
         )}
       </div>
       <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-ui-caption text-muted-foreground">
@@ -904,10 +905,11 @@ function UserMessage({
              everything after it (checkpoint restore first when available),
              so the editor replaces the bubble rather than cloning it. */
           <div className="w-full min-w-[280px]" onClick={(e) => e.stopPropagation()}>
-            <textarea
-              className="max-h-64 min-h-16 w-full resize-y rounded-lg border border-border bg-panel/80 px-2 py-1.5 text-ui-body leading-relaxed text-foreground outline-none focus:border-primary/60"
+            <TextArea
+              className="max-h-64 min-h-16 w-full leading-relaxed"
               value={draft}
               rows={Math.min(12, Math.max(3, draft.split("\n").length + 1))}
+              aria-label={t("编辑消息")}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -923,20 +925,18 @@ function UserMessage({
               <span className="mr-auto text-ui-caption text-muted-foreground">
                 {checkpoint && !checkpoint.partial ? t("重发将先回滚该轮文件变更并删除其后的对话") : t("重发将删除该消息及其后所有对话")}
               </span>
-              <button
-                className="press rounded-md px-2 py-0.5 text-ui-caption font-medium text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
-                onClick={cancelEdit}
-              >
+              <Button variant="ghost" size="sm" onClick={cancelEdit}>
                 {t("取消")}
-              </button>
-              <button
-                className="press rounded-md bg-primary px-2.5 py-0.5 text-ui-caption font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
                 disabled={!draft.trim()}
                 title={t("重发")}
                 onClick={submitEdit}
               >
                 {t("重发")}
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
@@ -1324,33 +1324,27 @@ const BlockView = memo(function BlockView({
                   containment sheared 4px off the buttons' bottom edge. */}
               {canCopy && (
                 <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-[18px] items-center gap-0.5 rounded-md bg-card px-1 opacity-0 shadow-card outline-1 outline-[color:var(--border)] transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                  <button
-                    className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
-                    title={t("复制")}
-                    aria-label={t("复制")}
+                  <IconButton
+                    icon={<Copy className="size-3" />}
+                    label={t("复制")}
+                    size="sm"
                     onClick={() => void copyText(block.text)}
-                  >
-                    <Copy className="size-3" />
-                  </button>
+                  />
                   {isLatest && canCopy && canRegenerate && (
-                    <button
-                      className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
-                      title={t("重新生成")}
-                      aria-label={t("重新生成")}
+                    <IconButton
+                      icon={<RefreshCw className="size-3" />}
+                      label={t("重新生成")}
+                      size="sm"
                       onClick={onRegenerate}
-                    >
-                      <RefreshCw className="size-3" />
-                    </button>
+                    />
                   )}
                   {onRemember && (
-                    <button
-                      className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
-                      title={t("记住这条")}
-                      aria-label={t("记住这条")}
+                    <IconButton
+                      icon={<Bookmark className="size-3" />}
+                      label={t("记住这条")}
+                      size="sm"
                       onClick={() => onRemember?.(block.text)}
-                    >
-                      <Bookmark className="size-3" />
-                    </button>
+                    />
                   )}
                 </div>
               )}
@@ -1843,14 +1837,15 @@ function MessageListInner({ state }: { state: SessionState }) {
               </div>
               <div className="mt-3 flex flex-col items-stretch gap-1.5">
                 {EXAMPLE_PROMPTS.map((ex) => (
-                  <button
+                  <Button
                     key={ex}
-                    className="press inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card transition-colors hover:bg-surface hover:text-foreground"
+                    variant="canvas"
+                    className="justify-start rounded-lg text-muted-foreground hover:bg-surface hover:text-foreground"
+                    icon={<Sparkles className="size-3 shrink-0 text-primary/70" />}
                     onClick={() => useChat.getState().requestDraft(t(ex))}
                   >
-                    <Sparkles className="size-3 shrink-0 text-primary/70" />
                     <span className="truncate">{t(ex)}</span>
-                  </button>
+                  </Button>
                 ))}
               </div>
               <p className="mt-3 text-ui-caption leading-relaxed text-muted-foreground/80">
@@ -1863,13 +1858,13 @@ function MessageListInner({ state }: { state: SessionState }) {
             // more history when this approaches the viewport; the button is
             // the explicit fallback (and shows how much is still hidden).
             <div ref={sentinelRef} className="flex justify-center">
-              <button
+              <FloatChip
+                className="text-muted-foreground hover:bg-surface hover:text-foreground"
                 onClick={expandOlder}
-                className="press inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption text-muted-foreground shadow-float transition-colors hover:bg-surface hover:text-foreground"
               >
                 <ChevronUp className="size-3" />
                 {t("展开更早 {0} 条消息", start)}
-              </button>
+              </FloatChip>
             </div>
           )}
           {visibleBlocks.slice(start).map((block, offset) => {
@@ -1966,11 +1961,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
               ref={bandRef}
             >
-              <div
-                className={`inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-ui-caption font-medium shadow-float ${
-                  mergedNotice ? "border border-warning/50 bg-warning/15 text-warning backdrop-blur-md" : "bg-primary text-primary-foreground"
-                }`}
-              >
+              <FloatPill tone={mergedNotice ? "warning" : "primary"} size="sm">
                 <Loader2 className="size-3 animate-spin" />
                 {state.initializing
                   ? t("正在创建新会话…")
@@ -1988,7 +1979,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                       : isPlanMode(state.modes)
                         ? t("正在规划")
                         : t("正在生成")}
-              </div>
+              </FloatPill>
             </div>
           )}
           {state.replaying && (
@@ -2001,17 +1992,17 @@ function MessageListInner({ state }: { state: SessionState }) {
               style={{ bottom: "calc(0.5rem + var(--pending-card-h, 0px))" }}
               ref={bandRef}
             >
-              <div className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-1.5 text-ui-caption font-medium text-primary-foreground shadow-float">
+              <FloatPill tone="primary" size="sm">
                 <Loader2 className="size-3 animate-spin" />
                 {t("正在恢复历史会话…")}
-              </div>
+              </FloatPill>
             </div>
           )}
         </div>
       </div>
       {showJump && !editingBlockId && (
-        <button
-          className="press jump-pulse absolute bottom-3 right-4 z-20 inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-float hover:bg-surface-2"
+        <FloatChip
+          className="jump-pulse absolute right-4 z-20"
           style={{ bottom: "calc(0.75rem + var(--pending-card-h, 0px))" }}
           onClick={() => {
             stickToBottom.current = true;
@@ -2021,268 +2012,13 @@ function MessageListInner({ state }: { state: SessionState }) {
         >
           <ArrowDown className="inline size-3 align-[-1px]" />
           {t("回到最新")}
-        </button>
+        </FloatChip>
       )}
-      <Toasts
+      <ToastStack
         skipToastId={mergedNotice?.id}
         suppressCompressAction={compressActionHidden}
         rideBand={bandVisible}
       />
-    </div>
-  );
-}
-
-/** Transient host notices (rate-limit retry / context-overflow compress),
- * rendered as a centered stack above the streaming indicator. Plain toasts
- * auto-dismiss on a timer and dismiss early on click; countdown retries and
- * display-only/persistent pills are not clickable — persistent ones stay
- * until the host removes them (dismissToast). Sticky pills (auto-memory
- * candidates) never auto-dismiss but the user may close them. */
-function Toasts({
-  skipToastId,
-  suppressCompressAction,
-  rideBand,
-}: {
-  skipToastId?: number;
-  /** A turn owns the session: hide the 立即压缩 action (the host refuses it). */
-  suppressCompressAction?: boolean;
-  /** A sticky bottom band (生成中 / 恢复历史 pill) is on screen: the stack must
-   * ride above it, using its measured height (--stream-pill-h). */
-  rideBand?: boolean;
-}) {
-  const toasts = useChat((s) => s.toasts);
-  const visible = skipToastId === undefined ? toasts : toasts.filter((x) => x.id !== skipToastId);
-  if (visible.length === 0) return null;
-  return (
-    // P2-19: bottom-anchored pending cards (approval / plan / question, z-30)
-    // used to cover this stack. --pending-card-h (App's ResizeObserver on the
-    // shared wrapper) lifts the stack above the card, same pattern as the
-    // jump pill.
-    // --stream-pill-h keeps the band clear: the band is sticky, so with a short
-    // transcript it sits at the CONTENT end (higher than the viewport-bottom
-    // offset a fixed clearance would assume), and when pinned its bottom edge is
-    // already 1.5rem above the overlay bottom (the scroller's pb-4 + its own
-    // 0.5rem offset) — a hardcoded 3.5rem overlapped a wrapped band by ~12px
-    // (user screenshot 2026-10-21). 2.5rem = that 1.5rem + a 1rem gap.
-    // Without a band, 3.5rem is enough to clear the jump-to-latest chip.
-    <div
-      className="pointer-events-none absolute inset-x-0 z-20 flex flex-col items-center gap-1.5 px-3"
-      style={{
-        bottom: rideBand
-          ? "calc(2.5rem + var(--pending-card-h, 0px) + var(--stream-pill-h, 0px))"
-          : "calc(3.5rem + var(--pending-card-h, 0px))",
-      }}
-    >
-      {visible.map((t) => (
-        <ToastPill key={t.id} toast={t} suppressCompressAction={suppressCompressAction} />
-      ))}
-    </div>
-  );
-}
-
-/** Live countdown chip ("Ns"), anchored to the host's absolute epoch deadline
- * so the UI never drifts from message round-trip latency. Shared by the toast
- * stack pills and the streaming pill's merged countdown (UI-audit 4.9). */
-function CountdownSeconds({ deadline }: { deadline: number }) {
-  const [secs, setSecs] = useState(Math.ceil((deadline - Date.now()) / 1000));
-  useEffect(() => {
-    let last = -1;
-    const tick = () => {
-      const left = Math.max(0, deadline - Date.now());
-      const s = Math.ceil(left / 1000);
-      if (s !== last) {
-        last = s;
-        setSecs(s);
-      }
-    };
-    tick();
-    const iv = setInterval(tick, 250);
-    return () => clearInterval(iv);
-  }, [deadline]);
-  return <span className="ml-0.5 shrink-0 font-mono tabular-nums opacity-80">{secs}s</span>;
-}
-
-/** Sticky pills that ask the user for a decision carry their own domain icon,
- * so a memory proposal reads as part of the memory family (Brain, as in the
- * review dialog / quick-add / composer chip) instead of a generic info dot. */
-const TOAST_ACTION_ICON: Record<string, typeof Info> = {
-  "memory-review": Brain,
-};
-
-/** Decision-card species for a sticky notice that carries previews (the
- * auto-memory candidate batch): the approval-card family — eyebrow + title,
- * the lines that would be written, and one actions row. The primary button is
- * the ONLY forward channel (it opens the review dialog); 「忽略」and the header
- * X retire the notice, so no second affordance competes with the decision. */
-function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number) => void }) {
-  const previews = toast.preview ?? [];
-  return (
-    <div className="acrylic glow-ring card-lift pointer-events-auto stream-in w-full max-w-[min(100%,34rem)] rounded-xl border border-primary/45">
-      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-        <Brain className={`${ICON_INLINE} shrink-0 text-primary`} />
-        <span className="block min-w-0 flex-1 space-y-0.5">
-          <span className="block text-ui-micro tracking-wide text-muted-foreground/85">
-            {t("iFlow 建议沉淀记忆")}
-          </span>
-          <span className="block truncate text-ui-label font-semibold leading-tight">{toast.message}</span>
-        </span>
-        <button
-          type="button"
-          onClick={() => dismiss(toast.id)}
-          aria-label={t("关闭")}
-          title={t("关闭")}
-          className="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-surface hover:text-foreground active:scale-95"
-        >
-          <X className="size-3.5" />
-        </button>
-      </div>
-      {previews.length > 0 && (
-        <div className="space-y-1 px-3 py-2">
-          {previews.map((item, index) => (
-            <div key={index} className="flex items-start gap-1.5">
-              <Chip tone={item.scope === "project" ? "primary" : "muted"}>
-                {item.scope === "project" ? t("项目") : t("全局")}
-              </Chip>
-              <span className="min-w-0 flex-1 break-words text-ui-caption leading-relaxed text-foreground/90">
-                {item.text}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 px-3 py-2">
-        {toast.action && (
-          <button
-            onClick={() =>
-              useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
-            }
-            className="press inline-flex h-6 items-center justify-center gap-1 rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105"
-          >
-            <Check className="size-3.5 shrink-0" />
-            {toast.action.label}
-          </button>
-        )}
-        <button
-          onClick={() => dismiss(toast.id)}
-          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-surface/80 px-2.5 text-ui-caption text-muted-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:bg-surface-2 hover:text-foreground"
-        >
-          {t("忽略")}
-        </button>
-        <span className="ml-auto text-ui-micro text-muted-foreground/80">{t("确认后才会写入记忆")}</span>
-      </div>
-    </div>
-  );
-}
-
-/** One toast pill — overlay species, not a transcript card: the bottom floating
- * chip family (streaming pill / jump-to-latest / expand-older are capsules), so
- * it rounds full rather than taking the 12px card radius — a pill sitting next
- * to the merged streaming pill must read as one species. The acrylic popup
- * surface (near-opaque tint + inner edge + panel shadow) for quiet notices, the
- * primary accent for decision pills (same family as the approval card), 13px
- * body and 24px controls so it never reads as a footnote.
- * A host-owned info wait spins (Loader2) like the streaming pill rather than
- * showing a static icon; tone carries the level. */
-function ToastPill({
-  toast,
-  suppressCompressAction,
-}: {
-  toast: ToastItem;
-  suppressCompressAction?: boolean;
-}) {
-  const dismiss = useChat((s) => s.dismissToast);
-  // A preview-bearing sticky notice is a decision, not a status line: it gets
-  // the card species (what would be written + one explicit confirm channel).
-  if (toast.sticky && toast.preview && toast.preview.length > 0) {
-    return <ToastCard toast={toast} dismiss={dismiss} />;
-  }
-  const waiting = toast.level === "info" && toast.displayOnly;
-  const Icon =
-    toast.level === "warning"
-      ? AlertTriangle
-      : toast.level === "error"
-        ? XCircle
-        : waiting
-          ? Loader2
-          : TOAST_ACTION_ICON[toast.action?.actionId ?? ""] ?? Info;
-  const tone =
-    toast.level === "error"
-      ? "border-destructive/45 bg-destructive/15 text-destructive shadow-float backdrop-blur-md"
-      : toast.level === "warning"
-        ? "border-warning/45 bg-warning/15 text-warning shadow-float backdrop-blur-md"
-        : toast.sticky
-          ? "acrylic-pop border-primary/45 text-foreground shadow-float"
-          : "acrylic-pop border-border text-foreground shadow-float";
-  const body = (
-    <>
-      <Icon
-        className={`${ICON_INLINE} shrink-0 ${waiting || toast.level === "info" ? "text-primary" : ""} ${waiting ? "animate-spin" : ""}`}
-      />
-      <span className="break-words text-left">{toast.message}</span>
-      {toast.countdownDeadline !== undefined && <CountdownSeconds deadline={toast.countdownDeadline} />}
-    </>
-  );
-  // M1 P0-6: an inline action (e.g. 立即压缩) rides its own button — the pill
-  // body stays non-clickable when host-owned (persistent/display-only). The
-  // compress action is suppressed while a turn owns the session (the host
-  // refuses concurrent compression), so it is reachable only when idle.
-  const actionHidden = suppressCompressAction && toast.action?.actionId === "compress";
-  const actionButton =
-    toast.action &&
-    !actionHidden && (
-      <button
-        onClick={() =>
-          useChat.getState().send({ type: "toastAction", actionId: toast.action!.actionId, toastId: toast.toastId })
-        }
-        className={`press ml-1 inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md px-2.5 text-ui-caption transition-all duration-200 ${
-          toast.sticky
-            ? "bg-gradient-to-b from-primary to-primary/90 font-semibold text-primary-foreground shadow-btn hover:shadow-btn-hover hover:brightness-105"
-            : "border border-current/45 font-medium opacity-90 hover:opacity-100"
-        }`}
-      >
-        {toast.action.label}
-      </button>
-    );
-  // Sticky pills (auto-memory candidates) stay until the user closes them or
-  // the host dismisses them; the explicit X is a 24px icon button like the
-  // other dense card controls.
-  const closeButton = (
-    <button
-      type="button"
-      onClick={() => dismiss(toast.id)}
-      aria-label={t("关闭")}
-      title={t("关闭")}
-      className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-all duration-200 hover:bg-surface hover:text-foreground active:scale-95"
-    >
-      <X className="size-3.5" />
-    </button>
-  );
-  // Click semantics unchanged: sticky pills close on the message body, plain
-  // toasts dismiss on click, and host-owned waits (countdown / display-only /
-  // persistent) stay non-clickable because the host owns their lifecycle. An
-  // actionable pill is never wrapped in the dismiss <button> — nesting buttons
-  // is invalid HTML and used to swallow the whole action (memory-review path).
-  const clickable =
-    toast.sticky
-    || !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || toast.action);
-  return (
-    <div
-      className={`pointer-events-auto stream-in flex max-w-[92%] items-center gap-1.5 rounded-full px-3 py-2 text-ui-label leading-snug ${tone}`}
-    >
-      {clickable ? (
-        <button
-          type="button"
-          onClick={() => dismiss(toast.id)}
-          title={toast.sticky ? t("关闭") : undefined}
-          className="flex min-w-0 items-center gap-1.5 text-left"
-        >
-          {body}
-        </button>
-      ) : (
-        <span className="flex min-w-0 items-center gap-1.5 text-left">{body}</span>
-      )}
-      {actionButton}
-      {toast.sticky ? closeButton : null}
     </div>
   );
 }

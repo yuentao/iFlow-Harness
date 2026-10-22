@@ -289,10 +289,12 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     const ignore = buttons.find((b) => b.textContent?.includes("忽略"));
     expect(primary?.className).toContain("h-6");
     expect(ignore?.className).toContain("h-6");
-    // Both buttons ride the button species (shadow-btn); shadow-card's third
-    // layer (-12px spread) collapses on a 24px-tall button.
+    // The primary rides the button species (shadow-btn); the secondary is the
+    // kit's border-only surface (no shadow). Neither may take shadow-card: its
+    // third layer (-12px spread) collapses on a 24px-tall button.
     expect(primary?.className).toContain("shadow-btn");
-    expect(ignore?.className).toContain("shadow-btn");
+    expect(ignore?.className).not.toContain("shadow-card");
+    expect(ignore?.className).not.toContain("shadow-panel");
     expect(card.querySelector('[aria-label="关闭"]')?.className).toContain("size-6");
     expect(card.textContent).toContain("确认后才会写入记忆");
     // Buttons stay siblings: nesting the action inside a dismiss button used to

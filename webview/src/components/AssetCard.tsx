@@ -8,7 +8,7 @@ import type {
 } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, SAVE_BTN, ActionRow, Field, GHOST_BTN, Hint, SecondaryRow, Segmented, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Field, Hint, IconButton, ICON_INLINE, Segmented, TextArea, TextInput, SecondaryRow, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 
 /** Editor-state header override a section reports to the settings shell. */
@@ -394,8 +394,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             options={KIND_TABS.map((tab) => ({ value: tab.kind, label: tab.label }))}
           />
           <ToolbarRow>
-            <button
-              className={BTN}
+            <Button
+              variant="secondary"
+              icon={<Plus className={ICON_INLINE} />}
               disabled={state === null || !!loadError || saving}
               onClick={() => {
                 closeCreate();
@@ -403,9 +404,8 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 setEditError(null);
               }}
             >
-              <Plus className="size-3.5" />
               {t("新建")}
-            </button>
+            </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="ml-auto text-ui-label text-warning">
@@ -417,14 +417,14 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             )}
           </ToolbarRow>
           <SecondaryRow>
-            <button
-              className={GHOST_BTN}
+            <Button
+              variant="ghost"
+              icon={<RefreshCw className={ICON_INLINE} />}
               disabled={saving || (state === null && !loadError)}
               onClick={refresh}
             >
-              <RefreshCw className="size-3.5" />
               {refreshing ? t("刷新中…") : t("刷新")}
-            </button>
+            </Button>
           </SecondaryRow>
           {state === null ? (
             <div className="py-4 text-center text-ui-body text-muted-foreground">{t("扫描中…")}</div>
@@ -454,9 +454,10 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                         {item.shadowed && (
                           <Chip tone="warning">{t("全局同名遮蔽")}</Chip>
                         )}
-                        <button
-                          className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                          title={t("详情")}
+                        <IconButton
+                          icon={<ChevronRight className={ICON_INLINE} />}
+                          label={t("详情")}
+                          size="sm"
                           disabled={saving || !!loadError}
                           onClick={() => {
                             setDetail({ path: item.path, hash: item.hash });
@@ -464,30 +465,26 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                             setEditError(null);
                             requestOpen(item.path, "detail");
                           }}
-                        >
-                          <ChevronRight className="size-3.5" />
-                        </button>
-                        <button
-                          className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                          title={t("编辑")}
+                        />
+                        <IconButton
+                          icon={<Pencil className={ICON_INLINE} />}
+                          label={t("编辑")}
+                          size="sm"
                           disabled={saving || !!loadError || !item.editable}
                           onClick={() => {
                             setEditing({ path: item.path, content: "", hash: null });
                             setEditError(null);
                             requestOpen(item.path, "edit");
                           }}
-                        >
-                          <Pencil className="size-3.5" />
-                        </button>
+                        />
                         {!saving && !loadError && (
-                          <button
-                            data-variant="danger"
-                            className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-destructive/10 hover:text-destructive hover:opacity-100"
-                            title={t("删除 {0}", item.name)}
+                          <IconButton
+                            icon={<Trash2 className={ICON_INLINE} />}
+                            label={t("删除 {0}", item.name)}
+                            size="sm"
+                            tone="danger"
                             onClick={() => setConfirmDelete(item.path)}
-                          >
-                            <Trash2 className="size-3.5" />
-                          </button>
+                          />
                         )}
                       </div>
                       {item.description && (
@@ -534,8 +531,8 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           )}
           {detailContent !== null && (
             <ActionRow>
-              <button
-                className={BTN}
+              <Button
+                variant="secondary"
                 onClick={() => {
                   setEditing({ path: detail.path, content: detailContent, hash: detail.hash });
                   setDetail(null);
@@ -544,7 +541,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                 }}
               >
                 {t("编辑")}
-              </button>
+              </Button>
             </ActionRow>
           )}
         </div>
@@ -556,8 +553,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
           ) : (
             <Field label={t("文件内容（markdown + frontmatter）")}>
-              <textarea
-                className={`${INPUT} min-h-40 resize-y font-mono text-ui-label leading-relaxed`}
+              <TextArea
+                mono
+                className="min-h-40 resize-y text-ui-label leading-relaxed"
                 spellCheck={false}
                 value={editing.content}
                 onChange={(e) => {
@@ -570,9 +568,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             </Field>
           )}
           <ActionRow>
-            <button className={SAVE_BTN} disabled={editLoading !== null} onClick={saveEditing}>
+            <Button variant="primary" disabled={editLoading !== null} onClick={saveEditing}>
               {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
-            </button>
+            </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="text-ui-label text-warning">
@@ -588,55 +586,37 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
 
       {creating !== null && (
         <div className="space-y-2">
-          <ActionRow>
-            {(["command", "agent", "skill"] as AssetKind[]).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                aria-current={creating.kind === kind ? "true" : undefined}
-                className={`press shrink-0 rounded-lg px-2 py-1 text-ui-label font-medium transition-colors duration-150 ${
-                  creating.kind === kind
-                    ? "bg-primary/15 font-semibold text-primary"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                }`}
-                onClick={() => {
-                  // A kind switch legitimately needs that kind's skeleton
-                  // (frontmatter keys differ), so the draft is reset here.
-                  bodyTouched.current = false;
-                  setGenError(null);
-                  setCreating((current) =>
-                    current && { ...current, kind, body: templateBody(kind, current.name.trim()) },
-                  );
-                }}
-              >
-                {kindLabel(kind)}
-              </button>
-            ))}
-          </ActionRow>
-          <ActionRow>
-            {(["global", "project"] as AssetScope[]).map((scope) => (
-              <button
-                key={scope}
-                type="button"
-                aria-current={creating.scope === scope ? "true" : undefined}
-                disabled={scope === "project" && state?.cwd === null}
-                className={`press shrink-0 rounded-lg px-2 py-1 text-ui-label font-medium transition-colors duration-150 ${
-                  creating.scope === scope
-                    ? "bg-primary/15 font-semibold text-primary"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                }`}
-                onClick={() => {
-                  setCreating((current) => (current ? { ...current, scope } : null));
-                }}
-              >
-                {scopeLabel(scope)}
-              </button>
-            ))}
-          </ActionRow>
+          <div className="flex flex-wrap items-center gap-2">
+            <Segmented
+              ariaLabel={t("资产类型")}
+              value={creating.kind}
+              onChange={(kind) => {
+                // A kind switch legitimately needs that kind's skeleton
+                // (frontmatter keys differ), so the draft is reset here.
+                bodyTouched.current = false;
+                setGenError(null);
+                setCreating((current) =>
+                  current && { ...current, kind, body: templateBody(kind, current.name.trim()) },
+                );
+              }}
+              options={(["command", "agent", "skill"] as AssetKind[]).map((kind) => ({
+                value: kind,
+                label: kindLabel(kind),
+              }))}
+            />
+            <Segmented
+              ariaLabel={t("保存位置")}
+              value={creating.scope}
+              onChange={(scope) => setCreating((current) => (current ? { ...current, scope } : null))}
+              options={(["global", "project"] as AssetScope[]).map((scope) => ({
+                value: scope,
+                label: scopeLabel(scope),
+                disabled: scope === "project" && state?.cwd === null,
+              }))}
+            />
+          </div>
           <Field label={t("名称")}>
-            <input
-              type="text"
-              className={INPUT}
+            <TextInput
               value={creating.name}
               placeholder={t("如 fix-tests")}
               onChange={(e) => {
@@ -655,8 +635,8 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           </Field>
           <div className="rounded-lg border border-border/70 bg-surface/40 px-2 py-1.5">
             <Field label={t("需求描述（用于 AI 生成）")}>
-              <textarea
-                className={`${INPUT} min-h-16 resize-y leading-relaxed`}
+              <TextArea
+                className="min-h-16 resize-y leading-relaxed"
                 value={genRequirement}
                 placeholder={t("如：检查本次改动的类型错误并给出修复步骤")}
                 onChange={(e) => {
@@ -666,16 +646,21 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               />
             </Field>
             <ActionRow className="mt-2">
-              <button className={BTN} disabled={generating || saving} onClick={generateBody}>
-                <Sparkles className="size-3.5" />
+              <Button
+                variant="secondary"
+                icon={<Sparkles className={ICON_INLINE} />}
+                disabled={generating || saving}
+                onClick={generateBody}
+              >
                 {generating ? t("生成中…") : t("AI 生成内容")}
-              </button>
+              </Button>
               {genError && <span className="text-ui-body text-destructive">{genError}</span>}
             </ActionRow>
           </div>
           <Field label={t("内容（frontmatter 模板，可直接改）")}>
-            <textarea
-              className={`${INPUT} min-h-40 resize-y font-mono text-ui-label leading-relaxed`}
+            <TextArea
+              mono
+              className="min-h-40 resize-y text-ui-label leading-relaxed"
               spellCheck={false}
               value={creating.body}
               onChange={(e) => {
@@ -686,9 +671,9 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             />
           </Field>
           <ActionRow>
-            <button className={SAVE_BTN} disabled={generating} onClick={createAsset}>
+            <Button variant="primary" disabled={generating} onClick={createAsset}>
               {saving ? t("创建中…") : savedFlash ? t("已创建") : t("创建")}
-            </button>
+            </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="text-ui-label text-warning">

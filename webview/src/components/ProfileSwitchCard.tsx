@@ -3,7 +3,7 @@ import { ArrowLeftRight, MessageSquare, PlusCircle } from "lucide-react";
 import type { PendingProfileSwitchUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { ModalShell } from "./ui";
+import { Button, ICON_INLINE, ModalShell } from "./ui";
 
 /**
  * Profile-switch choice dialog: a custom centered modal (same acrylic form
@@ -11,6 +11,7 @@ import { ModalShell } from "./ui";
  * dialog, which broke the panel's visual language. The user chooses how the
  * current conversation survives the switch:
  * - 停留在当前会话 → host reloads the SAME session under the new credentials
+ *   (the recommended side, so it carries the primary outline + light fill)
  * - 开启新会话     → host clears the transcript and starts fresh
  * - X / Escape / backdrop / 取消 → the ENTIRE switch is cancelled.
  * No countdown: this dialog blocks no agent, so it waits for the user
@@ -34,65 +35,55 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
     send({ type: "respondProfileSwitch", id: pending.id, keepSession });
   };
 
-  const OPTION =
-    "card-lift press flex w-full items-start gap-2 rounded-lg border px-2.5 py-2 text-left shadow-card transition-all duration-200 disabled:pointer-events-none disabled:opacity-40";
-
   return (
     <ModalShell
       role="alertdialog"
       ariaLabel={t("切换 API 配置")}
       title={t("切换 API 配置")}
-      icon={<ArrowLeftRight className="size-3.5 shrink-0 text-primary" />}
-      onClose={() => answer(null)}
+              icon={<ArrowLeftRight className={`${ICON_INLINE} shrink-0 text-primary`} />}      onClose={() => answer(null)}
       initialFocus="first"
     >
       <div className="space-y-3 px-3 py-3">
         <p className="text-ui-label leading-relaxed text-foreground/90">
           {t("切换到 API 配置「{0}」后，当前对话如何处理？", pending.profileName)}
         </p>
-        <button
-          type="button"
+        <Button
+          variant="outline-primary"
           disabled={answered}
           data-autofocus
           aria-label={t("停留在当前会话")}
-          className={`${OPTION} border-primary/50 bg-primary/10 hover:border-primary/70 hover:bg-primary/15`}
+          className="w-full items-start justify-start rounded-lg bg-primary/10 px-2.5 py-2 hover:bg-primary/15"
+          icon={<MessageSquare className={`${ICON_INLINE} mt-0.5 shrink-0 text-primary`} />}
           onClick={() => answer(true)}
         >
-          <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-primary" />
           <span className="min-w-0">
             <span className="block text-ui-label font-semibold text-foreground">{t("停留在当前会话")}</span>
             <span className="block text-ui-caption leading-relaxed text-muted-foreground">
               {t("保留当前对话，改用新配置继续")}
             </span>
           </span>
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="canvas"
           disabled={answered}
           aria-label={t("开启新会话")}
-          className={`${OPTION} border-border hover:border-destructive/40 hover:bg-destructive/10`}
+          className="w-full items-start justify-start rounded-lg px-2.5 py-2 hover:border-destructive/40 hover:bg-destructive/10"
+          icon={<PlusCircle className={`${ICON_INLINE} mt-0.5 shrink-0 text-muted-foreground`} />}
           onClick={() => answer(false)}
         >
-          <PlusCircle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
           <span className="min-w-0">
             <span className="block text-ui-label font-semibold text-foreground">{t("开启新会话")}</span>
             <span className="block text-ui-caption leading-relaxed text-muted-foreground">
               {t("以新配置开始新对话")}
             </span>
           </span>
-        </button>
+        </Button>
       </div>
 
       <div className="flex items-center justify-end gap-1.5 border-t border-border/60 px-3 py-2">
-        <button
-          type="button"
-          disabled={answered}
-          aria-label={t("取消切换")}
-          className="press rounded-lg border border-border px-2.5 py-1 text-ui-caption text-muted-foreground transition-all duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-          onClick={() => answer(null)}
-        >
+        <Button variant="secondary" size="sm" disabled={answered} aria-label={t("取消切换")} onClick={() => answer(null)}>
           {t("取消")}
-        </button>
+        </Button>
       </div>
     </ModalShell>
   );

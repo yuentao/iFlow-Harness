@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, RotateCcw } from "lucide-react";
 import { t } from "../i18n";
+import { ICON_DISPLAY } from "./ui";
 
 interface Props {
   children: ReactNode;
@@ -79,7 +80,7 @@ export class ErrorBoundary extends Component<Props, State> {
     return (
       <div className="relative min-h-0 flex-1">
         <div className="stream-in mx-auto mt-6 flex max-w-[420px] flex-col items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-5 text-center">
-          <AlertTriangle className="size-5 text-warning" />
+          <AlertTriangle className={`${ICON_DISPLAY} text-warning`} />
           <div className="text-ui-body font-semibold text-foreground">{t("消息区渲染异常")}</div>
           <p className="text-ui-caption leading-relaxed text-muted-foreground">
             {t("内容渲染时遇到异常，将在下一次更新时自动重试。")}

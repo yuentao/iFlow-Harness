@@ -4,7 +4,7 @@ import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
 import { MCP_CATALOG, buildCatalogConfig } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, SAVE_BTN, ActionRow, Field, FieldLabel, GHOST_BTN, Hint, SecondaryRow, Segmented, ToolbarRow } from "./ui";
+import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, FieldLabel, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
 import type { McpScope, McpStatusUi, McpServerStatusView, McpToolView, McpPromptView } from "../../../shared/messages";
 
@@ -513,8 +513,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           {!catalogBrowse && (
             <>
               <ToolbarRow>
-                <button
-                  className={BTN}
+                <Button
+                  variant="secondary"
+                  icon={<Plus className={ICON_INLINE} />}
                   disabled={entries === null || !!loadError || saving}
                   onClick={() => {
                     setEntries([...(entries ?? []), { name: "", json: "{}" }]);
@@ -523,34 +524,33 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     setEditError(null);
                   }}
                 >
-                  <Plus className="size-3.5" />
                   {t("添加")}
-                </button>
-                <button className={SAVE_BTN} disabled={busy || entries === null || !!loadError || saving} onClick={save}>
+                </Button>
+                <Button variant="primary" disabled={busy || entries === null || !!loadError || saving} onClick={save}>
                   {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
-                </button>
+                </Button>
                 {editError && <span className="text-ui-body text-destructive">{editError}</span>}
               </ToolbarRow>
 
               {/* Secondary actions: catalog browsing and refresh are conveniences,
                   not the primary flow — they must not read as peers of 添加/保存. */}
               <SecondaryRow>
-                <button
-                  className={GHOST_BTN}
+                <Button
+                  variant="ghost"
+                  icon={<Sparkles className={ICON_INLINE} />}
                   disabled={busy || saving || entries === null || !!loadError}
                   onClick={() => setCatalogBrowse(true)}
                 >
-                  <Sparkles className="size-3.5" />
                   {t("模板目录")}
-                </button>
-                <button
-                  className={GHOST_BTN}
+                </Button>
+                <Button
+                  variant="ghost"
+                  icon={<RefreshCw className={ICON_INLINE} />}
                   disabled={busy || saving || (entries === null && !loadError)}
                   onClick={refresh}
                 >
-                  <RefreshCw className="size-3.5" />
                   {refreshing ? t("刷新中…") : t("刷新")}
-                </button>
+                </Button>
               </SecondaryRow>
             </>
           )}
@@ -568,17 +568,16 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       <span className="min-w-0 flex-1 truncate text-ui-body font-semibold text-foreground">
                         {template.title}
                       </span>
-                      <button
-                        className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors duration-150 hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                        title={t("安装")}
+                      <IconButton
+                        icon={<Plus className={ICON_INLINE} />}
+                        label={t("安装")}
+                        size="sm"
                         disabled={saving}
                         onClick={() => {
                           setCatalogForm({ entryId: template.id, values: {}, name: template.name });
                           setEditError(null);
                         }}
-                      >
-                        <Plus className="size-3.5" />
-                      </button>
+                      />
                     </div>
                     {template.description && (
                       <div className="truncate text-ui-label text-muted-foreground">{template.description}</div>
@@ -665,46 +664,40 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           ≈{fmtTokens(view.contextTokens)}
                         </span>
                       )}
-                      <button
-                        className="press shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                        title={t("详情")}
+                      <IconButton
+                        icon={<ChevronRight className={ICON_INLINE} />}
+                        label={t("详情")}
+                        size="sm"
                         disabled={saving || !!loadError}
                         onClick={() => {
                           setDetail(i);
                           setEditError(null);
                         }}
-                      >
-                        <ChevronRight className="size-3.5" />
-                      </button>
-                      <button
-                        className="press ml-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-colors hover:bg-accent/60 hover:opacity-100 hover:text-foreground"
-                        title={t("编辑")}
+                      />
+                      <IconButton
+                        icon={<Pencil className={ICON_INLINE} />}
+                        label={t("编辑")}
+                        size="sm"
                         disabled={saving || !!loadError}
                         onClick={() => {
                           setEditing(i);
                           setIsNew(false);
                           setEditError(null);
                         }}
-                      >
-                        <Pencil className="size-3.5" />
-                      </button>
+                      />
                       {!saving && !loadError && (
                         <Dropdown
                           align="right"
                           menuClass="w-[9rem]"
                           trigger={(open) => (
-                            <button
-                              type="button"
+                            <IconButton
+                              icon={<MoreHorizontal className={ICON_INLINE} />}
+                              label={t("服务器 {0} 的操作", entry.name)}
+                              size="sm"
                               aria-haspopup="menu"
                               aria-expanded={open}
-                              aria-label={t("服务器 {0} 的操作", entry.name)}
-                              title={t("更多操作")}
-                              className={`press ml-1 shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground ${
-                                open ? "bg-accent/60 text-foreground" : ""
-                              }`}
-                            >
-                              <MoreHorizontal className="size-3.5" />
-                            </button>
+                              className={open ? "bg-accent/60 text-foreground" : ""}
+                            />
                           )}
                         >
                           {(close) => (
@@ -717,7 +710,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                                 setConfirmDelete(i);
                               }}
                             >
-                              <Trash2 className="size-3.5 shrink-0" />
+                              <Trash2 className={ICON_INLINE} />
                               {t("删除")}
                             </button>
                           )}
@@ -875,11 +868,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 </h3>
               </div>
               <div className="divide-y divide-border/50">
-                <div className="flex flex-col gap-1 px-3 py-3">
-                  <FieldLabel required>{t("名称")}</FieldLabel>
-                  <input
-                    type="text"
-                    className={INPUT}
+                <Field required className="px-3 py-3" label={t("名称")}>
+                  <TextInput
                     value={entry.name}
                     placeholder={t("如 chrome-devtools")}
                     onChange={(e) => {
@@ -888,11 +878,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   />
-                </div>
-                <div className="flex flex-col gap-1 px-3 py-3">
-                  <FieldLabel>{t("描述")}</FieldLabel>
-                  <textarea
-                    className={`${INPUT} min-h-16 resize-y leading-relaxed`}
+                </Field>
+                <Field className="px-3 py-3" label={t("描述")}>
+                  <TextArea
+                    className="min-h-16 resize-y leading-relaxed"
                     value={fieldOfConfig(config, "description")}
                     onChange={(e) => {
                       const v = e.target.value;
@@ -900,7 +889,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   />
-                </div>
+                </Field>
               </div>
             </section>
 
@@ -916,37 +905,25 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               <div className="divide-y divide-border/50">
                 <div className="flex items-center gap-2 px-3 py-2">
                   <span className="mr-1 text-ui-label text-muted-foreground">{t("传输类型")}</span>
-                  <div
-                    role="group"
-                    aria-label={t("传输类型")}
-                    className="flex items-center gap-1 rounded-lg border border-border/70 bg-surface/40 px-1 py-1"
-                  >
-                    {MCP_TRANSPORTS.map((kind) => (
-                      <button
-                        key={kind}
-                        className={
-                          kind === transport
-                            ? "press rounded-md bg-primary/18 px-2 py-0.5 font-mono text-ui-label font-semibold text-primary"
-                            : "press rounded-md px-2 py-0.5 font-mono text-ui-label text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground"
-                        }
-                        title={kind}
-                        onClick={() => {
-                          setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithTransport(parseConfig(en.json) ?? {}, kind) } : en)) ?? null);
-                          setSavedFlash(false);
-                        }}
-                      >
-                        {kind}
-                      </button>
-                    ))}
-                  </div>
+                  <Segmented
+                    ariaLabel={t("传输类型")}
+                    value={transport}
+                    onChange={(kind) => {
+                      setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithTransport(parseConfig(en.json) ?? {}, kind) } : en)) ?? null);
+                      setSavedFlash(false);
+                    }}
+                    options={MCP_TRANSPORTS.map((kind) => ({
+                      value: kind,
+                      label: <span className="font-mono">{kind}</span>,
+                      title: kind,
+                    }))}
+                  />
                 </div>
             {isStdio ? (
               <>
-                <div className="flex flex-col gap-1 px-3 py-3">
-                  <FieldLabel required>{t("命令")}</FieldLabel>
-                  <input
-                    type="text"
-                    className={INPUT}
+                <Field required className="px-3 py-3" label={t("命令")}>
+                  <TextInput
+                    mono
                     value={fieldOfConfig(config, "command")}
                     placeholder="npx"
                     onChange={(e) => {
@@ -955,16 +932,17 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   />
-                </div>
+                </Field>
                 <div className="flex flex-col gap-2 px-3 py-3">
                   <FieldLabel>{t("参数")}</FieldLabel>
                   {args.length > 0 && (
                     <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {args.map((arg, ai) => (
                         <div key={ai} className="flex items-center gap-2 px-2 py-1">
-                          <input
-                            type="text"
-                            className={`${INPUT} flex-1 font-mono text-ui-label`}
+                          <TextInput
+                            mono
+                            aria-label={t("参数 {0}", ai + 1)}
+                            className="flex-1 text-ui-label"
                             value={arg}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -972,31 +950,30 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                               setSavedFlash(false);
                             }}
                           />
-                          <button
-                            data-variant="danger"
-                            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
-                            title={t("删除参数")}
+                          <IconButton
+                            icon={<Trash2 className={ICON_INLINE} />}
+                            label={t("删除参数")}
+                            size="sm"
+                            tone="danger"
                             onClick={() => {
                               setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgRemoved(parseConfig(en.json) ?? {}, ai) } : en)) ?? null);
                               setSavedFlash(false);
                             }}
-                          >
-                            ×
-                          </button>
+                          />
                         </div>
                       ))}
                     </div>
                   )}
-                  <button
-                    className={BTN}
+                  <Button
+                    variant="secondary"
+                    icon={<Plus className={ICON_INLINE} />}
                     onClick={() => {
                       setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithArgAdded(parseConfig(en.json) ?? {}) } : en)) ?? null);
                       setSavedFlash(false);
                     }}
                   >
-                    <Plus className="size-3.5" />
                     {t("添加参数")}
-                  </button>
+                  </Button>
                 </div>
                 <div className="flex flex-col gap-2 px-3 py-3 pb-3">
                   <FieldLabel>{t("环境变量")}</FieldLabel>
@@ -1004,9 +981,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {envRows.map(([keyName, keyValue], ri) => (
                         <div key={ri} className="flex items-center gap-2 px-2 py-1">
-                          <input
-                            type="text"
-                            className={`${INPUT} flex-1 font-mono text-ui-label`}
+                          <TextInput
+                            mono
+                            aria-label={t("环境变量 {0}", keyName)}
+                            className="flex-1 text-ui-label"
                             value={`${keyName}=${keyValue}`}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1014,40 +992,37 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                               setSavedFlash(false);
                             }}
                           />
-                          <button
-                            data-variant="danger"
-                            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
-                            title={t("删除变量")}
+                          <IconButton
+                            icon={<Trash2 className={ICON_INLINE} />}
+                            label={t("删除变量")}
+                            size="sm"
+                            tone="danger"
                             onClick={() => {
                               setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairRemoved(parseConfig(en.json) ?? {}, "env", ri) } : en)) ?? null);
                               setSavedFlash(false);
                             }}
-                          >
-                            ×
-                          </button>
+                          />
                         </div>
                       ))}
                     </div>
                   )}
-                  <button
-                    className={BTN}
+                  <Button
+                    variant="secondary"
+                    icon={<Plus className={ICON_INLINE} />}
                     onClick={() => {
                       setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "env") } : en)) ?? null);
                       setSavedFlash(false);
                     }}
                   >
-                    <Plus className="size-3.5" />
                     {t("添加变量")}
-                  </button>
+                  </Button>
                 </div>
               </>
             ) : (
               <>
-                <div className="flex flex-col gap-1 px-3 py-3">
-                  <FieldLabel required>{t("服务 URL")}</FieldLabel>
-                  <input
-                    type="text"
-                    className={INPUT}
+                <Field required className="px-3 py-3" label={t("服务 URL")}>
+                  <TextInput
+                    mono
                     value={fieldOfConfig(config, "url")}
                     placeholder="https://…"
                     onChange={(e) => {
@@ -1056,16 +1031,17 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       setSavedFlash(false);
                     }}
                   />
-                </div>
+                </Field>
                 <div className="flex flex-col gap-2 px-3 py-3 pb-3">
                   <FieldLabel>{t("请求头")}</FieldLabel>
                   {headerRows.length > 0 && (
                     <div className="overflow-hidden rounded-lg border border-border/60 divide-y divide-border/60">
                       {headerRows.map(([keyName, keyValue], ri) => (
                         <div key={ri} className="flex items-center gap-2 px-2 py-1">
-                          <input
-                            type="text"
-                            className={`${INPUT} flex-1 font-mono text-ui-label`}
+                          <TextInput
+                            mono
+                            aria-label={t("请求头 {0}", keyName)}
+                            className="flex-1 text-ui-label"
                             value={`${keyName}=${keyValue}`}
                             onChange={(e) => {
                               const v = e.target.value;
@@ -1073,31 +1049,30 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                               setSavedFlash(false);
                             }}
                           />
-                          <button
-                            data-variant="danger"
-                            className="press shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
-                            title={t("删除 header")}
+                          <IconButton
+                            icon={<Trash2 className={ICON_INLINE} />}
+                            label={t("删除 header")}
+                            size="sm"
+                            tone="danger"
                             onClick={() => {
                               setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairRemoved(parseConfig(en.json) ?? {}, "headers", ri) } : en)) ?? null);
                               setSavedFlash(false);
                             }}
-                          >
-                            ×
-                          </button>
+                          />
                         </div>
                       ))}
                     </div>
                   )}
-                  <button
-                    className={BTN}
+                  <Button
+                    variant="secondary"
+                    icon={<Plus className={ICON_INLINE} />}
                     onClick={() => {
                       setEntries((current) => current?.map((en, j) => (j === editing ? { ...en, json: configWithPairAdded(parseConfig(en.json) ?? {}, "headers") } : en)) ?? null);
                       setSavedFlash(false);
                     }}
                   >
-                    <Plus className="size-3.5" />
                     {t("添加 header")}
-                  </button>
+                  </Button>
                 </div>
                             </>
                           )}
@@ -1109,8 +1084,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                             </div>
                           </section>
             <ActionRow>
-              <button
-                className={SAVE_BTN}
+              <Button
+                variant="primary"
                 onClick={() => {
                   const target = entries[editing];
                   if (!target) return;
@@ -1138,7 +1113,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 }}
               >
                 {t("完成")}
-              </button>
+              </Button>
               {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             </ActionRow>
             <Hint>
@@ -1158,9 +1133,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               <span className="ml-1.5 text-ui-label text-muted-foreground">{t("安装模板")}</span>
             </div>
             <Field label={t("名称")}>
-              <input
-                type="text"
-                className={INPUT}
+              <TextInput
                 value={catalogForm.name}
                 placeholder={template.name}
                 onChange={(e) => {
@@ -1171,9 +1144,8 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
             </Field>
             {template.fields.map((field) => (
               <Field key={field.key} label={field.label}>
-                <input
-                  type="text"
-                  className={INPUT}
+                <TextInput
+                  mono
                   value={catalogForm.values[field.key] ?? ""}
                   placeholder={field.placeholder ?? ""}
                   onChange={(e) => {
@@ -1186,9 +1158,9 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               </Field>
             ))}
             <ActionRow>
-              <button className={SAVE_BTN} onClick={installCatalog}>
+              <Button variant="primary" onClick={installCatalog}>
                 {t("安装")}
-              </button>
+              </Button>
               {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             </ActionRow>
             <Hint>

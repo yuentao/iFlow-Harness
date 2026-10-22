@@ -3,7 +3,7 @@ import { ClipboardCheck, Pencil, Eye } from "lucide-react";
 import type { PendingPlanExitUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { CountdownBar, HelpTip } from "./ui";
+import { Button, CountdownBar, HelpTip, ICON_INLINE, TextArea } from "./ui";
 import { Markdown } from "./Markdown";
 
 /**
@@ -124,34 +124,34 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
                   duplicating it here put the same hint in two places. */}
             </span>
           </HelpTip>
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             disabled={answered}
             aria-label={editing ? t("预览计划") : t("编辑计划")}
             title={editing ? t("预览计划") : t("编辑计划")}
-            className="press inline-flex h-6 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-surface-2 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            icon={editing ? <Eye className={ICON_INLINE} /> : <Pencil className={ICON_INLINE} />}
             onClick={() => setEditing((v) => !v)}
           >
-            {editing ? <Eye className="size-3.5" /> : <Pencil className="size-3.5" />}
             {editing ? t("预览") : t("编辑")}
-          </button>
+          </Button>
         </span>
       </div>
       <div id={descId} className="space-y-2 px-3 py-3 text-ui-label">
         <p className="text-ui-caption text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
         {editing ? (
-          <textarea
+          <TextArea
             ref={textareaRef}
-            value={planText}
-            onChange={(e) => setPlanText(e.target.value)}
+            mono
             aria-label={t("编辑计划")}
-            spellCheck={false}
             /* mono + generous height: the plan is source-like markdown the
                user edits verbatim; min-height keeps short plans usable,
                max-h-64 caps the shrink-0 card like the render mode. The
                edit-scope caveat lives in the tooltip, not repeated here —
                the edit-mode primary button says it outright. */
-            className="max-h-64 min-h-40 w-full resize-y rounded-lg border border-primary/40 bg-editor p-2 font-mono text-ui-caption leading-relaxed text-foreground/90 outline-none placeholder:text-muted-foreground focus:border-primary/60"
+            className="max-h-64 min-h-40 w-full border-primary/40 p-2 text-ui-caption leading-relaxed text-foreground/90 focus:border-primary/60"
+            value={planText}
+            onChange={(e) => setPlanText(e.target.value)}
           />
         ) : (
           /* Markdown render + scroll cap: the plan text is uncapped (the
@@ -171,31 +171,21 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         aria-label={t("计划审批操作")}
         className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2"
       >
-        <button
-          disabled={answered}
-          aria-label={t("批准计划")}
-          className="press inline-flex h-6 items-center justify-center rounded-md bg-gradient-to-b from-primary to-primary/90 px-2.5 text-ui-caption font-semibold text-primary-foreground shadow-btn transition-all duration-200 hover:shadow-btn-hover hover:brightness-105 disabled:pointer-events-none disabled:opacity-40"
-          onClick={() => answer(true)}
-        >
+        <Button variant="primary" size="sm" disabled={answered} aria-label={t("批准计划")} onClick={() => answer(true)}>
           {t("批准计划")}
-        </button>
-        <button
-          disabled={answered}
-          data-autofocus
-          aria-label={t("拒绝计划")}
-          className="press inline-flex h-6 items-center justify-center rounded-md border border-destructive/40 px-2.5 text-ui-caption text-destructive transition-all duration-200 hover:bg-destructive/10 disabled:pointer-events-none disabled:opacity-40"
-          onClick={() => answer(false)}
-        >
+        </Button>
+        <Button variant="outline-danger" size="sm" disabled={answered} data-autofocus aria-label={t("拒绝计划")} onClick={() => answer(false)}>
           {t("拒绝计划")}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="outline-primary"
+          size="sm"
           disabled={answered}
           aria-label={editing ? t("保存并重新规划") : t("重新规划")}
-          className="press inline-flex h-6 items-center justify-center rounded-md border border-primary/40 px-2.5 text-ui-caption text-primary transition-all duration-200 hover:bg-primary/10 disabled:pointer-events-none disabled:opacity-40"
           onClick={() => answer(false, true)}
         >
           {editing ? t("保存并重新规划") : t("重新规划")}
-        </button>
+        </Button>
         <span className="ml-auto self-center text-ui-micro text-muted-foreground/80">
           {t("Y 批准 · N 拒绝 · R 重新规划")}
         </span>

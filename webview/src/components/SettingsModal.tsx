@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Brain, Database, Download, ExternalLink, KeyRound, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
@@ -13,7 +13,31 @@ import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { BTN, BTN_INPUT as INPUT, Chip, ConfirmDialog, Dropdown, HelpTip, ModalShell, SAVE_BTN, SettingsDisclosure, SettingsGroup, ActionRow, Field, Hint } from "./ui";
+import {
+  ActionRow,
+  Button,
+  Chip,
+  CommitNumberInput,
+  CommitTextInput,
+  ConfirmDialog,
+  Dropdown,
+  Field,
+  HelpTip,
+  Hint,
+  ICON_INLINE,
+  LinesCommitTextArea,
+  ModalShell,
+  Segmented,
+  SettingsDisclosure,
+  SettingsGroup,
+  Slider,
+  Switch,
+  TabButton,
+  TextArea,
+  TextInput,
+  ToggleChip,
+  rovingTabKeyDown,
+} from "./ui";
 import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
@@ -101,28 +125,6 @@ export function SettingsModal({
   const TABS = TAB_GROUPS.flatMap((g) => g.tabs);
   const tabTitle = TABS.find((x) => x.id === tab)?.label ?? "";
 
-  const onNavKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    // Sub-editor open: ArrowLeft goes back to the list (same channel as the
-    // header back arrow); the other arrows keep tab navigation.
-    if (sectionHeader && event.key === "ArrowLeft") {
-      event.preventDefault();
-      sectionHeader.back();
-      return;
-    }
-    const at = ALL_TABS.indexOf(tab);
-    if (at < 0) return;
-    let next = -1;
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (at + 1) % ALL_TABS.length;
-    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (at - 1 + ALL_TABS.length) % ALL_TABS.length;
-    else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = ALL_TABS.length - 1;
-    else return;
-    event.preventDefault();
-    const id = ALL_TABS[next]!;
-    onTabChange(id);
-    tabRefs.current[id]?.focus();
-  };
-
   return (
     <ModalShell
       wide
@@ -130,8 +132,7 @@ export function SettingsModal({
       role="dialog"
       ariaLabel={t("设置")}
       title={sectionHeader?.title ?? tabTitle}
-      icon={<Settings2 className="size-3.5 shrink-0 text-primary" />}
-      onBack={sectionHeader?.back ?? null}
+              icon={<Settings2 className={`${ICON_INLINE} shrink-0 text-primary`} />}      onBack={sectionHeader?.back ?? null}
       onClose={onDismiss}
       onEscape={() => {
         // Sub-editor open → Esc goes back to the list (matches the header
@@ -145,24 +146,25 @@ export function SettingsModal({
           <HelpTip label={t("设置如何保存")} align="left">
             {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在 CLI 配置文件，重启 CLI 生效。")}
           </HelpTip>
-          <button
-            className="press text-ui-caption text-muted-foreground underline-offset-2 transition-colors duration-200 hover:text-foreground hover:underline"
+          <Button
+            variant="ghost"
+            className="underline-offset-2 hover:underline"
             onClick={() => send({ type: "openSettings" })}
           >
             {t("在 VSCode 设置中编辑…")}
-          </button>
-          <button
-            className={`${BTN} ml-auto`}
+          </Button>
+          <Button
+            className="ml-auto"
             disabled={busy}
+            icon={<RefreshCw className={ICON_INLINE} />}
             title={t("重启 CLI 进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();
             }}
           >
-            <RefreshCw className="size-3.5" />
             {t("重启 CLI")}
-          </button>
+          </Button>
         </div>
       }
     >
@@ -170,7 +172,16 @@ export function SettingsModal({
         <nav
           role="tablist"
           aria-label={t("设置分区")}
-          onKeyDown={onNavKeyDown}
+          onKeyDown={(event) => {
+            // Sub-editor open: ArrowLeft goes back to the list (same channel as
+            // the header back arrow); the other arrows keep tab navigation.
+            if (sectionHeader && event.key === "ArrowLeft") {
+              event.preventDefault();
+              sectionHeader.back();
+              return;
+            }
+            rovingTabKeyDown(ALL_TABS, tab, onTabChange, (id) => tabRefs.current[id]?.focus())(event);
+          }}
           className="flex shrink-0 flex-col gap-2 border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:gap-2.5 @min-[460px]:overflow-visible @min-[460px]:border-b-0 @min-[460px]:border-r"
         >
           {TAB_GROUPS.map((group) => (
@@ -187,29 +198,21 @@ export function SettingsModal({
                 {group.label}
               </div>
               {group.tabs.map(({ id, icon: Icon, label }) => (
-                <button
+                <TabButton
                   key={id}
-                  type="button"
-                  role="tab"
+                  active={tab === id}
                   id={`settings-tab-${id}`}
-                  aria-selected={tab === id}
-                  aria-current={tab === id ? "page" : undefined}
-                  tabIndex={tab === id ? 0 : -1}
-                  data-autofocus={tab === id ? "true" : undefined}
-                  ref={(el) => {
+                  controls="settings-panel"
+                  icon={<Icon className="size-4 shrink-0" />}
+                  onActivate={() => onTabChange(id)}
+                  refCallback={(el) => {
                     tabRefs.current[id] = el;
                   }}
-                  aria-controls="settings-panel"
-                  className={`press flex grow basis-[calc(50%_-_2px)] items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-ui-body transition-all duration-200 @min-[460px]:grow-0 @min-[460px]:basis-auto ${
-                    tab === id
-                      ? "bg-primary/10 font-semibold text-primary"
-                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                  }`}
-                  onClick={() => onTabChange(id)}
+                  data-autofocus={tab === id ? "true" : undefined}
+                  className="grow basis-[calc(50%_-_2px)] @min-[460px]:grow-0 @min-[460px]:basis-auto"
                 >
-                  <Icon className="size-4 shrink-0" />
                   {label}
-                </button>
+                </TabButton>
               ))}
             </div>
           ))}
@@ -273,27 +276,6 @@ function SettingRow({
   );
 }
 
-function Switch({ checked, label, onChange }: { checked: boolean; label: string; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      className={`press relative mt-0.5 inline-flex h-[20px] w-[36px] shrink-0 items-center rounded-full border transition-colors duration-200 ${
-        checked ? "border-primary/50 bg-primary/70" : "border-border bg-border/70"
-      }`}
-      onClick={() => onChange(!checked)}
-    >
-      <span
-        className={`inline-block size-[14px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
-          checked ? "translate-x-[19px]" : "translate-x-[2px]"
-        }`}
-      />
-    </button>
-  );
-}
-
 function ToggleRow({
   label,
   description,
@@ -310,6 +292,8 @@ function ToggleRow({
   return <SettingRow label={label} description={description} detail={detail} control={<Switch checked={checked} label={label} onChange={onChange} />} />;
 }
 
+/** Single-choice row: the shared segmented control (one species with the MCP
+ * scope / asset kind strips — same surface, padding and active state). */
 function ChoiceRow<T extends string>({
   label,
   description,
@@ -331,29 +315,7 @@ function ChoiceRow<T extends string>({
       label={label}
       description={description}
       detail={detail}
-      control={
-        <div
-          role="group"
-          aria-label={label}
-          className="flex flex-wrap items-center gap-0.5 rounded-lg border border-border/60 bg-panel/60 p-0.5"
-        >
-          {options.map((option) => (
-            <button
-              key={option.value || option.label}
-              type="button"
-              aria-pressed={value === option.value}
-              className={`press rounded-md px-2.5 py-1.5 text-ui-label transition-colors duration-200 ${
-                value === option.value
-                  ? "bg-primary/15 font-semibold text-primary"
-                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              }`}
-              onClick={() => onChange(option.value)}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      }
+      control={<Segmented ariaLabel={label} options={options} value={value} onChange={onChange} />}
     />
   );
 }
@@ -379,25 +341,6 @@ function NumberRow({
   unit?: string;
   onCommit: (value: number) => void;
 }) {
-  const [draft, setDraft] = useState(String(value));
-  const [focused, setFocused] = useState(false);
-  const last = useRef(value);
-  useEffect(() => {
-    if (last.current === value) return;
-    last.current = value;
-    if (!focused) setDraft(String(value));
-  }, [value, focused]);
-  const commit = () => {
-    const parsed = Number(draft);
-    if (!Number.isFinite(parsed)) {
-      setDraft(String(value));
-      return;
-    }
-    const clamped = Math.max(min, Math.min(max ?? Number.POSITIVE_INFINITY, parsed));
-    const next = Math.trunc(clamped);
-    setDraft(String(next));
-    if (next !== value) onCommit(next);
-  };
   return (
     <SettingRow
       wideControl
@@ -405,27 +348,16 @@ function NumberRow({
       description={description}
       detail={detail}
       control={
-        <div className="flex items-center gap-1.5">
-          <input
-            type="number"
-            className={`${INPUT} w-full text-right @min-[600px]:w-28`}
-            value={draft}
-            aria-label={label}
-            min={min}
-            max={max}
-            step={step}
-            onFocus={() => setFocused(true)}
-            onChange={(e) => setDraft(e.target.value)}
-            onBlur={() => {
-              setFocused(false);
-              commit();
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") e.currentTarget.blur();
-            }}
-          />
-          {unit && <span className="shrink-0 text-ui-caption text-muted-foreground">{unit}</span>}
-        </div>
+        <CommitNumberInput
+          label={label}
+          value={value}
+          min={min}
+          max={max}
+          step={step}
+          unit={unit}
+          className="w-full text-right @min-[600px]:w-28"
+          onCommit={onCommit}
+        />
       }
     />
   );
@@ -446,21 +378,6 @@ function TextRow({
   placeholder?: string;
   onCommit: (value: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
-  const [focused, setFocused] = useState(false);
-  const last = useRef(value);
-  useEffect(() => {
-    if (last.current === value) return;
-    last.current = value;
-    if (!focused) setDraft(value);
-  }, [value, focused]);
-  const commit = () => {
-    const next = draft.trim();
-    // Always show the normalized text: when it equals the stored value no host
-    // echo follows, so the field would otherwise keep the untrimmed draft.
-    setDraft(next);
-    if (next !== value) onCommit(next);
-  };
   return (
     <SettingRow
       wideControl
@@ -468,22 +385,13 @@ function TextRow({
       description={description}
       detail={detail}
       control={
-        <input
-          type="text"
-          className={`${INPUT} w-full font-mono text-ui-caption @min-[600px]:w-64`}
-          value={draft}
-          aria-label={label}
+        <CommitTextInput
+          label={label}
+          mono
+          value={value}
           placeholder={placeholder}
-          spellCheck={false}
-          onFocus={() => setFocused(true)}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => {
-            setFocused(false);
-            commit();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-          }}
+          className="w-full text-ui-caption @min-[600px]:w-64"
+          onCommit={onCommit}
         />
       }
     />
@@ -505,44 +413,25 @@ function LinesRow({
   rows?: number;
   onCommit: (value: string[]) => void;
 }) {
-  const serialized = value.join("\n");
-  const [draft, setDraft] = useState(serialized);
-  const [focused, setFocused] = useState(false);
-  const last = useRef(serialized);
-  useEffect(() => {
-    if (last.current === serialized) return;
-    last.current = serialized;
-    if (!focused) setDraft(serialized);
-  }, [serialized, focused]);
-  const commit = () => {
-    const next = draft.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const normalized = next.join("\n");
-    // Mirror the stored form so the textarea never shows lines that were dropped.
-    setDraft(normalized);
-    if (normalized !== serialized) onCommit(next);
-  };
   return (
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{label}</div>
       <Hint className="mt-1">{description}</Hint>
-      <textarea
-        className={`${INPUT} mt-2 w-full resize-y font-mono text-ui-label leading-relaxed`}
+      <LinesCommitTextArea
+        label={label}
         rows={rows}
-        value={draft}
-        aria-label={label}
         placeholder={placeholder}
-        spellCheck={false}
-        onFocus={() => setFocused(true)}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => {
-          setFocused(false);
-          commit();
-        }}
+        className="mt-2"
+        value={value}
+        onCommit={onCommit}
       />
     </div>
   );
 }
 
+/** JSON editor (explicit apply, not blur-commit): dirty text must survive an
+ * invalid parse, so the kit's commit-on-blur species does not fit here. The
+ * field still uses the shared textarea chrome; only the save timing differs. */
 function JsonRulesRow({
   value,
   onCommit,
@@ -583,22 +472,22 @@ function JsonRulesRow({
       <Hint className="mt-1">
         {t("JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启 CLI 生效。")}
       </Hint>
-      <textarea
-        className={`${INPUT} mt-2 w-full resize-y font-mono text-ui-label leading-relaxed`}
+      <TextArea
+        mono
         rows={6}
-        value={draft}
         aria-label={t("思考模型规则")}
-        spellCheck={false}
-        aria-invalid={error !== null}
+        invalid={error !== null}
+        className="mt-2 w-full leading-relaxed"
+        value={draft}
         onChange={(e) => {
           setDraft(e.target.value);
           setDirty(true);
         }}
       />
       <ActionRow className="mt-2">
-        <button className={BTN} onClick={apply}>
+        <Button onClick={apply}>
           {t("应用")}
-        </button>
+        </Button>
         {error && <span className="text-ui-caption text-destructive">{error}</span>}
       </ActionRow>
     </div>
@@ -616,40 +505,20 @@ function RangeRow({
   value: number;
   onCommit: (value: number) => void;
 }) {
-  const [draft, setDraft] = useState(value);
-  const last = useRef(value);
-  useEffect(() => {
-    if (last.current === value) return;
-    last.current = value;
-    setDraft(value);
-  }, [value]);
-  const commit = () => {
-    if (draft !== value) onCommit(draft);
-  };
   return (
     <SettingRow
       wideControl
       label={label}
       description={description}
       control={
-        <div className="flex w-full items-center gap-2 @min-[600px]:w-48">
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={5}
-            value={draft}
-            aria-label={label}
-            className="w-full accent-[var(--color-primary)]"
-            onChange={(e) => setDraft(Number(e.target.value))}
-            onPointerUp={commit}
-            onBlur={commit}
-            onKeyUp={(e) => {
-              if (e.key.startsWith("Arrow")) commit();
-            }}
-          />
-          <span className="w-9 shrink-0 text-right text-ui-caption tabular-nums text-muted-foreground">{draft}%</span>
-        </div>
+        <Slider
+          label={label}
+          value={value}
+          step={5}
+          format={(v) => `${v}%`}
+          className="@min-[600px]:w-48"
+          onCommit={onCommit}
+        />
       }
     />
   );
@@ -1086,32 +955,13 @@ function ApiConfigSection({
           <div className="text-ui-caption text-muted-foreground">{t("服务商预设")}</div>
           <div className="flex flex-wrap gap-1">
             {PROVIDER_PRESETS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                aria-pressed={presetId === option.id}
-                className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
-                  presetId === option.id
-                    ? "border-primary/50 bg-primary/10 font-semibold text-primary"
-                    : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                }`}
-                onClick={() => applyPreset(option)}
-              >
+              <ToggleChip key={option.id} active={presetId === option.id} onClick={() => applyPreset(option)}>
                 {option.label}
-              </button>
+              </ToggleChip>
             ))}
-            <button
-              type="button"
-              aria-pressed={presetId === null}
-              className={`press rounded-full border px-2 py-0.5 text-ui-caption transition-colors duration-200 ${
-                presetId === null
-                  ? "border-primary/50 bg-primary/10 font-semibold text-primary"
-                  : "border-border text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              }`}
-              onClick={() => setPresetId(null)}
-            >
+            <ToggleChip active={presetId === null} onClick={() => setPresetId(null)}>
               {t("自定义")}
-            </button>
+            </ToggleChip>
           </div>
         </div>
         {preset && (
@@ -1119,56 +969,45 @@ function ApiConfigSection({
             <p className="text-ui-caption leading-relaxed text-muted-foreground">{t(preset.note)}</p>
             <ActionRow className="mt-1">
               {preset.keyUrl && (
-                <button
-                  className={BTN}
-                  onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}
-                >
-                  <ExternalLink className="size-3.5" />
+                <Button icon={<ExternalLink className={ICON_INLINE} />} onClick={() => send({ type: "openExternal", uri: preset.keyUrl! })}>
                   {t("获取 API Key")}
-                </button>
+                </Button>
               )}
               {preset.docsUrl && (
-                <button
-                  className={BTN}
-                  onClick={() => send({ type: "openExternal", uri: preset.docsUrl! })}
-                >
+                <Button onClick={() => send({ type: "openExternal", uri: preset.docsUrl! })}>
                   {t("查看文档")}
-                </button>
+                </Button>
               )}
             </ActionRow>
           </div>
         )}
         <Field label={t("配置名称（可选，默认为模型名）")}>
-          <input
-            type="text"
-            className={INPUT}
+          <TextInput
             value={form.profileName}
             placeholder={t("如 BUZZ、工作密钥…")}
             onChange={(e) => setForm((f) => ({ ...f, profileName: e.target.value }))}
           />
         </Field>
         <Field label={t("Base URL（OpenAI 兼容）")}>
-          <input
-            type="text"
-            className={INPUT}
+          <TextInput
+            mono
             value={form.baseUrl}
             placeholder="https://api.example.com/v1"
             onChange={(e) => setForm((f) => ({ ...f, baseUrl: e.target.value }))}
           />
         </Field>
         <Field label="API Key">
-          <input
+          <TextInput
             type="password"
-            className={INPUT}
+            mono
             value={form.apiKey}
             placeholder={keyPlaceholder}
             onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
           />
         </Field>
         <Field label={t("模型名称")}>
-          <input
-            type="text"
-            className={INPUT}
+          <TextInput
+            mono
             value={form.modelName}
             placeholder={t("如 glm-5.3-flash-free")}
             onChange={(e) => setForm((f) => ({ ...f, modelName: e.target.value }))}
@@ -1178,24 +1017,24 @@ function ApiConfigSection({
           <div className="flex flex-wrap items-center gap-1">
             <span className="text-ui-caption text-muted-foreground">{t("常用模型")}</span>
             {preset.models.map((model) => (
-              <button
+              <ToggleChip
                 key={model}
-                type="button"
-                className="press rounded-full border border-border px-2 py-0.5 font-mono text-ui-caption text-muted-foreground transition-colors duration-200 hover:bg-accent/60 hover:text-foreground"
+                mono
+                active={form.modelName.trim() === model}
                 onClick={() => setForm((f) => ({ ...f, modelName: model }))}
               >
                 {model}
-              </button>
+              </ToggleChip>
             ))}
           </div>
         )}
         <ActionRow>
-          <button className={SAVE_BTN} disabled={busy} onClick={submit}>
+          <Button variant="primary" disabled={busy} onClick={submit}>
             {t("保存并激活")}
-          </button>
-          <button className={BTN} onClick={back}>
+          </Button>
+          <Button onClick={back}>
             {t("取消")}
-          </button>
+          </Button>
           {formError && <span className="text-ui-label text-destructive">{formError}</span>}
         </ActionRow>
         <Hint>
@@ -1235,8 +1074,10 @@ function ApiConfigSection({
                     {candidate.modelName} · {candidate.keyTail}
                   </span>
                 </span>
-                <button
-                  className={`${SAVE_BTN} shrink-0 whitespace-nowrap`}
+                <Button
+                  variant="primary"
+                  size="sm"
+                  className="shrink-0 whitespace-nowrap"
                   disabled={busy}
                   title={`${candidate.baseUrl} · ${candidate.modelName}（${candidate.keyTail}）`}
                   onClick={() => {
@@ -1245,7 +1086,7 @@ function ApiConfigSection({
                   }}
                 >
                   {t("导入并激活")}
-                </button>
+                </Button>
               </div>
             ))}
           </div>
@@ -1263,10 +1104,9 @@ function ApiConfigSection({
       )}
       {auth.profiles.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <button className={BTN} disabled={busy} onClick={() => openNew()}>
-            <Plus className="size-3.5" />
+          <Button icon={<Plus className={ICON_INLINE} />} disabled={busy} onClick={() => openNew()}>
             {t("添加配置")}
-          </button>
+          </Button>
           <span className="text-ui-caption text-muted-foreground">{t("点击配置即可切换并重新认证")}</span>
         </div>
       )}
@@ -1280,21 +1120,15 @@ function ApiConfigSection({
           </Hint>
           <ActionRow className="mt-2 justify-center">
             {PROVIDER_PRESETS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className="press rounded-full border border-border px-2 py-0.5 text-ui-caption text-muted-foreground transition-colors duration-200 hover:border-primary/40 hover:bg-accent/60 hover:text-foreground"
-                onClick={() => openNew(option)}
-              >
+              <ToggleChip key={option.id} onClick={() => openNew(option)}>
                 {option.label}
-              </button>
+              </ToggleChip>
             ))}
           </ActionRow>
           <ActionRow className="mt-2 justify-center">
-            <button className={BTN} onClick={() => openNew()}>
-              <Plus className="size-3.5" />
+            <Button icon={<Plus className={ICON_INLINE} />} onClick={() => openNew()}>
               {t("自定义配置")}
-            </button>
+            </Button>
           </ActionRow>
         </div>
       ) : (

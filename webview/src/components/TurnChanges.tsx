@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { FileCode2, FilePen, History, Undo2 } from "lucide-react";
 import type { HostToWebview, TurnChangeUi } from "../../../shared/messages";
 import { canReviewTurn, isLatestTurn } from "../../../shared/turn-changes";
-import { ConfirmDialog, HelpTip } from "./ui";
+import { ConfirmDialog, HelpTip, ICON_INLINE, IconButton } from "./ui";
 import { useChat } from "../store";
 import { t } from "../i18n";
 
@@ -115,25 +115,26 @@ export function TurnChanges({ sessionId, userBlockId }: {
                 <span className="text-diff-del-fg">−{item.deletions}</span>
               </span>
             </button>
-            {item.canUndo && !item.reverted && latest && <button
-              className="press mr-1.5 shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-              title={t("撤销此文件的本轮修改")}
-              aria-label={t("撤销此文件的本轮修改")}
-              onClick={() => useChat.getState().send({ type: "revertTurnFile", sessionId, userBlockId, key: item.key })}
-            >
-              <Undo2 className="size-3.5" />
-            </button>}
+            {item.canUndo && !item.reverted && latest && (
+              <IconButton
+                icon={<Undo2 className={ICON_INLINE} />}
+                label={t("撤销此文件的本轮修改")}
+                size="sm"
+                tone="danger"
+                className="mr-1.5"
+                onClick={() => useChat.getState().send({ type: "revertTurnFile", sessionId, userBlockId, key: item.key })}
+              />
+            )}
           </li>)}
         </ul>}
         {!!records?.length && latest && checkpoint && (
-          <button
-            className="press shrink-0 rounded-md px-2 py-1 text-ui-caption text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-            title={t("回滚本轮")}
-            aria-label={t("回滚本轮")}
+          <IconButton
+            icon={<History className="size-3" />}
+            label={t("回滚本轮")}
+            size="sm"
+            tone="danger"
             onClick={() => setConfirmRollback(true)}
-          >
-            <History className="size-3" />
-          </button>
+          />
         )}
       </div>
     </section>

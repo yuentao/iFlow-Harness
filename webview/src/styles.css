@@ -660,6 +660,77 @@ textarea:focus-visible {
   outline: none;
 }
 
+/* --- kit controls: self-drawn checkbox + slider ----------------------------- */
+/* Checkbox: the native input keeps keyboard and screen-reader semantics, while
+   the box is self-drawn so it follows the radius/colour system instead of the
+   browser accent colour (the two call sites used two different accent vars).
+   The global :focus-visible rule excludes bare inputs, so the box carries its
+   own ring. */
+.ui-checkbox {
+  appearance: none;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-inner);
+  border: 1px solid var(--border);
+  background: var(--editor);
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+.ui-checkbox:checked {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.ui-checkbox:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: 2px solid var(--primary-foreground);
+  border-top: 0;
+  border-left: 0;
+  transform: rotate(45deg);
+}
+.ui-checkbox:disabled {
+  opacity: 0.4;
+}
+.ui-checkbox:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+/* Slider: 4px track whose filled portion is painted by the component's inline
+   gradient (var(--primary) up to the value, var(--border) beyond), with a 14px
+   knob. Chromium is the only engine a VSCode webview runs on, so the -webkit
+   pseudo-elements are sufficient. */
+.ui-slider {
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  outline: none;
+  cursor: pointer;
+}
+.ui-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: none;
+  background: var(--primary);
+  box-shadow: var(--shadow-btn);
+  transition: transform 0.12s var(--ease-out-expo);
+}
+.ui-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.08);
+}
+.ui-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--shadow-focus);
+}
+
 /* --- collapsible card bodies (Collapse component, MessageList) ------------- */
 /* grid-rows 0fr→1fr trick: animates to unknown content height without JS
    measurement. Children stay mounted (smooth both directions) and hidden
