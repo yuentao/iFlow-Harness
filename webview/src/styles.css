@@ -414,6 +414,23 @@
   }
 }
 
+/* --- VSCode's injected webview base styles -------------------------------- */
+/* VSCode wraps every webview in its own template stylesheet: bare `code` gets
+   `--vscode-textPreformat-background` + foreground, `padding: 1px 3px`, a 4px
+   radius and the monaco mono family, while `pre code` only resets the padding.
+   So a highlighted line inside a fence picks up a tint the design system never
+   asked for. Those defaults are unlayered, which out-ranks Tailwind utilities
+   regardless of specificity — the only way to beat them is an unlayered rule.
+   Reset them here; surfaces that want their own tint state it explicitly
+   (`.md :not(pre) > code`, `.approval-target`). */
+body code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  font-family: inherit;
+}
+
 /* App-level scroll surfaces (message list / diff body / popups). */
 .message-scroll,
 .diff-scroll {
@@ -480,6 +497,19 @@
      plus the always-on card drop shadow. Shadows are permanent here — the
      card-lift hover variant must not replace them. */
   box-shadow: var(--shadow-glow), var(--shadow-card);
+}
+
+/* Approval action target (the tool or path the agent wants to run). VSCode's
+   injected `code` defaults would paint this with --vscode-textPreformat-*,
+   which a Tailwind utility cannot out-rank — the chip states its own tokens. */
+.approval-target {
+  font-family: var(--font-mono);
+  font-size: var(--ui-font-caption);
+  /* Control-internal optical spacing (2/6px), matching the old px-1.5 py-0.5. */
+  padding: 2px 6px;
+  border-radius: var(--radius-inner);
+  background: var(--editor);
+  color: var(--color-info);
 }
 
 /* --- WIN12-style acrylic surfaces (header / composer / popups / dialogs) --- */
@@ -1339,6 +1369,10 @@ pre {
 
 .md :not(pre) > code {
   background: var(--editor);
+  /* The pill's own text color: VSCode's injected default was reset to
+     `inherit`, so the inline-code species states its accent here — same
+     reference semantics as links and the approval target chip. */
+  color: var(--color-info);
   border: 1px solid var(--border);
   padding: 1px 5px;
   border-radius: var(--radius-inner);
@@ -1348,7 +1382,8 @@ pre {
    line in single backticks instead of using a fence, so each line rendered as
    an inline-code pill — visually a per-line background stripe. Strip the pill
    treatment and tighten the paragraph rhythm so the lines read as one
-   continuous mono block. */
+   continuous mono block. They keep the reference color (`--color-info`) so the
+   mono runs still read as code, same semantics as inline pills and links. */
 .md p.code-lines {
   margin-block: 0;
   line-height: 1.7;
@@ -1359,6 +1394,7 @@ pre {
   border: none;
   padding: 0;
   border-radius: 0;
+  color: var(--color-info);
 }
 
 /* Syntax highlighting: hljs token spans (produced by webview/src/highlight.ts

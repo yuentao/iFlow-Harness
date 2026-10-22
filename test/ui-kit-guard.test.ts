@@ -140,6 +140,31 @@ describe("ui kit guard", () => {
     expect(kitCss).toMatch(/\.ui-resize\s*\{/);
   });
 
+  it("neutralises VSCode's injected webview code defaults", () => {
+    // VSCode wraps every webview in its own template stylesheet that tints bare
+    // `code` with --vscode-textPreformat-* (and `pre code` only resets the
+    // padding). Those rules are unlayered, so they out-rank Tailwind utilities
+    // no matter the specificity: the kit resets them unlayered, and a surface
+    // that wants its own tint must declare it in a custom class.
+    expect(kitCss).toMatch(/body\s+code\s*\{[^}]*background-color:\s*transparent/);
+    expect(kitCss).toMatch(/\.approval-target\s*\{[^}]*background:\s*var\(--editor\)/);
+    // The inline-code pill is the other tinted `code` species: rewritten as a
+    // utility it would silently lose to `body code` (layered < unlayered). Its
+    // text color must be stated too — the injected default is reset to inherit.
+    expect(kitCss).toMatch(/\.md :not\(pre\) > code\s*\{[^}]*background:/);
+    expect(kitCss).toMatch(/\.md :not\(pre\) > code\s*\{[^}]*color:\s*var\(--color-info\)/);
+    // The de-pill'd pseudo code block keeps the same reference color, so the
+    // two mono species never diverge.
+    expect(kitCss).toMatch(/\.md \.code-lines code\s*\{[^}]*color:\s*var\(--color-info\)/);
+    const approval = files.find((f) => f.rel === "components/ApprovalCard.tsx")!.content;
+    expect(approval).toContain('className="approval-target');
+    expect(approval).not.toMatch(/<code[^>]*bg-editor/);
+    // Any new `<code className="bg-*">` would read as a tint that VSCode's
+    // injected defaults silently overwrite.
+    const tintHits = violations(/<code[^>]*\bbg-/, () => false);
+    expect(tintHits).toEqual([]);
+  });
+
   it("keeps multiline resizing owned by the kit grip", () => {
     // Call sites must not re-declare a browser resize affordance.
     const hits = violations(/resize-(none|y|x|both)/, (rel) => rel === CONTROL_HOME || rel === STAGE_TEXTAREA);

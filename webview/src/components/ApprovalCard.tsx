@@ -169,9 +169,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           <span id={titleId} className="block truncate text-ui-label font-semibold leading-tight">
             {t(actionVerb)}
             {!!actionTarget && (
-              <code className="ml-1 rounded bg-editor px-1.5 py-0.5 font-mono text-ui-caption text-info">
-                {actionTarget}
-              </code>
+              <code className="approval-target ml-1">{actionTarget}</code>
             )}
           </span>
         </span>
