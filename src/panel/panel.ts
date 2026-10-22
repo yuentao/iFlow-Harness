@@ -10,7 +10,7 @@ import { inspect, promisify } from "node:util";
 import { execFile as execFileCb } from "node:child_process";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename, stat } from "node:fs/promises";
 import { AcpClient } from "../acp/client.js";
 import {
@@ -141,11 +141,13 @@ import {
   type FollowupTaskKind,
 } from "../../shared/turn-followup.js";
 import {
+  buildMetadataQueries,
   buildModelMetadataPrompt,
   parseModelMetadata,
-  pickMetadataModel,
   planMetadataAdditions,
+  type MetadataSource,
 } from "../../shared/model-metadata.js";
+import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.js";
 import { WireRingBuffer } from "./wire-log.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
@@ -246,24 +248,44 @@ const KNOWLEDGE_PROMPT_IDLE_MS = 90_000;
  * a page, still tight enough that a wedged gateway cannot hold the dialog. */
 const ASSET_GEN_TIMEOUT_MS = 120_000;
 const ASSET_GEN_IDLE_MS = 60_000;
-/** 「联网补充模型数据」: one throwaway agent turn doing several web_search
- * rounds (official docs + pricing pages per model, plus the newest market
- * releases). Multi-round search + thinking needs a generous ceiling, but a
- * wedged gateway must not hold the throwaway session open forever; the idle
- * watchdog reaps mid-turn wedges (search rounds emit updates every few s). */
+/** 「联网补充模型数据」: one host-side search sweep (one query per model id
+ * plus two market-wide ones) followed by ONE plain completion that extracts
+ * the metadata from the retrieved snippets. No CLI agent session: an agent
+ * turn drags in the whole system prompt + project memory + tool schemas
+ * (measured 2026-10-23: 56,287 input tokens for a trivial prompt) and the
+ * bundled CLI exposes no web-search tool for third-party gateway keys anyway. */
+const MODEL_METADATA_SEARCH_TIMEOUT_MS = 8_000;
+/** Wall-clock ceiling for the whole search sweep. */
+const MODEL_METADATA_SEARCH_PHASE_MS = 60_000;
+/** Extraction ceilings: the model reads the fetched pages, so it needs more
+ * wall-clock than a one-line rewrite (measured: ~95s on a slow gateway for a
+ * 15k-token source set). */
 const MODEL_METADATA_TIMEOUT_MS = 240_000;
-const MODEL_METADATA_IDLE_MS = 75_000;
-/** State of the in-flight 「联网补充模型数据」 turn: the throwaway session id,
- * the client it runs on, the answer text accumulated by `onSessionUpdate`,
- * and the ceiling/idle timers. `idleResolve` is wired by `runMetadataTurn`. */
-interface MetadataSession {
-  sessionId: string;
-  client: AcpClient;
-  text: string;
-  overallTimer?: ReturnType<typeof setTimeout>;
-  idleTimer?: ReturnType<typeof setTimeout>;
-  idleResolve?: () => void;
-}
+const MODEL_METADATA_IDLE_MS = 120_000;
+/** Concurrent search requests (a profile with a dozen models would otherwise
+ * fire a dozen requests at once and trip the engine's rate limit). */
+const MODEL_METADATA_SEARCH_CONCURRENCY = 4;
+/** Hits kept per query. */
+const MODEL_METADATA_HITS_PER_QUERY = 6;
+/** Total characters of source text handed to the model — the page bodies are
+ * read by the model itself (it does the extraction), so this budget is the
+ * dominant cost of the flow. Measured on a slow gateway: 20k tokens → 140s,
+ * ~6k tokens → well inside the ceiling. Raised from 30k after a real run
+ * (2026-10-23) showed two fetched pages + duplicate snippets carried no
+ * figures at all: the official pricing table is the only source of numbers,
+ * so the budget has to fit several real pages. */
+const MODEL_METADATA_SOURCE_CHARS = 48_000;
+/** Result pages fetched per sweep — the pricing/context tables live in the
+ * page body, not in the search snippet. Four covers the official docs page
+ * plus the comparison sites that usually rank next to it. */
+const MODEL_METADATA_PAGES = 4;
+/** Characters kept per fetched page. */
+const MODEL_METADATA_PAGE_CHARS = 8_000;
+/** Search hits whose snippet is handed to the model, and the per-snippet
+ * character cap — the result TITLE carries most of the signal ("GLM-5 …
+ * 200K上下文"), the snippet tail is mostly boilerplate. */
+const MODEL_METADATA_SNIPPET_HITS = 40;
+const MODEL_METADATA_SNIPPET_CHARS = 200;
 /** Abort an internal prompt whose session stream went silent for this long.
  * A healthy stream emits chunks every few seconds; the CLI's rate-limit
  * backoff pauses were observed well under this. Catches a mid-stream wedge
@@ -323,6 +345,24 @@ export function stripFileMentions(text: string): string {
 function notifySummary(raw: string, max = 80): string {
   const flat = raw.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+/**
+ * Last two labels of an endpoint host (`https://api.deepseek.com/v1` →
+ * `deepseek.com`), used to rank the vendor's own documentation above
+ * third-party comparison pages. Returns "" for an unparseable URL — callers
+ * treat that as "no affinity signal".
+ */
+function registrableHost(baseUrl: string | undefined): string {
+  if (!baseUrl) return "";
+  try {
+    const host = new URL(baseUrl.includes("://") ? baseUrl : `https://${baseUrl}`).hostname.toLowerCase().replace(/^www\./, "");
+    const parts = host.split(".").filter(Boolean);
+    if (parts.length < 2) return host;
+    const take = /^(com|net|org|gov|edu|ac)\.cn$/.test(parts.slice(-2).join(".")) && parts.length >= 3 ? 3 : 2;
+    return parts.slice(-take).join(".");
+  } catch {
+    return "";
+  }
 }
 /** M1 P0-6: occupancy ratio at which the context-warning pill fires
  * (≥100% is handled by the existing overflow auto-compress path). */
@@ -687,15 +727,18 @@ export class ChatPanel implements vscode.Disposable {
    * dropped when the requestId is stale or the session changed meanwhile. */
   private pendingEnhance: { requestId: number; cancel: () => void; sessionId: string | null } | null = null;
   /** 「联网补充模型数据」: own busy lane (user-initiated, long — same class
-   * as knowledge/asset drafting). The throwaway session holds only the
-   * answer text (accumulated from its agent_message_chunks); its timers
-   * bound the turn and `idleResolve` fires the idle watchdog from
-   * `onSessionUpdate`. */
+   * as knowledge/asset drafting). `metadataCancel` aborts the in-flight
+   * sweep/completion when the user presses 「停止检索」. */
   private metadataBusy = false;
-  private metadataSession: MetadataSession | null = null;
-  /** Instance fields (constants as defaults) so tests can inject small values. */
+  private metadataCancel: (() => void) | null = null;
+  /** Completion ceilings for the extraction call: it reads a large source
+   * set, so it needs more wall-clock than a one-line rewrite. */
   private metadataTimeoutMs = MODEL_METADATA_TIMEOUT_MS;
   private metadataIdleMs = MODEL_METADATA_IDLE_MS;
+  /** Instance fields for the search sweep budget (constants as defaults). */
+  private metadataSearchTimeoutMs = MODEL_METADATA_SEARCH_TIMEOUT_MS;
+  private metadataSearchPhaseMs = MODEL_METADATA_SEARCH_PHASE_MS;
+  private metadataSourceChars = MODEL_METADATA_SOURCE_CHARS;
   /** M1 P0-6: true while the ≥90% occupancy warning pill is shown (the
    * state machine fires once per entry into the warn zone). */
   private contextWarnActive = false;
@@ -2066,15 +2109,24 @@ export class ChatPanel implements vscode.Disposable {
 
   /** Run one internal prompt directly against the active endpoint; resolves
    * with the model's text (trimmed) or null on any failure. Never throws.
-   * `signal` lets a caller (enhance cancel) abort the gateway stream. */
+   * `signal` lets a caller (enhance cancel) abort the gateway stream.
+   * `opts` overrides the shared ceilings for callers that need their own
+   * budget (the metadata sweep reads a large source set and needs more
+   * wall-clock than a one-line rewrite). */
   private async runInternalPrompt(
     text: string,
     signal?: { aborted: boolean; onAbort?: (cancel: () => void) => void },
+    opts?: { timeoutMs?: number; idleMs?: number },
   ): Promise<string | null> {
     if (this.disposed || this.internalPromptBusy) return null;
     this.internalPromptBusy = true;
     try {
-      return await this.completeInternalPrompt(text, this.internalPromptTimeoutMs, this.internalPromptIdleMs, signal);
+      return await this.completeInternalPrompt(
+        text,
+        opts?.timeoutMs ?? this.internalPromptTimeoutMs,
+        opts?.idleMs ?? this.internalPromptIdleMs,
+        signal,
+      );
     } finally {
       this.internalPromptBusy = false;
     }
@@ -2203,20 +2255,21 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- 「联网补充模型数据」 (settings-panel web-search fetch) ------------------
   //
-  // Unlike the pure-text internal prompts (pitfall #26 fourth wave), this
-  // task genuinely needs a tool surface — `web_search` — so it runs on a
-  // THROWAWAY agent session instead of a direct completion:
-  //   session/new (mcpServers: [] → no MCP fleet; web_search is a core tool)
-  //   → set_mode default (never inherits plan/YOLO from the panel)
-  //   → set_model to a live-list-verified id (pitfall #25: a delisted push
-  //     would fail with model_not_found) → prompt with ceiling + idle watchdog.
-  // Session discipline mirrors the pre-2026-10 internal-session guards:
-  // updates never enter the transcript (accumulated in onSessionUpdate),
-  // permission/questions/plan-exit auto-refused. The CLI has no session/close,
-  // so the abandoned session object lives in the CLI process until restart
-  // (same accepted cost as restore probe sessions); its state file is deleted.
-  // Only validated rows are APPENDED (shared/model-metadata.ts dedup); a
-  // cancelled turn writes nothing.
+  // The panel searches the web ITSELF and asks the model to extract the
+  // metadata from the retrieved snippets:
+  //   endpoint + live model ids → one search query per model id (+ two
+  //   market-wide ones) → snippets become cited sources (S1, S2, …) → ONE
+  //   direct completion extracts the JSON envelope → only grounded entries
+  //   are APPENDED (shared/model-metadata.ts dedups + validates).
+  //
+  // Why not a CLI agent session (the first implementation): the bundled CLI
+  // only exposes `web_search` when a platform search key is configured and
+  // carries no search backend for third-party gateway keys (probed
+  // 2026-10-23: the tool is not even in the tool list, and an agent turn
+  // answered `{"models":[]}`), while an agent turn drags in the whole system
+  // prompt + project memory + tool schemas — measured 56,287 input tokens
+  // for a trivial prompt (39,992 system/memory, 12,160 tool schemas). This
+  // flow sends a few thousand tokens and needs no CLI session at all.
 
   private async fetchModelMetadata(): Promise<void> {
     if (this.disposed) return;
@@ -2236,51 +2289,63 @@ export class ChatPanel implements vscode.Disposable {
     this.metadataBusy = true;
     this.postToWebview({ type: "modelMetadataState", state: "searching" });
     this.store.sendToast("info", vscode.l10n.t("正在联网检索模型数据…"));
-    let meta: MetadataSession | null = null;
+    const control = { cancelled: false };
+    let abortCompletion: () => void = () => {};
+    this.metadataCancel = () => {
+      control.cancelled = true;
+      abortCompletion();
+    };
     try {
       const liveIds = await queryModelIds(endpoint, 12_000).catch(() => [] as string[]);
       const ids = [...new Set(
         [endpoint.modelName, this.store.getState().currentModelId, ...liveIds].filter((id): id is string => Boolean(id)),
       )];
       if (ids.length === 0) throw new Error(vscode.l10n.t("当前 API 配置未返回模型列表"));
-      const client = await this.ensureClient();
-      if (this.disposed || this.client !== client) throw new Error("CLI unavailable");
-      const cwd = this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-      const created = await client.newSession({ cwd, mcpServers: [] });
-      meta = { sessionId: created.sessionId, client, text: "" };
-      this.metadataSession = meta;
-      await client.setMode(meta.sessionId, "default").catch((error: unknown) => {
-        this.log.warn(`metadata session set_mode failed: ${errorMessage(error)}`);
-      });
-      const pushId = pickMetadataModel(this.store.getState().currentModelId, endpoint.modelName, liveIds);
-      if (pushId) {
-        await client.setModel(meta.sessionId, pushId).catch((error: unknown) => {
-          this.log.warn(`metadata session set_model failed: ${errorMessage(error)}`);
-        });
-      }
-      const reason = await this.runMetadataTurn(meta, buildModelMetadataPrompt(ids));
-      if (this.disposed) return;
-      if (this.client !== meta.client) {
-        // Profile switch / CLI restart mid-turn: the answer belongs to a dead
-        // endpoint — write nothing.
-        this.log.warn("metadata fetch discarded: CLI was replaced mid-turn");
-        this.postToWebview({ type: "modelMetadataState", state: "idle" });
-        return;
-      }
-      if (reason === "cancelled") {
+      if (control.cancelled) {
         this.postToWebview({ type: "modelMetadataState", state: "idle" });
         this.store.sendToast("info", vscode.l10n.t("联网检索已取消"));
         return;
       }
-      // Timeout/idle salvage: rows the search already confirmed are still real
-      // data; an unparsed (or absent) envelope never fabricates anything.
-      const entries = parseModelMetadata(meta.text);
+      // 1) search sweep — the panel's own HTTP calls, no model involved yet.
+      const queries = buildMetadataQueries(ids);
+      const hits = await this.runMetadataSearch(queries, control);
+      if (control.cancelled) {
+        this.postToWebview({ type: "modelMetadataState", state: "idle" });
+        this.store.sendToast("info", vscode.l10n.t("联网检索已取消"));
+        return;
+      }
+      const sources = await this.collectMetadataSources(hits, ids, endpoint.baseUrl);
+      if (sources.length === 0) {
+        const reasonText = vscode.l10n.t("未获取到检索结果，请检查网络后重试");
+        this.postToWebview({ type: "modelMetadataState", state: "error", error: reasonText });
+        this.store.sendToast("error", reasonText);
+        return;
+      }
+      // 2) extraction — one plain completion over the snippets (no system
+      // prompt, no tool schemas, no project memory).
+      const answer = await this.runInternalPrompt(
+        buildModelMetadataPrompt(ids, sources),
+        {
+          get aborted() {
+            return control.cancelled;
+          },
+          onAbort: (cancel) => {
+            abortCompletion = cancel;
+          },
+        },
+        { timeoutMs: this.metadataTimeoutMs, idleMs: this.metadataIdleMs },
+      );
+      if (this.disposed) return;
+      if (control.cancelled) {
+        this.postToWebview({ type: "modelMetadataState", state: "idle" });
+        this.store.sendToast("info", vscode.l10n.t("联网检索已取消"));
+        return;
+      }
+      // 3) validate + merge. An entry must cite a source that really mentions
+      // the model — an ungrounded row is dropped, never written to settings.
+      const entries = parseModelMetadata(answer, sources);
       if (entries.length === 0) {
-        const reasonText = reason === "timeout"
-          ? vscode.l10n.t("联网检索超时，已停止")
-          : reason === "idle"
-            ? vscode.l10n.t("联网检索中断（模型无响应），已停止")
-            : vscode.l10n.t("联网检索未返回可解析的数据");
+        const reasonText = vscode.l10n.t("联网检索未返回可解析的数据");
         this.postToWebview({ type: "modelMetadataState", state: "error", error: reasonText });
         this.store.sendToast("error", reasonText);
         return;
@@ -2309,7 +2374,7 @@ export class ChatPanel implements vscode.Disposable {
         added: { windows: additions.windows.length, costs: additions.costs.length, rules: additions.rules.length },
       });
       this.store.sendToast("info", doneText);
-      this.log.info(`metadata fetch (${reason}): +${additions.windows.length} windows, +${additions.costs.length} costs, +${additions.rules.length} rules`);
+      this.log.info(`metadata fetch: ${sources.length} sources → +${additions.windows.length} windows, +${additions.costs.length} costs, +${additions.rules.length} rules`);
     } catch (error) {
       if (this.disposed) return;
       const text = errorMessage(error);
@@ -2317,81 +2382,141 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("error", vscode.l10n.t("联网检索失败：{0}", text));
       this.log.warn(`metadata fetch failed: ${text}`);
     } finally {
-      if (meta) this.finishMetadataSession(meta);
+      this.metadataCancel = null;
       this.metadataBusy = false;
     }
   }
 
-  /** Run the metadata turn under a wall-clock ceiling AND an idle watchdog
-   * (re-armed by every session update). On expiry the throwaway turn is
-   * cancelled server-side; the accumulated text decides salvage in the caller.
-   * Never throws — the reason tells the caller what happened. */
-  private async runMetadataTurn(meta: MetadataSession, promptText: string): Promise<"complete" | "timeout" | "idle" | "cancelled" | "failed"> {
-    let wakeIdle: () => void = () => {};
-    const idle = new Promise<"idle">((resolve) => {
-      wakeIdle = () => resolve("idle");
-    });
-    meta.idleResolve = wakeIdle;
-    const overall = new Promise<"timeout">((resolve) => {
-      meta.overallTimer = setTimeout(() => resolve("timeout"), this.metadataTimeoutMs);
-    });
-    this.armMetadataIdleTimer(meta);
-    try {
-      const settled = await Promise.race([
-        meta.client
-          .prompt({ sessionId: meta.sessionId, prompt: [{ type: "text", text: promptText }] }, this.metadataTimeoutMs + 10_000)
-          .then((response) => (response.stopReason === "cancelled" ? "cancelled" : "complete"))
-          .catch(() => "failed" as const),
-        overall,
-        idle,
-      ]);
-      if (settled === "timeout" || settled === "idle") {
-        // The CLI keeps running the turn after a client-side timeout — pull it
-        // back (session/cancel) so the throwaway session stops spending tokens.
-        try {
-          meta.client.cancel(meta.sessionId);
-        } catch {
-          // peer already torn down; nothing to cancel
-        }
+  /**
+   * Search sweep: one HTTP request per query, capped concurrency, capped
+   * per-request time and a wall-clock ceiling for the whole phase. A failed
+   * query contributes nothing — the extraction still runs on what came back.
+   */
+  private async runMetadataSearch(
+    queries: readonly string[],
+    control: { cancelled: boolean },
+  ): Promise<WebSearchHit[]> {
+    const deadline = Date.now() + this.metadataSearchPhaseMs;
+    const hits: WebSearchHit[] = [];
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < queries.length) {
+        if (control.cancelled || Date.now() >= deadline) return;
+        const query = queries[cursor++];
+        if (!query) return;
+        const found = await searchWeb(query, {
+          timeoutMs: this.metadataSearchTimeoutMs,
+          limit: MODEL_METADATA_HITS_PER_QUERY,
+          snippetChars: MODEL_METADATA_SNIPPET_CHARS,
+        }).catch(() => [] as WebSearchHit[]);
+        hits.push(...found);
       }
-      return settled;
-    } finally {
-      if (meta.overallTimer) clearTimeout(meta.overallTimer);
-      if (meta.idleTimer) clearTimeout(meta.idleTimer);
-      meta.idleResolve = undefined;
+    };
+    const workers = Array.from(
+      { length: Math.min(MODEL_METADATA_SEARCH_CONCURRENCY, Math.max(1, queries.length)) },
+      () => worker(),
+    );
+    await Promise.all(workers);
+    return hits;
+  }
+
+  /**
+   * Retrieved hits → the citable source list handed to the model.
+   *
+   * Search snippets alone are thin: measured on a real sweep, only 3 of 70
+   * hits carried a context-window or price figure. So the most promising
+   * pages are fetched and reduced to their evidence lines (the pricing table
+   * usually sits far below the fold, and the page head is nav prose). The
+   * remaining snippets fill the budget as context. Every source gets a
+   * stable id (S1, S2, …) the answer must cite.
+   */
+  private async collectMetadataSources(
+    hits: readonly WebSearchHit[],
+    ids: readonly string[],
+    endpointBaseUrl?: string,
+  ): Promise<MetadataSource[]> {
+    const sources: MetadataSource[] = [];
+    let chars = 0;
+    const budget = this.metadataSourceChars;
+    // One source per page: Bing happily returns the same URL several times
+    // (three query variants hit the same pricing page), and a real sweep
+    // measured 25 of 37 sources as duplicates of the vendor homepage — pure
+    // budget waste that also dilutes the citations the model can choose.
+    const claimed = new Set<string>();
+    const urlKey = (url: string): string => url.split("#")[0]!.split("?")[0]!.toLowerCase();
+    const push = (title: string, url: string, body: string): void => {
+      if (chars >= budget) return;
+      const key = urlKey(url);
+      if (claimed.has(key)) return;
+      const room = budget - chars;
+      const snippet = body.slice(0, room);
+      if (!snippet && !title) return;
+      claimed.add(key);
+      chars += snippet.length + title.length + url.length;
+      sources.push({ id: `S${sources.length + 1}`, title, url, snippet });
+    };
+    // Hits whose title/snippet mention a requested model id are the relevant
+    // ones; among those, the pages that document prices or context windows
+    // are the ones worth reading. (This only picks WHICH pages to read — the
+    // model still extracts the values.)
+    const keys = ids.map((id) => id.toLowerCase()).filter(Boolean);
+    const mentions = (hit: WebSearchHit): boolean => {
+      const haystack = `${hit.title} ${hit.snippet}`.toLowerCase();
+      return keys.some((key) => haystack.includes(key));
+    };
+    const documentation = /pricing|price|价格|定价|计费|费用|上下文|context ?(window|length)|tokens/i;
+    // The official provider site beats third-party comparison pages when both
+    // match the query: the same registrable domain as the configured API
+    // endpoint (api-docs.deepseek.com vs api.deepseek.com) is the strongest
+    // signal that a page is the vendor's own documentation.
+    const endpointHost = registrableHost(endpointBaseUrl);
+    const score = (hit: WebSearchHit): number => {
+      let value = 0;
+      if (mentions(hit)) value += 2;
+      if (documentation.test(`${hit.title} ${hit.url}`)) value += 1;
+      if (endpointHost && urlKey(hit.url).includes(endpointHost)) value += 2;
+      return value;
+    };
+    const ranked = [...hits].sort((a, b) => score(b) - score(a));
+    // Dedupe the candidates only; claiming happens in push() when a page
+    // actually contributes text. (Claiming up-front made push() skip every
+    // successfully fetched page — the official pricing page ranked first and
+    // still vanished from the source list.)
+    const pages: WebSearchHit[] = [];
+    const pageKeys = new Set<string>();
+    for (const hit of ranked) {
+      if (!hit.url.startsWith("http")) continue;
+      const key = urlKey(hit.url);
+      if (claimed.has(key) || pageKeys.has(key)) continue;
+      pageKeys.add(key);
+      pages.push(hit);
+      if (pages.length >= MODEL_METADATA_PAGES) break;
     }
-  }
-
-  private armMetadataIdleTimer(meta: MetadataSession): void {
-    if (meta.idleTimer) clearTimeout(meta.idleTimer);
-    meta.idleTimer = setTimeout(() => meta.idleResolve?.(), this.metadataIdleMs);
-  }
-
-  /** Detach the throwaway session: clear timers, drop the guard slot, and
-   * delete the CLI's session-state file (prompt's finally wrote it by now).
-   * The session object itself cannot be closed — ACP has no session/close. */
-  private finishMetadataSession(meta: MetadataSession): void {
-    if (this.metadataSession === meta) this.metadataSession = null;
-    if (meta.overallTimer) clearTimeout(meta.overallTimer);
-    if (meta.idleTimer) clearTimeout(meta.idleTimer);
-    meta.idleResolve = undefined;
-    try {
-      unlinkSync(acpSessionFilePath(meta.sessionId));
-    } catch {
-      // never written (turn died early) or already gone — nothing to clean
+    const texts = await Promise.all(
+      pages.map((hit) =>
+        fetchPageText(hit.url, { timeoutMs: this.metadataSearchTimeoutMs, maxChars: MODEL_METADATA_PAGE_CHARS })
+          .catch(() => ""),
+      ),
+    );
+    for (let i = 0; i < pages.length; i++) {
+      const page = pages[i];
+      const text = texts[i] ?? "";
+      if (!page || !text) continue;
+      push(page.title, page.url, text);
     }
+    // Snippets of the top hits — context for pages that failed to load.
+    for (const hit of ranked.slice(0, MODEL_METADATA_SNIPPET_HITS)) {
+      if (chars >= budget) break;
+      push(hit.title, hit.url, hit.snippet.slice(0, MODEL_METADATA_SNIPPET_CHARS));
+    }
+    return sources;
   }
 
-  /** Settings-panel 「停止检索」: cancel the in-flight turn; the fetch's
-   * cancelled branch settles the UI state and the finally cleans up. */
+  /** Settings-panel 「停止检索」: abort the in-flight sweep / completion. The
+   * fetch's cancelled branch settles the UI state; the finally clears the
+   * busy lane. */
   private cancelModelMetadata(): void {
-    const meta = this.metadataSession;
-    if (!meta) return;
-    try {
-      meta.client.cancel(meta.sessionId);
-    } catch {
-      // peer already torn down — the fetch's finally still runs
-    }
+    this.metadataCancel?.();
   }
 
   /**
@@ -5094,20 +5219,6 @@ export class ChatPanel implements vscode.Disposable {
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
     if (this.discardedSessionIds.delete(n.sessionId)) return;
-    // 「联网补充模型数据」 throwaway session: its updates never enter the
-    // transcript. Keep only the answer text (the JSON envelope source) and
-    // re-arm the idle watchdog — every chunk/tool update proves the turn is
-    // alive. SubAgent adapter events (sentinel sessionId) are NOT matched
-    // here; the prompt forbids spawning subagents, and while the user turn
-    // is idle the shared drop guard reaps them anyway (pitfall #10 chain).
-    const meta = this.metadataSession;
-    if (meta && meta.sessionId === n.sessionId) {
-      if (n.update.sessionUpdate === "agent_message_chunk" && n.update.content.type === "text") {
-        meta.text += n.update.content.text;
-      }
-      this.armMetadataIdleTimer(meta);
-      return;
-    }
     // Everything else is the pure guard chain (shared/session-state.ts
     // dropSessionUpdate): reset-window drops (incl. sessionId-less updates,
     // which slipped through the earlier id-only guards — user-reported leak
@@ -5820,14 +5931,6 @@ export class ChatPanel implements vscode.Disposable {
             if (this.client !== client || this.disposed) {
               return { outcome: { outcome: "cancelled" } as const };
             }
-            // The metadata fetch runs on a throwaway session: no approval card
-            // may ever appear for it. `web_search` is read-only and asks for no
-            // permission (the Mod's engine chain only does fetches), so
-            // anything that DOES ask is a prompt violation — refuse it.
-            if (this.metadataSession?.sessionId === req.sessionId) {
-              this.log.warn(`metadata session asked permission for "${req.toolCall.toolName ?? "?"}" — auto-cancelled`);
-              return { outcome: { outcome: "cancelled" } as const };
-            }
             // M4 P1-1: the rule table answers matching requests without a card.
             // A failing pre-review must NEVER strand the agent — degrade to the
             // card (the pre-P1-1 behaviour) instead of rejecting or throwing.
@@ -5845,7 +5948,6 @@ export class ChatPanel implements vscode.Disposable {
           },
           onUserQuestions: (req: UserQuestionsRequest) => {
             if (this.client !== client) return Promise.resolve({ answers: {} });
-            if (this.metadataSession?.sessionId === req.sessionId) return Promise.resolve({ answers: {} });
             return this.userQuestionsFromAgent(req);
           },
           onExitPlanMode: async (req: ExitPlanModeRequest) => {
@@ -5855,9 +5957,6 @@ export class ChatPanel implements vscode.Disposable {
             // looking, so it can't be dismissed by a stray click the way a
             // native popup could (which silently rejected and stranded Plan mode).
             if (this.client !== client) return { approved: false, reason: "client busy" };
-            if (this.metadataSession?.sessionId === req.sessionId) {
-              return { approved: false, reason: "metadata fetch session: plan mode is not used" };
-            }
             return this.requestPlanExitFromUser(req);
           },
         },

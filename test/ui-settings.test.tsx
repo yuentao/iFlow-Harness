@@ -40,7 +40,11 @@ const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
   state: null as { pendingProfileSwitch: { id: string; profileName: string } | null } | null,
 }));
-const modelMetadata = vi.hoisted(() => ({ state: "idle" as "idle" | "searching" | "done" | "error" }));
+const modelMetadata = vi.hoisted(() => ({
+  state: "idle" as "idle" | "searching" | "done" | "error",
+  added: undefined as { windows: number; costs: number; rules: number } | undefined,
+  error: undefined as string | undefined,
+}));
 
 vi.mock("../webview/src/store", () => ({
   useChat: Object.assign(
@@ -239,18 +243,45 @@ it("shows model metadata groups in the account tab", () => {
 
 it("the metadata fetch button starts the web-search fetch", () => {
   renderApiTab();
-  click("联网补充模型数据");
+  expect(container.textContent).toContain("会调用当前模型提炼检索资料，产生一次额外 token 消耗。");
+  click("开始检索");
   expect(send).toHaveBeenCalledWith({ type: "fetchModelMetadata" });
 });
 
 it("shows the busy label and stop control while the fetch is searching", () => {
   modelMetadata.state = "searching";
   renderApiTab();
-  expect(container.textContent).toContain("正在联网检索…");
-  expect(container.textContent).not.toContain("联网补充模型数据");
+  expect(container.textContent).toContain("正在检索…");
+  expect(container.textContent).toContain("正在检索资料，随后交给当前模型提炼…");
   click("停止检索");
   expect(send).toHaveBeenCalledWith({ type: "cancelModelMetadata" });
   modelMetadata.state = "idle";
+});
+
+it("shows the appended counts when the fetch finishes", () => {
+  modelMetadata.state = "done";
+  modelMetadata.added = { windows: 2, costs: 1, rules: 2 };
+  renderApiTab();
+  expect(container.textContent).toContain("已追加：上下文窗口 2 条 · 成本单价 1 条 · 思考规则 2 条");
+  modelMetadata.state = "idle";
+  modelMetadata.added = undefined;
+});
+
+it("keeps the metadata status line out of the disclosure's divided children", () => {
+  // SettingsDisclosure's body applies `divide-y`, i.e. a border-top to every
+  // child after the first. The status line must share the action row's
+  // wrapper: as a direct child it got its own divider, which the -mt-2 pull
+  // dragged straight through the spinner text and the 停止检索 button.
+  renderApiTab();
+  click("模型元数据");
+  const hint = [...container.querySelectorAll("span")].find((el) =>
+    el.textContent?.includes("会调用当前模型提炼检索资料"),
+  );
+  const block = hint?.parentElement?.parentElement;
+  const divider = block?.parentElement;
+  expect(block?.textContent).toContain("联网补充模型数据");
+  expect(divider?.className).toContain("divide-y");
+  expect(divider?.firstElementChild).toBe(block);
 });
 
 it("shows a waiting label until the profile-switch choice is answered", () => {

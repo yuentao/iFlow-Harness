@@ -1,28 +1,60 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildMetadataQueries,
   buildModelMetadataPrompt,
   parseModelMetadata,
-  pickMetadataModel,
   planMetadataAdditions,
   MODEL_METADATA_MAX_ENTRIES,
   MODEL_METADATA_MAX_MODEL_IDS,
+  MODEL_METADATA_MAX_QUERIES,
+  type MetadataSource,
   type ModelMetadataEntry,
 } from "../shared/model-metadata.js";
 
+const sources: MetadataSource[] = [
+  { id: "S1", title: "GLM-4.6 pricing", url: "https://example.test/glm", snippet: "GLM-4.6 has a 200000 token context window." },
+  { id: "S2", title: "Other model", url: "https://example.test/other", snippet: "Some other model costs 1.1 per 1M tokens." },
+];
+
+describe("buildMetadataQueries", () => {
+  it("asks price and context-length queries per model id plus one market query", () => {
+    // Chinese term shapes are deliberate: `<id> pricing` / `<id> context
+    // window` hit Bing's fixed brand card (probed 2026-10-23), while
+    // `<id> 价格` / `<id> 上下文长度` surface the official pricing pages.
+    const queries = buildMetadataQueries(["glm-4.6", "deepseek-v3"]);
+    expect(queries[0]).toBe("glm-4.6 价格");
+    expect(queries[1]).toBe("glm-4.6 上下文长度");
+    expect(queries[2]).toBe("deepseek-v3 价格");
+    expect(queries[3]).toBe("deepseek-v3 上下文长度");
+    expect(queries[4]).toContain("大模型 API 价格 对比");
+    expect(queries).toHaveLength(5); // 2 models × 2 queries + 1 market query
+  });
+
+  it("dedupes repeated model ids", () => {
+    expect(buildMetadataQueries(["glm-4.6", "GLM-4.6"])).toHaveLength(3);
+  });
+
+  it("caps the query count", () => {
+    const ids = Array.from({ length: MODEL_METADATA_MAX_MODEL_IDS + 20 }, (_, i) => `m-${i}`);
+    expect(buildMetadataQueries(ids)).toHaveLength(MODEL_METADATA_MAX_QUERIES);
+  });
+});
+
 describe("buildModelMetadataPrompt", () => {
-  it("lists the profile model ids and demands a bare JSON envelope", () => {
-    const prompt = buildModelMetadataPrompt(["glm-4.6", "deepseek-v3"]);
+  it("lists the profile model ids and the citable sources", () => {
+    const prompt = buildModelMetadataPrompt(["glm-4.6", "deepseek-v3"], sources);
     expect(prompt).toContain("- glm-4.6");
     expect(prompt).toContain("- deepseek-v3");
-    expect(prompt).toContain("只允许调用 web_search");
-    expect(prompt).toContain("不要读取或写入任何文件");
+    expect(prompt).toContain("S1 | GLM-4.6 pricing");
+    expect(prompt).toContain("200000 token context window");
     expect(prompt).toContain("键 models");
     expect(prompt).toContain("绝不猜测、编造");
+    expect(prompt).toContain("source");
   });
 
   it("caps the handed model ids", () => {
     const ids = Array.from({ length: MODEL_METADATA_MAX_MODEL_IDS + 10 }, (_, i) => `m-${i}`);
-    const prompt = buildModelMetadataPrompt(ids);
+    const prompt = buildModelMetadataPrompt(ids, sources);
     expect(prompt).toContain(`- m-${MODEL_METADATA_MAX_MODEL_IDS - 1}`);
     expect(prompt).not.toContain(`- m-${MODEL_METADATA_MAX_MODEL_IDS}`);
   });
@@ -73,17 +105,64 @@ describe("parseModelMetadata", () => {
     const models = Array.from({ length: MODEL_METADATA_MAX_ENTRIES + 20 }, (_, i) => ({ name: `m-${i}`, contextWindow: 8000 }));
     expect(parseModelMetadata(JSON.stringify({ models }))).toHaveLength(MODEL_METADATA_MAX_ENTRIES);
   });
-});
 
-describe("pickMetadataModel", () => {
-  it("prefers the panel model when the live list proves it", () => {
-    expect(pickMetadataModel("OpenAI/GPT-4O", "other", ["openai/gpt-4o", "glm-4.6"])).toBe("OpenAI/GPT-4O");
+  it("keeps an entry whose cited source really mentions the model", () => {
+    const raw = '{"models":[{"name":"glm-4.6","contextWindow":200000,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, sources)).toEqual([
+      { name: "glm-4.6", contextWindow: 200000, source: "S1" },
+    ]);
   });
 
-  it("falls back to the profile model, then the first live id (never an unlisted push)", () => {
-    expect(pickMetadataModel("delisted-model", "glm-4.6", ["glm-4.6", "x"])).toBe("glm-4.6");
-    expect(pickMetadataModel("delisted", "also-delisted", ["first", "second"])).toBe("first");
-    expect(pickMetadataModel(null, null, [])).toBeNull();
+  it("drops an entry without a citation, with an unknown citation, or with a source that never mentions the model", () => {
+    const raw = JSON.stringify({
+      models: [
+        { name: "glm-4.6", contextWindow: 200000 },
+        { name: "glm-4.6", contextWindow: 200000, source: "S9" },
+        { name: "hallucinated-model", contextWindow: 999999, source: "S2" },
+      ],
+    });
+    expect(parseModelMetadata(raw, sources)).toEqual([]);
+  });
+
+  it("matches a source that writes the id differently (spacing/case)", () => {
+    const loose: MetadataSource[] = [
+      { id: "S1", title: "DeepSeek", url: "https://example.test/ds", snippet: "DeepSeek V3.2 supports 128000 tokens." },
+    ];
+    const raw = '{"models":[{"name":"deepseek-v3.2","contextWindow":128000,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, loose)).toEqual([
+      { name: "deepseek-v3.2", contextWindow: 128000, source: "S1" },
+    ]);
+  });
+
+  it("accepts a context window written in K/M units in the source", () => {
+    const k: MetadataSource[] = [
+      { id: "S1", title: "GLM-5", url: "https://example.test/glm", snippet: "GLM-5 supports 200K context tokens." },
+    ];
+    const raw = '{"models":[{"name":"glm-5","contextWindow":200000,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, k)).toEqual([{ name: "glm-5", contextWindow: 200000, source: "S1" }]);
+    const m: MetadataSource[] = [
+      { id: "S1", title: "Kimi", url: "https://example.test/kimi", snippet: "Kimi K3 supports 1M token context window." },
+    ];
+    const rawM = '{"models":[{"name":"kimi-k3","contextWindow":1000000,"source":"S1"}]}';
+    expect(parseModelMetadata(rawM, m)).toEqual([{ name: "kimi-k3", contextWindow: 1000000, source: "S1" }]);
+  });
+
+  it("drops an entry whose number the source does not state", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "GLM-5", url: "https://example.test/glm", snippet: "GLM-5 supports 200K context tokens." },
+    ];
+    const raw = '{"models":[{"name":"glm-5","contextWindow":1000000,"source":"S1"}]}';
+    expect(parseModelMetadata(raw, src)).toEqual([]);
+  });
+
+  it("drops an entry whose price the source does not state", () => {
+    const src: MetadataSource[] = [
+      { id: "S1", title: "GLM-5", url: "https://example.test/glm", snippet: "GLM-5 input $0.6 output $2.4 per 1M tokens." },
+    ];
+    const ok = '{"models":[{"name":"glm-5","inputPrice":0.6,"outputPrice":2.4,"source":"S1"}]}';
+    expect(parseModelMetadata(ok, src)).toEqual([{ name: "glm-5", inputPrice: 0.6, outputPrice: 2.4, source: "S1" }]);
+    const wrong = '{"models":[{"name":"glm-5","inputPrice":9.9,"outputPrice":2.4,"source":"S1"}]}';
+    expect(parseModelMetadata(wrong, src)).toEqual([]);
   });
 });
 

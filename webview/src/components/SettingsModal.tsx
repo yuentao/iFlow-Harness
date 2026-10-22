@@ -1231,31 +1231,62 @@ function ApiConfigSection({
       </Hint>
 
       <SettingsDisclosure title={t("模型元数据")} hint={t("高级，可选填")}>
-        <div className="px-4 py-3">
-          <div className="flex flex-wrap items-start gap-x-2 gap-y-1.5">
-            <Button
-              variant="secondary"
-              disabled={metadata.state === "searching"}
-              title={t("由 AI 联网检索最新模型资料与当前 API 配置中的模型，追加到下方表格（不覆盖已有条目）。")}
-              icon={metadata.state === "searching"
-                ? <Loader2 className={`${ICON_INLINE} animate-spin`} />
-                : <Globe className={ICON_INLINE} />}
-              onClick={() => send({ type: "fetchModelMetadata" })}
-            >
-              {metadata.state === "searching" ? t("正在联网检索…") : t("联网补充模型数据")}
-            </Button>
-            {metadata.state === "searching" && (
-              <Button variant="secondary" onClick={() => send({ type: "cancelModelMetadata" })}>
-                {t("停止检索")}
-              </Button>
+        <div>
+          <SettingRow
+            label={t("联网补充模型数据")}
+            description={t("联网检索官方资料，由当前模型提炼后追加到下表。")}
+            detail={t(
+              "检索由扩展直接发起，不经过内核会话；资料会交给当前模型做一次提炼（产生一次额外 token 消耗）。只追加、不覆盖，在资料中找不到依据的条目会被丢弃。",
             )}
-            <p className="min-w-[13rem] flex-1 text-ui-caption leading-relaxed text-muted-foreground">
-              {t("联网检索模型资料并追加，不覆盖已有条目。")}
-            </p>
+            control={
+              <Button
+                variant="secondary"
+                disabled={metadata.state === "searching"}
+                icon={metadata.state === "searching"
+                  ? <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                  : <Globe className={ICON_INLINE} />}
+                onClick={() => send({ type: "fetchModelMetadata" })}
+              >
+                {metadata.state === "searching" ? t("正在检索…") : t("开始检索")}
+              </Button>
+            }
+          />
+          <div className="-mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 px-4 pb-3">
+            {metadata.state === "searching" ? (
+              <>
+                <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
+                <span className="min-w-0 flex-1 text-ui-caption leading-relaxed text-muted-foreground">
+                  {t("正在检索资料，随后交给当前模型提炼…")}
+                </span>
+                <Button variant="secondary" size="sm" onClick={() => send({ type: "cancelModelMetadata" })}>
+                  {t("停止检索")}
+                </Button>
+              </>
+            ) : metadata.state === "error" && metadata.error ? (
+              <span className="min-w-0 flex-1 text-ui-caption leading-relaxed text-destructive">{metadata.error}</span>
+            ) : metadata.state === "done" && metadata.added ? (
+              <>
+                <Sparkles className={`${ICON_INLINE} shrink-0 text-primary`} />
+                <span className="min-w-0 flex-1 text-ui-caption leading-relaxed text-muted-foreground">
+                  {metadata.added.windows + metadata.added.costs + metadata.added.rules > 0
+                    ? t(
+                        "已追加：上下文窗口 {0} 条 · 成本单价 {1} 条 · 思考规则 {2} 条",
+                        metadata.added.windows,
+                        metadata.added.costs,
+                        metadata.added.rules,
+                      )
+                    : t("检索完成，资料中没有可补充的新数据。")}
+                </span>
+              </>
+            ) : (
+              <>
+                <Sparkles className={`${ICON_INLINE} shrink-0 text-primary`} />
+                <span className="min-w-0 flex-1 text-ui-caption leading-relaxed text-muted-foreground">
+                  {t("会调用当前模型提炼检索资料，产生一次额外 token 消耗。")}
+                </span>
+              </>
+            )}
           </div>
-          {metadata.state === "error" && metadata.error && (
-            <p className="mt-1 text-ui-caption text-destructive">{metadata.error}</p>
-          )}
         </div>
         <LinesRow
           label={t("上下文窗口覆写")}

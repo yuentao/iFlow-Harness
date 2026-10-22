@@ -831,13 +831,20 @@ const en: Record<string, string> = {
   "应用": "Apply",
   "JSON 格式无效": "Invalid JSON",
   "条目必须是数组": "The value must be an array",
-  "由 AI 联网检索最新模型资料与当前 API 配置中的模型，追加到下方表格（不覆盖已有条目）。":
-    "AI web-searches the newest model data plus your API profile's models and appends validated rows below (existing rows are never overwritten).",
-  "联网检索模型资料并追加，不覆盖已有条目。":
-    "Web-searches model data and appends it (existing rows are never overwritten).",
+  "联网检索官方资料，由当前模型提炼后追加到下表。":
+    "Web-searches official docs and appends the rows the current model extracts below.",
+  "检索由扩展直接发起，不经过内核会话；资料会交给当前模型做一次提炼（产生一次额外 token 消耗）。只追加、不覆盖，在资料中找不到依据的条目会被丢弃。":
+    "The extension runs the search itself (no core session); the retrieved text goes to the current model for one extraction pass, which costs extra tokens. Rows are only appended — anything the cited source cannot back is dropped.",
   "联网补充模型数据": "Fetch model data online",
-  "正在联网检索…": "Searching online…",
+  "开始检索": "Start search",
+  "正在检索…": "Searching…",
+  "正在检索资料，随后交给当前模型提炼…": "Searching the web, then asking the current model to extract the rows…",
   "停止检索": "Stop search",
+  "已追加：上下文窗口 {0} 条 · 成本单价 {1} 条 · 思考规则 {2} 条":
+    "Appended: {0} context windows · {1} unit prices · {2} thinking rules",
+  "检索完成，资料中没有可补充的新数据。": "Search finished; nothing new to add from the retrieved sources.",
+  "会调用当前模型提炼检索资料，产生一次额外 token 消耗。":
+    "Invokes the current model once to extract the rows — this costs extra tokens.",
   // F3 memory manager (Phase 1)
   "全局记忆": "Global memory",
   "项目记忆": "Project memory",
