@@ -120,7 +120,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - **多行字段高度走 kit 手柄**:textarea 一律 `resize-none`,调整高度由 `.ui-resize`(右下斜纹手柄,与 Composer 顶边拖拽同一语言,`aria-hidden`、仅鼠标)负责;调用点不得写 `resize-*`,自带尺寸编辑器传 `resizable={false}`(MessageList 内联编辑器)。
 - **密码字段显隐走 `TextInput revealable`**:kit `IconButton`(Eye/EyeOff)替代 Chrome 内置眼睛(原生按钮 CSS 无法覆写),`aria-label` 与 tooltip 同文。
 - **Button 是单行物种**:`Button` 固定 28px(`md`)/ 24px(`sm`)高,只放一行文案(图标 + 文案);需要「图标 + 标题 + 副描述」这种两行内容时用 `OptionCard` / `MenuItem`,**不要**给 `Button` 加 `py-*` 撑高——内容会溢出按钮自己的边框(Profile 切换卡曾如此:紫色描边只画在 28px 高的框上,文字溢出到框外)。守卫 `test/ui-kit-guard.test.ts` 断言组件里的 `Button` 不带 `py-*` 内边距覆写。
-- **按钮跟随所在表面的色调**:落在带语义底色的表面(警告/错误 toast 胶囊、警告横幅)里的动作按钮必须穿该色调(`variant="warning-soft"` / `"danger-soft"`,kit 里的 `WARNING_SOFT` / `DANGER_SOFT`),不能沿用中性次级按钮——灰 chip 浮在琥珀色提示上会读成无关控件(上下文接近上限提示的「立即压缩」曾如此)。中性表面上的普通动作仍是 `secondary`。`test/notification-merge.test.tsx` 断言警告/错误 toast 的动作按钮带对应色调且不含 `bg-editor`。
+- **按钮跟随所在表面的色调**:落在带语义底色的表面(警告/错误 toast 胶囊、警告横幅、错误横幅)里的动作按钮必须穿该色调(`variant="warning-soft"` / `"danger-soft"`,kit 里的 `WARNING_SOFT` / `DANGER_SOFT`),不能沿用中性次级按钮或 primary 渐变——灰 chip 浮在琥珀色提示上会读成无关控件(上下文接近上限提示的「立即压缩」曾如此),靛蓝 primary 压在红色错误横幅上同样读成另一个产品(该横幅的「重试」现为 `danger-soft`)。中性表面上的普通动作仍是 `secondary`;`ErrorBoundary` 的内联回退卡是琥珀底 → `warning-soft`,整页回退是中性底 → `canvas`。`test/notification-merge.test.tsx` 与 `test/error-boundary.test.tsx` 断言这些动作按钮带对应色调且不含 `bg-editor`。
 - 守卫 `test/ui-kit-guard.test.ts` 断言:styles.css 必含上述重置规则与 `.ui-resize` 物种、`resize-*` 只允许出现在 ui.tsx(+ Composer 例外)、`type="password"` 必须与 `revealable` 同元素,并含手柄拖拽/显隐切换的 jsdom 行为用例。
 - **边界条件**:下拉/浮层需视口夹取,窄屏右对齐菜单用 `align=right` 向内展开;`ModalShell` 给 `initialFocus`;审批卡/提问卡/Plan 卡**不受 streaming 门控**(陷阱 #12);渐进披露(行内删除等)用 `group-hover` / `group-focus-within` 的 opacity 组,不靠 `hidden`;`data-variant="danger"` 只被 Dropdown 的键盘导航选择器消费(`ui.tsx`),非菜单按钮的危险语义由 `tone="danger"` 承担。
 - **约束**:`test/ui-kit-guard.test.ts`(`npx vitest run test/ui-kit-guard.test.ts`)静态扫描 `webview/src`,断言原生控件只在 ui.tsx(+ Composer 那 1 处 textarea)、主按钮渐变串与按钮基串只在 ui.tsx、无 `accent-[`、无 `text-[Npx]` / `rounded-[Npx]`、`icon={<… className="size-3.5" />}` 走 `ICON_INLINE`、套件导出成员存在。新增控件请同时把成员名加进守卫清单。
@@ -210,6 +210,11 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - Tailwind v4 中 shadow-panel 会被解析为 shadow 颜色修饰符而只输出 --tw-shadow-color；自定义浮层阴影需要在 styles.css 中显式写 .shadow-panel/.shadow-float 规则，且 float 这类 utility 不在 @theme inline 时必须手动补规则。
 - 项目控件体系约定：控件统一收敛到 ui.tsx；原生控件外观残留（textarea resize 手柄、number 微调箭头、password reveal、autofill、selection/caret）应通过 styles.css 重置或 kit 自绘覆盖，避免浏览器默认外观。
 - 项目原生控件统一采用 kit 外观：无 select，checkbox、range、数值输入、密码显隐和 textarea 手柄均由项目自绘；Composer 提示输入作为既有例外。
+- 语义底色表面的动作按钮应跟随表面色调：警告用 warning-soft、错误用 danger-soft；中性表面用 secondary，粘性决策主操作保留 primary。
+- Button 是单行控件，不得用 py-* 强行增高；两行内容应使用 OptionCard 或 MenuItem。
+- OptionCard 用于单次选择中的多行选项，可用 emphasis 表达推荐态，并用 ariaLabel 提供与可见文案不同的可访问名。
+- 新增 UI kit 导出时，ui-kit-guard 的导出清单必须按源码实际声明精确匹配，并确保守卫改动与源码一起提交。
+- 按钮需跟随所在表面的语义色：警告表面用 warning-soft，错误表面用 danger-soft；中性表面用 secondary/canvas，粘性决策卡保留 primary。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

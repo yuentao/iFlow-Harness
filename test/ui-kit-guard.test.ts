@@ -242,8 +242,8 @@ describe("ui kit guard", () => {
       "export function MenuItem(",
       "export function SettingsGroup(",
       "export function SettingsDisclosure(",
-      "export const WARNING_SOFT(",
-      "export const DANGER_SOFT(",
+      "export const WARNING_SOFT =",
+      "export const DANGER_SOFT =",
     ];
     expect(names.filter((name) => !kit.includes(name))).toEqual([]);
   });

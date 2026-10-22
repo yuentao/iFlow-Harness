@@ -101,6 +101,29 @@ describe("ErrorBoundary", () => {
     expect(container.textContent).not.toContain("消息区渲染异常");
   });
 
+  it("wears the surface tone on the retry button", () => {
+    // The inline fallback IS an amber notice — its action follows the surface
+    // (warning tone), not a neutral grey chip.
+    render(<Flaky boom={true} resetKey={1} />);
+    const retry = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("重试"));
+    expect(retry).toBeDefined();
+    expect(retry!.className).toContain("text-warning");
+    expect(retry!.className).toContain("border-warning");
+    expect(retry!.className).not.toContain("bg-editor");
+  });
+
+  it("keeps the page fallback's retry on the neutral surface", () => {
+    render(
+      <ErrorBoundary variant="page">
+        <ThrowsOnce />
+      </ErrorBoundary>,
+    );
+    const retry = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("重试"));
+    expect(retry).toBeDefined();
+    expect(retry!.className).toContain("bg-surface");
+    expect(retry!.className).not.toContain("text-warning");
+  });
+
   it("auto-retries when resetKey changes (streaming self-heal)", () => {
     render(<Flaky boom={true} resetKey={1} />);
     expect(container.textContent).toContain("消息区渲染异常");

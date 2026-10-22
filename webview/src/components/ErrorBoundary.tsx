@@ -1,7 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, RotateCcw } from "lucide-react";
 import { t } from "../i18n";
-import { ICON_DISPLAY } from "./ui";
+import { Button, ICON_DISPLAY, ICON_INLINE } from "./ui";
 
 interface Props {
   children: ReactNode;
@@ -57,13 +57,12 @@ export class ErrorBoundary extends Component<Props, State> {
   render(): ReactNode {
     const { error } = this.state;
     if (error === null) return this.props.children;
-    const retry = (
-      <button
-        onClick={this.reset}
-        className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-3 py-1.5 text-ui-label font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
-      >
-        <RotateCcw className="size-3.5" /> {t("重试")}
-      </button>
+    // The retry wears the surface it sits on: the inline card is an amber
+    // notice (warning tone), the full-page fallback is neutral (canvas).
+    const retry = (variant: "canvas" | "warning-soft") => (
+      <Button variant={variant} icon={<RotateCcw className={ICON_INLINE} />} onClick={this.reset}>
+        {t("重试")}
+      </Button>
     );
     if (this.props.variant === "page") {
       return (
@@ -73,7 +72,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <p className="max-w-[320px] text-ui-caption leading-relaxed text-muted-foreground">
             {t("界面渲染时遇到异常。重新载入面板即可恢复；也可以直接重试。")}
           </p>
-          {retry}
+          {retry("canvas")}
         </div>
       );
     }
@@ -85,7 +84,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <p className="text-ui-caption leading-relaxed text-muted-foreground">
             {t("内容渲染时遇到异常，将在下一次更新时自动重试。")}
           </p>
-          {retry}
+          {retry("warning-soft")}
         </div>
       </div>
     );

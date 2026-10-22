@@ -140,12 +140,13 @@ function ErrorBanner({
       {expanded ? t("收起") : t("详情")}
     </button>
   );
-  // 重试 is the banner's ONE primary action — it wears the project's primary
-  // button style (gradient + shadow-btn, same family as 允许一次 / 保存并继续),
-  // not the neutral secondary button.
+  // 重试 is the banner's ONE action — it wears the banner's own destructive
+  // tone (soft destructive fill, same family as the 立即压缩 / 重试 actions on
+  // the error pill), not a neutral grey chip and not the primary gradient:
+  // an indigo button floating on a red banner read as an unrelated control.
   const retryButton = (
     <Button
-      variant="primary"
+      variant="danger-soft"
       className="shrink-0"
       icon={<RefreshCw className={ICON_INLINE} />}
       title={t("重启 CLI 并重试（会话自动恢复）")}
