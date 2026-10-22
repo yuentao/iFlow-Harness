@@ -210,7 +210,6 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - Tailwind v4 中 shadow-panel 会被解析为 shadow 颜色修饰符而只输出 --tw-shadow-color；自定义浮层阴影需要在 styles.css 中显式写 .shadow-panel/.shadow-float 规则，且 float 这类 utility 不在 @theme inline 时必须手动补规则。
 - 项目控件体系约定：控件统一收敛到 ui.tsx；原生控件外观残留（textarea resize 手柄、number 微调箭头、password reveal、autofill、selection/caret）应通过 styles.css 重置或 kit 自绘覆盖，避免浏览器默认外观。
 - 项目原生控件统一采用 kit 外观：无 select，checkbox、range、数值输入、密码显隐和 textarea 手柄均由项目自绘；Composer 提示输入作为既有例外。
-- 语义底色表面的动作按钮应跟随表面色调：警告用 warning-soft、错误用 danger-soft；中性表面用 secondary，粘性决策主操作保留 primary。
 - Button 是单行控件，不得用 py-* 强行增高；两行内容应使用 OptionCard 或 MenuItem。
 - OptionCard 用于单次选择中的多行选项，可用 emphasis 表达推荐态，并用 ariaLabel 提供与可见文案不同的可访问名。
 - 新增 UI kit 导出时，ui-kit-guard 的导出清单必须按源码实际声明精确匹配，并确保守卫改动与源码一起提交。
