@@ -1,6 +1,6 @@
 {
   "iflow.displayName": "心流·驭光",
-  "iflow.description": "iFlow 的 VSCode 图形智能体（基于 ACP）",
+  "iflow.description": "iFlow 内核的 VSCode 图形前端（基于 ACP）：内置执行体、流式对话、逐块 Diff 审批、轮级回退、记忆与知识库、MCP 管理",
   "iflow.viewContainer.title": "心流·驭光",
   "iflow.view.name": "聊天",
   "command.openPanel.title": "iFlow：打开聊天面板",

@@ -13,6 +13,7 @@
         "scripts/**/*.mjs"
       ],
       "ignoreExportsUsedInFile": true,
+      "ignoreDependencies": ["node-notifier"],
       "ignoreIssues": {
         "shared/messages.ts": ["exports", "types"],
         "src/acp/protocol.ts": ["exports", "types"],

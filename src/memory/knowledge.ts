@@ -165,11 +165,6 @@ export function readManagedKnowledgeImports(content: string): string[] {
   ];
 }
 
-export function hasManagedKnowledgeBlock(content: string): boolean {
-  const start = content.indexOf(MANAGED_START);
-  return start !== -1 && content.indexOf(MANAGED_END, start + MANAGED_START.length) !== -1;
-}
-
 /**
  * Replace/remove the managed block. Only this block is touched: user-written
  * memory above/below it is preserved byte-for-byte (apart from the blank-line

@@ -17,6 +17,8 @@ vendor/
 test/fixtures/*.ndjson
 test/fixtures/*.json
 test/fixtures/probe-memory-context.txt
+# Panel tests write transcripts to their stub storageUri; never a fixture.
+test/transcripts/
 
 # UI verification screenshots (Playwright smoke runs, repo root only)
 /*.jpg

@@ -3,7 +3,23 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
-## [1.7.0] - 2026-10-19
+## [2.0.0] - 2026-10-23
+
+- 新增 统一控件套件 UI Kit（控件之家只有一个）：`webview/src/components/ui.tsx` 收齐 Button/IconButton、TextInput/Commit*/SearchInput/Select、Switch/Checkbox/ToggleChip/OptionGroup+OptionCard、Slider/TabButton/Segmented、MenuItem 浮层行原语与 FloatPill/FloatChip/CountdownSeconds/ToastStack 浮层族，17 个组件文件的自绘控件全部改为套件引用（MessageList -334 行、SettingsModal -296 行、Composer -135 行）；原生 `<input>/<textarea>/<select>/checkbox/range` 只允许出现在 ui.tsx（唯一例外是 Composer 的提示输入 textarea），新增 `ui-kit-guard` 静态守卫断言原生控件位置、按钮基串与渐变串、无 `accent-[`/`text-[Npx]`/`rounded-[Npx]`、导出成员清单与 jsdom 行为用例
+- 新增 浏览器原生字段外观由 kit 接管：`styles.css` 关掉 number 微调箭头（键盘 ↑/↓ 步进保留）、把 autofill 黄底覆写成 `--editor` 底并保留焦点光晕、`caret-color` 与 `::selection` 走 primary、textarea 一律 `resize-none` 并由 `.ui-resize` 斜纹手柄拖拽高度（clamp 到 40px 下限与视口减 120 上限）、密码显隐走 `TextInput revealable`（kit IconButton 替代无法覆写的 Chrome 内置眼睛）、`OptionCard` 新增 `emphasis` 推荐项与 `ariaLabel` 显式可访问名；Profile 切换卡的两行选项从 `Button+py-2` 改为 `OptionGroup+OptionCard`（紫色描边只画在 28px 框上、文字溢出到框外）
+- 新增 回合末合并请求：AI 标题、下一步建议、自动提取记忆过去各发一次网关调用（一轮最多烧三次），现在由 `shared/turn-followup.ts` 按「已开启且符合条件」拼一份提示词一次发送，回复是单一 JSON 信封；解析先按外层对象、失败退化为按键挖取，缺项一律 `null`/`[]`——绝不伪造标题、chip 或记忆事实；单一 `followupBusy` lane、enhance 在飞时整批跳过且不登记 `titledSessionIds`、超时取所携带任务最宽松的上限、压缩轮只关闭对话派生的两项
+- 新增 设置面板「联网补充模型数据」：宿主侧直连检索（`src/acp/web-search.ts`，Bing `cn.bing.com` 端点优先、DDG 回退，`node:http(s)` 直连避开 fetch 代理 patch）→ 抓取最相关的页面原文（价格表在折叠线以下，搜索摘要不够用）→ 带编号的可引用来源交给 `streamChatCompletion` 直连提炼 → 宿主解析/校验/**只追加不覆盖**；溯源校验是结构性保证：条目必须引用存在的来源编号、该来源文本必须提到模型名、模型报出的每个数字必须能在该来源中找到（单位感知 `200000`↔"200K"、`1000000`↔"1M"），任一不满足整条丢弃；查询形态与端点是硬约束（英文 pricing/context window 形态退回 Bing 固定品牌卡片，中文价格/上下文长度才命中官方定价页），来源按 URL 去查询串去重；非美元来源省略价格字段（绝不汇率换算）。首版走一次性内核 agent 会话实测在第三方网关 key 下完全不工作（内核在 `searchApiKey` 为空时把 `web_search`/`web_fetch` 全部过滤，agent 直接回空信封）且一轮平凡 prompt 烧 56,287 input tokens（system 39,992 + tools schema 12,160，`mcpServers: []` 挡不住 settings.json 里的 MCP），改走宿主侧后同任务 11,273 tokens；设置行如实披露一次额外 token 消耗，完成态报追加计数、无新数据诚实提示
+- 新增 MCP 模板目录与 CLI 资产（技能/命令/子代理）可视化管理：MCP 配置编辑器表单化替代裸 JSON，支持全局/项目双作用域与合并规则预览；新增 界面反馈与状态可见（计划清单种子与勾选、工具输出完整导出）与异常处理错误提示（错误分类建议 + 设置跳转）
+- 新增 全局字号维度与会话重命名：5 档语义字号 token（title 16 / body 14 / label 13 / caption 12 / micro 11 + display 20）替换硬编码 px，`--ui-font-scale` 预设紧凑 0.92 / 标准 1 / 大 1.1；圆角归为 5 档语义 token（inner 4 / control 6 / card 8 / overlay 12 / bubble 16），按钮与图标尺寸约定（28/24、图标 14/16/20）、布局间距 token 化并随 `--ui-density` 缩放
+- 优化 设置面板信息架构与布局归一化：一级分类取代「通用/高级」兜底，侧栏 roving tabindex 键盘导航、初始焦点落当前侧栏项、切 tab 重置滚动；`ui.tsx` 新增 `Hint`/`ActionRow`/`ToolbarRow`/`FieldLabel`/`Field` 布局原语，5 个设置卡片的内联样式收敛为组件引用；`SettingsDisclosure` 承载次要内容（模型元数据默认收起），动作行与状态行同容器避免 `divide-y` 多出边线；返回交互统一为单一通道（子页经 header 返回箭头，底部不再放「返回」）
+- 优化 Composer 与通知层级：上下文 chip 折叠、模型菜单整合思考级别与用量明细、note 改走共用 toast 栈、24px 点击区、排队占位符统一；错误与未配置凭据提示改为转录上方的 inline banner（正文独占整行、操作行下移，320/480px 窄屏可读无横向溢出），限流/流中断倒计时合并进粘性「生成中」pill 并从底部 toast 栈跳过，抽共享 `CountdownSeconds` 锚定 host 绝对 deadline 消除计时漂移
+- 优化 引导向导精简为 4 步（欢迎并入连接、偏好步骤改由设置承接、模型搜索仅长目录显示、初始焦点落首个空输入、单一逃逸门）；记忆候选通知卡带 preview 与「查看确认」动作
+- 修复 渲染与浮层视觉：VSCode 注入的 webview 模板样式静默覆盖设计系统（裸 `code` 的 `--vscode-textPreformat-*` 底色是 unlayered，任何 utility 都压不过，现补 unlayered 重置与 `.approval-target` token 底色）；代码块底色板作用域（普通块保留 `--editor` 底板与软换行，仅思考卡内的围栏豁免底色）；浮层菜单阴影统一 `shadow-float`（`--shadow-panel` 的负 spread 在贴触发器的浮层上会塌陷）；底部通知带遮挡最新消息（streaming/恢复 pill 从 sticky 改 absolute 浮层，最新消息与 pill 之间保留可见间隙）；hover 操作条被 paint containment 裁切；工具卡标题窄屏截断（硬固定宽度 + 副标题吞溢出）；HelpTip 气泡被卡片 `overflow-hidden` 剪切（portal 到 body + 视口夹取 + 底部不足向上翻转）
+- 修复 语义与状态：工具卡轮末僵尸挂起、迟到 `in_progress` 帧覆盖已完成输出、Plan 退出被打断时的模式漂移（cancel 后立即重推当前模式）、审批/提问/Plan 卡焦点安全侧与 IME 回车、下拉菜单项语义（值选择整组 `menuitemradio` + 仅在 checkable 时输出 `aria-checked`）、错误表面动作按钮色调（警告横幅走 `warning-soft`、错误横幅走 `danger-soft`，中性灰 chip 浮在琥珀提示上读成无关控件）
+- 优化 撤销「工具活动分组」回到每工具一张独立卡片（分组把并行 task 的工具混进同一张卡）；记忆卡事实列表折叠（超过 3 条收成摘要行、行内 clamp 两行点击展开）、未注入标注改 warning 色调；新增 `npm run webview:serve` 长期静态调试入口
+- 变更 用户可见文案里的「iFlow CLI」统一改为「内核」（l10n 源、`package.nls` 双语与英文 bundle）
+
+
 
 - 新增 记忆管理与项目知识库（F3 三阶段落地）：设置页「记忆」tab 读取并内联编辑 CLI 实际加载的全局与项目 AGENTS.md/IFLOW.md（按 ## iFlow Added Memories 追加/删除事实、新建项目记忆、token 成本展示、sha256 冲突检测，遗留 memory.md 只展示不注入）；助手消息行内「记住这条」与编辑器右键「记住选中内容」走 MemoryQuickAdd 弹窗（requestId 匹配自己的回包，防广播串包）；iflow.autoMemoryCapture（默认开）回合结束后用当前模型提取长期记忆候选（独立 lane 不阻塞 enhance/AI 标题、2 分钟限流、归一化去重 + 置信度 ≥0.6 + 最多 5 条），只进审阅对话框确认才写盘；项目知识库生成 .iflow/knowledge/index.md + manifest.json（2000 文件上限扫描、增量刷新仅变化时调模型、基线 hash 不匹配强制显式全量重建、注入托管块 @import 并遵循 contextFileName 遍历全部项目记忆文件防重复展开）
 - 新增 首次引导向导与提供商预设配置：OnboardingWizard 引导网关/凭据/模型首次配置，provider-presets 预设切换不继承旧网关模型名防「新端点 + 旧模型」错配

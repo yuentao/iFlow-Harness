@@ -1259,6 +1259,3 @@ export class MemoryService {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-
-/** Exposed for tests: the exact template written by createProjectMemory. */
-export const PROJECT_MEMORY_TEMPLATE = PROJECT_TEMPLATE;

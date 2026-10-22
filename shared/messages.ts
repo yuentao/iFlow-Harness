@@ -12,7 +12,6 @@ import type {
   ToolLocation,
   StopReason,
   UserQuestion,
-  McpStatusReport,
   McpServerStatusView,
   McpToolView,
   McpPromptView,
@@ -24,7 +23,8 @@ import type { ApprovalRule } from "./approval-policy.js";
 export type { SlashCommand, UserQuestion };
 // MCP status wire types (mcp-status-refactor Mod): the settings card renders
 // the per-server view and the detail sub-page consume tools/prompts directly.
-export type { McpStatusReport, McpServerStatusView, McpToolView, McpPromptView };
+// The report envelope itself is consumed host-side from src/acp/protocol.js.
+export type { McpServerStatusView, McpToolView, McpPromptView };
 // M4 P1-1: the approval-policy card edits these directly (the rule shape is
 // shared pure data, not session state — it never rides a snapshot).
 export type { ApprovalRule, ApprovalAction } from "./approval-policy.js";

@@ -1,6 +1,6 @@
 {
   "iflow.displayName": "iFlow Harness",
-  "iflow.description": "iFlow graphical agent for VSCode (ACP-based)",
+  "iflow.description": "Graphical agent frontend for the iFlow core (ACP): built-in runtime, streaming chat, tool approval with per-hunk diffs, turn-level rollback, memory & knowledge base, MCP management",
   "iflow.viewContainer.title": "iFlow Harness",
   "iflow.view.name": "Chat",
   "command.openPanel.title": "iFlow: Open Chat Panel",

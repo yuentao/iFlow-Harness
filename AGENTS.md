@@ -7,7 +7,7 @@
 - 技术栈:TypeScript 7(strict)+ React 19 + Tailwind CSS 4 + zustand 5 + Vite 8 + vitest 5
 - 目标环境:VSCode `^1.90.0`,Node 22(CI)/ node20(esbuild target)
 - 仓库:`package.json` 声明 GitHub(`https://github.com/yuentao/iFlow-Harness.git`),但实际 `git remote` 仍指向内部 GitLab(`https://git.pandorastudio.cn/product/iFlow-harness.git`)——两处不一致,改发布配置时注意别踩空
-- 当前版本:见 `CHANGELOG.md` 顶部(现为 `1.1.2` / 2026-09-19)。**版本对齐硬性要求**:`package.json` 的 version 必须与 CHANGELOG 顶部 `## [x.y.z]` 保持一致再提交——release workflow 从 CHANGELOG 读版本并覆写 package.json,若两者漂移(如为覆盖商店缓存手动 bump 版本却不改 CHANGELOG),CI 会把版本覆写回旧号,商店与仓库永远对不上(2026-09-13 实际踩坑:商店已 1.0.3,仓库 CHANGELOG 还停留在 1.0.2、package.json 停留在 1.0.1)。发布前自检:`grep '"version"' package.json` 与 `head -6 CHANGELOG.md` 必须一致。
+- 当前版本:见 `CHANGELOG.md` 顶部(现为 `2.0.0` / 2026-10-23)。**版本对齐硬性要求**:`package.json` 的 version 必须与 CHANGELOG 顶部 `## [x.y.z]` 保持一致再提交——release workflow 从 CHANGELOG 读版本并覆写 package.json,若两者漂移(如为覆盖商店缓存手动 bump 版本却不改 CHANGELOG),CI 会把版本覆写回旧号,商店与仓库永远对不上(2026-09-13 实际踩坑:商店已 1.0.3,仓库 CHANGELOG 还停留在 1.0.2、package.json 停留在 1.0.1)。发布前自检:`grep '"version"' package.json` 与 `head -6 CHANGELOG.md` 必须一致。
 - 版本历史:0.1.0(2026-08-30 首版)→ 0.2.0(2026-09-07 全新 UI)→ 1.0.0(2026-09-11 提问卡/附件/内置 CLI 等)→ 1.0.1(2026-09-12 模型下拉修复)→ 1.0.3/1.0.4(2026-09-13 商店上架/倒计时与视觉升级)→ 1.0.5(2026-09-13 下拉硬门控/滚动锚定修复)→ 1.1.0(2026-09-15 token 用量/toast 浮层/Plan 确认卡/消息编辑回归)→ 1.1.1(2026-09-15 白屏崩溃/输入框拖拽/vendor bin 修复)→ 1.1.2(2026-09-19 Plan 计划编辑/历史下拉/set_model 对齐)
 
 ## 架构:三层单向数据流
