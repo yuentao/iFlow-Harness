@@ -964,7 +964,7 @@ export function Dropdown({
           ref={menuRef}
           role="menu"
           onKeyDown={onMenuKeyDown}
-          className={`absolute z-30 overflow-hidden rounded-xl border border-border acrylic-pop dropdown-in ${
+          className={`absolute z-30 overflow-hidden rounded-xl border border-border acrylic-pop shadow-float dropdown-in ${
             direction === "up" ? "bottom-full mb-1" : "top-full mt-1"
           } ${align === "right" ? "right-0" : "left-0"} ${menuClass}`}
         >
@@ -1488,6 +1488,7 @@ export function LinesCommitTextArea({
  */
 export function MenuItem({
   selected = false,
+  role = "menuitem",
   description,
   icon,
   danger = false,
@@ -1497,6 +1498,10 @@ export function MenuItem({
   children,
 }: {
   selected?: boolean;
+  /** `menuitemradio` / `menuitemcheckbox` for value pickers — every option in a
+   * value group carries the radio role, only the active one is checked. Plain
+   * action rows stay `menuitem` (aria-checked is invalid there). */
+  role?: "menuitem" | "menuitemradio" | "menuitemcheckbox";
   description?: string;
   icon?: ReactNode;
   danger?: boolean;
@@ -1505,11 +1510,12 @@ export function MenuItem({
   onClick: () => void;
   children: ReactNode;
 }) {
+  const checkable = role === "menuitemradio" || role === "menuitemcheckbox";
   return (
     <button
       type="button"
-      role={selected ? "menuitemradio" : "menuitem"}
-      aria-checked={selected ? true : undefined}
+      role={role}
+      aria-checked={checkable ? selected : undefined}
       data-variant={danger ? "danger" : undefined}
       disabled={disabled}
       onClick={onClick}
@@ -1599,6 +1605,7 @@ export function Select({
           {options.map((option) => (
             <MenuItem
               key={option.value}
+              role="menuitemradio"
               selected={option.value === value}
               description={option.description}
               disabled={option.disabled ?? false}

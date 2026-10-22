@@ -1509,7 +1509,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
 
       {/* slash-command popup: all prefix matches, keyboard navigable */}
       {cmdMatches.length > 0 && (
-        <div className="acrylic-pop dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
+        <div className="acrylic-pop shadow-float dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
           {cmdMatches.map((c, i) => (
             <button
               key={c.name}
@@ -1539,7 +1539,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           @url) first, then file or folder hits. Selecting a source resolves a
           context card via the host instead of inserting text. */}
       {mentionQuery !== null && (
-        <div className="acrylic-pop dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
+        <div className="acrylic-pop shadow-float dropdown-in absolute inset-x-3 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-xl border border-border">
           {sourceActions.map((a, i) => {
             const Icon = a.icon;
             return (
@@ -1784,6 +1784,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                     return (
                       <MenuItem
                         key={m.id}
+                        role="menuitemradio"
                         selected={m.id === modes.currentModeId}
                         description={view.desc}
                         onClick={() => {

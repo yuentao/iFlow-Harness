@@ -1,6 +1,29 @@
+// @vitest-environment jsdom
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { describe, expect, it } from "vitest";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vitest";
+import { Select } from "../webview/src/components/ui";
+
+/** jsdom ships neither ResizeObserver nor scrollIntoView; the Dropdown clamp
+ * and menu-item focus only need the members to exist. */
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  };
+}
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+/** jsdom has no layout, so `offsetParent` is always null and the kit's
+ * visibility filter (menu items, focusable scan) would drop everything. */
+Object.defineProperty(HTMLElement.prototype, "offsetParent", {
+  configurable: true,
+  get: () => document.body,
+});
 
 /**
  * UI-kit guard (M14 §4.5): the control family lives in `webview/src/components/ui.tsx`
@@ -92,6 +115,15 @@ describe("ui kit guard", () => {
     expect(violations(/text-\[\d+(\.\d+)?px\]|rounded-\[\d+(\.\d+)?px\]/, () => false)).toEqual([]);
   });
 
+  it("keeps overlay menus on the float shadow token", () => {
+    // `acrylic-pop` carries the panel-sized drop (negative spread), which
+    // collapses on trigger-anchored overlays. Those must carry `shadow-float`
+    // (the .acrylic-pop.shadow-float rule keeps the inset rim). Modal panels and
+    // header pills are not trigger-anchored, so they keep the panel drop.
+    const hits = violations(/acrylic-pop(?!.*shadow-float).*dropdown-in/, () => false);
+    expect(hits).toEqual([]);
+  });
+
   it("keeps button icons on the token tier", () => {
     // Control icons must come from ICON_INLINE; decorative glyphs (status dots,
     // inline captions) may still size themselves, so only the `icon=` prop of
@@ -140,5 +172,61 @@ describe("ui kit guard", () => {
       "export function SettingsDisclosure(",
     ];
     expect(names.filter((name) => !kit.includes(name))).toEqual([]);
+  });
+});
+
+/**
+ * Behaviour half of the guard: the kit's `Select` must be an overlay menu
+ * (Dropdown + MenuItem), not a native `<select>` — the OS popup ignores the
+ * panel's overlay language and announces nothing about the current choice.
+ */
+describe("select overlay", () => {
+  const OPTIONS = [
+    { value: "allow", label: "自动允许" },
+    { value: "deny", label: "自动拒绝" },
+    { value: "ask", label: "弹卡确认" },
+  ];
+
+  it("opens an overlay menu whose active option is announced", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onChange = vi.fn();
+
+    act(() => {
+      root.render(createElement(Select, { ariaLabel: "动作", options: OPTIONS, value: "ask", onChange }));
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button[aria-haspopup='menu']");
+    expect(trigger).toBeTruthy();
+    expect(trigger!.getAttribute("aria-label")).toBe("动作");
+    expect(trigger!.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger!.textContent).toContain("弹卡确认");
+    // No native popup anywhere.
+    expect(container.querySelector("select")).toBeNull();
+
+    act(() => trigger!.click());
+
+    const menu = container.querySelector<HTMLDivElement>("[role='menu']");
+    expect(menu).toBeTruthy();
+    expect(trigger!.getAttribute("aria-expanded")).toBe("true");
+    const items = [...menu!.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
+    expect(items.map((item) => item.textContent?.trim())).toEqual(["自动允许", "自动拒绝", "弹卡确认"]);
+    expect(items.find((item) => item.getAttribute("aria-checked") === "true")?.textContent).toContain("弹卡确认");
+    // Keyboard highlight starts on the active choice, not the first row.
+    expect(document.activeElement).toBe(items[2]);
+
+    act(() => {
+      items[2].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(items[0]);
+
+    act(() => items[1].click());
+    expect(onChange).toHaveBeenCalledWith("deny");
+    expect(container.querySelector("[role='menu']")).toBeNull();
+    expect(trigger!.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => root.unmount());
+    container.remove();
   });
 });

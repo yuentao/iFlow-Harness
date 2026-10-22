@@ -618,11 +618,13 @@ header.acrylic.header-scrolled {
   .shadow-panel {
     box-shadow: var(--shadow-panel);
   }
-  /* Floating capsule family (toast pills, sticky band, bottom chips). `float` is
-     not a color token, but the token lives outside @theme inline, so Tailwind
+  /* Floating capsule family (toast pills, sticky band, bottom chips) and the
+     trigger-anchored overlay menus (Dropdown, composer slash/@ popups). `float`
+     is not a color token, but the token lives outside @theme inline, so Tailwind
      generates no utility — the explicit rule is required, same as .shadow-card.
      On acrylic surfaces the inset rim from .acrylic-pop must survive: that rule
-     carries the panel-sized drop, which collapses on a ~30px capsule. */
+     carries the panel-sized drop, which collapses on a ~30px capsule or a menu
+     hugging its trigger. */
   .shadow-float {
     box-shadow: var(--shadow-float);
   }
