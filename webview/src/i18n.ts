@@ -589,7 +589,7 @@ const en: Record<string, string> = {
   "只根据变化更新索引，无变化时不会调用模型":
     "Update the index from changes only; no model call when nothing changed",
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
-  "正在启动 iFlow…": "Starting iFlow…",
+  "正在启动 …": "Starting …",
   "首次启动或配置了多个 MCP server 时较久":
     "Slower on first launch or with multiple MCP servers",
   // P1: edit & resend, session search, aria-live announcements

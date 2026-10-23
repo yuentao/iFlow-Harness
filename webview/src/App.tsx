@@ -485,7 +485,7 @@ export function App() {
           className="splash-hint"
           title={t("首次启动或配置了多个 MCP server 时较久")}
         >
-          {t("正在启动 iFlow…")}
+          {t("正在启动 …")}
           {status === "connecting" && connectingElapsed >= 3 && (
             <span className="ml-1 font-mono tabular-nums opacity-70">{connectingElapsed}s</span>
           )}
