@@ -9,6 +9,8 @@ docs/**
 .iflow/**
 scripts/**
 shared/**
+# Only the .md templates ship; prompts/index.ts is bundled into extension.cjs.
+prompts/**/*.ts
 UI/**
 webview/src/**
 webview/index.html
@@ -27,6 +29,7 @@ esbuild.mjs
 dist/src/**
 dist/shared/**
 dist/acp/**
+dist/prompts/**
 node_modules/**
 # ...but the vendored CLI's runtime deps MUST ship (scripts/vendor-cli.mjs).
 !vendor/iflow-cli/node_modules/**
@@ -34,3 +37,4 @@ node_modules/**
 m4-initial.jpg
 iflow.js.original
 session-*.md
+AGENTS.md

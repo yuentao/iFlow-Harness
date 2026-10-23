@@ -257,7 +257,7 @@ describe("MemoryService", () => {
     files[0] = { ...files[0]!, size: 7, mtimeMs: 2 };
     await service.generateKnowledge("job-inc", "incremental");
     expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("变化摘要");
+    expect(prompts[1]).toContain("Change summary");
     expect(prompts[1]).toContain("README.md");
     const manifest = JSON.parse(
       readFileSync(path.join(root, ".iflow", "knowledge", "manifest.json"), "utf8"),

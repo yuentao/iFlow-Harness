@@ -1,0 +1,3 @@
+command: Frontmatter keys: `description` (one line, what the command does). The body is the prompt the CLI runs when the user types the slash command; refer to the user's arguments as `{{args}}` where appropriate.
+agent: Frontmatter keys: `name` (MUST be exactly the given name), `description` (when to delegate to this subagent), `allowed-tools` (comma-separated tool names it may use). The body is the subagent's system instructions.
+skill: Frontmatter keys: `name` (MUST be exactly the given name), `description` (when this skill applies — the model uses it to judge relevance). The body is the step-by-step procedure the model follows when the skill is invoked.

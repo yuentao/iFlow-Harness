@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { ChatPanel } from "../src/panel/panel.js";
 import { stripFileMentions } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
@@ -8,6 +9,10 @@ import type * as vscode from "vscode";
 import { setConfigOverrides, workspace } from "./vscode-stub.js";
 import { clampSessionLabel } from "../shared/session-state.js";
 import { buildFollowupPrompt, parseFollowupResponse } from "../shared/turn-followup.js";
+import { buildAssetGenPrompt } from "../shared/asset-gen.js";
+import { buildModelMetadataPrompt } from "../shared/model-metadata.js";
+import { buildIncrementalKnowledgePrompt, buildKnowledgePrompt } from "../src/memory/knowledge.js";
+import { renderPrompt } from "../prompts/index.js";
 import type { Block } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -376,9 +381,9 @@ describe("turn-followup prompt & envelope (pure)", () => {
     expect(prompt).toContain('"nextSteps"');
     expect(prompt).not.toContain('"title"');
     expect(prompt).not.toContain('"facts"');
-    expect(prompt).toContain("【下一步】");
-    expect(prompt).not.toContain("【标题】");
-    expect(prompt).toContain("本轮工具调用：run_shell_command");
+    expect(prompt).toContain("[Next steps]");
+    expect(prompt).not.toContain("[Title]");
+    expect(prompt).toContain("Tool calls this turn: run_shell_command");
   });
 
   it("parses a fenced envelope and keeps the raw reply for the memory task", () => {
@@ -505,9 +510,9 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
 
     expect(completionMock.state.calls).toHaveLength(1);
     const sent = completionMock.state.calls[0]?.prompt ?? "";
-    expect(sent).toContain("【标题】");
-    expect(sent).toContain("【下一步】");
-    expect(sent).toContain("【长期记忆】");
+    expect(sent).toContain("[Title]");
+    expect(sent).toContain("[Next steps]");
+    expect(sent).toContain("[Long-term memory]");
     expect(sent).toContain('"facts"');
 
     expect(p.store.getState().sessions[0]?.label).toBe("登录改用 PKCE");
@@ -531,9 +536,9 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
 
     expect(completionMock.state.calls).toHaveLength(1);
     const sent = completionMock.state.calls[0]?.prompt ?? "";
-    expect(sent).toContain("【下一步】");
-    expect(sent).not.toContain("【标题】");
-    expect(sent).not.toContain("【长期记忆】");
+    expect(sent).toContain("[Next steps]");
+    expect(sent).not.toContain("[Title]");
+    expect(sent).not.toContain("[Long-term memory]");
     expect(p.store.getState().sessions[0]?.label).toBe(clampSessionLabel(FIRST_REQUEST));
     expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试"]);
     expect(p.memory.applyExtractionResult).not.toHaveBeenCalled();
@@ -598,5 +603,68 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     await p.runTurnFollowup(SESSION_ID, { allowTitle: false, conversationTasks: true });
     expect(completionMock.state.calls[0]?.timeoutMs).toBe(25_000);
     expect(completionMock.state.calls[0]?.idleMs).toBe(12_000);
+  });
+});
+
+// --- prompt template centralisation (prompts/) --------------------------------
+
+/** Every template a builder or the panel references by name. */
+const SHIPPED_TEMPLATES = [
+  "system-prompt",
+  "enhance",
+  "ask-selection",
+  "followup",
+  "followup-keys",
+  "followup-title",
+  "followup-next-steps",
+  "followup-memory",
+  "model-metadata",
+  "asset-gen",
+  "asset-gen-nouns",
+  "asset-gen-contracts",
+  "knowledge",
+  "knowledge-incremental",
+];
+
+describe("prompt templates (prompts/)", () => {
+  it("ships every template the builders reference", () => {
+    for (const name of SHIPPED_TEMPLATES) {
+      expect(existsSync(path.join(here, "..", "prompts", `${name}.md`), "utf8")).toBe(true);
+    }
+  });
+
+  it("fills every placeholder in the assembled prompts", () => {
+    const assembled = [
+      buildFollowupPrompt({
+        title: { request: "修一下登录报错" },
+        nextSteps: { user: "修一下登录报错", assistant: "已修复", toolTitles: [] },
+        memory: { conversation: "用户：…", existingFacts: [] },
+      }),
+      buildAssetGenPrompt("command", "fix", "run lint"),
+      buildModelMetadataPrompt(["m-1"], [{ id: "S1", title: "t", url: "u", snippet: "s" }]),
+      buildKnowledgePrompt("## 顶层结构\nsrc/  (2 files)"),
+      buildIncrementalKnowledgePrompt("# 项目知识索引", { added: ["a.ts"], modified: [], deleted: [] }, "tree", "excerpt"),
+      renderPrompt("enhance", { request: "hello" }),
+      renderPrompt("ask-selection", { path: "src/a.ts", range: "1-2", code: "x = 1" }),
+    ];
+    for (const prompt of assembled) {
+      // `{{args}}` is the CLI's own slash-command syntax, kept verbatim by design.
+      expect(prompt.replace("`{{args}}`", "")).not.toMatch(/\{\{\w+\}\}/);
+    }
+  });
+
+  it("rejects a missing variable instead of sending a half-filled prompt", () => {
+    expect(() => renderPrompt("enhance", {})).toThrow(/missing variable "{{request}}"/);
+  });
+
+  it("collapses an optional placeholder line rather than leaving a blank row", () => {
+    const unnamed = renderPrompt("asset-gen", { noun: "skill", contract: "c", nameLine: "", requirement: "r" });
+    expect(unnamed).not.toContain("Name:");
+    expect(unnamed).not.toMatch(/\n\n\n/);
+  });
+
+  it("keeps the slash-command contract's own {{args}} token verbatim", () => {
+    expect(buildAssetGenPrompt("command", "fix", "x")).toContain("`{{args}}`");
+    expect(buildAssetGenPrompt("agent", "a", "x")).not.toContain("`{{args}}`");
   });
 });

@@ -47,8 +47,8 @@ describe("buildModelMetadataPrompt", () => {
     expect(prompt).toContain("- deepseek-v3");
     expect(prompt).toContain("S1 | GLM-4.6 pricing");
     expect(prompt).toContain("200000 token context window");
-    expect(prompt).toContain("键 models");
-    expect(prompt).toContain("绝不猜测、编造");
+    expect(prompt).toContain("single key models");
+    expect(prompt).toContain("never guess");
     expect(prompt).toContain("source");
   });
 

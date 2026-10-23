@@ -1,3 +1,4 @@
+import { renderPrompt } from "../prompts/index.js";
 import { normalizeModelId } from "./context-window.js";
 import type { ThinkingModelRuleUi } from "./messages.js";
 
@@ -85,45 +86,26 @@ export function buildMetadataQueries(modelIds: readonly string[]): string[] {
 }
 
 /**
- * Prompt for the extraction turn. The model may only use the provided
- * snippets, and every entry must cite the source it was read from — the
- * parser drops entries whose citation is missing or whose source never
- * mentions the model, so a hallucinated row cannot reach the settings.
+ * Prompt for the extraction turn (wording in `prompts/model-metadata.md`). The
+ * model may only use the provided snippets, and every entry must cite the
+ * source it was read from — the parser drops entries whose citation is missing
+ * or whose source never mentions the model, so a hallucinated row cannot reach
+ * the settings.
  */
 export function buildModelMetadataPrompt(
   modelIds: readonly string[],
   sources: readonly MetadataSource[],
 ): string {
   const ids = modelIds.slice(0, MODEL_METADATA_MAX_MODEL_IDS);
-  const lines = [
-    "你在为编码助手整理模型元数据（上下文窗口、输入/输出单价、是否支持思考模式）。",
-    "规则：",
-    "- 事实只能来自下面给出的【检索资料】；资料里没有写到的字段一律省略该键，绝不猜测、编造或凭记忆填数。",
-    "- 每条记录必须带 source 字段，填它所依据的资料编号（如 S1）；在资料里找不到依据的模型不要输出。",
-    "- name 必须逐字复制「当前 API 配置中的模型 ID」里的某一项（区分大小写与连字符）；资料里若用别的展示名（如 DeepSeek-V4.1-Flash-1017），仍填请求列表里的那个 ID。",
-    "- 只有资料给出至少一个具体数值（上下文窗口或单价）时才输出该模型；只有名字的条目不要输出。",
-    "- 上下文窗口用 token 数（1M = 1000000，384K = 384000）。",
-    "- 单价一律用美元（USD，每 100 万 token）；资料只给人民币或其他币种时省略 inputPrice/outputPrice，绝不做汇率换算。",
-    "- 同一模型有峰谷/缓存命中多档价格时，取标准价：峰谷取高峰价，缓存取未命中价。",
-    "- supportsThinking 只在资料明确说明支持/不支持思考模式时填写。",
-    "- 对列表里的每个模型逐项检查上下文窗口、输入单价、输出单价、思考支持，资料里能读到的都要填。",
-    "- 每个模型最多一条。只输出一个 JSON 对象：不要 markdown 代码围栏、不要解释文字。对象只有一个键 models，是数组，每项形如",
-    '  {"name":"deepseek-flash","contextWindow":1000000,"inputPrice":0.15,"outputPrice":0.6,"supportsThinking":true,"source":"S1"}',
-    `- 总数不超过 ${MODEL_METADATA_MAX_ENTRIES} 条。`,
-    "",
-    "当前 API 配置中的模型 ID（优先覆盖这些）：",
-    ids.length > 0 ? ids.map((id) => `- ${id}`).join("\n") : "（无）",
-    "",
-    "【检索资料】",
-  ];
-  if (sources.length === 0) {
-    lines.push("（无）");
-  } else {
-    for (const source of sources) {
-      lines.push(`${source.id} | ${source.title} | ${source.url} | ${source.snippet}`);
-    }
-  }
-  return lines.join("\n");
+  return renderPrompt("model-metadata", {
+    maxEntries: String(MODEL_METADATA_MAX_ENTRIES),
+    ids: ids.length > 0 ? ids.map((id) => `- ${id}`).join("\n") : "(none)",
+    sources: sources.length === 0
+      ? "(none)"
+      : sources
+        .map((source) => `${source.id} | ${source.title} | ${source.url} | ${source.snippet}`)
+        .join("\n"),
+  });
 }
 
 /** Dig the outermost JSON object out of a reply (fences / preambles tolerated). */

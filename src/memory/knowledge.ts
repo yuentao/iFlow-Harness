@@ -1,4 +1,5 @@
 import path from "node:path";
+import { renderPrompt } from "../../prompts/index.js";
 
 /** Project knowledge lives beside the project memory, not in the extension
  * storage: it is a project asset users can review/commit. */
@@ -279,26 +280,11 @@ export async function buildWorkspaceDigest(
   ].join("\n");
 }
 
+/** Full-generation prompt (wording in `prompts/knowledge.md`). The digest is
+ * the only data handed in; the section headings stay verbatim Chinese because
+ * the index is injected into the project memory the CLI loads. */
 export function buildKnowledgePrompt(digest: string): string {
-  return [
-    "你在为一个代码仓库生成「项目知识索引」，供编码助手在后续会话中快速理解项目。",
-    "只基于提供的文件树和摘录，不要编造不存在的模块、命令或依赖。",
-    "输出 Markdown，固定结构：",
-    "# 项目知识索引",
-    "## 概览",
-    "## 技术栈与运行方式",
-    "## 目录结构与关键模块",
-    "## 约定与陷阱",
-    "## 常用命令",
-    "",
-    "要求：",
-    "- 控制在约 1500-2500 tokens；信息密度优先。",
-    "- 不要用代码围栏包裹整篇文档。",
-    "- 不确定的内容写“未从文件中确认”，不要猜测。",
-    "",
-    "仓库信息：",
-    digest,
-  ].join("\n");
+  return renderPrompt("knowledge", { digest });
 }
 
 /** Key-file excerpts for changed/added files only. This is the incremental
@@ -328,6 +314,10 @@ export async function buildChangedKeyExcerpts(
   return excerpts.length > 0 ? excerpts.join("\n\n") : "（无关键文件内容变化）";
 }
 
+/** Incremental-refresh prompt (wording in `prompts/knowledge-incremental.md`):
+ * the model gets the previous index plus the change list and only rewrites the
+ * affected sections; the 12K cap on the handed-in index is a data budget, not
+ * prompt wording, so it stays here. */
 export function buildIncrementalKnowledgePrompt(
   previousIndex: string,
   change: KnowledgeChange,
@@ -337,32 +327,12 @@ export function buildIncrementalKnowledgePrompt(
   const previous = previousIndex.length > 12_000
     ? `${previousIndex.slice(0, 12_000).trimEnd()}\n\n…（旧索引已截断）`
     : previousIndex;
-  return [
-    "你在维护一份代码仓库的「项目知识索引」。下面是当前索引，以及上次生成后发生的变化。",
-    "请只根据变化更新索引：保留未受影响章节的内容，修正目录结构/模块描述，删除已不存在内容的提及。",
-    "不要编造文件树和摘录之外的信息。",
-    "输出完整的更新后 Markdown 文档（不是 diff），保持原有章节结构：",
-    "# 项目知识索引",
-    "## 概览",
-    "## 技术栈与运行方式",
-    "## 目录结构与关键模块",
-    "## 约定与陷阱",
-    "## 常用命令",
-    "",
-    "要求：控制在约 1500-2500 tokens；不要用代码围栏包裹整篇文档。",
-    "",
-    "## 当前索引",
-    previous.trim(),
-    "",
-    "## 变化摘要",
-    summarizeKnowledgeChanges(change, 60),
-    "",
-    "## 当前目录结构",
-    treeSummary,
-    "",
-    "## 变化的关键文件摘录",
-    changedExcerpts,
-  ].join("\n");
+  return renderPrompt("knowledge-incremental", {
+    previous: previous.trim(),
+    changes: summarizeKnowledgeChanges(change, 60),
+    tree: treeSummary,
+    excerpts: changedExcerpts,
+  });
 }
 
 /** Strip an accidental outer markdown fence and enforce the title/trailing

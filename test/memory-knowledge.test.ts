@@ -71,7 +71,7 @@ describe("workspace digest", () => {
     const prompt = buildKnowledgePrompt("digest");
     expect(prompt).toContain("# 项目知识索引");
     expect(prompt).toContain("## 常用命令");
-    expect(prompt).toContain("不要用代码围栏包裹整篇文档");
+    expect(prompt).toContain("Do not wrap the whole document in a code fence");
     expect(prompt).toContain("digest");
   });
 });
@@ -113,11 +113,11 @@ describe("incremental refresh", () => {
       "## 顶层结构\nsrc/  (2 files)",
       "### README.md\n# Demo v2",
     );
-    expect(prompt).toContain("## 当前索引");
+    expect(prompt).toContain("## Current index");
     expect(prompt).toContain("README.md");
     expect(prompt).toContain("new.ts");
     expect(prompt).toContain("old.ts");
-    expect(prompt).toContain("不要编造");
+    expect(prompt).toContain("Do not invent");
   });
 
   it("parses manifests and rejects invalid payloads", () => {

@@ -1,3 +1,4 @@
+import { promptKey, renderPrompt } from "../prompts/index.js";
 import type { AssetKind } from "./messages.js";
 
 /**
@@ -18,22 +19,6 @@ import type { AssetKind } from "./messages.js";
  * `#` heading for their description).
  */
 
-/** Per-kind output contract stated in the prompt (English: model-facing). */
-const KIND_CONTRACT: Record<AssetKind, string> = {
-  command:
-    "Frontmatter keys: `description` (one line, what the command does). The body is the prompt the CLI runs when the user types the slash command; refer to the user's arguments as `{{args}}` where appropriate.",
-  agent:
-    "Frontmatter keys: `name` (MUST be exactly the given name), `description` (when to delegate to this subagent), `allowed-tools` (comma-separated tool names it may use). The body is the subagent's system instructions.",
-  skill:
-    "Frontmatter keys: `name` (MUST be exactly the given name), `description` (when this skill applies — the model uses it to judge relevance). The body is the step-by-step procedure the model follows when the skill is invoked.",
-};
-
-const KIND_NOUN: Record<AssetKind, string> = {
-  command: "custom slash command",
-  agent: "subagent definition",
-  skill: "skill",
-};
-
 /** Minimal loader-valid frontmatter per kind (also the empty-answer fallback). */
 function requiredFrontmatter(kind: AssetKind, name: string): string {
   const safeName = name.trim() || "generated";
@@ -48,28 +33,25 @@ function requiredFrontmatter(kind: AssetKind, name: string): string {
 }
 
 /**
- * Build the single user-message prompt for one generation.
+ * Build the single user-message prompt for one generation (wording in
+ * `prompts/asset-gen.md`, with the per-kind noun and output contract in
+ * `prompts/asset-gen-nouns.md` / `prompts/asset-gen-contracts.md`).
  *
  * The requirement is the user's own free text and is embedded verbatim: this
  * is a local file the user reviews in the editor before anything reaches disk,
  * and re-sanitizing their own instruction would only mangle it. (`@path`
  * mentions need no stripping here — unlike enhance/AI-title this prompt never
  * enters a CLI session, so there is no file-expansion or thinking-loop risk.)
+ * The command contract's own `{{args}}` token survives substitution verbatim.
  */
 export function buildAssetGenPrompt(kind: AssetKind, name: string, requirement: string): string {
   const trimmedName = name.trim();
-  return [
-    `You write iFlow CLI ${KIND_NOUN[kind]} files. Output the COMPLETE file content and NOTHING else — no explanation, no preamble, no markdown code fences.`,
-    "",
-    "The file is Markdown whose first line is `---`, then a short YAML frontmatter block, then a closing `---`, then the instruction body.",
-    KIND_CONTRACT[kind],
-    ...(trimmedName ? ["", `Name: ${trimmedName}`] : []),
-    "",
-    "Requirements from the user:",
-    requirement.trim() || "(none given — produce a sensible, focused default for this kind)",
-    "",
-    "Respond with the file content only, starting with the opening `---`.",
-  ].join("\n");
+  return renderPrompt("asset-gen", {
+    noun: promptKey("asset-gen-nouns", kind),
+    contract: promptKey("asset-gen-contracts", kind),
+    nameLine: trimmedName ? `Name: ${trimmedName}` : "",
+    requirement: requirement.trim() || "(none given — produce a sensible, focused default for this kind)",
+  });
 }
 
 /** Drop one wrapping fenced code block (```lang … ```) when present. */

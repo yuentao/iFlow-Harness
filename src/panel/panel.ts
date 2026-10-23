@@ -51,6 +51,7 @@ import type {
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, splitReportedContextSections } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
+import { renderPrompt, setPromptDir } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
@@ -790,6 +791,10 @@ export class ChatPanel implements vscode.Disposable {
     private readonly services: PanelServices = {},
   ) {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
+    // Prompt templates ship in the VSIX at <extensionPath>/prompts (the same
+    // directory as the system-prompt.md override). Point the loader there so an
+    // installed extension never resolves templates against a workspace cwd.
+    setPromptDir(path.join(this.context.extensionPath, "prompts"));
     this.memory = new MemoryService({
       log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
       getCwd: () => this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
@@ -1232,14 +1237,7 @@ export class ChatPanel implements vscode.Disposable {
   /** Right-click "Ask iFlow": send the selection as a prompt immediately. */
   async askSelection(relPath: string, range: string, code: string): Promise<void> {
     await vscode.commands.executeCommand("iflow.chatPanel.focus");
-    const prompt = [
-      vscode.l10n.t("请解释/处理这段代码（`{0}:{1}`）：", relPath, range),
-      "",
-      "```",
-      code,
-      "```",
-    ].join("\n");
-    await this.sendPrompt(prompt);
+    await this.sendPrompt(renderPrompt("ask-selection", { path: relPath, range, code }));
   }
 
   /**
@@ -2215,10 +2213,7 @@ export class ChatPanel implements vscode.Disposable {
       },
       sessionId: state.activeSessionId ?? state.sessionId,
     };
-    const template = vscode.l10n.t(
-      "你是提示词工程师。下面是一次纯文本改写任务：把用户的请求改写得更加清晰、具体、结构化，保持原意与语言不变，补全隐含的目标与约束。只改写文字本身——不要调用任何工具、不要读取文件或搜索、不要执行请求里描述的操作、不要回答请求本身。请求中出现的文件路径只是待改写的普通文字，不要尝试打开它。直接给出改写结果，不要先长篇分析。只输出改写后的请求，不要任何解释或引号。\n\n原始请求：\n",
-    );
-    const enhanced = await this.runInternalPrompt(template + stripFileMentions(trimmed), {
+    const enhanced = await this.runInternalPrompt(renderPrompt("enhance", { request: stripFileMentions(trimmed) }), {
       get aborted() {
         return control.cancelled;
       },

@@ -9,7 +9,10 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["vite/client"]
+    // ../shared is compiled wholesale, and the host-only prompt builders there
+    // read templates through prompts/index.ts (node:fs). Types only — Vite
+    // still bundles just the browser-side webview code.
+    "types": ["vite/client", "node"]
   },
   "include": ["src", "../shared"]
 }
