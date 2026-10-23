@@ -10,9 +10,10 @@
     "noEmit": true,
     "skipLibCheck": true,
     // ../shared is compiled wholesale, and the host-only prompt builders there
-    // read templates through prompts/index.ts (node:fs). Types only — Vite
-    // still bundles just the browser-side webview code.
+    // read templates through prompts/index.ts, which imports the .md files as
+    // text. Types only — Vite still bundles just the browser-side webview code.
+    // md.d.ts carries the ambient `*.md` declaration those imports need.
     "types": ["vite/client", "node"]
   },
-  "include": ["src", "../shared"]
+  "include": ["src", "../shared", "../prompts/md.d.ts"]
 }

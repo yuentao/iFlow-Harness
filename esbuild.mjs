@@ -12,6 +12,11 @@ await esbuild.build({
   platform: "node",
   target: "node20",
   sourcemap: true,
+  // Prompt templates ship as text inside the bundle instead of as readable
+  // `prompts/*.md` files in the VSIX (see .vscodeignore). The CLI's
+  // IFLOW_SYSTEM_MD override is the one template that needs a real file, and
+  // ChatPanel writes it into its own storage dir at runtime.
+  loader: { ".md": "text" },
   logLevel: "info",
 });
 

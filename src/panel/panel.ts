@@ -51,7 +51,7 @@ import type {
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, splitReportedContextSections } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
-import { renderPrompt, setPromptDir } from "../../prompts/index.js";
+import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
@@ -791,10 +791,6 @@ export class ChatPanel implements vscode.Disposable {
     private readonly services: PanelServices = {},
   ) {
     this.log = vscode.window.createOutputChannel(vscode.l10n.t("心流·驭光"), { log: true });
-    // Prompt templates ship in the VSIX at <extensionPath>/prompts (the same
-    // directory as the system-prompt.md override). Point the loader there so an
-    // installed extension never resolves templates against a workspace cwd.
-    setPromptDir(path.join(this.context.extensionPath, "prompts"));
     this.memory = new MemoryService({
       log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
       getCwd: () => this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
@@ -5852,14 +5848,18 @@ export class ChatPanel implements vscode.Disposable {
           : `spawning CLI: ${runtime} (renamed copy of ${node}) ${args.join(" ")} (cwd=${workspaceRoot})`,
       );
 
-      // System-prompt override shipped in the VSIX (prompts/system-prompt.md).
+      // System-prompt override for the CLI's IFLOW_SYSTEM_MD. The template ships
+      // inlined inside extension.cjs (the VSIX has no readable prompts/ dir), and
+      // the CLI only accepts a file path — so materializeSystemPrompt() writes the
+      // text into our own storage dir, next to context-report.json.
       // The CLI reads IFLOW_SYSTEM_MD on every startChat (probed, CLI 0.5.19
       // bundle: P0e() re-reads the file per session, session/load included), so
       // a full replacement covers new AND restored sessions — unlike the wire
       // settings.system_prompt, which the ACP adapter only applies on
-      // session/new. existsSync guard: the CLI throws on a missing override
-      // file, so never hand it a path that isn't there. The bundled file leans
-      // on the system-prompt-refactor MOD (vendor bundle, custom.12): its
+      // session/new. Null guard: the CLI throws on a missing override file, so
+      // never hand it a path that isn't there — a failed write simply means no
+      // override (upstream template). The bundled template leans on the
+      // system-prompt-refactor MOD (vendor bundle, custom.12): its
       // {{iflow:Environment Information}}/{{iflow:gitStatus}}/{{iflow:Git
       // Repository}}/{{iflow:Sandbox}} tokens are spliced from the built-in
       // template rendered moments earlier in the same startChat, so cwd / git
@@ -5869,9 +5869,9 @@ export class ChatPanel implements vscode.Disposable {
       // behaviour). Windows-compat warning and user-memory are appended by the
       // CLI after the file body (the `h`/`v` suffixes in P0e), so the override
       // file only replaces the core template.
-      const systemPromptFile = path.join(this.context.extensionPath, "prompts", "system-prompt.md");
+      const systemPromptFile = await this.materializeSystemPrompt();
       const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
-      if (existsSync(systemPromptFile)) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
+      if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
 
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
@@ -6424,6 +6424,36 @@ export class ChatPanel implements vscode.Disposable {
     // workspaceState falls back to global state when no workspace is open;
     // mirror that fallback for the file store.
     return path.join((this.context.storageUri ?? this.context.globalStorageUri).fsPath, "transcripts");
+  }
+
+  // --- System-prompt override for the CLI (IFLOW_SYSTEM_MD) ------------------
+
+  /**
+   * The system-prompt template ships as text inside extension.cjs (no readable
+   * prompt files in the VSIX), but the CLI reads `IFLOW_SYSTEM_MD` from disk —
+   * so materialise it in our own storage dir, the same place context-report.json
+   * lives. Skips the write when the file already holds the current template.
+   * Returns null on failure so the spawn omits the override instead of pointing
+   * the CLI at a path that does not exist (it throws on a missing file).
+   */
+  private async materializeSystemPrompt(): Promise<string | null> {
+    const fileUri = vscode.Uri.joinPath(this.context.storageUri ?? this.context.globalStorageUri, "system-prompt.md");
+    const text = loadPrompt("system-prompt");
+    try {
+      let existing: Uint8Array | null;
+      try {
+        existing = await vscode.workspace.fs.readFile(fileUri);
+      } catch {
+        existing = null;
+      }
+      if (existing === null || Buffer.from(existing).toString("utf8") !== text) {
+        await vscode.workspace.fs.writeFile(fileUri, Buffer.from(text, "utf8"));
+      }
+      return fileUri.fsPath;
+    } catch (error) {
+      this.log.warn(`system prompt override unavailable: ${errorMessage(error)}`);
+      return null;
+    }
   }
 
   // --- Auto-injected context transparency (acp-context-report Mod) ----------

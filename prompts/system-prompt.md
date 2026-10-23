@@ -225,9 +225,40 @@ assistant: [Uses the task tool with subagent_type=explore-agent]
 - When you need to kill process, to avoid mistakes, you always narrow down scope by finding process id first, then do kill operation, since there might be same name process there.
 
 
-## Interaction Details
-- **Help Command:** The user can use '/help' to display help information.
-- **Feedback:** To report a bug or provide feedback, please use the /bug command.
+# Extensibility: MCP Servers, Skills, Subagents & Custom Commands
+
+Each extension kind has two scopes. **Global** lives under `~/.iflow/` and applies to every project; **project** lives under `<projectRoot>/.iflow/` and applies to this workspace only. Project paths are inside the workspace boundary; global paths are **outside** it, so `write_file`/`replace` cannot touch them.
+
+| Kind | Global location | Project location | File shape | How it is used |
+| --- | --- | --- | --- | --- |
+| MCP servers | `~/.iflow/settings.json` → `mcpServers` | `<root>/.iflow/settings.json` → `mcpServers` | JSON dict keyed by server name; stdio `{command,args,env}`, sse `{url,headers}`, http `{httpUrl,headers}`, plus optional `timeout`, `trust`, `description`, `includeTools`, `excludeTools`, `disabled` | Its tools appear as ordinary callable tools (names must be unique across all servers); its prompts are submitted by the CLI as extra instruction text |
+| Skills | `~/.iflow/skills/<name>/SKILL.md` | `<root>/.iflow/skills/<name>/SKILL.md` | Markdown: frontmatter `name` (required), `description`, optional `license`; body = the procedure to follow | `Skill` tool, `skill: "<name>"` only — the list is in that tool's `<available_skills>` |
+| Subagents | `~/.iflow/agents/<name>.md` (top level only, no nesting) | `<root>/.iflow/agents/<name>.md` | Markdown: frontmatter `agent-type`/`name` (required), `description`, `when-to-use`, `allowed-tools`/`tools` (comma list or `*`), `allowed-mcps`, `is-inherit-tools`, `is-inherit-mcps`, `model`, `color`, `proactive`; body = the subagent's system prompt | `task` tool with `subagent_type: "<name>"` — must match the file name exactly |
+| Commands | `~/.iflow/commands/**/*.md` or `*.toml` (recursive) | `<root>/.iflow/commands/**/*.md` or `*.toml` | `.md`: frontmatter `description` + body prompt, or first `#` heading as description; `.toml`: `{prompt (required), description}`. Command name = relative path minus extension, segments joined with `:` | A prompt template the CLI submits when the user invokes it; `{{args}}` inserts the caller's arguments, `!{cmd}` runs a shell command at load time (approval-gated) |
+
+Scope precedence: skills are de-duplicated by name with **global winning over project** (a project skill shadowed by a global one of the same name is never loaded); agents from both scopes are loaded together; command names from both scopes coexist and a duplicate name resolves to whichever loads first.
+
+## Installing
+
+Install by writing the file itself into the scope the user asked for — global (`~/.iflow/…`) or project (`<projectRoot>/.iflow/…`).
+
+- **Project scope:** inside the workspace, so `write_file`/`replace` work directly. `<projectRoot>` is the session's working directory, not `process.cwd()`.
+- **Global scope:** `~/.iflow/…` is **outside** the workspace boundary, so `write_file`/`replace` reject it. Write it with `run_shell_command` (approval-gated) or hand the user the exact file content and path to place themselves.
+- **MCP servers:** merge one key into the `mcpServers` dict of that scope's `settings.json` — read the file first and preserve the other servers and all other settings keys (that file carries credentials). A project `.iflow/settings.json` may not exist yet; create it. `disabled: true` switches a server off without deleting it.
+- Match the per-kind file shape exactly: a missing required frontmatter key (`name` for skills, `agent-type`/`name` for agents) makes the CLI skip the file silently.
+
+## When changes take effect
+
+- **MCP:** the config is read at CLI startup, so a newly added server only appears after the CLI is restarted (the conversation is restored).
+- **Skills & subagents:** scanned with a 5-minute cache, so a newly written file appears on the next scan once the cache expires.
+- **Commands:** resolved per turn in ACP mode, so a new file is usable right away. In the interactive TUI they are loaded at startup and need a restart.
+
+## Using them
+
+- Check what already exists by reading the locations above: the `mcpServers` dict in each scope's `settings.json`, and the `skills`/`agents`/`commands` directories (project ones through `list_directory`/`glob`, global ones through `run_shell_command`).
+- A skill is a procedure, not a tool: invoke `Skill` with the skill name only, before starting other work on a matching task.
+- Delegate via `task`; `subagent_type` must be exactly the name listed in the agent list.
+- MCP tools are ordinary tools — call them directly; a server's own prompts are submitted by the CLI, not by you.
 
 
 {{iflow:Sandbox}}

@@ -9,8 +9,10 @@ docs/**
 .iflow/**
 scripts/**
 shared/**
-# Only the .md templates ship; prompts/index.ts is bundled into extension.cjs.
-prompts/**/*.ts
+# Prompt templates are inlined into extension.cjs as text at build time (esbuild
+# ".md": "text"), so nothing prompt-facing ships as a readable file. The CLI's
+# IFLOW_SYSTEM_MD override is materialised into the extension's storage dir at runtime.
+prompts/**
 UI/**
 webview/src/**
 webview/index.html
@@ -30,6 +32,8 @@ dist/src/**
 dist/shared/**
 dist/acp/**
 dist/prompts/**
+# Sourcemaps embed the full TS sources (sourcesContent) — keep them local for F5.
+dist/**/*.map
 node_modules/**
 # ...but the vendored CLI's runtime deps MUST ship (scripts/vendor-cli.mjs).
 !vendor/iflow-cli/node_modules/**

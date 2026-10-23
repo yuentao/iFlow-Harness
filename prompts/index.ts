@@ -1,7 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 /**
  * Single home for every model-facing prompt. The wording lives in `prompts/*.md`
  * and this module is the only reader; builders elsewhere just ask for a template
@@ -9,66 +5,65 @@ import { fileURLToPath } from "node:url";
  *
  * Templates are English (the model-facing language of this product). The OUTPUT
  * language is declared inside each template instead: session titles and next-step
- * chips follow the language of the user's request / conversation, and the
- * knowledge index body stays Chinese because it is injected into project memory.
+ * chips follow the language of the user's request / conversation, and the knowledge
+ * index body stays Chinese because it is injected into project memory.
  *
- * Search order (no VSCode dependency, so `shared/` builders and vitest can use
- * it directly):
- *   1. the directory the host set via `setPromptDir` — the installed extension's
- *      `prompts/`, the same place the `system-prompt.md` override ships
- *   2. next to / above this module — vitest source layout and tsc-emitted output
- *   3. `process.cwd()/prompts` — scripts and harness run from the repo root
+ * The `.md` files are imported as TEXT and inlined into `dist/extension.cjs` at
+ * build time (esbuild `loader: { ".md": "text" }`), so an installed extension
+ * ships no readable prompt files — see `.vscodeignore`. Types come from the
+ * ambient `*.md` declaration in `md.d.ts`; vitest mirrors the same contract with
+ * a text loader plugin in `vitest.config.ts`.
  *
- * The esbuild host bundle strips `import.meta.url` (checked in `dist/extension.cjs`:
- * it becomes `var import_meta = {}`), so candidate 2 never resolves there — the
- * host MUST call `setPromptDir`, which `ChatPanel`'s constructor does. Leaving it
- * unset in the bundle would fall through to cwd (the workspace folder) and throw.
+ * The one template that must exist on disk is `system-prompt`: the CLI reads
+ * `IFLOW_SYSTEM_MD` as a file path, so `ChatPanel` materialises this text into
+ * its own storage dir before spawning the CLI.
  *
  * A missing template or placeholder throws rather than degrading: sending the
  * model an instruction-less (or half-filled) prompt would silently produce junk.
  */
 
-let promptDirOverride: string | null = null;
-const cache = new Map<string, string>();
+import askSelection from "./ask-selection.md";
+import assetGen from "./asset-gen.md";
+import assetGenContracts from "./asset-gen-contracts.md";
+import assetGenNouns from "./asset-gen-nouns.md";
+import enhance from "./enhance.md";
+import followup from "./followup.md";
+import followupKeys from "./followup-keys.md";
+import followupMemory from "./followup-memory.md";
+import followupNextSteps from "./followup-next-steps.md";
+import followupTitle from "./followup-title.md";
+import knowledge from "./knowledge.md";
+import knowledgeIncremental from "./knowledge-incremental.md";
+import modelMetadata from "./model-metadata.md";
+import systemPrompt from "./system-prompt.md";
 
-/** Point the loader at the extension's own `prompts/` (VSIX install dir). */
-export function setPromptDir(dir: string): void {
-  promptDirOverride = dir;
-  cache.clear();
+/** CRLF normalised to LF, trailing blank lines dropped. */
+function normalize(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
 }
 
-function candidateDirs(): string[] {
-  const dirs: string[] = [];
-  if (promptDirOverride) dirs.push(promptDirOverride);
-  try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    dirs.push(path.join(here, "prompts"), path.join(path.dirname(here), "prompts"));
-  } catch {
-    // Bundled output without a usable import.meta.url — fall back to cwd.
-  }
-  dirs.push(path.join(process.cwd(), "prompts"));
-  return dirs;
-}
+const templates: Record<string, string> = {
+  "ask-selection": normalize(askSelection),
+  "asset-gen": normalize(assetGen),
+  "asset-gen-contracts": normalize(assetGenContracts),
+  "asset-gen-nouns": normalize(assetGenNouns),
+  enhance: normalize(enhance),
+  followup: normalize(followup),
+  "followup-keys": normalize(followupKeys),
+  "followup-memory": normalize(followupMemory),
+  "followup-next-steps": normalize(followupNextSteps),
+  "followup-title": normalize(followupTitle),
+  knowledge: normalize(knowledge),
+  "knowledge-incremental": normalize(knowledgeIncremental),
+  "model-metadata": normalize(modelMetadata),
+  "system-prompt": normalize(systemPrompt),
+};
 
-/** Absolute path of `prompts/<name>.md`, or a throw listing what was searched. */
-export function promptFile(name: string): string {
-  const fileName = `${name}.md`;
-  const dirs = candidateDirs();
-  for (const dir of dirs) {
-    const file = path.join(dir, fileName);
-    if (existsSync(file)) return file;
-  }
-  throw new Error(`prompt template "${fileName}" not found (searched: ${dirs.join(", ")})`);
-}
-
-/** Raw template text: CRLF normalised to LF, trailing blank lines dropped. */
+/** Raw template text; throws when the name is not one of the registered templates. */
 export function loadPrompt(name: string): string {
-  const file = promptFile(name);
-  const cached = cache.get(file);
-  if (cached !== undefined) return cached;
-  const text = readFileSync(file, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
-  cache.set(file, text);
-  return text;
+  const template = templates[name];
+  if (template === undefined) throw new Error(`prompt template "${name}" is not registered in prompts/index.ts`);
+  return template;
 }
 
 /**
