@@ -1322,6 +1322,10 @@ export function appendInjectedContext(
     const carried = mcpItems.length - unloaded;
     if (carried > 0) parts.push(l10n.t("{0} 个 MCP 服务器", String(carried)));
     if (unloaded > 0) parts.push(l10n.t("{0} 个 MCP 服务器未连接", String(unloaded)));
+    // Scope is host-computed from the two settings files the CLI merges; naming
+    // it here is the only place the user learns a server came from the project.
+    const projectScoped = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
+    if (projectScoped > 0) parts.push(l10n.t("{0} 个为项目级", String(projectScoped)));
   }
   const block: Block = {
     kind: "injected",

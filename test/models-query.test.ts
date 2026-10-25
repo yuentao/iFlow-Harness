@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   applyThinkingRules,
   cliImportCandidates,
+  mcpScopeOf,
   mergeThinkingRulesIntoFile,
   normalizeModelsUrl,
   parseModelsResponse,
@@ -168,6 +169,20 @@ describe("project-scope MCP settings", () => {
     });
     // A settings file without the field is an empty dict, not an error.
     expect(readMcpServers(settingsFile({ language: "zh-CN" }))).toEqual({});
+  });
+});
+
+describe("mcpScopeOf", () => {
+  it("labels a name by the scope(s) declaring it", () => {
+    expect(mcpScopeOf("a", { a: {} }, null)).toBe("global");
+    expect(mcpScopeOf("a", {}, { a: {} })).toBe("project");
+    // Same name in both files: the CLI merge lets the project entry win.
+    expect(mcpScopeOf("a", { a: {} }, { a: {} })).toBe("both");
+  });
+
+  it("never fabricates a scope for a name neither file declares", () => {
+    expect(mcpScopeOf("plugin-provided", {}, {})).toBeUndefined();
+    expect(mcpScopeOf("plugin-provided", { other: {} }, null)).toBeUndefined();
   });
 });
 

@@ -267,6 +267,11 @@ export interface InjectedContextItem {
    * request started, so its tools are NOT part of the request — shown as
    * unloaded and counted at 0 tokens. Absent = carried. */
   connected?: boolean;
+  /** MCP only: which settings scope(s) define this server. The CLI merges
+   * `{ ...user, ...workspace }` (probed CLI 0.5.19 bundle), so `both` means
+   * the two files declare the same name and the PROJECT entry is the one
+   * actually running. Absent = the host could not read either scope file. */
+  scope?: McpScope | "both";
 }
 
 /**
@@ -1098,7 +1103,14 @@ function evictOneBlock(block: Block): Block {
  */
 export interface McpStatusUi {
   discoveryState?: string;
-  servers: Record<string, McpServerStatusView & { contextTokens?: number }>;
+  /** `scope` is host-computed (the CLI's status report carries merged names
+   * only): which settings file(s) declare the server, so the card can say
+   * whether a row is the global entry, the project entry, or a name the
+   * project overrides. */
+  servers: Record<
+    string,
+    McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both" }
+  >;
 }
 
 /**

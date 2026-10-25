@@ -154,6 +154,39 @@ it("opens the detail sub-page with declarations, error and back header", () => {
   act(() => lastHeader!.back());
   expect(header.mock.calls.some(([h]) => h === null)).toBe(true);
 });
+it("keeps a still-discovering detail honest instead of claiming no tools", () => {
+  reply({ shared: { command: "node" } }, undefined, { shared: { command: "npx" } });
+  statusReply({
+    discoveryState: "in_progress",
+    servers: {
+      shared: {
+        status: "connecting", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        contextTokens: 0, scope: "both",
+      },
+    },
+  });
+  clickTitle("详情");
+  // toolCount is 0 while discovery runs; that must read as "reading…", not "none".
+  expect(container.textContent).toContain("工具声明读取中…");
+  expect(container.textContent).not.toContain("该服务器当前暴露无工具与提示");
+  expect(container.textContent).toContain("项目级覆盖全局");
+});
+it("colors a disconnected detail chip with the danger tone and labels its scope", () => {
+  reply({ a: { command: "node" } });
+  statusReply({
+    discoveryState: "completed",
+    servers: {
+      a: {
+        status: "disconnected", toolCount: 0, promptCount: 0, tools: [], prompts: [],
+        contextTokens: 0, scope: "global",
+      },
+    },
+  });
+  clickTitle("详情");
+  expect([...container.querySelectorAll("span")].some((s) => s.className.includes("bg-destructive"))).toBe(true);
+  expect(container.textContent).toContain("全局");
+  expect(container.textContent).toContain("工具声明不可获取");
+});
 it("refresh re-reads disk config and status without a second save in flight", () => {
   reply({ a: { command: "node" } });
   statusReply({ discoveryState: "completed", servers: { a: { status: "connected", toolCount: 0, promptCount: 0, tools: [], prompts: [], contextTokens: 0 } } });

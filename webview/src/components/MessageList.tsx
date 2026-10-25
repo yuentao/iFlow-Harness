@@ -1116,6 +1116,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   const mcpItems = block.items.filter((i) => i.kind === "mcp");
   const mcpCarried = mcpItems.filter((i) => i.connected !== false);
   const mcpUnloaded = mcpItems.length - mcpCarried.length;
+  const mcpProject = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
   const evicted = block.evicted === true;
   return (
     <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
@@ -1152,6 +1153,11 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
             {t("MCP 未连接")} {mcpUnloaded}
           </Chip>
         )}
+        {mcpProject > 0 && (
+          <Chip tone="info">
+            {t("MCP 项目级")} {mcpProject}
+          </Chip>
+        )}
       </button>
       <Collapse open={open}>
         <div className="border-t border-border/60 px-3 py-2">
@@ -1172,6 +1178,9 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
                 >
                   <Plug className="size-3 shrink-0 text-muted-foreground" />
                   <span className="shrink-0">{item.label}</span>
+                  {item.scope === "both" && <Chip tone="warning">{t("项目级覆盖全局")}</Chip>}
+                  {item.scope === "project" && <Chip tone="info">{t("项目级")}</Chip>}
+                  {item.scope === "global" && <Chip tone="muted">{t("全局")}</Chip>}
                   {item.connected === false && <Chip tone="warning">{t("未随请求注入")}</Chip>}
                 </div>
               ) : (

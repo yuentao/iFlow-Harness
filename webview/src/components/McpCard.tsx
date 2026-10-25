@@ -761,12 +761,21 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         ? "ml-1.5 shrink-0 rounded-full bg-success/15 border border-success/50 px-1.5 py-px text-ui-label font-medium text-success"
                         : view?.status === "connecting"
                           ? "ml-1.5 shrink-0 rounded-full bg-info/15 border border-info/50 px-1.5 py-px text-ui-label font-medium text-info"
-                          : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-px text-ui-label font-medium text-muted-foreground"
+                          : view && !view.disabled && !view.blocked
+                            ? "ml-1.5 shrink-0 rounded-full bg-destructive/15 border border-destructive/50 px-1.5 py-px text-ui-label font-medium text-destructive"
+                            : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-px text-ui-label font-medium text-muted-foreground"
                     }
                     title={view ? statusLabel(view) + (view.error ? ` — ${view.error}` : "") : t("连接状态不可获取（内核未连接或状态上报未启用）")}
                   >
                     {view ? statusLabel(view) : t("状态不可获取")}
                   </span>
+                  {view?.scope === "both" && (
+                    <Chip tone="warning" title={t("两级同名时内核用项目级配置整体替换全局条目（不合并字段）")}>
+                      {t("项目级覆盖全局")}
+                    </Chip>
+                  )}
+                  {view?.scope === "project" && <Chip tone="info">{t("项目级")}</Chip>}
+                  {view?.scope === "global" && <Chip tone="muted">{t("全局")}</Chip>}
                   {view?.contextTokens !== undefined && (
                     <span
                       className="ml-1.5 shrink-0 text-ui-label font-mono text-muted-foreground"
@@ -791,11 +800,11 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
 
                 {tools.length === 0 && prompts.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
-                    {view
-                      ? view.toolCount + view.promptCount === 0
+                    {!view || view.status === "disconnected" || view.disabled || view.blocked
+                      ? t("工具声明不可获取（未连接或状态上报未启用）")
+                      : view.status === "connected"
                         ? t("该服务器当前暴露无工具与提示")
-                        : t("工具声明读取中…")
-                      : t("工具声明不可获取（未连接或状态上报未启用）")}
+                        : t("工具声明读取中…")}
                   </div>
                 ) : (
                   <div className="space-y-2">

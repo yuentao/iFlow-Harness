@@ -422,6 +422,8 @@ const en: Record<string, string> = {
   "写入 {0}": "Writes to {0}",
   "覆盖全局": "Overrides global",
   "被项目覆盖": "Overridden by project",
+  "项目级": "Project scope",
+  "项目级覆盖全局": "Project scope (overrides global)",
   "两级同名时内核用项目级配置整体替换全局条目（不合并字段）":
     "For a name present in both scopes the Core replaces the global entry with the project one wholesale (fields are not merged)",
   "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启内核」生效（当前会话自动恢复）。":
@@ -569,13 +571,12 @@ const en: Record<string, string> = {
   "上下文摘要": "Context summary",
       "系统提示词": "System prompt",
   "自动注入": "Auto-injected",
-      "核心提示词": "Core prompt",
       "记忆": "Memory",  "上下文文件": "Context files",
       "{0} 个项目记忆文件": "{0} project memory file(s)",
       "{0} 个知识库文档": "{0} knowledge doc(s)",
-      "MCP 未连接": "MCP not connected",
-      "未随请求注入": "Not injected with the request",
-  "{0} 字符": "{0} chars",
+        "MCP 未连接": "MCP not connected",
+        "MCP 项目级": "MCP project-scope",
+        "未随请求注入": "Not injected with the request",  "{0} 字符": "{0} chars",
   "{0} 字节": "{0} bytes",
   "diff": "diff",
   // composer / message list (additional — new entries only)

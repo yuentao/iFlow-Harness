@@ -21,7 +21,7 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, applyThinkingRules, cliImportCandidates, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, cliImportCandidates, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -4615,9 +4615,17 @@ export class ChatPanel implements vscode.Disposable {
       this.postToWebview({ type: "mcpStatus", status: null });
       return;
     }
-    const servers: Record<string, McpServerStatusView & { contextTokens?: number }> = {};
+    const scopes = this.readMcpScopes();
+    const servers: Record<
+      string,
+      McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both" }
+    > = {};
     for (const [name, view] of Object.entries(report.servers ?? {})) {
-      servers[name] = { ...view, contextTokens: estimateMcpContextTokens(view.tools ?? []) };
+      servers[name] = {
+        ...view,
+        contextTokens: estimateMcpContextTokens(view.tools ?? []),
+        scope: mcpScopeOf(name, scopes.global, scopes.project),
+      };
     }
     const status: McpStatusUi = {
       discoveryState: report.discoveryState,
@@ -6597,13 +6605,20 @@ export class ChatPanel implements vscode.Disposable {
       return [];
     }
     if (!report || !report.available) return [];
+    const scopes = this.readMcpScopes();
     const items: InjectedContextItem[] = [];
     for (const [name, view] of Object.entries(report.servers ?? {})) {
       const tools = view.tools ?? [];
-      if (view.status === "connected" && tools.length > 0) {
+      const scope = mcpScopeOf(name, scopes.global, scopes.project);
+      if (view.status === "connected") {
+        // A connected server that exposes no tools still rides the request
+        // (its registry entry exists); the old guard required tools.length > 0,
+        // so such a server vanished from the card entirely and the count lied.
+        // Honest shape: carried, with an empty body — never a fabricated tool.
         items.push({
           kind: "mcp",
           label: name,
+          ...(scope ? { scope } : {}),
           // One compact JSON declaration per line — the same bytes the CLI
           // serializes into functionDeclarations.
           content: tools
@@ -6616,8 +6631,8 @@ export class ChatPanel implements vscode.Disposable {
             )
             .join("\n"),
         });
-      } else if (view.status !== "connected") {
-        items.push({ kind: "mcp", label: name, content: "", connected: false });
+      } else {
+        items.push({ kind: "mcp", label: name, ...(scope ? { scope } : {}), content: "", connected: false });
       }
     }
     return items;

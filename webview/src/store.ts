@@ -455,8 +455,8 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "本次请求自动注入了 6 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、1 个 MCP 服务器、1 个 MCP 服务器未连接",
-      tokens: 31240,
+      notice: "本次请求自动注入了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个为项目级",
+      tokens: 31320,
       items: [
         {
           kind: "system",
@@ -485,12 +485,21 @@ function createMockHost(): HostApi {
         {
           kind: "mcp",
           label: "apipost-mcp",
+          scope: "global",
           content:
             '{"name":"create_api","description":"Create an API endpoint","parameters":{"type":"object","properties":{"name":{"type":"string"}}}}\n' +
             '{"name":"update_api","description":"Modify an API endpoint","parameters":{"type":"object"}}\n' +
             '{"name":"list_projects","description":"List API projects","parameters":{"type":"object"}}',
         },
-        { kind: "mcp", label: "exa", content: "", connected: false },
+        // Declared in both settings files: the Core's merge lets the project
+        // entry win, so this row reads as project-scope overriding global.
+        {
+          kind: "mcp",
+          label: "chrome-devtools",
+          scope: "both",
+          content: '{"name":"navigate","description":"Navigate to a URL","parameters":{"type":"object"}}',
+        },
+        { kind: "mcp", label: "exa", scope: "global", content: "", connected: false },
       ],
     },
     {
@@ -1622,6 +1631,16 @@ function createMockHost(): HostApi {
         // The CLI connects the MERGED view (a project entry overrides the
         // global one of the same name), so the mock status covers exactly that.
         const servers = { ...(mockMcpGlobal ?? {}), ...(mockMcpProject ?? {}) };
+        // Mirrors the real host's scope annotation (models-query#mcpScopeOf):
+        // the status report carries merged names only, the scope is disk truth.
+        const scopeOf = (name: string): "global" | "project" | "both" | undefined => {
+          const inGlobal = mockMcpGlobal !== undefined && Object.hasOwn(mockMcpGlobal, name);
+          const inProject = mockMcpProject !== undefined && Object.hasOwn(mockMcpProject, name);
+          if (inGlobal && inProject) return "both";
+          if (inProject) return "project";
+          if (inGlobal) return "global";
+          return undefined;
+        };
         const statusServers: Record<string, unknown> = {};
         for (const [name, rawConfig] of Object.entries(servers)) {
           const config = rawConfig as Record<string, unknown> | undefined;
@@ -1637,6 +1656,7 @@ function createMockHost(): HostApi {
                 ],
                 prompts: [{ name: "help", description: "Usage help" }],
                 contextTokens: 180,
+                scope: scopeOf(name),
               }
             : {
                 status: "disconnected",
@@ -1647,6 +1667,7 @@ function createMockHost(): HostApi {
                 error: "spawn ENOENT: command not found",
                 errorKind: "spawn_failed",
                 contextTokens: 0,
+                scope: scopeOf(name),
               };
         }
         window.setTimeout(

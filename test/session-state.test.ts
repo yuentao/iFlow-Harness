@@ -2927,22 +2927,27 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     // EVERY request (the wire never reports them, the mcp-status Mod does);
     // the card counts the server once and hides its tool-by-tool detail.
     const declarations = '{"name":"create_api"}\n{"name":"list_api"}';
+    const projectDeclarations = '{"name":"deploy"}';
     const withMcp = [
       ...items(),
-      { kind: "mcp", label: "apipost-mcp", content: declarations },
+      { kind: "mcp", label: "apipost-mcp", content: declarations, scope: "global" as const },
       // Not connected when the request started: no body, 0 tokens — the
       // reducer must not claim its tools rode the request.
       { kind: "mcp", label: "exa", content: "", connected: false },
+      // Declared in BOTH settings files: the CLI merge lets the project entry
+      // win, so the notice has to say this server came from the project scope.
+      { kind: "mcp", label: "figma", content: projectDeclarations, scope: "both" as const },
     ];
     const state = initialSessionState();
     beginUserPrompt(state, "hi");
     appendInjectedContext(state, withMcp);
     const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
-    expect(block.notice).toContain("1 个 MCP 服务器、");
+    expect(block.notice).toContain("2 个 MCP 服务器、");
     expect(block.notice).toContain("1 个 MCP 服务器未连接");
+    expect(block.notice).toContain("1 个为项目级");
     expect(block.tokens).toBe(
       estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules") +
-        estimateTokens(declarations),
+        estimateTokens(declarations) + estimateTokens(projectDeclarations),
     );
   });
 

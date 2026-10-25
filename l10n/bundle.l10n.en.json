@@ -104,6 +104,7 @@
   "项目知识库": "Project knowledge",
   "{0} 个 MCP 服务器": "{0} MCP server(s)",
   "{0} 个 MCP 服务器未连接": "{0} MCP server(s) not connected",
+  "{0} 个为项目级": "{0} from the project scope",
   "本次请求自动注入了 {0} 项内容：{1}": "This request auto-injected {0} item(s): {1}",
   "记忆（~/.iflow/memory.md）": "Memory (~/.iflow/memory.md)",
   "系统提示词（未随会话捕获）": "System prompt (not captured)",

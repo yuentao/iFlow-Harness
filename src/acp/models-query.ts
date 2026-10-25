@@ -4,6 +4,7 @@ import path from "node:path";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { errorMessage } from "./jsonrpc.js";
+import type { McpScope } from "../../shared/messages.js";
 
 /** settings.json location — mirrors the CLI loaders' IFLOW_HOME support. */
 export function settingsFilePath(): string {
@@ -67,6 +68,27 @@ export function readMcpServers(file: string | null): Record<string, unknown> | n
   const settings = readCliSettings(file);
   if (settings) return settings.mcpServers ?? {};
   return existsSync(file) ? null : {};
+}
+
+/**
+ * Which settings scope(s) declare one MCP server name, from the two on-disk
+ * dicts. `both` means the same name appears in both files — the CLI merges
+ * `{ ...user, ...workspace }` (probed CLI 0.5.19 bundle), so the PROJECT
+ * entry is the one actually running while the global row still renders.
+ * `undefined` = neither file declares it (the CLI knows the server from a
+ * scope we could not read, e.g. a plugin-provided one) — never fabricated.
+ */
+export function mcpScopeOf(
+  name: string,
+  global: Record<string, unknown>,
+  project: Record<string, unknown> | null,
+): McpScope | "both" | undefined {
+  const inGlobal = Object.hasOwn(global, name);
+  const inProject = project !== null && Object.hasOwn(project, name);
+  if (inGlobal && inProject) return "both";
+  if (inProject) return "project";
+  if (inGlobal) return "global";
+  return undefined;
 }
 
 /** OAuth credential cache location — same home resolution as settings.json. */
