@@ -7,6 +7,7 @@
 import type {
   SessionModeState,
   SlashCommand,
+  SkillInfo,
   ToolCallStatus,
   ToolKind,
   ToolLocation,
@@ -20,7 +21,7 @@ import type { ApprovalRule } from "./approval-policy.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
-export type { SlashCommand, UserQuestion };
+export type { SlashCommand, UserQuestion, SkillInfo };
 // MCP status wire types (mcp-status-refactor Mod): the settings card renders
 // the per-server view and the detail sub-page consume tools/prompts directly.
 // The report envelope itself is consumed host-side from src/acp/protocol.js.
@@ -699,6 +700,12 @@ export interface SessionState {
   sessionId: string | null;
   modes: SessionModeState | null;
   commands: SlashCommand[];
+  /**
+   * Skills the CLI reported on `session/new` (`_meta.availableSkills`).
+   * The composer renders one `/skill <name>` entry per skill; the host
+   * resolves the skill body when such an invocation is sent.
+   */
+  skills: SkillInfo[];
   models: ModelInfoUi[];
   currentModelId: string | null;
   /** Current user-facing reasoning effort for the active ACP session. */
@@ -876,6 +883,7 @@ export function initialSessionState(): SessionState {
     sessionId: null,
     modes: null,
     commands: [],
+    skills: [],
     models: [],
     currentModelId: null,
     thinkLevel: "auto",
@@ -1338,6 +1346,16 @@ export interface HostSettingsUi {
   autoCompressOnIdle: boolean;
   autoMemoryCapture: boolean;
   autoTitle: boolean;
+  /** Wall-clock ceiling (seconds) for the turn-end memory extraction.
+   * 0 = no limit. */
+  memoryExtractTimeoutSeconds: number;
+  /** Wall-clock ceiling (seconds) for the next-step prediction.
+   * 0 = no limit. */
+  nextStepTimeoutSeconds: number;
+  /** Wall-clock ceiling (seconds) for a `/compress` turn. 0 = no limit. */
+  compressTimeoutSeconds: number;
+  /** Context occupancy (%) that triggers the turn-end auto-compress. */
+  autoCompressThresholdPercent: number;
   restoreLastSession: boolean;
   autoOpenPanel: boolean;
   warmStart: boolean;

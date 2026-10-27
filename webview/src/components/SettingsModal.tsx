@@ -182,7 +182,7 @@ export function SettingsModal({
             }
             rovingTabKeyDown(ALL_TABS, tab, onTabChange, (id) => tabRefs.current[id]?.focus())(event);
           }}
-          className="flex shrink-0 flex-col gap-2 border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:gap-2.5 @min-[460px]:overflow-visible @min-[460px]:border-b-0 @min-[460px]:border-r"
+          className="flex min-h-0 flex-col gap-2 overflow-y-auto border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:shrink-0 @min-[460px]:gap-2.5 @min-[460px]:border-b-0 @min-[460px]:border-r"
         >
           {TAB_GROUPS.map((group) => (
             <div
@@ -497,12 +497,19 @@ function JsonRulesRow({
 function RangeRow({
   label,
   description,
+  detail,
   value,
+  min = 0,
+  max = 100,
   onCommit,
 }: {
   label: string;
   description: string;
+  detail?: string;
   value: number;
+  /** Slider band (the Slider's own default is 0–100). */
+  min?: number;
+  max?: number;
   onCommit: (value: number) => void;
 }) {
   return (
@@ -510,10 +517,13 @@ function RangeRow({
       wideControl
       label={label}
       description={description}
+      detail={detail}
       control={
         <Slider
           label={label}
           value={value}
+          min={min}
+          max={max}
           step={5}
           format={(v) => `${v}%`}
           className="@min-[600px]:w-48"
@@ -522,6 +532,16 @@ function RangeRow({
       }
     />
   );
+}
+
+/**
+ * A setting that belongs to the toggle right above it: indented one step and
+ * drawn as part of the same block. The group body's `divide-y` strikes the
+ * block wrappers, not the toggle and its own row — so no separator appears
+ * between a feature and its dependent setting, and the two read as one unit.
+ */
+function DependentRow({ children }: { children: ReactNode }) {
+  return <div className="divide-y divide-border/50 pl-4">{children}</div>;
 }
 
 /** Chat / turn-end behavior. 4.7: 自动生成标题 is a per-session action, not a
@@ -543,33 +563,96 @@ function ChatSection() {
         />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("可能产生额外的模型调用")}>
-        <ToggleRow
-          label={t("下一步建议")}
-          description={t("回复完成后推测下一步操作，显示在输入框上方。")}
-          detail={t(
-            "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。",
+        <div>
+          <ToggleRow
+            label={t("下一步建议")}
+            description={t("回复完成后推测下一步操作，显示在输入框上方。")}
+            detail={t(
+              "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。",
+            )}
+            checked={settings.nextStepSuggestions}
+            onChange={(nextStepSuggestions) => update({ nextStepSuggestions })}
+          />
+          {settings.nextStepSuggestions && (
+            <DependentRow>
+              <NumberRow
+                label={t("下一步预测超时")}
+                description={t("下一步建议的模型调用最长等待秒数。")}
+                detail={t(
+                  "回合末的标题、下一步、记忆提取合并为一次模型调用，实际等待时间取所含任务中最宽松的上限；填 0 表示不限制。",
+                )}
+                value={settings.nextStepTimeoutSeconds}
+                min={0}
+                max={300}
+                unit={t("秒")}
+                onCommit={(nextStepTimeoutSeconds) => update({ nextStepTimeoutSeconds })}
+              />
+            </DependentRow>
           )}
-          checked={settings.nextStepSuggestions}
-          onChange={(nextStepSuggestions) => update({ nextStepSuggestions })}
-        />
-        <ToggleRow
-          label={t("自动压缩上下文")}
-          description={t("上下文占用达到阈值时自动压缩会话。")}
-          detail={t(
-            "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。",
+        </div>
+        <div>
+          <ToggleRow
+            label={t("自动压缩上下文")}
+            description={t("上下文占用达到阈值时自动压缩会话。")}
+            detail={t(
+              "每轮回复结束后，若上下文占用达到设定阈值，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。",
+            )}
+            checked={settings.autoCompressOnIdle}
+            onChange={(autoCompressOnIdle) => update({ autoCompressOnIdle })}
+          />
+          {settings.autoCompressOnIdle && (
+            <DependentRow>
+              <NumberRow
+                label={t("压缩超时")}
+                description={t("压缩会话的最长等待秒数。")}
+                detail={t(
+                  "默认 0（不限制）：压缩一个很大的会话本来就可能需要几分钟。填入秒数后，超时会取消这次压缩并提示你。",
+                )}
+                value={settings.compressTimeoutSeconds}
+                min={0}
+                max={600}
+                unit={t("秒")}
+                onCommit={(compressTimeoutSeconds) => update({ compressTimeoutSeconds })}
+              />
+              <RangeRow
+                label={t("自动压缩阈值")}
+                description={t("上下文占用达到该比例时自动压缩会话。")}
+                detail={t("可调范围 50–100%。")}
+                value={settings.autoCompressThresholdPercent}
+                min={50}
+                max={100}
+                onCommit={(autoCompressThresholdPercent) => update({ autoCompressThresholdPercent })}
+              />
+            </DependentRow>
           )}
-          checked={settings.autoCompressOnIdle}
-          onChange={(autoCompressOnIdle) => update({ autoCompressOnIdle })}
-        />
-        <ToggleRow
-          label={t("自动提取记忆")}
-          description={t("回复完成后提取可长期保留的偏好候选。")}
-          detail={t(
-            "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入（会产生额外 token）。",
+        </div>
+        <div>
+          <ToggleRow
+            label={t("自动提取记忆")}
+            description={t("回复完成后提取可长期保留的偏好候选。")}
+            detail={t(
+              "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入（会产生额外 token）。",
+            )}
+            checked={settings.autoMemoryCapture}
+            onChange={(autoMemoryCapture) => update({ autoMemoryCapture })}
+          />
+          {settings.autoMemoryCapture && (
+            <DependentRow>
+              <NumberRow
+                label={t("记忆提取超时")}
+                description={t("自动提取记忆的模型调用最长等待秒数。")}
+                detail={t(
+                  "回合末的标题、下一步、记忆提取合并为一次模型调用，实际等待时间取所含任务中最宽松的上限；填 0 表示不限制。",
+                )}
+                value={settings.memoryExtractTimeoutSeconds}
+                min={0}
+                max={600}
+                unit={t("秒")}
+                onCommit={(memoryExtractTimeoutSeconds) => update({ memoryExtractTimeoutSeconds })}
+              />
+            </DependentRow>
           )}
-          checked={settings.autoMemoryCapture}
-          onChange={(autoMemoryCapture) => update({ autoMemoryCapture })}
-        />
+        </div>
       </SettingsGroup>
     </div>
   );

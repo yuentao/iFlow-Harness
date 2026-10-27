@@ -664,8 +664,6 @@ const en: Record<string, string> = {
   "默认开启。关闭后不再发起该模型调用，已显示的候选会被清除。":
     "Enabled by default. When off, no extra call is made and any displayed candidates are cleared.",
   "自动压缩上下文": "Auto-compress context",
-  "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮（会产生一次压缩轮次）。":
-    "After a turn settles, if context occupancy reaches 95%, compress the conversation before continuing the next turn (one extra compress turn).",
   "默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。":
     "Off by default. When disabled, compression still runs after the gateway reports context overflow, and the「立即压缩」action remains available.",
   "界面": "Interface",
@@ -703,8 +701,8 @@ const en: Record<string, string> = {
   "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。":
     "One extra model call per completed turn (extra token usage). When off, no call is made and displayed candidates are cleared.",
   "上下文占用达到阈值时自动压缩会话。": "Compress the conversation when context occupancy reaches the threshold.",
-  "每轮回复结束后，若上下文占用达到 95%，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。":
-    "After a turn settles, if context occupancy reaches 95%, compress the conversation before continuing the next turn. Off by default; compression still runs after the gateway reports context overflow.",
+  "每轮回复结束后，若上下文占用达到设定阈值，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。":
+    "After a turn settles, if context occupancy reaches the configured threshold, compress the conversation before continuing the next turn. Off by default; compression still runs after the gateway reports context overflow.",
   "回复完成后提取可长期保留的偏好候选。": "Extract long-term preference candidates after a reply.",
   "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入（会产生额外 token）。":
     "After a turn settles, extract long-term preference candidates with the current model; they are written only after you confirm them (extra token usage).",
@@ -756,6 +754,20 @@ const en: Record<string, string> = {
   "快速追加": "Quick add",
   "回合结束后": "After each turn",
   "可能产生额外的模型调用": "May make extra model calls",
+  "下一步预测超时": "Next-step prediction timeout",
+  "下一步建议的模型调用最长等待秒数。": "Longest wait (seconds) for the next-step prediction model call.",
+  "记忆提取超时": "Memory extraction timeout",
+  "自动提取记忆的模型调用最长等待秒数。": "Longest wait (seconds) for the memory extraction model call.",
+  "回合末的标题、下一步、记忆提取合并为一次模型调用，实际等待时间取所含任务中最宽松的上限；填 0 表示不限制。":
+    "The turn-end title, next-step and memory tasks share ONE model call, so the actual budget is the loosest ceiling among the tasks it carries; 0 means no limit.",
+  "压缩超时": "Compression timeout",
+  "压缩会话的最长等待秒数。": "Longest wait (seconds) for a context-compression turn.",
+  "默认 0（不限制）：压缩一个很大的会话本来就可能需要几分钟。填入秒数后，超时会取消这次压缩并提示你。":
+    "0 (no limit) by default: compressing a very large session can legitimately take minutes. Once set, an overrunning compression is cancelled and reported.",
+  "自动压缩阈值": "Auto-compress threshold",
+  "上下文占用达到该比例时自动压缩会话。": "Compress the conversation once context occupancy reaches this percentage.",
+  "可调范围 50–100%。": "Adjustable between 50% and 100%.",
+  "秒": "s",
   "自动生成标题": "Auto-generate titles",
   "会话首轮完成后用当前模型生成简短标题（每会话一次，会产生一次轻量调用）。":
     "Generate a short title with the current model after a session's first turn (once per session, one lightweight call).",

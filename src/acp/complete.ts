@@ -14,9 +14,12 @@ export interface CompletionResult {
 }
 
 export interface CompletionOptions {
-  /** Hard wall-clock ceiling for the whole turn. */
+  /** Hard wall-clock ceiling for the whole turn. 0 = no ceiling (the turn
+   * runs until the gateway finishes — `iflow.memoryExtractTimeoutSeconds` /
+   * `iflow.nextStepTimeoutSeconds` expose that as 「不限制」). */
   timeoutMs: number;
-  /** Abort when the SSE stream produced nothing for this long. */
+  /** Abort when the SSE stream produced nothing for this long. 0 = no
+   * watchdog (the stream may stay silent indefinitely). */
   idleMs: number;
   /** External abort (panel disposal / user cancel). `onAbort` registers a
    * synchronous cancel hook so a user-initiated cancel settles the promise
@@ -154,7 +157,10 @@ export async function streamChatCompletion(
         res.on("error", () => finish(text ? "complete" : "failed"));
       },
     );
-    const ceiling = setTimeout(() => finish("timeout"), opts.timeoutMs);
+    // Both guards are opt-out: 0 means "no ceiling" / "no watchdog". They
+    // MUST NOT be installed with a 0 delay — `setTimeout(fn, 0)` fires on the
+    // next tick, which would turn 「不限制」 into 「立即超时」.
+    const ceiling = opts.timeoutMs > 0 ? setTimeout(() => finish("timeout"), opts.timeoutMs) : null;
     // Idle watchdog: SSE keep-alives and reasoning deltas both refresh the
     // stamp; total silence past the window means the stream wedged.
     const tick = () => {
@@ -165,7 +171,7 @@ export async function streamChatCompletion(
       }
       idleTimer = setTimeout(tick, Math.max(250, Math.floor(opts.idleMs / 4)));
     };
-    idleTimer = setTimeout(tick, opts.idleMs);
+    if (opts.idleMs > 0) idleTimer = setTimeout(tick, opts.idleMs);
     // Cancel path: with an onAbort hook the caller gets a synchronous
     // teardown (immediate settle + socket destroy); the 500ms poll stays as
     // the fallback for plain signals — a dismissed enhancement tears the

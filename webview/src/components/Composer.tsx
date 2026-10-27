@@ -28,7 +28,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
+import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SkillInfo, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
+import { SKILL_COMMAND } from "../../../shared/skills";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { Button, CANVAS_CHIP, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, MenuItem, SearchInput, fuzzyScore } from "./ui";
@@ -105,6 +106,7 @@ function formatCost(usd: number): string {
 /** Stable empty fallbacks — a fresh `[]` per selector call would re-render on
  * every store change (zustand compares with Object.is). */
 const EMPTY_COMMANDS: SlashCommand[] = [];
+const EMPTY_SKILLS: SkillInfo[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
 const EMPTY_QUEUE: QueuedPromptUi[] = [];
 
@@ -399,6 +401,7 @@ export function Composer() {
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   const commands = useChat((s) => s.state?.commands ?? EMPTY_COMMANDS);
+  const skills = useChat((s) => s.state?.skills ?? EMPTY_SKILLS);
   const modes = useChat((s) => s.state?.modes ?? null);
   const models = useChat((s) => s.state?.models ?? EMPTY_MODELS);
   const currentModelId = useChat((s) => s.state?.currentModelId ?? null);
@@ -759,11 +762,32 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
 
   // Slash-command popup: every command matching the typed prefix. While the
   // popup is open, Enter/Tab complete the selected command instead of sending.
+  //
+  // Skills are NOT CLI slash commands — the CLI exposes them through
+  // `_meta.availableSkills`, and its Skill tool is model-invoked (its
+  // confirmation is denied by the default approval policy), so the panel
+  // resolves `/skill <name>` itself. The popup therefore lists one synthetic
+  // entry per skill next to the CLI's own commands.
+  const skillCommands = useMemo<SlashCommand[]>(
+    () =>
+      skills.map((skill) => ({
+        name: `${SKILL_COMMAND} ${skill.name}`,
+        description: skill.description ?? null,
+      })),
+    [skills],
+  );
+  const allCommands = useMemo(() => [...commands, ...skillCommands], [commands, skillCommands]);
   const cmdMatches = useMemo(() => {
     if (!text.startsWith("/") || text.includes(" ")) return [];
     const input = text.slice(1).toLowerCase();
-    return commands.filter((c) => c.name.toLowerCase().startsWith(input));
-  }, [text, commands]);
+    return allCommands.filter((c) => {
+      const name = c.name.toLowerCase();
+      if (name.startsWith(input)) return true;
+      // A skill is also addressable by its bare name ("/pdf" → "/skill pdf").
+      if (!name.startsWith(`${SKILL_COMMAND} `)) return false;
+      return name.slice(SKILL_COMMAND.length + 1).startsWith(input);
+    });
+  }, [text, allCommands]);
   const [cmdIndex, setCmdIndex] = useState(0);
   useEffect(() => {
     setCmdIndex(0);
@@ -849,15 +873,20 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   textRef.current = text;
   const cancelInflightRef = useRef<() => void>(() => {});
   function cancelInflight(): void {
-    if (!enhancePending.current) return;
-    send({ type: "cancelEnhance", requestId: enhanceSeq.current });
-    // Late replies can no longer match the sequence → ignored here too, even
-    // against a host build that still answers a cancelled request.
-    enhanceSeq.current += 1;
-    enhancePending.current = false;
+    if (enhancePending.current) {
+      send({ type: "cancelEnhance", requestId: enhanceSeq.current });
+      // Late replies can no longer match the sequence → ignored here too, even
+      // against a host build that still answers a cancelled request.
+      enhanceSeq.current += 1;
+      enhancePending.current = false;
+      setEnhancing(false);
+    }
+    // The "enhanced" marker describes ONE draft. Once that draft is gone (the
+    // prompt was sent, or the session switched) the marker must go with it —
+    // otherwise the wand keeps its enhanced tint and a click would restore a
+    // stale prompt into the now-empty composer.
     enhanceOriginal.current = null;
     enhanceSnapshot.current = null;
-    setEnhancing(false);
   }
   cancelInflightRef.current = cancelInflight;
   function enhance(): void {
@@ -1523,10 +1552,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                 taRef.current?.focus();
               }}
             >
-              <span className="font-mono text-primary">/{c.name}</span>
-              <span className="truncate text-ui-caption text-muted-foreground">{c.description}</span>
+              {/* The command name must not wrap: a long skill name ("skill
+                  code-review") used to break the row into three lines, so the
+                  rows had ragged heights and the "Tab 补全" hint was squeezed
+                  into a vertical strip. The name keeps its own width (only
+                  ellipsised when it exceeds the row), the description takes
+                  the rest and truncates, the hint stays on one line. */}
+              <span className="max-w-[62%] shrink-0 truncate font-mono text-primary" title={`/${c.name}`}>
+                /{c.name}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-ui-caption text-muted-foreground">{c.description}</span>
               {i === cmdIndex && (
-                <kbd className="ml-auto rounded border border-border px-1 font-mono text-ui-micro text-muted-foreground">
+                <kbd className="ml-auto shrink-0 whitespace-nowrap rounded border border-border px-1 font-mono text-ui-micro text-muted-foreground">
                   {t("Tab 补全")}
                 </kbd>
               )}

@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "publisher": "yuantao",
   "author": {
@@ -318,6 +318,34 @@
           "type": "boolean",
           "default": true,
           "description": "%iflow.configuration.autoMemoryCapture.description%"
+        },
+        "iflow.memoryExtractTimeoutSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 0,
+          "maximum": 600,
+          "description": "%iflow.configuration.memoryExtractTimeoutSeconds.description%"
+        },
+        "iflow.nextStepTimeoutSeconds": {
+          "type": "number",
+          "default": 25,
+          "minimum": 0,
+          "maximum": 300,
+          "description": "%iflow.configuration.nextStepTimeoutSeconds.description%"
+        },
+        "iflow.compressTimeoutSeconds": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 600,
+          "description": "%iflow.configuration.compressTimeoutSeconds.description%"
+        },
+        "iflow.autoCompressThresholdPercent": {
+          "type": "number",
+          "default": 95,
+          "minimum": 50,
+          "maximum": 100,
+          "description": "%iflow.configuration.autoCompressThresholdPercent.description%"
         },
         "iflow.checkpoints": {
           "type": "boolean",

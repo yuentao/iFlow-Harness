@@ -604,6 +604,55 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     expect(completionMock.state.calls[0]?.timeoutMs).toBe(25_000);
     expect(completionMock.state.calls[0]?.idleMs).toBe(12_000);
   });
+
+  it("takes the memory-extraction ceiling from the setting", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      nextStepSuggestions: false,
+      autoMemoryCapture: true,
+      memoryExtractTimeoutSeconds: 30,
+    });
+    queueCompletion({ text: "{}", reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: false, conversationTasks: true });
+    const batch = completionMock.state.calls[0];
+    expect(batch?.timeoutMs).toBe(30_000);
+    // The idle watchdog stays below the shortened ceiling (at most half of
+    // it), so a wall-clock expiry never pre-empts the stall detection.
+    expect(batch?.idleMs).toBe(15_000);
+  });
+
+  it("takes the next-step ceiling from the setting", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: false,
+      nextStepSuggestions: true,
+      autoMemoryCapture: false,
+      nextStepTimeoutSeconds: 40,
+    });
+    queueCompletion({ text: "{}", reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: false, conversationTasks: true });
+    const batch = completionMock.state.calls[0];
+    expect(batch?.timeoutMs).toBe(40_000);
+    expect(batch?.idleMs).toBe(12_000);
+  });
+
+  it("a 0 ceiling lifts the whole batch (no wall-clock limit, no idle watchdog)", async () => {
+    // The turn-end title / next-step / memory tasks share ONE request, so
+    // 「不限制」 on one of them lifts the batch: no ceiling AND no watchdog.
+    setConfigOverrides({
+      checkpoints: false,
+      autoTitle: true,
+      nextStepSuggestions: true,
+      autoMemoryCapture: true,
+      memoryExtractTimeoutSeconds: 0,
+    });
+    queueCompletion({ text: "{}", reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+    const batch = completionMock.state.calls[0];
+    expect(batch?.timeoutMs).toBe(0);
+    expect(batch?.idleMs).toBe(0);
+  });
 });
 
 // --- prompt template centralisation (prompts/) --------------------------------

@@ -221,6 +221,22 @@ describe("ui kit guard", () => {
     expect(hits).toEqual([]);
   });
 
+  it("keeps the settings nav rail scrollable", () => {
+    // The settings nav rail (4 groups / 8 tabs) used to be `shrink-0` +
+    // `overflow-visible`: on a short or narrow screen it was clipped by the
+    // modal's own `overflow:hidden` and the bottom groups (e.g. 「运行与数据」)
+    // were unreachable. It must stay shrinkable and scrollable vertically;
+    // the wide layout only keeps the horizontal `shrink-0`.
+    const settings = files.find((f) => f.rel === "components/SettingsModal.tsx")!.content;
+    const navStart = settings.indexOf("<nav");
+    expect(navStart).toBeGreaterThan(-1);
+    const navBlock = settings.slice(navStart, settings.indexOf("</nav>", navStart));
+    const navClass = navBlock.match(/className="([^"]*)"/)?.[1] ?? "";
+    expect(navClass).toContain("min-h-0");
+    expect(navClass).toContain("overflow-y-auto");
+    expect(navClass).not.toContain("overflow-visible");
+  });
+
   it("keeps button icons on the token tier", () => {
     // Control icons must come from ICON_INLINE; decorative glyphs (status dots,
     // inline captions) may still size themselves, so only the `icon=` prop of

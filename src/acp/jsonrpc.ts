@@ -201,6 +201,25 @@ const RATE_LIMIT_RE = new RegExp(
 );
 
 /**
+ * Whether a rejection was produced by the LOCAL wall-clock guard rather
+ * than by the peer.
+ *
+ * `JsonRpcPeer.request`'s timeout rejects with
+ * `{code: InternalError, message: "Request timed out after <n>ms: <method>"}`
+ * and DROPS the pending entry — the peer keeps running the turn, so the
+ * caller must cancel it explicitly (the panel does that for a `/compress`
+ * turn that blew `iflow.compressTimeoutSeconds`).
+ *
+ * A peer-side rejection carries its own error code/message and never matches
+ * this prefix, so the two cases stay distinguishable.
+ */
+export function isRequestTimeoutError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === "string" && message.startsWith("Request timed out after");
+}
+
+/**
  * Whether a thrown prompt failure looks like a rate-limit rejection (see
  * RATE_LIMIT_RE). Pure text heuristic over `errorMessage`, so JSON-RPC
  * rejection envelopes (message + data.details) are covered too.

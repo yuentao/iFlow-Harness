@@ -176,7 +176,7 @@ export class SessionStore {
     return index;
   }
 
-  sessionStarted(meta: { sessionId: string; models?: SessionState["models"]; currentModelId?: string | null; commands?: SessionState["commands"]; modes?: SessionState["modes"] }): void {
+  sessionStarted(meta: { sessionId: string; models?: SessionState["models"]; currentModelId?: string | null; commands?: SessionState["commands"]; modes?: SessionState["modes"]; skills?: SessionState["skills"] }): void {
     setMeta(this.state, meta);
     this.flush();
   }

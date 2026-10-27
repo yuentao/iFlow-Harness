@@ -184,8 +184,20 @@ export interface NewSessionMeta {
   };
   availableCommands?: SlashCommand[];
   availableAgents?: unknown[];
-  availableSkills?: unknown[];
+  availableSkills?: SkillInfo[];
   availableMcpServers?: unknown[];
+}
+
+/**
+ * One skill reported by the CLI's SkillScanner (probed, CLI 0.5.19):
+ * `session/new` carries `_meta.availableSkills` — the skill's frontmatter
+ * `name` (NOT its directory name), its description and where it came from.
+ * The global set wins over a project skill of the same name.
+ */
+export interface SkillInfo {
+  name: string;
+  description?: string | null;
+  scope?: string;
 }
 
 export interface NewSessionResponse {

@@ -55,6 +55,10 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   autoCompressOnIdle: false,
   autoMemoryCapture: true,
   autoTitle: true,
+  memoryExtractTimeoutSeconds: 90,
+  nextStepTimeoutSeconds: 25,
+  compressTimeoutSeconds: 0,
+  autoCompressThresholdPercent: 95,
   restoreLastSession: false,
   autoOpenPanel: false,
   warmStart: true,
@@ -693,6 +697,19 @@ function createMockHost(): HostApi {
     commands: [
       { name: "init", description: "分析项目并创建或更新定制的 IFLOW.md 文件" },
       { name: "commit", description: "分析您的更改并创建有意义的提交消息" },
+    ],
+    // Skills the CLI reports on session/new (`_meta.availableSkills`) — the
+    // composer turns each into a `/skill <name>` slash entry. The long name
+    // mirrors real skill names (the popup must stay one row per entry).
+    skills: [
+      { name: "pdf", description: "读取与生成 PDF 文档", scope: "global" },
+      { name: "xlsx", description: "读取与生成 Excel 表格", scope: "global" },
+      {
+        name: "code-review",
+        description:
+          "Systematic code review patterns covering security, performance, maintainability, correctness, and testing — with severity levels and structured feedback guidance.",
+        scope: "global",
+      },
     ],
     // Mirrors a live GET {baseUrl}/models response (ids only).
     models: [

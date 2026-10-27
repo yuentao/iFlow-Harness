@@ -3,6 +3,13 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [2.1.0] - 2026-10-27
+
+- 新增 `/skill <name>` 技能触发：CLI 的 Skill 工具是模型调用（工具描述里带 `<available_skills>`），且 `shouldConfirmExecute` 会先要一次确认——ACP 下变成 `session/request_permission`，默认审批策略是拒绝，所以「让模型去调 Skill 工具」不能保证真跑起来；CLI 自带的 `/skills` 又是交互态命令，ACP 模式只会回「requires interactive mode」。因此由宿主解析并注入：`shared/skills.ts` 纯逻辑（`parseSkillInvocation` 解析 `/skill <name> [指令]`、`buildSkillPrompt` 拼 agent 侧载荷）+ `src/skills/service.ts` 按名解析技能文件（复用 `parseFrontmatter`，全局 `~/.iflow/skills` 先扫、项目 `<cwd>/.iflow/skills` 后扫、同名全局胜），注入内容与 CLI `buildUserMessageContent` 同构（Base directory + SKILL.md 正文 + 用户指令，正文逐字搬运不改写）；`sendPrompt`/`regenerate` 两条路径都在 `toAgentPromptText` 之前拦截；技能不存在时不拦发送（只 toast 提示并按普通文本发出，绝不吞用户文本）；Composer 斜杠弹层为每个技能合成一条 `/skill <name>` 条目（输入 `/pdf` 这类裸名也命中），选中后填入 `/skill <name> `
+- 新增 回合末超时与自动压缩阈值可配置：`iflow.memoryExtractTimeoutSeconds`（默认 90）/`iflow.nextStepTimeoutSeconds`（默认 25）/`iflow.compressTimeoutSeconds`（默认 0 = 不限制）/`iflow.autoCompressThresholdPercent`（默认 95，范围 50–100），全部用户级、Settings Sync 可携带；`src/acp/complete.ts` 修掉 `setTimeout(fn, 0)` 把「不限制」变成立即超时的缺陷（0 时不装定时器）；`jsonrpc.ts` 新增 `isRequestTimeoutError()` 识别本地看门狗拒绝；`followupCeiling` 每任务上限读配置、任一任务为 0 → 整个合并请求无墙钟上限且关闭 idle 看门狗、任务上限 > 0 时 idle = min(该任务默认 idle, 上限/2)；`promptWithRetry` 压缩轮走 per-call 超时、超时先 `client.cancel` 再抛 `CompressTimeoutError`（压缩调用点转成警告 toast 而非「压缩失败」错误横幅）；`maybeAutoCompressOnIdle` 阈值读配置
+- 优化 设置面板「回合结束后」分组重构：三组超时/阈值设置从独立的「超时与阈值」分组移进「回合结束后」分组，紧贴各自开关下方并跟随开关状态（开关关闭 → 该行完全不显示；开关打开 → 行出现在开关正下方）；新增本地 `DependentRow` 包装（缩进一档 `pl-4`、自带 `divide-y` 只分隔内部多行、不在开关与其从属行之间画线）；默认值全部沿用现状 → 运行时行为零回归
+- 修复 Composer 斜杠弹层布局：长技能名（如 `skill code-review`）曾把行撑成三行、行高参差、Tab 补全提示被挤成竖条——命令名保留自身宽度（超宽才省略号）、描述占剩余并截断、提示 `shrink-0 whitespace-nowrap` 保持单行；`cancelInflight` 修复「增强标记」残留（draft 已发送/会话切换后 wand 仍带增强色、点击会恢复过期草稿——增强标记随 draft 一起清空）
+
 ## [2.0.0] - 2026-10-23
 
 - 新增 统一控件套件 UI Kit（控件之家只有一个）：`webview/src/components/ui.tsx` 收齐 Button/IconButton、TextInput/Commit*/SearchInput/Select、Switch/Checkbox/ToggleChip/OptionGroup+OptionCard、Slider/TabButton/Segmented、MenuItem 浮层行原语与 FloatPill/FloatChip/CountdownSeconds/ToastStack 浮层族，17 个组件文件的自绘控件全部改为套件引用（MessageList -334 行、SettingsModal -296 行、Composer -135 行）；原生 `<input>/<textarea>/<select>/checkbox/range` 只允许出现在 ui.tsx（唯一例外是 Composer 的提示输入 textarea），新增 `ui-kit-guard` 静态守卫断言原生控件位置、按钮基串与渐变串、无 `accent-[`/`text-[Npx]`/`rounded-[Npx]`、导出成员清单与 jsdom 行为用例

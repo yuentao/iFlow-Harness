@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsModal, type SettingsTab } from "../webview/src/components/SettingsModal";
 import type { AuthUiState, HostSettingsUi } from "../shared/messages";
 
@@ -13,6 +13,10 @@ const hostSettings = vi.hoisted(() => ({
   autoCompressOnIdle: false,
   autoMemoryCapture: false,
   autoTitle: true,
+  memoryExtractTimeoutSeconds: 90,
+  nextStepTimeoutSeconds: 25,
+  compressTimeoutSeconds: 0,
+  autoCompressThresholdPercent: 95,
   restoreLastSession: false,
   autoOpenPanel: false,
   warmStart: true,
@@ -417,4 +421,72 @@ it("sends an import command for detected CLI credentials", () => {
   click("导入并激活");
   expect(beginPending).toHaveBeenCalledWith("profile", "终端默认");
   expect(send).toHaveBeenCalledWith({ type: "importCliCredentials", name: "终端默认" });
+});
+
+/**
+ * The turn-end ceilings live under their own toggle and follow it: the row is
+ * shown only while the toggle is on, and it sits between that toggle and the
+ * next one in the DOM.
+ */
+describe("回合末 timeout rows follow their toggle", () => {
+  /** True when `a` appears before `b` in the rendered text. */
+  const before = (a: string, b: string) => {
+    const text = container.textContent ?? "";
+    const ia = text.indexOf(a);
+    const ib = text.indexOf(b);
+    expect(ia).toBeGreaterThanOrEqual(0);
+    expect(ib).toBeGreaterThanOrEqual(0);
+    return ia < ib;
+  };
+
+  beforeEach(() => {
+    hostSettings.nextStepSuggestions = true;
+    hostSettings.autoCompressOnIdle = false;
+    hostSettings.autoMemoryCapture = true;
+  });
+
+  it("hides the next-step timeout while 下一步建议 is off", () => {
+    hostSettings.nextStepSuggestions = false;
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).not.toContain("下一步预测超时");
+  });
+
+  it("hides the compression rows while 自动压缩上下文 is off", () => {
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).not.toContain("压缩超时");
+    expect(container.textContent).not.toContain("自动压缩阈值");
+  });
+
+  it("hides the memory timeout while 自动提取记忆 is off", () => {
+    hostSettings.autoMemoryCapture = false;
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).not.toContain("记忆提取超时");
+  });
+
+  it("shows each timeout under its own toggle, in order", () => {
+    hostSettings.autoCompressOnIdle = true;
+    renderTab("chat", BASIC_AUTH);
+    expect(container.textContent).toContain("下一步预测超时");
+    expect(container.textContent).toContain("压缩超时");
+    expect(container.textContent).toContain("自动压缩阈值");
+    expect(container.textContent).toContain("记忆提取超时");
+    // 下一步建议 → 它的超时 → 自动压缩上下文 → 压缩超时 → 阈值 → 自动提取记忆 → 它的超时
+    expect(before("下一步建议", "下一步预测超时")).toBe(true);
+    expect(before("下一步预测超时", "自动压缩上下文")).toBe(true);
+    expect(before("自动压缩上下文", "压缩超时")).toBe(true);
+    expect(before("压缩超时", "自动压缩阈值")).toBe(true);
+    expect(before("自动压缩阈值", "自动提取记忆")).toBe(true);
+    expect(before("自动提取记忆", "记忆提取超时")).toBe(true);
+  });
+
+  it("carries the configured values into the controls", () => {
+    hostSettings.autoCompressOnIdle = true;
+    renderTab("chat", BASIC_AUTH);
+    const number = (label: string) =>
+      container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)?.value;
+    expect(number("下一步预测超时")).toBe("25");
+    expect(number("记忆提取超时")).toBe("90");
+    expect(number("压缩超时")).toBe("0");
+    expect(number("自动压缩阈值")).toBe("95");
+  });
 });

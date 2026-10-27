@@ -17,6 +17,7 @@ import {
   errorMessage,
   isContextOverflowError,
   isRateLimitError,
+  isRequestTimeoutError,
   isThinkingUnsupportedError,
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
@@ -126,6 +127,8 @@ import { SessionStore } from "./store.js";
 import { getTerminalRecorder, openInTerminal } from "./terminal.js";
 import { MemoryService } from "../memory/service.js";
 import { AssetsService } from "../assets/service.js";
+import { resolveSkill, skillRoots } from "../skills/service.js";
+import { buildSkillPrompt, parseSkillInvocation, type SkillInvocation } from "../../shared/skills.js";
 import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
@@ -310,7 +313,12 @@ const TITLE_REQUEST_MAX_CHARS = 2_000;
 /** Per-task ceilings for the merged turn-end request. The request runs with
  * the LOOSEST ceiling among the tasks it actually carries: a title-only call
  * keeps the 180s window, a next-step-only call stays at 25s, and a batch that
- * includes memory extraction gets memory's 90s window. */
+ * includes memory extraction gets memory's 90s window.
+ *
+ * `timeoutMs` is the built-in DEFAULT for the nextSteps/memory tasks — the
+ * live values come from `iflow.nextStepTimeoutSeconds` /
+ * `iflow.memoryExtractTimeoutSeconds` (read in followupCeiling, 0 = 不限制).
+ * `idleMs` stays the per-task idle window. */
 const FOLLOWUP_CEILINGS: Record<FollowupTaskKind, { timeoutMs: number; idleMs: number }> = {
   title: { timeoutMs: INTERNAL_PROMPT_TIMEOUT_MS, idleMs: INTERNAL_PROMPT_IDLE_MS },
   nextSteps: { timeoutMs: NEXT_STEP_TIMEOUT_MS, idleMs: NEXT_STEP_IDLE_MS },
@@ -376,13 +384,24 @@ const CONTEXT_WARN_EXIT_RATIO = 0.85;
  * pill's 立即压缩) before the system compresses on its own. An `estimated`
  * (guessed) window never triggers it — the 2026-10-11 hy3 report proved a
  * missing table row (32K fallback vs a real 256K window) misreports 100% and
- * would otherwise compress a perfectly healthy session every turn. */
+ * would otherwise compress a perfectly healthy session every turn.
+ * DEFAULT only: the live threshold comes from `iflow.autoCompressThresholdPercent`. */
 const CONTEXT_AUTOCOMPRESS_RATIO = 0.95;
 /** Thrown by promptWithRetry when the empty-response retry ladder is
  * exhausted. The catch chain re-throws it untouched: its user-facing wording
  * would otherwise trip the rate-limit heuristic ("稍后重试" ∈ RATE_LIMIT_RE)
  * and send the turn through another pointless retry round. */
 class EmptyResponseError extends Error {}
+/** Thrown when a `/compress` turn blows the user-configured ceiling
+ * (`iflow.compressTimeoutSeconds`). The JSON-RPC request was abandoned but
+ * the CLI turn keeps running, so the throw site cancels it first; the
+ * compress call sites turn this into a warning toast instead of the generic
+ * 「压缩失败」 wording. */
+class CompressTimeoutError extends Error {
+  constructor(readonly seconds: number) {
+    super(vscode.l10n.t("压缩超时（超过 {0} 秒），已取消压缩。", seconds));
+  }
+}
 /** Cap on base64 payload of an openImage attachment (~6MB decoded) — a
  * webview-supplied data URL is untrusted input; an oversized one must be
  * rejected before it is materialized to disk. */
@@ -1600,6 +1619,31 @@ export class ChatPanel implements vscode.Disposable {
         if (typeof msg.autoCompressOnIdle === "boolean") writes.push(["autoCompressOnIdle", msg.autoCompressOnIdle]);
         if (typeof msg.autoMemoryCapture === "boolean") writes.push(["autoMemoryCapture", msg.autoMemoryCapture]);
         if (typeof msg.autoTitle === "boolean") writes.push(["autoTitle", msg.autoTitle]);
+        // Timeout ceilings in seconds; 0 = 「不限制」 for all three.
+        if (msg.memoryExtractTimeoutSeconds !== undefined && Number.isFinite(msg.memoryExtractTimeoutSeconds)) {
+          writes.push([
+            "memoryExtractTimeoutSeconds",
+            Math.min(600, Math.max(0, Math.trunc(msg.memoryExtractTimeoutSeconds))),
+          ]);
+        }
+        if (msg.nextStepTimeoutSeconds !== undefined && Number.isFinite(msg.nextStepTimeoutSeconds)) {
+          writes.push([
+            "nextStepTimeoutSeconds",
+            Math.min(300, Math.max(0, Math.trunc(msg.nextStepTimeoutSeconds))),
+          ]);
+        }
+        if (msg.compressTimeoutSeconds !== undefined && Number.isFinite(msg.compressTimeoutSeconds)) {
+          writes.push([
+            "compressTimeoutSeconds",
+            Math.min(600, Math.max(0, Math.trunc(msg.compressTimeoutSeconds))),
+          ]);
+        }
+        if (msg.autoCompressThresholdPercent !== undefined && Number.isFinite(msg.autoCompressThresholdPercent)) {
+          writes.push([
+            "autoCompressThresholdPercent",
+            Math.min(100, Math.max(50, Math.trunc(msg.autoCompressThresholdPercent))),
+          ]);
+        }
         if (typeof msg.restoreLastSession === "boolean") writes.push(["restoreLastSession", msg.restoreLastSession]);
         if (typeof msg.autoOpenPanel === "boolean") writes.push(["autoOpenPanel", msg.autoOpenPanel]);
         if (typeof msg.warmStart === "boolean") writes.push(["warmStart", msg.warmStart]);
@@ -1826,6 +1870,53 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
+  // --- configurable ceilings (iflow.* settings) ------------------------------
+
+  /**
+   * Read one timeout setting (seconds) and clamp it to [0, maxSeconds].
+   * A missing / non-numeric / negative value falls back to the built-in
+   * default — a hand-edited settings.json must never wedge the panel. 0 is
+   * returned as-is: it is the 「不限制」 value of every ceiling here.
+   */
+  private timeoutSeconds(key: string, fallbackSeconds: number, maxSeconds: number): number {
+    const raw = vscode.workspace.getConfiguration("iflow").get<number>(key, fallbackSeconds);
+    if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return fallbackSeconds;
+    return Math.min(maxSeconds, Math.trunc(raw));
+  }
+
+  /** Turn-end memory-extraction ceiling (ms). `iflow.memoryExtractTimeoutSeconds`
+   * — 0 means 「不限制」, which also lifts the idle watchdog (see
+   * followupCeiling): a wedged gateway then holds the lane until it answers. */
+  private memoryExtractTimeoutMs(): number {
+    return this.timeoutSeconds("memoryExtractTimeoutSeconds", MEMORY_EXTRACT_TIMEOUT_MS / 1000, 600) * 1000;
+  }
+
+  /** Next-step prediction ceiling (ms). `iflow.nextStepTimeoutSeconds` —
+   * 0 means 「不限制」 (same idle-watchdog coupling as above). */
+  private nextStepTimeoutMs(): number {
+    return this.timeoutSeconds("nextStepTimeoutSeconds", NEXT_STEP_TIMEOUT_MS / 1000, 300) * 1000;
+  }
+
+  /** `/compress` turn ceiling (ms). `iflow.compressTimeoutSeconds` — 0 means
+   * 「不限制」, which is the historical behaviour: compressing a huge session
+   * can legitimately take minutes (pitfall #13 forbids killing it silently). */
+  private compressTimeoutMs(): number {
+    return this.timeoutSeconds("compressTimeoutSeconds", 0, 600) * 1000;
+  }
+
+  /** Context occupancy (ratio) that triggers the turn-end auto-compress.
+   * `iflow.autoCompressThresholdPercent` — percent in the settings, ratio
+   * here. The band starts at 50%: below that the panel would compress a
+   * healthy session on nearly every turn. */
+  private autoCompressThresholdRatio(): number {
+    const raw = vscode.workspace.getConfiguration("iflow").get<number>(
+      "autoCompressThresholdPercent",
+      Math.round(CONTEXT_AUTOCOMPRESS_RATIO * 100),
+    );
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return CONTEXT_AUTOCOMPRESS_RATIO;
+    return Math.min(100, Math.max(50, Math.trunc(raw))) / 100;
+  }
+
   /** Mirror every extension setting the settings panel renders. VSCode
    * configuration stays authoritative; a direct edit in VSCode re-pushes via
    * the onDidChangeConfiguration listener. */
@@ -1841,6 +1932,14 @@ export class ChatPanel implements vscode.Disposable {
       autoCompressOnIdle: config.get<boolean>("autoCompressOnIdle", false),
       autoMemoryCapture: config.get<boolean>("autoMemoryCapture", true),
       autoTitle: config.get<boolean>("autoTitle", true),
+      memoryExtractTimeoutSeconds: this.timeoutSeconds(
+        "memoryExtractTimeoutSeconds",
+        MEMORY_EXTRACT_TIMEOUT_MS / 1000,
+        600,
+      ),
+      nextStepTimeoutSeconds: this.timeoutSeconds("nextStepTimeoutSeconds", NEXT_STEP_TIMEOUT_MS / 1000, 300),
+      compressTimeoutSeconds: this.timeoutSeconds("compressTimeoutSeconds", 0, 600),
+      autoCompressThresholdPercent: Math.round(this.autoCompressThresholdRatio() * 100),
       restoreLastSession: config.get<boolean>("restoreLastSession", false),
       autoOpenPanel: config.get<boolean>("autoOpenPanel", false),
       warmStart: config.get<boolean>("warmStart", true),
@@ -2590,14 +2689,45 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** Ceiling for a merged batch: the loosest window among the tasks it carries. */
+  /**
+   * Ceiling for a merged batch: the loosest window among the tasks it carries.
+   *
+   * Each task's wall-clock budget comes from its setting
+   * (`iflow.memoryExtractTimeoutSeconds` / `iflow.nextStepTimeoutSeconds`;
+   * the title task keeps its fixed 180s), and the idle watchdog is clamped to
+   * at most half of that budget — with a short ceiling the wall-clock guard
+   * would always fire first and the salvage path ("stalled" vs "timeout")
+   * would change.
+   *
+   * A task configured as 0 (「不限制」) lifts the WHOLE batch: the three
+   * turn-end tasks share ONE HTTP request, so a per-task budget cannot be
+   * enforced on it — the batch then runs without a wall-clock ceiling and
+   * without the idle watchdog (a wedged gateway then holds the lane until it
+   * answers; that is what 「不限制」 means).
+   *
+   * With the default settings the result is identical to the previous
+   * hard-coded pair (180s ceiling / 90s idle).
+   */
   private followupCeiling(tasks: readonly FollowupTaskKind[]): { timeoutMs: number; idleMs: number } {
     let timeoutMs = 0;
     let idleMs = 0;
+    let unlimited = false;
     for (const task of tasks) {
-      timeoutMs = Math.max(timeoutMs, FOLLOWUP_CEILINGS[task].timeoutMs);
-      idleMs = Math.max(idleMs, FOLLOWUP_CEILINGS[task].idleMs);
+      const def = FOLLOWUP_CEILINGS[task];
+      const taskTimeoutMs =
+        task === "memory"
+          ? this.memoryExtractTimeoutMs()
+          : task === "nextSteps"
+            ? this.nextStepTimeoutMs()
+            : def.timeoutMs;
+      if (taskTimeoutMs <= 0) {
+        unlimited = true;
+        continue;
+      }
+      timeoutMs = Math.max(timeoutMs, taskTimeoutMs);
+      idleMs = Math.max(idleMs, Math.min(def.idleMs, Math.floor(taskTimeoutMs / 2)));
     }
+    if (unlimited) return { timeoutMs: 0, idleMs: 0 };
     return { timeoutMs, idleMs };
   }
 
@@ -2935,7 +3065,12 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       if (this.disposed || this.store.getState().sessionId !== sessionId) return;
       this.log.warn(`manual compress failed: ${errorMessage(error)}`);
-      this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+      this.store.sendToast(
+        "warning",
+        error instanceof CompressTimeoutError
+          ? error.message
+          : vscode.l10n.t("压缩失败：{0}", errorMessage(error)),
+      );
       // The turn is over on the failure path too — leaving 状态 streaming
       // would strand the panel in a phantom generating state.
       this.store.endCompressTurn();
@@ -2984,7 +3119,9 @@ export class ChatPanel implements vscode.Disposable {
     const window = usage?.contextWindow ?? null;
     if (!usage || usage.estimated || window === null || window <= 0) return false;
     const ratio = (usage.contextUsed ?? 0) / window;
-    if (ratio < CONTEXT_AUTOCOMPRESS_RATIO) return false;
+    // Threshold is user-configurable (`iflow.autoCompressThresholdPercent`).
+    const threshold = this.autoCompressThresholdRatio();
+    if (ratio < threshold) return false;
     this.autoCompressInFlight = true;
     const toastId = this.store.sendToast(
       "info",
@@ -3014,7 +3151,12 @@ export class ChatPanel implements vscode.Disposable {
       // failed proactive compress is a warning, not an error banner.
       if (this.disposed || this.store.getState().sessionId !== sessionId) return false;
       this.log.warn(`turn-end auto-compress failed: ${errorMessage(error)}`);
-      this.store.sendToast("warning", vscode.l10n.t("压缩失败：{0}", errorMessage(error)));
+      this.store.sendToast(
+        "warning",
+        error instanceof CompressTimeoutError
+          ? error.message
+          : vscode.l10n.t("压缩失败：{0}", errorMessage(error)),
+      );
       this.store.endCompressTurn();
     } finally {
       this.autoCompressInFlight = false;
@@ -5681,6 +5823,7 @@ export class ChatPanel implements vscode.Disposable {
         sessionId: loadedId,
         modes,
         commands: meta?.availableCommands ?? [],
+        skills: meta?.availableSkills ?? [],
         currentModelId,
       });
       this.applyLiveModels(modelsPromise, client, loadedId, meta?.models?.currentModelId ?? null);
@@ -7138,6 +7281,7 @@ export class ChatPanel implements vscode.Disposable {
       sessionId: session.sessionId,
       modes: session.modes,
       commands: meta?.availableCommands ?? [],
+      skills: meta?.availableSkills ?? [],
       currentModelId,
     });
     this.applyLiveModels(modelsPromise, client, session.sessionId, cliModelId);
@@ -7228,10 +7372,19 @@ export class ChatPanel implements vscode.Disposable {
     // The agent-facing text escapes "/"-leading non-commands in the TYPED
     // part (CLI would otherwise answer "Unknown command" and the model never
     // sees the text); the transcript keeps the composed verbatim input.
+    // A `/skill <name> …` invocation is NOT a CLI command — the panel
+    // resolves the skill itself and injects the payload the CLI's Skill tool
+    // would have produced (that tool is model-invoked and asks for a
+    // confirmation the default approval policy denies, so the model cannot be
+    // relied on to run it).
+    const skillCall = parseSkillInvocation(trimmed);
+    let typedText = toAgentPromptText(trimmed, this.store.getState().commands);
+    if (skillCall) {
+      const expanded = await this.expandSkillCall(skillCall);
+      if (expanded) typedText = expanded;
+    }
     const promptText =
-      [contextBlock, toAgentPromptText(trimmed, this.store.getState().commands)]
-        .filter(Boolean)
-        .join("\n\n") + attachmentBlock;
+      [contextBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -7402,6 +7555,34 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Resolve a `/skill <name> …` invocation into the text the agent receives:
+   * the skill's base directory + its SKILL.md body (what the CLI's Skill
+   * tool injects) + the user's own instruction.
+   *
+   * Host-owned on purpose: the CLI's Skill tool is MODEL-invoked and asks for
+   * a confirmation that the default approval policy denies, so asking the
+   * model to run it is not a dependable trigger. Resolving it here makes the
+   * invocation deterministic.
+   *
+   * Returns null when the skill cannot be found — the caller then sends the
+   * text as ordinary prose (never swallowed) and the user is told why.
+   */
+  private async expandSkillCall(call: SkillInvocation): Promise<string | null> {
+    const roots = skillRoots(memoryHome(), this.sessionCwd);
+    const skill = await resolveSkill(roots, call.name);
+    if (!skill) {
+      this.store.sendToast("warning", vscode.l10n.t("未找到技能「{0}」，已按普通文本发送", call.name));
+      return null;
+    }
+    this.log.info(`skill invoked: ${skill.name} (${skill.scope})`);
+    return buildSkillPrompt({
+      baseDirectory: skill.baseDirectory,
+      content: skill.content,
+      args: call.args,
+    });
+  }
+
+  /**
    * Regenerate the last assistant turn: re-run the most recent user prompt
    * through the same pipeline as sendPrompt, but WITHOUT recording a new user
    * block (the prompt already exists in the transcript). Host-owned because the
@@ -7441,8 +7622,19 @@ export class ChatPanel implements vscode.Disposable {
       // Same turn-start mode sync as sendPrompt: a regenerated turn must obey
       // the mode the composer shows, not a possibly drifted CLI copy.
       await this.assertModeForPrompt(client, promptSessionId);
+      // A regenerated turn must carry the SAME agent-facing text the original
+      // turn did — including a `/skill <name>` expansion (the raw command
+      // would be escaped into prose by toAgentPromptText).
+      const regenText = lastUserText.trim();
+      const regenSkill = parseSkillInvocation(regenText);
+      const regenExpanded = regenSkill ? await this.expandSkillCall(regenSkill) : null;
       const prompt: ContentBlock[] = [
-        { type: "text", text: toAgentPromptText(lastUserText.trim(), this.store.getState().commands) },
+        {
+          type: "text",
+          text:
+            regenExpanded ??
+            toAgentPromptText(regenText, this.store.getState().commands),
+        },
       ];
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // Session replaced mid-flight: the completion must not settle the NEW
@@ -8248,6 +8440,13 @@ export class ChatPanel implements vscode.Disposable {
    *   banner (EmptyResponseError) instead of staying silent.
    * All paths are bounded, so a prompt that keeps failing lands on the
    * normal error path after the last attempt.
+   *
+   * Compress ceiling: a `/compress` attempt (the overflow recovery below, the
+   * manual 立即压缩 action, the turn-end auto-compress) may be bounded by
+   * `iflow.compressTimeoutSeconds`. 0 (the default) means no ceiling — a huge
+   * session can legitimately take minutes to compress. On expiry the local
+   * watchdog abandons the JSON-RPC request; the CLI turn keeps running, so the
+   * catch chain cancels it and re-throws a CompressTimeoutError.
    */
   private async promptWithRetry(
     client: AcpClient,
@@ -8271,13 +8470,11 @@ export class ChatPanel implements vscode.Disposable {
         // attempt AND for turns that ARE a /compress from the start
         // (runCompressTurn pill action, maybeAutoCompressOnIdle). Cleared in
         // the finally below and on every non-compress attempt.
-        {
-          const firstBlock = blocks[0];
-          const isCompressAttempt =
-            compressNext ||
-            (firstBlock?.type === "text" && firstBlock.text.trimStart() === "/compress");
-          this.store.setCompressing(isCompressAttempt);
-        }
+        const firstBlock = blocks[0];
+        const isCompressAttempt =
+          compressNext ||
+          (firstBlock?.type === "text" && firstBlock.text.trimStart() === "/compress");
+        this.store.setCompressing(isCompressAttempt);
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).
         this.turnHadAgentOutput = false;
@@ -8285,7 +8482,14 @@ export class ChatPanel implements vscode.Disposable {
         // attempt (or turn) may legitimately re-note the same rule hit.
         this.autoApprovalNoted.clear();
         try {
-          const result = await client.prompt({ sessionId, prompt: blocks });
+          // A `/compress` turn may be given a wall-clock ceiling
+          // (`iflow.compressTimeoutSeconds`); 0 keeps the historical
+          // behaviour of an unbounded turn (a huge session can legitimately
+          // take minutes to compress — pitfall #13). Regular turns pass no
+          // per-call timeout at all, so they keep the AcpClient option's
+          // behaviour (unset = no ceiling: a user task may run for hours).
+          const compressTimeoutMs = isCompressAttempt ? this.compressTimeoutMs() : undefined;
+          const result = await client.prompt({ sessionId, prompt: blocks }, compressTimeoutMs);
           if (!compressNext) {
             // Empty-response gate (see EMPTY_RESPONSE_RETRY_DELAYS_MS): the
             // gateway answered 200 with no content, the CLI recorded an empty
@@ -8345,6 +8549,17 @@ export class ChatPanel implements vscode.Disposable {
           // The empty-response ladder already ran; never re-classify it as a
           // rate limit (its wording contains "稍后重试").
           if (error instanceof EmptyResponseError) throw error;
+          if (isCompressAttempt && isRequestTimeoutError(error)) {
+            // The compress turn blew `iflow.compressTimeoutSeconds`. The
+            // local watchdog abandoned the JSON-RPC request, but the CLI turn
+            // is STILL running — cancel it, or the session keeps streaming a
+            // compression nobody waits for.
+            this.log.warn(
+              `compress turn timed out on session ${sessionId}: ${this.formatErrorForLog(error)}`,
+            );
+            client.cancel(sessionId);
+            throw new CompressTimeoutError(Math.round(this.compressTimeoutMs() / 1000));
+          }
           if (isContextOverflowError(error) && !overflowRecovered) {
             overflowRecovered = true;
             compressNext = true;

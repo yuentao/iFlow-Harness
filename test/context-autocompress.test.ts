@@ -175,6 +175,29 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
     expect(toasts).toHaveLength(0);
   });
 
+  it("uses the configured threshold (iflow.autoCompressThresholdPercent)", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoCompressOnIdle: true,
+      autoCompressThresholdPercent: 80,
+    });
+    setUsage(usage(1000, 850));
+    expect(await p.maybeAutoCompressOnIdle("ac-session")).toBe(true);
+    expect(compressCalls).toHaveLength(1);
+  });
+
+  it("stays silent below the configured threshold", async () => {
+    setConfigOverrides({
+      checkpoints: false,
+      autoCompressOnIdle: true,
+      autoCompressThresholdPercent: 80,
+    });
+    setUsage(usage(1000, 700));
+    expect(await p.maybeAutoCompressOnIdle("ac-session")).toBe(false);
+    expect(compressCalls).toHaveLength(0);
+    expect(toasts).toHaveLength(0);
+  });
+
   it("estimated window NEVER compresses (the hy3 32K-fallback false-positive guard)", async () => {
     setUsage(usage(32768, 40000, true));
     await p.maybeAutoCompressOnIdle("ac-session");
@@ -396,5 +419,76 @@ describe("turn-end follow-up gating", () => {
     expect(followups).toEqual([
       { sessionId: "followup-gate-session", opts: { allowTitle: true, conversationTasks: true } },
     ]);
+  });
+});
+
+/**
+ * A `/compress` turn may be bounded by `iflow.compressTimeoutSeconds` (0 = no
+ * limit, the historical behaviour). When the ceiling fires, the local
+ * watchdog abandoned the JSON-RPC request but the CLI turn keeps running —
+ * the panel must cancel it explicitly, or the session keeps streaming a
+ * compression nobody waits for.
+ */
+describe("compress turn ceiling (iflow.compressTimeoutSeconds)", () => {
+  type CeilingInternals = {
+    promptWithRetry: (
+      client: unknown,
+      sessionId: string,
+      prompt: unknown,
+    ) => Promise<{ stopReason: string }>;
+  };
+
+  let panel: ChatPanel;
+  let p: CeilingInternals;
+  let storageDir: string;
+
+  beforeEach(() => {
+    setConfigOverrides({ checkpoints: false, compressTimeoutSeconds: 30 });
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-compress-ceiling-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as CeilingInternals;
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await panel.dispose();
+    fs.rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  /** Fake client that records the per-call timeout the panel passes down
+   * (0 = the panel passed none, i.e. no wall-clock ceiling). */
+  const fakeClient = (captured: number[], stopReason = "end_turn") => ({
+    prompt: vi.fn(async (_request: unknown, timeoutMs?: number) => {
+      captured.push(timeoutMs ?? 0);
+      return { stopReason };
+    }),
+    cancel: vi.fn(),
+  });
+
+  it("passes the configured ceiling to a /compress turn", async () => {
+    const captured: number[] = [];
+    await p.promptWithRetry(fakeClient(captured), "ac-session", [{ type: "text", text: "/compress" }]);
+    expect(captured).toEqual([30_000]);
+  });
+
+  it("leaves a regular turn unbounded", async () => {
+    const captured: number[] = [];
+    // "cancelled" skips the empty-response retry ladder (it only fires on
+    // an `end_turn` without agent output) — the assertion is the timeout.
+    await p.promptWithRetry(fakeClient(captured, "cancelled"), "ac-session", [{ type: "text", text: "普通问题" }]);
+    expect(captured).toEqual([0]);
+  });
+
+  it("cancels the still-running CLI turn when the ceiling fires", async () => {
+    const client = {
+      prompt: vi.fn(async () => {
+        throw { code: -32603, message: "Request timed out after 30000ms: session/prompt" };
+      }),
+      cancel: vi.fn(),
+    };
+    await expect(
+      p.promptWithRetry(client, "ac-session", [{ type: "text", text: "/compress" }]),
+    ).rejects.toThrow(/压缩超时/);
+    expect(client.cancel).toHaveBeenCalledWith("ac-session");
   });
 });

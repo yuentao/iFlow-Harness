@@ -1766,6 +1766,7 @@ export function setMeta(
     currentModelId?: string | null;
     thinkLevel?: SessionState["thinkLevel"];
     commands?: SlashCommand[];
+    skills?: SessionState["skills"];
   },
 ): void {
   if (meta.sessionId !== undefined) state.sessionId = meta.sessionId;
@@ -1774,6 +1775,7 @@ export function setMeta(
   if (meta.currentModelId !== undefined) state.currentModelId = meta.currentModelId;
   if (meta.thinkLevel !== undefined) state.thinkLevel = meta.thinkLevel;
   if (meta.commands !== undefined) state.commands = meta.commands;
+  if (meta.skills !== undefined) state.skills = meta.skills;
 }
 
 /**

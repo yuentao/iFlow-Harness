@@ -50,13 +50,15 @@ const COMMAND_SCAN_CAP = 200;
 const COMMAND_MAX_DEPTH = 8;
 
 /**
- * Minimal frontmatter reader for DISPLAY ONLY (description chip, agent
- * tools). Not a YAML parser: the CLI's zod validation stays authoritative,
- * and anything misread only decorates a row. Scalars keep quotes stripped;
- * `- item` continuations collect under the previous key (so both
- * `allowed-tools: Read, Edit` and the list form render).
+ * Minimal frontmatter reader. Not a YAML parser: the CLI's zod validation
+ * stays authoritative, and anything misread only decorates a row (or, for
+ * skills, yields no name → the skill is skipped exactly like the CLI does).
+ * Scalars keep quotes stripped; `- item` continuations collect under the
+ * previous key (so both `allowed-tools: Read, Edit` and the list form
+ * render). Exported for the skill resolver, which needs the frontmatter
+ * `name` and the body that follows it.
  */
-function parseFrontmatter(text: string): { meta: Record<string, string[]>; body: string } {
+export function parseFrontmatter(text: string): { meta: Record<string, string[]>; body: string } {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   if (lines[0]?.trim() !== "---") return { meta: {}, body: text };
   let end = -1;
