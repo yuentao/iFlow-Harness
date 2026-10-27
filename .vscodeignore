@@ -41,4 +41,6 @@ node_modules/**
 m4-initial.jpg
 iflow.js.original
 session-*.md
+# Local UI-verification screenshots (verify-*.png) are debug artifacts, not assets.
+verify-*.png
 AGENTS.md
