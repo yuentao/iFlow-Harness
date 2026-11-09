@@ -188,7 +188,7 @@ export function SuperAgentBoard() {
   if (list.length === 0) return null;
 
   return (
-    <div className="mx-3 mb-2 shrink-0 rounded-lg border border-border bg-surface/80 shadow-card">
+    <div className="acrylic stream-in mx-3 mt-3 mb-2 shrink-0 rounded-xl border border-border shadow-float">
       {/* Header row: the board's collapsed form is a single line so it never
           steals space from the transcript. Counts are icon + number chips
           (the wording lives in the tooltip) — the old "{n} 个进行中" text chips
