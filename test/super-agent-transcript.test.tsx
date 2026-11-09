@@ -149,7 +149,8 @@ describe("Super Agent 子会话实时操作面板", () => {
       sessionId: "super-1",
     });
     // A running child with nothing buffered yet reads as "暂无输出".
-    expect(container.textContent).toContain("暂无输出");
+    // The dialog is portalled to document.body, so it is outside `container`.
+    expect(document.body.textContent).toContain("暂无输出");
   });
 
   it("有转录时渲染 user / tool / text 三类块（工具卡走真实 ToolCard）", () => {
@@ -157,7 +158,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     clickLabel("展开子会话看板");
     clickText("查看实时操作");
 
-    const text = container.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text).toContain(USER_TASK);
     expect(text).toContain("执行命令");
     expect(text).toContain(ASSISTANT_TEXT);
@@ -174,16 +175,71 @@ describe("Super Agent 子会话实时操作面板", () => {
     clickLabel("展开子会话看板");
     clickText("查看实时操作");
 
-    const dialog = container.querySelector('[role="dialog"]');
+    const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
     expect(dialog!.getAttribute("aria-label")).toBe("子会话实时操作");
     expect(dialog!.textContent).toContain(USER_TASK);
 
-    clickLabel("收起");
+    const close = document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="收起"]');
+    expect(close).toBeTruthy();
+    act(() => close!.click());
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
-    expect(container.textContent).not.toContain(USER_TASK);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.textContent).not.toContain(USER_TASK);
     // The row keeps a single entry point — no inline pane state left behind.
     expect(container.textContent).toContain("查看实时操作");
+  });
+});
+
+describe("Super Agent 子会话中断确认", () => {
+  /** Click a button by its text inside the confirm dialog (portalled to body). */
+  function clickTextInDialog(text: string, dialog: Element): void {
+    const button = [...dialog.querySelectorAll("button")].find((b) => b.textContent === text);
+    expect(button).toBeTruthy();
+    act(() => button!.click());
+  }
+
+  it("行内中断先弹确认框，未确认前不发送 cancel", () => {
+    render();
+    clickLabel("展开子会话看板");
+    clickLabel("中断该子会话");
+
+    expect(send).not.toHaveBeenCalled();
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("中断子会话「修复登录跳转」？");
+
+    clickTextInDialog("中断", dialog!);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "cancel",
+      sessionId: "super-1",
+    });
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+  });
+
+  it("取消中断只关闭确认框，不发送任何消息", () => {
+    render();
+    clickLabel("展开子会话看板");
+    clickLabel("中断该子会话");
+
+    clickTextInDialog("取消", document.querySelector('[role="alertdialog"]')!);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+  });
+
+  it("全部中断先弹确认框，确认后才发送 cancelAll", () => {
+    render();
+    clickLabel("全部中断");
+
+    expect(send).not.toHaveBeenCalled();
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("中断全部 1 个进行中的子会话？");
+
+    clickTextInDialog("全部中断", dialog!);
+    expect(send).toHaveBeenCalledWith({ type: "superAgent", action: "cancelAll" });
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
   });
 });
