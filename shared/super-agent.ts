@@ -802,7 +802,8 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
 const SUPER_DIGEST_FOOTER = [
   "",
   "可管理上述子会话：输出 ```super-agent-actions 代码块，正文为 {\"actions\":[...]}；",
-  "动作 retry（重试失败/中断，复用原工作目录）、cancel（停止运行中）、answer（回答待答提问）、merge（合并已完成的分支）、cleanup（清理工作目录）。",
+  "动作 retry（重试失败/中断，复用原工作目录）、cancel（停止运行中）、answer（回答待答提问）、cleanup（清理工作目录）。",
+  "要合并某个已完成子会话的分支时，自己执行 git merge --no-ff <分支名>（分支名见上面每一行），需要解决冲突就按代码判断。",
   "answer 的 answers 以问题 header 为键：单选给字符串，多选给字符串数组。sessionId 必须逐字使用上面的 id。",
 ].join("\n");
 
@@ -846,7 +847,6 @@ export const MAX_SUPER_ACTIONS = 20;
 export type SuperAction =
   | { action: "retry"; sessionId: string }
   | { action: "cancel"; sessionId: string }
-  | { action: "merge"; sessionId: string }
   | {
       action: "cleanup";
       sessionId: string;
@@ -925,7 +925,6 @@ function parseActionBody(body: string): SuperAction[] | null {
     switch (action) {
       case "retry":
       case "cancel":
-      case "merge":
         out.push({ action, sessionId });
         break;
       case "cleanup":
@@ -1004,6 +1003,36 @@ export function buildSuperReportPrompt(entries: SuperReportEntry[]): string {
     "请先自行处理这些结果：判断每个子会话是否达成目标、改动去向（自动合并 / PR / 保留分支），以及是否还有遗留问题。不要逐条打断用户。",
     "只有在你无法判断、或确实需要用户决策时，才提出那一个具体问题；其余情况不要提问。",
     "最后向用户做一次完整汇报：每个子会话做了什么、结论、改动去向、失败或遗留的问题。不要编造上报里没有的结果，也不要声称自己执行过这些改动。",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 「让智能体合并」的请求文本
+// ---------------------------------------------------------------------------
+
+/**
+ * 看板「让智能体合并」交给主会话智能体的请求文本。
+ *
+ * 合并不再由宿主机械执行 `git merge`：冲突需要读懂代码，宿主只会把仓库留在
+ * 冲突态（或原样放弃并让用户去终端里手工收拾）。这里把分支、工作目录与边界
+ * 写给主智能体，让它用自己的工具完成合并、解决冲突并总结 —— 用户点一下
+ * 按钮，动手的是智能体。
+ *
+ * 提示词刻意写明「不要只给建议」「不要推送 / 删分支 / 切分支」：这是对一条
+ * 执行类请求的边界声明，不是让模型自由发挥的任务。
+ */
+export function buildSuperMergeRequestPrompt(session: SuperSessionUi): string {
+  const branch = session.isolation.branch ?? "";
+  return [
+    "[子会话合并请求]",
+    `用户在看板点击了「让智能体合并」。请你自己把子会话「${session.title}」的分支 ${branch} 合并到当前分支，不要只给建议、也不要让我手动执行。`,
+    `该子会话的工作目录：${session.isolation.path}（分支上的改动已经提交）。`,
+    "步骤：",
+    "1. 先跑 `git status` 确认主工作区状态；",
+    `2. 执行 \`git merge --no-ff ${branch}\`（保留合并提交）；`,
+    "3. 若出现冲突，逐个阅读冲突文件并自行解决，然后完成这次合并提交；无法安全解决时停下来如实说明，不要留下未完成的合并；",
+    "4. 合并后用 `git log --oneline -3` 与 `git status` 确认结果；",
+    "5. 不要推送、不要删除分支、不要切换到其它分支。最后用一两句话总结这次合并带入了哪些改动。",
   ].join("\n");
 }
 

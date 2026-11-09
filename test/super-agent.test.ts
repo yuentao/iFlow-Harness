@@ -3,6 +3,7 @@ import {
   allSuperSessionsSettled,
   applySuperEvent,
   buildSuperDigest,
+  buildSuperMergeRequestPrompt,
   buildSuperReportPrompt,
   canRetrySuperSession,
   describeSuperSessionLine,
@@ -501,14 +502,13 @@ describe("super agent · 看板摘要", () => {
 });
 
 describe("super agent · 管理动作协议", () => {
-  it("解析 retry / cancel / merge / cleanup / answer", () => {
+  it("解析 retry / cancel / cleanup / answer", () => {
     const text = [
       "```super-agent-actions",
       JSON.stringify({
         actions: [
           { action: "retry", sessionId: "super-a" },
           { action: "cancel", sessionId: "super-b" },
-          { action: "merge", sessionId: "super-c" },
           { action: "cleanup", sessionId: "super-d", keepBranch: true },
           { action: "answer", sessionId: "super-e", answers: { 范围: ["A", "B"], 备注: "都行" } },
         ],
@@ -520,7 +520,6 @@ describe("super agent · 管理动作协议", () => {
     expect(scan.actions).toEqual([
       { action: "retry", sessionId: "super-a" },
       { action: "cancel", sessionId: "super-b" },
-      { action: "merge", sessionId: "super-c" },
       { action: "cleanup", sessionId: "super-d", keepBranch: true },
       { action: "answer", sessionId: "super-e", answers: { 范围: ["A", "B"], 备注: "都行" } },
     ]);
@@ -561,14 +560,14 @@ describe("super agent · 管理动作协议", () => {
         actions: [
           { action: "explode", sessionId: "super-a" },
           { action: "answer", sessionId: "super-b" },
-          { action: "merge", sessionId: "super-c" },
+          { action: "cleanup", sessionId: "super-c" },
         ],
       }),
       "```",
     ].join("\n");
     const scan = extractSuperActions(text);
     expect(scan.invalidBlocks).toHaveLength(0);
-    expect(scan.actions).toEqual([{ action: "merge", sessionId: "super-c" }]);
+    expect(scan.actions).toEqual([{ action: "cleanup", sessionId: "super-c" }]);
   });
 
   it("一次输出最多执行 MAX_SUPER_ACTIONS 个动作", () => {
@@ -578,5 +577,23 @@ describe("super agent · 管理动作协议", () => {
     }));
     const text = ["```super-agent-actions", JSON.stringify({ actions }), "```"].join("\n");
     expect(extractSuperActions(text).actions).toHaveLength(MAX_SUPER_ACTIONS);
+  });
+});
+
+describe("super agent · 让智能体合并的请求", () => {
+  it("请求里带上标题、分支与工作目录，并要求智能体自己合并", () => {
+    const text = buildSuperMergeRequestPrompt(
+      session({ title: "修复登录跳转", status: "completed" }),
+    );
+    expect(text).toContain("修复登录跳转");
+    expect(text).toContain("iflow/super/a");
+    expect(text).toContain("/tmp/wt");
+    // 是「执行合并」的请求，不是让用户自己动手。
+    expect(text).toContain("git merge --no-ff iflow/super/a");
+    expect(text).toContain("自行解决");
+    // 边界：不推送、不删分支、不切分支。
+    expect(text).toContain("不要推送");
+    expect(text).toContain("不要删除分支");
+    expect(text).toContain("不要切换");
   });
 });

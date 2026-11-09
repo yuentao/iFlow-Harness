@@ -10,6 +10,7 @@ import {
   currentBranch,
   ensureSuperIsolationIgnored,
   inspectWorkingTree,
+  isBranchMerged,
   listWorktrees,
   mergeBranch,
   previewMerge,
@@ -372,6 +373,32 @@ describe("worktree · 自动合并的前置检查", () => {
     const repo = makeRepo();
     const preview = await previewMerge({ repoRoot: repo, branch: "iflow/super/does-not-exist" });
     expect(preview.available).toBe(false);
+  }, 30000);
+
+  it("isBranchMerged：合并前后如实反映分支是否已并入 HEAD", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-merged-check");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("merged-check"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "m.txt"), "merged\n", "utf8");
+    git(target, "add", "-A");
+    git(target, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child");
+
+    expect(await isBranchMerged({ repoRoot: repo, branch: "iflow/super/merged-check" })).toBe(
+      false,
+    );
+    const merged = await mergeBranch({ repoRoot: repo, branch: "iflow/super/merged-check" });
+    expect(merged.ok).toBe(true);
+    expect(await isBranchMerged({ repoRoot: repo, branch: "iflow/super/merged-check" })).toBe(
+      true,
+    );
+    // 分支不存在时如实返回 false —— 绝不谎报成功。
+    expect(await isBranchMerged({ repoRoot: repo, branch: "iflow/super/nope" })).toBe(false);
   }, 30000);
 
   it("进行中的合并被识别出来（不叠加第二次合并）", async () => {

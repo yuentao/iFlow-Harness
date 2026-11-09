@@ -73,8 +73,10 @@ import { CheckpointManager } from "./checkpoints.js";
 import { SuperAgentManager } from "./super-agent.js";
 import {
   buildSuperDigest,
+  buildSuperMergeRequestPrompt,
   extractSuperActions,
   extractSuperDirectives,
+  isTerminalSuperStatus,
   MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
@@ -6362,9 +6364,6 @@ export class ChatPanel implements vscode.Disposable {
           case "answer":
             ok = manager.respond(action.sessionId, { answers: action.answers });
             break;
-          case "merge":
-            ok = (await manager.merge(action.sessionId)).ok;
-            break;
           case "cleanup":
             ok = (await manager.cleanup(action.sessionId, { keepBranch: action.keepBranch })).ok;
             break;
@@ -6493,12 +6492,7 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "merge": {
         if (!msg.sessionId) return;
-        const result = await manager.merge(msg.sessionId);
-        if (result.ok) {
-          this.store.sendToast("info", vscode.l10n.t("已把子会话的分支合并到当前分支"));
-        } else {
-          this.store.sendToast("error", vscode.l10n.t("合并失败：{0}", result.error));
-        }
+        await this.requestSuperMerge(msg.sessionId);
         break;
       }
       case "retry": {
@@ -6511,6 +6505,80 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+    }
+  }
+
+  /**
+   * The board's merge button asks the AGENT to merge.
+   *
+   * The host no longer runs `git merge` itself: a conflict needs someone to
+   * read the code, and a mechanical merge would just abort and leave the user
+   * with the same problem. The request rides the MAIN session's normal prompt
+   * channel (so the agent has its full toolset in the main workspace), then
+   * the host verifies with `git merge-base --is-ancestor` that the branch
+   * actually landed and records the integration — reporting the truth either
+   * way instead of assuming success.
+   */
+  private async requestSuperMerge(id: string): Promise<void> {
+    const manager = this.getSuperAgent();
+    if (!manager) return;
+    const session = manager.get(id);
+    if (!session) {
+      this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
+      return;
+    }
+    if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
+      this.store.sendToast("warning", vscode.l10n.t("该子会话没有可合并的分支（仅目录隔离）"));
+      return;
+    }
+    if (session.integration?.state === "merged") {
+      this.store.sendToast("info", vscode.l10n.t("该子会话的改动已经合并"));
+      return;
+    }
+    if (!isTerminalSuperStatus(session.status)) {
+      this.store.sendToast("warning", vscode.l10n.t("子会话还没结束，完成后再让智能体合并"));
+      return;
+    }
+    const state = this.store.getState();
+    if (
+      state.initializing ||
+      state.status === "streaming" ||
+      state.replaying ||
+      this.historySyncBusy
+    ) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
+      );
+      return;
+    }
+    if (!state.sessionId) {
+      this.store.sendToast("warning", vscode.l10n.t("会话未就绪，无法让智能体合并"));
+      return;
+    }
+    this.store.sendToast(
+      "info",
+      vscode.l10n.t("已让智能体合并子会话「{0}」的分支", session.title),
+    );
+    await this.sendPrompt(
+      buildSuperMergeRequestPrompt(session),
+      undefined,
+      undefined,
+      undefined,
+      { delegateOnBusy: false },
+    );
+    if (this.disposed) return;
+    const merged = await manager.recordAgentMerge(id);
+    if (merged) {
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t("智能体已把子会话「{0}」的分支合并到当前分支", session.title),
+      );
+    } else {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("智能体本轮没有完成合并，分支仍保留：{0}", session.isolation.branch),
+      );
     }
   }
 
@@ -7943,8 +8011,13 @@ export class ChatPanel implements vscode.Disposable {
      * `internal: true` marks a HOST-driven turn (bookkeeping, not user work).
      * Such a turn must not rename the session, must not capture a workspace
      * checkpoint, and must not carry the child-session board digest.
+     *
+     * `delegateOnBusy: false` forbids the "streaming → dispatch this text as
+     * a child session" fallback. A merge request is one of those: it must run
+     * in the MAIN workspace (the child's worktree cannot merge into it), so
+     * the host refuses instead of silently delegating it.
      */
-    options?: { internal?: boolean },
+    options?: { internal?: boolean; delegateOnBusy?: boolean },
   ): Promise<void> {
     const internal = options?.internal === true;
     const trimmed = text.trim();
@@ -7972,6 +8045,16 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       if (internal) return;
+      // A merge request must run in the MAIN workspace, so delegating it to
+      // an isolated child session would be wrong (the child's worktree has
+      // its own branch). Refuse and say why instead of doing something else.
+      if (options?.delegateOnBusy === false) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
+        );
+        return;
+      }
       const contextBlock = hasContexts
         ? assembleContextSections(contexts!, (c) => this.contextSectionTitle(c))
         : "";

@@ -279,10 +279,10 @@ export function SuperAgentBoard() {
         <ConfirmDialog
           title={t("合并子会话分支")}
           message={t(
-            "把分支 {0} 合并到当前分支？这会改动你当前的工作分支，若有冲突会自动撤销并报错。",
+            "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。",
             confirmMerge.isolation.branch ?? "",
           )}
-          confirmLabel={t("合并")}
+          confirmLabel={t("让智能体合并")}
           onConfirm={() => {
             send({ type: "superAgent", action: "merge", sessionId: confirmMerge.id });
             setConfirmMerge(null);
@@ -465,17 +465,23 @@ function SuperSessionRow({
               variant="canvas"
               size="sm"
               icon={<GitMerge className={ICON_INLINE} />}
-              disabled={!session.isolation.branch || session.integration?.state === "merged"}
+              disabled={
+                !session.isolation.branch ||
+                session.integration?.state === "merged" ||
+                isActive(session)
+              }
               title={
                 session.integration?.state === "merged"
                   ? t("该子会话的改动已经合并")
-                  : session.isolation.branch
-                    ? t("把该子会话的分支合并到当前分支")
-                    : t("该子会话没有可合并的分支")
+                  : !session.isolation.branch
+                    ? t("该子会话没有可合并的分支")
+                    : isActive(session)
+                      ? t("子会话还没结束，完成后再让智能体合并")
+                      : t("让智能体把该子会话的分支合并到当前分支（冲突由它自行解决）")
               }
               onClick={onMerge}
             >
-              {t("合并")}
+              {t("让智能体合并")}
             </Button>
             <Button
               variant="canvas"

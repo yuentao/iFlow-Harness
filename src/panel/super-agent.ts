@@ -82,6 +82,7 @@ import {
   ensureSuperIsolationIgnored,
   ghAvailable,
   inspectWorkingTree,
+  isBranchMerged,
   mergeBranch,
   previewMerge,
   probeGitRepo,
@@ -422,28 +423,30 @@ export class SuperAgentManager {
   }
 
   /**
-   * 手动把一个子会话的分支合并回当前分支。
+   * 收尾一次「让智能体合并」。
    *
-   * 自动合并（`iflow.superAgent.integration = "merge"`）跳过时（工作区脏 /
-   * 冲突）用户可以在这里补一刀，而不是只能去终端。
+   * 合并由主会话智能体在会话里自己执行（`git merge` + 解决冲突），管理器
+   * 不再机械跑 `git merge` —— 冲突需要读懂代码，宿主只会把仓库留在冲突态。
+   * 这里只做两件事：用 `git merge-base --is-ancestor` 确认分支真的并入了当前
+   * HEAD，然后把结果补记到看板（终态粘性会丢弃状态事件，元数据补记不走
+   * 状态机）。
+   *
+   * 返回 false 表示分支还没合并（智能体没做完 / 改到了别处）——调用方据此
+   * 如实提示，绝不假装成功。
    */
-  async merge(id: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  async recordAgentMerge(id: string): Promise<boolean> {
     const session = this.sessions.get(id);
-    if (!session) return { ok: false, error: "子会话不存在" };
-    if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
-      return { ok: false, error: "该子会话没有可合并的分支（仅目录隔离）" };
-    }
-    const result = await mergeBranch({ repoRoot: this.deps.repoRoot, branch: session.isolation.branch });
-    if (result.ok) {
-      // 手动合并也要留痕：看板据此把「合并」按钮置灰，主会话也能看到改动去向。
-      this.recordIntegration(id, {
-        mode: session.integration?.mode ?? "manual",
-        state: "merged",
-        detail: `已手动合入 ${(await currentBranch(this.deps.repoRoot)) ?? "当前分支"}`,
-        at: Date.now(),
-      });
-    }
-    return result;
+    const branch = session?.isolation.branch;
+    if (!session || !branch) return false;
+    if (!(await isBranchMerged({ repoRoot: this.deps.repoRoot, branch }))) return false;
+    const target = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
+    this.recordIntegration(id, {
+      mode: this.deps.integrationMode(),
+      state: "merged",
+      detail: `智能体已合入 ${target}`,
+      at: Date.now(),
+    });
+    return true;
   }
 
   /**

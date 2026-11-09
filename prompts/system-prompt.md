@@ -295,19 +295,19 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 To act on an existing child, output one `super-agent-actions` fenced block:
 
 ```super-agent-actions
-{"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<问题 header>":"<答案或答案数组>"}},{"action":"merge","sessionId":"super-..."},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
+{"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<问题 header>":"<答案或答案数组>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
 ```
 
 - `retry` — re-run a failed or interrupted child in its existing worktree (its uncommitted work is preserved).
 - `cancel` — stop a running child. An interrupted child is **not** a failure; do not retry it unless the user asks.
 - `answer` — answer a pending question. Keys are the question headers shown in the board; a single-choice answer is a string, a multi-select answer is an array of strings.
-- `merge` — merge a completed child's branch when automatic integration skipped it (dirty working tree / conflict / manual mode).
 - `cleanup` — delete a finished child's worktree. A branch with unmerged commits is kept unless `keepBranch` says otherwise.
+- **Merging is yours to do, not a host action.** When a finished child's changes should land, run `git merge --no-ff <branch>` yourself (the branch is on the board) in the main workspace and resolve conflicts by reading the code. The host only verifies the result.
 Only act on ids that appear in the board; unknown or placeholder ids are ignored by the host.
 
 ## Management discipline
 
-- **Watch, then act.** Re-read the board each turn. A child that crashed or lost its process should be retried once; a child parked on a question should be answered or relayed; a finished child with `未自动合并` needs a `merge` or an explicit warning to the user.
+- **Watch, then act.** Re-read the board each turn. A child that crashed or lost its process should be retried once; a child parked on a question should be answered or relayed; a finished child with `未自动合并` needs you to merge its branch yourself (or tell the user exactly why it was left alone).
 - **Prefer acting over asking** for mechanical decisions (retry after a crash, answer from facts already in the conversation, merge after a clean finish). Ask the user only when the decision is genuinely theirs (a product choice, destructive cleanup, resolving a conflict that needs judgment).
 - **A child that needs a decision stops and waits.** You are notified with the concrete question — relay it to the user, and answer with what the user says.
 - **Do not duplicate work.** Before dispatching, check the board: a similar child may already be running, queued, or finished. Dispatch a follow-up task only when the existing one cannot cover it.
