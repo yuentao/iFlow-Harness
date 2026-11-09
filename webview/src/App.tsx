@@ -358,6 +358,30 @@ export function App() {
     return () => ro.disconnect();
   }, [hasPendingCard]);
 
+  // The Super Agent bar (top overlay) mirrors --pending-card-h in reverse: it
+  // floats over the scroller, so the transcript must reserve its height as top
+  // clearance or the first message would hide under it. Same var-on-the-wrapper
+  // technique; no children → the var is removed and the padding collapses.
+  const superBarRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const wrapper = transcriptWrapRef.current;
+    const bar = superBarRef.current;
+    if (!wrapper || !bar) return;
+    const apply = () => {
+      // The shell keeps an 8px pt-2 even with no board inside — measure only
+      // when a child is actually mounted, else clear the reserved clearance.
+      if (bar.firstElementChild && bar.offsetHeight > 0) {
+        wrapper.style.setProperty("--super-bar-h", `${bar.offsetHeight}px`);
+      } else {
+        wrapper.style.removeProperty("--super-bar-h");
+      }
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(bar);
+    return () => ro.disconnect();
+  }, []);
+
   // P1-3: screen-reader status announcements. The aria-live region re-announces
   // only when this string changes, so idle re-renders stay silent.
   // NOTE: must stay ABOVE the splash early-return below — a hook after that
@@ -907,17 +931,23 @@ export function App() {
           wrapper. pointer-events-none on the shell keeps the empty gutters
           transparent to scroll/click; each card re-enables pointer events on
           itself. */}
-      {/* The transcript column. The Super Agent board sits ABOVE it but
-          OUTSIDE the pending-card overlay's containing block: the overlay is
-          `absolute inset-0` over the wrapper, so a board INSIDE the wrapper
-          could be painted over by a tall approval card. Keeping the board in
-          its own flex row makes the two surfaces disjoint. */}
+      {/* The transcript column. The Super Agent bar floats at the TOP of the
+          transcript — the same overlay contract as the pending cards at the
+          bottom: absolute over the wrapper, so a delegated child appearing or
+          expanding never squeezes the message list. Its height is mirrored
+          into --super-bar-h (see the ResizeObserver above), which the Focus
+          hint rides below instead of being painted over by the bar. */}
       <div className="flex min-h-0 flex-1 flex-col">
-        <SuperAgentBoard />
         <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
           <MessageList />
+          <div ref={superBarRef} className="pointer-events-none absolute inset-x-0 top-0 z-30 pt-2">
+            <SuperAgentBoard />
+          </div>
           {focusMode && focusHint && (
-            <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
+            <div
+              className="pointer-events-none absolute inset-x-0 z-30 flex justify-center"
+              style={{ top: "calc(var(--super-bar-h, 0px) + 0.25rem)" }}
+            >
               <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card">
                 <Focus className="size-3 shrink-0" />
                 {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
