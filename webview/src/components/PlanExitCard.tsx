@@ -94,7 +94,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
 
   return (
     <div
-      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
+      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 shrink-0 rounded-xl border border-primary/40"
       role="alertdialog"
       aria-labelledby={titleId}
       aria-describedby={descId}

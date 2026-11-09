@@ -1414,11 +1414,40 @@ function blockText(block: Block): string {
     case "compression":
       return "";
     case "injected":
-      // Model-side fixed overhead (system prompt + memory), not conversation
-      // content — counting it would double-count what the usage estimate
-      // already attributes to the CLI's fixed per-request cost.
+      // Fixed prefill (system prompt / memory / tool declarations), not
+      // conversation content: it is counted ONCE as a prefill term OUTSIDE the
+      // compression fold (see injectedPrefillTokens). Counting it here would
+      // drop it at a `/compress` boundary and double count it in the
+      // authoritative delta.
       return "";
   }
+}
+
+/**
+ * Fixed per-request prefill the model carries: the CLI's assembled system
+ * instruction (built-in template + our override template + the joined
+ * hierarchical memory + the project context files + the expanded knowledge
+ * docs) and every connected MCP server's tool declarations. The
+ * acp-context-report Mod hands the panel those bytes verbatim, so the card
+ * measures them with the same o200k_base BPE the occupancy bar uses.
+ *
+ * Kept OUT of the compression fold on purpose: the system instruction and the
+ * tool declarations ride on EVERY request, so `/compress` does not drop them.
+ * The CLI's own post-compression `newTokenCount` is
+ * `countTokens({model, contents})` (bundle: CompressManager.tryCompress —
+ * contents only, no systemInstruction, no tools), so adding the prefill on
+ * top of that floor does not double count.
+ *
+ * Host-side limit (honest by construction): the CLI's built-in tool
+ * declarations and its environment part (cwd + directory listing) never reach
+ * the ACP wire, so the estimate stays a LOWER bound; the kernel-reported path
+ * (`lastRequestInputTokens`) contains the real total.
+ */
+function injectedPrefillTokens(block: Extract<Block, { kind: "injected" }>): number {
+  if (block.tokens === undefined) {
+    block.tokens = block.items.reduce((sum, item) => sum + estimateTokens(item.content), 0);
+  }
+  return block.tokens;
 }
 
 /**
@@ -1438,6 +1467,9 @@ function blockText(block: Block): string {
  */
 function blockTokens(block: Block): number {
   if (block.kind === "compression") return 0;
+  // The injected card's cost is a PREFILL term, not a transcript block: it is
+  // folded separately (injectedPrefillTokens) so a compression boundary does
+  // not drop it and the authoritative delta does not count it twice.
   if (block.kind === "injected") return 0;
   if (block.kind === "subagent") {
     let sum = 0;
@@ -1455,6 +1487,13 @@ function blockTokens(block: Block): number {
  * mutated its content. Only called from definitive change points — streaming
  * tail growth is coalesced by the store and cached lazily at turn end. */
 function recountBlockTokens(block: Block): void {
+  if (block.kind === "injected") {
+    // The injected bodies are immutable once the card is minted — keep the
+    // measured prefill total instead of zeroing it (blockText() is "" for
+    // this kind, so the generic path would wipe the prefill accounting).
+    injectedPrefillTokens(block);
+    return;
+  }
   block.tokens = block.kind === "compression" ? 0 : estimateTokens(blockText(block));
 }
 
@@ -1472,12 +1511,21 @@ function recountBlockTokens(block: Block): void {
  * context size, summary included) marks the fold boundary: blocks before it are
  * folded into that number, and only blocks after it are counted normally (a
  * still-pending card contributes 0). Transcripts without a completed
- * compression fold exactly as before. */
+ * compression fold exactly as before.
+ *
+ * Prefill: the fixed per-request overhead (system prompt / memory / tool
+ * declarations) is added OUTSIDE the fold — the model carries it on every
+ * request, so a `/compress` does not drop it, and the CLI's post-compression
+ * `newTokenCount` does not include it (bundle: countTokens takes `contents`
+ * only — no systemInstruction, no tools). It counts as INPUT (it is prompt
+ * text the model reads), and it is reported separately as `prefillTokens` so
+ * the UI can tell "the model reads 40K of fixed instructions" apart from
+ * "the conversation grew to 40K". */
 export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
   let inputTokens = 0;
   let outputTokens = 0;
   // P0-6 hover breakdown (kind-classified sums over the SAME fold window).
-  const breakdown: UsageBreakdownUi = { user: 0, assistant: 0, tool: 0, thought: 0 };
+  const breakdown: UsageBreakdownUi = { user: 0, assistant: 0, tool: 0, thought: 0, prefill: 0 };
   // Fold boundary: index AFTER the last completed compression card. Blocks
   // below it are no longer in the model's context.
   let foldStart = 0;
@@ -1503,6 +1551,17 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
     else if (b.kind === "thought") breakdown.thought += t;
     else breakdown.assistant += t; // text / plan / subagent (nested kinds not split)
   }
+  // Fixed prefill — outside the fold, counted once (the injected card is a
+  // single block; the first one wins so a legacy transcript with two cards
+  // cannot inflate the number).
+  let prefillTokens = 0;
+  for (const b of blocks) {
+    if (b.kind !== "injected") continue;
+    prefillTokens = injectedPrefillTokens(b);
+    break;
+  }
+  inputTokens += prefillTokens;
+  breakdown.prefill = prefillTokens;
   inputTokens += contextFloor;
   const totalTokens = inputTokens + outputTokens;
   return {
@@ -1514,6 +1573,7 @@ export function estimateSessionUsage(blocks: Block[]): SessionUsageUi {
     // Post-fold context occupancy — what the model actually carries (the
     // same number the overflow gate fights against), not cumulative burn.
     contextUsed: totalTokens,
+    prefillTokens,
     breakdown,
   };
 }
@@ -1711,6 +1771,13 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
   // authoritative). Residual bias: a SubAgent card streaming INSIDE the delta
   // range counts its internals; the next turn-end report re-anchors and erases
   // it.
+  //
+  // Prefill: `lastRequestInputTokens` IS the whole request input — system
+  // prompt, tool schemas, history and this turn's tool I/O — so the fixed
+  // prefill is ALREADY inside it and must not be added again. The delta sums
+  // `blockTokens`, which returns 0 for the injected card, so the prefill is
+  // never counted twice here either. `next.prefillTokens` still reports the
+  // measured prefill for the breakdown, in both paths.
   const report = state.usageReport;
   if (report && report.lastRequestInputTokens > 0 && report.atBlockCount <= state.blocks.length) {
     let delta = 0;
@@ -1747,6 +1814,7 @@ export function refreshSessionUsage(state: SessionState, usageCtx?: UsageContext
     prev.outputTokens === next.outputTokens &&
     prev.cacheReadTokens === next.cacheReadTokens &&
     prev.contextUsed === next.contextUsed &&
+    prev.prefillTokens === next.prefillTokens &&
     prev.usageAuthoritative === next.usageAuthoritative &&
     prev.contextWindow === next.contextWindow &&
     prev.estimated === next.estimated &&

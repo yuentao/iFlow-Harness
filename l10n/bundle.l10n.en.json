@@ -6,6 +6,7 @@
   "上下文 {0} / {1}（{2}%）": "Context {0} / {1} ({2}%)",
   "上下文约 {0} tokens": "Context ≈ {0} tokens",
   "输入 {0} tokens · 输出 {1} tokens": "Input {0} tokens · output {1} tokens",
+  "预填充 {0} tokens（系统提示词 / 记忆 / 工具声明）": "Prefill {0} tokens (system prompt / memory / tool declarations)",
   "缓存读取 {0} tokens": "Cache read {0} tokens",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
   "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",

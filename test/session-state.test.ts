@@ -2117,7 +2117,7 @@ describe("session usage split & real-time refresh", () => {
     expect(b.thought).toBe(estimateTokens("思考过程"));
     expect(b.tool).toBe(estimateTokens("列出目录\n文件清单"));
     // Every kind lands in exactly one bucket, and they sum to the total.
-    expect(b.user + b.assistant + b.tool + b.thought).toBe(usage.totalTokens);
+    expect(b.user + b.assistant + b.tool + b.thought + (b.prefill ?? 0)).toBe(usage.totalTokens);
   });
 
   it("P0-6: the breakdown folds at the compression boundary too", () => {
@@ -2892,13 +2892,56 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     );
   });
 
-  it("excludes injected bodies from the transcript token estimate", () => {
+  it("counts injected bodies as fixed prefill, not as transcript content", () => {
     const state = initialSessionState();
     appendInjectedContext(state, items());
     beginUserPrompt(state, "hi");
     const usage = estimateSessionUsage(state.blocks);
-    // Only the user turn counts; the injected system prompt/memory do not.
-    expect(usage.inputTokens).toBe(estimateTokens("hi"));
+    const prefill =
+      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules");
+    // The injected bodies are PREFILL — input the model re-reads on every
+    // request — so they count once, in their own bucket, and land in the
+    // occupancy (the estimate used to ignore them entirely, which made the
+    // bar read a few thousand tokens while the model actually read tens of
+    // thousands of instructions).
+    expect(usage.prefillTokens).toBe(prefill);
+    expect(usage.breakdown!.prefill).toBe(prefill);
+    expect(usage.inputTokens).toBe(prefill + estimateTokens("hi"));
+    expect(usage.contextUsed).toBe(usage.totalTokens);
+    // The five buckets still add up to the occupancy (prefill included).
+    const b = usage.breakdown!;
+    expect(b.user + b.assistant + b.tool + b.thought + b.prefill!).toBe(usage.totalTokens);
+  });
+
+  it("keeps the prefill outside the compression fold (the model re-reads it every request)", () => {
+    const state = initialSessionState();
+    appendInjectedContext(state, items());
+    beginUserPrompt(state, "压缩前的问题");
+    applySessionUpdate(state, notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ type: "compression", compression: { isPending: false, originalTokenCount: 90_000, newTokenCount: 7_855, summary: "摘要" } }) } }));
+    beginUserPrompt(state, "压缩后的问题");
+    refreshSessionUsage(state);
+    const prefill =
+      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules");
+    // The CLI's newTokenCount counts `contents` only (no systemInstruction,
+    // no tools — bundle: CompressManager.tryCompress), so the prefill is
+    // added on top of the floor instead of being folded into it.
+    expect(state.usage!.prefillTokens).toBe(prefill);
+    expect(state.usage!.inputTokens).toBe(7_855 + prefill + estimateTokens("压缩后的问题"));
+  });
+
+  it("does not double count the prefill when the kernel reports the occupancy", () => {
+    const state = initialSessionState();
+    appendInjectedContext(state, items());
+    beginUserPrompt(state, "hi");
+    completePrompt(state, "end_turn", null, { lastRequestInputTokens: 61_000 });
+    const prefill =
+      estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules");
+    // lastRequestInputTokens IS the whole request input (system prompt +
+    // tool schemas + history), so the prefill is already inside it.
+    expect(state.usage!.contextUsed).toBe(61_000);
+    expect(state.usage!.usageAuthoritative).toBe(true);
+    // The measured prefill still rides along for the breakdown.
+    expect(state.usage!.prefillTokens).toBe(prefill);
   });
 
   it("is idempotent: a second call skips when a card already exists", () => {

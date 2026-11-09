@@ -633,6 +633,21 @@ export interface SessionUsageUi {
   /** Current context occupancy in tokens (post-compression fold; equals the
    * model's actual carried context, not cumulative consumption). */
   contextUsed?: number;
+  /**
+   * Fixed per-request prefill the model carries on EVERY request, independent
+   * of the conversation history: the CLI's assembled system instruction (its
+   * built-in template + our override template + the joined hierarchical
+   * memory + the project context files + the expanded knowledge docs) plus
+   * every connected MCP server's tool declarations.
+   *
+   * Measured byte-exact from the acp-context-report Mod's snapshot (the same
+   * o200k_base BPE as the rest of the estimate), so the occupancy bar stops
+   * ignoring the tens of thousands of tokens the model actually reads. The
+   * estimate path adds it to the occupancy; the kernel-reported path
+   * (`usageAuthoritative`) already contains it inside
+   * `lastRequestInputTokens`, so it is NOT added a second time there.
+   */
+  prefillTokens?: number;
   /** True when `contextWindow` is a conservative fallback guess rather than a
    * table/override hit — the UI labels the percentage "估算". Orthogonal to
    * `usageAuthoritative` (window source vs token source). */
@@ -658,6 +673,10 @@ export interface UsageBreakdownUi {
   assistant: number;
   tool: number;
   thought: number;
+  /** Fixed prefill (system prompt / memory / tool declarations) — counted
+   * outside the compression fold, because the model carries it on every
+   * request. Absent on older hosts. */
+  prefill?: number;
 }
 
 /** Authoritative context occupancy the CLI reported at the last turn end
@@ -909,7 +928,14 @@ export function initialSessionState(): SessionState {
 /** Zeroed usage so the token chip renders from the first paint (a session
  * with no content yet shows ↑0 ↓0 rather than hiding the indicator). */
 export function emptySessionUsage(): SessionUsageUi {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    prefillTokens: 0,
+  };
 }
 
 /**

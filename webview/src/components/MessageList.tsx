@@ -1096,13 +1096,113 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
 }
 
 /**
+ * Header chip row pinned to ONE line: chips that exceed the available width
+ * collapse into a `+N` chip — the full breakdown lives in the expanded body,
+ * so a many-source injection never balloons the header into a chip cloud.
+ * Widths come from an invisible full-width clone (hidden chips would measure
+ * 0 otherwise); jsdom lays nothing out (offsetWidth/clientWidth 0), so it
+ * keeps every chip visible.
+ */
+function InjectedChipRow({ chips }: { chips: ReactNode[] }) {
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const measureRef = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(chips.length);
+  useEffect(() => {
+    const row = rowRef.current;
+    const measure = measureRef.current;
+    if (!row || !measure) return;
+    const compute = () => {
+      const avail = row.clientWidth;
+      const widths = Array.from(measure.children as HTMLCollectionOf<HTMLElement>).map((c) => c.offsetWidth);
+      if (avail <= 0 || widths.length !== chips.length) return;
+      const GAP = 8;
+      const fit = (limit: number) => {
+        let used = 0;
+        let k = 0;
+        for (let i = 0; i < chips.length; i++) {
+          const next = k === 0 ? (widths[i] ?? 0) : used + GAP + (widths[i] ?? 0);
+          if (next > limit) break;
+          used = next;
+          k = i + 1;
+        }
+        return k;
+      };
+      if (fit(avail) === chips.length) {
+        setVisible(chips.length);
+        return;
+      }
+      // Reserve the "+N" chip (+ gap) so the row still ends on one line.
+      setVisible(Math.max(fit(avail - 44), 1));
+    };
+    const ro = new ResizeObserver(compute);
+    ro.observe(row);
+    compute();
+    return () => ro.disconnect();
+  }, [chips.length]);
+  const hidden = Math.max(chips.length - visible, 0);
+  return (
+    <div className="relative min-w-0 flex-1">
+      <div ref={rowRef} className="flex items-center gap-x-2 overflow-hidden">
+        {chips.slice(0, visible)}
+        {hidden > 0 && (
+          <Chip tone="muted" title={t("其余注入类别见展开详情")}>
+            +{hidden}
+          </Chip>
+        )}
+      </div>
+      <div
+        ref={measureRef}
+        aria-hidden
+        className="pointer-events-none absolute left-0 top-0 flex gap-x-2 opacity-0"
+      >
+        {chips}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One injected body (pitfall #27 mount discipline): short bodies stay inline;
+ * taller ones fold behind a caret and mount their text only on first open, so
+ * expanding a many-source card stays a compact list instead of a wall of
+ * eagerly mounted panes. Same "fold only pays off once content is tall" rule
+ * as the tool-output rows.
+ */
+function InjectedBody({ content }: { content: string }) {
+  const [open, setOpen] = useState(false);
+  const [openedOnce, setOpenedOnce] = useState(false);
+  const pane = (
+    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
+      {content}
+    </pre>
+  );
+  if (content.trimEnd().split("\n").length < 3) return pane;
+  return (
+    <>
+      <button
+        onClick={() => {
+          setOpenedOnce(true);
+          setOpen((v) => !v);
+        }}
+        className="mt-1 flex w-full items-center gap-1.5 text-left text-ui-caption text-muted-foreground hover:text-foreground"
+      >
+        <Caret open={open} />
+        {t("查看内容")}
+      </button>
+      <Collapse open={open}>{openedOnce && pane}</Collapse>
+    </>
+  );
+}
+
+/**
  * Auto-injected-context card (first prompt of a session): what the model
  * actually sees beyond the typed text — the assembled system instruction, the
  * joined hierarchical memory, each context file, with FULL bodies (the
  * CLI-side acp-context-report Mod surfaces them). MCP entries show only the
  * server name: their declaration bodies still feed the token estimate, but the
- * tool-by-tool detail is not surfaced here. Folded by default; the header alone
- * lists what was injected.
+ * tool-by-tool detail is not surfaced here. Folded by default; the header
+ * lists what was injected on ONE line (chips that don't fit collapse into
+ * `+N`), and each body in the expanded list folds until opened.
  */
 function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injected" }> }) {
   const [open, setOpen] = useState(false);
@@ -1118,11 +1218,19 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   const mcpUnloaded = mcpItems.length - mcpCarried.length;
   const mcpProject = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
   const evicted = block.evicted === true;
+  const chips: ReactNode[] = [];
+  if (systemCount > 0) chips.push(<Chip key="system" tone="info">{t("系统提示词")}</Chip>);
+  if (memoryCount > 0) chips.push(<Chip key="memory" tone="muted">{t("全局记忆")}</Chip>);
+  if (fileCount > 0) chips.push(<Chip key="files" tone="muted">{t("项目记忆")} {fileCount}</Chip>);
+  if (knowledgeCount > 0) chips.push(<Chip key="knowledge" tone="muted">{t("项目知识库")} {knowledgeCount}</Chip>);
+  if (mcpCarried.length > 0) chips.push(<Chip key="mcp" tone="muted">{t("MCP 服务器")} {mcpCarried.length}</Chip>);
+  if (mcpUnloaded > 0) chips.push(<Chip key="mcpUnloaded" tone="warning">{t("MCP 未连接")} {mcpUnloaded}</Chip>);
+  if (mcpProject > 0) chips.push(<Chip key="mcpProject" tone="info">{t("MCP 项目级")} {mcpProject}</Chip>);
   return (
     <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-x-2 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
       >
         <Caret open={open} />
         <span className="shrink-0 font-medium text-foreground/75">{t("自动注入")}</span>
@@ -1131,33 +1239,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
             ≈ {block.tokens.toLocaleString()} tokens
           </span>
         )}
-        {systemCount > 0 && <Chip tone="info">{t("系统提示词")}</Chip>}
-        {memoryCount > 0 && <Chip tone="muted">{t("全局记忆")}</Chip>}
-        {fileCount > 0 && (
-          <Chip tone="muted">
-            {t("项目记忆")} {fileCount}
-          </Chip>
-        )}
-        {knowledgeCount > 0 && (
-          <Chip tone="muted">
-            {t("项目知识库")} {knowledgeCount}
-          </Chip>
-        )}
-        {mcpCarried.length > 0 && (
-          <Chip tone="muted">
-            {t("MCP 服务器")} {mcpCarried.length}
-          </Chip>
-        )}
-        {mcpUnloaded > 0 && (
-          <Chip tone="warning">
-            {t("MCP 未连接")} {mcpUnloaded}
-          </Chip>
-        )}
-        {mcpProject > 0 && (
-          <Chip tone="info">
-            {t("MCP 项目级")} {mcpProject}
-          </Chip>
-        )}
+        <InjectedChipRow chips={chips} />
       </button>
       <Collapse open={open}>
         <div className="border-t border-border/60 px-3 py-2">
@@ -1192,11 +1274,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
                     )}
                     <span className="shrink-0 text-muted-foreground">{t("{0} 字符", item.content.length)}</span>
                   </div>
-                  {item.content && (
-                    <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
-                      {item.content}
-                    </pre>
-                  )}
+                  {item.content && <InjectedBody content={item.content} />}
                 </div>
               )
             )}
@@ -1235,11 +1313,7 @@ function SystemPromptSections({ content }: { content: string }) {
                 : t("{0} 字符", s.content.length)}
             </span>
           </div>
-          {s.kind !== "core" && (
-            <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-editor/60 px-2.5 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
-              {s.content}
-            </pre>
-          )}
+          {s.kind !== "core" && <InjectedBody content={s.content} />}
         </div>
       ))}
     </div>

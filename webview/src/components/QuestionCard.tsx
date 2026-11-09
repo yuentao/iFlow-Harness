@@ -92,12 +92,12 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
 
   return (
     <div
-      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 mb-2 shrink-0 rounded-xl border border-primary/40"
+      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 flex max-h-full shrink-0 flex-col rounded-xl border border-primary/40"
       role="alertdialog"
       aria-labelledby={titleId}
       aria-describedby={descId}
     >
-      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <HelpCircle className="size-3.5 shrink-0 text-primary" />
         <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 需要你的回答")}</span>
         <span className="ml-auto">
@@ -116,9 +116,13 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
           </HelpTip>
         </span>
       </div>
+      {/* Scroll body: the card caps at the overlay wrapper (max-h-full), so
+          the body takes whatever is left after header/countdown/actions and
+          scrolls internally — no viewport guess, and the action buttons stay
+          visible even for multi-question asks with long option copy. */}
       <div
         id={descId}
-        className="max-h-[max(140px,calc(100vh-240px))] space-y-3 overflow-y-auto px-3 py-3 text-ui-label"
+        className="min-h-0 flex-auto space-y-3 overflow-y-auto px-3 py-3 text-ui-label"
       >
         {pending.questions.map((q) => {
           const picks = selected[q.header] ?? new Set<string>();
@@ -199,8 +203,10 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
           );
         })}
       </div>
-      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动继续")} />
-      <div ref={actionsRef} role="group" aria-label={t("回答操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
+      <div className="shrink-0">
+        <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动继续")} />
+      </div>
+      <div ref={actionsRef} role="group" aria-label={t("回答操作")} className="flex shrink-0 flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         <Button
           variant="primary"
           size="sm"

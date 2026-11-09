@@ -999,6 +999,18 @@ export class ChatPanel implements vscode.Disposable {
     rows.push(
       vscode.l10n.t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
     );
+    // Fixed prefill: the instructions / memory / tool declarations the model
+    // re-reads on EVERY request. Without this row the occupancy looks like
+    // "the conversation so far" while the model actually carries tens of
+    // thousands of tokens of fixed input.
+    if (u.prefillTokens && u.prefillTokens > 0) {
+      rows.push(
+        vscode.l10n.t(
+          "预填充 {0} tokens（系统提示词 / 记忆 / 工具声明）",
+          u.prefillTokens.toLocaleString(),
+        ),
+      );
+    }
     if (u.cacheReadTokens > 0) {
       rows.push(vscode.l10n.t("缓存读取 {0} tokens", u.cacheReadTokens.toLocaleString()));
     }

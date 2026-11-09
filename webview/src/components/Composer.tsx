@@ -142,6 +142,7 @@ function useUsage() {
   const bdAssistant = useChat((s) => s.state?.usage?.breakdown?.assistant ?? 0);
   const bdTool = useChat((s) => s.state?.usage?.breakdown?.tool ?? 0);
   const bdThought = useChat((s) => s.state?.usage?.breakdown?.thought ?? 0);
+  const bdPrefill = useChat((s) => s.state?.usage?.breakdown?.prefill ?? 0);
   const pct =
     contextWindow && contextWindow > 0
       ? Math.min(100, Math.round((contextUsed / contextWindow) * 100))
@@ -161,6 +162,7 @@ function useUsage() {
     bdAssistant,
     bdTool,
     bdThought,
+    bdPrefill,
   };
 }
 
@@ -170,8 +172,35 @@ function usageBarTone(pct: number): string {
   return pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-primary/70";
 }
 
-/** Full breakdown, shared by the chip's tooltip and the menu summary. */
+/** Full breakdown, shared by the chip's tooltip and the menu summary.
+ * The breakdown carries the PREFILL bucket — the fixed per-request overhead
+ * the model reads on every request (system prompt / memory / tool
+ * declarations). Without it the occupancy looked like "the conversation so
+ * far" while the model actually reads tens of thousands of tokens of
+ * instructions. In the estimate path a caveat line marks the number as a
+ * lower bound: the CLI's built-in tool declarations and its directory
+ * listing never reach the ACP wire, so only the kernel-reported number
+ * covers them. */
 function usageTooltip(u: Usage): string {
+  const breakdownLine =
+    u.bdPrefill > 0
+      ? t(
+          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 预填充 {4}",
+          u.bdUser.toLocaleString(),
+          u.bdAssistant.toLocaleString(),
+          u.bdTool.toLocaleString(),
+          u.bdThought.toLocaleString(),
+          u.bdPrefill.toLocaleString(),
+        )
+      : t(
+          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}",
+          u.bdUser.toLocaleString(),
+          u.bdAssistant.toLocaleString(),
+          u.bdTool.toLocaleString(),
+          u.bdThought.toLocaleString(),
+        );
+  const prefillNote = u.bdPrefill > 0 ? t("预填充 = 系统提示词 / 记忆 / 工具声明，每次请求都携带") : "";
+  const caveatLine = !u.usageAuthoritative && u.bdPrefill > 0 ? t("估算未含内核内置工具声明与目录清单") : "";
   return u.pct === null
     ? [
         t(
@@ -181,7 +210,12 @@ function usageTooltip(u: Usage): string {
           (u.usageAuthoritative ? u.contextUsed : u.inputTokens).toLocaleString(),
         ),
         t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
-      ].join("\n")
+        breakdownLine,
+        prefillNote,
+        caveatLine,
+      ]
+        .filter(Boolean)
+        .join("\n")
     : [
         t(
           "上下文占用 {0} / {1}（{2}%{3}{4}）",
@@ -192,7 +226,9 @@ function usageTooltip(u: Usage): string {
           u.usageAuthoritative ? t("，占用为内核上报值") : "",
         ),
         t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
-        t("用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}", u.bdUser.toLocaleString(), u.bdAssistant.toLocaleString(), u.bdTool.toLocaleString(), u.bdThought.toLocaleString()),
+        breakdownLine,
+        prefillNote,
+        caveatLine,
         u.cacheReadTokens > 0 ? t("缓存读取 {0} tokens", u.cacheReadTokens.toLocaleString()) : "",
         u.estimatedCost !== null ? t("预估成本 {0}（按公开单价估算）", formatCost(u.estimatedCost)) : t("该模型无单价记录，不显示成本"),
       ]

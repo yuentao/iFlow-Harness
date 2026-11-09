@@ -724,15 +724,20 @@ function createMockHost(): HostApi {
     // Demo token usage (mirrors the host-estimated SessionUsageUi shape) so
     // the usage chip next to the model dropdown is visible in mock mode.
     usage: {
-      inputTokens: 18432,
-      outputTokens: 6421,
+      inputTokens: 48732,
+      outputTokens: 7441,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
-      totalTokens: 24853,
+      totalTokens: 56173,
       contextWindow: 200_000,
-      contextUsed: 24853,
+      contextUsed: 56173,
       estimated: false,
-      breakdown: { user: 3211, assistant: 5120, tool: 14201, thought: 2321 },
+      // The fixed prefill the model carries on every request (system prompt /
+      // memory / tool declarations) is part of the occupancy, not of the
+      // conversation — it mirrors the injected card's own token total below
+      // (the host measures both from the same context report).
+      prefillTokens: 31320,
+      breakdown: { user: 3211, assistant: 5120, tool: 14201, thought: 2321, prefill: 31320 },
       estimatedCost: 0.0271,
     },
     // M4 demo: two persisted sessions; switching restores a short transcript.
