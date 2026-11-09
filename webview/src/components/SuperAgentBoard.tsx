@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -6,7 +6,6 @@ import {
   CircleHelp,
   GitBranch,
   GitMerge,
-  Info,
   Loader2,
   RotateCcw,
   Square,
@@ -16,7 +15,6 @@ import {
 import type { Block } from "../../../shared/messages";
 import type {
   SuperIntegrationState,
-  SuperReportState,
   SuperSessionUi,
 } from "../../../shared/super-agent";
 import {
@@ -24,7 +22,6 @@ import {
   sumSuperUsage,
   summarizeSuperSessions,
   superIntegrationLabel,
-  superReportLabel,
 } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
@@ -35,7 +32,6 @@ import {
   ConfirmDialog,
   ICON_INLINE,
   IconButton,
-  ModalShell,
 } from "./ui";
 
 /** One child session's status → chip tone + label. */
@@ -72,22 +68,6 @@ const INTEGRATION_TONE: Record<
   failed: "danger",
   skipped: "muted",
 };
-
-/** Report state → timeline chip tone. */
-function reportTone(state: SuperReportState): "muted" | "success" | "warning" | "danger" | "info" {
-  switch (state) {
-    case "progress":
-      return "info";
-    case "ready":
-      return "success";
-    case "blocked":
-      return "warning";
-    case "failed":
-      return "danger";
-    case "dropped":
-      return "muted";
-  }
-}
 
 function isActive(session: SuperSessionUi): boolean {
   return session.status === "preparing" || session.status === "running" || session.status === "awaiting_input";
@@ -322,7 +302,6 @@ function SuperSessionRow({
   onCleanup: () => void;
 }) {
   const send = useChat((s) => s.send);
-  const [showDetail, setShowDetail] = useState(false);
   const [showLive, setShowLive] = useState(false);
   const transcript = useChat((s) => s.superTranscripts[session.id]) ?? EMPTY_TRANSCRIPT;
   const liveRef = useRef<HTMLDivElement>(null);
@@ -363,12 +342,6 @@ function SuperSessionRow({
         {(session.attempts ?? 1) > 1 && (
           <Chip tone="muted">{t("第 {0} 次尝试", session.attempts ?? 1)}</Chip>
         )}
-        <IconButton
-          icon={<Info className={ICON_INLINE} />}
-          label={t("查看进度详情")}
-          size="sm"
-          onClick={() => setShowDetail(true)}
-        />
         {isActive(session) && (
           <IconButton
             icon={<Square className={ICON_INLINE} />}
@@ -404,17 +377,16 @@ function SuperSessionRow({
           summary. */}
       {session.pending && <SuperPendingArea session={session} />}
 
-      {/* Live tail while running / final summary afterwards — clicking opens
-          the detail modal instead of expanding a separate inline panel. */}
+      {/* One-line tail while running / final summary afterwards. The full
+          text stays in the tooltip; the live-activity pane below is the only
+          interactive view. */}
       {preview && (
-        <button
-          type="button"
-          className="press mt-1 block w-full truncate px-2 text-left text-ui-caption text-muted-foreground hover:text-foreground"
+        <div
+          className="mt-1 truncate px-2 text-ui-caption text-muted-foreground"
           title={preview}
-          onClick={() => setShowDetail(true)}
         >
           {lastLine(preview)}
-        </button>
+        </div>
       )}
 
       {session.error && (
@@ -562,172 +534,7 @@ function SuperSessionRow({
           </div>
         </div>
       </div>
-
-      {showDetail && (
-        <SuperSessionDetail session={session} onClose={() => setShowDetail(false)} />
-      )}
     </div>
-  );
-}
-
-/** One labelled block inside the detail modal. */
-function DetailSection({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="flex flex-col gap-1">
-      <div className="text-ui-caption font-medium text-muted-foreground">{title}</div>
-      <div className="rounded-sm border border-border bg-canvas/60 px-2 py-1.5 text-ui-caption text-foreground">
-        {children}
-      </div>
-    </section>
-  );
-}
-
-/**
- * Full progress detail for one child session.
- *
- * The child's transcript lives in its own CLI process and is deliberately
- * never copied into the main store (it would pollute `blocks` and break the
- * blockPatch anchor). This modal therefore shows everything the host actually
- * observed: the task it was given, the live assistant tail, the report
- * timeline, the isolation boundary, the settled token usage and the
- * integration outcome.
- */
-function SuperSessionDetail({
-  session,
-  onClose,
-}: {
-  session: SuperSessionUi;
-  onClose: () => void;
-}) {
-  const chip = statusChip(session);
-  const started = session.startedAt ?? session.createdAt;
-  const ended = session.endedAt ?? Date.now();
-  const usage = session.tokens;
-
-  return (
-    <ModalShell
-      title={session.title}
-      icon={<GitBranch className={ICON_INLINE} />}
-      ariaLabel={t("子会话进度详情")}
-      onClose={onClose}
-      initialFocus="first"
-      wide
-    >
-      <div className="flex max-h-[70vh] flex-col gap-3 overflow-y-auto pr-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Chip tone={chip.tone}>{chip.label}</Chip>
-          <span className="text-ui-caption tabular-nums text-muted-foreground">
-            {t("已运行 {0}", formatElapsed(ended - started))}
-          </span>
-          {session.model && <Chip tone="muted">{session.model}</Chip>}
-        </div>
-
-        <DetailSection title={t("任务")}>
-          <p className="whitespace-pre-wrap break-words">{session.task}</p>
-        </DetailSection>
-
-        {session.progress && (
-          <DetailSection title={t("实时进度")}>
-            <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words font-mono text-ui-micro">
-              {session.progress}
-            </pre>
-          </DetailSection>
-        )}
-
-        {session.summary && (
-          <DetailSection title={t("结果摘要")}>
-            <p className="whitespace-pre-wrap break-words">{session.summary}</p>
-          </DetailSection>
-        )}
-
-        <DetailSection title={t("进度记录")}>
-          {session.reports.length === 0 ? (
-            <p className="text-muted-foreground">{t("暂无进度记录")}</p>
-          ) : (
-            <div className="flex flex-col gap-1">
-              {session.reports.map((report, index) => (
-                <div key={`${report.at}-${index}`} className="flex min-w-0 items-start gap-2">
-                  <span className="shrink-0 font-mono text-ui-micro text-muted-foreground">
-                    {new Date(report.at).toLocaleTimeString()}
-                  </span>
-                  <Chip tone={reportTone(report.state)}>{t(superReportLabel(report.state))}</Chip>
-                  <span className="min-w-0 flex-1 break-words">{report.summary}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </DetailSection>
-
-        <DetailSection title={t("隔离")}>
-          <div className="flex flex-col gap-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <GitBranch className="size-3 shrink-0" />
-              <span className="min-w-0 flex-1 break-all font-mono">
-                {session.isolation.branch ?? session.isolation.path}
-              </span>
-              {session.isolation.kind === "directory" && (
-                <Chip tone="warning">{t("仅目录隔离")}</Chip>
-              )}
-            </div>
-            {session.isolation.branch && (
-              <div className="break-all font-mono text-ui-micro text-muted-foreground">
-                {session.isolation.path}
-              </div>
-            )}
-            {session.isolation.note && (
-              <div className="text-ui-micro text-muted-foreground">{session.isolation.note}</div>
-            )}
-          </div>
-        </DetailSection>
-
-        <DetailSection title={t("Token 开销")}>
-          {usage ? (
-            <div className="flex flex-col gap-1">
-              <div className="flex flex-wrap items-center gap-2 tabular-nums">
-                <span>{t("输入 {0} tokens", usage.input.toLocaleString())}</span>
-                <span>{t("输出 {0} tokens", usage.output.toLocaleString())}</span>
-                {usage.cachedRead !== undefined && usage.cachedRead > 0 && (
-                  <span>{t("缓存读取 {0} tokens", usage.cachedRead.toLocaleString())}</span>
-                )}
-              </div>
-              <div>
-                {typeof usage.estimatedCost === "number"
-                  ? t("预估成本 {0}（按公开单价估算）", formatCostPrecise(usage.estimatedCost))
-                  : t("该模型无单价记录，不显示成本")}
-              </div>
-              <div className="text-ui-micro text-muted-foreground">
-                {usage.authoritative
-                  ? t("输入为内核上报的末次请求上下文；输出按子会话文本估算")
-                  : t("输入按任务提示估算（内核未上报用量）；输出按子会话文本估算")}
-              </div>
-            </div>
-          ) : (
-            <p className="text-muted-foreground">{t("子会话结束后统计 Token 开销")}</p>
-          )}
-        </DetailSection>
-
-        {session.integration && (
-          <DetailSection title={t("改动去向")}>
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <Chip tone={INTEGRATION_TONE[session.integration.state]}>
-                {t(superIntegrationLabel(session.integration))}
-              </Chip>
-              {session.integration.url ? (
-                <span className="break-all font-mono">{session.integration.url}</span>
-              ) : session.integration.detail ? (
-                <span className="break-words">{session.integration.detail}</span>
-              ) : null}
-            </div>
-          </DetailSection>
-        )}
-
-        {session.error && (
-          <DetailSection title={t("错误")}>
-            <p className="break-words text-destructive">{session.error}</p>
-          </DetailSection>
-        )}
-      </div>
-    </ModalShell>
   );
 }
 
