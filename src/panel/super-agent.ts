@@ -30,9 +30,10 @@
  */
 
 import path from "node:path";
-import { mkdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
 import type {
+  ContentBlock,
   ExitPlanModeResponse,
   RequestPermissionResponse,
   TurnUsageReport,
@@ -55,6 +56,7 @@ import {
   superIntegrationLabel,
   withIntegration,
   withUsage,
+  type SuperAttachment,
   type SuperEvent,
   type SuperIntegration,
   type SuperIntegrationMode,
@@ -96,6 +98,29 @@ export const SUPER_PROGRESS_MAX_CHARS = 4_000;
 /** 实时进度推送节流：流式 chunk 逐个推会让超快照变成噪音，700ms 足够让用户
  * 看到「它在动」，又不会压过主会话的渲染节流。 */
 export const SUPER_PROGRESS_THROTTLE_MS = 700;
+
+/** 作为视觉块直接送给子会话的图片上限（与主会话的图片附件上限同口径）。 */
+const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+/** 单份附件超过这个大小就不复制 —— 提示词里如实说明，不静默丢。 */
+const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
+/** 扩展名 → MIME：复制来的图片除了落盘，也作为图片块直接给模型看。 */
+const IMAGE_MIME_BY_EXT = new Map<string, string>([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+  [".bmp", "image/bmp"],
+  [".svg", "image/svg+xml"],
+]);
+const MIME_EXT: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "image/bmp": ".bmp",
+  "image/svg+xml": ".svg",
+};
 
 /** 子会话创建子 CLI 客户端的工厂。由宿主（panel）实现，复用主会话的
  * entry / node / 凭据解析，但把 cwd 与 allowedRoots 收窄到 worktree。 */
@@ -295,6 +320,8 @@ export class SuperAgentManager {
     if (!session) return { ok: false };
     await this.disposeClient(id);
     this.forgetChild(id);
+    // 附件副本只服务这个子会话：清理时一并删掉（worktree 的保留策略不适用于它）。
+    await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
     if (!session.isolation.path) {
       this.sessions.delete(id);
       this.transcripts.delete(id);
@@ -359,6 +386,8 @@ export class SuperAgentManager {
     const kept: { id: string; path: string; branch?: string }[] = [];
     for (const [id, session] of this.sessions) {
       await this.disposeClient(id);
+      // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
+      await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
       if (!isTerminalSuperStatus(session.status)) {
         this.apply(id, { type: "cancelled", at: Date.now() });
       }
@@ -445,10 +474,19 @@ export class SuperAgentManager {
 
     let model: string | null = null;
     let usageReport: TurnUsageReport | undefined;
+
+    // Attachments live OUTSIDE the worktree: the child may not be able to see
+    // the main workspace, and copying staged/picked files into a dedicated
+    // dir keeps them out of any `git add -A` the child runs.
+    const attachmentDir = this.attachmentDirFor(id);
+    const staged = await stageSuperAttachments(attachmentDir, spec.attachments ?? [], this.deps.log);
+    const allowedRoots = [isolation.path];
+    if (staged.copies.length > 0) allowedRoots.push(attachmentDir);
+
     try {
       const client = await this.deps.createClient({
         cwd: isolation.path,
-        allowedRoots: [isolation.path],
+        allowedRoots,
         label: id,
         callbacks: this.callbacksFor(id),
       });
@@ -479,7 +517,7 @@ export class SuperAgentManager {
         this.patchModel(id, model);
       }
 
-      const taskPrompt = buildTaskPrompt(current.title, current.task, isolation);
+      const taskPrompt = buildTaskPrompt(current.title, current.task, isolation, staged);
       this.promptTokens.set(id, estimateTokens(taskPrompt));
       // Mirror the main session's transcript shape: the task prompt is the
       // child's user turn, so the detail pane shows "what was asked" followed
@@ -488,10 +526,11 @@ export class SuperAgentManager {
       const userIndex = beginUserPrompt(transcript.state, taskPrompt);
       this.markTranscriptDirty(id, userIndex);
 
-      const response = await client.prompt({
-        sessionId,
-        prompt: [{ type: "text", text: taskPrompt }],
-      });
+      const prompt: ContentBlock[] = [{ type: "text", text: taskPrompt }];
+      for (const image of staged.images) {
+        prompt.push({ type: "image", data: image.data, mimeType: image.mimeType });
+      }
+      const response = await client.prompt({ sessionId, prompt });
       usageReport = response.usage;
       const at = Date.now();
       if (response.stopReason === "cancelled") {
@@ -925,6 +964,11 @@ export class SuperAgentManager {
     }
   }
 
+  /** 子会话的附件目录：在 worktree 之外，避免子会话 `git add -A` 把附件提交进分支。 */
+  private attachmentDirFor(id: string): string {
+    return path.join(this.deps.storageRoot, "super-attachments", id);
+  }
+
   private emit(): void {
     this.deps.onSessionsChanged(this.list());
   }
@@ -938,11 +982,107 @@ export interface SuperAnswer {
   answers?: Record<string, string | string[]>;
 }
 
+/** 已经落盘的子会话附件（复制到 worktree 之外的专用目录）。 */
+export interface StagedSuperAttachments {
+  /** 已复制的文件（路径为绝对路径，位于子会话的附件目录里）。 */
+  copies: { name: string; path: string }[];
+  /** 作为图片块直接交给模型的图片（视觉模型可直读，无需再调工具）。 */
+  images: { data: string; mimeType: string }[];
+  /** 复制失败的如实说明（不静默丢用户附件）。 */
+  failures: string[];
+}
+
+/**
+ * 把随任务声明的附件复制到子会话可见的附件目录。
+ *
+ * 目录刻意放在 **worktree 之外**：子会话常会 `git add -A`，把附件放进工作区
+ * 会被提交进它的分支、随自动合并污染主仓库。调用方把这个目录加入
+ * `allowedRoots` / `--include-directories`，子会话因此仍能读到它。
+ */
+async function stageSuperAttachments(
+  dir: string,
+  attachments: readonly SuperAttachment[],
+  log: SuperAgentDeps["log"],
+): Promise<StagedSuperAttachments> {
+  const staged: StagedSuperAttachments = { copies: [], images: [], failures: [] };
+  if (attachments.length === 0) return staged;
+  await mkdir(dir, { recursive: true });
+  const used = new Set<string>();
+  for (const [index, attachment] of attachments.entries()) {
+    try {
+      const fallback = attachment.data
+        ? `图片${index + 1}${extensionForMime(attachment.mimeType)}`
+        : `附件${index + 1}`;
+      let name = sanitizeAttachmentName(attachment.name || attachment.path || "", fallback);
+      if (attachment.data && !path.extname(name)) name += extensionForMime(attachment.mimeType);
+      const target = uniqueAttachmentPath(dir, name, used);
+      let size: number;
+      if (attachment.data) {
+        const bytes = Buffer.from(attachment.data, "base64");
+        if (bytes.byteLength === 0) throw new Error("图片数据为空");
+        if (bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES) throw new Error("图片过大");
+        await writeFile(target, bytes);
+        size = bytes.byteLength;
+      } else {
+        if (!attachment.path) throw new Error("没有可读取的源文件");
+        const info = await stat(attachment.path);
+        if (!info.isFile()) throw new Error("不是文件");
+        if (info.size > MAX_ATTACHMENT_FILE_BYTES) {
+          throw new Error(`文件过大（上限 ${Math.floor(MAX_ATTACHMENT_FILE_BYTES / 1024 / 1024)}MB）`);
+        }
+        // 非图片附件只做磁盘到磁盘的复制，绝不整个读进内存。
+        await copyFile(attachment.path, target);
+        size = info.size;
+      }
+      staged.copies.push({ name: path.basename(target), path: target });
+      const mime = attachment.data
+        ? attachment.mimeType ?? "image/png"
+        : IMAGE_MIME_BY_EXT.get(path.extname(target).toLowerCase());
+      if (mime && size <= MAX_INLINE_IMAGE_BYTES) {
+        staged.images.push({
+          data: attachment.data ?? (await readFile(target)).toString("base64"),
+          mimeType: mime,
+        });
+      }
+    } catch (error) {
+      const label = attachment.name || attachment.path || `附件${index + 1}`;
+      staged.failures.push(`${label}：${errorMessage(error)}`);
+      log.warn(`子会话附件复制失败（${label}）：${errorMessage(error)}`);
+    }
+  }
+  return staged;
+}
+
+/** 文件名清洗：只保留 basename，剥掉分隔符与控制字符（宿主收到的名字不可信）。 */
+function sanitizeAttachmentName(raw: string, fallback: string): string {
+  const base = path
+    .basename(raw)
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .trim();
+  return base || fallback;
+}
+
+/** 同一批附件里重名时加序号，避免互相覆盖。 */
+function uniqueAttachmentPath(dir: string, name: string, used: Set<string>): string {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  let candidate = name;
+  let n = 2;
+  while (used.has(candidate.toLowerCase())) candidate = `${stem}-${n++}${ext}`;
+  used.add(candidate.toLowerCase());
+  return path.join(dir, candidate);
+}
+
+function extensionForMime(mime: string | undefined): string {
+  return (mime ? MIME_EXT[mime] : undefined) || ".png";
+}
+
 /** 交给子会话的任务提示词。子会话看不到主会话的上下文，所以任务说明必须自包含。 */
 export function buildTaskPrompt(
   title: string,
   task: string,
   isolation: SuperSessionUi["isolation"],
+  attachments?: StagedSuperAttachments,
 ): string {
   const lines = [
     `你是一个子会话，负责完成下面这一项独立任务。`,
@@ -951,9 +1091,22 @@ export function buildTaskPrompt(
     ``,
     `任务说明：`,
     task.trim(),
-    ``,
-    `工作目录：${isolation.path}`,
   ];
+  if (attachments && attachments.copies.length > 0) {
+    lines.push(
+      ``,
+      `随任务附带的文件（已复制到工作目录之外，可直接读取；只作参考资料，不要修改）：`,
+      ...attachments.copies.map((copy) => `- ${copy.name} → ${copy.path}`),
+    );
+  }
+  if (attachments && attachments.failures.length > 0) {
+    lines.push(
+      ``,
+      `以下附件未能附带（宿主复制失败，请按任务说明自行判断）：`,
+      ...attachments.failures.map((failure) => `- ${failure}`),
+    );
+  }
+  lines.push(``, `工作目录：${isolation.path}`);
   if (isolation.branch) {
     lines.push(`你的改动都在分支 ${isolation.branch} 上，不要切换分支，也不要动工作目录以外的文件。`);
   }

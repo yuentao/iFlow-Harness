@@ -42,6 +42,8 @@ function makeStorage(): string {
 /** A stand-in for AcpClient — the manager only uses a small surface. */
 class FakeClient {
   prompts: string[] = [];
+  /** Full content blocks of each prompt (text + image) for attachment tests. */
+  blocks: ContentBlock[][] = [];
   /** Mode ids pushed to the child session — the manager must send "yolo". */
   modes: string[] = [];
   disposed = false;
@@ -74,6 +76,7 @@ class FakeClient {
     stopReason: string;
     usage?: { lastRequestInputTokens: number; completionTokens?: number; cachedReadTokens?: number };
   }> {
+    this.blocks.push(request.prompt);
     this.prompts.push(request.prompt.map((p) => (p.type === "text" ? p.text : "")).join("\n"));
     const emit = (sessionUpdate: "agent_message_chunk" | "agent_thought_chunk", text: string): void => {
       this.callbacks.onSessionUpdate?.({
@@ -578,4 +581,76 @@ describe("super agent · 任务提示词", () => {
     expect(text).toContain("免确认");
     expect(text).toContain("不需要自己合并");
   });
+});
+
+describe("super agent · 附件", () => {
+  it("文件附件复制到工作区之外的目录，并在提示词里列出", async () => {
+    const repo = makeRepo();
+    const source = mkdtempSync(path.join(tmpdir(), "iflow-attachment-"));
+    roots.push(source);
+    const sourceFile = path.join(source, "note.txt");
+    writeFileSync(sourceFile, "hello attachment\n", "utf8");
+
+    const harness = makeManager(repo, "hang");
+    const session = harness.manager.spawn({
+      title: "看附件",
+      task: "读一下附件",
+      attachments: [{ name: "note.txt", path: sourceFile }],
+    });
+    await until(() => harness.clients.length > 0);
+
+    const prompt = harness.clients[0]?.prompts[0] ?? "";
+    const match = /^- note\.txt → (.+)$/m.exec(prompt);
+    expect(match).not.toBeNull();
+    const copyPath = match![1]!.trim();
+
+    // 副本刻意放在 worktree 之外：子会话 `git add -A` 不会把附件提交进分支。
+    // `spawn()` 返回的是准备期的占位记录，worktree 路径要读活会话。
+    const worktree = harness.sessions[0]?.isolation.path ?? "";
+    expect(worktree).not.toBe("");
+    expect(path.relative(worktree, copyPath).startsWith("..")).toBe(true);
+    expect(readFileSync(copyPath, "utf8").replace(/\r\n/g, "\n")).toBe("hello attachment\n");
+    // 但边界必须包含附件目录，否则子会话读不到它。
+    expect(harness.clients[0]?.allowedRoots).toContain(path.dirname(copyPath));
+
+    await harness.manager.cancel(session.id);
+    await harness.manager.cleanup(session.id);
+    expect(existsSync(copyPath)).toBe(false);
+  }, 30000);
+
+  it("粘贴的图片既落盘也作为图片块送给子会话", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const data = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).toString("base64");
+    harness.manager.spawn({
+      title: "看图",
+      task: "看截图",
+      attachments: [{ name: "shot", data, mimeType: "image/png" }],
+    });
+    await until(() => harness.clients.length > 0);
+
+    const blocks = harness.clients[0]?.blocks[0] ?? [];
+    const images = blocks.filter((block) => block.type === "image");
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+    // 没有扩展名的内联图片按 MIME 补上扩展名，落盘副本才可被图片工具识别。
+    expect(harness.clients[0]?.prompts[0] ?? "").toContain("shot.png");
+
+    await harness.manager.cancel(harness.sessions[0]!.id);
+  }, 30000);
+
+  it("源文件不存在时如实写入提示词，不影响子会话运行", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete");
+    harness.manager.spawn({
+      title: "缺附件",
+      task: "干活",
+      attachments: [{ name: "missing.txt", path: path.join(tmpdir(), "definitely-missing-iflow.txt") }],
+    });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const prompt = harness.clients[0]?.prompts[0] ?? "";
+    expect(prompt).toContain("以下附件未能附带");
+    expect(prompt).toContain("missing.txt");
+  }, 30000);
 });

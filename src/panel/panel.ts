@@ -74,9 +74,12 @@ import { SuperAgentManager } from "./super-agent.js";
 import {
   extractSuperDirectives,
   MAX_CONCURRENT_SUPER_SESSIONS,
+  MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
+  type SuperAttachment,
   type SuperReport,
   type SuperSessionUi,
+  type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
   assembleContextSections,
@@ -430,6 +433,12 @@ const IMAGE_MIME_BY_EXT = new Map<string, string>([
   [".svg", "image/svg+xml"],
 ]);
 
+/** 路径比较键（Windows 文件系统大小写不敏感）。 */
+function normalizePathKey(target: string): string {
+  const resolved = path.resolve(target);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 /** Reusable abortable delay: resolves after `ms`, or early once
  * `shouldAbort()` returns true (polled every 100ms — plenty for a 5s wait). */
 function abortableDelay(ms: number, shouldAbort: () => boolean): Promise<void> {
@@ -633,6 +642,15 @@ export class ChatPanel implements vscode.Disposable {
   private superScanText = "";
   /** How much of `superScanText` has already been consumed (no re-dispatch). */
   private superScanOffset = 0;
+  /**
+   * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
+   * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
+   * 期间有效：回合结束即清空，避免下一次派发拿到上一轮的旧附件。
+   */
+  private currentTurnAttachments: {
+    images: { data: string; mimeType: string }[];
+    files: { name: string; path: string }[];
+  } | null = null;
   /**
    * Freshness baseline for the Mod context report BEFORE the next session
    * creation/load. The report is written at startChat (inside session/new /
@@ -5998,6 +6016,95 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Super Agent (child sessions of the main session) ----------------------
 
+  /** 主仓根目录（worktree 的来源，也是委派附件路径的允许边界）。 */
+  private superRepoRoot(): string {
+    return (
+      this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath
+    );
+  }
+
+  /**
+   * 把一个委派说明补全成交给子会话的最终 spec。
+   *
+   * 附件有两个来源：
+   *  - 本轮用户附件（图片 base64 / 文件路径）—— 自动带上，子会话看不到对话，
+   *    不带给它等于静默丢用户上下文；
+   *  - 指令里显式写的 `attachments` 路径 —— 只放行工作区内的路径与暂存目录，
+   *    以及用户本轮亲自附上的文件；模型不能借这条通道把任意磁盘文件复制出去。
+   *
+   * 超过上限的部分丢弃并计数（调用方据此提示，不静默裁掉）。
+   */
+  private prepareSuperSpec(spec: SuperTaskSpec, onDropped: (count: number) => void): SuperTaskSpec {
+    const repoRoot = this.superRepoRoot();
+    const attachments: SuperAttachment[] = [];
+    const seen = new Set<string>();
+    const carried = this.currentTurnAttachments;
+    const userPaths = new Set<string>();
+    if (carried) {
+      let imageIndex = 0;
+      for (const image of carried.images) {
+        attachments.push({
+          name: vscode.l10n.t("图片{0}", ++imageIndex),
+          data: image.data,
+          mimeType: image.mimeType,
+        });
+      }
+      for (const file of carried.files) {
+        attachments.push({ name: file.name, path: file.path });
+        userPaths.add(normalizePathKey(file.path));
+        seen.add(normalizePathKey(file.path));
+      }
+    }
+    let dropped = 0;
+    for (const candidate of spec.attachments ?? []) {
+      if (candidate.data) {
+        attachments.push(candidate);
+        continue;
+      }
+      if (!candidate.path) continue;
+      const resolved = this.resolveSuperAttachmentPath(candidate.path, repoRoot, userPaths);
+      if (!resolved) {
+        dropped++;
+        continue;
+      }
+      const key = normalizePathKey(resolved);
+      if (seen.has(key)) continue; // 用户附件已在列表里，模型重复引用不再加一份
+      seen.add(key);
+      attachments.push({ name: candidate.name, path: resolved });
+    }
+    if (dropped > 0) onDropped(dropped);
+    if (attachments.length > MAX_SUPER_ATTACHMENTS) {
+      onDropped(attachments.length - MAX_SUPER_ATTACHMENTS);
+      attachments.length = MAX_SUPER_ATTACHMENTS;
+    }
+    const next: SuperTaskSpec = { title: spec.title, task: spec.task };
+    if (attachments.length > 0) next.attachments = attachments;
+    return next;
+  }
+
+  /**
+   * 解析指令里的附件路径：相对路径按主仓根解析；只有工作区内、暂存目录内、
+   * 或用户本轮亲自附上的文件才放行（其余一律拒绝，不把任意磁盘文件复制给子会话）。
+   */
+  private resolveSuperAttachmentPath(
+    raw: string,
+    repoRoot: string,
+    userPaths: ReadonlySet<string>,
+  ): string | null {
+    // 模型常把提示词里的 `@path` 原样抄回来 —— 去掉标记再解析。
+    const value = raw.trim().replace(/^@/, "");
+    if (!value) return null;
+    const absolute = path.isAbsolute(value) ? path.resolve(value) : path.resolve(repoRoot, value);
+    if (userPaths.has(normalizePathKey(absolute))) return absolute;
+    if (isWithin(repoRoot, absolute)) return absolute;
+    // 只有**本会话**的暂存目录（用户拖入/粘贴的文件落在这里）。
+    const stageRoot = attachmentSessionDir(this.store.getState().sessionId ?? "adhoc");
+    if (isWithin(stageRoot, absolute)) return absolute;
+    return null;
+  }
+
   /**
    * The Super Agent orchestrator, created on first delegation.
    *
@@ -6009,10 +6116,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private getSuperAgent(): SuperAgentManager {
     if (this.superAgent) return this.superAgent;
-    const repoRoot =
-      this.services.workspaceRoot ??
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-      this.context.extensionUri.fsPath;
+    const repoRoot = this.superRepoRoot();
     this.superAgent = new SuperAgentManager({
       repoRoot,
       storageRoot: this.context.globalStorageUri.fsPath,
@@ -6055,11 +6159,14 @@ export class ChatPanel implements vscode.Disposable {
     const locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
     const node = nodePathConfigured || locatedNode || process.execPath;
     const runtime = await concealNodeExecutable(node, this.context.globalStorageUri.fsPath);
-    // --include-directories stays EMPTY on purpose: the worktree root is the
-    // child's cwd, and the main working copy must NOT be reachable from a
-    // child session (the CLI validates its file tools against
-    // cwd + include-directories).
-    const { args } = buildAcpCommand(entry, []);
+    // The child's cwd is its worktree. The ONLY extra root is its dedicated
+    // attachment dir (staged files/images) — the main working copy must stay
+    // unreachable, and the CLI's workspace check must agree with our fs
+    // boundary, so both get the same root set.
+    const includeDirectories = params.allowedRoots.filter(
+      (root) => path.resolve(root) !== path.resolve(params.cwd),
+    );
+    const { args } = buildAcpCommand(entry, includeDirectories);
     const systemPromptFile = await this.materializeSystemPrompt();
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
@@ -6114,12 +6221,22 @@ export class ChatPanel implements vscode.Disposable {
     if (scan.blocks.length === 0) return;
     const manager = this.getSuperAgent();
     let dispatched = 0;
+    let droppedAttachments = 0;
     for (const tasks of scan.blocks) {
-      for (const spec of tasks) {
+      for (const task of tasks) {
+        const spec = this.prepareSuperSpec(task, (count) => {
+          droppedAttachments += count;
+        });
         const session = manager.spawn(spec);
         dispatched++;
         this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
       }
+    }
+    if (droppedAttachments > 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("子会话委派指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
+      );
     }
     this.store.sendToast(
       "info",
@@ -6167,18 +6284,19 @@ export class ChatPanel implements vscode.Disposable {
   /** Route a Super Agent action from the board. */
   private async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
     const manager = this.getSuperAgent();
-          switch (msg.action) {
-          case "transcript": {
-            if (!msg.sessionId) return;
-            this.postToWebview({
-              type: "superTranscript",
-              sessionId: msg.sessionId,
-              from: 0,
-              blocks: manager.transcriptBlocks(msg.sessionId),
-            });
-            break;
-          }
-          case "cancel": {        if (!msg.sessionId) return;
+    switch (msg.action) {
+      case "transcript": {
+        if (!msg.sessionId) return;
+        this.postToWebview({
+          type: "superTranscript",
+          sessionId: msg.sessionId,
+          from: 0,
+          blocks: manager.transcriptBlocks(msg.sessionId),
+        });
+        break;
+      }
+      case "cancel": {
+        if (!msg.sessionId) return;
         await manager.cancel(msg.sessionId);
         break;
       }
@@ -7782,6 +7900,12 @@ export class ChatPanel implements vscode.Disposable {
       ) {
         void this.insertInjectedContextCard(this.contextReportBaseline);
       }
+      if (!internal) {
+        this.currentTurnAttachments =
+          (images?.length ?? 0) + (files?.length ?? 0) > 0
+            ? { images: images ?? [], files: files ?? [] }
+            : null;
+      }
       this.store.userPrompt(
         fullText,
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
@@ -7819,6 +7943,8 @@ export class ChatPanel implements vscode.Disposable {
         prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
       }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
+      // 本轮已结束：委派指令只在流式期间出现，之后不该再把旧附件带给新子会话。
+      if (!internal) this.currentTurnAttachments = null;
       // Session replaced mid-flight (新会话/profile switch cancelled the
       // in-flight turn): the completion must not settle the NEW session's
       // state (or overwrite its usage estimate) — drop like the catch path.
@@ -7869,6 +7995,7 @@ export class ChatPanel implements vscode.Disposable {
       // keeps steering (roadmap Steer semantics).
       void this.dispatchQueue();
     } catch (error) {
+      if (!internal) this.currentTurnAttachments = null;
       // A3: the panel was disposed mid-flight — the store is gone, so there
       // is nothing to mark and nothing to persist.
       if (this.disposed) {

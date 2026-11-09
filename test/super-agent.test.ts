@@ -4,6 +4,7 @@ import {
   buildSuperReportPrompt,
   extractSuperDirectives,
   isTerminalSuperStatus,
+  MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   reportForSession,
   summarizeSuperSessions,
@@ -81,6 +82,48 @@ describe("super agent · 委派指令解析", () => {
     ].join("\n");
     const scan = extractSuperDirectives(text);
     expect(scan.blocks[0]).toEqual([{ title: "真的", task: "真的任务" }]);
+  });
+
+  it("任务可以携带附件路径（字符串或 {path,name} 对象）", () => {
+    const text = [
+      "```super-agent",
+      '{"tasks":[{"title":"A","task":"任务 A","attachments":["docs/spec.md",{"path":"C:/tmp/shot.png","name":"截图.png"}]}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks[0]?.[0]?.attachments).toEqual([
+      { name: "spec.md", path: "docs/spec.md" },
+      { name: "截图.png", path: "C:/tmp/shot.png" },
+    ]);
+  });
+
+  it("附件列表里的非法项被跳过，且每个任务的附件数有上限", () => {
+    const many = Array.from({ length: 15 }, (_, i) => `f${i}.txt`);
+    const text = [
+      "```super-agent",
+      JSON.stringify({
+        tasks: [
+          {
+            title: "A",
+            task: "任务 A",
+            attachments: ["<工作区相对路径或绝对路径>", ...many, 42, { name: "x" }, ""],
+          },
+        ],
+      }),
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    const attachments = scan.blocks[0]?.[0]?.attachments ?? [];
+    expect(attachments).toHaveLength(MAX_SUPER_ATTACHMENTS);
+    expect(attachments.every((attachment) => typeof attachment.path === "string")).toBe(true);
+    // 模型把协议示例里的占位符原样抄回来时也要丢掉，不能去复制一个字面量。
+    expect(attachments.some((attachment) => attachment.path?.startsWith("<"))).toBe(false);
+  });
+
+  it("没有附件时不产生 attachments 字段", () => {
+    const text = ['```super-agent', '{"tasks":[{"title":"A","task":"任务 A"}]}', "```"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks[0]?.[0]).not.toHaveProperty("attachments");
   });
 
   it("未闭合的代码块不算数（等后续 chunk）", () => {
