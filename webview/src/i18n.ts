@@ -53,6 +53,12 @@ const en: Record<string, string> = {
     "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",
   "清理": "Clean up",
   "中断该子会话": "Interrupt this child session",
+  "中断子会话": "Interrupt the child session",
+  "中断": "Interrupt",
+  "中断子会话「{0}」？子会话进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。":
+    "Interrupt child session “{0}”? Its process stops immediately and this task is neither committed nor merged automatically; changes already written to its working directory are kept, and you can retry later.",
+  "中断全部 {0} 个进行中的子会话？它们各自的进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。":
+    "Interrupt all {0} running child sessions? Each process stops immediately and their tasks are neither committed nor merged automatically; changes already written to their working directories are kept, and you can retry later.",
   "重试该子会话（沿用原工作目录，保留已有改动）":
     "Retry this child session (reuses its working directory and keeps existing changes)",
   "第 {0} 次尝试": "Attempt {0}",

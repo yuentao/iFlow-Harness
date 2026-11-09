@@ -151,6 +151,12 @@ export function SuperAgentBoard() {
   const [expanded, setExpanded] = useState(false);
   const [confirmMerge, setConfirmMerge] = useState<SuperSessionUi | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState<SuperSessionUi | null>(null);
+  // Interrupts kill a live process, so both the per-row and the board-wide
+  // action go through a confirm dialog like merge / cleanup do. The board-wide
+  // variant snapshots the active count at open time — recomputing it while the
+  // dialog is open could show “0 个” if the children finish on their own.
+  const [confirmCancel, setConfirmCancel] = useState<SuperSessionUi | null>(null);
+  const [confirmCancelAll, setConfirmCancelAll] = useState<number | null>(null);
   // Ticking clock for the elapsed labels of live children.
   const [, setTick] = useState(0);
 
@@ -242,7 +248,7 @@ export function SuperAgentBoard() {
               icon={<Square className={ICON_INLINE} />}
               aria-label={t("全部中断")}
               title={t("全部中断")}
-              onClick={() => send({ type: "superAgent", action: "cancelAll" })}
+              onClick={() => setConfirmCancelAll(active.length)}
             >
               <span className="@max-[380px]:hidden">{t("全部中断")}</span>
             </Button>
@@ -258,6 +264,7 @@ export function SuperAgentBoard() {
               session={session}
               onMerge={() => setConfirmMerge(session)}
               onCleanup={() => setConfirmCleanup(session)}
+              onCancel={() => setConfirmCancel(session)}
             />
           ))}
           {(totals.input > 0 || totals.output > 0) && (
@@ -290,6 +297,36 @@ export function SuperAgentBoard() {
           onCancel={() => setConfirmMerge(null)}
         />
       )}
+      {confirmCancel && (
+        <ConfirmDialog
+          title={t("中断子会话")}
+          message={t(
+            "中断子会话「{0}」？子会话进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。",
+            confirmCancel.title,
+          )}
+          confirmLabel={t("中断")}
+          onConfirm={() => {
+            send({ type: "superAgent", action: "cancel", sessionId: confirmCancel.id });
+            setConfirmCancel(null);
+          }}
+          onCancel={() => setConfirmCancel(null)}
+        />
+      )}
+      {confirmCancelAll !== null && (
+        <ConfirmDialog
+          title={t("全部中断")}
+          message={t(
+            "中断全部 {0} 个进行中的子会话？它们各自的进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。",
+            confirmCancelAll,
+          )}
+          confirmLabel={t("全部中断")}
+          onConfirm={() => {
+            send({ type: "superAgent", action: "cancelAll" });
+            setConfirmCancelAll(null);
+          }}
+          onCancel={() => setConfirmCancelAll(null)}
+        />
+      )}
       {confirmCleanup && (
         <ConfirmDialog
           title={t("清理子会话")}
@@ -314,10 +351,12 @@ function SuperSessionRow({
   session,
   onMerge,
   onCleanup,
+  onCancel,
 }: {
   session: SuperSessionUi;
   onMerge: () => void;
   onCleanup: () => void;
+  onCancel: () => void;
 }) {
   const send = useChat((s) => s.send);
   const [showLive, setShowLive] = useState(false);
@@ -347,7 +386,7 @@ function SuperSessionRow({
             label={t("中断该子会话")}
             size="sm"
             tone="danger"
-            onClick={() => send({ type: "superAgent", action: "cancel", sessionId: session.id })}
+            onClick={onCancel}
           />
         )}
       </div>
