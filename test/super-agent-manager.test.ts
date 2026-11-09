@@ -42,6 +42,7 @@ type Plan =
   | "hang"
   | "hang-text"
   | "throw"
+  | "throw-object"
   | "usage";
 
 /** A stand-in for AcpClient — the manager only uses a small surface. */
@@ -133,6 +134,11 @@ class FakeClient {
     }
     if (this.plan === "complete") return { stopReason: "end_turn" };
     if (this.plan === "throw") throw new Error("child exploded");
+    if (this.plan === "throw-object") {
+      // JSON-RPC rejections are plain objects (`{code, message, data}`), not
+      // Errors — naively stringifying them renders "[object Object]".
+      throw { code: -32603, message: "内核拒绝了这次请求", data: { detail: "boom" } };
+    }
     return new Promise((resolve) => {
       this.settle = resolve;
     });
@@ -413,6 +419,17 @@ describe("super agent · 编排", () => {
     await until(() => harness.sessions[0]?.status === "failed");
     expect(harness.sessions[0]?.status).toBe("failed");
     expect(harness.reports.at(-1)?.report.state).toBe("failed");
+  }, 30000);
+
+  it("JSON-RPC 普通对象失败时给出可读原因，而不是 [object Object]", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "throw-object");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "failed");
+    const error = harness.sessions[0]?.error ?? "";
+    expect(error).toContain("内核拒绝了这次请求");
+    expect(error).not.toContain("[object Object]");
+    expect(harness.reports.at(-1)?.report.summary).toContain("内核拒绝了这次请求");
   }, 30000);
 
   it("中断子会话 → cancelled 并终止进程", async () => {
