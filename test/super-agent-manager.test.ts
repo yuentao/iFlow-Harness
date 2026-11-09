@@ -50,7 +50,7 @@ class FakeClient {
 
   constructor(
     readonly callbacks: AcpClientCallbacks,
-    private readonly plan: "complete" | "commit" | "hang" | "throw",
+    private readonly plan: "complete" | "commit" | "hang" | "hang-text" | "throw" | "usage",
   ) {}
 
   async newSession(): Promise<{ sessionId: string }> {
@@ -66,8 +66,34 @@ class FakeClient {
     return {};
   }
 
-  async prompt(request: { sessionId: string; prompt: ContentBlock[] }): Promise<{ stopReason: string }> {
+  async prompt(request: {
+    sessionId: string;
+    prompt: ContentBlock[];
+  }): Promise<{
+    stopReason: string;
+    usage?: { lastRequestInputTokens: number; completionTokens?: number; cachedReadTokens?: number };
+  }> {
     this.prompts.push(request.prompt.map((p) => (p.type === "text" ? p.text : "")).join("\n"));
+    const emit = (sessionUpdate: "agent_message_chunk" | "agent_thought_chunk", text: string): void => {
+      this.callbacks.onSessionUpdate?.({
+        sessionId: "sub",
+        update: { sessionUpdate, content: { type: "text", text } },
+      } as never);
+    };
+    if (this.plan === "usage") {
+      emit("agent_message_chunk", "正在检查配置文件");
+      emit("agent_thought_chunk", "先读 settings");
+      return {
+        stopReason: "end_turn",
+        usage: { lastRequestInputTokens: 1_234, completionTokens: 56, cachedReadTokens: 12 },
+      };
+    }
+    if (this.plan === "hang-text") {
+      emit("agent_message_chunk", "已经写了一部分");
+      return new Promise((resolve) => {
+        this.settle = resolve;
+      });
+    }
     if (this.plan === "commit") {
       // A real child edits files INSIDE its worktree and commits them.
       writeFileSync(path.join(this.cwd, "child.txt"), "from child\n", "utf8");
@@ -100,7 +126,7 @@ interface Harness {
 
 function makeManager(
   repoRoot: string,
-  plan: "complete" | "commit" | "hang" | "throw" = "complete",
+  plan: "complete" | "commit" | "hang" | "hang-text" | "throw" | "usage" = "complete",
   mode: SuperIntegrationMode = "merge",
 ): Harness {
   const clients: FakeClient[] = [];
@@ -124,6 +150,7 @@ function makeManager(
       reports.push(...entries);
     },
     currentModel: () => "test-model",
+    priceFor: () => ({ input: 1, output: 2 }),
     integrationMode: () => mode,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
@@ -356,6 +383,45 @@ describe("super agent · 编排", () => {
     expect(result.branchKept).toBe(true);
     expect(result.reason).toContain("未合并");
     expect(existsSync(wt)).toBe(false);
+  }, 30000);
+
+  it("结算 token 用量、预估成本与模型，并留下实时进度", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "usage");
+    harness.manager.spawn({ title: "检查配置", task: "看看设置文件" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    await until(() => harness.sessions[0]?.tokens !== undefined);
+
+    const session = harness.sessions[0]!;
+    expect(session.model).toBe("test-model");
+    expect(session.progress).toContain("正在检查配置文件");
+
+    const usage = session.tokens!;
+    expect(usage.input).toBe(1_234);
+    expect(usage.authoritative).toBe(true);
+    expect(usage.cachedRead).toBe(12);
+    // The reported completion (56) is larger than the tiny text estimate.
+    expect(usage.output).toBeGreaterThanOrEqual(56);
+    expect(usage.estimatedCost).toBeCloseTo(
+      (usage.input / 1_000_000) * 1 + (usage.output / 1_000_000) * 2,
+      10,
+    );
+  }, 30000);
+
+  it("中断也保留已产生的用量（输入标记为非权威）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang-text");
+    const session = harness.manager.spawn({ title: "检查配置", task: "看看设置文件" });
+    await until(() => harness.sessions[0]?.status === "running");
+
+    await harness.manager.cancel(session.id);
+    await until(() => harness.sessions[0]?.tokens !== undefined);
+
+    const usage = harness.sessions[0]?.tokens!;
+    expect(usage.authoritative).toBe(false);
+    expect(usage.input).toBeGreaterThan(0);
+    expect(usage.output).toBeGreaterThan(0);
+    expect(harness.sessions[0]?.progress).toContain("已经写了一部分");
   }, 30000);
 });
 

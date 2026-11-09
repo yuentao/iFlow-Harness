@@ -7,6 +7,8 @@ import {
   normalizeSuperTitle,
   reportForSession,
   summarizeSuperSessions,
+  sumSuperUsage,
+  withUsage,
   type SuperSessionUi,
 } from "../shared/super-agent.js";
 
@@ -226,5 +228,46 @@ describe("super agent · 汇报", () => {
       session({ id: "f", status: "cancelled" }),
     ]);
     expect(summary).toEqual({ total: 6, running: 2, awaiting: 1, done: 1, failed: 2 });
+  });
+});
+
+describe("super agent · token 用量", () => {
+  it("结算用量可以补记在终态会话上（不经过状态机）", () => {
+    const done = applySuperEvent(
+      session(),
+      { type: "report", report: { state: "ready", summary: "改完了", at: 10 }, at: 10 },
+    );
+    expect(isTerminalSuperStatus(done.status)).toBe(true);
+    const withTokens = withUsage(
+      done,
+      { input: 1200, output: 300, cachedRead: 100, estimatedCost: 0.0018, authoritative: true },
+      20,
+    );
+    expect(withTokens.status).toBe("completed");
+    expect(withTokens.tokens?.input).toBe(1200);
+    expect(withTokens.tokens?.output).toBe(300);
+    expect(withTokens.tokens?.cachedRead).toBe(100);
+    expect(withTokens.tokens?.estimatedCost).toBeCloseTo(0.0018);
+    expect(withTokens.updatedAt).toBe(20);
+  });
+
+  it("合计只统计产生了用量的子会话", () => {
+    const totals = sumSuperUsage([
+      session({ id: "a", tokens: { input: 1000, output: 100, estimatedCost: 0.001 } }),
+      session({ id: "b", tokens: { input: 500, output: 50, estimatedCost: 0.0005 } }),
+      session({ id: "c" }),
+    ]);
+    expect(totals.input).toBe(1500);
+    expect(totals.output).toBe(150);
+    expect(totals.estimatedCost).toBeCloseTo(0.0015);
+  });
+
+  it("混入无单价的子会话时合计成本不显示（不给偏小的总数）", () => {
+    const totals = sumSuperUsage([
+      session({ id: "a", tokens: { input: 1000, output: 100, estimatedCost: 0.001 } }),
+      session({ id: "b", tokens: { input: 500, output: 50, estimatedCost: null } }),
+    ]);
+    expect(totals.input).toBe(1500);
+    expect(totals.estimatedCost).toBeNull();
   });
 });

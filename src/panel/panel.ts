@@ -56,11 +56,9 @@ import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
 import {
   clearQueue as clearQueueUi,
-  enqueuePrompt as enqueuePromptUi,
   moveQueued as moveQueuedUi,
   removeQueued as removeQueuedUi,
   shiftQueued as shiftQueuedUi,
-  QUEUE_MAX,
 } from "../../shared/queue.js";
 import {
   checkpointLabelFromText,
@@ -76,6 +74,7 @@ import { SuperAgentManager } from "./super-agent.js";
 import {
   extractSuperDirectives,
   MAX_CONCURRENT_SUPER_SESSIONS,
+  normalizeSuperTitle,
   type SuperReport,
   type SuperSessionUi,
 } from "../../shared/super-agent.js";
@@ -302,6 +301,11 @@ const MODEL_METADATA_SNIPPET_CHARS = 200;
  * backoff pauses were observed well under this. Catches a mid-stream wedge
  * without waiting out the full wall-clock ceiling. */
 const INTERNAL_PROMPT_IDLE_MS = 90_000;
+/** Child-session status relay (Super Agent): a side note to the MAIN session,
+ * sent as its own direct completion so it never queues behind the main turn.
+ * Short budget on purpose — a slow gateway must not pin a relay request. */
+const SUPER_REPORT_TIMEOUT_MS = 60_000;
+const SUPER_REPORT_IDLE_MS = 20_000;
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
  * delays the chips — it must never hold the panel in a pseudo-busy state.
@@ -630,12 +634,6 @@ export class ChatPanel implements vscode.Disposable {
   /** How much of `superScanText` has already been consumed (no re-dispatch). */
   private superScanOffset = 0;
   /**
-   * Child-session status updates waiting to reach the MAIN session. The main
-   * session may be streaming (a report prompt would interleave with the
-   * in-flight turn), so reports queue here until it is idle.
-   */
-  private pendingSuperReports: { session: SuperSessionUi; report: SuperReport }[] = [];
-  /**
    * Freshness baseline for the Mod context report BEFORE the next session
    * creation/load. The report is written at startChat (inside session/new /
    * session/load), so the first prompt's baseline is THIS timestamp — a
@@ -809,7 +807,6 @@ export class ChatPanel implements vscode.Disposable {
     string,
     { images?: { data: string; mimeType: string }[]; files?: { name: string; path: string }[]; contexts?: ContextRefUi[] }
   >();
-  private queueSeqSeed = 0;
   /**
    * M2 P0-3: when the user clicks 立即发送 on a queued entry, we cancel the
    * in-flight turn and set this to that entry's id; the turn's completion
@@ -6012,6 +6009,11 @@ export class ChatPanel implements vscode.Disposable {
       onSessionsChanged: (sessions) => this.store.setSuperSessions(sessions),
       onReport: (entries) => this.queueSuperReport(entries),
       currentModel: () => this.store.getState().currentModelId,
+      // Child sessions spend the same money as the main session: reuse the
+      // exact same price resolution (`iflow.costTable` overrides → curated
+      // table → null) so the two surfaces can never disagree.
+      priceFor: (modelId) =>
+        resolveCost(modelId, parseCostTable(vscode.workspace.getConfiguration("iflow").get<string[]>("costTable", []))),
       // Read on every integration, so flipping the setting applies to the
       // next finished child without a restart.
       integrationMode: () => {
@@ -6109,46 +6111,47 @@ export class ChatPanel implements vscode.Disposable {
     );
   }
 
-  /** Queue a child-session status update for the MAIN session. */
+  /**
+   * Relay a child-session status update to the MAIN session.
+   *
+   * Asynchronous and parallel by design: the relay is a DIRECT gateway
+   * completion (streamChatCompletion), not a prompt on the main ACP session.
+   * It therefore never waits for the main session to be idle, never queues
+   * behind an in-flight turn, and never interleaves two conversations — the
+   * main turn keeps streaming while the relay runs alongside it. The reply
+   * lands in the transcript as a plain assistant text block (no turn, no
+   * checkpoint, no title change). Fire-and-forget: a failed relay is logged
+   * and dropped — the child's state is already on the board in
+   * `superSessions`, the relay is only a note for the main session.
+   */
   private queueSuperReport(entries: { session: SuperSessionUi; report: SuperReport }[]): void {
     if (entries.length === 0) return;
-    this.pendingSuperReports.push(...entries);
-    this.flushSuperReports();
+    void this.relaySuperReport(entries);
   }
 
-  /**
-   * Deliver the queued child-session reports to the MAIN session.
-   *
-   * Deferred while the main session is busy — interleaving a report prompt
-   * with an in-flight turn would interleave two conversations. Several
-   * reports are merged into ONE prompt (dsh's relay: preserve order, do not
-   * flood the main session).
-   */
-  private flushSuperReports(): void {
-    if (this.disposed || this.pendingSuperReports.length === 0) return;
-    const state = this.store.getState();
-    if (state.status === "streaming" || state.initializing || state.replaying) return;
-    const entries = this.pendingSuperReports;
-    this.pendingSuperReports = [];
+  private async relaySuperReport(entries: { session: SuperSessionUi; report: SuperReport }[]): Promise<void> {
+    if (this.disposed) return;
     const text = this.superAgent?.reportPrompt(entries) ?? "";
     if (!text) return;
-    void this.sendPrompt(text, undefined, undefined, undefined, { internal: true });
+    // Deliberately NOT runInternalPrompt: its single busy lane would serialize
+    // the relay behind enhance / title work. Each relay is its own request.
+    const reply = await this.completeInternalPrompt(
+      text,
+      SUPER_REPORT_TIMEOUT_MS,
+      SUPER_REPORT_IDLE_MS,
+    );
+    if (this.disposed || !reply) {
+      if (!reply) this.log.warn("super agent report relay produced no text");
+      return;
+    }
+    this.store.appendRelayMessage(reply);
+    void this.persistActiveTranscript();
   }
 
   /** Route a Super Agent action from the board. */
   private async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
     const manager = this.getSuperAgent();
     switch (msg.action) {
-      case "spawn": {
-        const task = (msg.task ?? "").trim();
-        if (!task) {
-          this.store.sendToast("warning", vscode.l10n.t("子会话任务说明不能为空"));
-          return;
-        }
-        const title = (msg.title ?? "").trim() || vscode.l10n.t("子会话");
-        manager.spawn({ title, task });
-        break;
-      }
       case "cancel": {
         if (!msg.sessionId) return;
         await manager.cancel(msg.sessionId);
@@ -7634,18 +7637,46 @@ export class ChatPanel implements vscode.Disposable {
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return;
-    // M2 P0-3: a turn is streaming — the composer no longer blocks typing,
-    // so this is the QUEUE path (roadmap: Enter while generating = enqueue).
-    // replaying/historySyncBusy stay rejected: beginReplay also reports
-    // "streaming", and a queue entry typed during a restore would race the
-    // transcript the restore is rebuilding.
+    // The main session only DELEGATES: while a turn is streaming, a new user
+    // prompt is not queued behind it — it is dispatched as a child session
+    // (own CLI process, own worktree), so the main turn is never interleaved
+    // and the user never waits on a FIFO. replaying/historySyncBusy stay
+    // rejected: beginReplay also reports "streaming", and spawning during a
+    // restore would race the transcript the restore is rebuilding.
+    // Host-driven reports (`internal`) never delegate — a report arriving
+    // while the main session is busy is dropped, not turned into a child.
     const gateState = this.store.getState();
     if (gateState.status === "streaming") {
       if (gateState.replaying || this.historySyncBusy) {
         this.log.info("sendPrompt rejected: replay/history-sync in flight");
         return;
       }
-      this.enqueuePrompt(trimmed, images, files, contexts);
+      if (internal) return;
+      const contextBlock = hasContexts
+        ? assembleContextSections(contexts!, (c) => this.contextSectionTitle(c))
+        : "";
+      // A child session is a text task: file attachments ride along as paths
+      // the child can read itself; inline image payloads cannot cross over, so
+      // say so instead of dropping them silently.
+      const fileBlock =
+        files && files.length > 0
+          ? `\n\n${vscode.l10n.t("用户附带以下本地文件（可按需读取）：")}\n${files
+              .map((f) => `- ${f.name} → ${f.path}`)
+              .join("\n")}`
+          : "";
+      const task = [contextBlock, trimmed].filter(Boolean).join("\n\n") + fileBlock;
+      const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
+      this.getSuperAgent().spawn({ title, task });
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),
+      );
+      if (images && images.length > 0) {
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("{0} 张图片附件没有转交给子会话，请重新附加", images.length),
+        );
+      }
       return;
     }
     // Context cards (right-click selection + @folder/@problems/@git/@url):
@@ -7812,9 +7843,6 @@ export class ChatPanel implements vscode.Disposable {
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
       // keeps steering (roadmap Steer semantics).
       void this.dispatchQueue();
-      // Super Agent: the main session is idle again — deliver any child
-      // session reports that were waiting for a free slot.
-      this.flushSuperReports();
     } catch (error) {
       // A3: the panel was disposed mid-flight — the store is gone, so there
       // is nothing to mark and nothing to persist.
@@ -7983,35 +8011,6 @@ export class ChatPanel implements vscode.Disposable {
       void this.touchActiveSession();
       this.postSound("error");
     }
-  }
-
-  /**
-   * M2 P0-3: queue a prompt typed while a turn streams (roadmap: Enter during
-   * generation = enqueue; the queue is host-owned, FIFO, capped at
-   * QUEUE_MAX). The UI projection rides the snapshot tail; the heavy payload
-   * (images/files/contexts) stays in `queuePayloads` so base64 never
-   * serializes onto every blockPatch.
-   */
-  private enqueuePrompt(
-    text: string,
-    images?: { data: string; mimeType: string }[],
-    files?: { name: string; path: string }[],
-    contexts?: ContextRefUi[],
-  ): void {
-    const state = this.store.getState();
-    const id = `q-${Date.now().toString(36)}-${++this.queueSeqSeed}`;
-    const attachments = [
-      ...(images ?? []).map((_, i) => vscode.l10n.t("图片{0}", i + 1)),
-      ...(files ?? []).map((f) => f.name),
-    ];
-    const entry: QueuedPromptUi = { id, text, attachments, enqueuedAt: Date.now() };
-    const { queue, ok } = enqueuePromptUi(state.queue ?? [], entry);
-    if (!ok) {
-      this.store.sendToast("warning", vscode.l10n.t("队列已满（最多 {0} 条），本条未加入", QUEUE_MAX));
-      return;
-    }
-    this.queuePayloads.set(id, { images, files, contexts });
-    this.store.setQueue(queue, state.queuePaused ?? false);
   }
 
   /**
@@ -8325,12 +8324,9 @@ export class ChatPanel implements vscode.Disposable {
       detail: res.detail,
       content: res.content,
     };
-    const status = this.store.getState().status;
-    if (status === "streaming" || status === "connecting") {
-      this.enqueuePrompt(text, undefined, undefined, [ctx]);
-    } else {
-      await this.sendPrompt(text, undefined, undefined, [ctx]);
-    }
+    // sendPrompt owns the busy path: while streaming it dispatches the
+    // request as a child session (the main session only delegates).
+    await this.sendPrompt(text, undefined, undefined, [ctx]);
   }
 
   /**

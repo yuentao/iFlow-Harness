@@ -164,6 +164,20 @@ export function withIntegration(
   return { ...session, integration, updatedAt: integration.at };
 }
 
+/**
+ * 记录子会话的 token 用量。
+ *
+ * 与 `withIntegration` 同理：这是对已结束会话的元数据补记，不经过状态机 ——
+ * 走 `applySuperEvent` 会被终态粘性直接丢弃，而用量恰恰是在终态之后才结算的。
+ */
+export function withUsage(
+  session: SuperSessionUi,
+  tokens: SuperTokenUsage,
+  at: number,
+): SuperSessionUi {
+  return { ...session, tokens, updatedAt: at };
+}
+
 /** 集成结果的中文短标签（看板与主会话汇报共用，避免两处措辞漂移）。 */
 export function superIntegrationLabel(integration: SuperIntegration): string {
   switch (integration.state) {
@@ -178,6 +192,59 @@ export function superIntegrationLabel(integration: SuperIntegration): string {
     case "skipped":
       return "未自动合并";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Token 用量
+// ---------------------------------------------------------------------------
+
+/**
+ * 子会话的 token 开销。
+ *
+ * 口径与主会话一致（见 `TurnUsageReport` / `SessionUsageUi`）：CLI 的
+ * acp-usage-report Mod 只上报**末次请求**的输入，因此 `input` 是那一轮的
+ * 上下文（权威），`output` 是宿主从子会话流式文本估算的全轮输出（含思考
+ * 文本，保守地取 `completionTokens` 与文本估算的较大值）。多轮工具循环的
+ * 输入总量 wire 不带，所以这是「可解释的下界」，不是账单级精确值。
+ */
+export interface SuperTokenUsage {
+  input: number;
+  output: number;
+  /** 末次请求命中缓存的输入 token（已包含在 `input` 里）。 */
+  cachedRead?: number;
+  /** 按 `iflow.costTable` / 内置单价估算的美元成本；null = 该模型无单价。 */
+  estimatedCost?: number | null;
+  /** true = `input` 来自内核上报；false = 宿主按任务提示估算。 */
+  authoritative?: boolean;
+}
+
+/** 所有子会话的合计开销（看板汇总）。`estimatedCost` 只有在每个产生了用量
+ * 的子会话都能算出成本时才给数值 —— 混入无单价模型时宁可不显示，也不给一个
+ * 偏小的总数。 */
+export function sumSuperUsage(sessions: readonly SuperSessionUi[]): {
+  input: number;
+  output: number;
+  estimatedCost: number | null;
+} {
+  let input = 0;
+  let output = 0;
+  let cost = 0;
+  let costComplete = true;
+  let anyUsage = false;
+  for (const session of sessions) {
+    const usage = session.tokens;
+    if (!usage) continue;
+    anyUsage = true;
+    input += usage.input;
+    output += usage.output;
+    if (typeof usage.estimatedCost === "number") cost += usage.estimatedCost;
+    else costComplete = false;
+  }
+  return {
+    input,
+    output,
+    estimatedCost: anyUsage && costComplete ? cost : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +267,13 @@ export interface SuperSessionUi {
   isolation: SuperIsolation;
   /** 子会话的 ACP sessionId。 */
   cliSessionId?: string;
+  /** 子会话实际使用的模型 id（null/缺省 = 沿用 CLI 默认）。 */
+  model?: string;
+  /**
+   * 实时进度：子会话助手文本的**尾部**快照（宿主节流写入，最长
+   * `SUPER_PROGRESS_MAX_CHARS`）。只用于看板的「进度详情」，不是完整转录。
+   */
+  progress?: string;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
@@ -210,8 +284,8 @@ export interface SuperSessionUi {
   error?: string;
   /** 正在等待的应答。 */
   pending?: SuperPending;
-  /** 末次上报的 token 用量（CLI 的 usage 报告，缺失则不显示）。 */
-  tokens?: { input: number; output: number };
+  /** 子会话的 token 开销（回合结束后结算，见 SuperTokenUsage）。 */
+  tokens?: SuperTokenUsage;
   /** 完成后把分支带回主工作区的结果（自动合并 / PR 流程写入）。 */
   integration?: SuperIntegration;
   /** 汇报历史（审计用，按时间升序）。 */

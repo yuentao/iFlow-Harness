@@ -7,7 +7,6 @@ import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
-import { QUEUE_MAX } from "../shared/queue.js";
 import type { QueuedPromptUi, SessionState } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -77,17 +76,13 @@ type PanelInternals = {
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   maybeGenerateAiTitle: (id: string) => Promise<void>;
-  enqueuePrompt: (
-    text: string,
-    images?: { data: string; mimeType: string }[],
-    files?: { name: string; path: string }[],
-    contexts?: unknown[],
-  ) => void;
+  completeInternalPrompt: (text: string, timeoutMs: number, idleMs: number) => Promise<string | null>;
   store: {
     getState: () => PanelState;
     sessionStarted: (meta: { sessionId: string }) => void;
     replaceState: (state: unknown) => void;
     sendToast: (...args: unknown[]) => number;
+    appendRelayMessage: (text: string) => void;
   };
 };
 
@@ -170,14 +165,18 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(revert).toHaveBeenCalledWith("q-session", "u", "src/a.ts");
   });
 
-  it("Enter while streaming enqueues: no user block, no CLI call", async () => {
+  it("Enter while streaming dispatches a child session: no queue, no CLI call", async () => {
     const first = send("first turn");
     await flush();
     expect(p.store.getState().status).toBe("streaming");
     const blocksBefore = p.store.getState().blocks.length;
+    const spawn = vi.fn((_spec: { title: string; task: string }) => ({ id: "super-1" }));
+    Object.assign(p, { getSuperAgent: () => ({ spawn }) });
 
-    await send("queued second");
-    expect(queue().map((q) => q.text)).toEqual(["queued second"]);
+    await send("delegate this");
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn.mock.calls[0]?.[0]).toMatchObject({ title: "delegate this", task: "delegate this" });
+    expect(queue()).toHaveLength(0); // no local queue entry
     expect(p.store.getState().blocks.length).toBe(blocksBefore); // not appended
     expect(calls).toHaveLength(1); // CLI untouched
     calls[0]!.resolve({ stopReason: "end_turn" });
@@ -185,126 +184,35 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
   });
 
-  it("the settled turn dispatches the FIFO head automatically", async () => {
+  it("child-session reports relay in parallel while the main turn streams", async () => {
     const first = send("first turn");
     await flush();
-    await send("queued A");
-    await send("queued B");
-    calls[0]!.resolve({ stopReason: "end_turn" });
-    await first;
-    // dispatchQueue runs after promptCompleted — A goes out, B stays queued
-    await flush();
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.prompt[0]!.text).toContain("queued A");
-    expect(queue().map((q) => q.text)).toEqual(["queued B"]);
-    calls[1]!.resolve({ stopReason: "end_turn" });
-    await flush();
-    expect(calls).toHaveLength(3);
-    expect(calls[2]!.prompt[0]!.text).toContain("queued B");
-    expect(queue()).toHaveLength(0);
-  });
+    expect(p.store.getState().status).toBe("streaming");
+    let release: (v: string | null) => void = () => {};
+    const complete = vi.fn(() => new Promise<string | null>((r) => { release = r; }));
+    const append = vi.fn();
+    Object.assign(p, {
+      completeInternalPrompt: complete,
+      superAgent: { reportPrompt: () => "[子会话状态上报] ok" },
+    });
+    p.store.appendRelayMessage = append;
 
-  it("a failed turn pauses the queue with a warning toast; resume continues", async () => {
-    const first = send("first turn");
-    await flush();
-    await send("queued A");
-    calls[0]!.reject(new Error("gateway down"));
-    await first;
-    await flush();
-    expect(p.store.getState().queuePaused).toBe(true);
-    expect(queue()).toHaveLength(1);
-    expect(calls).toHaveLength(1); // nothing dispatched into the broken endpoint
-    expect(toasts.some((t) => t.level === "warning" && t.message.includes("队列已暂停"))).toBe(true);
-
-    await p.handleWebviewMessage({ type: "queueAction", action: "resume" });
-    await flush();
-    expect(p.store.getState().queuePaused).toBe(false);
-    expect(calls).toHaveLength(2); // resume dispatches from the errored state
-    calls[1]!.resolve({ stopReason: "end_turn" });
-    await flush();
-    expect(queue()).toHaveLength(0);
-  });
-
-  it("sendNow marks the entry, cancels the live turn, and jumps the FIFO", async () => {
-    const cancel = vi.fn();
-    p.client = { cancel };
-    const first = send("first turn");
-    await flush();
-    await send("queued A");
-    await send("queued B");
-
-    const bId = queue()[1]!.id;
-    await p.handleWebviewMessage({ type: "queueAction", action: "sendNow", id: bId });
-    expect(cancel).toHaveBeenCalledWith("q-session"); // Steer = Stop semantics
-
-    calls[0]!.resolve({ stopReason: "cancelled" });
-    await first;
-    await flush();
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.prompt[0]!.text).toContain("queued B"); // B before A
-    expect(queue().map((q) => q.text)).toEqual(["queued A"]);
-    calls[1]!.resolve({ stopReason: "end_turn" });
-    await flush();
-  });
-
-  it("edit pops the entry back into the composer via queueEdited", async () => {
-    const posts: unknown[] = [];
-    vi.spyOn(p, "postToWebview").mockImplementation((m) => posts.push(m));
-    const first = send("first turn");
-    await flush();
-    await send("queued A");
-    const aId = queue()[0]!.id;
-
-    await p.handleWebviewMessage({ type: "queueAction", action: "edit", id: aId, requestId: 7 });
-    const reply = posts.find((m) => (m as { type?: string }).type === "queueEdited") as {
-      requestId: number;
-      text: string;
+    const internals = p as unknown as {
+      queueSuperReport: (entries: unknown[]) => void;
     };
-    expect(reply.requestId).toBe(7);
-    expect(reply.text).toBe("queued A");
-    expect(queue()).toHaveLength(0); // entry leaves the queue on edit
+    internals.queueSuperReport([{ session: { id: "super-1", title: "t" }, report: { state: "done", summary: "ok" } }]);
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1); // started immediately, no idle wait
+    expect(append).not.toHaveBeenCalled(); // still in flight
+
+    release("汇报正文");
+    await flush();
+    expect(append).toHaveBeenCalledWith("汇报正文");
+    expect(p.store.getState().status).toBe("streaming"); // main turn untouched
+
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
-  });
-
-  it("delete and move act on the queue projection", async () => {
-    const first = send("first turn");
     await flush();
-    await send("A");
-    await send("B");
-    await send("C");
-
-    await p.handleWebviewMessage({ type: "queueAction", action: "move", id: queue()[2]!.id, delta: -1 });
-    expect(queue().map((q) => q.text)).toEqual(["A", "C", "B"]);
-    await p.handleWebviewMessage({ type: "queueAction", action: "delete", id: queue()[0]!.id });
-    expect(queue().map((q) => q.text)).toEqual(["C", "B"]);
-
-    calls[0]!.reject(new Error("stop test")); // settle the live turn as failed
-    await first;
-    await flush();
-    await p.handleWebviewMessage({ type: "queueAction", action: "clear" });
-    expect(queue()).toHaveLength(0);
-  });
-
-  it("a wholesale state swap (new session / restore / profile switch) clears the queue", async () => {
-    const first = send("first turn");
-    await flush();
-    await send("queued A");
-    expect(queue()).toHaveLength(1);
-    // store.onStateReplaced → clearQueue (covers every wholesale replacement)
-    p.store.replaceState({ ...p.store.getState(), sessionId: "other-session" });
-    expect(queue()).toHaveLength(0);
-    calls[0]!.reject(new Error("session replaced"));
-    await first;
-    await flush();
-  });
-
-  it("QUEUE_MAX overflow is refused with a warning toast", () => {
-    for (let i = 0; i < QUEUE_MAX; i++) p.enqueuePrompt(`msg ${i}`);
-    expect(queue()).toHaveLength(QUEUE_MAX);
-    p.enqueuePrompt("overflow");
-    expect(queue()).toHaveLength(QUEUE_MAX);
-    expect(toasts.some((t) => t.level === "warning" && t.message.includes("队列已满"))).toBe(true);
   });
 
   it("subagent stop routes to _iflow/agent/cancel without cancelling the turn", async () => {

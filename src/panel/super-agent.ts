@@ -32,9 +32,12 @@ import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
 import type {
   ExitPlanModeResponse,
   RequestPermissionResponse,
+  TurnUsageReport,
   UserQuestion,
   UserQuestionsResponse,
 } from "../acp/protocol.js";
+import { estimateTokens } from "../../shared/session-state.js";
+import { estimateCost } from "../../shared/context-window.js";
 import {
   applySuperEvent,
   buildSuperReportPrompt,
@@ -43,6 +46,7 @@ import {
   reportForSession,
   superIntegrationLabel,
   withIntegration,
+  withUsage,
   type SuperEvent,
   type SuperIntegration,
   type SuperIntegrationMode,
@@ -50,6 +54,7 @@ import {
   type SuperReport,
   type SuperSessionUi,
   type SuperTaskSpec,
+  type SuperTokenUsage,
 } from "../../shared/super-agent.js";
 import {
   branchHasUnmergedCommits,
@@ -74,6 +79,16 @@ import {
  */
 export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * 实时进度的尾部上限。子会话的完整转录不进快照，看板只拿一段尾部文本做
+ * 「进度详情」；不设上限的话长输出会随每次 flush 反复序列化。
+ */
+export const SUPER_PROGRESS_MAX_CHARS = 4_000;
+
+/** 实时进度推送节流：流式 chunk 逐个推会让超快照变成噪音，700ms 足够让用户
+ * 看到「它在动」，又不会压过主会话的渲染节流。 */
+export const SUPER_PROGRESS_THROTTLE_MS = 700;
+
 /** 子会话创建子 CLI 客户端的工厂。由宿主（panel）实现，复用主会话的
  * entry / node / 凭据解析，但把 cwd 与 allowedRoots 收窄到 worktree。 */
 export type SuperClientFactory = (params: {
@@ -95,6 +110,8 @@ export interface SuperAgentDeps {
   onReport: (entries: { session: SuperSessionUi; report: SuperReport }[]) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
+  /** 模型单价（USD / 百万 token）；null = 无单价记录，不显示成本。 */
+  priceFor?: (modelId: string | null) => { input: number; output: number } | null;
   /** 完成后如何把分支带回主工作区（`iflow.superAgent.integration`，每次实时读）。 */
   integrationMode: () => SuperIntegrationMode;
   log: {
@@ -114,8 +131,14 @@ export class SuperAgentManager {
   private readonly sessions = new Map<string, SuperSessionUi>();
   private readonly clients = new Map<string, AcpClient>();
   private readonly resolvers = new Map<string, PendingResolver>();
-  /** 每个子会话最后的助手文本 —— 汇报摘要的来源。 */
+  /** 每个子会话的助手文本 —— 汇报摘要与输出 token 估算的来源。 */
   private readonly lastText = new Map<string, string>();
+  /** 每个子会话的思考文本 —— 只用于输出 token 估算（思考也算生成开销）。 */
+  private readonly lastThought = new Map<string, string>();
+  /** 交给子会话的任务提示 token 估算 —— 内核没上报输入时的兜底下界。 */
+  private readonly promptTokens = new Map<string, number>();
+  /** 实时进度的节流定时器（每个子会话最多一个在飞）。 */
+  private readonly progressTimers = new Map<string, NodeJS.Timeout>();
   /** 超过并发上限时排队的派发请求。 */
   private readonly queue: { spec: SuperTaskSpec; id: string }[] = [];
   /** 已开始准备（真正占用了并发槽位）的子会话 id。 */
@@ -223,6 +246,7 @@ export class SuperAgentManager {
     const session = this.sessions.get(id);
     if (!session) return { ok: false };
     await this.disposeClient(id);
+    this.forgetChild(id);
     if (!session.isolation.path) {
       this.sessions.delete(id);
       this.emit();
@@ -295,6 +319,11 @@ export class SuperAgentManager {
       if (resolver.timer) clearTimeout(resolver.timer);
     }
     this.resolvers.clear();
+    for (const timer of this.progressTimers.values()) clearTimeout(timer);
+    this.progressTimers.clear();
+    this.lastText.clear();
+    this.lastThought.clear();
+    this.promptTokens.clear();
     this.queue.length = 0;
     return kept;
   }
@@ -358,6 +387,8 @@ export class SuperAgentManager {
     this.sessions.set(id, { ...current, isolation, queued: false, updatedAt: Date.now() });
     this.emit();
 
+    let model: string | null = null;
+    let usageReport: TurnUsageReport | undefined;
     try {
       const client = await this.deps.createClient({
         cwd: isolation.path,
@@ -382,19 +413,23 @@ export class SuperAgentManager {
         this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
       }
 
-      const model = this.deps.currentModel();
+      model = this.deps.currentModel();
       if (model) {
         try {
           await client.setModel(sessionId, model);
         } catch (error) {
           this.deps.log.warn(`子会话设置模型失败（沿用内核默认）：${errorMessage(error)}`);
         }
+        this.patchModel(id, model);
       }
 
+      const taskPrompt = buildTaskPrompt(current.title, current.task, isolation);
+      this.promptTokens.set(id, estimateTokens(taskPrompt));
       const response = await client.prompt({
         sessionId,
-        prompt: [{ type: "text", text: buildTaskPrompt(current.title, current.task, isolation) }],
+        prompt: [{ type: "text", text: taskPrompt }],
       });
+      usageReport = response.usage;
       const at = Date.now();
       if (response.stopReason === "cancelled") {
         this.apply(id, { type: "cancelled", at });
@@ -413,6 +448,9 @@ export class SuperAgentManager {
       this.apply(id, { type: "failed", error: errorMessage(error), at: Date.now() });
       this.notifyReport(id);
     } finally {
+      // 结算进度与 token 用量：取消/失败也要留下已经产生的开销。
+      this.finalizeProgress(id);
+      this.recordUsage(id, model, usageReport);
       // 子会话的进程在轮次结束后不再需要 —— 留着只会白占内存。
       await this.disposeClient(id);
       this.started.delete(id);
@@ -424,10 +462,18 @@ export class SuperAgentManager {
     return {
       onSessionUpdate: (notification) => {
         const update = notification.update;
-        if (update.sessionUpdate !== "agent_message_chunk") return;
-        const text = extractText(update.content);
-        if (!text) return;
-        this.lastText.set(id, (this.lastText.get(id) ?? "") + text);
+        if (update.sessionUpdate === "agent_message_chunk") {
+          const text = extractText(update.content);
+          if (!text) return;
+          this.lastText.set(id, (this.lastText.get(id) ?? "") + text);
+          this.scheduleProgress(id);
+          return;
+        }
+        if (update.sessionUpdate === "agent_thought_chunk") {
+          const text = extractText(update.content);
+          if (!text) return;
+          this.lastThought.set(id, (this.lastThought.get(id) ?? "") + text);
+        }
       },
       // 免确认：审批直接放行，不产生待办、不打扰主会话。
       onRequestPermission: async (request) => {
@@ -648,6 +694,103 @@ export class SuperAgentManager {
     const text = (this.lastText.get(id) ?? "").trim();
     if (!text) return "（子会话没有留下文本摘要）";
     return text.length > 800 ? `${text.slice(0, 799)}…` : text;
+  }
+
+  /** 清理已删除子会话的附属状态（文本缓冲、节流定时器）。 */
+  private forgetChild(id: string): void {
+    const timer = this.progressTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.progressTimers.delete(id);
+    }
+    this.lastText.delete(id);
+    this.lastThought.delete(id);
+    this.promptTokens.delete(id);
+  }
+
+  /** 记录子会话实际使用的模型（看板详情要显示它，成本也按它查单价）。 */
+  private patchModel(id: string, model: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.model === model) return;
+    this.sessions.set(id, { ...session, model, updatedAt: Date.now() });
+    this.emit();
+  }
+
+  /** 节流推送实时进度：流式 chunk 不必逐个上屏，但要让看板看得出「它在动」。 */
+  private scheduleProgress(id: string): void {
+    if (this.progressTimers.has(id)) return;
+    const timer = setTimeout(() => {
+      this.progressTimers.delete(id);
+      this.publishProgress(id);
+    }, SUPER_PROGRESS_THROTTLE_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.progressTimers.set(id, timer);
+  }
+
+  private publishProgress(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session || isTerminalSuperStatus(session.status)) return;
+    const tail = this.progressTail(id);
+    if (!tail || session.progress === tail) return;
+    this.sessions.set(id, { ...session, progress: tail });
+    this.emit();
+  }
+
+  /** 回合结束时把最后一帧进度落定（终态会话也能补记，方法不经过状态机）。 */
+  private finalizeProgress(id: string): void {
+    const timer = this.progressTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.progressTimers.delete(id);
+    }
+    const session = this.sessions.get(id);
+    if (!session) return;
+    const tail = this.progressTail(id);
+    if (!tail || session.progress === tail) return;
+    this.sessions.set(id, { ...session, progress: tail });
+  }
+
+  /** 助手文本的尾部快照（含省略号，明确告知前面还有内容）。 */
+  private progressTail(id: string): string | undefined {
+    const text = (this.lastText.get(id) ?? "").trim();
+    if (!text) return undefined;
+    return text.length > SUPER_PROGRESS_MAX_CHARS
+      ? `…${text.slice(-SUPER_PROGRESS_MAX_CHARS)}`
+      : text;
+  }
+
+  /**
+   * 结算子会话的 token 开销。
+   *
+   * 输入取内核上报的**末次请求上下文**（权威）；没上报时退回任务提示的 BPE
+   * 估算并标记非权威 —— 绝不把估算值冒充成内核数据。输出取
+   * `completionTokens` 与全部助手/思考文本估算的较大值（工具循环的多轮生成
+   * wire 不带拆分，这是保守下界）。成本只在有单价时计算。
+   */
+  private recordUsage(
+    id: string,
+    model: string | null,
+    report: TurnUsageReport | undefined,
+  ): void {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    const text = (this.lastText.get(id) ?? "") + (this.lastThought.get(id) ?? "");
+    const estimatedOutput = estimateTokens(text);
+    const output = Math.max(report?.completionTokens ?? 0, estimatedOutput);
+    const input = report?.lastRequestInputTokens ?? this.promptTokens.get(id) ?? 0;
+    if (input <= 0 && output <= 0) return;
+    const price = this.deps.priceFor?.(model) ?? null;
+    const usage: SuperTokenUsage = {
+      input,
+      output,
+      ...(typeof report?.cachedReadTokens === "number" && report.cachedReadTokens > 0
+        ? { cachedRead: report.cachedReadTokens }
+        : {}),
+      estimatedCost: price ? estimateCost({ inputTokens: input, outputTokens: output }, price) : null,
+      authoritative: typeof report?.lastRequestInputTokens === "number" && report.lastRequestInputTokens > 0,
+    };
+    this.sessions.set(id, withUsage(session, usage, Date.now()));
+    this.emit();
   }
 
   private async disposeClient(id: string): Promise<void> {

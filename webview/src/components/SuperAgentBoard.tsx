@@ -1,27 +1,37 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
+  CircleHelp,
   GitBranch,
   GitMerge,
+  Info,
   Loader2,
-  Plus,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
-import type { SuperIntegrationState, SuperSessionUi } from "../../../shared/super-agent";
-import { summarizeSuperSessions, superIntegrationLabel } from "../../../shared/super-agent";
+import type {
+  SuperIntegrationState,
+  SuperReportState,
+  SuperSessionUi,
+} from "../../../shared/super-agent";
+import {
+  sumSuperUsage,
+  summarizeSuperSessions,
+  superIntegrationLabel,
+  superReportLabel,
+} from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import {
   Button,
   Chip,
   ConfirmDialog,
-  Field,
   ICON_INLINE,
   IconButton,
-  TextArea,
-  TextInput,
+  ModalShell,
 } from "./ui";
 
 /** One child session's status → chip tone + label. */
@@ -59,6 +69,22 @@ const INTEGRATION_TONE: Record<
   skipped: "muted",
 };
 
+/** Report state → timeline chip tone. */
+function reportTone(state: SuperReportState): "muted" | "success" | "warning" | "danger" | "info" {
+  switch (state) {
+    case "progress":
+      return "info";
+    case "ready":
+      return "success";
+    case "blocked":
+      return "warning";
+    case "failed":
+      return "danger";
+    case "dropped":
+      return "muted";
+  }
+}
+
 function isActive(session: SuperSessionUi): boolean {
   return session.status === "preparing" || session.status === "running" || session.status === "awaiting_input";
 }
@@ -73,6 +99,37 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+/** Compact token count: 1234 → 1.2K, 1234567 → 1.2M. */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k < 10 ? k.toFixed(1) : Math.round(k)}K`;
+  }
+  const m = n / 1_000_000;
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`;
+}
+
+/** Compact USD estimate for the row chip: sub-cent figures keep 4 decimals. */
+function formatCost(usd: number): string {
+  if (usd > 0 && usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+/** Detail/total precision: a child turn is usually a fraction of a cent, so
+ * keep four decimals until the figure reaches a dollar. */
+function formatCostPrecise(usd: number): string {
+  if (usd > 0 && usd < 1) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+/** Last non-empty line of a multi-line progress/summary body. */
+function lastLine(text: string): string {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.at(-1) ?? text.trim();
+}
+
 /**
  * Super Agent board — the management surface for the main session's child
  * sessions.
@@ -83,17 +140,19 @@ function formatElapsed(ms: number): string {
  * pending questions, interrupts them, merges their branch back, or cleans
  * them up.
  *
+ * Children are opened by the AGENT, not by the user: the main session
+ * delegates by emitting a `super-agent` block and the host dispatches it.
+ * The board therefore has no create form — it only manages what the agent
+ * opened.
+ *
  * The board is NOT the transcript: a child's transcript stays in its own
- * process; here we only show its status, its summary and its pending
- * request.
+ * process; here we only show its status, its summary, its live progress tail,
+ * its token usage and its pending request.
  */
 export function SuperAgentBoard() {
   const sessions = useChat((s) => s.state?.superSessions);
   const send = useChat((s) => s.send);
   const [expanded, setExpanded] = useState(false);
-  const [composing, setComposing] = useState(false);
-  const [title, setTitle] = useState("");
-  const [task, setTask] = useState("");
   const [confirmMerge, setConfirmMerge] = useState<SuperSessionUi | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState<SuperSessionUi | null>(null);
   // Ticking clock for the elapsed labels of live children.
@@ -109,6 +168,7 @@ export function SuperAgentBoard() {
     [list],
   );
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
+  const totals = useMemo(() => sumSuperUsage(list), [list]);
 
   useEffect(() => {
     if (active.length === 0) return;
@@ -116,46 +176,58 @@ export function SuperAgentBoard() {
     return () => window.clearInterval(timer);
   }, [active.length]);
 
-  // Nothing to manage and nothing to compose → the board stays out of the way.
-  if (list.length === 0 && !composing) return null;
-
-  const submit = () => {
-    const trimmedTask = task.trim();
-    if (!trimmedTask) return;
-    send({ type: "superAgent", action: "spawn", title: title.trim(), task: trimmedTask });
-    setTitle("");
-    setTask("");
-    setComposing(false);
-    setExpanded(true);
-  };
+  // Nothing to manage → the board stays out of the way.
+  if (list.length === 0) return null;
 
   return (
-    <div className="mx-3 mb-2 shrink-0 rounded-lg border border-border bg-surface/70 shadow-card">
+    <div className="mx-3 mb-2 shrink-0 rounded-lg border border-border bg-surface/80 shadow-card">
       {/* Header row: the board's collapsed form is a single line so it never
-          steals space from the transcript. `flex-wrap` keeps the action
-          cluster usable on narrow panels — the chips are shrink-0, so without
-          wrapping a ~320px panel would scroll horizontally. */}
-      <div className="flex flex-wrap items-center gap-2 px-2 py-1.5">
+          steals space from the transcript. Counts are icon + number chips
+          (the wording lives in the tooltip) — the old "{n} 个进行中" text chips
+          wrapped into a ragged second row at ~360px and pushed the action
+          cluster around. `flex-wrap` is kept only as a last-resort guard so a
+          pathological width wraps whole groups instead of clipping them. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
         <button
           type="button"
           aria-expanded={expanded}
           aria-label={t("展开子会话看板")}
           title={t("展开子会话看板")}
-          className="press flex h-6 min-w-0 items-center gap-1 rounded-sm px-1 text-ui-label font-medium text-foreground hover:bg-accent/60"
+          className="press flex h-6 shrink-0 items-center gap-1 rounded-sm px-1 text-ui-label font-medium text-foreground hover:bg-accent/60"
           onClick={() => setExpanded((v) => !v)}
         >
           {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
           <span className="shrink-0">{t("子会话")}</span>
-          <span className="text-ui-caption text-muted-foreground">({list.length})</span>
+          <span className="rounded-full bg-canvas px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
+            {list.length}
+          </span>
         </button>
-        {counts.running > 0 && (
-          <Chip tone="primary">
-            <Loader2 className="size-2.5 animate-spin" /> {t("{0} 个进行中", counts.running)}
-          </Chip>
-        )}
-        {counts.awaiting > 0 && <Chip tone="warning">{t("{0} 个待处理", counts.awaiting)}</Chip>}
-        {counts.done > 0 && <Chip tone="success">{t("{0} 个已完成", counts.done)}</Chip>}
-        {counts.failed > 0 && <Chip tone="danger">{t("{0} 个未成功", counts.failed)}</Chip>}
+        <div className="flex shrink-0 items-center gap-1">
+          {counts.running > 0 && (
+            <Chip tone="primary" title={t("{0} 个进行中", counts.running)}>
+              <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
+              <span className="tabular-nums">{counts.running}</span>
+            </Chip>
+          )}
+          {counts.awaiting > 0 && (
+            <Chip tone="warning" title={t("{0} 个待处理", counts.awaiting)}>
+              <CircleHelp className="size-2.5" aria-hidden="true" />
+              <span className="tabular-nums">{counts.awaiting}</span>
+            </Chip>
+          )}
+          {counts.done > 0 && (
+            <Chip tone="success" title={t("{0} 个已完成", counts.done)}>
+              <Check className="size-2.5" aria-hidden="true" />
+              <span className="tabular-nums">{counts.done}</span>
+            </Chip>
+          )}
+          {counts.failed > 0 && (
+            <Chip tone="danger" title={t("{0} 个未成功", counts.failed)}>
+              <X className="size-2.5" aria-hidden="true" />
+              <span className="tabular-nums">{counts.failed}</span>
+            </Chip>
+          )}
+        </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {active.length > 0 && (
             <Button
@@ -167,59 +239,11 @@ export function SuperAgentBoard() {
               {t("全部中断")}
             </Button>
           )}
-          <Button
-            variant="canvas"
-            size="sm"
-            icon={<Plus className={ICON_INLINE} />}
-            onClick={() => setComposing((v) => !v)}
-          >
-            {t("新建子会话")}
-          </Button>
         </div>
       </div>
 
-      {composing && (
-        <div className="border-t border-border px-2 py-2">
-          <div className="flex flex-col gap-2">
-            <Field label={t("任务标题")}>
-              <TextInput
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder={t("例如：修复登录跳转")}
-                aria-label={t("任务标题")}
-              />
-            </Field>
-            <Field label={t("任务说明（子会话看不到当前对话，请写完整）")}>
-              <TextArea
-                value={task}
-                onChange={(e) => setTask(e.target.value)}
-                rows={4}
-                placeholder={t("例如：修复 src/auth.ts 的登录跳转逻辑，并补一个单测")}
-                aria-label={t("任务说明")}
-              />
-            </Field>
-            <div className="flex items-center gap-2">
-              <Button variant="primary" size="sm" disabled={!task.trim()} onClick={submit}>
-                {t("派发")}
-              </Button>
-              <Button
-                variant="canvas"
-                size="sm"
-                onClick={() => {
-                  setComposing(false);
-                  setTitle("");
-                  setTask("");
-                }}
-              >
-                {t("取消")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {expanded && list.length > 0 && (
-        <div className="flex flex-col gap-2 border-t border-border px-2 py-2">
+        <div className="flex max-h-[40vh] flex-col gap-2 overflow-y-auto border-t border-border px-2 py-2">
           {list.map((session) => (
             <SuperSessionRow
               key={session.id}
@@ -228,6 +252,18 @@ export function SuperAgentBoard() {
               onCleanup={() => setConfirmCleanup(session)}
             />
           ))}
+          {(totals.input > 0 || totals.output > 0) && (
+            <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border bg-canvas/40 px-2 py-1.5 text-ui-micro text-muted-foreground">
+              <span className="font-medium text-foreground">{t("子会话合计开销")}</span>
+              <span className="tabular-nums">
+                {t("输入 {0} · 输出 {1}", formatTokens(totals.input), formatTokens(totals.output))}
+              </span>
+              {totals.estimatedCost !== null && (
+                <span className="tabular-nums">{formatCostPrecise(totals.estimatedCost)}</span>
+              )}
+              <span className="ml-auto">{t("按公开单价估算，仅供参考")}</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -280,17 +316,26 @@ function SuperSessionRow({
   const chip = statusChip(session);
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? Date.now();
+  const preview = session.progress ?? session.summary;
 
   return (
-    <div className="rounded-md border border-border bg-canvas/60 px-2 py-1.5">
-      <div className="flex min-w-0 items-center gap-2">
+    <div className="shrink-0 rounded-md border border-border/80 bg-canvas/60 transition-colors hover:border-border">
+      {/* Header line: status first so a long title ellipsizes instead of
+          shoving the chip and duration off the row. */}
+      <div className="flex items-center gap-1.5 px-2 pt-1.5">
+        <Chip tone={chip.tone}>{chip.label}</Chip>
         <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={session.title}>
           {session.title}
         </span>
-        <Chip tone={chip.tone}>{chip.label}</Chip>
-        <span className="shrink-0 text-ui-caption tabular-nums text-muted-foreground">
+        <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
           {formatElapsed(ended - started)}
         </span>
+        <IconButton
+          icon={<Info className={ICON_INLINE} />}
+          label={t("查看进度详情")}
+          size="sm"
+          onClick={() => setShowDetail(true)}
+        />
         {isActive(session) && (
           <IconButton
             icon={<Square className={ICON_INLINE} />}
@@ -302,10 +347,11 @@ function SuperSessionRow({
         )}
       </div>
 
-      {/* Isolation line: the worktree path + branch, mono and selectable. The
-          user needs the branch name to inspect the work, and the 免确认 chip
-          states up front that child tool calls are never approved by hand. */}
-      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-ui-caption text-muted-foreground">
+      {/* Isolation line: the worktree branch (path on hover), mono and
+          selectable. Only the branch truncates — the 免确认 chip states up
+          front that child tool calls are never approved by hand and must stay
+          visible at any width. */}
+      <div className="mt-1 flex min-w-0 items-center gap-1.5 px-2 text-ui-caption text-muted-foreground">
         <GitBranch className="size-3 shrink-0" />
         <span className="min-w-0 flex-1 truncate font-mono" title={session.isolation.path}>
           {session.isolation.branch ?? session.isolation.path}
@@ -320,79 +366,263 @@ function SuperSessionRow({
         </Chip>
       </div>
 
-      {session.error && (
-        <div className="mt-1 break-words text-ui-caption text-destructive">{session.error}</div>
+      {/* A pending question is the only thing that needs the user, so it sits
+          directly under the isolation line instead of being buried below the
+          summary. */}
+      {session.pending && <SuperPendingArea session={session} />}
+
+      {/* Live tail while running / final summary afterwards — clicking opens
+          the detail modal instead of expanding a separate inline panel. */}
+      {preview && (
+        <button
+          type="button"
+          className="press mt-1 block w-full truncate px-2 text-left text-ui-caption text-muted-foreground hover:text-foreground"
+          title={preview}
+          onClick={() => setShowDetail(true)}
+        >
+          {lastLine(preview)}
+        </button>
       )}
 
-      {session.summary && (
-        <div className="mt-1">
-          <button
-            type="button"
-            className="press text-left text-ui-caption text-muted-foreground underline-offset-2 hover:underline"
-            onClick={() => setShowDetail((v) => !v)}
-          >
-            {showDetail ? t("收起摘要") : t("查看摘要")}
-          </button>
-          {showDetail && (
-            <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-sm bg-editor/60 px-2 py-1 text-ui-caption text-foreground">
-              {session.summary}
+      {session.error && (
+        <div className="mx-2 mt-1.5 break-words rounded-sm border border-destructive/30 bg-destructive/10 px-2 py-1 text-ui-caption text-destructive">
+          {session.error}
+        </div>
+      )}
+
+      {/* Footer strip: where the branch ended up, what the child cost, and the
+          row's actions. Folding the old standalone token / integration rows in
+          here shortens the card by two lines; `flex-wrap` lets the action
+          cluster drop to its own row as a block on narrow panels. */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 px-2 py-1.5">
+        {session.integration && (
+          <div className="flex min-w-0 items-center gap-1.5 text-ui-caption text-muted-foreground">
+            <Chip tone={INTEGRATION_TONE[session.integration.state]}>
+              {t(superIntegrationLabel(session.integration))}
+            </Chip>
+            {session.integration.url ? (
+              <span className="min-w-0 truncate font-mono" title={session.integration.url}>
+                {session.integration.url}
+              </span>
+            ) : (
+              session.integration.detail && (
+                <span className="min-w-0 truncate" title={session.integration.detail}>
+                  {session.integration.detail}
+                </span>
+              )
+            )}
+          </div>
+        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {session.tokens && (
+            <span
+              className="flex items-center gap-1.5 font-mono text-ui-micro tabular-nums text-muted-foreground"
+              title={t("输入为内核上报的末次请求上下文；输出按子会话文本估算")}
+            >
+              <span>
+                ↑{formatTokens(session.tokens.input)} ↓{formatTokens(session.tokens.output)}
+              </span>
+              {session.tokens.estimatedCost !== null && session.tokens.estimatedCost !== undefined && (
+                <span title={t("预估成本（token 估算 × 公开单价，仅供参考）")}>
+                  {formatCost(session.tokens.estimatedCost)}
+                </span>
+              )}
+            </span>
+          )}
+          <div className="flex items-center gap-1">
+            <Button
+              variant="canvas"
+              size="sm"
+              icon={<GitMerge className={ICON_INLINE} />}
+              disabled={!session.isolation.branch || session.integration?.state === "merged"}
+              title={
+                session.integration?.state === "merged"
+                  ? t("该子会话的改动已经合并")
+                  : session.isolation.branch
+                    ? t("把该子会话的分支合并到当前分支")
+                    : t("该子会话没有可合并的分支")
+              }
+              onClick={onMerge}
+            >
+              {t("合并")}
+            </Button>
+            <Button
+              variant="canvas"
+              size="sm"
+              icon={<Trash2 className={ICON_INLINE} />}
+              onClick={onCleanup}
+            >
+              {t("清理")}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {showDetail && (
+        <SuperSessionDetail session={session} onClose={() => setShowDetail(false)} />
+      )}
+    </div>
+  );
+}
+
+/** One labelled block inside the detail modal. */
+function DetailSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-1">
+      <div className="text-ui-caption font-medium text-muted-foreground">{title}</div>
+      <div className="rounded-sm border border-border bg-canvas/60 px-2 py-1.5 text-ui-caption text-foreground">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Full progress detail for one child session.
+ *
+ * The child's transcript lives in its own CLI process and is deliberately
+ * never copied into the main store (it would pollute `blocks` and break the
+ * blockPatch anchor). This modal therefore shows everything the host actually
+ * observed: the task it was given, the live assistant tail, the report
+ * timeline, the isolation boundary, the settled token usage and the
+ * integration outcome.
+ */
+function SuperSessionDetail({
+  session,
+  onClose,
+}: {
+  session: SuperSessionUi;
+  onClose: () => void;
+}) {
+  const chip = statusChip(session);
+  const started = session.startedAt ?? session.createdAt;
+  const ended = session.endedAt ?? Date.now();
+  const usage = session.tokens;
+
+  return (
+    <ModalShell
+      title={session.title}
+      icon={<GitBranch className={ICON_INLINE} />}
+      ariaLabel={t("子会话进度详情")}
+      onClose={onClose}
+      initialFocus="first"
+      wide
+    >
+      <div className="flex max-h-[70vh] flex-col gap-3 overflow-y-auto pr-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Chip tone={chip.tone}>{chip.label}</Chip>
+          <span className="text-ui-caption tabular-nums text-muted-foreground">
+            {t("已运行 {0}", formatElapsed(ended - started))}
+          </span>
+          {session.model && <Chip tone="muted">{session.model}</Chip>}
+        </div>
+
+        <DetailSection title={t("任务")}>
+          <p className="whitespace-pre-wrap break-words">{session.task}</p>
+        </DetailSection>
+
+        {session.progress && (
+          <DetailSection title={t("实时进度")}>
+            <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words font-mono text-ui-micro">
+              {session.progress}
+            </pre>
+          </DetailSection>
+        )}
+
+        {session.summary && (
+          <DetailSection title={t("结果摘要")}>
+            <p className="whitespace-pre-wrap break-words">{session.summary}</p>
+          </DetailSection>
+        )}
+
+        <DetailSection title={t("进度记录")}>
+          {session.reports.length === 0 ? (
+            <p className="text-muted-foreground">{t("暂无进度记录")}</p>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {session.reports.map((report, index) => (
+                <div key={`${report.at}-${index}`} className="flex min-w-0 items-start gap-2">
+                  <span className="shrink-0 font-mono text-ui-micro text-muted-foreground">
+                    {new Date(report.at).toLocaleTimeString()}
+                  </span>
+                  <Chip tone={reportTone(report.state)}>{t(superReportLabel(report.state))}</Chip>
+                  <span className="min-w-0 flex-1 break-words">{report.summary}</span>
+                </div>
+              ))}
             </div>
           )}
-        </div>
-      )}
+        </DetailSection>
 
-      {/* Integration result: what happened to the branch when the child
-          finished (auto-merge / PR / kept for manual merge). */}
-      {session.integration && (
-        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-ui-caption text-muted-foreground">
-          <Chip tone={INTEGRATION_TONE[session.integration.state]}>
-            {t(superIntegrationLabel(session.integration))}
-          </Chip>
-          {session.integration.url ? (
-            <span className="min-w-0 flex-1 truncate font-mono" title={session.integration.url}>
-              {session.integration.url}
-            </span>
-          ) : (
-            session.integration.detail && (
-              <span className="min-w-0 flex-1 truncate" title={session.integration.detail}>
-                {session.integration.detail}
+        <DetailSection title={t("隔离")}>
+          <div className="flex flex-col gap-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <GitBranch className="size-3 shrink-0" />
+              <span className="min-w-0 flex-1 break-all font-mono">
+                {session.isolation.branch ?? session.isolation.path}
               </span>
-            )
+              {session.isolation.kind === "directory" && (
+                <Chip tone="warning">{t("仅目录隔离")}</Chip>
+              )}
+            </div>
+            {session.isolation.branch && (
+              <div className="break-all font-mono text-ui-micro text-muted-foreground">
+                {session.isolation.path}
+              </div>
+            )}
+            {session.isolation.note && (
+              <div className="text-ui-micro text-muted-foreground">{session.isolation.note}</div>
+            )}
+          </div>
+        </DetailSection>
+
+        <DetailSection title={t("Token 开销")}>
+          {usage ? (
+            <div className="flex flex-col gap-1">
+              <div className="flex flex-wrap items-center gap-2 tabular-nums">
+                <span>{t("输入 {0} tokens", usage.input.toLocaleString())}</span>
+                <span>{t("输出 {0} tokens", usage.output.toLocaleString())}</span>
+                {usage.cachedRead !== undefined && usage.cachedRead > 0 && (
+                  <span>{t("缓存读取 {0} tokens", usage.cachedRead.toLocaleString())}</span>
+                )}
+              </div>
+              <div>
+                {typeof usage.estimatedCost === "number"
+                  ? t("预估成本 {0}（按公开单价估算）", formatCostPrecise(usage.estimatedCost))
+                  : t("该模型无单价记录，不显示成本")}
+              </div>
+              <div className="text-ui-micro text-muted-foreground">
+                {usage.authoritative
+                  ? t("输入为内核上报的末次请求上下文；输出按子会话文本估算")
+                  : t("输入按任务提示估算（内核未上报用量）；输出按子会话文本估算")}
+              </div>
+            </div>
+          ) : (
+            <p className="text-muted-foreground">{t("子会话结束后统计 Token 开销")}</p>
           )}
-        </div>
-      )}
+        </DetailSection>
 
-      {session.pending && (
-        <SuperPendingArea session={session} />
-      )}
+        {session.integration && (
+          <DetailSection title={t("改动去向")}>
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <Chip tone={INTEGRATION_TONE[session.integration.state]}>
+                {t(superIntegrationLabel(session.integration))}
+              </Chip>
+              {session.integration.url ? (
+                <span className="break-all font-mono">{session.integration.url}</span>
+              ) : session.integration.detail ? (
+                <span className="break-words">{session.integration.detail}</span>
+              ) : null}
+            </div>
+          </DetailSection>
+        )}
 
-      <div className="mt-1.5 flex items-center gap-1">
-        <Button
-          variant="canvas"
-          size="sm"
-          icon={<GitMerge className={ICON_INLINE} />}
-          disabled={!session.isolation.branch || session.integration?.state === "merged"}
-          title={
-            session.integration?.state === "merged"
-              ? t("该子会话的改动已经合并")
-              : session.isolation.branch
-                ? t("把该子会话的分支合并到当前分支")
-                : t("该子会话没有可合并的分支")
-          }
-          onClick={onMerge}
-        >
-          {t("合并")}
-        </Button>
-        <Button
-          variant="canvas"
-          size="sm"
-          icon={<Trash2 className={ICON_INLINE} />}
-          onClick={onCleanup}
-        >
-          {t("清理")}
-        </Button>
+        {session.error && (
+          <DetailSection title={t("错误")}>
+            <p className="break-words text-destructive">{session.error}</p>
+          </DetailSection>
+        )}
       </div>
-    </div>
+    </ModalShell>
   );
 }
 
@@ -411,7 +641,7 @@ function SuperPendingArea({ session }: { session: SuperSessionUi }) {
   if (!pending) return null;
 
   return (
-    <div className="mt-1.5 rounded-sm border border-warning/40 bg-warning/10 px-2 py-1.5">
+    <div className="mx-2 mt-1.5 rounded-sm border border-warning/40 bg-warning/10 px-2 py-1.5">
       <div className="text-ui-caption font-medium text-warning">{t("子会话需要你回答")}</div>
       <div className="mt-1 flex flex-col gap-2">
         {pending.questions.map((question) => (

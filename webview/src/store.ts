@@ -717,7 +717,12 @@ function createMockHost(): HostApi {
       createdAt: Date.now() - 65_000,
       updatedAt: Date.now() - 2_000,
       startedAt: Date.now() - 62_000,
-      reports: [],
+      model: "glm-5.3-flash-free",
+      progress:
+        "已定位到 src/auth.ts 的 redirect 分支条件写反了。\n正在补一个覆盖 401 回跳的单测。",
+      reports: [
+        { state: "progress", summary: "读取 src/auth.ts 与相关单测", at: Date.now() - 50_000 },
+      ],
     },
     {
       id: "super-demo-2",
@@ -767,13 +772,33 @@ function createMockHost(): HostApi {
       startedAt: Date.now() - 298_000,
       endedAt: Date.now() - 180_000,
       summary: "已梳理依赖：未发现冗余项；gpt-tokenizer 与 cytoscape 均为运行时必需。",
+      model: "deepseek-v4-pro",
+      progress: "依赖梳理完成：未发现冗余项。",
+      tokens: {
+        input: 18_420,
+        output: 2_140,
+        cachedRead: 6_000,
+        estimatedCost: 0.0227,
+        authoritative: true,
+      },
       integration: {
         mode: "merge",
         state: "merged",
         detail: "已合入 main",
         at: Date.now() - 179_000,
       },
-      reports: [],
+      reports: [
+        {
+          state: "progress",
+          summary: "已扫描 package.json 与 node_modules 引用",
+          at: Date.now() - 260_000,
+        },
+        {
+          state: "ready",
+          summary: "已梳理依赖：未发现冗余项。",
+          at: Date.now() - 180_000,
+        },
+      ],
     },
     {
       id: "super-demo-4",
@@ -790,6 +815,14 @@ function createMockHost(): HostApi {
       startedAt: Date.now() - 418_000,
       endedAt: Date.now() - 400_000,
       summary: "已按章节重命名 12 张截图；没有删改任何文件内容。",
+      model: "glm-5.3-flash-free",
+      progress: "已按章节重命名 12 张截图。",
+      tokens: {
+        input: 7_300,
+        output: 880,
+        estimatedCost: 0.0083,
+        authoritative: true,
+      },
       reports: [],
     },
   ];
@@ -1985,24 +2018,7 @@ function createMockHost(): HostApi {
         // Super Agent board actions. The real host owns the child sessions;
         // the mock mutates the same projection so the board's interactions
         // are exercisable in browser debug mode.
-        if (m.action === "spawn") {
-          demoSuperSessions.push({
-            id: `super-demo-${demoSuperSessions.length + 1}`,
-            title: m.title || "子会话",
-            task: m.task || "",
-            status: "running",
-            isolation: {
-              kind: "git_worktree",
-              path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/new-task-z9",
-              branch: "iflow/super/new-task-z9",
-              baseRef: "a1b2c3d",
-            },
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            startedAt: Date.now(),
-            reports: [],
-          });
-        } else if (m.action === "cancel") {
+        if (m.action === "cancel") {
           const target = demoSuperSessions.find((s) => s.id === m.sessionId);
           if (target) {
             target.status = "cancelled";

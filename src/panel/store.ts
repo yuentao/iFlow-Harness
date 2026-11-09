@@ -31,6 +31,7 @@ import {
   markSubAgentStopped,
   markToolReverted,
   markToolHunkDecisions,
+  nextBlockId,
   refreshSessionUsage,
   resolveExitPlanModeBlock,
   setMeta,
@@ -429,6 +430,20 @@ export class SessionStore {
 
   approvalResolutionNote(toolName: string, resolution: string): void {
     this.noteMutationIndex(appendApprovalResolution(this.state, toolName, resolution));
+    this.flush();
+  }
+
+  /**
+   * Super Agent: append one relayed child-session status note to the MAIN
+   * transcript as a plain assistant text block. The relay runs on its own
+   * direct completion (never a main ACP turn), so this must not touch
+   * `status`, checkpoints or the session title — it is a tail-only append.
+   */
+  appendRelayMessage(text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.state.blocks.push({ kind: "text", id: nextBlockId(), text: trimmed });
+    this.noteMutationIndex(this.state.blocks.length - 1);
     this.flush();
   }
 

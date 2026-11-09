@@ -1651,8 +1651,11 @@ export type WebviewToHost =
   | { type: "stopSubagent"; sessionId: string; agentId: string }
   /**
    * Super Agent — operate on a child session of the main session.
-   *  - `spawn`: open a new child session (the host isolates it in its own
-   *    git worktree and runs a dedicated CLI process for it).
+   *
+   * Child sessions are created ONLY by the agent's own delegation protocol
+   * (a `super-agent` fenced block in its reply — the host dispatches it), so
+   * this message carries management actions only; there is no manual create
+   * path.
    *  - `cancel` / `cancelAll`: interrupt one or every child session.
    *  - `respond`: answer an ask_user_question raised BY a child session.
    *    Approvals are NOT part of this loop — child sessions always run in
@@ -1667,13 +1670,9 @@ export type WebviewToHost =
    */
   | {
       type: "superAgent";
-      action: "spawn" | "cancel" | "cancelAll" | "respond" | "cleanup" | "merge";
+      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge";
       /** Target child session (absent for cancelAll). */
       sessionId?: string;
-      /** spawn: the task title. */
-      title?: string;
-      /** spawn: the task description handed to the child session. */
-      task?: string;
       /** respond: the answers map (ask_user_question), keyed by header. */
       answers?: Record<string, string | string[]>;
       /** cleanup: keep the git branch. */
