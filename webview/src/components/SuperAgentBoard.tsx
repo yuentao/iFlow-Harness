@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   ChevronDown,
@@ -12,6 +12,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import type { Block } from "../../../shared/messages";
 import type {
   SuperIntegrationState,
   SuperReportState,
@@ -25,6 +26,7 @@ import {
 } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { BlockView } from "./MessageList";
 import {
   Button,
   Chip,
@@ -88,6 +90,10 @@ function reportTone(state: SuperReportState): "muted" | "success" | "warning" | 
 function isActive(session: SuperSessionUi): boolean {
   return session.status === "preparing" || session.status === "running" || session.status === "awaiting_input";
 }
+
+/** Stable empty transcript: returning a fresh `[]` from a zustand selector
+ * would change identity on every render. */
+const EMPTY_TRANSCRIPT: Block[] = [];
 
 /** Elapsed time, humanized. */
 function formatElapsed(ms: number): string {
@@ -313,10 +319,30 @@ function SuperSessionRow({
 }) {
   const send = useChat((s) => s.send);
   const [showDetail, setShowDetail] = useState(false);
+  const [showLive, setShowLive] = useState(false);
+  const transcript = useChat((s) => s.superTranscripts[session.id]) ?? EMPTY_TRANSCRIPT;
+  const liveRef = useRef<HTMLDivElement>(null);
+  // Follow the tail unless the user scrolled up — same rule as the main
+  // transcript, so "live activity" keeps the newest tool call in view.
+  const liveStick = useRef(true);
   const chip = statusChip(session);
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? Date.now();
   const preview = session.progress ?? session.summary;
+
+  useEffect(() => {
+    const el = liveRef.current;
+    if (!el || !showLive || !liveStick.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [transcript.length, showLive]);
+
+  // First open after a webview reboot: the host re-sends transcripts on
+  // `ready`, but if this child was spun up before the pane existed the store
+  // may still be empty — pull the full transcript once.
+  useEffect(() => {
+    if (!showLive || transcript.length > 0) return;
+    send({ type: "superAgent", action: "transcript", sessionId: session.id });
+  }, [showLive, transcript.length, send, session.id]);
 
   return (
     <div className="shrink-0 rounded-md border border-border/80 bg-canvas/60 transition-colors hover:border-border">
@@ -389,6 +415,67 @@ function SuperSessionRow({
           {session.error}
         </div>
       )}
+
+      {/* Live transcript: the child's own session/update stream rendered with
+          the SAME block components as the main transcript (tool cards,
+          thoughts, plans, nested sub-agents). It rides a dedicated host
+          channel — the child's blocks never enter the main transcript. */}
+      <div className="mt-1 flex flex-col px-2">
+        <button
+          type="button"
+          className="press self-start text-left text-ui-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          onClick={() =>
+            setShowLive((v) => {
+              liveStick.current = true;
+              return !v;
+            })
+          }
+        >
+          {showLive ? t("收起实时操作") : t("查看实时操作")}
+        </button>
+        {showLive && (
+          <div
+            ref={liveRef}
+            onScroll={() => {
+              const el = liveRef.current;
+              if (el) liveStick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            }}
+            className="mt-1 max-h-64 overflow-y-auto rounded-sm bg-editor/60 px-2 py-1"
+          >
+            {transcript.length === 0 ? (
+              <div className="text-ui-caption text-muted-foreground">
+                {session.status === "preparing" || session.queued
+                  ? t("准备中…")
+                  : t("暂无输出")}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {transcript.map((block, index) => {
+                  const prev = index > 0 ? transcript[index - 1] : undefined;
+                  const showAvatar =
+                    prev === undefined ||
+                    prev.kind !== "text" ||
+                    (prev.kind === "text" && prev.system === true);
+                  return (
+                    <div key={block.id ?? `idx-${index}`} className="cv-block">
+                      <BlockView
+                        block={block}
+                        isLatest={index === transcript.length - 1}
+                        turnActive={isActive(session)}
+                        canCopy
+                        canRegenerate={false}
+                        canDelete={false}
+                        showAvatar={showAvatar}
+                        onRegenerate={() => {}}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Footer strip: where the branch ended up, what the child cost, and the
           row's actions. Folding the old standalone token / integration rows in

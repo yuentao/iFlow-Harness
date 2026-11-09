@@ -1443,6 +1443,17 @@ export type HostToWebview =
       /** Current non-blocks metadata (status, approvals, modes, …). */
       tail: SessionSnapshotTail;
     }
+  /**
+   * Super Agent — one child session's live transcript.
+   *
+   * A child session runs in its OWN CLI process, so its transcript never
+   * enters the main `blocks` (that would pollute the main transcript and
+   * break the blockPatch anchor). This message carries it on a separate
+   * channel instead: blocks from index `from` to the end are re-sent, so the
+   * webview keeps merging incrementally. `from === 0` means full replacement
+   * (first open / resync / request).
+   */
+  | { type: "superTranscript"; sessionId: string; from: number; blocks: Block[] }
   | {
       type: "toast";
       level: "info" | "warning" | "error";
@@ -1667,10 +1678,13 @@ export type WebviewToHost =
    *    (host-side `git merge --no-ff`; a conflict aborts and reports). This
    *    is the manual path — completed children are merged automatically
    *    according to `iflow.superAgent.integration`.
+   *  - `transcript`: fetch a child's live transcript on demand (the board's
+   *    read-only panel opens, or its local cache is shorter than the host's).
+   *    It never touches the main transcript.
    */
   | {
       type: "superAgent";
-      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge";
+      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript";
       /** Target child session (absent for cancelAll). */
       sessionId?: string;
       /** respond: the answers map (ask_user_question), keyed by header. */

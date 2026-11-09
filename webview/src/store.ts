@@ -3,6 +3,7 @@ import {
   applyBlockPatch,
   evictBlockPayloads,
   type ApprovalRule,
+  type Block,
   type HostSettingsUi,
   type HostToWebview,
   type KnowledgeDocUi,
@@ -42,6 +43,28 @@ const UI_DENSITY_SCALES: Record<UiDensity, number> = {
   standard: 1,
   comfortable: 1.12,
 };
+
+/**
+ * Keep only the transcripts of child sessions that still exist. The board and
+ * `state.superSessions` share one source of truth, so a cleaned-up child's
+ * transcript must not linger in the webview heap.
+ */
+function pruneSuperTranscripts(
+  transcripts: Record<string, Block[]>,
+  sessions: SuperSessionUi[] | undefined,
+): Record<string, Block[]> {
+  if (!sessions || sessions.length === 0) {
+    return Object.keys(transcripts).length === 0 ? transcripts : {};
+  }
+  const keep = new Set(sessions.map((s) => s.id));
+  let changed = false;
+  const next: Record<string, Block[]> = {};
+  for (const [id, blocks] of Object.entries(transcripts)) {
+    if (keep.has(id)) next[id] = blocks;
+    else changed = true;
+  }
+  return changed ? next : transcripts;
+}
 
 function applyUiScale(fontSize: UiFontSize, density: UiDensity): void {
   const style = document.documentElement.style;
@@ -2323,6 +2346,15 @@ export interface ToastItem {
 
 interface ChatStore {
   state: SessionState | null;
+  /**
+   * Live transcripts of the main session's child sessions, keyed by child id.
+   *
+   * They ride their OWN `superTranscript` channel (never the main `blocks`),
+   * so the detail pane renders the exact same block components as the main
+   * transcript without breaking the blockPatch anchor. Pruned to the
+   * sessions that still exist on every snapshot / patch.
+   */
+  superTranscripts: Record<string, Block[]>;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
   /**
@@ -2394,6 +2426,7 @@ import { setLocale } from "./i18n";
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
+  superTranscripts: {},
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   modelMetadata: { state: "idle" },
@@ -2424,25 +2457,30 @@ export const useChat = create<ChatStore>((set, get) => ({
     // listeners — Composer registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") {
       setLocale(msg.locale);
+      const state = evict(msg.state);
+      const superTranscripts = pruneSuperTranscripts(
+        get().superTranscripts,
+        state.superSessions,
+      );
       // A pending switch is cleared as soon as the host confirms the value.
       const pending = get().pending;
       if (pending) {
         const confirmed =
           (pending.kind === "profile" &&
-            msg.state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
-          (pending.kind === "model" && msg.state.currentModelId === pending.target) ||
-          (pending.kind === "mode" && msg.state.modes?.currentModeId === pending.target) ||
-          (pending.kind === "think" && msg.state.thinkLevel === pending.target);
+            state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
+          (pending.kind === "model" && state.currentModelId === pending.target) ||
+          (pending.kind === "mode" && state.modes?.currentModeId === pending.target) ||
+          (pending.kind === "think" && state.thinkLevel === pending.target);
         if (confirmed) {
           if (pendingTimer) {
             clearTimeout(pendingTimer);
             pendingTimer = null;
           }
-          set({ pending: null, state: evict(msg.state) });
+          set({ pending: null, state, superTranscripts });
           return;
         }
       }
-      set({ state: evict(msg.state) });
+      set({ state, superTranscripts });
       return;
     }
     if (msg.type === "blockPatch") {
@@ -2457,6 +2495,10 @@ export const useChat = create<ChatStore>((set, get) => ({
         return;
       }
       const state: SessionState = evict({ ...msg.tail, blocks });
+      const superTranscripts = pruneSuperTranscripts(
+        get().superTranscripts,
+        state.superSessions,
+      );
       const pending = get().pending;
       if (pending) {
         const confirmed =
@@ -2470,11 +2512,30 @@ export const useChat = create<ChatStore>((set, get) => ({
             clearTimeout(pendingTimer);
             pendingTimer = null;
           }
-          set({ pending: null, state });
+          set({ pending: null, state, superTranscripts });
           return;
         }
       }
-      set({ state });
+      set({ state, superTranscripts });
+      return;
+    }
+    if (msg.type === "superTranscript") {
+      set((s) => {
+        const prev = s.superTranscripts[msg.sessionId] ?? [];
+        if (msg.from > 0 && msg.from > prev.length) {
+          // A patch was missed (should not happen with ordered postMessage):
+          // ask for the full transcript; the reply comes back with from = 0.
+          get().send({ type: "superAgent", action: "transcript", sessionId: msg.sessionId });
+          return s;
+        }
+        const next =
+          msg.from <= 0 ? msg.blocks : [...prev.slice(0, msg.from), ...msg.blocks];
+        // Same payload budget as the main transcript: a long-running child can
+        // accumulate large tool outputs, and the detail pane only mounts a
+        // window of blocks at a time.
+        const capped = evictBlockPayloads(next, EVICT_KEEP_BLOCKS);
+        return { superTranscripts: { ...s.superTranscripts, [msg.sessionId]: capped } };
+      });
       return;
     }
     if (msg.type === "hostSettings") {
