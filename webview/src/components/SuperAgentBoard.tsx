@@ -156,6 +156,11 @@ function lastLine(text: string): string {
  * The board is NOT the transcript: a child's transcript stays in its own
  * process; here we only show its status, its summary, its live progress tail,
  * its token usage and its pending request.
+ *
+ * Presentation: the bar FLOATS at the top of the transcript, same overlay
+ * contract as the approval/question cards at the bottom (App.tsx anchors it
+ * absolutely over the scroller). It never takes a flex row, so a child
+ * appearing or expanding cannot squeeze the message list.
  */
 export function SuperAgentBoard() {
   const sessions = useChat((s) => s.state?.superSessions);
@@ -188,7 +193,11 @@ export function SuperAgentBoard() {
   if (list.length === 0) return null;
 
   return (
-    <div className="acrylic stream-in mx-3 mt-3 mb-2 shrink-0 rounded-xl border border-border shadow-float">
+    // `pointer-events-auto` re-enables hits inside App's pointer-events-none
+    // top overlay shell (the gutters around the bar stay transparent to
+    // transcript scroll). The surface is acrylic like the pending cards it
+    // mirrors; ConfirmDialog portals to body, so it escapes this shelf.
+    <div className="acrylic stream-in pointer-events-auto mx-3 mt-3 mb-2 shrink-0 overflow-hidden rounded-xl border border-border shadow-float">
       {/* Header row: the board's collapsed form is a single line so it never
           steals space from the transcript. Counts are icon + number chips
           (the wording lives in the tooltip) — the old "{n} 个进行中" text chips

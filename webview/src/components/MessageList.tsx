@@ -1913,11 +1913,15 @@ function MessageListInner({ state }: { state: SessionState }) {
             permanently under the card. --stream-pill-h does the same for the
             floating bottom band (height + breathing gap, set above): the pill
             floats over the scroller's bottom edge, so the content reserves its
-            clearance here and the newest message keeps a visible gap from it. */}
+            clearance here and the newest message keeps a visible gap from it.
+            --super-bar-h is the top-edge counterpart: the Super Agent bar
+            floats over the scroller's top, so the first message must start
+            below it. */}
         <div
           ref={contentRef}
           className="space-y-3"
           style={{
+            paddingTop: "var(--super-bar-h, 0px)",
             paddingBottom: "calc(0.25rem + var(--pending-card-h, 0px) + var(--stream-pill-h, 0px))",
           }}
         >
