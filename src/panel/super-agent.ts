@@ -44,6 +44,7 @@ import type {
   UserQuestion,
   UserQuestionsResponse,
 } from "../acp/protocol.js";
+import { errorMessage } from "../acp/jsonrpc.js";
 import {
   applySessionUpdate,
   beginUserPrompt,
@@ -1425,11 +1426,6 @@ function extractText(content: unknown): string {
     if (record.type === "text" && typeof record.text === "string") return record.text;
   }
   return "";
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
 }
 
 /** 重叠文件列表的人话渲染（看板与汇报都读它，太长会淹掉正文）。 */
