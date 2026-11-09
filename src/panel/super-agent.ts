@@ -22,8 +22,11 @@
  *    子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是单数槽位，
  *    多子会话并发会互相覆盖）。
  *  - **完成后自动带回改动**：按 `iflow.superAgent.integration` 自动合并到主
- *    工作区的当前分支，或推送分支并创建 PR。合并**串行**执行，且只在主工作区
- *    干净、不在中间态时进行；冲突自动 `merge --abort`，绝不把仓库留在冲突态。
+ *    工作区的当前分支，或推送分支并创建 PR。合并**串行**执行；是否安全先用
+ *    `git merge-tree` 在对象库里预演（不碰索引与工作区），因此主工作区有未提交
+ *    改动也能合并 —— 只有「合并会改动你正在改的已跟踪文件」或「正处于
+ *    merge/rebase/cherry-pick 中间态」时才跳过并保留分支。冲突在预演阶段就被
+ *    识别，实际 `merge` 不会启动，仓库永远不会被留在冲突态。
  *
  * 汇报的来源是宿主观察到的事件，不是内核的 report 工具 —— 内核的
  * agent→client 方法表是固定集合，新增原生工具必须改 fork bundle（v1 不做）。
@@ -78,6 +81,7 @@ import {
   ghAvailable,
   inspectWorkingTree,
   mergeBranch,
+  previewMerge,
   probeGitRepo,
   pushBranch,
   remoteOriginUrl,
@@ -857,26 +861,80 @@ export class SuperAgentManager {
 
     if (mode === "merge") {
       const tree = await inspectWorkingTree(this.deps.repoRoot);
-      if (!tree.clean) {
+      if (!tree.available) {
         record({
           state: "skipped",
           needsAction: true,
-          detail: tree.inProgress
-            ? `主工作区正处于 ${tree.inProgress} 中间态，分支已保留待你手动合并`
-            : `主工作区有 ${tree.dirtyCount} 处未提交改动，分支已保留待你手动合并`,
+          detail: "读不到主工作区状态（git 不可用），分支已保留待你手动合并",
         });
         return;
+      }
+      // 中间态一律让路：在别人的合并/变基上再叠一次，冲突回滚可能带走用户工作。
+      if (tree.inProgress) {
+        record({
+          state: "skipped",
+          needsAction: true,
+          detail: `主工作区正处于 ${tree.inProgress} 中间态，分支已保留待你手动合并`,
+        });
+        return;
+      }
+      // 对象库预演：不碰索引与工作区就知道会不会冲突。冲突时连 merge 都不启动。
+      const preview = await previewMerge({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
+      if (preview.available && !preview.clean) {
+        record({
+          state: "conflict",
+          needsAction: true,
+          detail: `与当前分支存在内容冲突（已预演，工作区未被改动）；分支 ${isolation.branch} 仍在，请手动合并解决`,
+        });
+        return;
+      }
+      // 脏工作区不再一律挡路：git 能带着未提交改动合并其它文件（用户的改动原样
+      // 保留在工作区）。只有合并会改动「你正在改的已跟踪文件」时才必须让路 ——
+      // 未跟踪文件只在同名时才被 git 拒绝，而那次拒绝发生在动手之前。
+      if (!tree.clean) {
+        if (!preview.available) {
+          record({
+            state: "skipped",
+            needsAction: true,
+            detail: `主工作区有 ${tree.dirtyCount} 处未提交改动，且当前 git 无法预演合并，分支已保留待你手动合并`,
+          });
+          return;
+        }
+        const overlap = tree.trackedPaths.filter((file) => preview.paths.includes(file));
+        if (overlap.length > 0) {
+          record({
+            state: "skipped",
+            needsAction: true,
+            detail: `主工作区有未提交改动，其中 ${overlap.length} 个文件与子会话的改动重叠（${describePaths(overlap)}），分支已保留待你手动合并`,
+          });
+          return;
+        }
       }
       const result = await mergeBranch({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
       if (result.ok) {
         const target = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
-        record({ state: "merged", detail: `已合入 ${target}` });
-      } else {
         record({
-          state: "conflict",
-          needsAction: true,
-          detail: `自动合并冲突，已撤销合并；分支 ${isolation.branch} 仍在：${result.error}`,
+          state: "merged",
+          detail: tree.clean
+            ? `已合入 ${target}`
+            : `已合入 ${target}（你本地未提交的 ${tree.dirtyCount} 处改动原样保留）`,
         });
+      } else {
+        // 合并没成：确认它到底有没有启动（预演之后 HEAD 可能被别处改过）。
+        const after = await inspectWorkingTree(this.deps.repoRoot);
+        if (after.inProgress === "merge") {
+          record({
+            state: "conflict",
+            needsAction: true,
+            detail: `合并冲突且自动撤销失败，仓库可能停在合并中间态（可用 git merge --abort 恢复）；分支 ${isolation.branch} 仍在：${result.error}`,
+          });
+        } else {
+          record({
+            state: "skipped",
+            needsAction: true,
+            detail: `git 拒绝合并，工作区未被改动（常见原因：未跟踪文件与子会话新增的文件同名，请先移走或提交它）；分支 ${isolation.branch} 已保留：${result.error}`,
+          });
+        }
       }
       return;
     }
@@ -1345,6 +1403,12 @@ function extractText(content: unknown): string {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** 重叠文件列表的人话渲染（看板与汇报都读它，太长会淹掉正文）。 */
+function describePaths(paths: readonly string[], limit = 5): string {
+  const head = paths.slice(0, limit).join("、");
+  return paths.length > limit ? `${head} 等 ${paths.length} 个` : head;
 }
 
 /** 重试提示词里的截断：上一次的错误/摘要可能很长，别把它们整段塞进提示词。 */

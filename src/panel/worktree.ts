@@ -278,30 +278,110 @@ export async function mergeBranch(options: {
   }
 }
 
+export interface MergePreview {
+  /** 能否预演（git 太旧 / 多个 merge base / 分支不可达时为 false → 调用方必须保守）。 */
+  available: boolean;
+  /** HEAD 与分支能否无冲突自动合并（available 为 false 时无意义）。 */
+  clean: boolean;
+  /**
+   * 这次合并可能写入 / 删除的路径：两侧相对 merge-base 的改动并集（保守超集，
+   * 正斜杠、相对仓库根）。调用方拿它与本地未提交的**已跟踪**改动求交。
+   */
+  paths: string[];
+}
+
+/**
+ * 非破坏性合并预演。
+ *
+ * `git merge-tree --write-tree` 只操作对象库：写出的 tree 对象留在 loose
+ * objects 里（无害、可 GC），**索引与工作区一律不动**，也不会留下 MERGE_HEAD。
+ * 因此「会不会冲突」可以在真正 merge 之前问清楚 —— 冲突时连 `merge --abort`
+ * 都不需要，仓库从头到尾没被碰过。
+ *
+ * 旧版 git（< 2.38，不认 `--write-tree`）与多个 merge base 的场景返回
+ * `available: false`，调用方退回「要求工作区干净」的保守策略。
+ */
+export async function previewMerge(options: { repoRoot: string; branch: string }): Promise<MergePreview> {
+  const unavailable: MergePreview = { available: false, clean: false, paths: [] };
+  let base: string;
+  let childPaths: string[];
+  let mainPaths: string[];
+  try {
+    base = (await git(options.repoRoot, ["merge-base", "HEAD", options.branch])).stdout.trim();
+    if (!base) return unavailable;
+    childPaths = await changedPaths(options.repoRoot, base, options.branch);
+    mainPaths = await changedPaths(options.repoRoot, base, "HEAD");
+  } catch {
+    return unavailable;
+  }
+  const paths = [...new Set([...childPaths, ...mainPaths])];
+  const probe = await gitRaw(options.repoRoot, ["merge-tree", "--write-tree", "HEAD", options.branch]);
+  if (probe.code === 0) return { available: true, clean: true, paths };
+  // exit code 1 = 合并有冲突；>1 或进程级失败 = 命令不可用（旧版 git 等）。
+  if (probe.code === 1) return { available: true, clean: false, paths };
+  return unavailable;
+}
+
+/** 两个提交之间改动过的路径（`--no-renames`：重命名拆成删除 + 新增）。 */
+async function changedPaths(repoRoot: string, from: string, to: string): Promise<string[]> {
+  const { stdout } = await git(repoRoot, ["diff", "--no-renames", "--name-only", "-z", from, to]);
+  return splitNul(stdout);
+}
+
+/** `-z` 输出的 NUL 分隔列表（路径里可能含空格 / 换行，不能按行拆）。 */
+function splitNul(text: string): string[] {
+  return text.split("\0").filter((entry) => entry.length > 0);
+}
+
 // ---------------------------------------------------------------------------
 // 集成：把子会话的改动带回主工作区（自动合并 / PR）
 // ---------------------------------------------------------------------------
 
 /**
- * 主工作区的状态。自动合并**只在干净、且不在中间态的工作区上执行** —— 合并
- * 会改写工作树，用户未提交的改动一旦混进冲突回滚就可能在不知情中丢失。
+ * 主工作区的状态。
+ *
+ * `clean === false` 本身**不是**拒绝合并的理由：git 能安全地把未提交改动带着
+ * 一起合并，只要这次合并不碰那些文件。真正必须让路的只有两种情况 ——
+ * 仓库停在 merge / rebase / cherry-pick 中间态（不能再叠一次合并），以及
+ * 合并会改动的路径与「已跟踪文件的未提交改动」有交集（`trackedPaths`，调用方
+ * 与 `previewMerge().paths` 求交后判断）。未跟踪文件单独计（`untrackedCount`）：
+ * git 只在合并要创建同名文件时才拒绝，而且拒绝发生在动手之前、工作区不变。
  */
 export interface WorkingTreeState {
+  /** 状态是否真的读到了（false = git 不可用 / 仓库损坏，调用方必须保守处理）。 */
+  available: boolean;
   clean: boolean;
-  /** 未提交的条目数（已跟踪改动 + 未跟踪文件）。 */
+  /** 未提交的条目数（已跟踪改动路径数 + 未跟踪文件数）。 */
   dirtyCount: number;
   /** 仓库是否停在 merge / rebase / cherry-pick 中间态。 */
   inProgress: "merge" | "rebase" | "cherry-pick" | null;
+  /** 已跟踪文件的未提交改动路径（含删除与重命名两侧；相对仓库根、正斜杠）。 */
+  trackedPaths: string[];
+  /** 未跟踪文件数。 */
+  untrackedCount: number;
 }
 
 export async function inspectWorkingTree(repoRoot: string): Promise<WorkingTreeState> {
-  let dirtyCount = 0;
+  // `git diff HEAD` 覆盖已暂存 + 未暂存的已跟踪改动（不含未跟踪文件）；
+  // `--no-renames` 让重命名拆成删除 + 新增两侧，两边路径都进集合（保守）。
+  // `-z` 用 NUL 分隔，路径里即便有空格 / 换行也不会被转义或拆错。
+  let trackedPaths: string[];
+  let untrackedCount: number;
   try {
-    const { stdout } = await git(repoRoot, ["status", "--porcelain"]);
-    dirtyCount = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+    const tracked = await git(repoRoot, ["diff", "--no-renames", "--name-only", "-z", "HEAD"]);
+    trackedPaths = splitNul(tracked.stdout);
+    const untracked = await git(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
+    untrackedCount = splitNul(untracked.stdout).length;
   } catch {
-    // 连 status 都拿不到 —— 保守当作不可合并。
-    return { clean: false, dirtyCount: 0, inProgress: null };
+    // 连状态都拿不到 —— 保守当作不可合并。
+    return {
+      available: false,
+      clean: false,
+      dirtyCount: 0,
+      inProgress: null,
+      trackedPaths: [],
+      untrackedCount: 0,
+    };
   }
   const has = async (ref: string): Promise<boolean> => {
     try {
@@ -315,7 +395,15 @@ export async function inspectWorkingTree(repoRoot: string): Promise<WorkingTreeS
   if (await has("MERGE_HEAD")) inProgress = "merge";
   else if (await has("REBASE_HEAD")) inProgress = "rebase";
   else if (await has("CHERRY_PICK_HEAD")) inProgress = "cherry-pick";
-  return { clean: dirtyCount === 0 && inProgress === null, dirtyCount, inProgress };
+  const dirtyCount = trackedPaths.length + untrackedCount;
+  return {
+    available: true,
+    clean: dirtyCount === 0 && inProgress === null,
+    dirtyCount,
+    inProgress,
+    trackedPaths,
+    untrackedCount,
+  };
 }
 
 /** 工作区的当前分支（detached HEAD 时为 null）。 */
@@ -454,6 +542,36 @@ async function git(cwd: string, args: string[]): Promise<{ stdout: string; stder
     encoding: "utf8",
   });
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/**
+ * 与 `git()` 同源，但把子进程退出码原样返回而不是抛错。
+ *
+ * `git merge-tree --write-tree` 用退出码表达语义（0 = 干净、1 = 冲突、
+ * >1 = 命令失败），三个结果必须分开处理：把冲突当成「命令不可用」会让调用方
+ * 退到保守策略多绕一圈，反过来把不可用当成冲突则会误报。
+ */
+async function gitRaw(
+  cwd: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  try {
+    const result = await execFileAsync("git", args, {
+      cwd,
+      timeout: GIT_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: GIT_MAX_BUFFER,
+      encoding: "utf8",
+    });
+    return { code: 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  } catch (error) {
+    const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
+    return {
+      code: typeof failure.code === "number" ? failure.code : -1,
+      stdout: typeof failure.stdout === "string" ? failure.stdout : "",
+      stderr: typeof failure.stderr === "string" ? failure.stderr : "",
+    };
+  }
 }
 
 function errorMessage(error: unknown): string {

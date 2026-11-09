@@ -11,6 +11,7 @@ import {
   inspectWorkingTree,
   listWorktrees,
   mergeBranch,
+  previewMerge,
   probeGitRepo,
   remoteOriginUrl,
   removeWorktree,
@@ -252,12 +253,86 @@ describe("worktree · 自动合并的前置检查", () => {
     expect(await currentBranch(repo)).toBeTruthy();
   }, 30000);
 
-  it("未跟踪文件也算脏 —— 自动合并必须让路", async () => {
+  it("未跟踪文件只单独计数，不算「会被合并覆盖」的已跟踪改动", async () => {
     const repo = makeRepo();
     writeFileSync(path.join(repo, "untracked.txt"), "x\n", "utf8");
     const state = await inspectWorkingTree(repo);
+    expect(state.available).toBe(true);
     expect(state.clean).toBe(false);
-    expect(state.dirtyCount).toBeGreaterThan(0);
+    expect(state.dirtyCount).toBe(1);
+    expect(state.dirtyCount).toBe(state.untrackedCount);
+    // 未跟踪文件不在 trackedPaths 里：合并不会因为它们而必须让路。
+    expect(state.trackedPaths).toEqual([]);
+  }, 30000);
+
+  it("已跟踪改动按路径列出（供与合并路径求交）", async () => {
+    const repo = makeRepo();
+    writeFileSync(path.join(repo, "a.txt"), "edited\n", "utf8");
+    writeFileSync(path.join(repo, "staged-new.txt"), "n\n", "utf8");
+    git(repo, "add", "staged-new.txt");
+    writeFileSync(path.join(repo, "loose-untracked.txt"), "u\n", "utf8");
+
+    const state = await inspectWorkingTree(repo);
+    expect(state.trackedPaths).toContain("a.txt");
+    // 已暂存的新增文件同样算「已跟踪改动」——合并若碰它就会覆盖索引内容。
+    expect(state.trackedPaths).toContain("staged-new.txt");
+    expect(state.trackedPaths).not.toContain("loose-untracked.txt");
+    expect(state.untrackedCount).toBe(1);
+  }, 30000);
+
+  it("合并预演：干净的合并给出会改动的路径", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-preview-clean");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("preview-clean"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "c.txt"), "merged\n", "utf8");
+    git(target, "add", "-A");
+    git(target, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child");
+
+    const preview = await previewMerge({ repoRoot: repo, branch: "iflow/super/preview-clean" });
+    expect(preview.available).toBe(true);
+    expect(preview.clean).toBe(true);
+    expect(preview.paths).toContain("c.txt");
+  }, 30000);
+
+  it("合并预演：冲突在动手之前就被识别，工作区与仓库状态都不变", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-preview-conflict");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("preview-conflict"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "a.txt"), "child\n", "utf8");
+    git(target, "add", "-A");
+    git(target, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child");
+    writeFileSync(path.join(repo, "a.txt"), "main\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "main");
+
+    const preview = await previewMerge({ repoRoot: repo, branch: "iflow/super/preview-conflict" });
+    expect(preview.available).toBe(true);
+    expect(preview.clean).toBe(false);
+    // 两侧都改过 a.txt，它必然在「合并会改动」的路径集合里。
+    expect(preview.paths).toContain("a.txt");
+
+    // 关键：预演只写对象库，索引 / 工作区 / 中间态一概没动。
+    expect(readText(path.join(repo, "a.txt"))).toBe("main\n");
+    expect(git(repo, "status", "--porcelain").trim()).toBe("");
+    expect(existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+  }, 30000);
+
+  it("合并预演：分支不可达时如实返回不可用（调用方退回保守策略）", async () => {
+    const repo = makeRepo();
+    const preview = await previewMerge({ repoRoot: repo, branch: "iflow/super/does-not-exist" });
+    expect(preview.available).toBe(false);
   }, 30000);
 
   it("进行中的合并被识别出来（不叠加第二次合并）", async () => {
