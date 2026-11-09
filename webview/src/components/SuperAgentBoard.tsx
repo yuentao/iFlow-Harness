@@ -8,6 +8,7 @@ import {
   GitMerge,
   Info,
   Loader2,
+  RotateCcw,
   Square,
   Trash2,
   X,
@@ -19,6 +20,7 @@ import type {
   SuperSessionUi,
 } from "../../../shared/super-agent";
 import {
+  canRetrySuperSession,
   sumSuperUsage,
   summarizeSuperSessions,
   superIntegrationLabel,
@@ -356,6 +358,9 @@ function SuperSessionRow({
         <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
           {formatElapsed(ended - started)}
         </span>
+        {(session.attempts ?? 1) > 1 && (
+          <Chip tone="muted">{t("第 {0} 次尝试", session.attempts ?? 1)}</Chip>
+        )}
         <IconButton
           icon={<Info className={ICON_INLINE} />}
           label={t("查看进度详情")}
@@ -386,6 +391,9 @@ function SuperSessionRow({
           <Chip tone="warning" title={session.isolation.note}>
             {t("仅目录隔离")}
           </Chip>
+        )}
+        {(session.attempts ?? 1) > 1 && (
+          <Chip tone="muted">{t("第 {0} 次尝试", session.attempts ?? 1)}</Chip>
         )}
         <Chip tone="info" title={t("子会话始终免确认：工具调用不会被审批，也不需要你批准")}>
           {t("免确认")}
@@ -517,6 +525,17 @@ function SuperSessionRow({
             </span>
           )}
           <div className="flex items-center gap-1">
+            {canRetrySuperSession(session) && (
+              <Button
+                variant="canvas"
+                size="sm"
+                icon={<RotateCcw className={ICON_INLINE} />}
+                title={t("重试该子会话（沿用原工作目录，保留已有改动）")}
+                onClick={() => send({ type: "superAgent", action: "retry", sessionId: session.id })}
+              >
+                {t("重试")}
+              </Button>
+            )}
             <Button
               variant="canvas"
               size="sm"

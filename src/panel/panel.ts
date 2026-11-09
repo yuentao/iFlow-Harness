@@ -6334,6 +6334,16 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+      case "retry": {
+        if (!msg.sessionId) return;
+        const ok = await manager.retry(msg.sessionId);
+        if (ok) {
+          this.store.sendToast("info", vscode.l10n.t("已重新派发子会话（沿用原工作目录）"));
+        } else {
+          this.store.sendToast("warning", vscode.l10n.t("该子会话当前无法重试"));
+        }
+        break;
+      }
     }
   }
 

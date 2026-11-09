@@ -47,6 +47,9 @@ const en: Record<string, string> = {
     "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept.",
   "清理": "Clean up",
   "中断该子会话": "Interrupt this child session",
+  "重试该子会话（沿用原工作目录，保留已有改动）":
+    "Retry this child session (reuses its working directory and keeps existing changes)",
+  "第 {0} 次尝试": "Attempt {0}",
   "仅目录隔离": "Directory isolation only",
   "收起摘要": "Hide summary",
   "查看摘要": "Show summary",

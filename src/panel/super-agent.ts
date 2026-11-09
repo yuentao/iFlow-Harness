@@ -30,6 +30,7 @@
  */
 
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
 import type {
@@ -50,9 +51,11 @@ import { initialSessionState, type Block, type SessionState } from "../../shared
 import {
   applySuperEvent,
   buildSuperReportPrompt,
+  canRetrySuperSession,
   isTerminalSuperStatus,
   MAX_CONCURRENT_SUPER_SESSIONS,
   reportForSession,
+  retrySuperSession,
   superIntegrationLabel,
   withIntegration,
   withUsage,
@@ -182,6 +185,25 @@ interface SuperTranscript {
   dirtyFrom: number | null;
 }
 
+/** 重试时带给 `prepare` 的上一轮上下文。 */
+interface SuperRetryState {
+  /** 本次执行的序号（2 = 第一次重试）。 */
+  attempt: number;
+  /** 上一次中断的原因。 */
+  error?: string;
+  /** 上一次留下的进展摘要。 */
+  summary?: string;
+  /** 优先复用上一次的隔离目录（worktree 里可能有未提交的工作）。 */
+  reuseIsolation: boolean;
+}
+
+interface SuperQueueEntry {
+  spec: SuperTaskSpec;
+  id: string;
+  /** 仅重试时存在。 */
+  retry?: SuperRetryState;
+}
+
 export class SuperAgentManager {
   private readonly sessions = new Map<string, SuperSessionUi>();
   private readonly clients = new Map<string, AcpClient>();
@@ -198,8 +220,8 @@ export class SuperAgentManager {
   private readonly transcripts = new Map<string, SuperTranscript>();
   /** 转录推送的节流定时器（流式块高频到达，合并成一次消息）。 */
   private transcriptTimer: NodeJS.Timeout | null = null;
-  /** 超过并发上限时排队的派发请求。 */
-  private readonly queue: { spec: SuperTaskSpec; id: string }[] = [];
+  /** 超过并发上限时排队的派发请求（重试项额外带上上一轮的中断信息）。 */
+  private readonly queue: SuperQueueEntry[] = [];
   /** 已开始准备（真正占用了并发槽位）的子会话 id。 */
   private readonly started = new Set<string>();
   /** 集成（merge / push + PR）的串行链 —— 并发合并同一个工作区会把仓库搅乱。 */
@@ -248,6 +270,7 @@ export class SuperAgentManager {
       task: spec.task,
       status: "preparing",
       queued: true,
+      attempts: 1,
       isolation: { kind: "directory", path: "", note: "正在准备隔离环境" },
       createdAt: now,
       updatedAt: now,
@@ -264,6 +287,8 @@ export class SuperAgentManager {
   async cancel(id: string): Promise<boolean> {
     const session = this.sessions.get(id);
     if (!session || isTerminalSuperStatus(session.status)) return false;
+    // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
+    this.dequeue(id);
     const client = this.clients.get(id);
     if (client && session.cliSessionId) {
       try {
@@ -285,6 +310,39 @@ export class SuperAgentManager {
       .map((s) => s.id);
     for (const id of ids) await this.cancel(id);
     return ids.length;
+  }
+
+  /**
+   * 重试一个「意外中断」的子会话（`failed` / `cancelled`）。
+   *
+   * 复用同一个记录与隔离目录：worktree 里可能有中断前没提交的改动，重试的
+   * 提示词会告诉新进程「上一轮中断了、先检查现状再继续」，而不是假装从零
+   * 开始。目录已被删掉 / 从未建好时退化为新建隔离环境。返回 false 表示该
+   * 子会话当前不可重试。
+   */
+  async retry(id: string): Promise<boolean> {
+    if (this.disposed) return false;
+    const session = this.sessions.get(id);
+    if (!session || !canRetrySuperSession(session)) return false;
+
+    // 上一轮的进程本该在终态时回收；这里再做一次防御性回收（幂等），并把
+    // 它从并发槽位摘掉 —— 否则重置后的会话会把自己算成「已占用」而永远
+    // 排在自己前面。
+    await this.disposeClient(id);
+    this.started.delete(id);
+
+    const retry: SuperRetryState = {
+      attempt: (session.attempts ?? 1) + 1,
+      error: session.error,
+      summary: session.summary ?? (this.lastText.get(id)?.trim() || undefined),
+      reuseIsolation: true,
+    };
+    this.sessions.set(id, retrySuperSession(session, Date.now()));
+    this.lastText.delete(id);
+    this.queue.push({ spec: { title: session.title, task: session.task }, id, retry });
+    this.emit();
+    this.pump();
+    return true;
   }
 
   /**
@@ -318,6 +376,10 @@ export class SuperAgentManager {
   ): Promise<{ ok: boolean; branchKept?: boolean; reason?: string }> {
     const session = this.sessions.get(id);
     if (!session) return { ok: false };
+    // 排队中的会话被清理后不能再被 pump 启动。
+    this.dequeue(id);
+    this.started.delete(id);
+    this.lastText.delete(id);
     await this.disposeClient(id);
     this.forgetChild(id);
     // 附件副本只服务这个子会话：清理时一并删掉（worktree 的保留策略不适用于它）。
@@ -421,7 +483,14 @@ export class SuperAgentManager {
       const next = this.queue.shift();
       if (!next) return;
       this.started.add(next.id);
-      void this.prepare(next.id, next.spec);
+      void this.prepare(next.id, next.spec, next.retry);
+    }
+  }
+
+  /** 把一个会话的排队项移除（取消 / 清理 / 重试重新入队时用）。 */
+  private dequeue(id: string): void {
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      if (this.queue[i]?.id === id) this.queue.splice(i, 1);
     }
   }
 
@@ -435,40 +504,58 @@ export class SuperAgentManager {
     return count;
   }
 
-  private async prepare(id: string, spec: SuperTaskSpec): Promise<void> {
+  private async prepare(id: string, spec: SuperTaskSpec, retry?: SuperRetryState): Promise<void> {
     const session = this.sessions.get(id);
-    if (!session || this.disposed) return;
-
-    const slug = sanitizeWorktreeName(spec.title);
-    const unique = `${Date.now().toString(36)}-${(this.seq++).toString(36)}`;
-    const probe = await probeGitRepo(this.deps.repoRoot);
+    if (!session || this.disposed || isTerminalSuperStatus(session.status)) {
+      // 排队期间被取消 / 清理 / 面板关闭 —— 不要为它建目录或起进程。
+      this.started.delete(id);
+      return;
+    }
+    // 本次执行的序号：finally 据此判断自己是否已被一次重试取代。
+    const attempt = session.attempts ?? 1;
 
     let isolation: SuperSessionUi["isolation"];
-    if (probe.isRepo && probe.head) {
-      const branch = superBranchName(`${slug}-${unique}`);
-      const target = worktreePathFor(this.deps.storageRoot, this.deps.repoRoot, slug, unique);
-      try {
-        await createWorktree({ repoRoot: this.deps.repoRoot, targetPath: target, branch, baseRef: probe.head });
-        isolation = { kind: "git_worktree", path: target, branch, baseRef: probe.head };
-      } catch (error) {
-        // 建 worktree 失败不能让整个委派失败 —— 退回目录隔离并如实标注。
-        this.deps.log.warn(`worktree 创建失败，退回目录隔离：${errorMessage(error)}`);
+    const reused = retry?.reuseIsolation ? reusableIsolation(session.isolation) : null;
+    if (reused) {
+      // 重试复用上次的目录：worktree 里可能有中断前没提交的改动。
+      isolation = reused;
+      this.deps.log.info(`super agent: ${id} 重试复用工作目录 ${reused.path}`);
+    } else {
+      const slug = sanitizeWorktreeName(spec.title);
+      const unique = `${Date.now().toString(36)}-${(this.seq++).toString(36)}`;
+      const probe = await probeGitRepo(this.deps.repoRoot);
+
+      if (probe.isRepo && probe.head) {
+        const branch = superBranchName(`${slug}-${unique}`);
+        const target = worktreePathFor(this.deps.storageRoot, this.deps.repoRoot, slug, unique);
+        try {
+          await createWorktree({ repoRoot: this.deps.repoRoot, targetPath: target, branch, baseRef: probe.head });
+          isolation = { kind: "git_worktree", path: target, branch, baseRef: probe.head };
+        } catch (error) {
+          // 建 worktree 失败不能让整个委派失败 —— 退回目录隔离并如实标注。
+          this.deps.log.warn(`worktree 创建失败，退回目录隔离：${errorMessage(error)}`);
+          const dir = path.join(this.deps.storageRoot, "super-dirs", `${slug}-${unique}`);
+          await mkdir(dir, { recursive: true });
+          isolation = { kind: "directory", path: dir, note: "worktree 创建失败，仅目录隔离" };
+        }
+      } else {
         const dir = path.join(this.deps.storageRoot, "super-dirs", `${slug}-${unique}`);
         await mkdir(dir, { recursive: true });
-        isolation = { kind: "directory", path: dir, note: "worktree 创建失败，仅目录隔离" };
+        isolation = {
+          kind: "directory",
+          path: dir,
+          note: probe.isRepo ? "仓库还没有任何提交，仅目录隔离" : "当前目录不是 git 仓库，仅目录隔离",
+        };
       }
-    } else {
-      const dir = path.join(this.deps.storageRoot, "super-dirs", `${slug}-${unique}`);
-      await mkdir(dir, { recursive: true });
-      isolation = {
-        kind: "directory",
-        path: dir,
-        note: probe.isRepo ? "仓库还没有任何提交，仅目录隔离" : "当前目录不是 git 仓库，仅目录隔离",
-      };
     }
 
     const current = this.sessions.get(id);
-    if (!current || this.disposed) return;
+    if (!current || this.disposed || isTerminalSuperStatus(current.status)) {
+      this.started.delete(id);
+      return;
+    }
+    // 准备期间又发生了一次重试 —— 让新的一次执行接管。
+    if ((current.attempts ?? 1) !== attempt) return;
     this.sessions.set(id, { ...current, isolation, queued: false, updatedAt: Date.now() });
     this.emit();
 
@@ -517,7 +604,13 @@ export class SuperAgentManager {
         this.patchModel(id, model);
       }
 
-      const taskPrompt = buildTaskPrompt(current.title, current.task, isolation, staged);
+      const taskPrompt = buildTaskPrompt(
+        current.title,
+        current.task,
+        isolation,
+        staged,
+        retry ? { attempt: retry.attempt, error: retry.error, summary: retry.summary } : undefined,
+      );
       this.promptTokens.set(id, estimateTokens(taskPrompt));
       // Mirror the main session's transcript shape: the task prompt is the
       // child's user turn, so the detail pane shows "what was asked" followed
@@ -557,8 +650,13 @@ export class SuperAgentManager {
       // reach the webview even if the throttle timer has not fired yet.
       this.flushTranscripts();
       // 子会话的进程在轮次结束后不再需要 —— 留着只会白占内存。
-      await this.disposeClient(id);
-      this.started.delete(id);
+      // 已被一次重试取代时（attempts 变了），这一轮的进程早就该被清掉，
+      // 但客户端槽位已经归新的一次执行，不能再按 id 误杀。
+      const latest = this.sessions.get(id);
+      if (!latest || (latest.attempts ?? 1) === attempt) {
+        await this.disposeClient(id);
+        this.started.delete(id);
+      }
       this.pump();
     }
   }
@@ -978,6 +1076,21 @@ export class SuperAgentManager {
 // 辅助
 // ---------------------------------------------------------------------------
 
+/**
+ * 重试时优先复用上一次的隔离环境。
+ *
+ * 只要求目录还在：worktree 的 `.git` 指向主仓，目录存在就说明它仍是这个
+ * 子会话的工作副本。目录已被手工删掉 / 从未建成时返回 null，由调用方新建
+ * （分支也随之一并重建）。
+ */
+function reusableIsolation(
+  isolation: SuperSessionUi["isolation"],
+): SuperSessionUi["isolation"] | null {
+  if (!isolation.path || !existsSync(isolation.path)) return null;
+  if (isolation.kind === "git_worktree" && !isolation.branch) return null;
+  return isolation;
+}
+
 export interface SuperAnswer {
   answers?: Record<string, string | string[]>;
 }
@@ -1077,12 +1190,23 @@ function extensionForMime(mime: string | undefined): string {
   return (mime ? MIME_EXT[mime] : undefined) || ".png";
 }
 
+/** 重试时附加到任务提示词里的上一轮上下文。 */
+export interface SuperRetryContext {
+  /** 本次执行的序号（2 = 第一次重试）。 */
+  attempt: number;
+  /** 上一次中断的原因。 */
+  error?: string;
+  /** 上一次留下的进展摘要。 */
+  summary?: string;
+}
+
 /** 交给子会话的任务提示词。子会话看不到主会话的上下文，所以任务说明必须自包含。 */
 export function buildTaskPrompt(
   title: string,
   task: string,
   isolation: SuperSessionUi["isolation"],
   attachments?: StagedSuperAttachments,
+  retry?: SuperRetryContext,
 ): string {
   const lines = [
     `你是一个子会话，负责完成下面这一项独立任务。`,
@@ -1109,6 +1233,18 @@ export function buildTaskPrompt(
   lines.push(``, `工作目录：${isolation.path}`);
   if (isolation.branch) {
     lines.push(`你的改动都在分支 ${isolation.branch} 上，不要切换分支，也不要动工作目录以外的文件。`);
+  }
+  if (retry) {
+    lines.push(
+      ``,
+      `这是一次重试（第 ${retry.attempt} 次执行）。上一次执行被意外中断${
+        retry.error ? `：${truncateForPrompt(retry.error, 300)}` : ""
+      }。`,
+      `工作目录里可能保留着上一次的部分改动，请先检查现状再继续：不要重复已经完成的工作，也不要丢弃已有改动。`,
+    );
+    if (retry.summary) {
+      lines.push(`上一次留下的进展摘要：${truncateForPrompt(retry.summary, 600)}`);
+    }
   }
   lines.push(
     `不要动工作目录以外（尤其是主工作区）的文件。`,
@@ -1148,4 +1284,10 @@ function extractText(content: unknown): string {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/** 重试提示词里的截断：上一次的错误/摘要可能很长，别把它们整段塞进提示词。 */
+function truncateForPrompt(text: string, max: number): string {
+  const trimmed = text.trim();
+  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 }

@@ -273,5 +273,7 @@
   "已清理子会话": "Child session cleaned up.",
   "已把子会话的分支合并到当前分支": "Merged the child session branch into the current branch.",
   "合并失败：{0}": "Merge failed: {0}",
+  "已重新派发子会话（沿用原工作目录）": "Re-dispatched the child session (reusing its working directory).",
+  "该子会话当前无法重试": "This child session cannot be retried right now.",
   "子会话": "Child session"
 }

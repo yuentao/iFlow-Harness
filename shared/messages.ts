@@ -1681,10 +1681,14 @@ export type WebviewToHost =
    *  - `transcript`: fetch a child's live transcript on demand (the board's
    *    read-only panel opens, or its local cache is shorter than the host's).
    *    It never touches the main transcript.
+   *  - `retry`: re-run a child that was interrupted (`failed` / `cancelled`).
+   *    The host reuses the same record and working directory so any
+   *    uncommitted work left by the interrupted run stays visible; the new
+   *    child is told it is a retry and to inspect the current state first.
    */
   | {
       type: "superAgent";
-      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript";
+      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript" | "retry";
       /** Target child session (absent for cancelAll). */
       sessionId?: string;
       /** respond: the answers map (ask_user_question), keyed by header. */

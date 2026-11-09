@@ -2,11 +2,13 @@ import { describe, it, expect } from "vitest";
 import {
   applySuperEvent,
   buildSuperReportPrompt,
+  canRetrySuperSession,
   extractSuperDirectives,
   isTerminalSuperStatus,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   reportForSession,
+  retrySuperSession,
   summarizeSuperSessions,
   sumSuperUsage,
   withUsage,
@@ -218,6 +220,46 @@ describe("super agent · 状态机", () => {
     expect(isTerminalSuperStatus("cancelled")).toBe(true);
     expect(isTerminalSuperStatus("running")).toBe(false);
     expect(isTerminalSuperStatus("awaiting_input")).toBe(false);
+  });
+});
+
+describe("super agent · 意外中断后的重试", () => {
+  it("只有 failed / cancelled 可以重试，completed 与进行中都不行", () => {
+    expect(canRetrySuperSession(session({ status: "failed" }))).toBe(true);
+    expect(canRetrySuperSession(session({ status: "cancelled" }))).toBe(true);
+    expect(canRetrySuperSession(session({ status: "completed" }))).toBe(false);
+    expect(canRetrySuperSession(session({ status: "running" }))).toBe(false);
+    expect(canRetrySuperSession(session({ status: "preparing" }))).toBe(false);
+    expect(canRetrySuperSession(session({ status: "awaiting_input" }))).toBe(false);
+  });
+
+  it("重试把终态残留清掉，保留隔离环境与汇报历史", () => {
+    const failed = applySuperEvent(session({ attempts: 1 }), {
+      type: "failed",
+      error: "子会话内核退出（code=1）",
+      at: 2000,
+    });
+    const next = retrySuperSession(failed, 3000);
+
+    expect(next.status).toBe("preparing");
+    expect(next.queued).toBe(true);
+    expect(next.attempts).toBe(2);
+    expect(next.error).toBeUndefined();
+    expect(next.summary).toBeUndefined();
+    expect(next.endedAt).toBeUndefined();
+    expect(next.startedAt).toBeUndefined();
+    expect(next.integration).toBeUndefined();
+    // 同一个记录、同一套隔离环境 —— worktree 里可能有上次没提交的工作。
+    expect(next.id).toBe(failed.id);
+    expect(next.isolation).toEqual(failed.isolation);
+    // 审计轨迹保留：失败记录还在，末尾追加一条重试记录。
+    expect(next.reports.length).toBe(failed.reports.length + 1);
+    expect(next.reports.at(-1)?.summary).toContain("第 2 次");
+  });
+
+  it("首次执行没有 attempts 时按 1 计", () => {
+    const failed = applySuperEvent(session(), { type: "failed", error: "boom", at: 2000 });
+    expect(retrySuperSession(failed, 3000).attempts).toBe(2);
   });
 });
 
