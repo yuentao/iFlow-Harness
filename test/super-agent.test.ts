@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applySuperEvent,
+  buildSuperMergeRequestPrompt,
   buildSuperReportPrompt,
   canRetrySuperSession,
   extractSuperDirectives,
@@ -354,5 +355,23 @@ describe("super agent · token 用量", () => {
     ]);
     expect(totals.input).toBe(1500);
     expect(totals.estimatedCost).toBeNull();
+  });
+});
+
+describe("super agent · 让智能体合并的请求", () => {
+  it("请求里带上标题、分支与工作目录，并要求智能体自己合并", () => {
+    const text = buildSuperMergeRequestPrompt(
+      session({ title: "修复登录跳转", status: "completed" }),
+    );
+    expect(text).toContain("修复登录跳转");
+    expect(text).toContain("iflow/super/a");
+    expect(text).toContain("/tmp/wt");
+    // 是「执行合并」的请求，不是让用户自己动手。
+    expect(text).toContain("git merge --no-ff iflow/super/a");
+    expect(text).toContain("自行解决");
+    // 边界：不推送、不删分支、不切分支。
+    expect(text).toContain("不要推送");
+    expect(text).toContain("不要删除分支");
+    expect(text).toContain("不要切换");
   });
 });

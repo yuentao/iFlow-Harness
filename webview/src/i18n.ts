@@ -39,9 +39,14 @@ const en: Record<string, string> = {
   "展开子会话看板": "Expand the child-session board",
   "派发": "Dispatch",
   "合并子会话分支": "Merge the child session's branch",
-  "把分支 {0} 合并到当前分支？这会改动你当前的工作分支，若有冲突会自动撤销并报错。":
-    "Merge branch {0} into the current branch? This changes your working branch; conflicts abort the merge and report the error.",
-  "合并": "Merge",
+  "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。":
+    "Let the agent merge branch {0} into the current branch? It performs the merge itself and resolves conflicts; this changes your working branch.",
+  "让智能体合并": "Let the agent merge",
+  "子会话还没结束，完成后再让智能体合并":
+    "The child session has not finished; merge it after it completes",
+  "让智能体把该子会话的分支合并到当前分支（冲突由它自行解决）":
+    "Let the agent merge this child's branch into the current branch (it resolves conflicts itself)",
+  "该子会话没有可合并的分支": "This child session has no branch to merge",
   "清理子会话": "Clean up the child session",
   "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。":
     "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",

@@ -1674,10 +1674,13 @@ export type WebviewToHost =
    *  - `cleanup`: drop the child session and its worktree; `keepBranch`
    *    preserves the git branch (the default keeps it when the branch still
    *    carries unmerged commits).
-   *  - `merge`: merge the child's branch back into the current branch
-   *    (host-side `git merge --no-ff`; a conflict aborts and reports). This
-   *    is the manual path — completed children are merged automatically
-   *    according to `iflow.superAgent.integration`.
+   *  - `merge`: ask the MAIN AGENT to merge the child's branch back into the
+   *    current branch — the agent runs the git command itself and resolves
+   *    conflicts. The host only verifies (`git merge-base --is-ancestor`)
+   *    that the branch landed and records the integration; it never runs a
+   *    mechanical `git merge` on the user's working copy. Completed children
+   *    are otherwise merged automatically according to
+   *    `iflow.superAgent.integration`.
    *  - `transcript`: fetch a child's live transcript on demand (the board's
    *    read-only panel opens, or its local cache is shorter than the host's).
    *    It never touches the main transcript.

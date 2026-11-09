@@ -103,9 +103,12 @@ afterEach(() => {
   container.remove();
 });
 
-function render(superTranscripts: Record<string, Block[]> = {}): void {
+function render(
+  superTranscripts: Record<string, Block[]> = {},
+  overrides: Partial<SuperSessionUi> = {},
+): void {
   store.current = {
-    state: { superSessions: [session()] },
+    state: { superSessions: [session(overrides)] },
     superTranscripts,
     send,
   };
@@ -148,8 +151,9 @@ describe("Super Agent 子会话实时操作面板", () => {
       action: "transcript",
       sessionId: "super-1",
     });
-    // A running child with nothing buffered yet reads as "暂无输出".
-    expect(container.textContent).toContain("暂无输出");
+    // The dialog portals onto document.body; a running child with nothing
+    // buffered yet reads as "暂无输出".
+    expect(document.body.textContent).toContain("暂无输出");
   });
 
   it("有转录时渲染 user / tool / text 三类块（工具卡走真实 ToolCard）", () => {
@@ -157,7 +161,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     clickLabel("展开子会话看板");
     clickText("查看实时操作");
 
-    const text = container.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text).toContain(USER_TASK);
     expect(text).toContain("执行命令");
     expect(text).toContain(ASSISTANT_TEXT);
@@ -174,16 +178,57 @@ describe("Super Agent 子会话实时操作面板", () => {
     clickLabel("展开子会话看板");
     clickText("查看实时操作");
 
-    const dialog = container.querySelector('[role="dialog"]');
+    const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
     expect(dialog!.getAttribute("aria-label")).toBe("子会话实时操作");
     expect(dialog!.textContent).toContain(USER_TASK);
 
-    clickLabel("收起");
+    const close = [...document.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "收起",
+    );
+    expect(close).toBeTruthy();
+    act(() => close!.click());
 
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
-    expect(container.textContent).not.toContain(USER_TASK);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.textContent).not.toContain(USER_TASK);
     // The row keeps a single entry point — no inline pane state left behind.
     expect(container.textContent).toContain("查看实时操作");
+  });
+});
+
+describe("Super Agent 子会话合并入口", () => {
+  it("运行中的子会话不允许合并（按钮置灰）", () => {
+    render();
+    clickLabel("展开子会话看板");
+
+    const button = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "让智能体合并",
+    );
+    expect(button).toBeTruthy();
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
+    render({}, { status: "completed" });
+    clickLabel("展开子会话看板");
+    clickText("让智能体合并");
+
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog).toBeTruthy();
+    // The request is executed BY the agent, and conflicts are its problem.
+    expect(dialog!.textContent).toContain("它会自己执行合并并解决冲突");
+    expect(dialog!.textContent).toContain("iflow/super/a");
+
+    const confirm = [...dialog!.querySelectorAll("button")].find(
+      (b) => b.textContent === "让智能体合并",
+    );
+    expect(confirm).toBeTruthy();
+    act(() => confirm!.click());
+
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "merge",
+      sessionId: "super-1",
+    });
   });
 });

@@ -650,15 +650,23 @@ describe("super agent · 自动集成", () => {
     expect(harness.reports.at(-1)?.report.state).toBe("ready");
   }, 30000);
 
-  it("手动合并也记录集成结果", async () => {
+  it("智能体合并后的收尾：分支真的并入 HEAD 才补记，未并入如实返回 false", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "commit", "manual");
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
 
-    const first = await harness.manager.merge(session.id);
-    expect(first.ok).toBe(true);
-    await until(() => harness.sessions[0]?.integration?.state === "merged");
+    // 智能体还没动手：管理器不能替它合并，也不能谎报成功。
+    expect(await harness.manager.recordAgentMerge(session.id)).toBe(false);
+    expect(harness.sessions[0]?.integration).toBeUndefined();
+
+    // 模拟主会话智能体在会话里执行的合并。
+    git(repo, "merge", "--no-ff", "--no-edit", branch);
+    expect(await harness.manager.recordAgentMerge(session.id)).toBe(true);
+    const integration = harness.sessions[0]?.integration;
+    expect(integration?.state).toBe("merged");
+    expect(integration?.detail).toContain("智能体");
     expect(existsSync(path.join(repo, "child.txt"))).toBe(true);
   }, 30000);
 });

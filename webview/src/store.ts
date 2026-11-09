@@ -2101,17 +2101,23 @@ function createMockHost(): HostApi {
           const index = demoSuperSessions.findIndex((s) => s.id === m.sessionId);
           if (index >= 0) demoSuperSessions.splice(index, 1);
         } else if (m.action === "merge") {
+          // Mirror the real host: the click becomes a request to the MAIN
+          // agent, which performs the merge itself.
+          demoBlocks.push({
+            kind: "user",
+            text: "请把子会话的分支合并到当前分支（mock 请求，由智能体执行）",
+          });
           const target = demoSuperSessions.find((s) => s.id === m.sessionId);
           if (target) {
             target.integration = {
-              mode: "manual",
+              mode: "merge",
               state: "merged",
-              detail: "已手动合入 main",
+              detail: "智能体已合入 main",
               at: Date.now(),
             };
             target.updatedAt = Date.now();
           }
-          demoBlocks.push({ kind: "text", text: "*（已把子会话分支合并到当前分支，mock）*" });
+          demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
         }
         broadcastDemo(mockStatus, null);
         return;

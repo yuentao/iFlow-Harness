@@ -210,6 +210,26 @@ export async function branchHasUnmergedCommits(options: {
   }
 }
 
+/**
+ * 分支是否已经完全并进当前 HEAD（`git merge-base --is-ancestor`）。
+ *
+ * 给「让智能体合并」收尾用：智能体在会话里跑完 git 之后，宿主用它确认分支
+ * 真的落了地，再补记集成结果。分支不可达 / git 不可用时返回 false —— 宁可
+ * 让看板继续显示未合并，也不谎报成功。
+ */
+export async function isBranchMerged(options: {
+  repoRoot: string;
+  branch: string;
+}): Promise<boolean> {
+  const probe = await gitRaw(options.repoRoot, [
+    "merge-base",
+    "--is-ancestor",
+    options.branch,
+    "HEAD",
+  ]);
+  return probe.code === 0;
+}
+
 export interface WorktreeCommitResult {
   /** 是否产生了新提交（工作区本来就干净时为 false）。 */
   committed: boolean;
