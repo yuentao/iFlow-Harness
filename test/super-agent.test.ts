@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  allSuperSessionsSettled,
   applySuperEvent,
   buildSuperReportPrompt,
   canRetrySuperSession,
@@ -11,6 +12,7 @@ import {
   retrySuperSession,
   summarizeSuperSessions,
   sumSuperUsage,
+  SuperReportBuffer,
   withUsage,
   type SuperSessionUi,
 } from "../shared/super-agent.js";
@@ -301,6 +303,75 @@ describe("super agent · 汇报", () => {
 
   it("空汇报不产出提示词", () => {
     expect(buildSuperReportPrompt([])).toBe("");
+  });
+
+  it("汇报提示词要求主会话自行处理、仅在疑惑时提问、最后完整汇报", () => {
+    const text = buildSuperReportPrompt([
+      { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
+    ]);
+    expect(text).toContain("自行处理");
+    expect(text).toContain("完整汇报");
+    expect(text).toContain("都已结束");
+    expect(text).toContain("不要编造");
+  });
+});
+
+describe("super agent · 合并汇报", () => {
+  it("只有全部子会话进入终态才算结束", () => {
+    expect(allSuperSessionsSettled([])).toBe(false);
+    expect(allSuperSessionsSettled([session({ status: "running" })])).toBe(false);
+    expect(allSuperSessionsSettled([session({ status: "awaiting_input" })])).toBe(false);
+    expect(
+      allSuperSessionsSettled([
+        session({ id: "a", status: "completed" }),
+        session({ id: "b", status: "failed" }),
+        session({ id: "c", status: "cancelled" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("未全部结束前不产出汇报批次", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      { session: session({ id: "b", status: "completed" }), report: { state: "ready", summary: "b 完成", at: 1 } },
+    ]);
+    expect(buffer.takeSettled([session({ id: "a", status: "running" }), session({ id: "b", status: "completed" })])).toBeNull();
+  });
+
+  it("全部结束后一次性取走所有子会话的最后一条汇报", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      { session: session({ id: "b", status: "completed" }), report: { state: "ready", summary: "b 完成", at: 1 } },
+    ]);
+    buffer.add([
+      { session: session({ id: "a", status: "completed" }), report: { state: "ready", summary: "a 完成", at: 2 } },
+    ]);
+    const batch = buffer.takeSettled([
+      session({ id: "a", status: "completed" }),
+      session({ id: "b", status: "completed" }),
+    ]);
+    expect(batch?.map((entry) => entry.session.id)).toEqual(["b", "a"]);
+    expect(batch?.[0]?.report.summary).toBe("b 完成");
+    // 取走后缓冲区清空，不会重复转述。
+    expect(
+      buffer.takeSettled([
+        session({ id: "a", status: "completed" }),
+        session({ id: "b", status: "completed" }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("同一子会话只保留最后一条汇报（blocked 被 ready 覆盖）", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      { session: session({ id: "a", status: "awaiting_input" }), report: { state: "blocked", summary: "等待回答", at: 1 } },
+    ]);
+    buffer.add([
+      { session: session({ id: "a", status: "completed" }), report: { state: "ready", summary: "已完成", at: 2 } },
+    ]);
+    const batch = buffer.takeSettled([session({ id: "a", status: "completed" })]);
+    expect(batch).toHaveLength(1);
+    expect(batch?.[0]?.report.state).toBe("ready");
   });
 
   it("看板计数", () => {
