@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  Activity,
   Check,
   ChevronDown,
   ChevronRight,
@@ -333,29 +334,10 @@ function SuperSessionRow({
   const send = useChat((s) => s.send);
   const [showDetail, setShowDetail] = useState(false);
   const [showLive, setShowLive] = useState(false);
-  const transcript = useChat((s) => s.superTranscripts[session.id]) ?? EMPTY_TRANSCRIPT;
-  const liveRef = useRef<HTMLDivElement>(null);
-  // Follow the tail unless the user scrolled up — same rule as the main
-  // transcript, so "live activity" keeps the newest tool call in view.
-  const liveStick = useRef(true);
   const chip = statusChip(session);
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? Date.now();
   const preview = session.progress ?? session.summary;
-
-  useEffect(() => {
-    const el = liveRef.current;
-    if (!el || !showLive || !liveStick.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [transcript.length, showLive]);
-
-  // First open after a webview reboot: the host re-sends transcripts on
-  // `ready`, but if this child was spun up before the pane existed the store
-  // may still be empty — pull the full transcript once.
-  useEffect(() => {
-    if (!showLive || transcript.length > 0) return;
-    send({ type: "superAgent", action: "transcript", sessionId: session.id });
-  }, [showLive, transcript.length, send, session.id]);
 
   return (
     <div className="shrink-0 rounded-md border border-border/80 bg-canvas/60 transition-colors hover:border-border">
@@ -432,65 +414,20 @@ function SuperSessionRow({
         </div>
       )}
 
-      {/* Live transcript: the child's own session/update stream rendered with
-          the SAME block components as the main transcript (tool cards,
-          thoughts, plans, nested sub-agents). It rides a dedicated host
-          channel — the child's blocks never enter the main transcript. */}
-      <div className="mt-1 flex flex-col px-2">
+      {/* Live transcript entry: the child's own session/update stream opens
+          in a dialog (see SuperSessionLive) instead of expanding inline — an
+          inline pane pushed the neighbouring cards around and capped the
+          stream at max-h-64, so the newest tool call was always the one
+          squeezed out. The blocks ride a dedicated host channel; the child's
+          transcript never enters the main transcript. */}
+      <div className="mt-1 flex items-center px-2">
         <button
           type="button"
           className="press self-start text-left text-ui-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-          onClick={() =>
-            setShowLive((v) => {
-              liveStick.current = true;
-              return !v;
-            })
-          }
+          onClick={() => setShowLive(true)}
         >
-          {showLive ? t("收起实时操作") : t("查看实时操作")}
+          {t("查看实时操作")}
         </button>
-        {showLive && (
-          <div
-            ref={liveRef}
-            onScroll={() => {
-              const el = liveRef.current;
-              if (el) liveStick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-            }}
-            className="mt-1 max-h-64 overflow-y-auto rounded-sm bg-editor/60 px-2 py-1"
-          >
-            {transcript.length === 0 ? (
-              <div className="text-ui-caption text-muted-foreground">
-                {session.status === "preparing" || session.queued
-                  ? t("准备中…")
-                  : t("暂无输出")}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {transcript.map((block, index) => {
-                  const prev = index > 0 ? transcript[index - 1] : undefined;
-                  const showAvatar =
-                    prev === undefined ||
-                    prev.kind !== "text" ||
-                    (prev.kind === "text" && prev.system === true);
-                  return (
-                    <div key={block.id ?? `idx-${index}`} className="cv-block">
-                      <BlockView
-                        block={block}
-                        isLatest={index === transcript.length - 1}
-                        turnActive={isActive(session)}
-                        canCopy
-                        canRegenerate={false}
-                        canDelete={false}
-                        showAvatar={showAvatar}
-                        onRegenerate={() => {}}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Footer strip: where the branch ended up, what the child cost, and the
@@ -572,6 +509,9 @@ function SuperSessionRow({
         </div>
       </div>
 
+      {showLive && (
+        <SuperSessionLive session={session} onClose={() => setShowLive(false)} />
+      )}
       {showDetail && (
         <SuperSessionDetail session={session} onClose={() => setShowDetail(false)} />
       )}
@@ -735,6 +675,112 @@ function SuperSessionDetail({
             <p className="break-words text-destructive">{session.error}</p>
           </DetailSection>
         )}
+      </div>
+    </ModalShell>
+  );
+}
+
+/**
+ * Live activity for one child session, in a dialog.
+ *
+ * The child's own `session/update` stream is rendered with the SAME block
+ * components as the main transcript (tool cards, thoughts, plans, nested
+ * sub-agents). It rides the dedicated `superTranscripts` host channel — the
+ * child's blocks never enter the main transcript.
+ *
+ * A dialog (rather than an inline expanding pane) keeps the board layout
+ * stable: an inline pane reflowed every neighbouring card and its `max-h-64`
+ * cap cut the newest tool call out of view exactly when it mattered.
+ */
+function SuperSessionLive({
+  session,
+  onClose,
+}: {
+  session: SuperSessionUi;
+  onClose: () => void;
+}) {
+  const send = useChat((s) => s.send);
+  const transcript = useChat((s) => s.superTranscripts[session.id]) ?? EMPTY_TRANSCRIPT;
+  const liveRef = useRef<HTMLDivElement>(null);
+  // Follow the tail unless the user scrolled up — same rule as the main
+  // transcript, so live activity keeps the newest tool call in view.
+  const liveStick = useRef(true);
+  const chip = statusChip(session);
+  const started = session.startedAt ?? session.createdAt;
+  const ended = session.endedAt ?? Date.now();
+
+  useEffect(() => {
+    const el = liveRef.current;
+    if (!el || !liveStick.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [transcript]);
+
+  // First open after a webview reboot: the host re-sends transcripts on
+  // `ready`, but if this child was spun up before the pane existed the store
+  // may still be empty — pull the full transcript once.
+  useEffect(() => {
+    if (transcript.length > 0) return;
+    send({ type: "superAgent", action: "transcript", sessionId: session.id });
+  }, [transcript.length, send, session.id]);
+
+  return (
+    <ModalShell
+      wide
+      title={session.title}
+      icon={<Activity className={`${ICON_INLINE} shrink-0 text-primary`} />}
+      ariaLabel={t("子会话实时操作")}
+      onClose={onClose}
+      initialFocus="first"
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Chip tone={chip.tone}>{chip.label}</Chip>
+          <span className="text-ui-caption tabular-nums text-muted-foreground">
+            {t("已运行 {0}", formatElapsed(ended - started))}
+          </span>
+          {session.model && <Chip tone="muted">{session.model}</Chip>}
+          <span className="ml-auto text-ui-micro text-muted-foreground">{t("实时输出")}</span>
+        </div>
+        <div
+          ref={liveRef}
+          onScroll={() => {
+            const el = liveRef.current;
+            if (el) liveStick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+          className="min-h-0 flex-1 overflow-y-auto rounded-sm bg-editor/60 px-2 py-2"
+        >
+          {transcript.length === 0 ? (
+            <div className="text-ui-caption text-muted-foreground">
+              {session.status === "preparing" || session.queued
+                ? t("准备中…")
+                : t("暂无输出")}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {transcript.map((block, index) => {
+                const prev = index > 0 ? transcript[index - 1] : undefined;
+                const showAvatar =
+                  prev === undefined ||
+                  prev.kind !== "text" ||
+                  (prev.kind === "text" && prev.system === true);
+                return (
+                  <div key={block.id ?? `idx-${index}`} className="cv-block">
+                    <BlockView
+                      block={block}
+                      isLatest={index === transcript.length - 1}
+                      turnActive={isActive(session)}
+                      canCopy
+                      canRegenerate={false}
+                      canDelete={false}
+                      showAvatar={showAvatar}
+                      onRegenerate={() => {}}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </ModalShell>
   );

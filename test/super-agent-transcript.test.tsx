@@ -1,17 +1,17 @@
 // @vitest-environment jsdom
 /**
- * Super Agent board — "查看实时操作" pane.
+ * Super Agent board — "查看实时操作" dialog.
  *
  * A child session runs in its own CLI process, so its transcript never enters
  * the main `blocks`; it rides the dedicated `superTranscripts` channel and is
  * rendered with the SAME `BlockView` as the main transcript. These cases pin
- * the data path + toggle behavior as real DOM interaction:
+ * the data path + dialog behavior as real DOM interaction:
  *
- *  - the row only offers the pane once the board is expanded;
+ *  - the row only offers the entry once the board is expanded;
  *  - opening with no local buffer asks the host for the full transcript;
- *  - an opened pane renders the child's user / tool / text blocks (tool card
- *    resolves its presentation label, i.e. the component wiring is real);
- *  - collapsing the pane removes it again.
+ *  - the opened dialog renders the child's user / tool / text blocks (tool
+ *    card resolves its presentation label, i.e. the component wiring is real);
+ *  - the dialog closes from its header button and leaves only the row entry.
  *
  * The incremental merge (`from > 0`) lives in `webview/src/store.ts`
  * `applyHostMessage`, not in this component — it is not re-tested here.
@@ -169,16 +169,21 @@ describe("Super Agent 子会话实时操作面板", () => {
     });
   });
 
-  it("再点「收起实时操作」面板消失，入口回到「查看实时操作」", () => {
+  it("实时操作以弹框呈现，头部关闭后回到行内入口", () => {
     render({ "super-1": [USER_BLOCK] });
     clickLabel("展开子会话看板");
     clickText("查看实时操作");
-    expect(container.textContent).toContain(USER_TASK);
 
-    clickText("收起实时操作");
+    const dialog = container.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.getAttribute("aria-label")).toBe("子会话实时操作");
+    expect(dialog!.textContent).toContain(USER_TASK);
 
+    clickLabel("收起");
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(container.textContent).not.toContain(USER_TASK);
+    // The row keeps a single entry point — no inline pane state left behind.
     expect(container.textContent).toContain("查看实时操作");
-    expect(container.textContent).not.toContain("收起实时操作");
   });
 });
