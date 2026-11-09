@@ -1664,10 +1664,14 @@ export type WebviewToHost =
    *    (host-side `git merge --no-ff`; a conflict aborts and reports). This
    *    is the manual path — completed children are merged automatically
    *    according to `iflow.superAgent.integration`.
+   *  - `retry`: re-run a child that was interrupted (`failed` / `cancelled`).
+   *    The host reuses the same record and working directory so any
+   *    uncommitted work left by the interrupted run stays visible; the new
+   *    child is told it is a retry and to inspect the current state first.
    */
   | {
       type: "superAgent";
-      action: "spawn" | "cancel" | "cancelAll" | "respond" | "cleanup" | "merge";
+      action: "spawn" | "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "retry";
       /** Target child session (absent for cancelAll). */
       sessionId?: string;
       /** spawn: the task title. */

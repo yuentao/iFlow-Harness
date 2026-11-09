@@ -197,6 +197,8 @@ export interface SuperSessionUi {
    * it as 「排队中」 instead of pretending it started.
    */
   queued?: boolean;
+  /** 执行次数（1 = 首次）。意外中断后重试会 +1 —— 看板据此显示「第 N 次」。 */
+  attempts?: number;
   isolation: SuperIsolation;
   /** 子会话的 ACP sessionId。 */
   cliSessionId?: string;
@@ -343,6 +345,49 @@ export function applySuperEvent(session: SuperSessionUi, event: SuperEvent): Sup
 /** 待应答的人话描述（看板与主会话汇报共用）。 */
 export function describePending(pending: SuperPending): string {
   return pending.questions[0]?.question ?? "子会话提出了一个问题";
+}
+
+// ---------------------------------------------------------------------------
+// 重试（意外中断后的补救）
+// ---------------------------------------------------------------------------
+
+/**
+ * 能否重试。
+ *
+ * 只有「非正常结束」的子会话可重试：`failed`（提示词报错 / 内核崩溃 /
+ * 进程意外退出）与 `cancelled`（用户中断、面板关闭时被终止）。`completed`
+ * 是正常终态，重跑它属于「再来一遍」而不是「恢复中断」，不在本能力范围内。
+ */
+export function canRetrySuperSession(session: SuperSessionUi): boolean {
+  return session.status === "failed" || session.status === "cancelled";
+}
+
+/**
+ * 把终态子会话重置为「准备中」，供重试使用。
+ *
+ * 刻意保留 `id` / 标题 / 任务说明 / **隔离环境**：worktree 与分支里可能有
+ * 中断前留下的未提交改动，管理层会优先复用它（新建一个空 worktree 等于把
+ * 那些工作藏起来）。只清掉上一轮的终态残留（错误、摘要、待应答、集成结果、
+ * 旧 CLI 会话 id），并把 `attempts` +1。汇报历史保留 —— 审计上能看到
+ * 「失败 → 重试 → 完成」的完整轨迹。
+ */
+export function retrySuperSession(session: SuperSessionUi, at: number): SuperSessionUi {
+  const attempt = (session.attempts ?? 1) + 1;
+  return {
+    ...session,
+    status: "preparing",
+    queued: true,
+    attempts: attempt,
+    cliSessionId: undefined,
+    startedAt: undefined,
+    endedAt: undefined,
+    summary: undefined,
+    error: undefined,
+    pending: undefined,
+    integration: undefined,
+    updatedAt: at,
+    reports: [...session.reports, { state: "progress", summary: `重试中（第 ${attempt} 次）`, at }],
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ function makeStorage(): string {
   return dir;
 }
 
+type Plan = "complete" | "commit" | "hang" | "throw";
+
 /** A stand-in for AcpClient — the manager only uses a small surface. */
 class FakeClient {
   prompts: string[] = [];
@@ -50,7 +52,7 @@ class FakeClient {
 
   constructor(
     readonly callbacks: AcpClientCallbacks,
-    private readonly plan: "complete" | "commit" | "hang" | "throw",
+    private readonly plan: Plan,
   ) {}
 
   async newSession(): Promise<{ sessionId: string }> {
@@ -100,7 +102,7 @@ interface Harness {
 
 function makeManager(
   repoRoot: string,
-  plan: "complete" | "commit" | "hang" | "throw" = "complete",
+  plan: Plan | Plan[] = "complete",
   mode: SuperIntegrationMode = "merge",
 ): Harness {
   const clients: FakeClient[] = [];
@@ -110,7 +112,8 @@ function makeManager(
     repoRoot,
     storageRoot: makeStorage(),
     createClient: async (params) => {
-      const client = new FakeClient(params.callbacks, plan);
+      const planForClient = Array.isArray(plan) ? (plan[clients.length] ?? "complete") : plan;
+      const client = new FakeClient(params.callbacks, planForClient);
       client.cwd = params.cwd;
       client.allowedRoots = params.allowedRoots;
       clients.push(client);
@@ -455,4 +458,114 @@ describe("super agent · 任务提示词", () => {
     expect(text).toContain("免确认");
     expect(text).toContain("不需要自己合并");
   });
+
+  it("重试提示词说明上一轮中断、要求先检查现状", () => {
+    const text = buildTaskPrompt(
+      "改登录",
+      "干活",
+      { kind: "directory", path: "/tmp/dir" },
+      { attempt: 2, error: "子会话内核退出（code=1）", summary: "已改了一半" },
+    );
+    expect(text).toContain("第 2 次执行");
+    expect(text).toContain("子会话内核退出");
+    expect(text).toContain("先检查现状");
+    expect(text).toContain("已改了一半");
+  });
+
+  it("首次执行的提示词里没有重试说明", () => {
+    const text = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
+    expect(text).not.toContain("这是一次重试");
+  });
+});
+
+describe("super agent · 意外中断后重试", () => {
+  it("失败后可以重试，沿用原工作目录与分支，并保留上次的未提交改动", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["throw", "complete"], "manual");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "failed");
+
+    const first = harness.sessions[0]!;
+    const originalPath = first.isolation.path;
+    const originalBranch = first.isolation.branch;
+    // 模拟中断前留下、尚未提交的工作。
+    writeFileSync(path.join(originalPath, "partial.txt"), "half done\n", "utf8");
+
+    expect(await harness.manager.retry(spawned.id)).toBe(true);
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const second = harness.sessions[0]!;
+    expect(second.attempts).toBe(2);
+    expect(second.error).toBeUndefined();
+    expect(second.isolation.path).toBe(originalPath);
+    expect(second.isolation.branch).toBe(originalBranch);
+    // 重试起的是新进程，但工作目录还是同一个 —— 之前没提交的改动还在。
+    expect(harness.clients).toHaveLength(2);
+    expect(harness.clients[1]?.cwd).toBe(originalPath);
+    expect(harness.clients[1]?.allowedRoots).toEqual([originalPath]);
+    expect(existsSync(path.join(originalPath, "partial.txt"))).toBe(true);
+    // 提示词明确这是重试，并带上上次的中断原因。
+    const prompt = harness.clients[1]?.prompts[0] ?? "";
+    expect(prompt).toContain("这是一次重试");
+    expect(prompt).toContain("第 2 次");
+    expect(prompt).toContain("child exploded");
+  }, 30000);
+
+  it("被中断（cancelled）的子会话也可以重试", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["hang", "complete"], "manual");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    await harness.manager.cancel(spawned.id);
+    await until(() => harness.sessions[0]?.status === "cancelled");
+
+    expect(await harness.manager.retry(spawned.id)).toBe(true);
+    await until(() => harness.sessions[0]?.status === "completed");
+    expect(harness.sessions[0]?.attempts).toBe(2);
+  }, 30000);
+
+  it("已完成的子会话不能重试", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "manual");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    expect(await harness.manager.retry(spawned.id)).toBe(false);
+    expect(harness.clients).toHaveLength(1);
+    expect(harness.sessions[0]?.status).toBe("completed");
+  }, 30000);
+
+  it("工作目录已被删除时重试会新建隔离环境", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["throw", "complete"], "manual");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "failed");
+    const originalPath = harness.sessions[0]!.isolation.path;
+    rmSync(originalPath, { recursive: true, force: true });
+
+    expect(await harness.manager.retry(spawned.id)).toBe(true);
+    await until(() => harness.sessions[0]?.status === "completed");
+    const second = harness.sessions[0]!;
+    expect(second.isolation.path).toBeTruthy();
+    expect(second.isolation.path).not.toBe(originalPath);
+    expect(existsSync(second.isolation.path)).toBe(true);
+  }, 30000);
+
+  it("排队中的子会话被取消后不会再被启动", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const ids: string[] = [];
+    for (let i = 0; i < MAX_CONCURRENT_SUPER_SESSIONS + 1; i++) {
+      ids.push(harness.manager.spawn({ title: `任务 ${i}`, task: "干活" }).id);
+    }
+    await until(() => harness.clients.length >= MAX_CONCURRENT_SUPER_SESSIONS);
+    const queued = harness.sessions.find((s) => s.queued);
+    expect(queued).toBeDefined();
+    await harness.manager.cancel(queued!.id);
+
+    // 腾出槽位后，被取消的排队项不该再起一个新进程。
+    await harness.manager.cancel(ids[0]!);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(harness.clients.length).toBe(MAX_CONCURRENT_SUPER_SESSIONS);
+  }, 30000);
 });

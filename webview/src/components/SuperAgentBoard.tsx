@@ -6,11 +6,16 @@ import {
   GitMerge,
   Loader2,
   Plus,
+  RotateCcw,
   Square,
   Trash2,
 } from "lucide-react";
 import type { SuperIntegrationState, SuperSessionUi } from "../../../shared/super-agent";
-import { summarizeSuperSessions, superIntegrationLabel } from "../../../shared/super-agent";
+import {
+  canRetrySuperSession,
+  summarizeSuperSessions,
+  superIntegrationLabel,
+} from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import {
@@ -315,6 +320,9 @@ function SuperSessionRow({
             {t("仅目录隔离")}
           </Chip>
         )}
+        {(session.attempts ?? 1) > 1 && (
+          <Chip tone="muted">{t("第 {0} 次尝试", session.attempts ?? 1)}</Chip>
+        )}
         <Chip tone="info" title={t("子会话始终免确认：工具调用不会被审批，也不需要你批准")}>
           {t("免确认")}
         </Chip>
@@ -367,6 +375,17 @@ function SuperSessionRow({
       )}
 
       <div className="mt-1.5 flex items-center gap-1">
+        {canRetrySuperSession(session) && (
+          <Button
+            variant="canvas"
+            size="sm"
+            icon={<RotateCcw className={ICON_INLINE} />}
+            title={t("重试该子会话（沿用原工作目录，保留已有改动）")}
+            onClick={() => send({ type: "superAgent", action: "retry", sessionId: session.id })}
+          >
+            {t("重试")}
+          </Button>
+        )}
         <Button
           variant="canvas"
           size="sm"

@@ -792,6 +792,25 @@ function createMockHost(): HostApi {
       summary: "已按章节重命名 12 张截图；没有删改任何文件内容。",
       reports: [],
     },
+    {
+      id: "super-demo-5",
+      title: "重构 MCP 配置解析",
+      task: "把 shared/mcp-catalog.ts 的解析逻辑拆成可单测的小函数",
+      status: "failed",
+      attempts: 1,
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/mcp-parse-r8",
+        branch: "iflow/super/mcp-parse-r8",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 540_000,
+      updatedAt: Date.now() - 500_000,
+      startedAt: Date.now() - 538_000,
+      endedAt: Date.now() - 500_000,
+      error: "子会话内核退出（code=1）",
+      reports: [],
+    },
   ];
 
   const demoMeta = {
@@ -2024,6 +2043,19 @@ function createMockHost(): HostApi {
           if (target?.pending) {
             target.pending = undefined;
             target.status = "running";
+            target.updatedAt = Date.now();
+          }
+        } else if (m.action === "retry") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target && (target.status === "failed" || target.status === "cancelled")) {
+            target.status = "running";
+            target.attempts = (target.attempts ?? 1) + 1;
+            target.error = undefined;
+            target.summary = undefined;
+            target.pending = undefined;
+            target.integration = undefined;
+            target.endedAt = undefined;
+            target.startedAt = Date.now();
             target.updatedAt = Date.now();
           }
         } else if (m.action === "cleanup") {
