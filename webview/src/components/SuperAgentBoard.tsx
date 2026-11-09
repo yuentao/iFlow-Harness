@@ -242,9 +242,11 @@ export function SuperAgentBoard() {
               variant="canvas"
               size="sm"
               icon={<Square className={ICON_INLINE} />}
+              aria-label={t("全部中断")}
+              title={t("全部中断")}
               onClick={() => send({ type: "superAgent", action: "cancelAll" })}
             >
-              {t("全部中断")}
+              <span className="@max-[380px]:hidden">{t("全部中断")}</span>
             </Button>
           )}
         </div>
@@ -391,9 +393,6 @@ function SuperSessionRow({
           <Chip tone="warning" title={session.isolation.note}>
             {t("仅目录隔离")}
           </Chip>
-        )}
-        {(session.attempts ?? 1) > 1 && (
-          <Chip tone="muted">{t("第 {0} 次尝试", session.attempts ?? 1)}</Chip>
         )}
         <Chip tone="info" title={t("子会话始终免确认：工具调用不会被审批，也不需要你批准")}>
           {t("免确认")}
