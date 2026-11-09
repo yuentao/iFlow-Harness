@@ -35,6 +35,7 @@ const en: Record<string, string> = {
   "{0} 个待处理": "{0} need you",
   "{0} 个已完成": "{0} done",
   "{0} 个未成功": "{0} unfinished",
+  "{0} 个已中断": "{0} stopped",
   "全部中断": "Interrupt all",
   "展开子会话看板": "Expand the child-session board",
   "派发": "Dispatch",

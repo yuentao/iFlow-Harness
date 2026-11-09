@@ -72,10 +72,13 @@ import {
 import { CheckpointManager } from "./checkpoints.js";
 import { SuperAgentManager } from "./super-agent.js";
 import {
+  buildSuperDigest,
+  extractSuperActions,
   extractSuperDirectives,
   MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
+  type SuperAction,
   type SuperAttachment,
   type SuperReport,
   type SuperSessionUi,
@@ -642,6 +645,15 @@ export class ChatPanel implements vscode.Disposable {
   private superScanText = "";
   /** How much of `superScanText` has already been consumed (no re-dispatch). */
   private superScanOffset = 0;
+  /**
+   * Rolling buffer of the same MAIN-session text, scanned for management
+   * actions (`super-agent-actions` fenced blocks). Kept separate from the
+   * delegation buffer: the two protocols have independent fences and
+   * independent consume offsets, so one can never swallow the other.
+   */
+  private superActionScanText = "";
+  /** How much of `superActionScanText` has already been executed. */
+  private superActionScanOffset = 0;
   /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
@@ -5487,6 +5499,7 @@ export class ChatPanel implements vscode.Disposable {
       !(n.update as { agentId?: string }).agentId
     ) {
       this.scanSuperDirectives(n.update.content);
+      this.scanSuperActions(n.update.content);
     }
     // Empty-response detection: any visible agent output during the live turn
     // disqualifies it from the "gateway answered empty" retry. Replay updates
@@ -6294,6 +6307,91 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Scan the MAIN session's assistant text for child-session management
+   * actions (`super-agent-actions` fenced blocks).
+   *
+   * Same channel and same guard as delegation scanning: only the main
+   * agent's own text is read, so a child can never steer another child.
+   * Actions execute as soon as the block closes — the main session can
+   * retry / cancel / answer / merge / clean up mid-turn instead of waiting
+   * for the user to click the board.
+   */
+  private scanSuperActions(content: unknown): void {
+    const text = ChatPanel.chunkText(content);
+    if (!text) return;
+    this.superActionScanText += text;
+    const scan = extractSuperActions(this.superActionScanText, this.superActionScanOffset);
+    if (scan.end > this.superActionScanOffset) this.superActionScanOffset = scan.end;
+    if (scan.invalidBlocks.length > 0) {
+      this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
+    }
+    if (scan.actions.length > 0) void this.runSuperActions(scan.actions);
+  }
+
+  /**
+   * Execute parsed management actions in output order.
+   *
+   * Failures are never silent: an action aimed at a stale id or inapplicable
+   * state is counted as ignored and reported once, so the main session can
+   * correct itself on the next turn (the board snapshot shows the real state).
+   */
+  private async runSuperActions(actions: readonly SuperAction[]): Promise<void> {
+    const manager = this.getSuperAgent();
+    if (!manager) return;
+    let applied = 0;
+    let ignored = 0;
+    for (const action of actions) {
+      try {
+        let ok = false;
+        switch (action.action) {
+          case "retry":
+            ok = await manager.retry(action.sessionId);
+            break;
+          case "cancel":
+            ok = await manager.cancel(action.sessionId);
+            break;
+          case "answer":
+            ok = manager.respond(action.sessionId, { answers: action.answers });
+            break;
+          case "merge":
+            ok = (await manager.merge(action.sessionId)).ok;
+            break;
+          case "cleanup":
+            ok = (await manager.cleanup(action.sessionId, { keepBranch: action.keepBranch })).ok;
+            break;
+        }
+        if (ok) applied++;
+        else ignored++;
+      } catch (error) {
+        ignored++;
+        this.log.warn(`super agent action ${action.action} failed: ${errorMessage(error)}`);
+      }
+    }
+    if (applied > 0) {
+      this.store.sendToast("info", vscode.l10n.t("已按主会话指令管理子会话：成功 {0} 个", applied));
+    }
+    if (ignored > 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("{0} 个子会话管理动作未生效（目标不存在或状态不适用）", ignored),
+      );
+    }
+  }
+
+  /**
+   * Live child-session board injected into every main-session turn.
+   *
+   * Without it the main agent has no way to know a child's state — it would
+   * dispatch and then be blind until the user narrates the board. Empty when
+   * no child was ever spawned, so ordinary turns pay nothing.
+   */
+  private superAgentsDigest(): string {
+    const sessions = this.store.getState().superSessions;
+    if (!sessions || sessions.length === 0) return "";
+    return buildSuperDigest(sessions);
+  }
+
+  /**
    * Relay a child-session status update to the MAIN session.
    *
    * Asynchronous and parallel by design: the relay is a DIRECT gateway
@@ -6301,10 +6399,12 @@ export class ChatPanel implements vscode.Disposable {
    * It therefore never waits for the main session to be idle, never queues
    * behind an in-flight turn, and never interleaves two conversations — the
    * main turn keeps streaming while the relay runs alongside it. The reply
-   * lands in the transcript as a plain assistant text block (no turn, no
-   * checkpoint, no title change). Fire-and-forget: a failed relay is logged
+   * lands in the transcript as a muted SYSTEM NOTE (never an assistant text
+   * block): it was not said by the main agent, and the main agent's own
+   * context receives child state through the board digest instead. No turn,
+   * no checkpoint, no title change. Fire-and-forget: a failed relay is logged
    * and dropped — the child's state is already on the board in
-   * `superSessions`, the relay is only a note for the main session.
+   * `superSessions`.
    */
   private queueSuperReport(entries: { session: SuperSessionUi; report: SuperReport }[]): void {
     if (entries.length === 0) return;
@@ -7823,9 +7923,9 @@ export class ChatPanel implements vscode.Disposable {
     files?: { name: string; path: string }[],
     contexts?: ContextRefUi[],
     /**
-     * `internal: true` marks a HOST-driven turn (a Super Agent status
-     * report). Such a turn must not rename the session and must not capture
-     * a workspace checkpoint — it is bookkeeping, not user work.
+     * `internal: true` marks a HOST-driven turn (bookkeeping, not user work).
+     * Such a turn must not rename the session, must not capture a workspace
+     * checkpoint, and must not carry the child-session board digest.
      */
     options?: { internal?: boolean },
   ): Promise<void> {
@@ -7922,8 +8022,13 @@ export class ChatPanel implements vscode.Disposable {
       const expanded = await this.expandSkillCall(skillCall);
       if (expanded) typedText = expanded;
     }
+    // The orchestrator's eyes: every main-session turn starts with the live
+    // child-session board (host state, NOT user text — it is never written to
+    // the user bubble). Internal helper requests (titles / enhance / reports)
+    // must not carry it: they are not turns of the conversation.
+    const superDigest = internal ? "" : this.superAgentsDigest();
     const promptText =
-      [contextBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
+      [superDigest, contextBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -8178,12 +8283,13 @@ export class ChatPanel implements vscode.Disposable {
       const regenText = lastUserText.trim();
       const regenSkill = parseSkillInvocation(regenText);
       const regenExpanded = regenSkill ? await this.expandSkillCall(regenSkill) : null;
+      const regenDigest = this.superAgentsDigest();
       const prompt: ContentBlock[] = [
         {
           type: "text",
-          text:
-            regenExpanded ??
-            toAgentPromptText(regenText, this.store.getState().commands),
+          text: [regenDigest, regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands)]
+            .filter(Boolean)
+            .join("\n\n"),
         },
       ];
       const result = await this.promptWithRetry(client, promptSessionId, prompt);

@@ -626,3 +626,22 @@ describe("SessionStore.deleteUserMessage (snapshot anchoring)", () => {
     expect(messages).toHaveLength(0);
   });
 });
+
+describe("SessionStore.appendRelayMessage (host note, not assistant speech)", () => {
+  it("写入 system 文本块：静音注记，不冒充主会话发言", () => {
+    const { store } = makeStore();
+    store.appendRelayMessage("子会话已完成：修复了登录跳转");
+    expect(store.getState().blocks).toHaveLength(1);
+    expect(store.getState().blocks[0]).toMatchObject({
+      kind: "text",
+      system: true,
+      text: "子会话已完成：修复了登录跳转",
+    });
+  });
+
+  it("空白文本不产生块（不留下空行）", () => {
+    const { store } = makeStore();
+    store.appendRelayMessage("   \n ");
+    expect(store.getState().blocks).toHaveLength(0);
+  });
+});

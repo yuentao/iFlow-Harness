@@ -1,0 +1,7 @@
+# .iflowignore — 供 iFlow CLI 的文件/记忆扫描使用的忽略清单（gitignore 语法）。
+#
+# 层级记忆加载器默认不尊重 .gitignore（respectGitIgnore: false）但尊重本文件
+# （respectGeminiIgnore: true），所以 node_modules 里的第三方 AGENTS.md / IFLOW.md
+# 会被当成项目记忆注入每轮 system prompt。只忽略这两类文档，保留依赖源码可读。
+node_modules/**/AGENTS.md
+node_modules/**/IFLOW.md

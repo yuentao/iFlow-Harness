@@ -295,6 +295,10 @@ export class SuperAgentManager {
     if (!session || isTerminalSuperStatus(session.status)) return false;
     // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
     this.dequeue(id);
+    // 先落「已中断」再杀进程：终止进程会触发 AcpClient 的 onExit，而管理层把
+    // 内核退出一律记成 failed —— 终态粘性会让随后的 cancelled 被丢弃，手动
+    // 停止就显示成失败。先把终态占住，onExit 的失败事件会被幂等地忽略。
+    this.apply(id, { type: "cancelled", at: Date.now() });
     const client = this.clients.get(id);
     if (client && session.cliSessionId) {
       try {
@@ -304,7 +308,6 @@ export class SuperAgentManager {
       }
     }
     await this.disposeClient(id);
-    this.apply(id, { type: "cancelled", at: Date.now() });
     this.notifyReport(id);
     return true;
   }
@@ -453,12 +456,14 @@ export class SuperAgentManager {
     this.disposed = true;
     const kept: { id: string; path: string; branch?: string }[] = [];
     for (const [id, session] of this.sessions) {
-      await this.disposeClient(id);
-      // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
-      await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
+      // 与 cancel 同理：先落「已中断」再杀进程，否则 onExit 会把这次终止记成
+      // 内核异常退出（failed），且终态粘性让随后的 cancelled 无法覆盖。
       if (!isTerminalSuperStatus(session.status)) {
         this.apply(id, { type: "cancelled", at: Date.now() });
       }
+      await this.disposeClient(id);
+      // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
+      await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
       if (session.isolation.path) {
         kept.push({ id, path: session.isolation.path, branch: session.isolation.branch });
       }

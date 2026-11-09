@@ -227,6 +227,12 @@ export function SuperAgentBoard() {
               <span className="tabular-nums">{counts.failed}</span>
             </Chip>
           )}
+          {counts.cancelled > 0 && (
+            <Chip tone="muted" title={t("{0} 个已中断", counts.cancelled)}>
+              <Square className="size-2.5" aria-hidden="true" />
+              <span className="tabular-nums">{counts.cancelled}</span>
+            </Chip>
+          )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {active.length > 0 && (

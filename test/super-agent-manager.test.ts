@@ -150,6 +150,10 @@ class FakeClient {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    // 真实 AcpClient 的 dispose 会 kill 进程，随后 child 的 exit 回调触发
+    // onExit —— 管理层把它当作内核退出。这里照做，否则「先杀进程再落
+    // cancelled」的顺序缺陷在测试里永远暴露不出来。
+    this.callbacks.onExit?.(0, null);
   }
 }
 
@@ -432,7 +436,7 @@ describe("super agent · 编排", () => {
     expect(harness.reports.at(-1)?.report.summary).toContain("内核拒绝了这次请求");
   }, 30000);
 
-  it("中断子会话 → cancelled 并终止进程", async () => {
+  it("中断子会话 → cancelled 并终止进程（内核退出不算失败）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -440,6 +444,9 @@ describe("super agent · 编排", () => {
     await harness.manager.cancel(session.id);
     expect(harness.sessions[0]?.status).toBe("cancelled");
     expect(harness.clients[0]?.disposed).toBe(true);
+    // 终止进程会触发 onExit —— 它不能被记成内核异常退出，也不能上报失败。
+    expect(harness.sessions[0]?.error).toBeUndefined();
+    expect(harness.reports.filter((entry) => entry.report.state === "failed")).toHaveLength(0);
   }, 30000);
 
   it("并发超出的派发进排队，槽位空出后自动开跑", async () => {

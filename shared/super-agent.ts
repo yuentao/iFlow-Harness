@@ -672,25 +672,246 @@ function isPlaceholderTask(text: string): boolean {
 // 汇报文本
 // ---------------------------------------------------------------------------
 
-/** 看板顶部的计数摘要。 */
+/**
+ * 看板顶部的计数摘要。
+ *
+ * `cancelled` 单独计数、不计入 `failed`：用户主动停止（或面板关闭时被终止）
+ * 不是失败，把它染成红色「未成功」会让人误以为子会话出了故障。
+ */
 export function summarizeSuperSessions(sessions: readonly SuperSessionUi[]): {
   total: number;
   running: number;
   awaiting: number;
   done: number;
+  /** 真失败：提示词报错 / 内核崩溃 / 进程意外退出。 */
   failed: number;
+  /** 用户中断。 */
+  cancelled: number;
 } {
   let running = 0;
   let awaiting = 0;
   let done = 0;
   let failed = 0;
+  let cancelled = 0;
   for (const s of sessions) {
     if (s.status === "preparing" || s.status === "running") running++;
     else if (s.status === "awaiting_input") awaiting++;
     else if (s.status === "completed") done++;
-    else if (s.status === "failed" || s.status === "cancelled") failed++;
+    else if (s.status === "failed") failed++;
+    else if (s.status === "cancelled") cancelled++;
   }
-  return { total: sessions.length, running, awaiting, done, failed };
+  return { total: sessions.length, running, awaiting, done, failed, cancelled };
+}
+
+// ---------------------------------------------------------------------------
+// 看板摘要（每轮注入主会话的感知层）
+// ---------------------------------------------------------------------------
+
+/**
+ * 摘要的字符预算。它在**每一轮**主会话请求里出现，必须可控：超预算时从尾部
+ * 丢弃条目并明确注明省略了几个，绝不把半截句子喂给模型。
+ */
+export const SUPER_DIGEST_MAX_CHARS = 4000;
+
+const SUPER_STATUS_LABEL: Record<SuperStatus, string> = {
+  preparing: "准备中",
+  running: "运行中",
+  awaiting_input: "等待用户处理",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已中断",
+};
+
+/** 压成一行并截断（看板摘要里每条信息只占一行，避免 JSON 式嵌套）。 */
+function truncateInline(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** 子会话一行摘要（`buildSuperDigest` 的内部构件，导出供测试断言）。 */
+export function describeSuperSessionLine(session: SuperSessionUi): string {
+  const status = `${SUPER_STATUS_LABEL[session.status]}${
+    session.queued && session.status === "preparing" ? "（排队中）" : ""
+  }${(session.attempts ?? 1) > 1 ? `（第 ${session.attempts} 次）` : ""}`;
+  const parts = [`- ${session.id}「${session.title}」${status}`];
+  if (session.isolation.branch) parts.push(`分支 ${session.isolation.branch}`);
+  if (session.status === "awaiting_input" && session.pending) {
+    parts.push(`待答提问（请求 ${session.pending.requestId}）：${truncateInline(describePending(session.pending), 160)}`);
+  } else if (session.status === "failed") {
+    parts.push(`失败原因：${truncateInline(session.error ?? "未知", 160)}`);
+  } else if (session.summary) {
+    parts.push(`摘要：${truncateInline(session.summary, 160)}`);
+  }
+  if (session.integration) {
+    parts.push(
+      `改动去向：${superIntegrationLabel(session.integration)}${
+        session.integration.detail ? `（${truncateInline(session.integration.detail, 120)}）` : ""
+      }${session.integration.url ? ` ${session.integration.url}` : ""}`,
+    );
+  }
+  return parts.join("｜");
+}
+
+const SUPER_DIGEST_FOOTER = [
+  "",
+  "可管理上述子会话：输出 ```super-agent-actions 代码块，正文为 {\"actions\":[...]}；",
+  "动作 retry（重试失败/中断，复用原工作目录）、cancel（停止运行中）、answer（回答待答提问）、merge（合并已完成的分支）、cleanup（清理工作目录）。",
+  "answer 的 answers 以问题 header 为键：单选给字符串，多选给字符串数组。sessionId 必须逐字使用上面的 id。",
+].join("\n");
+
+/**
+ * 主会话每轮看到的结构化看板快照。
+ *
+ * 这是「主会话管理子会话」的感知层：没有它，主会话派发完就与子会话失联，
+ * 只能靠用户转述。内容刻意做成逐行结构化文本 —— id 可被管理动作逐字引用，
+ * 摘要按字符预算截断，保证每轮的固定成本可控。
+ */
+export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
+  if (sessions.length === 0) return "";
+  const counts = summarizeSuperSessions(sessions);
+  const header =
+    `[子会话看板]（宿主自动注入的实时状态，不是用户发言。共 ${counts.total} 个：` +
+    `进行中 ${counts.running}、待处理 ${counts.awaiting}、已完成 ${counts.done}、` +
+    `失败 ${counts.failed}、已中断 ${counts.cancelled}）`;
+  const lines = sessions.map((session) => describeSuperSessionLine(session));
+  const omittedNote = (count: number): string => `…（其余 ${count} 个子会话因预算省略，可用动作前先请用户确认）`;
+  const render = (kept: readonly string[], omitted: number): string =>
+    [
+      header,
+      ...kept,
+      ...(omitted > 0 ? [omittedNote(omitted)] : []),
+    ].join("\n") + SUPER_DIGEST_FOOTER;
+
+  let kept = lines;
+  while (kept.length > 1 && render(kept, lines.length - kept.length).length > SUPER_DIGEST_MAX_CHARS) {
+    kept = kept.slice(0, -1);
+  }
+  return render(kept, lines.length - kept.length);
+}
+
+// ---------------------------------------------------------------------------
+// 管理动作协议（super-agent-actions）
+// ---------------------------------------------------------------------------
+
+/** 一个动作块里最多执行多少个动作（防止一次输出引发动作风暴）。 */
+export const MAX_SUPER_ACTIONS = 20;
+
+export type SuperAction =
+  | { action: "retry"; sessionId: string }
+  | { action: "cancel"; sessionId: string }
+  | { action: "merge"; sessionId: string }
+  | {
+      action: "cleanup";
+      sessionId: string;
+      /** 显式保留分支（默认：分支上有未合并提交时宿主自己也会保留）。 */
+      keepBranch?: boolean;
+    }
+  | { action: "answer"; sessionId: string; answers: Record<string, string | string[]> };
+
+export interface SuperActionScan {
+  /** 解析成功的动作，按输出顺序（执行也按这个顺序）。 */
+  actions: SuperAction[];
+  /** 解析失败的块正文（宿主据此提示用户，不静默吞掉）。 */
+  invalidBlocks: string[];
+  /** 扫描结束位置（消费偏移，同一段文本不会被执行两次）。 */
+  end: number;
+}
+
+/** 动作块的开栏标记（必须独占一行）。 */
+const ACTION_FENCE_OPEN = /^```super-agent-actions[ \t]*$/;
+
+/**
+ * 从主 Agent 的回复文本里扫出管理动作块。
+ *
+ * 与委派指令同构：逐块解析、未闭合就停在开栏处等待后续 chunk、解析失败只
+ * 记不入执行。刻意**静默忽略**「占位符 id」（模型把协议示例原样抄回来）：
+ * 这种块不是错误，不该给用户弹警告。
+ */
+export function extractSuperActions(text: string, fromOffset = 0): SuperActionScan {
+  const actions: SuperAction[] = [];
+  const invalidBlocks: string[] = [];
+  let end = fromOffset;
+  let cursor = fromOffset;
+
+  while (cursor < text.length) {
+    const open = findFence(text, cursor, ACTION_FENCE_OPEN);
+    if (!open) break;
+    const close = findFence(text, open.bodyStart, FENCE_CLOSE);
+    if (!close) {
+      // 还没闭合（流式中间态）—— 等后续 chunk 补齐，不能提前执行半截动作。
+      end = open.lineStart;
+      break;
+    }
+    const body = text.slice(open.bodyStart, close.lineStart).trim();
+    const parsed = parseActionBody(body);
+    if (parsed === null) invalidBlocks.push(body);
+    else actions.push(...parsed);
+    cursor = close.lineEnd;
+    end = close.lineEnd;
+  }
+
+  return { actions: actions.slice(0, MAX_SUPER_ACTIONS), invalidBlocks, end };
+}
+
+/** 解析动作块正文。null = 格式非法（要提示），[] = 合法但无可执行动作（静默）。 */
+function parseActionBody(body: string): SuperAction[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const raw = Array.isArray(parsed)
+    ? parsed
+    : isRecord(parsed) && Array.isArray(parsed.actions)
+      ? parsed.actions
+      : null;
+  if (!raw) return null;
+
+  const out: SuperAction[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    const action = typeof entry.action === "string" ? entry.action.trim() : "";
+    const sessionId = typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
+    // 占位符（`<id>` 之类）是文档示例被回显 —— 不是错误，静默跳过。
+    if (!sessionId || isPlaceholderTask(sessionId)) continue;
+    switch (action) {
+      case "retry":
+      case "cancel":
+      case "merge":
+        out.push({ action, sessionId });
+        break;
+      case "cleanup":
+        out.push(entry.keepBranch === true ? { action, sessionId, keepBranch: true } : { action, sessionId });
+        break;
+      case "answer": {
+        const answers = parseActionAnswers(entry.answers);
+        if (answers) out.push({ action, sessionId, answers });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+function parseActionAnswers(raw: unknown): Record<string, string | string[]> | null {
+  if (!isRecord(raw)) return null;
+  const answers: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const name = key.trim();
+    if (!name) continue;
+    if (typeof value === "string") answers[name] = value;
+    else if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+      answers[name] = value as string[];
+    }
+  }
+  return Object.keys(answers).length > 0 ? answers : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 /** Report 状态 → 中文短标签（主会话汇报与看板共用，避免两处措辞漂移）。 */
@@ -710,11 +931,11 @@ export function superReportLabel(state: SuperReportState): string {
 }
 
 /**
- * 把子会话汇报拼成一条给**主会话**的提示词。
+ * 子会话状态注记的生成提示词。
  *
- * 刻意做成结构化文本而不是自由叙述：主 Agent 需要据此（a）向用户转述、
- * （b）决定下一步（例如是否再派一个子会话去修）。多条汇报合成一条，避免
- * N 个子会话同时完成时把主会话灌爆（dsh 的 relay 保序 + 合并）。
+ * 由宿主旁路直连调用（不是主会话的一轮），产物以**系统注记**呈现给用户，
+ * 因此措辞不能自称主会话、也不能要求它「继续对话」——只做客观转述。
+ * 多条汇报合成一条，避免 N 个子会话同时完成时刷屏（dsh 的 relay 保序 + 合并）。
  */
 export function buildSuperReportPrompt(entries: { session: SuperSessionUi; report: SuperReport }[]): string {
   if (entries.length === 0) return "";
@@ -729,10 +950,10 @@ export function buildSuperReportPrompt(entries: { session: SuperSessionUi; repor
   });
   return [
     "[子会话状态上报]",
-    "以下是你派发的子会话的状态更新（由宿主自动上报，不是用户发言）。",
+    "以下是宿主观察到的子会话状态更新（不是用户发言，也不是你之前说过的话）。",
     ...lines,
     "",
-    "请据此向用户简明转述结果；若有需要用户决策的事项，明确提出那一个具体问题。",
+    "请用一两句话客观说明进展；若有需要用户决策的事项，明确提出那一个具体问题。不要扮演主会话，也不要声称自己执行过这些改动。",
   ].join("\n");
 }
 

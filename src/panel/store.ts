@@ -435,14 +435,19 @@ export class SessionStore {
 
   /**
    * Super Agent: append one relayed child-session status note to the MAIN
-   * transcript as a plain assistant text block. The relay runs on its own
-   * direct completion (never a main ACP turn), so this must not touch
-   * `status`, checkpoints or the session title — it is a tail-only append.
+   * transcript.
+   *
+   * The relay runs on its own direct completion (never a main ACP turn), so
+   * the text is NOT something the main agent said — it is a host note about
+   * child sessions. It is therefore appended as a `system` text block (muted
+   * line, no brand avatar, no copy/regenerate actions), never as an
+   * assistant reply. Tail-only: no status change, checkpoint or session
+   * rename.
    */
   appendRelayMessage(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
-    this.state.blocks.push({ kind: "text", id: nextBlockId(), text: trimmed });
+    this.state.blocks.push({ kind: "text", id: nextBlockId(), text: trimmed, system: true });
     this.noteMutationIndex(this.state.blocks.length - 1);
     this.flush();
   }

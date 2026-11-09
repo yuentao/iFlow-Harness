@@ -224,6 +224,7 @@ npm run package        # vendor:cli && build && vsce package --no-dependencies
 - 子会话 worktree 目录名 slug 需截断到 24 字符，以规避 Windows/git 路径长度限制；创建失败时要把 git 的真实报错透传给子会话，不要静默退化为空目录。
 - `.acrylic` 的 `backdrop-filter` 会给 `fixed` 后代建立包含块，叠加 `overflow-hidden` 会裁切弹框；浮卡内的全屏弹框应使用 `createPortal(..., document.body)`，与 `ConfirmDialog` 一致。
 - 顶部浮卡高度测量不能用空依赖的 effect：首帧 splash 早返回时 ref 为 null，之后不会重跑；应改用 callback ref，在浮卡真正挂载时创建/更新 ResizeObserver。
+- AcpClient 的 JSON-RPC 拒绝是普通对象 {code,message,data}，错误展示必须复用 src/acp/jsonrpc.ts 的 errorMessage，直接用 String(error) 会得到 [object Object]。
 
 ## 已知陷阱(代码注释里踩过并验证过的,改代码前必读)
 

@@ -314,4 +314,63 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await turn;
     await flush();
   });
+
+  it("every main-session turn carries the child-session board digest", async () => {
+    p.store.replaceState({
+      ...p.store.getState(),
+      superSessions: [
+        {
+          id: "super-board-1",
+          title: "修复登录跳转",
+          task: "修好它",
+          status: "running",
+          isolation: { kind: "directory", path: "/tmp/wt" },
+          createdAt: 1,
+          updatedAt: 2,
+          reports: [],
+        },
+      ],
+    });
+    const turn = send("继续");
+    await flush();
+    const sent = calls[0]!.prompt[0]!.text!;
+    expect(sent.startsWith("[子会话看板]")).toBe(true);
+    expect(sent).toContain("super-board-1");
+    expect(sent).toContain("继续");
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await turn;
+    await flush();
+  });
+
+  it("普通回合（无子会话）不注入看板", async () => {
+    const turn = send("你好");
+    await flush();
+    expect(calls[0]!.prompt[0]!.text).toBe("你好");
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await turn;
+    await flush();
+  });
+
+  it("management actions in the main agent's text drive the manager", async () => {
+    const retry = vi.fn(async (_id: string) => true);
+    const cancel = vi.fn(async (_id: string) => true);
+    Object.assign(p, {
+      getSuperAgent: () => ({
+        retry,
+        cancel,
+        respond: vi.fn(() => true),
+        merge: vi.fn(async () => ({ ok: true })),
+        cleanup: vi.fn(async () => ({ ok: true })),
+      }),
+    });
+    const internals = p as unknown as { scanSuperActions: (content: unknown) => void };
+    internals.scanSuperActions({
+      type: "text",
+      text: ['```super-agent-actions', '{"actions":[{"action":"retry","sessionId":"super-1"}]}', "```"].join("\n"),
+    });
+    await flush();
+    expect(retry).toHaveBeenCalledExactlyOnceWith("super-1");
+    expect(cancel).not.toHaveBeenCalled();
+    expect(toasts.at(-1)?.message).toContain("成功 1 个");
+  });
 });

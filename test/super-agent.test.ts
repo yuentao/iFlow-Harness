@@ -1,15 +1,20 @@
 import { describe, it, expect } from "vitest";
 import {
   applySuperEvent,
+  buildSuperDigest,
   buildSuperReportPrompt,
   canRetrySuperSession,
+  describeSuperSessionLine,
+  extractSuperActions,
   extractSuperDirectives,
   isTerminalSuperStatus,
+  MAX_SUPER_ACTIONS,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   reportForSession,
   retrySuperSession,
   summarizeSuperSessions,
+  SUPER_DIGEST_MAX_CHARS,
   sumSuperUsage,
   withUsage,
   type SuperSessionUi,
@@ -303,7 +308,7 @@ describe("super agent · 汇报", () => {
     expect(buildSuperReportPrompt([])).toBe("");
   });
 
-  it("看板计数", () => {
+  it("看板计数：用户中断不计入失败", () => {
     const summary = summarizeSuperSessions([
       session({ id: "a", status: "running" }),
       session({ id: "b", status: "preparing" }),
@@ -312,7 +317,7 @@ describe("super agent · 汇报", () => {
       session({ id: "e", status: "failed" }),
       session({ id: "f", status: "cancelled" }),
     ]);
-    expect(summary).toEqual({ total: 6, running: 2, awaiting: 1, done: 1, failed: 2 });
+    expect(summary).toEqual({ total: 6, running: 2, awaiting: 1, done: 1, failed: 1, cancelled: 1 });
   });
 });
 
@@ -354,5 +359,153 @@ describe("super agent · token 用量", () => {
     ]);
     expect(totals.input).toBe(1500);
     expect(totals.estimatedCost).toBeNull();
+  });
+});
+
+describe("super agent · 看板摘要", () => {
+  it("没有子会话时不注入任何内容", () => {
+    expect(buildSuperDigest([])).toBe("");
+  });
+
+  it("列出每个子会话的 id、状态与摘要，并附管理动作说明", () => {
+    const digest = buildSuperDigest([
+      session({ id: "super-a", status: "running", summary: "正在补单测" }),
+      session({
+        id: "super-b",
+        title: "梳理依赖",
+        status: "completed",
+        summary: "未发现冗余",
+        integration: { mode: "merge", state: "merged", at: 10 },
+      }),
+    ]);
+    expect(digest).toContain("super-a");
+    expect(digest).toContain("运行中");
+    expect(digest).toContain("正在补单测");
+    expect(digest).toContain("super-b");
+    expect(digest).toContain("已完成");
+    expect(digest).toContain("已自动合并");
+    expect(digest).toContain("super-agent-actions");
+    // 用户中断不计入失败：摘要里应分开呈现。
+    expect(digest).toContain("失败 0");
+    expect(digest).toContain("已中断 0");
+  });
+
+  it("失败会话给出原因，待答会话给出请求 id 与问题", () => {
+    const digest = buildSuperDigest([
+      session({ id: "super-f", status: "failed", error: "内核拒绝了这次请求" }),
+      session({
+        id: "super-q",
+        status: "awaiting_input",
+        pending: {
+          kind: "question",
+          requestId: "req-7",
+          questions: [{ header: "范围", question: "要覆盖压缩卡吗？", multiSelect: false, options: [] }],
+          deadline: 1,
+        },
+      }),
+    ]);
+    expect(digest).toContain("失败原因：内核拒绝了这次请求");
+    expect(digest).toContain("req-7");
+    expect(digest).toContain("要覆盖压缩卡吗？");
+  });
+
+  it("超出字符预算时丢弃尾部条目并注明省略数量", () => {
+    const many = Array.from({ length: 120 }, (_, i) =>
+      session({ id: `super-${i}`, title: `任务 ${i}`, status: "completed", summary: "x".repeat(120) }),
+    );
+    const digest = buildSuperDigest(many);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    expect(digest).toMatch(/其余 \d+ 个子会话因预算省略/);
+    expect(digest).toContain("super-0");
+    expect(digest).not.toContain("super-119");
+  });
+
+  it("单行摘要压成一行并截断过长文本", () => {
+    const line = describeSuperSessionLine(
+      session({ status: "completed", summary: `第一行\n第二行${"长".repeat(300)}` }),
+    );
+    expect(line).not.toContain("\n");
+    expect(line.length).toBeLessThan(300);
+  });
+});
+
+describe("super agent · 管理动作协议", () => {
+  it("解析 retry / cancel / merge / cleanup / answer", () => {
+    const text = [
+      "```super-agent-actions",
+      JSON.stringify({
+        actions: [
+          { action: "retry", sessionId: "super-a" },
+          { action: "cancel", sessionId: "super-b" },
+          { action: "merge", sessionId: "super-c" },
+          { action: "cleanup", sessionId: "super-d", keepBranch: true },
+          { action: "answer", sessionId: "super-e", answers: { 范围: ["A", "B"], 备注: "都行" } },
+        ],
+      }),
+      "```",
+    ].join("\n");
+    const scan = extractSuperActions(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.actions).toEqual([
+      { action: "retry", sessionId: "super-a" },
+      { action: "cancel", sessionId: "super-b" },
+      { action: "merge", sessionId: "super-c" },
+      { action: "cleanup", sessionId: "super-d", keepBranch: true },
+      { action: "answer", sessionId: "super-e", answers: { 范围: ["A", "B"], 备注: "都行" } },
+    ]);
+  });
+
+  it("回显文档占位符时静默忽略，不当作错误", () => {
+    const text = ['```super-agent-actions', '{"actions":[{"action":"retry","sessionId":"<id>"}]}', "```"].join("\n");
+    const scan = extractSuperActions(text);
+    expect(scan.actions).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(0);
+  });
+
+  it("非法 JSON → 收进 invalidBlocks 且不执行任何动作", () => {
+    const scan = extractSuperActions(["```super-agent-actions", "{nope}", "```"].join("\n"));
+    expect(scan.actions).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+  });
+
+  it("未闭合的块不提前执行（流式中间态）", () => {
+    const text = ['```super-agent-actions', '{"actions":[{"action":"retry","sessionId":"super-a"}]}'].join("\n");
+    const scan = extractSuperActions(text);
+    expect(scan.actions).toHaveLength(0);
+    expect(scan.end).toBe(0);
+  });
+
+  it("消费偏移保证同一段文本不会被执行两次", () => {
+    const text = ['```super-agent-actions', '{"actions":[{"action":"cancel","sessionId":"super-a"}]}', "```"].join("\n");
+    const first = extractSuperActions(text);
+    expect(first.actions).toHaveLength(1);
+    const second = extractSuperActions(text, first.end);
+    expect(second.actions).toHaveLength(0);
+  });
+
+  it("未知动作与缺 answers 的 answer 被丢弃，但块本身合法", () => {
+    const text = [
+      "```super-agent-actions",
+      JSON.stringify({
+        actions: [
+          { action: "explode", sessionId: "super-a" },
+          { action: "answer", sessionId: "super-b" },
+          { action: "merge", sessionId: "super-c" },
+        ],
+      }),
+      "```",
+    ].join("\n");
+    const scan = extractSuperActions(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.actions).toEqual([{ action: "merge", sessionId: "super-c" }]);
+  });
+
+  it("一次输出最多执行 MAX_SUPER_ACTIONS 个动作", () => {
+    const actions = Array.from({ length: MAX_SUPER_ACTIONS + 5 }, (_, i) => ({
+      action: "cancel",
+      sessionId: `super-${i}`,
+    }));
+    const text = ["```super-agent-actions", JSON.stringify({ actions }), "```"].join("\n");
+    expect(extractSuperActions(text).actions).toHaveLength(MAX_SUPER_ACTIONS);
   });
 });
