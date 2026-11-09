@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   branchHasUnmergedCommits,
+  commitWorktree,
   createWorktree,
   currentBranch,
   inspectWorkingTree,
@@ -293,5 +294,62 @@ describe("worktree · 自动合并的前置检查", () => {
     expect(await remoteOriginUrl(repo)).toBeNull();
     git(repo, "remote", "add", "origin", "https://example.com/a.git");
     expect(await remoteOriginUrl(repo)).toBe("https://example.com/a.git");
+  }, 30000);
+});
+
+describe("worktree · 宿主代子会话提交", () => {
+  it("把已跟踪改动与未跟踪文件一起提交，提交后工作区干净", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-commit");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("commit"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "a.txt"), "changed\n", "utf8");
+    writeFileSync(path.join(target, "new.txt"), "new\n", "utf8");
+
+    const before = git(target, "rev-list", "--count", "HEAD").trim();
+    const result = await commitWorktree({
+      repoRoot: repo,
+      worktreePath: target,
+      message: "super-agent: commit test",
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.committed).toBe(true);
+    expect(result.files).toBe(2);
+    // 分支上多了一个提交，提交信息来自宿主，且工作区不再有未提交改动。
+    const after = git(target, "rev-list", "--count", "HEAD").trim();
+    expect(Number(after)).toBe(Number(before) + 1);
+    expect(git(target, "log", "-1", "--format=%s")).toContain("super-agent: commit test");
+    expect(git(target, "status", "--porcelain").trim()).toBe("");
+    // 提交身份由宿主显式提供，不依赖用户全局配置。
+    expect(git(target, "log", "-1", "--format=%an")).toContain("iFlow Harness");
+  }, 30000);
+
+  it("工作区本来就干净时不产生空提交", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-commit-clean");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("commit-clean"),
+      baseRef: probe.head!,
+    });
+
+    const before = git(target, "rev-list", "--count", "HEAD").trim();
+    const result = await commitWorktree({
+      repoRoot: repo,
+      worktreePath: target,
+      message: "super-agent: nothing to do",
+    });
+
+    expect(result.committed).toBe(false);
+    expect(result.files).toBe(0);
+    expect(git(target, "rev-list", "--count", "HEAD").trim()).toBe(before);
   }, 30000);
 });

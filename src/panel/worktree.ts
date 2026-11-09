@@ -163,6 +163,54 @@ export async function branchHasUnmergedCommits(options: {
   }
 }
 
+export interface WorktreeCommitResult {
+  /** 是否产生了新提交（工作区本来就干净时为 false）。 */
+  committed: boolean;
+  /** 提交的改动条目数（`git status --porcelain` 非空行数）。 */
+  files: number;
+  /** 提交失败的原因（失败时工作区保持原样，绝不回滚用户工作）。 */
+  error?: string;
+}
+
+/**
+ * 把子会话 worktree 里未提交的改动固化成一个提交。
+ *
+ * 自动合并 / PR 只认**提交**，而子会话不一定自己 commit（系统提示禁止未经
+ * 明示的提交）。宿主因此在子会话正常结束后补这一刀：只在它自己的 worktree
+ * 内执行（主工作区完全不受影响），不推送、不切换分支、不 --no-verify ——
+ * 钩子失败就如实上报并保留分支，绝不绕过项目检查。
+ */
+export async function commitWorktree(options: {
+  repoRoot: string;
+  worktreePath: string;
+  message: string;
+}): Promise<WorktreeCommitResult> {
+  let files = 0;
+  try {
+    const { stdout } = await git(options.worktreePath, ["status", "--porcelain"]);
+    files = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+  } catch (error) {
+    return { committed: false, files: 0, error: errorMessage(error) };
+  }
+  if (files === 0) return { committed: false, files: 0 };
+  try {
+    await git(options.worktreePath, ["add", "-A"]);
+    // 显式身份：子会话的提交不能依赖用户全局 git 配置是否存在。
+    await git(options.worktreePath, [
+      "-c",
+      "user.name=iFlow Harness",
+      "-c",
+      "user.email=iflow-harness@local",
+      "commit",
+      "-m",
+      options.message,
+    ]);
+    return { committed: true, files };
+  } catch (error) {
+    return { committed: false, files, error: errorMessage(error) };
+  }
+}
+
 export interface WorktreeRemoveResult {
   /** worktree 目录是否已被移除。 */
   removed: boolean;

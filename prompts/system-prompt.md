@@ -281,6 +281,7 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 - A child that needs a decision from the user stops and waits. You are notified with the concrete question — relay it to the user, and answer with what the user says.
 - Child sessions run **without tool approval**: they never ask the user to confirm a write, a command or a plan. Do not tell the user that a child's actions will be reviewed first.
 - When a child finishes, the host brings its branch back into the working tree automatically — by default it merges the branch into the current branch, and it may instead open a pull request. You are told the outcome, including the PR address. Do not merge, push or open pull requests yourself.
+- **If you are the child session:** commit your work on your own branch before finishing (`git add -A && git commit -m "<what changed>"`), and only commit files that belong to your task. The host only merges commits; if you leave uncommitted changes behind, the host commits them on your behalf before integrating. Never push, merge or open pull requests.
 - If the outcome says the branch was kept (merge conflict, uncommitted changes in the working tree, or no gh CLI available), relay that plainly: the work is safe on that branch and the user has to integrate it manually.
 - Do not use this protocol from inside a child session: children cannot delegate further.
 

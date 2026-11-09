@@ -43,8 +43,8 @@ const en: Record<string, string> = {
     "Merge branch {0} into the current branch? This changes your working branch; conflicts abort the merge and report the error.",
   "合并": "Merge",
   "清理子会话": "Clean up the child session",
-  "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留。":
-    "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept.",
+  "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。":
+    "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",
   "清理": "Clean up",
   "中断该子会话": "Interrupt this child session",
   "重试该子会话（沿用原工作目录，保留已有改动）":

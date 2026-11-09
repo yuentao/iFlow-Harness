@@ -296,7 +296,7 @@ export function SuperAgentBoard() {
         <ConfirmDialog
           title={t("清理子会话")}
           message={t(
-            "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留。",
+            "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。",
             confirmCleanup.title,
           )}
           confirmLabel={t("清理")}

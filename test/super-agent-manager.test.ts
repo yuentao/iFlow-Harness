@@ -39,7 +39,7 @@ function makeStorage(): string {
   return dir;
 }
 
-type Plan = "complete" | "commit" | "hang" | "hang-text" | "throw" | "usage";
+type Plan = "complete" | "commit" | "edit" | "hang" | "hang-text" | "throw" | "usage";
 
 /** A stand-in for AcpClient — the manager only uses a small surface. */
 class FakeClient {
@@ -99,6 +99,12 @@ class FakeClient {
       return new Promise((resolve) => {
         this.settle = resolve;
       });
+    }
+    if (this.plan === "edit") {
+      // A child that edits its worktree but does NOT commit (the common case:
+      // the system prompt forbids committing without an explicit request).
+      writeFileSync(path.join(this.cwd, "partial.txt"), "half done\n", "utf8");
+      return { stopReason: "end_turn" };
     }
     if (this.plan === "commit") {
       // A real child edits files INSIDE its worktree and commits them.
@@ -508,6 +514,21 @@ describe("super agent · 自动集成", () => {
     ).toBe(true);
   }, 30000);
 
+  it("子会话没提交时宿主代提交，再正常自动合并", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "edit", "merge");
+    harness.manager.spawn({ title: "写文件", task: "把文件写出来但不提交" });
+    await until(() => harness.sessions[0]?.integration?.state === "merged");
+
+    const session = harness.sessions[0]!;
+    expect(session.integration?.needsAction).toBeFalsy();
+    // 宿主补的提交让自动合并真的把文件带回了主工作区。
+    expect(existsSync(path.join(repo, "partial.txt"))).toBe(true);
+    expect(
+      session.reports.some((report) => report.summary.includes("宿主已代子会话提交")),
+    ).toBe(true);
+  }, 30000);
+
   it("主工作区有未提交改动时跳过自动合并，并上报 blocked", async () => {
     const repo = makeRepo();
     writeFileSync(path.join(repo, "dirty.txt"), "uncommitted\n", "utf8");
@@ -579,10 +600,12 @@ describe("super agent · 任务提示词", () => {
     expect(text).not.toContain("iflow/super/");
   });
 
-  it("明确告知免确认模式与「不要自己合并」", () => {
+  it("明确告知免确认、要求自己提交、且不要自己合并/推送", () => {
     const text = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
     expect(text).toContain("免确认");
-    expect(text).toContain("不需要自己合并");
+    expect(text).toContain("git add -A && git commit");
+    expect(text).toContain("不要推送");
+    expect(text).toContain("宿主会代你补一个提交");
   });
 
   it("重试提示词说明上一轮中断、要求先检查现状", () => {

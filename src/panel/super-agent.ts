@@ -71,6 +71,7 @@ import {
 } from "../../shared/super-agent.js";
 import {
   branchHasUnmergedCommits,
+  commitWorktree,
   createPullRequest,
   createWorktree,
   currentBranch,
@@ -635,8 +636,29 @@ export class SuperAgentManager {
           at,
           report: { state: "ready", summary: this.summarize(id), at },
         });
-        // 自动合并 / PR 只依赖 worktree 里的提交，与子进程无关。
-        await this.integrate(id);
+        // 子会话不一定会自己提交（系统提示禁止未经用户明示的 commit），而
+        // 自动集成只认提交：正常完成时由宿主在它自己的 worktree 内补一次提交。
+        // 失败 / 中断刻意不提交 —— 重试要能直达未完成的现场。
+        const commit = await this.commitChildWork(id, isolation);
+        if (commit.error) {
+          this.recordIntegration(id, {
+            mode: this.deps.integrationMode(),
+            at: Date.now(),
+            state: "skipped",
+            needsAction: true,
+            detail: `宿主代提交失败，分支已保留：${commit.error}`,
+          });
+        } else {
+          if (commit.committed) {
+            this.appendReport(id, {
+              state: "progress",
+              summary: `宿主已代子会话提交 ${commit.files} 个文件`,
+              at: Date.now(),
+            });
+          }
+          // 自动合并 / PR 只依赖 worktree 里的提交，与子进程无关。
+          await this.integrate(id);
+        }
         this.notifyReport(id);
       }
     } catch (error) {
@@ -894,6 +916,44 @@ export class SuperAgentManager {
     } else {
       record({ state: "failed", needsAction: true, detail: `创建 PR 失败：${pr.error}` });
     }
+  }
+
+  /**
+   * 正常结束后把子会话的未提交改动固化成一次提交（只发生在它自己的
+   * worktree，主工作区完全不受影响）。失败时把错误交回调用方如实上报。
+   */
+  private async commitChildWork(
+    id: string,
+    isolation: SuperSessionUi["isolation"],
+  ): Promise<{ committed: boolean; files: number; error?: string }> {
+    if (isolation.kind !== "git_worktree" || !isolation.path) {
+      return { committed: false, files: 0 };
+    }
+    const session = this.sessions.get(id);
+    if (!session) return { committed: false, files: 0 };
+    const result = await commitWorktree({
+      repoRoot: this.deps.repoRoot,
+      worktreePath: isolation.path,
+      message: `super-agent: ${session.title}\n\n${this.summarize(id)}`,
+    });
+    if (result.error) {
+      this.deps.log.warn(`子会话代提交失败：${result.error}`);
+    } else if (result.committed) {
+      this.deps.log.info(`super agent: ${id} 宿主代提交 ${result.files} 个文件`);
+    }
+    return result;
+  }
+
+  /** 补一条汇报：终态粘性会丢弃状态事件，元数据补记不走状态机。 */
+  private appendReport(id: string, report: SuperReport): void {
+    const current = this.sessions.get(id);
+    if (!current) return;
+    this.sessions.set(id, {
+      ...current,
+      reports: [...current.reports, report],
+      updatedAt: report.at,
+    });
+    this.emit();
   }
 
   /** 写入集成结果（元数据补记，不经过状态机 —— 终态会话的事件会被丢弃）。 */
@@ -1249,7 +1309,8 @@ export function buildTaskPrompt(
   lines.push(
     `不要动工作目录以外（尤其是主工作区）的文件。`,
     `你处于免确认模式：工具调用不会被审批。请自行判断风险，不要执行与任务无关的破坏性命令。`,
-    `完成后由宿主负责把你的改动带回主工作区，你不需要自己合并、推送或创建 PR。`,
+    `完成前请把改动提交到当前分支（git add -A && git commit -m "说明这次改动的信息"）；只提交本任务相关的文件，不要切换、重命名或删除分支。`,
+    `不要推送、不要创建 PR、不要合并 —— 宿主会在你完成后把分支带回主工作区；若你遗留了未提交的改动，宿主会代你补一个提交。`,
     ``,
     `完成后用一段话总结：做了什么、结论是什么、还剩什么没做。这段总结会被原样转达给主会话。`,
   );
