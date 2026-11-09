@@ -349,9 +349,32 @@ export function describePending(pending: SuperPending): string {
 // 委派指令协议
 // ---------------------------------------------------------------------------
 
+/** 一个子会话任务最多携带的附件数（提示词与复制成本都要有上限）。 */
+export const MAX_SUPER_ATTACHMENTS = 10;
+
+/**
+ * 随任务交给子会话的一份文件或图片。
+ *
+ * 子会话看不到主会话的对话，也读不到主工作区与暂存目录，所以附件必须由宿主
+ * **复制**到它可见的位置：`path` 是宿主磁盘上的源文件；`data` 是用户粘贴图片
+ * 的内联 base64（这类图片从来没有磁盘路径）。两者恰好有一个。
+ */
+export interface SuperAttachment {
+  /** 展示名（默认取路径 basename）。 */
+  name: string;
+  /** 宿主机上的源文件路径（由宿主复制）。 */
+  path?: string;
+  /** 内联图片载荷（base64，不含 `data:` 前缀）。 */
+  data?: string;
+  /** 内联图片的 MIME 类型。 */
+  mimeType?: string;
+}
+
 export interface SuperTaskSpec {
   title: string;
   task: string;
+  /** 随任务交给子会话的附件（指令里只允许写路径，内联图片由宿主补）。 */
+  attachments?: SuperAttachment[];
 }
 
 /** 委派代码块的开栏标记（必须独占一行）。 */
@@ -457,7 +480,7 @@ function parseDirectiveBody(body: string): SuperTaskSpec[] | null {
   const tasks: SuperTaskSpec[] = [];
   for (const entry of rawTasks) {
     if (typeof entry !== "object" || entry === null) return null;
-    const record = entry as { title?: unknown; task?: unknown };
+    const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
     const task = typeof record.task === "string" ? record.task.trim() : "";
     // A task that is still a placeholder (the model echoed the documented
     // example back) is skipped — opening a child session for "<任务说明>"
@@ -465,9 +488,57 @@ function parseDirectiveBody(body: string): SuperTaskSpec[] | null {
     if (!task || isPlaceholderTask(task)) continue;
     const rawTitle = typeof record.title === "string" ? record.title.trim() : "";
     const title = rawTitle && !isPlaceholderTask(rawTitle) ? rawTitle : "";
-    tasks.push({ title: normalizeSuperTitle(title, task.split("\n")[0] ?? "子会话"), task });
+    const attachments = parseDirectiveAttachments(record.attachments);
+    tasks.push({
+      title: normalizeSuperTitle(title, task.split("\n")[0] ?? "子会话"),
+      task,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    });
   }
   return tasks.length > 0 ? tasks : null;
+}
+
+/**
+ * 委派指令里的附件列表。只接受路径 —— base64 图片不可能由模型可靠地写出，
+ * 而一段被流式扫描的巨型 base64 只会拖垮协议。用户的粘贴图片由宿主自己补
+ * 进同一个列表（见 `ChatPanel.currentTurnAttachments`）。
+ */
+function parseDirectiveAttachments(raw: unknown): SuperAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SuperAttachment[] = [];
+  for (const entry of raw) {
+    if (out.length >= MAX_SUPER_ATTACHMENTS) break;
+    if (typeof entry === "string") {
+      const target = entry.trim();
+      if (target && !isPlaceholderTask(target)) out.push({ name: attachmentBaseName(target), path: target });
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as { path?: unknown; name?: unknown };
+    if (typeof record.path !== "string" || !record.path.trim()) continue;
+    const target = record.path.trim();
+    if (isPlaceholderTask(target)) continue;
+    const rawName = typeof record.name === "string" ? record.name.trim() : "";
+    out.push({
+      name: normalizeAttachmentName(rawName || attachmentBaseName(target)),
+      path: target,
+    });
+  }
+  return out;
+}
+
+/** 路径的末段（不引 node:path —— 本模块被 webview 一起打包）。 */
+function attachmentBaseName(target: string): string {
+  const trimmed = target.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || "附件";
+}
+
+/** 展示名清洗：压空白、去掉控制字符、截断到 80 字。 */
+function normalizeAttachmentName(raw: string): string {
+  const cleaned = raw.replace(/[\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "附件";
+  return cleaned.length > 80 ? `${cleaned.slice(0, 79)}…` : cleaned;
 }
 
 /** 占位符形态的任务 / 标题（模型把协议示例原样抄了回来）。 */

@@ -266,6 +266,7 @@
   "已派发 {0} 个子会话（并发上限 {1}）": "Dispatched {0} child session(s) (concurrency limit {1})",
   "子会话委派指令无法解析，已忽略": "Could not parse the child-session delegation directive; ignored.",
   "子会话任务说明不能为空": "The child session task description cannot be empty.",
+  "子会话委派指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略": "{0} attachment(s) in the child-session directive are unavailable (not inside the workspace or the staging directory) and were ignored.",
   "已中断 {0} 个子会话": "Interrupted {0} child session(s).",
   "该子会话没有待处理的请求": "This child session has no pending request.",
   "已清理工作目录，分支已保留：{0}": "Working directory removed; the branch was kept: {0}",

@@ -268,10 +268,12 @@ You can delegate independent pieces of work to **child sessions**. Each child se
 To delegate, output one `super-agent` fenced block whose body is JSON:
 
 ```super-agent
-{"tasks":[{"title":"<不超过 24 字的标题>","task":"<自包含的任务说明>"}]}
+{"tasks":[{"title":"<不超过 24 字的标题>","task":"<自包含的任务说明>","attachments":["<工作区相对路径或绝对路径>"]}]}
 ```
 
 Replace the angle-bracket placeholders with real content — a placeholder is ignored, and a block whose tasks are all placeholders is rejected.
+
+- Attachments: images and files the user attached to the CURRENT message are handed to every child automatically — do not list them again. Use the optional `attachments` array only for extra workspace files a child needs (workspace-relative or absolute; a path outside the workspace is ignored). The host copies them into the child's own attachment directory; a child cannot read the main workspace or the conversation.
 
 - You may delegate several tasks in one block. Each task must be independently completable: a child cannot see your context, so its description has to stand on its own (state the goal, the relevant files, and what "done" means).
 - Keep the title short; it labels the child session in the panel.
