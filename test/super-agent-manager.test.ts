@@ -33,7 +33,16 @@ function makeRepo(): string {
   return dir;
 }
 
-type Plan = "complete" | "commit" | "edit" | "hang" | "hang-text" | "throw" | "usage";
+type Plan =
+  | "complete"
+  | "commit"
+  | "commit-a"
+  | "commit-a-gated"
+  | "edit"
+  | "hang"
+  | "hang-text"
+  | "throw"
+  | "usage";
 
 /** A stand-in for AcpClient — the manager only uses a small surface. */
 class FakeClient {
@@ -45,6 +54,8 @@ class FakeClient {
   disposed = false;
   cwd = "";
   allowedRoots: string[] = [];
+  /** Resolver for the "commit-a-gated" plan: the test opens the gate explicitly. */
+  releasePrompt: (() => void) | null = null;
   private settle: ((value: { stopReason: string }) => void) | null = null;
 
   constructor(
@@ -105,6 +116,19 @@ class FakeClient {
       writeFileSync(path.join(this.cwd, "child.txt"), "from child\n", "utf8");
       git(this.cwd, "add", "-A");
       git(this.cwd, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child work");
+      return { stopReason: "end_turn" };
+    }
+    if (this.plan === "commit-a" || this.plan === "commit-a-gated") {
+      // The child touches a file the user may also have edited locally —
+      // this is the overlap case the integration step must defer on.
+      writeFileSync(path.join(this.cwd, "a.txt"), "child side\n", "utf8");
+      git(this.cwd, "add", "-A");
+      git(this.cwd, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child edits a");
+      if (this.plan === "commit-a-gated") {
+        await new Promise<void>((resolve) => {
+          this.releasePrompt = resolve;
+        });
+      }
       return { stopReason: "end_turn" };
     }
     if (this.plan === "complete") return { stopReason: "end_turn" };
@@ -438,6 +462,9 @@ describe("super agent · 编排", () => {
     const harness = makeManager(repo);
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
+    // 宿主在 completed 之后还会检查一次 worktree 并可能代提交（`git add -A`）；
+    // 等集成结果落定再动 worktree，否则两个 git 进程会撞 index.lock。
+    await until(() => harness.sessions[0]?.integration !== undefined);
     // 在 worktree 里提交一次 → 分支上有未合并提交。
     const wt = harness.sessions[0]?.isolation.path!;
     writeFileSync(path.join(wt, "b.txt"), "work\n", "utf8");
@@ -525,21 +552,63 @@ describe("super agent · 自动集成", () => {
     ).toBe(true);
   }, 30000);
 
-  it("主工作区有未提交改动时跳过自动合并，并上报 blocked", async () => {
+  it("主工作区的未跟踪文件与无关改动不再挡路：照常合并且本地改动原样保留", async () => {
     const repo = makeRepo();
-    writeFileSync(path.join(repo, "dirty.txt"), "uncommitted\n", "utf8");
+    // 两种最常见的「脏」：未跟踪文件 + 与子会话无关的已跟踪改动。
+    writeFileSync(path.join(repo, "untracked.txt"), "screenshot\n", "utf8");
+    writeFileSync(path.join(repo, "a.txt"), "local edit\n", "utf8");
+
     const harness = makeManager(repo, "commit", "merge");
     harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.integration?.state === "merged");
+    await until(() => harness.reports.length > 0);
+
+    const session = harness.sessions[0]!;
+    expect(session.integration?.needsAction).toBeFalsy();
+    expect(session.integration?.detail).toContain("原样保留");
+    // 子会话的改动回到了主工作区……
+    expect(existsSync(path.join(repo, "child.txt"))).toBe(true);
+    // ……而用户自己的未提交改动一个字都没被覆盖。
+    expect(readFileSync(path.join(repo, "a.txt"), "utf8").replace(/\r\n/g, "\n")).toBe("local edit\n");
+    expect(readFileSync(path.join(repo, "untracked.txt"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "screenshot\n",
+    );
+    expect(harness.reports.at(-1)?.report.state).toBe("ready");
+  }, 30000);
+
+  it("主工作区的改动与子会话改动重叠时跳过，并列出重叠文件", async () => {
+    const repo = makeRepo();
+    writeFileSync(path.join(repo, "a.txt"), "local edit\n", "utf8");
+
+    const harness = makeManager(repo, "commit-a", "merge");
+    harness.manager.spawn({ title: "改 a.txt", task: "干活" });
     await until(() => harness.sessions[0]?.integration?.state === "skipped");
     await until(() => harness.reports.length > 0);
 
     const session = harness.sessions[0]!;
     expect(session.integration?.needsAction).toBe(true);
-    expect(session.integration?.detail).toContain("未提交改动");
-    // 分支保留、工作区没被改动。
-    expect(existsSync(path.join(repo, "child.txt"))).toBe(false);
+    expect(session.integration?.detail).toContain("重叠");
+    expect(session.integration?.detail).toContain("a.txt");
+    // 用户的改动没有被覆盖，分支保留。
+    expect(readFileSync(path.join(repo, "a.txt"), "utf8").replace(/\r\n/g, "\n")).toBe("local edit\n");
     expect(harness.reports.at(-1)?.report.state).toBe("blocked");
-    expect(harness.reports.at(-1)?.report.humanAction).toContain("未提交改动");
+  }, 30000);
+
+  it("预演发现冲突时不启动合并，仓库保持原状", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "commit-a-gated", "merge");
+    harness.manager.spawn({ title: "改 a.txt", task: "干活" });
+    // 子会话先完成自己的提交，再让主分支上出现冲突改动。
+    await until(() => Boolean(harness.clients[0]?.releasePrompt));
+    writeFileSync(path.join(repo, "a.txt"), "main side\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "main side");
+    harness.clients[0]!.releasePrompt!();
+
+    await until(() => harness.sessions[0]?.integration?.state === "conflict");
+    // 冲突在预演阶段就被识别 → 真正的 merge 没启动 → 没有 MERGE_HEAD、文件未被改写。
+    expect(existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+    expect(readFileSync(path.join(repo, "a.txt"), "utf8").replace(/\r\n/g, "\n")).toBe("main side\n");
   }, 30000);
 
   it("manual 模式不做任何自动集成", async () => {
