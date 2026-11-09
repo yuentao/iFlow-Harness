@@ -1468,6 +1468,17 @@ export class ChatPanel implements vscode.Disposable {
         // apply on top of a transcript the webview no longer holds).
         this.store.resync();
         this.store.pushSnapshot();
+        // Child transcripts are NOT part of the snapshot (their own channel),
+        // so a rebooted webview must get them re-sent or the detail pane is
+        // blank until the child emits its next chunk.
+        for (const entry of this.superAgent?.transcriptEntries() ?? []) {
+          this.postToWebview({
+            type: "superTranscript",
+            sessionId: entry.sessionId,
+            from: 0,
+            blocks: entry.blocks,
+          });
+        }
         // Wire race (verified): the initial postTheme() in openEditorTab fires
         // before the webview's React message listener exists, so the first
         // theme/auroraIntensity push is dropped and the aurora stays at its
@@ -6010,6 +6021,11 @@ export class ChatPanel implements vscode.Disposable {
       storageRoot: this.context.globalStorageUri.fsPath,
       createClient: (params) => this.createSuperClient(params),
       onSessionsChanged: (sessions) => this.store.setSuperSessions(sessions),
+      // A child's transcript rides its OWN channel: putting it in the main
+      // `blocks` would pollute the main transcript and break the blockPatch
+      // anchor. `from` is the incremental start index.
+      onTranscript: (sessionId, from, blocks) =>
+        this.postToWebview({ type: "superTranscript", sessionId, from, blocks }),
       onReport: (entries) => this.queueSuperReport(entries),
       currentModel: () => this.store.getState().currentModelId,
       // Read on every integration, so flipping the setting applies to the
@@ -6147,6 +6163,16 @@ export class ChatPanel implements vscode.Disposable {
         }
         const title = (msg.title ?? "").trim() || vscode.l10n.t("子会话");
         manager.spawn({ title, task });
+        break;
+      }
+      case "transcript": {
+        if (!msg.sessionId) return;
+        this.postToWebview({
+          type: "superTranscript",
+          sessionId: msg.sessionId,
+          from: 0,
+          blocks: manager.transcriptBlocks(msg.sessionId),
+        });
         break;
       }
       case "cancel": {

@@ -1,9 +1,12 @@
 /**
- * Super Agent — 子会话编排（Extension Host only，零 vscode 依赖）。
+ * Super Agent — 子会话编排（Extension Host only；编排逻辑本身不直接 import
+ * vscode，但为了复用 `shared/session-state.ts` 的 reducer 而传递依赖它）。
  *
  * 一个子会话 = 一个独立 CLI 进程 + 一个独立 ACP session + 一个独立工作目录
  * （git worktree）。子会话的转录**不进主会话的 blocks**（会污染主转录并破坏
- * blockPatch 锚），主会话只看到一份投影：`SuperSessionUi` 列表。
+ * blockPatch 锚），主会话只看到一份投影：`SuperSessionUi` 列表。子会话自己的
+ * 实时转录走独立通道（`onTranscript` → `superTranscript` 消息），详情面板用与
+ * 主会话相同的 reducer / 块组件渲染。
  *
  * 关键设计（取自 Orca / dsh / DeepSeek 的共同骨架）：
  *  - 并发上限 + FIFO 排队：超过上限的派发请求排队而不是被拒绝 —— 用户要求
@@ -35,6 +38,8 @@ import type {
   UserQuestion,
   UserQuestionsResponse,
 } from "../acp/protocol.js";
+import { applySessionUpdate, beginUserPrompt } from "../../shared/session-state.js";
+import { initialSessionState, type Block, type SessionState } from "../../shared/messages.js";
 import {
   applySuperEvent,
   buildSuperReportPrompt,
@@ -91,6 +96,14 @@ export interface SuperAgentDeps {
   createClient: SuperClientFactory;
   /** 子会话列表变化（宿主写进 store.superSessions）。 */
   onSessionsChanged: (sessions: SuperSessionUi[]) => void;
+  /**
+   * 子会话的实时转录增量。`from` 是起始块索引，`blocks` 是从 `from` 到末尾
+   * 的切片（webview 用 `[...已有.slice(0, from), ...blocks]` 合并）。
+   *
+   * 子会话跑在独立 CLI 进程里，转录**不能**进主 `blocks`（污染主转录、
+   * 破坏 blockPatch 锚），所以走这条独立通道；节流由管理器负责。
+   */
+  onTranscript?: (sessionId: string, from: number, blocks: Block[]) => void;
   /** 需要主会话知道的状态更新（宿主转成给主会话的提示词）。 */
   onReport: (entries: { session: SuperSessionUi; report: SuperReport }[]) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
@@ -110,12 +123,30 @@ interface PendingResolver {
   timer: NodeJS.Timeout | null;
 }
 
+/**
+ * One child session's transcript buffer.
+ *
+ * The state is a full `SessionState` only so the SAME reducer the main
+ * transcript uses (`applySessionUpdate`) can be reused — the detail pane then
+ * renders tool cards / thoughts / plans / sub-agent cards with identical
+ * semantics instead of a second, drifting mini-reducer.
+ */
+interface SuperTranscript {
+  state: SessionState;
+  /** Lowest block index mutated since the last push (null = nothing new). */
+  dirtyFrom: number | null;
+}
+
 export class SuperAgentManager {
   private readonly sessions = new Map<string, SuperSessionUi>();
   private readonly clients = new Map<string, AcpClient>();
   private readonly resolvers = new Map<string, PendingResolver>();
   /** 每个子会话最后的助手文本 —— 汇报摘要的来源。 */
   private readonly lastText = new Map<string, string>();
+  /** 每个子会话的实时转录缓冲（详情看板的数据源）。 */
+  private readonly transcripts = new Map<string, SuperTranscript>();
+  /** 转录推送的节流定时器（流式块高频到达，合并成一次消息）。 */
+  private transcriptTimer: NodeJS.Timeout | null = null;
   /** 超过并发上限时排队的派发请求。 */
   private readonly queue: { spec: SuperTaskSpec; id: string }[] = [];
   /** 已开始准备（真正占用了并发槽位）的子会话 id。 */
@@ -135,6 +166,20 @@ export class SuperAgentManager {
 
   get(id: string): SuperSessionUi | undefined {
     return this.sessions.get(id);
+  }
+
+  /** 某个子会话的完整转录（详情首次打开 / webview 重同步时拉取）。 */
+  transcriptBlocks(id: string): Block[] {
+    return this.transcripts.get(id)?.state.blocks.slice() ?? [];
+  }
+
+  /** 全部子会话的转录快照（webview 重启后 `ready` 时重推）。 */
+  transcriptEntries(): { sessionId: string; blocks: Block[] }[] {
+    const entries: { sessionId: string; blocks: Block[] }[] = [];
+    for (const [sessionId, entry] of this.transcripts) {
+      entries.push({ sessionId, blocks: entry.state.blocks.slice() });
+    }
+    return entries;
   }
 
   /**
@@ -225,6 +270,7 @@ export class SuperAgentManager {
     await this.disposeClient(id);
     if (!session.isolation.path) {
       this.sessions.delete(id);
+      this.transcripts.delete(id);
       this.emit();
       return { ok: true };
     }
@@ -238,12 +284,14 @@ export class SuperAgentManager {
         keepBranch: options.keepBranch,
       });
       this.sessions.delete(id);
+      this.transcripts.delete(id);
       this.emit();
       return { ok: result.removed, branchKept: result.branchKept, reason: result.reason };
     }
     // 目录隔离：直接删掉那个独立目录。
     await rm(session.isolation.path, { recursive: true, force: true }).catch(() => undefined);
     this.sessions.delete(id);
+    this.transcripts.delete(id);
     this.emit();
     return { ok: true };
   }
@@ -391,9 +439,17 @@ export class SuperAgentManager {
         }
       }
 
+      const promptText = buildTaskPrompt(current.title, current.task, isolation);
+      // Mirror the main session's transcript shape: the task prompt is the
+      // child's user turn, so the detail pane shows "what was asked" followed
+      // by the live tool calls / thoughts / text.
+      const transcript = this.transcriptFor(id);
+      const userIndex = beginUserPrompt(transcript.state, promptText);
+      this.markTranscriptDirty(id, userIndex);
+
       const response = await client.prompt({
         sessionId,
-        prompt: [{ type: "text", text: buildTaskPrompt(current.title, current.task, isolation) }],
+        prompt: [{ type: "text", text: promptText }],
       });
       const at = Date.now();
       if (response.stopReason === "cancelled") {
@@ -413,6 +469,9 @@ export class SuperAgentManager {
       this.apply(id, { type: "failed", error: errorMessage(error), at: Date.now() });
       this.notifyReport(id);
     } finally {
+      // Flush before the process goes away: the last text/tool chunks must
+      // reach the webview even if the throttle timer has not fired yet.
+      this.flushTranscripts();
       // 子会话的进程在轮次结束后不再需要 —— 留着只会白占内存。
       await this.disposeClient(id);
       this.started.delete(id);
@@ -424,10 +483,19 @@ export class SuperAgentManager {
     return {
       onSessionUpdate: (notification) => {
         const update = notification.update;
-        if (update.sessionUpdate !== "agent_message_chunk") return;
-        const text = extractText(update.content);
-        if (!text) return;
-        this.lastText.set(id, (this.lastText.get(id) ?? "") + text);
+        // Keep the summary source (the final assistant prose) as before.
+        if (update.sessionUpdate === "agent_message_chunk") {
+          const text = extractText(update.content);
+          if (text) this.lastText.set(id, (this.lastText.get(id) ?? "") + text);
+        }
+        // And feed EVERY update into the shared reducer so the detail pane
+        // renders the same live transcript as the main session (tool cards,
+        // thoughts, plans, nested sub-agents). Live `user_message_chunk`
+        // echoes are ignored by the reducer; the task prompt is added by
+        // `prepare` as the user turn.
+        const transcript = this.transcriptFor(id);
+        const index = applySessionUpdate(transcript.state, notification);
+        if (index !== null) this.markTranscriptDirty(id, index);
       },
       // 免确认：审批直接放行，不产生待办、不打扰主会话。
       onRequestPermission: async (request) => {
@@ -460,6 +528,51 @@ export class SuperAgentManager {
       },
       onStderr: (line) => this.deps.log.debug?.(`[${id}] ${line}`),
     };
+  }
+
+  /** Lazily create the transcript buffer for a child session. */
+  private transcriptFor(id: string): SuperTranscript {
+    let entry = this.transcripts.get(id);
+    if (!entry) {
+      entry = { state: initialSessionState(), dirtyFrom: null };
+      this.transcripts.set(id, entry);
+    }
+    return entry;
+  }
+
+  /** Record the lowest mutated block index and schedule a throttled push. */
+  private markTranscriptDirty(id: string, index: number): void {
+    const entry = this.transcripts.get(id);
+    if (!entry) return;
+    if (entry.dirtyFrom === null || index < entry.dirtyFrom) entry.dirtyFrom = index;
+    this.scheduleTranscriptFlush();
+  }
+
+  /**
+   * Streaming chunks arrive far faster than a human can read; coalesce them
+   * into one message per ~120ms (the same idea as the main store's throttled
+   * flush, at a smaller budget because a child transcript is short-lived).
+   */
+  private scheduleTranscriptFlush(): void {
+    if (this.transcriptTimer) return;
+    const timer = setTimeout(() => {
+      this.transcriptTimer = null;
+      this.flushTranscripts();
+    }, 120);
+    if (typeof timer.unref === "function") timer.unref();
+    this.transcriptTimer = timer;
+  }
+
+  /** Push every dirty child transcript to the host (incremental from `from`). */
+  private flushTranscripts(): void {
+    const send = this.deps.onTranscript;
+    if (!send) return;
+    for (const [id, entry] of this.transcripts) {
+      const from = entry.dirtyFrom;
+      if (from === null) continue;
+      entry.dirtyFrom = null;
+      send(id, from, entry.state.blocks.slice(from));
+    }
   }
 
   /**

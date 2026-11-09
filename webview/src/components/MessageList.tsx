@@ -1329,7 +1329,7 @@ function SystemPromptSections({ content }: { content: string }) {
  * changes re-render thought cards cheaply (no markdown work when text is
  * unchanged — Markdown memoizes on its `text` prop).
  */
-const BlockView = memo(function BlockView({
+export const BlockView = memo(function BlockView({
   block,
   isLatest,
   turnActive,

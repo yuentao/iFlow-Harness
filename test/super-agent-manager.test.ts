@@ -12,6 +12,7 @@ import {
   type SuperReport,
   type SuperSessionUi,
 } from "../shared/super-agent.js";
+import type { Block } from "../shared/messages.js";
 
 const roots: string[] = [];
 
@@ -96,6 +97,8 @@ interface Harness {
   clients: FakeClient[];
   sessions: SuperSessionUi[];
   reports: { session: SuperSessionUi; report: SuperReport }[];
+  /** Pushes seen on the child-transcript channel (incremental, `from`). */
+  transcripts: { sessionId: string; from: number; blocks: Block[] }[];
 }
 
 function makeManager(
@@ -106,6 +109,7 @@ function makeManager(
   const clients: FakeClient[] = [];
   const sessions: SuperSessionUi[] = [];
   const reports: { session: SuperSessionUi; report: SuperReport }[] = [];
+  const transcripts: { sessionId: string; from: number; blocks: Block[] }[] = [];
   const manager = new SuperAgentManager({
     repoRoot,
     storageRoot: makeStorage(),
@@ -123,11 +127,14 @@ function makeManager(
     onReport: (entries) => {
       reports.push(...entries);
     },
+    onTranscript: (sessionId, from, blocks) => {
+      transcripts.push({ sessionId, from, blocks });
+    },
     currentModel: () => "test-model",
     integrationMode: () => mode,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
-  return { manager, clients, sessions, reports };
+  return { manager, clients, sessions, reports, transcripts };
 }
 
 /**
@@ -262,6 +269,56 @@ describe("super agent · 编排", () => {
     expect(prompt).toContain("修好 src/auth.ts");
     expect(prompt).toContain(harness.sessions[0]?.isolation.path ?? "X");
     expect(prompt).toContain("免确认");
+  }, 30000);
+
+  it("子会话的实时操作（任务/思考/工具/正文）进入自己的转录并增量推送", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const session = harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
+    await until(() => harness.sessions[0]?.status === "running");
+    // The task prompt is appended right before `client.prompt`; wait for it so
+    // the injections below land after the user turn (otherwise the ordering
+    // assertion races the setMode/setModel awaits in prepare).
+    await until(() => harness.manager.transcriptBlocks(session.id).length === 1);
+
+    const cb = harness.clients[0]!.callbacks;
+    cb.onSessionUpdate?.({
+      sessionId: "sub",
+      update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "先看代码" } },
+    } as never);
+    cb.onSessionUpdate?.({
+      sessionId: "sub",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        toolName: "read_file",
+        title: "读取 src/auth.ts",
+        kind: "read",
+        status: "in_progress",
+        content: [],
+        locations: [],
+        args: { path: "src/auth.ts" },
+      },
+    } as never);
+    cb.onSessionUpdate?.({
+      sessionId: "sub",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "改好了" } },
+    } as never);
+
+    await until(() => harness.manager.transcriptBlocks(session.id).length >= 4);
+    const blocks = harness.manager.transcriptBlocks(session.id);
+    // 派发的任务提示词是用户轮，之后是 agent 的实时操作。
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "thought", "tool", "text"]);
+    expect(blocks[0]).toMatchObject({ kind: "user" });
+    if (blocks[0]?.kind === "user") expect(blocks[0].text).toContain("修好 src/auth.ts");
+    if (blocks[2]?.kind === "tool") expect(blocks[2].toolName).toBe("read_file");
+    if (blocks[3]?.kind === "text") expect(blocks[3].text).toBe("改好了");
+
+    // 节流推送（~120ms）真正到达后再断言。
+    await until(() => harness.transcripts.length > 0);
+    // 首次推送从 0 开始且含用户块，详情打开即可完整渲染。
+    expect(harness.transcripts[0]?.from).toBe(0);
+    expect(harness.transcripts[0]?.blocks[0]?.kind).toBe("user");
   }, 30000);
 
   it("非 git 仓库降级为目录隔离并如实标注", async () => {
