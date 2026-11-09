@@ -232,8 +232,7 @@
   "这条记忆保存到哪里？": "Where should this memory be saved?",
   "描述要记住的偏好或约定（可编辑）": "Describe the preference or convention to remember (editable)",
   "写入记忆失败": "Failed to write memory",
-  "已加入记忆，新建会话或恢复会话后生效":
-    "Memory added. It takes effect in a new or restored session.",
+  "已加入记忆，新建会话或恢复会话后生效": "Memory added. It takes effect in a new or restored session.",
   "立即重启内核": "Restart Core now",
   "正在提取长期记忆候选…": "Extracting long-term memory candidates…",
   "发现 {0} 条可记忆内容": "Found {0} memorizable item(s)",
@@ -248,8 +247,7 @@
   "项目知识已生成（{0} tokens）": "Project knowledge generated ({0} tokens)",
   "项目知识已增量更新（{0} tokens）": "Project knowledge updated incrementally ({0} tokens)",
   "知识库已是最新": "Knowledge base is up to date",
-  "知识索引缺少有效清单或已被手动修改，请点击「全量重建」确认覆盖":
-    "The knowledge index has no valid manifest or was edited manually — click “Full rebuild” to overwrite it explicitly",
+  "知识索引缺少有效清单或已被手动修改，请点击「全量重建」确认覆盖": "The knowledge index has no valid manifest or was edited manually — click “Full rebuild” to overwrite it explicitly",
   "没有可用的增量基线，改为全量生成": "No usable incremental baseline — running a full rebuild",
   "升级知识清单，执行一次全量生成": "Upgrading the knowledge manifest — running one full rebuild",
   "工作区文件超过扫描上限，已改为全量生成": "The workspace exceeds the scan limit — running a full rebuild",
@@ -264,5 +262,15 @@
   "知识文件不存在，请先重新生成": "The knowledge file does not exist; regenerate it first",
   "已注入项目知识（新会话生效）": "Project knowledge injected (effective in a new session)",
   "已取消项目知识注入": "Project knowledge injection disabled",
-  "更新知识注入失败：{0}": "Failed to update knowledge injection: {0}"
+  "更新知识注入失败：{0}": "Failed to update knowledge injection: {0}",
+  "已派发 {0} 个子会话（并发上限 {1}）": "Dispatched {0} child session(s) (concurrency limit {1})",
+  "子会话委派指令无法解析，已忽略": "Could not parse the child-session delegation directive; ignored.",
+  "子会话任务说明不能为空": "The child session task description cannot be empty.",
+  "已中断 {0} 个子会话": "Interrupted {0} child session(s).",
+  "该子会话没有待处理的请求": "This child session has no pending request.",
+  "已清理工作目录，分支已保留：{0}": "Working directory removed; the branch was kept: {0}",
+  "已清理子会话": "Child session cleaned up.",
+  "已把子会话的分支合并到当前分支": "Merged the child session branch into the current branch.",
+  "合并失败：{0}": "Merge failed: {0}",
+  "子会话": "Child session"
 }

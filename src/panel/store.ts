@@ -251,6 +251,16 @@ export class SessionStore {
     this.flush();
   }
 
+  /**
+   * Super Agent — publish the child-session projection. Non-blocks metadata,
+   * so it rides the blockPatch tail channel exactly like the queue and the
+   * checkpoint index (the children's own transcripts never enter `blocks`).
+   */
+  setSuperSessions(sessions: SessionState["superSessions"]): void {
+    this.state.superSessions = sessions;
+    this.flush();
+  }
+
   /** Publish the turn-end next-step prediction. Non-blocks metadata, so it
    * rides the blockPatch tail exactly like the queue/checkpoint projections. */
   suggestNextSteps(suggestions: string[]): void {

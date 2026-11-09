@@ -18,6 +18,7 @@ import type {
   McpPromptView,
 } from "../src/acp/protocol.js";
 import type { ApprovalRule } from "./approval-policy.js";
+import type { SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
@@ -793,6 +794,16 @@ export interface SessionState {
    * channel. Absent = checkpointing disabled / nothing captured yet.
    */
   checkpoints?: CheckpointUi[];
+  /**
+   * Super Agent — the main session's child sessions (sub-sessions). Each one
+   * runs in its OWN CLI process inside its own git worktree, so several of
+   * them can edit the same project without stepping on each other. The
+   * transcript of a sub-session never enters `blocks` (it would pollute the
+   * main transcript and break the blockPatch anchor) — the main session only
+   * sees this projection. Non-blocks metadata, so it rides the blockPatch
+   * tail channel.
+   */
+  superSessions?: SuperSessionUi[];
   /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
@@ -1638,6 +1649,36 @@ export type WebviewToHost =
   | { type: "cancel" }
   /** CLI 0.5.19 only supports whole-turn cancellation. */
   | { type: "stopSubagent"; sessionId: string; agentId: string }
+  /**
+   * Super Agent — operate on a child session of the main session.
+   *  - `spawn`: open a new child session (the host isolates it in its own
+   *    git worktree and runs a dedicated CLI process for it).
+   *  - `cancel` / `cancelAll`: interrupt one or every child session.
+   *  - `respond`: answer an ask_user_question raised BY a child session.
+   *    Approvals are NOT part of this loop — child sessions always run in
+   *    no-confirmation mode, so the host allows their tool calls itself.
+   *  - `cleanup`: drop the child session and its worktree; `keepBranch`
+   *    preserves the git branch (the default keeps it when the branch still
+   *    carries unmerged commits).
+   *  - `merge`: merge the child's branch back into the current branch
+   *    (host-side `git merge --no-ff`; a conflict aborts and reports). This
+   *    is the manual path — completed children are merged automatically
+   *    according to `iflow.superAgent.integration`.
+   */
+  | {
+      type: "superAgent";
+      action: "spawn" | "cancel" | "cancelAll" | "respond" | "cleanup" | "merge";
+      /** Target child session (absent for cancelAll). */
+      sessionId?: string;
+      /** spawn: the task title. */
+      title?: string;
+      /** spawn: the task description handed to the child session. */
+      task?: string;
+      /** respond: the answers map (ask_user_question), keyed by header. */
+      answers?: Record<string, string | string[]>;
+      /** cleanup: keep the git branch. */
+      keepBranch?: boolean;
+    }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }

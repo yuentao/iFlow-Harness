@@ -19,6 +19,7 @@ import {
 } from "../../shared/messages";
 import { normalizeModelId } from "../../shared/context-window";
 import { collectTurnChanges } from "../../shared/turn-changes";
+import type { SuperSessionUi } from "../../shared/super-agent";
 
 declare const acquireVsCodeApi: () => { postMessage: (msg: unknown) => void };
 
@@ -156,8 +157,16 @@ function playCue(kind: "done" | "error"): void {
  */
 function createMockHost(): HostApi {
   const broadcast = (msg: HostToWebview) => {
+    // postMessage structured-clones every payload; the mock dispatches a plain
+    // object, so nested arrays would keep their identity and zustand's
+    // reference equality would skip the re-render. Clone the projections we
+    // mutate in place (the Super Agent board is the only one today).
+    const payload: HostToWebview =
+      msg.type === "snapshot" && msg.state
+        ? { ...msg, state: { ...msg.state, superSessions: msg.state.superSessions ? [...msg.state.superSessions] : undefined } }
+        : msg;
     window.setTimeout(
-      () => window.dispatchEvent(new MessageEvent("message", { data: { ...msg, locale: "zh-cn" } })),
+      () => window.dispatchEvent(new MessageEvent("message", { data: { ...payload, locale: "zh-cn" } })),
       60,
     );
   };
@@ -688,8 +697,106 @@ function createMockHost(): HostApi {
       settleMockTurn();
     }, 6_000);
   }
+  /**
+   * Super Agent demo children — one running, one waiting for the user, one
+   * finished. Mirrors the real host projection so the board can be exercised
+   * in browser debug mode (the mock host is the frontend's dev surface).
+   */
+  const demoSuperSessions: SuperSessionUi[] = [
+    {
+      id: "super-demo-1",
+      title: "修复登录跳转",
+      task: "修复 src/auth.ts 的登录跳转逻辑并补一个单测",
+      status: "running",
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/fix-login-x7",
+        branch: "iflow/super/fix-login-x7",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 65_000,
+      updatedAt: Date.now() - 2_000,
+      startedAt: Date.now() - 62_000,
+      reports: [],
+    },
+    {
+      id: "super-demo-2",
+      title: "补充会话状态单测",
+      task: "为 shared/session-state.ts 的 reducer 补一组单测",
+      status: "awaiting_input",
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/add-tests-k3",
+        branch: "iflow/super/add-tests-k3",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 120_000,
+      updatedAt: Date.now() - 20_000,
+      startedAt: Date.now() - 118_000,
+      pending: {
+        kind: "question",
+        requestId: "super-demo-2-question-1",
+        questions: [
+          {
+            header: "测试范围",
+            question: "这一组单测要覆盖压缩卡还是只覆盖用量估算？",
+            multiSelect: false,
+            options: [
+              { label: "只覆盖用量估算", description: "范围小、跑得快" },
+              { label: "连压缩卡一起覆盖", description: "更完整，但要多写夹具" },
+            ],
+          },
+        ],
+        deadline: Date.now() + 240_000,
+      },
+      reports: [],
+    },
+    {
+      id: "super-demo-3",
+      title: "梳理依赖",
+      task: "梳理 package.json 的依赖，找出冗余项",
+      status: "completed",
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/deps-m2",
+        branch: "iflow/super/deps-m2",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 300_000,
+      updatedAt: Date.now() - 180_000,
+      startedAt: Date.now() - 298_000,
+      endedAt: Date.now() - 180_000,
+      summary: "已梳理依赖：未发现冗余项；gpt-tokenizer 与 cytoscape 均为运行时必需。",
+      integration: {
+        mode: "merge",
+        state: "merged",
+        detail: "已合入 main",
+        at: Date.now() - 179_000,
+      },
+      reports: [],
+    },
+    {
+      id: "super-demo-4",
+      title: "整理文档配图",
+      task: "把 docs/images 里的截图按章节重命名",
+      status: "completed",
+      isolation: {
+        kind: "directory",
+        path: "C:/Users/demo/.vscode-iflow/super-dirs/docs-m4",
+        note: "当前目录不是 git 仓库，仅目录隔离",
+      },
+      createdAt: Date.now() - 420_000,
+      updatedAt: Date.now() - 400_000,
+      startedAt: Date.now() - 418_000,
+      endedAt: Date.now() - 400_000,
+      summary: "已按章节重命名 12 张截图；没有删改任何文件内容。",
+      reports: [],
+    },
+  ];
+
   const demoMeta = {
     sessionId: "mock-session",
+    superSessions: demoSuperSessions,
     modes: { currentModeId: "smart", availableModes: [
       { id: "smart", name: "Smart" }, { id: "yolo", name: "YOLO" },
       { id: "default", name: "Default" }, { id: "plan", name: "Plan" },
@@ -1872,6 +1979,70 @@ function createMockHost(): HostApi {
         // (No real subagent lifecycle here, so settle the demo turn.)
         demoBlocks.push({ kind: "text", text: "*（已停止该子代理，整轮继续，mock）*" });
         settleMockTurn();
+        return;
+      }
+      if (m.type === "superAgent") {
+        // Super Agent board actions. The real host owns the child sessions;
+        // the mock mutates the same projection so the board's interactions
+        // are exercisable in browser debug mode.
+        if (m.action === "spawn") {
+          demoSuperSessions.push({
+            id: `super-demo-${demoSuperSessions.length + 1}`,
+            title: m.title || "子会话",
+            task: m.task || "",
+            status: "running",
+            isolation: {
+              kind: "git_worktree",
+              path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/new-task-z9",
+              branch: "iflow/super/new-task-z9",
+              baseRef: "a1b2c3d",
+            },
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            startedAt: Date.now(),
+            reports: [],
+          });
+        } else if (m.action === "cancel") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target) {
+            target.status = "cancelled";
+            target.pending = undefined;
+            target.endedAt = Date.now();
+            target.updatedAt = Date.now();
+          }
+        } else if (m.action === "cancelAll") {
+          for (const session of demoSuperSessions) {
+            if (session.status === "running" || session.status === "preparing" || session.status === "awaiting_input") {
+              session.status = "cancelled";
+              session.pending = undefined;
+              session.endedAt = Date.now();
+              session.updatedAt = Date.now();
+            }
+          }
+        } else if (m.action === "respond") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target?.pending) {
+            target.pending = undefined;
+            target.status = "running";
+            target.updatedAt = Date.now();
+          }
+        } else if (m.action === "cleanup") {
+          const index = demoSuperSessions.findIndex((s) => s.id === m.sessionId);
+          if (index >= 0) demoSuperSessions.splice(index, 1);
+        } else if (m.action === "merge") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target) {
+            target.integration = {
+              mode: "manual",
+              state: "merged",
+              detail: "已手动合入 main",
+              at: Date.now(),
+            };
+            target.updatedAt = Date.now();
+          }
+          demoBlocks.push({ kind: "text", text: "*（已把子会话分支合并到当前分支，mock）*" });
+        }
+        broadcastDemo(mockStatus, null);
         return;
       }
       if (m.type === "cancel") {

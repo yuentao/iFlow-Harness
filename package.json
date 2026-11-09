@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "publisher": "yuantao",
   "author": {
@@ -211,6 +211,16 @@
           ],
           "default": "",
           "markdownDescription": "%iflow.configuration.approvalMode.description%"
+        },
+        "iflow.superAgent.integration": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "pr",
+            "manual"
+          ],
+          "default": "merge",
+          "markdownDescription": "%iflow.configuration.superAgentIntegration.description%"
         },
         "iflow.osNotifications": {
           "type": "string",

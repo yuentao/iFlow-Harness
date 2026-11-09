@@ -22,6 +22,7 @@
   "iflow.configuration.autoOpenPanel.description": "VSCode 启动时自动打开聊天面板",
   "iflow.configuration.language.description": "写入 `~/.iflow/settings.json` 的内核语言。留空表示不修改。重启内核后生效。",
   "iflow.configuration.approvalMode.description": "写入 ~/.iflow/settings.json 的默认审批模式（default = 每次确认，smart = 自动批准安全编辑，yolo = 自动批准全部，plan = 只读规划）。留空表示不修改。重启内核后生效。",
+  "iflow.configuration.superAgentIntegration.description": "子会话完成后如何把它的改动带回你的工作区：merge（默认）= 自动合并到当前分支——主工作区有未提交改动或正处于 merge/rebase 中间态时跳过并提示，冲突会自动撤销，绝不把仓库留在冲突态；pr = 推送分支并用 gh CLI 创建 PR；manual = 只保留分支，由你在子会话看板里手动合并。子会话始终以免确认模式运行。",
   "iflow.configuration.osNotifications.description": "面板不可见时的系统通知：approvals = 仅在审批/提问/计划阻塞智能体时通知（默认）；all = 另在整轮完成时通知；off = 关闭。",
   "iflow.configuration.contextWindowOverrides.description": "模型上下文窗口覆写，每行一条 `模型名=token数`（如 `glm-4.6=200000`）。优先于内置表；未知模型回退保守默认值。",
   "iflow.configuration.costTable.description": "会话成本估算的单价表，每行一条 `模型名=输入价,输出价`（USD/百万 token，如 `deepseek-v3=0.27,1.1`）。",

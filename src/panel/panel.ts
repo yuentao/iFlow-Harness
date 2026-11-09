@@ -12,7 +12,7 @@ import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, writeFile, mkdir, rm, rename, stat } from "node:fs/promises";
-import { AcpClient } from "../acp/client.js";
+import { AcpClient, type AcpClientCallbacks } from "../acp/client.js";
 import {
   errorMessage,
   isContextOverflowError,
@@ -72,6 +72,13 @@ import {
   upsertCheckpoint,
 } from "../../shared/checkpoints.js";
 import { CheckpointManager } from "./checkpoints.js";
+import { SuperAgentManager } from "./super-agent.js";
+import {
+  extractSuperDirectives,
+  MAX_CONCURRENT_SUPER_SESSIONS,
+  type SuperReport,
+  type SuperSessionUi,
+} from "../../shared/super-agent.js";
 import {
   assembleContextSections,
   buildFolderListing,
@@ -607,6 +614,28 @@ export class ChatPanel implements vscode.Disposable {
   /** cwd the current ACP session was created with (base for relative paths). */
   private sessionCwd: string | null = null;
   /**
+   * Super Agent — the orchestrator for child sessions spawned by the MAIN
+   * session. Each child runs its own CLI process inside its own git worktree,
+   * so several of them can touch the same project without colliding. Created
+   * lazily (the first delegation pays the setup cost).
+   */
+  private superAgent: SuperAgentManager | null = null;
+  /**
+   * Rolling buffer of the MAIN session's assistant text, scanned for
+   * delegation directives (`super-agent` fenced blocks). Scanned per chunk,
+   * so a delegation takes effect mid-turn — the main session can open child
+   * sessions at any time, not only at turn end.
+   */
+  private superScanText = "";
+  /** How much of `superScanText` has already been consumed (no re-dispatch). */
+  private superScanOffset = 0;
+  /**
+   * Child-session status updates waiting to reach the MAIN session. The main
+   * session may be streaming (a report prompt would interleave with the
+   * in-flight turn), so reports queue here until it is idle.
+   */
+  private pendingSuperReports: { session: SuperSessionUi; report: SuperReport }[] = [];
+  /**
    * Freshness baseline for the Mod context report BEFORE the next session
    * creation/load. The report is written at startChat (inside session/new /
    * session/load), so the first prompt's baseline is THIS timestamp — a
@@ -1074,6 +1103,24 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
     this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
+    // Super Agent: kill the child sessions' CLI processes too — each one is
+    // its own process tree, and leaving them behind would leak node
+    // processes (and MCP server fleets) on every window close. Their
+    // worktrees are NOT removed: they may still hold work the user has not
+    // merged yet.
+    try {
+      const kept = (await this.superAgent?.dispose()) ?? [];
+      for (const entry of kept) {
+        this.log.info(
+          `super agent: child ${entry.id} stopped; worktree kept at ${entry.path}${
+            entry.branch ? ` (branch ${entry.branch})` : ""
+          }`,
+        );
+      }
+    } catch {
+      // best-effort teardown
+    }
+    this.superAgent = null;
     this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
     if (this.diagDebounce) {
@@ -1459,6 +1506,9 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+      case "superAgent":
+        await this.handleSuperAgentAction(msg);
+        break;
       case "cancel":
         this.cancelCurrentTurn();
         break;
@@ -5402,6 +5452,16 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     this.store.onSessionUpdate(n, { replaying: this.restoring });
+    // Super Agent: watch the MAIN agent's own text for delegation
+    // directives. Nested SubAgent events carry an `agentId` (the CLI's own
+    // `task` tool) and are skipped — v1 supports one level of children only.
+    if (
+      !this.restoring &&
+      n.update.sessionUpdate === "agent_message_chunk" &&
+      !(n.update as { agentId?: string }).agentId
+    ) {
+      this.scanSuperDirectives(n.update.content);
+    }
     // Empty-response detection: any visible agent output during the live turn
     // disqualifies it from the "gateway answered empty" retry. Replay updates
     // (session/load) are excluded — they belong to a past turn.
@@ -5926,6 +5986,224 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`transcript read failed: ${errorMessage(error)}`);
       return { blocks: [], firstUserText: null };
     }
+  }
+
+  // --- Super Agent (child sessions of the main session) ----------------------
+
+  /**
+   * The Super Agent orchestrator, created on first delegation.
+   *
+   * `createClient` mirrors the main session's spawn path (same vendored
+   * entry, same node runtime, same credentials) but narrows the boundary to
+   * the worktree: `cwd` and `allowedRoots` are the worktree root ONLY, so
+   * neither the CLI's own workspace check nor our fs-callback boundary can
+   * reach the main working copy. That is the whole point of the isolation.
+   */
+  private getSuperAgent(): SuperAgentManager {
+    if (this.superAgent) return this.superAgent;
+    const repoRoot =
+      this.services.workspaceRoot ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+      this.context.extensionUri.fsPath;
+    this.superAgent = new SuperAgentManager({
+      repoRoot,
+      storageRoot: this.context.globalStorageUri.fsPath,
+      createClient: (params) => this.createSuperClient(params),
+      onSessionsChanged: (sessions) => this.store.setSuperSessions(sessions),
+      onReport: (entries) => this.queueSuperReport(entries),
+      currentModel: () => this.store.getState().currentModelId,
+      // Read on every integration, so flipping the setting applies to the
+      // next finished child without a restart.
+      integrationMode: () => {
+        const mode = vscode.workspace
+          .getConfiguration("iflow")
+          .get<string>("superAgent.integration");
+        return mode === "pr" || mode === "manual" ? mode : "merge";
+      },
+      log: this.log,
+    });
+    return this.superAgent;
+  }
+
+  /** Spawn a CLI client for a child session (own process, own worktree). */
+  private async createSuperClient(params: {
+    cwd: string;
+    allowedRoots: string[];
+    label: string;
+    callbacks: AcpClientCallbacks;
+  }): Promise<AcpClient> {
+    const entry = this.resolveEntry();
+    const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
+    const locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
+    const node = nodePathConfigured || locatedNode || process.execPath;
+    const runtime = await concealNodeExecutable(node, this.context.globalStorageUri.fsPath);
+    // --include-directories stays EMPTY on purpose: the worktree root is the
+    // child's cwd, and the main working copy must NOT be reachable from a
+    // child session (the CLI validates its file tools against
+    // cwd + include-directories).
+    const { args } = buildAcpCommand(entry, []);
+    const systemPromptFile = await this.materializeSystemPrompt();
+    const spawnEnv: NodeJS.ProcessEnv = {
+      IFLOW_HARNESS: "1",
+      IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile(),
+    };
+    if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
+    const client = new AcpClient(
+      {
+        command: runtime,
+        args,
+        cwd: params.cwd,
+        env: spawnEnv,
+        requestTimeoutMs: 120_000,
+        allowedRoots: params.allowedRoots,
+      },
+      params.callbacks,
+    );
+    await client.connect();
+    const creds =
+      (await this.resolveWorkspaceHandshakeCreds().catch(() => null)) ??
+      (await loadCredentials(this.context.secrets).catch(() => null));
+    if (creds) {
+      await client.authenticate({
+        methodId: "openai-compatible",
+        methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
+      });
+    }
+    return client;
+  }
+
+  /**
+   * Scan the MAIN session's assistant text for delegation directives.
+   *
+   * The directive is a `super-agent` fenced block carrying JSON:
+   * `{ "tasks": [{ "title", "task" }] }`. Scanning happens per chunk, so a
+   * delegation takes effect mid-turn — the main session can open child
+   * sessions at any time, not only at turn end.
+   *
+   * Only the main agent's OWN text is scanned: nested SubAgent events (the
+   * CLI's own `task` tool) carry an `agentId` and are ignored — v1 supports
+   * exactly one level of children.
+   */
+  private scanSuperDirectives(content: unknown): void {
+    const text = ChatPanel.chunkText(content);
+    if (!text) return;
+    this.superScanText += text;
+    const scan = extractSuperDirectives(this.superScanText, this.superScanOffset);
+    if (scan.end > this.superScanOffset) this.superScanOffset = scan.end;
+    if (scan.invalidBlocks.length > 0) {
+      this.store.sendToast("warning", vscode.l10n.t("子会话委派指令无法解析，已忽略"));
+    }
+    if (scan.blocks.length === 0) return;
+    const manager = this.getSuperAgent();
+    let dispatched = 0;
+    for (const tasks of scan.blocks) {
+      for (const spec of tasks) {
+        const session = manager.spawn(spec);
+        dispatched++;
+        this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
+      }
+    }
+    this.store.sendToast(
+      "info",
+      vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, MAX_CONCURRENT_SUPER_SESSIONS),
+    );
+  }
+
+  /** Queue a child-session status update for the MAIN session. */
+  private queueSuperReport(entries: { session: SuperSessionUi; report: SuperReport }[]): void {
+    if (entries.length === 0) return;
+    this.pendingSuperReports.push(...entries);
+    this.flushSuperReports();
+  }
+
+  /**
+   * Deliver the queued child-session reports to the MAIN session.
+   *
+   * Deferred while the main session is busy — interleaving a report prompt
+   * with an in-flight turn would interleave two conversations. Several
+   * reports are merged into ONE prompt (dsh's relay: preserve order, do not
+   * flood the main session).
+   */
+  private flushSuperReports(): void {
+    if (this.disposed || this.pendingSuperReports.length === 0) return;
+    const state = this.store.getState();
+    if (state.status === "streaming" || state.initializing || state.replaying) return;
+    const entries = this.pendingSuperReports;
+    this.pendingSuperReports = [];
+    const text = this.superAgent?.reportPrompt(entries) ?? "";
+    if (!text) return;
+    void this.sendPrompt(text, undefined, undefined, undefined, { internal: true });
+  }
+
+  /** Route a Super Agent action from the board. */
+  private async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
+    const manager = this.getSuperAgent();
+    switch (msg.action) {
+      case "spawn": {
+        const task = (msg.task ?? "").trim();
+        if (!task) {
+          this.store.sendToast("warning", vscode.l10n.t("子会话任务说明不能为空"));
+          return;
+        }
+        const title = (msg.title ?? "").trim() || vscode.l10n.t("子会话");
+        manager.spawn({ title, task });
+        break;
+      }
+      case "cancel": {
+        if (!msg.sessionId) return;
+        await manager.cancel(msg.sessionId);
+        break;
+      }
+      case "cancelAll": {
+        const count = await manager.cancelAll();
+        this.store.sendToast("info", vscode.l10n.t("已中断 {0} 个子会话", count));
+        break;
+      }
+      case "respond": {
+        if (!msg.sessionId) return;
+        const ok = manager.respond(msg.sessionId, { answers: msg.answers });
+        if (!ok) this.store.sendToast("warning", vscode.l10n.t("该子会话没有待处理的请求"));
+        break;
+      }
+      case "cleanup": {
+        if (!msg.sessionId) return;
+        const result = await manager.cleanup(msg.sessionId, { keepBranch: msg.keepBranch });
+        if (result.branchKept) {
+          this.store.sendToast(
+            "info",
+            vscode.l10n.t("已清理工作目录，分支已保留：{0}", result.reason ?? ""),
+          );
+        } else {
+          this.store.sendToast("info", vscode.l10n.t("已清理子会话"));
+        }
+        break;
+      }
+      case "merge": {
+        if (!msg.sessionId) return;
+        const result = await manager.merge(msg.sessionId);
+        if (result.ok) {
+          this.store.sendToast("info", vscode.l10n.t("已把子会话的分支合并到当前分支"));
+        } else {
+          this.store.sendToast("error", vscode.l10n.t("合并失败：{0}", result.error));
+        }
+        break;
+      }
+    }
+  }
+
+  /** Text of an agent message chunk (the wire carries a single ContentBlock). */
+  private static chunkText(content: unknown): string {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      let out = "";
+      for (const block of content) out += ChatPanel.chunkText(block);
+      return out;
+    }
+    if (content && typeof content === "object") {
+      const block = content as { type?: string; text?: unknown };
+      if (block.type === "text" && typeof block.text === "string") return block.text;
+    }
+    return "";
   }
 
   // --- Agent lifecycle ----------------------------------------------------------
@@ -7338,7 +7616,14 @@ export class ChatPanel implements vscode.Disposable {
     images?: { data: string; mimeType: string }[],
     files?: { name: string; path: string }[],
     contexts?: ContextRefUi[],
+    /**
+     * `internal: true` marks a HOST-driven turn (a Super Agent status
+     * report). Such a turn must not rename the session and must not capture
+     * a workspace checkpoint — it is bookkeeping, not user work.
+     */
+    options?: { internal?: boolean },
   ): Promise<void> {
+    const internal = options?.internal === true;
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return;
@@ -7446,13 +7731,15 @@ export class ChatPanel implements vscode.Disposable {
         (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
         files,
       );
-      void this.labelSessionWithPrompt(fullText);
+      if (!internal) void this.labelSessionWithPrompt(fullText);
       void this.persistActiveTranscript(); // user turn lands even on a crash
       // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
       // file changes are revertible. Awaited — a parallel capture would race
       // the agent's writes and bake them into the "before" snapshot. Best
-      // effort: a partial capture never blocks the prompt.
-      {
+      // effort: a partial capture never blocks the prompt. Host-driven turns
+      // (Super Agent reports) skip it: they change no files, and a snapshot
+      // per report would tax every child-session completion.
+      if (!internal) {
         const afterUser = this.store.getState().blocks;
         const userIndex = afterUser.length - 1;
         const userBlockId = afterUser[userIndex]?.id;
@@ -7525,6 +7812,9 @@ export class ChatPanel implements vscode.Disposable {
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
       // keeps steering (roadmap Steer semantics).
       void this.dispatchQueue();
+      // Super Agent: the main session is idle again — deliver any child
+      // session reports that were waiting for a free slot.
+      this.flushSuperReports();
     } catch (error) {
       // A3: the panel was disposed mid-flight — the store is gone, so there
       // is nothing to mark and nothing to persist.

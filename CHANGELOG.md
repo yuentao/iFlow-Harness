@@ -3,6 +3,16 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [2.2.0] - 2026-11-09
+
+- 新增 Super Agent（主会话 + 多子会话 + worktree 隔离）：主会话可自行派发多个子会话，每个子会话 = 独立 CLI 进程 + 独立 ACP session + 独立 git worktree（分支 `iflow/super/<slug>-<unique>`，落在 `<globalStorage>/super-worktrees/<repoSlug>/`），多个子会话同时改同一项目不互相踩踏；派发通道是宿主侧委派指令协议——主 Agent 在回复里输出 `super-agent` 代码块（`{"tasks":[{"title","task"}]}`），宿主在 `agent_message_chunk` 上流式扫描、命中完整闭合块即立即派发（不等本轮结束，满足「随时开启」），消费偏移量保证同一段文本不二次派发，只扫主客户端文本（带 `agentId` 的嵌套 SubAgent 事件跳过 → 只支持主→子一层），UI 另有「新建子会话」按钮兜底
+- 新增 子会话文件隔离：子客户端 `cwd = worktree 路径`、`allowedRoots = [worktree 路径]`、`--include-directories` 传空 → CLI 侧 `isPathWithinWorkspace` 与宿主 `resolveAgentPath` 同源收窄，子代理写不到主工作区；非 git 仓库降级为独立空目录并在看板标注「仅目录隔离」；已知限制（诚实声明）：worktree 只含已提交内容，主仓库未提交/未跟踪文件对子会话不可见
+- 新增 子会话状态上报双通道：`SessionState.superSessions`（非 blocks 元数据，搭 blockPatch tail 通道）驱动看板；子会话进入 ready/blocked/failed/dropped 时宿主向主会话发一条 `session/prompt`（主会话 streaming 时延迟到空闲，多条合并为一条保序），主 Agent 据此转述给用户并决策
+- 新增 子会话始终免确认：每个子会话 `session/new` 后由宿主推到内核 `yolo` 模式，且宿主对任何 `session/request_permission` / `_iflow/plan/exit` 直接放行（优先 `allow_always`；模式推送失败时的兜底，没有允许选项时按取消而不是伪造批准），审批不产生待办、不阻塞子会话；只有 `_iflow/user/questions` 是真正的信息缺口——落到该子会话自己的 pending 槽位（主会话 pending 是单数槽位，多子会话并发会互相覆盖），由看板就地作答，5 分钟未答按「未回答」继续；用户可中断单个/全部子会话、手动补合并、清理（分支有未合并提交时拒绝静默删，只删 worktree 保留分支，抄 Orca 的 “Review N Branches”）
+- 新增 worktree 自动合并 / PR 流程（新设置 `iflow.superAgent.integration`，默认 `merge`）：子会话完成后宿主**串行**把它的分支带回主工作区——`merge` = 自动 `git merge --no-ff` 到当前分支，主工作区有未提交改动或正处于 merge/rebase/cherry-pick 中间态时**跳过并保留分支**（绝不替用户 commit 或 stash）、上报 blocked 让人决定，冲突自动 `merge --abort` 不把仓库留在冲突态；`pr` = 推送分支并用 `gh` 创建 PR（无 origin 远程 / 无 gh CLI / 推送失败时如实失败并保留分支）；`manual` = 只保留分支。集成结果写进 `SuperSessionUi.integration`（看板 chip + 详情，主会话汇报里带「改动去向」与 PR 地址）；没有产生提交时标注跳过且不打扰用户
+- 新增 `shared/super-agent.ts`（子会话模型、终态粘性状态机、委派指令解析、汇报文本、集成结果）、`src/panel/super-agent.ts`（并发上限 4 + FIFO 排队的编排器、免确认放行、串行集成）、`src/panel/worktree.ts`（worktree 增删查、分支未合并检测、合并、工作区干净检查、push 与 gh PR）、`webview/src/components/SuperAgentBoard.tsx`（看板，只用 ui.tsx 套件控件）；`prompts/system-prompt.md` 增 `# Super Agent` 协议段（占位符形态的任务会被忽略，模型原样抄回示例不会白开一个子会话；明确子会话免确认、改动由宿主带回、主 Agent 不要自己 merge/push）
+- 诚实边界（本版明确不做）：原生 CLI 工具须改 fork bundle（锚点漂移会硬失败）→ 用委派指令文本协议 + UI 手动派发；自动合并要求主工作区干净（有未提交改动时只跳过并保留分支，不会自动提交用户的改动）；PR 流程依赖 `gh` 已安装并登录（缺失时降级为保留分支）；子会话只看到 worktree 里**已提交**的内容，主仓库未提交/未跟踪文件对它不可见；子会话转录不落盘 → 只留摘要与汇报历史；多层嵌套子会话 → 只支持主→子一层
+
 ## [2.1.0] - 2026-10-27
 
 - 新增 `/skill <name>` 技能触发：CLI 的 Skill 工具是模型调用（工具描述里带 `<available_skills>`），且 `shouldConfirmExecute` 会先要一次确认——ACP 下变成 `session/request_permission`，默认审批策略是拒绝，所以「让模型去调 Skill 工具」不能保证真跑起来；CLI 自带的 `/skills` 又是交互态命令，ACP 模式只会回「requires interactive mode」。因此由宿主解析并注入：`shared/skills.ts` 纯逻辑（`parseSkillInvocation` 解析 `/skill <name> [指令]`、`buildSkillPrompt` 拼 agent 侧载荷）+ `src/skills/service.ts` 按名解析技能文件（复用 `parseFrontmatter`，全局 `~/.iflow/skills` 先扫、项目 `<cwd>/.iflow/skills` 后扫、同名全局胜），注入内容与 CLI `buildUserMessageContent` 同构（Base directory + SKILL.md 正文 + 用户指令，正文逐字搬运不改写）；`sendPrompt`/`regenerate` 两条路径都在 `toAgentPromptText` 之前拦截；技能不存在时不拦发送（只 toast 提示并按普通文本发出，绝不吞用户文本）；Composer 斜杠弹层为每个技能合成一条 `/skill <name>` 条目（输入 `/pdf` 这类裸名也命中），选中后填入 `/skill <name> `

@@ -21,6 +21,7 @@ import { t } from "./i18n";
 import { copyText } from "./components/Markdown";
 import { Button, Chip, ConfirmDialog, Dropdown, ICON_INLINE, ICON_TOOLBAR, IconButton, SearchInput, TextInput } from "./components/ui";
 import { MessageList } from "./components/MessageList";
+import { SuperAgentBoard } from "./components/SuperAgentBoard";
 import { Composer } from "./components/Composer";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { PlanExitCard } from "./components/PlanExitCard";
@@ -906,26 +907,34 @@ export function App() {
           wrapper. pointer-events-none on the shell keeps the empty gutters
           transparent to scroll/click; each card re-enables pointer events on
           itself. */}
-      <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
-        <MessageList />
-        {focusMode && focusHint && (
-          <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card">
-              <Focus className="size-3 shrink-0" />
-              {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
+      {/* The transcript column. The Super Agent board sits ABOVE it but
+          OUTSIDE the pending-card overlay's containing block: the overlay is
+          `absolute inset-0` over the wrapper, so a board INSIDE the wrapper
+          could be painted over by a tall approval card. Keeping the board in
+          its own flex row makes the two surfaces disjoint. */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <SuperAgentBoard />
+        <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
+          <MessageList />
+          {focusMode && focusHint && (
+            <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card">
+                <Focus className="size-3 shrink-0" />
+                {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
+              </div>
             </div>
-          </div>
-        )}
-        {(pendingApproval || pendingPlanExit || pendingQuestions) && (
-          <div
-            ref={pendingOverlayRef}
-            className="pointer-events-none absolute inset-0 z-30 flex flex-col justify-end gap-2 pb-3"
-          >
-            {pendingApproval && <ApprovalCard approval={pendingApproval} />}
-            {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
-            {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
-          </div>
-        )}
+          )}
+          {(pendingApproval || pendingPlanExit || pendingQuestions) && (
+            <div
+              ref={pendingOverlayRef}
+              className="pointer-events-none absolute inset-0 z-30 flex flex-col justify-end gap-2 pb-3"
+            >
+              {pendingApproval && <ApprovalCard approval={pendingApproval} />}
+              {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
+              {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
+            </div>
+          )}
+        </div>
       </div>
 
       <Composer />
