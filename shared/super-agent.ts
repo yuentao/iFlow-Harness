@@ -673,6 +673,53 @@ function isPlaceholderTask(text: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * 主会话汇报的合并门槛：所有子会话都已进入终态。
+ *
+ * 主会话只在**全部**子会话结束后收到一次合并汇报 —— 中途的 blocked /
+ * ready 只更新看板，否则 N 个子会话会灌出 N 条互相打断的汇报，主会话也
+ * 没机会给出完整结论。空列表没有可汇报的内容。
+ */
+export function allSuperSessionsSettled(sessions: readonly SuperSessionUi[]): boolean {
+  return sessions.length > 0 && sessions.every((s) => isTerminalSuperStatus(s.status));
+}
+
+/** 一条待转述的子会话汇报。 */
+export interface SuperReportEntry {
+  session: SuperSessionUi;
+  report: SuperReport;
+}
+
+/**
+ * 主会话合并汇报的缓冲区。
+ *
+ * 同一子会话只保留**最后一条**汇报：中途的 blocked（等用户回答）会被随后
+ * 的 ready 覆盖，合并汇报里不该出现互相矛盾的中间状态。缓冲区里的条目
+ * 只有在全部子会话都进入终态后才被取走 —— 否则继续积累。
+ */
+export class SuperReportBuffer {
+  private readonly pending = new Map<string, SuperReportEntry>();
+
+  add(entries: readonly SuperReportEntry[]): void {
+    for (const entry of entries) this.pending.set(entry.session.id, entry);
+  }
+
+  /**
+   * 全部子会话都已进入终态时取走并清空缓冲区；否则返回 null（继续积累）。
+   * 空缓冲区不产出批次（没有东西可汇报）。
+   */
+  takeSettled(sessions: readonly SuperSessionUi[]): SuperReportEntry[] | null {
+    if (this.pending.size === 0 || !allSuperSessionsSettled(sessions)) return null;
+    const batch = [...this.pending.values()];
+    this.pending.clear();
+    return batch;
+  }
+
+  clear(): void {
+    this.pending.clear();
+  }
+}
+
+/**
  * 看板顶部的计数摘要。
  *
  * `cancelled` 单独计数、不计入 `failed`：用户主动停止（或面板关闭时被终止）
@@ -931,13 +978,14 @@ export function superReportLabel(state: SuperReportState): string {
 }
 
 /**
- * 子会话状态注记的生成提示词。
+ * 子会话最终状态注记的生成提示词。
  *
  * 由宿主旁路直连调用（不是主会话的一轮），产物以**系统注记**呈现给用户，
  * 因此措辞不能自称主会话、也不能要求它「继续对话」——只做客观转述。
- * 多条汇报合成一条，避免 N 个子会话同时完成时刷屏（dsh 的 relay 保序 + 合并）。
+ * 宿主只在 `allSuperSessionsSettled` 之后调用它，把这一批子会话的最终
+ * 汇报合成一条，避免 N 个子会话把主会话灌爆（dsh 的 relay 保序 + 合并）。
  */
-export function buildSuperReportPrompt(entries: { session: SuperSessionUi; report: SuperReport }[]): string {
+export function buildSuperReportPrompt(entries: SuperReportEntry[]): string {
   if (entries.length === 0) return "";
   const lines = entries.map(({ session, report }) => {
     const human = report.humanAction ? `\n   需要用户处理：${report.humanAction}` : "";
@@ -950,10 +998,12 @@ export function buildSuperReportPrompt(entries: { session: SuperSessionUi; repor
   });
   return [
     "[子会话状态上报]",
-    "以下是宿主观察到的子会话状态更新（不是用户发言，也不是你之前说过的话）。",
+    "以下是宿主观察到的子会话最终状态（不是用户发言，也不是你之前说过的话）。当前这批子会话都已结束。",
     ...lines,
     "",
-    "请用一两句话客观说明进展；若有需要用户决策的事项，明确提出那一个具体问题。不要扮演主会话，也不要声称自己执行过这些改动。",
+    "请先自行处理这些结果：判断每个子会话是否达成目标、改动去向（自动合并 / PR / 保留分支），以及是否还有遗留问题。不要逐条打断用户。",
+    "只有在你无法判断、或确实需要用户决策时，才提出那一个具体问题；其余情况不要提问。",
+    "最后向用户做一次完整汇报：每个子会话做了什么、结论、改动去向、失败或遗留的问题。不要编造上报里没有的结果，也不要声称自己执行过这些改动。",
   ].join("\n");
 }
 

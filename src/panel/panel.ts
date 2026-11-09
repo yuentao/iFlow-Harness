@@ -78,10 +78,10 @@ import {
   MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
+  SuperReportBuffer,
   type SuperAction,
   type SuperAttachment,
-  type SuperReport,
-  type SuperSessionUi,
+  type SuperReportEntry,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
@@ -655,6 +655,14 @@ export class ChatPanel implements vscode.Disposable {
   /** How much of `superActionScanText` has already been executed. */
   private superActionScanOffset = 0;
   /**
+   * 子会话汇报的合并缓冲：主会话只在**全部**子会话结束后收到一次合并汇报。
+   * 同一子会话只保留最后一条（blocked → ready 之类的中途状态不重复转述），
+   * 中途进展只更新看板。
+   */
+  private readonly pendingSuperReports = new SuperReportBuffer();
+  /** 串行化合并汇报：并发直连调用会让两条汇报交错追加进转录。 */
+  private superRelayChain: Promise<void> = Promise.resolve();
+  /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
    * 期间有效：回合结束即清空，避免下一次派发拿到上一轮的旧附件。
@@ -1148,6 +1156,7 @@ export class ChatPanel implements vscode.Disposable {
       // best-effort teardown
     }
     this.superAgent = null;
+    this.pendingSuperReports.clear();
     this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
     if (this.diagDebounce) {
@@ -6392,29 +6401,37 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Relay a child-session status update to the MAIN session.
+   * Buffer a child-session status update and relay it to the MAIN session
+   * once every child has settled.
    *
-   * Asynchronous and parallel by design: the relay is a DIRECT gateway
-   * completion (streamChatCompletion), not a prompt on the main ACP session.
-   * It therefore never waits for the main session to be idle, never queues
-   * behind an in-flight turn, and never interleaves two conversations — the
-   * main turn keeps streaming while the relay runs alongside it. The reply
-   * lands in the transcript as a muted SYSTEM NOTE (never an assistant text
-   * block): it was not said by the main agent, and the main agent's own
-   * context receives child state through the board digest instead. No turn,
-   * no checkpoint, no title change. Fire-and-forget: a failed relay is logged
-   * and dropped — the child's state is already on the board in
-   * `superSessions`.
+   * The main session must not be interrupted once per child: a batch of N
+   * delegations would otherwise produce N separate notes with no complete
+   * picture. Reports are accumulated (one latest report per child) and only
+   * handed over when `allSuperSessionsSettled` — until then the board alone
+   * shows progress. The relay itself is a DIRECT gateway completion
+   * (streamChatCompletion), not a prompt on the main ACP session, so it never
+   * waits for the main session to be idle. Relays are serialized so two
+   * batches cannot interleave their appended text blocks. The reply lands in
+   * the transcript as a muted SYSTEM NOTE (never an assistant text block): it
+   * was not said by the main agent, whose own context receives child state
+   * through the board digest. Fire-and-forget: a failed relay is logged and
+   * dropped — the child states are already on the board in `superSessions`.
    */
-  private queueSuperReport(entries: { session: SuperSessionUi; report: SuperReport }[]): void {
+  private queueSuperReport(entries: SuperReportEntry[]): void {
     if (entries.length === 0) return;
-    void this.relaySuperReport(entries);
+    this.pendingSuperReports.add(entries);
+    const batch = this.pendingSuperReports.takeSettled(this.superAgent?.list() ?? []);
+    if (!batch) return;
+    this.superRelayChain = this.superRelayChain
+      .then(() => this.relaySuperReport(batch))
+      .catch((error) => this.log.warn(`super agent report relay failed: ${errorMessage(error)}`));
   }
 
-  private async relaySuperReport(entries: { session: SuperSessionUi; report: SuperReport }[]): Promise<void> {
+  private async relaySuperReport(entries: SuperReportEntry[]): Promise<void> {
     if (this.disposed) return;
     const text = this.superAgent?.reportPrompt(entries) ?? "";
     if (!text) return;
+    this.log.info(`super agent: relaying ${entries.length} settled child report(s)`);
     // Deliberately NOT runInternalPrompt: its single busy lane would serialize
     // the relay behind enhance / title work. Each relay is its own request.
     const reply = await this.completeInternalPrompt(

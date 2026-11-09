@@ -222,7 +222,10 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     const append = vi.fn();
     Object.assign(p, {
       completeInternalPrompt: complete,
-      superAgent: { reportPrompt: () => "[子会话状态上报] ok" },
+      superAgent: {
+        reportPrompt: () => "[子会话状态上报] ok",
+        list: () => [{ id: "super-1", status: "completed" }],
+      },
     });
     p.store.appendRelayMessage = append;
 
@@ -242,6 +245,39 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
     await flush();
+  });
+
+  it("waits for every child before relaying one combined report", async () => {
+    const complete = vi.fn(async () => "汇报正文");
+    const append = vi.fn();
+    const sessions: { id: string; status: string }[] = [
+      { id: "super-1", status: "running" },
+      { id: "super-2", status: "running" },
+    ];
+    const reportPrompt = vi.fn((_entries: unknown[]) => "[子会话状态上报] ok");
+    Object.assign(p, {
+      completeInternalPrompt: complete,
+      superAgent: { reportPrompt, list: () => sessions },
+    });
+    p.store.appendRelayMessage = append;
+    const internals = p as unknown as { queueSuperReport: (entries: unknown[]) => void };
+
+    internals.queueSuperReport([{ session: { id: "super-1", title: "t1" }, report: { state: "ready", summary: "1 ok" } }]);
+    await flush();
+    expect(complete).not.toHaveBeenCalled(); // still one child running
+
+    internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
+    await flush();
+    expect(complete).not.toHaveBeenCalled();
+
+    for (const entry of sessions) entry.status = "completed";
+    internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
+    await flush();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(reportPrompt).toHaveBeenCalledTimes(1);
+    // One combined note carrying both children, not one note per child.
+    expect((reportPrompt.mock.calls[0]?.[0] as unknown[]).length).toBe(2);
+    expect(append).toHaveBeenCalledWith("汇报正文");
   });
 
   it("subagent stop routes to _iflow/agent/cancel without cancelling the turn", async () => {
