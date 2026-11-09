@@ -184,6 +184,35 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
   });
 
+  it("Enter while streaming carries the turn's attachments to the child session", async () => {
+    const first = send("first turn");
+    await flush();
+    expect(p.store.getState().status).toBe("streaming");
+    const spawn = vi.fn((_spec: unknown) => ({ id: "super-1" }));
+    Object.assign(p, { getSuperAgent: () => ({ spawn }) });
+
+    await p.handleWebviewMessage({
+      type: "sendPrompt",
+      text: "look at this",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+      files: [{ name: "note.txt", path: "C:/tmp/note.txt" }],
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const spec = spawn.mock.calls[0]?.[0] as { task: string; attachments?: unknown[] };
+    // Images ride as inline blocks (they have no path), files by source path —
+    // the manager copies both into the child's own attachment dir.
+    expect(spec.attachments).toEqual([
+      { name: "图片1", data: "QUJD", mimeType: "image/png" },
+      { name: "note.txt", path: "C:/tmp/note.txt" },
+    ]);
+    // The parent tree is unreachable from the child's worktree: its path must
+    // not be quoted into the task text.
+    expect(spec.task).not.toContain("C:/tmp/note.txt");
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await first;
+    await flush();
+  });
+
   it("child-session reports relay in parallel while the main turn streams", async () => {
     const first = send("first turn");
     await flush();

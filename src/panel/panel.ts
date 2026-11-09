@@ -6095,6 +6095,38 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 本轮用户附件 → 子会话可携带的形态。
+   *
+   * 图片走内联 base64（用户粘贴的截图从来没有磁盘路径），文件留源路径、由
+   * `SuperAgentManager` 复制到子会话自己的附件目录 —— 子会话在独立 worktree
+   * 里，主工作区的路径它读不到，所以必须复制而不是引用。超过
+   * `MAX_SUPER_ATTACHMENTS` 的部分丢弃并回报数量（调用方提示，不静默裁掉）。
+   */
+  private collectSuperAttachments(
+    images: { data: string; mimeType: string }[] | undefined,
+    files: { name: string; path: string }[] | undefined,
+    onDropped: (count: number) => void,
+  ): SuperAttachment[] {
+    const attachments: SuperAttachment[] = [];
+    let imageIndex = 0;
+    for (const image of images ?? []) {
+      attachments.push({
+        name: vscode.l10n.t("图片{0}", ++imageIndex),
+        data: image.data,
+        mimeType: image.mimeType,
+      });
+    }
+    for (const file of files ?? []) {
+      attachments.push({ name: file.name, path: file.path });
+    }
+    if (attachments.length > MAX_SUPER_ATTACHMENTS) {
+      onDropped(attachments.length - MAX_SUPER_ATTACHMENTS);
+      attachments.length = MAX_SUPER_ATTACHMENTS;
+    }
+    return attachments;
+  }
+
+  /**
    * 解析指令里的附件路径：相对路径按主仓根解析；只有工作区内、暂存目录内、
    * 或用户本轮亲自附上的文件才放行（其余一律拒绝，不把任意磁盘文件复制给子会话）。
    */
@@ -7826,31 +7858,34 @@ export class ChatPanel implements vscode.Disposable {
       const contextBlock = hasContexts
         ? assembleContextSections(contexts!, (c) => this.contextSectionTitle(c))
         : "";
-      // A child session is a text task: file attachments ride along as paths
-      // the child can read itself; inline image payloads cannot cross over, so
-      // say so instead of dropping them silently.
-      const fileBlock =
-        files && files.length > 0
-          ? `\n\n${vscode.l10n.t("用户附带以下本地文件（可按需读取）：")}\n${files
-              .map((f) => `- ${f.name} → ${f.path}`)
-              .join("\n")}`
-          : "";
-      const task = [contextBlock, trimmed].filter(Boolean).join("\n\n") + fileBlock;
+      // Attachments ride along in the child's OWN staging dir: images become
+      // inline image blocks (they never have a path), files are copied there.
+      // Quoting a main-workspace path in the task text would be useless — the
+      // child works inside its own worktree and cannot read the parent tree.
+      let droppedAttachments = 0;
+      const attachments = this.collectSuperAttachments(images, files, (count) => {
+        droppedAttachments += count;
+      });
+      const task = [contextBlock, trimmed].filter(Boolean).join("\n\n");
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
       const manager = this.getSuperAgent();
       if (!manager) {
         this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
         return;
       }
-      manager.spawn({ title, task });
+      manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
       this.store.sendToast(
         "info",
         vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),
       );
-      if (images && images.length > 0) {
+      if (droppedAttachments > 0) {
         this.store.sendToast(
           "warning",
-          vscode.l10n.t("{0} 张图片附件没有转交给子会话，请重新附加", images.length),
+          vscode.l10n.t(
+            "每个子会话最多携带 {0} 个附件，超出上限的 {1} 个已忽略",
+            MAX_SUPER_ATTACHMENTS,
+            droppedAttachments,
+          ),
         );
       }
       return;
