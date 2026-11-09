@@ -33,12 +33,6 @@ function makeRepo(): string {
   return dir;
 }
 
-function makeStorage(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "iflow-super-storage-"));
-  roots.push(dir);
-  return dir;
-}
-
 type Plan = "complete" | "commit" | "edit" | "hang" | "hang-text" | "throw" | "usage";
 
 /** A stand-in for AcpClient — the manager only uses a small surface. */
@@ -149,7 +143,6 @@ function makeManager(
   const transcripts: { sessionId: string; from: number; blocks: Block[] }[] = [];
   const manager = new SuperAgentManager({
     repoRoot,
-    storageRoot: makeStorage(),
     createClient: async (params) => {
       const planForClient = Array.isArray(plan) ? (plan[clients.length] ?? "complete") : plan;
       const client = new FakeClient(params.callbacks, planForClient);
@@ -206,6 +199,9 @@ describe("super agent · 编排", () => {
     expect(session?.isolation.kind).toBe("git_worktree");
     expect(session?.isolation.branch).toContain("iflow/super/");
     expect(existsSync(session?.isolation.path ?? "")).toBe(true);
+    // 工作副本跟着项目走，不写扩展自己的数据目录。
+    expect(path.resolve(session?.isolation.path ?? "").startsWith(path.resolve(repo))).toBe(true);
+    expect(session?.isolation.path).toContain(path.join(".iflow", "super", "worktrees"));
 
     const client = harness.clients[0];
     expect(client).toBeDefined();
@@ -432,7 +428,7 @@ describe("super agent · 编排", () => {
     const kept = await harness.manager.dispose();
     expect(harness.clients[0]?.disposed).toBe(true);
     expect(kept).toHaveLength(1);
-    expect(kept[0]?.path).toContain("super-worktrees");
+    expect(kept[0]?.path).toContain(path.join(".iflow", "super", "worktrees"));
     // worktree 还在 —— 用户可能还没合并里面的工作。
     expect(existsSync(kept[0]?.path ?? "")).toBe(true);
   }, 30000);
@@ -601,11 +597,26 @@ describe("super agent · 任务提示词", () => {
   });
 
   it("明确告知免确认、要求自己提交、且不要自己合并/推送", () => {
-    const text = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
+    const text = buildTaskPrompt(
+      "改登录",
+      "干活",
+      { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/x", baseRef: "abc" },
+    );
     expect(text).toContain("免确认");
     expect(text).toContain("git add -A && git commit");
     expect(text).toContain("不要推送");
     expect(text).toContain("宿主会代你补一个提交");
+  });
+
+  it("目录隔离时告知原因，并要求不要用 git", () => {
+    const text = buildTaskPrompt("改登录", "干活", {
+      kind: "directory",
+      path: "/tmp/dir",
+      note: "worktree 创建失败（fatal: 路径过长），仅目录隔离",
+    });
+    expect(text).toContain("worktree 创建失败");
+    expect(text).toContain("不要执行 git 命令");
+    expect(text).not.toContain("git add -A && git commit");
   });
 
   it("重试提示词说明上一轮中断、要求先检查现状", () => {

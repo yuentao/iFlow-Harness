@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Activity,
   Check,
@@ -532,7 +533,7 @@ function SuperSessionLive({
     send({ type: "superAgent", action: "transcript", sessionId: session.id });
   }, [transcript.length, send, session.id]);
 
-  return (
+  return createPortal(
     <ModalShell
       wide
       title={session.title}
@@ -591,7 +592,8 @@ function SuperSessionLive({
           )}
         </div>
       </div>
-    </ModalShell>
+    </ModalShell>,
+    document.body,
   );
 }
 

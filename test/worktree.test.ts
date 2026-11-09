@@ -1,6 +1,6 @@
 ﻿import { describe, it, expect, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -8,13 +8,13 @@ import {
   commitWorktree,
   createWorktree,
   currentBranch,
+  ensureSuperIsolationIgnored,
   inspectWorkingTree,
   listWorktrees,
   mergeBranch,
   probeGitRepo,
   remoteOriginUrl,
   removeWorktree,
-  repoSlug,
   sanitizeWorktreeName,
   superBranchName,
   worktreePathFor,
@@ -83,17 +83,10 @@ describe("worktree · 命名（纯函数）", () => {
     expect(superBranchName("fix-login")).toBe("iflow/super/fix-login");
   });
 
-  it("同名目录按绝对路径区分", () => {
-    const a = repoSlug(path.join("C:", "work", "api"));
-    const b = repoSlug(path.join("D:", "other", "api"));
-    expect(a).not.toBe(b);
-    expect(repoSlug(path.join("C:", "work", "api"))).toBe(a);
-  });
-
-  it("worktree 路径落在 storage 之下，不在仓库里", () => {
-    const p = worktreePathFor("C:/storage", "C:/work/api", "fix-login", "abc");
-    expect(p.startsWith(path.join("C:/storage", "super-worktrees"))).toBe(true);
-    expect(p).toContain("abc");
+  it("worktree 路径落在项目内的隔离子树里", () => {
+    const repo = path.join("C:", "work", "api");
+    const p = worktreePathFor(repo, "fix-login", "abc");
+    expect(p).toBe(path.join(repo, ".iflow", "super", "worktrees", "fix-login-abc"));
   });
 });
 
@@ -130,6 +123,52 @@ describe("worktree · 真实 git 仓库", () => {
 
     const list = await listWorktrees(repo);
     expect(list.some((w) => w.branch === "iflow/super/child")).toBe(true);
+  }, 30000);
+
+  it("worktree 建在项目内，且被本地 exclude 排除（主工作区保持干净）", async () => {
+    const repo = makeRepo();
+    await ensureSuperIsolationIgnored(repo);
+    const probe = await probeGitRepo(repo);
+    const target = worktreePathFor(repo, "in-repo", "abc");
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("in-repo-abc"),
+      baseRef: probe.head!,
+    });
+    expect(target.startsWith(repo)).toBe(true);
+    expect(readText(path.join(target, "a.txt"))).toBe("one\n");
+    // 关键：隔离子树不出现在主仓库的 status 里 —— 否则自动合并会永远被
+    // inspectWorkingTree 判成「工作区不干净」。
+    expect(git(repo, "status", "--porcelain").trim()).toBe("");
+    // 幂等：重复调用不会重复写 exclude。
+    await ensureSuperIsolationIgnored(repo);
+    const exclude = readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
+    expect(
+      exclude.split(/\r?\n/).filter((line) => line.trim() === ".iflow/super/"),
+    ).toHaveLength(1);
+  }, 30000);
+
+  it("工作区是仓库子目录时，exclude 按仓库根写相对路径", async () => {
+    const repo = makeRepo();
+    const sub = path.join(repo, "pkg");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(path.join(sub, "b.txt"), "x\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "sub");
+
+    await ensureSuperIsolationIgnored(sub);
+    const exclude = readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
+    expect(exclude).toContain("pkg/.iflow/super/");
+
+    const probe = await probeGitRepo(sub);
+    await createWorktree({
+      repoRoot: sub,
+      targetPath: worktreePathFor(sub, "sub", "x"),
+      branch: superBranchName("sub-x"),
+      baseRef: probe.head!,
+    });
+    expect(git(sub, "status", "--porcelain").trim()).toBe("");
   }, 30000);
 
   it("worktree 里改文件不影响主工作区", async () => {

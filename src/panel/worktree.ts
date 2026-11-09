@@ -7,8 +7,10 @@
  *
  * 取自 Orca 的 worktree 模型（https://www.onorca.dev/docs/model/worktrees），
  * 但按本项目的边界做了三处调整：
- *  1. worktree 放在扩展的 globalStorage 下、**仓库之外** —— 放进仓库会让主
- *     仓库的 `git status` 多出一个未跟踪目录。
+ *  1. worktree 放在**项目内**的 `.iflow/super/worktrees/` 下 —— 子会话的工作
+ *     副本跟着项目走，不写扩展的 globalStorage。这棵子树通过仓库本地
+ *     `.git/info/exclude` 排除（见 `ensureSuperIsolationIgnored`），因此主仓库
+ *     的 `git status` 不会被它弄脏，也不会被 `git add -A` 带进提交。
  *  2. 清理时**不静默删分支**：分支上还有未合并的提交时，删除 worktree 但保留
  *     分支，并把「有 N 个分支待审」交回用户（Orca 的 “Review N Branches”）。
  *  3. 非 git 仓库降级为一个独立空目录 —— 隔离强度只有「目录隔离」，看板与
@@ -22,10 +24,9 @@
  */
 
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -47,6 +48,10 @@ export const SUPER_BRANCH_PREFIX = "iflow/super/";
  * 连续的 `-` 合并；首尾的 `-` 去掉。中文标题原样保留（git 分支名支持
  * UTF-8，目录名在 NTFS / APFS 上也安全），空结果回退为 `task` —— 目录名
  * 另有随机后缀，重名不会真的撞上。
+ *
+ * 截断到 24 字符：worktree 目录名会出现在它内部每个文件的路径前缀里，
+ * Windows 的 260 字符上限（git 默认不开 core.longpaths）很容易被长标题 +
+ * 深层源文件撞上，checkout 中途失败会让整个 worktree 建不起来。
  */
 export function sanitizeWorktreeName(raw: string): string {
   const slug = raw
@@ -57,7 +62,7 @@ export function sanitizeWorktreeName(raw: string): string {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .toLowerCase();
-  return slug.length > 0 ? slug.slice(0, 40) : "task";
+  return slug.length > 0 ? slug.slice(0, 24) : "task";
 }
 
 /** 分支全名。 */
@@ -65,20 +70,62 @@ export function superBranchName(slug: string): string {
   return `${SUPER_BRANCH_PREFIX}${slug}`;
 }
 
-/**
- * 仓库的稳定标识：目录名 + 绝对路径的短哈希。同名目录（`~/a/api` 与 `~/b/api`）
- * 因此不会互相覆盖。
- */
-export function repoSlug(repoRoot: string): string {
-  const base = path.basename(repoRoot) || "repo";
-  const safe = base.replace(/[^\w.-]+/g, "-").slice(0, 30);
-  const hash = createHash("sha1").update(path.resolve(repoRoot)).digest("hex").slice(0, 8);
-  return `${safe}-${hash}`;
+/** Super Agent 的隔离子树（相对仓库根）。整棵子树都是扩展的临时工作区。 */
+const SUPER_ISOLATION_ROOT = path.join(".iflow", "super");
+
+/** 隔离目录：worktree / 非 git 降级目录 / 子会话附件都在项目内的同一棵子树下。 */
+export function superIsolationDir(
+  repoRoot: string,
+  kind: "worktrees" | "dirs" | "attachments",
+): string {
+  return path.join(repoRoot, SUPER_ISOLATION_ROOT, kind);
 }
 
-/** worktree 的落盘路径：`<storage>/super-worktrees/<repoSlug>/<slug>-<unique>`。 */
-export function worktreePathFor(storageRoot: string, repoRoot: string, slug: string, unique: string): string {
-  return path.join(storageRoot, "super-worktrees", repoSlug(repoRoot), `${slug}-${unique}`);
+/**
+ * 把隔离子树写进仓库的本地 exclude（`.git/info/exclude`）。
+ *
+ * 不写 `.gitignore`：那会改动用户受版本控制的文件。exclude 是纯本地元数据，
+ * 效果相同且可逆 —— 隔离子树绝不能出现在 `git status` 里（自动合并只在干净
+ * 工作区上执行，见 `inspectWorkingTree`），也不能被 `git add -A` 带进提交。
+ *
+ * exclude 的匹配基准是**仓库根**而不是调用方的 cwd：工作区是仓库子目录时，
+ * 条目必须是 `pkg/.iflow/super/` 这种相对仓库根的写法。
+ *
+ * 非 git 仓库 / git 不可用时静默跳过：目录隔离本来就没有版本语义。
+ */
+export async function ensureSuperIsolationIgnored(repoRoot: string): Promise<void> {
+  let excludePath: string;
+  let pattern: string;
+  try {
+    const [exclude, top] = await Promise.all([
+      git(repoRoot, ["rev-parse", "--git-path", "info/exclude"]),
+      git(repoRoot, ["rev-parse", "--show-toplevel"]),
+    ]);
+    const relativeExclude = exclude.stdout.trim();
+    const topLevel = top.stdout.trim();
+    if (!relativeExclude || !topLevel) return;
+    excludePath = path.resolve(repoRoot, relativeExclude);
+    const relativeRoot = path.relative(topLevel, path.join(repoRoot, SUPER_ISOLATION_ROOT));
+    if (!relativeRoot || relativeRoot.startsWith("..")) return;
+    pattern = `${relativeRoot.replace(/\\/g, "/")}/`;
+  } catch {
+    return;
+  }
+  try {
+    const current = await readFile(excludePath, "utf8").catch(() => "");
+    const lines = current.split(/\r?\n/).map((line) => line.trim());
+    if (lines.includes(pattern)) return;
+    const separator = current.length > 0 && !current.endsWith("\n") ? "\n" : "";
+    await mkdir(path.dirname(excludePath), { recursive: true });
+    await appendFile(excludePath, `${separator}${pattern}\n`, "utf8");
+  } catch {
+    // 只读仓库 / 权限问题不阻断委派：工作区变脏只会让自动合并跳过。
+  }
+}
+
+/** worktree 的落盘路径：`<repoRoot>/.iflow/super/worktrees/<slug>-<unique>`。 */
+export function worktreePathFor(repoRoot: string, slug: string, unique: string): string {
+  return path.join(superIsolationDir(repoRoot, "worktrees"), `${slug}-${unique}`);
 }
 
 /** git 在 Windows 上更稳地接受正斜杠路径。 */

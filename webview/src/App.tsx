@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -362,11 +362,21 @@ export function App() {
   // floats over the scroller, so the transcript must reserve its height as top
   // clearance or the first message would hide under it. Same var-on-the-wrapper
   // technique; no children → the var is removed and the padding collapses.
-  const superBarRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const wrapper = transcriptWrapRef.current;
-    const bar = superBarRef.current;
-    if (!wrapper || !bar) return;
+  //
+  // A callback ref, not a mount-only effect: the first render is the splash
+  // early-return, so the shell does not exist yet and a `[]` effect would run
+  // once with a null ref and never retry (the transcript then keeps 0px top
+  // clearance and the bar covers the first message).
+  const superBarObserver = useRef<ResizeObserver | null>(null);
+  const attachSuperBar = useCallback((bar: HTMLDivElement | null) => {
+    superBarObserver.current?.disconnect();
+    superBarObserver.current = null;
+    if (!bar) return;
+    // The bar's direct parent is the transcript wrapper the scroll column
+    // lives in (see the tree below); the ref may still be null on the very
+    // first commit of this subtree.
+    const wrapper = transcriptWrapRef.current ?? bar.parentElement;
+    if (!wrapper) return;
     const apply = () => {
       // The shell keeps an 8px pt-2 even with no board inside — measure only
       // when a child is actually mounted, else clear the reserved clearance.
@@ -379,8 +389,9 @@ export function App() {
     apply();
     const ro = new ResizeObserver(apply);
     ro.observe(bar);
-    return () => ro.disconnect();
+    superBarObserver.current = ro;
   }, []);
+  useEffect(() => () => superBarObserver.current?.disconnect(), []);
 
   // P1-3: screen-reader status announcements. The aria-live region re-announces
   // only when this string changes, so idle re-renders stay silent.
@@ -940,7 +951,7 @@ export function App() {
       <div className="flex min-h-0 flex-1 flex-col">
         <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
           <MessageList />
-          <div ref={superBarRef} className="pointer-events-none absolute inset-x-0 top-0 z-30 pt-2">
+          <div ref={attachSuperBar} className="pointer-events-none absolute inset-x-0 top-0 z-30 pt-2">
             <SuperAgentBoard />
           </div>
           {focusMode && focusHint && (

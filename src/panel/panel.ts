@@ -6016,12 +6016,17 @@ export class ChatPanel implements vscode.Disposable {
 
   // --- Super Agent (child sessions of the main session) ----------------------
 
-  /** 主仓根目录（worktree 的来源，也是委派附件路径的允许边界）。 */
-  private superRepoRoot(): string {
+  /**
+   * 主仓根目录（worktree 的来源，也是委派附件路径的允许边界）。
+   *
+   * 没有打开的工作区时返回 null：隔离目录现在建在项目内，回退到扩展自己的
+   * 安装目录会在那里堆 worktree，必须由调用方直接拒绝委派。
+   */
+  private superRepoRoot(): string | null {
     return (
       this.services.workspaceRoot ??
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
-      this.context.extensionUri.fsPath
+      null
     );
   }
 
@@ -6064,6 +6069,11 @@ export class ChatPanel implements vscode.Disposable {
         continue;
       }
       if (!candidate.path) continue;
+      if (!repoRoot) {
+        // 没有工作区就没有解析基准：只保留随任务附带的 base64 图片。
+        dropped++;
+        continue;
+      }
       const resolved = this.resolveSuperAttachmentPath(candidate.path, repoRoot, userPaths);
       if (!resolved) {
         dropped++;
@@ -6114,12 +6124,15 @@ export class ChatPanel implements vscode.Disposable {
    * neither the CLI's own workspace check nor our fs-callback boundary can
    * reach the main working copy. That is the whole point of the isolation.
    */
-  private getSuperAgent(): SuperAgentManager {
+  private getSuperAgent(): SuperAgentManager | null {
     if (this.superAgent) return this.superAgent;
     const repoRoot = this.superRepoRoot();
+    if (!repoRoot) {
+      this.log.warn("super agent unavailable: no workspace folder open");
+      return null;
+    }
     this.superAgent = new SuperAgentManager({
       repoRoot,
-      storageRoot: this.context.globalStorageUri.fsPath,
       createClient: (params) => this.createSuperClient(params),
       onSessionsChanged: (sessions) => this.store.setSuperSessions(sessions),
       // A child's transcript rides its OWN channel: putting it in the main
@@ -6220,6 +6233,10 @@ export class ChatPanel implements vscode.Disposable {
     }
     if (scan.blocks.length === 0) return;
     const manager = this.getSuperAgent();
+    if (!manager) {
+      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法委派子会话"));
+      return;
+    }
     let dispatched = 0;
     let droppedAttachments = 0;
     for (const tasks of scan.blocks) {
@@ -6284,6 +6301,7 @@ export class ChatPanel implements vscode.Disposable {
   /** Route a Super Agent action from the board. */
   private async handleSuperAgentAction(msg: Extract<WebviewToHost, { type: "superAgent" }>): Promise<void> {
     const manager = this.getSuperAgent();
+    if (!manager) return;
     switch (msg.action) {
       case "transcript": {
         if (!msg.sessionId) return;
@@ -7819,7 +7837,12 @@ export class ChatPanel implements vscode.Disposable {
           : "";
       const task = [contextBlock, trimmed].filter(Boolean).join("\n\n") + fileBlock;
       const title = normalizeSuperTitle(trimmed.split("\n")[0] ?? "");
-      this.getSuperAgent().spawn({ title, task });
+      const manager = this.getSuperAgent();
+      if (!manager) {
+        this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
+        return;
+      }
+      manager.spawn({ title, task });
       this.store.sendToast(
         "info",
         vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),

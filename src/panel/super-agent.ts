@@ -75,6 +75,7 @@ import {
   createPullRequest,
   createWorktree,
   currentBranch,
+  ensureSuperIsolationIgnored,
   ghAvailable,
   inspectWorkingTree,
   mergeBranch,
@@ -84,6 +85,7 @@ import {
   removeWorktree,
   sanitizeWorktreeName,
   superBranchName,
+  superIsolationDir,
   worktreePathFor,
 } from "./worktree.js";
 
@@ -136,10 +138,8 @@ export type SuperClientFactory = (params: {
 }) => Promise<AcpClient>;
 
 export interface SuperAgentDeps {
-  /** 主仓根目录（worktree 的来源）；非 git 仓库时降级为目录隔离。 */
+  /** 主仓根目录（worktree / 隔离目录的来源）；非 git 仓库时降级为目录隔离。 */
   repoRoot: string;
-  /** worktree 落盘根目录（扩展 globalStorage）。 */
-  storageRoot: string;
   createClient: SuperClientFactory;
   /** 子会话列表变化（宿主写进 store.superSessions）。 */
   onSessionsChanged: (sessions: SuperSessionUi[]) => void;
@@ -525,22 +525,31 @@ export class SuperAgentManager {
       const slug = sanitizeWorktreeName(spec.title);
       const unique = `${Date.now().toString(36)}-${(this.seq++).toString(36)}`;
       const probe = await probeGitRepo(this.deps.repoRoot);
+      // 隔离子树在项目内：先把它写进仓库本地 exclude。否则 worktree 一建出来
+      // 主工作区就变脏，自动合并会被 inspectWorkingTree 挡掉。
+      if (probe.isRepo) await ensureSuperIsolationIgnored(this.deps.repoRoot);
 
       if (probe.isRepo && probe.head) {
         const branch = superBranchName(`${slug}-${unique}`);
-        const target = worktreePathFor(this.deps.storageRoot, this.deps.repoRoot, slug, unique);
+        const target = worktreePathFor(this.deps.repoRoot, slug, unique);
         try {
           await createWorktree({ repoRoot: this.deps.repoRoot, targetPath: target, branch, baseRef: probe.head });
           isolation = { kind: "git_worktree", path: target, branch, baseRef: probe.head };
         } catch (error) {
-          // 建 worktree 失败不能让整个委派失败 —— 退回目录隔离并如实标注。
-          this.deps.log.warn(`worktree 创建失败，退回目录隔离：${errorMessage(error)}`);
-          const dir = path.join(this.deps.storageRoot, "super-dirs", `${slug}-${unique}`);
+          // 建 worktree 失败不能让整个委派失败 —— 退回目录隔离，并把真实原因
+          // 交给子会话与看板（否则它只看到「空目录、不是 git 仓库」）。
+          const reason = truncateForPrompt(errorMessage(error).replace(/\s+/g, " "), 200);
+          this.deps.log.warn(`worktree 创建失败，退回目录隔离：${reason}`);
+          const dir = path.join(superIsolationDir(this.deps.repoRoot, "dirs"), `${slug}-${unique}`);
           await mkdir(dir, { recursive: true });
-          isolation = { kind: "directory", path: dir, note: "worktree 创建失败，仅目录隔离" };
+          isolation = {
+            kind: "directory",
+            path: dir,
+            note: `worktree 创建失败（${reason}），仅目录隔离`,
+          };
         }
       } else {
-        const dir = path.join(this.deps.storageRoot, "super-dirs", `${slug}-${unique}`);
+        const dir = path.join(superIsolationDir(this.deps.repoRoot, "dirs"), `${slug}-${unique}`);
         await mkdir(dir, { recursive: true });
         isolation = {
           kind: "directory",
@@ -1122,9 +1131,13 @@ export class SuperAgentManager {
     }
   }
 
-  /** 子会话的附件目录：在 worktree 之外，避免子会话 `git add -A` 把附件提交进分支。 */
+  /**
+   * 子会话的附件目录：在 worktree 之外，避免子会话 `git add -A` 把附件提交进
+   * 分支；但它落在项目内的隔离子树里（`.iflow/super/attachments`，已被仓库
+   * 本地 exclude 排除），不写扩展的数据目录。
+   */
   private attachmentDirFor(id: string): string {
-    return path.join(this.deps.storageRoot, "super-attachments", id);
+    return path.join(superIsolationDir(this.deps.repoRoot, "attachments"), id);
   }
 
   private emit(): void {
@@ -1293,6 +1306,12 @@ export function buildTaskPrompt(
   lines.push(``, `工作目录：${isolation.path}`);
   if (isolation.branch) {
     lines.push(`你的改动都在分支 ${isolation.branch} 上，不要切换分支，也不要动工作目录以外的文件。`);
+  } else {
+    lines.push(
+      `注意：宿主没能为你建立独立的 git worktree，这个工作目录只是一个独立空目录（${
+        isolation.note ?? "仅目录隔离"
+      }），不是 git 仓库 —— 不要执行 git 命令，也不要去主工作区找文件。`,
+    );
   }
   if (retry) {
     lines.push(
@@ -1309,8 +1328,16 @@ export function buildTaskPrompt(
   lines.push(
     `不要动工作目录以外（尤其是主工作区）的文件。`,
     `你处于免确认模式：工具调用不会被审批。请自行判断风险，不要执行与任务无关的破坏性命令。`,
-    `完成前请把改动提交到当前分支（git add -A && git commit -m "说明这次改动的信息"）；只提交本任务相关的文件，不要切换、重命名或删除分支。`,
-    `不要推送、不要创建 PR、不要合并 —— 宿主会在你完成后把分支带回主工作区；若你遗留了未提交的改动，宿主会代你补一个提交。`,
+  );
+  if (isolation.branch) {
+    lines.push(
+      `完成前请把改动提交到当前分支（git add -A && git commit -m "说明这次改动的信息"）；只提交本任务相关的文件，不要切换、重命名或删除分支。`,
+      `不要推送、不要创建 PR、不要合并 —— 宿主会在你完成后把分支带回主工作区；若你遗留了未提交的改动，宿主会代你补一个提交。`,
+    );
+  } else {
+    lines.push(`工作目录不是 git 仓库：不要尝试提交或使用任何 git 命令，把改动留在工作目录里即可。`);
+  }
+  lines.push(
     ``,
     `完成后用一段话总结：做了什么、结论是什么、还剩什么没做。这段总结会被原样转达给主会话。`,
   );
