@@ -283,3 +283,57 @@ describe("Super Agent 子会话中断确认", () => {
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
   });
 });
+
+describe("Super Agent 看板排序与折叠", () => {
+  const notMerged = (id: string, title: string, createdAt: number): SuperSessionUi =>
+    session({
+      id,
+      title,
+      status: "completed",
+      createdAt,
+      integration: { mode: "merge", state: "skipped", at: createdAt + 10 },
+    });
+
+  const merged = (id: string, title: string, createdAt: number): SuperSessionUi =>
+    session({
+      id,
+      title,
+      status: "completed",
+      createdAt,
+      integration: { mode: "merge", state: "merged", at: createdAt + 10 },
+    });
+
+  function renderMany(sessions: SuperSessionUi[]): void {
+    store.current = { state: { superSessions: sessions }, superTranscripts: {}, send };
+    act(() => root.render(<SuperAgentBoard />));
+  }
+
+  it("进行中的子会话排在前面，改动没落地的排其后", () => {
+    renderMany([
+      notMerged("super-done", "待合并的任务", 1000),
+      session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
+      session({ id: "super-ask", title: "等我回答的任务", status: "awaiting_input", createdAt: 3000 }),
+    ]);
+    clickLabel("展开子会话看板");
+
+    const text = container.textContent ?? "";
+    expect(text.indexOf("等我回答的任务")).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf("等我回答的任务")).toBeLessThan(text.indexOf("进行中的任务"));
+    expect(text.indexOf("进行中的任务")).toBeLessThan(text.indexOf("待合并的任务"));
+  });
+
+  it("已完成且已自动合并的子会话默认折叠，展开分组后才可见", () => {
+    renderMany([
+      session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
+      merged("super-merged", "已合并的任务", 1000),
+    ]);
+    clickLabel("展开子会话看板");
+
+    // Folded away: only a one-line history row, no card, no title.
+    expect(container.textContent).toContain("已完成的 1 个子会话");
+    expect(container.textContent).not.toContain("已合并的任务");
+
+    clickLabel("展开已完成的子会话");
+    expect(container.textContent).toContain("已合并的任务");
+  });
+});

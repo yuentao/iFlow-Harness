@@ -915,6 +915,70 @@ export function summarizeSuperSessions(sessions: readonly SuperSessionUi[]): {
 }
 
 // ---------------------------------------------------------------------------
+// 看板分组（排序 + 折叠）
+// ---------------------------------------------------------------------------
+
+/**
+ * 看板分组结果。
+ *
+ * `visible` 是逐行展开的子会话（已排序）；`folded` 是收成一行历史的那些 ——
+ * 已完成且改动已自动合并，看板上再没有可执行动作（合并按钮本来就是灰的）。
+ */
+export interface SuperBoardGroups {
+  visible: SuperSessionUi[];
+  folded: SuperSessionUi[];
+}
+
+/**
+ * 是否是「已完成且改动已自动合并」的子会话 —— 看板把它折叠起来。
+ *
+ * 只认 `merged`：`pr_created`（改动在 PR 里）与 `skipped` / `conflict` /
+ * `failed`（改动还留在分支上）都还需要人看一眼，不该藏起来。
+ */
+export function isSuperSessionMerged(session: SuperSessionUi): boolean {
+  return session.status === "completed" && session.integration?.state === "merged";
+}
+
+/**
+ * 排序权重（越小越靠前）。
+ *
+ *  - 0 等用户应答：只有人在等它，别的都在自己跑。
+ *  - 1 进行中（准备中 / 运行中 / 排队中）。
+ *  - 2 失败 / 被中断：还能重试，需要人看一眼。
+ *  - 3 已完成但改动还没落地（未自动合并 / 合并冲突 / 集成失败 / 没有集成记录）。
+ *  - 4 已完成且改动已自动合并 —— 纯历史，折叠到末尾。
+ */
+function superBoardRank(session: SuperSessionUi): number {
+  if (session.status === "awaiting_input") return 0;
+  if (session.status === "preparing" || session.status === "running") return 1;
+  if (session.status === "failed" || session.status === "cancelled") return 2;
+  if (isSuperSessionMerged(session)) return 4;
+  return 3;
+}
+
+/**
+ * 看板排序 + 折叠分组（纯逻辑）。
+ *
+ * 同一权重内按创建时间升序（派发顺序），再按 id 兜底 —— 排序是稳定的，
+ * 状态一变不会让整列卡片跳来跳去。
+ */
+export function groupSuperSessionsForBoard(sessions: readonly SuperSessionUi[]): SuperBoardGroups {
+  const visible: SuperSessionUi[] = [];
+  const folded: SuperSessionUi[] = [];
+  for (const session of sessions) {
+    if (isSuperSessionMerged(session)) folded.push(session);
+    else visible.push(session);
+  }
+  const byRank = (a: SuperSessionUi, b: SuperSessionUi): number =>
+    superBoardRank(a) - superBoardRank(b) ||
+    a.createdAt - b.createdAt ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  visible.sort(byRank);
+  folded.sort(byRank);
+  return { visible, folded };
+}
+
+// ---------------------------------------------------------------------------
 // 看板摘要（每轮注入主会话的感知层）
 // ---------------------------------------------------------------------------
 

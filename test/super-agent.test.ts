@@ -9,6 +9,7 @@ import {
   describeSuperSessionLine,
   extractSuperActions,
   extractSuperDirectives,
+  groupSuperSessionsForBoard,
   isTerminalSuperStatus,
   MAX_SUPER_ACTIONS,
   MAX_SUPER_ATTACHMENTS,
@@ -485,6 +486,55 @@ describe("super agent · 合并汇报", () => {
       session({ id: "f", status: "cancelled" }),
     ]);
     expect(summary).toEqual({ total: 6, running: 2, awaiting: 1, done: 1, failed: 1, cancelled: 1 });
+  });
+});
+
+describe("super agent · 看板排序与折叠", () => {
+  const merged = (id: string, createdAt = 1000): SuperSessionUi =>
+    session({
+      id,
+      status: "completed",
+      createdAt,
+      integration: { mode: "merge", state: "merged", at: createdAt + 10 },
+    });
+
+  it("进行中的子会话排在最前，改动没落地的排其后", () => {
+    const { visible } = groupSuperSessionsForBoard([
+      merged("done"),
+      session({ id: "failed", status: "failed", createdAt: 2000 }),
+      session({ id: "running", status: "running", createdAt: 3000 }),
+      session({ id: "awaiting", status: "awaiting_input", createdAt: 4000 }),
+      session({ id: "pending-merge", status: "completed", createdAt: 5000 }),
+    ]);
+    expect(visible.map((s) => s.id)).toEqual(["awaiting", "running", "failed", "pending-merge"]);
+  });
+
+  it("已完成且已自动合并的子会话折叠成历史分组", () => {
+    const { visible, folded } = groupSuperSessionsForBoard([
+      merged("done"),
+      session({ id: "running", status: "running" }),
+    ]);
+    expect(folded.map((s) => s.id)).toEqual(["done"]);
+    expect(visible.map((s) => s.id)).toEqual(["running"]);
+  });
+
+  it("改动还没落地的已完成子会话不折叠（PR / 未自动合并 / 冲突都要人看）", () => {
+    const { visible, folded } = groupSuperSessionsForBoard([
+      session({ id: "pr", status: "completed", createdAt: 1000, integration: { mode: "pr", state: "pr_created", at: 2 } }),
+      session({ id: "skipped", status: "completed", createdAt: 2000, integration: { mode: "merge", state: "skipped", at: 2 } }),
+      session({ id: "conflict", status: "completed", createdAt: 3000, integration: { mode: "merge", state: "conflict", at: 2 } }),
+      session({ id: "none", status: "completed", createdAt: 4000 }),
+    ]);
+    expect(folded).toHaveLength(0);
+    expect(visible.map((s) => s.id).sort()).toEqual(["conflict", "none", "pr", "skipped"]);
+  });
+
+  it("同一权重内按派发顺序排列（状态变化不会让卡片跳来跳去）", () => {
+    const { visible } = groupSuperSessionsForBoard([
+      session({ id: "later", status: "running", createdAt: 2000 }),
+      session({ id: "earlier", status: "running", createdAt: 1000 }),
+    ]);
+    expect(visible.map((s) => s.id)).toEqual(["earlier", "later"]);
   });
 });
 

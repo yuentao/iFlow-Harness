@@ -21,6 +21,7 @@ import type {
 } from "../../../shared/super-agent";
 import {
   canRetrySuperSession,
+  groupSuperSessionsForBoard,
   sumSuperUsage,
   summarizeSuperSessions,
   superIntegrationLabel,
@@ -157,10 +158,16 @@ export function SuperAgentBoard() {
   // dialog is open could show “0 个” if the children finish on their own.
   const [confirmCancel, setConfirmCancel] = useState<SuperSessionUi | null>(null);
   const [confirmCancelAll, setConfirmCancelAll] = useState<number | null>(null);
+  // Finished children whose changes are already merged live in one collapsed
+  // history row (collapsed by default — nothing in them is actionable).
+  const [showFolded, setShowFolded] = useState(false);
   // Ticking clock for the elapsed labels of live children.
   const [, setTick] = useState(0);
 
   const list = sessions ?? [];
+  // Board order + folding: children that still need attention come first,
+  // done-and-merged ones are folded away (pure logic, shared/super-agent.ts).
+  const { visible, folded } = useMemo(() => groupSuperSessionsForBoard(list), [list]);
   // Non-terminal children (the interrupt-all gate + the elapsed timer). The
   // per-state COUNTS come from the shared summarizer — computing them here
   // with a status filter is how “2 个进行中” ended up double-counting the
@@ -258,7 +265,7 @@ export function SuperAgentBoard() {
 
       {expanded && list.length > 0 && (
         <div className="flex max-h-[40vh] flex-col gap-2 overflow-y-auto border-t border-border px-2 py-2">
-          {list.map((session) => (
+          {visible.map((session) => (
             <SuperSessionRow
               key={session.id}
               session={session}
@@ -267,6 +274,38 @@ export function SuperAgentBoard() {
               onCancel={() => setConfirmCancel(session)}
             />
           ))}
+          {/* Finished + already merged children collapse into ONE history row:
+              their changes are in the working tree, so there is nothing left
+              to act on — the cards only get in the way of the live ones. */}
+          {folded.length > 0 && (
+            <div className="shrink-0">
+              <button
+                type="button"
+                aria-expanded={showFolded}
+                aria-label={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
+                title={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
+                className="press flex w-full items-center gap-1.5 rounded-md border border-border/80 bg-canvas/40 px-2 py-1.5 text-ui-label font-medium text-foreground hover:bg-accent/60"
+                onClick={() => setShowFolded((v) => !v)}
+              >
+                {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
+                <span className="shrink-0">{t("已完成的 {0} 个子会话", folded.length)}</span>
+                <Chip tone="success">{t("已自动合并")}</Chip>
+              </button>
+              {showFolded && (
+                <div className="mt-2 flex flex-col gap-2">
+                  {folded.map((session) => (
+                    <SuperSessionRow
+                      key={session.id}
+                      session={session}
+                      onMerge={() => setConfirmMerge(session)}
+                      onCleanup={() => setConfirmCleanup(session)}
+                      onCancel={() => setConfirmCancel(session)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {(totals.input > 0 || totals.output > 0) && (
             <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border bg-canvas/40 px-2 py-1.5 text-ui-micro text-muted-foreground">
               <span className="font-medium text-foreground">{t("子会话合计开销")}</span>
