@@ -168,6 +168,101 @@ describe("super agent · 委派指令解析", () => {
   });
 });
 
+describe("super agent · 工具调用式委派载荷", () => {
+  // 实测（2026-11-10）：sensenova-6.8-flash-lite 不按 markdown 围栏块输出，
+  // 而是写成工具调用语法，载荷本身仍是合法的 tasks JSON。
+  const dsml = [
+    "我来把这两件工作分别委派给两个独立的子会话并行执行。",
+    "",
+    "<｜DSML｜tool-super-agent>",
+    '{"tasks":[{"title":"编写模块A设计说明","task":"新建 docs/alpha.md"},{"title":"编写模块B设计说明","task":"新建 docs/beta.md"}]}',
+    "</tool-super-agent>",
+  ].join("\n");
+
+  it("工具调用式载荷也能解析出任务", () => {
+    const scan = extractSuperDirectives(dsml);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]).toHaveLength(2);
+    expect(scan.blocks[0]?.[0]?.title).toBe("编写模块A设计说明");
+    expect(scan.blocks[0]?.[1]?.task).toBe("新建 docs/beta.md");
+    expect(scan.invalidBlocks).toHaveLength(0);
+  });
+
+  it("工具调用式载荷消费过的偏移量同样防止二次派发", () => {
+    const first = extractSuperDirectives(dsml);
+    expect(first.end).toBeGreaterThan(0);
+    expect(extractSuperDirectives(dsml, first.end).blocks).toHaveLength(0);
+  });
+
+  it("围栏块与工具调用式载荷各派发一次，不重复", () => {
+    const text = [
+      "```super-agent",
+      '{"tasks":[{"title":"围栏任务","task":"围栏里的任务"}]}',
+      "```",
+      "",
+      "<｜DSML｜tool-super-agent>",
+      '{"tasks":[{"title":"工具任务","task":"工具调用里的任务"}]}',
+      "</tool-super-agent>",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(2);
+    expect(scan.blocks[0]?.[0]?.title).toBe("围栏任务");
+    expect(scan.blocks[1]?.[0]?.title).toBe("工具任务");
+  });
+
+  it("参数包装体形态也能解析", () => {
+    const text = [
+      "<tool_call>",
+      '{"name":"super-agent","arguments":{"tasks":[{"title":"A","task":"任务 A"}]}}',
+      "</tool_call>",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks[0]?.[0]).toEqual({ title: "A", task: "任务 A" });
+  });
+
+  it("super-agent-actions 动作块不会被当成委派载荷", () => {
+    const text = [
+      "```super-agent-actions",
+      '{"actions":[{"action":"retry","sessionId":"super-1"}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(0);
+  });
+
+  it("工具调用式载荷里的占位符任务不派发", () => {
+    const text = [
+      "<｜DSML｜tool-super-agent>",
+      '{"tasks":[{"title":"<标题>","task":"<自包含的任务说明>"}]}',
+      "</tool-super-agent>",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(0);
+  });
+
+  it("工具调用式载荷内容非法时进 invalidBlocks（宿主据此提示用户）", () => {
+    const text = ["<｜DSML｜tool-super-agent>", '{"tasks":[{"title":"A"}]}', "</tool-super-agent>"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+  });
+
+  it("载荷没收全时不派发，收全后只派发一次", () => {
+    const head = "<｜DSML｜tool-super-agent>\n";
+    const body = '{"tasks":[{"title":"A","task":"任务 A"}]}';
+    expect(extractSuperDirectives(head).blocks).toHaveLength(0);
+    const mid = extractSuperDirectives(head + body);
+    expect(mid.blocks).toHaveLength(1);
+    expect(extractSuperDirectives(head + body, mid.end).blocks).toHaveLength(0);
+  });
+
+  it("与 super-agent 无关的 JSON 不会被误派发", () => {
+    const scan = extractSuperDirectives('普通文本里的 {"tasks":[{"title":"A","task":"真的任务"}]} 与 super-agent 无关');
+    expect(scan.blocks).toHaveLength(0);
+  });
+});
+
 describe("super agent · 状态机", () => {
   it("started → running", () => {
     const next = applySuperEvent(session(), { type: "started", cliSessionId: "s1", at: 2000 });
@@ -435,8 +530,12 @@ describe("super agent · token 用量", () => {
 });
 
 describe("super agent · 看板摘要", () => {
-  it("没有子会话时不注入任何内容", () => {
-    expect(buildSuperDigest([])).toBe("");
+  it("没有子会话时仍注入看板标记（主/子会话的角色信号）", () => {
+    // 系统提示用「输入里有没有 [子会话看板]」区分主会话与子会话：
+    // 空看板若返回空串，首轮主会话会被误判成子会话而自己动手干活。
+    const digest = buildSuperDigest([]);
+    expect(digest).toContain("[子会话看板]");
+    expect(digest.trim().length).toBeGreaterThan(0);
   });
 
   it("列出每个子会话的 id、状态与摘要，并附管理动作说明", () => {

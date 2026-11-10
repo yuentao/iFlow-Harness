@@ -378,10 +378,14 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
   });
 
-  it("普通回合（无子会话）不注入看板", async () => {
+  it("普通回合（无子会话）也注入看板标记，作为主会话的角色信号", async () => {
     const turn = send("你好");
     await flush();
-    expect(calls[0]!.prompt[0]!.text).toBe("你好");
+    // 系统提示用「有没有 [子会话看板]」区分主会话与子会话；空看板若返回空串，
+    // 首轮主会话会被误判成子会话而自己动手干活（测到的真实缺陷）。
+    const text = calls[0]!.prompt[0]!.text!;
+    expect(text.startsWith("[子会话看板]")).toBe(true);
+    expect(text.endsWith("你好")).toBe(true);
     calls[0]!.resolve({ stopReason: "end_turn" });
     await turn;
     await flush();

@@ -529,6 +529,10 @@ export function normalizeSuperTitle(raw: string, fallback = "子会话"): string
  *
  * 解析失败的块不会中断扫描 —— 它们被收集进 `invalidBlocks`，宿主据此给用户
  * 一条明确提示，而不是假装什么都没发生。
+ *
+ * 围栏块之外还有一条**兜底路径**：模型有时不按围栏块输出，而是把载荷写成
+ * 「工具调用」语法（见 {@link findToolStylePayloads}）。两条路径解析出同一份
+ * 任务列表，且互不重复派发。
  */
 export function extractSuperDirectives(text: string, fromOffset = 0): SuperDirectiveScan {
   const blocks: SuperTaskSpec[][] = [];
@@ -536,6 +540,7 @@ export function extractSuperDirectives(text: string, fromOffset = 0): SuperDirec
   let end = fromOffset;
 
   let cursor = fromOffset;
+  let fenceUnclosed = false;
   while (cursor < text.length) {
     const open = findFence(text, cursor, FENCE_OPEN);
     if (!open) break;
@@ -543,6 +548,7 @@ export function extractSuperDirectives(text: string, fromOffset = 0): SuperDirec
     if (!close) {
       // 还没闭合（流式中间态）—— 停在这里，等后续 chunk 补齐。
       end = open.lineStart;
+      fenceUnclosed = true;
       break;
     }
     const body = text.slice(open.bodyStart, close.lineStart).trim();
@@ -553,7 +559,165 @@ export function extractSuperDirectives(text: string, fromOffset = 0): SuperDirec
     end = close.lineEnd;
   }
 
+  // 工具调用式载荷：只在围栏扫描没吃掉的区域里找，否则同一个 JSON 会被
+  // 派发两次（围栏路径先走，已经消费过的区域不会进兜底扫描）。
+  // 围栏未闭合时不做兜底 —— 那段文本归围栏路径管（等收栏再解析），
+  // 否则「载荷已完整但围栏还没收栏」的流式中间态会被提前派发。
+  if (!fenceUnclosed) {
+    for (const match of findToolStylePayloads(text, Math.max(fromOffset, end))) {
+      if (match.tasks) blocks.push(match.tasks);
+      else invalidBlocks.push(match.body);
+      if (match.end > end) end = match.end;
+    }
+  }
+
   return { blocks, invalidBlocks, end };
+}
+
+/** 委派标记：模型在「工具调用式」输出里用它点名要委派子会话。 */
+const TOOL_STYLE_MARKER = "super-agent";
+/** 标记与载荷之间允许的最大间隔（字符）—— 模型通常在标记后一两行内给出载荷。 */
+const TOOL_STYLE_PAYLOAD_GAP = 80;
+
+interface ToolStylePayload {
+  /** 解析出的任务；null = 看起来是委派载荷但内容非法（宿主据此提示用户）。 */
+  tasks: SuperTaskSpec[] | null;
+  /** 载荷原文。 */
+  body: string;
+  /** 载荷起始偏移。 */
+  start: number;
+  /** 载荷结束偏移（不含）。 */
+  end: number;
+}
+
+/**
+ * 找「工具调用式」的委派载荷。
+ *
+ * 背景（实测 2026-11-10）：sensenova-6.8-flash-lite 收到「并行委派两个子会话」
+ * 的要求后，输出的是 `<｜DSML｜tool-super-agent>{"tasks":[...]}</tool-super-agent>`
+ * —— 载荷仍是合法的 tasks JSON，只是包裹标记是工具调用而不是 markdown 围栏。
+ * 本扩展允许接入任意 OpenAI 兼容端点，各家模型的工具调用写法并不一致
+ * （`<｜DSML｜tool-xxx>`、`<tool_call>{...}</tool_call>`……），所以宿主不能
+ * 只认一种写法。
+ *
+ * 锚点是**标记本身**而不是某种固定语法：标记 → 不远处的一个 `{` / `[` →
+ * 配对的 JSON → 严格的任务校验。判定链任一环不成立就不派发，模型把协议
+ * 示例原样抄回来（占位符任务）同样不会误派发。
+ */
+function findToolStylePayloads(text: string, from: number): ToolStylePayload[] {
+  const out: ToolStylePayload[] = [];
+  let searchFrom = from;
+  while (searchFrom < text.length) {
+    const marker = text.indexOf(TOOL_STYLE_MARKER, searchFrom);
+    if (marker === -1) break;
+    const after = marker + TOOL_STYLE_MARKER.length;
+    const start = findPayloadStart(text, after);
+    if (start === -1) {
+      // 标记后面还没有载荷（流式中间态）—— 等后续 chunk。
+      break;
+    }
+    const close = matchJsonValue(text, start);
+    if (close === -1) {
+      // JSON 还没收全（流式中间态）—— 跳过这个标记，继续找后面的。
+      searchFrom = after;
+      continue;
+    }
+    const tasks = parseToolStylePayload(text.slice(start, close + 1));
+    if (tasks.tasks) {
+      out.push({ tasks: tasks.tasks, body: text.slice(start, close + 1), start, end: close + 1 });
+      searchFrom = close + 1;
+      continue;
+    }
+    if (tasks.looksLikeDelegation) {
+      // 确实是委派载荷但内容非法 —— 交给宿主提示用户，而不是静默丢弃。
+      out.push({ tasks: null, body: text.slice(start, close + 1), start, end: close + 1 });
+      searchFrom = close + 1;
+      continue;
+    }
+    searchFrom = after;
+  }
+  return out;
+}
+
+/** 标记之后的第一个 `{` / `[`（超过间隔就当没有载荷）。 */
+function findPayloadStart(text: string, after: number): number {
+  const limit = Math.min(text.length, after + TOOL_STYLE_PAYLOAD_GAP);
+  for (let i = after; i < limit; i++) {
+    const ch = text.charAt(i);
+    if (ch === "{" || ch === "[") return i;
+  }
+  return -1;
+}
+
+/**
+ * 从 `{` / `[` 开始找配对的结束符（跳过字符串字面量与转义）。
+ * 找不到返回 -1 —— 流式中间态的半截 JSON。
+ */
+function matchJsonValue(text: string, start: number): number {
+  const open = text.charAt(start);
+  if (open !== "{" && open !== "[") return -1;
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      const expected = ch === "}" ? "{" : "[";
+      if (stack.pop() !== expected) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 解析工具调用式的载荷。除了直接的 `{"tasks":[...]}` / 裸数组，还认得模型
+ * 常用的参数包装体（`{"name":"super-agent","arguments":{"tasks":[...]}}`）。
+ *
+ * 返回 `looksLikeDelegation` 区分「这不是委派载荷」（例如 `super-agent-actions`
+ * 的动作块）与「是委派载荷但内容非法」—— 后者要被宿主提示，前者要静默忽略。
+ */
+function parseToolStylePayload(body: string): {
+  tasks: SuperTaskSpec[] | null;
+  looksLikeDelegation: boolean;
+} {
+  const direct = parseDirectiveBody(body);
+  if (direct) return { tasks: direct, looksLikeDelegation: true };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { tasks: null, looksLikeDelegation: false };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { tasks: null, looksLikeDelegation: false };
+  }
+  const record = parsed as Record<string, unknown>;
+  if ("tasks" in record) return { tasks: null, looksLikeDelegation: true };
+  for (const key of ["arguments", "parameters", "input", "args"]) {
+    const inner = record[key];
+    if (typeof inner !== "object" || inner === null || Array.isArray(inner)) continue;
+    const tasks = parseDirectiveBody(JSON.stringify(inner));
+    if (tasks) return { tasks, looksLikeDelegation: true };
+    if ("tasks" in (inner as Record<string, unknown>)) {
+      return { tasks: null, looksLikeDelegation: true };
+    }
+  }
+  return { tasks: null, looksLikeDelegation: false };
 }
 
 interface FenceMatch {
@@ -803,7 +967,8 @@ const SUPER_DIGEST_FOOTER = [
   "",
   "可管理上述子会话：输出 ```super-agent-actions 代码块，正文为 {\"actions\":[...]}；",
   "动作 retry（重试失败/中断，复用原工作目录）、cancel（停止运行中）、answer（回答待答提问）、cleanup（清理工作目录）。",
-  "要合并某个已完成子会话的分支时，自己执行 git merge --no-ff <分支名>（分支名见上面每一行），需要解决冲突就按代码判断。",
+  "合并由宿主按集成模式自动完成（默认 merge，可能改为 PR）：「改动去向」显示已自动合并就不要重复合并；",
+  "只有显示分支被保留（未自动合并 / 合并冲突 / 没有 gh CLI）时，才自己执行 git merge --no-ff <分支名>（分支名见上面每一行），需要解决冲突就按代码判断。",
   "answer 的 answers 以问题 header 为键：单选给字符串，多选给字符串数组。sessionId 必须逐字使用上面的 id。",
 ].join("\n");
 
@@ -813,9 +978,16 @@ const SUPER_DIGEST_FOOTER = [
  * 这是「主会话管理子会话」的感知层：没有它，主会话派发完就与子会话失联，
  * 只能靠用户转述。内容刻意做成逐行结构化文本 —— id 可被管理动作逐字引用，
  * 摘要按字符预算截断，保证每轮的固定成本可控。
+ *
+ * **空看板也必须带 `[子会话看板]` 标记**：系统提示用「输入里有没有这块看板」
+ * 来区分主会话与子会话（没有 = 子会话 = 忽略编排指令，只做自己的任务）。
+ * 首轮还没有任何子会话，若这里返回空串，主会话就会被误判成子会话而自己
+ * 动手干活 —— 委派根本没机会发生，模型还「看起来一切正常」。
  */
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
-  if (sessions.length === 0) return "";
+  if (sessions.length === 0) {
+    return "[子会话看板]（宿主自动注入的实时状态，不是用户发言。当前没有子会话。）";
+  }
   const counts = summarizeSuperSessions(sessions);
   const header =
     `[子会话看板]（宿主自动注入的实时状态，不是用户发言。共 ${counts.total} 个：` +

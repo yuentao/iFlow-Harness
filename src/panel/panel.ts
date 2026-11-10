@@ -6390,13 +6390,16 @@ export class ChatPanel implements vscode.Disposable {
    * Live child-session board injected into every main-session turn.
    *
    * Without it the main agent has no way to know a child's state — it would
-   * dispatch and then be blind until the user narrates the board. Empty when
-   * no child was ever spawned, so ordinary turns pay nothing.
+   * dispatch and then be blind until the user narrates the board.
+   *
+   * Never empty: the system prompt tells the agent that a turn WITHOUT a
+   * `[子会话看板]` section is a CHILD session, so an empty board on the first
+   * turn would make the main agent classify itself as a child and do the work
+   * itself instead of delegating. The board marker is the role signal.
    */
   private superAgentsDigest(): string {
     const sessions = this.store.getState().superSessions;
-    if (!sessions || sessions.length === 0) return "";
-    return buildSuperDigest(sessions);
+    return buildSuperDigest(sessions ?? []);
   }
 
   /**
