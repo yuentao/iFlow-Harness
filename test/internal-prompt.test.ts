@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { ChatPanel } from "../src/panel/panel.js";
 import { stripFileMentions } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
@@ -680,6 +680,18 @@ describe("prompt templates (prompts/)", () => {
     for (const name of SHIPPED_TEMPLATES) {
       expect(existsSync(path.join(here, "..", "prompts", `${name}.md`), "utf8")).toBe(true);
     }
+  });
+
+  it("makes self-decomposition and proactive delegation the default in the system prompt", () => {
+    // The host can only dispatch what the main agent writes: if this mandate is
+    // dropped, the agent silently goes back to doing everything itself and
+    // child sessions only appear when the user asks for them.
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("Decompose the user's task yourself, then delegate");
+    expect(text).toContain("```super-agent");
+    expect(text).toContain("## When to split");
+    expect(text).toContain("## What stays in this session");
+    expect(text).toContain("children cannot delegate further");
   });
 
   it("fills every placeholder in the assembled prompts", () => {
