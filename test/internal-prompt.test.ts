@@ -668,6 +668,7 @@ const SHIPPED_TEMPLATES = [
   "followup-next-steps",
   "followup-memory",
   "model-metadata",
+  "super-agent-task",
   "asset-gen",
   "asset-gen-nouns",
   "asset-gen-contracts",
