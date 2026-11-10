@@ -54,16 +54,46 @@ const isSyncDenied = (name) =>
   SYNC_DEFAULT_DENYLIST.some((d) => name === d) || name.startsWith("oauth_creds");
 
 /**
- * Default source (2026-10-17): the LOCAL fork checkout next to this repo —
- * ../iflow-fork relative to REPO_ROOT (J:\git\iflow-fork for J:\git\iflow-harness;
- * remote product/iflow-fork.git). It carries every injected *.loader.cjs Mod
- * bundle and leads the published @yuentao npm scope, which lags behind
- * (custom.12 is not on npm), so packaging no longer consults the registry by
- * default. The npm path stays reachable via an explicit --version (registry
- * acceptance checks / future publishes); --from / --from-dir still override
- * the source entirely.
+ * The MAIN worktree root — the repo every worktree belongs to.
+ *
+ * The fork checkout lives next to the MAIN repo (J:\git\iflow-fork), not next
+ * to each worktree: a super-agent worktree sits under
+ * <main>/.iflow/super/worktrees/<name>, so resolving "../iflow-fork" from
+ * that worktree root would look in <main>/.iflow/super/worktrees/ and fail
+ * with "no local CLI fork checkout" (hit when running `npm run package`
+ * inside a worktree). `git rev-parse --git-common-dir` points at the shared
+ * .git of the main worktree, so the fork lookup stays correct no matter which
+ * worktree the script is invoked from.
  */
-const DEFAULT_LOCAL_FORK_DIR = path.resolve(REPO_ROOT, "..", "iflow-fork");
+function resolveMainRepoRoot() {
+  try {
+    const common = execFileSync(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: REPO_ROOT, encoding: "utf8", windowsHide: true },
+    ).trim();
+    if (!common) return REPO_ROOT;
+    const root = path.dirname(common);
+    // Only trust it when it really is a checkout of this project.
+    return existsSync(path.join(root, "package.json")) ? root : REPO_ROOT;
+  } catch {
+    return REPO_ROOT;
+  }
+}
+
+const MAIN_REPO_ROOT = resolveMainRepoRoot();
+
+/**
+ * Default source (2026-10-17): the LOCAL fork checkout next to the MAIN repo —
+ * ../iflow-fork relative to the main repo root (J:\git\iflow-fork for
+ * J:\git\iflow-harness; remote product/iflow-fork.git). It carries every
+ * injected *.loader.cjs Mod bundle and leads the published @yuentao npm scope,
+ * which lags behind (custom.12 is not on npm), so packaging no longer
+ * consults the registry by default. The npm path stays reachable via an
+ * explicit --version (registry acceptance checks / future publishes);
+ * --from / --from-dir still override the source entirely.
+ */
+const DEFAULT_LOCAL_FORK_DIR = path.resolve(MAIN_REPO_ROOT, "..", "iflow-fork");
 const NPM_PACKAGE = "@yuentao/iflow-cli";
 
 // Directories/files pruned from the package, relative to the package root.
@@ -161,8 +191,8 @@ if (fromDir) {
   const forkDir = process.env.IFLOW_VENDOR_FORK_DIR || DEFAULT_LOCAL_FORK_DIR;
   if (!existsSync(path.join(forkDir, "package.json"))) {
     throw new Error(
-      `no local CLI fork checkout at ${forkDir} — packaging vendors from ../iflow-fork, not npm. ` +
-      `Clone it next to this repo (git clone https://git.pandorastudio.cn/product/iflow-fork.git iflow-fork), ` +
+      `no local CLI fork checkout at ${forkDir} — packaging vendors from ../iflow-fork (next to the MAIN repo ${MAIN_REPO_ROOT}), not npm. ` +
+      `Clone it next to the main repo (git clone https://git.pandorastudio.cn/product/iflow-fork.git iflow-fork), ` +
       `or point IFLOW_VENDOR_FORK_DIR / --from-dir at an installed fork, ` +
       `or pass --version to opt back into the npm registry path.`,
     );
