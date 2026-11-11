@@ -9,6 +9,7 @@ import {
   createWorktree,
   currentBranch,
   ensureSuperIsolationIgnored,
+  inspectWorktreeState,
   inspectWorkingTree,
   isBranchMerged,
   listWorktrees,
@@ -522,5 +523,215 @@ describe("worktree · 宿主代子会话提交", () => {
     expect(result.committed).toBe(false);
     expect(result.files).toBe(0);
     expect(git(target, "rev-list", "--count", "HEAD").trim()).toBe(before);
+  }, 30000);
+});
+
+describe("worktree · 删除可靠性与状态判定", () => {
+  it("删除失败（注入 fs 接缝）时如实报 removed=false 并保留分支", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-remove-fail");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("remove-fail"),
+      baseRef: probe.head!,
+    });
+
+    let calls = 0;
+    const result = await removeWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: "iflow/super/remove-fail",
+      baseRef: probe.head!,
+      removeDir: async () => {
+        calls += 1;
+        throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+      },
+      retryDelaysMs: [1, 1],
+    });
+
+    // 删不掉就是删不掉 —— 绝不能因为「fs.rm 没抛错」就报成功。
+    expect(result.removed).toBe(false);
+    // 目录没删净 → 分支必须保留（不能靠 git branch -D 恰好失败来兜底）。
+    expect(result.branchKept).toBe(true);
+    expect(result.reason).toContain("EBUSY");
+    expect(git(repo, "branch", "--list", "iflow/super/remove-fail")).toContain(
+      "iflow/super/remove-fail",
+    );
+    // 目录确实还在。
+    expect(existsSync(target)).toBe(true);
+    // 瞬时错误值得重试（EBUSY）。
+    expect(calls).toBeGreaterThan(1);
+  }, 30000);
+
+  it("部分删除（目录残留）判定为失败并保留分支", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-remove-partial");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("remove-partial"),
+      baseRef: probe.head!,
+    });
+
+    // 模拟 Windows 上的部分删除：删掉一部分内容就失败，目录仍在。
+    const result = await removeWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: "iflow/super/remove-partial",
+      baseRef: probe.head!,
+      removeDir: async (p) => {
+        rmSync(path.join(p, "a.txt"), { force: true });
+      },
+      retryDelaysMs: [1, 1],
+    });
+
+    expect(result.removed).toBe(false);
+    expect(result.branchKept).toBe(true);
+    expect(result.reason).toContain("残留目录");
+    expect(existsSync(target)).toBe(true);
+    expect(git(repo, "branch", "--list", "iflow/super/remove-partial")).toContain(
+      "iflow/super/remove-partial",
+    );
+  }, 30000);
+
+  it("目录删净后照常删分支（回归：重试逻辑不误伤正常路径）", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-remove-ok");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("remove-ok"),
+      baseRef: probe.head!,
+    });
+
+    const result = await removeWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: "iflow/super/remove-ok",
+      baseRef: probe.head!,
+    });
+
+    expect(result.removed).toBe(true);
+    expect(result.branchKept).toBe(false);
+    expect(existsSync(target)).toBe(false);
+    expect(git(repo, "branch", "--list", "iflow/super/remove-ok")).not.toContain(
+      "iflow/super/remove-ok",
+    );
+  }, 30000);
+
+  it("inspectWorktreeState：正常 worktree 报告自身状态与分支", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-state");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("state"),
+      baseRef: probe.head!,
+    });
+
+    const clean = await inspectWorktreeState(target);
+    expect(clean.kind).toBe("worktree");
+    expect(clean.clean).toBe(true);
+    expect(clean.branch).toBe("iflow/super/state");
+
+    writeFileSync(path.join(target, "scratch.txt"), "x\n", "utf8");
+    const dirty = await inspectWorktreeState(target);
+    expect(dirty.kind).toBe("worktree");
+    expect(dirty.clean).toBe(false);
+    expect(dirty.branch).toBe("iflow/super/state");
+  }, 30000);
+
+  it("inspectWorktreeState：半删残留（.git 没了）判为 not-a-worktree", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-half-deleted");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("half-deleted"),
+      baseRef: probe.head!,
+    });
+
+    // 半删现场：.git 被删、其余文件还在。
+    rmSync(path.join(target, ".git"), { force: true, recursive: true });
+    expect(existsSync(target)).toBe(true);
+
+    const state = await inspectWorktreeState(target);
+    expect(state.kind).toBe("not-a-worktree");
+    // 证明不了干净 → 不能报干净。
+    expect(state.clean).toBe(false);
+    expect(state.branch).toBeNull();
+  }, 30000);
+
+  it("inspectWorktreeState：目录不存在判为 missing", async () => {
+    const state = await inspectWorktreeState(
+      path.join(tmpdir(), "iflow-wt-missing-does-not-exist"),
+    );
+    expect(state.kind).toBe("missing");
+    expect(state.clean).toBe(false);
+    expect(state.branch).toBeNull();
+  }, 30000);
+
+  it("worktreeHasUncommittedChanges：普通子目录不继承父仓库的「干净」结论", async () => {
+    const repo = makeRepo();
+    // 主仓是干净的 —— 旧实现在这里会报 false（当成干净，可以删），
+    // 新实现必须报 true（拿不到状态 ≠ 干净）。
+    expect(git(repo, "status", "--porcelain").trim()).toBe("");
+
+    const plain = path.join(repo, "plain-dir");
+    mkdirSync(plain, { recursive: true });
+    expect(await worktreeHasUncommittedChanges(plain)).toBe(true);
+
+    const state = await inspectWorktreeState(plain);
+    expect(state.kind).toBe("not-a-worktree");
+    expect(state.clean).toBe(false);
+  }, 30000);
+
+  it("worktreeHasUncommittedChanges：半删残留目录不返回主仓的状态", async () => {
+    const repo = makeRepo();
+    const probe = await probeGitRepo(repo);
+    const target = targetPath("wt-residual-in-repo");
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("residual-in-repo"),
+      baseRef: probe.head!,
+    });
+    // 残留目录搬进主仓内部（真实现场就是这样：worktree 树在仓库里）。
+    const residual = path.join(repo, "residual");
+    mkdirSync(residual, { recursive: true });
+    writeFileSync(path.join(residual, "leftover.txt"), "x\n", "utf8");
+    // 主仓此刻是脏的 —— 旧实现会把主仓的脏算到这个目录头上。
+    writeFileSync(path.join(repo, "a.txt"), "dirty in main\n", "utf8");
+    expect(git(repo, "status", "--porcelain")).toContain("a.txt");
+
+    expect(await worktreeHasUncommittedChanges(residual)).toBe(true);
+    const state = await inspectWorktreeState(residual);
+    expect(state.kind).toBe("not-a-worktree");
+    expect(state.clean).toBe(false);
+  }, 30000);
+
+  it("worktreeHasUncommittedChanges：worktree 自身的状态不受父仓库影响", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-independent");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("independent"),
+      baseRef: probe.head!,
+    });
+    // 主仓脏，worktree 干净 —— 两者必须各看各的。
+    writeFileSync(path.join(repo, "a.txt"), "dirty in main\n", "utf8");
+
+    expect(await worktreeHasUncommittedChanges(target)).toBe(false);
+    const state = await inspectWorktreeState(target);
+    expect(state.kind).toBe("worktree");
+    expect(state.clean).toBe(true);
   }, 30000);
 });
