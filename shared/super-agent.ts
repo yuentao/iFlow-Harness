@@ -126,15 +126,28 @@ export type SuperIsolationKind =
   /** 真 git worktree：分支独立，文件互不干扰。 */
   | "git_worktree"
   /** 非 git 仓库的降级方案：只是一个独立空目录，没有版本隔离。 */
-  | "directory";
+  | "directory"
+  /**
+   * 主仓工作区：没有 worktree 隔离，子会话直接在主仓根目录里干活。
+   *
+   * 合并子会话必须落在这一档：合并只能在目标分支所在的工作区发生 ——
+   * 在子会话自己的 worktree 里 merge 并不会把改动并进主仓当前分支。
+   * 代价是没有版本隔离（同一个工作区同时只能有一个这种子会话在跑），
+   * 所以它的任务书必须把边界写死。
+   */
+  | "repo";
 
 export interface SuperIsolation {
   kind: SuperIsolationKind;
-  /** 子会话的工作目录（worktree 路径或独立目录）。 */
+  /**
+   * 子会话的工作目录（worktree 路径、独立目录，或主仓根）。
+   *
+   * `repo` 这一档的 path 是主仓根：它不是隔离产物，清理时不能删。
+   */
   path: string;
-  /** git 分支名（仅 worktree）。 */
+  /** git 分支名（仅 worktree；`repo` 档没有自己的分支）。 */
   branch?: string;
-  /** worktree 的起点 ref。 */
+  /** worktree 的起点 ref（仅 worktree）。 */
   baseRef?: string;
   /**
    * worktree 与本地分支已随合并成功清理；`path` 仅用于追溯，磁盘上已不存在。
@@ -154,6 +167,39 @@ export interface SuperIsolation {
    * 英文的（子会话跑的是同一份英文系统提示），所以这里不能塞中文 note。
    */
   degradeReason?: string;
+}
+
+/**
+ * 隔离种类的看板标签（如实说明隔离强度，不伪造分支）。
+ *
+ * 「repo」档必须说成「主仓工作区（无隔离）」：这类子会话跑在主仓工作区里，
+ * 没有自己的分支 —— 显示一个不存在的分支名，看板上就会指向一个谁也找不到的
+ * 分支。worktree 档的分支名由看板单独显示，这里只说隔离方式。
+ */
+export function superIsolationLabel(isolation: SuperIsolation): string {
+  switch (isolation.kind) {
+    case "git_worktree":
+      return "独立 worktree";
+    case "directory":
+      return "仅目录隔离";
+    case "repo":
+      return "主仓工作区（无隔离）";
+  }
+}
+
+/**
+ * 落盘 / 恢复前的隔离信息归一。
+ *
+ * 「repo」档没有自己的分支（它跑在主仓当前分支上）：归档里若带上了分支名
+ * （手改过的记录、旧版本残留），一律丢掉 —— 看板上显示一个并不存在的分支，
+ * 比什么都不显示更糟。
+ */
+function normalizeIsolation(isolation: SuperIsolation): SuperIsolation {
+  if (isolation.kind !== "repo") return isolation;
+  const normalized: SuperIsolation = { kind: "repo", path: isolation.path };
+  if (isolation.note) normalized.note = isolation.note;
+  if (isolation.degradeReason) normalized.degradeReason = isolation.degradeReason;
+  return normalized;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +604,7 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     task: session.task,
     status: session.status,
     mainSessionId: session.mainSessionId,
-    isolation: session.isolation,
+    isolation: normalizeIsolation(session.isolation),
     model: session.model,
     attempts: session.attempts,
     createdAt: session.createdAt,
@@ -590,7 +636,7 @@ export function fromPersistedSuperSession(record: PersistedSuperSession): SuperS
     status: terminal ? record.status : "cancelled",
     mainSessionId: record.mainSessionId,
     restored: true,
-    isolation: record.isolation,
+    isolation: normalizeIsolation(record.isolation),
     model: record.model,
     attempts: record.attempts,
     createdAt: record.createdAt,
@@ -1344,7 +1390,10 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
     session.queued && session.status === "preparing" ? "（排队中）" : ""
   }${(session.attempts ?? 1) > 1 ? `（第 ${session.attempts} 次）` : ""}`;
   const parts = [`- ${session.id}「${session.title}」${status}`];
+  // 有分支才报分支；没有分支的子会话（如跑在主仓工作区的合并子会话）如实报
+  // 隔离方式 —— 看板不能显示一个并不存在的分支名。
   if (session.isolation.branch) parts.push(`分支 ${session.isolation.branch}`);
+  else parts.push(superIsolationLabel(session.isolation));
   if (session.status === "awaiting_input" && session.pending) {
     parts.push(`待答提问（请求 ${session.pending.requestId}）：${truncateInline(describePending(session.pending), 160)}`);
   } else if (session.status === "failed") {
@@ -1598,19 +1647,24 @@ export function buildSuperReportPrompt(entries: SuperReportEntry[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * 交给主会话智能体的合并请求文本。
+ * 「让智能体合并」的任务书文本。
+ *
+ * **这段文本是写给子会话的，不是写给主会话的**：它会被宿主放进一个
+ * `super-agent` 委派块的 task 字段，派给一个专职合并的子会话执行。
+ * 主会话只负责派发与汇报，不碰 git。
+ *
+ * 那个子会话必须能触达**主仓工作区**（隔离种类 `repo`）：合并只能在主仓
+ * 工作区发生 —— 在别的 worktree 里 merge 出来的结果落不到主仓当前分支上，
+ * 等于白做。这正是 `SuperIsolationKind` 里有 `repo` 这一档的原因。
  *
  * 两条触发路径共用同一段执行步骤，**开头措辞不同**：
  *  - 自动（`auto: true`）：宿主在子会话完成后发现改动没能自动合并，于是自动
  *    请智能体合并 —— 这时不能说「用户在看板点击了」（用户并没有点）。
  *  - 手动：用户在看板上点了「让智能体合并」。
  *
- * 合并不再由宿主机械执行 `git merge`：冲突需要读懂代码，宿主只会把仓库留在
- * 冲突态（或原样放弃并让用户去终端里手工收拾）。这里把分支、工作目录与边界
- * 写给主智能体，让它用自己的工具完成合并、解决冲突并总结 —— 动手的是智能体。
- *
- * 提示词刻意写明「不要只给建议」「不要推送 / 删分支 / 切分支」：这是对一条
- * 执行类请求的边界声明，不是让模型自由发挥的任务。
+ * 提示词刻意写死边界与安全阀：这是对一条执行类任务的硬约束，不是让模型
+ * 自由发挥 —— 不推送、不 rebase、不删分支、不切分支、不碰无关文件；冲突
+ * 解决不了就 `git merge --abort`，绝不能把仓库留在半合并状态。
  */
 export function buildSuperMergeRequestPrompt(
   session: SuperSessionUi,
@@ -1618,19 +1672,34 @@ export function buildSuperMergeRequestPrompt(
 ): string {
   const branch = session.isolation.branch ?? "";
   const reason = options?.reason?.trim();
+  if (!branch) {
+    // 没有自己的分支就没有可合并的目标 —— 如实说清楚，别让执行者对着
+    // 一个空的 `git merge --no-ff` 猜。
+    return [
+      "[合并任务]",
+      `子会话「${session.title}」没有自己的分支（隔离方式：${superIsolationLabel(session.isolation)}），没有可合并的目标。`,
+      "不要执行任何 git 命令，也不要改动任何文件 —— 如实汇报「该子会话没有可合并的分支」即可。",
+    ].join("\n");
+  }
   const lead = options?.auto
-    ? `子会话「${session.title}」的改动没能自动合并到当前分支${reason ? `（${reason}）` : ""}。请你自己把它的分支 ${branch} 合并到当前分支，不要只给建议、也不要让我手动执行。`
-    : `用户在看板点击了「让智能体合并」。请你自己把子会话「${session.title}」的分支 ${branch} 合并到当前分支，不要只给建议、也不要让我手动执行。`;
+    ? `子会话「${session.title}」的改动没能自动合并到主仓当前分支${reason ? `（${reason}）` : ""}。把它的分支 ${branch} 合并到主仓当前分支。`
+    : `用户在看板点击了「让智能体合并」：把子会话「${session.title}」的分支 ${branch} 合并到主仓当前分支。`;
   return [
-    "[子会话合并请求]",
+    "[合并任务]",
     lead,
-    `该子会话的工作目录：${session.isolation.path}（分支上的改动已经提交）。`,
+    "工作目录：主仓工作区根目录（你的当前工作目录）—— 合并只能在主仓工作区发生。",
+    `分支 ${branch} 上的改动已经提交完毕，不需要切分支，也不需要去子会话的工作目录里操作。`,
     "步骤：",
-    "1. 先跑 `git status` 确认主工作区状态；",
+    "1. 先跑 `git status` 确认主仓工作区状态（有没有未提交的改动、是不是已经在 merge/rebase 中间态）；",
     `2. 执行 \`git merge --no-ff ${branch}\`（保留合并提交）；`,
-    "3. 若出现冲突，逐个阅读冲突文件并自行解决，然后完成这次合并提交；无法安全解决时停下来如实说明，不要留下未完成的合并；",
-    "4. 合并后用 `git log --oneline -3` 与 `git status` 确认结果；",
-    "5. 不要推送、不要删除分支、不要切换到其它分支。最后用一两句话总结这次合并带入了哪些改动。",
+    "3. 若出现冲突，逐个阅读冲突文件并按代码语义判断双方意图，解决冲突时保留双方的改动，不要丢弃任何一侧的改动，然后完成这次合并提交；",
+    "4. 合并后用 `git log --oneline -3` 与 `git status` 确认结果。",
+    "硬边界（不要越过）：",
+    "- 不要 push、不要 rebase、不要删除分支、不要切换分支；",
+    "- 不要改动与本次合并无关的文件；",
+    "- 不要动用户尚未提交的其它改动。",
+    "安全阀：如果冲突无法可靠解决（读不懂哪一侧是对的，或需要用户决策），执行 `git merge --abort` 撤销这次合并并如实说明原因 —— 绝不能把仓库留在半合并状态。",
+    "最后如实汇报：合并 commit（哈希与标题）、被改动的文件清单、遇到的冲突与各自的处理方式；若合并失败，说明失败原因与失败时仓库的状态。",
   ].join("\n");
 }
 
