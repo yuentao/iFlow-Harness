@@ -64,7 +64,7 @@ class FakeClient {
   prompts: string[] = [];
   /** Full content blocks of each prompt (text + image) for attachment tests. */
   blocks: ContentBlock[][] = [];
-  /** Mode ids pushed to the child session — the manager must send "default". */
+  /** Mode ids pushed to the child session — the manager must send "yolo". */
   modes: string[] = [];
   disposed = false;
   cwd = "";
@@ -297,12 +297,12 @@ describe("super agent · 编排", () => {
     expect(client?.cwd).not.toBe(repo);
   }, 30000);
 
-  it("子会话被推到 default 模式（yolo 会静默执行 shell，护栏就看不到命令）", async () => {
+  it("子会话被推到 yolo 模式（刻意完全自主，不因审批往返停顿）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "running");
-    expect(harness.clients[0]?.modes).toEqual(["default"]);
+    expect(harness.clients[0]?.modes).toEqual(["yolo"]);
   }, 30000);
 
   it("审批请求由宿主直接放行，不产生待办、不打扰主会话", async () => {
@@ -329,7 +329,7 @@ describe("super agent · 编排", () => {
     expect(harness.reports.length).toBe(reportsBefore);
   }, 30000);
 
-  it("shell 工具审批回 allow_once（否则护栏只看得到第一条命令）", async () => {
+  it("兜底路径：shell 审批回 allow_once（allow_always 会让后续命令绕过护栏）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
@@ -354,7 +354,7 @@ describe("super agent · 编排", () => {
     expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
   }, 30000);
 
-  it("命中依赖护栏的 shell 命令被拒绝，子会话继续跑、不产生待办", async () => {
+  it("兜底路径：命中依赖护栏的 shell 命令被拒绝，子会话继续跑、不产生待办", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });

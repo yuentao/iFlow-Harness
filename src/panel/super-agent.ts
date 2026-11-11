@@ -15,15 +15,15 @@
  *    子会话改回运行中（Orca `worker_done`「恰好发一次」的宿主侧等价物）。
  *  - 内部进展不打扰主会话：只有 ready / blocked / failed / dropped 会上报，
  *    progress 只更新看板（dsh 的 `internal_only` vs `notify`）。
- *  - **子会话始终免确认，但每一次工具调用都回到宿主**：内核被推到 `default`
- *    模式（**不是** `yolo` —— yolo 下内核会静默执行写/删/shell、根本不发
- *    `session/request_permission`，宿主的依赖护栏就成了摆设），宿主对任何
- *    `session/request_permission` / `_iflow/plan/exit` 立即自动放行。因此审批
- *    不产生待办、不阻塞子会话，而宿主仍能逐条看到 shell 命令并在放行前过
- *    `shared/super-agent-guard.ts` 的护栏（拦会破坏主工作区依赖的安装/联接
- *    命令）。只有 `_iflow/user/questions` 是真正的信息缺口 —— 那是只有人才能
- *    回答的，落到子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是
- *    单数槽位，多子会话并发会互相覆盖）。
+ *  - **子会话始终免确认且完全自主**：内核被推到 `yolo` 模式 —— 这是刻意的产品
+ *    语义，子会话必须完全自主、不因审批往返而停顿，也不该把审批变成人工负担。
+ *    代价是 `yolo` 下内核通常**不发** `session/request_permission`，所以宿主在
+ *    审批点上的依赖护栏（`shared/super-agent-guard.ts`，拦会破坏主工作区依赖的
+ *    安装/联接命令）只是**兜底**而非主防线：万一某类工具仍然发审批，宿主就地
+ *    自动放行（shell 用 allow_once，危险命令 deny），既不产生待办也不阻塞子会话。
+ *    只有 `_iflow/user/questions` 是真正的信息缺口 —— 那是只有人才能回答的，
+ *    落到子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是单数槽位，
+ *    多子会话并发会互相覆盖）。
  *  - **完成后自动带回改动**：按 `iflow.superAgent.integration` 自动合并到主
  *    工作区的当前分支，或推送分支并创建 PR。合并**串行**执行；是否安全先用
  *    `git merge-tree` 在对象库里预演（不碰索引与工作区），因此主工作区有未提交
@@ -882,14 +882,13 @@ export class SuperAgentManager {
       const { sessionId } = await client.newSession({ cwd: isolation.path, mcpServers: [] });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
 
-      // 免确认，但**不**推到 yolo：yolo 下内核静默执行写/删/shell，根本不发
-      // `session/request_permission`，宿主的依赖护栏（callbacksFor 里的
-      // classifyChildShellCommand）就永远看不到命令 —— 护栏形同虚设。这里
-      // 推到 default，让每次工具调用都回到宿主；宿主立即自动放行（shell 用
-      // allow_once），用户体验上依旧是「免确认」，而 shell 命令逐条过护栏。
-      // 推送失败也无所谓 —— callbacksFor 的自动放行是兜底。
+      // 子会话推 `yolo` 是**刻意的**：子会话必须完全自主，不因审批往返而停顿，
+      // 也不该把审批变成人工负担。代价是 `yolo` 下内核通常**不发**
+      // `session/request_permission`，所以审批点上的依赖护栏（callbacksFor 里的
+      // classifyChildShellCommand）只是**兜底** —— 万一某类工具仍然发审批，就仍然
+      // 自动放行（shell 用 allow_once）+ 拦危险 shell；它不是主防线，不能依赖它。
       try {
-        await client.setMode(sessionId, "default");
+        await client.setMode(sessionId, "yolo");
       } catch (error) {
         this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
       }
@@ -1081,9 +1080,11 @@ export class SuperAgentManager {
         const index = applySessionUpdate(transcript.state, notification);
         if (index !== null) this.markTranscriptDirty(id, index);
       },
-      // 免确认：审批自动放行，不产生待办、不打扰主会话。
+      // 兜底路径：审批自动放行，不产生待办、不打扰主会话。
+      // 子会话推的是 yolo，内核通常根本不发 `session/request_permission`；这里
+      // 只在万一某类工具仍然发审批时生效，所以下面的依赖护栏同样是兜底而非主防线。
       //
-      // 但「自动放行」之前必须过依赖护栏（2026-11-11 事故：子会话把主仓
+      // 「自动放行」之前仍过依赖护栏（2026-11-11 事故：子会话把主仓
       // node_modules 联接进 worktree 后跑 `npm ci`，顺着联接清空了用户依赖）。
       // 护栏是 `shared/super-agent-guard.ts` 的纯函数表，这里只负责给它喂
       // 命令文本与隔离上下文，命中即拒绝 —— 模型看到工具被拒后可自行换方案。
