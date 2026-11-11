@@ -612,6 +612,30 @@ function createMockHost(): HostApi {
         "```",
       ].join("\n"),
     },
+    {
+      kind: "text",
+      // Single-task delegation sample: exercises the "one card, no 1/1 chip"
+      // branch in SuperDirectiveCard (the 3-task block above only covers the
+      // batch layout).
+      text: [
+        "这一件只需要一个子会话：",
+        "",
+        "```super-agent",
+        JSON.stringify(
+          {
+            tasks: [
+              {
+                title: "只跑一次 typecheck",
+                task: "在仓库根目录运行 npm run typecheck，把真实输出（通过/失败与错误行）如实汇报。",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n"),
+    },
     { kind: "plan", id: "demo-plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
   const demoApproval: SessionState["pendingApproval"] = {
