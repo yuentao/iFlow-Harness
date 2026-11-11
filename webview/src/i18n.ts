@@ -1045,6 +1045,25 @@ const en: Record<string, string> = {
   "正在写入项目知识…": "Writing project knowledge…",
   "正在生成…": "Generating…",
   "生成失败": "Generation failed",
+  // super-agent 协议块卡片（转录里取代裸 JSON 代码块）
+  "委派子会话": "Delegated child sessions",
+  "{0} 个任务": "{0} task(s)",
+  "子会话操作": "Child session actions",
+  "{0} 个动作": "{0} action(s)",
+  "回答": "Answer",
+  "{0} 个回答": "{0} answer(s)",
+  "保留分支": "Keep branch",
+  "原始协议块": "Raw protocol block",
+  "{0} · {1} 字符": "{0} · {1} chars",
+  "内容不是合法 JSON": "The body is not valid JSON",
+  "缺少 tasks 数组": "Missing the tasks array",
+  "缺少 actions 数组": "Missing the actions array",
+  "没有可展示的任务": "No task to display",
+  "没有可展示的动作": "No action to display",
+  "未知的协议块语言": "Unknown protocol fence language",
+  "展开任务说明": "Expand the task description",
+  "收起任务说明": "Collapse the task description",
+  "未指定子会话": "No child session specified",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
