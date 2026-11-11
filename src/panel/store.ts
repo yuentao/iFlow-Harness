@@ -31,7 +31,6 @@ import {
   markSubAgentStopped,
   markToolReverted,
   markToolHunkDecisions,
-  nextBlockId,
   refreshSessionUsage,
   resolveExitPlanModeBlock,
   setMeta,
@@ -434,25 +433,6 @@ export class SessionStore {
 
   approvalResolutionNote(toolName: string, resolution: string): void {
     this.noteMutationIndex(appendApprovalResolution(this.state, toolName, resolution));
-    this.flush();
-  }
-
-  /**
-   * Super Agent: append one relayed child-session status note to the MAIN
-   * transcript.
-   *
-   * The relay runs on its own direct completion (never a main ACP turn), so
-   * the text is NOT something the main agent said — it is a host note about
-   * child sessions. It is therefore appended as a `system` text block (muted
-   * line, no brand avatar, no copy/regenerate actions), never as an
-   * assistant reply. Tail-only: no status change, checkpoint or session
-   * rename.
-   */
-  appendRelayMessage(text: string): void {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    this.state.blocks.push({ kind: "text", id: nextBlockId(), text: trimmed, system: true });
-    this.noteMutationIndex(this.state.blocks.length - 1);
     this.flush();
   }
 

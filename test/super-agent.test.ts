@@ -479,6 +479,28 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("都已结束");
     expect(text).toContain("不要编造");
   });
+
+  it("汇报提示词把主会话接回同一个任务，而不是让它等用户再开口", () => {
+    const text = buildSuperReportPrompt([
+      { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
+    ]);
+    // 主会话派发完本轮结束是正常的，宿主在子会话全部结束后补一轮。
+    expect(text).toContain("同一个任务的新回合");
+    expect(text).toContain("不要停下来等用户再开口");
+    // 「根据汇报再进行下一步」：后续步骤要自己动手，不是只给建议。
+    expect(text).toContain("直接做");
+    expect(text).toContain("不要只给建议");
+  });
+
+  it("全部被中断的汇报不催主会话继续，而是先问用户", () => {
+    const text = buildSuperReportPrompt([
+      { session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } },
+    ]);
+    expect(text).toContain("被中断");
+    expect(text).toContain("不要自动重跑");
+    expect(text).toContain("问用户是否要继续");
+    expect(text).not.toContain("不要停下来等用户再开口");
+  });
 });
 
 describe("super agent · 合并汇报", () => {

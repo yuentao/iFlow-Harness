@@ -283,5 +283,7 @@
   "会话未就绪，无法让智能体合并": "The session is not ready; cannot ask the agent to merge.",
   "已重新派发子会话（沿用原工作目录）": "Re-dispatched the child session (reusing its working directory).",
   "该子会话当前无法重试": "This child session cannot be retried right now.",
+  "正在等待 {0} 个子会话汇报，全部结束后会自动继续": "Waiting for {0} child session(s) to report; it continues automatically once all of them finish.",
+  "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），全部结束后会自动继续": "Waiting for {0} child session(s) to report ({1} awaiting your answer); it continues automatically once all of them finish.",
   "子会话": "Child session"
 }

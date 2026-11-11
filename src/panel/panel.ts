@@ -318,11 +318,19 @@ const MODEL_METADATA_SNIPPET_CHARS = 200;
  * backoff pauses were observed well under this. Catches a mid-stream wedge
  * without waiting out the full wall-clock ceiling. */
 const INTERNAL_PROMPT_IDLE_MS = 90_000;
-/** Child-session status relay (Super Agent): a side note to the MAIN session,
- * sent as its own direct completion so it never queues behind the main turn.
- * Short budget on purpose — a slow gateway must not pin a relay request. */
-const SUPER_REPORT_TIMEOUT_MS = 60_000;
-const SUPER_REPORT_IDLE_MS = 20_000;
+/**
+ * Super Agent heartbeat interval.
+ *
+ * Once the main session's turn is over it is IDLE while its children keep
+ * working — nothing in the ACP protocol will wake it again. The host therefore
+ * keeps a heartbeat alive for as long as there is unfinished Super Agent work:
+ * it refreshes the 「waiting for children」 pill and retries delivery of the
+ * consolidated child report (and any queued agent-merge request) the moment the
+ * main session is free. This is what makes the overall flow uninterrupted:
+ * a finished delegation always comes back as a new main-session turn, even if
+ * that turn's trigger raced a replay / a streaming turn / an error.
+ */
+const SUPER_HEARTBEAT_MS = 1_500;
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
  * delays the chips — it must never hold the panel in a pseudo-busy state.
@@ -681,8 +689,28 @@ export class ChatPanel implements vscode.Disposable {
    * 中途进展只更新看板。
    */
   private readonly pendingSuperReports = new SuperReportBuffer();
-  /** 串行化合并汇报：并发直连调用会让两条汇报交错追加进转录。 */
-  private superRelayChain: Promise<void> = Promise.resolve();
+  /**
+   * 已经合并好、等着交给主会话的子会话汇报提示词（先进先出）。
+   *
+   * 交付方式是**主会话上的一次真实 prompt**（hidden：转录里不出现用户气泡），
+   * 不是旁路直连调用 —— 只有让主会话自己读到这批结果，它才能接着推进任务，
+   * 而不是把汇报折叠成一条用户看得到、智能体却不知道的系统注记。
+   */
+  private pendingSuperReportPrompts: string[] = [];
+  /** 汇报 turn 正在跑（drain 的重入锁，与合并队列互斥）。 */
+  private superReportRunning = false;
+  /**
+   * 等待子会话的心跳。
+   *
+   * 主会话回合结束后只剩子会话在跑时，没有任何协议事件会再次唤醒主会话；
+   * 这个定时器负责 ①维持「等待 N 个子会话」的常驻提示 ②一旦主会话空闲就把
+   * 排队的汇报 / 合并请求发出去。没有待办且没有活着的子会话时自动停表。
+   */
+  private superHeartbeatTimer: NodeJS.Timeout | null = null;
+  /** 常驻「等待子会话」提示的 toast id（null = 当前没显示）。 */
+  private superWaitToastId: number | null = null;
+  /** 常驻提示的状态指纹：子会话进度帧高频触发，指纹不变就不重发。 */
+  private superWaitToastKey: string | null = null;
   /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
@@ -1184,6 +1212,8 @@ export class ChatPanel implements vscode.Disposable {
     }
     this.superAgent = null;
     this.pendingSuperReports.clear();
+    this.pendingSuperReportPrompts = [];
+    this.stopSuperHeartbeat();
     this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
     if (this.diagDebounce) {
@@ -6307,6 +6337,13 @@ export class ChatPanel implements vscode.Disposable {
         // 子会话状态一变就把记录落盘：扩展随时可能被重启（窗口关闭、宿主
         // 崩溃），不落盘就等于「那次运行发生过什么」永远丢了。
         this.persistSuperSessions();
+        // Child progress frames arrive continuously; the heartbeat is what
+        // turns "main turn ended, children still working" into a visible
+        // waiting state and keeps the report delivery retrying.
+        if (sessions.some((session) => !isTerminalSuperStatus(session.status))) {
+          this.ensureSuperHeartbeat();
+        }
+        this.refreshSuperWaitHeartbeat();
       },
       // A child's transcript rides its OWN channel: putting it in the main
       // `blocks` would pollute the main transcript and break the blockPatch
@@ -6525,50 +6562,178 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Buffer a child-session status update and relay it to the MAIN session
-   * once every child has settled.
+   * Buffer a child-session status update and hand it to the MAIN session once
+   * every child has settled.
    *
    * The main session must not be interrupted once per child: a batch of N
    * delegations would otherwise produce N separate notes with no complete
    * picture. Reports are accumulated (one latest report per child) and only
    * handed over when `allSuperSessionsSettled` — until then the board alone
-   * shows progress. The relay itself is a DIRECT gateway completion
-   * (streamChatCompletion), not a prompt on the main ACP session, so it never
-   * waits for the main session to be idle. Relays are serialized so two
-   * batches cannot interleave their appended text blocks. The reply lands in
-   * the transcript as a muted SYSTEM NOTE (never an assistant text block): it
-   * was not said by the main agent, whose own context receives child state
-   * through the board digest. Fire-and-forget: a failed relay is logged and
-   * dropped — the child states are already on the board in `superSessions`.
+   * shows progress.
+   *
+   * Delivery is a **real prompt on the main ACP session** (`hidden`, so no
+   * user bubble appears), NOT a side-channel completion appended as a muted
+   * note. The main turn has usually already ended by then (delegation is
+   * mid-turn, children outlive it), so that prompt is what restarts the
+   * conversation: the agent reads the reports from its OWN context and can
+   * take the next step. A side note would leave the agent blind to its own
+   * children — exactly the "主会话停了 / 流程断了" symptom.
+   *
+   * The prompt is queued and drained when the main session is free; the
+   * Super Agent heartbeat retries until it lands.
    */
   private queueSuperReport(entries: SuperReportEntry[]): void {
-    if (entries.length === 0) return;
+    if (entries.length === 0 || this.disposed) return;
     this.pendingSuperReports.add(entries);
     const batch = this.pendingSuperReports.takeSettled(this.superAgent?.list() ?? []);
     if (!batch) return;
-    this.superRelayChain = this.superRelayChain
-      .then(() => this.relaySuperReport(batch))
-      .catch((error) => this.log.warn(`super agent report relay failed: ${errorMessage(error)}`));
+    const text = this.superAgent?.reportPrompt(batch) ?? "";
+    if (!text) return;
+    this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
+    this.pendingSuperReportPrompts.push(text);
+    this.ensureSuperHeartbeat();
+    void this.drainSuperReports();
   }
 
-  private async relaySuperReport(entries: SuperReportEntry[]): Promise<void> {
-    if (this.disposed) return;
-    const text = this.superAgent?.reportPrompt(entries) ?? "";
-    if (!text) return;
-    this.log.info(`super agent: relaying ${entries.length} settled child report(s)`);
-    // Deliberately NOT runInternalPrompt: its single busy lane would serialize
-    // the relay behind enhance / title work. Each relay is its own request.
-    const reply = await this.completeInternalPrompt(
-      text,
-      SUPER_REPORT_TIMEOUT_MS,
-      SUPER_REPORT_IDLE_MS,
+  /**
+   * Deliver queued child reports to the main session, one turn at a time.
+   *
+   * Only runs when the main session is free. The merge queue owns the same
+   * single lane (a merge request is also a main-session turn), so the two are
+   * mutually exclusive — otherwise two concurrent `sendPrompt` calls would
+   * interleave on one ACP session.
+   */
+  private async drainSuperReports(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    this.superReportRunning = true;
+    try {
+      while (this.pendingSuperReportPrompts.length > 0) {
+        if (this.disposed) return;
+        if (!this.mainSessionFree()) break;
+        // A merge request is also a turn of the main session; let it go first
+        // and come back when it has settled (the heartbeat re-enters here).
+        if (this.superMergeRunning || this.pendingSuperMerges.length > 0) break;
+        const text = this.pendingSuperReportPrompts.shift()!;
+        this.clearSuperWaitHeartbeat();
+        this.log.info("super agent: delivering the settled child report as a fresh main-session turn");
+        await this.sendPrompt(text, undefined, undefined, undefined, {
+          delegateOnBusy: false,
+          hidden: true,
+        });
+        // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
+        // 处理错误后自然的下一轮。
+        if (this.store.getState().status === "error") break;
+      }
+    } catch (error) {
+      this.log.warn(`super agent report delivery failed: ${errorMessage(error)}`);
+    } finally {
+      this.superReportRunning = false;
+    }
+  }
+
+  /**
+   * The main session can accept a host-driven turn right now.
+   *
+   * Mirrors the gate `sendPrompt` applies, evaluated BEFORE anything is
+   * shifted off a queue so a rejected turn can never swallow a report.
+   */
+  private mainSessionFree(): boolean {
+    const state = this.store.getState();
+    return (
+      !!state.sessionId &&
+      !state.initializing &&
+      state.status !== "streaming" &&
+      !state.replaying &&
+      !this.historySyncBusy
     );
-    if (this.disposed || !reply) {
-      if (!reply) this.log.warn("super agent report relay produced no text");
+  }
+
+  /**
+   * Keep the heartbeat alive while any Super Agent work is outstanding.
+   *
+   * Without it, a child finishing while the main session is replaying history
+   * (or right after a failed turn) would leave its report stranded: nothing
+   * else fires the delivery hook again.
+   */
+  private ensureSuperHeartbeat(): void {
+    if (this.disposed || this.superHeartbeatTimer) return;
+    const timer = setInterval(() => this.superHeartbeatTick(), SUPER_HEARTBEAT_MS);
+    // Never keep the extension host alive just for the heartbeat.
+    if (typeof timer.unref === "function") timer.unref();
+    this.superHeartbeatTimer = timer;
+  }
+
+  private superHeartbeatTick(): void {
+    if (this.disposed) {
+      this.stopSuperHeartbeat();
       return;
     }
-    this.store.appendRelayMessage(reply);
-    void this.persistActiveTranscript();
+    this.refreshSuperWaitHeartbeat();
+    void this.drainSuperReports();
+    void this.drainSuperMerges();
+    if (!this.hasSuperWork()) this.stopSuperHeartbeat();
+  }
+
+  /** Outstanding Super Agent work (queued turns, or children still running). */
+  private hasSuperWork(): boolean {
+    if (this.disposed) return false;
+    if (this.pendingSuperReportPrompts.length > 0) return true;
+    if (this.pendingSuperMerges.length > 0) return true;
+    return (this.store.getState().superSessions ?? []).some(
+      (session) => !isTerminalSuperStatus(session.status),
+    );
+  }
+
+  private stopSuperHeartbeat(): void {
+    if (this.superHeartbeatTimer) {
+      clearInterval(this.superHeartbeatTimer);
+      this.superHeartbeatTimer = null;
+    }
+    this.clearSuperWaitHeartbeat();
+  }
+
+  /**
+   * The 「waiting for children」 pill.
+   *
+   * The main turn is over while children still run, so the panel would look
+   * idle/stopped even though work continues. A persistent, display-only toast
+   * states that the host is waiting and will continue on its own. Refreshed by
+   * the heartbeat; re-sent only when the live/awaiting counts change (progress
+   * frames arrive continuously and must not churn the toast stack).
+   */
+  private refreshSuperWaitHeartbeat(): void {
+    if (this.disposed) return;
+    const sessions = this.store.getState().superSessions ?? [];
+    const live = sessions.filter((session) => !isTerminalSuperStatus(session.status));
+    const awaiting = live.filter((session) => session.status === "awaiting_input").length;
+    if (live.length === 0 || !this.mainSessionFree()) {
+      this.clearSuperWaitHeartbeat();
+      return;
+    }
+    const key = `${live.length}:${awaiting}`;
+    if (key === this.superWaitToastKey && this.superWaitToastId !== null) return;
+    this.clearSuperWaitHeartbeat();
+    const message =
+      awaiting > 0
+        ? vscode.l10n.t(
+            "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），全部结束后会自动继续",
+            live.length,
+            awaiting,
+          )
+        : vscode.l10n.t("正在等待 {0} 个子会话汇报，全部结束后会自动继续", live.length);
+    this.superWaitToastKey = key;
+    this.superWaitToastId = this.store.sendToast("info", message, {
+      persistent: true,
+      displayOnly: true,
+    });
+  }
+
+  private clearSuperWaitHeartbeat(): void {
+    if (this.superWaitToastId !== null) {
+      this.store.dismissToast(this.superWaitToastId);
+      this.superWaitToastId = null;
+    }
+    this.superWaitToastKey = null;
   }
 
   /** Route a Super Agent action from the board. */
@@ -6756,6 +6921,8 @@ export class ChatPanel implements vscode.Disposable {
         ) {
           break;
         }
+        // 汇报 turn 也占用主会话这同一条车道，等它结束（心跳会再叫我们）。
+        if (this.superReportRunning) break;
         const next = this.pendingSuperMerges.shift();
         if (!next) break;
         await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
@@ -8477,6 +8644,12 @@ export class ChatPanel implements vscode.Disposable {
       // 主会话空闲了 → 发起排队的「让智能体合并」（子会话完成后自动合并的
       // 那一路）。串行执行，一次只合并一个。
       void this.drainSuperMerges();
+      // 同理：子会话汇报可能在别的事件里就绪（流式期间 / 恢复历史期间），
+      // 回合结束时补一次投递，并刷新「等待子会话」心跳 —— 主会话空闲而子会话
+      // 仍在跑时，这条常驻提示就是「流程没断，宿主在等」的唯一可见证据。
+      void this.drainSuperReports();
+      this.refreshSuperWaitHeartbeat();
+      if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
       if (!internal) this.currentTurnAttachments = null;
       // A3: the panel was disposed mid-flight — the store is gone, so there
