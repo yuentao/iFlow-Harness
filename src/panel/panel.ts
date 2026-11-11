@@ -85,6 +85,7 @@ import {
   SuperReportBuffer,
   type SuperAction,
   type SuperAttachment,
+  type SuperPendingFence,
   type SuperReportEntry,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
@@ -675,6 +676,13 @@ export class ChatPanel implements vscode.Disposable {
   private superScanText = "";
   /** How much of `superScanText` has already been consumed (no re-dispatch). */
   private superScanOffset = 0;
+  /**
+   * 上一个还没闭合的委派围栏（开栏位置 + 已经找过收栏的正文位置）。
+   *
+   * 长任务书要横跨几十个 chunk 才收栏，没有这个锚点的话每来一段就要从开栏处
+   * 重扫整段正文；把断点带回去就能续扫。
+   */
+  private superPendingOpen: SuperPendingFence | undefined = undefined;
   /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
@@ -6475,10 +6483,17 @@ export class ChatPanel implements vscode.Disposable {
     const text = ChatPanel.chunkText(content);
     if (!text) return;
     this.superScanText += text;
-    const scan = extractSuperDirectives(this.superScanText, this.superScanOffset);
+    const scan = extractSuperDirectives(this.superScanText, this.superScanOffset, this.superPendingOpen);
+    this.superPendingOpen = scan.pendingOpen;
     if (scan.end > this.superScanOffset) this.superScanOffset = scan.end;
     if (scan.invalidBlocks.length > 0) {
-      this.store.sendToast("warning", vscode.l10n.t("子会话委派指令无法解析，已忽略"));
+      // 只报「无法解析」等于让用户和模型都没法自查；带上失败原因与正文长度，
+      // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。
+      const first = scan.invalidBlocks[0]!;
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("子会话委派指令无法解析（{0}，载荷 {1} 字符），已忽略", first.reason, first.body.length),
+      );
     }
     if (scan.blocks.length === 0) return;
     const manager = this.getSuperAgent();

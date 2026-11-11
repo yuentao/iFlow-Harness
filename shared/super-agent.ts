@@ -642,16 +642,40 @@ const FENCE_OPEN = /^```super-agent[ \t]*$/;
 /** 收栏标记（必须独占一行）。 */
 const FENCE_CLOSE = /^```[ \t]*$/;
 
+/** 一个解析失败的委派指令块。 */
+export interface SuperInvalidBlock {
+  /** 块正文原文（宿主只取长度提示用户，不把整段回灌进 toast）。 */
+  body: string;
+  /** 失败原因（中文短语，直接进 toast —— 只报「无法解析」等于没报）。 */
+  reason: string;
+}
+
+/**
+ * 围栏还没收起时的续扫锚点。
+ *
+ * 流式输出里一个块会横跨几十个 chunk，宿主每来一段就重扫一次整段文本；长任务
+ * 书（上万字符）加上未闭合的等待期，重扫是平方级的浪费。把「开栏在哪、正文
+ * 已经找到哪」带回去，下次就能从断点续扫。
+ */
+export interface SuperPendingFence {
+  /** 开栏行的行首偏移。 */
+  lineStart: number;
+  /** 已经找过收栏（但没找到）的正文位置 —— 下次从这里继续往后找。 */
+  scannedTo: number;
+}
+
 export interface SuperDirectiveScan {
   /** 解析成功的指令块，每个块一组任务。 */
   blocks: SuperTaskSpec[][];
-  /** 解析失败的块正文（宿主据此提示用户，不静默吞掉）。 */
-  invalidBlocks: string[];
+  /** 解析失败的块（宿主据此提示用户，不静默吞掉）。 */
+  invalidBlocks: SuperInvalidBlock[];
   /**
    * 扫描结束位置（消费偏移）。调用方把它当作下一轮的起点 —— 已消费的块不会
    * 被二次派发，即使同一段文本在后续 chunk 里再次出现。
    */
   end: number;
+  /** 有围栏未闭合时的续扫锚点（宿主把它原样带进下一次扫描）。 */
+  pendingOpen?: SuperPendingFence;
 }
 
 /** 标题清洗：压空白、截断到 40 字（看板一行放得下）。 */
@@ -675,29 +699,40 @@ export function normalizeSuperTitle(raw: string, fallback = "子会话"): string
  * 「工具调用」语法（见 {@link findToolStylePayloads}）。两条路径解析出同一份
  * 任务列表，且互不重复派发。
  */
-export function extractSuperDirectives(text: string, fromOffset = 0): SuperDirectiveScan {
+export function extractSuperDirectives(
+  text: string,
+  fromOffset = 0,
+  pending?: SuperPendingFence,
+): SuperDirectiveScan {
   const blocks: SuperTaskSpec[][] = [];
-  const invalidBlocks: string[] = [];
+  const invalidBlocks: SuperInvalidBlock[] = [];
   let end = fromOffset;
+  let pendingOpen: SuperPendingFence | undefined;
 
   let cursor = fromOffset;
+  // 上一轮停在未闭合的开栏处时，宿主会把锚点带回来：从那里续扫，不再把已经
+  // 确认不含指令的前缀（长会话里可能上百 KB）重扫一遍。
+  let resume = pending && pending.lineStart >= fromOffset ? pending : undefined;
   let fenceUnclosed = false;
   while (cursor < text.length) {
-    const open = findFence(text, cursor, FENCE_OPEN);
+    const open = findFence(text, resume ? resume.lineStart : cursor, FENCE_OPEN);
+    const resumeScannedTo = resume && open && open.lineStart === resume.lineStart ? resume.scannedTo : 0;
+    resume = undefined;
     if (!open) break;
-    const close = findFence(text, open.bodyStart, FENCE_CLOSE);
-    if (!close) {
-      // 还没闭合（流式中间态）—— 停在这里，等后续 chunk 补齐。
+    const resolved = resolveDirectiveBlock(text, open, resumeScannedTo);
+    if (resolved.kind === "unclosed") {
+      // 还没闭合（流式中间态）—— 停在这里，等后续 chunk 补齐。正文里的代码
+      // 围栏不会让它提前结束：收栏靠 JSON 结构定位，见 resolveDirectiveBlock。
       end = open.lineStart;
+      pendingOpen = { lineStart: open.lineStart, scannedTo: resolved.scannedTo };
       fenceUnclosed = true;
       break;
     }
-    const body = text.slice(open.bodyStart, close.lineStart).trim();
-    const parsed = parseDirectiveBody(body);
-    if (parsed) blocks.push(parsed);
-    else if (body) invalidBlocks.push(body);
-    cursor = close.lineEnd;
-    end = close.lineEnd;
+    const parsed = parseDirectiveBody(resolved.body);
+    if (parsed.ok) blocks.push(parsed.tasks);
+    else if (resolved.body) invalidBlocks.push({ body: resolved.body, reason: parsed.reason });
+    cursor = resolved.closeEnd;
+    end = resolved.closeEnd;
   }
 
   // 工具调用式载荷：只在围栏扫描没吃掉的区域里找，否则同一个 JSON 会被
@@ -707,12 +742,12 @@ export function extractSuperDirectives(text: string, fromOffset = 0): SuperDirec
   if (!fenceUnclosed) {
     for (const match of findToolStylePayloads(text, Math.max(fromOffset, end))) {
       if (match.tasks) blocks.push(match.tasks);
-      else invalidBlocks.push(match.body);
+      else invalidBlocks.push({ body: match.body, reason: "工具调用式载荷里的任务字段非法" });
       if (match.end > end) end = match.end;
     }
   }
 
-  return { blocks, invalidBlocks, end };
+  return { blocks, invalidBlocks, end, ...(pendingOpen ? { pendingOpen } : {}) };
 }
 
 /** 委派标记：模型在「工具调用式」输出里用它点名要委派子会话。 */
@@ -837,13 +872,10 @@ function parseToolStylePayload(body: string): {
   looksLikeDelegation: boolean;
 } {
   const direct = parseDirectiveBody(body);
-  if (direct) return { tasks: direct, looksLikeDelegation: true };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return { tasks: null, looksLikeDelegation: false };
-  }
+  if (direct.ok) return { tasks: direct.tasks, looksLikeDelegation: true };
+  const loose = parseJsonLoose(body);
+  if (!loose.ok) return { tasks: null, looksLikeDelegation: false };
+  const parsed = loose.value;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return { tasks: null, looksLikeDelegation: false };
   }
@@ -853,7 +885,7 @@ function parseToolStylePayload(body: string): {
     const inner = record[key];
     if (typeof inner !== "object" || inner === null || Array.isArray(inner)) continue;
     const tasks = parseDirectiveBody(JSON.stringify(inner));
-    if (tasks) return { tasks, looksLikeDelegation: true };
+    if (tasks.ok) return { tasks: tasks.tasks, looksLikeDelegation: true };
     if ("tasks" in (inner as Record<string, unknown>)) {
       return { tasks: null, looksLikeDelegation: true };
     }
@@ -886,24 +918,97 @@ function findFence(text: string, from: number, pattern: RegExp): FenceMatch | nu
   return null;
 }
 
-/** 解析指令块正文。返回 null 表示格式非法。 */
-function parseDirectiveBody(body: string): SuperTaskSpec[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null;
+/** 正文里的 JSON 结构不可用时最多试几个收栏候选（防病态文本拖死扫描）。 */
+const MAX_CLOSE_CANDIDATES = 8;
+
+/**
+ * 载荷看起来是 JSON 但迟迟收不全时，从开栏到文本末尾最多容忍多少字符。
+ *
+ * 不设上限的话，一个括号永远不配对的损坏块会让扫描永久停在「等收栏」，同一
+ * 段之后的任何委派指令都不会再被看到；而正常任务的载荷远小于这个尺度，超过
+ * 就按损坏块处理（退回候选收口，判非法并消费），保证后续文本仍能继续扫描。
+ */
+const MAX_UNCLOSED_SPAN = 512 * 1024;
+
+type BlockResolution =
+  | { kind: "closed"; body: string; closeEnd: number }
+  | { kind: "unclosed"; scannedTo: number };
+
+/**
+ * 定位一个指令块的正文与收栏。
+ *
+ * 收栏不能取「正文里的第一行 ```」：模型常把多行任务书按原始换行铺开（而不是
+ * JSON 的 `\n` 转义），任务书自己就带一段 markdown 代码围栏，那一行会提前截断
+ * 载荷、JSON 必然解析失败（实测 2026-11-11：长任务书 / 内嵌围栏 → 整块判非法，
+ * 委派静默不生效）。所以先跳过空白找到载荷的 `{` / `[`，用 {@link matchJsonValue}
+ * 定位 JSON 的真正结束位置，再从那里往后找第一行收栏 —— 正文里的围栏落在 JSON
+ * 内部，天然不会被误当收栏。
+ *
+ * JSON 结构不可用（散文前缀、括号本身就不配对）时退回按收栏逐个试，取第一个
+ * 能解析成功的候选；都失败了就把第一个收栏的正文交给调用方报「非法块」。
+ * 唯一的例外是「正文以 `{` / `[` 开头但 JSON 还没收全」：这是流式的正常中间态，
+ * 直接判未闭合等下一段（见下方注释），超长损坏块才退回候选收口。
+ *
+ * `scannedTo` 是上一轮已经找过、确认没有收栏的位置：流式输出每来一段就重扫
+ * 整段正文是平方级浪费，从断点往后找即可。
+ */
+function resolveDirectiveBlock(text: string, open: FenceMatch, scannedTo: number): BlockResolution {
+  const jsonStart = skipWhitespace(text, open.bodyStart);
+  const jsonEnd = jsonStart === -1 ? -1 : matchJsonValue(text, jsonStart);
+  if (jsonEnd !== -1) {
+    const close = findFence(text, Math.max(jsonEnd, scannedTo), FENCE_CLOSE);
+    if (!close) return { kind: "unclosed", scannedTo: text.length };
+    return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
   }
-  const rawTasks = Array.isArray(parsed)
-    ? parsed
-    : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { tasks?: unknown }).tasks)
-      ? (parsed as { tasks: unknown[] }).tasks
+  // 正文以 `{` / `[` 开头、但 JSON 还没收全（流式的正常中间态）：绝不能进下面的
+  // 候选收口去「试收栏」——任务书正文里的任何一行 ``` 都可能是它自己带的代码
+  // 围栏，真正的收栏只可能出现在 JSON 结束之后。把半截 JSON 当 closed 消费会推进
+  // 调用方的消费偏移，后续 chunk 补齐的载荷永远扫不回来（委派被静默吞掉，只弹
+  // 一条「载荷不是合法 JSON」）。所以直接返回 unclosed，等下一段续扫。
+  const firstChar = jsonStart === -1 ? "" : text.charAt(jsonStart);
+  if ((firstChar === "{" || firstChar === "[") && text.length - open.bodyStart <= MAX_UNCLOSED_SPAN) {
+    return { kind: "unclosed", scannedTo: text.length };
+  }
+  let searchFrom = Math.max(open.bodyStart, scannedTo);
+  let first: { body: string; closeEnd: number } | null = null;
+  for (let attempt = 0; attempt < MAX_CLOSE_CANDIDATES; attempt++) {
+    const close = findFence(text, searchFrom, FENCE_CLOSE);
+    if (!close) break;
+    const candidate = { body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+    if (parseDirectiveBody(candidate.body).ok) return { kind: "closed", ...candidate };
+    first ??= candidate;
+    searchFrom = close.lineEnd;
+  }
+  return first ? { kind: "closed", ...first } : { kind: "unclosed", scannedTo: text.length };
+}
+
+/** 跳过空白，返回第一个非空白字符的偏移（到底返回 -1）。 */
+function skipWhitespace(text: string, from: number): number {
+  for (let i = from; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") return i;
+  }
+  return -1;
+}
+
+/** 解析指令块正文的结果：失败要带原因，宿主才能提示得具体。 */
+type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason: string };
+
+/** 解析指令块正文。 */
+function parseDirectiveBody(body: string): DirectiveParse {
+  const parsed = parseJsonLoose(body);
+  if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON" };
+  const value = parsed.value;
+  const rawTasks = Array.isArray(value)
+    ? value
+    : typeof value === "object" && value !== null && Array.isArray((value as { tasks?: unknown }).tasks)
+      ? (value as { tasks: unknown[] }).tasks
       : null;
-  if (!rawTasks) return null;
+  if (!rawTasks) return { ok: false, reason: "缺少 tasks 数组" };
 
   const tasks: SuperTaskSpec[] = [];
   for (const entry of rawTasks) {
-    if (typeof entry !== "object" || entry === null) return null;
+    if (typeof entry !== "object" || entry === null) return { ok: false, reason: "任务条目不是对象" };
     const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
     const task = typeof record.task === "string" ? record.task.trim() : "";
     // A task that is still a placeholder (the model echoed the documented
@@ -919,7 +1024,96 @@ function parseDirectiveBody(body: string): SuperTaskSpec[] | null {
       ...(attachments.length > 0 ? { attachments } : {}),
     });
   }
-  return tasks.length > 0 ? tasks : null;
+  // 一条都派不出去不是「成功但为空」：模型可能只给了标题、或把协议示例原样
+  // 抄了回来。宿主需要知道这件事（否则用户只看到「什么都没发生」）。
+  if (tasks.length === 0) return { ok: false, reason: "没有可派发的任务（task 为空或全是占位符）" };
+  return { ok: true, tasks };
+}
+
+/**
+ * 宽松解析 JSON：先按原样 parse，失败再修一次。
+ *
+ * 模型写委派载荷时最常见的三种毛病（都实测出现过）：正文按原始换行铺开而
+ * 不给 `\n` 转义（Windows 路径里的 `\P` 之类更会把转义写坏）、尾逗号、
+ * 字符串里裸的控制字符。这些都不改变载荷的**语义**，直接判非法会让整次委派
+ * 静默失效，所以先做一次保守修补再交给 JSON.parse —— 修不好照样失败，绝不
+ * 编造内容。
+ */
+function parseJsonLoose(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    // 落到下面的修复路径。
+  }
+  try {
+    return { ok: true, value: JSON.parse(repairJson(text)) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * 修补常见的 JSON 写法问题。只做「保住原文含义」的变换：
+ * - 字符串里的原始换行 / 回车 / 制表符 → 转义序列；
+ * - 非法的转义（`\P`、`\a`…）→ 转义反斜杠本身，原文照旧可读；
+ * - 尾逗号（`,}` / `,]`）→ 丢掉逗号。
+ * 引号本身写坏（裸 `"` 截断字符串）不在修复范围内：那已经无法分辨边界。
+ */
+function repairJson(text: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (!inString) {
+      if (ch === '"') {
+        inString = true;
+        out += ch;
+        continue;
+      }
+      if (ch === ",") {
+        const next = nextNonWhitespace(text, i + 1);
+        if (next === "}" || next === "]") continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = text.charAt(i + 1);
+      if (next === '"' || next === "\\" || next === "/" || next === "b" || next === "f" || next === "n" || next === "r" || next === "t") {
+        out += ch + next;
+        i++;
+        continue;
+      }
+      if (next === "u") {
+        const hex = text.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += `\\u${hex}`;
+          i += 5;
+          continue;
+        }
+      }
+      out += "\\\\";
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+    if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (ch >= " ") out += ch;
+  }
+  return out;
+}
+
+function nextNonWhitespace(text: string, from: number): string {
+  for (let i = from; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") return ch;
+  }
+  return "";
 }
 
 /**

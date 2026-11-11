@@ -167,6 +167,156 @@ describe("super agent · 委派指令解析", () => {
     expect(extractSuperDirectives(head + body + tail, done.end).blocks).toHaveLength(0);
   });
 
+  // 实测（2026-11-11）：模型写长任务书时常把正文按原始换行铺开（而不是 JSON
+  // 的 \n 转义），任务书自己就带一段 markdown 代码围栏。旧实现把「第一行 ```」
+  // 当收栏，载荷被拦腰截断，整块判非法、委派静默不生效。
+  it("任务书里自带代码围栏，不会被当成收栏截断", () => {
+    const expected = ["第一步：读代码", "```", "npm test", "```", "第二步：改实现"].join("\n");
+    const text = [
+      "```super-agent",
+      '{"tasks":[{"title":"带围栏的任务书","task":"第一步：读代码',
+      "```",
+      "npm test",
+      "```",
+      '第二步：改实现"}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.task).toBe(expected);
+  });
+
+  it("任务书里的转义双引号与原始换行都能解析", () => {
+    const text = [
+      "```super-agent",
+      '{"tasks":[{"title":"引号","task":"他说：\\"先跑测试\\"，然后',
+      '第二行继续"}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks[0]?.[0]?.task).toBe('他说："先跑测试"，然后\n第二行继续');
+  });
+
+  it("超长任务书（约 3 万字符）仍能解析", () => {
+    const lines = Array.from(
+      { length: 600 },
+      (_, i) => `第 ${i + 1} 步：读 src/panel/panel.ts 并核对第 ${i + 1} 处调用点，确认参数与返回值一致`,
+    );
+    const expected = lines.join("\n");
+    expect(expected.length).toBeGreaterThan(29_000);
+    const text = ["```super-agent", `{"tasks":[{"title":"长任务","task":"${expected}"}]}`, "```"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks[0]?.[0]?.task).toBe(expected);
+  });
+
+  // 实测（2026-11-11）：任务书正文里出现「只由三个反引号组成的一行」（JSON 里是
+  // \n 转义）时，收栏定位不能被这段正文骗走。
+  it("任务书里含只由三个反引号组成的行（JSON 转义换行）仍能解析", () => {
+    const expected = ["步骤一", "```", "代码", "```", "步骤二"].join("\n");
+    const payload = '{"tasks":[{"title":"t","task":"步骤一\\n```\\n代码\\n```\\n步骤二"}]}';
+    // 载荷本身就是合法 JSON：\n 是转义序列，正文里没有真实的换行。
+    expect(payload).not.toContain("\n");
+    const text = ["```super-agent", payload, "```"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("t");
+    expect(scan.blocks[0]?.[0]?.task).toBe(expected);
+  });
+
+  it("任务书里含 JSON 转义双引号时仍能解析", () => {
+    const payload = '{"tasks":[{"title":"quoted","task":"He said \\"hi\\" then left"}]}';
+    const text = ["```super-agent", payload, "```"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.task).toBe('He said "hi" then left');
+  });
+
+  it("约 3 万字符的任务书仍能解析（合法 JSON 载荷）", () => {
+    const lines = Array.from(
+      { length: 600 },
+      (_, i) => `第 ${i + 1} 步：读 src/panel/panel.ts 并核对第 ${i + 1} 处调用点，确认参数与返回值一致`,
+    );
+    const expected = lines.join("\n");
+    expect(expected.length).toBeGreaterThan(29_000);
+    const payload = JSON.stringify({ tasks: [{ title: "长任务", task: expected }] });
+    const text = ["```super-agent", payload, "```"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.task).toBe(expected);
+  });
+
+  it("非法转义与尾逗号会被修复后解析", () => {
+    const text = [
+      "```super-agent",
+      '{"tasks":[{"title":"路径","task":"改 C:\\Program Files\\app\\main.ts 的构建脚本",},]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.blocks[0]?.[0]?.task).toBe("改 C:\\Program Files\\app\\main.ts 的构建脚本");
+  });
+
+  it("非法块带上失败原因与正文长度（宿主据此提示）", () => {
+    const scan = extractSuperDirectives(["```super-agent", "{not json}", "```"].join("\n"));
+    expect(scan.invalidBlocks).toHaveLength(1);
+    expect(scan.invalidBlocks[0]?.reason).toBeTruthy();
+    expect(scan.invalidBlocks[0]?.body).toBe("{not json}");
+  });
+
+  it("未闭合期间带 pendingOpen 续扫，收栏后只派发一次", () => {
+    const head = "开始处理。\n```super-agent\n";
+    const body = '{"tasks":[{"title":"A","task":"B"}]}';
+    const first = extractSuperDirectives(head + body);
+    expect(first.blocks).toHaveLength(0);
+    expect(first.pendingOpen?.lineStart).toBe(head.indexOf("```super-agent"));
+    const full = head + body + "\n```\n";
+    const done = extractSuperDirectives(full, first.end, first.pendingOpen);
+    expect(done.blocks).toHaveLength(1);
+    expect(done.pendingOpen).toBeUndefined();
+    const again = extractSuperDirectives(full, done.end, done.pendingOpen);
+    expect(again.blocks).toHaveLength(0);
+  });
+
+  // 实测（2026-11-11）：流式中间态里 JSON 还没收全，而任务书正文自带一行独占的
+  // 三个反引号。旧实现会把这行当收栏，把半截 JSON 当 closed 消费掉，后续 chunk
+  // 补齐的载荷永远扫不回来（委派被静默吞掉）。
+  it("流式：JSON 未收全 + 正文已含独占围栏行 → 不判非法，继续等收栏", () => {
+    const head = "开始处理。\n```super-agent\n";
+    const partial = [
+      '{"tasks":[{"title":"带围栏的任务书","task":"第一步：读代码',
+      "```",
+      "npm test",
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(head + partial);
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.pendingOpen).toBeDefined();
+    expect(scan.pendingOpen?.lineStart).toBe(head.indexOf("```super-agent"));
+  });
+
+  it("流式：补齐后的载荷从断点续扫，能派发且不判非法", () => {
+    const head = "开始处理。\n```super-agent\n";
+    const partial = [
+      '{"tasks":[{"title":"带围栏的任务书","task":"第一步：读代码',
+      "```",
+      "npm test",
+      "```",
+    ].join("\n");
+    const first = extractSuperDirectives(head + partial);
+    const full = `${head}${partial}\n第二步：改实现"}]}\n\`\`\`\n`;
+    const done = extractSuperDirectives(full, first.end, first.pendingOpen);
+    expect(done.blocks).toHaveLength(1);
+    expect(done.invalidBlocks).toHaveLength(0);
+    expect(done.pendingOpen).toBeUndefined();
+  });
+
   it("标题折叠空白并截断", () => {
     expect(normalizeSuperTitle("  修好   登录  ")).toBe("修好 登录");
     expect(normalizeSuperTitle("x".repeat(60)).length).toBe(40);
