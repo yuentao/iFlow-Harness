@@ -33,6 +33,7 @@ import {
   Button,
   Chip,
   ConfirmDialog,
+  HelpTip,
   ICON_INLINE,
   IconButton,
   ModalShell,
@@ -61,17 +62,35 @@ function statusChip(session: SuperSessionUi): { tone: "muted" | "success" | "war
   }
 }
 
-/** Integration result → chip tone. */
-const INTEGRATION_TONE: Record<
-  SuperIntegrationState,
-  "muted" | "success" | "primary" | "danger"
-> = {
-  merged: "success",
-  pr_created: "primary",
-  conflict: "danger",
-  failed: "danger",
-  skipped: "muted",
+/** Integration result → text tone. Rendered as inline text rather than a
+ * chip: the row already carries a status chip, and a second coloured block
+ * per row was pure visual weight. */
+const INTEGRATION_TEXT: Record<SuperIntegrationState, string> = {
+  merged: "text-success",
+  pr_created: "text-primary",
+  conflict: "text-destructive",
+  failed: "text-destructive",
+  skipped: "text-muted-foreground",
 };
+
+/**
+ * Short display name for a worktree branch.
+ *
+ * Branch names are `iflow/super/<task-slug>-<ts36>-<seq36>`; the slug is
+ * derived from the title printed on the same row, so repeating it is
+ * duplicate noise. Keep the unique suffix (what tells siblings apart) and
+ * leave the full ref to the tooltip / live pane. Both suffix parts are
+ * base36 — a decimal-only match silently stops shortening from the 6th
+ * child in a host process (seq 10 → "a").
+ */
+const SUPER_BRANCH_PREFIX = "iflow/super/";
+
+export function shortBranch(branch: string): string {
+  if (!branch.startsWith(SUPER_BRANCH_PREFIX)) return branch;
+  const tail = branch.slice(SUPER_BRANCH_PREFIX.length);
+  const match = /-([a-z0-9]+-[a-z0-9]+)$/i.exec(tail);
+  return match ? `super/…${match[1]}` : branch;
+}
 
 function isActive(session: SuperSessionUi): boolean {
   return session.status === "preparing" || session.status === "running" || session.status === "awaiting_input";
@@ -229,7 +248,7 @@ export function SuperAgentBoard() {
             </Chip>
           )}
           {counts.done > 0 && (
-            <Chip tone="success" title={t("{0} 个已完成", counts.done)}>
+            <Chip tone="success" title={t("{0} 个已完成", counts.done)} className="@max-[380px]:hidden">
               <Check className="size-2.5" aria-hidden="true" />
               <span className="tabular-nums">{counts.done}</span>
             </Chip>
@@ -241,12 +260,21 @@ export function SuperAgentBoard() {
             </Chip>
           )}
           {counts.cancelled > 0 && (
-            <Chip tone="muted" title={t("{0} 个已中断", counts.cancelled)}>
+            <Chip
+              tone="muted"
+              title={t("{0} 个已中断", counts.cancelled)}
+              className="@max-[380px]:hidden"
+            >
               <Square className="size-2.5" aria-hidden="true" />
               <span className="tabular-nums">{counts.cancelled}</span>
             </Chip>
           )}
         </div>
+        {/* No-confirmation is a property of every child, not of one row —
+            stated once here instead of a chip repeated on each card. */}
+        <HelpTip label={t("免确认说明")}>
+          {t("子会话始终免确认：工具调用不会被审批，也不需要你批准")}
+        </HelpTip>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {active.length > 0 && (
             <Button
@@ -307,7 +335,10 @@ export function SuperAgentBoard() {
             </div>
           )}
           {(totals.input > 0 || totals.output > 0) && (
-            <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border bg-canvas/40 px-2 py-1.5 text-ui-micro text-muted-foreground">
+            <div
+              className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border bg-canvas/40 px-2 py-1.5 text-ui-micro text-muted-foreground"
+              title={t("按公开单价估算，仅供参考")}
+            >
               <span className="font-medium text-foreground">{t("子会话合计开销")}</span>
               <span className="tabular-nums">
                 {t("输入 {0} · 输出 {1}", formatTokens(totals.input), formatTokens(totals.output))}
@@ -315,7 +346,6 @@ export function SuperAgentBoard() {
               {totals.estimatedCost !== null && (
                 <span className="tabular-nums">{formatCostPrecise(totals.estimatedCost)}</span>
               )}
-              <span className="ml-auto">{t("按公开单价估算，仅供参考")}</span>
             </div>
           )}
         </div>
@@ -408,6 +438,17 @@ function SuperSessionRow({
   // What survives is the record — the branch and its worktree — so the merge
   // and cleanup actions stay available.
   const historical = session.restored === true;
+  // Diagnostics — full branch ref, worktree path, retry count — ride the
+  // title tooltip: they matter when investigating a row, not while scanning
+  // the board. What stays visible is only the unique branch suffix.
+  const titleHint = [
+    session.title,
+    session.isolation.branch ? t("分支 {0}", session.isolation.branch) : null,
+    t("目录 {0}", session.isolation.path),
+    (session.attempts ?? 1) > 1 ? t("第 {0} 次尝试", session.attempts ?? 1) : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return (
     <div className="shrink-0 rounded-md border border-border/80 bg-canvas/60 transition-colors hover:border-border">
@@ -415,7 +456,7 @@ function SuperSessionRow({
           shoving the chip and duration off the row. */}
       <div className="flex items-center gap-1.5 px-2 pt-1.5">
         <Chip tone={chip.tone}>{chip.label}</Chip>
-        <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={session.title}>
+        <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
           {session.title}
         </span>
         {historical && (
@@ -426,9 +467,6 @@ function SuperSessionRow({
         <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
           {formatElapsed(ended - started)}
         </span>
-        {(session.attempts ?? 1) > 1 && (
-          <Chip tone="muted">{t("第 {0} 次尝试", session.attempts ?? 1)}</Chip>
-        )}
         {isActive(session) && (
           <IconButton
             icon={<Square className={ICON_INLINE} />}
@@ -440,23 +478,19 @@ function SuperSessionRow({
         )}
       </div>
 
-      {/* Isolation line: the worktree branch (path on hover), mono and
-          selectable. Only the branch truncates — the 免确认 chip states up
-          front that child tool calls are never approved by hand and must stay
-          visible at any width. */}
+      {/* Isolation line: the worktree branch, mono and selectable. Only the
+          unique suffix is shown — the slug repeats the title above, and the
+          full ref / path live in the tooltip. */}
       <div className="mt-1 flex min-w-0 items-center gap-1.5 px-2 text-ui-caption text-muted-foreground">
         <GitBranch className="size-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate font-mono" title={session.isolation.path}>
-          {session.isolation.branch ?? session.isolation.path}
+        <span className="min-w-0 flex-1 truncate font-mono" title={titleHint}>
+          {session.isolation.branch ? shortBranch(session.isolation.branch) : session.isolation.path}
         </span>
         {session.isolation.kind === "directory" && (
           <Chip tone="warning" title={session.isolation.note}>
             {t("仅目录隔离")}
           </Chip>
         )}
-        <Chip tone="info" title={t("子会话始终免确认：工具调用不会被审批，也不需要你批准")}>
-          {t("免确认")}
-        </Chip>
       </div>
 
       {/* A pending question is the only thing that needs the user, so it sits
@@ -509,18 +543,18 @@ function SuperSessionRow({
           cluster drop to its own row as a block on narrow panels. */}
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 px-2 py-1.5">
         {session.integration && (
-          <div className="flex min-w-0 items-center gap-1.5 text-ui-caption text-muted-foreground">
-            <Chip tone={INTEGRATION_TONE[session.integration.state]}>
+          <div className="flex min-w-0 items-center gap-1.5 text-ui-caption">
+            <span className={`shrink-0 font-medium ${INTEGRATION_TEXT[session.integration.state]}`}>
               {t(superIntegrationLabel(session.integration))}
-            </Chip>
+            </span>
             {session.integration.url ? (
-              <span className="min-w-0 truncate font-mono" title={session.integration.url}>
-                {session.integration.url}
+              <span className="min-w-0 truncate font-mono text-muted-foreground" title={session.integration.url}>
+                · {session.integration.url}
               </span>
             ) : (
               session.integration.detail && (
-                <span className="min-w-0 truncate" title={session.integration.detail}>
-                  {session.integration.detail}
+                <span className="min-w-0 truncate text-muted-foreground" title={session.integration.detail}>
+                  · {session.integration.detail}
                 </span>
               )
             )}

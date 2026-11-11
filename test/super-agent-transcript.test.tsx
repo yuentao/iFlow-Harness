@@ -21,7 +21,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Block } from "../shared/messages";
 import type { SuperSessionUi } from "../shared/super-agent";
-import { SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
+import { shortBranch, SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
 
 const store = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 
@@ -335,5 +335,14 @@ describe("Super Agent 看板排序与折叠", () => {
 
     clickLabel("展开已完成的子会话");
     expect(container.textContent).toContain("已合并的任务");
+  });
+});
+
+describe("shortBranch", () => {
+  it("只保留 base36 唯一后缀，非 super 分支原样返回", () => {
+    expect(shortBranch("iflow/super/修复按钮-mwammvh-1")).toBe("super/…mwammvh-1");
+    // 第 6 个子会话起序号是 base36（a、b…），不能被十进制正则退回整条 ref。
+    expect(shortBranch("iflow/super/修复按钮-mwammvh-b")).toBe("super/…mwammvh-b");
+    expect(shortBranch("feature/login-fix")).toBe("feature/login-fix");
   });
 });
