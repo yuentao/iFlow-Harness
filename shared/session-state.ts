@@ -1941,6 +1941,14 @@ export function newSessionState(state: SessionState): SessionState {
   // The recent-session list is workspace-scoped and must survive resets.
   fresh.sessions = state.sessions;
   fresh.activeSessionId = state.activeSessionId;
+  // Super Agent board: the child-session projection is WORKSPACE-scoped, not
+  // transcript-scoped — the children belong to the panel, not to the block
+  // list being swapped. Dropping it here blanked the board on every session
+  // switch and left it blank until the manager happened to emit again (which
+  // never happens for a finished child) — so after a restart, restoring a
+  // historical session showed no children at all. The manager re-publishes
+  // the scoped projection right after the switch anyway.
+  fresh.superSessions = state.superSessions;
   fresh.replaying = state.replaying;
   // Connection-scoped like status/auth: a restart does replaceState FIRST and
   // then markConnecting (which stamps the next epoch), so dropping the counter

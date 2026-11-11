@@ -58,8 +58,10 @@ import {
   reportForSession,
   retrySuperSession,
   superIntegrationLabel,
+  toPersistedSuperSession,
   withIntegration,
   withUsage,
+  type PersistedSuperSession,
   type SuperAttachment,
   type SuperEvent,
   type SuperIntegration,
@@ -167,6 +169,13 @@ export interface SuperAgentDeps {
   onNeedAgentMerge?: (session: SuperSessionUi, reason: string) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
+  /**
+   * 当前主会话 id —— 派发出来的子会话归属它。
+   *
+   * 子会话是主会话的产物：主会话 A 派发的子会话不能在主会话 B 的看板上出现
+   * （分支、汇报、重试都归 A 所有），重启恢复历史会话时也靠它把归档取回来。
+   */
+  currentMainSessionId: () => string | null;
   /** 模型单价（USD / 百万 token）；null = 无单价记录，不显示成本。 */
   priceFor?: (modelId: string | null) => { input: number; output: number } | null;
   /** 完成后如何把分支带回主工作区（`iflow.superAgent.integration`，每次实时读）。 */
@@ -221,6 +230,26 @@ export class SuperAgentManager {
   private readonly sessions = new Map<string, SuperSessionUi>();
   private readonly clients = new Map<string, AcpClient>();
   private readonly resolvers = new Map<string, PendingResolver>();
+  /**
+   * 从磁盘恢复回来的历史子会话，按**归属主会话**分组。
+   *
+   * 与 `sessions` 分开存：这些子会话的 CLI 进程早随扩展宿主退出了，没有
+   * 客户端、没有实时转录、也不能重试 —— 只是「那次运行发生过什么」的记录。
+   * 分开放是为了让重试/中断这些**进程级**操作天然找不到它们（不会去 kill
+   * 一个不存在的会话）。
+   *
+   * 按主会话分组而不是一个总表：归档是按主会话分文件的，落盘时要能逐个会话
+   * 取出来写回 —— 一个总表会让「写 A 的归档」顺手抹掉 B 的记录。
+   */
+  private readonly archived = new Map<string, SuperSessionUi[]>();
+  /**
+   * 曾经派发过子会话的主会话 id —— 归档按它分文件。
+   *
+   * 记的是「历史全集」而不是「现在还有子会话的」：子会话被清理掉之后，那个
+   * 会话的归档要写成空数组，否则磁盘上留着旧记录，下次恢复又冒出已经清理
+   * 掉的子会话。
+   */
+  private readonly archiveOwners = new Set<string>();
   /** 每个子会话的助手文本 —— 汇报摘要与输出 token 估算的来源。 */
   private readonly lastText = new Map<string, string>();
   /** 每个子会话的思考文本 —— 只用于输出 token 估算（思考也算生成开销）。 */
@@ -246,12 +275,92 @@ export class SuperAgentManager {
 
   // --- 对外 API -------------------------------------------------------------
 
-  list(): SuperSessionUi[] {
-    return [...this.sessions.values()].sort((a, b) => a.createdAt - b.createdAt);
+  /**
+   * 看板投影：活着的子会话 + 当前主会话的历史子会话。
+   *
+   * **活着的子会话一律可见**（不分主会话）：它们是正在跑的进程，用户必须
+   * 能看到并随时中断 —— 按主会话藏起来会让子会话跑到天荒地老也没人管。
+   *
+   * **历史子会话按主会话归属**：主会话 A 当年派发的子会话属于 A 的那段对话，
+   * 恢复 A 时才回到看板上；恢复 B 时它们不会串到 B 面前。不传 `mainSessionId`
+   * 时不含历史子会话（汇总门槛等「只关心活着的」的场合用）。
+   */
+  list(mainSessionId?: string | null): SuperSessionUi[] {
+    const live = [...this.sessions.values()];
+    const history = mainSessionId ? this.archived.get(mainSessionId) ?? [] : [];
+    return [...live, ...history].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   get(id: string): SuperSessionUi | undefined {
-    return this.sessions.get(id);
+    return this.sessions.get(id) ?? this.findArchived(id);
+  }
+
+  /**
+   * 找到一条子会话记录（活着的或历史恢复的）。
+   *
+   * 历史子会话的进程早就没了，但它们的**分支与工作目录还在磁盘上** —— 所以
+   * 「让智能体合并」「清理工作目录」这些针对磁盘事实的操作对它们同样有效。
+   */
+  private findArchived(id: string): SuperSessionUi | undefined {
+    for (const records of this.archived.values()) {
+      const found = records.find((s) => s.id === id);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  /** 移除一条子会话记录（活着的或历史恢复的）。 */
+  private removeSession(id: string): void {
+    this.sessions.delete(id);
+    for (const [owner, records] of this.archived) {
+      const next = records.filter((s) => s.id !== id);
+      if (next.length !== records.length) this.archived.set(owner, next);
+    }
+  }
+
+  /**
+   * 采纳从磁盘恢复的历史子会话（重启后恢复主会话时调用）。
+   *
+   * 这些记录**不是**活着的子会话：它们的 CLI 进程早已随扩展宿主退出。所以
+   * 它们不进 `sessions`（进程级操作——重试/中断——找不到它们），只进
+   * `archived`，看板照样能看见、照样能清理工作目录或让智能体合并分支。
+   */
+  restoreSessions(mainSessionId: string, records: SuperSessionUi[]): void {
+    this.archived.set(mainSessionId, records);
+    this.archiveOwners.add(mainSessionId);
+    this.emit();
+  }
+
+  /**
+   * 需要归档的主会话 id 集合 —— 落盘时逐个写归档。
+   *
+   * 按**归属**逐个写，而不是只写「当前主会话」：子会话是异步跑的，用户随时
+   * 可能切到别的会话去 —— 只写当前会话会把别人的归档覆盖成空。
+   *
+   * 这个集合是**曾经有过子会话**的会话全集，而不是「现在还有子会话」的：
+   * 子会话被清理掉之后，那个会话的归档必须被写成空数组（否则磁盘上留着旧
+   * 记录，恢复时又冒出已经清理掉的子会话）。
+   */
+  archivableMainSessionIds(): string[] {
+    return [...this.archiveOwners];
+  }
+
+  /**
+   * 某个主会话名下所有子会话（活着的 + 历史的）—— 落盘时用。
+   *
+   * 归档的是**记录**，不是运行态：活着的子会话剥掉运行期字段（待应答、实时
+   * 进度、已死的 cliSessionId），历史子会话本来就是记录，原样落盘。
+   */
+  archivableSessions(mainSessionId: string): PersistedSuperSession[] {
+    const out: PersistedSuperSession[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.mainSessionId !== mainSessionId) continue;
+      out.push(toPersistedSuperSession(session));
+    }
+    for (const session of this.archived.get(mainSessionId) ?? []) {
+      out.push(toPersistedSuperSession(session));
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /** 某个子会话的完整转录（详情首次打开 / webview 重同步时拉取）。 */
@@ -285,11 +394,14 @@ export class SuperAgentManager {
       queued: true,
       attempts: 1,
       isolation: { kind: "directory", path: "", note: "正在准备隔离环境" },
+      // 归属主会话：归档按它分文件，恢复历史会话时按它取回。
+      mainSessionId: this.deps.currentMainSessionId() ?? undefined,
       createdAt: now,
       updatedAt: now,
       reports: [],
     };
     this.sessions.set(id, session);
+    if (session.mainSessionId) this.archiveOwners.add(session.mainSessionId);
     this.queue.push({ spec, id });
     this.emit();
     this.pump();
@@ -385,12 +497,15 @@ export class SuperAgentManager {
    *
    * `keepBranch` 为真时分支一定保留；否则当分支上还有未合并提交时也保留，
    * 并在返回值里说明原因（不静默吞掉用户可能需要的提交）。
+   *
+   * **历史子会话也适用**：它的进程早没了，但 worktree 与分支还在磁盘上 ——
+   * 这正是「重启后把上次遗留的分支收拾干净」需要的操作。
    */
   async cleanup(
     id: string,
     options: { keepBranch?: boolean } = {},
   ): Promise<{ ok: boolean; branchKept?: boolean; reason?: string }> {
-    const session = this.sessions.get(id);
+    const session = this.get(id);
     if (!session) return { ok: false };
     // 排队中的会话被清理后不能再被 pump 启动。
     this.dequeue(id);
@@ -401,7 +516,7 @@ export class SuperAgentManager {
     // 附件副本只服务这个子会话：清理时一并删掉（worktree 的保留策略不适用于它）。
     await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
     if (!session.isolation.path) {
-      this.sessions.delete(id);
+      this.removeSession(id);
       this.transcripts.delete(id);
       this.emit();
       return { ok: true };
@@ -415,14 +530,14 @@ export class SuperAgentManager {
         baseRef: session.isolation.baseRef,
         keepBranch: options.keepBranch,
       });
-      this.sessions.delete(id);
+      this.removeSession(id);
       this.transcripts.delete(id);
       this.emit();
       return { ok: result.removed, branchKept: result.branchKept, reason: result.reason };
     }
     // 目录隔离：直接删掉那个独立目录。
     await rm(session.isolation.path, { recursive: true, force: true }).catch(() => undefined);
-    this.sessions.delete(id);
+    this.removeSession(id);
     this.transcripts.delete(id);
     this.emit();
     return { ok: true };
@@ -441,7 +556,7 @@ export class SuperAgentManager {
    * 如实提示，绝不假装成功。
    */
   async recordAgentMerge(id: string): Promise<boolean> {
-    const session = this.sessions.get(id);
+    const session = this.get(id);
     const branch = session?.isolation.branch;
     if (!session || !branch) return false;
     if (!(await isBranchMerged({ repoRoot: this.deps.repoRoot, branch }))) return false;
@@ -1064,9 +1179,18 @@ export class SuperAgentManager {
 
   /** 写入集成结果（元数据补记，不经过状态机 —— 终态会话的事件会被丢弃）。 */
   private recordIntegration(id: string, integration: SuperIntegration): void {
-    const current = this.sessions.get(id);
+    const current = this.get(id);
     if (!current) return;
-    this.sessions.set(id, withIntegration(current, integration));
+    const next = withIntegration(current, integration);
+    // 历史子会话不在 sessions 里 —— 补记要写回 archived，否则合并结果会丢。
+    if (this.sessions.has(id)) {
+      this.sessions.set(id, next);
+    } else {
+      for (const [owner, records] of this.archived) {
+        if (!records.some((s) => s.id === id)) continue;
+        this.archived.set(owner, records.map((s) => (s.id === id ? next : s)));
+      }
+    }
     this.emit();
     this.deps.log.info(
       `super agent: ${id} 集成 ${integration.state}${integration.detail ? ` — ${integration.detail}` : ""}`,
@@ -1238,7 +1362,7 @@ export class SuperAgentManager {
   }
 
   private emit(): void {
-    this.deps.onSessionsChanged(this.list());
+    this.deps.onSessionsChanged(this.list(this.deps.currentMainSessionId()));
   }
 }
 

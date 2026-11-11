@@ -70,6 +70,9 @@ const en: Record<string, string> = {
   "查看摘要": "Show summary",
   "查看实时操作": "Show live activity",
   "子会话实时操作": "Child session live activity",
+  "上次运行": "From a previous run",
+  "这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
+    "This child session had already finished in a previous run (a historical record restored after the extension restarted)",
   "准备中…": "Preparing…",
   "暂无输出": "No output yet",
   "需要确认执行工具调用": "Needs confirmation to run a tool call",

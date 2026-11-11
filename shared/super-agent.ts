@@ -300,6 +300,23 @@ export interface SuperSessionUi {
   integration?: SuperIntegration;
   /** 汇报历史（审计用，按时间升序）。 */
   reports: SuperReport[];
+  /**
+   * 派发这个子会话的**主会话** id。
+   *
+   * 子会话是主会话的产物，两者必须成对：主会话 A 派发的子会话在主会话 B
+   * 的看板上出现是错的（分支、汇报、重试都归 A 所有）。宿主落盘时按它分文件，
+   * 恢复主会话时按它取回 —— 这条字段就是「恢复历史会话时子会话被正确恢复」
+   * 的归属依据。
+   */
+  mainSessionId?: string;
+  /**
+   * true = 这条记录是从磁盘恢复出来的历史子会话。
+   *
+   * 扩展重启后子会话的 CLI 进程已经随宿主一起没了 —— 它只剩「分支与工作目录
+   * 还在」这一件事实。恢复出来的记录必须如实标成历史：不能再重试（没有进程
+   * 可重启），但仍然可以清理工作目录 / 让智能体合并分支（分支确实还在 git 里）。
+   */
+  restored?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +486,94 @@ export function retrySuperSession(session: SuperSessionUi, at: number): SuperSes
     integration: undefined,
     updatedAt: at,
     reports: [...session.reports, { state: "progress", summary: `重试中（第 ${attempt} 次）`, at }],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 归档（重启后恢复子会话）
+// ---------------------------------------------------------------------------
+
+/**
+ * 落盘的子会话记录（重启后恢复看板用）。
+ *
+ * 只存「重启后仍然成立」的事实：它属于哪个主会话、做了什么、在哪个分支上、
+ * 结束状态与汇报历史。**刻意不存**运行期字段 —— `pending`（宿主要回答的提问
+ * 随进程一起没了）、`progress`（实时进度尾）、`cliSessionId`（那个 ACP 会话
+ * 已经不存在了）。
+ */
+export interface PersistedSuperSession {
+  id: string;
+  title: string;
+  task: string;
+  status: SuperStatus;
+  /** 派发它的主会话 id —— 恢复时按它归属。 */
+  mainSessionId?: string;
+  isolation: SuperIsolation;
+  model?: string;
+  attempts?: number;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  summary?: string;
+  error?: string;
+  tokens?: SuperTokenUsage;
+  integration?: SuperIntegration;
+  reports: SuperReport[];
+}
+
+/** 活着的子会话 → 落盘记录（剥掉运行期字段）。 */
+export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuperSession {
+  return {
+    id: session.id,
+    title: session.title,
+    task: session.task,
+    status: session.status,
+    mainSessionId: session.mainSessionId,
+    isolation: session.isolation,
+    model: session.model,
+    attempts: session.attempts,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    summary: session.summary,
+    error: session.error,
+    tokens: session.tokens,
+    integration: session.integration,
+    reports: session.reports,
+  };
+}
+
+/**
+ * 落盘记录 → 恢复出来的子会话。
+ *
+ * 恢复必须**如实**：进程已经没了，所以任何非终态（准备中 / 运行中 / 等你
+ * 处理）都归一成「已中断」—— 一个永远停在「运行中」的子会话会让主会话的
+ * 汇报永远等不到「全部结束」，也会让看板谎报进度。分支与工作目录照旧保留：
+ * 它们在磁盘上还在，清理与合并仍然可用。
+ */
+export function fromPersistedSuperSession(record: PersistedSuperSession): SuperSessionUi {
+  const terminal = isTerminalSuperStatus(record.status);
+  return {
+    id: record.id,
+    title: record.title,
+    task: record.task,
+    status: terminal ? record.status : "cancelled",
+    mainSessionId: record.mainSessionId,
+    restored: true,
+    isolation: record.isolation,
+    model: record.model,
+    attempts: record.attempts,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt ?? (terminal ? undefined : record.updatedAt),
+    summary: record.summary,
+    error: record.error,
+    tokens: record.tokens,
+    integration: record.integration,
+    reports: record.reports,
   };
 }
 

@@ -9,6 +9,7 @@ import {
   describeSuperSessionLine,
   extractSuperActions,
   extractSuperDirectives,
+  fromPersistedSuperSession,
   groupSuperSessionsForBoard,
   isTerminalSuperStatus,
   MAX_SUPER_ACTIONS,
@@ -20,6 +21,7 @@ import {
   SUPER_DIGEST_MAX_CHARS,
   sumSuperUsage,
   SuperReportBuffer,
+  toPersistedSuperSession,
   withUsage,
   type SuperSessionUi,
 } from "../shared/super-agent.js";
@@ -364,6 +366,67 @@ describe("super agent · 意外中断后的重试", () => {
   it("首次执行没有 attempts 时按 1 计", () => {
     const failed = applySuperEvent(session(), { type: "failed", error: "boom", at: 2000 });
     expect(retrySuperSession(failed, 3000).attempts).toBe(2);
+  });
+});
+
+describe("super agent · 归档与恢复", () => {
+  it("落盘剥掉运行期字段（待应答提问 / 实时进度 / 已死的会话 id）", () => {
+    const live = session({
+      status: "awaiting_input",
+      mainSessionId: "main-1",
+      cliSessionId: "cli-9",
+      progress: "正在写代码……",
+      pending: {
+        kind: "question",
+        requestId: "req-1",
+        questions: [{ header: "h", question: "选哪个？" }],
+        deadline: 5000,
+      },
+    });
+    const persisted = toPersistedSuperSession(live);
+
+    // 恢复出来也答不了那个提问（进程没了），更不该展示实时进度 —— 都不存。
+    expect(persisted).not.toHaveProperty("pending");
+    expect(persisted).not.toHaveProperty("progress");
+    expect(persisted).not.toHaveProperty("cliSessionId");
+    // 归属与隔离信息必须留下：分支与工作目录是恢复后唯一还能操作的东西。
+    expect(persisted.mainSessionId).toBe("main-1");
+    expect(persisted.isolation.branch).toBe("iflow/super/a");
+    expect(persisted.task).toBe("修好它");
+  });
+
+  it("恢复出来标成历史记录", () => {
+    const restored = fromPersistedSuperSession(toPersistedSuperSession(session({ status: "completed" })));
+    expect(restored.restored).toBe(true);
+    expect(restored.status).toBe("completed");
+    expect(restored.isolation.branch).toBe("iflow/super/a");
+  });
+
+  it("运行中的子会话恢复成「已中断」—— 进程已经没了，不能谎称还在跑", () => {
+    for (const status of ["preparing", "running", "awaiting_input"] as const) {
+      const restored = fromPersistedSuperSession(toPersistedSuperSession(session({ status })));
+      expect(restored.status).toBe("cancelled");
+      // 终态：否则主会话的「全部子会话结束」汇报永远等不到，主会话就卡住了。
+      expect(isTerminalSuperStatus(restored.status)).toBe(true);
+      expect(restored.endedAt).toBe(1000);
+    }
+  });
+
+  it("已完成的子会话恢复后仍是已完成（不篡改历史）", () => {
+    const restored = fromPersistedSuperSession(toPersistedSuperSession(session({ status: "completed" })));
+    expect(restored.status).toBe("completed");
+  });
+
+  it("恢复出来的记录不能重试 —— 没有进程可以重启", () => {
+    const restored = fromPersistedSuperSession(toPersistedSuperSession(session({ status: "running" })));
+    // cancelled 本身可重试，但历史记录的重试语义不同（那会重跑整个任务），
+    // 所以看板按 restored 标记隐藏重试入口。
+    expect(restored.restored).toBe(true);
+  });
+
+  it("归档往返保留归属主会话", () => {
+    const persisted = toPersistedSuperSession(session({ mainSessionId: "main-42" }));
+    expect(fromPersistedSuperSession(persisted).mainSessionId).toBe("main-42");
   });
 });
 

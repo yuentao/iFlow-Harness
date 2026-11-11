@@ -403,6 +403,11 @@ function SuperSessionRow({
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? Date.now();
   const preview = session.progress ?? session.summary;
+  // A restored child ran in a PREVIOUS extension lifetime: its CLI process
+  // is gone, so there is no live transcript to show and nothing to retry.
+  // What survives is the record — the branch and its worktree — so the merge
+  // and cleanup actions stay available.
+  const historical = session.restored === true;
 
   return (
     <div className="shrink-0 rounded-md border border-border/80 bg-canvas/60 transition-colors hover:border-border">
@@ -413,6 +418,11 @@ function SuperSessionRow({
         <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={session.title}>
           {session.title}
         </span>
+        {historical && (
+          <Chip tone="muted" title={t("这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）")}>
+            {t("上次运行")}
+          </Chip>
+        )}
         <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
           {formatElapsed(ended - started)}
         </span>
@@ -477,16 +487,21 @@ function SuperSessionRow({
           inline pane pushed the neighbouring cards around and capped the
           stream at max-h-64, so the newest tool call was always the one
           squeezed out. The blocks ride a dedicated host channel; the child's
-          transcript never enters the main transcript. */}
-      <div className="mt-1 flex items-center px-2">
-        <button
-          type="button"
-          className="press self-start text-left text-ui-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-          onClick={() => setShowLive(true)}
-        >
-          {t("查看实时操作")}
-        </button>
-      </div>
+          transcript never enters the main transcript.
+          A restored child has NO live transcript (its process died with the
+          previous extension lifetime, and child transcripts are never
+          persisted) — the entry would open an empty dialog, so it is hidden. */}
+      {!historical && (
+        <div className="mt-1 flex items-center px-2">
+          <button
+            type="button"
+            className="press self-start text-left text-ui-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            onClick={() => setShowLive(true)}
+          >
+            {t("查看实时操作")}
+          </button>
+        </div>
+      )}
 
       {/* Footer strip: where the branch ended up, what the child cost, and the
           row's actions. Folding the old standalone token / integration rows in
@@ -528,7 +543,11 @@ function SuperSessionRow({
             </span>
           )}
           <div className="flex items-center gap-1">
-            {canRetrySuperSession(session) && (
+            {/* A restored child cannot be retried: its CLI process died with the
+                previous extension lifetime, and retrying would re-run the whole
+                task from scratch — not what 「恢复」 means. The branch and its
+                worktree are still there, so merge / cleanup stay available. */}
+            {!historical && canRetrySuperSession(session) && (
               <Button
                 variant="canvas"
                 size="sm"

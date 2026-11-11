@@ -76,6 +76,7 @@ import {
   buildSuperMergeRequestPrompt,
   extractSuperActions,
   extractSuperDirectives,
+  fromPersistedSuperSession,
   isTerminalSuperStatus,
   MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ATTACHMENTS,
@@ -86,6 +87,14 @@ import {
   type SuperReportEntry,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
+import {
+  deleteSuperSessionArchive,
+  listSuperSessionArchiveFiles,
+  readSuperSessionArchive,
+  superSessionFileName,
+  superSessionsDir,
+  writeSuperSessionArchive,
+} from "./super-store.js";
 import {
   assembleContextSections,
   buildFolderListing,
@@ -1164,6 +1173,12 @@ export class ChatPanel implements vscode.Disposable {
           }`,
         );
       }
+      // Final archive flush: dispose() just marked the in-flight children
+      // 「已中断」, and this is the last chance to record it — the host exits
+      // right after, so a fire-and-forget write would likely be lost. The
+      // records are what let the next restore show these children (and their
+      // unmerged branches) instead of an empty board.
+      await this.persistSuperSessions();
     } catch {
       // best-effort teardown
     }
@@ -5793,6 +5808,10 @@ export class ChatPanel implements vscode.Disposable {
     try {
       await this.forgetSession(sessionId);
       await this.clearTranscript(sessionId);
+      // The child-session archive is this session's too: keeping it would
+      // resurrect the deleted session's children (and their branches) the
+      // next time anyone restores anything.
+      await deleteSuperSessionArchive(this.superStoreDir(), sessionId);
       // M3 P0-1: drop the session's shadow repo + checkpoint index too.
       await this.removeCheckpointsForSession(sessionId);
       // A7: drop the session's staged-attachment dir too — the transcript that
@@ -5885,6 +5904,8 @@ export class ChatPanel implements vscode.Disposable {
     beginReplay(fresh);
     fresh.activeSessionId = sessionId;
     this.store.replaceState(fresh);
+    // 看板跟着主会话走：切到 B 就不能还显示着 A 的历史子会话。
+    this.publishSuperSessions();
     try {
       // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
       // carries ONLY {sessionId} — no modes, no _meta. A prior session/new does
@@ -5983,6 +6004,9 @@ export class ChatPanel implements vscode.Disposable {
       await this.cleanupEmptySession(outgoingId);
       await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
       void this.persistActiveTranscript(true); // seed the extension-owned copy
+      // 该主会话当年派发的子会话（重启后进程已亡，但分支与工作目录还在）：
+      // 把它们取回看板，用户才知道有哪些分支等着合并或清理。
+      await this.restoreSuperSessions(loadedId);
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
     } catch (error) {
@@ -6057,6 +6081,76 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   // --- Super Agent (child sessions of the main session) ----------------------
+
+  /**
+   * 把看板投影推给 webview（按当前主会话取历史子会话）。
+   *
+   * 会话切换后必须重推一次：看板的归属跟着主会话走，A 的历史子会话不能在
+   * B 的看板上出现。管理器只在子会话状态变化时 emit，纯切换不会触发。
+   */
+  private publishSuperSessions(): void {
+    const sessions = this.superAgent?.list(this.currentMainSessionId()) ?? [];
+    this.store.setSuperSessions(sessions);
+  }
+
+  /**
+   * 当前主会话 id —— 子会话归属它。
+   *
+   * 用 `activeSessionId`（切换器里的那个 id）而不是 `sessionId`：归档是按
+   * 「用户能看到的那个会话」分文件的，恢复历史会话时拿同一个 id 就能取回来。
+   */
+  private currentMainSessionId(): string | null {
+    const state = this.store.getState();
+    return state.activeSessionId ?? state.sessionId;
+  }
+
+  /**
+   * 把子会话记录落盘（重启后据此恢复看板）。
+   *
+   * 只存**记录**：分支、工作目录、结束状态、汇报历史。子会话的实时转录本来
+   * 就不落盘（既定边界），待应答的提问随进程一起没了 —— 恢复出来也答不了，
+   * 所以不存。
+   *
+   * 按**归属的主会话**逐个写：子会话是异步跑的，用户随时可能切到别的会话
+   * 去，只写当前会话会把别人的归档覆盖成空。
+   *
+   * 返回 Promise：面板关闭时要 await 它 —— 那时宿主随时会退出，fire-and-forget
+   * 的写很可能来不及落盘，子会话记录就此丢失。
+   */
+  private persistSuperSessions(): Promise<void> {
+    const manager = this.superAgent;
+    if (!manager) return Promise.resolve();
+    const writes = manager.archivableMainSessionIds().map((mainSessionId) =>
+      writeSuperSessionArchive(
+        this.superStoreDir(),
+        mainSessionId,
+        manager.archivableSessions(mainSessionId),
+      ).catch((error) => {
+        this.log.warn(`super agent archive write failed: ${errorMessage(error)}`);
+      }),
+    );
+    return Promise.all(writes).then(() => undefined);
+  }
+
+  /** 子会话归档的存放目录（扩展自己的存储，不进用户的仓库）。 */
+  private superStoreDir(): string {
+    return (this.context.storageUri ?? this.context.globalStorageUri).fsPath;
+  }
+
+  /**
+   * 恢复某个主会话的子会话历史（重启后恢复该会话时调用）。
+   *
+   * 归档里是「那次运行发生过什么」的记录，进程早已不存在，所以状态归一在
+   * `fromPersistedSuperSession` 里做（运行中 → 已中断）。分支与工作目录照旧
+   * 保留 —— 它们还在磁盘上，用户照样能清理或让智能体合并。
+   */
+  private async restoreSuperSessions(mainSessionId: string): Promise<void> {
+    const records = await readSuperSessionArchive(this.superStoreDir(), mainSessionId);
+    if (records.length === 0) return;
+    const restored = records.map((record) => fromPersistedSuperSession(record));
+    this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
+    this.getSuperAgent()?.restoreSessions(mainSessionId, restored);
+  }
 
   /**
    * 主仓根目录（worktree 的来源，也是委派附件路径的允许边界）。
@@ -6208,7 +6302,12 @@ export class ChatPanel implements vscode.Disposable {
     this.superAgent = new SuperAgentManager({
       repoRoot,
       createClient: (params) => this.createSuperClient(params),
-      onSessionsChanged: (sessions) => this.store.setSuperSessions(sessions),
+      onSessionsChanged: (sessions) => {
+        this.store.setSuperSessions(sessions);
+        // 子会话状态一变就把记录落盘：扩展随时可能被重启（窗口关闭、宿主
+        // 崩溃），不落盘就等于「那次运行发生过什么」永远丢了。
+        this.persistSuperSessions();
+      },
       // A child's transcript rides its OWN channel: putting it in the main
       // `blocks` would pollute the main transcript and break the blockPatch
       // anchor. `from` is the incremental start index.
@@ -6219,6 +6318,8 @@ export class ChatPanel implements vscode.Disposable {
       // 不再把这件事留给用户点看板上的按钮。
       onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
       currentModel: () => this.store.getState().currentModelId,
+      // 子会话归属当前主会话：归档按它分文件，恢复历史会话时按它取回。
+      currentMainSessionId: () => this.currentMainSessionId(),
       // Child sessions spend the same money as the main session: reuse the
       // exact same price resolution (`iflow.costTable` overrides → curated
       // table → null) so the two surfaces can never disagree.
@@ -7724,6 +7825,16 @@ export class ChatPanel implements vscode.Disposable {
         await rm(path.join(this.transcriptDir(), name), { force: true });
       }
     }
+    // Same garbage collection for the Super Agent child-session archives: an
+    // archive whose session left the list is pure residue — nothing would
+    // ever read it again, and leaving it behind resurrects the dead session's
+    // children (and their unmerged branches) on the next restore.
+    const keptArchiveNames = new Set(kept.map((s) => superSessionFileName(s.id)));
+    for (const name of await listSuperSessionArchiveFiles(this.superStoreDir())) {
+      if (name.endsWith(".json") && !keptArchiveNames.has(name)) {
+        await rm(path.join(superSessionsDir(this.superStoreDir()), name), { force: true });
+      }
+    }
     // M3 P0-1: same garbage collection for shadow-repo dirs — a checkpoint
     // store whose session left the list is pure residue (dirs are keyed by
     // the same sanitized id as the transcript files, minus the extension).
@@ -7984,6 +8095,9 @@ export class ChatPanel implements vscode.Disposable {
     // kept the old conversation". recordSession re-points it to the new id.
     fresh.activeSessionId = null;
     this.store.replaceState(fresh);
+    // 看板跟着主会话走：新会话没有历史子会话（活着的子会话仍然可见 ——
+    // 它们是正在跑的进程，用户还得能中断它们）。
+    this.publishSuperSessions();
     // Open the reset window: until the new session is established (finally),
     // onSessionUpdate drops everything not addressed to the store's own
     // session — this is what catches the abandoned turn's trailing updates

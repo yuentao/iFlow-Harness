@@ -172,6 +172,7 @@ function makeManager(
   repoRoot: string,
   plan: Plan | Plan[] = "complete",
   mode: SuperIntegrationMode = "merge",
+  mainSessionId: string | null = "main-1",
 ): Harness {
   const clients: FakeClient[] = [];
   const sessions: SuperSessionUi[] = [];
@@ -202,6 +203,7 @@ function makeManager(
       transcripts.push({ sessionId, from, blocks });
     },
     currentModel: () => "test-model",
+    currentMainSessionId: () => mainSessionId,
     priceFor: () => ({ input: 1, output: 2 }),
     integrationMode: () => mode,
     log: { info: () => {}, warn: () => {}, error: () => {} },
@@ -942,5 +944,182 @@ describe("super agent · 附件", () => {
     const prompt = harness.clients[0]?.prompts[0] ?? "";
     expect(prompt).toContain("These attachments could not be delivered");
     expect(prompt).toContain("missing.txt");
+  }, 30000);
+});
+
+describe("super agent · 归属与归档", () => {
+  it("派发的子会话归属当前主会话", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-7");
+    harness.manager.spawn({ title: "改登录", task: "修好它" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    expect(harness.sessions[0]?.mainSessionId).toBe("main-7");
+    expect(harness.manager.archivableMainSessionIds()).toContain("main-7");
+  }, 30000);
+
+  it("归档只含该主会话名下的子会话（别的会话的不混进来）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-1");
+    harness.manager.spawn({ title: "A 的任务", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const archived = harness.manager.archivableSessions("main-1");
+    expect(archived).toHaveLength(1);
+    expect(archived[0]?.mainSessionId).toBe("main-1");
+    // 另一个主会话名下一个都没有 —— 归档不能串会话。
+    expect(harness.manager.archivableSessions("main-2")).toEqual([]);
+  }, 30000);
+
+  it("恢复历史子会话后它回到看板上", () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-1");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-old",
+        title: "上次没跑完的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+
+    expect(harness.sessions).toHaveLength(1);
+    expect(harness.sessions[0]?.id).toBe("super-old");
+    expect(harness.sessions[0]?.restored).toBe(true);
+  });
+
+  it("历史子会话只在它自己的主会话下出现", () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-1");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-old",
+        title: "上次没跑完的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+
+    // 切到别的会话：那个会话看不到别人的历史子会话。
+    expect(harness.manager.list("main-2")).toEqual([]);
+    expect(harness.manager.list("main-1")).toHaveLength(1);
+  });
+
+  it("活着的子会话一直可见（不分主会话）—— 用户得能中断它们", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang", "merge", "main-1");
+    harness.manager.spawn({ title: "还在跑", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+
+    // 即便当前主会话不是 main-1，跑着的子会话也不能从看板上消失。
+    expect(harness.manager.list("main-2")).toHaveLength(1);
+
+    await harness.manager.cancel(harness.sessions[0]!.id);
+  }, 30000);
+
+  it("历史子会话不能被重试（没有进程可以重启），但可以查到", () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-1");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-old",
+        title: "上次没跑完的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+
+    // 查得到（合并/清理要靠它拿分支），但不在活着的会话表里 —— 重试/中断
+    // 这些进程级操作天然找不到它，不会去 kill 一个不存在的会话。
+    expect(harness.manager.get("super-old")).toBeDefined();
+    expect(harness.manager.list("main-1").some((s) => s.id === "super-old")).toBe(true);
+  });
+
+  it("归档剥掉运行期字段，但保留分支与工作目录", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang", "merge", "main-1");
+    harness.manager.spawn({ title: "改登录", task: "修好它" });
+    await until(() => harness.sessions[0]?.status === "running");
+
+    const archived = harness.manager.archivableSessions("main-1");
+    expect(archived).toHaveLength(1);
+    expect(archived[0]?.isolation.branch).toContain("iflow/super/");
+    expect(archived[0]).not.toHaveProperty("pending");
+    expect(archived[0]).not.toHaveProperty("progress");
+
+    await harness.manager.cancel(harness.sessions[0]!.id);
+  }, 30000);
+
+  it("写 A 的归档不会抹掉 B 的历史记录", () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-1");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-a",
+        title: "A 的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-a", branch: "iflow/super/a" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+    harness.manager.restoreSessions("main-2", [
+      {
+        id: "super-b",
+        title: "B 的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-b", branch: "iflow/super/b" },
+        mainSessionId: "main-2",
+        createdAt: 300,
+        updatedAt: 400,
+        reports: [],
+      },
+    ]);
+
+    // 两个会话各写各的归档 —— 互不干扰。
+    expect(harness.manager.archivableSessions("main-1").map((r) => r.id)).toEqual(["super-a"]);
+    expect(harness.manager.archivableSessions("main-2").map((r) => r.id)).toEqual(["super-b"]);
+    expect(harness.manager.archivableMainSessionIds().sort()).toEqual(["main-1", "main-2"]);
+  });
+
+  it("子会话被清理后，那个会话的归档写成空数组（不会又冒出旧记录）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete", "merge", "main-1");
+    harness.manager.spawn({ title: "改登录", task: "修好它" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    expect(harness.manager.archivableSessions("main-1")).toHaveLength(1);
+
+    // 清理掉它（工作目录删掉，分支按策略处理）。
+    await harness.manager.cleanup(harness.sessions[0]!.id);
+
+    // 归档要变空 —— 否则下次恢复又冒出已经清理掉的子会话。
+    expect(harness.manager.archivableSessions("main-1")).toEqual([]);
+    // 会话本身仍在归档集合里（要写一次空数组把磁盘上的旧记录清掉）。
+    expect(harness.manager.archivableMainSessionIds()).toContain("main-1");
   }, 30000);
 });
