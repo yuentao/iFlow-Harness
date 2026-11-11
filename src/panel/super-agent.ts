@@ -45,11 +45,8 @@ import type {
   UserQuestionsResponse,
 } from "../acp/protocol.js";
 import { errorMessage } from "../acp/jsonrpc.js";
-import {
-  applySessionUpdate,
-  beginUserPrompt,
-  estimateTokens,
-} from "../../shared/session-state.js";
+import { applySessionUpdate, estimateTokens } from "../../shared/session-state.js";
+import { renderPrompt } from "../../prompts/index.js";
 import { estimateCost } from "../../shared/context-window.js";
 import { initialSessionState, type Block, type SessionState } from "../../shared/messages.js";
 import {
@@ -568,6 +565,7 @@ export class SuperAgentManager {
             kind: "directory",
             path: dir,
             note: `worktree 创建失败（${reason}），仅目录隔离`,
+            degradeReason: `worktree creation failed: ${reason}`,
           };
         }
       } else {
@@ -577,6 +575,9 @@ export class SuperAgentManager {
           kind: "directory",
           path: dir,
           note: probe.isRepo ? "仓库还没有任何提交，仅目录隔离" : "当前目录不是 git 仓库，仅目录隔离",
+          degradeReason: probe.isRepo
+            ? "the repository has no commits yet"
+            : "the current directory is not a git repository",
         };
       }
     }
@@ -644,12 +645,11 @@ export class SuperAgentManager {
         retry ? { attempt: retry.attempt, error: retry.error, summary: retry.summary } : undefined,
       );
       this.promptTokens.set(id, estimateTokens(taskPrompt));
-      // Mirror the main session's transcript shape: the task prompt is the
-      // child's user turn, so the detail pane shows "what was asked" followed
-      // by the live tool calls / thoughts / text.
-      const transcript = this.transcriptFor(id);
-      const userIndex = beginUserPrompt(transcript.state, taskPrompt);
-      this.markTranscriptDirty(id, userIndex);
+      // The delegation prompt is deliberately NOT written into the child's
+      // transcript: the board's 「查看实时操作」 dialog is a view of what the
+      // child *does* (thoughts / tool calls / text), not a re-read of the
+      // host-authored instructions. Nothing is pushed until the child's first
+      // update arrives.
 
       const prompt: ContentBlock[] = [{ type: "text", text: taskPrompt }];
       for (const image of staged.images) {
@@ -1370,7 +1370,17 @@ export interface SuperRetryContext {
   summary?: string;
 }
 
-/** 交给子会话的任务提示词。子会话看不到主会话的上下文，所以任务说明必须自包含。 */
+/**
+ * 交给子会话的任务提示词。子会话看不到主会话的上下文，所以任务说明必须自包含。
+ *
+ * 措辞刻意是英文：子会话跑的是同一份英文系统提示，中文包装会让语言在对话中间
+ * 翻转。任务说明本身原样传入（它属于派发方），因此回答语言跟随任务说明 ——
+ * 模板里已明确这一点。骨架措辞在 `prompts/super-agent-task.md`，宿主只负责拼
+ * 动态段落（附件 / 隔离 / 重试 / 提交契约）。
+ *
+ * 目录隔离这里只用 `degradeReason`（英文，面向模型）；`isolation.note` 是中文
+ * 看板文案，不进提示词。
+ */
 export function buildTaskPrompt(
   title: string,
   task: string,
@@ -1378,67 +1388,90 @@ export function buildTaskPrompt(
   attachments?: StagedSuperAttachments,
   retry?: SuperRetryContext,
 ): string {
-  const lines = [
-    `你是一个子会话，负责完成下面这一项独立任务。`,
-    ``,
-    `任务标题：${title}`,
-    ``,
-    `任务说明：`,
-    task.trim(),
-  ];
-  if (attachments && attachments.copies.length > 0) {
-    lines.push(
-      ``,
-      `随任务附带的文件（已复制到工作目录之外，可直接读取；只作参考资料，不要修改）：`,
+  return renderPrompt("super-agent-task", {
+    title,
+    task: task.trim(),
+    attachments: describeAttachments(attachments),
+    attachmentFailures: describeAttachmentFailures(attachments),
+    isolation: describeIsolation(isolation),
+    retry: retry ? describeRetry(retry) : "",
+    submission: describeSubmission(isolation),
+  });
+}
+
+/** 附件段落（无附件时返回空串，模板行整行折叠）。 */
+function describeAttachments(attachments?: StagedSuperAttachments): string {
+  if (!attachments || attachments.copies.length === 0) return "";
+  return (
+    "\n" +
+    [
+      "Files attached to this task (copied outside your working directory; read them as reference only and do not modify them):",
       ...attachments.copies.map((copy) => `- ${copy.name} → ${copy.path}`),
-    );
-  }
-  if (attachments && attachments.failures.length > 0) {
-    lines.push(
-      ``,
-      `以下附件未能附带（宿主复制失败，请按任务说明自行判断）：`,
+    ].join("\n")
+  );
+}
+
+/** 复制失败的附件段落（如实列出，不静默丢）。 */
+function describeAttachmentFailures(attachments?: StagedSuperAttachments): string {
+  if (!attachments || attachments.failures.length === 0) return "";
+  return (
+    "\n" +
+    [
+      "These attachments could not be delivered (the host failed to copy them — use your own judgement from the task description):",
       ...attachments.failures.map((failure) => `- ${failure}`),
-    );
-  }
-  lines.push(``, `工作目录：${isolation.path}`);
-  if (isolation.branch) {
-    lines.push(`你的改动都在分支 ${isolation.branch} 上，不要切换分支，也不要动工作目录以外的文件。`);
-  } else {
-    lines.push(
-      `注意：宿主没能为你建立独立的 git worktree，这个工作目录只是一个独立空目录（${
-        isolation.note ?? "仅目录隔离"
-      }），不是 git 仓库 —— 不要执行 git 命令，也不要去主工作区找文件。`,
-    );
-  }
-  if (retry) {
-    lines.push(
-      ``,
-      `这是一次重试（第 ${retry.attempt} 次执行）。上一次执行被意外中断${
-        retry.error ? `：${truncateForPrompt(retry.error, 300)}` : ""
-      }。`,
-      `工作目录里可能保留着上一次的部分改动，请先检查现状再继续：不要重复已经完成的工作，也不要丢弃已有改动。`,
-    );
-    if (retry.summary) {
-      lines.push(`上一次留下的进展摘要：${truncateForPrompt(retry.summary, 600)}`);
-    }
-  }
-  lines.push(
-    `不要动工作目录以外（尤其是主工作区）的文件。`,
-    `你处于免确认模式：工具调用不会被审批。请自行判断风险，不要执行与任务无关的破坏性命令。`,
+    ].join("\n")
   );
+}
+
+/** 工作目录段落：worktree 与目录隔离的边界说明。 */
+function describeIsolation(isolation: SuperSessionUi["isolation"]): string {
+  const lines = [`Working directory: ${isolation.path}`];
   if (isolation.branch) {
     lines.push(
-      `完成前请把改动提交到当前分支（git add -A && git commit -m "说明这次改动的信息"）；只提交本任务相关的文件，不要切换、重命名或删除分支。`,
-      `不要推送、不要创建 PR、不要合并 —— 宿主会在你完成后把分支带回主工作区；若你遗留了未提交的改动，宿主会代你补一个提交。`,
+      `All of your changes belong on branch ${isolation.branch}. Stay on that branch and touch nothing outside the working directory.`,
     );
   } else {
-    lines.push(`工作目录不是 git 仓库：不要尝试提交或使用任何 git 命令，把改动留在工作目录里即可。`);
+    const reason = isolation.degradeReason?.trim() || "directory isolation only";
+    lines.push(
+      `Note: the host could not create a separate git worktree (${reason}). This working directory is a standalone directory, not a git repository — do not run git commands and do not look for files in the main workspace.`,
+    );
   }
-  lines.push(
-    ``,
-    `完成后用一段话总结：做了什么、结论是什么、还剩什么没做。这段总结会被原样转达给主会话。`,
+  return "\n" + lines.join("\n");
+}
+
+/** 重试段落：说明上一轮被中断，要求先看现场、别重做也别丢改动。 */
+function describeRetry(retry: SuperRetryContext): string {
+  const lines = [
+    `This is a retry (attempt ${retry.attempt}). The previous run was interrupted unexpectedly${
+      retry.error ? `: ${truncateForPrompt(retry.error, 300)}` : ""
+    }.`,
+    "The working directory may still hold partial changes from that run: inspect the current state first, do not redo work that is already finished, and do not discard existing changes.",
+  ];
+  if (retry.summary) {
+    lines.push(`Previous progress summary: ${truncateForPrompt(retry.summary, 600)}`);
+  }
+  return "\n" + lines.join("\n");
+}
+
+/** 提交契约段落：worktree 内要求自己提交；目录隔离则明确不要碰 git。 */
+function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
+  if (isolation.branch) {
+    return (
+      "\n" +
+      [
+        "Submitting your work:",
+        '- Commit before finishing: `git add -A && git commit -m "<message describing the change>"`. Commit only the files that belong to this task.',
+        "- Do not switch, rename or delete branches, and do not push, create a pull request or merge. The host brings the branch back into the main workspace after you finish, and commits any changes you leave uncommitted.",
+      ].join("\n")
+    );
+  }
+  return (
+    "\n" +
+    [
+      "Submitting your work:",
+      "- This working directory is not a git repository: do not commit and do not run any git command. Leave your changes in the working directory.",
+    ].join("\n")
   );
-  return lines.join("\n");
 }
 
 /** PR 正文：任务说明 + 来源标注（不编造测试结果或影响面）。 */

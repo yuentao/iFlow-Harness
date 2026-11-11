@@ -343,18 +343,18 @@ describe("super agent · 编排", () => {
     const prompt = harness.clients[0]?.prompts[0] ?? "";
     expect(prompt).toContain("修好 src/auth.ts");
     expect(prompt).toContain(harness.sessions[0]?.isolation.path ?? "X");
-    expect(prompt).toContain("免确认");
+    // 提示词本身是英文（子会话跑同一份英文系统提示）。
+    expect(prompt).toContain("tool calls are never reviewed or approved");
   }, 30000);
 
-  it("子会话的实时操作（任务/思考/工具/正文）进入自己的转录并增量推送", async () => {
+  it("子会话的实时操作（思考/工具/正文）进入自己的转录并增量推送，委派提示词不出现", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     const session = harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
     await until(() => harness.sessions[0]?.status === "running");
-    // The task prompt is appended right before `client.prompt`; wait for it so
-    // the injections below land after the user turn (otherwise the ordering
-    // assertion races the setMode/setModel awaits in prepare).
-    await until(() => harness.manager.transcriptBlocks(session.id).length === 1);
+    // Wait until `client.prompt` was actually called, so the injections below
+    // land after the setMode/setModel awaits in prepare.
+    await until(() => (harness.clients[0]?.prompts.length ?? 0) === 1);
 
     const cb = harness.clients[0]!.callbacks;
     cb.onSessionUpdate?.({
@@ -380,20 +380,19 @@ describe("super agent · 编排", () => {
       update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "改好了" } },
     } as never);
 
-    await until(() => harness.manager.transcriptBlocks(session.id).length >= 4);
+    await until(() => harness.manager.transcriptBlocks(session.id).length >= 3);
     const blocks = harness.manager.transcriptBlocks(session.id);
-    // 派发的任务提示词是用户轮，之后是 agent 的实时操作。
-    expect(blocks.map((b) => b.kind)).toEqual(["user", "thought", "tool", "text"]);
-    expect(blocks[0]).toMatchObject({ kind: "user" });
-    if (blocks[0]?.kind === "user") expect(blocks[0].text).toContain("修好 src/auth.ts");
-    if (blocks[2]?.kind === "tool") expect(blocks[2].toolName).toBe("read_file");
-    if (blocks[3]?.kind === "text") expect(blocks[3].text).toBe("改好了");
+    // 委派提示词不写进转录（「查看实时操作」只展示子会话自己的动作）。
+    expect(blocks.map((b) => b.kind)).toEqual(["thought", "tool", "text"]);
+    expect(blocks.every((b) => b.kind !== "user")).toBe(true);
+    if (blocks[1]?.kind === "tool") expect(blocks[1].toolName).toBe("read_file");
+    if (blocks[2]?.kind === "text") expect(blocks[2].text).toBe("改好了");
 
     // 节流推送（~120ms）真正到达后再断言。
     await until(() => harness.transcripts.length > 0);
-    // 首次推送从 0 开始且含用户块，详情打开即可完整渲染。
+    // 首次推送从 0 开始且不带头部的用户块，详情打开即渲染子会话动作。
     expect(harness.transcripts[0]?.from).toBe(0);
-    expect(harness.transcripts[0]?.blocks[0]?.kind).toBe("user");
+    expect(harness.transcripts[0]?.blocks[0]?.kind).toBe("thought");
   }, 30000);
 
   it("非 git 仓库降级为目录隔离并如实标注", async () => {
@@ -717,13 +716,14 @@ describe("super agent · 自动集成", () => {
 });
 
 describe("super agent · 任务提示词", () => {
-  it("含标题、任务、工作目录与分支", () => {
+  it("含标题、任务、工作目录与分支（英文骨架）", () => {
     const text = buildTaskPrompt(
       "改登录",
       "修好 src/auth.ts",
       { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/x", baseRef: "abc" },
     );
-    expect(text).toContain("改登录");
+    expect(text).toContain("Task title: 改登录");
+    expect(text).toContain("Task description:");
     expect(text).toContain("修好 src/auth.ts");
     expect(text).toContain("/tmp/wt");
     expect(text).toContain("iflow/super/x");
@@ -732,30 +732,34 @@ describe("super agent · 任务提示词", () => {
   it("目录隔离时不提分支", () => {
     const text = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
     expect(text).toContain("/tmp/dir");
+    expect(text).toContain("directory isolation only");
     expect(text).not.toContain("iflow/super/");
   });
 
-  it("明确告知免确认、要求自己提交、且不要自己合并/推送", () => {
+  it("明确告知非交互、要求自己提交、且不要自己合并/推送", () => {
     const text = buildTaskPrompt(
       "改登录",
       "干活",
       { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/x", baseRef: "abc" },
     );
-    expect(text).toContain("免确认");
+    expect(text).toContain("tool calls are never reviewed or approved");
     expect(text).toContain("git add -A && git commit");
-    expect(text).toContain("不要推送");
-    expect(text).toContain("宿主会代你补一个提交");
+    expect(text).toContain("do not push");
+    expect(text).toContain("commits any changes you leave uncommitted");
   });
 
-  it("目录隔离时告知原因，并要求不要用 git", () => {
+  it("目录隔离时用英文 degradeReason 说明原因，中文 note 不进提示词", () => {
     const text = buildTaskPrompt("改登录", "干活", {
       kind: "directory",
       path: "/tmp/dir",
       note: "worktree 创建失败（fatal: 路径过长），仅目录隔离",
+      degradeReason: "worktree creation failed: fatal: path too long",
     });
-    expect(text).toContain("worktree 创建失败");
-    expect(text).toContain("不要执行 git 命令");
+    expect(text).toContain("worktree creation failed: fatal: path too long");
+    expect(text).toContain("do not run git commands");
     expect(text).not.toContain("git add -A && git commit");
+    // 面向看板的中文说明只给人看。
+    expect(text).not.toContain("worktree 创建失败");
   });
 
   it("重试提示词说明上一轮中断、要求先检查现状", () => {
@@ -766,15 +770,15 @@ describe("super agent · 任务提示词", () => {
       undefined,
       { attempt: 2, error: "子会话内核退出（code=1）", summary: "已改了一半" },
     );
-    expect(text).toContain("第 2 次执行");
+    expect(text).toContain("This is a retry (attempt 2)");
     expect(text).toContain("子会话内核退出");
-    expect(text).toContain("先检查现状");
+    expect(text).toContain("inspect the current state first");
     expect(text).toContain("已改了一半");
   });
 
   it("首次执行的提示词里没有重试说明", () => {
     const text = buildTaskPrompt("改登录", "干活", { kind: "directory", path: "/tmp/dir" });
-    expect(text).not.toContain("这是一次重试");
+    expect(text).not.toContain("This is a retry");
   });
 });
 
@@ -806,8 +810,7 @@ describe("super agent · 意外中断后重试", () => {
     expect(existsSync(path.join(originalPath, "partial.txt"))).toBe(true);
     // 提示词明确这是重试，并带上上次的中断原因。
     const prompt = harness.clients[1]?.prompts[0] ?? "";
-    expect(prompt).toContain("这是一次重试");
-    expect(prompt).toContain("第 2 次");
+    expect(prompt).toContain("This is a retry (attempt 2)");
     expect(prompt).toContain("child exploded");
   }, 30000);
 
@@ -937,7 +940,7 @@ describe("super agent · 附件", () => {
     await until(() => harness.sessions[0]?.status === "completed");
 
     const prompt = harness.clients[0]?.prompts[0] ?? "";
-    expect(prompt).toContain("以下附件未能附带");
+    expect(prompt).toContain("These attachments could not be delivered");
     expect(prompt).toContain("missing.txt");
   }, 30000);
 });
