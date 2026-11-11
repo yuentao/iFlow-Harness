@@ -38,6 +38,7 @@ import {
   readFile,
   readdir,
   readlink,
+  realpath,
   rm,
   stat,
   symlink,
@@ -607,60 +608,266 @@ export async function commitWorktree(options: {
 }
 
 /**
+ * 一个 worktree 目录的当前状态。
+ *
+ * 关键在 `kind`：**目录存在不等于它是 worktree 根**。worktree 被半删
+ * （`.git` 没了、其余文件还在）时，git 会向上找到父仓库，把**主仓的状态**
+ * 当成这个目录的状态 —— 于是「子会话工作目录有未提交改动」这种结论可能
+ * 完全是主仓的脏文件造成的，清理流程据此做出的判断也就全错了。
+ */
+export interface WorktreeState {
+  kind: "worktree" | "not-a-worktree" | "missing";
+  /** 仅 kind === "worktree" 时有意义：该 worktree 自身是否干净。 */
+  clean: boolean;
+  /** 该 worktree 当前签出的分支（detached 或读不到时为 null）。 */
+  branch: string | null;
+}
+
+/**
+ * 路径归一化（只用于比较）：分隔符统一为 /、大小写不敏感、去掉尾部 /。
+ *
+ * Windows 上 git 的 `--show-toplevel` 用正斜杠并保留盘符原样大小写，而
+ * `path.resolve` 给的是反斜杠 —— 不归一化就会把同一个目录判成两个。
+ */
+function normalizePathKey(p: string): string {
+  const resolved = path.resolve(p).replace(/\\/g, "/");
+  const trimmed = resolved.length > 1 ? resolved.replace(/\/+$/, "") : resolved;
+  return trimmed.toLowerCase();
+}
+
+/** 真实路径（失败时退回词法形式）。去掉 Windows 的 `\\?\` 前缀。 */
+async function realPathOrLexical(p: string): Promise<string> {
+  try {
+    const real = await realpath(p);
+    return real.startsWith("\\\\?\\") ? real.slice(4) : real;
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** 路径是否存在（用 lstat：不跟随链接，链接本身存在就算存在）。 */
+async function pathExistsOnDisk(p: string): Promise<boolean> {
+  try {
+    await lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 检查一个路径的 worktree 状态。
+ *
+ * 判定顺序：
+ *  - 目录不存在 → `missing`；
+ *  - 目录存在，但 `git rev-parse --show-toplevel` 的输出**不是它自己**
+ *    （不是 worktree 根 / `.git` 已丢 / git 报错）→ `not-a-worktree`，此时
+ *    `clean` 恒为 false —— **证明不了干净就不是干净**；
+ *  - 是 worktree 根 → `clean` 来自**它自己**的 `git status --porcelain`，
+ *    `branch` 来自 `rev-parse --abbrev-ref HEAD`（detached 时为 null）。
+ */
+export async function inspectWorktreeState(worktreePath: string): Promise<WorktreeState> {
+  if (!(await pathExistsOnDisk(worktreePath))) {
+    return { kind: "missing", clean: false, branch: null };
+  }
+  const top = await gitRaw(worktreePath, ["rev-parse", "--show-toplevel"]);
+  if (top.code !== 0) {
+    return { kind: "not-a-worktree", clean: false, branch: null };
+  }
+  const topLevel = top.stdout.trim();
+  const self = normalizePathKey(await realPathOrLexical(worktreePath));
+  if (!topLevel || normalizePathKey(topLevel) !== self) {
+    // 路径落在某个仓库里，但不是那个仓库的工作树根 —— 典型是半删残留：
+    // `.git` 没了，git 向上找到主仓。不比对就会把主仓状态当成本目录状态。
+    return { kind: "not-a-worktree", clean: false, branch: null };
+  }
+  const status = await gitRaw(worktreePath, ["status", "--porcelain"]);
+  const branch = await currentBranch(worktreePath);
+  if (status.code !== 0) {
+    // 是 worktree，但状态读不到（索引损坏等）—— 不能证明干净。
+    return { kind: "worktree", clean: false, branch };
+  }
+  const clean = !status.stdout.split(/\r?\n/).some((line) => line.trim().length > 0);
+  return { kind: "worktree", clean, branch };
+}
+
+/**
  * worktree 里是否还有未提交的改动。
  *
  * 自动清理只在「合并成功」之后发生，但合并成功不代表 worktree 干净 —— 子会话
  * 代提交之后它可能又写了文件，用户也可能在里面手动改过。删目录是不可逆的，
- * 因此这里**只回答「能不能确定它是干净的」**：连 `git status` 都读不到
- * （目录已被手工删掉、git 不可用、索引损坏）一律按「有改动」处理，宁可留下
- * 一个目录让用户自己删，也不静默丢掉未提交的工作。
+ * 因此这里**只回答「能不能确定它是干净的」**：
+ *  - 拿不到状态（目录不存在 / 不是 worktree 根 / git 报错）→ 一律 true，
+ *    宁可留下一个目录让用户自己删，也不静默丢掉未提交的工作；
+ *  - 是 worktree → 只看**它自己**的 status，绝不把父仓库的状态算进来
+ *    （半删残留目录里 git 会向上找到主仓，那是主仓的脏，不是这个目录的）。
  */
 export async function worktreeHasUncommittedChanges(worktreePath: string): Promise<boolean> {
-  const probe = await gitRaw(worktreePath, ["status", "--porcelain"]);
-  if (probe.code !== 0) return true;
-  return probe.stdout.split(/\r?\n/).some((line) => line.trim().length > 0);
+  const state = await inspectWorktreeState(worktreePath);
+  if (state.kind !== "worktree") return true;
+  return !state.clean;
+}
+
+// ---------------------------------------------------------------------------
+// 删除：重试 + 复核
+// ---------------------------------------------------------------------------
+
+/**
+ * 删除失败时的退避序列（毫秒）。
+ *
+ * Windows 上 `fs.rm` 失败多半是**瞬时**占用：子进程刚退出、句柄还没释放、
+ * 杀软在扫、文件索引器在读。这类失败稍后重试往往就成功了。但删除发生在
+ * 扩展宿主里，总预算必须小 —— 宁可如实报「没删掉」，也不能把面板卡住。
+ */
+const REMOVE_RETRY_DELAYS_MS = [50, 150, 400, 800, 1200];
+
+/** 删除重试的总时间预算（毫秒）。 */
+const REMOVE_RETRY_BUDGET_MS = 5_000;
+
+/** 值得重试的瞬时错误码（其余错误重试也没有意义）。 */
+const TRANSIENT_REMOVE_CODES = new Set([
+  "EBUSY",
+  "EPERM",
+  "ENOTEMPTY",
+  "EMFILE",
+  "ENFILE",
+]);
+
+/**
+ * 默认的删除动作：Node 的递归删除。
+ *
+ * 必须由 Node 递归删除，**不能**交给 `git worktree remove --force`：
+ * Windows 上 git 会把 junction 当目录递归进去，删掉链接目标。预置的依赖树
+ * 里复刻了源中的 junction（指向主仓 packages/ 等位置），实测（2026-11-11，
+ * test/worktree-dependencies.test.ts 的清理用例）git 的删除会把主仓那一侧的
+ * 文件一起删掉。`fs.rm` 按 lstat 判定，链接只 unlink、不跟随目标；硬链接
+ * 文件也只是摘掉本目录里的名字。
+ */
+const defaultRemoveDir = async (targetPath: string): Promise<void> => {
+  await rm(targetPath, { recursive: true, force: true, maxRetries: 3 });
+};
+
+function isTransientRemoveError(error: unknown): boolean {
+  const code =
+    typeof error === "object" && error !== null
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return typeof code === "string" && TRANSIENT_REMOVE_CODES.has(code);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+interface RemovalOutcome {
+  removed: boolean;
+  /** 失败原因（removed 为 false 时有值）：残留目录 / 错误信息。 */
+  error?: string;
+}
+
+/**
+ * 删目录：**重试 + 复核**。
+ *
+ * 「`fs.rm` 没抛错」不等于「目录已删」—— Windows 上部分删除（删掉一部分
+ * 内容就失败）非常常见，旧实现只看不抛错，于是把没删净的目录当成删掉了
+ * （现场：worktree 残留目录还在，归档里却写着 released=true）。
+ *
+ * 因此每次删除动作之后都用 lstat 复核路径真的没了；还在就继续重试（瞬时
+ * 错误按退避、部分删除直接再删一次），最终仍未删净则如实报失败。
+ */
+async function removeDirectoryWithRetry(
+  targetPath: string,
+  removeDir: (p: string) => Promise<void>,
+  retryDelaysMs: number[],
+): Promise<RemovalOutcome> {
+  const startedAt = Date.now();
+  let lastError: unknown = null;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await removeDir(targetPath);
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+    }
+    // 复核：不管删除动作报没报错，路径还在就是没删掉。
+    if (!(await pathExistsOnDisk(targetPath))) return { removed: true };
+    const delay = retryDelaysMs[attempt];
+    if (delay === undefined) break;
+    // 非瞬时错误（权限被永久拒绝之类）重试没有意义。
+    if (lastError !== null && !isTransientRemoveError(lastError)) break;
+    if (Date.now() - startedAt + delay >= REMOVE_RETRY_BUDGET_MS) break;
+    await sleep(delay);
+  }
+  return {
+    removed: false,
+    error: lastError === null ? "残留目录" : errorMessage(lastError),
+  };
+}
+
+export interface WorktreeRemoveOptions {
+  repoRoot: string;
+  targetPath: string;
+  branch?: string;
+  baseRef?: string;
+  keepBranch?: boolean;
+  /**
+   * 删除目录的动作（单测注入）。默认是 `fs.rm` 递归删除（不跟随链接）。
+   */
+  removeDir?: (targetPath: string) => Promise<void>;
+  /** 重试退避序列（单测注入更短的序列）。 */
+  retryDelaysMs?: number[];
 }
 
 export interface WorktreeRemoveResult {
-  /** worktree 目录是否已被移除。 */
+  /** worktree 目录是否已被**真正**删除（复核过路径不存在）。 */
   removed: boolean;
-  /** 分支是否被保留（有未合并提交时必须保留）。 */
+  /**
+   * 分支是否被保留。
+   *
+   * 目录没删净、有未合并提交、用户显式要求或分支删除失败时都必须保留。
+   */
   branchKept: boolean;
-  /** 保留分支的原因（branchKept 为 true 时有值）。 */
+  /** 原因（branchKept 为 true 或 removed 为 false 时有值）。 */
   reason?: string;
 }
 
 /**
  * 移除 worktree。
  *
- * `keepBranch` 为 false 且分支上没有未合并提交时才删分支；否则保留分支并
- * 说明原因（Orca 的 “Review N Branches”：不静默吞掉用户可能需要的提交）。
+ * 删除走「重试 + 复核」：目录没真的删掉就算失败（`removed=false`），并给出
+ * 可读原因；此时**显式保留分支** —— 旧实现是「碰巧」因为 `git branch -D`
+ * 对仍被签出的分支失败才保住分支，那是偶然行为，不是保证。
+ *
+ * `keepBranch` 为 false、目录已删净、且分支上没有未合并提交时才删分支；
+ * 否则保留分支并说明原因（Orca 的 “Review N Branches”：不静默吞掉用户
+ * 可能需要的提交）。
  */
-export async function removeWorktree(options: {
-  repoRoot: string;
-  targetPath: string;
-  branch?: string;
-  baseRef?: string;
-  keepBranch?: boolean;
-}): Promise<WorktreeRemoveResult> {
-  let removed = false;
-  try {
-    // 必须由 Node 递归删除，**不能**交给 `git worktree remove --force`：
-    // Windows 上 git 会把 junction 当目录递归进去，删掉链接目标。预置的
-    // 依赖树里复刻了源中的 junction（指向主仓 packages/ 等位置），实测
-    // （2026-11-11，test/worktree-dependencies.test.ts 的清理用例）git 的
-    // 删除会把主仓那一侧的文件一起删掉。`fs.rm` 按 lstat 判定，链接只
-    // unlink、不跟随目标；硬链接文件也只是摘掉本目录里的名字。
-    await rm(options.targetPath, { recursive: true, force: true, maxRetries: 3 });
-    removed = true;
-  } catch {
-    removed = false;
-  }
+export async function removeWorktree(
+  options: WorktreeRemoveOptions,
+): Promise<WorktreeRemoveResult> {
+  const outcome = await removeDirectoryWithRetry(
+    options.targetPath,
+    options.removeDir ?? defaultRemoveDir,
+    options.retryDelaysMs ?? REMOVE_RETRY_DELAYS_MS,
+  );
+  const removed = outcome.removed;
   // 目录删净与否都要清掉 git 的 worktree 元数据（对已不存在的记账幂等）；
   // 目录未被删净时如实返回 removed=false，交由调用方保留记录并上报。
   await git(options.repoRoot, ["worktree", "prune"]).catch(() => undefined);
 
   const branch = options.branch;
+  if (!removed) {
+    // 目录还在 —— 分支仍被这个 worktree 签出（git 也会拒绝删它），但不能
+    // 依赖那个偶然行为：显式保留，并把删除失败的原因如实带上。
+    const detail = outcome.error ?? "未知原因";
+    return {
+      removed,
+      branchKept: Boolean(branch),
+      reason: `目录未删净（${detail}）${branch ? "，分支已保留" : ""}`,
+    };
+  }
   if (!branch) return { removed, branchKept: false };
   if (options.keepBranch) {
     return { removed, branchKept: true, reason: "用户选择保留分支" };
