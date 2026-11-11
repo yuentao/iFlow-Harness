@@ -70,6 +70,7 @@ const en: Record<string, string> = {
   "待回答": "Needs answer",
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
+  "工作目录与分支已清理": "Working directory and branch cleaned up",
   "收起摘要": "Hide summary",
   "查看摘要": "Show summary",
   "查看实时操作": "Show live activity",

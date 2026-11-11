@@ -116,6 +116,14 @@ export interface SuperIsolation {
   branch?: string;
   /** worktree 的起点 ref。 */
   baseRef?: string;
+  /**
+   * worktree 与本地分支已随合并成功清理；`path` 仅用于追溯，磁盘上已不存在。
+   *
+   * 记录（分支名 / 路径 / 集成结果）刻意保留：看板要能说清「改动去了哪里」，
+   * 而重复清理必须幂等 —— 看到这个标记就跳过磁盘操作，不能拿一条已经不存在的
+   * 路径去删。
+   */
+  released?: boolean;
   /** 隔离强度的诚实说明（降级时必填）—— 面向用户（中文），只出现在看板气泡里。 */
   note?: string;
   /**

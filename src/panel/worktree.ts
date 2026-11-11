@@ -278,6 +278,21 @@ export async function commitWorktree(options: {
   }
 }
 
+/**
+ * worktree 里是否还有未提交的改动。
+ *
+ * 自动清理只在「合并成功」之后发生，但合并成功不代表 worktree 干净 —— 子会话
+ * 代提交之后它可能又写了文件，用户也可能在里面手动改过。删目录是不可逆的，
+ * 因此这里**只回答「能不能确定它是干净的」**：连 `git status` 都读不到
+ * （目录已被手工删掉、git 不可用、索引损坏）一律按「有改动」处理，宁可留下
+ * 一个目录让用户自己删，也不静默丢掉未提交的工作。
+ */
+export async function worktreeHasUncommittedChanges(worktreePath: string): Promise<boolean> {
+  const probe = await gitRaw(worktreePath, ["status", "--porcelain"]);
+  if (probe.code !== 0) return true;
+  return probe.stdout.split(/\r?\n/).some((line) => line.trim().length > 0);
+}
+
 export interface WorktreeRemoveResult {
   /** worktree 目录是否已被移除。 */
   removed: boolean;

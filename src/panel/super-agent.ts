@@ -91,6 +91,7 @@ import {
   sanitizeWorktreeName,
   superBranchName,
   superIsolationDir,
+  worktreeHasUncommittedChanges,
   worktreePathFor,
 } from "./worktree.js";
 
@@ -515,6 +516,14 @@ export class SuperAgentManager {
     this.forgetChild(id);
     // 附件副本只服务这个子会话：清理时一并删掉（worktree 的保留策略不适用于它）。
     await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
+    // 合并成功时 worktree 与分支已经清理过 —— 这里只删记录，别拿已经不存在的
+    // 路径再做一次磁盘操作（那只会产生误导性的失败日志）。
+    if (session.isolation.released) {
+      this.removeSession(id);
+      this.transcripts.delete(id);
+      this.emit();
+      return { ok: true };
+    }
     if (!session.isolation.path) {
       this.removeSession(id);
       this.transcripts.delete(id);
@@ -567,6 +576,9 @@ export class SuperAgentManager {
       detail: `智能体已合入 ${target}`,
       at: Date.now(),
     });
+    // 分支确实并入了 HEAD，worktree 与分支可以清掉；此时子会话进程早已结束，
+    // 不存在 Windows 目录占用问题。
+    await this.releaseMergedIsolation(id);
     return true;
   }
 
@@ -588,7 +600,8 @@ export class SuperAgentManager {
       await this.disposeClient(id);
       // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
       await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
-      if (session.isolation.path) {
+      // 合并成功时 worktree 与分支已清理：磁盘上没有需要用户收拾的对象了。
+      if (session.isolation.path && !session.isolation.released) {
         kept.push({ id, path: session.isolation.path, branch: session.isolation.branch });
       }
     }
@@ -827,6 +840,11 @@ export class SuperAgentManager {
       if (!latest || (latest.attempts ?? 1) === attempt) {
         await this.disposeClient(id);
         this.started.delete(id);
+      }
+      // 自动合并成功后释放隔离。必须在进程回收之后：Windows 上子进程的 cwd
+      // 还停在 worktree 里时，目录删不掉（会留下半删的目录）。
+      if (this.sessions.get(id)?.integration?.state === "merged") {
+        await this.releaseMergedIsolation(id);
       }
       this.pump();
     }
@@ -1195,6 +1213,84 @@ export class SuperAgentManager {
     this.deps.log.info(
       `super agent: ${id} 集成 ${integration.state}${integration.detail ? ` — ${integration.detail}` : ""}`,
     );
+  }
+
+  /**
+   * 合并成功后释放隔离：删掉 worktree 目录与本地分支，只保留看板记录。
+   *
+   * 返回 true = 已清理或无需清理（幂等，可重复调用）。
+   *
+   * 三道保守闸门，任何一道不过都**不删**并如实返回 false：
+   *  1. `released` 已为真 → 磁盘上早没了，直接成功。
+   *  2. worktree 里还有未提交改动 → 删目录会永久丢数据（用户也可能在里面手动
+   *     改过），留给用户自己处置。
+   *  3. `removeWorktree` 保留了分支（未合并 / 删除失败）→ 不能标 released，
+   *     否则看板会谎称分支已清理。
+   *
+   * 调用时机由调用方保证：必须在子会话 CLI 进程退出之后。Windows 上进程的
+   * cwd 还停在 worktree 里时，目录是删不掉的。
+   */
+  private async releaseMergedIsolation(id: string): Promise<boolean> {
+    const session = this.get(id);
+    if (!session) return true;
+    const isolation = session.isolation;
+    if (isolation.kind !== "git_worktree") return true;
+    if (!isolation.path || !isolation.branch) return true;
+    if (isolation.released) return true;
+
+    if (await worktreeHasUncommittedChanges(isolation.path)) {
+      this.deps.log.warn(
+        `super agent: ${id} 的工作目录还有未提交改动，保留 worktree 与分支 ${isolation.branch}`,
+      );
+      return false;
+    }
+
+    // 删分支前再核一次「真的并入 HEAD」。调用方只在 merged 之后调用，但这里
+    // 不能拿状态当授权：分支可能被别处改动过（或记录来自一次被手工修改的
+    // 归档），删掉未合并的分支就是丢提交。
+    if (!(await isBranchMerged({ repoRoot: this.deps.repoRoot, branch: isolation.branch }))) {
+      this.deps.log.warn(
+        `super agent: ${id} 的分支 ${isolation.branch} 尚未并入当前 HEAD，保留 worktree 与分支`,
+      );
+      return false;
+    }
+
+    // 刻意不传 baseRef：baseRef 是分支起点，合并后分支的提交虽然已经在 HEAD
+    // 里，却不再以 baseRef 为祖先，`git rev-list baseRef..branch` 会把它们
+    // 数成「未合并」，分支反而被保留。合并已由上面的 isBranchMerged 确认。
+    const result = await removeWorktree({
+      repoRoot: this.deps.repoRoot,
+      targetPath: isolation.path,
+      branch: isolation.branch,
+      keepBranch: false,
+    });
+    if (!result.removed || result.branchKept) {
+      this.deps.log.warn(
+        `super agent: ${id} 隔离清理未完成（removed=${result.removed}, branchKept=${result.branchKept}）${result.reason ? `：${result.reason}` : ""}`,
+      );
+      return false;
+    }
+
+    // 记录保留、只打 released：看板仍要能说清「改动去了哪里」。
+    const next: SuperSessionUi = {
+      ...session,
+      isolation: { ...isolation, released: true },
+    };
+    // 与 recordIntegration 同一条写回路径：历史子会话不在 sessions 里，必须
+    // 写回 archived，否则重启后看板又会拿旧记录去删一个不存在的目录。
+    if (this.sessions.has(id)) {
+      this.sessions.set(id, next);
+    } else {
+      for (const [owner, records] of this.archived) {
+        if (!records.some((s) => s.id === id)) continue;
+        this.archived.set(owner, records.map((s) => (s.id === id ? next : s)));
+      }
+    }
+    this.emit();
+    this.deps.log.info(
+      `super agent: ${id} 合并成功，已清理 worktree 与分支 ${isolation.branch}`,
+    );
+    return true;
   }
 
   private apply(id: string, event: SuperEvent): void {
