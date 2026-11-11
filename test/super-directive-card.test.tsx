@@ -270,6 +270,49 @@ describe("AssistantText 协议块卡片", () => {
     expect(code!.textContent).toContain("进行中的任务");
   });
 
+  // 实测形态（用户截图 2026-11-12）：模型把委派写成工具调用式载荷而不是 markdown
+  // 围栏。宿主照样派发，所以转录必须出卡片 —— 按代码块渲染就是一堵 JSON 墙。
+  it("工具调用式载荷（DSML 包裹）渲染成任务卡，不留 JSON 墙与包裹残字", () => {
+    render(
+      [
+        "我来拆分两件工作，分别交给两个子会话。",
+        "",
+        "<｜DSML｜tool-super-agent>",
+        '{"tasks":[{"title":"编写模块A设计说明","task":"新建 docs/alpha.md"},{"title":"编写模块B设计说明","task":"新建 docs/beta.md"}]}',
+        "</tool-super-agent>",
+      ].join("\n"),
+    );
+    const cards = taskCards();
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.textContent).toContain("编写模块A设计说明");
+    expect(cards[1]!.textContent).toContain("编写模块B设计说明");
+    expect(text()).toContain("我来拆分两件工作");
+    // 裸 JSON 与包裹标记都不再出现在 DOM 里。
+    expect(text()).not.toContain('"tasks"');
+    expect(text()).not.toContain("tool-super-agent");
+    expect(container.querySelector("pre code")).toBeNull();
+  });
+
+  it("「super-agent:」+ ```json 载荷渲染成任务卡，代码块与孤立收栏都消失", () => {
+    render(
+      [
+        "现在派一个复核会话跑全量检查。",
+        "super-agent:",
+        "```json",
+        '{"tasks":[{"title":"合并后全量复核","task":"跑全量检查、如实汇报真实输出"}]}',
+        "```",
+        "复核会话已开工。",
+      ].join("\n"),
+    );
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("合并后全量复核");
+    expect(text()).toContain("现在派一个复核会话");
+    expect(text()).toContain("复核会话已开工");
+    expect(text()).not.toContain('"tasks"');
+    expect(container.querySelector("pre code")).toBeNull();
+  });
+
   it("普通段落 / 列表 / 普通代码块与协议卡共存，Markdown 不丢", () => {
     const mixed = [
       "开始处理：",

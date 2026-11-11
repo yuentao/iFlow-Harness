@@ -1279,4 +1279,130 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     expect(scan.pendingOpen).toBeDefined();
     expect(splitSuperDirectiveSegments(unclosed)).toEqual([{ kind: "text", text: unclosed }]);
   });
+
+  // 实测（2026-11-12 用户截图）：模型不按 markdown 围栏写委派，而写成**工具调用式**
+  // 载荷（`<｜DSML｜tool-super-agent>`，或「super-agent:」+ ```json 围栏）。宿主走
+  // findToolStylePayloads 派发，只认围栏的渲染侧切不出卡片 —— 看板上「等待子会话
+  // 汇报」已经出现，转录里却还是一堵 JSON 墙。两条读者必须走同一条判定链。
+  const dsmlShape = [
+    "我把这两件工作分别委派给两个子会话并行执行。",
+    "",
+    "<｜DSML｜tool-super-agent>",
+    '{"tasks":[{"title":"编写模块A设计说明","task":"新建 docs/alpha.md"},{"title":"编写模块B设计说明","task":"新建 docs/beta.md"}]}',
+    "</tool-super-agent>",
+    "",
+    "两个子会话已经开工。",
+  ].join("\n");
+
+  it("工具调用式载荷：宿主派发时渲染同样切出卡片（不再是 JSON 墙）", () => {
+    const scan = extractSuperDirectives(dsmlShape);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]).toHaveLength(2);
+
+    const segments = splitSuperDirectiveSegments(dsmlShape);
+    expect(segments.map((s) => s.kind)).toEqual(["text", "directive", "text"]);
+    const [directive] = directiveSegments(dsmlShape);
+    expect(directive?.language).toBe("super-agent");
+    expect(directive?.display.kind).toBe("tasks");
+    const display = directive?.display;
+    expect(display?.kind === "tasks" ? display.tasks.map((task) => task.title) : []).toEqual([
+      "编写模块A设计说明",
+      "编写模块B设计说明",
+    ]);
+    // 包裹标记连同载荷一起进卡片（前后不留残字），散文留在文本段里 —— 那是真给用户读的话。
+    expect(directive?.raw).toContain("<｜DSML｜tool-super-agent>");
+    expect(directive?.raw).toContain("</tool-super-agent>");
+    expect(segments[0]?.kind === "text" ? segments[0].text : "").toContain("我把这两件工作");
+    expect(segments[2]?.kind === "text" ? segments[2].text : "").toContain("两个子会话已经开工");
+    // 宿主派发出来的不是容错预览。
+    expect(display?.kind === "tasks" ? display.salvaged : undefined).not.toBe(true);
+  });
+
+  it("「super-agent:」+ ```json 围栏载荷渲染成卡片，正文不丢、代码块消失", () => {
+    const text = [
+      "5 个子会话全部完成并已经合并到 beta，现在派一个复核会话跑全量检查。",
+      "super-agent:",
+      "```json",
+      '{"tasks":[{"title":"合并后全量复核","task":"跑全量检查、如实汇报真实输出"}]}',
+      "```",
+      "复核会话已开工。",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("合并后全量复核");
+
+    const segments = splitSuperDirectiveSegments(text);
+    expect(segments.map((s) => s.kind)).toEqual(["text", "directive", "text"]);
+    const [directive] = directiveSegments(text);
+    expect(directive?.display.kind).toBe("tasks");
+    // 裹载荷的 ```json 连同收栏一起进卡片，否则转录里会剩一行孤立的 ```。
+    expect(directive?.raw).toContain("```json");
+    expect(directive?.raw.trimEnd().endsWith("```")).toBe(true);
+    expect(segments[0]?.kind === "text" ? segments[0].text : "").toContain("现在派一个复核会话");
+    expect(segments[2]?.kind === "text" ? segments[2].text : "").toContain("复核会话已开工");
+  });
+
+  it("参数包装体（arguments.tasks）派发出来时卡片照原样展示，不标容错", () => {
+    const text = [
+      "<tool_call>",
+      '{"name":"super-agent","arguments":{"tasks":[{"title":"A","task":"任务 A"}]}}',
+      "</tool_call>",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks[0]?.[0]).toEqual({ title: "A", task: "任务 A" });
+
+    const [directive] = directiveSegments(text);
+    expect(directive?.display.kind).toBe("tasks");
+    const display = directive?.display;
+    expect(display?.kind === "tasks" ? display.tasks[0]?.task : undefined).toBe("任务 A");
+    expect(display?.kind === "tasks" ? display.salvaged : undefined).not.toBe(true);
+  });
+
+  it("载荷没收全时不出卡片（流式中间态），收全后出一张", () => {
+    const head = "<｜DSML｜tool-super-agent>\n";
+    const partial = '{"tasks":[{"title":"A","task":"任务 A"';
+    expect(splitSuperDirectiveSegments(head + partial)).toEqual([
+      { kind: "text", text: head + partial },
+    ]);
+    expect(directiveSegments(head + partial + "}]}")).toHaveLength(1);
+  });
+
+  it("散文里提到 super-agent 但没有载荷时不出现卡片", () => {
+    const text = "我会在需要时用 super-agent 代码块来委派子会话。";
+    expect(extractSuperDirectives(text).blocks).toHaveLength(0);
+    expect(splitSuperDirectiveSegments(text)).toEqual([{ kind: "text", text }]);
+  });
+
+  it("与 super-agent 无关的 JSON 不出现卡片（与宿主同一判定）", () => {
+    const text = '普通文本里的 {"tasks":[{"title":"A","task":"真的任务"}]} 与 super-agent 无关';
+    expect(extractSuperDirectives(text).blocks).toHaveLength(0);
+    expect(splitSuperDirectiveSegments(text)).toEqual([{ kind: "text", text }]);
+  });
+
+  it("围栏块与工具调用式载荷各出一张卡，不重复切分", () => {
+    const text = [
+      "```super-agent",
+      '{"tasks":[{"title":"围栏任务","task":"围栏里的任务"}]}',
+      "```",
+      "",
+      "<｜DSML｜tool-super-agent>",
+      '{"tasks":[{"title":"工具任务","task":"工具里的任务"}]}',
+      "</tool-super-agent>",
+    ].join("\n");
+    expect(extractSuperDirectives(text).blocks).toHaveLength(2);
+    const titles = directiveSegments(text).flatMap((segment) =>
+      segment.display.kind === "tasks" ? segment.display.tasks.map((task) => task.title) : [],
+    );
+    expect(titles).toEqual(["围栏任务", "工具任务"]);
+  });
+
+  it("工具调用式载荷内容非法时切成卡片段（宿主同样报非法），不再留 JSON 墙", () => {
+    const text = ["<｜DSML｜tool-super-agent>", '{"tasks":[{"title":"A"}]}', "</tool-super-agent>"].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+    const [directive] = directiveSegments(text);
+    expect(directive).toBeDefined();
+    expect(directive?.raw).toContain("tool-super-agent");
+  });
 });
