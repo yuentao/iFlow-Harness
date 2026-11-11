@@ -15,6 +15,9 @@
  *     分支，并把「有 N 个分支待审」交回用户（Orca 的 “Review N Branches”）。
  *  3. 非 git 仓库降级为一个独立空目录 —— 隔离强度只有「目录隔离」，看板与
  *     汇报都会如实标注，不谎称有版本隔离。
+ *  4. worktree 建好后立刻预置一份自己的 `node_modules`（硬链接树，见
+ *     `presetWorktreeDependencies`）—— 子会话在其中跑 `npm ci` 只会重装
+ *     自己这份，顺链接清空主工作区依赖的事故从结构上不可能再发生。
  *
  * 已知限制（诚实声明）：worktree 只包含**已提交**的内容。主仓库里未提交的
  * 改动与未跟踪文件对子会话不可见。
@@ -26,7 +29,19 @@
 import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import type { Dirent, Stats } from "node:fs";
+import {
+  appendFile,
+  link,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  stat,
+  symlink,
+} from "node:fs/promises";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -160,10 +175,310 @@ export async function probeGitRepo(repoRoot: string): Promise<GitRepoProbe> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 依赖预置：让 worktree 自带一份 node_modules
+// ---------------------------------------------------------------------------
+//
+// 事故背景：worktree 里没有依赖时，子会话会自己建一个指向主仓 node_modules
+// 的目录联接，然后跑 `npm ci` —— `npm ci` 的第一步是删 node_modules，顺着
+// 联接把**用户主工作区的依赖**清空了。所以不能靠子会话自觉：让 worktree
+// 里本来就有一份独立依赖，它就没有理由去联接主工作区。
+//
+// 用**硬链接**（同卷零额外占用，删除只是 unlink，不影响主仓文件），不是
+// 联接、不是符号链接、更不是整目录拷贝（几 GB × 并发子会话不可接受）。
+
+/** 依赖目录名（固定，不随项目变化）。 */
+export const DEPENDENCIES_DIR = "node_modules";
+
+/** 并行建硬链接的并发度：目录遍历串行，只有 link 这一步值得并行。 */
+const LINK_CONCURRENCY = 16;
+
+/**
+ * 预置依赖树时用到的 FS 表面。
+ *
+ * 抽成接口只为单测注入（模拟跨卷 `EXDEV` / 权限失败）；生产代码一律使用
+ * `defaultDependencyFs`，不做路径改写。
+ */
+export interface DependencyPresetFs {
+  lstat(p: string): Promise<Stats>;
+  stat(p: string): Promise<Stats>;
+  readdir(p: string): Promise<Dirent[]>;
+  mkdir(p: string): Promise<void>;
+  link(src: string, dest: string): Promise<void>;
+  readlink(p: string): Promise<string>;
+  symlink(target: string, dest: string, type?: "file" | "dir" | "junction"): Promise<void>;
+  rm(p: string): Promise<void>;
+}
+
+const defaultDependencyFs: DependencyPresetFs = {
+  lstat: (p) => lstat(p),
+  stat: (p) => stat(p),
+  readdir: (p) => readdir(p, { withFileTypes: true }),
+  mkdir: async (p) => {
+    await mkdir(p, { recursive: true });
+  },
+  link: async (src, dest) => {
+    await link(src, dest);
+  },
+  readlink: (p) => readlink(p),
+  symlink: async (target, dest, type) => {
+    await symlink(target, dest, type);
+  },
+  rm: async (p) => {
+    await rm(p, { recursive: true, force: true });
+  },
+};
+
+/** 预置被跳过的原因（都是「结构上不该做」，不是错误）。 */
+export type DependencyPresetSkip = "no-source" | "already-present" | "not-ignored";
+
+export interface DependencyPresetResult {
+  /** 是否真的建出了依赖树。 */
+  ok: boolean;
+  /** 建出的硬链接文件数。 */
+  files: number;
+  /** 建出的目录数（含 node_modules 本身）。 */
+  dirs: number;
+  /** 按链接复制（未跟随）的符号链接 / junction 数。 */
+  symlinks: number;
+  /** 跳过原因（`ok` 为 true 时不填）。 */
+  skip?: DependencyPresetSkip;
+  /** 失败原因（跨卷 / 权限 / 路径过长等，`ok` 为 true 时不填）。 */
+  error?: string;
+  durationMs: number;
+}
+
+export interface LinkTreeStats {
+  files: number;
+  dirs: number;
+  symlinks: number;
+}
+
+/**
+ * 把 `source` 目录树以**硬链接**复刻到 `target`。
+ *
+ * - 目录真实创建（`mkdir -p`），文件 `link`，因此零额外磁盘占用；
+ * - 源里的符号链接 / junction **按链接复制**（`readlink` + `symlink`），
+ *   绝不跟随 —— 跟随会把链接目标的内容也做成硬链接，越界到树外；
+ * - 目标已存在则跳过该项（幂等）；
+ * - 任何失败都向上抛，由调用方整体回退（不退化成拷贝）。
+ *
+ * 导出给单测与耗时实测用；生产路径经 `presetWorktreeDependencies` 走到这里。
+ */
+export async function linkDependencyTree(
+  source: string,
+  target: string,
+  overrides?: Partial<DependencyPresetFs>,
+): Promise<LinkTreeStats> {
+  const fs = { ...defaultDependencyFs, ...overrides };
+  const plan = await collectTree(fs, source, target);
+  for (const rel of plan.dirs) {
+    await fs.mkdir(rel === "" ? target : path.join(target, rel));
+  }
+  let files = 0;
+  const fileFailure = await runPool(plan.files, LINK_CONCURRENCY, async (item) => {
+    try {
+      await fs.link(item.src, item.dest);
+      files += 1;
+    } catch (error) {
+      // 目标已存在 → 幂等跳过。其余错误（EXDEV / EPERM / ENAMETOOLONG）上抛。
+      if (!isErrno(error, "EEXIST")) throw error;
+    }
+  });
+  if (fileFailure) throw fileFailure;
+  let symlinks = 0;
+  for (const item of plan.links) {
+    try {
+      await replicateLink(fs, item);
+      symlinks += 1;
+    } catch (error) {
+      if (!isErrno(error, "EEXIST")) throw error;
+    }
+  }
+  return { files, dirs: plan.dirs.length, symlinks };
+}
+
+interface TreePlan {
+  /** 要创建的目录（相对 target，`""` 为根）。 */
+  dirs: string[];
+  files: { src: string; dest: string }[];
+  links: { src: string; dest: string; dir: boolean }[];
+}
+
+/** 先完整遍历再动手：遍历失败时目标树还是空的，回退成本最低。 */
+async function collectTree(
+  fs: DependencyPresetFs,
+  source: string,
+  target: string,
+): Promise<TreePlan> {
+  const plan: TreePlan = { dirs: [""], files: [], links: [] };
+  const stack: string[] = [""];
+  while (stack.length > 0) {
+    const rel = stack.pop() ?? "";
+    const dir = rel === "" ? source : path.join(source, rel);
+    for (const entry of await fs.readdir(dir)) {
+      const childRel = rel === "" ? entry.name : path.join(rel, entry.name);
+      const src = path.join(dir, entry.name);
+      const dest = path.join(target, childRel);
+      let isLink = entry.isSymbolicLink();
+      let isDirectory = entry.isDirectory() && !isLink;
+      // 目录要 lstat 复核：Windows 上普通目录与 junction 都可能被 dirent
+      // 报成目录，跟进去就会把链接目标的内容硬链接进树里（越界）。普通文件
+      // 不需要（它是 reparse point 时 dirent 会标成链接），省掉三万多次 lstat。
+      if (isDirectory) {
+        const info = await fs.lstat(src);
+        if (info.isSymbolicLink()) {
+          isLink = true;
+          isDirectory = false;
+        }
+      }
+      if (isLink) {
+        plan.links.push({ src, dest, dir: await isDirectoryLink(fs, src) });
+      } else if (isDirectory) {
+        plan.dirs.push(childRel);
+        stack.push(childRel);
+      } else {
+        plan.files.push({ src, dest });
+      }
+    }
+  }
+  return plan;
+}
+
+/** 链接目标是否为目录（跟随失败时按文件处理，不阻塞）。 */
+async function isDirectoryLink(fs: DependencyPresetFs, src: string): Promise<boolean> {
+  try {
+    return (await fs.stat(src)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** 复刻一个符号链接（不跟随其目标）。 */
+async function replicateLink(
+  fs: DependencyPresetFs,
+  item: { src: string; dest: string; dir: boolean },
+): Promise<void> {
+  let linkTarget = await fs.readlink(item.src);
+  if (process.platform !== "win32") {
+    await fs.symlink(linkTarget, item.dest, item.dir ? "dir" : "file");
+    return;
+  }
+  if (!item.dir) {
+    await fs.symlink(linkTarget, item.dest, "file");
+    return;
+  }
+  // Windows：目录用 junction（无需管理员权限）。junction 要求绝对路径，且
+  // Node 对 junction 的 readlink 会带 `\\?\` 前缀 —— 建链接前去掉。
+  if (linkTarget.startsWith("\\\\?\\")) linkTarget = linkTarget.slice(4);
+  if (!path.isAbsolute(linkTarget)) {
+    linkTarget = path.resolve(path.dirname(item.src), linkTarget);
+  }
+  await fs.symlink(linkTarget, item.dest, "junction");
+}
+
+/**
+ * 给 worktree 预置一份自己的 `node_modules`（硬链接树）。
+ *
+ * 三道安全闸，任一不满足就**静默跳过**（不报错、不阻塞 spawn）：
+ *  1. 主仓根的 `node_modules` 不存在 / 不是真实目录；
+ *  2. `node_modules` 没有被 git 忽略（否则子会话 `git add -A` 会把它提交进
+ *     分支）—— 用 `git check-ignore` 在 worktree 里判定；
+ *  3. 中途任何链接失败（跨卷 `EXDEV`、权限、路径过长）：删除已建的整棵树，
+ *     如实记原因，**绝不退化成拷贝**。
+ */
+export async function presetWorktreeDependencies(options: {
+  repoRoot: string;
+  worktreePath: string;
+  /** 单测注入（模拟 EXDEV 等）；生产代码不传。 */
+  fs?: Partial<DependencyPresetFs>;
+}): Promise<DependencyPresetResult> {
+  const startedAt = Date.now();
+  const fs = { ...defaultDependencyFs, ...options.fs };
+  const skipped = { ok: false, files: 0, dirs: 0, symlinks: 0 } as const;
+  const finish = (
+    extra: Omit<DependencyPresetResult, "durationMs">,
+  ): DependencyPresetResult => ({ ...extra, durationMs: Date.now() - startedAt });
+
+  const source = path.join(options.repoRoot, DEPENDENCIES_DIR);
+  const target = path.join(options.worktreePath, DEPENDENCIES_DIR);
+
+  // 闸 1：主仓有真实（非链接）的 node_modules 才有东西可预置。
+  let sourceInfo: Stats;
+  try {
+    sourceInfo = await fs.lstat(source);
+  } catch {
+    return finish({ ...skipped, skip: "no-source" });
+  }
+  if (!sourceInfo.isDirectory()) return finish({ ...skipped, skip: "no-source" });
+  if (await pathExists(fs, target)) return finish({ ...skipped, skip: "already-present" });
+
+  // 闸 2：必须被 git 忽略。尾斜杠不能省 —— git 把 `node_modules`（无斜杠）
+  // 当文件判定，匹配不上 `.gitignore` 里的 `node_modules/`（实测如此）。
+  const ignore = await gitRaw(options.worktreePath, [
+    "check-ignore",
+    "-q",
+    `${DEPENDENCIES_DIR}/`,
+  ]);
+  if (ignore.code !== 0) return finish({ ...skipped, skip: "not-ignored" });
+
+  // 闸 3：失败整体回退。目标树里只有本次建的链接与目录，`rm` 不跟随链接
+  // （unlink 语义），删掉的只是链接名，主仓文件仍被源目录那一侧引用。
+  try {
+    return finish({ ok: true, ...(await linkDependencyTree(source, target, fs)) });
+  } catch (error) {
+    await fs.rm(target).catch(() => undefined);
+    return finish({ ...skipped, error: errorMessage(error) });
+  }
+}
+
+async function pathExists(fs: DependencyPresetFs, p: string): Promise<boolean> {
+  try {
+    await fs.lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 并发跑一组任务；任一项失败即停止派发并返回该错误（其余在飞任务先收尾）。 */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<unknown | null> {
+  let cursor = 0;
+  let failure: unknown = null;
+  const run = async (): Promise<void> => {
+    while (failure === null) {
+      const item = items[cursor++];
+      if (item === undefined) return;
+      try {
+        await worker(item);
+      } catch (error) {
+        if (failure === null) failure = error;
+        return;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+  return failure;
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === code
+  );
+}
+
 export interface WorktreeCreateResult {
   path: string;
   branch: string;
   baseRef: string;
+  /** worktree 内依赖预置的结果（最好努力；跳过 / 失败都不影响 worktree 可用）。 */
+  dependencies?: DependencyPresetResult;
 }
 
 /**
@@ -171,6 +486,10 @@ export interface WorktreeCreateResult {
  * `targetPath`。
  *
  * `targetPath` 必须**不存在**（git 的硬要求），因此调用方只建父目录。
+ *
+ * 建完立刻预置独立的 `node_modules`（硬链接树），并在**返回前** await 完成
+ * —— 调用方拿到 worktree 就会 spawn 子会话，晚于这一步就来不及了。预置是
+ * 最好努力：跳过或失败都照常返回可用的 worktree（结果记在 `dependencies`）。
  */
 export async function createWorktree(options: {
   repoRoot: string;
@@ -187,7 +506,16 @@ export async function createWorktree(options: {
     gitPath(options.targetPath),
     options.baseRef,
   ]);
-  return { path: options.targetPath, branch: options.branch, baseRef: options.baseRef };
+  const dependencies = await presetWorktreeDependencies({
+    repoRoot: options.repoRoot,
+    worktreePath: options.targetPath,
+  });
+  return {
+    path: options.targetPath,
+    branch: options.branch,
+    baseRef: options.baseRef,
+    dependencies,
+  };
 }
 
 /** worktree 是否还有未合并到 baseRef 的提交。 */
