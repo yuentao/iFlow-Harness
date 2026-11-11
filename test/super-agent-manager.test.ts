@@ -64,7 +64,7 @@ class FakeClient {
   prompts: string[] = [];
   /** Full content blocks of each prompt (text + image) for attachment tests. */
   blocks: ContentBlock[][] = [];
-  /** Mode ids pushed to the child session — the manager must send "yolo". */
+  /** Mode ids pushed to the child session — the manager must send "default". */
   modes: string[] = [];
   disposed = false;
   cwd = "";
@@ -297,12 +297,12 @@ describe("super agent · 编排", () => {
     expect(client?.cwd).not.toBe(repo);
   }, 30000);
 
-  it("子会话被推到免确认模式（yolo）", async () => {
+  it("子会话被推到 default 模式（yolo 会静默执行 shell，护栏就看不到命令）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");
     harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "running");
-    expect(harness.clients[0]?.modes).toEqual(["yolo"]);
+    expect(harness.clients[0]?.modes).toEqual(["default"]);
   }, 30000);
 
   it("审批请求由宿主直接放行，不产生待办、不打扰主会话", async () => {
@@ -322,8 +322,62 @@ describe("super agent · 编排", () => {
       ],
     } as never)) as { outcome: { outcome: string; optionId?: string } };
 
-    // 选 allow_always 而不是 allow_once：同一个子会话后续不该再问。
+    // 非 shell 工具选 allow_always：同一个子会话后续不该再问。
     expect(response.outcome).toEqual({ outcome: "selected", optionId: "always" });
+    expect(harness.sessions[0]?.status).toBe("running");
+    expect(harness.sessions[0]?.pending).toBeUndefined();
+    expect(harness.reports.length).toBe(reportsBefore);
+  }, 30000);
+
+  it("shell 工具审批回 allow_once（否则护栏只看得到第一条命令）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+
+    const response = (await harness.clients[0]!.callbacks.onRequestPermission?.({
+      sessionId: "sub-1",
+      toolCall: {
+        toolCallId: "t2",
+        toolName: "run_shell_command",
+        kind: "execute",
+        title: "npm test",
+        args: { command: "npm test" },
+      },
+      options: [
+        { optionId: "allow", name: "允许", kind: "allow_once" },
+        { optionId: "always", name: "始终允许", kind: "allow_always" },
+        { optionId: "deny", name: "拒绝", kind: "reject_once" },
+      ],
+    } as never)) as { outcome: { outcome: string; optionId?: string } };
+
+    expect(response.outcome).toEqual({ outcome: "selected", optionId: "allow" });
+  }, 30000);
+
+  it("命中依赖护栏的 shell 命令被拒绝，子会话继续跑、不产生待办", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    const reportsBefore = harness.reports.length;
+
+    const response = (await harness.clients[0]!.callbacks.onRequestPermission?.({
+      sessionId: "sub-1",
+      toolCall: {
+        toolCallId: "t3",
+        toolName: "run_shell_command",
+        kind: "execute",
+        title: `npm ci --prefix "${repo}"`,
+        args: { command: `npm ci --prefix "${repo}"` },
+      },
+      options: [
+        { optionId: "allow", name: "允许", kind: "allow_once" },
+        { optionId: "always", name: "始终允许", kind: "allow_always" },
+        { optionId: "deny", name: "拒绝", kind: "reject_once" },
+      ],
+    } as never)) as { outcome: { outcome: string; optionId?: string } };
+
+    expect(response.outcome).toEqual({ outcome: "selected", optionId: "deny" });
     expect(harness.sessions[0]?.status).toBe("running");
     expect(harness.sessions[0]?.pending).toBeUndefined();
     expect(harness.reports.length).toBe(reportsBefore);
