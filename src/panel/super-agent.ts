@@ -139,6 +139,15 @@ const MIME_EXT: Record<string, string> = {
 export type SuperClientFactory = (params: {
   cwd: string;
   allowedRoots: string[];
+  /**
+   * 传给 CLI 的 `--include-directories`（工作目录之外的额外可读写根）。
+   *
+   * 由管理器显式给出，不让宿主自己猜：CLI 侧的 `isPathWithinWorkspace` 与
+   * 宿主侧的 `resolveAgentPath` 必须认同一组根，否则子会话能碰到的范围和
+   * 宿主允许的范围会打架。主仓工作区档（合并子会话）尤其关键 —— 主仓根必须
+   * 显式交给 CLI，否则它读不到主仓文件。
+   */
+  includeDirectories: string[];
   label: string;
   callbacks: AcpClientCallbacks;
 }) => Promise<AcpClient>;
@@ -161,13 +170,35 @@ export interface SuperAgentDeps {
   onReport: (entries: { session: SuperSessionUi; report: SuperReport }[]) => void;
   /**
    * 自动集成没能把改动带回主分支（改动与本地未提交改动重叠 / 预演冲突 /
-   * git 拒绝合并等），但分支里确实有提交 —— 宿主据此**自动**请主会话智能体
-   * 合并，而不是把按钮留给用户自己点。
+   * git 拒绝合并等），但分支里确实有提交 —— 宿主据此**自动**派出一个合并
+   * 子会话（repo 档，跑在主仓工作区里执行 `git merge --no-ff`），而不是把
+   * 按钮留给用户自己点。
    *
-   * `reason` 是宿主如实记下的原因（会写进请求提示词，让智能体知道背景）。
+   * `reason` 是宿主如实记下的原因（会写进合并任务书，让执行者知道背景）。
    * 只有 merge 模式会触发：pr 模式的语义是开 PR，manual 模式压根不做集成。
    */
   onNeedAgentMerge?: (session: SuperSessionUi, reason: string) => void;
+  /**
+   * 合并子会话跑完后的结果（宿主据此如实 toast）。
+   *
+   * `merged` = 只读 git 检测确认目标分支已并入当前分支；false = 合并没成，
+   * 分支仍保留。宿主拿到的是**检测结果**，不是子会话的自述 —— 子会话可能只
+   * 做了一半，或者把改动合到了别的地方。
+   */
+  onMergeResult?: (info: {
+    /** 来源子会话（被合并的那个）的 id。 */
+    sourceId: string;
+    /** 来源子会话的标题（给人看的）。 */
+    title: string;
+    /** 被合并的分支名。 */
+    branch: string;
+    /** 分支是否真的并入了当前分支。 */
+    merged: boolean;
+    /** 合并子会话本身是否失败 / 被中断。 */
+    failed: boolean;
+    /** 人话说明。 */
+    detail: string;
+  }) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
   /**
@@ -273,6 +304,17 @@ export class SuperAgentManager {
   private readonly queue: SuperQueueEntry[] = [];
   /** 已开始准备（真正占用了并发槽位）的子会话 id。 */
   private readonly started = new Set<string>();
+  /**
+   * 合并子会话 → 它要合并的目标。
+   *
+   * 只有 repo 档的合并子会话会进这张表：它们没有自己的分支，合并结束后由
+   * 宿主用只读 git 检测目标分支是否并入了当前分支，再把结果写回**来源**
+   * 子会话的 integration。
+   */
+  private readonly mergeTargets = new Map<
+    string,
+    { sourceId: string; branch: string; title: string }
+  >();
   /** 集成（merge / push + PR）的串行链 —— 并发合并同一个工作区会把仓库搅乱。 */
   private integrationChain: Promise<void> = Promise.resolve();
   private seq = 0;
@@ -389,10 +431,15 @@ export class SuperAgentManager {
    * 委派指令一次可能带多个任务，调用方不该被 worktree 创建 + CLI 握手阻塞。
    *
    * 超过并发上限时请求进 FIFO 排队，槽位一空就自动开跑（「随时开启」）。
+   *
+   * `options.isolation = "repo"` 派的是**主仓工作区档**子会话：它没有
+   * worktree、没有自己的分支，直接在主仓根目录里干活（合并子会话专用 ——
+   * 合并只能在目标分支所在的工作区发生）。
    */
-  spawn(spec: SuperTaskSpec): SuperSessionUi {
+  spawn(spec: SuperTaskSpec, options?: { isolation?: "repo" }): SuperSessionUi {
     const now = Date.now();
     const id = `super-${now.toString(36)}-${(this.seq++).toString(36)}`;
+    const repoIsolation = options?.isolation === "repo";
     const session: SuperSessionUi = {
       id,
       title: spec.title,
@@ -400,7 +447,9 @@ export class SuperAgentManager {
       status: "preparing",
       queued: true,
       attempts: 1,
-      isolation: { kind: "directory", path: "", note: "正在准备隔离环境" },
+      isolation: repoIsolation
+        ? { kind: "repo", path: this.deps.repoRoot }
+        : { kind: "directory", path: "", note: "正在准备隔离环境" },
       // 归属主会话：归档按它分文件，恢复历史会话时按它取回。
       mainSessionId: this.deps.currentMainSessionId() ?? undefined,
       createdAt: now,
@@ -413,6 +462,60 @@ export class SuperAgentManager {
     this.emit();
     this.pump();
     return session;
+  }
+
+  /**
+   * 派一个**合并子会话**（repo 档）。
+   *
+   * 合并子会话跑在**主仓工作区**里执行 `git merge --no-ff` —— 合并只能发生
+   * 在目标分支所在的工作区，在别的 worktree 里 merge 等于白做（合并出来的
+   * 提交不会落到主仓当前分支上）。它没有自己的分支：产出就是主仓当前分支上
+   * 的那个合并提交，因此它不会进入「完成后自动合并它的分支」那条流程。
+   *
+   * 合并结束后由宿主用**只读** git 检测（`git merge-base --is-ancestor`）
+   * 判断目标分支是否真的并入了当前分支，再把结果写进**来源**子会话的
+   * integration —— 检测不出来就如实记「分支仍保留」，绝不谎报成功。
+   *
+   * 返回 null 表示现在派不了：来源子会话没有自己的分支（没有可合并的目标），
+   * 或已有一个合并子会话在跑 —— 主仓工作区没有版本隔离，同一时刻只能有一个。
+   */
+  async spawnMerge(options: {
+    /** 来源子会话（提供分支与归属；集成结果写回它）。 */
+    source: SuperSessionUi;
+    /** 合并任务书（`buildSuperMergeRequestPrompt` 的产物）。 */
+    task: string;
+    /** 看板标题（如「合并分支 iflow/super/x」）。 */
+    title: string;
+  }): Promise<SuperSessionUi | null> {
+    const branch = options.source.isolation.branch;
+    if (!branch) {
+      this.deps.log.warn("super agent: 来源子会话没有分支，无法派合并子会话");
+      return null;
+    }
+    if (this.repoMergeRunning()) {
+      this.deps.log.warn("super agent: 已有一个合并子会话在跑（主仓工作区无版本隔离），本次不派发");
+      return null;
+    }
+    const child = this.spawn(
+      { title: options.title, task: options.task },
+      { isolation: "repo" },
+    );
+    this.mergeTargets.set(child.id, {
+      sourceId: options.source.id,
+      branch,
+      title: options.source.title,
+    });
+    this.deps.log.info(`super agent: 派出合并子会话 ${child.id}（合并 ${branch}）`);
+    return child;
+  }
+
+  /** 是否已有一个合并子会话在跑（主仓工作区没有版本隔离）。 */
+  private repoMergeRunning(): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.isolation.kind !== "repo") continue;
+      if (!isTerminalSuperStatus(session.status)) return true;
+    }
+    return false;
   }
 
   /** 中断一个子会话（终止其 CLI 进程与当前轮次）。 */
@@ -434,6 +537,9 @@ export class SuperAgentManager {
       }
     }
     await this.disposeClient(id);
+    // 排队中就被中断的合并子会话不会走到 prepare 的收尾（它根本没启动）——
+    // 这里补一次判定，否则来源子会话的 integration 会永远停在旧状态。
+    if (!session.cliSessionId) await this.finalizeMergeChild(id);
     this.notifyReport(id);
     return true;
   }
@@ -520,6 +626,9 @@ export class SuperAgentManager {
     this.lastText.delete(id);
     await this.disposeClient(id);
     this.forgetChild(id);
+    // 排队中就被清理的合并子会话不会走到 prepare 的收尾（它根本没启动）——
+    // 这里补一次判定，否则来源子会话的 integration 会永远停在旧状态。
+    if (!session.cliSessionId) await this.finalizeMergeChild(id);
     // 附件副本只服务这个子会话：清理时一并删掉（worktree 的保留策略不适用于它）。
     await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
     // 合并成功时 worktree 与分支已经清理过 —— 这里只删记录，别拿已经不存在的
@@ -531,6 +640,14 @@ export class SuperAgentManager {
       return { ok: true };
     }
     if (!session.isolation.path) {
+      this.removeSession(id);
+      this.transcripts.delete(id);
+      this.emit();
+      return { ok: true };
+    }
+    if (session.isolation.kind === "repo") {
+      // 主仓工作区档：path 是**主仓根**，不是隔离产物 —— 清理绝不能删它。
+      // 只移除记录（工作目录与分支都不归这个子会话管）。
       this.removeSession(id);
       this.transcripts.delete(id);
       this.emit();
@@ -559,36 +676,6 @@ export class SuperAgentManager {
   }
 
   /**
-   * 收尾一次「让智能体合并」。
-   *
-   * 合并由主会话智能体在会话里自己执行（`git merge` + 解决冲突），管理器
-   * 不再机械跑 `git merge` —— 冲突需要读懂代码，宿主只会把仓库留在冲突态。
-   * 这里只做两件事：用 `git merge-base --is-ancestor` 确认分支真的并入了当前
-   * HEAD，然后把结果补记到看板（终态粘性会丢弃状态事件，元数据补记不走
-   * 状态机）。
-   *
-   * 返回 false 表示分支还没合并（智能体没做完 / 改到了别处）——调用方据此
-   * 如实提示，绝不假装成功。
-   */
-  async recordAgentMerge(id: string): Promise<boolean> {
-    const session = this.get(id);
-    const branch = session?.isolation.branch;
-    if (!session || !branch) return false;
-    if (!(await isBranchMerged({ repoRoot: this.deps.repoRoot, branch }))) return false;
-    const target = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
-    this.recordIntegration(id, {
-      mode: this.deps.integrationMode(),
-      state: "merged",
-      detail: `智能体已合入 ${target}`,
-      at: Date.now(),
-    });
-    // 分支确实并入了 HEAD，worktree 与分支可以清掉；此时子会话进程早已结束，
-    // 不存在 Windows 目录占用问题。
-    await this.releaseMergedIsolation(id);
-    return true;
-  }
-
-  /**
    * 面板关闭 / 内核重启时终止全部子进程。
    *
    * **worktree 保留**：里面可能有用户还没合并的工作，随手删掉就是丢数据。
@@ -607,7 +694,13 @@ export class SuperAgentManager {
       // worktree 保留（里面可能有未合并的工作），附件副本是纯拷贝 → 删掉。
       await rm(this.attachmentDirFor(id), { recursive: true, force: true }).catch(() => undefined);
       // 合并成功时 worktree 与分支已清理：磁盘上没有需要用户收拾的对象了。
-      if (session.isolation.path && !session.isolation.released) {
+      // 主仓工作区档的 path 是主仓根 —— 它不是待清理的隔离产物，绝不能报给
+      // 用户当「遗留的 worktree」。
+      if (
+        session.isolation.path &&
+        !session.isolation.released &&
+        session.isolation.kind !== "repo"
+      ) {
         kept.push({ id, path: session.isolation.path, branch: session.isolation.branch });
       }
     }
@@ -689,6 +782,10 @@ export class SuperAgentManager {
       // 重试复用上次的目录：worktree 里可能有中断前没提交的改动。
       isolation = reused;
       this.deps.log.info(`super agent: ${id} 重试复用工作目录 ${reused.path}`);
+    } else if (session.isolation.kind === "repo") {
+      // 主仓工作区档：不建 worktree、不建分支 —— 子会话直接在主仓根目录里
+      // 干活。合并只能在目标分支所在的工作区发生，这一档就是为此存在的。
+      isolation = { kind: "repo", path: this.deps.repoRoot };
     } else {
       const slug = sanitizeWorktreeName(spec.title);
       const unique = `${Date.now().toString(36)}-${(this.seq++).toString(36)}`;
@@ -751,11 +848,19 @@ export class SuperAgentManager {
     const staged = await stageSuperAttachments(attachmentDir, spec.attachments ?? [], this.deps.log);
     const allowedRoots = [isolation.path];
     if (staged.copies.length > 0) allowedRoots.push(attachmentDir);
+    // CLI 侧 `isPathWithinWorkspace` 与宿主侧 `resolveAgentPath` 必须同源：
+    // 主仓工作区档要把主仓根**显式**交给 CLI（--include-directories），否则
+    // 合并子会话读不到主仓文件（读不到冲突文件就无从解决冲突）。
+    const includeDirectories =
+      isolation.kind === "repo"
+        ? [...allowedRoots]
+        : allowedRoots.filter((root) => path.resolve(root) !== path.resolve(isolation.path));
 
     try {
       const client = await this.deps.createClient({
         cwd: isolation.path,
         allowedRoots,
+        includeDirectories,
         label: id,
         callbacks: this.callbacksFor(id),
       });
@@ -819,6 +924,8 @@ export class SuperAgentManager {
         // 子会话不一定会自己提交（系统提示禁止未经用户明示的 commit），而
         // 自动集成只认提交：正常完成时由宿主在它自己的 worktree 内补一次提交。
         // 失败 / 中断刻意不提交 —— 重试要能直达未完成的现场。
+        // 主仓工作区档（合并子会话）在这里什么都不做：它的产出是合并提交，
+        // 绝不能对主仓跑 `git add -A`（那会把用户未提交的其它改动卷进去）。
         const commit = await this.commitChildWork(id, isolation);
         if (commit.error) {
           this.recordIntegration(id, {
@@ -867,8 +974,72 @@ export class SuperAgentManager {
       if (this.sessions.get(id)?.integration?.state === "merged") {
         await this.releaseMergedIsolation(id);
       }
+      // 合并子会话收尾：用只读 git 检测目标分支是否真的并入了当前分支，
+      // 再把结果写回来源子会话的 integration（失败/中断同样要如实记）。
+      await this.finalizeMergeChild(id);
       this.pump();
     }
+  }
+
+  /**
+   * 合并子会话的收尾判定。
+   *
+   * **只信 git，不信子会话的自述**：子会话可能只做了一半、或者把改动合到了
+   * 其它地方。用只读的 `git merge-base --is-ancestor` 判断目标分支是不是真
+   * 的并进了当前 HEAD，检测不出来就如实记「分支仍保留」，绝不谎报成功。
+   *
+   * 结果写回**来源**子会话的 integration（看板上「改动去向」看的是它）。
+   */
+  private async finalizeMergeChild(id: string): Promise<void> {
+    const target = this.mergeTargets.get(id);
+    if (!target) return;
+    this.mergeTargets.delete(id);
+    const child = this.sessions.get(id);
+    const merged = await isBranchMerged({
+      repoRoot: this.deps.repoRoot,
+      branch: target.branch,
+    });
+    const targetBranch = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
+    if (merged) {
+      this.recordIntegration(target.sourceId, {
+        mode: this.deps.integrationMode(),
+        state: "merged",
+        detail: `合并子会话已把 ${target.branch} 合入 ${targetBranch}`,
+        at: Date.now(),
+      });
+      // 分支确实并入 HEAD：来源子会话的 worktree 与分支可以清掉。
+      await this.releaseMergedIsolation(target.sourceId);
+      this.deps.onMergeResult?.({
+        sourceId: target.sourceId,
+        title: target.title,
+        branch: target.branch,
+        merged: true,
+        failed: false,
+        detail: `已合入 ${targetBranch}`,
+      });
+      return;
+    }
+    const failed = child?.status === "failed" || child?.status === "cancelled";
+    const detail = failed
+      ? `合并子会话${child?.status === "cancelled" ? "被中断" : "失败"}，${target.branch} 仍保留${
+          child?.error ? `：${child.error}` : ""
+        }`
+      : `合并子会话没有把 ${target.branch} 合入当前分支，${target.branch} 仍保留`;
+    this.recordIntegration(target.sourceId, {
+      mode: this.deps.integrationMode(),
+      state: failed ? "failed" : "skipped",
+      needsAction: true,
+      detail,
+      at: Date.now(),
+    });
+    this.deps.onMergeResult?.({
+      sourceId: target.sourceId,
+      title: target.title,
+      branch: target.branch,
+      merged: false,
+      failed,
+      detail,
+    });
   }
 
   private callbacksFor(id: string): AcpClientCallbacks {
@@ -1181,6 +1352,10 @@ export class SuperAgentManager {
   /**
    * 正常结束后把子会话的未提交改动固化成一次提交（只发生在它自己的
    * worktree，主工作区完全不受影响）。失败时把错误交回调用方如实上报。
+   *
+   * **主仓工作区档绝不代提交**：那里的 `git add -A` 会把用户尚未提交的其它
+   * 改动一起卷进合并提交 —— 那等于替用户改了他的工作区。合并子会话的产出
+   * 是合并提交本身，不需要也不允许宿主再补一刀。
    */
   private async commitChildWork(
     id: string,
@@ -1664,10 +1839,18 @@ function describeAttachmentFailures(attachments?: StagedSuperAttachments): strin
   );
 }
 
-/** 工作目录段落：worktree 与目录隔离的边界说明。 */
+/** 工作目录段落：worktree、目录隔离与主仓工作区三档的边界说明。 */
 function describeIsolation(isolation: SuperSessionUi["isolation"]): string {
   const lines = [`Working directory: ${isolation.path}`];
-  if (isolation.branch) {
+  if (isolation.kind === "repo") {
+    // 主仓工作区档：这是唯一一档允许在主仓里动 git 的隔离方式，边界必须
+    // 写死 —— 尤其是「不许 git add -A / commit -a / stash」：那会把用户
+    // 尚未提交的其它改动卷进合并提交。
+    lines.push(
+      "This working directory is the MAIN repository workspace: no version isolation, no branch of your own. The task brief explicitly authorizes integration (merging) here, so you may read the repository files and run `git merge --no-ff <branch>` plus conflict resolution.",
+      "Hard boundaries for this workspace: never push, rebase, delete or switch branches; never modify files unrelated to the merge; never run `git add -A`, `git commit -a`, `git stash` or any other command that would stage or discard the user's uncommitted changes; never touch anything outside this working directory.",
+    );
+  } else if (isolation.branch) {
     lines.push(
       `All of your changes belong on branch ${isolation.branch}. Stay on that branch and touch nothing outside the working directory.`,
     );
@@ -1694,8 +1877,18 @@ function describeRetry(retry: SuperRetryContext): string {
   return "\n" + lines.join("\n");
 }
 
-/** 提交契约段落：worktree 内要求自己提交；目录隔离则明确不要碰 git。 */
+/** 提交契约段落：worktree 内要求自己提交；目录隔离明确不要碰 git；
+ * 主仓工作区档则明确「合并提交就是交付物，不许自己提交」。 */
 function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
+  if (isolation.kind === "repo") {
+    return (
+      "\n" +
+      [
+        "Submitting your work:",
+        "- The merge commit is the deliverable — do not create commits of your own. Never run `git add -A`, `git commit -a`, `git stash` or `git checkout --`: they would sweep the user's uncommitted changes into the merge commit or throw them away.",
+      ].join("\n")
+    );
+  }
   if (isolation.branch) {
     return (
       "\n" +

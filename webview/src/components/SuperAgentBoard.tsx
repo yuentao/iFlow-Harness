@@ -25,6 +25,7 @@ import {
   sumSuperUsage,
   summarizeSuperSessions,
   superIntegrationLabel,
+  superIsolationLabel,
 } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { t } from "../i18n";
@@ -573,6 +574,12 @@ function SuperSessionRow({
                 {t("仅目录隔离")}
               </Chip>
             )}
+            {/* A merge child runs in the MAIN workspace: no worktree, no
+                branch of its own — say so instead of showing a branch that
+                does not exist. */}
+            {session.isolation.kind === "repo" && (
+              <Chip tone="info">{superIsolationLabel(session.isolation)}</Chip>
+            )}
           </div>
 
           {session.integration && (
@@ -654,7 +661,7 @@ function SuperSessionRow({
                     ? t("该子会话没有可合并的分支")
                     : isActive(session)
                       ? t("子会话还没结束，完成后再让智能体合并")
-                      : t("让智能体把该子会话的分支合并到当前分支（冲突由它自行解决）")
+                      : t("派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）")
               }
               onClick={onMerge}
             >

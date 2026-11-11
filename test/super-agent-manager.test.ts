@@ -53,7 +53,11 @@ type Plan =
   | "hang-text"
   | "throw"
   | "throw-object"
-  | "usage";
+  | "usage"
+  /** 合并子会话：按任务书里的分支在主仓工作区执行 `git merge --no-ff`。 */
+  | "merge"
+  /** 合并子会话：什么都不做（用来验证宿主不谎报成功）。 */
+  | "merge-noop";
 
 /** A stand-in for AcpClient — the manager only uses a small surface. */
 class FakeClient {
@@ -65,6 +69,8 @@ class FakeClient {
   disposed = false;
   cwd = "";
   allowedRoots: string[] = [];
+  /** 传给 CLI 的 `--include-directories`（工作目录之外的额外可读写根）。 */
+  includeDirectories: string[] = [];
   /** Resolver for the "commit-a-gated" plan: the test opens the gate explicitly. */
   releasePrompt: (() => void) | null = null;
   private settle: ((value: { stopReason: string }) => void) | null = null;
@@ -129,6 +135,17 @@ class FakeClient {
       git(this.cwd, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child work");
       return { stopReason: "end_turn" };
     }
+    if (this.plan === "merge" || this.plan === "merge-noop") {
+      // A merge child runs in the MAIN workspace (its cwd is the repo root)
+      // and does what its task brief says: `git merge --no-ff <branch>`.
+      const brief = request.prompt.map((p) => (p.type === "text" ? p.text : "")).join("\n");
+      const match = /git merge --no-ff ([^\s`]+)/.exec(brief);
+      const branch = match?.[1];
+      if (this.plan === "merge" && branch) {
+        git(this.cwd, "merge", "--no-ff", "--no-edit", branch);
+      }
+      return { stopReason: "end_turn" };
+    }
     if (this.plan === "commit-a" || this.plan === "commit-a-gated") {
       // The child touches a file the user may also have edited locally —
       // this is the overlap case the integration step must defer on.
@@ -176,6 +193,15 @@ interface Harness {
   transcripts: { sessionId: string; from: number; blocks: Block[] }[];
   /** 「请智能体合并」的回调（自动集成没能把改动带回主分支时触发）。 */
   needMerges: { session: SuperSessionUi; reason: string }[];
+  /** 合并子会话跑完后的检测结果（宿主据此 toast）。 */
+  mergeResults: {
+    sourceId: string;
+    title: string;
+    branch: string;
+    merged: boolean;
+    failed: boolean;
+    detail: string;
+  }[];
 }
 
 function makeManager(
@@ -191,6 +217,7 @@ function makeManager(
   const reports: { session: SuperSessionUi; report: SuperReport }[] = [];
   const transcripts: { sessionId: string; from: number; blocks: Block[] }[] = [];
   const needMerges: { session: SuperSessionUi; reason: string }[] = [];
+  const mergeResults: Harness["mergeResults"] = [];
   const manager = new SuperAgentManager({
     repoRoot,
     createClient: async (params) => {
@@ -198,6 +225,7 @@ function makeManager(
       const client = new FakeClient(params.callbacks, planForClient);
       client.cwd = params.cwd;
       client.allowedRoots = params.allowedRoots;
+      client.includeDirectories = params.includeDirectories;
       clients.push(client);
       return client as unknown as AcpClient;
     },
@@ -211,6 +239,9 @@ function makeManager(
     onNeedAgentMerge: (session, reason) => {
       needMerges.push({ session, reason });
     },
+    onMergeResult: (info) => {
+      mergeResults.push(info);
+    },
     onTranscript: (sessionId, from, blocks) => {
       transcripts.push({ sessionId, from, blocks });
     },
@@ -221,7 +252,7 @@ function makeManager(
     maxConcurrentSessions: () => maxConcurrent,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
-  return { manager, clients, sessions, reports, transcripts, needMerges };
+  return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults };
 }
 
 /**
@@ -682,10 +713,11 @@ describe("super agent · 自动集成", () => {
     expect(existsSync(path.join(repo, "child.txt"))).toBe(true);
   }, 30000);
 
-  it("worktree 里还有未提交改动时保留目录与分支（绝不丢数据）", async () => {
+  it("合并子会话合入后，worktree 里还有未提交改动时保留目录与分支（绝不丢数据）", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo, "commit", "manual");
-    const session = harness.manager.spawn({ title: "改登录", task: "干活" });
+    // 第一个子会话在 worktree 里提交；第二个是合并子会话（主仓工作区档）。
+    const harness = makeManager(repo, ["commit", "merge"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
     // 宿主在终态之后还会检查 worktree 并可能代提交（`git add -A`）。ready 上报
     // 发生在那之后，是这条尾巴结束的确定信号 —— 否则我们写的文件会被顺带提交。
@@ -695,11 +727,18 @@ describe("super agent · 自动集成", () => {
     const branch = harness.sessions[0]!.isolation.branch!;
     // 子会话结束后又留下一份未提交内容（重试现场 / 用户手动改过）。
     writeFileSync(path.join(worktree, "leftover.txt"), "keep me\n", "utf8");
-    // 模拟主会话智能体把分支真的并进当前分支，再走收尾。
-    git(repo, "merge", "--no-ff", "--no-edit", branch);
 
-    expect(await harness.manager.recordAgentMerge(session.id)).toBe(true);
+    // 派一个合并子会话：它在主仓工作区里把分支真的合进来。
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.mergeResults.length > 0);
+
     // 合并已确认，但目录不干净 → 不删、不标 released、分支保留。
+    expect(harness.mergeResults[0]?.merged).toBe(true);
     expect(harness.sessions[0]?.integration?.state).toBe("merged");
     expect(harness.sessions[0]?.isolation.released).toBeFalsy();
     expect(existsSync(path.join(worktree, "leftover.txt"))).toBe(true);
@@ -758,24 +797,169 @@ describe("super agent · 自动集成", () => {
     expect(harness.needMerges).toHaveLength(0);
   }, 30000);
 
-  it("智能体合并后的收尾：分支真的并入 HEAD 才补记，未并入如实返回 false", async () => {
+  it("合并子会话的结果由只读 git 检测写入 integration：没并入就如实说仍保留", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo, "commit", "manual");
-    const session = harness.manager.spawn({ title: "改登录", task: "干活" });
+    // 合并子会话什么都不做（只汇报自己干了活）—— 宿主不能信它的自述。
+    const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
     const branch = harness.sessions[0]!.isolation.branch!;
 
-    // 智能体还没动手：管理器不能替它合并，也不能谎报成功。
-    expect(await harness.manager.recordAgentMerge(session.id)).toBe(false);
-    expect(harness.sessions[0]?.integration).toBeUndefined();
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.mergeResults.length > 0);
 
-    // 模拟主会话智能体在会话里执行的合并。
-    git(repo, "merge", "--no-ff", "--no-edit", branch);
-    expect(await harness.manager.recordAgentMerge(session.id)).toBe(true);
+    // 分支没并入 → 如实记「仍保留」，绝不谎报成功。
+    expect(harness.mergeResults[0]?.merged).toBe(false);
+    expect(harness.mergeResults[0]?.branch).toBe(branch);
+    const integration = harness.sessions[0]?.integration;
+    expect(integration?.state).not.toBe("merged");
+    expect(integration?.needsAction).toBe(true);
+    expect(integration?.detail).toContain(branch);
+    // 改动没回到主工作区。
+    expect(existsSync(path.join(repo, "child.txt"))).toBe(false);
+  }, 30000);
+
+  it("合并子会话真的合入后：integration 记为已合并，改动回到主工作区", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["commit", "merge"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.mergeResults.length > 0);
+
+    expect(harness.mergeResults[0]?.merged).toBe(true);
     const integration = harness.sessions[0]?.integration;
     expect(integration?.state).toBe("merged");
-    expect(integration?.detail).toContain("智能体");
+    expect(integration?.detail).toContain(branch);
+    expect(integration?.needsAction).toBeFalsy();
+    // 子会话的改动真的回到了主工作区。
     expect(existsSync(path.join(repo, "child.txt"))).toBe(true);
+    // 合并子会话自己没有分支：它不进入「自动合并它的分支」那条流程。
+    const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
+    expect(mergeSession?.isolation.kind).toBe("repo");
+    expect(mergeSession?.isolation.branch).toBeUndefined();
+    expect(mergeSession?.integration).toBeUndefined();
+  }, 30000);
+});
+
+describe("super agent · 合并子会话（主仓工作区档）", () => {
+  it("合并子会话跑在主仓工作区：cwd / allowedRoots / includeDirectories 都是主仓根", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.clients.length === 2);
+
+    const client = harness.clients[1]!;
+    // 工作目录就是主仓根（合并只能在目标分支所在的工作区发生）。
+    expect(client.cwd).toBe(repo);
+    expect(client.allowedRoots).toEqual([repo]);
+    // CLI 侧 isPathWithinWorkspace 与宿主 resolveAgentPath 同源：主仓根必须
+    // 显式交给 CLI，否则它读不到主仓文件。
+    expect(client.includeDirectories).toEqual([repo]);
+
+    // 隔离档位是 repo：没有自己的分支，也没有 worktree。
+    const mergeSession = harness.sessions.find((s) => s.id === merge!.id);
+    expect(mergeSession?.isolation.kind).toBe("repo");
+    expect(mergeSession?.isolation.path).toBe(repo);
+    expect(mergeSession?.isolation.branch).toBeUndefined();
+  }, 30000);
+
+  it("清理合并子会话只移除记录，绝不删主仓工作区", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => harness.mergeResults.length > 0);
+
+    const cleaned = await harness.manager.cleanup(merge!.id);
+    expect(cleaned.ok).toBe(true);
+    // 主仓根还在，里面的一切都没被动过。
+    expect(existsSync(repo)).toBe(true);
+    expect(readFileSync(path.join(repo, "a.txt"), "utf8").replace(/\r\n/g, "\n")).toBe("one\n");
+    expect(existsSync(path.join(repo, ".git"))).toBe(true);
+    // 记录也没了。
+    expect(harness.manager.get(merge!.id)).toBeUndefined();
+  }, 30000);
+
+  it("同一时刻只能有一个合并子会话（主仓工作区没有版本隔离）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["commit", "hang", "merge-noop"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const first = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(first).not.toBeNull();
+    await until(() => harness.clients.length === 2);
+
+    // 第一个还在跑 → 第二个不派（并发合并同一个仓库会把状态搅乱）。
+    const second = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(second).toBeNull();
+
+    await harness.manager.cancel(first!.id);
+  }, 30000);
+
+  it("合并子会话的提示词写死边界：不许 git add -A / commit -a / stash", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, ["commit", "merge-noop"], "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    const branch = harness.sessions[0]!.isolation.branch!;
+
+    const merge = await harness.manager.spawnMerge({
+      source: harness.sessions[0]!,
+      task: `[合并任务]\n执行 \`git merge --no-ff ${branch}\``,
+      title: `合并分支 ${branch}`,
+    });
+    expect(merge).not.toBeNull();
+    await until(() => (harness.clients[1]?.prompts.length ?? 0) === 1);
+
+    const prompt = harness.clients[1]?.prompts[0] ?? "";
+    // 主仓工作区档：允许合并，但绝不能卷走用户未提交的其它改动。
+    expect(prompt).toContain("git merge --no-ff");
+    expect(prompt).toContain("`git add -A`");
+    expect(prompt).toContain("`git commit -a`");
+    expect(prompt).toContain("`git stash`");
+    // 也不能让子会话自己提交：合并提交就是交付物。
+    expect(prompt).not.toContain("git add -A && git commit");
+    expect(prompt).toContain("do not create commits of your own");
   }, 30000);
 });
 

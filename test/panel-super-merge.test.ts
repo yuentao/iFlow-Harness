@@ -1,11 +1,13 @@
 /**
  * 子会话合并请求（宿主侧）。
  *
- * 两条要求：
+ * 三条要求：
  *  1. 子会话完成、改动**没能自动合并**时，宿主自动发起合并请求 —— 不再把这
  *     件事留给用户点看板上的按钮；主会话正忙时排队，空闲后再发起（串行）。
- *  2. 合并请求是内部指令：提示词发给智能体，但**不在转录里显形**（没有用户
- *     气泡，也不会把会话标题改成这段提示词）。
+ *  2. 合并**不再走主会话的 prompt 通道**：宿主派一个跑在主仓工作区的合并
+ *     子会话（repo 档）去执行 `git merge --no-ff`。主会话既不跑 git，也不
+ *     收到这段提示词。
+ *  3. 排队的是「待派发的合并子会话」，不是一条待发送的提示词。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -69,6 +71,13 @@ type PromptCall = {
   resolve: (v: { stopReason: string }) => void;
 };
 
+/** 宿主派发合并子会话时交给管理器的参数。 */
+type MergeSpawn = {
+  source: SuperSessionUi;
+  task: string;
+  title: string;
+};
+
 type PanelInternals = {
   ensureClient: () => Promise<unknown>;
   promptWithRetry: (
@@ -103,20 +112,22 @@ const CHILD: SuperSessionUi = {
   reports: [],
 };
 
-describe("ChatPanel 子会话合并请求（自动触发 + 隐藏提示词）", () => {
+describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会话 prompt）", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
   let calls: PromptCall[];
+  let merges: MergeSpawn[];
 
   beforeEach(async () => {
     // sendPrompt 会等一次工作区快照（真实 git 子进程）；这里只测合并请求的
-    // 触发与隐藏，关掉 checkpoint 免得每次都拉起 git。
+    // 触发与派发，关掉 checkpoint 免得每次都拉起 git。
     setConfigOverrides({ checkpoints: false });
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-supermerge-storage-"));
     panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
     calls = [];
+    merges = [];
     p.ensureClient = async () => ({});
     p.promptWithRetry = vi.fn(
       (_c: unknown, _s: string, prompt: Array<{ type: string; text?: string }>) =>
@@ -131,7 +142,20 @@ describe("ChatPanel 子会话合并请求（自动触发 + 隐藏提示词）", 
     Object.assign(p, {
       getSuperAgent: () => ({
         get: () => CHILD,
-        recordAgentMerge: async () => true,
+        // 合并子会话由管理器派发（repo 档）；这里只记录宿主交给它的参数。
+        spawnMerge: async (request: MergeSpawn) => {
+          merges.push(request);
+          return {
+            id: "super-merge-1",
+            title: request.title,
+            task: request.task,
+            status: "preparing",
+            isolation: { kind: "repo", path: here },
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            reports: [],
+          };
+        },
       }),
     });
   });
@@ -147,46 +171,47 @@ describe("ChatPanel 子会话合并请求（自动触发 + 隐藏提示词）", 
   }
 
   /**
-   * 等到合并请求真的发出为止。夹具里的 promptWithRetry 永不 resolve（这一轮
-   * 在测试里就是「还没结束」），所以只能等「请求已发出」这个信号，不能 await
-   * 整条 drain 链。
+   * 等到合并子会话真的派出为止。合并子会话是异步的（它有自己的 CLI 进程），
+   * 所以这里等「已派发」这个信号，而不是等它跑完。
    */
-  async function waitForCalls(count: number, timeoutMs = 2000): Promise<void> {
+  async function waitForMerges(count: number, timeoutMs = 2000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (calls.length < count && Date.now() < deadline) {
+    while (merges.length < count && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 10));
     }
   }
 
-  it("自动触发合并请求：提示词发给智能体，但转录里没有用户气泡", async () => {
+  it("自动触发合并请求：派合并子会话，主会话收不到这段提示词", async () => {
     p.scheduleSuperMerge("super-1", "改动与本地未提交改动重叠");
-    await waitForCalls(1);
+    await waitForMerges(1);
 
-    expect(calls).toHaveLength(1);
-    const text = calls[0]!.prompt.map((b) => b.text ?? "").join("\n");
-    expect(text).toContain("git merge --no-ff iflow/super/a");
+    expect(merges).toHaveLength(1);
+    const request = merges[0]!;
+    // 来源就是那个没合进来的子会话。
+    expect(request.source.id).toBe("super-1");
+    // 标题点明是哪个分支。
+    expect(request.title).toBe("合并分支 iflow/super/a");
+    // 任务书就是合并任务书本身。
+    expect(request.task).toContain("git merge --no-ff iflow/super/a");
     // 自动触发：开头说的是「没能自动合并」，不是「用户在看板点击了」。
-    expect(text).toContain("没能自动合并");
-    expect(text).not.toContain("用户在看板点击了");
-    // 内部指令不在转录里显形（没有用户气泡）。
-    expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(0);
+    expect(request.task).toContain("没能自动合并");
+    expect(request.task).not.toContain("用户在看板点击了");
 
-    calls[0]!.resolve({ stopReason: "end_turn" });
-    await flush();
+    // 关键：合并不再走主会话的 prompt 通道（主会话不跑 git）。
+    expect(calls).toHaveLength(0);
+    expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(0);
   });
 
-  it("主会话正忙时排队，空闲后自动发起（不丢请求）", async () => {
+  it("主会话正忙时排队，空闲后自动派发（不丢请求）", async () => {
     p.store.replaceState({ ...p.store.getState(), status: "streaming" });
     p.scheduleSuperMerge("super-1", "改动重叠");
     await flush();
-    expect(calls).toHaveLength(0);
+    expect(merges).toHaveLength(0);
 
     p.store.replaceState({ ...p.store.getState(), status: "idle" });
     void p.drainSuperMerges();
-    await waitForCalls(1);
-    expect(calls).toHaveLength(1);
-
-    calls[0]!.resolve({ stopReason: "end_turn" });
-    await flush();
+    await waitForMerges(1);
+    expect(merges).toHaveLength(1);
+    expect(merges[0]?.source.id).toBe("super-1");
   });
 });

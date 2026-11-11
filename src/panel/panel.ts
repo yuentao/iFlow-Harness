@@ -661,8 +661,8 @@ export class ChatPanel implements vscode.Disposable {
    * 待「让智能体合并」的子会话队列。
    *
    * 自动集成没能把改动带回主分支时，宿主自动把子会话排进来（不再等用户点
-   * 看板上的按钮）；主会话正忙时留在队列里，等它空闲后**串行**发起 —— 合并
-   * 必须发生在主工作区里，并发合并同一个仓库会把状态搅乱。
+   * 看板上的按钮）；主会话正忙时留在队列里，等它空闲后**串行**派发合并
+   * 子会话 —— 合并必须发生在主工作区里，并发合并同一个仓库会把状态搅乱。
    */
   private pendingSuperMerges: Array<{ id: string; reason: string }> = [];
   /** 合并队列正在跑（drain 的重入锁）。 */
@@ -6386,9 +6386,33 @@ export class ChatPanel implements vscode.Disposable {
       onTranscript: (sessionId, from, blocks) =>
         this.postToWebview({ type: "superTranscript", sessionId, from, blocks }),
       onReport: (entries) => this.queueSuperReport(entries),
-      // 自动集成没能把子会话的改动带回主分支 → 自动请主会话智能体合并，
+      // 自动集成没能把子会话的改动带回主分支 → 自动请智能体合并，
       // 不再把这件事留给用户点看板上的按钮。
       onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
+      // 合并子会话跑完：宿主用只读 git 检测的结果如实告知（成功 / 失败 /
+      // 分支仍保留），并把队列里的下一个合并请求放出去。
+      onMergeResult: (info) => {
+        if (info.merged) {
+          this.store.sendToast(
+            "info",
+            vscode.l10n.t(
+              "合并子会话已把子会话「{0}」的分支 {1} 合入当前分支",
+              info.title,
+              info.branch,
+            ),
+          );
+        } else {
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t(
+              "合并子会话没能完成合并，分支仍保留：{0}（{1}）",
+              info.branch,
+              info.detail,
+            ),
+          );
+        }
+        void this.drainSuperMerges();
+      },
       currentModel: () => this.store.getState().currentModelId,
       // 子会话归属当前主会话：归档按它分文件，恢复历史会话时按它取回。
       currentMainSessionId: () => this.currentMainSessionId(),
@@ -6421,6 +6445,7 @@ export class ChatPanel implements vscode.Disposable {
   private async createSuperClient(params: {
     cwd: string;
     allowedRoots: string[];
+    includeDirectories: string[];
     label: string;
     callbacks: AcpClientCallbacks;
   }): Promise<AcpClient> {
@@ -6429,13 +6454,12 @@ export class ChatPanel implements vscode.Disposable {
     const locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
     const node = nodePathConfigured || locatedNode || process.execPath;
     const runtime = await concealNodeExecutable(node, this.context.globalStorageUri.fsPath);
-    // The child's cwd is its worktree. The ONLY extra root is its dedicated
-    // attachment dir (staged files/images) — the main working copy must stay
-    // unreachable, and the CLI's workspace check must agree with our fs
-    // boundary, so both get the same root set.
-    const includeDirectories = params.allowedRoots.filter(
-      (root) => path.resolve(root) !== path.resolve(params.cwd),
-    );
+    // The child's cwd is its worktree (or, for a merge child, the main
+    // workspace). The extra roots come from the manager, which knows the
+    // isolation kind: worktree children get only their attachment dir, while
+    // a merge child gets the main repo root so the CLI's own workspace check
+    // and our fs boundary agree on what it may read.
+    const includeDirectories = params.includeDirectories;
     const { args } = buildAcpCommand(entry, includeDirectories);
     const systemPromptFile = await this.materializeSystemPrompt();
     const spawnEnv: NodeJS.ProcessEnv = {
@@ -6665,9 +6689,16 @@ export class ChatPanel implements vscode.Disposable {
       while (this.pendingSuperReportPrompts.length > 0) {
         if (this.disposed) return;
         if (!this.mainSessionFree()) break;
-        // A merge request is also a turn of the main session; let it go first
-        // and come back when it has settled (the heartbeat re-enters here).
-        if (this.superMergeRunning || this.pendingSuperMerges.length > 0) break;
+        // 合并子会话在**主仓工作区**里跑 git merge：主会话这时若也去改主仓
+        // 的文件，两边会互相踩（合并提交可能卷进主会话的半成品改动）。
+        // 所以有合并子会话在跑（或还有排队的合并请求）时先让合并走完。
+        if (
+          this.superMergeRunning ||
+          this.pendingSuperMerges.length > 0 ||
+          this.superMergeChildRunning()
+        ) {
+          break;
+        }
         const text = this.pendingSuperReportPrompts.shift()!;
         this.clearSuperWaitHeartbeat();
         this.log.info("super agent: delivering the settled child report as a fresh main-session turn");
@@ -6870,13 +6901,18 @@ export class ChatPanel implements vscode.Disposable {
   /**
    * The board's merge button asks the AGENT to merge.
    *
-   * The host no longer runs `git merge` itself: a conflict needs someone to
-   * read the code, and a mechanical merge would just abort and leave the user
-   * with the same problem. The request rides the MAIN session's normal prompt
-   * channel (so the agent has its full toolset in the main workspace), then
-   * the host verifies with `git merge-base --is-ancestor` that the branch
-   * actually landed and records the integration — reporting the truth either
-   * way instead of assuming success.
+   * The merge is done by a **dedicated child session that runs in the main
+   * repository workspace** (isolation kind `repo`): the host no longer runs
+   * `git merge` itself (a conflict needs someone to read the code), and the
+   * main session no longer merges either (it only delegates, plans and
+   * reports — it must not touch git).
+   *
+   * A merge child has no worktree and no branch of its own: merging has to
+   * happen in the workspace that holds the target branch, and its product IS
+   * the merge commit on the main branch. When it finishes, the host verifies
+   * with a read-only `git merge-base --is-ancestor` that the branch actually
+   * landed and records the integration — reporting the truth either way
+   * instead of assuming success.
    */
   private async requestSuperMerge(
     id: string,
@@ -6921,46 +6957,49 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     if (!state.sessionId) {
+      if (options?.auto) {
+        this.scheduleSuperMerge(id, options.reason ?? "");
+        return;
+      }
       this.store.sendToast("warning", vscode.l10n.t("会话未就绪，无法让智能体合并"));
+      return;
+    }
+    // 派一个跑在主仓工作区的合并子会话：任务书就是合并任务书本身。
+    const branch = session.isolation.branch;
+    const child = await manager.spawnMerge({
+      source: session,
+      task: buildSuperMergeRequestPrompt(session, {
+        auto: options?.auto === true,
+        reason: options?.reason,
+      }),
+      title: vscode.l10n.t("合并分支 {0}", branch),
+    });
+    if (!child) {
+      if (options?.auto) {
+        // 已有合并子会话在跑（主仓工作区没有版本隔离）：自动路径不能就此丢掉
+        // —— 重新排队，等前一个合并子会话跑完再派。
+        this.scheduleSuperMerge(id, options.reason ?? "");
+        return;
+      }
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("已有合并子会话在跑，等它结束后再合并：{0}", branch),
+      );
       return;
     }
     this.store.sendToast(
       "info",
       options?.auto
-        ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已让智能体合并", session.title)
-        : vscode.l10n.t("已让智能体合并子会话「{0}」的分支", session.title),
+        ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已派出合并子会话", session.title)
+        : vscode.l10n.t("已派出合并子会话，合并子会话「{0}」的分支", session.title),
     );
-    await this.sendPrompt(
-      buildSuperMergeRequestPrompt(session, {
-        auto: options?.auto === true,
-        reason: options?.reason,
-      }),
-      undefined,
-      undefined,
-      undefined,
-      // `hidden`: 合并请求是宿主发起的内部指令 —— 不该在转录里显形成一个
-      // 用户气泡，更不该把会话标题改成这段提示词。智能体照样收到它。
-      { delegateOnBusy: false, hidden: true },
-    );
-    if (this.disposed) return;
-    const merged = await manager.recordAgentMerge(id);
-    if (merged) {
-      this.store.sendToast(
-        "info",
-        vscode.l10n.t("智能体已把子会话「{0}」的分支合并到当前分支", session.title),
-      );
-    } else {
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t("智能体本轮没有完成合并，分支仍保留：{0}", session.isolation.branch),
-      );
-    }
   }
 
   /**
    * 排入「让智能体合并」队列并立刻尝试发起。
    *
    * 队列按子会话去重：同一个子会话只排一次（自动触发与手动点击可能撞车）。
+   * 队列里排的是**待派发的合并子会话**，不是发给主会话的提示词。
    */
   private scheduleSuperMerge(id: string, reason: string): void {
     if (!this.pendingSuperMerges.some((item) => item.id === id)) {
@@ -6970,11 +7009,14 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 串行发起待合并的子会话。
+   * 串行派发待合并的子会话。
    *
    * 合并必须发生在主工作区里，并发合并同一个仓库会把状态搅乱，所以一次只
    * 跑一个。主会话正忙 / 正在恢复历史时留在队列里，等空闲后由回合结束钩子
    * 再叫一次。
+   *
+   * 合并子会话是**异步**的（它有自己的 CLI 进程）：派出去之后本轮就结束，
+   * 下一个排队的合并等它跑完（`onMergeResult` 回调）再派。
    */
   private async drainSuperMerges(): Promise<void> {
     if (this.superMergeRunning) return;
@@ -6992,13 +7034,30 @@ export class ChatPanel implements vscode.Disposable {
         }
         // 汇报 turn 也占用主会话这同一条车道，等它结束（心跳会再叫我们）。
         if (this.superReportRunning) break;
+        // 主仓工作区没有版本隔离：同一时刻只能有一个合并子会话在跑。
+        if (this.superMergeChildRunning()) break;
         const next = this.pendingSuperMerges.shift();
         if (!next) break;
         await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
+        // 合并子会话跑完才派下一个（onMergeResult 会再叫一次 drain）。
+        break;
       }
     } finally {
       this.superMergeRunning = false;
     }
+  }
+
+  /**
+   * 是否已有一个合并子会话在跑。
+   *
+   * 合并子会话跑在**主仓工作区**里（没有版本隔离）：两个合并同时改同一个
+   * 工作区会把仓库状态搅乱，所以同一时刻只能有一个。
+   */
+  private superMergeChildRunning(): boolean {
+    return (this.store.getState().superSessions ?? []).some(
+      (session) =>
+        session.isolation.kind === "repo" && !isTerminalSuperStatus(session.status),
+    );
   }
 
   /** Text of an agent message chunk (the wire carries a single ContentBlock). */
