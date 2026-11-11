@@ -751,6 +751,25 @@ describe("prompt templates (prompts/)", () => {
     expect(brief).toContain("never claim a check passed");
   });
 
+  it("gives the main session no git exception: an unmerged branch goes to a merge child session", () => {
+    // 主会话连 git 也不跑：分支没能自动合并时，派一个合并子会话去做，
+    // 主会话只读汇报。旧提示词给主会话留了「自己 merge」这条例外。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    // 新分工：明确不跑 git + 派合并子会话。
+    expect(text).toContain("This session runs no git either");
+    expect(text).toContain("you never run git yourself");
+    expect(text).toContain("dispatch a merge child session");
+    expect(text).toContain("dispatch a merge child session to do it");
+    expect(text).toContain("means you dispatch a merge child session for it");
+    // 旧分工：「你自己合并」整句消失（用完整句子断言，不用裸 git merge 串）。
+    expect(text).not.toContain(
+      "Only when the board shows the branch was **kept** (未自动合并 / 合并冲突 / no gh CLI) do you merge it yourself: run `git merge --no-ff <branch>` in the main workspace (the branch is on the board) and resolve conflicts by reading the code.",
+    );
+    expect(text).not.toContain(
+      "a finished child with `未自动合并` needs you to merge its branch yourself (or tell the user exactly why it was left alone).",
+    );
+  });
+
   it("fills every placeholder in the assembled prompts", () => {
     const assembled = [
       buildFollowupPrompt({
