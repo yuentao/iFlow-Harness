@@ -1049,8 +1049,9 @@ const en: Record<string, string> = {
   "正在生成…": "Generating…",
   "生成失败": "Generation failed",
   // super-agent 协议块卡片（转录里取代裸 JSON 代码块）
-  "委派子会话": "Delegated child sessions",
-  "{0} 个任务": "{0} task(s)",
+  "第 {0}/{1} 个任务": "Task {0}/{1}",
+  "载荷未能完整解析，以下任务书仅供阅读，可能尚未派发":
+    "The payload could not be fully parsed; the task briefs below are for reading only and may not have been dispatched yet.",
   "子会话操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
