@@ -44,6 +44,7 @@ const baseSettings: HostSettingsUi = {
   contextWindowOverrides: [],
   costTable: [],
   thinkingModelRules: [],
+  superAgentMaxConcurrent: 5,
 };
 
 beforeEach(() => {

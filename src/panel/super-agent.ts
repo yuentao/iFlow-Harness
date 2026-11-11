@@ -53,8 +53,8 @@ import {
   applySuperEvent,
   buildSuperReportPrompt,
   canRetrySuperSession,
+  clampMaxConcurrentSuperSessions,
   isTerminalSuperStatus,
-  MAX_CONCURRENT_SUPER_SESSIONS,
   reportForSession,
   retrySuperSession,
   superIntegrationLabel,
@@ -181,6 +181,12 @@ export interface SuperAgentDeps {
   priceFor?: (modelId: string | null) => { input: number; output: number } | null;
   /** 完成后如何把分支带回主工作区（`iflow.superAgent.integration`，每次实时读）。 */
   integrationMode: () => SuperIntegrationMode;
+  /**
+   * 同时运行的子会话上限（`iflow.superAgent.maxConcurrent`，每次实时读）。
+   * 实时读而不是构造时快照：设置页改完要立刻影响下一次 pump，且调高上限后
+   * 排队中的派发不必等重启面板。
+   */
+  maxConcurrentSessions: () => number;
   log: {
     info: (msg: string) => void;
     warn: (msg: string) => void;
@@ -623,11 +629,26 @@ export class SuperAgentManager {
     return kept;
   }
 
+  /**
+   * 设置页改了并发上限后立刻重试队列。
+   *
+   * pump 平时由 spawn / settle / retry 驱动；调**高**上限时可能一个事件都没有
+   * （队列里排着队，但没人结束），不主动补一次就会一直等到下一次事件。
+   * 调低不需要额外动作 —— 已在运行的子会话按约定不受影响。
+   */
+  pumpQueue(): void {
+    if (this.disposed) return;
+    this.pump();
+  }
+
   // --- 内部 -----------------------------------------------------------------
 
   /** 队列泵：并发有空位时把排队的派发请求放出去。 */
   private pump(): void {
-    while (this.queue.length > 0 && this.activeCount() < MAX_CONCURRENT_SUPER_SESSIONS) {
+    // 每次 pump 都重新读配置并归一化：上限是用户可调的，0 / Infinity 之类的
+    // 脏值不能让池子卡死或无限放开。
+    const limit = clampMaxConcurrentSuperSessions(this.deps.maxConcurrentSessions());
+    while (this.queue.length > 0 && this.activeCount() < limit) {
       const next = this.queue.shift();
       if (!next) return;
       this.started.add(next.id);

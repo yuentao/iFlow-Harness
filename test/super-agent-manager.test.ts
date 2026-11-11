@@ -7,7 +7,7 @@ import { SuperAgentManager, buildTaskPrompt } from "../src/panel/super-agent.js"
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock, UserQuestion } from "../src/acp/protocol.js";
 import {
-  MAX_CONCURRENT_SUPER_SESSIONS,
+  DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   type SuperIntegrationMode,
   type SuperReport,
   type SuperSessionUi,
@@ -183,6 +183,8 @@ function makeManager(
   plan: Plan | Plan[] = "complete",
   mode: SuperIntegrationMode = "merge",
   mainSessionId: string | null = "main-1",
+  /** 并发上限：排队用例显式注入小值，避免依赖某个写死的常量。 */
+  maxConcurrent: number = DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
 ): Harness {
   const clients: FakeClient[] = [];
   const sessions: SuperSessionUi[] = [];
@@ -216,6 +218,7 @@ function makeManager(
     currentMainSessionId: () => mainSessionId,
     priceFor: () => ({ input: 1, output: 2 }),
     integrationMode: () => mode,
+    maxConcurrentSessions: () => maxConcurrent,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
   return { manager, clients, sessions, reports, transcripts, needMerges };
@@ -468,20 +471,21 @@ describe("super agent · 编排", () => {
 
   it("并发超出的派发进排队，槽位空出后自动开跑", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo, "hang");
+    const limit = 2;
+    const harness = makeManager(repo, "hang", "merge", "main-1", limit);
     const ids: string[] = [];
-    for (let i = 0; i < MAX_CONCURRENT_SUPER_SESSIONS + 2; i++) {
+    for (let i = 0; i < limit + 2; i++) {
       ids.push(harness.manager.spawn({ title: `任务 ${i}`, task: "干活" }).id);
     }
-    await until(() => harness.clients.length >= MAX_CONCURRENT_SUPER_SESSIONS);
+    await until(() => harness.clients.length >= limit);
     const queued = harness.sessions.filter((s) => s.queued);
     expect(queued.length).toBe(2);
-    expect(harness.clients.length).toBe(MAX_CONCURRENT_SUPER_SESSIONS);
+    expect(harness.clients.length).toBe(limit);
 
     // 腾出一个槽位 → 排队的那个自动开跑。
     await harness.manager.cancel(ids[0]!);
-    await until(() => harness.clients.length === MAX_CONCURRENT_SUPER_SESSIONS + 1);
-    expect(harness.clients.length).toBe(MAX_CONCURRENT_SUPER_SESSIONS + 1);
+    await until(() => harness.clients.length === limit + 1);
+    expect(harness.clients.length).toBe(limit + 1);
     expect(harness.sessions.filter((s) => s.queued).length).toBe(1);
   }, 30000);
 
@@ -916,12 +920,13 @@ describe("super agent · 意外中断后重试", () => {
 
   it("排队中的子会话被取消后不会再被启动", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo, "hang");
+    const limit = 2;
+    const harness = makeManager(repo, "hang", "merge", "main-1", limit);
     const ids: string[] = [];
-    for (let i = 0; i < MAX_CONCURRENT_SUPER_SESSIONS + 1; i++) {
+    for (let i = 0; i < limit + 1; i++) {
       ids.push(harness.manager.spawn({ title: `任务 ${i}`, task: "干活" }).id);
     }
-    await until(() => harness.clients.length >= MAX_CONCURRENT_SUPER_SESSIONS);
+    await until(() => harness.clients.length >= limit);
     const queued = harness.sessions.find((s) => s.queued);
     expect(queued).toBeDefined();
     await harness.manager.cancel(queued!.id);
@@ -929,7 +934,30 @@ describe("super agent · 意外中断后重试", () => {
     // 腾出槽位后，被取消的排队项不该再起一个新进程。
     await harness.manager.cancel(ids[0]!);
     await new Promise((resolve) => setTimeout(resolve, 400));
-    expect(harness.clients.length).toBe(MAX_CONCURRENT_SUPER_SESSIONS);
+    expect(harness.clients.length).toBe(limit);
+  }, 30000);
+
+  it("上限 1 时第二个派发排队，第一个完成后才启动", async () => {
+    const repo = makeRepo();
+    // 第一个在 prompt 里挂住（releasePrompt 控制），否则它会瞬间完成，
+    // 「第二个还在排队」的断言就会和完成事件赛跑。
+    const harness = makeManager(repo, ["commit-a-gated", "complete"], "manual", "main-1", 1);
+    const first = harness.manager.spawn({ title: "任务 1", task: "干活" });
+    const second = harness.manager.spawn({ title: "任务 2", task: "干活" });
+    // spawn 同步入队：第二个立刻处于排队态。
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(true);
+
+    // 第一个真正跑起来时，仍然只有一个进程 —— 第二个不能被提前启动。
+    await until(() => Boolean(harness.clients[0]?.releasePrompt));
+    expect(harness.sessions.find((s) => s.id === first.id)?.queued).toBe(false);
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(true);
+    expect(harness.clients.length).toBe(1);
+
+    // 放行第一个 → 它完成腾出槽位，第二个才起跑。
+    harness.clients[0]!.releasePrompt!();
+    await until(() => harness.clients.length === 2);
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(false);
+    await until(() => harness.sessions.find((s) => s.id === second.id)?.status === "completed");
   }, 30000);
 });
 

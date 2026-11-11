@@ -562,6 +562,18 @@ function ChatSection() {
           onChange={(autoTitle) => update({ autoTitle })}
         />
       </SettingsGroup>
+      <SettingsGroup title={t("子会话")}>
+        <NumberRow
+          label={t("并发上限")}
+          description={t("同时运行的子会话数量上限。")}
+          detail={t("默认 5，范围 1–20。超出的派发会排队，等有空位再启动；调低后已在运行的子会话不受影响。")}
+          value={settings.superAgentMaxConcurrent}
+          min={1}
+          max={20}
+          unit={t("个")}
+          onCommit={(superAgentMaxConcurrent) => update({ superAgentMaxConcurrent })}
+        />
+      </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("可能产生额外的模型调用")}>
         <div>
           <ToggleRow

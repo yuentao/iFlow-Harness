@@ -105,6 +105,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   contextWindowOverrides: [],
   costTable: [],
   thinkingModelRules: [],
+  superAgentMaxConcurrent: 5,
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------

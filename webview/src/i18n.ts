@@ -776,6 +776,11 @@ const en: Record<string, string> = {
   "会话": "Session",
   "会话首轮完成后自动生成简短标题。": "Generate a short title after a session's first turn.",
   "每会话一次，会产生一次轻量模型调用。": "Once per session; one lightweight model call.",
+  "并发上限": "Concurrency limit",
+  "同时运行的子会话数量上限。": "Maximum number of child sessions running at the same time.",
+  "默认 5，范围 1–20。超出的派发会排队，等有空位再启动；调低后已在运行的子会话不受影响。":
+    "Defaults to 5, adjustable from 1 to 20. Extra dispatches queue and start as slots free up; lowering the limit does not interrupt sessions already running.",
+  "个": "sessions",
   "回复完成后推测下一步操作，显示在输入框上方。":
     "Predict likely next actions after a reply and show them above the composer.",
   "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。":

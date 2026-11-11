@@ -39,6 +39,7 @@ const hostSettings = vi.hoisted(() => ({
   contextWindowOverrides: [],
   costTable: [],
   thinkingModelRules: [],
+  superAgentMaxConcurrent: 5,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,

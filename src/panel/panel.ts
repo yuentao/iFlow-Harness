@@ -74,11 +74,12 @@ import { SuperAgentManager } from "./super-agent.js";
 import {
   buildSuperDigest,
   buildSuperMergeRequestPrompt,
+  clampMaxConcurrentSuperSessions,
+  DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   extractSuperActions,
   extractSuperDirectives,
   fromPersistedSuperSession,
   isTerminalSuperStatus,
-  MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   SuperReportBuffer,
@@ -1860,7 +1861,14 @@ export class ChatPanel implements vscode.Disposable {
         if (Array.isArray(msg.thinkingModelRules)) {
           writes.push(["thinkingModelRules", sanitizeThinkingRules(msg.thinkingModelRules)]);
         }
+        // 子会话并发上限：先归一化再落盘，面板不该把 0 / 越界值写进 settings.json。
+        if (msg.superAgentMaxConcurrent !== undefined && Number.isFinite(msg.superAgentMaxConcurrent)) {
+          writes.push(["superAgent.maxConcurrent", clampMaxConcurrentSuperSessions(msg.superAgentMaxConcurrent)]);
+        }
         for (const [key, value] of writes) await this.writeUserSetting(key, value);
+        // 调高上限后排队的子会话立刻有机会起跑；调低不影响已在运行的会话，
+        // 但 pump 本身是幂等且只按新上限放行，所以两种情况都能直接调。
+        if (msg.superAgentMaxConcurrent !== undefined) this.superAgent?.pumpQueue();
         // Turning suggestions off must also retract the chips already on screen.
         if (msg.nextStepSuggestions === false) this.store.suggestNextSteps([]);
         // The theme message carries the aurora opacity; repaint immediately
@@ -2128,6 +2136,10 @@ export class ChatPanel implements vscode.Disposable {
       contextWindowOverrides: stringList("contextWindowOverrides"),
       costTable: stringList("costTable"),
       thinkingModelRules: sanitizeThinkingRules(config.get<unknown>("thinkingModelRules", [])),
+      // 子会话并发上限：手改 settings.json 可能留下 0 / Infinity，归一化后再给 UI。
+      superAgentMaxConcurrent: clampMaxConcurrentSuperSessions(
+        config.get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+      ),
     });
   }
 
@@ -6385,6 +6397,13 @@ export class ChatPanel implements vscode.Disposable {
           .get<string>("superAgent.integration");
         return mode === "pr" || mode === "manual" ? mode : "merge";
       },
+      // 同样实时读：pump 每次都取当前值，设置页改完不需要重启面板。
+      maxConcurrentSessions: () =>
+        clampMaxConcurrentSuperSessions(
+          vscode.workspace
+            .getConfiguration("iflow")
+            .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+        ),
       log: this.log,
     });
     return this.superAgent;
@@ -6485,9 +6504,15 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("子会话委派指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
+    // 提示里报实际生效的上限（设置页可调），而不是写死的常量。
+    const concurrency = clampMaxConcurrentSuperSessions(
+      vscode.workspace
+        .getConfiguration("iflow")
+        .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+    );
     this.store.sendToast(
       "info",
-      vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, MAX_CONCURRENT_SUPER_SESSIONS),
+      vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, concurrency),
     );
   }
 

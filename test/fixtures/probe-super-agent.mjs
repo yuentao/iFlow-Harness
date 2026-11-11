@@ -219,6 +219,8 @@ async function main() {
     },
     currentModel: () => profile.modelName,
     integrationMode: () => "merge",
+    // 探针固定用默认并发上限；真实面板读 iflow.superAgent.maxConcurrent。
+    maxConcurrentSessions: () => 5,
     log: {
       info: (m) => console.log("[mgr]", m),
       warn: (m) => console.warn("[mgr]", m),
