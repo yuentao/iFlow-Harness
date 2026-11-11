@@ -1244,6 +1244,16 @@ export interface SuperReportEntry {
 export class SuperReportBuffer {
   private readonly pending = new Map<string, SuperReportEntry>();
 
+  /**
+   * 还没被取走的汇报条数。
+   *
+   * 非 0 = 「还有汇报欠着主会话」：要么还有子会话没进终态（批次不能取走），
+   * 要么批次已备好但还没投进主会话。宿主用它决定面板要不要呈现忙碌态。
+   */
+  get size(): number {
+    return this.pending.size;
+  }
+
   add(entries: readonly SuperReportEntry[]): void {
     for (const entry of entries) this.pending.set(entry.session.id, entry);
   }

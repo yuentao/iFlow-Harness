@@ -35,7 +35,7 @@ import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } 
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
 
-function statusChip(status: AgentStatus, compressing = false, plan = false) {
+function statusChip(status: AgentStatus, compressing = false, plan = false, superWaiting = false) {
   switch (status) {
     case "connecting":
       return (
@@ -47,8 +47,16 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
     // the agent state, and a permanent "ready" pill with an infinite ping was
     // pure decoration stealing attention from the transcript. Busy/error states
     // still announce themselves.
+    // 唯一例外：宿主正在等子会话汇报（superWaiting）。主会话此刻没有自己的
+    // 回合，但流程没断 —— 显示「无状态」会让人以为卡住了，还会顺手点顶栏的
+    // 「新会话」，把排队里的汇报落到已被替换的会话上。
     case "idle":
-      return null;
+      return superWaiting ? (
+        <Chip tone="primary">
+          <Loader2 className="size-2.5 animate-spin" />{" "}
+          <span className="@max-[320px]:hidden">{t("生成中")}</span>
+        </Chip>
+      ) : null;
     case "streaming":
       return (
         <Chip tone="primary">
@@ -231,6 +239,10 @@ export function App() {
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
   const compressing = useChat((s) => s.state?.compressing ?? false);
+  // 宿主正在等子会话汇报：顶栏显示忙碌 chip，并禁用「新会话」（等待期新建
+  // 会话会让排队里的汇报落到已被替换的会话上）。它是 orthogonal 于 status 的
+  // 标记，所以等待期用户仍然可以发消息、由主会话响应。
+  const superWaiting = useChat((s) => s.state?.superWaiting ?? false);
   const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
@@ -499,13 +511,16 @@ export function App() {
         return;
       }
       if (e.key.toLowerCase() === "n") {
+        // 等待子会话汇报期间不能新建会话（与顶栏「新会话」按钮同一语义）：
+        // 排队里的汇报会落到已被替换的会话上。
+        if (superWaiting) return;
         e.preventDefault();
         send({ type: "newSession" });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send]);
+  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode
@@ -841,7 +856,7 @@ export function App() {
               <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
             </Chip>
           ) : (
-            statusChip(status ?? "connecting", compressing, isPlanMode(modes))
+            statusChip(status ?? "connecting", compressing, isPlanMode(modes), superWaiting)
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <IconButton
@@ -856,7 +871,12 @@ export function App() {
             <IconButton
               icon={<Plus className={ICON_TOOLBAR} />}
               label={t("新会话")}
-              disabled={locked}
+              // IconButton 的默认 title 就是 label —— 只有等待期才覆盖它，
+              // 说明为什么不能新建会话（title={undefined} 会把默认 tooltip 抹掉）。
+              {...(superWaiting
+                ? { title: t("子会话还在运行并等待汇报，暂时不能新建会话") }
+                : {})}
+              disabled={locked || superWaiting}
               onClick={() => send({ type: "newSession" })}
             />
             {/* Settings hub: profiles & credentials, MCP servers, approval

@@ -19,6 +19,7 @@ import {
   applySessionUpdate,
   attachSynthesizedDiff,
   beginCompressTurn,
+  beginHiddenTurn,
   beginUserPrompt,
   clearPendingQuestions,
   closeOpenSubAgents,
@@ -262,6 +263,19 @@ export class SessionStore {
    */
   setSuperSessions(sessions: SessionState["superSessions"]): void {
     this.state.superSessions = sessions;
+    this.flush();
+  }
+
+  /**
+   * Super Agent — 宿主是否正在等子会话的结果（等待汇报期间）。
+   *
+   * 这是**正交**的忙碌标记：它不改 `status`，所以等待期用户仍能发消息并由
+   * 主会话响应；面板只用它渲染顶栏忙碌 chip 与禁用「新会话」。
+   * 幂等：同值不推 —— 心跳每 1.5s 调一次，不能每次都刷快照。
+   */
+  setSuperWaiting(waiting: boolean): void {
+    if ((this.state.superWaiting ?? false) === waiting) return;
+    this.state.superWaiting = waiting;
     this.flush();
   }
 
@@ -525,6 +539,18 @@ export class SessionStore {
    * `promptCompleted` like any other turn). */
   endCompressTurn(): void {
     endCompressTurn(this.state);
+    this.flush();
+  }
+
+  /**
+   * 开启一个**不落用户气泡**的宿主驱动回合（Super Agent 的子会话汇报）。
+   *
+   * hidden 回合不写用户块，`beginUserPrompt` 不会把状态翻成 streaming ——
+   * 那一轮在面板上是「无状态」。这里显式翻成 streaming：顶栏按「正在生成」
+   * 渲染，顶栏「新会话」禁用。回合结束仍由 `promptCompleted` 收尾。
+   */
+  beginHiddenTurn(): void {
+    beginHiddenTurn(this.state);
     this.flush();
   }
 
