@@ -229,8 +229,10 @@ export function SuperAgentBoard() {
     // transcript scroll). Deliberately NOT acrylic and NOT shadow-float: this
     // is a toolbar over the transcript, not a content card — a raised surface
     // here competed with the message/tool cards underneath. ConfirmDialog
-    // portals to body, so it escapes this shelf.
-    <div className="stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 bg-canvas/95">
+    // portals to body, so it escapes this shelf. The surface must stay OPAQUE
+    // (`bg-card`, never a translucent tint): the bar floats over the scrolling
+    // transcript, so any alpha ghosts the message text through it.
+    <div className="stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 bg-card">
       {/* Header row: the board's collapsed form is a single line so it never
           steals space from the transcript. Counts are icon + number chips
           (the wording lives in the tooltip) — the old "{n} 个进行中" text chips
@@ -248,7 +250,7 @@ export function SuperAgentBoard() {
         >
           {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
           <span className="shrink-0">{t("子会话")}</span>
-          <span className="rounded-full bg-canvas px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
+          <span className="rounded-full bg-surface px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
             {list.length}
           </span>
         </button>
