@@ -765,10 +765,13 @@ export function extractSuperDirectives(
     const resumeScannedTo = resume && open && open.lineStart === resume.lineStart ? resume.scannedTo : 0;
     resume = undefined;
     if (!open) break;
-    const resolved = resolveDirectiveBlock(text, open, resumeScannedTo);
+    const resolved = resolveSuperDirectiveBlock(text, open, {
+      language: "super-agent",
+      scannedTo: resumeScannedTo,
+    });
     if (resolved.kind === "unclosed") {
       // 还没闭合（流式中间态）—— 停在这里，等后续 chunk 补齐。正文里的代码
-      // 围栏不会让它提前结束：收栏靠 JSON 结构定位，见 resolveDirectiveBlock。
+      // 围栏不会让它提前结束：收栏靠 JSON 结构定位，见 resolveSuperDirectiveBlock。
       end = open.lineStart;
       pendingOpen = { lineStart: open.lineStart, scannedTo: resolved.scannedTo };
       fenceUnclosed = true;
@@ -871,22 +874,72 @@ function findPayloadStart(text: string, after: number): number {
   return -1;
 }
 
+/** 是否是 JSON 里的空白。 */
+function isJsonSpace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+}
+
+/** JSON 字符串之后允许出现的结构字符。 */
+function isJsonStructuralChar(ch: string): boolean {
+  return ch === "," || ch === "}" || ch === "]" || ch === ":";
+}
+
 /**
- * 从 `{` / `[` 开始找配对的结束符（跳过字符串字面量与转义）。
- * 找不到返回 -1 —— 流式中间态的半截 JSON。
+ * 判断 `text[index]` 处的 `"` 是不是「字符串真正的收尾」。
+ *
+ * 模型写长任务书时经常在正文里放**未转义的 ASCII 引号**（实测 2026-11-12：
+ * 委派块因此既派发不了、也退化成一堵 JSON 墙）。朴素的「遇到引号就出串」会把
+ * 结构读歪；真收尾的引号后面必然跟着结构字符（`,` `}` `]` `:`）或空白后跟结构
+ * 字符 —— 合法 JSON 里字符串内部的引号必然已转义，不会满足这个条件。于是裸引号
+ * 可以被安全地留在正文里。
+ *
+ * 文本用尽时返回 false：字符串还没收尾 —— 那是流式中间态，不是「刚好写完」。
  */
-function matchJsonValue(text: string, start: number): number {
+function isJsonStringTerminator(text: string, index: number, limit: number): boolean {
+  let i = index + 1;
+  while (i < limit && isJsonSpace(text.charAt(i))) i++;
+  if (i >= limit) return false;
+  return isJsonStructuralChar(text.charAt(i));
+}
+
+/** JSON 结构扫描的状态。 */
+type JsonStructureStatus =
+  /** 括号配对、字符串闭合 → 载荷到此结束。 */
+  | "complete"
+  /** 文本用尽时字符串还开着 → 载荷可能还在写（流式中间态）。 */
+  | "unterminated"
+  /** 字符串都闭合了但括号没配平 → 载荷写坏了。 */
+  | "unbalanced"
+  /** 括号类型对不上 → 载荷写坏了。 */
+  | "mismatch"
+  /** 根本不是 JSON（散文前缀之类）。 */
+  | "notJson";
+
+interface JsonStructure {
+  status: JsonStructureStatus;
+  /** `complete` 时的结束偏移（含）。 */
+  end: number;
+}
+
+/**
+ * 扫描一个 JSON 值的结构，并区分几种「不可用」。
+ *
+ * 关键在于把「载荷还在写」和「载荷写坏了」分开 —— 前者要等下一段，后者要立刻
+ * 报非法（旧实现两者都当成「还在写」，于是坏载荷既派发不了、也不报错，转录那边
+ * 还会退化成一堵 JSON 墙）。
+ */
+function scanJsonStructure(text: string, start: number, limit: number): JsonStructure {
   const open = text.charAt(start);
-  if (open !== "{" && open !== "[") return -1;
+  if (open !== "{" && open !== "[") return { status: "notJson", end: -1 };
   const stack: string[] = [];
   let inString = false;
   let escaped = false;
-  for (let i = start; i < text.length; i++) {
+  for (let i = start; i < limit; i++) {
     const ch = text.charAt(i);
     if (inString) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
+      else if (ch === '"' && isJsonStringTerminator(text, i, limit)) inString = false;
       continue;
     }
     if (ch === '"') {
@@ -899,11 +952,20 @@ function matchJsonValue(text: string, start: number): number {
     }
     if (ch === "}" || ch === "]") {
       const expected = ch === "}" ? "{" : "[";
-      if (stack.pop() !== expected) return -1;
-      if (stack.length === 0) return i;
+      if (stack.pop() !== expected) return { status: "mismatch", end: -1 };
+      if (stack.length === 0) return { status: "complete", end: i };
     }
   }
-  return -1;
+  return { status: inString ? "unterminated" : "unbalanced", end: -1 };
+}
+
+/**
+ * 从 `{` / `[` 开始找配对的结束符（跳过字符串字面量与转义）。
+ * 找不到返回 -1 —— 流式中间态的半截 JSON。
+ */
+function matchJsonValue(text: string, start: number): number {
+  const scan = scanJsonStructure(text, start, text.length);
+  return scan.status === "complete" ? scan.end : -1;
 }
 
 /**
@@ -975,58 +1037,6 @@ const MAX_CLOSE_CANDIDATES = 8;
  * 就按损坏块处理（退回候选收口，判非法并消费），保证后续文本仍能继续扫描。
  */
 const MAX_UNCLOSED_SPAN = 512 * 1024;
-
-type BlockResolution =
-  | { kind: "closed"; body: string; closeEnd: number }
-  | { kind: "unclosed"; scannedTo: number };
-
-/**
- * 定位一个指令块的正文与收栏。
- *
- * 收栏不能取「正文里的第一行 ```」：模型常把多行任务书按原始换行铺开（而不是
- * JSON 的 `\n` 转义），任务书自己就带一段 markdown 代码围栏，那一行会提前截断
- * 载荷、JSON 必然解析失败（实测 2026-11-11：长任务书 / 内嵌围栏 → 整块判非法，
- * 委派静默不生效）。所以先跳过空白找到载荷的 `{` / `[`，用 {@link matchJsonValue}
- * 定位 JSON 的真正结束位置，再从那里往后找第一行收栏 —— 正文里的围栏落在 JSON
- * 内部，天然不会被误当收栏。
- *
- * JSON 结构不可用（散文前缀、括号本身就不配对）时退回按收栏逐个试，取第一个
- * 能解析成功的候选；都失败了就把第一个收栏的正文交给调用方报「非法块」。
- * 唯一的例外是「正文以 `{` / `[` 开头但 JSON 还没收全」：这是流式的正常中间态，
- * 直接判未闭合等下一段（见下方注释），超长损坏块才退回候选收口。
- *
- * `scannedTo` 是上一轮已经找过、确认没有收栏的位置：流式输出每来一段就重扫
- * 整段正文是平方级浪费，从断点往后找即可。
- */
-function resolveDirectiveBlock(text: string, open: FenceMatch, scannedTo: number): BlockResolution {
-  const jsonStart = skipWhitespace(text, open.bodyStart);
-  const jsonEnd = jsonStart === -1 ? -1 : matchJsonValue(text, jsonStart);
-  if (jsonEnd !== -1) {
-    const close = findFence(text, Math.max(jsonEnd, scannedTo), FENCE_CLOSE);
-    if (!close) return { kind: "unclosed", scannedTo: text.length };
-    return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
-  }
-  // 正文以 `{` / `[` 开头、但 JSON 还没收全（流式的正常中间态）：绝不能进下面的
-  // 候选收口去「试收栏」——任务书正文里的任何一行 ``` 都可能是它自己带的代码
-  // 围栏，真正的收栏只可能出现在 JSON 结束之后。把半截 JSON 当 closed 消费会推进
-  // 调用方的消费偏移，后续 chunk 补齐的载荷永远扫不回来（委派被静默吞掉，只弹
-  // 一条「载荷不是合法 JSON」）。所以直接返回 unclosed，等下一段续扫。
-  const firstChar = jsonStart === -1 ? "" : text.charAt(jsonStart);
-  if ((firstChar === "{" || firstChar === "[") && text.length - open.bodyStart <= MAX_UNCLOSED_SPAN) {
-    return { kind: "unclosed", scannedTo: text.length };
-  }
-  let searchFrom = Math.max(open.bodyStart, scannedTo);
-  let first: { body: string; closeEnd: number } | null = null;
-  for (let attempt = 0; attempt < MAX_CLOSE_CANDIDATES; attempt++) {
-    const close = findFence(text, searchFrom, FENCE_CLOSE);
-    if (!close) break;
-    const candidate = { body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
-    if (parseDirectiveBody(candidate.body).ok) return { kind: "closed", ...candidate };
-    first ??= candidate;
-    searchFrom = close.lineEnd;
-  }
-  return first ? { kind: "closed", ...first } : { kind: "unclosed", scannedTo: text.length };
-}
 
 /** 跳过空白，返回第一个非空白字符的偏移（到底返回 -1）。 */
 function skipWhitespace(text: string, from: number): number {
@@ -1211,6 +1221,403 @@ function isPlaceholderTask(text: string): boolean {
   if (!trimmed) return true;
   if (/^<[^<>]{1,60}>$/.test(trimmed)) return true;
   return trimmed === "..." || trimmed === "…" || trimmed === "TODO";
+}
+
+// ---------------------------------------------------------------------------
+// 协议块的统一解析（宿主派发与转录渲染共用同一份实现）
+// ---------------------------------------------------------------------------
+//
+// 协议块（```super-agent / ```super-agent-actions）是**同一个协议**的两个读者：
+// 宿主据此派发 / 执行，转录据此渲染成卡片。两边必须对「块在哪里结束、正文是
+// 什么」给出**同一个**答案 —— 否则会出现「宿主已经派发了，转录却把它当普通
+// 代码块」（用户看到一堵 JSON 墙，子会话其实已经在跑）或反过来。
+//
+// 判定链（两侧完全一致）：
+//  1. JSON 结构定位收栏（任务书正文里自带的 ``` 不是收栏）；
+//  2. 结构不可用时按收栏候选逐个试，取第一个正文「可用」的；
+//  3. 「可用」的判定两侧同源（tasks 用 parseDirectiveBody 的同等判定，actions
+//     用等价的动作形状校验）—— 判定不同 → 选到的收栏不同 → 边界就不同；
+//  4. 载荷确实写坏了（结构不配对 / 散文前缀）时按候选收口并判非法，**不再**
+//     无限期等下去（旧实现对 `{` 开头的坏块永远返回「未闭合」，宿主静默吞掉、
+//     转录退化成 JSON 墙）；
+//  5. 正文还在流式输出中（任务书没收尾）→ 判未闭合，等下一段。
+
+/** 协议块的语言类别：决定正文怎么校验、坏掉时怎么降级。 */
+export type SuperDirectiveLang = "tasks" | "actions" | "other";
+
+/** 围栏语言 → 语言类别。 */
+function directiveLangOf(language: string): SuperDirectiveLang {
+  if (language === "super-agent") return "tasks";
+  if (language === "super-agent-actions") return "actions";
+  return "other";
+}
+
+/** 协议块的开栏信息（宿主与渲染共用同一形状）。 */
+export interface SuperDirectiveOpen {
+  /** 开栏行的行首偏移。 */
+  lineStart: number;
+  /** 正文起始偏移（开栏行之后）。 */
+  bodyStart: number;
+}
+
+/** 协议块的边界判定结果。 */
+export type SuperDirectiveResolution =
+  | { kind: "closed"; body: string; closeEnd: number }
+  | { kind: "unclosed"; scannedTo: number };
+
+/**
+ * 正文是否「可用」（宿主与渲染必须同源判定）。
+ *
+ * tasks 用宿主 `parseDirectiveBody` 的同等判定（能拆出至少一个真任务）；
+ * actions 用等价的动作形状校验（能解析出 actions 数组）。两边判定不同 →
+ * 两边选到的收栏候选就可能不同 → 转录里会出现「宿主已派发、渲染却是原始协议块」。
+ */
+function isUsableDirectiveBody(lang: SuperDirectiveLang, body: string): boolean {
+  if (lang === "tasks") return parseDirectiveBody(body).ok;
+  if (lang === "actions") return parseActionBody(body) !== null;
+  return false;
+}
+
+/** 收栏候选（正文按候选收栏切分的结果）。 */
+interface CloseCandidate {
+  body: string;
+  closeEnd: number;
+}
+
+/**
+ * 收栏候选：正文之后最多试 {@link MAX_CLOSE_CANDIDATES} 个收栏。
+ *
+ * 从开栏往后逐个收栏切分正文 —— 任务书正文里自带的 ``` 会把正文切碎，所以
+ * 「第一个收栏」未必是块真正的结尾，用候选逐个试才能找到对的那个。
+ */
+function collectCloseCandidates(text: string, bodyStart: number): CloseCandidate[] {
+  const out: CloseCandidate[] = [];
+  let searchFrom = bodyStart;
+  for (let attempt = 0; attempt < MAX_CLOSE_CANDIDATES; attempt++) {
+    const close = findFence(text, searchFrom, FENCE_CLOSE);
+    if (!close) break;
+    out.push({ body: text.slice(bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd });
+    searchFrom = close.lineEnd;
+  }
+  return out;
+}
+
+/**
+ * 当前块正文的活动区域终点：下一个 `super-agent*` 围栏之前。
+ *
+ * 容错拆分只在这个区域里找任务书 —— 否则模型块之后的散文里出现的
+ * `"title"` / `"task"` 字样会被当成下一个任务的字段。
+ */
+function directiveRegionEnd(text: string, bodyStart: number): number {
+  const next = findSuperRenderFence(text, bodyStart);
+  return next ? next.lineStart : text.length;
+}
+
+/**
+ * 定位一个协议块的正文与收栏 —— 宿主派发与转录渲染的唯一入口。
+ *
+ * 收栏不能取「正文里的第一行 ```」：模型常把多行任务书按原始换行铺开（而不是
+ * JSON 的 `\n` 转义），任务书自己就带一段 markdown 代码围栏，那一行会提前截断
+ * 载荷、JSON 必然解析失败（实测 2026-11-11：长任务书 / 内嵌围栏 → 整块判非法，
+ * 委派静默不生效）。所以先按 JSON 结构定位载荷的真正结束位置，再从那里往后找
+ * 第一行收栏 —— 正文里的围栏落在 JSON 内部，天然不会被误当收栏。
+ *
+ * JSON 结构不可用（散文前缀、括号不配对、字符串里有裸引号把结构读歪）时退回
+ * 按收栏候选逐个试，取第一个正文「可用」的；都不可用就按「坏块」处理：取第一
+ * 个候选交给调用方报非法 —— **不再**无限期等下去（旧实现对 `{` 开头的坏块永远
+ * 返回「未闭合」，宿主那一侧静默吞掉、转录那一侧退化成 JSON 墙）。
+ *
+ * 唯一的例外是「正文还在流式输出中」（任务书的值没收尾）：那是流式的正常中间态，
+ * 判未闭合等下一段（见 `scanTaskBooks` 的 pending 判定）。
+ *
+ * `scannedTo` 是上一轮已经找过、确认没有收栏的位置：流式输出每来一段就重扫
+ * 整段正文是平方级浪费，从断点往后找即可。
+ */
+export function resolveSuperDirectiveBlock(
+  text: string,
+  open: SuperDirectiveOpen,
+  options: { language: string; scannedTo?: number },
+): SuperDirectiveResolution {
+  const lang = directiveLangOf(options.language);
+  const scannedTo = options.scannedTo ?? 0;
+  const regionEnd = directiveRegionEnd(text, open.bodyStart);
+  const jsonStart = skipWhitespace(text, open.bodyStart);
+  const structure =
+    jsonStart === -1 || jsonStart >= regionEnd
+      ? { status: "notJson" as const, end: -1 }
+      : scanJsonStructure(text, jsonStart, regionEnd);
+
+  if (structure.status === "complete") {
+    const close = findFence(text, Math.max(structure.end, scannedTo), FENCE_CLOSE);
+    if (!close) return { kind: "unclosed", scannedTo: text.length };
+    return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+  }
+
+  // 字符串还开着 = 载荷确实还在写（流式的正常中间态）。此刻任务书正文里可能已经
+  // 出现独占的 ``` 行 —— 绝不能拿它当收栏收口，否则半截 JSON 被消费掉，后续
+  // chunk 补齐的载荷永远扫不回来（宿主静默吞掉、渲染半截卡片闪烁）。
+  if (structure.status === "unterminated") {
+    // 逃生阀：字符串超长仍不闭合的不是流式中间态，是损坏块 —— 按第一个收栏
+    // 收口（沿用 MAX_UNCLOSED_SPAN 的原始语义），避免单个坏块永久停住扫描。
+    if (text.length - open.bodyStart > MAX_UNCLOSED_SPAN) {
+      const close = findFence(text, open.bodyStart, FENCE_CLOSE);
+      if (close) {
+        return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+      }
+    }
+    return { kind: "unclosed", scannedTo: text.length };
+  }
+
+  // 结构不完整但字符串都闭合了：可能刚好停在某个值之后（流式中间态），也可能
+  // 真的写坏了（少括号 / 裸引号把结构读歪）。先按收栏候选找能解析的正文 ——
+  // 能解析就说明块是完整的，直接收口。
+  const candidates = collectCloseCandidates(text, open.bodyStart);
+  for (const candidate of candidates) {
+    if (isUsableDirectiveBody(lang, candidate.body)) return { kind: "closed", ...candidate };
+  }
+
+  // 候选都不可用：用容错拆分确认载荷是否已经写完 —— 拆出完整任务书且末尾没有
+  // 没收尾字段，说明模型写完了，只是 JSON 结构坏了。此时仍要求真有一行收栏，
+  // 否则流式中途的暂时不平衡会被误判成结束。
+  if (lang === "tasks") {
+    // 只在「这个块的正文范围」里拆：第一个收栏候选之前（与交给调用方的坏块
+    // 正文同一边界），没有候选才退回到下一个 super-agent 围栏之前。
+    const salvageLimit = candidates[0] ? Math.min(candidates[0].closeEnd, regionEnd) : regionEnd;
+    const salvaged = scanTaskBooks(text, open.bodyStart, salvageLimit);
+    if (salvaged.books.length > 0 && !salvaged.pending) {
+      const close = findFence(text, Math.max(salvaged.end, scannedTo), FENCE_CLOSE);
+      if (close) {
+        return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+      }
+    }
+  }
+
+  if (candidates.length === 0) return { kind: "unclosed", scannedTo: text.length };
+  // 明确的坏块（有收栏却怎么写都解析不了）：取第一个候选收口，交给调用方报
+  // 「非法块」或降级展示，绝不无限期等下去（旧实现对 `{` 开头的坏块永远返回
+  // 「未闭合」—— 宿主静默吞掉、渲染退化成 JSON 墙）。
+  return { kind: "closed", ...candidates[0]! };
+}
+
+// ---------------------------------------------------------------------------
+// 容错拆分（畸形载荷的降级路径）
+// ---------------------------------------------------------------------------
+
+/** 容错拆出的一条任务书。 */
+interface SalvagedTaskBook {
+  title: string;
+  task: string;
+}
+
+/** 容错扫描的结果。 */
+interface TaskBookScan {
+  /** 拆出来的任务书（占位符已剔除）。 */
+  books: SalvagedTaskBook[];
+  /** 末尾还有没收尾的字段 → 载荷可能还在流式输出中。 */
+  pending: boolean;
+  /** 最后一条任务书的结束偏移（绝对偏移）。 */
+  end: number;
+}
+
+/** 协议正文里的字段（`"title"` / `"task"`）。 */
+interface DirectiveField {
+  key: "title" | "task";
+  value: string;
+  /** 字段值的结束偏移（绝对偏移）。 */
+  end: number;
+}
+
+/**
+ * 找出正文里的一个 `"title"` / `"task"` 字段（值还没读）。
+ *
+ * 只认 JSON 风格的带引号键 —— 散文里的 `title:` 不算字段（否则模型正文里的
+ * 普通文字会被当成任务书）。
+ */
+function matchDirectiveKey(
+  text: string,
+  at: number,
+  limit: number,
+): { key: "title" | "task"; valueStart: number } | null {
+  for (const key of ["title", "task"] as const) {
+    const token = `"${key}"`;
+    if (!text.startsWith(token, at)) continue;
+    let i = at + token.length;
+    while (i < limit && isJsonSpace(text.charAt(i))) i++;
+    if (text.charAt(i) !== ":") continue;
+    i++;
+    while (i < limit && isJsonSpace(text.charAt(i))) i++;
+    return { key, valueStart: i };
+  }
+  return null;
+}
+
+/**
+ * 宽容地读一个 JSON 字符串值。
+ *
+ * 与严格 JSON 的差别只有一处：引号后面必须跟着结构字符（`,` `}` `]` `:`）或文本
+ * 结束，才算这个字符串真的收尾；否则它是模型写在正文里的**裸引号**（任务书里
+ * 写 `他说："先跑测试"` 是常事），当作正文继续读。这样既能读出完整任务书，
+ * 又不会把正文里的裸引号误当成边界。
+ *
+ * 返回 `terminated: false` 表示值没收尾 —— 载荷还在流式输出中，或已经写坏了。
+ */
+function readTolerantString(
+  text: string,
+  start: number,
+  limit: number,
+): { value: string; end: number; terminated: boolean } | null {
+  if (text.charAt(start) !== '"') return null;
+  let i = start + 1;
+  let value = "";
+  while (i < limit) {
+    const ch = text.charAt(i);
+    if (ch === "\\") {
+      const next = text.charAt(i + 1);
+      if (next === "") break;
+      value += decodeJsonEscape(next);
+      i += 2;
+      continue;
+    }
+    if (ch === '"') {
+      const next = nextNonWhitespace(text, i + 1);
+      if (next === "" || next === "," || next === "}" || next === "]" || next === ":") {
+        return { value, end: i + 1, terminated: true };
+      }
+      value += ch;
+      i++;
+      continue;
+    }
+    value += ch;
+    i++;
+  }
+  return { value, end: limit, terminated: false };
+}
+
+/** JSON 转义字符 → 原字符。 */
+function decodeJsonEscape(ch: string): string {
+  switch (ch) {
+    case "n":
+      return "\n";
+    case "t":
+      return "\t";
+    case "r":
+      return "\r";
+    case "b":
+      return "\b";
+    case "f":
+      return "\f";
+    case '"':
+      return '"';
+    case "\\":
+      return "\\";
+    case "/":
+      return "/";
+    default:
+      return ch;
+  }
+}
+
+/**
+ * 把字段列表配成任务书。
+ *
+ * 配对规则（保守，绝不凭空编造内容）：
+ *  - 一条任务书 = 一个 `"task"` 的值（标题可以缺，用任务书首行兜底）；
+ *  - 标题取**最近**的、且与它之间没有别的任务书的 `"title"`：字段顺序颠倒
+ *    （`task` 在前、`title` 在后）也认；
+ *  - 正文里出现协议示例 / 占位符任务不算真任务（沿用 isPlaceholderTask）。
+ */
+function pairTaskBooks(
+  fields: DirectiveField[],
+): { books: SalvagedTaskBook[]; ends: number[] } {
+  const books: SalvagedTaskBook[] = [];
+  const ends: number[] = [];
+  const usedTitle = new Set<number>();
+  for (let f = 0; f < fields.length; f++) {
+    const field = fields[f]!;
+    if (field.key !== "task") continue;
+    const task = field.value.trim();
+    if (!task || isPlaceholderTask(task)) continue;
+    let title = "";
+    let titleIndex = -1;
+    for (let j = f - 1; j >= 0; j--) {
+      const prev = fields[j]!;
+      if (prev.key === "task") break;
+      if (prev.key === "title" && !usedTitle.has(j)) {
+        title = prev.value.trim();
+        titleIndex = j;
+        break;
+      }
+    }
+    if (!title) {
+      for (let j = f + 1; j < fields.length; j++) {
+        const next = fields[j]!;
+        if (next.key === "task") break;
+        if (next.key === "title") {
+          title = next.value.trim();
+          titleIndex = j;
+          break;
+        }
+      }
+    }
+    if (titleIndex >= 0) usedTitle.add(titleIndex);
+    const fallback = task.split("\n")[0] ?? "子会话";
+    const titleText = title && !isPlaceholderTask(title) ? title : fallback;
+    books.push({ title: normalizeSuperTitle(titleText, fallback), task });
+    ends.push(titleIndex >= 0 ? Math.max(field.end, fields[titleIndex]!.end) : field.end);
+  }
+  return { books, ends };
+}
+
+/**
+ * 在正文里容错扫描任务书。
+ *
+ * 逐个字段往前读（读完一个值就跳过它 —— 任务书正文里嵌套的协议示例因此不会被
+ * 当成新的任务），末尾若还有没收尾的字段，说明载荷可能还在流式输出中。
+ */
+function scanTaskBooks(text: string, from: number, limit: number): TaskBookScan {
+  const fields: DirectiveField[] = [];
+  let pending = false;
+  let i = from;
+  while (i < limit) {
+    const key = matchDirectiveKey(text, i, limit);
+    if (!key) {
+      i += 1;
+      continue;
+    }
+    const read = readTolerantString(text, key.valueStart, limit);
+    if (!read || !read.terminated) {
+      // 键在、值没到 → 载荷还在写（或已经写坏）。
+      pending = true;
+      break;
+    }
+    fields.push({ key: key.key, value: read.value, end: read.end });
+    i = read.end;
+  }
+  const { books, ends } = pairTaskBooks(fields);
+  const end = ends.length > 0 ? ends[ends.length - 1]! : from;
+  return { books, pending, end };
+}
+
+/**
+ * 从无法完整解析的载荷正文里容错拆出任务书。
+ *
+ * 背景（实测 2026-11-12）：模型写委派载荷时常把长任务书按原始换行铺开、在正文里
+ * 写裸引号、或者括号不配对 —— 整体 JSON 解析不了，但「哪个是标题、哪个是任务
+ * 书」其实一目了然。整块因此既派发不了、又在转录里退化成一堵 JSON 墙。
+ *
+ * 提取刻意保守：
+ *  - 只认**成对出现**的 `"title"` / `"task"` 字段（值的冒号必须在）；
+ *  - 缺 title 时用任务书首行兜底，字段顺序颠倒也认；
+ *  - 夹杂其它无关字段不影响；
+ *  - 占位符任务（模型把协议示例原样抄回来）不算；
+ *  - 绝不凭空编造内容：拆不出就返回空数组，调用方按原有的 raw 原因码降级。
+ */
+export function salvageSuperTasks(body: string): SuperDirectiveTask[] {
+  return scanTaskBooks(body, 0, body.length).books.map((book) => ({
+    title: book.title,
+    task: book.task,
+    attachments: [],
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,18 +1920,17 @@ export function extractSuperActions(text: string, fromOffset = 0): SuperActionSc
   while (cursor < text.length) {
     const open = findFence(text, cursor, ACTION_FENCE_OPEN);
     if (!open) break;
-    const close = findFence(text, open.bodyStart, FENCE_CLOSE);
-    if (!close) {
+    const resolved = resolveSuperDirectiveBlock(text, open, { language: "super-agent-actions" });
+    if (resolved.kind === "unclosed") {
       // 还没闭合（流式中间态）—— 等后续 chunk 补齐，不能提前执行半截动作。
       end = open.lineStart;
       break;
     }
-    const body = text.slice(open.bodyStart, close.lineStart).trim();
-    const parsed = parseActionBody(body);
-    if (parsed === null) invalidBlocks.push(body);
+    const parsed = parseActionBody(resolved.body);
+    if (parsed === null) invalidBlocks.push(resolved.body);
     else actions.push(...parsed);
-    cursor = close.lineEnd;
-    end = close.lineEnd;
+    cursor = resolved.closeEnd;
+    end = resolved.closeEnd;
   }
 
   return { actions: actions.slice(0, MAX_SUPER_ACTIONS), invalidBlocks, end };
@@ -1789,7 +2195,18 @@ export type SuperDirectiveRawReason =
   | "unknown_language";
 
 export type SuperDirectiveDisplay =
-  | { kind: "tasks"; tasks: SuperDirectiveTask[] }
+  | {
+      kind: "tasks";
+      tasks: SuperDirectiveTask[];
+      /**
+       * 这些任务书是从**无法完整解析**的载荷里容错拆出来的。
+       *
+       * **容错拆出 ≠ 已派发**：宿主对同一段载荷走的是严格解析（`parseDirectiveBody`），
+       * 失败即进 `invalidBlocks` 并提示用户，绝不会据此开启子会话。渲染侧拿到
+       * `salvaged: true` 时只能把它当「可读的降级预览」，不要显示成「已派发」。
+       */
+      salvaged?: boolean;
+    }
   | { kind: "actions"; actions: SuperDirectiveAction[] }
   /** 非法 JSON / 未知形状 / 未知语言：卡片只显示语言与长度，不回灌整段原文。 */
   | { kind: "raw"; reason: SuperDirectiveRawReason };
@@ -1841,43 +2258,36 @@ function findSuperRenderFence(text: string, from: number): SuperRenderFenceMatch
 }
 
 /**
- * 定位协议块的正文与收栏，与宿主 `resolveDirectiveBlock` 同构：收栏靠 JSON
- * 结构定位（任务书正文里自带的 ``` 不是收栏）。半截 JSON 一律判未闭合，
- * 等下一段再判 —— 渲染与派发因此不会对同一段流式文本得出不同结论。
+ * 容错展示：严格解析不出结构时，尽力把任务书拆出来给用户看。
+ *
+ * 拆不出返回 null —— 调用方按原有的 raw 原因码降级，语义与改动前一致。
+ * 拆出来的一律带 `salvaged: true`：这是**可读的降级**，不代表宿主已经派发
+ * （宿主对同一段走严格解析，失败会进 invalidBlocks）。
  */
-function resolveSuperRenderBlock(
-  text: string,
-  open: SuperRenderFenceMatch,
-): { kind: "closed"; body: string; closeEnd: number } | { kind: "unclosed" } {
-  const jsonStart = skipWhitespace(text, open.bodyStart);
-  const jsonEnd = jsonStart === -1 ? -1 : matchJsonValue(text, jsonStart);
-  if (jsonEnd !== -1) {
-    const close = findFence(text, jsonEnd, FENCE_CLOSE);
-    if (!close) return { kind: "unclosed" };
-    return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
-  }
-  const firstChar = jsonStart === -1 ? "" : text.charAt(jsonStart);
-  // 正文以 `{` / `[` 开头但 JSON 还没收全：流式中间态，等收栏；超长损坏块
-  // （MAX_UNCLOSED_SPAN）退回按第一个收栏收口，避免单个坏块永久停住渲染。
-  if ((firstChar === "{" || firstChar === "[") && text.length - open.bodyStart <= MAX_UNCLOSED_SPAN) {
-    return { kind: "unclosed" };
-  }
-  const close = findFence(text, open.bodyStart, FENCE_CLOSE);
-  if (!close) return { kind: "unclosed" };
-  return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+function salvageTaskDisplay(body: string): SuperDirectiveDisplay | null {
+  const tasks = salvageSuperTasks(body);
+  if (tasks.length === 0) return null;
+  return { kind: "tasks", tasks, salvaged: true };
 }
 
 /** 围栏正文 → 卡片可展示的结构；解析不出预期形状时退化为 raw 原因码。 */
 function describeSuperDirective(language: string, body: string): SuperDirectiveDisplay {
   const parsed = parseJsonLoose(body);
-  if (!parsed.ok) return { kind: "raw", reason: "invalid_json" };
+  if (!parsed.ok) {
+    return (language === "super-agent" ? salvageTaskDisplay(body) : null) ?? {
+      kind: "raw",
+      reason: "invalid_json",
+    };
+  }
   const value = parsed.value;
 
   if (language === "super-agent") {
     let rawTasks: unknown[] | null = null;
     if (Array.isArray(value)) rawTasks = value;
     else if (isRecord(value) && Array.isArray(value.tasks)) rawTasks = value.tasks;
-    if (!rawTasks) return { kind: "raw", reason: "missing_tasks" };
+    if (!rawTasks) {
+      return salvageTaskDisplay(body) ?? { kind: "raw", reason: "missing_tasks" };
+    }
     const tasks: SuperDirectiveTask[] = [];
     for (const entry of rawTasks) {
       if (!isRecord(entry)) continue;
@@ -1892,7 +2302,8 @@ function describeSuperDirective(language: string, body: string): SuperDirectiveD
         attachments: parseDirectiveAttachments(entry.attachments).map((attachment) => attachment.name),
       });
     }
-    return tasks.length > 0 ? { kind: "tasks", tasks } : { kind: "raw", reason: "empty_tasks" };
+    if (tasks.length > 0) return { kind: "tasks", tasks };
+    return salvageTaskDisplay(body) ?? { kind: "raw", reason: "empty_tasks" };
   }
 
   if (language === "super-agent-actions") {
@@ -1936,7 +2347,7 @@ export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment
   while (cursor < text.length) {
     const open = findSuperRenderFence(text, cursor);
     if (!open) break;
-    const resolved = resolveSuperRenderBlock(text, open);
+    const resolved = resolveSuperDirectiveBlock(text, open, { language: open.language });
     if (resolved.kind === "unclosed") break;
     if (open.lineStart > textStart) {
       segments.push({ kind: "text", text: text.slice(textStart, open.lineStart) });
