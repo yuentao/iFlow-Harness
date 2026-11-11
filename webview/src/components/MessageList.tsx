@@ -57,6 +57,7 @@ import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown, copyText } from "./Markdown";
+import { AssistantText } from "./SuperDirectiveCard";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
@@ -1397,7 +1398,7 @@ export const BlockView = memo(function BlockView({
               </span>
             )}
             <div className="assistant-body relative text-ui-body leading-relaxed text-foreground/90">
-              <Markdown text={block.text} streamCaret={isLatest && turnActive} />
+              <AssistantText text={block.text} streamCaret={isLatest && turnActive} />
               {/* UI-audit 4.3 P1: ONE hover/focus action bar per message (copy /
                   regenerate / remember) — no icons welded to the text end. It
                   floats (absolute) so a hidden bar reserves no height. The

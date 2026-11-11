@@ -1735,3 +1735,213 @@ export function reportForSession(
   }
 }
 
+// ---------------------------------------------------------------------------
+// 协议块的转录投影（webview 渲染用）
+// ---------------------------------------------------------------------------
+//
+// 主 Agent 把委派 / 管理动作写成 ```super-agent / ```super-agent-actions
+// 围栏。宿主侧的扫描派发（`extractSuperDirectives` / `extractSuperActions`）
+// 与这里的渲染投影是**两条互不影响的读者**：这里只决定转录里显示成什么，
+// 不参与派发，也不改变任何宿主状态。
+//
+// 流式策略：围栏闭合之前不渲染卡片（整段按原样留给 Markdown），闭合后才
+// 切换成卡片。理由：
+// ① 未闭合的正文是半截 JSON，此时解析必然失败；若此刻就渲染「原始协议块」
+//    卡片，流式期间会反复闪成「解析失败」，比普通代码块更糟；
+// ② 宿主同样要等收栏才派发 —— 渲染与派发在同一时刻切换，用户看到卡片出现
+//    就等于这条指令已经完整；
+// ③ 没有「解析中」的临时 UI，未闭合时的行为与改动前逐字节一致（普通代码
+//    块），失败面最小。代价只是收栏那一瞬间文字从代码块跃变为卡片。
+
+export interface SuperDirectiveTask {
+  title: string;
+  task: string;
+  attachments: string[];
+}
+
+export interface SuperDirectiveAction {
+  /** 原样动作名（retry / cancel / cleanup / answer / 未知）。 */
+  action: string;
+  sessionId: string;
+  /** `cleanup` 显式要求保留分支。 */
+  keepBranch?: boolean;
+  /** `answer` 动作携带的回答条数。 */
+  answerCount?: number;
+}
+
+/** 无法结构化展示时的原因码（文案在 webview 侧翻译，shared 保持语言中立）。 */
+export type SuperDirectiveRawReason =
+  | "invalid_json"
+  | "missing_tasks"
+  | "empty_tasks"
+  | "missing_actions"
+  | "empty_actions"
+  | "unknown_language";
+
+export type SuperDirectiveDisplay =
+  | { kind: "tasks"; tasks: SuperDirectiveTask[] }
+  | { kind: "actions"; actions: SuperDirectiveAction[] }
+  /** 非法 JSON / 未知形状 / 未知语言：卡片只显示语言与长度，不回灌整段原文。 */
+  | { kind: "raw"; reason: SuperDirectiveRawReason };
+
+export type SuperDirectiveSegment =
+  | { kind: "text"; text: string }
+  | {
+      kind: "directive";
+      /** 围栏语言（`super-agent` / `super-agent-actions` / 同前缀的其它语言）。 */
+      language: string;
+      /** 围栏原文（含开栏与收栏行）。 */
+      raw: string;
+      display: SuperDirectiveDisplay;
+    };
+
+/** 渲染侧识别的围栏：`super-agent` 及其派生语言（`super-agent-actions` 等）。 */
+const SUPER_RENDER_FENCE_OPEN = /^```(super-agent(?:-[A-Za-z0-9_-]+)?)[ \t]*$/;
+
+/** 转录里识别协议围栏的快速探测串（避免每帧逐行扫描长回答）。 */
+const SUPER_RENDER_MARK = "```super-agent";
+
+interface SuperRenderFenceMatch {
+  language: string;
+  /** 围栏所在行的行首偏移。 */
+  lineStart: number;
+  /** 围栏行之后的正文起始偏移。 */
+  bodyStart: number;
+}
+
+/** 找下一个独占一行的 super-agent 系列围栏。 */
+function findSuperRenderFence(text: string, from: number): SuperRenderFenceMatch | null {
+  let pos = from;
+  while (pos <= text.length) {
+    let lineEnd = text.indexOf("\n", pos);
+    if (lineEnd === -1) lineEnd = text.length;
+    const line = text.slice(pos, lineEnd).replace(/\r$/, "");
+    const match = SUPER_RENDER_FENCE_OPEN.exec(line);
+    if (match) {
+      return {
+        language: match[1] ?? "super-agent",
+        lineStart: pos,
+        bodyStart: Math.min(lineEnd + 1, text.length),
+      };
+    }
+    if (lineEnd === text.length) return null;
+    pos = lineEnd + 1;
+  }
+  return null;
+}
+
+/**
+ * 定位协议块的正文与收栏，与宿主 `resolveDirectiveBlock` 同构：收栏靠 JSON
+ * 结构定位（任务书正文里自带的 ``` 不是收栏）。半截 JSON 一律判未闭合，
+ * 等下一段再判 —— 渲染与派发因此不会对同一段流式文本得出不同结论。
+ */
+function resolveSuperRenderBlock(
+  text: string,
+  open: SuperRenderFenceMatch,
+): { kind: "closed"; body: string; closeEnd: number } | { kind: "unclosed" } {
+  const jsonStart = skipWhitespace(text, open.bodyStart);
+  const jsonEnd = jsonStart === -1 ? -1 : matchJsonValue(text, jsonStart);
+  if (jsonEnd !== -1) {
+    const close = findFence(text, jsonEnd, FENCE_CLOSE);
+    if (!close) return { kind: "unclosed" };
+    return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+  }
+  const firstChar = jsonStart === -1 ? "" : text.charAt(jsonStart);
+  // 正文以 `{` / `[` 开头但 JSON 还没收全：流式中间态，等收栏；超长损坏块
+  // （MAX_UNCLOSED_SPAN）退回按第一个收栏收口，避免单个坏块永久停住渲染。
+  if ((firstChar === "{" || firstChar === "[") && text.length - open.bodyStart <= MAX_UNCLOSED_SPAN) {
+    return { kind: "unclosed" };
+  }
+  const close = findFence(text, open.bodyStart, FENCE_CLOSE);
+  if (!close) return { kind: "unclosed" };
+  return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+}
+
+/** 围栏正文 → 卡片可展示的结构；解析不出预期形状时退化为 raw 原因码。 */
+function describeSuperDirective(language: string, body: string): SuperDirectiveDisplay {
+  const parsed = parseJsonLoose(body);
+  if (!parsed.ok) return { kind: "raw", reason: "invalid_json" };
+  const value = parsed.value;
+
+  if (language === "super-agent") {
+    let rawTasks: unknown[] | null = null;
+    if (Array.isArray(value)) rawTasks = value;
+    else if (isRecord(value) && Array.isArray(value.tasks)) rawTasks = value.tasks;
+    if (!rawTasks) return { kind: "raw", reason: "missing_tasks" };
+    const tasks: SuperDirectiveTask[] = [];
+    for (const entry of rawTasks) {
+      if (!isRecord(entry)) continue;
+      const task = typeof entry.task === "string" ? entry.task.trim() : "";
+      const rawTitle = typeof entry.title === "string" ? entry.title.trim() : "";
+      // 只有标题没有正文的条目不是可派发的任务（宿主也会跳过），但既然模型写
+      // 了出来，转录里还是显示这一行标题。
+      if (!task && !rawTitle) continue;
+      tasks.push({
+        title: normalizeSuperTitle(rawTitle || task.split("\n")[0] || ""),
+        task: task || rawTitle,
+        attachments: parseDirectiveAttachments(entry.attachments).map((attachment) => attachment.name),
+      });
+    }
+    return tasks.length > 0 ? { kind: "tasks", tasks } : { kind: "raw", reason: "empty_tasks" };
+  }
+
+  if (language === "super-agent-actions") {
+    let rawActions: unknown[] | null = null;
+    if (Array.isArray(value)) rawActions = value;
+    else if (isRecord(value) && Array.isArray(value.actions)) rawActions = value.actions;
+    if (!rawActions) return { kind: "raw", reason: "missing_actions" };
+    const actions: SuperDirectiveAction[] = [];
+    for (const entry of rawActions) {
+      if (!isRecord(entry)) continue;
+      const action = typeof entry.action === "string" ? entry.action.trim() : "";
+      const sessionId = typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
+      if (!action && !sessionId) continue;
+      const answers = parseActionAnswers(entry.answers);
+      actions.push({
+        action: action || "unknown",
+        sessionId,
+        ...(entry.keepBranch === true ? { keepBranch: true } : {}),
+        ...(answers ? { answerCount: Object.keys(answers).length } : {}),
+      });
+    }
+    return actions.length > 0 ? { kind: "actions", actions } : { kind: "raw", reason: "empty_actions" };
+  }
+
+  return { kind: "raw", reason: "unknown_language" };
+}
+
+/**
+ * 把一段助手文本切成「普通文本段 + 协议块段」。
+ *
+ * 只识别**独占一行**的 ```super-agent / ```super-agent-<name> 围栏（与宿主
+ * 的围栏正则同一形状），围栏之外的内容原样保留给 Markdown。未闭合的围栏不
+ * 切分：剩余整段仍是文本段（Markdown 会照常渲染成代码块），收栏后下一次调
+ * 用才切成卡片。
+ */
+export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment[] {
+  if (!text.includes(SUPER_RENDER_MARK)) return text ? [{ kind: "text", text }] : [];
+  const segments: SuperDirectiveSegment[] = [];
+  let textStart = 0;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const open = findSuperRenderFence(text, cursor);
+    if (!open) break;
+    const resolved = resolveSuperRenderBlock(text, open);
+    if (resolved.kind === "unclosed") break;
+    if (open.lineStart > textStart) {
+      segments.push({ kind: "text", text: text.slice(textStart, open.lineStart) });
+    }
+    segments.push({
+      kind: "directive",
+      language: open.language,
+      raw: text.slice(open.lineStart, resolved.closeEnd),
+      display: describeSuperDirective(open.language, resolved.body),
+    });
+    cursor = resolved.closeEnd;
+    textStart = resolved.closeEnd;
+  }
+  const rest = text.slice(textStart);
+  if (rest) segments.push({ kind: "text", text: rest });
+  return segments;
+}
+
