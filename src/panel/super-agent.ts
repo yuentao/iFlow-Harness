@@ -15,12 +15,15 @@
  *    子会话改回运行中（Orca `worker_done`「恰好发一次」的宿主侧等价物）。
  *  - 内部进展不打扰主会话：只有 ready / blocked / failed / dropped 会上报，
  *    progress 只更新看板（dsh 的 `internal_only` vs `notify`）。
- *  - **子会话始终免确认**：内核被推到 `yolo` 模式，且宿主对任何
- *    `session/request_permission` / `_iflow/plan/exit` 直接放行（模式推送失败
- *    时的兜底）。因此审批不会产生待办、不会阻塞子会话。只有
- *    `_iflow/user/questions` 是真正的信息缺口 —— 那是只有人才能回答的，落到
- *    子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是单数槽位，
- *    多子会话并发会互相覆盖）。
+ *  - **子会话始终免确认，但每一次工具调用都回到宿主**：内核被推到 `default`
+ *    模式（**不是** `yolo` —— yolo 下内核会静默执行写/删/shell、根本不发
+ *    `session/request_permission`，宿主的依赖护栏就成了摆设），宿主对任何
+ *    `session/request_permission` / `_iflow/plan/exit` 立即自动放行。因此审批
+ *    不产生待办、不阻塞子会话，而宿主仍能逐条看到 shell 命令并在放行前过
+ *    `shared/super-agent-guard.ts` 的护栏（拦会破坏主工作区依赖的安装/联接
+ *    命令）。只有 `_iflow/user/questions` 是真正的信息缺口 —— 那是只有人才能
+ *    回答的，落到子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是
+ *    单数槽位，多子会话并发会互相覆盖）。
  *  - **完成后自动带回改动**：按 `iflow.superAgent.integration` 自动合并到主
  *    工作区的当前分支，或推送分支并创建 PR。合并**串行**执行；是否安全先用
  *    `git merge-tree` 在对象库里预演（不碰索引与工作区），因此主工作区有未提交
@@ -33,7 +36,7 @@
  */
 
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
 import type {
@@ -46,6 +49,12 @@ import type {
 } from "../acp/protocol.js";
 import { errorMessage } from "../acp/jsonrpc.js";
 import { applySessionUpdate, estimateTokens } from "../../shared/session-state.js";
+import {
+  classifyChildShellCommand,
+  extractShellCommand,
+  isShellToolCall,
+  pickChildPermissionOption,
+} from "../../shared/super-agent-guard.js";
 import { renderPrompt } from "../../prompts/index.js";
 import { estimateCost } from "../../shared/context-window.js";
 import { initialSessionState, type Block, type SessionState } from "../../shared/messages.js";
@@ -873,10 +882,14 @@ export class SuperAgentManager {
       const { sessionId } = await client.newSession({ cwd: isolation.path, mcpServers: [] });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
 
-      // 免确认：把内核自己推到 yolo 模式，这样连审批往返都不会发生。
+      // 免确认，但**不**推到 yolo：yolo 下内核静默执行写/删/shell，根本不发
+      // `session/request_permission`，宿主的依赖护栏（callbacksFor 里的
+      // classifyChildShellCommand）就永远看不到命令 —— 护栏形同虚设。这里
+      // 推到 default，让每次工具调用都回到宿主；宿主立即自动放行（shell 用
+      // allow_once），用户体验上依旧是「免确认」，而 shell 命令逐条过护栏。
       // 推送失败也无所谓 —— callbacksFor 的自动放行是兜底。
       try {
-        await client.setMode(sessionId, "yolo");
+        await client.setMode(sessionId, "default");
       } catch (error) {
         this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
       }
@@ -1068,20 +1081,55 @@ export class SuperAgentManager {
         const index = applySessionUpdate(transcript.state, notification);
         if (index !== null) this.markTranscriptDirty(id, index);
       },
-      // 免确认：审批直接放行，不产生待办、不打扰主会话。
+      // 免确认：审批自动放行，不产生待办、不打扰主会话。
+      //
+      // 但「自动放行」之前必须过依赖护栏（2026-11-11 事故：子会话把主仓
+      // node_modules 联接进 worktree 后跑 `npm ci`，顺着联接清空了用户依赖）。
+      // 护栏是 `shared/super-agent-guard.ts` 的纯函数表，这里只负责给它喂
+      // 命令文本与隔离上下文，命中即拒绝 —— 模型看到工具被拒后可自行换方案。
       onRequestPermission: async (request) => {
-        const allow =
-          request.options.find((option) => option.kind === "allow_always") ??
-          request.options.find((option) => option.kind.startsWith("allow"));
+        const session = this.sessions.get(id);
+        const shell = isShellToolCall(request.toolCall);
+        if (shell && session) {
+          const command = extractShellCommand(request.toolCall);
+          if (command) {
+            const verdict = classifyChildShellCommand(command, {
+              cwd: session.isolation.path,
+              repoRoot: this.deps.repoRoot,
+              nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
+            });
+            if (verdict.decision === "deny") {
+              this.deps.log.warn(
+                `[${id}] 拒绝子会话命令（保护主工作区依赖）：${verdict.reason ?? ""}`,
+              );
+              const reject =
+                request.options.find((option) => option.kind === "reject_once") ??
+                request.options.find((option) => option.kind.startsWith("reject"));
+              // 拒绝也只能用 agent 自己给出的选项 id（CLI 用原生枚举解析，
+              // 伪造 id 会抛）；没有拒绝选项就按「取消」—— 与审批超时同一条路。
+              if (reject) {
+                return {
+                  outcome: { outcome: "selected", optionId: reject.optionId },
+                } as RequestPermissionResponse;
+              }
+              return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
+            }
+          }
+        }
+        // shell 类必须 `allow_once`：`allow_always` 会让 CLI 对该工具的后续
+        // 调用不再请求权限，宿主护栏就只看得到第一条命令（形同虚设）。
+        const allow = pickChildPermissionOption(request.options, shell);
         if (!allow) {
           // 没有任何可放行的选项 —— 只能说「取消」，绝不伪造批准。
           this.deps.log.warn(
-            `[${id}] 审批请求没有允许选项，按取消处理：${request.toolCall.toolName ?? "tool"}`,
+            `[${id}] 审批请求没有${shell ? " allow_once 允许选项" : "允许选项"}，按取消处理：${
+              request.toolCall.toolName ?? "tool"
+            }`,
           );
           return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
         }
         this.deps.log.debug?.(
-          `[${id}] 自动放行 ${request.toolCall.toolName ?? "tool"}（免确认模式）`,
+          `[${id}] 自动放行 ${request.toolCall.toolName ?? "tool"}（免确认模式，${allow.kind}）`,
         );
         return {
           outcome: { outcome: "selected", optionId: allow.optionId },
@@ -1675,6 +1723,23 @@ function reusableIsolation(
   if (!isolation.path || !existsSync(isolation.path)) return null;
   if (isolation.kind === "git_worktree" && !isolation.branch) return null;
   return isolation;
+}
+
+/**
+ * 子会话工作目录的 `node_modules` 是不是一个指向别处的链接。
+ *
+ * Windows 目录联接（junction）在 Node 里同样报 `lstat().isSymbolicLink()`
+ * 为 true —— 正是 2026-11-11 事故的形态：worktree 的 `node_modules` 链到
+ * 主仓那份，`npm ci` 第一步删目录就顺着链接清空了用户依赖。`lstat` 看的是
+ * 链接本身（不跟进去），所以这项探测只读不写。文件不存在 / 无权限时按
+ * 「不是链接」处理（新 worktree 本来就没有 node_modules）。
+ */
+function isLinkedNodeModules(cwd: string): boolean {
+  try {
+    return lstatSync(path.join(cwd, "node_modules")).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 export interface SuperAnswer {
