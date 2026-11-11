@@ -683,15 +683,20 @@ describe("prompt templates (prompts/)", () => {
     }
   });
 
-  it("makes self-decomposition and proactive delegation the default in the system prompt", () => {
+  it("makes the main session an orchestrator that only delegates, plans, manages and reports", () => {
     // The host can only dispatch what the main agent writes: if this mandate is
     // dropped, the agent silently goes back to doing everything itself and
-    // child sessions only appear when the user asks for them.
+    // child sessions only appear when the user asks for them. The boundary is
+    // strict — implementation is never kept in the main session.
     const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("You are the orchestrator: delegation, planning, management and reporting");
+    expect(text).toContain("The children do the work");
     expect(text).toContain("Decompose the user's task yourself, then delegate");
+    expect(text).toContain("Implementation work is never kept here");
     expect(text).toContain("```super-agent");
     expect(text).toContain("## When to split");
     expect(text).toContain("## What stays in this session");
+    expect(text).toContain("Never edit a delegated file yourself");
     expect(text).toContain("children cannot delegate further");
   });
 
