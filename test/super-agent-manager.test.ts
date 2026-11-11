@@ -20,6 +20,16 @@ function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
 }
 
+/** 同上的读出版本（分支列表断言需要 stdout）。 */
+function gitOut(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    windowsHide: true,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
 function makeRepo(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "iflow-super-"));
   roots.push(dir);
@@ -645,6 +655,54 @@ describe("super agent · 自动集成", () => {
     harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.integration?.state === "merged");
     expect(harness.needMerges).toHaveLength(0);
+  }, 30000);
+
+  it("自动合并成功后清理 worktree 与本地分支，记录保留", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "commit", "merge");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.integration?.state === "merged");
+
+    const session = harness.sessions[0]!;
+    const worktree = session.isolation.path;
+    const branch = session.isolation.branch!;
+
+    await until(() => harness.sessions[0]?.isolation.released === true);
+    // 磁盘上的 worktree 与分支都清掉了……
+    expect(existsSync(worktree)).toBe(false);
+    expect(gitOut(repo, "branch", "--list", branch).trim()).toBe("");
+    // ……而看板记录还在（分支名 / 路径留作追溯）。
+    expect(harness.sessions[0]?.id).toBe(session.id);
+    expect(harness.sessions[0]?.isolation.branch).toBe(branch);
+    // 合并回来的文件确实在主工作区。
+    expect(existsSync(path.join(repo, "child.txt"))).toBe(true);
+  }, 30000);
+
+  it("worktree 里还有未提交改动时保留目录与分支（绝不丢数据）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "commit", "manual");
+    const session = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    // 宿主在终态之后还会检查 worktree 并可能代提交（`git add -A`）。ready 上报
+    // 发生在那之后，是这条尾巴结束的确定信号 —— 否则我们写的文件会被顺带提交。
+    await until(() => harness.reports.some((entry) => entry.report.state === "ready"));
+
+    const worktree = harness.sessions[0]!.isolation.path;
+    const branch = harness.sessions[0]!.isolation.branch!;
+    // 子会话结束后又留下一份未提交内容（重试现场 / 用户手动改过）。
+    writeFileSync(path.join(worktree, "leftover.txt"), "keep me\n", "utf8");
+    // 模拟主会话智能体把分支真的并进当前分支，再走收尾。
+    git(repo, "merge", "--no-ff", "--no-edit", branch);
+
+    expect(await harness.manager.recordAgentMerge(session.id)).toBe(true);
+    // 合并已确认，但目录不干净 → 不删、不标 released、分支保留。
+    expect(harness.sessions[0]?.integration?.state).toBe("merged");
+    expect(harness.sessions[0]?.isolation.released).toBeFalsy();
+    expect(existsSync(path.join(worktree, "leftover.txt"))).toBe(true);
+    expect(readFileSync(path.join(worktree, "leftover.txt"), "utf8").replace(/\r\n/g, "\n")).toBe(
+      "keep me\n",
+    );
+    expect(gitOut(repo, "branch", "--list", branch)).toContain(branch);
   }, 30000);
 
   it("manual 模式不触发自动合并请求（用户要自己收拾分支）", async () => {

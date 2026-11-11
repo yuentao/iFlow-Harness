@@ -19,6 +19,7 @@ import {
   removeWorktree,
   sanitizeWorktreeName,
   superBranchName,
+  worktreeHasUncommittedChanges,
   worktreePathFor,
 } from "../src/panel/worktree.js";
 
@@ -186,6 +187,35 @@ describe("worktree · 真实 git 仓库", () => {
     writeFileSync(path.join(target, "a.txt"), "two\n", "utf8");
     expect(readText(path.join(repo, "a.txt"))).toBe("one\n");
     expect(readText(path.join(target, "a.txt"))).toBe("two\n");
+  }, 30000);
+
+  it("worktreeHasUncommittedChanges：干净的 worktree 返回 false", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-clean-check");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("clean-check"),
+      baseRef: probe.head!,
+    });
+    expect(await worktreeHasUncommittedChanges(target)).toBe(false);
+  }, 30000);
+
+  it("worktreeHasUncommittedChanges：有未提交改动 / 目录不可读都按有改动处理", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-dirty-check");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("dirty-check"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "scratch.txt"), "not committed\n", "utf8");
+    expect(await worktreeHasUncommittedChanges(target)).toBe(true);
+    // 连 status 都拿不到时绝不能报「干净」—— 那会让自动清理删掉未知内容。
+    expect(await worktreeHasUncommittedChanges(path.join(target, "does-not-exist"))).toBe(true);
   }, 30000);
 
   it("有未合并提交时保留分支（不静默吞掉工作）", async () => {

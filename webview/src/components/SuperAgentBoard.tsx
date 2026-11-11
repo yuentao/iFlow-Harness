@@ -488,8 +488,13 @@ function SuperSessionRow({
   // marker — ride the title tooltip instead of occupying their own lines.
   const titleHint = [
     session.title,
-    session.isolation.branch ? t("分支 {0}", session.isolation.branch) : null,
-    t("目录 {0}", session.isolation.path),
+    // 合并成功时磁盘对象已清理：工具提示不该再给出一条已经不存在的路径。
+    session.isolation.released
+      ? t("工作目录与分支已清理")
+      : session.isolation.branch
+        ? t("分支 {0}", session.isolation.branch)
+        : null,
+    session.isolation.released ? null : t("目录 {0}", session.isolation.path),
     (session.attempts ?? 1) > 1 ? t("第 {0} 次尝试", session.attempts ?? 1) : null,
     historical ? t("这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）") : null,
   ]
@@ -556,9 +561,13 @@ function SuperSessionRow({
           {/* Isolation: full ref + worktree path, mono and selectable. */}
           <div className="flex min-w-0 items-center gap-1.5 text-ui-micro text-muted-foreground">
             <GitBranch className="size-3 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate font-mono" title={`${session.isolation.branch ?? ""}\n${session.isolation.path}`}>
-              {session.isolation.branch ?? session.isolation.path}
-            </span>
+            {session.isolation.released ? (
+              <span className="min-w-0 flex-1 truncate">{t("工作目录与分支已清理")}</span>
+            ) : (
+              <span className="min-w-0 flex-1 truncate font-mono" title={`${session.isolation.branch ?? ""}\n${session.isolation.path}`}>
+                {session.isolation.branch ?? session.isolation.path}
+              </span>
+            )}
             {session.isolation.kind === "directory" && (
               <Chip tone="warning" title={session.isolation.note}>
                 {t("仅目录隔离")}
@@ -651,14 +660,16 @@ function SuperSessionRow({
             >
               {t("让智能体合并")}
             </Button>
-            <Button
-              variant="canvas"
-              size="sm"
-              icon={<Trash2 className={ICON_INLINE} />}
-              onClick={onCleanup}
-            >
-              {t("清理")}
-            </Button>
+            {!session.isolation.released && (
+              <Button
+                variant="canvas"
+                size="sm"
+                icon={<Trash2 className={ICON_INLINE} />}
+                onClick={onCleanup}
+              >
+                {t("清理")}
+              </Button>
+            )}
           </div>
         </div>
       )}
