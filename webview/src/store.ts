@@ -599,10 +599,12 @@ function createMockHost(): HostApi {
               {
                 title: "补 README 的登录章节",
                 task: "更新 README 的登录章节，说明 API Profile 的切换方式与凭据只存在 SecretStorage。",
+                attachments: [{ path: "README.md" }],
               },
               {
                 title: "核对 CI 脚本",
                 task: "确认 release workflow 与 CHANGELOG 顶部版本一致，并跑一遍 npm run typecheck。",
+                attachments: [{ path: ".github/workflows/release.yml" }],
               },
             ],
           },
