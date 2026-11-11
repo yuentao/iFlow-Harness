@@ -739,6 +739,16 @@ describe("prompt templates (prompts/)", () => {
     expect(text).toContain("## What stays in this session");
     expect(text).toContain("Never edit a delegated file yourself");
     expect(text).toContain("children cannot delegate further");
+    // Zero-execution mandate: the main session runs no checks itself, and
+    // verification is delegated like any other unit of work.
+    expect(text).toContain("This session executes nothing");
+    expect(text).toContain("no tests, no typecheck, no build, no shell command, and no file edits");
+    expect(text).toContain("running the project's checks and reporting their real output goes to a child");
+    expect(text).toContain("never re-run it here");
+    // The child side owns the checks and has to report them honestly.
+    const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
+    expect(brief).toContain("Run the project checks the task brief asks for");
+    expect(brief).toContain("never claim a check passed");
   });
 
   it("fills every placeholder in the assembled prompts", () => {
