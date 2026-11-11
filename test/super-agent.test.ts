@@ -623,14 +623,29 @@ describe("super agent · 汇报", () => {
     expect(buildSuperReportPrompt([])).toBe("");
   });
 
-  it("汇报提示词要求主会话自行处理、仅在疑惑时提问、最后完整汇报", () => {
+  it("汇报提示词要求把后续步骤派给子会话、仅在疑惑时提问、最后完整汇报", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
-    expect(text).toContain("自行处理");
+    expect(text).toContain("派给子会话");
+    expect(text).toContain("不要自己跑命令");
     expect(text).toContain("完整汇报");
     expect(text).toContain("都已结束");
     expect(text).toContain("不要编造");
+  });
+
+  it("汇报提示词把复核写成派发任务，而不是让主会话自己执行", () => {
+    const text = buildSuperReportPrompt([
+      { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
+    ]);
+    expect(text).toContain("复核不在本会话跑");
+    expect(text).toContain("跑测试");
+    expect(text).toContain("类型检查");
+    expect(text).toContain("构建");
+    expect(text).toContain("不要自己改文件");
+    // 旧措辞（主会话自己动手）不能再出现。
+    expect(text).not.toContain("先自行处理");
+    expect(text).not.toContain("能自己完成的后续步骤");
   });
 
   it("汇报提示词把主会话接回同一个任务，而不是让它等用户再开口", () => {
