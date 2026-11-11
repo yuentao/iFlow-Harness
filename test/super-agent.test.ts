@@ -20,6 +20,8 @@ import {
   normalizeSuperTitle,
   reportForSession,
   retrySuperSession,
+  salvageSuperTasks,
+  splitSuperDirectiveSegments,
   summarizeSuperSessions,
   superIsolationLabel,
   SUPER_DIGEST_MAX_CHARS,
@@ -1119,5 +1121,162 @@ describe("子会话并发上限", () => {
     expect(clampMaxConcurrentSuperSessions(Number.NaN)).toBe(5);
     expect(clampMaxConcurrentSuperSessions("8" as unknown as number)).toBe(5);
     expect(clampMaxConcurrentSuperSessions(Number.POSITIVE_INFINITY)).toBe(5);
+  });
+});
+
+describe("super agent · 宿主与渲染共用块解析", () => {
+  /** 渲染侧切出的协议段。 */
+  function directiveSegments(text: string) {
+    return splitSuperDirectiveSegments(text).flatMap((segment) =>
+      segment.kind === "directive" ? [segment] : [],
+    );
+  }
+
+  it("合法载荷：宿主派发时，渲染切出的是 directive 段而不是文本段", () => {
+    const text = [
+      "好的，我来拆分。",
+      "```super-agent",
+      JSON.stringify({
+        tasks: [
+          { title: "改登录", task: "修好 src/auth.ts" },
+          { title: "补文档", task: "更新 README" },
+        ],
+      }),
+      "```",
+      "两位子会话已经开工。",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.invalidBlocks).toHaveLength(0);
+
+    const segments = splitSuperDirectiveSegments(text);
+    expect(segments.map((segment) => segment.kind)).toEqual(["text", "directive", "text"]);
+    const [directive] = directiveSegments(text);
+    expect(directive?.display.kind).toBe("tasks");
+    expect(directive?.display.kind === "tasks" ? directive.display.tasks.length : 0).toBe(2);
+    // 正常解析出来的任务不是「容错拆出」的降级预览。
+    expect(directive?.display.kind === "tasks" ? directive.display.salvaged : undefined).not.toBe(true);
+  });
+
+  it("任务书自带代码围栏时，宿主与渲染选到同一个收栏", () => {
+    const task = "先跑：\n```\nnpm test\n```\n然后修";
+    const text = [
+      "```super-agent",
+      JSON.stringify({ tasks: [{ title: "带围栏", task }] }),
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks[0]?.[0]?.task).toBe(task);
+
+    const [directive] = directiveSegments(text);
+    expect(directive?.display.kind).toBe("tasks");
+    expect(directive?.display.kind === "tasks" ? directive.display.tasks[0]?.task : undefined).toBe(task);
+    // 收栏是块自己的结束行，不是任务书里那段围栏。
+    expect(directive?.raw.endsWith("```")).toBe(true);
+    expect(directive?.raw).toContain("npm test");
+  });
+
+  // 三种实测形态：整体 JSON 解析不了，但「哪是标题、哪是任务书」一目了然。
+  // 旧实现里宿主静默吞掉、渲染退化成一堵 JSON 墙。
+  const malformed: Array<{ name: string; payload: string }> = [
+    {
+      name: "长任务书按原始换行铺开",
+      payload: [
+        '{"tasks":[{"title":"读代码","task":"第一步：读 shared/super-agent.ts',
+        '第二步：改实现"},{"title":"跑测试","task":"npm test"}]}',
+      ].join("\n"),
+    },
+    {
+      name: "任务书正文里有裸引号",
+      payload:
+        '{"tasks":[{"title":"查日志","task":"执行 grep "TODO" 定位残留"},{"title":"跑测试","task":"npm test"}]}',
+    },
+    {
+      name: "括号不配对",
+      payload: '{"tasks":[{"title":"甲","task":"读代码"},{"title":"乙","task":"跑测试"}',
+    },
+  ];
+
+  for (const { name, payload } of malformed) {
+    it(`畸形载荷（${name}）→ 渲染拆出任务书，宿主不静默吞掉`, () => {
+      const text = ["```super-agent", payload, "```"].join("\n");
+      const scan = extractSuperDirectives(text);
+      // 宿主侧：要么派发，要么给出明确失败（invalidBlocks 带原因），绝不静默吞掉。
+      expect(scan.blocks.length + scan.invalidBlocks.length).toBeGreaterThanOrEqual(1);
+      if (scan.invalidBlocks.length > 0) {
+        expect(scan.invalidBlocks[0]?.reason).toBeTruthy();
+      }
+
+      const segments = splitSuperDirectiveSegments(text);
+      expect(segments.every((segment) => segment.kind === "directive")).toBe(true);
+      const [directive] = directiveSegments(text);
+      expect(directive).toBeDefined();
+      // 不再退化成一堵 JSON 墙 / 原始协议块卡。
+      expect(directive?.display.kind).toBe("tasks");
+      const display = directive?.display;
+      expect(display?.kind === "tasks" ? display.tasks.length : 0).toBe(2);
+      // 宿主报非法时，两边认定的块正文必须是同一段（边界同源）。
+      if (scan.invalidBlocks[0]) {
+        expect(directive?.raw).toContain(scan.invalidBlocks[0].body);
+      }
+      // 容错拆出 ≠ 已派发：宿主没派发时必须带 salvaged 标记；反过来宿主派发了
+      // 就不是降级预览（两侧对同一段文本的严格解析结论一致）。
+      if (scan.blocks.length === 0 && display?.kind === "tasks") {
+        expect(display.salvaged).toBe(true);
+      }
+      if (scan.blocks.length > 0) {
+        expect(display?.kind === "tasks" ? display.salvaged : undefined).not.toBe(true);
+      }
+    });
+  }
+
+  it("容错拆分：字段顺序颠倒、缺 title、夹杂无关字段都能拆", () => {
+    const body = '{"tasks":[{"task":"跑测试","owner":"x","title":"乙"},{"task":"读代码","owner":"y"}]}';
+    expect(salvageSuperTasks(body)).toEqual([
+      { title: "乙", task: "跑测试", attachments: [] },
+      // 缺 title 时用任务书首行兜底，绝不编造标题。
+      { title: "读代码", task: "读代码", attachments: [] },
+    ]);
+  });
+
+  it("容错拆分：任务书里的裸引号与原始换行按正文保留", () => {
+    const body = [
+      '{"tasks":[{"title":"查日志","task":"执行 grep "TODO"',
+      '并修掉"},{"title":"跑测试","task":"npm test"}]}',
+    ].join("\n");
+    const tasks = salvageSuperTasks(body);
+    expect(tasks).toHaveLength(2);
+    expect(tasks[0]?.task).toContain('"TODO"');
+    expect(tasks[0]?.task).toContain("\n并修掉");
+    expect(tasks[1]?.task).toBe("npm test");
+  });
+
+  it("容错拆分不认占位符任务（模型回显协议示例）", () => {
+    expect(salvageSuperTasks('{"tasks":[{"title":"<标题>","task":"<任务说明>"}]}')).toEqual([]);
+    // 混入占位符时只保留真任务 —— 与宿主 parseDirectiveBody 的占位符判定同源。
+    expect(
+      salvageSuperTasks('{"tasks":[{"title":"<标题>","task":"<说明>"},{"title":"真的","task":"真的任务"}]}'),
+    ).toEqual([{ title: "真的", task: "真的任务", attachments: [] }]);
+  });
+
+  it("全是占位符的畸形载荷仍退回 raw 原因码，而不是编造任务", () => {
+    const text = ["```super-agent", '{"tasks":[{"title":"<标题>","task":"<任务说明>"}', "```"].join("\n");
+    const [directive] = directiveSegments(text);
+    expect(directive?.display).toEqual({ kind: "raw", reason: "invalid_json" });
+  });
+
+  it("未闭合的畸形围栏不产出半截卡片（宿主继续续扫，渲染整段仍是文本）", () => {
+    const unclosed = [
+      "```super-agent",
+      '{"tasks":[{"title":"带围栏","task":"第一步：读代码',
+      "```",
+      "npm test",
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(unclosed);
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.pendingOpen).toBeDefined();
+    expect(splitSuperDirectiveSegments(unclosed)).toEqual([{ kind: "text", text: unclosed }]);
   });
 });
