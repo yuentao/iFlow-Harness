@@ -48,8 +48,8 @@ const en: Record<string, string> = {
   "让智能体合并": "Let the agent merge",
   "子会话还没结束，完成后再让智能体合并":
     "The child session has not finished; merge it after it completes",
-  "让智能体把该子会话的分支合并到当前分支（冲突由它自行解决）":
-    "Let the agent merge this child's branch into the current branch (it resolves conflicts itself)",
+  "派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）":
+    "Dispatch a merge child session to merge this child's branch into the current branch (it resolves conflicts itself)",
   "该子会话没有可合并的分支": "This child session has no branch to merge",
   "清理子会话": "Clean up the child session",
   "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。":
@@ -66,6 +66,7 @@ const en: Record<string, string> = {
     "Retry this child session (reuses its working directory and keeps existing changes)",
   "第 {0} 次尝试": "Attempt {0}",
   "仅目录隔离": "Directory isolation only",
+  "主仓工作区（无隔离）": "Main workspace (no isolation)",
   "免确认说明": "No-confirmation note",
   "待回答": "Needs answer",
   "分支 {0}": "Branch {0}",
