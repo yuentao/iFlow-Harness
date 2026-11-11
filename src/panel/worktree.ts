@@ -645,13 +645,20 @@ export async function removeWorktree(options: {
 }): Promise<WorktreeRemoveResult> {
   let removed = false;
   try {
-    await git(options.repoRoot, ["worktree", "remove", "--force", gitPath(options.targetPath)]);
+    // 必须由 Node 递归删除，**不能**交给 `git worktree remove --force`：
+    // Windows 上 git 会把 junction 当目录递归进去，删掉链接目标。预置的
+    // 依赖树里复刻了源中的 junction（指向主仓 packages/ 等位置），实测
+    // （2026-11-11，test/worktree-dependencies.test.ts 的清理用例）git 的
+    // 删除会把主仓那一侧的文件一起删掉。`fs.rm` 按 lstat 判定，链接只
+    // unlink、不跟随目标；硬链接文件也只是摘掉本目录里的名字。
+    await rm(options.targetPath, { recursive: true, force: true, maxRetries: 3 });
     removed = true;
   } catch {
-    // git 拒绝删除（目录已被手工改坏 / 已被删）——退回到直接删目录 + prune。
-    await git(options.repoRoot, ["worktree", "prune"]);
-    removed = true;
+    removed = false;
   }
+  // 目录删净与否都要清掉 git 的 worktree 元数据（对已不存在的记账幂等）；
+  // 目录未被删净时如实返回 removed=false，交由调用方保留记录并上报。
+  await git(options.repoRoot, ["worktree", "prune"]).catch(() => undefined);
 
   const branch = options.branch;
   if (!branch) return { removed, branchKept: false };

@@ -147,6 +147,24 @@ describe("worktree · 依赖预置（硬链接）", () => {
     expect(existsSync(path.join(dir, "node_modules"))).toBe(false);
   }, 30000);
 
+  it("闸 1：主仓 node_modules 是链接（junction/symlink）时跳过，不跟随目标", async () => {
+    const repo = makeRepo();
+    const outside = tempDir("iflow-deps-outside-");
+    mkdirSync(path.join(outside, "node_modules", "pkg-x"), { recursive: true });
+    writeFileSync(path.join(outside, "node_modules", "pkg-x", "index.js"), "module.exports = 1;\n");
+    symlinkSync(
+      path.join(outside, "node_modules"),
+      path.join(repo, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const wt = tempDir("iflow-deps-linked-");
+
+    const result = await presetWorktreeDependencies({ repoRoot: repo, worktreePath: wt });
+    expect(result.ok).toBe(false);
+    expect(result.skip).toBe("no-source");
+    expect(existsSync(path.join(wt, "node_modules"))).toBe(false);
+  }, 30000);
+
   it("闸 2：node_modules 未被 git 忽略时跳过（避免 git add -A 把它提交进分支）", async () => {
     const repo = makeRepo({ ignoreNodeModules: false });
     makeNodeModules(repo);
@@ -205,5 +223,9 @@ describe("worktree · 依赖预置（硬链接）", () => {
     expect(existsSync(sourceFile)).toBe(true);
     expect(statSync(sourceFile, { bigint: true }).ino).toBe(beforeIno);
     expect(readFileSync(sourceFile, "utf8")).toContain("module.exports");
+    // 复刻的 junction 指向主仓的 packages 目录：删除时也不能顺着它删过去。
+    const junctionTarget = path.join(repo, "packages", "linked-pkg", "package.json");
+    expect(existsSync(junctionTarget)).toBe(true);
+    expect(readFileSync(junctionTarget, "utf8")).toContain("linked-pkg");
   }, 30000);
 });
