@@ -553,6 +553,58 @@ header.acrylic.header-scrolled {
     var(--shadow-panel);
 }
 
+/* --- Super Agent board surface (floating shelf over the transcript) ------ */
+/* The board floats OVER the scrolling transcript (App.tsx anchors it
+   absolutely over the transcript column), so it is the one surface that has
+   to look like it belongs to the same material family as the header and the
+   composer without ever letting the message text underneath read through it.
+
+   Material choice: the board is NOT nested inside a backdrop-filter
+   ancestor — the acrylic header and the acrylic composer are SIBLINGS of
+   the transcript column, not ancestors of it — so its own backdrop-filter
+   really samples the transcript behind it. (`.acrylic-pop` omits the blur
+   for the opposite reason: popups always nest inside an acrylic ancestor,
+   where a second blur could only sample that ancestor's flat tint.)
+
+   Density: the tint is mixed from the two existing acrylic tints instead of
+   the plain --acrylic-tint (38%): at that alpha the scrolling message text
+   ghosted straight through the shelf. The blur turns the text behind into a
+   wash that is never legible, so the denser tint still reads as glass while
+   the board's own labels stay readable.
+
+   Shadow tier follows the surface size: collapsed the shelf is a ~38px
+   strip, where --shadow-panel's -24px spread collapses the projection to
+   nothing, so it takes the float drop (spread kept inside its own height);
+   expanded it is a real panel and can carry the panel-sized drop. */
+.super-board-surface {
+  /* Density: mixing the two existing acrylic tints at 40% lands on ~59%
+     opacity in BOTH themes (light 0.40*0.90+0.60*0.38≈0.59, dark
+     0.40*0.88+0.60*0.40≈0.59). That is the measured floor: the plain
+     --acrylic-tint (38%) let bright terminal output ghost through the shelf
+     on the dark theme (verified: "VITE v8.0.0 ready in 101 ms" read straight
+     through), while this mix keeps every scrolled line an unreadable wash in
+     both themes without flattening the surface into an opaque slab. */
+  background-color: color-mix(in oklab, var(--acrylic-pop-tint) 40%, var(--acrylic-tint));
+  background-image: var(--acrylic-highlight);
+  backdrop-filter: blur(48px) saturate(1.8);
+}
+/* The shadow tier rides the existing .shadow-* classes (the same idiom as
+   .acrylic-pop.shadow-float): collapsed the shelf is a ~38px strip, where
+   --shadow-panel's -24px spread collapses the projection to nothing, so it
+   takes the float drop; expanded it is a real panel and takes the panel
+   drop. The doubled selector keeps the acrylic inset rim alive — the
+   plain .shadow-* rules would otherwise replace the whole box-shadow. */
+.super-board-surface.shadow-float {
+  box-shadow:
+    inset 0 0 0 1px var(--acrylic-edge),
+    var(--shadow-float);
+}
+.super-board-surface.shadow-panel {
+  box-shadow:
+    inset 0 0 0 1px var(--acrylic-edge),
+    var(--shadow-panel);
+}
+
 /* Dropdown menu entrance: quick fade + slight rise, anchored to the trigger
    edge (down = rise from below, up = settle from above). */
 @utility dropdown-in {
@@ -570,10 +622,16 @@ header.acrylic.header-scrolled {
 }
 
 /* No backdrop-filter support → fall back to the opaque panel color; a
-   translucent tint without blur would just look washed out. */
+   translucent tint without blur would just look washed out. The board
+   needs the OPAQUE card color specifically: without the blur nothing
+   hides the transcript text behind the shelf, so a translucent tint there
+   would let it read straight through. */
 @supports not (backdrop-filter: blur(1px)) {
   .acrylic {
     background-color: var(--panel);
+  }
+  .super-board-surface {
+    background-color: var(--card);
   }
 }
 
