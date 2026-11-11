@@ -97,6 +97,28 @@ const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
   "run_command",
 ]);
 
+/**
+ * 会「在原位再开一层 shell」的包装命令（小写 basename）。
+ *
+ * 这些命令把内层命令放在一个参数里，最常见的写法还会给整段命令加引号 ——
+ * `cmd /c "npm ci"` 经 `tokenize` 之后 `npm ci` 变成**一个词**，安装/删除
+ * 规则因此全部失明（2026-11-11 实测：`powershell -c "npm ci"` 在
+ * `nodeModulesIsLink` 为真时照样被放行，正是事故重现路径）。
+ */
+const WRAPPER_COMMANDS: ReadonlySet<string> = new Set([
+  "cmd",
+  "powershell",
+  "pwsh",
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "call",
+]);
+
+/** 包装命令中「下一段就是完整命令」的开关（去掉 `-`/`/` 前缀后比较）。 */
+const INLINE_COMMAND_FLAGS: ReadonlySet<string> = new Set(["c", "k", "command", "lc", "cl"]);
+
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
 
@@ -119,8 +141,26 @@ export function classifyChildShellCommand(
   command: string,
   ctx: ChildShellGuardContext,
 ): ChildShellGuardResult {
-  const text = command ?? "";
+  return classifyText(command ?? "", ctx, 3);
+}
+
+function classifyText(
+  text: string,
+  ctx: ChildShellGuardContext,
+  depth: number,
+): ChildShellGuardResult {
   if (!text.trim()) return { decision: "allow" };
+
+  // ⓪ 先解包 `cmd /c "..."` / `powershell -Command "..."`：引号里的命令在
+  //    下面按词切分时会粘连成一个词，安装/删除规则看不到它。内层命令按同一
+  //    张表重新判定（只认带内联命令开关的形态 —— `bash script.sh` 的脚本名
+  //    不是命令，不去猜它内容）。
+  if (depth > 0) {
+    for (const nested of unwrapShellCommands(text)) {
+      const result = classifyText(nested, ctx, depth - 1);
+      if (result.decision === "deny") return result;
+    }
+  }
 
   const segments = splitSegments(text).map(tokenize);
   const lower = text.toLowerCase();
@@ -208,6 +248,34 @@ export function pickChildPermissionOption<T extends { kind: string }>(
 // ---------------------------------------------------------------------------
 // 内部实现
 // ---------------------------------------------------------------------------
+
+/**
+ * 把 `cmd /c "npm ci"` / `powershell -NoProfile -Command "npm ci"` 的内层命令
+ * 取出来（`tokenize` 已去掉引号，内层文本可以直接再切分）。
+ *
+ * 只在包装命令后面紧跟内联命令开关时才解包 —— 否则 `bash run.sh` 的脚本名
+ * 会被当成命令本身，凭空制造误判。
+ */
+function unwrapShellCommands(text: string): string[] {
+  const out: string[] = [];
+  for (const segment of splitSegments(text)) {
+    const tokens = tokenize(segment);
+    const name = tokens[0] ? commandName(tokens[0]) : "";
+    if (!WRAPPER_COMMANDS.has(name)) continue;
+    for (let i = 1; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (!/^[-/]/.test(token)) continue;
+      if (!INLINE_COMMAND_FLAGS.has(token.replace(/^[-/]/, "").toLowerCase())) continue;
+      const inner = tokens
+        .slice(i + 1)
+        .join(" ")
+        .trim();
+      if (inner) out.push(inner);
+      break;
+    }
+  }
+  return out;
+}
 
 /** 拆命令段：换行 / `;` / `&&` / `||` / 管道 / `&`。只用于逐段看首个命令词。 */
 function splitSegments(text: string): string[] {
