@@ -1247,21 +1247,32 @@ export function buildSuperReportPrompt(entries: SuperReportEntry[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * 看板「让智能体合并」交给主会话智能体的请求文本。
+ * 交给主会话智能体的合并请求文本。
+ *
+ * 两条触发路径共用同一段执行步骤，**开头措辞不同**：
+ *  - 自动（`auto: true`）：宿主在子会话完成后发现改动没能自动合并，于是自动
+ *    请智能体合并 —— 这时不能说「用户在看板点击了」（用户并没有点）。
+ *  - 手动：用户在看板上点了「让智能体合并」。
  *
  * 合并不再由宿主机械执行 `git merge`：冲突需要读懂代码，宿主只会把仓库留在
  * 冲突态（或原样放弃并让用户去终端里手工收拾）。这里把分支、工作目录与边界
- * 写给主智能体，让它用自己的工具完成合并、解决冲突并总结 —— 用户点一下
- * 按钮，动手的是智能体。
+ * 写给主智能体，让它用自己的工具完成合并、解决冲突并总结 —— 动手的是智能体。
  *
  * 提示词刻意写明「不要只给建议」「不要推送 / 删分支 / 切分支」：这是对一条
  * 执行类请求的边界声明，不是让模型自由发挥的任务。
  */
-export function buildSuperMergeRequestPrompt(session: SuperSessionUi): string {
+export function buildSuperMergeRequestPrompt(
+  session: SuperSessionUi,
+  options?: { auto?: boolean; reason?: string },
+): string {
   const branch = session.isolation.branch ?? "";
+  const reason = options?.reason?.trim();
+  const lead = options?.auto
+    ? `子会话「${session.title}」的改动没能自动合并到当前分支${reason ? `（${reason}）` : ""}。请你自己把它的分支 ${branch} 合并到当前分支，不要只给建议、也不要让我手动执行。`
+    : `用户在看板点击了「让智能体合并」。请你自己把子会话「${session.title}」的分支 ${branch} 合并到当前分支，不要只给建议、也不要让我手动执行。`;
   return [
     "[子会话合并请求]",
-    `用户在看板点击了「让智能体合并」。请你自己把子会话「${session.title}」的分支 ${branch} 合并到当前分支，不要只给建议、也不要让我手动执行。`,
+    lead,
     `该子会话的工作目录：${session.isolation.path}（分支上的改动已经提交）。`,
     "步骤：",
     "1. 先跑 `git status` 确认主工作区状态；",

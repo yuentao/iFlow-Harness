@@ -744,5 +744,19 @@ describe("super agent · 让智能体合并的请求", () => {
     expect(text).toContain("不要推送");
     expect(text).toContain("不要删除分支");
     expect(text).toContain("不要切换");
+    // 手动触发：措辞如实说明是用户点的。
+    expect(text).toContain("用户在看板点击了");
+  });
+
+  it("自动触发时不说「用户在看板点击了」，而是说明改动没能自动合并", () => {
+    const text = buildSuperMergeRequestPrompt(
+      session({ title: "修复登录跳转", status: "completed" }),
+      { auto: true, reason: "主工作区有未提交改动，与子会话的改动重叠" },
+    );
+    expect(text).toContain("没能自动合并");
+    expect(text).toContain("主工作区有未提交改动，与子会话的改动重叠");
+    expect(text).not.toContain("用户在看板点击了");
+    // 执行步骤与手动触发一致。
+    expect(text).toContain("git merge --no-ff iflow/super/a");
   });
 });

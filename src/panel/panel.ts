@@ -639,6 +639,16 @@ export class ChatPanel implements vscode.Disposable {
    */
   private superAgent: SuperAgentManager | null = null;
   /**
+   * 待「让智能体合并」的子会话队列。
+   *
+   * 自动集成没能把改动带回主分支时，宿主自动把子会话排进来（不再等用户点
+   * 看板上的按钮）；主会话正忙时留在队列里，等它空闲后**串行**发起 —— 合并
+   * 必须发生在主工作区里，并发合并同一个仓库会把状态搅乱。
+   */
+  private pendingSuperMerges: Array<{ id: string; reason: string }> = [];
+  /** 合并队列正在跑（drain 的重入锁）。 */
+  private superMergeRunning = false;
+  /**
    * Rolling buffer of the MAIN session's assistant text, scanned for
    * delegation directives (`super-agent` fenced blocks). Scanned per chunk,
    * so a delegation takes effect mid-turn — the main session can open child
@@ -6205,6 +6215,9 @@ export class ChatPanel implements vscode.Disposable {
       onTranscript: (sessionId, from, blocks) =>
         this.postToWebview({ type: "superTranscript", sessionId, from, blocks }),
       onReport: (entries) => this.queueSuperReport(entries),
+      // 自动集成没能把子会话的改动带回主分支 → 自动请主会话智能体合并，
+      // 不再把这件事留给用户点看板上的按钮。
+      onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
       currentModel: () => this.store.getState().currentModelId,
       // Child sessions spend the same money as the main session: reuse the
       // exact same price resolution (`iflow.costTable` overrides → curated
@@ -6530,7 +6543,10 @@ export class ChatPanel implements vscode.Disposable {
    * actually landed and records the integration — reporting the truth either
    * way instead of assuming success.
    */
-  private async requestSuperMerge(id: string): Promise<void> {
+  private async requestSuperMerge(
+    id: string,
+    options?: { auto?: boolean; reason?: string },
+  ): Promise<void> {
     const manager = this.getSuperAgent();
     if (!manager) return;
     const session = manager.get(id);
@@ -6557,6 +6573,12 @@ export class ChatPanel implements vscode.Disposable {
       state.replaying ||
       this.historySyncBusy
     ) {
+      if (options?.auto) {
+        // 主会话正忙着：留在队列里等它空闲。自动路径不能就此丢掉 —— 丢掉就
+        // 等于把这件事又推回给用户手动点按钮，那正是这次要改掉的行为。
+        this.scheduleSuperMerge(id, options.reason ?? "");
+        return;
+      }
       this.store.sendToast(
         "warning",
         vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
@@ -6569,14 +6591,21 @@ export class ChatPanel implements vscode.Disposable {
     }
     this.store.sendToast(
       "info",
-      vscode.l10n.t("已让智能体合并子会话「{0}」的分支", session.title),
+      options?.auto
+        ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已让智能体合并", session.title)
+        : vscode.l10n.t("已让智能体合并子会话「{0}」的分支", session.title),
     );
     await this.sendPrompt(
-      buildSuperMergeRequestPrompt(session),
+      buildSuperMergeRequestPrompt(session, {
+        auto: options?.auto === true,
+        reason: options?.reason,
+      }),
       undefined,
       undefined,
       undefined,
-      { delegateOnBusy: false },
+      // `hidden`: 合并请求是宿主发起的内部指令 —— 不该在转录里显形成一个
+      // 用户气泡，更不该把会话标题改成这段提示词。智能体照样收到它。
+      { delegateOnBusy: false, hidden: true },
     );
     if (this.disposed) return;
     const merged = await manager.recordAgentMerge(id);
@@ -6590,6 +6619,48 @@ export class ChatPanel implements vscode.Disposable {
         "warning",
         vscode.l10n.t("智能体本轮没有完成合并，分支仍保留：{0}", session.isolation.branch),
       );
+    }
+  }
+
+  /**
+   * 排入「让智能体合并」队列并立刻尝试发起。
+   *
+   * 队列按子会话去重：同一个子会话只排一次（自动触发与手动点击可能撞车）。
+   */
+  private scheduleSuperMerge(id: string, reason: string): void {
+    if (!this.pendingSuperMerges.some((item) => item.id === id)) {
+      this.pendingSuperMerges.push({ id, reason });
+    }
+    void this.drainSuperMerges();
+  }
+
+  /**
+   * 串行发起待合并的子会话。
+   *
+   * 合并必须发生在主工作区里，并发合并同一个仓库会把状态搅乱，所以一次只
+   * 跑一个。主会话正忙 / 正在恢复历史时留在队列里，等空闲后由回合结束钩子
+   * 再叫一次。
+   */
+  private async drainSuperMerges(): Promise<void> {
+    if (this.superMergeRunning) return;
+    this.superMergeRunning = true;
+    try {
+      while (this.pendingSuperMerges.length > 0) {
+        const state = this.store.getState();
+        if (
+          state.status === "streaming" ||
+          state.initializing ||
+          state.replaying ||
+          this.historySyncBusy
+        ) {
+          break;
+        }
+        const next = this.pendingSuperMerges.shift();
+        if (!next) break;
+        await this.requestSuperMerge(next.id, { auto: true, reason: next.reason });
+      }
+    } finally {
+      this.superMergeRunning = false;
     }
   }
 
@@ -8027,10 +8098,16 @@ export class ChatPanel implements vscode.Disposable {
      * a child session" fallback. A merge request is one of those: it must run
      * in the MAIN workspace (the child's worktree cannot merge into it), so
      * the host refuses instead of silently delegating it.
+     *
+     * `hidden: true` — an internal instruction that must NOT show up in the
+     * transcript: no user bubble, no session rename, no checkpoint. The agent
+     * still receives the prompt, and its answer still streams into the
+     * transcript as an assistant message.
      */
-    options?: { internal?: boolean; delegateOnBusy?: boolean },
+    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
   ): Promise<void> {
     const internal = options?.internal === true;
+    const hidden = options?.hidden === true;
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return;
@@ -8190,20 +8267,25 @@ export class ChatPanel implements vscode.Disposable {
             ? { images: images ?? [], files: files ?? [] }
             : null;
       }
-      this.store.userPrompt(
-        fullText,
-        (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
-        files,
-      );
-      if (!internal) void this.labelSessionWithPrompt(fullText);
-      void this.persistActiveTranscript(); // user turn lands even on a crash
+      // `hidden`: the prompt goes to the agent but must not show up in the
+      // transcript — no user bubble, no session rename. The agent's answer
+      // still streams in as an assistant message.
+      if (!hidden) {
+        this.store.userPrompt(
+          fullText,
+          (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
+          files,
+        );
+        if (!internal) void this.labelSessionWithPrompt(fullText);
+        void this.persistActiveTranscript(); // user turn lands even on a crash
+      }
       // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
       // file changes are revertible. Awaited — a parallel capture would race
       // the agent's writes and bake them into the "before" snapshot. Best
       // effort: a partial capture never blocks the prompt. Host-driven turns
       // (Super Agent reports) skip it: they change no files, and a snapshot
       // per report would tax every child-session completion.
-      if (!internal) {
+      if (!internal && !hidden) {
         const afterUser = this.store.getState().blocks;
         const userIndex = afterUser.length - 1;
         const userBlockId = afterUser[userIndex]?.id;
@@ -8278,6 +8360,9 @@ export class ChatPanel implements vscode.Disposable {
       // (cancelled) also drains: Stop interrupts the CURRENT turn, the queue
       // keeps steering (roadmap Steer semantics).
       void this.dispatchQueue();
+      // 主会话空闲了 → 发起排队的「让智能体合并」（子会话完成后自动合并的
+      // 那一路）。串行执行，一次只合并一个。
+      void this.drainSuperMerges();
     } catch (error) {
       if (!internal) this.currentTurnAttachments = null;
       // A3: the panel was disposed mid-flight — the store is gone, so there

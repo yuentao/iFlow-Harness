@@ -164,6 +164,8 @@ interface Harness {
   reports: { session: SuperSessionUi; report: SuperReport }[];
   /** Pushes seen on the child-transcript channel (incremental, `from`). */
   transcripts: { sessionId: string; from: number; blocks: Block[] }[];
+  /** 「请智能体合并」的回调（自动集成没能把改动带回主分支时触发）。 */
+  needMerges: { session: SuperSessionUi; reason: string }[];
 }
 
 function makeManager(
@@ -175,6 +177,7 @@ function makeManager(
   const sessions: SuperSessionUi[] = [];
   const reports: { session: SuperSessionUi; report: SuperReport }[] = [];
   const transcripts: { sessionId: string; from: number; blocks: Block[] }[] = [];
+  const needMerges: { session: SuperSessionUi; reason: string }[] = [];
   const manager = new SuperAgentManager({
     repoRoot,
     createClient: async (params) => {
@@ -192,6 +195,9 @@ function makeManager(
     onReport: (entries) => {
       reports.push(...entries);
     },
+    onNeedAgentMerge: (session, reason) => {
+      needMerges.push({ session, reason });
+    },
     onTranscript: (sessionId, from, blocks) => {
       transcripts.push({ sessionId, from, blocks });
     },
@@ -200,7 +206,7 @@ function makeManager(
     integrationMode: () => mode,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
-  return { manager, clients, sessions, reports, transcripts };
+  return { manager, clients, sessions, reports, transcripts, needMerges };
 }
 
 /**
@@ -618,6 +624,36 @@ describe("super agent · 自动集成", () => {
     expect(harness.reports.at(-1)?.report.state).toBe("blocked");
   }, 30000);
 
+  it("改动没能自动合并时，自动请主会话智能体合并（不再等用户点按钮）", async () => {
+    const repo = makeRepo();
+    writeFileSync(path.join(repo, "a.txt"), "local edit\n", "utf8");
+
+    const harness = makeManager(repo, "commit-a", "merge");
+    harness.manager.spawn({ title: "改 a.txt", task: "干活" });
+    await until(() => harness.needMerges.length > 0);
+
+    const request = harness.needMerges[0]!;
+    expect(request.session.id).toBe(harness.sessions[0]?.id);
+    // 原因如实带给宿主（它会写进请求提示词，智能体据此知道背景）。
+    expect(request.reason).toContain("重叠");
+  }, 30000);
+
+  it("自动合并成功时不再打扰智能体", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "commit", "merge");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.integration?.state === "merged");
+    expect(harness.needMerges).toHaveLength(0);
+  }, 30000);
+
+  it("manual 模式不触发自动合并请求（用户要自己收拾分支）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "commit", "manual");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    expect(harness.needMerges).toHaveLength(0);
+  }, 30000);
+
   it("预演发现冲突时不启动合并，仓库保持原状", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "commit-a-gated", "merge");
@@ -655,6 +691,8 @@ describe("super agent · 自动集成", () => {
     expect(session.integration?.detail).toContain("没有产生任何提交");
     expect(session.integration?.needsAction).toBeFalsy();
     expect(harness.reports.at(-1)?.report.state).toBe("ready");
+    // 没有任何东西可合并 → 不该白跑一轮「让智能体合并」。
+    expect(harness.needMerges).toHaveLength(0);
   }, 30000);
 
   it("智能体合并后的收尾：分支真的并入 HEAD 才补记，未并入如实返回 false", async () => {

@@ -159,6 +159,15 @@ export interface SuperAgentDeps {
   onTranscript?: (sessionId: string, from: number, blocks: Block[]) => void;
   /** 需要主会话知道的状态更新（宿主转成给主会话的提示词）。 */
   onReport: (entries: { session: SuperSessionUi; report: SuperReport }[]) => void;
+  /**
+   * 自动集成没能把改动带回主分支（改动与本地未提交改动重叠 / 预演冲突 /
+   * git 拒绝合并等），但分支里确实有提交 —— 宿主据此**自动**请主会话智能体
+   * 合并，而不是把按钮留给用户自己点。
+   *
+   * `reason` 是宿主如实记下的原因（会写进请求提示词，让智能体知道背景）。
+   * 只有 merge 模式会触发：pr 模式的语义是开 PR，manual 模式压根不做集成。
+   */
+  onNeedAgentMerge?: (session: SuperSessionUi, reason: string) => void;
   /** 子会话使用的模型；跟随主会话当前模型，null = 用 CLI 的默认值。 */
   currentModel: () => string | null;
   /** 模型单价（USD / 百万 token）；null = 无单价记录，不显示成本。 */
@@ -680,6 +689,9 @@ export class SuperAgentManager {
           }
           // 自动合并 / PR 只依赖 worktree 里的提交，与子进程无关。
           await this.integrate(id);
+          // 改动没能自动带回主分支（重叠 / 冲突 / git 拒绝）→ 自动请主会话
+          // 智能体合并，不再把这件事留给用户点按钮。
+          this.maybeRequestAgentMerge(id);
         }
         this.notifyReport(id);
       }
@@ -992,6 +1004,24 @@ export class SuperAgentManager {
     } else {
       record({ state: "failed", needsAction: true, detail: `创建 PR 失败：${pr.error}` });
     }
+  }
+
+  /**
+   * 自动集成没能把改动带回来时，自动请主会话智能体合并。
+   *
+   * 只在 merge 模式下触发：pr 模式的语义是开 PR（本地合并违背用户的选择），
+   * manual 模式压根不做集成（用户要自己收拾分支）。`needsAction` 是宿主给
+   * 「需要人动手」打的结构化标记 —— 「子会话没有产生任何提交」不带这个标记，
+   * 那时没有任何东西可合并，不该白跑一轮。
+   */
+  private maybeRequestAgentMerge(id: string): void {
+    const session = this.sessions.get(id);
+    const integration = session?.integration;
+    if (!session || !integration) return;
+    if (integration.mode !== "merge") return;
+    if (integration.state === "merged") return;
+    if (!integration.needsAction) return;
+    this.deps.onNeedAgentMerge?.(session, integration.detail ?? "");
   }
 
   /**
