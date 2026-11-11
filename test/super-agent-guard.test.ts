@@ -100,6 +100,29 @@ describe("子会话 shell 护栏 · 拒绝", () => {
       name: "删除链过去的 node_modules 子目录",
       command: "rm -rf node_modules/.cache",
     },
+    {
+      name: "cmd /c 引号包裹的 npm ci（node_modules 是链接）",
+      command: 'cmd /c "npm ci"',
+      context: { nodeModulesIsLink: true },
+    },
+    {
+      name: "powershell -c 引号包裹的 npm ci（node_modules 是链接）",
+      command: 'powershell -c "npm ci"',
+      context: { nodeModulesIsLink: true },
+    },
+    {
+      name: "powershell -NoProfile -Command 引号包裹的删除 node_modules",
+      command: 'powershell -NoProfile -Command "Remove-Item -Recurse -Force node_modules"',
+    },
+    {
+      name: "bash -c 引号里先 cd 到主仓再安装",
+      command: 'bash -c "cd J:/git/proj && npm ci"',
+    },
+    {
+      name: "powershell -c 里的环境变量赋值与安装（分号分隔）",
+      command: 'powershell -c "$env:FOO=1; npm ci"',
+      context: { nodeModulesIsLink: true },
+    },
   ];
 
   for (const testCase of cases) {
@@ -142,6 +165,19 @@ describe("子会话 shell 护栏 · 放行", () => {
     { name: "node_modules_backup 不是 node_modules", command: "rm -rf node_modules_backup" },
     { name: "多段命令里的普通检查", command: "npm test; npm run typecheck" },
     { name: "空命令", command: "   " },
+    {
+      name: "包装命令里跑普通测试（解包后仍不是安装）",
+      command: 'powershell -c "npm test"',
+    },
+    {
+      name: "提交信息里出现 npm ci（只是文本，不是执行的命令）",
+      command: 'git commit -m "fix: npm ci 联接事故"',
+      context: { nodeModulesIsLink: true },
+    },
+    {
+      name: "bash 跑脚本文件（没有内联命令开关，不解包）",
+      command: "bash scripts/harness.mjs",
+    },
   ];
 
   for (const testCase of cases) {
