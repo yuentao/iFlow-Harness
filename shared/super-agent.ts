@@ -17,8 +17,28 @@
 
 import type { UserQuestion } from "../src/acp/protocol.js";
 
-/** 同时运行的子会话上限。超出上限的派发请求进 FIFO 排队（不拒绝）。 */
-export const MAX_CONCURRENT_SUPER_SESSIONS = 4;
+/** 同时运行的子会话数量默认值（设置项 `iflow.superAgent.maxConcurrent`）。 */
+export const DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS = 5;
+/** 可调范围下限：至少允许一个子会话，0 会把池子彻底卡死。 */
+export const MIN_CONCURRENT_SUPER_SESSIONS = 1;
+/** 可调范围上限：再多孩子会话同时跑会把本机与网关一起压垮。 */
+export const MAX_CONCURRENT_SUPER_SESSIONS = 20;
+
+/**
+ * 把任意来源的并发上限收敛成合法值。
+ *
+ * 设置可能来自面板输入、手改 settings.json 或旧版本残留：非有限数
+ * （NaN / Infinity / 字符串等运行时脏值）回落到默认 5，其余截断取整后
+ * 夹到 1..20 —— 「超出上限的派发进 FIFO 排队（不拒绝）」这个语义要求上限
+ * 恒为正整数，0 或 Infinity 都会让它失真。
+ */
+export function clampMaxConcurrentSuperSessions(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS;
+  return Math.min(
+    MAX_CONCURRENT_SUPER_SESSIONS,
+    Math.max(MIN_CONCURRENT_SUPER_SESSIONS, Math.trunc(value)),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // 状态

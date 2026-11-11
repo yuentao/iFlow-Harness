@@ -6,12 +6,15 @@ import {
   buildSuperMergeRequestPrompt,
   buildSuperReportPrompt,
   canRetrySuperSession,
+  clampMaxConcurrentSuperSessions,
+  DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   describeSuperSessionLine,
   extractSuperActions,
   extractSuperDirectives,
   fromPersistedSuperSession,
   groupSuperSessionsForBoard,
   isTerminalSuperStatus,
+  MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ACTIONS,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
@@ -843,5 +846,25 @@ describe("super agent · 让智能体合并的请求", () => {
     expect(text).not.toContain("用户在看板点击了");
     // 执行步骤与手动触发一致。
     expect(text).toContain("git merge --no-ff iflow/super/a");
+  });
+});
+
+describe("子会话并发上限", () => {
+  it("默认 5，可调范围 1–20", () => {
+    expect(DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS).toBe(5);
+    expect(MAX_CONCURRENT_SUPER_SESSIONS).toBe(20);
+  });
+
+  it("越界值夹到 1..20", () => {
+    expect(clampMaxConcurrentSuperSessions(0)).toBe(1);
+    expect(clampMaxConcurrentSuperSessions(1000)).toBe(20);
+    expect(clampMaxConcurrentSuperSessions(7)).toBe(7);
+  });
+
+  it("非有限值回落到默认 5", () => {
+    // 手改 settings.json 可能留下 NaN / 字符串 —— 不能让池子卡死或无限放开。
+    expect(clampMaxConcurrentSuperSessions(Number.NaN)).toBe(5);
+    expect(clampMaxConcurrentSuperSessions("8" as unknown as number)).toBe(5);
+    expect(clampMaxConcurrentSuperSessions(Number.POSITIVE_INFINITY)).toBe(5);
   });
 });

@@ -1427,6 +1427,9 @@ export interface HostSettingsUi {
   contextWindowOverrides: string[];
   costTable: string[];
   thinkingModelRules: ThinkingModelRuleUi[];
+  /** Simultaneously running child sessions (`iflow.superAgent.maxConcurrent`).
+   * Extra dispatches queue in FIFO order instead of being rejected. */
+  superAgentMaxConcurrent: number;
 }
 
 export type HostToWebview =

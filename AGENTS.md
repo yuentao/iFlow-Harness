@@ -30,7 +30,7 @@ webview/ (用户操作)   ──→ WebviewToHost 消息 ──→ src/panel/pan
 | `src/acp/models-query.ts` | 实时 `GET {baseUrl}/models` 取模型列表;读 CLI settings.json;归档过期 OAuth 缓存 |
 | `src/panel/panel.ts` | Webview 容器、消息路由、审批流、提问卡、Plan 审批、Diff 回退、会话持久化、速率限制/上下文溢出重试、token 用量估算、toast 生命周期(最大的文件,~3250 行) |
 | `src/panel/store.ts` | Host 侧 store:reducer 应用 + 节流快照 + P-1 增量快照(`blockPatch`)锚定 + toast 序号/生命周期 + 流式期间 500ms 用量刷新 |
-| `src/panel/super-agent.ts` | Super Agent 子会话编排:并发池(上限 4 + FIFO 排队)、每子会话一个独立 CLI 进程、**子会话始终免确认**(推 `yolo` + 宿主直接放行审批/Plan 退出,只有提问路由到看板)、完成后**串行自动合并/PR**、状态汇报回主会话、按主会话归属的归档/恢复 |
+| `src/panel/super-agent.ts` | Super Agent 子会话编排:并发池(默认 5、范围 1–20、设置面板可调 + FIFO 排队)、每子会话一个独立 CLI 进程、**子会话始终免确认**(推 `yolo` + 宿主直接放行审批/Plan 退出,只有提问路由到看板)、完成后**串行自动合并/PR**、状态汇报回主会话、按主会话归属的归档/恢复 |
 | `src/panel/super-store.ts` | 子会话归档的落盘(按主会话分文件、原子写、读回/删除/孤儿列举) |
 | `src/panel/worktree.ts` | git worktree 隔离:建/删 worktree、分支未合并检测、合并回主分支(冲突自动 `merge --abort`) |
 | `shared/messages.ts` | Host ↔ WebView 消息协议 + `Block` / `SessionState` 类型(两侧共用)+ `applyBlockPatch`(含 `toast`/`dismissToast`、`regenerate`、`openDiff` 消息) |
