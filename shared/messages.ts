@@ -815,6 +815,20 @@ export interface SessionState {
    */
   superSessions?: SuperSessionUi[];
   /**
+   * 宿主正在等子会话的结果（还有子会话没进终态，或它们的汇报还没投进主会话）。
+   *
+   * 这是一个**正交**的忙碌标记：它不改 `status`，所以「等待期间用户仍然可以
+   * 发消息、并且由主会话响应」这条语义不受影响 —— `status` 一旦变成
+   * "streaming"，`sendPrompt` 就会把用户的消息派发成子会话（那是「主会话正在
+   * 生成」的语义，不是「主会话在等子会话」）。
+   *
+   * 面板用它做两件事：顶栏渲染转圈忙碌 chip（idle 时顶栏本来没有任何状态
+   * chip，用户看到的正是「无状态」），以及禁用「新会话」——等待期点「新会话」
+   * 会让排队里的汇报落到已被替换的会话上（汇报丢失 / 归属错位）。
+   * 非 blocks 元数据，所以它搭 blockPatch 的 tail 通道。
+   */
+  superWaiting?: boolean;
+  /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
    * outside the agent session). Non-blocks metadata: it rides the blockPatch
@@ -940,6 +954,7 @@ export function initialSessionState(): SessionState {
     usage: emptySessionUsage(),
     queue: [],
     queuePaused: false,
+    superWaiting: false,
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,

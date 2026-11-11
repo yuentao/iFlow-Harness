@@ -2018,6 +2018,24 @@ export function endCompressTurn(state: SessionState): void {
   if (state.status === "streaming") state.status = "idle";
 }
 
+/**
+ * 开启一个**不落用户气泡**的宿主驱动回合（Super Agent 的子会话汇报：
+ * hidden prompt —— 智能体读得到，转录里没有用户块）。
+ *
+ * hidden 回合不写用户块，所以 `beginUserPrompt` 不会把状态翻成 streaming：
+ * 那一轮在面板上就成了「无状态」—— 顶栏没有忙碌 chip、顶栏「新会话」也不
+ * 禁用，用户点它会把在飞的汇报回合连同排队里的汇报一起废掉（汇报丢失）。
+ * 这里显式翻成 streaming：面板按「正在生成」渲染，忙碌锁生效，同一时刻也不会
+ * 有第二个 prompt 交叠在同一个 ACP 会话上。
+ *
+ * 回合结束仍由 `completePrompt` 收尾（status 回到 idle）。
+ */
+export function beginHiddenTurn(state: SessionState): void {
+  state.status = "streaming";
+  state.stopReason = null;
+  state.errorMessage = null;
+}
+
 // --- transcript restore (M4: CLI does not replay history on session/load) ----
 
 /**

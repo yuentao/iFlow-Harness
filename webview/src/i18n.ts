@@ -249,6 +249,9 @@ const en: Record<string, string> = {
   "更新任务清单": "Updating todos",
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
+  // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
+  "子会话还在运行并等待汇报，暂时不能新建会话":
+    "Child sessions are still running and waiting to report — new session is unavailable for now",
   "删除会话 {0}": "Delete session {0}",
   // M4 P1-8 session pin & archive
   "置顶": "Pin",

@@ -87,6 +87,7 @@ import {
   type SuperAttachment,
   type SuperPendingFence,
   type SuperReportEntry,
+  type SuperSessionUi,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
@@ -721,6 +722,15 @@ export class ChatPanel implements vscode.Disposable {
   /** 常驻提示的状态指纹：子会话进度帧高频触发，指纹不变就不重发。 */
   private superWaitToastKey: string | null = null;
   /**
+   * 已经把汇报交给宿主的子会话 id。
+   *
+   * 子会话进入终态（completed / failed / cancelled）之后，宿主还要等它把汇报
+   * 交上来 —— 中间隔着宿主代提交与自动合并（git 操作，可能好几秒）。这段时间
+   * 里子会话「已经终态」但汇报还没进汇报队列，所以「还在等」不能只看子会话
+   * 状态：终态但没交接汇报的子会话同样算未完成。
+   */
+  private readonly superReportedChildIds = new Set<string>();
+  /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
    * 期间有效：回合结束即清空，避免下一次派发拿到上一轮的旧附件。
@@ -1073,12 +1083,16 @@ export class ChatPanel implements vscode.Disposable {
         background = new vscode.ThemeColor("statusBarItem.errorBackground");
         break;
       default:
-        text = state.pendingApproval
-          ? `$(bell) iFlow: ${vscode.l10n.t("等待审批")}${model}`
-          : `$(check) iFlow${mode}${model}`;
-        background = state.pendingApproval
-          ? new vscode.ThemeColor("statusBarItem.warningBackground")
-          : undefined;
+        if (state.pendingApproval) {
+          text = `$(bell) iFlow: ${vscode.l10n.t("等待审批")}${model}`;
+          background = new vscode.ThemeColor("statusBarItem.warningBackground");
+        } else if (state.superWaiting) {
+          // 等待子会话汇报：主会话此刻没有自己的回合，但流程没断 —— 状态栏
+          // 不能显示 idle 的 $(check)，否则读起来就是「没事可做」。
+          text = `$(sync~spin) iFlow: ${vscode.l10n.t("生成中")}${model}`;
+        } else {
+          text = `$(check) iFlow${mode}${model}`;
+        }
     }
     if (this.statusBar.text !== text || this.statusBar.backgroundColor !== background) {
       this.statusBar.text = text;
@@ -1223,6 +1237,8 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperReports.clear();
     this.pendingSuperReportPrompts = [];
     this.stopSuperHeartbeat();
+    // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
+    this.store.setSuperWaiting(false);
     this.cancelAllProfileSwitches();
     this.clearPostRejectionWatchdog();
     if (this.diagDebounce) {
@@ -5357,7 +5373,9 @@ export class ChatPanel implements vscode.Disposable {
         this.store.markConnecting();
         // startNewSession reuses the same live client (ensureClient hands it
         // straight back) and runs session/new against the new credentials.
-        await this.startNewSession();
+        // bypassSuperWait: 切换 Profile 必须能换会话 —— 状态已经被换掉了，
+        // 「等待子会话汇报」的守卫若生效，会把面板留在没有会话的坏状态。
+        await this.startNewSession({ bypassSuperWait: true });
         // Only markConnected/markError may move the status off "connecting"
         // (newSessionState deliberately preserves it) — the restart path gets
         // this from ensureClient's post-handshake, but the hot path never
@@ -6156,6 +6174,8 @@ export class ChatPanel implements vscode.Disposable {
   private publishSuperSessions(): void {
     const sessions = this.superAgent?.list(this.currentMainSessionId()) ?? [];
     this.store.setSuperSessions(sessions);
+    // 看板换了归属，等待态也得跟着重算（否则切完会话还留着旧的忙碌标记）。
+    this.syncSuperWaitingState();
   }
 
   /**
@@ -6663,9 +6683,38 @@ export class ChatPanel implements vscode.Disposable {
    */
   private queueSuperReport(entries: SuperReportEntry[]): void {
     if (entries.length === 0 || this.disposed) return;
+    // 这些子会话已经把汇报交上来了：终态不再等于「已完成」。
+    for (const entry of entries) this.superReportedChildIds.add(entry.session.id);
     this.pendingSuperReports.add(entries);
-    const batch = this.pendingSuperReports.takeSettled(this.superAgent?.list() ?? []);
-    if (!batch) return;
+    this.settleSuperReportsIfReady();
+    this.syncSuperWaitingState();
+  }
+
+  /**
+   * 汇报缓冲的批次门槛重算。
+   *
+   * 平时由「最后一个子会话上报」自己触发取批次；但子会话被清理（用户点
+   * 清理 / 合并完释放）之后门槛可能已经成立而**再没有人来触发**——它的
+   * onReport 不会再来第二次。等待期面板一直忙碌，那条路就成了永久的忙碌
+   * 态。所以心跳与看板变化时都补一次重算。
+   *
+   * 缓冲里还有汇报、但来源子会话全被清掉了：批次门槛（「所有子会话都进入
+   * 终态」）永远不成立，也没有任何会话可投递 —— 如实记一笔然后丢掉，
+   * 不能让面板卡在忙碌态。
+   */
+  private settleSuperReportsIfReady(): void {
+    if (this.disposed || this.superReportRunning) return;
+    if (this.pendingSuperReports.size === 0) return;
+    const live = this.superAgent?.list() ?? [];
+    if (live.length === 0) {
+      this.log.warn(
+        "super agent: child sessions were cleaned up before their reports were delivered — dropping",
+      );
+      this.pendingSuperReports.clear();
+      return;
+    }
+    const batch = this.pendingSuperReports.takeSettled(live);
+    if (!batch) return; // 还有子会话在跑：继续积累。
     const text = this.superAgent?.reportPrompt(batch) ?? "";
     if (!text) return;
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
@@ -6714,6 +6763,9 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`super agent report delivery failed: ${errorMessage(error)}`);
     } finally {
       this.superReportRunning = false;
+      // 汇报已经投出去（或投失败）：重算忙碌标记 —— 全部终态且汇报已投出时
+      // 面板回到 idle，不再是忙碌态。
+      this.syncSuperWaitingState();
     }
   }
 
@@ -6765,6 +6817,9 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed) return false;
     if (this.pendingSuperReportPrompts.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
+    // 汇报已交上来但批次还没凑齐（还有子会话在跑）：这一批永远投不出去，
+    // 心跳必须继续跑，否则既没有汇报也没有忙碌态刷新。
+    if (this.pendingSuperReports.size > 0) return true;
     return (this.store.getState().superSessions ?? []).some(
       (session) => !isTerminalSuperStatus(session.status),
     );
@@ -6793,6 +6848,53 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 主会话此刻是否还在等子会话的结果。
+   *
+   * 五种「还在等」：
+   *  ①还有子会话没进终态；
+   *  ②子会话已终态但还没把汇报交给宿主（终态与汇报交接之间隔着代提交与
+   *    自动合并的 git 操作，可能好几秒）；
+   *  ③汇报缓冲里还有欠账（有汇报但批次还没凑齐 —— 比如另一个主会话的子会话
+   *    还在跑，这一批就投不出去）；
+   *  ④汇报提示词已备好、还在队列里等主会话空闲；
+   *  ⑤汇报正在投进主会话（那一轮是 hidden prompt，status 会变 streaming）。
+   *
+   * 只看子会话状态是不够的：汇报真正投出去之前，面板都该呈现忙碌态 ——
+   * 否则用户会看到「无状态」，并在这个窗口点顶栏的「新会话」，把排队里的
+   * 汇报落到已被替换的会话上。
+   */
+  private superWaitingForReports(liveChildren?: SuperSessionUi[]): boolean {
+    if (this.pendingSuperReportPrompts.length > 0) return true;
+    if (this.superReportRunning) return true;
+    if (this.pendingSuperReports.size > 0) return true;
+    // 只看**活着的**子会话：归档里的历史子会话早就终态，也永远不会再汇报，
+    // 算进来会让忙碌态永远关不掉。
+    const live = liveChildren ?? this.superAgent?.list() ?? [];
+    for (const session of live) {
+      if (!isTerminalSuperStatus(session.status)) return true;
+      if (!this.superReportedChildIds.has(session.id)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 把「正在等子会话」这个忙碌标记同步给 webview。
+   *
+   * 等待期主会话的 `status` 仍然是 "idle" —— 用户还要能发消息并由主会话响应，
+   * 所以不能借用 "streaming"（那会把用户消息派发成子会话）。但面板必须呈现
+   * 忙碌态：顶栏不能是「无状态」，「新会话」也不能可点。
+   */
+  private syncSuperWaitingState(): void {
+    // 子会话被清理后它的 id 不再有意义 —— 顺手剪掉，别让集合无限增长。
+    const live = this.superAgent?.list() ?? [];
+    const liveIds = new Set(live.map((session) => session.id));
+    for (const id of [...this.superReportedChildIds]) {
+      if (!liveIds.has(id)) this.superReportedChildIds.delete(id);
+    }
+    this.store.setSuperWaiting(this.superWaitingForReports(live));
+  }
+
+  /**
    * The 「waiting for children」 pill.
    *
    * The main turn is over while children still run, so the panel would look
@@ -6803,6 +6905,11 @@ export class ChatPanel implements vscode.Disposable {
    */
   private refreshSuperWaitHeartbeat(): void {
     if (this.disposed) return;
+    // 子会话被清理后「所有子会话都终态」可能已经成立、却再没有人来触发取
+    // 批次（它的 onReport 不会再来）—— 心跳与看板变化时补一次重算。
+    this.settleSuperReportsIfReady();
+    // 忙碌标记跟常驻提示同源：心跳每 1.5s 刷一次，等待期面板一直是忙碌态。
+    this.syncSuperWaitingState();
     const sessions = this.store.getState().superSessions ?? [];
     const live = sessions.filter((session) => !isTerminalSuperStatus(session.status));
     const awaiting = live.filter((session) => session.status === "awaiting_input").length;
@@ -8319,10 +8426,24 @@ export class ChatPanel implements vscode.Disposable {
       });
   }
 
-  private async startNewSession(): Promise<void> {
+  private async startNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
     if (this.historySyncBusy) return;
     // A3: never start a session into a destroyed panel.
     if (this.disposed) throw new DisposedError();
+    // 等待子会话汇报期间不能新建会话：排队里的汇报与在飞的汇报回合会落到
+    // **已被替换**的会话上（sendPrompt 的 session-replaced 守卫会丢弃结果），
+    // 子会话的归属（mainSessionId）也对不上 —— 用户看到的是汇报丢失 + 归属
+    // 错位。命令面板的 iflow.newSession 绕过 webview 的禁用按钮，所以守卫
+    // 必须在宿主侧，不能只靠 UI 禁用。
+    // Profile 切换必须能换会话（它走的是另一条路：状态已经被换掉了），用
+    // bypassSuperWait 放行。
+    if (!options?.bypassSuperWait && this.superWaitingForReports()) {
+      this.log.warn("new session refused: the host is still waiting for child session reports");
+      this.store.appendNotice(
+        vscode.l10n.t("还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
+      );
+      return;
+    }
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its
     // hasPersistedTranscript check scans ~/.iflow/projects/<cwd-slug>/).
     this.sessionCwd =
@@ -8687,6 +8808,12 @@ export class ChatPanel implements vscode.Disposable {
         );
         if (!internal) void this.labelSessionWithPrompt(fullText);
         void this.persistActiveTranscript(); // user turn lands even on a crash
+      } else {
+        // hidden 回合（子会话汇报）：不写用户块 → beginUserPrompt 不会把状态
+        // 翻成 streaming → 那一轮在面板上是「无状态」（顶栏没有忙碌 chip，
+        // 顶栏「新会话」也不禁用，用户点它会把在飞的汇报回合废掉）。这里显式
+        // 开启：状态翻成 streaming，面板按「正在生成」渲染。
+        this.store.beginHiddenTurn();
       }
       // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
       // file changes are revertible. Awaited — a parallel capture would race
