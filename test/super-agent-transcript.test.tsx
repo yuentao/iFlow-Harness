@@ -129,21 +129,35 @@ function clickLabel(label: string): void {
   act(() => button!.click());
 }
 
+/** Expand one child's detail by clicking its single-line row. */
+function clickRow(title: string): void {
+  const button = [...container.querySelectorAll("button")].find(
+    (b) => (b.textContent ?? "").includes(title),
+  );
+  expect(button).toBeTruthy();
+  act(() => button!.click());
+}
+
 describe("Super Agent 子会话实时操作面板", () => {
-  it("折叠状态下不提供面板入口，展开看板后行内出现「查看实时操作」", () => {
+  it("折叠时无行；展开看板只显示单行；再展开该行才出现「查看实时操作」", () => {
     render();
+    expect(container.textContent).not.toContain("修复登录跳转");
     expect(container.textContent).not.toContain("查看实时操作");
 
     clickLabel("展开子会话看板");
-
     expect(container.textContent).toContain("修复登录跳转");
     expect(container.textContent).toContain("运行中");
+    // P1: actions live in the row detail, not on the line.
+    expect(container.textContent).not.toContain("查看实时操作");
+
+    clickRow("修复登录跳转");
     expect(container.textContent).toContain("查看实时操作");
   });
 
   it("打开面板时本地无转录 → 向宿主拉取该子会话的全量转录", () => {
     render();
     clickLabel("展开子会话看板");
+    clickRow("修复登录跳转");
     clickText("查看实时操作");
 
     expect(send).toHaveBeenCalledWith({
@@ -159,6 +173,7 @@ describe("Super Agent 子会话实时操作面板", () => {
   it("有转录时渲染 user / tool / text 三类块（工具卡走真实 ToolCard）", () => {
     render({ "super-1": [USER_BLOCK, TOOL_BLOCK, TEXT_BLOCK] });
     clickLabel("展开子会话看板");
+    clickRow("修复登录跳转");
     clickText("查看实时操作");
 
     const text = document.body.textContent ?? "";
@@ -176,6 +191,7 @@ describe("Super Agent 子会话实时操作面板", () => {
   it("实时操作以弹框呈现，头部关闭后回到行内入口", () => {
     render({ "super-1": [USER_BLOCK] });
     clickLabel("展开子会话看板");
+    clickRow("修复登录跳转");
     clickText("查看实时操作");
 
     const dialog = document.querySelector('[role="dialog"]');
@@ -198,6 +214,7 @@ describe("Super Agent 子会话合并入口", () => {
   it("运行中的子会话不允许合并（按钮置灰）", () => {
     render();
     clickLabel("展开子会话看板");
+    clickRow("修复登录跳转");
 
     const button = [...container.querySelectorAll("button")].find(
       (b) => b.textContent === "让智能体合并",
@@ -209,6 +226,7 @@ describe("Super Agent 子会话合并入口", () => {
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
     render({}, { status: "completed" });
     clickLabel("展开子会话看板");
+    clickRow("修复登录跳转");
     clickText("让智能体合并");
 
     const dialog = document.querySelector('[role="alertdialog"]');
@@ -314,7 +332,7 @@ describe("Super Agent 看板排序与折叠", () => {
       session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
       session({ id: "super-ask", title: "等我回答的任务", status: "awaiting_input", createdAt: 3000 }),
     ]);
-    clickLabel("展开子会话看板");
+    // 有子会话等待回答 → 看板自动展开，不需要（也不应该）再点一次。
 
     const text = container.textContent ?? "";
     expect(text.indexOf("等我回答的任务")).toBeGreaterThanOrEqual(0);
@@ -335,6 +353,45 @@ describe("Super Agent 看板排序与折叠", () => {
 
     clickLabel("展开已完成的子会话");
     expect(container.textContent).toContain("已合并的任务");
+  });
+
+  it("一次只展开一行详情", () => {
+    renderMany([
+      session({ id: "super-a", title: "任务甲", status: "running", createdAt: 1000 }),
+      session({ id: "super-b", title: "任务乙", status: "running", createdAt: 2000 }),
+    ]);
+    clickLabel("展开子会话看板");
+
+    const rowButton = (title: string) =>
+      [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(title))!;
+    const entryCount = () =>
+      [...container.querySelectorAll("button")].filter((b) => b.textContent === "查看实时操作").length;
+
+    clickRow("任务甲");
+    expect(rowButton("任务甲").getAttribute("aria-expanded")).toBe("true");
+    expect(entryCount()).toBe(1);
+
+    clickRow("任务乙");
+    expect(rowButton("任务甲").getAttribute("aria-expanded")).toBe("false");
+    expect(rowButton("任务乙").getAttribute("aria-expanded")).toBe("true");
+    // 甲的详情已收起，只剩乙的一份入口。
+    expect(entryCount()).toBe(1);
+  });
+
+  it("有子会话等待回答时自动展开；全部已完成且已合并后自动收起", () => {
+    const boardExpanded = () =>
+      container
+        .querySelector('button[aria-label="展开子会话看板"]')
+        ?.getAttribute("aria-expanded");
+
+    renderMany([
+      session({ id: "super-ask", title: "等我回答的任务", status: "awaiting_input", createdAt: 1000 }),
+    ]);
+    expect(boardExpanded()).toBe("true");
+    expect(container.textContent).toContain("等我回答的任务");
+
+    renderMany([merged("super-m", "已合并的任务", 1000)]);
+    expect(boardExpanded()).toBe("false");
   });
 });
 

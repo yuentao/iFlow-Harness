@@ -978,7 +978,12 @@ export function App() {
           {(pendingApproval || pendingPlanExit || pendingQuestions) && (
             <div
               ref={pendingOverlayRef}
-              className="pointer-events-none absolute inset-0 z-30 flex flex-col justify-end gap-2 pb-3"
+              // Starts below the Super Agent bar: both layers are z-30 and the
+              // cards come later in the DOM, so an expanded board used to be
+              // painted over by the question card. Reserving the bar height
+              // keeps both usable (the card caps itself and scrolls).
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex flex-col justify-end gap-2 pb-3"
+              style={{ top: "var(--super-bar-h, 0px)" }}
             >
               {pendingApproval && <ApprovalCard approval={pendingApproval} />}
               {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}

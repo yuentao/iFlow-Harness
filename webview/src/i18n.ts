@@ -67,6 +67,7 @@ const en: Record<string, string> = {
   "第 {0} 次尝试": "Attempt {0}",
   "仅目录隔离": "Directory isolation only",
   "免确认说明": "No-confirmation note",
+  "待回答": "Needs answer",
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
   "收起摘要": "Hide summary",
