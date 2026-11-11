@@ -2806,6 +2806,16 @@ export class ChatPanel implements vscode.Disposable {
     if (state.sessionId !== sessionId) return;
     const blocks = state.blocks;
 
+    // 主会话回合先结束、子会话还在跑时，对话里没有它们的结果——此时提炼
+    // 「下一步建议」与「自动记忆」都基于残缺内容，而且子会话汇报会再触发
+    // 一轮 followup 把同样的东西重做一遍。子会话全部结束后宿主会以 hidden
+    // 汇报 prompt 唤醒主会话，那一轮结束时自然补上这两项，所以这里跳过即可，
+    // 不要另做补触发。标题不受影响：它是首轮会话标签，与子会话结果无关。
+    const childrenRunning = this.hasRunningSuperSessions();
+    if (childrenRunning && opts.conversationTasks) {
+      this.log.info("turn followup: skipped next-steps/memory while child sessions are still running");
+    }
+
     const input: FollowupInput = {};
     const tasks: FollowupTaskKind[] = [];
     const titleTask = opts.allowTitle ? this.titleTaskFor(sessionId) : null;
@@ -2814,13 +2824,18 @@ export class ChatPanel implements vscode.Disposable {
       tasks.push("title");
       this.titledSessionIds.add(sessionId);
     }
-    const prediction = opts.conversationTasks ? this.nextStepTaskFor(sessionId) : null;
+    const prediction =
+      opts.conversationTasks && !childrenRunning ? this.nextStepTaskFor(sessionId) : null;
     if (prediction) {
       input.nextSteps = prediction.input;
       tasks.push("nextSteps");
     }
     let memory: { conversation: string; existingFacts: string[] } | null = null;
-    if (opts.conversationTasks && this.memory.isExtractionEligible(sessionId, blocks)) {
+    if (
+      opts.conversationTasks &&
+      !childrenRunning &&
+      this.memory.isExtractionEligible(sessionId, blocks)
+    ) {
       memory = await this.memory.buildExtractionInput(blocks);
       if (memory) {
         input.memory = memory;
@@ -6679,6 +6694,20 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed) return false;
     if (this.pendingSuperReportPrompts.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
+    return (this.store.getState().superSessions ?? []).some(
+      (session) => !isTerminalSuperStatus(session.status),
+    );
+  }
+
+  /**
+   * 是否还有子会话没进入终态。
+   *
+   * 主会话回合先结束而子会话仍在跑时，对话里没有它们的结果，此时提炼
+   * 「下一步建议」/「自动记忆」只能基于残缺内容；子会话全部结束后宿主会以
+   * hidden 汇报 prompt 重新唤醒主会话，那一轮自然补上。因此 runTurnFollowup
+   * 用这里跳过 conversation-derived 的两项（标题不受影响）。
+   */
+  private hasRunningSuperSessions(): boolean {
     return (this.store.getState().superSessions ?? []).some(
       (session) => !isTerminalSuperStatus(session.status),
     );

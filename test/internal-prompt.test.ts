@@ -432,6 +432,7 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
         status: string;
         nextStepSuggestions?: string[];
         nextStepLoading?: boolean;
+        superSessions?: Array<{ status: string }>;
       };
       sessionStarted: (meta: { sessionId: string }) => void;
       setSessions: (sessions: SessionEntry[], activeSessionId?: string | null) => void;
@@ -542,6 +543,46 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     expect(p.store.getState().sessions[0]?.label).toBe(clampSessionLabel(FIRST_REQUEST));
     expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试"]);
     expect(p.memory.applyExtractionResult).not.toHaveBeenCalled();
+  });
+
+  it("skips next steps and memory while child sessions are still running", async () => {
+    // 主会话回合先结束、子会话还在跑：它们的结果还没进对话，此时提炼
+    // 下一步/记忆是残缺的，子会话汇报后那一轮会自然补上。
+    p.store.getState().superSessions = [{ status: "running" }];
+    queueCompletion({ text: JSON.stringify({ title: "登录改用 PKCE" }), reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+
+    expect(completionMock.state.calls).toHaveLength(1);
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).toContain("[Title]");
+    expect(sent).not.toContain("[Next steps]");
+    expect(sent).not.toContain("[Long-term memory]");
+    expect(sent).not.toContain('"facts"');
+    expect(p.store.getState().sessions[0]?.label).toBe("登录改用 PKCE");
+    expect(p.store.getState().nextStepSuggestions).toEqual([]);
+    expect(p.memory.beginExtraction).not.toHaveBeenCalled();
+    expect(p.memory.applyExtractionResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps the full batch once every child session reached a terminal state", async () => {
+    p.store.getState().superSessions = [{ status: "completed" }, { status: "cancelled" }];
+    queueCompletion({
+      text: JSON.stringify({
+        title: "登录改用 PKCE",
+        nextSteps: ["运行测试"],
+        facts: [{ text: "项目统一用 pnpm 安装依赖", scope: "global", category: "convention", confidence: 0.9 }],
+      }),
+      reason: "complete",
+    });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+
+    expect(completionMock.state.calls).toHaveLength(1);
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).toContain("[Title]");
+    expect(sent).toContain("[Next steps]");
+    expect(sent).toContain("[Long-term memory]");
+    expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试"]);
+    expect(p.memory.applyExtractionResult).toHaveBeenCalledTimes(1);
   });
 
   it("sends nothing when no task is eligible", async () => {
