@@ -21,6 +21,7 @@ import {
   reportForSession,
   retrySuperSession,
   summarizeSuperSessions,
+  superIsolationLabel,
   SUPER_DIGEST_MAX_CHARS,
   sumSuperUsage,
   SuperReportBuffer,
@@ -983,22 +984,50 @@ describe("super agent · 管理动作协议", () => {
 });
 
 describe("super agent · 让智能体合并的请求", () => {
-  it("请求里带上标题、分支与工作目录，并要求智能体自己合并", () => {
+  it("任务书要求在主仓工作区执行 git merge --no-ff，并划清硬边界", () => {
     const text = buildSuperMergeRequestPrompt(
       session({ title: "修复登录跳转", status: "completed" }),
     );
     expect(text).toContain("修复登录跳转");
     expect(text).toContain("iflow/super/a");
-    expect(text).toContain("/tmp/wt");
-    // 是「执行合并」的请求，不是让用户自己动手。
+    // 合并只能在主仓工作区发生 —— 任务书必须写明这一点。
+    expect(text).toContain("主仓工作区");
     expect(text).toContain("git merge --no-ff iflow/super/a");
-    expect(text).toContain("自行解决");
-    // 边界：不推送、不删分支、不切分支。
-    expect(text).toContain("不要推送");
+    // 冲突按代码语义解决，两边的改动都要保住。
+    expect(text).toContain("按代码语义判断双方意图");
+    expect(text).toContain("不要丢弃任何一侧的改动");
+    // 硬边界：不推送、不 rebase、不删分支、不切分支、不碰无关文件。
+    expect(text).toContain("不要 push");
+    expect(text).toContain("不要 rebase");
     expect(text).toContain("不要删除分支");
-    expect(text).toContain("不要切换");
+    expect(text).toContain("不要切换分支");
+    expect(text).toContain("不要改动与本次合并无关的文件");
+    expect(text).toContain("不要动用户尚未提交的其它改动");
     // 手动触发：措辞如实说明是用户点的。
     expect(text).toContain("用户在看板点击了");
+  });
+
+  it("任务书带安全阀：冲突解决不了就 abort，并要求如实汇报", () => {
+    const text = buildSuperMergeRequestPrompt(
+      session({ title: "修复登录跳转", status: "completed" }),
+    );
+    expect(text).toContain("git merge --abort");
+    expect(text).toContain("绝不能把仓库留在半合并状态");
+    expect(text).toContain("如实汇报");
+    expect(text).toContain("合并 commit");
+    expect(text).toContain("被改动的文件清单");
+  });
+
+  // 旧的措辞是写给主会话的（「你自己去合并、别只给建议、别让我手动执行」）。
+  // 现在这段文本是委派块里的 task 文本，交给一个专职合并的子会话执行 ——
+  // 面向主会话的指令必须删掉，否则子会话会读到互相矛盾的要求。
+  it("不再残留面向主会话的旧措辞", () => {
+    const text = buildSuperMergeRequestPrompt(
+      session({ title: "修复登录跳转", status: "completed" }),
+    );
+    expect(text).not.toContain("不要只给建议");
+    expect(text).not.toContain("也不要让我手动执行");
+    expect(text).not.toContain("请你自己");
   });
 
   it("自动触发时不说「用户在看板点击了」，而是说明改动没能自动合并", () => {
@@ -1011,6 +1040,65 @@ describe("super agent · 让智能体合并的请求", () => {
     expect(text).not.toContain("用户在看板点击了");
     // 执行步骤与手动触发一致。
     expect(text).toContain("git merge --no-ff iflow/super/a");
+    expect(text).toContain("git merge --abort");
+  });
+
+  it("没有分支时不编造合并命令，如实说明无可合并目标", () => {
+    const text = buildSuperMergeRequestPrompt(
+      session({ isolation: { kind: "directory", path: "/tmp/dir" }, status: "completed" }),
+    );
+    expect(text).not.toContain("git merge --no-ff");
+    expect(text).toContain("没有可合并的目标");
+    expect(text).toContain("不要执行任何 git 命令");
+  });
+});
+
+describe("super agent · 主仓工作区隔离（repo）", () => {
+  const repoSession = (overrides: Partial<SuperSessionUi> = {}): SuperSessionUi =>
+    session({
+      isolation: { kind: "repo", path: "J:/repo" },
+      ...overrides,
+    });
+
+  it("看板标签如实说明是主仓工作区，而不是伪造一个分支", () => {
+    expect(superIsolationLabel(repoSession().isolation)).toBe("主仓工作区（无隔离）");
+    expect(superIsolationLabel({ kind: "git_worktree", path: "/wt", branch: "iflow/super/a" })).toBe(
+      "独立 worktree",
+    );
+    expect(superIsolationLabel({ kind: "directory", path: "/dir" })).toBe("仅目录隔离");
+  });
+
+  it("看板摘要里报的是隔离方式，不是一个不存在的分支", () => {
+    const line = describeSuperSessionLine(repoSession({ status: "running" }));
+    expect(line).toContain("主仓工作区（无隔离）");
+    expect(line).not.toContain("分支 ");
+  });
+
+  it("归档往返保留 repo 隔离，且不会带出分支", () => {
+    const persisted = toPersistedSuperSession(repoSession({ status: "completed" }));
+    expect(persisted.isolation.kind).toBe("repo");
+    expect(persisted.isolation.path).toBe("J:/repo");
+    expect(persisted.isolation.branch).toBeUndefined();
+
+    const restored = fromPersistedSuperSession(persisted);
+    expect(restored.isolation.kind).toBe("repo");
+    expect(restored.isolation.path).toBe("J:/repo");
+    expect(restored.isolation.branch).toBeUndefined();
+  });
+
+  it("恢复时把残留的分支名丢掉（不能显示并不存在的分支）", () => {
+    const restored = fromPersistedSuperSession({
+      ...toPersistedSuperSession(repoSession({ status: "completed" })),
+      isolation: { kind: "repo", path: "J:/repo", branch: "iflow/super/ghost" },
+    });
+    expect(restored.isolation.branch).toBeUndefined();
+    expect(superIsolationLabel(restored.isolation)).toBe("主仓工作区（无隔离）");
+  });
+
+  it("运行中的主仓工作区子会话恢复后仍是「已中断」（进程已经没了）", () => {
+    const restored = fromPersistedSuperSession(toPersistedSuperSession(repoSession({ status: "running" })));
+    expect(restored.status).toBe("cancelled");
+    expect(isTerminalSuperStatus(restored.status)).toBe(true);
   });
 });
 
