@@ -747,6 +747,16 @@ export interface SessionState {
   replaying: boolean;
   /** True while a new session is being created (host busy; UI locks switches). */
   initializing: boolean;
+  /**
+   * Monotonic count of Core boot attempts that re-entered `connecting` (hot
+   * restart / profile-switch reconnect). A restart keeps the splash on
+   * `connecting` — the successor handshake owns the same screen — so without
+   * this marker the splash's elapsed timer keeps counting the SUPERSEDED
+   * boot and the 「重启内核」 escape reads as a dead button. Non-blocks
+   * metadata, so it rides the existing blockPatch tail channel; absent in
+   * mock hosts and pre-restart snapshots (treated as 0 by the webview).
+   */
+  connectEpoch?: number;
   /** True while the host drives a `/compress` turn (overflow auto-compress,
    * turn-end proactive compress, or the 立即压缩 pill action). The webview
    * renders the streaming indicator as 正在压缩 instead of plain generating. */

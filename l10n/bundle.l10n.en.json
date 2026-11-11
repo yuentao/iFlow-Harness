@@ -127,6 +127,7 @@
   "立即重启": "Restart now",
   "无法写入 {0}（文件缺失或不可读），内核配置未同步": "Cannot write {0} (missing or unreadable) — Core config not synced",
   "正在生成中，请等待完成或先停止，再重启内核": "Generating — wait for it to finish or stop it before restarting the Core",
+  "正在同步会话历史，请等待完成后再重启内核": "Session history is syncing — wait for it to finish before restarting the Core",
   "内核已重启": "Core restarted",
   "内核已重启，计划审批已跳过": "Core restarted, plan approval skipped",
   "无法读取 {0}（文件缺失或不可读）": "Cannot read {0} (missing or unreadable)",

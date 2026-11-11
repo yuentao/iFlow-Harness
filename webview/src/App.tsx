@@ -423,21 +423,31 @@ export function App() {
   // splash with no feedback and no escape hatch; the live seconds plus a
   // patience-threshold restart affordance give the user both. The hook sits
   // BEFORE the splash early-return (hook-count stability, see liveMessage).
+  // A host restart keeps `connecting` (the successor handshake owns this same
+  // screen), so connectEpoch is what says "this is a NEW boot": without it the
+  // bar keeps counting the superseded attempt and 「重启内核」 reads as a dead
+  // button.
+  const connectEpoch = useChat((s) => s.state?.connectEpoch ?? 0);
   const connectingSince = useRef<number | null>(null);
+  const epochSeen = useRef(connectEpoch);
   const [connectingElapsed, setConnectingElapsed] = useState(0);
   useEffect(() => {
     if (status !== "connecting") {
+      epochSeen.current = connectEpoch;
       connectingSince.current = null;
       setConnectingElapsed(0);
       return;
     }
-    if (connectingSince.current === null) connectingSince.current = Date.now();
+    if (connectingSince.current === null || epochSeen.current !== connectEpoch) {
+      epochSeen.current = connectEpoch;
+      connectingSince.current = Date.now();
+    }
     const tick = () =>
       setConnectingElapsed(Math.max(0, Math.floor((Date.now() - (connectingSince.current ?? Date.now())) / 1000)));
     tick();
     const iv = setInterval(tick, 1000);
     return () => clearInterval(iv);
-  }, [status]);
+  }, [status, connectEpoch]);
 
   // The error banner is host-owned (errorMessage rides the snapshot); a local
   // dismiss hides it until a DIFFERENT error arrives.
@@ -532,7 +542,7 @@ export function App() {
           className="splash-hint"
           title={t("首次启动或配置了多个 MCP server 时较久")}
         >
-          {t("正在启动 …")}
+          {connectEpoch > 0 ? t("正在重新启动内核 …") : t("正在启动 …")}
           {status === "connecting" && connectingElapsed >= 3 && (
             <span className="ml-1 font-mono tabular-nums opacity-70">{connectingElapsed}s</span>
           )}

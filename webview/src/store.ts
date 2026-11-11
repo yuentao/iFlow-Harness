@@ -991,9 +991,45 @@ function createMockHost(): HostApi {
       },
     });
   }
+  // Mirrors the host's connectEpoch counter so the splash can be exercised
+  // outside VSCode: restartCli re-enters `connecting` with a bumped epoch,
+  // then the "fresh Core" finishes booting and the panel comes back.
+  let mockConnectEpoch = 0;
   return {
     postMessage(msg) {
       const m = msg as WebviewToHost;
+      if (m.type === "restartCli") {
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [],
+            status: "connecting",
+            errorMessage: null,
+            stopReason: null,
+            ...demoMeta,
+            connectEpoch: mockConnectEpoch + 1,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        mockConnectEpoch += 1;
+        setTimeout(() => {
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: demoBlocks,
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              connectEpoch: mockConnectEpoch,
+              pendingApproval: null,
+              auth: authState,
+            },
+          });
+        }, 1500);
+        return;
+      }
       if (m.type === "ready") {
         broadcast({ type: "theme", kind: mockTheme });
         broadcast({ type: "hostSettings", ...mockHostSettings });

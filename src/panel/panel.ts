@@ -4712,7 +4712,15 @@ export class ChatPanel implements vscode.Disposable {
    */
   async restartCli(): Promise<void> {
     if (this.disposed) return;
-    if (this.historySyncBusy) return;
+    if (this.historySyncBusy) {
+      // A silent refusal here is indistinguishable from a dead button — the
+      // splash's 「重启内核」 and the error banner's 「重试」 are the only escape
+      // hatches in a wedged state, so say why the restart did not run.
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("正在同步会话历史，请等待完成后再重启内核"),
+      );
+      return;
+    }
     const state = this.store.getState();
     if (state.status === "streaming" || state.initializing) {
       void vscode.window.showWarningMessage(

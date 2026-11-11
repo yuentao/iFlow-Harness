@@ -1942,6 +1942,11 @@ export function newSessionState(state: SessionState): SessionState {
   fresh.sessions = state.sessions;
   fresh.activeSessionId = state.activeSessionId;
   fresh.replaying = state.replaying;
+  // Connection-scoped like status/auth: a restart does replaceState FIRST and
+  // then markConnecting (which stamps the next epoch), so dropping the counter
+  // here would restart every restart back to 1 and the splash could not tell
+  // the second restart apart from the first (its timer would keep running).
+  fresh.connectEpoch = state.connectEpoch;
   // Token usage is per-session; a new session starts from a zeroed counter
   // (the chip shows ↑0 ↓0 instead of hiding — the CLI does not yet report
   // usage, so the host's transcript estimate starts fresh here).

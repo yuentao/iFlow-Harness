@@ -158,6 +158,10 @@ export class SessionStore {
   /** Back to the splash state (profile-switch reconnect: old CLI is down, new one booting). */
   markConnecting(): void {
     this.state.status = "connecting";
+    // Strictly-increasing marker for the splash (see SessionState.connectEpoch):
+    // `connecting` alone cannot tell a fresh boot from the superseded handshake
+    // it replaced, so the elapsed timer would keep running the old attempt.
+    this.state.connectEpoch = (this.state.connectEpoch ?? 0) + 1;
     this.flush();
   }
 

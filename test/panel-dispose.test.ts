@@ -283,6 +283,9 @@ describe("ChatPanel restartCli vs wedged connect (P0-3)", () => {
     expect(p.store.getState().errorMessage).toBeNull();
     expect(p.connecting).toBeNull();
     expect(p.client).not.toBeNull();
+    // The splash must see this boot as a NEW attempt (its elapsed timer
+    // re-anchors on connectEpoch) — otherwise the restart looks like a no-op.
+    expect(p.store.getState().connectEpoch ?? 0).toBeGreaterThanOrEqual(1);
     // The wedged handshake rejected (superseded), it never resolved.
     await expect(wedged).rejects.toThrow();
   }, 30000);

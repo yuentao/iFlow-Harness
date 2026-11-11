@@ -656,6 +656,7 @@ const en: Record<string, string> = {
     "Update the index from changes only; no model call when nothing changed",
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 …": "Starting …",
+  "正在重新启动内核 …": "Restarting the Core …",
   "首次启动或配置了多个 MCP server 时较久":
     "Slower on first launch or with multiple MCP servers",
   // P1: edit & resend, session search, aria-live announcements
