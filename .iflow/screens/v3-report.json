@@ -1,0 +1,390 @@
+[
+  {
+    "theme": "light",
+    "width": 900,
+    "autoExpanded": true,
+    "auto": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.35 0.03 275 / 0.15) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 876,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 900,
+      "innerWidth": 900,
+      "hitTest": "board"
+    },
+    "scrollTop": 520,
+    "expandedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.35 0.03 275 / 0.15) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 876,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 900,
+      "innerWidth": 900,
+      "hitTest": "board"
+    },
+    "collapsedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-float",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.2 0.02 275 / 0.08) 0px 1px 2px 0px, oklch(0.35 0.03 275 / 0.14) 0px 6px 16px -6px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 876,
+        "h": 38
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 900,
+      "innerWidth": 900,
+      "hitTest": "board"
+    },
+    "dialog": {
+      "open": false,
+      "rowToggled": {
+        "rows": 7,
+        "clicked": true
+      },
+      "liveBtn": {
+        "found": false
+      },
+      "dialogShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-dialog-900.png"
+    },
+    "shots": {
+      "expandedTopShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-expanded-top-900.png",
+      "expandedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-expanded-900.png",
+      "collapsedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-collapsed-900.png"
+    }
+  },
+  {
+    "theme": "light",
+    "width": 480,
+    "autoExpanded": true,
+    "auto": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.35 0.03 275 / 0.15) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 456,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 480,
+      "innerWidth": 480,
+      "hitTest": "board"
+    },
+    "scrollTop": 520,
+    "expandedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.35 0.03 275 / 0.15) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 456,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 480,
+      "innerWidth": 480,
+      "hitTest": "board"
+    },
+    "collapsedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-float",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.2 0.02 275 / 0.08) 0px 1px 2px 0px, oklch(0.35 0.03 275 / 0.14) 0px 6px 16px -6px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 456,
+        "h": 38
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 480,
+      "innerWidth": 480,
+      "hitTest": "board"
+    },
+    "dialog": null,
+    "shots": {
+      "expandedTopShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-expanded-top-480.png",
+      "expandedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-expanded-480.png",
+      "collapsedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-collapsed-480.png"
+    }
+  },
+  {
+    "theme": "light",
+    "width": 360,
+    "autoExpanded": true,
+    "auto": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.35 0.03 275 / 0.15) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 336,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 360,
+      "innerWidth": 360,
+      "hitTest": "board"
+    },
+    "scrollTop": 520,
+    "expandedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.35 0.03 275 / 0.15) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 336,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 360,
+      "innerWidth": 360,
+      "hitTest": "board"
+    },
+    "collapsedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-float",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(1 0 0 / 0.588)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.55), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.7) 0px 0px 0px 1px inset, oklch(0.2 0.02 275 / 0.08) 0px 1px 2px 0px, oklch(0.35 0.03 275 / 0.14) 0px 6px 16px -6px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 336,
+        "h": 38
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 360,
+      "innerWidth": 360,
+      "hitTest": "board"
+    },
+    "dialog": null,
+    "shots": {
+      "expandedTopShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-expanded-top-360.png",
+      "expandedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-expanded-360.png",
+      "collapsedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-light-collapsed-360.png"
+    }
+  },
+  {
+    "theme": "dark",
+    "width": 900,
+    "autoExpanded": true,
+    "auto": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.1 0.02 285 / 0.4) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 876,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 900,
+      "innerWidth": 900,
+      "hitTest": "board"
+    },
+    "scrollTop": 520,
+    "expandedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.1 0.02 285 / 0.4) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 876,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 900,
+      "innerWidth": 900,
+      "hitTest": "board"
+    },
+    "collapsedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-float",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.05 0.02 285 / 0.28) 0px 1px 2px 0px, oklch(0.05 0.02 285 / 0.45) 0px 6px 16px -6px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 876,
+        "h": 38
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 900,
+      "innerWidth": 900,
+      "hitTest": "board"
+    },
+    "dialog": null,
+    "shots": {
+      "expandedTopShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-expanded-top-900.png",
+      "expandedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-expanded-900.png",
+      "collapsedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-collapsed-900.png"
+    }
+  },
+  {
+    "theme": "dark",
+    "width": 480,
+    "autoExpanded": true,
+    "auto": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.1 0.02 285 / 0.4) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 456,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 480,
+      "innerWidth": 480,
+      "hitTest": "board"
+    },
+    "scrollTop": 520,
+    "expandedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.1 0.02 285 / 0.4) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 456,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 480,
+      "innerWidth": 480,
+      "hitTest": "board"
+    },
+    "collapsedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-float",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.05 0.02 285 / 0.28) 0px 1px 2px 0px, oklch(0.05 0.02 285 / 0.45) 0px 6px 16px -6px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 456,
+        "h": 38
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 480,
+      "innerWidth": 480,
+      "hitTest": "board"
+    },
+    "dialog": null,
+    "shots": {
+      "expandedTopShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-expanded-top-480.png",
+      "expandedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-expanded-480.png",
+      "collapsedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-collapsed-480.png"
+    }
+  },
+  {
+    "theme": "dark",
+    "width": 360,
+    "autoExpanded": true,
+    "auto": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.1 0.02 285 / 0.4) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 336,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 360,
+      "innerWidth": 360,
+      "hitTest": "board"
+    },
+    "scrollTop": 520,
+    "expandedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-panel",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.1 0.02 285 / 0.4) 0px 24px 60px -24px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 336,
+        "h": 366
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 360,
+      "innerWidth": 360,
+      "hitTest": "board"
+    },
+    "collapsedMeasure": {
+      "cls": "stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface shadow-float",
+      "backdropFilter": "blur(48px) saturate(1.8)",
+      "backgroundColor": "oklab(0.241892 0.0060018 -0.022399 / 0.592)",
+      "backgroundImage": "linear-gradient(oklch(1 0 0 / 0.09), oklch(1 0 0 / 0) 42%)",
+      "boxShadow": "oklch(1 0 0 / 0.1) 0px 0px 0px 1px inset, oklch(0.05 0.02 285 / 0.28) 0px 1px 2px 0px, oklch(0.05 0.02 285 / 0.45) 0px 6px 16px -6px",
+      "rect": {
+        "x": 12,
+        "y": 61,
+        "w": 336,
+        "h": 38
+      },
+      "backdropAncestors": [],
+      "docScrollWidth": 360,
+      "innerWidth": 360,
+      "hitTest": "board"
+    },
+    "dialog": null,
+    "shots": {
+      "expandedTopShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-expanded-top-360.png",
+      "expandedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-expanded-360.png",
+      "collapsedOverTextShot": "J:\\git\\iflow-harness\\.iflow\\super\\worktrees\\看板背景改亚克力加阴影-mwchyuns-9\\.iflow\\screens\\v3-dark-collapsed-360.png"
+    }
+  }
+]

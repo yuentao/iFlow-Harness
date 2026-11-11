@@ -226,13 +226,35 @@ export function SuperAgentBoard() {
   return (
     // `pointer-events-auto` re-enables hits inside App's pointer-events-none
     // top overlay shell (the gutters around the bar stay transparent to
-    // transcript scroll). Deliberately NOT acrylic and NOT shadow-float: this
-    // is a toolbar over the transcript, not a content card — a raised surface
-    // here competed with the message/tool cards underneath. ConfirmDialog
-    // portals to body, so it escapes this shelf. The surface must stay OPAQUE
-    // (`bg-card`, never a translucent tint): the bar floats over the scrolling
-    // transcript, so any alpha ghosts the message text through it.
-    <div className="stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 bg-card">
+    // transcript scroll).
+    //
+    // Material: acrylic + shadow (user request 2026-11-12). `.super-board-
+    // surface` (styles.css) carries the acrylic tint, the backdrop blur and
+    // the acrylic inset rim; the shadow tier rides the existing .shadow-*
+    // classes and follows the surface size — the collapsed shelf is a ~38px
+    // strip where --shadow-panel's -24px spread collapses the projection to
+    // nothing, so it takes the float drop, while the expanded board is a
+    // real panel and takes the panel drop.
+    //
+    // Why the blur really works here: the board is NOT nested inside a
+    // backdrop-filter ancestor. The acrylic header and the acrylic composer
+    // are SIBLINGS of the transcript column, not ancestors of it, so no
+    // backdrop root stands between the board and the transcript — its own
+    // backdrop-filter samples the scrolling message text for real (unlike
+    // .acrylic-pop, which omits the blur because popups always nest inside
+    // an acrylic ancestor and could only sample that subtree's flat tint).
+    // The surface density is chosen in styles.css so the text behind is
+    // blurred into an illegible wash, never readable through the shelf.
+    //
+    // The board keeps `overflow-hidden` for its own rounded corners, and
+    // both dialogs (ConfirmDialog, the live-activity modal) portal to
+    // document.body, so neither the clip nor the backdrop-filter's
+    // containing block can trap them.
+    <div
+      className={`stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface ${
+        expanded ? "shadow-panel" : "shadow-float"
+      }`}
+    >
       {/* Header row: the board's collapsed form is a single line so it never
           steals space from the transcript. Counts are icon + number chips
           (the wording lives in the tooltip) — the old "{n} 个进行中" text chips
