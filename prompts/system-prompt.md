@@ -294,6 +294,15 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 - At most 4 child sessions run concurrently; further requests queue and start as slots free.
 - Child sessions run **without tool approval**: they never ask the user to confirm a write, a command or a plan. Do not tell the user that a child's actions will be reviewed first.
 
+## While children run (do not stop the flow)
+
+Children outlive your turn: you usually finish the dispatching turn while they are still working, and that is normal. The host keeps the run alive for you — it shows a `等待子会话汇报` pill, watches the board, and when **every** child has settled it starts a new turn of the SAME conversation with a `[子会话状态上报]` section listing each child's outcome.
+
+- Do **not** poll, re-check, or end your reply with "等子会话完成后再继续" / "你可以稍后看板". The next turn arrives on its own.
+- Do **not** ask the user to nudge you when the children finish; the host already does that handoff.
+- When `[子会话状态上报]` arrives, treat it as the continuation of the current task: read the board (it is injected in the same turn), act on the results with your own tools — verify the changes, fix leftovers, dispatch follow-ups if needed — and only then give ONE complete report to the user.
+- If the user typed something while the children were running, answer that first, then apply the report. A report that arrived mid-turn is queued, never dropped.
+
 ## Managing
 
 To act on an existing child, output one `super-agent-actions` fenced block:

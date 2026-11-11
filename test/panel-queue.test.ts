@@ -76,13 +76,12 @@ type PanelInternals = {
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   maybeGenerateAiTitle: (id: string) => Promise<void>;
-  completeInternalPrompt: (text: string, timeoutMs: number, idleMs: number) => Promise<string | null>;
   store: {
     getState: () => PanelState;
     sessionStarted: (meta: { sessionId: string }) => void;
     replaceState: (state: unknown) => void;
     sendToast: (...args: unknown[]) => number;
-    appendRelayMessage: (text: string) => void;
+    dismissToast: (toastId: number) => void;
   };
 };
 
@@ -102,7 +101,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
   let p: PanelInternals;
   let storageDir: string;
   let calls: PromptCall[];
-  let toasts: { level: string; message: string }[];
+  let toasts: { level: string; message: string; opts?: Record<string, unknown> }[];
 
   beforeEach(async () => {
     // sendPrompt awaits the M3 workspace snapshot (a real git subprocess); this
@@ -124,8 +123,8 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     p.touchActiveSession = async () => {};
     p.maybeGenerateAiTitle = async () => {};
     toasts = [];
-    vi.spyOn(p.store, "sendToast").mockImplementation(((level: string, message: string) => {
-      toasts.push({ level, message });
+    vi.spyOn(p.store, "sendToast").mockImplementation(((level: string, message: string, opts?: Record<string, unknown>) => {
+      toasts.push({ level, message, opts });
       return 0;
     }) as PanelInternals["store"]["sendToast"]);
     p.store.sessionStarted({ sessionId: "q-session" });
@@ -213,71 +212,133 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
   });
 
-  it("child-session reports relay in parallel while the main turn streams", async () => {
+  it("child-session reports become the next main-session turn once the current one ends", async () => {
     const first = send("first turn");
     await flush();
     expect(p.store.getState().status).toBe("streaming");
-    let release: (v: string | null) => void = () => {};
-    const complete = vi.fn(() => new Promise<string | null>((r) => { release = r; }));
-    const append = vi.fn();
+    const reportPrompt = vi.fn(() => "[子会话状态上报] ok");
     Object.assign(p, {
-      completeInternalPrompt: complete,
       superAgent: {
-        reportPrompt: () => "[子会话状态上报] ok",
+        reportPrompt,
         list: () => [{ id: "super-1", status: "completed" }],
       },
     });
-    p.store.appendRelayMessage = append;
 
     const internals = p as unknown as {
       queueSuperReport: (entries: unknown[]) => void;
     };
     internals.queueSuperReport([{ session: { id: "super-1", title: "t" }, report: { state: "done", summary: "ok" } }]);
     await flush();
-    expect(complete).toHaveBeenCalledTimes(1); // started immediately, no idle wait
-    expect(append).not.toHaveBeenCalled(); // still in flight
-
-    release("汇报正文");
-    await flush();
-    expect(append).toHaveBeenCalledWith("汇报正文");
-    expect(p.store.getState().status).toBe("streaming"); // main turn untouched
+    // The main turn is still streaming: the report waits, it must not
+    // interleave a second prompt on the same ACP session.
+    expect(calls).toHaveLength(1);
 
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
     await flush();
+
+    // Turn settled → the report is handed over as the NEXT turn, so the agent
+    // (not the user) carries the flow forward.
+    expect(calls).toHaveLength(2);
+    expect(reportPrompt).toHaveBeenCalledTimes(1);
+    const text = calls[1]!.prompt.map((b) => b.text ?? "").join("\n");
+    expect(text).toContain("[子会话状态上报]");
+    expect(text).toContain("[子会话看板]"); // still a main-session turn
+    // Hidden instruction: the assistant answers in the transcript, but no
+    // user bubble is fabricated for a host-driven turn.
+    expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(1);
+
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
   });
 
-  it("waits for every child before relaying one combined report", async () => {
-    const complete = vi.fn(async () => "汇报正文");
-    const append = vi.fn();
+  it("waits for every child before delivering one combined report turn", async () => {
     const sessions: { id: string; status: string }[] = [
       { id: "super-1", status: "running" },
       { id: "super-2", status: "running" },
     ];
     const reportPrompt = vi.fn((_entries: unknown[]) => "[子会话状态上报] ok");
-    Object.assign(p, {
-      completeInternalPrompt: complete,
-      superAgent: { reportPrompt, list: () => sessions },
-    });
-    p.store.appendRelayMessage = append;
-    const internals = p as unknown as { queueSuperReport: (entries: unknown[]) => void };
+    Object.assign(p, { superAgent: { reportPrompt, list: () => sessions } });
+    const internals = p as unknown as {
+      queueSuperReport: (entries: unknown[]) => void;
+      drainSuperReports: () => Promise<void>;
+    };
 
     internals.queueSuperReport([{ session: { id: "super-1", title: "t1" }, report: { state: "ready", summary: "1 ok" } }]);
     await flush();
-    expect(complete).not.toHaveBeenCalled(); // still one child running
+    expect(calls).toHaveLength(0); // still one child running
 
     internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
     await flush();
-    expect(complete).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
 
     for (const entry of sessions) entry.status = "completed";
     internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
     await flush();
-    expect(complete).toHaveBeenCalledTimes(1);
     expect(reportPrompt).toHaveBeenCalledTimes(1);
-    // One combined note carrying both children, not one note per child.
+    // One combined report carrying both children, not one turn per child.
     expect((reportPrompt.mock.calls[0]?.[0] as unknown[]).length).toBe(2);
-    expect(append).toHaveBeenCalledWith("汇报正文");
+    expect(calls).toHaveLength(1);
+
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await flush();
+  });
+
+  it("keeps a queued report while the host is replaying history, delivers it afterwards", async () => {
+    const reportPrompt = vi.fn(() => "[子会话状态上报] ok");
+    Object.assign(p, {
+      superAgent: { reportPrompt, list: () => [{ id: "super-1", status: "completed" }] },
+    });
+    p.store.replaceState({ ...p.store.getState(), status: "idle", replaying: true });
+    const internals = p as unknown as {
+      queueSuperReport: (entries: unknown[]) => void;
+      drainSuperReports: () => Promise<void>;
+    };
+    internals.queueSuperReport([{ session: { id: "super-1", title: "t" }, report: { state: "ready", summary: "ok" } }]);
+    await flush();
+    expect(calls).toHaveLength(0); // never interrupt a replay
+
+    p.store.replaceState({ ...p.store.getState(), replaying: false, status: "idle" });
+    void internals.drainSuperReports(); // what the Super Agent heartbeat does on its tick
+    await flush();
+    expect(calls).toHaveLength(1);
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await flush();
+  });
+
+  it("shows the waiting heartbeat while children run and the main session is idle", async () => {
+    const internals = p as unknown as { refreshSuperWaitHeartbeat: () => void };
+    const child = {
+      id: "super-1",
+      title: "修复登录",
+      task: "修好 src/auth.ts",
+      status: "running",
+      isolation: { kind: "git_worktree", path: "/tmp/wt", branch: "iflow/super/a" },
+      createdAt: 1,
+      updatedAt: 2,
+      reports: [],
+    };
+    p.store.replaceState({
+      ...p.store.getState(),
+      status: "idle",
+      superSessions: [child],
+    });
+    internals.refreshSuperWaitHeartbeat();
+    const pill = toasts.at(-1);
+    expect(pill?.level).toBe("info");
+    expect(pill?.message).toContain("正在等待 1 个子会话汇报");
+    expect(pill?.opts).toMatchObject({ persistent: true, displayOnly: true });
+
+    // Progress frames keep arriving; the same fingerprint must not re-send
+    // the pill over and over.
+    const count = toasts.length;
+    internals.refreshSuperWaitHeartbeat();
+    expect(toasts.length).toBe(count);
+
+    // A main-session turn means it is obviously working — no waiting pill.
+    p.store.replaceState({ ...p.store.getState(), status: "streaming" });
+    internals.refreshSuperWaitHeartbeat();
+    expect(toasts.filter((t) => t.message.includes("正在等待"))).toHaveLength(1);
   });
 
   it("subagent stop routes to _iflow/agent/cancel without cancelling the turn", async () => {
