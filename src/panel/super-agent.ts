@@ -37,7 +37,8 @@
 
 import path from "node:path";
 import { existsSync, lstatSync } from "node:fs";
-import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
 import type {
   ContentBlock,
@@ -91,6 +92,7 @@ import {
   ghAvailable,
   inspectWorkingTree,
   isBranchMerged,
+  listWorktrees,
   mergeBranch,
   previewMerge,
   probeGitRepo,
@@ -98,6 +100,7 @@ import {
   remoteOriginUrl,
   removeWorktree,
   sanitizeWorktreeName,
+  SUPER_BRANCH_PREFIX,
   superBranchName,
   superIsolationDir,
   worktreeHasUncommittedChanges,
@@ -124,6 +127,37 @@ export const SUPER_PROGRESS_THROTTLE_MS = 700;
 const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
 /** 单份附件超过这个大小就不复制 —— 提示词里如实说明，不静默丢。 */
 const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
+
+/**
+ * 隔离释放失败后的后台重试间隔（毫秒）。
+ *
+ * 只针对「目录删不掉」这一类**可重试**的失败（Windows 上子进程刚退出、
+ * 文件仍被占用等）。刻意保留的情况（工作目录有未提交改动、分支还没并入
+ * HEAD）不重试 —— 重试多少次都不会变好，只会白占定时器。
+ */
+const RELEASE_RETRY_DELAYS_MS = [5_000, 15_000, 45_000];
+
+/**
+ * 释放隔离的结果。
+ *
+ * `retryable` 区分两类失败：**可重试**（磁盘层面的偶发失败，重试有意义）
+ * 与**有意保留**（有未提交改动、分支未并入 HEAD —— 那是刻意的安全闸门，
+ * 重试只是白跑）。
+ */
+type ReleaseOutcome =
+  | { ok: true }
+  | { ok: false; retryable: boolean; reason: string };
+
+/** 残留清扫的结果（供宿主如实上报）。 */
+export interface SuperSweepResult {
+  /** 删掉的残留 worktree 数量。 */
+  removed: number;
+  /** 因各种原因保留的数量。 */
+  kept: number;
+  /** 疑似残留的目录（不在 git worktree 注册表里）—— 只记日志，不自动删。 */
+  orphans: string[];
+}
+
 /** 扩展名 → MIME：复制来的图片除了落盘，也作为图片块直接给模型看。 */
 const IMAGE_MIME_BY_EXT = new Map<string, string>([
   [".png", "image/png"],
@@ -326,6 +360,18 @@ export class SuperAgentManager {
   >();
   /** 集成（merge / push + PR）的串行链 —— 并发合并同一个工作区会把仓库搅乱。 */
   private integrationChain: Promise<void> = Promise.resolve();
+  /**
+   * 「分支上没有任何独有提交」的隔离，等子进程退出后再释放。
+   *
+   * 目录删除必须等 CLI 进程先走：Windows 上进程的 cwd 还停在 worktree 里时，
+   * 目录删不掉（会留下半删的目录）。所以集成阶段只登记，释放动作由
+   * `prepare()` 的 finally 在回收进程之后执行。
+   */
+  private readonly pendingEmptyRelease = new Set<string>();
+  /** 隔离释放失败后的后台重试定时器（每个子会话最多一个在飞）。 */
+  private readonly releaseRetryTimers = new Map<string, NodeJS.Timeout>();
+  /** 每个子会话已安排过的释放重试次数（用来限制重试轮数）。 */
+  private readonly releaseRetryAttempts = new Map<string, number>();
   private seq = 0;
   private disposed = false;
 
@@ -685,6 +731,133 @@ export class SuperAgentManager {
   }
 
   /**
+   * 清扫磁盘上的残留 worktree。
+   *
+   * 只处理**同时满足**下列全部条件的 worktree：
+   *  1. 在 `git worktree list` 里注册，且路径就在 `.iflow/super/worktrees/` 下；
+   *  2. 分支名在 `iflow/super/` 命名空间下（用户自己的分支绝不碰）；
+   *  3. 分支已完全并入当前 HEAD（`merge-base --is-ancestor`）—— 没并入的
+   *     分支上可能有还没人审的提交，绝不能删；
+   *  4. worktree 自身干净（`git status --porcelain` 为空）；
+   *  5. 不是活着的子会话正在用的工作目录。
+   *
+   * **孤儿目录（目录在、但已不在 git 注册表里或没有 .git 关联）一律不自动
+   * 删**：无法确认里面有没有独有改动，删掉就是丢数据 —— 只记日志请人工确认。
+   *
+   * 幂等：可重复调用。只删隔离子树下的目录与 `iflow/super/` 分支，绝不碰
+   * 主仓工作区，也绝不碰用户自己的分支。
+   */
+  async sweepStaleWorktrees(): Promise<SuperSweepResult> {
+    const result: SuperSweepResult = { removed: 0, kept: 0, orphans: [] };
+    if (this.disposed) return result;
+
+    const root = superIsolationDir(this.deps.repoRoot, "worktrees");
+    let entries: Dirent[];
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      // 没有隔离子树 → 没有残留。
+      return result;
+    }
+
+    const registered = await listWorktrees(this.deps.repoRoot);
+    const registeredByPath = new Map<string, string | null>();
+    for (const item of registered) {
+      registeredByPath.set(normalizePathKey(item.path), item.branch);
+    }
+
+    // 活着的子会话正在用的工作目录：绝不能删（它还在跑）。
+    const livePaths = new Set<string>();
+    for (const session of this.sessions.values()) {
+      if (isTerminalSuperStatus(session.status)) continue;
+      if (!session.isolation.path) continue;
+      livePaths.add(normalizePathKey(session.isolation.path));
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const target = path.join(root, entry.name);
+      const key = normalizePathKey(target);
+      const branch = registeredByPath.get(key);
+      if (branch === undefined) {
+        // 孤儿目录：不在 git 的 worktree 注册表里（半删残留 / 手删过 .git）。
+        // 无法确认里面有没有独有改动 —— 只记日志，绝不自动删。
+        result.orphans.push(target);
+        this.deps.log.warn(
+          `super agent: 发现疑似残留目录（已不在 git worktree 注册表中，可能含独有改动，需人工确认）：${target}`,
+        );
+        continue;
+      }
+      if (!branch || !branch.startsWith(SUPER_BRANCH_PREFIX)) {
+        result.kept += 1;
+        this.deps.log.info(
+          `super agent: 跳过残留目录 ${target}（不是 ${SUPER_BRANCH_PREFIX} 命名空间下的分支：${branch ?? "detached"}）`,
+        );
+        continue;
+      }
+      if (livePaths.has(key)) {
+        result.kept += 1;
+        this.deps.log.info(`super agent: 跳过残留目录 ${target}（仍是活着的子会话的工作目录）`);
+        continue;
+      }
+      if (!(await isBranchMerged({ repoRoot: this.deps.repoRoot, branch }))) {
+        result.kept += 1;
+        this.deps.log.info(`super agent: 保留残留目录 ${target}（分支 ${branch} 尚未并入当前 HEAD）`);
+        continue;
+      }
+      if (await worktreeHasUncommittedChanges(target)) {
+        result.kept += 1;
+        this.deps.log.warn(`super agent: 保留残留目录 ${target}（工作目录还有未提交改动）`);
+        continue;
+      }
+      const removal = await removeWorktree({
+        repoRoot: this.deps.repoRoot,
+        targetPath: target,
+        branch,
+        keepBranch: false,
+      });
+      if (!removal.removed || removal.branchKept) {
+        result.kept += 1;
+        this.deps.log.warn(
+          `super agent: 清理残留目录 ${target} 未完成（removed=${removal.removed}, branchKept=${removal.branchKept}）${removal.reason ?? ""}`,
+        );
+        continue;
+      }
+      result.removed += 1;
+      this.deps.log.info(`super agent: 已清理残留 worktree ${target} 与分支 ${branch}`);
+      // 被清掉的记录也要标成「已释放」，否则看板一直显示待清理。
+      this.markWorktreeReleased(target);
+    }
+    if (result.removed > 0) this.emit();
+    return result;
+  }
+
+  /**
+   * 把指向某个 worktree 目录的记录都标成「隔离已释放」。
+   *
+   * 清扫掉的可能是历史（archived）子会话的工作目录 —— 它们的记录留在归档里，
+   * 不打 released 标记的话看板会一直显示「还有工作目录没清理」。
+   */
+  private markWorktreeReleased(targetPath: string): void {
+    const key = normalizePathKey(targetPath);
+    const matches = (session: SuperSessionUi): boolean =>
+      Boolean(session.isolation.path) && normalizePathKey(session.isolation.path) === key;
+    for (const [id, session] of [...this.sessions]) {
+      if (!matches(session)) continue;
+      this.sessions.set(id, { ...session, isolation: { ...session.isolation, released: true } });
+    }
+    for (const [owner, records] of [...this.archived]) {
+      if (!records.some(matches)) continue;
+      this.archived.set(
+        owner,
+        records.map((s) =>
+          matches(s) ? { ...s, isolation: { ...s.isolation, released: true } } : s,
+        ),
+      );
+    }
+  }
+
+  /**
    * 面板关闭 / 内核重启时终止全部子进程。
    *
    * **worktree 保留**：里面可能有用户还没合并的工作，随手删掉就是丢数据。
@@ -719,6 +892,12 @@ export class SuperAgentManager {
     this.resolvers.clear();
     for (const timer of this.progressTimers.values()) clearTimeout(timer);
     this.progressTimers.clear();
+    // 隔离释放的重试定时器也要清掉：面板正在关闭，不能让后台重试去动
+    // 磁盘上的 worktree（它与 dispose 的收尾会互相踩）。
+    for (const timer of this.releaseRetryTimers.values()) clearTimeout(timer);
+    this.releaseRetryTimers.clear();
+    this.releaseRetryAttempts.clear();
+    this.pendingEmptyRelease.clear();
     if (this.transcriptTimer) {
       clearTimeout(this.transcriptTimer);
       this.transcriptTimer = null;
@@ -977,6 +1156,7 @@ export class SuperAgentManager {
       // 已被一次重试取代时（attempts 变了），这一轮的进程早就该被清掉，
       // 但客户端槽位已经归新的一次执行，不能再按 id 误杀。
       const latest = this.sessions.get(id);
+      const isCurrentAttempt = latest !== undefined && (latest.attempts ?? 1) === attempt;
       if (!latest || (latest.attempts ?? 1) === attempt) {
         await this.disposeClient(id);
         this.started.delete(id);
@@ -984,7 +1164,13 @@ export class SuperAgentManager {
       // 自动合并成功后释放隔离。必须在进程回收之后：Windows 上子进程的 cwd
       // 还停在 worktree 里时，目录删不掉（会留下半删的目录）。
       if (this.sessions.get(id)?.integration?.state === "merged") {
-        await this.releaseMergedIsolation(id);
+        await this.releaseIsolationWithRetry(id, "merged");
+      }
+      // 「没有产生任何提交」的子会话同样要释放隔离（目录与空分支都是残留）。
+      // 已被一次重试取代时**绝不能删** —— 新的一轮还在用这个 worktree。
+      const pendingEmpty = this.pendingEmptyRelease.delete(id);
+      if (isCurrentAttempt && pendingEmpty) {
+        await this.releaseIsolationWithRetry(id, "empty");
       }
       // 合并子会话收尾：用只读 git 检测目标分支是否真的并入了当前分支，
       // 再把结果写回来源子会话的 integration（失败/中断同样要如实记）。
@@ -1020,7 +1206,7 @@ export class SuperAgentManager {
         at: Date.now(),
       });
       // 分支确实并入 HEAD：来源子会话的 worktree 与分支可以清掉。
-      await this.releaseMergedIsolation(target.sourceId);
+      await this.releaseIsolationWithRetry(target.sourceId, "merged");
       this.deps.onMergeResult?.({
         sourceId: target.sourceId,
         title: target.title,
@@ -1259,7 +1445,15 @@ export class SuperAgentManager {
         baseRef: isolation.baseRef,
       }))
     ) {
+      // 分支上没有任何独有提交 → 删掉 worktree 目录与这条空分支不会丢任何
+      // 东西（子会话若在 worktree 里另建过分支，提交在那个分支上，删目录
+      // 也不会删掉它）。
+      //
+      // 这里**不直接删**：CLI 进程的 cwd 还停在这个 worktree 里，Windows 上
+      // 目录删不掉。先登记，实际释放由 prepare() 的 finally 在进程回收之后
+      // 执行（与「合并成功后释放隔离」同一时序）。
       record({ state: "skipped", detail: "子会话没有产生任何提交" });
+      this.pendingEmptyRelease.add(id);
       return;
     }
 
@@ -1461,33 +1655,67 @@ export class SuperAgentManager {
   }
 
   /**
-   * 合并成功后释放隔离：删掉 worktree 目录与本地分支，只保留看板记录。
+   * 释放隔离，并在**可重试**的失败上安排有限次后台重试。
    *
-   * 返回 true = 已清理或无需清理（幂等，可重复调用）。
+   * 有意保留的失败（有未提交改动、分支未并入 HEAD）不重试 —— 重试多少次都
+   * 不会变好，只会把定时器白白占着。
+   */
+  private async releaseIsolationWithRetry(
+    id: string,
+    mode: "merged" | "empty",
+  ): Promise<void> {
+    const outcome = await this.releaseIsolation(id, mode);
+    if (!outcome.ok && outcome.retryable) {
+      this.scheduleReleaseRetry(id, mode, outcome.reason);
+    }
+  }
+
+  /**
+   * 释放隔离：删掉 worktree 目录与本地分支，只保留看板记录。
    *
-   * 三道保守闸门，任何一道不过都**不删**并如实返回 false：
-   *  1. `released` 已为真 → 磁盘上早没了，直接成功。
-   *  2. worktree 里还有未提交改动 → 删目录会永久丢数据（用户也可能在里面手动
-   *     改过），留给用户自己处置。
-   *  3. `removeWorktree` 保留了分支（未合并 / 删除失败）→ 不能标 released，
-   *     否则看板会谎称分支已清理。
+   * 两条路径共用一道闸门骨架，差别只在「分支能不能删」的判据：
+   *  - `merged`：分支已并入 HEAD → 可以删分支（`isBranchMerged` 复核）；
+   *  - `empty`：分支上没有任何独有提交 → 删分支不会丢东西
+   *    （`branchHasUnmergedCommits` 复核，判据是 baseRef..branch 为空）。
+   *
+   * 幂等：已释放（`released` 为真）直接成功，可重复调用。
    *
    * 调用时机由调用方保证：必须在子会话 CLI 进程退出之后。Windows 上进程的
    * cwd 还停在 worktree 里时，目录是删不掉的。
    */
-  private async releaseMergedIsolation(id: string): Promise<boolean> {
+  private async releaseIsolation(
+    id: string,
+    mode: "merged" | "empty",
+  ): Promise<ReleaseOutcome> {
+    if (mode === "merged") return this.releaseMergedIsolation(id);
+    return this.releaseEmptyIsolation(id);
+  }
+
+  /**
+   * 合并成功后释放隔离：删掉 worktree 目录与本地分支，只保留看板记录。
+   *
+   * 三道保守闸门，任何一道不过都**不删**并如实返回：
+   *  1. `released` 已为真 → 磁盘上早没了，直接成功。
+   *  2. worktree 里还有未提交改动 → 删目录会永久丢数据（用户也可能在里面手动
+   *     改过），留给用户自己处置。**有意保留，不重试。**
+   *  3. `removeWorktree` 没删干净 / 分支没删掉 → 可重试（磁盘层面的偶发
+   *     失败，比如子进程刚退出、文件仍被占用）。
+   *
+   * 「分支还没并入 HEAD」也是有意保留，不重试 —— 重试多少次它都不会并入。
+   */
+  private async releaseMergedIsolation(id: string): Promise<ReleaseOutcome> {
     const session = this.get(id);
-    if (!session) return true;
+    if (!session) return { ok: true };
     const isolation = session.isolation;
-    if (isolation.kind !== "git_worktree") return true;
-    if (!isolation.path || !isolation.branch) return true;
-    if (isolation.released) return true;
+    if (isolation.kind !== "git_worktree") return { ok: true };
+    if (!isolation.path || !isolation.branch) return { ok: true };
+    if (isolation.released) return { ok: true };
 
     if (await worktreeHasUncommittedChanges(isolation.path)) {
       this.deps.log.warn(
         `super agent: ${id} 的工作目录还有未提交改动，保留 worktree 与分支 ${isolation.branch}`,
       );
-      return false;
+      return { ok: false, retryable: false, reason: "工作目录还有未提交改动" };
     }
 
     // 删分支前再核一次「真的并入 HEAD」。调用方只在 merged 之后调用，但这里
@@ -1497,7 +1725,7 @@ export class SuperAgentManager {
       this.deps.log.warn(
         `super agent: ${id} 的分支 ${isolation.branch} 尚未并入当前 HEAD，保留 worktree 与分支`,
       );
-      return false;
+      return { ok: false, retryable: false, reason: "分支尚未并入当前 HEAD" };
     }
 
     // 刻意不传 baseRef：baseRef 是分支起点，合并后分支的提交虽然已经在 HEAD
@@ -1510,32 +1738,199 @@ export class SuperAgentManager {
       keepBranch: false,
     });
     if (!result.removed || result.branchKept) {
+      const reason = result.reason ?? "目录或分支未能删除";
       this.deps.log.warn(
-        `super agent: ${id} 隔离清理未完成（removed=${result.removed}, branchKept=${result.branchKept}）${result.reason ? `：${result.reason}` : ""}`,
+        `super agent: ${id} 隔离清理未完成（removed=${result.removed}, branchKept=${result.branchKept}）：${reason}`,
       );
-      return false;
+      return { ok: false, retryable: true, reason };
     }
 
     // 记录保留、只打 released：看板仍要能说清「改动去了哪里」。
-    const next: SuperSessionUi = {
-      ...session,
-      isolation: { ...isolation, released: true },
-    };
-    // 与 recordIntegration 同一条写回路径：历史子会话不在 sessions 里，必须
-    // 写回 archived，否则重启后看板又会拿旧记录去删一个不存在的目录。
-    if (this.sessions.has(id)) {
-      this.sessions.set(id, next);
-    } else {
-      for (const [owner, records] of this.archived) {
-        if (!records.some((s) => s.id === id)) continue;
-        this.archived.set(owner, records.map((s) => (s.id === id ? next : s)));
-      }
-    }
-    this.emit();
+    this.markReleased(id);
     this.deps.log.info(
       `super agent: ${id} 合并成功，已清理 worktree 与分支 ${isolation.branch}`,
     );
-    return true;
+    return { ok: true };
+  }
+
+  /**
+   * 「没有产生任何提交」的隔离释放：删掉 worktree 目录与那条空分支。
+   *
+   * 与合并路径的区别只有一处：**不要求分支并入 HEAD** —— 分支上本来就没有
+   * 独有提交，删掉它不会丢任何东西。其余闸门一致：
+   *  - 有未提交改动 → 有意保留（删目录就是丢数据），不重试、不谎称已清理；
+   *  - 分支上突然出现未合并提交（状态在这期间变了）→ 有意保留，不重试；
+   *  - 目录/分支删不掉 → 可重试。
+   *
+   * 子会话可能在自己的 worktree 里另建过分支（那样提交不在
+   * `iflow/super/` 分支上）：删目录不会删掉那个分支，提交仍在。
+   */
+  private async releaseEmptyIsolation(id: string): Promise<ReleaseOutcome> {
+    const session = this.get(id);
+    if (!session) return { ok: true };
+    const isolation = session.isolation;
+    if (isolation.kind !== "git_worktree") return { ok: true };
+    if (!isolation.path || !isolation.branch) return { ok: true };
+    if (isolation.released) return { ok: true };
+
+    const keep = (detail: string): ReleaseOutcome => {
+      this.deps.log.warn(`super agent: ${id} ${detail}，保留 worktree 与分支 ${isolation.branch}`);
+      this.recordIntegration(id, {
+        mode: session.integration?.mode ?? this.deps.integrationMode(),
+        state: "skipped",
+        detail,
+        at: Date.now(),
+      });
+      return { ok: false, retryable: false, reason: detail };
+    };
+
+    if (await worktreeHasUncommittedChanges(isolation.path)) {
+      return keep("子会话没有产生任何提交，工作目录保留（还有未提交改动）");
+    }
+
+    // 删分支前再核一次「确实没有独有提交」—— 状态可能在这期间变了
+    // （比如子会话临收尾前才提交）。
+    const baseRef = isolation.baseRef;
+    if (!baseRef) {
+      return keep("子会话没有产生任何提交，工作目录保留（缺少分支起点，无法确认分支为空）");
+    }
+    if (
+      await branchHasUnmergedCommits({
+        repoRoot: this.deps.repoRoot,
+        branch: isolation.branch,
+        baseRef,
+      })
+    ) {
+      return keep("子会话没有产生任何提交（分支上出现新提交），工作目录保留");
+    }
+
+    const result = await removeWorktree({
+      repoRoot: this.deps.repoRoot,
+      targetPath: isolation.path,
+      branch: isolation.branch,
+      keepBranch: false,
+    });
+    if (!result.removed || result.branchKept) {
+      const reason = result.reason ?? "目录或分支未能删除";
+      this.deps.log.warn(
+        `super agent: ${id} 空分支的 worktree 清理未完成（removed=${result.removed}, branchKept=${result.branchKept}）：${reason}`,
+      );
+      this.recordIntegration(id, {
+        mode: session.integration?.mode ?? this.deps.integrationMode(),
+        state: "skipped",
+        detail: "子会话没有产生任何提交，工作目录清理未完成（稍后重试）",
+        at: Date.now(),
+      });
+      return { ok: false, retryable: true, reason };
+    }
+
+    this.markReleased(id);
+    this.recordIntegration(id, {
+      mode: session.integration?.mode ?? this.deps.integrationMode(),
+      state: "skipped",
+      detail: "子会话没有产生任何提交，工作目录已清理",
+      at: Date.now(),
+    });
+    this.deps.log.info(
+      `super agent: ${id} 没有产生任何提交，已清理 worktree 与分支 ${isolation.branch}`,
+    );
+    return { ok: true };
+  }
+
+  /**
+   * 释放失败后的有限后台重试。
+   *
+   * 只重试**可重试**的失败（目录删不掉这类磁盘层面的偶发失败）。有意保留
+   * 的情况（有未提交改动 / 分支未并入 HEAD）不重试。
+   *
+   * 与面板关闭互斥：`dispose()` 会清掉所有定时器，重试回调也会先看
+   * `disposed` —— 不会跟面板的收尾抢同一个 worktree。
+   */
+  private scheduleReleaseRetry(
+    id: string,
+    mode: "merged" | "empty",
+    reason: string,
+  ): void {
+    if (this.disposed) return;
+    if (this.releaseRetryTimers.has(id)) return;
+    const attempt = this.releaseRetryAttempts.get(id) ?? 0;
+    if (attempt >= RELEASE_RETRY_DELAYS_MS.length) {
+      this.deps.log.warn(
+        `super agent: ${id} 隔离释放重试 ${attempt} 次仍未成功，放弃自动清理（请手动处理）：${reason}`,
+      );
+      return;
+    }
+    const delay = RELEASE_RETRY_DELAYS_MS[attempt] ?? RELEASE_RETRY_DELAYS_MS[0]!;
+    this.releaseRetryAttempts.set(id, attempt + 1);
+    const timer = setTimeout(() => {
+      this.releaseRetryTimers.delete(id);
+      void this.runReleaseRetry(id, mode, reason);
+    }, delay);
+    if (typeof timer.unref === "function") timer.unref();
+    this.releaseRetryTimers.set(id, timer);
+    this.deps.log.warn(
+      `super agent: ${id} 隔离释放失败（${reason}），${Math.round(delay / 1000)}s 后进行第 ${attempt + 1} 次重试`,
+    );
+  }
+
+  /** 后台重试的一次尝试。 */
+  private async runReleaseRetry(
+    id: string,
+    mode: "merged" | "empty",
+    reason: string,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const outcome = await this.releaseIsolation(id, mode);
+    if (outcome.ok) {
+      this.releaseRetryAttempts.delete(id);
+      return;
+    }
+    if (!outcome.retryable) {
+      // 有意保留 —— 不再重试，如实上报即可。
+      this.releaseRetryAttempts.delete(id);
+      return;
+    }
+    this.scheduleReleaseRetry(id, mode, outcome.reason || reason);
+  }
+
+  /**
+   * 把一条子会话记录标成「隔离已释放」（worktree 与分支都已从磁盘上清掉）。
+   *
+   * 与 recordIntegration 同一条写回路径：历史子会话不在 sessions 里，必须
+   * 写回 archived，否则重启后看板又会拿旧记录去删一个不存在的目录。
+   */
+  private markReleased(id: string): void {
+    const updated = this.updateSessionRecord(id, (session) => ({
+      ...session,
+      isolation: { ...session.isolation, released: true },
+    }));
+    if (updated) this.emit();
+  }
+
+  /**
+   * 改一条子会话记录（活着的或历史恢复的），返回是否真的改到了。
+   *
+   * 单一写回通道：sessions 与 archived 各一份，改哪份取决于记录在哪。
+   */
+  private updateSessionRecord(
+    id: string,
+    transform: (session: SuperSessionUi) => SuperSessionUi,
+  ): boolean {
+    const live = this.sessions.get(id);
+    if (live) {
+      this.sessions.set(id, transform(live));
+      return true;
+    }
+    let updated = false;
+    for (const [owner, records] of this.archived) {
+      if (!records.some((s) => s.id === id)) continue;
+      this.archived.set(
+        owner,
+        records.map((s) => (s.id === id ? transform(s) : s)),
+      );
+      updated = true;
+    }
+    return updated;
   }
 
   private apply(id: string, event: SuperEvent): void {
@@ -1724,6 +2119,17 @@ function reusableIsolation(
   if (!isolation.path || !existsSync(isolation.path)) return null;
   if (isolation.kind === "git_worktree" && !isolation.branch) return null;
   return isolation;
+}
+
+/**
+ * 路径比较键：统一分隔符，Windows 上忽略大小写。
+ *
+ * git 的 worktree 列表用正斜杠输出，主仓给的路径是反斜杠 —— 不归一化就比不出
+ * 同一个目录（残留清扫会因此把在用的 worktree 误判成孤儿）。
+ */
+function normalizePathKey(target: string): string {
+  const resolved = path.resolve(target).replace(/\\/g, "/");
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 /**

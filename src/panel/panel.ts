@@ -6231,10 +6231,20 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async restoreSuperSessions(mainSessionId: string): Promise<void> {
     const records = await readSuperSessionArchive(this.superStoreDir(), mainSessionId);
-    if (records.length === 0) return;
-    const restored = records.map((record) => fromPersistedSuperSession(record));
-    this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
-    this.getSuperAgent()?.restoreSessions(mainSessionId, restored);
+    if (records.length > 0) {
+      const restored = records.map((record) => fromPersistedSuperSession(record));
+      this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);
+      this.getSuperAgent()?.restoreSessions(mainSessionId, restored);
+    }
+    // 恢复归档时顺带清扫磁盘上的残留 worktree（只在恢复时触发，不是每次
+    // 快照都跑）：上次运行遗留的、已经并入当前分支的空 worktree 与分支，
+    // 在这里被收掉 —— 否则它们会一直堆在 `.iflow/super/worktrees/` 下。
+    const swept = await this.getSuperAgent()?.sweepStaleWorktrees?.();
+    if (swept && (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0)) {
+      this.log.info(
+        `super agent: 残留清扫 — 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
+      );
+    }
   }
 
   /**

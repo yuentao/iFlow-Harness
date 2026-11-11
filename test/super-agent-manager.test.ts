@@ -589,12 +589,14 @@ describe("super agent · 编排", () => {
 
   it("清理子会话时保留有未合并提交的分支", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo);
+    // manual 模式：不做自动集成，也就不会在「没有产生任何提交」后自动释放
+    // 隔离 —— worktree 活到测试自己往里提交为止（这正是本例要验的场景）。
+    const harness = makeManager(repo, "complete", "manual");
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
     // 宿主在 completed 之后还会检查一次 worktree 并可能代提交（`git add -A`）；
-    // 等集成结果落定再动 worktree，否则两个 git 进程会撞 index.lock。
-    await until(() => harness.sessions[0]?.integration !== undefined);
+    // 等它上报完成再动 worktree，否则两个 git 进程会撞 index.lock。
+    await until(() => harness.reports.length > 0);
     // 在 worktree 里提交一次 → 分支上有未合并提交。
     const wt = harness.sessions[0]?.isolation.path!;
     writeFileSync(path.join(wt, "b.txt"), "work\n", "utf8");
