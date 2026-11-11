@@ -809,6 +809,8 @@ interface ToolStylePayload {
   tasks: SuperTaskSpec[] | null;
   /** 载荷原文。 */
   body: string;
+  /** 标记偏移（渲染侧据此把包裹标记一起纳入卡片）。 */
+  marker: number;
   /** 载荷起始偏移。 */
   start: number;
   /** 载荷结束偏移（不含）。 */
@@ -849,13 +851,13 @@ function findToolStylePayloads(text: string, from: number): ToolStylePayload[] {
     }
     const tasks = parseToolStylePayload(text.slice(start, close + 1));
     if (tasks.tasks) {
-      out.push({ tasks: tasks.tasks, body: text.slice(start, close + 1), start, end: close + 1 });
+      out.push({ tasks: tasks.tasks, body: text.slice(start, close + 1), marker, start, end: close + 1 });
       searchFrom = close + 1;
       continue;
     }
     if (tasks.looksLikeDelegation) {
       // 确实是委派载荷但内容非法 —— 交给宿主提示用户，而不是静默丢弃。
-      out.push({ tasks: null, body: text.slice(start, close + 1), start, end: close + 1 });
+      out.push({ tasks: null, body: text.slice(start, close + 1), marker, start, end: close + 1 });
       searchFrom = close + 1;
       continue;
     }
@@ -2155,18 +2157,24 @@ export function reportForSession(
 // 协议块的转录投影（webview 渲染用）
 // ---------------------------------------------------------------------------
 //
-// 主 Agent 把委派 / 管理动作写成 ```super-agent / ```super-agent-actions
-// 围栏。宿主侧的扫描派发（`extractSuperDirectives` / `extractSuperActions`）
-// 与这里的渲染投影是**两条互不影响的读者**：这里只决定转录里显示成什么，
-// 不参与派发，也不改变任何宿主状态。
+// 主 Agent 把委派 / 管理动作写成 ```super-agent / ```super-agent-actions 围栏，
+// 或者写成**工具调用式**载荷（实测各家模型写法不一：`<｜DSML｜tool-super-agent>`、
+// `<tool_call>`、以及「`super-agent:` + ```json 围栏」）。宿主侧的扫描派发
+// （`extractSuperDirectives` / `extractSuperActions`）与这里的渲染投影是**同一个
+// 协议的两个读者**：这里只决定转录里显示成什么，不参与派发，也不改变任何宿主状态。
 //
-// 流式策略：围栏闭合之前不渲染卡片（整段按原样留给 Markdown），闭合后才
-// 切换成卡片。理由：
-// ① 未闭合的正文是半截 JSON，此时解析必然失败；若此刻就渲染「原始协议块」
+// **两条判定链必须与宿主逐字同源**（围栏走 `resolveSuperDirectiveBlock`，工具调用式
+// 走 `findToolStylePayloads`）：只认围栏的渲染侧遇到工具调用式载荷时切不出卡片，
+// 于是「宿主已经派发、转录仍是一堵 JSON 墙」（用户实测截图 2026-11-12 —— 看板上有
+// 「等待子会话汇报」，转录里却看不到委派卡）。
+//
+// 流式策略：载荷收全之前不渲染卡片（整段按原样留给 Markdown），收全后才切换成
+// 卡片。理由：
+// ① 未收全的正文是半截 JSON，此时解析必然失败；若此刻就渲染「原始协议块」
 //    卡片，流式期间会反复闪成「解析失败」，比普通代码块更糟；
-// ② 宿主同样要等收栏才派发 —— 渲染与派发在同一时刻切换，用户看到卡片出现
+// ② 宿主同样要等载荷收全才派发 —— 渲染与派发在同一时刻切换，用户看到卡片出现
 //    就等于这条指令已经完整；
-// ③ 没有「解析中」的临时 UI，未闭合时的行为与改动前逐字节一致（普通代码
+// ③ 没有「解析中」的临时 UI，未收全时的行为与改动前逐字节一致（普通代码
 //    块），失败面最小。代价只是收栏那一瞬间文字从代码块跃变为卡片。
 
 export interface SuperDirectiveTask {
@@ -2215,9 +2223,10 @@ export type SuperDirectiveSegment =
   | { kind: "text"; text: string }
   | {
       kind: "directive";
-      /** 围栏语言（`super-agent` / `super-agent-actions` / 同前缀的其它语言）。 */
+      /** 围栏语言（`super-agent` / `super-agent-actions` / 同前缀的其它语言）；
+       *  工具调用式载荷固定报协议标记 `super-agent`（它没有围栏语言）。 */
       language: string;
-      /** 围栏原文（含开栏与收栏行）。 */
+      /** 协议块原文：围栏含开栏与收栏行；工具调用式含包裹标记与紧随的收栏行。 */
       raw: string;
       display: SuperDirectiveDisplay;
     };
@@ -2225,8 +2234,14 @@ export type SuperDirectiveSegment =
 /** 渲染侧识别的围栏：`super-agent` 及其派生语言（`super-agent-actions` 等）。 */
 const SUPER_RENDER_FENCE_OPEN = /^```(super-agent(?:-[A-Za-z0-9_-]+)?)[ \t]*$/;
 
-/** 转录里识别协议围栏的快速探测串（避免每帧逐行扫描长回答）。 */
-const SUPER_RENDER_MARK = "```super-agent";
+/**
+ * 转录里识别协议块的快速探测串（避免每帧逐行扫描长回答）。
+ *
+ * 探测的是**协议标记本身**而不是 ` ```super-agent `：工具调用式写法（`<｜DSML｜tool-
+ * super-agent>`、`super-agent:` + ```json）没有围栏前缀，只探测围栏串会让整段扫描
+ * 被跳过 —— 卡片就永远出不来。扫描本身仍是精确判定，探测只是省掉无标记文本的开销。
+ */
+const SUPER_RENDER_PROBE = TOOL_STYLE_MARKER;
 
 interface SuperRenderFenceMatch {
   language: string;
@@ -2255,6 +2270,55 @@ function findSuperRenderFence(text: string, from: number): SuperRenderFenceMatch
     pos = lineEnd + 1;
   }
   return null;
+}
+
+/** 包裹标记里可以连同载荷一起吞掉的字符（不含空白、中文与散文标点）。 */
+const WRAPPER_CHAR = /[`<>|｜\-_/A-Za-z0-9]/;
+
+/**
+ * 工具调用式载荷的卡片起始偏移：把紧贴标记的包裹标记（`<｜DSML｜tool-`、行首的 ``` ）
+ * 一并纳入，否则转录里会留下一截 `<｜DSML｜tool-` 这样的残字。
+ *
+ * 散文一律留在文本段里 —— 模型写在标记前面的那句话是真给用户读的，不能吞。
+ * 「紧贴标记的一串拉丁词」不算包裹（`我会用 super-agent 委派` 里的 `用` 不是标记），
+ * 只有以 `<` / ``` 开头、或含 `tool` 的紧邻片段才当包裹处理。
+ */
+function toolStyleRegionStart(text: string, marker: number): number {
+  let i = marker;
+  while (i > 0 && WRAPPER_CHAR.test(text.charAt(i - 1))) i--;
+  if (i === marker) return marker;
+  const prefix = text.slice(i, marker);
+  if (prefix.startsWith("<") || prefix.startsWith("`") || prefix.includes("tool")) return i;
+  return marker;
+}
+
+/**
+ * 工具调用式载荷的卡片结束偏移：载荷后面紧跟一行独占的 ``` 收栏（模型把载荷裹在
+ * ```json 里）或包裹标记的收尾（`</tool-super-agent>`）时把它一并纳入 —— 留在外面
+ * 就是一行孤零零的 ```，Markdown 会拿它去裹后面的正文。
+ */
+function toolStyleRegionEnd(text: string, payloadEnd: number): number {
+  // 载荷与紧随的收栏行之间可能夹着换行（```json 块的结尾就是「}\n```」）。
+  let i = payloadEnd;
+  while (i < text.length && (text.charAt(i) === "\n" || text.charAt(i) === "\r")) i++;
+  const lineEnd = text.indexOf("\n", i);
+  const line = text.slice(i, lineEnd === -1 ? text.length : lineEnd).replace(/\r$/, "");
+  if (FENCE_CLOSE.test(line) || /^<\/?[A-Za-z0-9_|｜\-/]+>$/.test(line)) {
+    return lineEnd === -1 ? text.length : lineEnd + 1;
+  }
+  return payloadEnd;
+}
+
+/** 宿主解析出的任务 → 卡片可展示的任务书（附件取展示名）。 */
+function tasksFromSpecs(tasks: SuperTaskSpec[]): SuperDirectiveDisplay {
+  return {
+    kind: "tasks",
+    tasks: tasks.map((task) => ({
+      title: task.title,
+      task: task.task,
+      attachments: (task.attachments ?? []).map((attachment) => attachment.name),
+    })),
+  };
 }
 
 /**
@@ -2334,21 +2398,31 @@ function describeSuperDirective(language: string, body: string): SuperDirectiveD
 /**
  * 把一段助手文本切成「普通文本段 + 协议块段」。
  *
- * 只识别**独占一行**的 ```super-agent / ```super-agent-<name> 围栏（与宿主
- * 的围栏正则同一形状），围栏之外的内容原样保留给 Markdown。未闭合的围栏不
- * 切分：剩余整段仍是文本段（Markdown 会照常渲染成代码块），收栏后下一次调
- * 用才切成卡片。
+ * 两条判定链与宿主派发逐字同源（见本节顶部注释）：
+ *  - 围栏：只识别**独占一行**的 ```super-agent / ```super-agent-<name>（与宿主
+ *    的围栏正则同一形状），收栏由 `resolveSuperDirectiveBlock` 按 JSON 结构定位；
+ *  - 工具调用式载荷：走宿主的 `findToolStylePayloads`（标记 + 不远处的 JSON），
+ *    卡片边界把包裹标记与紧随的收栏行一并吞掉（{@link toolStyleRegionStart} /
+ *    {@link toolStyleRegionEnd}）。
+ *
+ * 围栏之外的内容原样保留给 Markdown。未闭合的围栏不切分：剩余整段仍是文本段
+ * （Markdown 会照常渲染成代码块），收栏后下一次调用才切成卡片 —— 与宿主「等收栏
+ * 才派发」在同一时刻切换。工具调用式载荷同理：JSON 没收全就不切。
  */
 export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment[] {
-  if (!text.includes(SUPER_RENDER_MARK)) return text ? [{ kind: "text", text }] : [];
+  if (!text.includes(SUPER_RENDER_PROBE)) return text ? [{ kind: "text", text }] : [];
   const segments: SuperDirectiveSegment[] = [];
   let textStart = 0;
   let cursor = 0;
+  let fenceUnclosed = false;
   while (cursor < text.length) {
     const open = findSuperRenderFence(text, cursor);
     if (!open) break;
     const resolved = resolveSuperDirectiveBlock(text, open, { language: open.language });
-    if (resolved.kind === "unclosed") break;
+    if (resolved.kind === "unclosed") {
+      fenceUnclosed = true;
+      break;
+    }
     if (open.lineStart > textStart) {
       segments.push({ kind: "text", text: text.slice(textStart, open.lineStart) });
     }
@@ -2361,6 +2435,27 @@ export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment
     cursor = resolved.closeEnd;
     textStart = resolved.closeEnd;
   }
+
+  // 工具调用式载荷：只在围栏没消费掉的区域里找（与宿主同一起点），围栏未闭合时
+  // 同样不做兜底 —— 那段文本归围栏路径管。宿主据此派发，这里据此出卡片。
+  if (!fenceUnclosed) {
+    for (const match of findToolStylePayloads(text, cursor)) {
+      const start = toolStyleRegionStart(text, match.marker);
+      const end = toolStyleRegionEnd(text, match.end);
+      if (start > textStart) segments.push({ kind: "text", text: text.slice(textStart, start) });
+      segments.push({
+        kind: "directive",
+        language: TOOL_STYLE_MARKER,
+        raw: text.slice(start, end),
+        // 宿主派发出来的任务照原样展示（不带容错标记）；宿主没派发的载荷走
+        // describeSuperDirective 的降级路径（容错拆出 / 原始协议块）。
+        display: match.tasks ? tasksFromSpecs(match.tasks) : describeSuperDirective(TOOL_STYLE_MARKER, match.body),
+      });
+      cursor = end;
+      textStart = end;
+    }
+  }
+
   const rest = text.slice(textStart);
   if (rest) segments.push({ kind: "text", text: rest });
   return segments;
