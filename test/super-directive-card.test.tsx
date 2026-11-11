@@ -6,7 +6,9 @@
  * 普通 JSON 代码块渲染时是一堵难以阅读的 JSON 墙。这些用例钉住：
  *
  *  - 纯函数切分：普通文本段与协议段分开，未闭合围栏不切；
- *  - 委派卡：任务标题/正文/附件都在，且不再出现裸 JSON；
+ *  - 委派卡：每个任务书渲染成**一张独立卡片**（标题 / 正文 / 附件 / 序号 chip），
+ *    不再有「委派子会话 / N 个任务」那种汇总卡，也不再出现裸 JSON；
+ *  - 容错提示：载荷没能完整解析时，拆出的任务书带一条诚实提示；
  *  - 操作卡：动作中文名 + 目标子会话 id；
  *  - 非法 JSON / 未知形状 / 未知语言：退化为「原始协议块」卡，不抛异常；
  *  - 未闭合围栏（流式中间态）：仍是普通代码块，不渲染半截卡片；
@@ -16,7 +18,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { splitSuperDirectiveSegments } from "../shared/super-agent";
-import { AssistantText } from "../webview/src/components/SuperDirectiveCard";
+import { AssistantText, SuperDirectiveCard } from "../webview/src/components/SuperDirectiveCard";
 
 const send = vi.hoisted(() => vi.fn());
 const useChat = vi.hoisted(() =>
@@ -51,6 +53,18 @@ const DELEGATE = [
   "```",
 ].join("\n");
 
+const DELEGATE_ONE = [
+  "```super-agent",
+  JSON.stringify(
+    {
+      tasks: [{ title: "独自开工", task: "只派一个子会话时也应该就是一张卡" }],
+    },
+    null,
+    2,
+  ),
+  "```",
+].join("\n");
+
 const ACTIONS = [
   "```super-agent-actions",
   JSON.stringify(
@@ -66,6 +80,9 @@ const ACTIONS = [
   ),
   "```",
 ].join("\n");
+
+/** 单条协议段的类型（组件的 props 类型不是导出的，用 Parameters 取）。 */
+type DirectiveSegment = Parameters<typeof SuperDirectiveCard>[0]["segment"];
 
 let root: Root;
 let container: HTMLDivElement;
@@ -87,8 +104,17 @@ function render(text: string): void {
   act(() => root.render(<AssistantText text={text} />));
 }
 
+function renderSegment(segment: DirectiveSegment): void {
+  act(() => root.render(<SuperDirectiveCard segment={segment} />));
+}
+
 function text(): string {
   return container.textContent ?? "";
+}
+
+/** 委派任务卡（每张任务书一张）。 */
+function taskCards(): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>('[data-testid="super-task-card"]')];
 }
 
 describe("splitSuperDirectiveSegments", () => {
@@ -126,18 +152,69 @@ describe("splitSuperDirectiveSegments", () => {
 });
 
 describe("AssistantText 协议块卡片", () => {
-  it("super-agent 围栏渲染成委派卡：标题 / 正文 / 附件都在，不再是裸 JSON", () => {
+  it("super-agent 围栏里的每个任务书渲染成一张独立卡片", () => {
     render(DELEGATE);
+    const cards = taskCards();
+    expect(cards).toHaveLength(2);
+
+    // 每张卡只带自己那份任务书：标题 / 正文 / 附件各自独立。
+    expect(cards[0]!.textContent).toContain("修复登录跳转");
+    expect(cards[0]!.textContent).toContain("修好 src/auth.ts 的登录跳转并补单测");
+    expect(cards[0]!.textContent).toContain("auth.ts");
+    expect(cards[0]!.textContent).not.toContain("补文档");
+
+    expect(cards[1]!.textContent).toContain("补文档");
+    expect(cards[1]!.textContent).toContain("更新 README 的登录章节");
+    expect(cards[1]!.textContent).not.toContain("修复登录跳转");
+
+    // 序号 chip 表达批次内的次序。
+    expect(cards[0]!.textContent).toContain("第 1/2 个任务");
+    expect(cards[1]!.textContent).toContain("第 2/2 个任务");
+
+    // 不再有「委派子会话 / N 个任务」那种汇总卡：只有每张卡自己的序号 chip。
     const body = text();
-    expect(body).toContain("委派子会话");
-    expect(body).toContain("2 个任务");
-    expect(body).toContain("修复登录跳转");
-    expect(body).toContain("修好 src/auth.ts 的登录跳转并补单测");
-    expect(body).toContain("补文档");
-    // 附件名展示（路径的 basename）
-    expect(body).toContain("auth.ts");
-    // 原始载荷不再进 DOM
+    expect(body).not.toContain("委派子会话");
+    expect(body.match(/第 \d+\/\d+ 个任务/g)).toEqual(["第 1/2 个任务", "第 2/2 个任务"]);
+    // 原始载荷不再进 DOM。
     expect(body).not.toContain('"tasks"');
+  });
+
+  it("只有一个任务书时就是一张卡，不出现多余的序号层级", () => {
+    render(DELEGATE_ONE);
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("独自开工");
+    expect(cards[0]!.textContent).toContain("只派一个子会话时也应该就是一张卡");
+    // 单卡没有批次信息，不显示「第 1/1 个任务」。
+    expect(text()).not.toMatch(/第 \d+\/\d+ 个任务/);
+  });
+
+  it("容错拆出的任务书带一条诚实提示（可能尚未派发）", () => {
+    renderSegment({
+      kind: "directive",
+      language: "super-agent",
+      raw: "```super-agent\n{坏掉的载荷\n```",
+      // shared 侧给 tasks 变体加的容错标记（可选字段）：这里直接构造，
+      // 不依赖 shared 的解析路径。
+      display: {
+        kind: "tasks",
+        tasks: [{ title: "容错拆出的任务", task: "正文", attachments: [] }],
+        salvaged: true,
+      },
+    } as unknown as DirectiveSegment);
+
+    const notice = container.querySelector('[data-testid="super-task-salvaged"]');
+    expect(notice).toBeTruthy();
+    expect(notice!.textContent).toContain("载荷未能完整解析");
+    expect(notice!.textContent).toContain("可能尚未派发");
+    // 提示之外，任务书照常展示（用户至少能读到模型想干什么）。
+    expect(taskCards()).toHaveLength(1);
+    expect(taskCards()[0]!.textContent).toContain("容错拆出的任务");
+  });
+
+  it("正常派发的任务书没有容错提示", () => {
+    render(DELEGATE);
+    expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
   });
 
   it("super-agent-actions 围栏渲染成操作卡：动作中文名 + 目标子会话 id", () => {
@@ -152,6 +229,8 @@ describe("AssistantText 协议块卡片", () => {
     expect(body).toContain("保留分支");
     expect(body).toContain("1 个回答");
     expect(body).not.toContain('"actions"');
+    // 动作卡仍是一张卡多行，不跟着任务书拆。
+    expect(taskCards()).toHaveLength(0);
   });
 
   it("非法 JSON 退化为原始协议块卡（带原因，不抛异常）", () => {
@@ -161,6 +240,7 @@ describe("AssistantText 协议块卡片", () => {
     expect(body).toContain("原始协议块");
     expect(body).toContain("内容不是合法 JSON");
     expect(body).not.toContain("委派子会话");
+    expect(taskCards()).toHaveLength(0);
   });
 
   it("JSON 合法但形状不符同样退化", () => {
@@ -183,6 +263,7 @@ describe("AssistantText 协议块卡片", () => {
     const unclosed = ["```super-agent", '{"tasks": [{"title": "进行中的任务"'].join("\n");
     expect(() => render(unclosed)).not.toThrow();
     expect(text()).not.toContain("委派子会话");
+    expect(taskCards()).toHaveLength(0);
     const code = container.querySelector("pre code");
     expect(code).toBeTruthy();
     expect(code!.className).toContain("language-super-agent");
@@ -214,7 +295,7 @@ describe("AssistantText 协议块卡片", () => {
     expect(jsCode).toBeTruthy();
     expect(jsCode!.textContent).toContain("const a = 1;");
     // 协议卡与尾注
-    expect(body).toContain("委派子会话");
+    expect(body).toContain("修复登录跳转");
     expect(body).toContain("收尾。");
   });
 });

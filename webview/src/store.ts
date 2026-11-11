@@ -569,6 +569,49 @@ function createMockHost(): HostApi {
         "```",
       ].join("\n"),
     },
+    {
+      kind: "text",
+      // Mock a delegation turn: one ```super-agent block carrying THREE task
+      // briefs. The transcript renders each brief as its own card (the mock
+      // host is the frontend's dev surface, so browser iteration needs a
+      // sample that exercises the split-card layout).
+      text: [
+        "这三个任务书我拆给三个子会话并行做：",
+        "",
+        "```super-agent",
+        JSON.stringify(
+          {
+            tasks: [
+              {
+                title: "修复登录跳转",
+                task: [
+                  "修好 src/auth.ts 的登录跳转：redirect 分支的条件写反了，401 回跳到登录页而不是首页。",
+                  "",
+                  "具体步骤：",
+                  "1. 读 src/auth.ts，找到 redirect 判断那一行，把条件改成 authError.code === 401。",
+                  "2. 补一个覆盖 401 回跳的单测（test/auth.test.ts），断言回跳目标 URL。",
+                  "3. 跑 npx vitest run test/auth.test.ts 与 npm run typecheck 验证。",
+                  "",
+                  "约束：不要顺手重构 auth.ts 的其它逻辑，改动越少越好。",
+                ].join("\n"),
+                attachments: [{ path: "src/auth.ts" }],
+              },
+              {
+                title: "补 README 的登录章节",
+                task: "更新 README 的登录章节，说明 API Profile 的切换方式与凭据只存在 SecretStorage。",
+              },
+              {
+                title: "核对 CI 脚本",
+                task: "确认 release workflow 与 CHANGELOG 顶部版本一致，并跑一遍 npm run typecheck。",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n"),
+    },
     { kind: "plan", id: "demo-plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
   const demoApproval: SessionState["pendingApproval"] = {

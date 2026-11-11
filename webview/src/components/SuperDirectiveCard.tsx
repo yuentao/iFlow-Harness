@@ -6,7 +6,7 @@
  * 读的指令**，人只需要一眼确认「派了什么 / 做了什么」。所以这里把围栏换成
  * 专属卡片：
  *
- *  - `super-agent`          → 委派子会话卡（任务标题 + 任务正文 + 附件）；
+ *  - `super-agent`          → 每个任务书一张独立卡片（标题 + 正文 + 附件）；
  *  - `super-agent-actions`  → 子会话操作卡（动作 + 目标子会话）；
  *  - 其它 `super-agent-*`   → 原始协议块卡（语言名 + 长度，不整段回灌）；
  *  - 非法 JSON / 形状不符   → 原始协议块卡（含原因），绝不弹 toast。
@@ -23,6 +23,7 @@ import { t } from "../i18n";
 import {
   splitSuperDirectiveSegments,
   type SuperDirectiveAction,
+  type SuperDirectiveDisplay,
   type SuperDirectiveRawReason,
   type SuperDirectiveSegment,
   type SuperDirectiveTask,
@@ -36,6 +37,15 @@ type DirectiveSegment = Extract<SuperDirectiveSegment, { kind: "directive" }>;
 const CARD = "stream-in my-2 overflow-hidden rounded-lg border border-border/60 bg-card shadow-card";
 const CARD_HEAD = "flex items-center gap-2 border-b border-border/60 px-3 py-2";
 const CARD_ICON = "flex size-6 shrink-0 items-center justify-center rounded-md";
+
+/**
+ * 任务卡表面：与 CARD 同材质，但**不带 my-2** —— 一批任务卡之间的间距由外层
+ * 的 space-y-2 统一给（卡片自己的外边距会让间距忽大忽小）。
+ */
+const TASK_CARD =
+  "stream-in overflow-hidden rounded-lg border border-border/60 bg-card shadow-card";
+/** 任务卡头部：标题可换行（任务标题最长 40 字），所以图标与 chip 顶端对齐。 */
+const TASK_CARD_HEAD = "flex items-start gap-2 border-b border-border/60 px-3 py-2";
 
 const ACTION_LABELS: Record<string, string> = {
   retry: "重试",
@@ -64,70 +74,109 @@ const RAW_REASONS: Record<SuperDirectiveRawReason, string> = {
 const TASK_COLLAPSE_CHARS = 220;
 const TASK_COLLAPSE_LINES = 3;
 
-function TasksCard({ tasks }: { tasks: SuperDirectiveTask[] }) {
+/**
+ * tasks 展示分支的**局部投影**。
+ *
+ * shared 侧会给「从坏载荷里容错拆出来的任务书」加一个可选的 `salvaged` 标记
+ * （字段由另一个子会话提供）。这里用交叉类型读它 —— shared 改动前后都能编译：
+ * 字段还不存在时读到 undefined，提示也就不显示；字段存在时如实告知用户。
+ */
+type TasksDisplay = Extract<SuperDirectiveDisplay, { kind: "tasks" }> & {
+  salvaged?: boolean;
+};
+
+/**
+ * 委派任务书：每个任务书一张**独立卡片**。
+ *
+ * 一条委派块里常常带 3 个任务书。合成一张卡时正文挤成一坨 JSON 墙，用户读不到
+ * 任何一个任务书；拆开后每个任务书都能单独扫读（标题 / 正文 / 附件），序号 chip
+ * 表达批次内的次序。委派语义靠 Users 图标表达，不再有「委派子会话 / N 个任务」那种
+ * 汇总卡 —— 那正是用户读不下去的那一层。
+ */
+function TasksCards({ tasks, salvaged }: { tasks: SuperDirectiveTask[]; salvaged: boolean }) {
   return (
-    <div className={CARD}>
-      <div className={CARD_HEAD}>
-        <span className={`${CARD_ICON} bg-primary/12 text-primary`}>
-          <Users className={ICON_INLINE} />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-ui-label font-medium text-foreground/90">
-          {t("委派子会话")}
-        </span>
-        <Chip tone="primary">{t("{0} 个任务", tasks.length)}</Chip>
-      </div>
-      <ul className="divide-y divide-border/60">
-        {tasks.map((task, index) => (
-          <TaskRow key={index} task={task} index={index} />
-        ))}
-      </ul>
+    <div className="my-2 space-y-2">
+      {salvaged && <SalvagedNotice />}
+      {tasks.map((task, index) => (
+        <TaskCard key={index} task={task} index={index} total={tasks.length} />
+      ))}
     </div>
   );
 }
 
-function TaskRow({ task, index }: { task: SuperDirectiveTask; index: number }) {
+/**
+ * 容错提示：载荷没能完整解析时，拆出来的任务书**可能根本没派发**。
+ * 卡片照常展示（用户至少能读到模型想干什么），但必须如实说明这一点 —— 沉默地
+ * 展示一份「看起来已派发」的任务书比不展示更糟。
+ */
+function SalvagedNotice() {
+  return (
+    <div
+      data-testid="super-task-salvaged"
+      className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
+    >
+      <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} />
+      <span>{t("载荷未能完整解析，以下任务书仅供阅读，可能尚未派发")}</span>
+    </div>
+  );
+}
+
+/** 单个任务书卡片：头部是标题 + 序号 chip，正文是任务书全文（可展开）。 */
+function TaskCard({
+  task,
+  index,
+  total,
+}: {
+  task: SuperDirectiveTask;
+  index: number;
+  total: number;
+}) {
   const [open, setOpen] = useState(false);
   const long =
     task.task.length > TASK_COLLAPSE_CHARS || task.task.split("\n").length > TASK_COLLAPSE_LINES;
   return (
-    <li className="px-3 py-2">
-      <div className="flex items-start gap-2">
-        <span className="mt-0.5 shrink-0 text-ui-micro tabular-nums text-muted-foreground/70">
-          {index + 1}
+    <div className={TASK_CARD} data-testid="super-task-card">
+      <div className={TASK_CARD_HEAD}>
+        <span className={`${CARD_ICON} bg-primary/12 text-primary`} aria-hidden="true">
+          <Users className={ICON_INLINE} />
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="break-words text-ui-label font-medium text-foreground/90">{task.title}</div>
-          <div
-            className={`mt-0.5 whitespace-pre-wrap break-words text-ui-caption leading-relaxed text-muted-foreground ${
-              open ? "" : "line-clamp-3"
-            }`}
-          >
-            {task.task}
-          </div>
-          {task.attachments.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {task.attachments.map((name, attachmentIndex) => (
-                <Chip key={`${name}-${attachmentIndex}`} tone="muted" truncate>
-                  {name}
-                </Chip>
-              ))}
-            </div>
-          )}
-          {long && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="mt-1"
-              aria-label={open ? t("收起任务说明") : t("展开任务说明")}
-              icon={open ? <ChevronUp className={ICON_INLINE} /> : <ChevronDown className={ICON_INLINE} />}
-              onClick={() => setOpen((value) => !value)}
-            >
-              {open ? t("收起") : t("展开")}
-            </Button>
-          )}
-        </div>
+        <span className="min-w-0 flex-1 break-words text-ui-label font-medium text-foreground/90">
+          {task.title}
+        </span>
+        {/* 只有一张卡时不需要「第 1/1 个任务」这种序号 —— 批次信息是多余的层级。 */}
+        {total > 1 && <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>}
       </div>
-    </li>
+      <div className="px-3 py-2">
+        <div
+          className={`whitespace-pre-wrap break-words text-ui-caption leading-relaxed text-muted-foreground ${
+            open ? "" : "line-clamp-3"
+          }`}
+        >
+          {task.task}
+        </div>
+        {task.attachments.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {task.attachments.map((name, attachmentIndex) => (
+              <Chip key={`${name}-${attachmentIndex}`} tone="muted" truncate>
+                {name}
+              </Chip>
+            ))}
+          </div>
+        )}
+        {long && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mt-1"
+            aria-label={open ? t("收起任务说明") : t("展开任务说明")}
+            icon={open ? <ChevronUp className={ICON_INLINE} /> : <ChevronDown className={ICON_INLINE} />}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {open ? t("收起") : t("展开")}
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -203,8 +252,12 @@ function RawCard({
 export function SuperDirectiveCard({ segment }: { segment: DirectiveSegment }) {
   const { display, language, raw } = segment;
   switch (display.kind) {
-    case "tasks":
-      return <TasksCard tasks={display.tasks} />;
+    case "tasks": {
+      // 投影成局部交叉类型：shared 侧给 tasks 变体加的 salvaged 标记（可选）
+      // 存在与否都不影响这里的编译与行为。
+      const tasks = display as TasksDisplay;
+      return <TasksCards tasks={tasks.tasks} salvaged={tasks.salvaged === true} />;
+    }
     case "actions":
       return <ActionsCard actions={display.actions} />;
     case "raw":
