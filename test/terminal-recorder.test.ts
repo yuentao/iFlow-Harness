@@ -303,13 +303,13 @@ describe("buildTerminalReport", () => {
       },
     ]);
     expect(body).toContain("$ npm run dev");
-    expect(body).toContain("（J:\\proj · 仍在运行）");
+    expect(body).toContain("(J:\\proj · still running)");
     expect(body).toContain("VITE ready");
     expect(body).toContain("$ npm test");
-    expect(body).toContain("（退出码 1）");
-    expect(body).toContain("…（更早的输出已截断，共 120 字符）");
+    expect(body).toContain("(exit code 1)");
+    expect(body).toContain("… (earlier output truncated, 120 characters dropped)");
     expect(body).toContain("pass"); // trailing whitespace trimmed
-    expect(body).toContain("（无输出）");
+    expect(body).toContain("(no output)");
     expect(body.split("\n\n---\n\n")).toHaveLength(3);
   });
 });
