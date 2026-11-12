@@ -188,6 +188,24 @@ export function superIsolationLabel(isolation: SuperIsolation): string {
 }
 
 /**
+ * 隔离种类的英文短标签 —— {@link superIsolationLabel} 的模型面向孪生版本。
+ *
+ * 中文标签留在原处：它渲染在看板上（中文是源语言）。而宿主发给模型的提示词
+ * （看板摘要 / 汇报 / 合并任务书）是英文的 —— 子会话跑的是同一份英文系统提示，
+ * 中途翻语言会让模型读着别扭，所以提示词这条路另有一份措辞。
+ */
+function superIsolationLabelEn(isolation: SuperIsolation): string {
+  switch (isolation.kind) {
+    case "git_worktree":
+      return "isolated git worktree";
+    case "directory":
+      return "directory isolation only";
+    case "repo":
+      return "main repository workspace (no isolation)";
+  }
+}
+
+/**
  * 落盘 / 恢复前的隔离信息归一。
  *
  * 「repo」档没有自己的分支（它跑在主仓当前分支上）：归档里若带上了分支名
@@ -273,6 +291,27 @@ export function superIntegrationLabel(integration: SuperIntegration): string {
       return "集成失败";
     case "skipped":
       return "未自动合并";
+  }
+}
+
+/**
+ * 集成结果的英文短标签 —— {@link superIntegrationLabel} 的模型面向孪生版本。
+ *
+ * 措辞与 `prompts/system-prompt.md` 的看板词表对齐（merged automatically /
+ * merge conflict / skipped），模型据此判断「分支被保留」还是「已经合进去了」。
+ */
+function superIntegrationLabelEn(integration: SuperIntegration): string {
+  switch (integration.state) {
+    case "merged":
+      return "merged automatically";
+    case "conflict":
+      return "merge conflict";
+    case "pr_created":
+      return "PR created";
+    case "failed":
+      return "integration failed";
+    case "skipped":
+      return "not merged automatically";
   }
 }
 
@@ -515,9 +554,14 @@ export function applySuperEvent(session: SuperSessionUi, event: SuperEvent): Sup
   }
 }
 
-/** 待应答的人话描述（看板与主会话汇报共用）。 */
+/**
+ * 待应答的人话描述（模型面向：只进汇报提示词与看板摘要的说明行）。
+ *
+ * 问题正文是子会话自己写的，原样透传；只有「没有题目」这个兜底是宿主写的，
+ * 所以它是英文 —— 兜底出现在英文提示词里不能夹一句中文。
+ */
 export function describePending(pending: SuperPending): string {
-  return pending.questions[0]?.question ?? "子会话提出了一个问题";
+  return pending.questions[0]?.question ?? "the child session asked a question";
 }
 
 // ---------------------------------------------------------------------------
@@ -1827,12 +1871,12 @@ export function groupSuperSessionsForBoard(sessions: readonly SuperSessionUi[]):
 export const SUPER_DIGEST_MAX_CHARS = 4000;
 
 const SUPER_STATUS_LABEL: Record<SuperStatus, string> = {
-  preparing: "准备中",
-  running: "运行中",
-  awaiting_input: "等待用户处理",
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已中断",
+  preparing: "preparing",
+  running: "running",
+  awaiting_input: "awaiting you",
+  completed: "completed",
+  failed: "failed",
+  cancelled: "interrupted",
 };
 
 /** 压成一行并截断（看板摘要里每条信息只占一行，避免 JSON 式嵌套）。 */
@@ -1841,40 +1885,46 @@ function truncateInline(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-/** 子会话一行摘要（`buildSuperDigest` 的内部构件，导出供测试断言）。 */
+/**
+ * 子会话一行摘要（`buildSuperDigest` 的内部构件，导出供测试断言）。
+ *
+ * **模型面向**：这一行会被注入主会话的提示词，所以是英文 —— 子会话跑的是
+ * 同一份英文系统提示，词表与 `prompts/system-prompt.md` 的看板说明对齐
+ * （preparing / running / awaiting you / completed / failed / interrupted）。
+ */
 export function describeSuperSessionLine(session: SuperSessionUi): string {
   const status = `${SUPER_STATUS_LABEL[session.status]}${
-    session.queued && session.status === "preparing" ? "（排队中）" : ""
-  }${(session.attempts ?? 1) > 1 ? `（第 ${session.attempts} 次）` : ""}`;
-  const parts = [`- ${session.id}「${session.title}」${status}`];
+    session.queued && session.status === "preparing" ? " (queued)" : ""
+  }${(session.attempts ?? 1) > 1 ? ` (attempt ${session.attempts})` : ""}`;
+  const parts = [`- ${session.id} "${session.title}" ${status}`];
   // 有分支才报分支；没有分支的子会话（如跑在主仓工作区的合并子会话）如实报
-  // 隔离方式 —— 看板不能显示一个并不存在的分支名。
-  if (session.isolation.branch) parts.push(`分支 ${session.isolation.branch}`);
-  else parts.push(superIsolationLabel(session.isolation));
+  // 隔离方式 —— 不能显示一个并不存在的分支名。
+  if (session.isolation.branch) parts.push(`branch ${session.isolation.branch}`);
+  else parts.push(superIsolationLabelEn(session.isolation));
   if (session.status === "awaiting_input" && session.pending) {
-    parts.push(`待答提问（请求 ${session.pending.requestId}）：${truncateInline(describePending(session.pending), 160)}`);
+    parts.push(`pending question (request ${session.pending.requestId}): ${truncateInline(describePending(session.pending), 160)}`);
   } else if (session.status === "failed") {
-    parts.push(`失败原因：${truncateInline(session.error ?? "未知", 160)}`);
+    parts.push(`failure reason: ${truncateInline(session.error ?? "unknown", 160)}`);
   } else if (session.summary) {
-    parts.push(`摘要：${truncateInline(session.summary, 160)}`);
+    parts.push(`summary: ${truncateInline(session.summary, 160)}`);
   }
   if (session.integration) {
     parts.push(
-      `改动去向：${superIntegrationLabel(session.integration)}${
-        session.integration.detail ? `（${truncateInline(session.integration.detail, 120)}）` : ""
+      `changes: ${superIntegrationLabelEn(session.integration)}${
+        session.integration.detail ? ` (${truncateInline(session.integration.detail, 120)})` : ""
       }${session.integration.url ? ` ${session.integration.url}` : ""}`,
     );
   }
-  return parts.join("｜");
+  return parts.join(" | ");
 }
 
 const SUPER_DIGEST_FOOTER = [
   "",
-  "可管理上述子会话：输出 ```super-agent-actions 代码块，正文为 {\"actions\":[...]}；",
-  "动作 retry（重试失败/中断，复用原工作目录）、cancel（停止运行中）、answer（回答待答提问）、cleanup（清理工作目录）。",
-  "合并由宿主按集成模式自动完成（默认 merge，可能改为 PR）：「改动去向」显示已自动合并就不要重复合并；",
-  "只有显示分支被保留（未自动合并 / 合并冲突 / 没有 gh CLI）时，才自己执行 git merge --no-ff <分支名>（分支名见上面每一行），需要解决冲突就按代码判断。",
-  "answer 的 answers 以问题 header 为键：单选给字符串，多选给字符串数组。sessionId 必须逐字使用上面的 id。",
+  "You can manage the child sessions above: emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
+  "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
+  "Merging is done by the host, following the integration mode (merge by default, possibly PR): when the \"changes:\" line says merged automatically, do not merge it again;",
+  "only when the branch was kept (not merged automatically / merge conflict / no gh CLI) should you run `git merge --no-ff <branch>` yourself (the branch name is on each line above), resolving conflicts by reading the code.",
+  "The answers of an answer action are keyed by the question header: a string for a single choice, an array of strings for a multi choice. The sessionId must be the exact id shown above.",
 ].join("\n");
 
 /**
@@ -1891,15 +1941,15 @@ const SUPER_DIGEST_FOOTER = [
  */
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
   if (sessions.length === 0) {
-    return "[子会话看板]（宿主自动注入的实时状态，不是用户发言。当前没有子会话。）";
+    return "[子会话看板] (host-injected live status, not a user message. There are no child sessions right now.)";
   }
   const counts = summarizeSuperSessions(sessions);
   const header =
-    `[子会话看板]（宿主自动注入的实时状态，不是用户发言。共 ${counts.total} 个：` +
-    `进行中 ${counts.running}、待处理 ${counts.awaiting}、已完成 ${counts.done}、` +
-    `失败 ${counts.failed}、已中断 ${counts.cancelled}）`;
+    `[子会话看板] (host-injected live status, not a user message. ${counts.total} child session(s) in total: ` +
+    `${counts.running} running, ${counts.awaiting} awaiting you, ${counts.done} completed, ` +
+    `${counts.failed} failed, ${counts.cancelled} interrupted)`;
   const lines = sessions.map((session) => describeSuperSessionLine(session));
-  const omittedNote = (count: number): string => `…（其余 ${count} 个子会话因预算省略，可用动作前先请用户确认）`;
+  const omittedNote = (count: number): string => `… (${count} more child session(s) omitted for budget — confirm with the user before acting on them)`;
   const render = (kept: readonly string[], omitted: number): string =>
     [
       header,
@@ -2036,19 +2086,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** Report 状态 → 中文短标签（主会话汇报与看板共用，避免两处措辞漂移）。 */
+/**
+ * Report 状态 → 英文短标签（模型面向：它只出现在发给主会话的汇报提示词里）。
+ *
+ * 词表与看板摘要的 `SUPER_STATUS_LABEL` 对齐（completed / interrupted /
+ * waiting for the user），模型据此判断这个子会话是收尾了还是要人处理。
+ */
 export function superReportLabel(state: SuperReportState): string {
   switch (state) {
     case "progress":
-      return "进行中";
+      return "in progress";
     case "ready":
-      return "已完成";
+      return "completed";
     case "blocked":
-      return "等待用户处理";
+      return "waiting for the user";
     case "failed":
-      return "失败";
+      return "failed";
     case "dropped":
-      return "已中断";
+      return "interrupted";
   }
 }
 
@@ -2063,6 +2118,10 @@ export function superReportLabel(state: SuperReportState): string {
  * 不再等同一批全部结束。`pendingCount` 是「仍在跑的子会话数」—— 它决定
  * 提示词的结尾：还有人在跑时**不能**让主会话现在就向用户做最终完整汇报
  * （后面还会有新的汇报回合，那时才是收尾的时候）。
+ *
+ * **正文是英文**：子会话跑的是同一份英文系统提示，汇报提示词是发给主会话
+ * 的一次真实 prompt —— 中途翻语言会让模型读着别扭。协议标记
+ * （`[子会话状态上报]`）保持原样：宿主与模型约定用它识别「这是状态上报」。
  */
 export function buildSuperReportPrompt(
   entries: SuperReportEntry[],
@@ -2071,18 +2130,18 @@ export function buildSuperReportPrompt(
   if (entries.length === 0) return "";
   const pendingCount = Math.max(0, options?.pendingCount ?? 0);
   const lines = entries.map(({ session, report }) => {
-    const human = report.humanAction ? `\n   需要用户处理：${report.humanAction}` : "";
+    const human = report.humanAction ? `\n   needs user action: ${report.humanAction}` : "";
     const integration = session.integration
-      ? `\n   改动去向：${superIntegrationLabel(session.integration)}${
-          session.integration.detail ? `（${session.integration.detail}）` : ""
+      ? `\n   changes: ${superIntegrationLabelEn(session.integration)}${
+          session.integration.detail ? ` (${session.integration.detail})` : ""
         }${session.integration.url ? ` ${session.integration.url}` : ""}`
       : "";
-    return `- 子会话 #${session.id}「${session.title}」${superReportLabel(report.state)}：${report.summary}${human}${integration}`;
+    return `- Child session #${session.id} "${session.title}" ${superReportLabel(report.state)}: ${report.summary}${human}${integration}`;
   });
   const head = [
     "[子会话状态上报]",
-    "以下是宿主观察到的子会话最终状态（不是用户发言，也不是你之前说过的话）。",
-    `以下是本批已结束的 ${entries.length} 个子会话的最终状态。`,
+    "Below is the final state of the child sessions as observed by the host — this is not a user message, and not something you said earlier.",
+    `These are the final states of the ${entries.length} child session(s) that just finished in this batch.`,
     ...lines,
     "",
   ];
@@ -2090,7 +2149,7 @@ export function buildSuperReportPrompt(
   // 后续完成的孩子会由宿主继续汇报。
   const pendingNote =
     pendingCount > 0
-      ? `另有 ${pendingCount} 个子会话仍在运行，它们结束后宿主会继续汇报 —— 先处理这批结果（复核/后续任务照常派给子会话），不要等它们；此时不要向用户做最终完整汇报。`
+      ? `${pendingCount} other child session(s) are still running; the host will keep reporting as they finish — process this batch first (dispatch review / follow-up work to child sessions as usual), do not wait for them, and do not give the user a final complete report yet.`
       : null;
   // 全部是「被中断」时不能照常催它继续：那是用户主动停的（看板中断 / 面板
   // 关闭），自动把任务重跑一遍会像是没听话。
@@ -2098,20 +2157,20 @@ export function buildSuperReportPrompt(
   if (allDropped) {
     return [
       ...head,
-      "这些子会话是**被中断**的（用户停止，或面板当时已关闭），不是失败。不要自动重跑它们，也不要假设任务还要继续 —— 先简短说明它们停在哪里、还留下什么，然后问用户是否要继续。",
+      "These child sessions were **interrupted** (the user stopped them, or the panel was closed at the time) — they did not fail. Do not re-run them automatically, and do not assume the work continues: briefly state where they stopped and what was left behind, then ask the user whether to continue.",
       ...(pendingNote ? [pendingNote] : []),
     ].join("\n");
   }
   return [
     ...head,
-    "**这是同一个任务的新回合。** 上一轮在你派发完子会话后结束是正常的 —— 宿主会在每个子会话结束时把结果交回给你。现在请接着推进，不要停下来等用户再开口。",
-    "先读汇报做判断：每个子会话是否达成目标、改动去向（自动合并 / PR / 保留分支），以及是否还有遗留问题 —— 判断只看上报文本就够了，**复核不在本会话跑**。需要复核就把「跑测试 / 类型检查 / 构建并如实汇报真实输出」写成任务派给子会话。",
-    "后续步骤一律派给子会话去做（复核任务、修复任务、补做未完成的步骤），不要自己跑命令、不要自己改文件；派发这些任务时直接做，不要只给建议，也不要让用户来催。",
-    "只有在你无法判断、或确实需要用户决策时，才提出那一个具体问题；其余情况不要提问。",
+    "**This is a new turn of the same task.** It is normal that the previous turn ended right after you dispatched the child sessions — the host hands their results back to you as each one finishes. Continue from here; do not stop and wait for the user to speak again.",
+    "Read the reports and decide: whether each child session met its goal, where its changes went (merged automatically / PR / branch kept), and whether anything is left open — the reported text is enough for that judgement, **review does not run in this session**. When a review is needed, write it as a task for a child session (\"run the tests / the type check / the build and report the real output\").",
+    "Dispatch every follow-up step to a child session (review tasks, fix tasks, the steps that were left unfinished); do not run commands or edit files yourself. Dispatch those tasks directly — do not merely suggest them, and do not wait for the user to nudge you.",
+    "Only when you genuinely cannot judge something, or when the user really has to make a decision, ask that one specific question; do not ask anything else.",
     ...(pendingNote
       ? [pendingNote]
       : [
-          "最后向用户做一次完整汇报：每个子会话做了什么、结论、改动去向、失败或遗留的问题。不要编造上报里没有的结果，也不要声称自己执行过这些改动。",
+          "Finally give the user one complete report: what each child session did, the conclusion, where the changes went, and any failures or remaining issues. Do not invent results that are not in the reports, and do not claim that you performed those changes yourself.",
         ]),
   ].join("\n");
 }
@@ -2139,6 +2198,10 @@ export function buildSuperReportPrompt(
  * 提示词刻意写死边界与安全阀：这是对一条执行类任务的硬约束，不是让模型
  * 自由发挥 —— 不推送、不 rebase、不删分支、不切分支、不碰无关文件；冲突
  * 解决不了就 `git merge --abort`，绝不能把仓库留在半合并状态。
+ *
+ * **正文是英文**：合并子会话跑的是同一份英文系统提示，任务书里混中文会让
+ * 模型读着别扭。协议标记（`[合并任务]`）保持原样 —— 它是宿主与模型约定的
+ * 「这是一条合并任务书」标识。
  */
 export function buildSuperMergeRequestPrompt(
   session: SuperSessionUi,
@@ -2151,29 +2214,29 @@ export function buildSuperMergeRequestPrompt(
     // 一个空的 `git merge --no-ff` 猜。
     return [
       "[合并任务]",
-      `子会话「${session.title}」没有自己的分支（隔离方式：${superIsolationLabel(session.isolation)}），没有可合并的目标。`,
-      "不要执行任何 git 命令，也不要改动任何文件 —— 如实汇报「该子会话没有可合并的分支」即可。",
+      `The child session "${session.title}" has no branch of its own (isolation: ${superIsolationLabelEn(session.isolation)}), so there is nothing to merge.`,
+      "Do not run any git command and do not modify any file — just report faithfully that this child session has no mergeable branch.",
     ].join("\n");
   }
   const lead = options?.auto
-    ? `子会话「${session.title}」的改动没能自动合并到主仓当前分支${reason ? `（${reason}）` : ""}。把它的分支 ${branch} 合并到主仓当前分支。`
-    : `用户在看板点击了「让智能体合并」：把子会话「${session.title}」的分支 ${branch} 合并到主仓当前分支。`;
+    ? `The changes of child session "${session.title}" could not be merged automatically into the current branch of the main repository${reason ? ` (${reason})` : ""}. Merge its branch ${branch} into the current branch of the main repository.`
+    : `The user clicked "Let the agent merge" on the board: merge the branch ${branch} of child session "${session.title}" into the current branch of the main repository.`;
   return [
     "[合并任务]",
     lead,
-    "工作目录：主仓工作区根目录（你的当前工作目录）—— 合并只能在主仓工作区发生。",
-    `分支 ${branch} 上的改动已经提交完毕，不需要切分支，也不需要去子会话的工作目录里操作。`,
-    "步骤：",
-    "1. 先跑 `git status` 确认主仓工作区状态（有没有未提交的改动、是不是已经在 merge/rebase 中间态）；",
-    `2. 执行 \`git merge --no-ff ${branch}\`（保留合并提交）；`,
-    "3. 若出现冲突，逐个阅读冲突文件并按代码语义判断双方意图，解决冲突时保留双方的改动，不要丢弃任何一侧的改动，然后完成这次合并提交；",
-    "4. 合并后用 `git log --oneline -3` 与 `git status` 确认结果。",
-    "硬边界（不要越过）：",
-    "- 不要 push、不要 rebase、不要删除分支、不要切换分支；",
-    "- 不要改动与本次合并无关的文件；",
-    "- 不要动用户尚未提交的其它改动。",
-    "安全阀：如果冲突无法可靠解决（读不懂哪一侧是对的，或需要用户决策），执行 `git merge --abort` 撤销这次合并并如实说明原因 —— 绝不能把仓库留在半合并状态。",
-    "最后如实汇报：合并 commit（哈希与标题）、被改动的文件清单、遇到的冲突与各自的处理方式；若合并失败，说明失败原因与失败时仓库的状态。",
+    "Working directory: the root of the main repository workspace (your current working directory) — a merge can only happen in the main repository workspace.",
+    `The changes on branch ${branch} are already committed; you do not need to switch branches, and you do not need to work inside the child session's working directory.`,
+    "Steps:",
+    "1. Run `git status` first to check the state of the main repository workspace (uncommitted changes? already in the middle of a merge/rebase?);",
+    `2. Run \`git merge --no-ff ${branch}\` (keep the merge commit);`,
+    "3. If conflicts appear, read each conflicting file and judge the intent of both sides by the code itself; when resolving, keep both sides' changes — never discard one side — then complete the merge commit;",
+    "4. After the merge, confirm the result with `git log --oneline -3` and `git status`.",
+    "Hard boundaries (do not cross them):",
+    "- do not push, do not rebase, do not delete branches, do not switch branches;",
+    "- do not modify files unrelated to this merge;",
+    "- do not touch the user's other uncommitted changes.",
+    "Safety valve: if a conflict cannot be resolved reliably (you cannot tell which side is right, or it needs a user decision), run `git merge --abort` to undo the merge and explain why — never leave the repository half-merged.",
+    "Finally report faithfully: the merge commit (hash and title), the list of changed files, the conflicts you hit and how you handled each one; if the merge failed, explain the failure and the state of the repository at that moment.",
   ].join("\n");
 }
 
@@ -2194,7 +2257,7 @@ export function reportForSession(
     case "failed":
       return { state: "failed", summary: session.error ?? fallbackSummary, at };
     case "cancelled":
-      return { state: "dropped", summary: session.summary ?? "已被中断", at };
+      return { state: "dropped", summary: session.summary ?? "interrupted", at };
     case "awaiting_input":
       return session.pending
         ? {

@@ -619,7 +619,8 @@ describe("super agent · 汇报", () => {
     ]);
     expect(text).toContain("修复登录跳转");
     expect(text).toContain("改完了");
-    expect(text).toContain("已完成");
+    // 状态标签是英文（提示词正文面向模型）。
+    expect(text).toContain("completed");
   });
 
   it("空汇报不产出提示词", () => {
@@ -630,13 +631,13 @@ describe("super agent · 汇报", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
-    expect(text).toContain("派给子会话");
-    expect(text).toContain("不要自己跑命令");
-    expect(text).toContain("完整汇报");
+    expect(text).toContain("Dispatch every follow-up step to a child session");
+    expect(text).toContain("do not run commands or edit files yourself");
+    expect(text).toContain("give the user one complete report");
     // 逐个即时汇报：说的是「本批已结束的 N 个」，不再是「这一批都已结束」。
-    expect(text).toContain("本批已结束的 1 个子会话");
-    expect(text).not.toContain("当前这批子会话都已结束");
-    expect(text).toContain("不要编造");
+    expect(text).toContain("the 1 child session(s) that just finished in this batch");
+    expect(text).not.toContain("the whole batch has finished");
+    expect(text).toContain("Do not invent results");
   });
 
   it("没有子会话在跑时：提示词说宿主逐个交回，并保留最终完整汇报", () => {
@@ -644,10 +645,10 @@ describe("super agent · 汇报", () => {
       [{ session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } }],
       { pendingCount: 0 },
     );
-    expect(text).toContain("宿主会在每个子会话结束时把结果交回");
-    expect(text).toContain("最后向用户做一次完整汇报");
-    expect(text).not.toContain("仍在运行");
-    expect(text).not.toContain("宿主一直守候到它们全部结束");
+    expect(text).toContain("hands their results back to you as each one finishes");
+    expect(text).toContain("give the user one complete report");
+    expect(text).not.toContain("are still running");
+    expect(text).not.toContain("wait until every one of them has finished");
   });
 
   it("还有子会话在跑时：先处理这批结果，不要现在做最终完整汇报", () => {
@@ -655,34 +656,34 @@ describe("super agent · 汇报", () => {
       [{ session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } }],
       { pendingCount: 2 },
     );
-    expect(text).toContain("另有 2 个子会话仍在运行");
-    expect(text).toContain("它们结束后宿主会继续汇报");
-    expect(text).toContain("不要等它们");
-    expect(text).toContain("此时不要向用户做最终完整汇报");
+    expect(text).toContain("2 other child session(s) are still running");
+    expect(text).toContain("the host will keep reporting as they finish");
+    expect(text).toContain("do not wait for them");
+    expect(text).toContain("do not give the user a final complete report yet");
     // 还有人在跑 → 这一轮不做最终完整汇报（收尾留给最后一次）。
-    expect(text).not.toContain("最后向用户做一次完整汇报");
+    expect(text).not.toContain("give the user one complete report");
   });
 
   it("缺省 pendingCount 等同于 0（没有子会话在跑）", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
-    expect(text).toContain("最后向用户做一次完整汇报");
-    expect(text).not.toContain("仍在运行");
+    expect(text).toContain("give the user one complete report");
+    expect(text).not.toContain("are still running");
   });
 
   it("汇报提示词把复核写成派发任务，而不是让主会话自己执行", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
-    expect(text).toContain("复核不在本会话跑");
-    expect(text).toContain("跑测试");
-    expect(text).toContain("类型检查");
-    expect(text).toContain("构建");
-    expect(text).toContain("不要自己改文件");
+    expect(text).toContain("review does not run in this session");
+    expect(text).toContain("run the tests");
+    expect(text).toContain("the type check");
+    expect(text).toContain("the build");
+    expect(text).toContain("do not run commands or edit files yourself");
     // 旧措辞（主会话自己动手）不能再出现。
-    expect(text).not.toContain("先自行处理");
-    expect(text).not.toContain("能自己完成的后续步骤");
+    expect(text).not.toContain("handle it yourself first");
+    expect(text).not.toContain("the follow-up steps you can complete yourself");
   });
 
   it("汇报提示词把主会话接回同一个任务，而不是让它等用户再开口", () => {
@@ -690,21 +691,21 @@ describe("super agent · 汇报", () => {
       { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
     ]);
     // 主会话派发完本轮结束是正常的，宿主在子会话全部结束后补一轮。
-    expect(text).toContain("同一个任务的新回合");
-    expect(text).toContain("不要停下来等用户再开口");
+    expect(text).toContain("a new turn of the same task");
+    expect(text).toContain("do not stop and wait for the user to speak again");
     // 「根据汇报再进行下一步」：后续步骤要自己动手，不是只给建议。
-    expect(text).toContain("直接做");
-    expect(text).toContain("不要只给建议");
+    expect(text).toContain("Dispatch those tasks directly");
+    expect(text).toContain("do not merely suggest them");
   });
 
   it("全部被中断的汇报不催主会话继续，而是先问用户", () => {
     const text = buildSuperReportPrompt([
       { session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } },
     ]);
-    expect(text).toContain("被中断");
-    expect(text).toContain("不要自动重跑");
-    expect(text).toContain("问用户是否要继续");
-    expect(text).not.toContain("不要停下来等用户再开口");
+    expect(text).toContain("were **interrupted**");
+    expect(text).toContain("Do not re-run them automatically");
+    expect(text).toContain("ask the user whether to continue");
+    expect(text).not.toContain("do not stop and wait for the user to speak again");
   });
 
   it("全部被中断且还有子会话在跑：保留中断说明，并补上仍在运行的说明", () => {
@@ -712,11 +713,11 @@ describe("super agent · 汇报", () => {
       [{ session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } }],
       { pendingCount: 1 },
     );
-    expect(text).toContain("被中断");
-    expect(text).toContain("不要自动重跑");
-    expect(text).toContain("问用户是否要继续");
-    expect(text).toContain("另有 1 个子会话仍在运行");
-    expect(text).toContain("它们结束后宿主会继续汇报");
+    expect(text).toContain("were **interrupted**");
+    expect(text).toContain("Do not re-run them automatically");
+    expect(text).toContain("ask the user whether to continue");
+    expect(text).toContain("1 other child session(s) are still running");
+    expect(text).toContain("the host will keep reporting as they finish");
   });
 });
 
@@ -936,15 +937,15 @@ describe("super agent · 看板摘要", () => {
       }),
     ]);
     expect(digest).toContain("super-a");
-    expect(digest).toContain("运行中");
+    expect(digest).toContain("running");
     expect(digest).toContain("正在补单测");
     expect(digest).toContain("super-b");
-    expect(digest).toContain("已完成");
-    expect(digest).toContain("已自动合并");
+    expect(digest).toContain("completed");
+    expect(digest).toContain("merged automatically");
     expect(digest).toContain("super-agent-actions");
     // 用户中断不计入失败：摘要里应分开呈现。
-    expect(digest).toContain("失败 0");
-    expect(digest).toContain("已中断 0");
+    expect(digest).toContain("0 failed");
+    expect(digest).toContain("0 interrupted");
   });
 
   it("失败会话给出原因，待答会话给出请求 id 与问题", () => {
@@ -961,7 +962,7 @@ describe("super agent · 看板摘要", () => {
         },
       }),
     ]);
-    expect(digest).toContain("失败原因：内核拒绝了这次请求");
+    expect(digest).toContain("failure reason: 内核拒绝了这次请求");
     expect(digest).toContain("req-7");
     expect(digest).toContain("要覆盖压缩卡吗？");
   });
@@ -972,7 +973,7 @@ describe("super agent · 看板摘要", () => {
     );
     const digest = buildSuperDigest(many);
     expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
-    expect(digest).toMatch(/其余 \d+ 个子会话因预算省略/);
+    expect(digest).toMatch(/\d+ more child session\(s\) omitted for budget/);
     expect(digest).toContain("super-0");
     expect(digest).not.toContain("super-119");
   });
@@ -1073,20 +1074,20 @@ describe("super agent · 让智能体合并的请求", () => {
     expect(text).toContain("修复登录跳转");
     expect(text).toContain("iflow/super/a");
     // 合并只能在主仓工作区发生 —— 任务书必须写明这一点。
-    expect(text).toContain("主仓工作区");
+    expect(text).toContain("main repository workspace");
     expect(text).toContain("git merge --no-ff iflow/super/a");
     // 冲突按代码语义解决，两边的改动都要保住。
-    expect(text).toContain("按代码语义判断双方意图");
-    expect(text).toContain("不要丢弃任何一侧的改动");
+    expect(text).toContain("judge the intent of both sides by the code itself");
+    expect(text).toContain("never discard one side");
     // 硬边界：不推送、不 rebase、不删分支、不切分支、不碰无关文件。
-    expect(text).toContain("不要 push");
-    expect(text).toContain("不要 rebase");
-    expect(text).toContain("不要删除分支");
-    expect(text).toContain("不要切换分支");
-    expect(text).toContain("不要改动与本次合并无关的文件");
-    expect(text).toContain("不要动用户尚未提交的其它改动");
+    expect(text).toContain("do not push");
+    expect(text).toContain("do not rebase");
+    expect(text).toContain("do not delete branches");
+    expect(text).toContain("do not switch branches");
+    expect(text).toContain("do not modify files unrelated to this merge");
+    expect(text).toContain("do not touch the user's other uncommitted changes");
     // 手动触发：措辞如实说明是用户点的。
-    expect(text).toContain("用户在看板点击了");
+    expect(text).toContain("The user clicked");
   });
 
   it("任务书带安全阀：冲突解决不了就 abort，并要求如实汇报", () => {
@@ -1094,10 +1095,10 @@ describe("super agent · 让智能体合并的请求", () => {
       session({ title: "修复登录跳转", status: "completed" }),
     );
     expect(text).toContain("git merge --abort");
-    expect(text).toContain("绝不能把仓库留在半合并状态");
-    expect(text).toContain("如实汇报");
-    expect(text).toContain("合并 commit");
-    expect(text).toContain("被改动的文件清单");
+    expect(text).toContain("never leave the repository half-merged");
+    expect(text).toContain("report faithfully");
+    expect(text).toContain("the merge commit (hash and title)");
+    expect(text).toContain("the list of changed files");
   });
 
   // 旧的措辞是写给主会话的（「你自己去合并、别只给建议、别让我手动执行」）。
@@ -1107,9 +1108,9 @@ describe("super agent · 让智能体合并的请求", () => {
     const text = buildSuperMergeRequestPrompt(
       session({ title: "修复登录跳转", status: "completed" }),
     );
-    expect(text).not.toContain("不要只给建议");
-    expect(text).not.toContain("也不要让我手动执行");
-    expect(text).not.toContain("请你自己");
+    expect(text).not.toContain("do not merely suggest it");
+    expect(text).not.toContain("do not make me do it manually");
+    expect(text).not.toContain("please do it yourself");
   });
 
   it("自动触发时不说「用户在看板点击了」，而是说明改动没能自动合并", () => {
@@ -1117,9 +1118,9 @@ describe("super agent · 让智能体合并的请求", () => {
       session({ title: "修复登录跳转", status: "completed" }),
       { auto: true, reason: "主工作区有未提交改动，与子会话的改动重叠" },
     );
-    expect(text).toContain("没能自动合并");
+    expect(text).toContain("could not be merged automatically");
     expect(text).toContain("主工作区有未提交改动，与子会话的改动重叠");
-    expect(text).not.toContain("用户在看板点击了");
+    expect(text).not.toContain("The user clicked");
     // 执行步骤与手动触发一致。
     expect(text).toContain("git merge --no-ff iflow/super/a");
     expect(text).toContain("git merge --abort");
@@ -1130,8 +1131,8 @@ describe("super agent · 让智能体合并的请求", () => {
       session({ isolation: { kind: "directory", path: "/tmp/dir" }, status: "completed" }),
     );
     expect(text).not.toContain("git merge --no-ff");
-    expect(text).toContain("没有可合并的目标");
-    expect(text).toContain("不要执行任何 git 命令");
+    expect(text).toContain("there is nothing to merge");
+    expect(text).toContain("Do not run any git command");
   });
 });
 
@@ -1152,8 +1153,9 @@ describe("super agent · 主仓工作区隔离（repo）", () => {
 
   it("看板摘要里报的是隔离方式，不是一个不存在的分支", () => {
     const line = describeSuperSessionLine(repoSession({ status: "running" }));
-    expect(line).toContain("主仓工作区（无隔离）");
-    expect(line).not.toContain("分支 ");
+    // 摘要是模型面向的，隔离说明用英文。
+    expect(line).toContain("main repository workspace (no isolation)");
+    expect(line).not.toContain("branch ");
   });
 
   it("归档往返保留 repo 隔离，且不会带出分支", () => {
