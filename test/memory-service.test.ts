@@ -470,7 +470,7 @@ describe("MemoryService", () => {
     expect(service.isExtractionEligible("other-session", blocks)).toBe(false);
 
     const input = await service.buildExtractionInput(blocks);
-    expect(input?.conversation).toContain("用户：以后用 pnpm 安装依赖");
+    expect(input?.conversation).toContain("User: 以后用 pnpm 安装依赖");
     expect(input?.existingFacts).toEqual([]);
 
     const toastId = service.beginExtraction();
