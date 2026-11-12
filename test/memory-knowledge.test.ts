@@ -62,7 +62,7 @@ describe("workspace digest", () => {
     const digest = await buildWorkspaceDigest(files, async (file) =>
       file.endsWith("package.json") ? '{"name":"demo"}' : null,
     );
-    expect(digest).toContain("采样文件数：3 / 3");
+    expect(digest).toContain("Sampled files: 3 / 3");
     expect(digest).toContain("src/");
     expect(digest).toContain('"name":"demo"');
   });
@@ -88,7 +88,7 @@ describe("sanitizeGeneratedMarkdown", () => {
     const clean = sanitizeGeneratedMarkdown("# 我的索引\n\n" + "x".repeat(30_000));
     expect(clean.startsWith("# 我的索引")).toBe(true);
     expect(clean.length).toBeLessThan(20_100);
-    expect(clean).toContain("已截断");
+    expect(clean).toContain("(truncated)");
   });
 });
 

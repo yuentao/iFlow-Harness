@@ -14,8 +14,8 @@ describe("memory extraction conversation excerpt", () => {
       { kind: "tool", toolCallId: "t1", toolName: "x", title: "x", toolKind: "other", status: "completed" } as Block,
     ];
     const conversation = buildExtractionConversation(blocks);
-    expect(conversation).toContain("用户：以后用 pnpm 安装依赖");
-    expect(conversation).toContain("助手：好的，我会记住。");
+    expect(conversation).toContain("User: 以后用 pnpm 安装依赖");
+    expect(conversation).toContain("Assistant: 好的，我会记住。");
     expect(conversation).not.toContain("t1");
   });
 
