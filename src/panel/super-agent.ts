@@ -67,7 +67,6 @@ import {
   isTerminalSuperStatus,
   reportForSession,
   retrySuperSession,
-  superIntegrationLabel,
   toPersistedSuperSession,
   withIntegration,
   withUsage,
@@ -358,7 +357,18 @@ export class SuperAgentManager {
     string,
     { sourceId: string; branch: string; title: string }
   >();
-  /** 集成（merge / push + PR）的串行链 —— 并发合并同一个工作区会把仓库搅乱。 */
+  /**
+   * 集成结果的**模型面向**原因（英文）。
+   *
+   * `SuperIntegration.detail` 是看板给用户看的中文说明，不能直接进英文的
+   * 汇报提示词与合并任务书 —— 中途翻语言会让模型读着别扭（与
+   * `shared/super-agent.ts` 里中文标签 / 英文标签并存的同一纪律）。
+   *
+   * 所以这里另存一份英文事实描述：与 `detail` 一一对应，由写 `detail` 的
+   * 同一个调用点同时给出（见 {@link recordIntegration}）。
+   */
+  private readonly integrationReasonEn = new Map<string, string>();
+  /** 集成（自动合并 / PR）的串行链 —— 并发合并同一个工作区会把仓库搅乱。 */
   private integrationChain: Promise<void> = Promise.resolve();
   /**
    * 「分支上没有任何独有提交」的隔离，等子进程退出后再释放。
@@ -1199,12 +1209,16 @@ export class SuperAgentManager {
     });
     const targetBranch = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
     if (merged) {
-      this.recordIntegration(target.sourceId, {
-        mode: this.deps.integrationMode(),
-        state: "merged",
-        detail: `合并子会话已把 ${target.branch} 合入 ${targetBranch}`,
-        at: Date.now(),
-      });
+      this.recordIntegration(
+        target.sourceId,
+        {
+          mode: this.deps.integrationMode(),
+          state: "merged",
+          detail: `合并子会话已把 ${target.branch} 合入 ${targetBranch}`,
+          at: Date.now(),
+        },
+        `merged into ${targetBranch}`,
+      );
       // 分支确实并入 HEAD：来源子会话的 worktree 与分支可以清掉。
       await this.releaseIsolationWithRetry(target.sourceId, "merged");
       this.deps.onMergeResult?.({
@@ -1223,13 +1237,19 @@ export class SuperAgentManager {
           child?.error ? `：${child.error}` : ""
         }`
       : `合并子会话没有把 ${target.branch} 合入当前分支，${target.branch} 仍保留`;
-    this.recordIntegration(target.sourceId, {
-      mode: this.deps.integrationMode(),
-      state: failed ? "failed" : "skipped",
-      needsAction: true,
-      detail,
-      at: Date.now(),
-    });
+    this.recordIntegration(
+      target.sourceId,
+      {
+        mode: this.deps.integrationMode(),
+        state: failed ? "failed" : "skipped",
+        needsAction: true,
+        detail,
+        at: Date.now(),
+      },
+      failed
+        ? `the merge child session ${child?.status === "cancelled" ? "was interrupted" : "failed"}; ${target.branch} is kept`
+        : `the merge child session did not merge ${target.branch} into the current branch; ${target.branch} is kept`,
+    );
     this.deps.onMergeResult?.({
       sourceId: target.sourceId,
       title: target.title,
@@ -1434,8 +1454,11 @@ export class SuperAgentManager {
     const isolation = session.isolation;
     if (isolation.kind !== "git_worktree" || !isolation.branch || !isolation.baseRef) return;
 
-    const record = (integration: Omit<SuperIntegration, "mode" | "at">): void => {
-      this.recordIntegration(id, { mode, at: Date.now(), ...integration });
+    const record = (
+      integration: Omit<SuperIntegration, "mode" | "at">,
+      reasonEn?: string,
+    ): void => {
+      this.recordIntegration(id, { mode, at: Date.now(), ...integration }, reasonEn);
     };
 
     if (
@@ -1452,7 +1475,10 @@ export class SuperAgentManager {
       // 这里**不直接删**：CLI 进程的 cwd 还停在这个 worktree 里，Windows 上
       // 目录删不掉。先登记，实际释放由 prepare() 的 finally 在进程回收之后
       // 执行（与「合并成功后释放隔离」同一时序）。
-      record({ state: "skipped", detail: "子会话没有产生任何提交" });
+      record(
+        { state: "skipped", detail: "子会话没有产生任何提交" },
+        "the child session produced no commits",
+      );
       this.pendingEmptyRelease.add(id);
       return;
     }
@@ -1460,30 +1486,39 @@ export class SuperAgentManager {
     if (mode === "merge") {
       const tree = await inspectWorkingTree(this.deps.repoRoot);
       if (!tree.available) {
-        record({
-          state: "skipped",
-          needsAction: true,
-          detail: "读不到主工作区状态（git 不可用），分支已保留待你手动合并",
-        });
+        record(
+          {
+            state: "skipped",
+            needsAction: true,
+            detail: "读不到主工作区状态（git 不可用），分支已保留待你手动合并",
+          },
+          "the state of the main workspace could not be read (git is unavailable)",
+        );
         return;
       }
       // 中间态一律让路：在别人的合并/变基上再叠一次，冲突回滚可能带走用户工作。
       if (tree.inProgress) {
-        record({
-          state: "skipped",
-          needsAction: true,
-          detail: `主工作区正处于 ${tree.inProgress} 中间态，分支已保留待你手动合并`,
-        });
+        record(
+          {
+            state: "skipped",
+            needsAction: true,
+            detail: `主工作区正处于 ${tree.inProgress} 中间态，分支已保留待你手动合并`,
+          },
+          `the main workspace is in the middle of a ${tree.inProgress}`,
+        );
         return;
       }
       // 对象库预演：不碰索引与工作区就知道会不会冲突。冲突时连 merge 都不启动。
       const preview = await previewMerge({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
       if (preview.available && !preview.clean) {
-        record({
-          state: "conflict",
-          needsAction: true,
-          detail: `与当前分支存在内容冲突（已预演，工作区未被改动）；分支 ${isolation.branch} 仍在，请手动合并解决`,
-        });
+        record(
+          {
+            state: "conflict",
+            needsAction: true,
+            detail: `与当前分支存在内容冲突（已预演，工作区未被改动）；分支 ${isolation.branch} 仍在，请手动合并解决`,
+          },
+          "the branch conflicts with the current branch (the merge was previewed; the working tree was not modified)",
+        );
         return;
       }
       // 脏工作区不再一律挡路：git 能带着未提交改动合并其它文件（用户的改动原样
@@ -1491,47 +1526,64 @@ export class SuperAgentManager {
       // 未跟踪文件只在同名时才被 git 拒绝，而那次拒绝发生在动手之前。
       if (!tree.clean) {
         if (!preview.available) {
-          record({
-            state: "skipped",
-            needsAction: true,
-            detail: `主工作区有 ${tree.dirtyCount} 处未提交改动，且当前 git 无法预演合并，分支已保留待你手动合并`,
-          });
+          record(
+            {
+              state: "skipped",
+              needsAction: true,
+              detail: `主工作区有 ${tree.dirtyCount} 处未提交改动，且当前 git 无法预演合并，分支已保留待你手动合并`,
+            },
+            `the main workspace has ${tree.dirtyCount} uncommitted change(s) and this git version cannot preview the merge`,
+          );
           return;
         }
         const overlap = tree.trackedPaths.filter((file) => preview.paths.includes(file));
         if (overlap.length > 0) {
-          record({
-            state: "skipped",
-            needsAction: true,
-            detail: `主工作区有未提交改动，其中 ${overlap.length} 个文件与子会话的改动重叠（${describePaths(overlap)}），分支已保留待你手动合并`,
-          });
+          record(
+            {
+              state: "skipped",
+              needsAction: true,
+              detail: `主工作区有未提交改动，其中 ${overlap.length} 个文件与子会话的改动重叠（${describePaths(overlap)}），分支已保留待你手动合并`,
+            },
+            `the main workspace has uncommitted changes in ${overlap.length} file(s) that overlap the child session's changes (${describePathsEn(overlap)})`,
+          );
           return;
         }
       }
       const result = await mergeBranch({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
       if (result.ok) {
         const target = (await currentBranch(this.deps.repoRoot)) ?? "当前分支";
-        record({
-          state: "merged",
-          detail: tree.clean
-            ? `已合入 ${target}`
-            : `已合入 ${target}（你本地未提交的 ${tree.dirtyCount} 处改动原样保留）`,
-        });
+        record(
+          {
+            state: "merged",
+            detail: tree.clean
+              ? `已合入 ${target}`
+              : `已合入 ${target}（你本地未提交的 ${tree.dirtyCount} 处改动原样保留）`,
+          },
+          tree.clean
+            ? `merged into ${target}`
+            : `merged into ${target} (the ${tree.dirtyCount} uncommitted local change(s) were kept as they were)`,
+        );
       } else {
         // 合并没成：确认它到底有没有启动（预演之后 HEAD 可能被别处改过）。
         const after = await inspectWorkingTree(this.deps.repoRoot);
         if (after.inProgress === "merge") {
-          record({
-            state: "conflict",
-            needsAction: true,
-            detail: `合并冲突且自动撤销失败，仓库可能停在合并中间态（可用 git merge --abort 恢复）；分支 ${isolation.branch} 仍在：${result.error}`,
-          });
+          record(
+            {
+              state: "conflict",
+              needsAction: true,
+              detail: `合并冲突且自动撤销失败，仓库可能停在合并中间态（可用 git merge --abort 恢复）；分支 ${isolation.branch} 仍在：${result.error}`,
+            },
+            "the merge conflicted and the automatic rollback failed; the repository may be stuck in a merge state (recover it with `git merge --abort`)",
+          );
         } else {
-          record({
-            state: "skipped",
-            needsAction: true,
-            detail: `git 拒绝合并，工作区未被改动（常见原因：未跟踪文件与子会话新增的文件同名，请先移走或提交它）；分支 ${isolation.branch} 已保留：${result.error}`,
-          });
+          record(
+            {
+              state: "skipped",
+              needsAction: true,
+              detail: `git 拒绝合并，工作区未被改动（常见原因：未跟踪文件与子会话新增的文件同名，请先移走或提交它）；分支 ${isolation.branch} 已保留：${result.error}`,
+            },
+            "git refused the merge and the working tree was not modified (a common cause is an untracked file with the same name as a file the child session added)",
+          );
         }
       }
       return;
@@ -1539,20 +1591,29 @@ export class SuperAgentManager {
 
     // mode === "pr"
     if (!(await remoteOriginUrl(this.deps.repoRoot))) {
-      record({ state: "failed", needsAction: true, detail: "仓库没有配置 origin 远程，分支已保留" });
+      record(
+        { state: "failed", needsAction: true, detail: "仓库没有配置 origin 远程，分支已保留" },
+        "the repository has no origin remote configured",
+      );
       return;
     }
     if (!(await ghAvailable())) {
-      record({
-        state: "failed",
-        needsAction: true,
-        detail: "未找到 gh CLI，分支已保留（可手动合并或自行推送）",
-      });
+      record(
+        {
+          state: "failed",
+          needsAction: true,
+          detail: "未找到 gh CLI，分支已保留（可手动合并或自行推送）",
+        },
+        "the gh CLI was not found",
+      );
       return;
     }
     const pushed = await pushBranch({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
     if (!pushed.ok) {
-      record({ state: "failed", needsAction: true, detail: `推送分支失败：${pushed.error}` });
+      record(
+        { state: "failed", needsAction: true, detail: `推送分支失败：${pushed.error}` },
+        `pushing the branch failed: ${pushed.error}`,
+      );
       return;
     }
     const base = (await currentBranch(this.deps.repoRoot)) ?? isolation.baseRef;
@@ -1564,13 +1625,19 @@ export class SuperAgentManager {
       body: buildPullRequestBody(session),
     });
     if (pr.ok) {
-      record({
-        state: "pr_created",
-        detail: `已推送到 origin，目标分支 ${base}`,
-        url: pr.url || undefined,
-      });
+      record(
+        {
+          state: "pr_created",
+          detail: `已推送到 origin，目标分支 ${base}`,
+          url: pr.url || undefined,
+        },
+        `pushed to origin, target branch ${base}`,
+      );
     } else {
-      record({ state: "failed", needsAction: true, detail: `创建 PR 失败：${pr.error}` });
+      record(
+        { state: "failed", needsAction: true, detail: `创建 PR 失败：${pr.error}` },
+        `creating the pull request failed: ${pr.error}`,
+      );
     }
   }
 
@@ -1589,7 +1656,9 @@ export class SuperAgentManager {
     if (integration.mode !== "merge") return;
     if (integration.state === "merged") return;
     if (!integration.needsAction) return;
-    this.deps.onNeedAgentMerge?.(session, integration.detail ?? "");
+    // The reason goes into the merge task book, which is **model-facing**:
+    // it must be the English fact description, not the Chinese board text.
+    this.deps.onNeedAgentMerge?.(session, this.integrationReasonEn.get(id) ?? "");
   }
 
   /**
@@ -1634,10 +1703,22 @@ export class SuperAgentManager {
     this.emit();
   }
 
-  /** 写入集成结果（元数据补记，不经过状态机 —— 终态会话的事件会被丢弃）。 */
-  private recordIntegration(id: string, integration: SuperIntegration): void {
+  /**
+   * 写入集成结果（元数据补记，不经过状态机 —— 终态会话的事件会被丢弃）。
+   *
+   * `reasonEn` 是这条结果的**模型面向**英文说明：中文的 `detail` 给看板看，
+   * 英文的 `reasonEn` 进汇报提示词与合并任务书。两份由同一个调用点给出，
+   * 所以不会各说各话。
+   */
+  private recordIntegration(
+    id: string,
+    integration: SuperIntegration,
+    reasonEn?: string,
+  ): void {
     const current = this.get(id);
     if (!current) return;
+    if (reasonEn) this.integrationReasonEn.set(id, reasonEn);
+    else this.integrationReasonEn.delete(id);
     const next = withIntegration(current, integration);
     // 历史子会话不在 sessions 里 —— 补记要写回 archived，否则合并结果会丢。
     if (this.sessions.has(id)) {
@@ -1773,26 +1854,36 @@ export class SuperAgentManager {
     if (!isolation.path || !isolation.branch) return { ok: true };
     if (isolation.released) return { ok: true };
 
-    const keep = (detail: string): ReleaseOutcome => {
+    const keep = (detail: string, reasonEn: string): ReleaseOutcome => {
       this.deps.log.warn(`super agent: ${id} ${detail}，保留 worktree 与分支 ${isolation.branch}`);
-      this.recordIntegration(id, {
-        mode: session.integration?.mode ?? this.deps.integrationMode(),
-        state: "skipped",
-        detail,
-        at: Date.now(),
-      });
+      this.recordIntegration(
+        id,
+        {
+          mode: session.integration?.mode ?? this.deps.integrationMode(),
+          state: "skipped",
+          detail,
+          at: Date.now(),
+        },
+        reasonEn,
+      );
       return { ok: false, retryable: false, reason: detail };
     };
 
     if (await worktreeHasUncommittedChanges(isolation.path)) {
-      return keep("子会话没有产生任何提交，工作目录保留（还有未提交改动）");
+      return keep(
+        "子会话没有产生任何提交，工作目录保留（还有未提交改动）",
+        "the child session produced no commits and the working directory still has uncommitted changes",
+      );
     }
 
     // 删分支前再核一次「确实没有独有提交」—— 状态可能在这期间变了
     // （比如子会话临收尾前才提交）。
     const baseRef = isolation.baseRef;
     if (!baseRef) {
-      return keep("子会话没有产生任何提交，工作目录保留（缺少分支起点，无法确认分支为空）");
+      return keep(
+        "子会话没有产生任何提交，工作目录保留（缺少分支起点，无法确认分支为空）",
+        "the child session produced no commits and the branch start point is unknown, so the branch cannot be confirmed empty",
+      );
     }
     if (
       await branchHasUnmergedCommits({
@@ -1801,7 +1892,10 @@ export class SuperAgentManager {
         baseRef,
       })
     ) {
-      return keep("子会话没有产生任何提交（分支上出现新提交），工作目录保留");
+      return keep(
+        "子会话没有产生任何提交（分支上出现新提交），工作目录保留",
+        "the child session produced no commits, but new commits appeared on the branch",
+      );
     }
 
     const result = await removeWorktree({
@@ -1815,22 +1909,30 @@ export class SuperAgentManager {
       this.deps.log.warn(
         `super agent: ${id} 空分支的 worktree 清理未完成（removed=${result.removed}, branchKept=${result.branchKept}）：${reason}`,
       );
-      this.recordIntegration(id, {
-        mode: session.integration?.mode ?? this.deps.integrationMode(),
-        state: "skipped",
-        detail: "子会话没有产生任何提交，工作目录清理未完成（稍后重试）",
-        at: Date.now(),
-      });
+      this.recordIntegration(
+        id,
+        {
+          mode: session.integration?.mode ?? this.deps.integrationMode(),
+          state: "skipped",
+          detail: "子会话没有产生任何提交，工作目录清理未完成（稍后重试）",
+          at: Date.now(),
+        },
+        "the child session produced no commits and its working directory could not be cleaned up yet",
+      );
       return { ok: false, retryable: true, reason };
     }
 
     this.markReleased(id);
-    this.recordIntegration(id, {
-      mode: session.integration?.mode ?? this.deps.integrationMode(),
-      state: "skipped",
-      detail: "子会话没有产生任何提交，工作目录已清理",
-      at: Date.now(),
-    });
+    this.recordIntegration(
+      id,
+      {
+        mode: session.integration?.mode ?? this.deps.integrationMode(),
+        state: "skipped",
+        detail: "子会话没有产生任何提交，工作目录已清理",
+        at: Date.now(),
+      },
+      "the child session produced no commits; its working directory was cleaned up",
+    );
     this.deps.log.info(
       `super agent: ${id} 没有产生任何提交，已清理 worktree 与分支 ${isolation.branch}`,
     );
@@ -1956,15 +2058,22 @@ export class SuperAgentManager {
   /**
    * 集成没能把改动带回主工作区时，用 blocked 覆盖「已完成」的乐观上报 ——
    * 主会话需要知道分支还在、要用户动手。
+   *
+   * **正文是英文**：这份汇报会作为主会话的一次真实 prompt 发出去，混中文
+   * 会让模型在对话中间翻语言。中文的看板说明仍在 `integration.detail`
+   * （看板给用户看），这里用同一调用点写下的英文事实描述。
    */
   private integrationReport(session: SuperSessionUi): SuperReport | null {
     const integration = session.integration;
     if (!integration || !integration.needsAction) return null;
+    const reason =
+      this.integrationReasonEn.get(session.id) ??
+      "the changes were not brought back into the main workspace automatically";
     return {
       state: "blocked",
-      summary: `${superIntegrationLabel(integration)}${integration.detail ? `：${integration.detail}` : ""}`,
+      summary: `The changes were not integrated automatically: ${reason}. The branch is kept and still has to be merged into the current branch of the main repository.`,
       at: integration.at,
-      humanAction: integration.detail ?? "子会话的改动没有自动带回主工作区",
+      humanAction: `Merge the branch of this child session into the current branch of the main repository (${reason}).`,
     };
   }
 
@@ -1982,9 +2091,16 @@ export class SuperAgentManager {
     return buildSuperReportPrompt(entries, { pendingCount });
   }
 
+  /**
+   * 子会话的文本摘要（模型面向：它会作为汇报正文回到主会话）。
+   *
+   * 没有正文时的兜底是英文：汇报提示词整体是英文的，兜底夹一句中文会让
+   * 模型在对话中间翻语言（与 `shared/super-agent.ts` 的 `describePending`
+   * 兜底同一纪律）。
+   */
   private summarize(id: string): string {
     const text = (this.lastText.get(id) ?? "").trim();
-    if (!text) return "（子会话没有留下文本摘要）";
+    if (!text) return "(the child session left no text summary)";
     return text.length > 800 ? `${text.slice(0, 799)}…` : text;
   }
 
@@ -1999,6 +2115,7 @@ export class SuperAgentManager {
     this.lastThought.delete(id);
     this.promptTokens.delete(id);
     this.transcripts.delete(id);
+    this.integrationReasonEn.delete(id);
   }
 
   /** 记录子会话实际使用的模型（看板详情要显示它，成本也按它查单价）。 */
@@ -2190,25 +2307,29 @@ async function stageSuperAttachments(
   const used = new Set<string>();
   for (const [index, attachment] of attachments.entries()) {
     try {
+      // The fallback names become file names in the attachment dir and are
+      // listed in the task prompt — that is model-facing text, so English.
       const fallback = attachment.data
-        ? `图片${index + 1}${extensionForMime(attachment.mimeType)}`
-        : `附件${index + 1}`;
+        ? `image${index + 1}${extensionForMime(attachment.mimeType)}`
+        : `attachment${index + 1}`;
       let name = sanitizeAttachmentName(attachment.name || attachment.path || "", fallback);
       if (attachment.data && !path.extname(name)) name += extensionForMime(attachment.mimeType);
       const target = uniqueAttachmentPath(dir, name, used);
       let size: number;
       if (attachment.data) {
         const bytes = Buffer.from(attachment.data, "base64");
-        if (bytes.byteLength === 0) throw new Error("图片数据为空");
-        if (bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES) throw new Error("图片过大");
+        if (bytes.byteLength === 0) throw new Error("the image payload is empty");
+        if (bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES) throw new Error("the image is too large");
         await writeFile(target, bytes);
         size = bytes.byteLength;
       } else {
-        if (!attachment.path) throw new Error("没有可读取的源文件");
+        if (!attachment.path) throw new Error("there is no readable source file");
         const info = await stat(attachment.path);
-        if (!info.isFile()) throw new Error("不是文件");
+        if (!info.isFile()) throw new Error("the source is not a regular file");
         if (info.size > MAX_ATTACHMENT_FILE_BYTES) {
-          throw new Error(`文件过大（上限 ${Math.floor(MAX_ATTACHMENT_FILE_BYTES / 1024 / 1024)}MB）`);
+          throw new Error(
+            `the file is too large (limit ${Math.floor(MAX_ATTACHMENT_FILE_BYTES / 1024 / 1024)}MB)`,
+          );
         }
         // 非图片附件只做磁盘到磁盘的复制，绝不整个读进内存。
         await copyFile(attachment.path, target);
@@ -2225,8 +2346,11 @@ async function stageSuperAttachments(
         });
       }
     } catch (error) {
-      const label = attachment.name || attachment.path || `附件${index + 1}`;
-      staged.failures.push(`${label}：${errorMessage(error)}`);
+      const label = attachment.name || attachment.path || `attachment${index + 1}`;
+      // The failure line is quoted verbatim in the task prompt (model-facing):
+      // English, so the child session reads it in the same language as the
+      // rest of its instructions.
+      staged.failures.push(`${label}: ${errorMessage(error)}`);
       log.warn(`子会话附件复制失败（${label}）：${errorMessage(error)}`);
     }
   }
@@ -2389,7 +2513,12 @@ function describeSubmission(isolation: SuperSessionUi["isolation"]): string {
   );
 }
 
-/** PR 正文：任务说明 + 来源标注（不编造测试结果或影响面）。 */
+/**
+ * PR 正文：任务说明 + 来源标注（不编造测试结果或影响面）。
+ *
+ * **保持中文**：这是给人看的产出物（GitHub 上的 PR 描述），不是发给模型的
+ * 提示词 —— 产出物语言不随提示词英文化而改变。
+ */
 function buildPullRequestBody(session: SuperSessionUi): string {
   return [session.task.trim(), "", `_由 iFlow Harness 子会话 \`${session.id}\` 自动创建。_`].join("\n");
 }
@@ -2418,6 +2547,17 @@ function extractText(content: unknown): string {
 function describePaths(paths: readonly string[], limit = 5): string {
   const head = paths.slice(0, limit).join("、");
   return paths.length > limit ? `${head} 等 ${paths.length} 个` : head;
+}
+
+/**
+ * 重叠文件列表的**模型面向**渲染（英文）。
+ *
+ * 与 {@link describePaths} 一一对应：中文那份给看板看，英文这份进汇报提示词
+ * 与合并任务书（两边都是英文，不能各说各话）。
+ */
+function describePathsEn(paths: readonly string[], limit = 5): string {
+  const head = paths.slice(0, limit).join(", ");
+  return paths.length > limit ? `${head} and ${paths.length - limit} more` : head;
 }
 
 /** 重试提示词里的截断：上一次的错误/摘要可能很长，别把它们整段塞进提示词。 */
