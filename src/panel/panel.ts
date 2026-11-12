@@ -6443,7 +6443,9 @@ export class ChatPanel implements vscode.Disposable {
       let imageIndex = 0;
       for (const image of carried.images) {
         attachments.push({
-          name: vscode.l10n.t("图片{0}", ++imageIndex),
+          // The name becomes the file name in the child's attachment dir and is
+          // listed in the child's task prompt — model-facing, so English.
+          name: `image${++imageIndex}`,
           data: image.data,
           mimeType: image.mimeType,
         });
@@ -6503,7 +6505,9 @@ export class ChatPanel implements vscode.Disposable {
     let imageIndex = 0;
     for (const image of images ?? []) {
       attachments.push({
-        name: vscode.l10n.t("图片{0}", ++imageIndex),
+        // The name becomes the file name in the child's attachment dir and is
+        // listed in the child's task prompt — model-facing, so English.
+        name: `image${++imageIndex}`,
         data: image.data,
         mimeType: image.mimeType,
       });
@@ -8903,7 +8907,7 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       const contextBlock = hasContexts
-        ? assembleContextSections(contexts!, (c) => this.contextSectionTitle(c))
+        ? assembleContextSections(contexts!, (c) => this.contextSectionTitleEn(c))
         : "";
       // Attachments ride along in the child's OWN staging dir: images become
       // inline image blocks (they never have a path), files are copied there.
@@ -8942,16 +8946,27 @@ export class ChatPanel implements vscode.Disposable {
     // ride RAW — the composed text starts with a section title, never with
     // "/", so the CLI's command gate cannot misfire; only the typed part
     // goes through toAgentPromptText (its "/"-escape must not touch code).
+    //
+    // Two title variants on purpose: the transcript keeps the Chinese titles
+    // (the user reads that bubble), the agent gets the English ones (the
+    // model-facing prompt is English throughout).
     const contextBlock = hasContexts
       ? assembleContextSections(contexts!, (c) => this.contextSectionTitle(c))
+      : "";
+    const agentContextBlock = hasContexts
+      ? assembleContextSections(contexts!, (c) => this.contextSectionTitleEn(c))
       : "";
     const fullText = [contextBlock, trimmed].filter(Boolean).join("\n\n");
     // The agent sees the attachment list inline: absolute paths it can read
     // with its own tools. The transcript block (beginUserPrompt) mirrors the
     // same list so the UI matches what was actually sent.
+    //
+    // **English**: this line only ever reaches the model (the transcript gets
+    // its own file note), so it must not be an l10n string — a translated
+    // header would flip the language in the middle of an English prompt.
     const attachmentBlock =
       files && files.length > 0
-        ? `\n\n${vscode.l10n.t("用户附带以下本地文件（可按需读取）：")}\n${files
+        ? `\n\nThe user attached the following local files (read them as needed):\n${files
             .map((f) => `- ${f.name} → ${f.path}`)
             .join("\n")}`
         : "";
@@ -8975,7 +8990,7 @@ export class ChatPanel implements vscode.Disposable {
     // must not carry it: they are not turns of the conversation.
     const superDigest = internal ? "" : this.superAgentsDigest();
     const promptText =
-      [superDigest, contextBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
+      [superDigest, agentContextBlock, typedText].filter(Boolean).join("\n\n") + attachmentBlock;
     // C3/C9: the webview's busy lock cannot guard the command channels
     // (`iflow.askSelection`, `@iflow` participant). A prompt during a session
     // reset would hit the about-to-be-discarded sessionId; two overlapping
@@ -9470,6 +9485,33 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Per-kind section title for the **agent-facing** prompt (English).
+   *
+   * The Chinese titles above are what the user reads in the transcript (the
+   * composed context prefix is part of the user bubble) — they stay Chinese.
+   * The model, however, gets an English prompt: the child session runs the
+   * same English system prompt, so a Chinese header in the middle of it
+   * reads like a language switch. Same discipline as the Super Agent labels
+   * (Chinese for the board, English for the model).
+   */
+  private contextSectionTitleEn(ctx: ContextRefUi): string {
+    switch (ctx.kind) {
+      case "code":
+        return `About \`${ctx.label}:${ctx.detail}\`:`;
+      case "folder":
+        return `Direct children of the folder \`${ctx.label}\`:`;
+      case "problems":
+        return `Workspace diagnostics (${ctx.detail}):`;
+      case "git":
+        return "Workspace git status and changes:";
+      case "url":
+        return `Web page content (${ctx.label}):`;
+      case "terminal":
+        return `Recent terminal commands and their output (${ctx.detail}):`;
+    }
+  }
+
+  /**
    * Shared @problems body builder: the resolveContext card and the
    * diagnostics-watch "排队修复" action must inject the exact same report.
    * Returns `{error}` when there is nothing to report (the card would be
@@ -9607,9 +9649,11 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("info", res.error);
       return;
     }
-    const text = vscode.l10n.t(
-      "请修复当前工作区的错误级诊断（见附加的诊断清单），完成后简要说明修复内容。",
-    );
+    // Model-facing request (it becomes the agent's prompt): English, and not
+    // an l10n string — a translated instruction would flip the language in
+    // the middle of an English prompt.
+    const text =
+      "Fix the error-level diagnostics in the current workspace (see the attached diagnostics list), then briefly describe what you changed.";
     const ctx: ContextRefUi = {
       id: `ctx-diag-${Date.now().toString(36)}`,
       kind: "problems",
