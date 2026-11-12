@@ -694,9 +694,9 @@ export class ChatPanel implements vscode.Disposable {
   /** How much of `superActionScanText` has already been executed. */
   private superActionScanOffset = 0;
   /**
-   * 子会话汇报的合并缓冲：主会话只在**全部**子会话结束后收到一次合并汇报。
-   * 同一子会话只保留最后一条（blocked → ready 之类的中途状态不重复转述），
-   * 中途进展只更新看板。
+   * 子会话汇报的缓冲：**逐个即时交付** —— 某个子会话一进入终态，它的汇报
+   * 就被取走交给主会话（不必等同一批全部结束）。同一子会话只保留最后一条
+   * （blocked → ready 之类的中途状态不重复转述），中途进展只更新看板。
    */
   private readonly pendingSuperReports = new SuperReportBuffer();
   /**
@@ -6671,14 +6671,13 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Buffer a child-session status update and hand it to the MAIN session once
-   * every child has settled.
+   * Buffer a child-session status update and hand it to the MAIN session as
+   * soon as THAT child has settled.
    *
-   * The main session must not be interrupted once per child: a batch of N
-   * delegations would otherwise produce N separate notes with no complete
-   * picture. Reports are accumulated (one latest report per child) and only
-   * handed over when `allSuperSessionsSettled` — until then the board alone
-   * shows progress.
+   * 逐个即时汇报（2026-11-12）：谁先结束谁先汇报，不必等同一批全部跑完 ——
+   * 主会话不必守着最慢的那个孩子。Reports are accumulated (one latest
+   * report per child) and the settled ones are handed over right away; the
+   * children still running keep their entry in the buffer.
    *
    * Delivery is a **real prompt on the main ACP session** (`hidden`, so no
    * user bubble appears), NOT a side-channel completion appended as a muted
@@ -6701,30 +6700,30 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 汇报缓冲的批次门槛重算。
+   * 取走缓冲里**已经终态**的子会话汇报并投递（逐个即时汇报）。
    *
-   * 平时由「最后一个子会话上报」自己触发取批次；但子会话被清理（用户点
-   * 清理 / 合并完释放）之后门槛可能已经成立而**再没有人来触发**——它的
-   * onReport 不会再来第二次。等待期面板一直忙碌，那条路就成了永久的忙碌
-   * 态。所以心跳与看板变化时都补一次重算。
+   * 门槛是「来源子会话已终态」，不是「这一批全部结束」—— 一个子会话跑完
+   * 就交一次，主会话可以立刻接着推进；还在跑的子会话的汇报继续留在缓冲里。
    *
-   * 缓冲里还有汇报、但来源子会话全被清掉了：批次门槛（「所有子会话都进入
-   * 终态」）永远不成立，也没有任何会话可投递 —— 如实记一笔然后丢掉，
-   * 不能让面板卡在忙碌态。
+   * 来源子会话已经被清理（用户点清理 / 合并完释放）时，它的汇报再也没人能
+   * 接 —— 如实记一笔然后丢掉，不能让面板卡在忙碌态。
+   *
+   * 心跳与看板变化时都补一次重算：子会话被清理之后可能再没有人来触发取件
+   * （它的 onReport 不会再来第二次）。
    */
   private settleSuperReportsIfReady(): void {
     if (this.disposed || this.superReportRunning) return;
     if (this.pendingSuperReports.size === 0) return;
     const live = this.superAgent?.list() ?? [];
-    if (live.length === 0) {
+    // 来源子会话已不存在：这份汇报没人能接，丢掉（否则面板永久忙碌）。
+    const dropped = this.pendingSuperReports.dropMissing(live);
+    if (dropped.length > 0) {
       this.log.warn(
-        "super agent: child sessions were cleaned up before their reports were delivered — dropping",
+        `super agent: dropped ${dropped.length} child report(s) whose session(s) were cleaned up before delivery: ${dropped.join(", ")}`,
       );
-      this.pendingSuperReports.clear();
-      return;
     }
     const batch = this.pendingSuperReports.takeSettled(live);
-    if (!batch) return; // 还有子会话在跑：继续积累。
+    if (!batch) return; // 全都还在跑：继续积累。
     const text = this.superAgent?.reportPrompt(batch) ?? "";
     if (!text) return;
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
@@ -6740,6 +6739,9 @@ export class ChatPanel implements vscode.Disposable {
    * single lane (a merge request is also a main-session turn), so the two are
    * mutually exclusive — otherwise two concurrent `sendPrompt` calls would
    * interleave on one ACP session.
+   *
+   * 逐个即时汇报：每个终态子会话各占一轮（不是一批合并成一轮）—— 后续
+   * 子会话结束时会再排一轮。
    */
   private async drainSuperReports(): Promise<void> {
     if (this.disposed || this.superReportRunning) return;
@@ -6773,8 +6775,8 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`super agent report delivery failed: ${errorMessage(error)}`);
     } finally {
       this.superReportRunning = false;
-      // 汇报已经投出去（或投失败）：重算忙碌标记 —— 全部终态且汇报已投出时
-      // 面板回到 idle，不再是忙碌态。
+      // 汇报已经投出去（或投失败）：重算忙碌标记 —— 还有子会话在跑时面板保持
+      // 忙碌态，全部结束且汇报已投出时才回到 idle。
       this.syncSuperWaitingState();
     }
   }
@@ -6827,8 +6829,8 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed) return false;
     if (this.pendingSuperReportPrompts.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
-    // 汇报已交上来但批次还没凑齐（还有子会话在跑）：这一批永远投不出去，
-    // 心跳必须继续跑，否则既没有汇报也没有忙碌态刷新。
+    // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
+    // 继续跑，否则既没有汇报也没有忙碌态刷新。
     if (this.pendingSuperReports.size > 0) return true;
     return (this.store.getState().superSessions ?? []).some(
       (session) => !isTerminalSuperStatus(session.status),
@@ -6864,8 +6866,8 @@ export class ChatPanel implements vscode.Disposable {
    *  ①还有子会话没进终态；
    *  ②子会话已终态但还没把汇报交给宿主（终态与汇报交接之间隔着代提交与
    *    自动合并的 git 操作，可能好几秒）；
-   *  ③汇报缓冲里还有欠账（有汇报但批次还没凑齐 —— 比如另一个主会话的子会话
-   *    还在跑，这一批就投不出去）；
+   *  ③汇报缓冲里还有欠账（有汇报，但来源子会话还没终态 —— 它一结束就会
+   *    被交回主会话）；
    *  ④汇报提示词已备好、还在队列里等主会话空闲；
    *  ⑤汇报正在投进主会话（那一轮是 hidden prompt，status 会变 streaming）。
    *
@@ -6933,11 +6935,14 @@ export class ChatPanel implements vscode.Disposable {
     const message =
       awaiting > 0
         ? vscode.l10n.t(
-            "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），全部结束后会自动继续",
+            "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
             live.length,
             awaiting,
           )
-        : vscode.l10n.t("正在等待 {0} 个子会话汇报，全部结束后会自动继续", live.length);
+        : vscode.l10n.t(
+            "正在等待 {0} 个子会话汇报（完成一个即汇报一个，会自动继续）",
+            live.length,
+          );
     this.superWaitToastKey = key;
     this.superWaitToastId = this.store.sendToast("info", message, {
       persistent: true,

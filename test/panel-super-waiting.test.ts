@@ -265,39 +265,52 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(notices.some((n) => n.includes("子会话"))).toBe(true);
   });
 
-  it("子会话被清理后批次门槛才成立：心跳补一次重算把汇报投出去，不卡在忙碌态", async () => {
-    // A 已终态并上报，B 还在跑 → 批次凑不齐，先攒着。
+  it("逐个终态即汇报：已结束的那个先交，不必等还在跑的那个", async () => {
     const a = child({ id: "super-a", status: "completed", summary: "A 完成" });
     const b = child({ id: "super-b", status: "running" });
     manager.list = () => [a, b];
     p.queueSuperReport([{ session: a, report: READY_REPORT }]);
     await flush();
-    expect(p.store.getState().superWaiting).toBe(true);
-    expect(calls).toHaveLength(0);
-
-    // B 被用户清理（不再出现，也不会再上报）→ 门槛成立，但没有任何 onReport
-    // 会再来触发取批次；心跳必须补这一次重算。
-    manager.list = () => [a];
-    p.refreshSuperWaitHeartbeat();
-    await flush();
+    // A 已终态 → 立刻交一次汇报（B 还在跑，不影响这一轮）。
     expect(calls).toHaveLength(1);
     expect(calls[0]!.prompt[0]!.text).toContain("【汇报】");
+    // 还有子会话在跑 → 面板保持忙碌态。
+    expect(p.store.getState().superWaiting).toBe(true);
 
     calls[0]!.resolve({ stopReason: "end_turn" });
     await flush();
     await flush();
+    expect(p.store.getState().superWaiting).toBe(true);
+
+    // B 也结束了 → 再交一次汇报。
+    const doneB = child({ id: "super-b", status: "completed", summary: "B 完成" });
+    manager.list = () => [a, doneB];
+    p.queueSuperReport([{ session: doneB, report: READY_REPORT }]);
+    await flush();
+    expect(calls).toHaveLength(2);
+
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+    // 全部终态且汇报都投出去了 → 忙碌态消失。
     expect(p.store.getState().superWaiting).toBe(false);
   });
 
-  it("来源子会话全被清理：无从投递的汇报被丢弃，忙碌态不残留", async () => {
-    const a = child({ id: "super-a", status: "completed", summary: "A 完成" });
+  it("来源子会话被清理：无从投递的汇报被丢弃，忙碌态不残留", async () => {
+    // A 还在等人回答：它的 blocked 汇报先入缓冲（来源没终态 → 条目留在缓冲里）。
+    const a = child({ id: "super-a", status: "awaiting_input", summary: "等回答" });
     const b = child({ id: "super-b", status: "running" });
     manager.list = () => [a, b];
-    p.queueSuperReport([{ session: a, report: READY_REPORT }]);
+    p.queueSuperReport([
+      { session: a, report: { state: "blocked", summary: "等回答", at: 2000, humanAction: "等回答" } },
+    ]);
     await flush();
+    // 还没终态 → 不交付。
+    expect(calls).toHaveLength(0);
     expect(p.store.getState().superWaiting).toBe(true);
 
-    // 两个子会话都被清理掉了：A 的汇报还欠在缓冲里，但已经没有会话可投。
+    // 子会话被清理掉了：这份汇报再也没人能接 —— 如实丢掉，不能让面板卡在
+    // 忙碌态。
     manager.list = () => [];
     p.refreshSuperWaitHeartbeat();
     await flush();

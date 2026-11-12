@@ -319,11 +319,11 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 
 ## While children run (do not stop the flow)
 
-Children outlive your turn: you usually finish the dispatching turn while they are still working, and that is normal. The host keeps the run alive for you — it shows a `等待子会话汇报` pill, watches the board, and when **every** child has settled it starts a new turn of the SAME conversation with a `[子会话状态上报]` section listing each child's outcome.
+Children outlive your turn: you usually finish the dispatching turn while they are still working, and that is normal. The host keeps the run alive for you — it shows a `等待子会话汇报` pill and watches the board. **Each child is reported as soon as it settles**: the host starts a new turn of the SAME conversation with a `[子会话状态上报]` section listing that child's outcome, and reports the remaining children as they finish. Never wait for the whole batch before reading a result.
 
 - Do **not** poll, re-check, or end your reply with "等子会话完成后再继续" / "你可以稍后看板". The next turn arrives on its own.
 - Do **not** ask the user to nudge you when the children finish; the host already does that handoff.
-- When `[子会话状态上报]` arrives, treat it as the continuation of the current task: read the board (it is injected in the same turn) and advance the work by dispatching follow-ups — review and fixes both belong to children, so do not run a command or edit a file here — and only then give ONE complete report to the user.
+- When `[子会话状态上报]` arrives, treat it as the continuation of the current task: read the board (it is injected in the same turn) and advance the work by dispatching follow-ups — review and fixes both belong to children, so do not run a command or edit a file here — and only then give ONE complete report to the user. A report may cover only the children that have finished so far; the host hands over the rest as they finish, and the final complete report belongs to the last one.
 - If the user typed something while the children were running, answer that first, then apply the report. A report that arrived mid-turn is queued, never dropped.
 
 ## Managing

@@ -633,8 +633,42 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("派给子会话");
     expect(text).toContain("不要自己跑命令");
     expect(text).toContain("完整汇报");
-    expect(text).toContain("都已结束");
+    // 逐个即时汇报：说的是「本批已结束的 N 个」，不再是「这一批都已结束」。
+    expect(text).toContain("本批已结束的 1 个子会话");
+    expect(text).not.toContain("当前这批子会话都已结束");
     expect(text).toContain("不要编造");
+  });
+
+  it("没有子会话在跑时：提示词说宿主逐个交回，并保留最终完整汇报", () => {
+    const text = buildSuperReportPrompt(
+      [{ session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } }],
+      { pendingCount: 0 },
+    );
+    expect(text).toContain("宿主会在每个子会话结束时把结果交回");
+    expect(text).toContain("最后向用户做一次完整汇报");
+    expect(text).not.toContain("仍在运行");
+    expect(text).not.toContain("宿主一直守候到它们全部结束");
+  });
+
+  it("还有子会话在跑时：先处理这批结果，不要现在做最终完整汇报", () => {
+    const text = buildSuperReportPrompt(
+      [{ session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } }],
+      { pendingCount: 2 },
+    );
+    expect(text).toContain("另有 2 个子会话仍在运行");
+    expect(text).toContain("它们结束后宿主会继续汇报");
+    expect(text).toContain("不要等它们");
+    expect(text).toContain("此时不要向用户做最终完整汇报");
+    // 还有人在跑 → 这一轮不做最终完整汇报（收尾留给最后一次）。
+    expect(text).not.toContain("最后向用户做一次完整汇报");
+  });
+
+  it("缺省 pendingCount 等同于 0（没有子会话在跑）", () => {
+    const text = buildSuperReportPrompt([
+      { session: session({ status: "completed" }), report: { state: "ready", summary: "改完了", at: 1 } },
+    ]);
+    expect(text).toContain("最后向用户做一次完整汇报");
+    expect(text).not.toContain("仍在运行");
   });
 
   it("汇报提示词把复核写成派发任务，而不是让主会话自己执行", () => {
@@ -672,6 +706,18 @@ describe("super agent · 汇报", () => {
     expect(text).toContain("问用户是否要继续");
     expect(text).not.toContain("不要停下来等用户再开口");
   });
+
+  it("全部被中断且还有子会话在跑：保留中断说明，并补上仍在运行的说明", () => {
+    const text = buildSuperReportPrompt(
+      [{ session: session({ status: "cancelled" }), report: { state: "dropped", summary: "用户中断", at: 1 } }],
+      { pendingCount: 1 },
+    );
+    expect(text).toContain("被中断");
+    expect(text).toContain("不要自动重跑");
+    expect(text).toContain("问用户是否要继续");
+    expect(text).toContain("另有 1 个子会话仍在运行");
+    expect(text).toContain("它们结束后宿主会继续汇报");
+  });
 });
 
 describe("super agent · 合并汇报", () => {
@@ -688,15 +734,36 @@ describe("super agent · 合并汇报", () => {
     ).toBe(true);
   });
 
-  it("未全部结束前不产出汇报批次", () => {
+  it("只取走来源已终态的条目，还在跑的留在缓冲里", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
-      { session: session({ id: "b", status: "completed" }), report: { state: "ready", summary: "b 完成", at: 1 } },
+      { session: session({ id: "a", status: "completed" }), report: { state: "ready", summary: "a 完成", at: 1 } },
+      { session: session({ id: "b", status: "running" }), report: { state: "ready", summary: "b 未完", at: 2 } },
     ]);
-    expect(buffer.takeSettled([session({ id: "a", status: "running" }), session({ id: "b", status: "completed" })])).toBeNull();
+    const batch = buffer.takeSettled([
+      session({ id: "a", status: "completed" }),
+      session({ id: "b", status: "running" }),
+    ]);
+    // 只有终态的 a 被取走（逐个即时汇报）。
+    expect(batch?.map((entry) => entry.session.id)).toEqual(["a"]);
+    // b 还在跑：它的条目继续留在缓冲里。
+    expect(buffer.size).toBe(1);
   });
 
-  it("全部结束后一次性取走所有子会话的最后一条汇报", () => {
+  it("仍在跑的子会话结束后，它的汇报被取走", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      { session: session({ id: "b", status: "running" }), report: { state: "ready", summary: "b 未完", at: 2 } },
+    ]);
+    expect(buffer.takeSettled([session({ id: "b", status: "running" })])).toBeNull();
+    expect(buffer.size).toBe(1);
+
+    const batch = buffer.takeSettled([session({ id: "b", status: "completed" })]);
+    expect(batch?.map((entry) => entry.session.id)).toEqual(["b"]);
+    expect(buffer.size).toBe(0);
+  });
+
+  it("已终态的子会话的汇报各自被取走（不再等整批结束）", () => {
     const buffer = new SuperReportBuffer();
     buffer.add([
       { session: session({ id: "b", status: "completed" }), report: { state: "ready", summary: "b 完成", at: 1 } },
@@ -717,6 +784,19 @@ describe("super agent · 合并汇报", () => {
         session({ id: "b", status: "completed" }),
       ]),
     ).toBeNull();
+  });
+
+  it("来源子会话已不存在：条目被丢掉（否则面板永久忙碌）", () => {
+    const buffer = new SuperReportBuffer();
+    buffer.add([
+      { session: session({ id: "a", status: "completed" }), report: { state: "ready", summary: "a 完成", at: 1 } },
+      { session: session({ id: "b", status: "running" }), report: { state: "ready", summary: "b 未完", at: 2 } },
+    ]);
+    // a 已被清理（不再出现在会话列表里）→ 它的汇报没人能接。
+    expect(buffer.dropMissing([session({ id: "b", status: "running" })])).toEqual(["a"]);
+    expect(buffer.size).toBe(1);
+    // 已经丢过的不再重复上报。
+    expect(buffer.dropMissing([session({ id: "b", status: "running" })])).toEqual([]);
   });
 
   it("同一子会话只保留最后一条汇报（blocked 被 ready 覆盖）", () => {

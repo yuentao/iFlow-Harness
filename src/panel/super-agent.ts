@@ -1968,9 +1968,18 @@ export class SuperAgentManager {
     };
   }
 
-  /** 汇报给主会话的提示词（宿主用它向主会话发一条 prompt）。 */
+  /**
+   * 汇报给主会话的提示词（宿主用它向主会话发一条 prompt）。
+   *
+   * `pendingCount` = 还在跑（非终态）的子会话数。逐个即时汇报意味着这一轮
+   * 往往**不是**收尾：还在跑的孩子结束后宿主会再交一次汇报，所以提示词里
+   * 会明确「先处理这批结果、此时不要向用户做最终完整汇报」。
+   */
   reportPrompt(entries: { session: SuperSessionUi; report: SuperReport }[]): string {
-    return buildSuperReportPrompt(entries);
+    const pendingCount = this.list().filter(
+      (session) => !isTerminalSuperStatus(session.status),
+    ).length;
+    return buildSuperReportPrompt(entries, { pendingCount });
   }
 
   private summarize(id: string): string {
