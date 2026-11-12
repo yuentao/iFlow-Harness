@@ -413,6 +413,7 @@
     "lint:deps": "knip",
     "harness": "node scripts/harness.mjs",
     "probe:memory": "node test/fixtures/probe-memory.mjs",
+    "probe:restore-concurrency": "node test/fixtures/probe-restore-concurrency.mjs",
     "vendor:cli": "node scripts/vendor-cli.mjs",
     "defaults:sync": "node scripts/vendor-cli.mjs --sync-defaults",
     "package": "npm run vendor:cli -- --force && npm run build && vsce package --no-dependencies"

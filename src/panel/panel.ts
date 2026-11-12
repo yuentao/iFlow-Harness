@@ -226,6 +226,22 @@ const POST_REJECTION_IDLE_MS = 120_000;
 /** Cap for discardedSessionIds (hot re-auth abandons at most one session per
  * profile switch; the cap only guards pathological unbounded growth). */
 const DISCARDED_SESSION_IDS_CAP = 8;
+/**
+ * Outcome of one restore attempt — the settle handle resolves with it so a
+ * 新会话 request that interrupted the restore can word its notice truthfully
+ * ("已取消…" vs "恢复完成后将自动新建会话").
+ */
+type RestoreOutcome = "aborted" | "completed" | "failed";
+/** Cap for abandonedRestoreSessionIds (one entry per abandoned restore). */
+const ABANDONED_RESTORE_IDS_CAP = 8;
+/** A promise whose resolver is captured for later (settle handles). */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 /** Hard cap on how long the @iflow participant waits for a prompt to finish
  * (P3). The wait loop ends on idle/error/cancel; this timeout is the last
  * resort if none of those ever fire. */
@@ -5581,8 +5597,54 @@ export class ChatPanel implements vscode.Disposable {
    * here reads as "restored session shows another conversation's content").
    */
   private restoringSessionId: string | null = null;
+  /**
+   * Abort request for the in-flight restore: set when the user asks for a
+   * 新会话 while the history is still being restored. The restore checks it
+   * at every checkpoint (after each await) and, when it fires, abandons the
+   * restore WITHOUT writing anything to the store — the 新会话 flow takes
+   * over from there.
+   */
+  private restoreAbort = false;
+  /**
+   * The 新会话 intent recorded while a restore was in flight. The restore
+   * may be too far along to abort (it already wrote to the store), so the
+   * intent is honored as soon as the restore settles — the user never has
+   * to click 新会话 twice.
+   */
+  private pendingNewSession = false;
+  /**
+   * Settle handle of the in-flight restore: resolves with the restore's
+   * outcome ("aborted" | "completed" | "failed") when the restore is done.
+   * Non-null exactly while a restore is in flight (created right after
+   * `restoring` is set, resolved in the restore's finally).
+   */
+  private restoreSettle: { promise: Promise<RestoreOutcome>; resolve: (o: RestoreOutcome) => void } | null = null;
+  /** Outcome of the last restore attempt (read when the settle fires). */
+  private lastRestoreOutcome: RestoreOutcome = "completed";
+  /**
+   * The in-flight 新会话 flow. Concurrent requests share ONE run: the click
+   * that interrupts a restore and the restore's own fallback both funnel
+   * here, so a second `session/new` is never issued (and the destructive
+   * side effects — cleanupEmptySession / cancelAllApprovals /
+   * persistActiveTranscript — run exactly once).
+   */
+  private newSessionRun: Promise<void> | null = null;
+  /**
+   * Sessions whose restore was abandoned. Late `session/update` traffic for
+   * them (the CLI's replay of the history we gave up on) must never reach
+   * the store — it would repopulate the fresh transcript. Entries are
+   * removed again when the same session is restored for real, so a later
+   * legitimate restore is not poisoned.
+   */
+  private abandonedRestoreSessionIds = new Set<string>();
 
   private onSessionUpdate(n: Parameters<SessionStore["onSessionUpdate"]>[0]): void {
+    // An abandoned restore (the user asked for a 新会话 while the history was
+    // being restored): the CLI may still replay the history we gave up on —
+    // those updates belong to the abandoned session and must never reach the
+    // store (they would repopulate the fresh transcript). The id is removed
+    // from the set again when the same session is restored for real.
+    if (n.sessionId && this.abandonedRestoreSessionIds.has(n.sessionId)) return;
     // Hot re-auth (profile switch) abandons the old session on the SAME live
     // client — drop its trailing updates so they can't leak into the fresh
     // state. delete-style: the entry is consumed on first sight.
@@ -5975,14 +6037,31 @@ export class ChatPanel implements vscode.Disposable {
     // Race the /models HTTP query with the probe + loadSession below (it only
     // reads the endpoint from settings.json — independent of the session).
     const modelsPromise = this.queryLiveModels();
+    // An abandoned restore never calls applyLiveModels — keep the rejection
+    // handled so the query cannot become an unhandled rejection.
+    modelsPromise.catch(() => {});
     // Capture before the state swap: if the switch succeeds, an abandoned
     // empty active session must not linger in the switcher.
     const outgoingId = this.store.getState().activeSessionId ?? this.store.getState().sessionId;
+    const tRestore = Date.now();
     this.log.info(`restoring session ${sessionId} …`);
     this.restoring = true;
     this.restoringSessionId = sessionId;
     this.replayTitle = null;
     this.sessionCwd = workspaceRoot;
+    // A fresh attempt: neither an abort request nor a queued 新会话 intent
+    // may survive from an earlier restore.
+    this.restoreAbort = false;
+    this.pendingNewSession = false;
+    this.lastRestoreOutcome = "completed";
+    // Settle handle — a 新会话 requested while the restore runs waits on it
+    // and may ask the restore to abort through `restoreAbort`.
+    const settle = deferred<RestoreOutcome>();
+    this.restoreSettle = settle;
+    // This session is being restored FOR REAL: drop the abandoned marker a
+    // previous aborted attempt may have left, otherwise its replayed updates
+    // would be swallowed by the late-traffic guard.
+    this.abandonedRestoreSessionIds.delete(sessionId);
     const fresh = newSessionState(this.store.getState());
     beginReplay(fresh);
     fresh.activeSessionId = sessionId;
@@ -5997,17 +6076,39 @@ export class ChatPanel implements vscode.Disposable {
       // meta/modes are used. The CLI owns that session's lifecycle (ACP-mode
       // sessions are not persisted and die with the CLI process); this is not
       // a leak.
+      //
+      // Concurrency (probed 2026-11-12 against the vendored CLI,
+      // test/fixtures/probe-restore-concurrency.mjs): running the probe
+      // `session/new` and the `session/load` CONCURRENTLY on one client is
+      // SAFE (both resolve, the loaded session keeps its id, a later load
+      // still works, the loaded session still answers a prompt — no
+      // crosstalk), but it is NOT meaningfully faster: serial 1541ms/1750ms
+      // vs concurrent 1489ms/1574ms — the CLI does the heavy work serially
+      // internally, only ~50ms of the ~1.5s overlap. The serial order stays:
+      // no measurable win, and the probe's meta/modes ordering stays obvious.
       this.contextReportBaseline = Date.now();
+      const tProbe = Date.now();
       const probe = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+      this.log.info(`restore: probe session/new ok in ${Date.now() - tProbe}ms`);
+      // Abort checkpoint 1 — nothing has been written to the store yet.
+      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
       const probeMeta: NewSessionMeta | undefined = probe._meta;
+      const tLoad = Date.now();
       const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
+      this.log.info(`restore: session/load ok in ${Date.now() - tLoad}ms`);
+      // Abort checkpoint 2 — still nothing written to the store.
+      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
       const meta: NewSessionMeta | undefined = probeMeta ?? session._meta;
       const modes = session.modes ?? probe.modes;
       endReplay(this.store.getState());
 
       // Rebuild the transcript from the CLI's session file (NDJSON).
       const loadedId = session.sessionId;
+      const tTranscript = Date.now();
       const restored = await this.loadPersistedTranscript(loadedId);
+      this.log.info(`restore: transcript loaded in ${Date.now() - tTranscript}ms (${restored.blocks.length} blocks)`);
+      // Abort checkpoint 3 — the transcript is rebuilt but not yet written.
+      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
       if (restored.blocks.length === 0) {
         restored.blocks.push({
           kind: "text",
@@ -6025,7 +6126,14 @@ export class ChatPanel implements vscode.Disposable {
       // M3 P0-1 phase 1: the persisted checkpoint index anchors to the
       // ORIGINAL ids (the transcript file is lossless), so read it + reopen
       // the shadow repo BEFORE the re-mint happens.
+      const tCheckpoint = Date.now();
       await this.loadCheckpointIndex(loadedId);
+      this.log.info(`restore: checkpoint index loaded in ${Date.now() - tCheckpoint}ms`);
+      // Abort checkpoint 4 — the LAST await before the first store write
+      // (sessionStarted / replaceTranscript). Beyond this point the restore
+      // has already committed to the store and can no longer be abandoned;
+      // a 新会话 request waits for it to settle instead.
+      if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
       const preRemintUserIds = restored.blocks
         .filter((b) => b.kind === "user" && b.id)
         .map((b) => b.id as string);
@@ -6078,12 +6186,16 @@ export class ChatPanel implements vscode.Disposable {
       // Re-push whenever the panel's selection differs — after validating
       // the selection is still offered by the live endpoint.
       const restoreCliModelId = meta?.models?.currentModelId ?? null;
+      const tModel = Date.now();
       if (currentModelId && currentModelId !== restoreCliModelId) {
         const pushId = await this.validateModelForPush(modelsPromise, currentModelId, restoreCliModelId);
         if (pushId) await this.setModel(pushId);
       }
       await this.applyThinkLevel(client, loadedId, this.store.getState().thinkLevel);
-      this.log.info(`session restored: ${loadedId} (${restored.blocks.length} blocks)`);
+      this.log.info(`restore: model push done in ${Date.now() - tModel}ms`);
+      this.log.info(
+        `session restored: ${loadedId} (${restored.blocks.length} blocks) in ${Date.now() - tRestore}ms total`,
+      );
       await this.cleanupEmptySession(outgoingId);
       await this.recordSession(loadedId, restored.firstUserText ? clampSessionLabel(restored.firstUserText) : null);
       void this.persistActiveTranscript(true); // seed the extension-owned copy
@@ -6095,7 +6207,7 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       const message = errorMessage(error);
       endReplay(this.store.getState());
-      this.log.error(`session restore failed: ${message}`);
+      this.log.error(`session restore failed: ${message} (after ${Date.now() - tRestore}ms)`);
       this.store.markError(vscode.l10n.t("会话恢复失败：{0}", message));
       // Async failure — the user is likely in the editor; cue it.
       this.postSound("error");
@@ -6105,12 +6217,61 @@ export class ChatPanel implements vscode.Disposable {
       // pruneUnrestorableSessions would delete the orphaned transcript file —
       // turning a retryable failure into irreversible content loss. The user
       // can still remove it explicitly via the switcher's delete.
+      this.lastRestoreOutcome = "failed";
       return false;
     } finally {
       this.restoring = false;
       this.restoringSessionId = null;
       this.replayTitle = null;
+      // Release everyone waiting on this restore (a 新会话 request that
+      // interrupted it) with the truthful outcome.
+      const settleHandle = this.restoreSettle;
+      this.restoreSettle = null;
+      settleHandle?.resolve(this.lastRestoreOutcome);
     }
+  }
+
+  /**
+   * Abort checkpoint of an in-flight restore.
+   *
+   * True → the restore was abandoned: the user asked for a 新会话 while the
+   * history was still being restored. Every store write of a restore happens
+   * AFTER the last checkpoint, so abandoning here leaves the store untouched:
+   * no sessionStarted, no replaceTranscript, no applyLiveModels, no
+   * restoreSuperSessions, no "已恢复会话" toast. The state is reset to a
+   * clean idle (the replay marker must not survive) and the abandoned
+   * session id is remembered so its late traffic cannot leak into the fresh
+   * session.
+   *
+   * False → no abort was requested: the restore continues.
+   */
+  private abortRestoreIfRequested(sessionId: string, outgoingId: string | null): boolean {
+    if (!this.restoreAbort) return false;
+    // Both flags are set together by the 新会话 flow: the abort REQUEST and
+    // the queued INTENT. The restore only gives up when the intent is really
+    // there — otherwise the request was stale.
+    if (!this.pendingNewSession) return false;
+    this.restoreAbort = false;
+    this.lastRestoreOutcome = "aborted";
+    // The replayed history of the abandoned session must never reach the
+    // store again — even the tail that arrives after the abort.
+    this.abandonedRestoreSessionIds.add(sessionId);
+    while (this.abandonedRestoreSessionIds.size > ABANDONED_RESTORE_IDS_CAP) {
+      const oldest = this.abandonedRestoreSessionIds.values().next().value;
+      if (oldest === undefined) break;
+      this.abandonedRestoreSessionIds.delete(oldest);
+    }
+    // Clean idle: the replay marker (status "streaming" + replaying) must not
+    // survive the abandoned restore, and the switcher must point back at the
+    // session we came from (the 新会话 flow cleans THAT one up).
+    const state = this.store.getState();
+    endReplay(state);
+    state.sessionId = null;
+    state.activeSessionId = outgoingId;
+    this.store.setInitializing(false);
+    this.store.replaceState(state);
+    this.log.warn(`session restore of ${sessionId} abandoned: the user asked for a 新会话`);
+    return true;
   }
 
   /**
@@ -8441,7 +8602,32 @@ export class ChatPanel implements vscode.Disposable {
       });
   }
 
+  /**
+   * Start a fresh session.
+   *
+   * Concurrent requests share ONE run: a 新会话 clicked while the startup
+   * restore was being abandoned and the restore's own fallback both funnel
+   * through here, so the CLI sees a single `session/new` and the destructive
+   * side effects (cleanupEmptySession / cancelAllApprovals /
+   * persistActiveTranscript) run exactly once.
+   */
   private async startNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
+    const running = this.newSessionRun;
+    if (running) {
+      this.log.info("new session: joining the in-flight run");
+      await running;
+      return;
+    }
+    const run = this.runStartNewSession(options);
+    this.newSessionRun = run;
+    try {
+      await run;
+    } finally {
+      if (this.newSessionRun === run) this.newSessionRun = null;
+    }
+  }
+
+  private async runStartNewSession(options?: { bypassSuperWait?: boolean }): Promise<void> {
     if (this.historySyncBusy) return;
     // A3: never start a session into a destroyed panel.
     if (this.disposed) throw new DisposedError();
@@ -8458,6 +8644,29 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
       );
       return;
+    }
+    // A restore is in flight: the user asked for a 新会话 while the history
+    // was still being restored. Ask the restore to abandon itself (it has
+    // not written anything to the store yet) and continue with the 新会话
+    // flow once it settles — the user does not have to click twice.
+    // If the restore is already too far along to be abandoned, the intent
+    // is recorded and honored right after it settles.
+    const restoreSettle = this.restoreSettle;
+    if (restoreSettle) {
+      this.restoreAbort = true;
+      this.pendingNewSession = true;
+      this.log.info("new session requested during a restore: asking the restore to abort");
+      const outcome = await restoreSettle.promise;
+      this.pendingNewSession = false;
+      if (outcome === "aborted") {
+        this.store.appendNotice(vscode.l10n.t("已取消正在进行的恢复，正在新建会话"));
+      } else if (outcome === "completed") {
+        this.store.appendNotice(vscode.l10n.t("恢复完成后将自动新建会话"));
+      } else {
+        this.store.appendNotice(vscode.l10n.t("恢复未完成，正在新建会话"));
+      }
+      // The panel may have been closed while we waited for the restore.
+      if (this.disposed) return;
     }
     // Anchor the CLI-transcript lookup before the empty-session cleanup (its
     // hasPersistedTranscript check scans ~/.iflow/projects/<cwd-slug>/).
@@ -8502,15 +8711,20 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
     this.cancelAllPlanExits(vscode.l10n.t("会话已重置，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
-    // Mutual exclusion: a session restore is in flight — running a reset
-    // CONCURRENTLY let the restore's replayed updates (and the in-flight
-    // session/new's late sessionStarted) interleave into one transcript
-    // (user-reported: old content + "正在创建新会话…" + empty-state on screen
-    // together). Refuse until the restore settles.
+    // Defensive: a restore that STARTED after the abort request above (the
+    // switcher can fire one while the panel is idle) must not interleave its
+    // replayed updates with the fresh session. This is the rare path — the
+    // normal case was handled at the top of this method.
     if (this.restoring) {
-      this.log.warn("new session refused: a session restore is in flight");
-      this.store.appendNotice(vscode.l10n.t("正在恢复历史会话，请稍后再新建会话"));
-      return;
+      this.log.warn("new session: a session restore started concurrently — waiting for it to settle");
+      const settle = this.restoreSettle;
+      if (settle) {
+        this.restoreAbort = true;
+        this.pendingNewSession = true;
+        await settle.promise;
+        this.pendingNewSession = false;
+      }
+      if (this.disposed) return;
     }
     // Clear the transcript IMMEDIATELY. Clearing only after `session/new`
     // returned left the old transcript visibly in place for the whole CLI
