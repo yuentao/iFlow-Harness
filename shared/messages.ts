@@ -1967,6 +1967,62 @@ export type WebviewToHost =
 // ---------------------------------------------------------------------------
 
 /**
+ * The agent-facing attachment block header — a PROTOCOL literal.
+ *
+ * The host appends this header + a `- name → path` list to the prompt it
+ * sends to the CLI, and the CLI records that text verbatim in
+ * `~/.iflow/acp/sessions/<id>.json`. When the user later deletes a message,
+ * the host matches the transcript prompt against the recorded CLI turn and
+ * has to recognise the attachment block to tell "the CLI turn is this prompt
+ * plus the attachment list" from "this prompt is merely a prefix of some
+ * other turn".
+ *
+ * Producer and consumer MUST use the same literal. When only the producer is
+ * translated (the model-facing prompts were switched to English), the
+ * consumer stops recognising what the producer writes: the delete silently
+ * degrades to a transcript-only delete and the message stays in the model's
+ * context.
+ *
+ * English because it is model-facing text (the model reads it). The
+ * transcript-side note (`（文件：name → path）`, see `normalizeUserPromptText`)
+ * stays Chinese — that one is user-facing.
+ */
+export const AGENT_ATTACHMENT_HEADER =
+  "The user attached the following local files (read them as needed):";
+
+/**
+ * Header variants written by older builds — accepted so that deleting a
+ * message in a session recorded before the switch to English still finds the
+ * CLI turn. The Chinese spelling is the pre-2026-11-12 host wording; the
+ * "these local files" one is the English l10n bundle's translation of it.
+ */
+const LEGACY_AGENT_ATTACHMENT_HEADERS = [
+  "用户附带以下本地文件（可按需读取）：",
+  "The user attached these local files (read them as needed):",
+];
+
+/**
+ * Does `text` contain an agent-facing attachment block (a header line
+ * followed by a `- name → path` list)?
+ *
+ * Used by the host to tell "the CLI turn is this prompt plus the attachment
+ * list" from "this prompt is merely a prefix of some other turn" — the
+ * latter must NOT match, or a delete would cut the wrong turn out of the
+ * model's context.
+ */
+export function hasAgentAttachmentBlock(text: string): boolean {
+  const headers = [AGENT_ATTACHMENT_HEADER, ...LEGACY_AGENT_ATTACHMENT_HEADERS];
+  for (const header of headers) {
+    const at = text.indexOf(header);
+    if (at < 0) continue;
+    // The header must be followed by the `- name → path` list — a bare
+    // mention of the header text is not an attachment block.
+    if (/^\n- /.test(text.slice(at + header.length))) return true;
+  }
+  return false;
+}
+
+/**
  * Canonical form of a user prompt for cross-store matching (transcript block
  * ↔ CLI chatHistory entry ↔ composer history recall): strips the zero-width
  * escape `toAgentPromptText` prefixes to non-command "/" input (the CLI
