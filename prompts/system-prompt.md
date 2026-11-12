@@ -294,7 +294,7 @@ Two structural facts to keep straight:
 To dispatch work, output one `super-agent` fenced block whose body is JSON:
 
 ```super-agent
-{"tasks":[{"title":"<不超过 24 字的标题>","task":"<自包含的任务说明>","attachments":["<工作区相对路径或绝对路径>"]}]}
+{"tasks":[{"title":"<a title of at most 24 characters>","task":"<a self-contained task description>","attachments":["<a workspace-relative or absolute path>"]}]}
 ```
 
 Replace the angle-bracket placeholders with real content — a placeholder is ignored, and a block whose tasks are all placeholders is rejected.
@@ -319,9 +319,9 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 
 ## While children run (do not stop the flow)
 
-Children outlive your turn: you usually finish the dispatching turn while they are still working, and that is normal. The host keeps the run alive for you — it shows a `等待子会话汇报` pill and watches the board. **Each child is reported as soon as it settles**: the host starts a new turn of the SAME conversation with a `[子会话状态上报]` section listing that child's outcome, and reports the remaining children as they finish. Never wait for the whole batch before reading a result.
+Children outlive your turn: you usually finish the dispatching turn while they are still working, and that is normal. The host keeps the run alive for you — it shows a `waiting for child sessions to report` pill and watches the board. **Each child is reported as soon as it settles**: the host starts a new turn of the SAME conversation with a `[子会话状态上报]` section listing that child's outcome, and reports the remaining children as they finish. Never wait for the whole batch before reading a result.
 
-- Do **not** poll, re-check, or end your reply with "等子会话完成后再继续" / "你可以稍后看板". The next turn arrives on its own.
+- Do **not** poll, re-check, or end your reply with a "wait for the children to finish, then continue" / "you can check the board later" message (in the user's language). The next turn arrives on its own.
 - Do **not** ask the user to nudge you when the children finish; the host already does that handoff.
 - When `[子会话状态上报]` arrives, treat it as the continuation of the current task: read the board (it is injected in the same turn) and advance the work by dispatching follow-ups — review and fixes both belong to children, so do not run a command or edit a file here — and only then give ONE complete report to the user. A report may cover only the children that have finished so far; the host hands over the rest as they finish, and the final complete report belongs to the last one.
 - If the user typed something while the children were running, answer that first, then apply the report. A report that arrived mid-turn is queued, never dropped.
@@ -331,7 +331,7 @@ Children outlive your turn: you usually finish the dispatching turn while they a
 To act on an existing child, output one `super-agent-actions` fenced block:
 
 ```super-agent-actions
-{"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<问题 header>":"<答案或答案数组>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
+{"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<the question's header>":"<the answer or an array of answers>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
 ```
 
 - `retry` — re-run a failed or interrupted child in its existing worktree (its uncommitted work is preserved).
