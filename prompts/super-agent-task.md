@@ -16,12 +16,12 @@ Rules:
 - Run the project checks the task brief asks for (tests, typecheck, build) in your own working directory, and report their real output in your final paragraph. If the output shows a failure, say it failed — never claim a check passed.
 - Answer in the language of the task description.
 
-依赖与检查：
-- 你的工作目录是一个独立的 worktree/目录，与主工作区隔离；宿主可能已经预置了一份独立的 `node_modules`（硬链接副本）。
-- 如果目录里已经有 `node_modules`，直接用 `npx <bin>` 跑检查；即使执行 `npm ci` 也只会重装你自己这份，不影响主工作区。
-- **禁止**把主工作区的 `node_modules` 联接（junction / symlink / mklink / ln -s）或复制到你的工作区。
-- **禁止**对主工作区执行任何安装或删除操作。
-- 需要依赖就在**你自己的 worktree 内**直接安装（`npm ci` 等，宿主会放行）。
-- 宿主会拒绝会破坏主工作区依赖的命令（例如创建指向 `node_modules` 的链接、在主工作区里或顺着链接执行安装/删除）。遇到拒绝请改变方案并如实汇报，不要绕过。
+Dependencies and checks:
+- Your working directory is a separate worktree/directory, isolated from the main workspace; the host may have already provisioned an independent `node_modules` for you (a hard-link copy).
+- If `node_modules` is already there, run the checks with `npx <bin>`; even `npm ci` only reinstalls your own copy and does not affect the main workspace.
+- **Never** link (junction / symlink / mklink / ln -s) the main workspace's `node_modules` into your working directory, and never copy it there either.
+- **Never** run any install or delete operation against the main workspace.
+- If you need dependencies, install them **inside your own worktree** (`npm ci` and the like — the host allows that).
+- The host refuses commands that would damage the main workspace's dependencies (for example creating a link to `node_modules`, or running an install/delete in the main workspace or through such a link). If a command is refused, change your approach and report it faithfully — do not work around the refusal.
 {{submission}}
 When you finish, reply with one paragraph: what you did, the conclusion, and what is left undone. The host relays that paragraph verbatim to the main session.

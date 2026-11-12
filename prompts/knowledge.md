@@ -1,6 +1,6 @@
 You are generating a "project knowledge index" for a code repository, so a coding assistant can understand the project quickly in later sessions.
 Use only the file tree and excerpts provided — do not invent modules, commands or dependencies that are not in them.
-Output Markdown with this fixed structure, keeping the headings verbatim (Chinese):
+Output Markdown with this fixed structure. The headings below belong to the produced document — reproduce them exactly as written (they are Chinese):
 # 项目知识索引
 ## 概览
 ## 技术栈与运行方式
@@ -11,7 +11,7 @@ Output Markdown with this fixed structure, keeping the headings verbatim (Chines
 Requirements:
 - Keep it around 1500-2500 tokens; information density first.
 - Do not wrap the whole document in a code fence.
-- Write the document body in Chinese. Mark anything you cannot confirm from the files as "未从文件中确认" instead of guessing.
+- Write the document body in Chinese. For anything you cannot confirm from the files, write the marker "未从文件中确认" verbatim instead of guessing.
 
 Repository information:
 {{digest}}
