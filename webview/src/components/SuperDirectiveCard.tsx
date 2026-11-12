@@ -20,7 +20,7 @@
  *
  * 宿主派发不经过本文件：`src/panel/panel.ts` 仍按原逻辑扫描同一段文本。
  */
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronUp, FileWarning, ListChecks, Users } from "lucide-react";
 import { t } from "../i18n";
 import {
@@ -33,6 +33,12 @@ import {
 } from "../../../shared/super-agent";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
+import {
+  parseSuperTaskText,
+  previewSuperTaskBlocks,
+  type SuperTaskBlock,
+  type SuperTaskInline,
+} from "./super-task-text";
 
 type DirectiveSegment = Extract<SuperDirectiveSegment, { kind: "directive" }>;
 
@@ -73,9 +79,15 @@ const RAW_REASONS: Record<SuperDirectiveRawReason, string> = {
   unknown_language: "未知的协议块语言",
 };
 
-/** 正文超过这个长度或行数才提供展开：短任务书一次读完，不占额外操作。 */
-const TASK_COLLAPSE_CHARS = 220;
-const TASK_COLLAPSE_LINES = 3;
+/**
+ * 折叠态的预览预算：字符数 + 块数。
+ *
+ * 折叠不再用 line-clamp 把整段文字切在半句上（那正是「乱糟糟」的观感来源），
+ * 而是**按块**给出前几块 —— 段落、列表项、代码块各自完整；只有当第一块本身就
+ * 超预算时，才在句子边界处切一刀并补一个省略号。
+ */
+const TASK_PREVIEW_CHARS = 200;
+const TASK_PREVIEW_BLOCKS = 3;
 
 /**
  * tasks 展示分支的**局部投影**。
@@ -135,8 +147,14 @@ function TaskCard({
   total: number;
 }) {
   const [open, setOpen] = useState(false);
-  const long =
-    task.task.length > TASK_COLLAPSE_CHARS || task.task.split("\n").length > TASK_COLLAPSE_LINES;
+  const blocks = useMemo(() => parseSuperTaskText(task.task), [task.task]);
+  const preview = useMemo(
+    () => previewSuperTaskBlocks(blocks, TASK_PREVIEW_CHARS, TASK_PREVIEW_BLOCKS),
+    [blocks],
+  );
+  // 折叠态只渲染前几块（每块完整），展开态渲染全部块。
+  const shown = open ? blocks : preview.blocks;
+  const long = preview.truncated;
   return (
     <div className={TASK_CARD} data-testid="super-task-card">
       <div className={TASK_CARD_HEAD}>
@@ -150,13 +168,17 @@ function TaskCard({
         {total > 1 && <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>}
       </div>
       <div className="px-3 py-2">
-        <div
-          className={`whitespace-pre-wrap break-words text-ui-caption leading-relaxed text-muted-foreground ${
-            open ? "" : "line-clamp-3"
-          }`}
-        >
-          {task.task}
-        </div>
+        <TaskBody blocks={shown} />
+        {/* 折叠态还有内容没给出来：单独一行提示，不在末块尾巴上补省略号 ——
+            一段完整的文字看起来像半句，比不提示更糟。 */}
+        {!open && preview.truncated && !preview.cutText && (
+          <div
+            data-testid="super-task-more"
+            className="text-ui-micro leading-none text-muted-foreground/60"
+          >
+            …
+          </div>
+        )}
         {task.attachments.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
             {task.attachments.map((name, attachmentIndex) => (
@@ -180,6 +202,103 @@ function TaskCard({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * 任务书正文：块列表。
+ *
+ * 模型写的任务书常是「一整段文字墙」（段落不分明、(1)(2)(3) 挤在同一行、路径与
+ * 函数名混在中文里没有区分）。这里按解析出的块逐块排版，块与块之间留白，编号项
+ * 带序号徽标并悬挂缩进对齐 —— 用户一眼能扫到「有几步、每步讲什么」。
+ */
+function TaskBody({ blocks }: { blocks: SuperTaskBlock[] }) {
+  if (blocks.length === 0) return null;
+  return (
+    <div data-testid="super-task-body" className="space-y-2">
+      {blocks.map((block, index) => (
+        <TaskBlockView key={index} block={block} />
+      ))}
+    </div>
+  );
+}
+
+/** 单个正文块 → 排版后的行。 */
+function TaskBlockView({ block }: { block: SuperTaskBlock }) {
+  switch (block.kind) {
+    case "paragraph":
+      return (
+        <p
+          data-testid="super-task-paragraph"
+          className="whitespace-pre-wrap break-words text-ui-caption leading-relaxed text-muted-foreground"
+        >
+          {renderTaskInlines(block.inlines)}
+        </p>
+      );
+    case "bullet":
+      return (
+        <div data-testid="super-task-bullet" className="flex gap-1.5">
+          <span
+            aria-hidden="true"
+            className="mt-1.5 size-1 shrink-0 rounded-full bg-muted-foreground/60"
+          />
+          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ui-caption leading-relaxed text-muted-foreground">
+            {renderTaskInlines(block.inlines)}
+          </span>
+        </div>
+      );
+    case "ordered":
+      return (
+        <div data-testid="super-task-ordered" className="flex gap-1.5">
+          {/* 序号徽标：固定宽度 + 悬挂缩进，让多行的条目正文仍然对齐。 */}
+          <span
+            data-testid="super-task-ordered-marker"
+            className="mt-0.5 flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm bg-primary/12 px-1 font-mono text-ui-micro leading-none text-primary"
+          >
+            {block.label}
+          </span>
+          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ui-caption leading-relaxed text-muted-foreground">
+            {renderTaskInlines(block.inlines)}
+          </span>
+        </div>
+      );
+    case "quote":
+      return (
+        <blockquote
+          data-testid="super-task-quote"
+          className="border-l border-border/70 pl-2 text-ui-caption italic leading-relaxed text-muted-foreground/90"
+        >
+          {renderTaskInlines(block.inlines)}
+        </blockquote>
+      );
+    case "heading":
+      return (
+        <p data-testid="super-task-heading" className="text-ui-label font-medium text-foreground">
+          {renderTaskInlines(block.inlines)}
+        </p>
+      );
+    case "code":
+      return (
+        <pre
+          data-testid="super-task-code"
+          className="overflow-x-auto rounded-md border border-border bg-editor px-2 py-1.5 font-mono text-ui-micro leading-relaxed text-foreground"
+        >
+          <code>{block.text}</code>
+        </pre>
+      );
+  }
+}
+
+/** 行内片段 → React 节点：普通文本原样，行内代码套等宽药丸样式。 */
+function renderTaskInlines(inlines: SuperTaskInline[]): ReactNode[] {
+  return inlines.map((inline, index) =>
+    inline.kind === "code" ? (
+      <code key={index} className="super-task-code">
+        {inline.text}
+      </code>
+    ) : (
+      <Fragment key={index}>{inline.text}</Fragment>
+    ),
   );
 }
 

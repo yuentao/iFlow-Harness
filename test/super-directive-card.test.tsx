@@ -108,6 +108,11 @@ function renderSegment(segment: DirectiveSegment): void {
   act(() => root.render(<SuperDirectiveCard segment={segment} />));
 }
 
+/** 造一个只含任务书的委派协议块。 */
+function delegate(tasks: Array<{ title: string; task: string; attachments: string[] }>): string {
+  return ["```super-agent", JSON.stringify({ tasks }, null, 2), "```"].join("\n");
+}
+
 function text(): string {
   return container.textContent ?? "";
 }
@@ -340,5 +345,89 @@ describe("AssistantText 协议块卡片", () => {
     // 协议卡与尾注
     expect(body).toContain("修复登录跳转");
     expect(body).toContain("收尾。");
+  });
+
+  // 用户截图 2026-11-12：任务书正文是一整段文字墙，(1)…(8) 挤在同一行里读不下去。
+  // 卡片正文改成结构化排版后，这些用例钉住「墙」被拆成了什么。
+  it("任务书正文里的行内 (1)(2)(3) 枚举被切成独立编号项", () => {
+    render(
+      delegate([
+        {
+          title: "枚举任务书",
+          task: "目标说明。(1) 第一步做 A。(2) 第二步做 B。(3) 第三步做 C。",
+          attachments: [],
+        },
+      ]),
+    );
+    const ordered = [...container.querySelectorAll('[data-testid="super-task-ordered"]')];
+    expect(ordered).toHaveLength(3);
+    expect(ordered[0]!.textContent).toContain("第一步做 A");
+    expect(ordered[1]!.textContent).toContain("第二步做 B");
+    expect(ordered[2]!.textContent).toContain("第三步做 C");
+    // 序号徽标：1 / 2 / 3。
+    const markers = [...container.querySelectorAll('[data-testid="super-task-ordered-marker"]')];
+    expect(markers.map((marker) => marker.textContent)).toEqual(["1", "2", "3"]);
+    // 枚举之前的前言仍是段落。
+    const paragraphs = [...container.querySelectorAll('[data-testid="super-task-paragraph"]')];
+    expect(paragraphs).toHaveLength(1);
+    expect(paragraphs[0]!.textContent).toContain("目标说明");
+  });
+
+  it("任务书正文里的反引号片段与文件路径渲染成行内代码", () => {
+    render(
+      delegate([
+        {
+          title: "带代码的任务书",
+          task: "先跑 `npm test`，再改 src/panel/panel.ts",
+          attachments: [],
+        },
+      ]),
+    );
+    const codes = [...container.querySelectorAll("code.super-task-code")];
+    expect(codes.map((code) => code.textContent)).toEqual([
+      "npm test",
+      "src/panel/panel.ts",
+    ]);
+    // 代码块（围栏）与行内代码是两种物种。
+    expect(container.querySelector('[data-testid="super-task-code"]')).toBeNull();
+  });
+
+  it("任务书正文里的行首项目符号与编号渲染成列表项", () => {
+    render(
+      delegate([
+        { title: "列表任务书", task: "- 甲项\n- 乙项\n1. 丙项", attachments: [] },
+      ]),
+    );
+    const bullets = [...container.querySelectorAll('[data-testid="super-task-bullet"]')];
+    expect(bullets).toHaveLength(2);
+    expect(bullets[0]!.textContent).toContain("甲项");
+    const ordered = [...container.querySelectorAll('[data-testid="super-task-ordered"]')];
+    expect(ordered).toHaveLength(1);
+    expect(ordered[0]!.textContent).toContain("丙项");
+  });
+
+  it("折叠态按块截断（不切半句），展开后渲染全部块", () => {
+    const item = "这是一条比较长的任务说明，用来把任务书正文撑过折叠预览的字符预算，确保折叠态真的会截断。";
+    render(
+      delegate([
+        {
+          title: "长任务书",
+          task: Array.from({ length: 6 }, () => `- ${item}`).join("\n"),
+          attachments: [],
+        },
+      ]),
+    );
+    const blocks = () => [...container.querySelectorAll('[data-testid="super-task-body"] > *')];
+    // 折叠态只给前几块，每块都是完整的列表项（末块不被切半句）。
+    expect(blocks().length).toBeLessThan(6);
+    expect(blocks().length).toBeGreaterThan(0);
+    expect(blocks()[blocks().length - 1]!.textContent).not.toContain("…");
+    // 「还有更多」是单独一行提示，不混进正文。
+    expect(container.querySelector('[data-testid="super-task-more"]')!.textContent).toContain("…");
+    const expand = container.querySelector<HTMLButtonElement>('button[aria-label="展开任务说明"]');
+    expect(expand).toBeTruthy();
+    act(() => expand!.click());
+    expect(blocks()).toHaveLength(6);
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="收起任务说明"]')).toBeTruthy();
   });
 });
