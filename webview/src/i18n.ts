@@ -252,6 +252,8 @@ const en: Record<string, string> = {
   // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
   "子会话还在运行并等待汇报，暂时不能新建会话":
     "Child sessions are still running and waiting to report — new session is unavailable for now",
+  // 恢复进行中：「新会话」按钮可点（宿主会放弃恢复并立刻新建会话）
+  "取消正在进行的会话恢复并新建会话": "Cancel the session restore in progress and start a new session",
   "删除会话 {0}": "Delete session {0}",
   // M4 P1-8 session pin & archive
   "置顶": "Pin",

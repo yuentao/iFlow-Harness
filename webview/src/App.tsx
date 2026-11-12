@@ -871,12 +871,18 @@ export function App() {
             <IconButton
               icon={<Plus className={ICON_TOOLBAR} />}
               label={t("新会话")}
-              // IconButton 的默认 title 就是 label —— 只有等待期才覆盖它，
-              // 说明为什么不能新建会话（title={undefined} 会把默认 tooltip 抹掉）。
+              // IconButton 的默认 title 就是 label —— 只有需要解释「为什么现在
+              // 不能/能新建会话」时才覆盖它（title={undefined} 会把默认
+              // tooltip 抹掉）。
               {...(superWaiting
                 ? { title: t("子会话还在运行并等待汇报，暂时不能新建会话") }
-                : {})}
-              disabled={locked || superWaiting}
+                : replaying
+                  ? { title: t("取消正在进行的会话恢复并新建会话") }
+                  : {})}
+              // 恢复中（replaying）不禁用：宿主会放弃这次恢复并立刻新建会话，
+              // 用户不必等恢复跑完再点一次。其余忙碌态（生成中 / 正在创建新
+              // 会话 / 正在切换会话）仍然禁用。
+              disabled={switching || superWaiting || (busy && !replaying)}
               onClick={() => send({ type: "newSession" })}
             />
             {/* Settings hub: profiles & credentials, MCP servers, approval
