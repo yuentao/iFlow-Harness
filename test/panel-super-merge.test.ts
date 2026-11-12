@@ -193,9 +193,9 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
     expect(request.title).toBe("合并分支 iflow/super/a");
     // 任务书就是合并任务书本身。
     expect(request.task).toContain("git merge --no-ff iflow/super/a");
-    // 自动触发：开头说的是「没能自动合并」，不是「用户在看板点击了」。
-    expect(request.task).toContain("没能自动合并");
-    expect(request.task).not.toContain("用户在看板点击了");
+    // 自动触发：开头说的是「没能自动合并」，不是「用户在看板点击了」（提示词正文是英文）。
+    expect(request.task).toContain("could not be merged automatically");
+    expect(request.task).not.toContain("The user clicked");
 
     // 关键：合并不再走主会话的 prompt 通道（主会话不跑 git）。
     expect(calls).toHaveLength(0);
