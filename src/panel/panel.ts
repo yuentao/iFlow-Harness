@@ -50,7 +50,7 @@ import type {
   McpServerStatusView,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { extractCorePrompt, isPlanMode, splitReportedContextSections } from "../../shared/messages.js";
+import { extractCorePrompt, isPlanMode, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
@@ -8964,9 +8964,15 @@ export class ChatPanel implements vscode.Disposable {
     // **English**: this line only ever reaches the model (the transcript gets
     // its own file note), so it must not be an l10n string — a translated
     // header would flip the language in the middle of an English prompt.
+    //
+    // The header is the SHARED protocol literal (`AGENT_ATTACHMENT_HEADER`):
+    // the CLI records this text verbatim, and the delete-message flow has to
+    // recognise the block to locate the turn in the CLI history. Keeping the
+    // producer and the consumer on one constant is what stops the two from
+    // drifting apart when the wording changes.
     const attachmentBlock =
       files && files.length > 0
-        ? `\n\nThe user attached the following local files (read them as needed):\n${files
+        ? `\n\n${AGENT_ATTACHMENT_HEADER}\n${files
             .map((f) => `- ${f.name} → ${f.path}`)
             .join("\n")}`
         : "";

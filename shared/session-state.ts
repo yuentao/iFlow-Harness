@@ -18,6 +18,7 @@ import { estimateCost } from "./context-window.js";
 import {
   emptySessionUsage,
   initialSessionState,
+  hasAgentAttachmentBlock,
   normalizeUserPromptText,
   type Block,
   type InjectedContextItem,
@@ -2597,11 +2598,12 @@ function cliEntryUserText(entry: unknown): string | null {
 
 /** A CLI user turn matches a transcript prompt on exact text, or on the prompt
  * being a prefix whose remainder is the agent-side attachment block (sendPrompt
- * appends `用户附带以下本地文件…` after the typed text; the transcript records the
- * same list as `（文件：…）` note lines that normalizeUserPromptText strips). */
+ * appends `AGENT_ATTACHMENT_HEADER` + the file list after the typed text; the
+ * transcript records the same list as `（文件：…）` note lines that
+ * normalizeUserPromptText strips). */
 function cliTurnMatches(hay: string, needle: string): boolean {
   return hay === needle ||
-    (hay.startsWith(needle) && /(?:^|\n)用户附带以下本地文件[\s\S]*：\n- /u.test(hay.slice(needle.length)));
+    (hay.startsWith(needle) && hasAgentAttachmentBlock(hay.slice(needle.length)));
 }
 
 /** Outcome of locating a deletion's truncation point in the CLI history. */
