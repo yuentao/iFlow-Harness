@@ -1436,6 +1436,22 @@ pre {
   border-radius: var(--radius-inner);
 }
 
+/* Inline code inside a super-agent task brief (the delegation card body is not
+   inside a `.md` container, so the markdown rule above never reaches it).
+   Declared as its own class — a Tailwind `bg-*` utility on <code> would lose to
+   VSCode's unlayered injected `body code` defaults, and the ui-kit guard
+   rejects `bg-*` on <code> for the same reason. */
+.super-task-code {
+  background: var(--editor);
+  color: var(--color-info);
+  border: 1px solid var(--border);
+  padding: 1px 4px;
+  border-radius: var(--radius-inner);
+  font-family: var(--font-mono);
+  font-size: var(--ui-font-micro);
+  overflow-wrap: anywhere;
+}
+
 /* Pseudo code-blocks (Markdown.tsx `.code-lines`): the model wrapped every
    line in single backticks instead of using a fence, so each line rendered as
    an inline-code pill — visually a per-line background stripe. Strip the pill
