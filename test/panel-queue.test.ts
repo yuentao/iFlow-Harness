@@ -252,7 +252,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
   });
 
-  it("waits for every child before delivering one combined report turn", async () => {
+  it("delivers a report as soon as each child settles (one turn per settled child)", async () => {
     const sessions: { id: string; status: string }[] = [
       { id: "super-1", status: "running" },
       { id: "super-2", status: "running" },
@@ -264,23 +264,26 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
       drainSuperReports: () => Promise<void>;
     };
 
+    // 第一个子会话结束 → 立刻交一次汇报（不必等第二个跑完）。
+    sessions[0]!.status = "completed";
     internals.queueSuperReport([{ session: { id: "super-1", title: "t1" }, report: { state: "ready", summary: "1 ok" } }]);
     await flush();
-    expect(calls).toHaveLength(0); // still one child running
-
-    internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
-    await flush();
-    expect(calls).toHaveLength(0);
-
-    for (const entry of sessions) entry.status = "completed";
-    internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
-    await flush();
     expect(reportPrompt).toHaveBeenCalledTimes(1);
-    // One combined report carrying both children, not one turn per child.
-    expect((reportPrompt.mock.calls[0]?.[0] as unknown[]).length).toBe(2);
+    expect((reportPrompt.mock.calls[0]?.[0] as unknown[]).length).toBe(1);
     expect(calls).toHaveLength(1);
 
     calls[0]!.resolve({ stopReason: "end_turn" });
+    await flush();
+
+    // 第二个子会话结束 → 再交一次汇报（各交各的，不合并成一轮）。
+    sessions[1]!.status = "completed";
+    internals.queueSuperReport([{ session: { id: "super-2", title: "t2" }, report: { state: "ready", summary: "2 ok" } }]);
+    await flush();
+    expect(reportPrompt).toHaveBeenCalledTimes(2);
+    expect((reportPrompt.mock.calls[1]?.[0] as unknown[]).length).toBe(1);
+    expect(calls).toHaveLength(2);
+
+    calls[1]!.resolve({ stopReason: "end_turn" });
     await flush();
   });
 

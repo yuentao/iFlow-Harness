@@ -1627,11 +1627,12 @@ export function salvageSuperTasks(body: string): SuperDirectiveTask[] {
 // ---------------------------------------------------------------------------
 
 /**
- * 主会话汇报的合并门槛：所有子会话都已进入终态。
+ * 这一批子会话是否**全部**进入终态。
  *
- * 主会话只在**全部**子会话结束后收到一次合并汇报 —— 中途的 blocked /
- * ready 只更新看板，否则 N 个子会话会灌出 N 条互相打断的汇报，主会话也
- * 没机会给出完整结论。空列表没有可汇报的内容。
+ * 自 2026-11-12 起它**不再**是「向主会话交汇报」的门槛 —— 汇报改成逐个即时
+ * 交付（谁先结束谁先汇报，见 {@link SuperReportBuffer.takeSettled}）。它现在
+ * 只回答一个事实问题：这一批是不是全部跑完了（看板据此显示「全部结束」）。
+ * 空列表没有可汇报的内容。
  */
 export function allSuperSessionsSettled(sessions: readonly SuperSessionUi[]): boolean {
   return sessions.length > 0 && sessions.every((s) => isTerminalSuperStatus(s.status));
@@ -1644,11 +1645,15 @@ export interface SuperReportEntry {
 }
 
 /**
- * 主会话合并汇报的缓冲区。
+ * 主会话汇报的缓冲区（**逐个即时上报**语义）。
  *
  * 同一子会话只保留**最后一条**汇报：中途的 blocked（等用户回答）会被随后
- * 的 ready 覆盖，合并汇报里不该出现互相矛盾的中间状态。缓冲区里的条目
- * 只有在全部子会话都进入终态后才被取走 —— 否则继续积累。
+ * 的 ready 覆盖，汇报里不该出现互相矛盾的中间状态。
+ *
+ * 取件门槛是**逐个子会话**的：某个子会话一进入终态，它的那条汇报就可以被
+ * 取走交给主会话，不必等同一批的其它子会话全部结束。仍在跑的子会话对应的
+ * 条目继续留在缓冲里，等它结束再取 —— 于是「谁先结束谁先汇报」，主会话不必
+ * 守着最后一个慢子会话。
  */
 export class SuperReportBuffer {
   private readonly pending = new Map<string, SuperReportEntry>();
@@ -1656,7 +1661,7 @@ export class SuperReportBuffer {
   /**
    * 还没被取走的汇报条数。
    *
-   * 非 0 = 「还有汇报欠着主会话」：要么还有子会话没进终态（批次不能取走），
+   * 非 0 = 「还有汇报欠着主会话」：要么来源子会话还没进终态（条目还得留着），
    * 要么批次已备好但还没投进主会话。宿主用它决定面板要不要呈现忙碌态。
    */
   get size(): number {
@@ -1668,14 +1673,47 @@ export class SuperReportBuffer {
   }
 
   /**
-   * 全部子会话都已进入终态时取走并清空缓冲区；否则返回 null（继续积累）。
-   * 空缓冲区不产出批次（没有东西可汇报）。
+   * 取走**来源子会话已经终态**的条目（逐个即时上报）。
+   *
+   * 状态看的是传入的**当前**会话列表（不是条目里的快照）—— 条目是汇报发生
+   * 那一刻的副本，可能还停在 blocked / running。
+   *
+   * 仍在跑的子会话：条目**留在缓冲里**，等它结束后再取（同一个子会话的条目
+   * 会被新汇报覆盖，不会重复转述）。来源子会话已经不在列表里（被清理 /
+   * 合并后释放）的条目不取也不删 —— 交由 {@link dropMissing} 处理。
+   *
+   * 无可取时返回 null（继续积累）。
    */
   takeSettled(sessions: readonly SuperSessionUi[]): SuperReportEntry[] | null {
-    if (this.pending.size === 0 || !allSuperSessionsSettled(sessions)) return null;
-    const batch = [...this.pending.values()];
-    this.pending.clear();
-    return batch;
+    if (this.pending.size === 0) return null;
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    const batch: SuperReportEntry[] = [];
+    for (const [id, entry] of [...this.pending]) {
+      const session = byId.get(id);
+      if (!session) continue; // 来源已消失：交给 dropMissing 清理。
+      if (!isTerminalSuperStatus(session.status)) continue; // 还在跑：留在缓冲。
+      batch.push(entry);
+      this.pending.delete(id);
+    }
+    return batch.length > 0 ? batch : null;
+  }
+
+  /**
+   * 丢掉来源子会话已经不存在的条目，返回被丢掉的子会话 id。
+   *
+   * 子会话被用户清理 / 合并完释放后，它的那条汇报再也没人能接 —— 如实记一
+   * 笔然后丢掉，不能让面板永久停在忙碌态。
+   */
+  dropMissing(sessions: readonly SuperSessionUi[]): string[] {
+    if (this.pending.size === 0) return [];
+    const liveIds = new Set(sessions.map((session) => session.id));
+    const dropped: string[] = [];
+    for (const id of [...this.pending.keys()]) {
+      if (liveIds.has(id)) continue;
+      this.pending.delete(id);
+      dropped.push(id);
+    }
+    return dropped;
   }
 
   clear(): void {
@@ -2021,11 +2059,17 @@ export function superReportLabel(state: SuperReportState): string {
  * 这条提示词就是**把对话接上**的那一环。所以措辞必须明确：这是同一个任务的
  * 新回合，上一轮结束是正常的，现在应基于这些结果继续动手，而不是等用户再开口。
  *
- * 合并纪律不变（dsh 的 relay 保序 + 合并）：宿主只在 `allSuperSessionsSettled`
- * 之后调用它，把这一批子会话的最终汇报合成一条，避免 N 个子会话把主会话灌爆。
+ * **逐个即时汇报**（2026-11-12）：宿主在每个子会话进入终态时就交一次汇报，
+ * 不再等同一批全部结束。`pendingCount` 是「仍在跑的子会话数」—— 它决定
+ * 提示词的结尾：还有人在跑时**不能**让主会话现在就向用户做最终完整汇报
+ * （后面还会有新的汇报回合，那时才是收尾的时候）。
  */
-export function buildSuperReportPrompt(entries: SuperReportEntry[]): string {
+export function buildSuperReportPrompt(
+  entries: SuperReportEntry[],
+  options?: { pendingCount?: number },
+): string {
   if (entries.length === 0) return "";
+  const pendingCount = Math.max(0, options?.pendingCount ?? 0);
   const lines = entries.map(({ session, report }) => {
     const human = report.humanAction ? `\n   需要用户处理：${report.humanAction}` : "";
     const integration = session.integration
@@ -2035,28 +2079,40 @@ export function buildSuperReportPrompt(entries: SuperReportEntry[]): string {
       : "";
     return `- 子会话 #${session.id}「${session.title}」${superReportLabel(report.state)}：${report.summary}${human}${integration}`;
   });
+  const head = [
+    "[子会话状态上报]",
+    "以下是宿主观察到的子会话最终状态（不是用户发言，也不是你之前说过的话）。",
+    `以下是本批已结束的 ${entries.length} 个子会话的最终状态。`,
+    ...lines,
+    "",
+  ];
+  // 还有子会话在跑：这一轮不是收尾 —— 主会话要先把已经结束的结果消化掉，
+  // 后续完成的孩子会由宿主继续汇报。
+  const pendingNote =
+    pendingCount > 0
+      ? `另有 ${pendingCount} 个子会话仍在运行，它们结束后宿主会继续汇报 —— 先处理这批结果（复核/后续任务照常派给子会话），不要等它们；此时不要向用户做最终完整汇报。`
+      : null;
   // 全部是「被中断」时不能照常催它继续：那是用户主动停的（看板中断 / 面板
   // 关闭），自动把任务重跑一遍会像是没听话。
   const allDropped = entries.every((entry) => entry.report.state === "dropped");
   if (allDropped) {
     return [
-      "[子会话状态上报]",
-      "以下是宿主观察到的子会话最终状态（不是用户发言，也不是你之前说过的话）。当前这批子会话都已结束。",
-      ...lines,
-      "",
+      ...head,
       "这些子会话是**被中断**的（用户停止，或面板当时已关闭），不是失败。不要自动重跑它们，也不要假设任务还要继续 —— 先简短说明它们停在哪里、还留下什么，然后问用户是否要继续。",
+      ...(pendingNote ? [pendingNote] : []),
     ].join("\n");
   }
   return [
-    "[子会话状态上报]",
-    "以下是宿主观察到的子会话最终状态（不是用户发言，也不是你之前说过的话）。当前这批子会话都已结束。",
-    ...lines,
-    "",
-    "**这是同一个任务的新回合。** 上一轮在你派发完子会话后结束是正常的 —— 宿主一直守候到它们全部结束，才把这些结果交回给你。现在请接着推进，不要停下来等用户再开口。",
+    ...head,
+    "**这是同一个任务的新回合。** 上一轮在你派发完子会话后结束是正常的 —— 宿主会在每个子会话结束时把结果交回给你。现在请接着推进，不要停下来等用户再开口。",
     "先读汇报做判断：每个子会话是否达成目标、改动去向（自动合并 / PR / 保留分支），以及是否还有遗留问题 —— 判断只看上报文本就够了，**复核不在本会话跑**。需要复核就把「跑测试 / 类型检查 / 构建并如实汇报真实输出」写成任务派给子会话。",
     "后续步骤一律派给子会话去做（复核任务、修复任务、补做未完成的步骤），不要自己跑命令、不要自己改文件；派发这些任务时直接做，不要只给建议，也不要让用户来催。",
     "只有在你无法判断、或确实需要用户决策时，才提出那一个具体问题；其余情况不要提问。",
-    "最后向用户做一次完整汇报：每个子会话做了什么、结论、改动去向、失败或遗留的问题。不要编造上报里没有的结果，也不要声称自己执行过这些改动。",
+    ...(pendingNote
+      ? [pendingNote]
+      : [
+          "最后向用户做一次完整汇报：每个子会话做了什么、结论、改动去向、失败或遗留的问题。不要编造上报里没有的结果，也不要声称自己执行过这些改动。",
+        ]),
   ].join("\n");
 }
 
