@@ -2115,6 +2115,7 @@ export class SuperAgentManager {
     this.lastThought.delete(id);
     this.promptTokens.delete(id);
     this.transcripts.delete(id);
+    this.integrationReasonEn.delete(id);
   }
 
   /** 记录子会话实际使用的模型（看板详情要显示它，成本也按它查单价）。 */
