@@ -199,9 +199,10 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     const spec = spawn.mock.calls[0]?.[0] as { task: string; attachments?: unknown[] };
     // Images ride as inline blocks (they have no path), files by source path —
-    // the manager copies both into the child's own attachment dir.
+    // the manager copies both into the child's own attachment dir. The name is
+    // model-facing (it lands in the child's task prompt), so it is English.
     expect(spec.attachments).toEqual([
-      { name: "图片1", data: "QUJD", mimeType: "image/png" },
+      { name: "image1", data: "QUJD", mimeType: "image/png" },
       { name: "note.txt", path: "C:/tmp/note.txt" },
     ]);
     // The parent tree is unreachable from the child's worktree: its path must
@@ -405,9 +406,11 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     await flush();
     expect(calls).toHaveLength(1);
     const sent = calls[0]!.prompt[0]!.text!;
-    // card order preserved, each a titled fenced section ahead of the text
-    expect(sent.indexOf("工作区诊断")).toBeLessThan(sent.indexOf("工作区 Git"));
-    expect(sent.indexOf("工作区 Git")).toBeLessThan(sent.indexOf("解释这个报错"));
+    // card order preserved, each a titled fenced section ahead of the text.
+    // The section titles in the AGENT-facing prompt are English (the
+    // transcript keeps the Chinese ones).
+    expect(sent.indexOf("Workspace diagnostics")).toBeLessThan(sent.indexOf("Workspace git status"));
+    expect(sent.indexOf("Workspace git status")).toBeLessThan(sent.indexOf("解释这个报错"));
     expect(sent).toContain("```text\na.ts:\n  [错误] L3: boom\n```");
     expect(sent.startsWith("/")).toBe(false); // CLI slash-gate discipline
     calls[0]!.resolve({ stopReason: "end_turn" });

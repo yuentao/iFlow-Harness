@@ -737,7 +737,8 @@ describe("super agent · 自动集成", () => {
     const request = harness.needMerges[0]!;
     expect(request.session.id).toBe(harness.sessions[0]?.id);
     // 原因如实带给宿主（它会写进请求提示词，智能体据此知道背景）。
-    expect(request.reason).toContain("重叠");
+    // 提示词是英文的，所以这里断言的是英文原因。
+    expect(request.reason).toContain("overlap");
   }, 30000);
 
   it("自动合并成功时不再打扰智能体", async () => {
