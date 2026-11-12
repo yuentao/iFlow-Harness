@@ -1487,4 +1487,81 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     expect(directive).toBeDefined();
     expect(directive?.raw).toContain("tool-super-agent");
   });
+
+  // 用户实测截图 2026-11-12：模型把委派写成「散文 + 内联开栏 + 单行 JSON」——
+  // 开栏粘在前一段散文后面（不在独占一行）。宿主照样派发（面板出现等待汇报的
+  // pill），转录里却是一整块 JSON：渲染侧与派发侧各抄了一份近似规则，同一段
+  // 文本两边判定不一致（渲染侧的协议块扫描先吃掉后面的围栏块，内联载荷就再
+  // 也没人认领）。
+  describe("散文 + 内联开栏 + 单行 JSON", () => {
+    const PAYLOAD = '{"tasks":[{"title":"甲任务","task":"做甲"}]}';
+    const PAYLOAD_B = '{"tasks":[{"title":"乙任务","task":"做乙"}]}';
+
+    /** 宿主逐帧扫描（模拟流式分片），返回派发出去的任务标题。 */
+    function dispatchedTitles(text: string, chunk: number): string[] {
+      let fromOffset = 0;
+      let pending: ReturnType<typeof extractSuperDirectives>["pendingOpen"];
+      const titles: string[] = [];
+      for (let i = 0; i < text.length; i += chunk) {
+        const scan = extractSuperDirectives(text.slice(0, i + chunk), fromOffset, pending);
+        for (const block of scan.blocks) for (const task of block) titles.push(task.title);
+        fromOffset = scan.end;
+        pending = scan.pendingOpen;
+      }
+      return titles;
+    }
+
+    /** 转录里出卡片的任务标题。 */
+    function renderedTitles(text: string): string[] {
+      return directiveSegments(text).flatMap((segment) =>
+        segment.display.kind === "tasks" ? segment.display.tasks.map((task) => task.title) : [],
+      );
+    }
+
+    const FIXTURES: Array<[string, string]> = [
+      ["独占收栏", ["我来分派两件事。```super-agent", PAYLOAD, "```", "分派完成。"].join("\n")],
+      ["无收栏", ["我来分派两件事。```super-agent", PAYLOAD].join("\n")],
+      ["同行 JSON + 同行收栏", "我来分派两件事。```super-agent " + PAYLOAD + " ```"],
+      ["后续还有一个独占围栏块", ["我来分派两件事。```super-agent", PAYLOAD, "```", "再补一个：", "```super-agent", PAYLOAD_B, "```"].join("\n")],
+    ];
+
+    for (const [name, text] of FIXTURES) {
+      it(`宿主派发出来的载荷，转录里一定出卡片（${name}）`, () => {
+        const rendered = renderedTitles(text);
+        expect(rendered.length).toBeGreaterThan(0);
+        // 分片大小不同也不能改变结论：宿主派发过的任务，转录里都有卡片。
+        for (const chunk of [1, 3, 16, text.length]) {
+          for (const title of dispatchedTitles(text, chunk)) {
+            expect(rendered).toContain(title);
+          }
+        }
+      });
+    }
+
+    it("流式过程中：宿主一派发，转录当场就出卡片（不等下一帧）", () => {
+      const text = ["我来分派两件事。```super-agent", PAYLOAD, "```", "分派完成。"].join("\n");
+      let fromOffset = 0;
+      let pending: ReturnType<typeof extractSuperDirectives>["pendingOpen"];
+      const dispatched: string[] = [];
+      for (let i = 0; i < text.length; i += 3) {
+        const slice = text.slice(0, i + 3);
+        const scan = extractSuperDirectives(slice, fromOffset, pending);
+        for (const block of scan.blocks) for (const task of block) dispatched.push(task.title);
+        fromOffset = scan.end;
+        pending = scan.pendingOpen;
+        const rendered = renderedTitles(slice);
+        for (const title of dispatched) expect(rendered).toContain(title);
+      }
+      expect(dispatched).toEqual(["甲任务"]);
+    });
+
+    it("载荷没收全时：既不派发也不出卡（收齐了才一起切）", () => {
+      const partial = ["我来分派两件事。```super-agent", '{"tasks":[{"title":"甲任务","task":"做'].join("\n");
+      expect(extractSuperDirectives(partial).blocks).toHaveLength(0);
+      expect(renderedTitles(partial)).toHaveLength(0);
+      const full = `${partial}甲"}]}`;
+      expect(extractSuperDirectives(full).blocks).toHaveLength(1);
+      expect(renderedTitles(full)).toEqual(["甲任务"]);
+    });
+  });
 });

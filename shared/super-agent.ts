@@ -727,8 +727,6 @@ export interface SuperTaskSpec {
   attachments?: SuperAttachment[];
 }
 
-/** 委派代码块的开栏标记（必须独占一行）。 */
-const FENCE_OPEN = /^```super-agent[ \t]*$/;
 /** 收栏标记（必须独占一行）。 */
 const FENCE_CLOSE = /^```[ \t]*$/;
 
@@ -776,6 +774,99 @@ export function normalizeSuperTitle(raw: string, fallback = "子会话"): string
 }
 
 /**
+ * 协议块区域（围栏式 / 工具调用式）—— 宿主派发与转录渲染共用的判定结果。
+ */
+export interface SuperProtocolRegion {
+  /** 围栏语言；工具调用式载荷固定 `super-agent`（它没有围栏语言）。 */
+  language: string;
+  /** 区域起点（围栏开栏行 / 工具调用式标记）。 */
+  start: number;
+  /** 区域终点（围栏收栏之后 / 载荷末尾）。 */
+  end: number;
+  /** 载荷正文（围栏正文 / 工具调用式载荷原文）。 */
+  body: string;
+  /** 解析出的任务；null = 载荷非法或不是委派载荷。 */
+  tasks: SuperTaskSpec[] | null;
+  /** 载荷非法的原因（宿主据此提示用户）。 */
+  reason?: string;
+  /** 载荷没收全（流式中间态）—— 区域尚未成形。 */
+  pending: boolean;
+}
+
+/**
+ * 找出文本里的协议块区域（围栏式 + 工具调用式），按起点排序。
+ *
+ * **宿主派发与转录渲染必须用同一个函数**：两边各抄一份近似规则时，同一段文本
+ * 两边会给出不同判定 —— 一边认得的形态另一边认不得，于是出现「宿主已派发
+ * （面板有等待汇报的 pill）、转录里却是一堵 JSON 墙」（用户实测截图
+ * 2026-11-12：模型把围栏开栏粘在前一段散文后面，开栏不在独占一行，载荷是
+ * 单行 JSON）。
+ *
+ * 两类区域互斥：落在围栏块内部的工具调用式载荷不再单独成块（围栏路径已经
+ * 消费过它，再算一次会重复派发 / 出两张卡）。围栏块尚未闭合时（流式中间态）
+ * 整段归属这个块：后面的文本可能还在写，既不当别的协议块，也不单独派发。
+ */
+export function findSuperProtocolRegions(
+  text: string,
+  from = 0,
+  accept: (language: string) => boolean = () => true,
+): SuperProtocolRegion[] {
+  const regions: SuperProtocolRegion[] = [];
+  /** 已闭合围栏块的范围（工具调用式载荷落在里面就不再单独成块）。 */
+  const fenceSpans: Array<[number, number]> = [];
+  let cursor = from;
+  let pending = false;
+
+  while (cursor < text.length) {
+    const open = findSuperFenceOpen(text, cursor, accept);
+    if (!open) break;
+    const resolved = resolveSuperDirectiveBlock(text, open, { language: open.language });
+    if (resolved.kind === "unclosed") {
+      regions.push({
+        language: open.language,
+        start: open.lineStart,
+        end: open.lineStart,
+        body: "",
+        tasks: null,
+        pending: true,
+      });
+      pending = true;
+      break;
+    }
+    const parsed = open.language === "super-agent" ? parseDirectiveBody(resolved.body) : null;
+    regions.push({
+      language: open.language,
+      start: open.lineStart,
+      end: resolved.closeEnd,
+      body: resolved.body,
+      tasks: parsed && parsed.ok ? parsed.tasks : null,
+      ...(parsed && !parsed.ok ? { reason: parsed.reason } : {}),
+      pending: false,
+    });
+    fenceSpans.push([open.lineStart, resolved.closeEnd]);
+    cursor = resolved.closeEnd;
+  }
+
+  if (!pending) {
+    for (const match of findToolStylePayloads(text, from)) {
+      if (fenceSpans.some(([start, end]) => match.marker >= start && match.marker < end)) continue;
+      regions.push({
+        language: TOOL_STYLE_MARKER,
+        start: match.marker,
+        end: match.end,
+        body: match.body,
+        tasks: match.tasks,
+        ...(match.tasks ? {} : { reason: "工具调用式载荷里的任务字段非法" }),
+        pending: false,
+      });
+    }
+  }
+
+  regions.sort((a, b) => a.start - b.start);
+  return regions;
+}
+
+/**
  * 从主 Agent 的回复文本里扫出委派指令块。
  *
  * 逐块解析：开栏 → 收集正文直到收栏 → JSON.parse。JSON 必须是
@@ -788,6 +879,10 @@ export function normalizeSuperTitle(raw: string, fallback = "子会话"): string
  * 围栏块之外还有一条**兜底路径**：模型有时不按围栏块输出，而是把载荷写成
  * 「工具调用」语法（见 {@link findToolStylePayloads}）。两条路径解析出同一份
  * 任务列表，且互不重复派发。
+ *
+ * 协议块区域由 {@link findSuperProtocolRegions} 统一找出 —— 与转录渲染
+ * （{@link splitSuperDirectiveSegments}）同源，「宿主派发出来的载荷，转录里
+ * 一定出卡片」。
  */
 export function extractSuperDirectives(
   text: string,
@@ -799,45 +894,25 @@ export function extractSuperDirectives(
   let end = fromOffset;
   let pendingOpen: SuperPendingFence | undefined;
 
-  let cursor = fromOffset;
   // 上一轮停在未闭合的开栏处时，宿主会把锚点带回来：从那里续扫，不再把已经
   // 确认不含指令的前缀（长会话里可能上百 KB）重扫一遍。
-  let resume = pending && pending.lineStart >= fromOffset ? pending : undefined;
-  let fenceUnclosed = false;
-  while (cursor < text.length) {
-    const open = findFence(text, resume ? resume.lineStart : cursor, FENCE_OPEN);
-    const resumeScannedTo = resume && open && open.lineStart === resume.lineStart ? resume.scannedTo : 0;
-    resume = undefined;
-    if (!open) break;
-    const resolved = resolveSuperDirectiveBlock(text, open, {
-      language: "super-agent",
-      scannedTo: resumeScannedTo,
-    });
-    if (resolved.kind === "unclosed") {
-      // 还没闭合（流式中间态）—— 停在这里，等后续 chunk 补齐。正文里的代码
+  const from = pending && pending.lineStart >= fromOffset ? pending.lineStart : fromOffset;
+
+  // 协议块区域与转录渲染同源（findSuperProtocolRegions）：宿主派发出来的载荷，
+  // 转录里一定出卡片。
+  for (const region of findSuperProtocolRegions(text, from)) {
+    if (region.pending) {
+      // 还没收全（流式中间态）—— 停在这里，等后续 chunk 补齐。正文里的代码
       // 围栏不会让它提前结束：收栏靠 JSON 结构定位，见 resolveSuperDirectiveBlock。
-      end = open.lineStart;
-      pendingOpen = { lineStart: open.lineStart, scannedTo: resolved.scannedTo };
-      fenceUnclosed = true;
+      end = region.start;
+      pendingOpen = { lineStart: region.start, scannedTo: text.length };
       break;
     }
-    const parsed = parseDirectiveBody(resolved.body);
-    if (parsed.ok) blocks.push(parsed.tasks);
-    else if (resolved.body) invalidBlocks.push({ body: resolved.body, reason: parsed.reason });
-    cursor = resolved.closeEnd;
-    end = resolved.closeEnd;
-  }
-
-  // 工具调用式载荷：只在围栏扫描没吃掉的区域里找，否则同一个 JSON 会被
-  // 派发两次（围栏路径先走，已经消费过的区域不会进兜底扫描）。
-  // 围栏未闭合时不做兜底 —— 那段文本归围栏路径管（等收栏再解析），
-  // 否则「载荷已完整但围栏还没收栏」的流式中间态会被提前派发。
-  if (!fenceUnclosed) {
-    for (const match of findToolStylePayloads(text, Math.max(fromOffset, end))) {
-      if (match.tasks) blocks.push(match.tasks);
-      else invalidBlocks.push({ body: match.body, reason: "工具调用式载荷里的任务字段非法" });
-      if (match.end > end) end = match.end;
-    }
+    if (region.end > end) end = region.end;
+    // 动作块（super-agent-actions）由 extractSuperActions 处理，这里只跳过。
+    if (region.language !== "super-agent") continue;
+    if (region.tasks) blocks.push(region.tasks);
+    else if (region.body) invalidBlocks.push({ body: region.body, reason: region.reason ?? "载荷不是合法 JSON" });
   }
 
   return { blocks, invalidBlocks, end, ...(pendingOpen ? { pendingOpen } : {}) };
@@ -1070,6 +1145,62 @@ function findFence(text: string, from: number, pattern: RegExp): FenceMatch | nu
     pos = lineEnd + 1;
   }
   return null;
+}
+
+/** 协议围栏开栏：```super-agent 或派生语言（super-agent-actions 等）。 */
+const SUPER_FENCE_OPEN = /^```(super-agent(?:-[A-Za-z0-9_-]+)?)[ \t]*$/;
+
+/** 收栏标记。 */
+const FENCE_MARKER = "```";
+
+/**
+ * 找下一个独占一行的协议围栏开栏 —— **宿主派发与转录渲染共用的唯一一个入口**。
+ *
+ * 两边各抄一份近似规则时（一边只认 `super-agent`、一边认 `super-agent-*`），
+ * 同一段文本两边会给出不同判定：一边认得的形态另一边认不得，于是出现
+ * 「宿主已派发（面板有等待汇报的 pill）、转录里仍是一堵 JSON 墙」
+ * （用户实测截图 2026-11-12：模型把围栏开栏粘在散文后面，载荷是单行 JSON）。
+ *
+ * `accept` 按语言挑选：宿主与渲染必须用同一份规则，否则同源判定无从谈起。
+ */
+function findSuperFenceOpen(
+  text: string,
+  from: number,
+  accept: (language: string) => boolean,
+): (SuperDirectiveOpen & { language: string }) | null {
+  let pos = from;
+  while (pos <= text.length) {
+    let lineEnd = text.indexOf("\n", pos);
+    if (lineEnd === -1) lineEnd = text.length;
+    const line = text.slice(pos, lineEnd).replace(/\r$/, "");
+    const match = SUPER_FENCE_OPEN.exec(line);
+    if (match) {
+      const language = match[1] ?? "super-agent";
+      if (accept(language)) {
+        return { language, lineStart: pos, bodyStart: Math.min(lineEnd + 1, text.length) };
+      }
+    }
+    if (lineEnd === text.length) return null;
+    pos = lineEnd + 1;
+  }
+  return null;
+}
+
+/**
+ * 收栏定位：JSON 结构收尾之后的第一个 ``` 标记。
+ *
+ * 标记必须落在行首（正常围栏），或紧贴载荷收尾（模型把收栏粘在载荷尾巴后面：
+ * `...}``` `）。**按「独占一行」的行匹配会漏掉后一种形态** —— 宿主在流式某一帧
+ * 恰好看到独占的 ``` 会派发出去，转录侧整段重扫却找不到收栏，于是
+ * 「宿主已派发、转录里仍是一堵 JSON 墙」。
+ */
+function findCloseMarker(text: string, from: number): number {
+  let at = text.indexOf(FENCE_MARKER, from);
+  while (at !== -1) {
+    if (at === from || at === 0 || text.charAt(at - 1) === "\n") return at;
+    at = text.indexOf(FENCE_MARKER, at + 1);
+  }
+  return -1;
 }
 
 /** 正文里的 JSON 结构不可用时最多试几个收栏候选（防病态文本拖死扫描）。 */
@@ -1355,7 +1486,7 @@ function collectCloseCandidates(text: string, bodyStart: number): CloseCandidate
  * `"title"` / `"task"` 字样会被当成下一个任务的字段。
  */
 function directiveRegionEnd(text: string, bodyStart: number): number {
-  const next = findSuperRenderFence(text, bodyStart);
+  const next = findSuperFenceOpen(text, bodyStart, () => true);
   return next ? next.lineStart : text.length;
 }
 
@@ -1376,8 +1507,9 @@ function directiveRegionEnd(text: string, bodyStart: number): number {
  * 唯一的例外是「正文还在流式输出中」（任务书的值没收尾）：那是流式的正常中间态，
  * 判未闭合等下一段（见 `scanTaskBooks` 的 pending 判定）。
  *
- * `scannedTo` 是上一轮已经找过、确认没有收栏的位置：流式输出每来一段就重扫
- * 整段正文是平方级浪费，从断点往后找即可。
+ * `scannedTo` 只是上一轮扫描位置的提示，**不再参与判定**：拿它当收栏搜索的
+ * 起点会让同一个块的结论随流式分片大小漂移 —— 宿主在某一帧派发出去了，
+ * 转录侧整段重扫却判定未闭合（转录里退化成 JSON 墙）。
  */
 export function resolveSuperDirectiveBlock(
   text: string,
@@ -1385,7 +1517,9 @@ export function resolveSuperDirectiveBlock(
   options: { language: string; scannedTo?: number },
 ): SuperDirectiveResolution {
   const lang = directiveLangOf(options.language);
-  const scannedTo = options.scannedTo ?? 0;
+  // `scannedTo`（上一轮已扫到哪）**故意不再参与判定**：它是流式优化的产物，
+  // 拿它当收栏搜索的起点会让同一个块的结论随分片大小漂移 —— 宿主在某一帧
+  // 派发出去了，转录侧整段重扫却判定未闭合（JSON 墙）。
   const regionEnd = directiveRegionEnd(text, open.bodyStart);
   const jsonStart = skipWhitespace(text, open.bodyStart);
   const structure =
@@ -1394,9 +1528,15 @@ export function resolveSuperDirectiveBlock(
       : scanJsonStructure(text, jsonStart, regionEnd);
 
   if (structure.status === "complete") {
-    const close = findFence(text, Math.max(structure.end, scannedTo), FENCE_CLOSE);
-    if (!close) return { kind: "unclosed", scannedTo: text.length };
-    return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+    // 收栏按字符定位：标记落在行首（正常围栏），或紧贴载荷收尾（模型把收栏
+    // 粘在载荷后面：`...}``` `）。按「独占一行」匹配会漏掉后一种形态。
+    const closeAt = findCloseMarker(text, structure.end + 1);
+    if (closeAt === -1) return { kind: "unclosed", scannedTo: text.length };
+    return {
+      kind: "closed",
+      body: text.slice(open.bodyStart, closeAt).trim(),
+      closeEnd: closeAt + FENCE_MARKER.length,
+    };
   }
 
   // 字符串还开着 = 载荷确实还在写（流式的正常中间态）。此刻任务书正文里可能已经
@@ -1431,7 +1571,7 @@ export function resolveSuperDirectiveBlock(
     const salvageLimit = candidates[0] ? Math.min(candidates[0].closeEnd, regionEnd) : regionEnd;
     const salvaged = scanTaskBooks(text, open.bodyStart, salvageLimit);
     if (salvaged.books.length > 0 && !salvaged.pending) {
-      const close = findFence(text, Math.max(salvaged.end, scannedTo), FENCE_CLOSE);
+      const close = findFence(text, salvaged.end, FENCE_CLOSE);
       if (close) {
         return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
       }
@@ -1928,6 +2068,24 @@ const SUPER_DIGEST_FOOTER = [
 ].join("\n");
 
 /**
+ * 看板标记（**协议哨兵，不是文案**）。
+ *
+ * 这段 token 跨三个文件联动，改一处就会静默坏掉：
+ *  - `prompts/system-prompt.md`：系统提示用「输入里有没有 [子会话看板]」区分
+ *    主会话与子会话（没有 = 子会话 = 忽略编排指令，只做自己的任务）；
+ *  - `src/panel/panel.ts`：提示注入按它判定这一轮是不是主会话；
+ *  - `test/*`：断言它在。
+ *
+ * 看板摘要是**模型面向**文本（子会话跑的是同一份英文系统提示），所以正文一律
+ * 英文（标题见 {@link SUPER_BOARD_LABEL_EN}）；这个 token 只是协议标识，保留
+ * 原样 —— 单独改它的语言会让主会话把自己当成子会话，委派直接失效。
+ */
+const SUPER_BOARD_MARKER = "[子会话看板]";
+
+/** 看板标题（模型面向：英文；用户看到的看板 UI 文案在 webview 侧，保持中文）。 */
+const SUPER_BOARD_LABEL_EN = "[child-session board]";
+
+/**
  * 主会话每轮看到的结构化看板快照。
  *
  * 这是「主会话管理子会话」的感知层：没有它，主会话派发完就与子会话失联，
@@ -1941,11 +2099,11 @@ const SUPER_DIGEST_FOOTER = [
  */
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
   if (sessions.length === 0) {
-    return "[子会话看板] (host-injected live status, not a user message. There are no child sessions right now.)";
+    return `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. There are no child sessions right now.)`;
   }
   const counts = summarizeSuperSessions(sessions);
   const header =
-    `[子会话看板] (host-injected live status, not a user message. ${counts.total} child session(s) in total: ` +
+    `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. ${counts.total} child session(s) in total: ` +
     `${counts.running} running, ${counts.awaiting} awaiting you, ${counts.done} completed, ` +
     `${counts.failed} failed, ${counts.cancelled} interrupted)`;
   const lines = sessions.map((session) => describeSuperSessionLine(session));
@@ -1991,9 +2149,6 @@ export interface SuperActionScan {
   end: number;
 }
 
-/** 动作块的开栏标记（必须独占一行）。 */
-const ACTION_FENCE_OPEN = /^```super-agent-actions[ \t]*$/;
-
 /**
  * 从主 Agent 的回复文本里扫出管理动作块。
  *
@@ -2008,7 +2163,7 @@ export function extractSuperActions(text: string, fromOffset = 0): SuperActionSc
   let cursor = fromOffset;
 
   while (cursor < text.length) {
-    const open = findFence(text, cursor, ACTION_FENCE_OPEN);
+    const open = findSuperFenceOpen(text, cursor, (language) => language === "super-agent-actions");
     if (!open) break;
     const resolved = resolveSuperDirectiveBlock(text, open, { language: "super-agent-actions" });
     if (resolved.kind === "unclosed") {
@@ -2350,9 +2505,6 @@ export type SuperDirectiveSegment =
       display: SuperDirectiveDisplay;
     };
 
-/** 渲染侧识别的围栏：`super-agent` 及其派生语言（`super-agent-actions` 等）。 */
-const SUPER_RENDER_FENCE_OPEN = /^```(super-agent(?:-[A-Za-z0-9_-]+)?)[ \t]*$/;
-
 /**
  * 转录里识别协议块的快速探测串（避免每帧逐行扫描长回答）。
  *
@@ -2361,35 +2513,6 @@ const SUPER_RENDER_FENCE_OPEN = /^```(super-agent(?:-[A-Za-z0-9_-]+)?)[ \t]*$/;
  * 被跳过 —— 卡片就永远出不来。扫描本身仍是精确判定，探测只是省掉无标记文本的开销。
  */
 const SUPER_RENDER_PROBE = TOOL_STYLE_MARKER;
-
-interface SuperRenderFenceMatch {
-  language: string;
-  /** 围栏所在行的行首偏移。 */
-  lineStart: number;
-  /** 围栏行之后的正文起始偏移。 */
-  bodyStart: number;
-}
-
-/** 找下一个独占一行的 super-agent 系列围栏。 */
-function findSuperRenderFence(text: string, from: number): SuperRenderFenceMatch | null {
-  let pos = from;
-  while (pos <= text.length) {
-    let lineEnd = text.indexOf("\n", pos);
-    if (lineEnd === -1) lineEnd = text.length;
-    const line = text.slice(pos, lineEnd).replace(/\r$/, "");
-    const match = SUPER_RENDER_FENCE_OPEN.exec(line);
-    if (match) {
-      return {
-        language: match[1] ?? "super-agent",
-        lineStart: pos,
-        bodyStart: Math.min(lineEnd + 1, text.length),
-      };
-    }
-    if (lineEnd === text.length) return null;
-    pos = lineEnd + 1;
-  }
-  return null;
-}
 
 /** 包裹标记里可以连同载荷一起吞掉的字符（不含空白、中文与散文标点）。 */
 const WRAPPER_CHAR = /[`<>|｜\-_/A-Za-z0-9]/;
@@ -2517,12 +2640,12 @@ function describeSuperDirective(language: string, body: string): SuperDirectiveD
 /**
  * 把一段助手文本切成「普通文本段 + 协议块段」。
  *
- * 两条判定链与宿主派发逐字同源（见本节顶部注释）：
- *  - 围栏：只识别**独占一行**的 ```super-agent / ```super-agent-<name>（与宿主
- *    的围栏正则同一形状），收栏由 `resolveSuperDirectiveBlock` 按 JSON 结构定位；
- *  - 工具调用式载荷：走宿主的 `findToolStylePayloads`（标记 + 不远处的 JSON），
- *    卡片边界把包裹标记与紧随的收栏行一并吞掉（{@link toolStyleRegionStart} /
- *    {@link toolStyleRegionEnd}）。
+ * 协议块区域由 {@link findSuperProtocolRegions} 找出 —— 与宿主派发
+ * （{@link extractSuperDirectives}）**同一个函数**，两条判定链不可能再分叉：
+ *  - 围栏：独占一行的 ```super-agent / ```super-agent-<name>，收栏由
+ *    `resolveSuperDirectiveBlock` 按 JSON 结构定位；
+ *  - 工具调用式载荷：标记 + 不远处的 JSON，卡片边界把包裹标记与紧随的收栏行
+ *    一并吞掉（{@link toolStyleRegionStart} / {@link toolStyleRegionEnd}）。
  *
  * 围栏之外的内容原样保留给 Markdown。未闭合的围栏不切分：剩余整段仍是文本段
  * （Markdown 会照常渲染成代码块），收栏后下一次调用才切成卡片 —— 与宿主「等收栏
@@ -2532,47 +2655,27 @@ export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment
   if (!text.includes(SUPER_RENDER_PROBE)) return text ? [{ kind: "text", text }] : [];
   const segments: SuperDirectiveSegment[] = [];
   let textStart = 0;
-  let cursor = 0;
-  let fenceUnclosed = false;
-  while (cursor < text.length) {
-    const open = findSuperRenderFence(text, cursor);
-    if (!open) break;
-    const resolved = resolveSuperDirectiveBlock(text, open, { language: open.language });
-    if (resolved.kind === "unclosed") {
-      fenceUnclosed = true;
-      break;
-    }
-    if (open.lineStart > textStart) {
-      segments.push({ kind: "text", text: text.slice(textStart, open.lineStart) });
-    }
+  for (const region of findSuperProtocolRegions(text)) {
+    // 载荷没收全（流式中间态）：整段留给 Markdown，等收齐再切。
+    if (region.pending) break;
+    // 工具调用式载荷的卡片边界要把包裹标记与紧随的收栏行一并吞掉。
+    const start = region.language === TOOL_STYLE_MARKER ? toolStyleRegionStart(text, region.start) : region.start;
+    const end = region.language === TOOL_STYLE_MARKER ? toolStyleRegionEnd(text, region.end) : region.end;
+    if (start > textStart) segments.push({ kind: "text", text: text.slice(textStart, start) });
     segments.push({
       kind: "directive",
-      language: open.language,
-      raw: text.slice(open.lineStart, resolved.closeEnd),
-      display: describeSuperDirective(open.language, resolved.body),
+      language: region.language,
+      raw: text.slice(start, end),
+      display:
+        region.language === TOOL_STYLE_MARKER
+          ? // 宿主派发出来的任务照原样展示（不带容错标记）；宿主没派发的载荷走
+            // describeSuperDirective 的降级路径（容错拆出 / 原始协议块）。
+            region.tasks
+            ? tasksFromSpecs(region.tasks)
+            : describeSuperDirective(TOOL_STYLE_MARKER, region.body)
+          : describeSuperDirective(region.language, region.body),
     });
-    cursor = resolved.closeEnd;
-    textStart = resolved.closeEnd;
-  }
-
-  // 工具调用式载荷：只在围栏没消费掉的区域里找（与宿主同一起点），围栏未闭合时
-  // 同样不做兜底 —— 那段文本归围栏路径管。宿主据此派发，这里据此出卡片。
-  if (!fenceUnclosed) {
-    for (const match of findToolStylePayloads(text, cursor)) {
-      const start = toolStyleRegionStart(text, match.marker);
-      const end = toolStyleRegionEnd(text, match.end);
-      if (start > textStart) segments.push({ kind: "text", text: text.slice(textStart, start) });
-      segments.push({
-        kind: "directive",
-        language: TOOL_STYLE_MARKER,
-        raw: text.slice(start, end),
-        // 宿主派发出来的任务照原样展示（不带容错标记）；宿主没派发的载荷走
-        // describeSuperDirective 的降级路径（容错拆出 / 原始协议块）。
-        display: match.tasks ? tasksFromSpecs(match.tasks) : describeSuperDirective(TOOL_STYLE_MARKER, match.body),
-      });
-      cursor = end;
-      textStart = end;
-    }
+    textStart = end;
   }
 
   const rest = text.slice(textStart);

@@ -318,6 +318,53 @@ describe("AssistantText 协议块卡片", () => {
     expect(container.querySelector("pre code")).toBeNull();
   });
 
+  // 用户实测截图 2026-11-12：模型把委派写成「散文 + 内联开栏 + 单行 JSON」——
+  // 开栏粘在前一段散文后面（不在独占一行）。宿主照样派发（面板出现等待汇报的
+  // pill），转录里必须出任务卡，不能是一整块 JSON 墙。
+  it("内联开栏（粘在散文后面）+ 单行 JSON 渲染成任务卡，散文留在卡片前后", () => {
+    render(
+      [
+        "我来分派两件事。```super-agent",
+        '{"tasks":[{"title":"甲任务","task":"做甲"}]}',
+        "```",
+        "分派完成。",
+      ].join("\n"),
+    );
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("甲任务");
+    expect(cards[0]!.textContent).toContain("做甲");
+    // 卡片前后的散文都还在（既不被吞掉，也不被 JSON 墙淹没）。
+    expect(text()).toContain("我来分派两件事");
+    expect(text()).toContain("分派完成");
+    // 裸 JSON 不进 DOM。
+    expect(text()).not.toContain('"tasks"');
+    expect(container.querySelector("pre code")).toBeNull();
+  });
+
+  // 同一形态后面还跟着一个正常围栏块时，内联载荷照样出卡（渲染侧的协议块扫描
+  // 与派发侧同源：工具调用式载荷不会被后面的围栏块挤掉）。
+  it("内联开栏载荷 + 后续独占围栏块：两个任务各出一张卡", () => {
+    render(
+      [
+        "我来分派两件事。```super-agent",
+        '{"tasks":[{"title":"甲任务","task":"做甲"}]}',
+        "```",
+        "再补一个：",
+        "```super-agent",
+        '{"tasks":[{"title":"乙任务","task":"做乙"}]}',
+        "```",
+      ].join("\n"),
+    );
+    const cards = taskCards();
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.textContent).toContain("甲任务");
+    expect(cards[1]!.textContent).toContain("乙任务");
+    expect(text()).toContain("我来分派两件事");
+    expect(text()).toContain("再补一个");
+    expect(text()).not.toContain('"tasks"');
+  });
+
   it("普通段落 / 列表 / 普通代码块与协议卡共存，Markdown 不丢", () => {
     const mixed = [
       "开始处理：",
