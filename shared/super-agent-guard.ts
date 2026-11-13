@@ -10,10 +10,22 @@
  * 因此宿主在**自动放行子会话的 shell 工具之前**先过这张表：命中即拒绝该次
  * 调用（模型看到工具被拒，可以自行换方案）。
  *
- * 前提（调用点必须保证）：护栏只看得到经过宿主审批的调用，所以 shell 工具
- * **每一次**都必须回到宿主 —— 见 `pickChildPermissionOption` 与
- * `src/panel/super-agent.ts` 的 `callbacksFor` 注释。若对 shell 工具回
- * `allow_always`，CLI 后续同类调用不再请求权限，护栏从此失明。
+ * 两条落地路径（能力不同，必须分开看 —— 否则会误判护栏到底有没有用）：
+ *  1. **审批路径**（`session/request_permission`）：宿主能**拒掉单次调用**。
+ *     前提是 shell 工具每一次都回到宿主 —— 见 `pickChildPermissionOption`
+ *     与 `src/panel/super-agent.ts` 的 `callbacksFor` 注释；若对 shell 工具回
+ *     `allow_always`，CLI 后续同类调用不再请求权限，护栏从此失明。
+ *  2. **预检路径**（`session/update` 的 tool_call 帧）：子会话跑在 `yolo`
+ *     免确认模式下，内核**通常根本不发** `session/request_permission`
+ *     （见 `src/panel/super-agent.ts` 的 `callbacksFor` 注释），审批路径
+ *     形同虚设。宿主改从 wire 上「命令即将执行」的那一帧读命令文本
+ *     （`tool_call_update(in_progress)`，CLI 在 `execute` 之前推送）——
+ *     但这条路径**只能终止整个子会话**，拒不掉单次调用。
+ *
+ * 所以判定结果带一档 **severity**：
+ *  - `tool`：只该拒掉这一次调用 —— 终止整个子会话属于误伤；
+ *  - `session`：命令会（可能）破坏用户主工作区的依赖树 —— 预检路径据此
+ *    终止子会话，审批路径据此拒掉这次调用。
  *
  * 取舍：本模块刻意**不**碰文件系统 —— `nodeModulesIsLink` 由宿主用
  * `lstatSync` 取（Windows junction 在 Node 里同样报 `isSymbolicLink()` 为
@@ -38,9 +50,34 @@ export interface ChildShellGuardContext {
    * 由宿主用 `lstatSync(...).isSymbolicLink()` 取；缺省按「不是链接」处理。
    */
   nodeModulesIsLink?: boolean;
+  /**
+   * 读取子会话工作目录内的脚本文件内容（可选）。
+   *
+   * 由宿主注入（护栏本身零文件系统依赖，纯函数才能单测）。用途：判定
+   * `node <脚本文件>` 这类把命令藏进文件的写法 —— 脚本内容里有危险调用就
+   * 拦，读不到就不拦（见 `classifyNodeInvocation` 的说明）。
+   *
+   * 传入的是**绝对路径**；实现方应自行再确认它落在子会话工作目录内
+   * （护栏已经判过一次，宿主侧再兜一层：护栏是纯逻辑，边界归宿主管）。
+   */
+  readLocalFile?: (absolutePath: string) => string | null;
 }
 
 export type ChildShellDecision = "allow" | "deny";
+
+/**
+ * 命中后的处置档位。
+ *
+ * - `tool`：只该拒掉**这一次**工具调用（子会话可以换个方案继续）。
+ * - `session`：足以终止整个子会话 —— 命令会（可能）破坏用户主工作区的
+ *   依赖树。
+ *
+ * 为什么分档：护栏有两条落地路径，能力不同（见模块头注释）。审批路径能拒掉
+ * 单次调用，预检路径只能终止整个子会话。用同一档位去终止，会把「删掉自己
+ * worktree 里的 node_modules」这种无害动作升级成「杀掉整个子会话」—— 那是
+ * 误伤。所以只有**明确会动到用户主工作区依赖树**的命中才是 `session`。
+ */
+export type ChildShellSeverity = "tool" | "session";
 
 export interface ChildShellGuardResult {
   decision: ChildShellDecision;
@@ -52,6 +89,8 @@ export interface ChildShellGuardResult {
    * 拒绝」。
    */
   reason?: string;
+  /** 处置档位（`decision === "deny"` 时有意义）。 */
+  severity?: ChildShellSeverity;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +158,35 @@ const WRAPPER_COMMANDS: ReadonlySet<string> = new Set([
 /** 包装命令中「下一段就是完整命令」的开关（去掉 `-`/`/` 前缀后比较）。 */
 const INLINE_COMMAND_FLAGS: ReadonlySet<string> = new Set(["c", "k", "command", "lc", "cl"]);
 
+/** Node 解释器名（basename，小写）。 */
+const NODE_BINARIES: ReadonlySet<string> = new Set(["node", "nodejs"]);
+
+/**
+ * Node 的「内联求值」开关 —— 脚本内容直接跟在命令行里。
+ *
+ * 这类写法把真正的命令藏在一段 JS 里：命令文本里根本没有「npm」这个词，
+ * 按词切分也切不出来（审计实测：`node -e "require('child_process').execSync('npm ci')"`
+ * 与 `node make-link.js` 两类写法都被判成放行）。
+ */
+const NODE_EVAL_FLAGS: ReadonlySet<string> = new Set(["-e", "--eval", "-p", "--print"]);
+
+/**
+ * 脚本里出现「从子进程里跑包管理器安装」的形态。
+ *
+ * 必须同时出现 `child_process`（脚本确实能起子进程）与「包管理器 + 安装子命令」
+ * 的组合：只看到 `npm ci` 这几个字（例如脚本里只是打印一句提示）不算危险，
+ * 只看到 `child_process`（例如跑个 `git status`）也不算 —— 两个条件合起来
+ * 才是「这条命令会去装依赖」。
+ *
+ * 允许中间夹少量字符（`npm', ['ci']` 这种数组写法、`npm ' + 'ci` 这种拼接），
+ * 但不许跨行 —— 跨行的两个词多半不是同一个调用。
+ */
+const INSTALL_CALL_IN_SCRIPT =
+  /\b(npm|pnpm|yarn|bun)\b[^\n]{0,40}?\b(ci|install|i|add)\b/i;
+
+/** 脚本里「创建链接」的 API 调用形态。 */
+const LINK_CALL_IN_SCRIPT = /symlinksync|symlink\s*\(|fs\.symlink|junction|mklink|hardlink/i;
+
 const LINK_REASON =
   "Blocked by the host guard: creating a link (mklink / junction / symlink) that points at node_modules is not allowed. A child session must not share the main workspace's dependencies — deleting a linked node_modules (e.g. `npm ci`) destroys the real dependency tree. Install dependencies inside your own working directory instead.";
 
@@ -131,6 +199,12 @@ const MAIN_WORKSPACE_INSTALL_REASON =
 const MAIN_WORKSPACE_DELETE_REASON =
   "Blocked by the host guard: this command deletes a node_modules dependency tree. Removing dependencies is not allowed for child sessions.";
 
+const SCRIPT_INSTALL_REASON =
+  "Blocked by the host guard: this command runs a dependency install from inside a Node script (child_process + npm/pnpm/yarn/bun install). The host cannot see which directory the script installs into, so it cannot rule out that it rewrites the main workspace's node_modules. Run the install directly in your own working directory instead — that is allowed as long as your node_modules is not a link.";
+
+const SCRIPT_LINK_REASON =
+  "Blocked by the host guard: this command creates a link that points at node_modules from inside a Node script. A linked node_modules turns the next `npm ci` into a deletion of the real dependency tree (possibly the user's main workspace). Install dependencies inside your own working directory instead.";
+
 /**
  * 判定一条子会话 shell 命令是否放行。
  *
@@ -141,7 +215,7 @@ export function classifyChildShellCommand(
   command: string,
   ctx: ChildShellGuardContext,
 ): ChildShellGuardResult {
-  return classifyText(command ?? "", ctx, 3);
+  return classifyText(command ?? "", ctx, 4);
 }
 
 function classifyText(
@@ -168,21 +242,67 @@ function classifyText(
   // ① 创建指向 node_modules 的链接（mklink / New-Item -ItemType Junction /
   //    ln -s / os.symlink / junction.exe ...）。
   if (mentionsNodeModules(text) && createsLink(lower)) {
-    return { decision: "deny", reason: LINK_REASON };
+    return { decision: "deny", reason: LINK_REASON, severity: linkSeverity(segments) };
   }
 
-  // ② 包管理器安装类命令 —— 只在「会动到主工作区依赖」时拒绝。
+  // ② Node 内联脚本 / 脚本文件 —— 命令藏在 JS 里，按词切分看不见。
+  //    放在安装/删除规则之前：这类写法的命令文本里根本没有包管理器词。
+  const nodeVerdict = classifyNodeInvocation(segments, ctx);
+  if (nodeVerdict) return nodeVerdict;
+
+  // ③ 包管理器安装类命令 —— 只在「会动到主工作区依赖」时拒绝。
   if (findInstallInvocation(segments)) {
     const reason = installDenyReason(segments, text, ctx);
-    if (reason) return { decision: "deny", reason };
+    if (reason) return { decision: "deny", reason, severity: "session" };
   }
 
-  // ③ 显式删除依赖树（同一段里既有删除动词又提到 node_modules）。
+  // ④ 显式删除依赖树（同一段里既有删除动词又提到 node_modules）。
   if (deletesNodeModules(segments)) {
-    return { decision: "deny", reason: MAIN_WORKSPACE_DELETE_REASON };
+    return {
+      decision: "deny",
+      reason: MAIN_WORKSPACE_DELETE_REASON,
+      severity: deleteSeverity(text, ctx),
+    };
   }
 
   return { decision: "allow" };
+}
+
+/**
+ * 判定「命令即将执行」的那一帧（`session/update` 的 tool_call 帧）。
+ *
+ * 存在的理由：子会话跑在 `yolo` 免确认模式下，内核通常**不发**
+ * `session/request_permission` —— 审批路径上的护栏形同虚设。宿主能观察到的
+ * 唯一命令文本入口是 wire 上的 tool_call 帧：`args` 里带原始参数
+ * （probed CLI 0.5.19：`tool_call_update(in_progress)` 才带 args，而那一帧
+ * 恰好在 `execute` 之前推送）。
+ *
+ * 只看「即将执行」的那两帧（`pending` / `in_progress`）：完成帧里可能还带着
+ * 同一段命令，重判一次只是白费力气。
+ *
+ * 返回 null 表示「这条帧不走护栏」（不是工具调用 / 不是 shell 类 / 取不到命令
+ * 文本）。取不到命令文本时**不猜**：无法判定就不假装拦得住。
+ */
+export function classifyChildToolCall(
+  frame: {
+    sessionUpdate?: string;
+    toolCallId?: string;
+    toolName?: string;
+    kind?: string;
+    status?: string;
+    title?: string;
+    args?: unknown;
+  },
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (frame.sessionUpdate !== "tool_call" && frame.sessionUpdate !== "tool_call_update") {
+    return null;
+  }
+  if (frame.status !== "pending" && frame.status !== "in_progress") return null;
+  if (!isShellToolCall({ toolName: frame.toolName, kind: frame.kind })) return null;
+  const command = extractShellCommand({ title: frame.title, args: frame.args });
+  if (!command) return null;
+  return classifyChildShellCommand(command, ctx);
 }
 
 /**
@@ -334,6 +454,199 @@ function createsLink(lowerCommand: string): boolean {
   return false;
 }
 
+/**
+ * 链接命令的「被创建出来的那个路径」。
+ *
+ * 只有当**被创建的路径本身就是 node_modules** 时，创建链接才等于「把依赖树
+ * 换成链接」—— 那正是 2026-11-11 事故的第一步。反过来，链接建在 node_modules
+ * **里面**（monorepo 常见的 `ln -s ../../packages/core node_modules/core`）
+ * 并不让 node_modules 变成链接，爆炸半径完全不同。
+ *
+ * 各家命令的语法不同，这里按形态分别取：
+ *  - `mklink /J <link> <target>`：第一个非开关参数；
+ *  - `junction <link> <target>`（Sysinternals）：第一个非开关参数；
+ *  - `New-Item -Path <link> -Target ...`：`-Path` 的值；
+ *  - `ln -s <target> <link>`：**最后一个**非开关参数。
+ *
+ * 取不到就返回 null（按「不终止子会话」的保守档处理）。
+ */
+function linkDestination(tokens: string[]): string | null {
+  const name = tokens[0] ? commandName(tokens[0]) : "";
+  const rest = tokens.slice(1);
+  const plain = rest.filter((token) => !/^[-/]/.test(token));
+  if (name === "mklink" || name === "junction") return plain[0] ?? null;
+  if (name === "new-item") {
+    const index = rest.findIndex((token) => token.toLowerCase() === "-path");
+    if (index < 0) return null;
+    return rest[index + 1] ?? null;
+  }
+  if (name === "ln") return plain.length > 0 ? plain[plain.length - 1]! : null;
+  return null;
+}
+
+/** 被创建的路径是不是 node_modules 本身。 */
+function isNodeModulesPath(value: string): boolean {
+  const base = value.replace(/\\/g, "/").split("/").pop() ?? "";
+  return base.toLowerCase() === "node_modules";
+}
+
+/**
+ * 链接命中的处置档位。
+ *
+ * `session` 档只给「被创建的路径就是 node_modules」—— 那是事故的第一步，
+ * 必须当场终止。链接建在 node_modules 里面之类（爆炸半径有限）只按 `tool` 档
+ * 拒掉这一次调用，不因此杀掉整个子会话。
+ */
+function linkSeverity(segments: string[][]): ChildShellSeverity {
+  for (const tokens of segments) {
+    const destination = linkDestination(tokens);
+    if (destination && isNodeModulesPath(destination)) return "session";
+  }
+  return "tool";
+}
+
+/**
+ * 删除依赖树命中的处置档位。
+ *
+ * 只有「删到的是用户的依赖树」才是 `session` 档：worktree 的 node_modules
+ * 本身就是链接（删它等于删用户主工作区的依赖），或命令文本点名了主工作区。
+ * 删自己 worktree 里那份真实的 node_modules 爆炸半径仅限子会话自己的目录，
+ * 按 `tool` 档拒掉这一次调用即可。
+ */
+function deleteSeverity(text: string, ctx: ChildShellGuardContext): ChildShellSeverity {
+  if (ctx.nodeModulesIsLink) return "session";
+  if (mentionsMainWorkspace(text, ctx)) return "session";
+  return "tool";
+}
+
+// ---------------------------------------------------------------------------
+// Node 内联脚本 / 脚本文件
+// ---------------------------------------------------------------------------
+
+/**
+ * 一段命令里有没有 Node 解释器调用，以及它带的是内联脚本还是脚本文件。
+ *
+ * 找不到就返回 null（不是 node 调用，或 node 后面没有可执行的东西，例如
+ * `node --version`）。
+ */
+function findNodeInvocation(
+  tokens: string[],
+): { kind: "inline"; script: string } | { kind: "file"; file: string } | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (!NODE_BINARIES.has(commandName(tokens[i]!))) continue;
+    for (let j = i + 1; j < tokens.length; j++) {
+      const token = tokens[j]!;
+      const lower = token.toLowerCase();
+      // `--eval=<脚本>` / `--print=<脚本>`：脚本跟在等号后面。
+      if (lower.startsWith("--eval=") || lower.startsWith("--print=")) {
+        const script = token.slice(token.indexOf("=") + 1);
+        return script ? { kind: "inline", script } : null;
+      }
+      // `-e <脚本>` / `-p <脚本>`：脚本是下一个词。
+      if (NODE_EVAL_FLAGS.has(lower)) {
+        const script = tokens[j + 1];
+        return script ? { kind: "inline", script } : null;
+      }
+      if (token.startsWith("-")) continue; // node 自己的选项
+      // 第一个非选项词 = 脚本文件。
+      return { kind: "file", file: token };
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 判定 Node 调用里的脚本是否危险。
+ *
+ * 两种危险形态：
+ *  1. 脚本里创建指向 node_modules 的链接 —— 事故的第一步，无条件拦；
+ *  2. 脚本里用 child_process 跑包管理器安装 —— 装到哪儿脚本说了算（可以
+ *     chdir、可以 `--prefix`），宿主看不见，拦。
+ *
+ * 为什么第 2 条不区分「装到自己的 worktree」：脚本内容里能看见目标目录时，
+ * 宿主能判断（见 `scriptInstallSeverity`）；看不见时（目标在变量里、在
+ * 拼接里、在配置里）一律按「装到哪儿不知道」处理。
+ */
+function classifyDangerousScript(
+  script: string,
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  if (mentionsNodeModules(script) && LINK_CALL_IN_SCRIPT.test(script)) {
+    return { decision: "deny", reason: SCRIPT_LINK_REASON, severity: "session" };
+  }
+  if (!/child_process/.test(script)) return null;
+  if (!INSTALL_CALL_IN_SCRIPT.test(script)) return null;
+  return {
+    decision: "deny",
+    reason: SCRIPT_INSTALL_REASON,
+    severity: scriptInstallSeverity(script, ctx),
+  };
+}
+
+/**
+ * 脚本里装依赖的处置档位。
+ *
+ * `session` 档：worktree 的 node_modules 已经是链接，或脚本文本点名了主工作区
+ * —— 这两种情况下装依赖明确会动到用户的依赖树。其余（脚本在自己 worktree
+ * 里装自己的依赖）按 `tool` 档：拒掉这一次调用，子会话可以换成直接跑
+ * `npm ci`（那是允许的）。
+ */
+function scriptInstallSeverity(
+  script: string,
+  ctx: ChildShellGuardContext,
+): ChildShellSeverity {
+  if (ctx.nodeModulesIsLink) return "session";
+  if (mentionsMainWorkspace(script, ctx)) return "session";
+  return "tool";
+}
+
+/**
+ * 逐段判定 Node 调用。
+ *
+ * 脚本文件只在**子会话自己的工作目录内**才读：护栏没有理由为了判定去碰用户
+ * 主工作区里的文件，也没有理由去读工作目录外的脚本（那本来也不在子会话的
+ * 隔离边界内）。
+ *
+ * 读不到就放行（刻意不拒绝）：脚本可能根本不存在（命令自己会失败）、可能
+ * 不是文本、也可能宿主没给读取能力。一刀切拒绝会误伤大量正常用法（本仓库
+ * 自己的 `node scripts/harness.mjs` 就是常规操作），而真正危险的形态会在
+ * 别处再被看见（命令文本里的包装命令、脚本里的链接创建）。
+ */
+function classifyNodeInvocation(
+  segments: string[][],
+  ctx: ChildShellGuardContext,
+): ChildShellGuardResult | null {
+  let dir = ctx.cwd;
+  for (const tokens of segments) {
+    const name = tokens[0] ? commandName(tokens[0]) : "";
+    // 段内的 `cd` 会改变后续脚本的相对路径基准。
+    if (CD_COMMANDS.has(name)) {
+      const target = tokens
+        .slice(1)
+        .find((token) => !token.startsWith("-") && token.toLowerCase() !== "/d");
+      if (target && target !== "-") dir = resolvePath(normalizePath(dir), target);
+      continue;
+    }
+    const invocation = findNodeInvocation(tokens);
+    if (!invocation) continue;
+    if (invocation.kind === "inline") {
+      const verdict = classifyDangerousScript(invocation.script, ctx);
+      if (verdict) return verdict;
+      continue;
+    }
+    const resolved = resolveInside(dir, invocation.file);
+    if (!resolved) continue;
+    const reader = ctx.readLocalFile;
+    if (!reader) continue;
+    const content = reader(resolved);
+    if (!content) continue;
+    const verdict = classifyDangerousScript(content, ctx);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
 /** 找出安装类调用（扫每个命令段，取该段第一个包管理器词后的首个非选项词）。 */
 function findInstallInvocation(segments: string[][]): { manager: string; subcommand: string } | null {
   for (const tokens of segments) {
@@ -343,8 +656,10 @@ function findInstallInvocation(segments: string[][]): { manager: string; subcomm
       if (!subcommands) continue;
       const rest = tokens.slice(i + 1);
       const first = rest.find((token) => !token.startsWith("-"));
-      // `yarn` / `yarn --frozen-lockfile` 本身就是安装。
-      if (name === "yarn" && !first) return { manager: name, subcommand: "" };
+      // `yarn` / `yarn --frozen-lockfile` / 裸 `pnpm` 本身就是安装。
+      if ((name === "yarn" || name === "pnpm") && !first) {
+        return { manager: name, subcommand: "" };
+      }
       if (first && subcommands.includes(first.toLowerCase())) {
         return { manager: name, subcommand: first.toLowerCase() };
       }
@@ -446,4 +761,54 @@ function resolvePath(base: string, target: string): string {
   const trimmed = target.trim();
   if (!trimmed) return base;
   return normalizePath(isAbsolutePath(trimmed) ? trimmed : `${base}/${trimmed}`);
+}
+
+/**
+ * 归一化绝对路径但**保留大小写** —— 读文件要拿原始路径，比较边界才用小写。
+ *
+ * 与 {@link normalizePath} 的区别只有大小写：后者一律小写（Windows / POSIX
+ * 都当大小写无关处理），这里保留原样。
+ */
+function normalizePathCase(value: string): string {
+  const raw = value.replace(/\\/g, "/");
+  const drive = /^([A-Za-z]):\//.exec(raw);
+  const prefix = drive ? `${drive[1]}:` : "";
+  const rest = drive ? raw.slice(drive[0].length - 1) : raw;
+  const parts: string[] = [];
+  for (const part of rest.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return `${prefix}/${parts.join("/")}`;
+}
+
+/** 拼接路径（保留原始分隔符风格）。 */
+function joinPath(base: string, target: string): string {
+  const separator = base.includes("\\") ? "\\" : "/";
+  return `${base.replace(/[\\/]+$/, "")}${separator}${target.replace(/^[\\/]+/, "")}`;
+}
+
+/**
+ * 把一个脚本路径解析成「**确实落在 base 目录内**」的绝对路径。
+ *
+ * 落在外面就返回 null（护栏不去读工作目录外的文件：那是用户主工作区的东西，
+ * 护栏没有理由为了判定去碰它）。
+ *
+ * 比较用小写归一（Windows 大小写无关），返回的仍是原始大小写的路径 —— 读文件
+ * 要用它。
+ */
+function resolveInside(base: string, target: string): string | null {
+  if (!base || !target) return null;
+  const raw = isAbsolutePath(target) ? target : joinPath(base, target);
+  const resolved = normalizePathCase(raw);
+  const baseKey = normalizePath(base);
+  const key = normalizePath(resolved);
+  if (!baseKey || key === baseKey) return null;
+  const prefix = baseKey.endsWith("/") ? baseKey : `${baseKey}/`;
+  if (!key.startsWith(prefix)) return null;
+  return resolved;
 }
