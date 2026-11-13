@@ -3,7 +3,7 @@ import { Check, Ellipsis, FileCode2, Undo2 } from "lucide-react";
 import type { ToolDiffUi } from "../../../shared/messages";
 import { computeHunks, diffRows } from "../../../shared/hunks";
 import { t } from "../i18n";
-import { FileRef } from "./ui";
+import { Button, FileRef, ICON_INLINE } from "./ui";
 
 interface DiffRow {
   type: "add" | "del" | "same" | "hunk";
@@ -54,10 +54,16 @@ export function DiffView({
   toolCallId,
   hunkActions,
   maxHeightClass = "max-h-60",
+  chrome = "card",
 }: {
   diff: ToolDiffUi;
   actions?: ReactNode;
   toolCallId?: string;
+  /** Surface style inherited from the containing block: `card` (main
+   * transcript) keeps the framed diff box; `flat` (Super Agent live pane)
+   * drops the outer card fill and tightens the paddings, while the diff body
+   * itself keeps its readable red/green rows. */
+  chrome?: "card" | "flat";
   /** P0-2 per-hunk editing: present only for completed, editable diffs. */
   hunkActions?: {
     /** Committed decisions to restore UI state (index-aligned with hunks). */
@@ -139,9 +145,11 @@ export function DiffView({
   const keepCount = keep.filter(Boolean).length;
   const revertCount = hunkCount - keepCount;
 
+  const flat = chrome === "flat";
+
   return (
-    <div className="overflow-hidden bg-card">
-      <div className="flex items-center gap-2 px-3 py-2">
+    <div className={flat ? "overflow-hidden" : "overflow-hidden bg-card"}>
+      <div className={`flex items-center gap-2 ${flat ? "px-2 py-1" : "px-3 py-2"}`}>
         <FileCode2 className="size-3.5 shrink-0 text-primary" />
         <FileRef path={diff.path} toolCallId={toolCallId} />
         <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-ui-caption">
@@ -150,7 +158,11 @@ export function DiffView({
         </span>
       </div>
       <div
-        className={`diff-scroll mx-3 mb-3 overflow-auto rounded-lg border border-border/60 bg-editor font-mono text-ui-caption leading-[1.7] ${maxHeightClass}`}
+        className={`diff-scroll overflow-auto bg-editor font-mono text-ui-caption leading-[1.7] ${
+          flat
+            ? "mx-2 mb-2 rounded-sm border border-border/50"
+            : "mx-3 mb-3 rounded-lg border border-border/60"
+        } ${maxHeightClass}`}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
@@ -233,15 +245,32 @@ export function DiffView({
         )}
       </div>
       {editable && hunkCount > 0 && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2">
-          <button
-            className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={!dirty || hunkActions?.busy}
-            title={t("将回退的块恢复为编辑前内容，保留其余改动")}
-            onClick={() => hunkActions?.onApply([...keep])}
-          >
-            <Check className="size-3" /> {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
-          </button>
+        <div
+          className={`flex flex-wrap items-center gap-2 ${
+            flat ? "px-2 pb-1" : "border-t border-border/60 px-3 py-2"
+          }`}
+        >
+          {flat ? (
+            <Button
+              variant="canvas"
+              size="sm"
+              icon={<Check className={ICON_INLINE} />}
+              disabled={!dirty || hunkActions?.busy}
+              title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+              onClick={() => hunkActions?.onApply([...keep])}
+            >
+              {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
+            </Button>
+          ) : (
+            <button
+              className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!dirty || hunkActions?.busy}
+              title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+              onClick={() => hunkActions?.onApply([...keep])}
+            >
+              <Check className="size-3" /> {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
+            </button>
+          )}
           {dirty && (
             <button
               className="press inline-flex items-center gap-1 text-ui-caption text-muted-foreground transition-colors hover:text-foreground"
@@ -252,7 +281,11 @@ export function DiffView({
           )}
         </div>
       )}
-      {actions && <div className="flex flex-wrap items-center gap-2 px-3 py-2">{actions}</div>}
+      {actions && (
+        <div className={`flex flex-wrap items-center gap-2 ${flat ? "px-2 pb-1" : "px-3 py-2"}`}>
+          {actions}
+        </div>
+      )}
     </div>
   );
 }

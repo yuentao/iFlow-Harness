@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Block } from "../shared/messages";
 import type { SuperSessionUi } from "../shared/super-agent";
 import { shortBranch, SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
+import { BlockView } from "../webview/src/components/MessageList";
 
 const store = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 
@@ -186,6 +187,67 @@ describe("Super Agent 子会话实时操作面板", () => {
       action: "transcript",
       sessionId: "super-1",
     });
+  });
+
+  it("实时操作里的转录块走极简档：工具卡无卡片表面、状态是纯文字；主转录默认档仍是卡片", () => {
+    render({
+      "super-1": [
+        TOOL_BLOCK,
+        { kind: "thought", id: "b-thought", text: "先确认 redirect 的判断条件" },
+      ],
+    });
+    clickLabel("展开子会话看板");
+    clickRow("修复登录跳转");
+    clickText("查看实时操作");
+
+    const dialog = document.querySelector('[role="dialog"]');
+    const flatCard = dialog!.querySelector<HTMLElement>(".tool-card");
+    expect(flatCard).toBeTruthy();
+    expect(flatCard!.classList.contains("tool-card-flat")).toBe(true);
+    for (const cls of ["shadow-card", "bg-card", "card-lift", "stream-in", "border", "rounded-lg"]) {
+      expect(flatCard!.classList.contains(cls)).toBe(false);
+    }
+    // Header padding is the tightened flat row.
+    expect(flatCard!.firstElementChild!.className).toContain("px-2");
+    expect(flatCard!.firstElementChild!.className).toContain("py-1");
+    // Status reads as a caption line, not a chip.
+    expect(flatCard!.textContent).toContain("已完成");
+    expect(flatCard!.querySelector(".chip-fade")).toBeNull();
+    // The thought row is a bare chevron + label, no framed card.
+    const thoughtToggle = [...dialog!.querySelectorAll<HTMLElement>("button")].find(
+      (el) => el.textContent === "思考过程",
+    );
+    expect(thoughtToggle).toBeTruthy();
+    expect(thoughtToggle!.parentElement!.classList.contains("rounded-sm")).toBe(true);
+    expect(thoughtToggle!.parentElement!.classList.contains("shadow-card")).toBe(false);
+    expect(dialog!.querySelector(".thought-body")!.className).not.toContain("border-t");
+
+    // Main transcript default chrome keeps the card surface it always had.
+    const host = document.createElement("div");
+    document.body.append(host);
+    const mainRoot = createRoot(host);
+    act(() =>
+      mainRoot.render(
+        <BlockView
+          block={TOOL_BLOCK}
+          isLatest
+          turnActive={false}
+          canCopy
+          canRegenerate={false}
+          canDelete={false}
+          showAvatar
+          onRegenerate={() => {}}
+        />,
+      ),
+    );
+    const card = host.querySelector<HTMLElement>(".tool-card");
+    expect(card).toBeTruthy();
+    expect(card!.classList.contains("shadow-card")).toBe(true);
+    expect(card!.classList.contains("bg-card")).toBe(true);
+    expect(card!.classList.contains("stream-in")).toBe(true);
+    expect(card!.classList.contains("tool-card-flat")).toBe(false);
+    act(() => mainRoot.unmount());
+    host.remove();
   });
 
   it("实时操作以弹框呈现，头部关闭后回到行内入口", () => {

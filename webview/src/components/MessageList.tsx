@@ -160,7 +160,22 @@ function Caret({ open, className = "size-3" }: { open: boolean; className?: stri
   );
 }
 
-function StatusChip({ status }: { status: ToolBlock["status"] }) {
+/**
+ * Card chrome for transcript blocks. `card` (default) is the main transcript
+ * surface: bordered card, card background, shadow, entrance animation. `flat`
+ * is the Super Agent live pane: no frame / fill / shadow — rows are separated
+ * by a hairline on the list container instead, so a child session's stream
+ * reads as a log rather than a stack of cards.
+ */
+export type BlockChrome = "card" | "flat";
+
+function StatusChip({
+  status,
+  flat = false,
+}: {
+  status: ToolBlock["status"];
+  flat?: boolean;
+}) {
   // Re-mounting the chip on status changes keeps the transition noticeable
   // without animating the card contents or moving the audit details.
   const chip = useMemo(() => {
@@ -188,6 +203,27 @@ function StatusChip({ status }: { status: ToolBlock["status"] }) {
       </Chip>
     );
   }, [status]);
+  if (flat) {
+    // Flat chrome: one caption line, no chip fill or border — the colour
+    // carries the state, the words carry the meaning.
+    const tone =
+      status === "completed"
+        ? "text-success"
+        : status === "failed"
+          ? "text-destructive"
+          : status === "pending"
+            ? "text-muted-foreground"
+            : "text-primary";
+    const label =
+      status === "completed"
+        ? t("已完成")
+        : status === "failed"
+          ? t("失败")
+          : status === "pending"
+            ? t("等待执行")
+            : t("执行中");
+    return <span className={`text-ui-caption ${tone}`}>{label}</span>;
+  }
   return <span key={status} className="inline-flex">{chip}</span>;
 }
 
@@ -405,7 +441,8 @@ function InputDetails({ input, title }: { input: string; title: string }) {
   );
 }
 
-function ToolCard({ block }: { block: ToolBlock }) {
+function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: BlockChrome }) {
+  const flat = chrome === "flat";
   const send = useChat((s) => s.send);
   const primary = block.locations[0];
   const hasDiff = block.diff !== null;
@@ -424,10 +461,19 @@ function ToolCard({ block }: { block: ToolBlock }) {
     presentation.accent === "execute" && block.status !== "completed" ? (block.input ?? "") : "";
 
   return (
-    <div className={`tool-card tool-card-${presentation.accent} stream-in status-fade card-lift overflow-hidden rounded-lg border border-border bg-card shadow-card status-${block.status}`}>
-      <div className="flex items-center gap-2 px-3 py-2">
-        <span className="tool-icon" title={detail}>
-          <Icon className="size-3 shrink-0" />
+    <div
+      className={
+        flat
+          ? `tool-card tool-card-flat tool-card-${presentation.accent} status-fade overflow-hidden rounded-sm status-${block.status}`
+          : `tool-card tool-card-${presentation.accent} stream-in status-fade card-lift overflow-hidden rounded-lg border border-border bg-card shadow-card status-${block.status}`
+      }
+    >
+      <div className={`flex items-center gap-2 ${flat ? "px-2 py-1" : "px-3 py-2"}`}>
+        <span
+          className={flat ? `shrink-0 ${block.status === "in_progress" ? "text-primary" : "text-muted-foreground"}` : "tool-icon"}
+          title={detail}
+        >
+          <Icon className={flat ? `${ICON_INLINE} shrink-0` : "size-3 shrink-0"} />
         </span>
         <span className="tool-card-label text-ui-label font-semibold" title={detail}>
           {title}
@@ -459,29 +505,41 @@ function ToolCard({ block }: { block: ToolBlock }) {
               />
             </>
           )}
-          {block.reverted && (
-            <Chip tone="muted">
-              <Undo2 className="size-2.5" /> {t("已回退")}
-            </Chip>
-          )}
-          {block.partiallyReverted && !block.reverted && (
-            <Chip tone="muted">
-              <Undo2 className="size-2.5" /> {t("部分回退")}
-            </Chip>
-          )}
+          {block.reverted &&
+            (flat ? (
+              <span className="text-ui-micro text-muted-foreground">{t("已回退")}</span>
+            ) : (
+              <Chip tone="muted">
+                <Undo2 className="size-2.5" /> {t("已回退")}
+              </Chip>
+            ))}
+          {block.partiallyReverted &&
+            !block.reverted &&
+            (flat ? (
+              <span className="text-ui-micro text-muted-foreground">{t("部分回退")}</span>
+            ) : (
+              <Chip tone="muted">
+                <Undo2 className="size-2.5" /> {t("部分回退")}
+              </Chip>
+            ))}
           {block.evicted && (
             <span
               title={t("为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留")}
             >
-              <Chip tone="muted">{t("内容已释放")}</Chip>
+              {flat ? (
+                <span className="text-ui-micro text-muted-foreground">{t("内容已释放")}</span>
+              ) : (
+                <Chip tone="muted">{t("内容已释放")}</Chip>
+              )}
             </span>
           )}
-          <StatusChip status={block.status} />
+          <StatusChip status={block.status} flat={flat} />
         </span>
       </div>
       {hasDiff && (
         <DiffView
           diff={block.diff!}
+          chrome={chrome}
           toolCallId={block.toolCallId}
           hunkActions={
             completedWithDiff && block.diff!.newText !== null
@@ -497,7 +555,8 @@ function ToolCard({ block }: { block: ToolBlock }) {
                 <>
                   <Button
                     variant="canvas"
-                    className="rounded-lg"
+                    size={flat ? "sm" : undefined}
+                    className={flat ? undefined : "rounded-lg"}
                     icon={<Undo2 className="size-3" />}
                     title={t("将该文件恢复为编辑前内容")}
                     onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
@@ -506,7 +565,8 @@ function ToolCard({ block }: { block: ToolBlock }) {
                   </Button>
                   <Button
                     variant="canvas"
-                    className="rounded-lg"
+                    size={flat ? "sm" : undefined}
+                    className={flat ? undefined : "rounded-lg"}
                     icon={<Columns2 className="size-3" />}
                     title={t("在 VSCode diff 视图中查看该变更")}
                     onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
@@ -565,7 +625,8 @@ function agentAccent(type: string | null): { border: string; icon: string; chip:
  * newest steps stay visible because during streaming they arrive at the tail. */
 const SUB_AGENT_VISIBLE_STEPS = 4;
 
-function SubAgentCard({ block }: { block: SubAgentBlock }) {
+function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome?: BlockChrome }) {
+  const flat = chrome === "flat";
   const [expanded, setExpanded] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   /** First-open latch for the lazy-mounted read-only transcript body. */
@@ -631,10 +692,16 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   const accent = agentAccent(block.agentType);
 
   return (
-    <div className={`stream-in status-fade card-lift overflow-hidden rounded-lg border bg-card shadow-card ${accent.border}`}>
-      <div className="flex items-center gap-2 px-3 py-2">
-        <span className="tool-icon">
-          <Bot className={`size-3 shrink-0 ${accent.icon}`} />
+    <div
+      className={
+        flat
+          ? "status-fade overflow-hidden rounded-sm"
+          : `stream-in status-fade card-lift overflow-hidden rounded-lg border bg-card shadow-card ${accent.border}`
+      }
+    >
+      <div className={`flex items-center gap-2 ${flat ? "px-2 py-1" : "px-3 py-2"}`}>
+        <span className={flat ? "shrink-0" : "tool-icon"}>
+          <Bot className={`${flat ? ICON_INLINE : "size-3"} shrink-0 ${accent.icon}`} />
         </span>
         <span className="tool-card-title min-w-0 truncate text-ui-label font-semibold">{localizeStepTitle(block.title)}</span>
         {/* min-w-0 + clip: agentType comes from an uncapped regex capture of
@@ -658,14 +725,14 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
           />
         )}
       </div>
-      <div className="flex flex-wrap gap-3 px-3 pb-2 font-mono text-ui-caption text-muted-foreground">
+      <div className={`flex flex-wrap gap-3 font-mono text-ui-caption text-muted-foreground ${flat ? "px-2 pb-1" : "px-3 pb-2"}`}>
         <span title={t("子代理 token 为转录估算，包含子代理")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
         <span>{t("耗时")} {duration}</span>
       </div>
       {block.entries.length > 0 && (
-        <div className="border-t border-border/60 px-3 py-2">
+        <div className={flat ? "border-t border-border/50 px-2 py-1.5" : "border-t border-border/60 px-3 py-2"}>
           <ul className="space-y-2">
             {visible.map((t2) => (
               <li key={t2.toolCallId} className="flex items-center gap-2 text-ui-label">
@@ -678,7 +745,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
           </ul>
           {children.length > 0 && (
             <div className="mt-2 space-y-2 border-l border-border/70 pl-2">
-              {children.map((child) => <SubAgentCard key={child.id ?? child.agentId} block={child} />)}
+              {children.map((child) => <SubAgentCard key={child.id ?? child.agentId} block={child} chrome={chrome} />)}
             </div>
           )}
           <button
@@ -697,7 +764,7 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
                 in the DOM — hundreds of entries per SubAgent card. */}
             {transcriptMounted && (
               <div className="mt-1 space-y-1 border-l border-border/50 pl-2 text-ui-caption text-muted-foreground">
-                {block.entries.map((entry, index) => <ReadOnlySubAgentEntry key={entry.id ?? `${entry.kind}-${index}`} block={entry} />)}
+                {block.entries.map((entry, index) => <ReadOnlySubAgentEntry key={entry.id ?? `${entry.kind}-${index}`} block={entry} chrome={chrome} />)}
               </div>
             )}
           </Collapse>
@@ -716,12 +783,12 @@ function SubAgentCard({ block }: { block: SubAgentBlock }) {
   );
 }
 
-function ReadOnlySubAgentEntry({ block }: { block: Block }) {
+function ReadOnlySubAgentEntry({ block, chrome = "card" }: { block: Block; chrome?: BlockChrome }) {
   if (block.kind === "subagent") return null; // Rendered once in the tree above.
-  if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} /></div>{block.input && <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all opacity-80">{block.input}</pre>}<pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
+  if (block.kind === "tool") return <div><div>{localizeStepTitle(block.title || block.toolName)} · <StatusChip status={block.status} flat={chrome === "flat"} /></div>{block.input && <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all opacity-80">{block.input}</pre>}<pre className="max-h-64 overflow-auto whitespace-pre-wrap">{block.output}</pre></div>;
   if (block.kind === "thought") return <div><Brain className="mr-1 inline size-3" />{block.evicted ? <span className="opacity-60">{t("内容已释放")}</span> : block.text}</div>;
   if (block.kind === "text" || block.kind === "user") return <Markdown text={block.text} />;
-  if (block.kind === "plan") return <TaskList block={block} />;
+  if (block.kind === "plan") return <TaskList block={block} chrome={chrome} />;
   return <div>{block.notice}</div>;
 }
 
@@ -729,13 +796,16 @@ function ThoughtCard({
   block,
   isLatest,
   turnActive,
+  chrome = "card",
 }: {
   block: ThoughtBlock;
   /** True while this thought is the transcript tail (still streaming). */
   isLatest: boolean;
   /** True while the turn is generating (status=streaming, no replay/init). */
   turnActive: boolean;
+  chrome?: BlockChrome;
 }) {
+  const flat = chrome === "flat";
   // Default OPEN: the live reasoning is the interesting part of a turn.
   const [open, setOpen] = useState(true);
   // User override wins: once they toggle manually, stop auto-collapsing.
@@ -750,25 +820,37 @@ function ThoughtCard({
     return () => clearTimeout(timer);
   }, [done]);
   return (
-    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/70 bg-panel/60 shadow-card">
+    <div
+      className={
+        flat
+          ? "overflow-hidden rounded-sm"
+          : "stream-in card-lift overflow-hidden rounded-lg border border-border/70 bg-panel/60 shadow-card"
+      }
+    >
       <button
         onClick={() => {
           userTouched.current = true;
           setOpen((v) => !v);
         }}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
+        className={`flex w-full items-center gap-2 text-left text-ui-label text-muted-foreground hover:text-foreground ${flat ? "px-2 py-1" : "px-3 py-2"}`}
       >
         <Caret open={open} className="size-3.5" />
-        <Brain className="size-3.5 text-primary" />
+        {!flat && <Brain className="size-3.5 text-primary" />}
         {t("思考过程")}
         {block.evicted && (
           <span className="text-ui-micro text-muted-foreground/70">{t("内容已释放")}</span>
         )}
       </button>
       <Collapse open={open}>
-        <div className="thought-body border-t border-border/60 px-3 py-2 text-ui-label leading-relaxed text-muted-foreground">
-          <ThoughtText text={block.text} />
-        </div>
+        {flat ? (
+          <div className="thought-body px-2 py-1 text-ui-label leading-relaxed text-muted-foreground">
+            <ThoughtText text={block.text} />
+          </div>
+        ) : (
+          <div className="thought-body border-t border-border/60 px-3 py-2 text-ui-label leading-relaxed text-muted-foreground">
+            <ThoughtText text={block.text} />
+          </div>
+        )}
       </Collapse>
     </div>
   );
@@ -776,7 +858,8 @@ function ThoughtCard({
 
 
 
-function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
+function TaskList({ block, chrome = "card" }: { block: Extract<Block, { kind: "plan" }>; chrome?: BlockChrome }) {
+  const flat = chrome === "flat";
   const send = useChat((s) => s.send);
   const total = block.entries.length;
   const done = block.entries.filter((e) => e.status === "completed").length;
@@ -786,8 +869,14 @@ function TaskList({ block }: { block: Extract<Block, { kind: "plan" }> }) {
   // inert. Stale clicks (block gone) are dropped host-side silently.
   const tickable = Boolean(block.id);
   return (
-    <div className="stream-in card-lift rounded-lg border border-border bg-card px-3 py-3 shadow-card">
-      <div className="mb-2 flex items-center gap-2 text-ui-label font-semibold">
+    <div
+      className={
+        flat
+          ? "rounded-sm px-2 py-1"
+          : "stream-in card-lift rounded-lg border border-border bg-card px-3 py-3 shadow-card"
+      }
+    >
+      <div className={`flex items-center gap-2 text-ui-label font-semibold ${flat ? "mb-1" : "mb-2"}`}>
         <CircleDot className="size-3.5 text-primary" />
         {t("任务清单")}
         <span aria-live="polite" className="ml-auto font-mono text-ui-caption text-muted-foreground">
@@ -1069,15 +1158,22 @@ function UserMessage({
 
 /** Collapsible context-compression card (slash /compress). The carried
  * conversation summary is long, so it stays folded until requested. */
-function CompressionCard({ block }: { block: Extract<Block, { kind: "compression" }> }) {
+function CompressionCard({ block, chrome = "card" }: { block: Extract<Block, { kind: "compression" }>; chrome?: BlockChrome }) {
+  const flat = chrome === "flat";
   const [open, setOpen] = useState(false);
   const hasSummary = block.summary !== null;
   return (
-    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
+    <div
+      className={
+        flat
+          ? "overflow-hidden rounded-sm"
+          : "stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card"
+      }
+    >
       <button
         onClick={() => hasSummary && setOpen((v) => !v)}
         disabled={!hasSummary}
-        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-ui-label ${
+        className={`flex w-full items-center gap-2 text-left text-ui-label ${flat ? "px-2 py-1" : "px-3 py-2"} ${
           hasSummary ? "text-muted-foreground hover:text-foreground" : "text-muted-foreground"
         }`}
       >
@@ -1086,7 +1182,7 @@ function CompressionCard({ block }: { block: Extract<Block, { kind: "compression
         {hasSummary && <Chip tone="muted">{t("上下文摘要")}</Chip>}
       </button>
       <Collapse open={open && hasSummary}>
-        <div className="border-t border-border/60 px-3 py-2">
+        <div className={flat ? "px-2 py-1" : "border-t border-border/60 px-3 py-2"}>
           <div className="max-h-64 overflow-y-auto text-ui-label leading-relaxed text-muted-foreground">
             {block.summary !== null && <Markdown text={block.summary} />}
           </div>
@@ -1205,7 +1301,8 @@ function InjectedBody({ content }: { content: string }) {
  * lists what was injected on ONE line (chips that don't fit collapse into
  * `+N`), and each body in the expanded list folds until opened.
  */
-function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injected" }> }) {
+function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block, { kind: "injected" }>; chrome?: BlockChrome }) {
+  const flat = chrome === "flat";
   const [open, setOpen] = useState(false);
   const systemCount = block.items.filter((i) => i.kind === "system").length;
   const memoryCount = block.items.filter((i) => i.kind === "memory").length;
@@ -1228,10 +1325,16 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
   if (mcpUnloaded > 0) chips.push(<Chip key="mcpUnloaded" tone="warning">{t("MCP 未连接")} {mcpUnloaded}</Chip>);
   if (mcpProject > 0) chips.push(<Chip key="mcpProject" tone="info">{t("MCP 项目级")} {mcpProject}</Chip>);
   return (
-    <div className="stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
+    <div
+      className={
+        flat
+          ? "overflow-hidden rounded-sm"
+          : "stream-in card-lift overflow-hidden rounded-lg border border-border/60 bg-card shadow-card"
+      }
+    >
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-x-2 px-3 py-2 text-left text-ui-label text-muted-foreground hover:text-foreground"
+        className={`flex w-full items-center gap-x-2 text-left text-ui-label text-muted-foreground hover:text-foreground ${flat ? "px-2 py-1" : "px-3 py-2"}`}
       >
         <Caret open={open} />
         <span className="shrink-0 font-medium text-foreground/75">{t("自动注入")}</span>
@@ -1243,7 +1346,7 @@ function InjectedContextCard({ block }: { block: Extract<Block, { kind: "injecte
         <InjectedChipRow chips={chips} />
       </button>
       <Collapse open={open}>
-        <div className="border-t border-border/60 px-3 py-2">
+        <div className={flat ? "px-2 py-1" : "border-t border-border/60 px-3 py-2"}>
           {evicted && (
             <div className="mb-2 text-ui-caption opacity-60">
               <Info className="mr-1 inline size-3" />
@@ -1342,10 +1445,14 @@ export const BlockView = memo(function BlockView({
   onRegenerate,
   onRemember,
   onEditingChange,
+  chrome = "card",
 }: {
   block: Block;
   isLatest: boolean;
   turnActive: boolean;
+  /** Surface style for card-shaped blocks. `card` (default) is the main
+   * transcript; `flat` is the Super Agent live pane (no frames/shadows). */
+  chrome?: BlockChrome;
   /** False while replaying (history restore) — the replay placeholder is a
    * text block and must not grow copy/regenerate actions. */
   canCopy: boolean;
@@ -1438,17 +1545,17 @@ export const BlockView = memo(function BlockView({
         </div>
       );
     case "thought":
-      return <ThoughtCard block={block} isLatest={isLatest} turnActive={turnActive} />;
+      return <ThoughtCard block={block} isLatest={isLatest} turnActive={turnActive} chrome={chrome} />;
     case "tool":
-      return <ToolCard block={block} />;
+      return <ToolCard block={block} chrome={chrome} />;
     case "subagent":
-      return <SubAgentCard block={block} />;
+      return <SubAgentCard block={block} chrome={chrome} />;
     case "compression":
-      return <CompressionCard block={block} />;
+      return <CompressionCard block={block} chrome={chrome} />;
     case "injected":
-      return <InjectedContextCard block={block} />;
+      return <InjectedContextCard block={block} chrome={chrome} />;
     case "plan":
-      return <TaskList block={block} />;
+      return <TaskList block={block} chrome={chrome} />;
   }
 });
 
