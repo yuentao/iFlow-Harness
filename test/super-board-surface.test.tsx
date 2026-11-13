@@ -580,30 +580,77 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     expect(label!.className).toContain("@max-[380px]:hidden");
   });
 
-  it("--super-bar-h：折叠时不设置，展开时是面板高 + 16，收起后移除", () => {
-    // jsdom 不做布局，offsetHeight 恒为 0 —— 先把面板高度 stub 成 240，
-    // 让 App 的高度镜像 effect 走真实代码路径（不是假设值）。
-    const spy = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(240);
+  /**
+   * jsdom 不做布局，offsetHeight 恒为 0 —— 按元素给出确定高度，让 App 的
+   * 高度镜像 effect 走真实代码路径（不是假设值）。待答条与展开面板必须取
+   * 不同的值，否则无法证明折叠态的变量来自 strip 自身。
+   */
+  function withStubHeights(run: () => void): void {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        if (this.getAttribute("aria-label") === "子会话待答问题") return 120;
+        if (this.id === "super-board-panel") return 240;
+        return 0;
+      },
+    });
     try {
-      renderApp([session()]);
-      const barHosts = () =>
-        [...container.querySelectorAll<HTMLElement>("*")].filter(
-          (el) => el.style.getPropertyValue("--super-bar-h") !== "",
-        );
-
-      // 折叠：控件在 header 里，转录顶部没有任何覆盖 → 不设置该变量。
-      expect(barHosts()).toHaveLength(0);
-
-      act(() => boardControl()!.click());
-      const hosts = barHosts();
-      expect(hosts).toHaveLength(1);
-      expect(hosts[0]!.style.getPropertyValue("--super-bar-h")).toBe("256px");
-
-      act(() => boardControl()!.click());
-      expect(barHosts()).toHaveLength(0);
+      run();
     } finally {
-      spy.mockRestore();
+      if (original) Object.defineProperty(HTMLElement.prototype, "offsetHeight", original);
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>).offsetHeight;
     }
+  }
+
+  /** 承载 --super-bar-h 内联变量的元素（转录 wrapper）。 */
+  const barHosts = () =>
+    [...container.querySelectorAll<HTMLElement>("*")].filter(
+      (el) => el.style.getPropertyValue("--super-bar-h") !== "",
+    );
+  const barValue = () => barHosts()[0]!.style.getPropertyValue("--super-bar-h");
+
+  it("--super-bar-h：无待答折叠态不设置，展开时是面板高 + 16，收起后移除", () => {
+    withStubHeights(() => {
+      renderApp([session()]);
+
+      // 折叠且没有待答条：控件在 header 里，转录顶部没有任何覆盖 → 不设置。
+      expect(barHosts()).toHaveLength(0);
+
+      act(() => boardControl()!.click());
+      expect(barHosts()).toHaveLength(1);
+      expect(barValue()).toBe("256px");
+
+      act(() => boardControl()!.click());
+      expect(barHosts()).toHaveLength(0);
+    });
+  });
+
+  it("--super-bar-h：折叠 + 有待答条时是待答条高 + 16，转录按它预留顶部", () => {
+    withStubHeights(() => {
+      renderApp([askingSession()]);
+      // 有待答子会话时看板自行展开；手动收起后待答条挂在 header 下方。
+      act(() => boardControl()!.click());
+      expect(container.querySelector('[role="region"][aria-label="子会话待答问题"]')).toBeTruthy();
+
+      // 折叠态的 strip 同样镜像高度（旧实现为 0，转录首条与主会话提问卡
+      // 因此无预留地盖住它）。
+      expect(barHosts()).toHaveLength(1);
+      expect(barValue()).toBe("136px");
+
+      // 转录内容容器读的就是这个变量。jsdom 不解析继承的 var，因此断言
+      // 「内联引用存在」+「变量宿主是它的祖先」，不伪造计算样式。
+      const content = [...container.querySelectorAll<HTMLElement>("div")].find(
+        (el) => el.style.paddingTop === "var(--super-bar-h, 0px)",
+      );
+      expect(content).toBeTruthy();
+      expect(barHosts()[0]!.contains(content!)).toBe(true);
+
+      // 再展开：strip 卸载、面板挂载，变量换成面板高度（同一 ref 不互覆盖）。
+      act(() => boardControl()!.click());
+      expect(barHosts()).toHaveLength(1);
+      expect(barValue()).toBe("256px");
+    });
   });
 });
 
