@@ -31,6 +31,11 @@ import {
   superIntegrationLabel,
   superIsolationLabel,
 } from "../../../shared/super-agent";
+import {
+  deriveSuperTimeline,
+  type SuperTimelineNode,
+  type SuperTimelineTone,
+} from "../../../shared/super-timeline";
 import { useChat } from "../store";
 import { t } from "../i18n";
 import { BlockView } from "./MessageList";
@@ -151,6 +156,124 @@ export function shortBranch(branch: string): string {
   const tail = branch.slice(SUPER_BRANCH_PREFIX.length);
   const match = /-([a-z0-9]+-[a-z0-9]+)$/i.exec(tail);
   return match ? `super/…${match[1]}` : branch;
+}
+
+/**
+ * 阶段轨节点标签。
+ *
+ * `attempt` 节点带数字（「第 2 次」），走带参模板；其余标签是固定中文短语，
+ * 直接过字典（缺翻译时 `t()` 回落原文）。
+ */
+function timelineNodeLabel(node: SuperTimelineNode): string {
+  if (node.kind === "attempt" && node.attempt !== undefined) return t("第 {0} 次", node.attempt);
+  return t(node.label);
+}
+
+/** 节点时间（HH:MM:SS）。只进 title / aria-label，不铺在行内。 */
+function formatClock(at: number): string {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+/** 圆点色调：已发生=实心、当前=高亮、失败/中断=错误色、跳过=静音。 */
+function timelineDot(node: SuperTimelineNode): string {
+  switch (node.tone) {
+    case "current":
+      // 「等你回答」是唯一必须由人推动的状态，用警告色；排队等名额是信息色，
+      // 真正在跑的用主色 —— 三者在折叠行上仍然只靠圆点区分，所以每一档都配
+      // 一圈 ring 把「当前」这一层单独画出来。
+      return node.kind === "awaiting_input"
+        ? "bg-warning ring-2 ring-warning/30"
+        : node.kind === "queued"
+          ? "bg-info ring-2 ring-info/30"
+          : "bg-primary ring-2 ring-primary/30";
+    case "failed":
+      return "bg-destructive";
+    case "idle":
+      return "bg-muted-foreground/40";
+    case "done":
+    default:
+      return "bg-muted-foreground/60";
+  }
+}
+
+/** 标签文字色（与圆点同一套色调，文案是主编码）。 */
+const TIMELINE_TEXT: Record<SuperTimelineTone, string> = {
+  done: "text-muted-foreground",
+  current: "text-primary",
+  failed: "text-destructive",
+  idle: "text-muted-foreground/70",
+};
+
+function timelineText(node: SuperTimelineNode): string {
+  if (node.tone !== "current") return TIMELINE_TEXT[node.tone];
+  if (node.kind === "awaiting_input") return "text-warning";
+  if (node.kind === "queued") return "text-info";
+  return TIMELINE_TEXT.current;
+}
+
+/**
+ * 子会话阶段轨：真实节点的横向序列（6px 圆点 + 1px 连接线）。
+ *
+ * 数据全部来自 `deriveSuperTimeline` —— 只画真实发生过的阶段，绝不渲染
+ * 「准备 → 运行 → 收尾 → 完成」这种固定模板（用户明确要求过）。纯展示：
+ * 不新增点击通道；完整节点与时间戳只进 `title` / `aria-label`。
+ *
+ * `compact` 给折叠行用：容器窄到放不下标签时只留圆点与连接线，把宽度还给
+ * 状态 chip 与标题。轨本身 `min-w-0 overflow-hidden`，在任何窄屏下都不会
+ * 撑出横向溢出。
+ */
+function SuperTimeline({
+  session,
+  labeled = false,
+  compact = false,
+  className = "",
+}: {
+  session: SuperSessionUi;
+  labeled?: boolean;
+  compact?: boolean;
+  className?: string;
+}) {
+  const nodes = useMemo(() => deriveSuperTimeline(session), [session]);
+  const described = nodes
+    .map((node) => {
+      const label = timelineNodeLabel(node);
+      return node.at === undefined ? label : `${label} ${formatClock(node.at)}`;
+    })
+    .join(" → ");
+
+  return (
+    <span
+      role="img"
+      aria-label={t("阶段轨：{0}", described)}
+      title={described}
+      className={`flex min-w-0 max-w-[50%] shrink items-center gap-1 overflow-hidden ${className}`}
+    >
+      {nodes.map((node, index) => (
+        <span key={`${node.kind}-${index}`} className="flex shrink-0 items-center gap-1">
+          {index > 0 && <span className="h-px w-2 shrink-0 bg-border" aria-hidden="true" />}
+          <span
+            className={`size-1.5 shrink-0 rounded-full ${timelineDot(node)}`}
+            aria-hidden="true"
+          />
+          {labeled && (
+            <span
+              className={`shrink-0 whitespace-nowrap text-ui-micro font-medium ${timelineText(node)}${
+                compact ? " @max-[520px]:hidden" : ""
+              }`}
+            >
+              {timelineNodeLabel(node)}
+            </span>
+          )}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function isActive(session: SuperSessionUi): boolean {
@@ -662,6 +785,9 @@ function SuperSessionRow({
             {chip.icon}
             <span className="text-ui-micro font-medium">{chip.label}</span>
           </span>
+          {/* 真实阶段轨：只画发生过的节点（派生见 shared/super-timeline.ts）。
+              折叠行空间紧张，窄容器下标签自动收起，只留圆点与连接线。 */}
+          <SuperTimeline session={session} labeled compact className="shrink" />
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
@@ -693,11 +819,13 @@ function SuperSessionRow({
         <div className="flex flex-col gap-2 px-2 pb-2 pt-0.5">
           {/* Same triple encoding as the collapsed row (icon + label +
               colour) — one status language, not two. */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-2">
             <Chip tone={chip.tone}>
               {chip.icon}
               {chip.label}
             </Chip>
+            {/* 展开态空间充足：同一个组件，标签常显。 */}
+            <SuperTimeline session={session} labeled />
           </div>
 
           {preview && (

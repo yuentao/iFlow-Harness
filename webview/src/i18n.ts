@@ -48,6 +48,10 @@ const en: Record<string, string> = {
   "收起已完成的子会话": "Collapse the finished child sessions",
   "已完成的 {0} 个子会话": "Finished child sessions ({0})",
   "派发": "Dispatch",
+  "启动": "Started",
+  "等待应答": "Waiting for you",
+  "第 {0} 次": "Attempt {0}",
+  "阶段轨：{0}": "Timeline: {0}",
   "合并子会话分支": "Merge the child session's branch",
   "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。":
     "Let the agent merge branch {0} into the current branch? It performs the merge itself and resolves conflicts; this changes your working branch.",
