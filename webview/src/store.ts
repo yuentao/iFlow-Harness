@@ -846,6 +846,7 @@ function createMockHost(): HostApi {
           },
         ],
         deadline: Date.now() + 240_000,
+        timeoutMs: 300_000,
       },
       reports: [],
     },

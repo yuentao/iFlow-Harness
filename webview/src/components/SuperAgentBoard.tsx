@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   Activity,
@@ -6,10 +6,13 @@ import {
   ChevronDown,
   ChevronRight,
   CircleHelp,
+  Clock,
   GitBranch,
   GitMerge,
+  Hourglass,
   Loader2,
   RotateCcw,
+  ShieldOff,
   Square,
   Trash2,
   X,
@@ -18,6 +21,7 @@ import type { Block } from "../../../shared/messages";
 import type {
   SuperIntegrationState,
   SuperSessionUi,
+  SuperStatus,
 } from "../../../shared/super-agent";
 import {
   canRetrySuperSession,
@@ -34,33 +38,89 @@ import {
   Button,
   Chip,
   ConfirmDialog,
+  CountdownBar,
+  DisclosureButton,
   HelpTip,
   ICON_INLINE,
   IconButton,
   ModalShell,
 } from "./ui";
+import { QuestionBody, type QuestionAnswerMap } from "./QuestionBody";
 
-/** One child session's status → chip tone + label. */
-function statusChip(session: SuperSessionUi): { tone: "muted" | "success" | "warning" | "danger" | "primary" | "info"; label: string } {
+/** 状态色调（看板状态编码的第三重：颜色只是冗余，形状与文案才是主编码）。 */
+type StatusTone = "muted" | "success" | "warning" | "danger" | "primary" | "info";
+
+/**
+ * 状态文案。
+ *
+ * 文案是状态的第一重编码 —— 与颜色、图标并列，而不是补充：折叠态一行只有
+ * 几十像素，色点在截图里、在色觉障碍下都读不出六种状态的差别。
+ */
+function statusLabel(session: SuperSessionUi): string {
   // A queued delegation waits for a free concurrency slot — say so instead of
   // pretending it started.
   if (session.queued && session.status === "preparing") {
-    return { tone: "info", label: t("排队中") };
+    return t("排队中");
   }
   switch (session.status) {
     case "preparing":
-      return { tone: "warning", label: t("准备中") };
+      return t("准备中");
     case "running":
-      return { tone: "primary", label: t("运行中") };
+      return t("运行中");
     case "awaiting_input":
-      return { tone: "warning", label: t("等待你处理") };
+      return t("等待你处理");
     case "completed":
-      return { tone: "success", label: t("已完成") };
+      return t("已完成");
     case "failed":
-      return { tone: "danger", label: t("失败") };
+      return t("失败");
     case "cancelled":
-      return { tone: "muted", label: t("已中断") };
+      return t("已中断");
   }
+}
+
+/**
+ * 状态 → 颜色 + 图标（形状）。
+ *
+ * 图标是第二重编码，形状互不相同：排队=时钟、准备=沙漏、运行=转圈、等你=问号、
+ * 完成=对勾、失败=叉、中断=方块。颜色只是第三重冗余。
+ *
+ * 「准备中」与「等待你处理」曾经共用同一个 warning 色 —— 现在是
+ * 沙漏/蓝 与 问号/琥珀，一眼可分：前者用户只能等，后者用户必须动手。
+ */
+const STATUS_VISUAL: Record<SuperStatus, { tone: StatusTone; icon: ReactNode }> = {
+  preparing: { tone: "info", icon: <Hourglass className="size-3 shrink-0" aria-hidden="true" /> },
+  running: { tone: "primary", icon: <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" /> },
+  awaiting_input: { tone: "warning", icon: <CircleHelp className="size-3 shrink-0" aria-hidden="true" /> },
+  completed: { tone: "success", icon: <Check className="size-3 shrink-0" aria-hidden="true" /> },
+  failed: { tone: "danger", icon: <X className="size-3 shrink-0" aria-hidden="true" /> },
+  cancelled: { tone: "muted", icon: <Square className="size-3 shrink-0" aria-hidden="true" /> },
+};
+
+/** 排队中：等一个并发名额，还没开始 —— 灰色时钟，与「准备中」的沙漏区分。 */
+const QUEUED_VISUAL: { tone: StatusTone; icon: ReactNode } = {
+  tone: "muted",
+  icon: <Clock className="size-3 shrink-0" aria-hidden="true" />,
+};
+
+/** 状态色调 → 文字色（图标与文案共用同一色调）。 */
+const STATUS_TEXT: Record<StatusTone, string> = {
+  muted: "text-muted-foreground",
+  success: "text-success",
+  warning: "text-warning",
+  danger: "text-destructive",
+  primary: "text-primary",
+  info: "text-info",
+};
+
+/** 一个子会话的完整状态编码：颜色 + 文案 + 图标。 */
+function statusVisual(session: SuperSessionUi): {
+  tone: StatusTone;
+  label: string;
+  icon: ReactNode;
+} {
+  const visual =
+    session.queued && session.status === "preparing" ? QUEUED_VISUAL : STATUS_VISUAL[session.status];
+  return { tone: visual.tone, label: statusLabel(session), icon: visual.icon };
 }
 
 /** Integration result → text tone. Rendered as inline text rather than a
@@ -195,6 +255,26 @@ export function SuperAgentBoard() {
   );
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
+  // Live-region text: announce CHANGES, not the whole board. On mount there
+  // is nothing to announce (the rows are right there to be read), and a
+  // change-only feed keeps the board's own text free of a second copy of
+  // every title.
+  const previousStatuses = useRef<Map<string, string>>(new Map());
+  const [announcement, setAnnouncement] = useState("");
+  useEffect(() => {
+    const next = new Map<string, string>();
+    const changed: string[] = [];
+    for (const session of list) {
+      const label = statusLabel(session);
+      next.set(session.id, label);
+      const before = previousStatuses.current.get(session.id);
+      if (before !== undefined && before !== label) {
+        changed.push(t("子会话 {0}：{1}", session.title, label));
+      }
+    }
+    previousStatuses.current = next;
+    if (changed.length > 0) setAnnouncement(changed.join("；"));
+  }, [list]);
 
   useEffect(() => {
     if (active.length === 0) return;
@@ -262,12 +342,11 @@ export function SuperAgentBoard() {
           cluster around. `flex-wrap` is kept only as a last-resort guard so a
           pathological width wraps whole groups instead of clipping them. */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
-        <button
-          type="button"
-          aria-expanded={expanded}
+        <DisclosureButton
+          expanded={expanded}
           aria-label={t("展开子会话看板")}
           title={t("展开子会话看板")}
-          className="press flex h-6 shrink-0 items-center gap-1 rounded-sm px-1 text-ui-label font-medium text-foreground hover:bg-accent/60"
+          className="h-6 shrink-0 gap-1 rounded-sm px-1"
           onClick={() => setExpanded((v) => !v)}
         >
           {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
@@ -275,28 +354,45 @@ export function SuperAgentBoard() {
           <span className="rounded-full bg-surface px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
             {list.length}
           </span>
-        </button>
+        </DisclosureButton>
         <div className="flex shrink-0 items-center gap-1">
           {counts.running > 0 && (
-            <Chip tone="primary" title={t("{0} 个进行中", counts.running)}>
+            <Chip
+              tone="primary"
+              title={t("{0} 个进行中", counts.running)}
+              ariaLabel={t("{0} 个进行中", counts.running)}
+            >
               <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
               <span className="tabular-nums">{counts.running}</span>
             </Chip>
           )}
           {counts.awaiting > 0 && (
-            <Chip tone="warning" title={t("{0} 个待处理", counts.awaiting)}>
+            <Chip
+              tone="warning"
+              title={t("{0} 个待处理", counts.awaiting)}
+              ariaLabel={t("{0} 个待处理", counts.awaiting)}
+            >
               <CircleHelp className="size-2.5" aria-hidden="true" />
               <span className="tabular-nums">{counts.awaiting}</span>
             </Chip>
           )}
           {counts.done > 0 && (
-            <Chip tone="success" title={t("{0} 个已完成", counts.done)} className="@max-[380px]:hidden">
+            <Chip
+              tone="success"
+              title={t("{0} 个已完成", counts.done)}
+              ariaLabel={t("{0} 个已完成", counts.done)}
+              className="@max-[380px]:hidden"
+            >
               <Check className="size-2.5" aria-hidden="true" />
               <span className="tabular-nums">{counts.done}</span>
             </Chip>
           )}
           {counts.failed > 0 && (
-            <Chip tone="danger" title={t("{0} 个未成功", counts.failed)}>
+            <Chip
+              tone="danger"
+              title={t("{0} 个未成功", counts.failed)}
+              ariaLabel={t("{0} 个未成功", counts.failed)}
+            >
               <X className="size-2.5" aria-hidden="true" />
               <span className="tabular-nums">{counts.failed}</span>
             </Chip>
@@ -305,6 +401,7 @@ export function SuperAgentBoard() {
             <Chip
               tone="muted"
               title={t("{0} 个已中断", counts.cancelled)}
+              ariaLabel={t("{0} 个已中断", counts.cancelled)}
               className="@max-[380px]:hidden"
             >
               <Square className="size-2.5" aria-hidden="true" />
@@ -313,9 +410,20 @@ export function SuperAgentBoard() {
           )}
         </div>
         {/* No-confirmation is a property of every child, not of one row —
-            stated once here instead of a chip repeated on each card. */}
+            stated once here instead of a chip repeated on each card.
+            It is NOT hover-only: the fact that a child's shell commands run
+            without approval is the single most consequential thing about
+            child sessions, so it stays on screen (the tooltip only adds the
+            detail). */}
+        <span
+          className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-ui-micro font-medium text-warning"
+          title={t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
+        >
+          <ShieldOff className="size-3 shrink-0" aria-hidden="true" />
+          {t("免确认")}
+        </span>
         <HelpTip label={t("免确认说明")}>
-          {t("子会话始终免确认：工具调用不会被审批，也不需要你批准")}
+          {t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
         </HelpTip>
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {active.length > 0 && (
@@ -332,6 +440,13 @@ export function SuperAgentBoard() {
           )}
         </div>
       </div>
+      {/* Status changes are announced, not just re-drawn: a child that turns
+          「等待你处理」 must reach a screen reader without the user hunting
+          for the board. Only CHANGES are announced (see above) — opening the
+          panel does not read the whole column out loud. */}
+      <p className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </p>
 
       {expanded && list.length > 0 && (
         <div className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto border-t border-border px-2 py-1">
@@ -351,18 +466,17 @@ export function SuperAgentBoard() {
               to act on — they only get in the way of the live ones. */}
           {folded.length > 0 && (
             <div className="shrink-0">
-              <button
-                type="button"
-                aria-expanded={showFolded}
+              <DisclosureButton
+                expanded={showFolded}
                 aria-label={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
                 title={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
-                className="press flex w-full items-center gap-1.5 px-2 py-1.5 text-ui-label font-medium text-foreground hover:bg-accent/30"
+                className="w-full rounded-sm px-2 py-1.5"
                 onClick={() => setShowFolded((v) => !v)}
               >
                 {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
                 <span className="shrink-0">{t("已完成的 {0} 个子会话", folded.length)}</span>
                 <Chip tone="success">{t("已自动合并")}</Chip>
-              </button>
+              </DisclosureButton>
               {showFolded && (
                 <div className="divide-y divide-border/40 border-t border-border/40">
                   {folded.map((session) => (
@@ -404,7 +518,7 @@ export function SuperAgentBoard() {
             "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。",
             confirmMerge.isolation.branch ?? "",
           )}
-          confirmLabel={t("让智能体合并")}
+          confirmLabel={t("让智能体合并分支")}
           onConfirm={() => {
             send({ type: "superAgent", action: "merge", sessionId: confirmMerge.id });
             setConfirmMerge(null);
@@ -461,20 +575,10 @@ export function SuperAgentBoard() {
   );
 }
 
-/** Status → dot colour (same 6px dot language as the MCP card). */
-const STATUS_DOT: Record<"muted" | "success" | "warning" | "danger" | "primary" | "info", string> = {
-  muted: "bg-muted-foreground/60",
-  success: "bg-success",
-  warning: "bg-warning",
-  danger: "bg-destructive",
-  primary: "bg-primary",
-  info: "bg-info",
-};
-
 /**
  * One child session row.
  *
- * Collapsed it is a single 32px line — status dot, title, “needs you” flag,
+ * Collapsed it is a single 32px line — status (icon + label + colour), title,
  * elapsed — and nothing else. Everything diagnostic (branch, summary, tokens,
  * merge result) and every action live in the detail below, opened by clicking
  * the row. Only one row is open at a time, so the board cannot turn into a
@@ -500,7 +604,7 @@ function SuperSessionRow({
 }) {
   const send = useChat((s) => s.send);
   const [showLive, setShowLive] = useState(false);
-  const chip = statusChip(session);
+  const chip = statusVisual(session);
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? Date.now();
   const preview = session.progress ?? session.summary;
@@ -509,6 +613,21 @@ function SuperSessionRow({
   // What survives is the record — the branch and its worktree — so the merge
   // and cleanup actions stay available.
   const historical = session.restored === true;
+  // Why the merge action is unavailable right now. Spelled out in words so
+  // it can be shown under the buttons, read by a screen reader and hovered
+  // as a tooltip — a greyed-out button without a reason reads as broken.
+  const mergeBlocked =
+    !session.isolation.branch ||
+    session.integration?.state === "merged" ||
+    isActive(session);
+  const mergeReason =
+    session.integration?.state === "merged"
+      ? t("该子会话的改动已经合并")
+      : !session.isolation.branch
+        ? t("该子会话没有可合并的分支")
+        : isActive(session)
+          ? t("子会话还没结束，完成后再让智能体合并")
+          : t("派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）");
   // Diagnostics — full branch ref, worktree path, retry count, restored
   // marker — ride the title tooltip instead of occupying their own lines.
   const titleHint = [
@@ -531,20 +650,21 @@ function SuperSessionRow({
       {/* The row itself: one line, status first so a long title ellipsizes
           instead of shoving the duration and chevron off the row. */}
       <div className="flex items-center gap-1.5 px-2 py-1.5 transition-colors hover:bg-accent/30">
-        <button
-          type="button"
-          aria-expanded={open}
+        {/* The row trigger carries the status triple encoding (icon shape +
+            label + colour) so a collapsed row is readable without hovering
+            and without relying on hue alone. */}
+        <DisclosureButton
+          expanded={open}
           onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="min-w-0 flex-1 gap-2"
         >
-          <span className={`size-1.5 shrink-0 rounded-full ${STATUS_DOT[chip.tone]}`} aria-hidden="true" />
-          <span className="sr-only">{chip.label}</span>
+          <span className={`flex shrink-0 items-center gap-1 ${STATUS_TEXT[chip.tone]}`}>
+            {chip.icon}
+            <span className="text-ui-micro font-medium">{chip.label}</span>
+          </span>
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
-          {session.pending && (
-            <span className="shrink-0 text-ui-micro font-medium text-warning">{t("待回答")}</span>
-          )}
           <span className="shrink-0 text-ui-micro tabular-nums text-muted-foreground">
             {formatElapsed(ended - started)}
           </span>
@@ -552,7 +672,7 @@ function SuperSessionRow({
             className={`${ICON_INLINE} shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
             aria-hidden="true"
           />
-        </button>
+        </DisclosureButton>
         {/* Stopping a live child is the one action that must not hide behind
             the detail: the process keeps writing files meanwhile. */}
         {isActive(session) && (
@@ -571,6 +691,15 @@ function SuperSessionRow({
 
       {open && (
         <div className="flex flex-col gap-2 px-2 pb-2 pt-0.5">
+          {/* Same triple encoding as the collapsed row (icon + label +
+              colour) — one status language, not two. */}
+          <div className="flex items-center gap-1.5">
+            <Chip tone={chip.tone}>
+              {chip.icon}
+              {chip.label}
+            </Chip>
+          </div>
+
           {preview && (
             <div className="whitespace-pre-wrap break-words text-ui-caption text-muted-foreground">
               {preview}
@@ -673,21 +802,19 @@ function SuperSessionRow({
               variant="canvas"
               size="sm"
               icon={<GitMerge className={ICON_INLINE} />}
-              disabled={
-                !session.isolation.branch ||
-                session.integration?.state === "merged" ||
-                isActive(session)
-              }
-              title={
-                session.integration?.state === "merged"
-                  ? t("该子会话的改动已经合并")
-                  : !session.isolation.branch
-                    ? t("该子会话没有可合并的分支")
-                    : isActive(session)
-                      ? t("子会话还没结束，完成后再让智能体合并")
-                      : t("派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）")
-              }
-              onClick={onMerge}
+              /* `aria-disabled` instead of `disabled`: the kit's disabled
+                 style kills pointer events, so the `title` (the only place
+                 the reason was written) could never be read. aria-disabled
+                 keeps the button focusable and its title/aria-label
+                 readable, and the reason is spelled out under the row. */
+              aria-disabled={mergeBlocked || undefined}
+              aria-label={mergeBlocked ? mergeReason : t("让智能体合并")}
+              title={mergeReason}
+              className={mergeBlocked ? "cursor-not-allowed opacity-40" : undefined}
+              onClick={() => {
+                if (mergeBlocked) return;
+                onMerge();
+              }}
             >
               {t("让智能体合并")}
             </Button>
@@ -702,6 +829,11 @@ function SuperSessionRow({
               </Button>
             )}
           </div>
+          {mergeBlocked && (
+            /* The reason is visible without hover — a greyed-out button with
+               no explanation reads as a broken control. */
+            <p className="text-ui-micro text-muted-foreground">{mergeReason}</p>
+          )}
         </div>
       )}
 
@@ -737,7 +869,7 @@ function SuperSessionLive({
   // Follow the tail unless the user scrolled up — same rule as the main
   // transcript, so live activity keeps the newest tool call in view.
   const liveStick = useRef(true);
-  const chip = statusChip(session);
+  const chip = statusVisual(session);
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? Date.now();
 
@@ -766,7 +898,10 @@ function SuperSessionLive({
     >
       <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 py-3">
         <div className="flex flex-wrap items-center gap-1.5">
-          <Chip tone={chip.tone}>{chip.label}</Chip>
+          <Chip tone={chip.tone}>
+            {chip.icon}
+            {chip.label}
+          </Chip>
           <span className="text-ui-caption tabular-nums text-muted-foreground">
             {t("已运行 {0}", formatElapsed(ended - started))}
           </span>
@@ -826,62 +961,68 @@ function SuperSessionLive({
  * no-confirmation mode, and the host answers their `request_permission` /
  * plan-exit requests itself. `ask_user_question` is the only thing that truly
  * needs a human.
+ *
+ * The questions themselves are rendered by `QuestionBody` — the SAME
+ * component the main session's question card uses. The board used to carry
+ * a parallel, poorer implementation: the option descriptions were dropped on
+ * the floor, the options were plain buttons with no radiogroup/checkboxgroup
+ * semantics, there was no free-text answer and no hint about the timeout.
+ * Two copies of one `ask_user_question` payload behaving differently is a
+ * trap for the user, so there is now only one implementation.
  */
 function SuperPendingArea({ session }: { session: SuperSessionUi }) {
   const send = useChat((s) => s.send);
   const pending = session.pending;
-  const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
+  const [answers, setAnswers] = useState<QuestionAnswerMap>({});
+  const [sent, setSent] = useState(false);
   if (!pending) return null;
+
+  const respond = (payload: QuestionAnswerMap) => {
+    if (sent) return;
+    setSent(true);
+    send({ type: "superAgent", action: "respond", sessionId: session.id, answers: payload });
+  };
 
   return (
     <div className="mx-2 mt-1.5 rounded-sm border border-warning/40 bg-warning/10 px-2 py-1.5">
       <div className="text-ui-caption font-medium text-warning">{t("子会话需要你回答")}</div>
-      <div className="mt-1 flex flex-col gap-2">
-        {pending.questions.map((question) => (
-          <div key={question.header} className="flex flex-col gap-1">
-            <div className="text-ui-caption text-foreground">{question.question}</div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {question.options.map((option) => {
-                const selected = answers[question.header];
-                const isOn = Array.isArray(selected)
-                  ? selected.includes(option.label)
-                  : selected === option.label;
-                return (
-                  <Button
-                    key={option.label}
-                    variant={isOn ? "outline-primary" : "canvas"}
-                    size="sm"
-                    onClick={() => {
-                      setAnswers((prev) => {
-                        const current = prev[question.header];
-                        if (question.multiSelect) {
-                          const list = Array.isArray(current) ? current : current ? [current] : [];
-                          return {
-                            ...prev,
-                            [question.header]: list.includes(option.label)
-                              ? list.filter((v) => v !== option.label)
-                              : [...list, option.label],
-                          };
-                        }
-                        return { ...prev, [question.header]: option.label };
-                      });
-                    }}
-                  >
-                    {option.label}
-                  </Button>
-                );
-              })}
-            </div>
-          </div>
-        ))}
+      <div className="mt-1 text-ui-micro text-muted-foreground">
+        {t("子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。")}
       </div>
-      <div className="mt-1">
+      <div className="mt-1.5">
+        <QuestionBody
+          questions={pending.questions}
+          disabled={sent}
+          onAnswersChange={setAnswers}
+          onSubmit={() => respond(answers)}
+        />
+      </div>
+      {/* The real host deadline (SUPER_PENDING_TIMEOUT_MS) — the board must
+          not invent a second, drifting window. */}
+      <CountdownBar
+        deadline={pending.deadline}
+        timeoutMs={pending.timeoutMs}
+        quietLabel={t("按未回答继续")}
+        className="px-0 pb-0 pt-1.5"
+      />
+      <div className="mt-1 flex flex-wrap items-center gap-1.5">
         <Button
           variant="primary"
           size="sm"
-          onClick={() => send({ type: "superAgent", action: "respond", sessionId: session.id, answers })}
+          disabled={sent}
+          aria-label={t("提交回答")}
+          onClick={() => respond(answers)}
         >
           {t("提交回答")}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={sent}
+          aria-label={t("不回答并继续")}
+          onClick={() => respond({})}
+        >
+          {t("不回答并继续")}
         </Button>
       </div>
     </div>

@@ -444,7 +444,7 @@ describe("super agent · 状态机", () => {
     const next = applySuperEvent(session(), {
       type: "needs_input",
       at: 2000,
-      pending: { kind: "question", requestId: "r1", questions: [], deadline: 0 },
+      pending: { kind: "question", requestId: "r1", questions: [], deadline: 0, timeoutMs: 300_000 },
     });
     expect(next.status).toBe("awaiting_input");
     expect(next.pending?.kind).toBe("question");
@@ -455,7 +455,7 @@ describe("super agent · 状态机", () => {
     const waiting = applySuperEvent(session(), {
       type: "needs_input",
       at: 2000,
-      pending: { kind: "question", requestId: "r1", questions: [], deadline: 0 },
+      pending: { kind: "question", requestId: "r1", questions: [], deadline: 0, timeoutMs: 300_000 },
     });
     const next = applySuperEvent(waiting, { type: "input_resolved", at: 3000 });
     expect(next.status).toBe("running");
@@ -537,6 +537,7 @@ describe("super agent · 归档与恢复", () => {
         requestId: "req-1",
         questions: [{ header: "h", question: "选哪个？" }],
         deadline: 5000,
+        timeoutMs: 300_000,
       },
     });
     const persisted = toPersistedSuperSession(live);
@@ -601,7 +602,7 @@ describe("super agent · 汇报", () => {
     const waiting = applySuperEvent(session(), {
       type: "needs_input",
       at: 10,
-      pending: { kind: "question", requestId: "r", questions: [], deadline: 0 },
+      pending: { kind: "question", requestId: "r", questions: [], deadline: 0, timeoutMs: 300_000 },
     });
     const report = reportForSession(waiting, 20, "fallback");
     expect(report?.state).toBe("blocked");
@@ -959,6 +960,7 @@ describe("super agent · 看板摘要", () => {
           requestId: "req-7",
           questions: [{ header: "范围", question: "要覆盖压缩卡吗？", multiSelect: false, options: [] }],
           deadline: 1,
+          timeoutMs: 300_000,
         },
       }),
     ]);

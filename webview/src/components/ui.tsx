@@ -275,18 +275,21 @@ export function CountdownBar({
   deadline,
   timeoutMs,
   quietLabel,
+  className = "",
 }: {
   deadline: number;
   timeoutMs: number;
   /** Translated auto-action phrase for the quiet line (t("自动拒绝") etc.). */
   quietLabel?: string;
+  /** Extra classes on the outer element (compact hosts override the card padding). */
+  className?: string;
 }) {
   const { remainingMs, ratio } = useCountdown(deadline, timeoutMs);
   const urgent = remainingMs <= 15_000;
   const warning = remainingMs <= 60_000;
   if (quietLabel && !warning) {
     return (
-      <p className="px-3 pb-2 text-ui-caption leading-snug text-muted-foreground/70">
+      <p className={`px-3 pb-2 text-ui-caption leading-snug text-muted-foreground/70 ${className}`}>
         {t("约 {0} 分钟后{1}", Math.ceil(remainingMs / 60_000), quietLabel)}
       </p>
     );
@@ -294,7 +297,7 @@ export function CountdownBar({
   const barColor = urgent ? "bg-destructive" : warning ? "bg-warning" : "bg-primary";
   const textClass = urgent ? "text-destructive" : warning ? "text-warning" : "text-muted-foreground";
   return (
-    <div className="flex items-center gap-2 px-3 pb-2">
+    <div className={`flex items-center gap-2 px-3 pb-2 ${className}`}>
       <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-border/40">
         <div
           className={`h-full rounded-full transition-[width] duration-1000 ease-linear ${barColor}`}
@@ -352,6 +355,7 @@ export function Chip({
   className = "",
   title,
   truncate = false,
+  ariaLabel,
 }: {
   children: ReactNode;
   tone?: "muted" | "success" | "warning" | "danger" | "primary" | "info";
@@ -361,10 +365,19 @@ export function Chip({
   /** Let the chip shrink and ellipsize its label. Use for dynamic values in
    * tight rows (e.g. a subagent type); static chips keep their shrink-0. */
   truncate?: boolean;
+  /**
+   * Accessible name for a chip whose visible content is not self-describing
+   * (e.g. an icon + a bare number). A plain `span` ignores `aria-label`, so
+   * the chip takes `role="img"` — its contents become presentational and the
+   * label is what a screen reader announces.
+   */
+  ariaLabel?: string;
 }) {
   return (
     <span
       title={title}
+      role={ariaLabel ? "img" : undefined}
+      aria-label={ariaLabel}
       className={`chip-fade inline-flex ${truncate ? "min-w-0" : "shrink-0"} items-center gap-1 rounded-full px-2 py-0.5 text-ui-caption font-medium tracking-wide transition-colors duration-300 ${CHIP_TONES[tone]}${className ? ` ${className}` : ""}`}
     >
       {truncate ? <span className="truncate">{children}</span> : children}
@@ -737,11 +750,14 @@ export function ConfirmDialog({
   return createPortal(
     <ModalShell title={title} onClose={onCancel} ariaLabel={title} role="alertdialog">
       <div className="px-4 py-3 text-ui-label leading-relaxed text-foreground/90">{message}</div>
-      <div className="flex items-center justify-end gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2">
+      {/* The action row wraps instead of squeezing: a long confirm label
+          (e.g. 「让智能体合并分支」) used to be clipped mid-word, which left
+          the user reading 「让智能体合…」 — a truncated instruction. */}
+      <div className="flex flex-wrap items-center justify-end gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2">
         <button
           data-autofocus
           type="button"
-          className="press inline-flex h-6 items-center justify-center rounded-md border border-border bg-editor px-3 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
+          className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-border bg-editor px-3 text-ui-caption font-medium text-foreground transition-colors hover:bg-accent"
           onClick={onCancel}
         >
           {t("取消")}
@@ -753,7 +769,7 @@ export function ConfirmDialog({
                 type="button"
                 title={a.title}
                 disabled={a.disabled}
-                className={`press inline-flex h-6 items-center justify-center rounded-md border px-3 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                className={`press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border px-3 text-ui-caption font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                   a.variant === "primary"
                     ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
                     : a.variant === "danger"
@@ -768,7 +784,7 @@ export function ConfirmDialog({
           : (
             <button
               type="button"
-              className="press inline-flex h-6 items-center justify-center rounded-md border border-destructive/50 bg-destructive/10 px-3 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
+              className="press inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-md border border-destructive/50 bg-destructive/10 px-3 text-ui-caption font-semibold text-destructive transition-colors hover:bg-destructive/20"
               onClick={onConfirm}
             >
               {confirmLabel ?? t("删除")}
@@ -1219,6 +1235,40 @@ export function IconButton({
       {...rest}
     >
       {icon}
+    </button>
+  );
+}
+
+/**
+ * Disclosure trigger (expand / collapse).
+ *
+ * The board has three of them: the board's own header switch, the folded
+ * group of finished children, and each child row. They all need the same
+ * thing — a focusable single-line button carrying `aria-expanded` and an
+ * arbitrary content slot.
+ *
+ * The kit's `Button` cannot serve them: it is a fixed-height, centred
+ * species (28/24px) and these rows are elastic (status + title + elapsed +
+ * chevron, where the title truncates). So the trigger gets its own
+ * primitive here and no component hand-rolls a `<button>` for it.
+ */
+export function DisclosureButton({
+  expanded,
+  children,
+  className = "",
+  ...rest
+}: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "aria-expanded"> & {
+  expanded: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      className={`press flex items-center gap-1.5 text-left text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/60 ${className}`}
+      {...rest}
+    >
+      {children}
     </button>
   );
 }
