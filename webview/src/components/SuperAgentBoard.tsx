@@ -805,6 +805,7 @@ function SuperSessionRow({
         <DisclosureButton
           expanded={open}
           onClick={onToggle}
+          hoverSurface="row"
           className="min-w-0 flex-1 gap-2"
         >
           <span className={`flex shrink-0 items-center gap-1 ${STATUS_TEXT[chip.tone]}`}>
@@ -830,6 +831,7 @@ function SuperSessionRow({
             label={t("中断该子会话")}
             size="sm"
             tone="danger"
+            hoverSurface="row"
             onClick={onCancel}
           />
         )}
