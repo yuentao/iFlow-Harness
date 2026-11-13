@@ -493,3 +493,272 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     expect(workspaceGet("iflow.workspaceActiveModel")).toEqual({ B: "Qwen3.8-Flash-Next" });
   });
 });
+
+/**
+ * Saving an EDITED profile is not a profile switch:
+ *  - the profile list is a strict upsert (renaming must not leave the old row),
+ *  - editing the currently active profile must re-authenticate hot and reload
+ *    the SAME session (keepSession) — the CLI keeps running and the transcript
+ *    survives, instead of the cold "connecting / new session" panel reset.
+ */
+describe("ChatPanel saveAuth: 编辑配置的严格 upsert 与热更新", () => {
+  type SavedProfile = { baseUrl: string; apiKey: string; modelName: string };
+
+  type SaveAuthPanel = {
+    client: FakeClient | null;
+    discardedSessionIds: Set<string>;
+    handleWebviewMessage: (msg: WebviewToHost) => Promise<void>;
+    queryLiveModels: () => Promise<{ id: string; name: string }[]>;
+    refreshSessionList: () => Promise<unknown>;
+    startNewSession: (options?: { bypassSuperWait?: boolean }) => Promise<void>;
+    reconnectWithCredentials: (
+      creds: { baseUrl: string; apiKey: string; modelName: string },
+      keepSession?: boolean,
+    ) => Promise<void>;
+    store: {
+      getState: () => {
+        sessionId: string | null;
+        activeSessionId: string | null;
+        blocks: unknown[];
+        status: string;
+      };
+      sessionStarted: (meta: { sessionId: string }) => void;
+      userPrompt: (text: string) => void;
+    };
+  };
+
+  let panel: ChatPanel;
+  let p: SaveAuthPanel;
+  let iflowHome: string;
+  let storageDir: string;
+
+  beforeEach(async () => {
+    // readCliSettings / retireStaleOAuthCreds resolve through IFLOW_HOME —
+    // point it at a temp dir so no test touches the real home.
+    iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-save-auth-"));
+    process.env.IFLOW_HOME = iflowHome;
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-save-auth-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as SaveAuthPanel;
+    vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined as never);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    await rm(iflowHome, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true });
+    delete process.env.IFLOW_HOME;
+    vi.restoreAllMocks();
+  });
+
+  function secrets(): vscode.SecretStorage {
+    return (panel as unknown as { context: { secrets: vscode.SecretStorage } }).context.secrets;
+  }
+  function workspace(): vscode.Memento {
+    return (panel as unknown as { context: { workspaceState: vscode.Memento } }).context.workspaceState;
+  }
+  async function seedProfiles(map: Record<string, SavedProfile>): Promise<void> {
+    await secrets().store("iflow.profiles", JSON.stringify(map));
+  }
+  async function readProfiles(): Promise<Record<string, SavedProfile>> {
+    const raw = await secrets().get("iflow.profiles");
+    return raw ? (JSON.parse(raw) as Record<string, SavedProfile>) : {};
+  }
+  function activeName(): string | undefined {
+    return workspace().get<string>("iflow.workspaceActiveProfile");
+  }
+  function seedLiveSession(sessionId = "keep-session"): void {
+    p.client = makeFakeClient();
+    p.store.sessionStarted({ sessionId });
+    p.store.userPrompt("hello");
+    p.store.getState().status = "idle";
+  }
+  function stubReconnect(): ReturnType<typeof vi.fn> {
+    const fn = vi.fn(async () => {});
+    p.reconnectWithCredentials = fn as unknown as SaveAuthPanel["reconnectWithCredentials"];
+    return fn;
+  }
+
+  const PROFILE_A: SavedProfile = {
+    baseUrl: "https://a.example.com/v1",
+    apiKey: "sk-a-1111",
+    modelName: "model-a",
+  };
+
+  it("同名校验：连续两次保存同名配置后列表只有一条，且内容为最后一次", async () => {
+    const reconnect = stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://a.example.com/v1",
+      apiKey: "sk-first",
+      modelName: "model-a",
+      profileName: "A",
+    });
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://a.example.com/v1",
+      apiKey: "sk-second",
+      modelName: "model-a2",
+      profileName: "A",
+    });
+
+    const profiles = await readProfiles();
+    expect(Object.keys(profiles)).toEqual(["A"]);
+    expect(profiles.A).toEqual({
+      baseUrl: "https://a.example.com/v1",
+      apiKey: "sk-second",
+      modelName: "model-a2",
+    });
+    expect(activeName()).toBe("A");
+    expect(reconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("改名：replaceName=A、新名 B → 旧键被删除，只剩 B，指针指向 B 且保留原 Key", async () => {
+    await seedProfiles({ A: PROFILE_A });
+    await workspace().update("iflow.workspaceActiveProfile", "A");
+    const reconnect = stubReconnect();
+
+    // apiKey: null = 留空保持不变（宿主复用当前配置的 key）。
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://b.example.com/v1",
+      apiKey: null,
+      modelName: "model-b",
+      profileName: "B",
+      replaceName: "A",
+    });
+
+    const profiles = await readProfiles();
+    expect(Object.keys(profiles)).toEqual(["B"]);
+    expect(profiles.B).toEqual({
+      baseUrl: "https://b.example.com/v1",
+      apiKey: "sk-a-1111",
+      modelName: "model-b",
+    });
+    expect(activeName()).toBe("B");
+    expect(reconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("名称为空回退成模型名时同样不留旧键（清空名称的编辑）", async () => {
+    await seedProfiles({ 本地网关: PROFILE_A });
+    await workspace().update("iflow.workspaceActiveProfile", "本地网关");
+    stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: PROFILE_A.baseUrl,
+      apiKey: null,
+      modelName: "gemini-4-argon",
+      profileName: null,
+      replaceName: "本地网关",
+    });
+
+    const profiles = await readProfiles();
+    expect(Object.keys(profiles)).toEqual(["gemini-4-argon"]);
+    expect(activeName()).toBe("gemini-4-argon");
+  });
+
+  it("改名当前激活配置时仍按当前配置处理（reconnect 收到 keepSession=true）", async () => {
+    await seedProfiles({ A: PROFILE_A });
+    await workspace().update("iflow.workspaceActiveProfile", "A");
+    seedLiveSession();
+    const reconnect = stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: PROFILE_A.baseUrl,
+      apiKey: "sk-a-2222",
+      modelName: "model-a",
+      profileName: "B",
+      replaceName: "A",
+    });
+
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(reconnect.mock.calls[0]![1]).toBe(true);
+  });
+
+  it("非当前配置（新增/非激活）保存仍走原来的冷路径", async () => {
+    await seedProfiles({ A: PROFILE_A });
+    await workspace().update("iflow.workspaceActiveProfile", "A");
+    seedLiveSession();
+    const reconnect = stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://c.example.com/v1",
+      apiKey: "sk-c",
+      modelName: "model-c",
+      profileName: "C",
+    });
+
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(reconnect.mock.calls[0]![1]).toBe(false);
+  });
+
+  it("编辑当前配置：热路径原地重载同一会话 —— 不 dispose、不新建会话、转录不丢", async () => {
+    await seedProfiles({ A: PROFILE_A });
+    await workspace().update("iflow.workspaceActiveProfile", "A");
+    seedLiveSession("keep-session");
+    p.queryLiveModels = async () => [{ id: "model-a", name: "model-a" }];
+    p.refreshSessionList = async () => [];
+    const blocksBefore = p.store.getState().blocks;
+    const client = p.client!;
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: PROFILE_A.baseUrl,
+      apiKey: "sk-a-3333",
+      modelName: "model-a",
+      profileName: "A",
+    });
+
+    // The CLI process is NOT killed and no new session is started.
+    expect(client.dispose).not.toHaveBeenCalled();
+    expect(client.newSession).not.toHaveBeenCalled();
+    // Hot re-auth + in-place session/load of the SAME conversation.
+    expect(client.authenticate).toHaveBeenCalledTimes(1);
+    expect(client.authenticate.mock.calls[0]![0]).toMatchObject({
+      methodInfo: { apiKey: "sk-a-3333", baseUrl: PROFILE_A.baseUrl, modelName: "model-a" },
+    });
+    expect(client.loadSession).toHaveBeenCalledTimes(1);
+    expect(client.loadSession.mock.calls[0]![0]).toMatchObject({ sessionId: "keep-session" });
+    // Seamless: the transcript array object was never replaced, status never
+    // dropped to "connecting" (no splash), pointer unchanged.
+    expect(p.store.getState().blocks).toBe(blocksBefore);
+    expect(p.store.getState().status).toBe("idle");
+    expect(p.store.getState().sessionId).toBe("keep-session");
+    expect(activeName()).toBe("A");
+    expect(p.discardedSessionIds.has("keep-session")).toBe(false);
+  });
+
+  it("热路径 reload 失败 → 降级不抛异常，旧会话被丢弃并可见地转新会话", async () => {
+    await seedProfiles({ A: PROFILE_A });
+    await workspace().update("iflow.workspaceActiveProfile", "A");
+    seedLiveSession("keep-session");
+    p.client!.loadSession.mockRejectedValueOnce(new Error("load refused"));
+    p.refreshSessionList = async () => [];
+    // Isolate the degrade decision: the real startNewSession would need a full
+    // handshake; the point here is that the panel visibly abandons the session.
+    p.startNewSession = vi.fn(async () => {});
+
+    await expect(
+      p.handleWebviewMessage({
+        type: "saveAuth",
+        baseUrl: PROFILE_A.baseUrl,
+        apiKey: "sk-a-4444",
+        modelName: "model-a",
+        profileName: "A",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(p.client!.loadSession).toHaveBeenCalledTimes(1);
+    expect(p.discardedSessionIds.has("keep-session")).toBe(true);
+    expect(p.startNewSession).toHaveBeenCalledTimes(1);
+    // The old conversation is cleared — the fallback is visible, not silent.
+    expect(p.store.getState().blocks).toEqual([]);
+    expect(p.store.getState().sessionId).toBeNull();
+    expect(activeName()).toBe("A");
+  });
+});

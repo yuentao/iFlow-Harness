@@ -1796,8 +1796,18 @@ export type WebviewToHost =
   | { type: "pickAttachments" }
   /** Open a user-attached image (data URL) in VSCode's image preview. */
   | { type: "openImage"; dataUrl: string }
-  /** M3: store openai-compatible credentials and authenticate a fresh session. */
-  | { type: "saveAuth"; baseUrl: string; apiKey: string | null; modelName: string; profileName?: string | null }
+  /** M3: store openai-compatible credentials and authenticate a fresh session.
+   * `replaceName` is the name the edited profile had BEFORE this save (absent
+   * for a new profile): the host deletes that stale key when the profile was
+   * renamed, so editing never leaves a duplicate row behind. */
+  | {
+      type: "saveAuth";
+      baseUrl: string;
+      apiKey: string | null;
+      modelName: string;
+      profileName?: string | null;
+      replaceName?: string | null;
+    }
   /** M3: forget stored credentials (CLI keeps its own). */
   | { type: "clearAuth" }
   /** M3: switch the active API profile and re-authenticate. */

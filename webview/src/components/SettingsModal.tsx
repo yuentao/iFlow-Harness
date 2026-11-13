@@ -1033,6 +1033,10 @@ function ApiConfigSection({
       apiKey: form.apiKey.trim() === "" ? null : form.apiKey.trim(),
       modelName: form.modelName.trim(),
       profileName: form.profileName.trim() || null,
+      // Editing an existing profile: tell the host which key to drop if the
+      // user renamed it (or cleared the name) — otherwise the old row lingers
+      // next to the new one. A new profile has no previous name.
+      replaceName: editing?.name ?? null,
     });
     // Stay in the modal: the list re-renders with the new active profile once
     // the host's re-auth snapshot lands (the switch chip covers the wait).
