@@ -13,9 +13,15 @@
  *  - `restored`（扩展重启后恢复的历史记录）不额外造节点：进程已经没了，剩下
  *    的只有磁盘上的分支与结束状态，多画一个「上次运行」就是伪造。
  *
+ * **todolist 优先（2026-11-13）**：子会话自己用 `todo_write` 建的 todolist 是
+ * 用户真正想看的步骤，比宿主观察到的阶段事实贴切。只要 `session.todos` 非空，
+ * 轨上的**节点**就只画这些条目（原文 + 完成状态），派发 / 启动 / 集成等阶段
+ * 事实不再占节点，改由 `describeSuperTimelineFacts` 拼成串放进 title/aria-label。
+ * `todos` 为空或缺省时完整保留上面的阶段轨逻辑（兼容性降级：不空白、不伪造）。
+ *
  * 纯逻辑：零 VSCode / 零 React 依赖，看板与单测共用。
  */
-import type { SuperSessionUi } from "./super-agent.js";
+import type { SuperSessionUi, SuperTodoUi } from "./super-agent.js";
 import { superIntegrationLabel } from "./super-agent.js";
 
 /**
@@ -46,7 +52,9 @@ export type SuperTimelineKind =
   /** 被用户中断 / 进程随宿主退出。 */
   | "cancelled"
   /** 结束后把分支带回主工作区的结果。 */
-  | "integration";
+  | "integration"
+  /** 子会话自己建的 todolist 条目（原文 label，不翻译）。 */
+  | "todo";
 
 export interface SuperTimelineNode {
   kind: SuperTimelineKind;
@@ -63,6 +71,11 @@ export interface SuperTimelineNode {
   detail?: string;
   /** 第几次尝试（仅 `attempt` 节点；webview 用它套 i18n 模板）。 */
   attempt?: number;
+  /**
+   * true = `label` 是子会话写入的动态原文（todolist 条目），webview 必须原样
+   * 渲染，**不得**过 `t()` 字典（字典里没有、也不该有用户文本）。
+   */
+  rawLabel?: boolean;
 }
 
 /** 只接受有限的数值时间戳 —— 脏数据不生成「1970 年」这种假节点。 */
@@ -79,7 +92,7 @@ function isTerminalStatus(session: SuperSessionUi): boolean {
 }
 
 /**
- * 从真实字段推导阶段轨。
+ * 从真实字段推导**阶段**轨（宿主观察到的生命周期事实）。
  *
  * 节点顺序：派发 → （第 N 次）→ （排队）→ （启动）→ （等待应答 | 终态）→
  * （集成结果）。括号里的节点只在对应事实存在时出现。
@@ -87,8 +100,11 @@ function isTerminalStatus(session: SuperSessionUi): boolean {
  * 「当前」语义：非终态时最后一个节点标 `current`；终态时最后一个节点带对应
  * 终态色调（完成 → done / 失败或中断 → failed）—— 已经结束的子会话没有
  * 「正在进行」的阶段，不该继续高亮。
+ *
+ * 这是唯一一份阶段判定：看板降级轨与 `describeSuperTimelineFacts`（title 用）
+ * 都调它，绝不复制第二套规则。
  */
-export function deriveSuperTimeline(session: SuperSessionUi): SuperTimelineNode[] {
+function deriveStageNodes(session: SuperSessionUi): SuperTimelineNode[] {
   const nodes: SuperTimelineNode[] = [];
 
   const createdAt = finiteAt(session.createdAt);
@@ -191,4 +207,89 @@ export function deriveSuperTimeline(session: SuperSessionUi): SuperTimelineNode[
     if (node.kind === "integration") return node;
     return { ...node, tone: session.status === "completed" ? "done" : "failed" };
   });
+}
+
+/** detail 里状态词与优先级词的分隔符；webview 按它拆开逐词过 `t()`。 */
+export const SUPER_TODO_DETAIL_SEP = " · ";
+
+/** todolist 状态的中文标签（中文是源语言；webview 侧对结果调 `t()` 翻译）。 */
+export function superTodoStatusLabel(status: SuperTodoUi["status"]): string {
+  switch (status) {
+    case "completed":
+      return "已完成";
+    case "in_progress":
+      return "进行中";
+    case "pending":
+      return "待办";
+  }
+}
+
+/** todolist 优先级的中文标签（同上，可被 `t()` 翻译的静态词）。 */
+export function superTodoPriorityLabel(priority: NonNullable<SuperTodoUi["priority"]>): string {
+  switch (priority) {
+    case "high":
+      return "高优先级";
+    case "medium":
+      return "中优先级";
+    case "low":
+      return "低优先级";
+  }
+}
+
+/**
+ * 节点的 detail：状态 / 优先级的中文说明，**只进 title/aria-label**，不作为
+ * 可见节点文本（与既有 `detail` 的语义一致）。动态 todo 文本是 `label`，不在这里。
+ */
+function superTodoDetail(todo: SuperTodoUi): string {
+  const parts = [superTodoStatusLabel(todo.status)];
+  if (todo.priority) parts.push(superTodoPriorityLabel(todo.priority));
+  return parts.join(SUPER_TODO_DETAIL_SEP);
+}
+
+/**
+ * 子会话自己的 todolist → 时间轴节点。
+ *
+ * - 每个条目恰好一个节点，`label` 是**原文**（`rawLabel`），`at` 省略 —— wire
+ *   不带可靠的逐条时间戳，绝不伪造；
+ * - tone 由条目自身状态决定：`completed`→done、`in_progress`→current、
+ *   `pending`→idle；
+ * - 终态会话与恢复出来的历史记录没有「正在进行」：残留的 `in_progress` 一律
+ *   降为 done，不出现 current 高亮（沿用阶段轨的同一条纪律）。
+ */
+function deriveTodoNodes(session: SuperSessionUi): SuperTimelineNode[] {
+  const frozen = isTerminalStatus(session) || session.restored === true;
+  return (session.todos ?? []).map((todo): SuperTimelineNode => {
+    let tone: SuperTimelineTone;
+    if (todo.status === "completed") tone = "done";
+    else if (todo.status === "in_progress") tone = frozen ? "done" : "current";
+    else tone = "idle";
+    return {
+      kind: "todo",
+      label: todo.content,
+      rawLabel: true,
+      detail: superTodoDetail(todo),
+      tone,
+    };
+  });
+}
+
+/**
+ * 时间轴节点：有 todolist 时**只**画子会话自己建的步骤（用户单选决策），
+ * 否则完整降级回阶段轨，绝不空白、不伪造。
+ */
+export function deriveSuperTimeline(session: SuperSessionUi): SuperTimelineNode[] {
+  const todos = session.todos;
+  if (todos && todos.length > 0) return deriveTodoNodes(session);
+  return deriveStageNodes(session);
+}
+
+/**
+ * 阶段事实的中文串（如「派发 → 启动 → 已完成 → 无需合并」），供 webview 放进
+ * title/aria-label —— 决策「只用 todo 节点」后，派发 / 启动 / 集成等事实不再占
+ * 节点，但必须仍可查。复用 {@link deriveStageNodes}，不复制第二套判定。
+ */
+export function describeSuperTimelineFacts(session: SuperSessionUi): string {
+  return deriveStageNodes(session)
+    .map((node) => node.label)
+    .join(" → ");
 }

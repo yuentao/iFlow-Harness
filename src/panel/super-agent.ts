@@ -66,6 +66,7 @@ import {
   canRetrySuperSession,
   clampMaxConcurrentSuperSessions,
   isTerminalSuperStatus,
+  normalizeSuperTodos,
   reportForSession,
   retrySuperSession,
   toPersistedSuperSession,
@@ -80,6 +81,7 @@ import {
   type SuperReport,
   type SuperSessionUi,
   type SuperTaskSpec,
+  type SuperTodoUi,
   type SuperTokenUsage,
 } from "../../shared/super-agent.js";
 import {
@@ -1413,6 +1415,23 @@ export class SuperAgentManager {
         const transcript = this.transcriptFor(id);
         const index = applySessionUpdate(transcript.state, notification);
         if (index !== null) this.markTranscriptDirty(id, index);
+
+        // A `plan` update is the CLI's mirror of todo_write — a FULL snapshot
+        // of the child's own todolist every time (probed, CLI 0.5.19). The
+        // reducer above renders it as a TaskList card in the live transcript;
+        // here we also project it onto SuperSessionUi so the board timeline
+        // shows the child's own steps instead of host-side stage facts.
+        // Nested SubAgent plans stamp an agentId on the notification / update /
+        // update._meta (wire, CLI 0.5.19) and belong to a DIFFERENT agent —
+        // ignore them so another agent's todos never leak into this child.
+        if (update.sessionUpdate === "plan") {
+          const wire = update as { agentId?: unknown; _meta?: { agentId?: unknown } };
+          const nested =
+            notification.agentId ||
+            (typeof wire.agentId === "string" ? wire.agentId : "") ||
+            (typeof wire._meta?.agentId === "string" ? wire._meta.agentId : "");
+          if (!nested) this.patchTodos(id, normalizeSuperTodos(update.entries));
+        }
       },
       // 兜底路径：审批自动放行，不产生待办、不打扰主会话。
       // 子会话推的是 yolo，内核通常根本不发 `session/request_permission`；这里
@@ -2363,6 +2382,24 @@ export class SuperAgentManager {
     const session = this.sessions.get(id);
     if (!session || session.model === model) return;
     this.sessions.set(id, { ...session, model, updatedAt: Date.now() });
+    this.emit();
+  }
+
+  /**
+   * 全量替换子会话自己的 todolist（plan update 每次都是完整快照，不追加 /
+   * 不合并）。只走既有的 `emit()`：宿主在 onSessionsChanged 里既刷新看板投影，
+   * 又调用 persistSuperSessions 落盘 —— 不新建第二条广播 / 落盘通道。
+   * 全量快照可能重复推同一份内容，逐字比对避免无谓刷新与写放大。
+   */
+  private patchTodos(id: string, todos: SuperTodoUi[]): void {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    // 首帧一定写入（哪怕是空数组：`todos` 缺省与「没有 todolist」语义不同，
+    // 但都要让看板与归档拿到确定的 []）。仅已有快照且逐字相同时才跳过。
+    if (session.todos !== undefined && JSON.stringify(session.todos) === JSON.stringify(todos)) {
+      return;
+    }
+    this.sessions.set(id, { ...session, todos, updatedAt: Date.now() });
     this.emit();
   }
 

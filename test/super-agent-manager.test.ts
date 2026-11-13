@@ -1618,3 +1618,96 @@ describe("super agent · 子会话输出文本有上限", () => {
     expect(SUPER_TEXT_MAX_CHARS).toBeLessThan(1_000_000);
   });
 });
+
+describe("super agent · 子会话 todolist 投影", () => {
+  /** 起一个正在跑的子会话（hang），并等 prompt 真正发出后再注入 plan 更新。 */
+  async function running(): Promise<{ harness: Harness; id: string }> {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    await until(() => (harness.clients[0]?.prompts.length ?? 0) === 1);
+    return { harness, id: spawned.id };
+  }
+
+  function sendPlan(
+    client: FakeClient,
+    entries: unknown,
+    extra: Record<string, unknown> = {},
+  ): void {
+    client.callbacks.onSessionUpdate?.({
+      sessionId: "sub",
+      update: { sessionUpdate: "plan", entries },
+      ...extra,
+    } as never);
+  }
+
+  it("plan（todo_write 的镜像）全量写入 todos，并经既有 emit 刷新看板", async () => {
+    const { harness } = await running();
+
+    sendPlan(harness.clients[0]!, [
+      { content: "读代码", status: "completed" },
+      { content: "改实现", status: "in_progress", priority: "high" },
+    ]);
+
+    // emit 是同步的：看板投影（onSessionsChanged）立刻拿到 todo；归档落盘也
+    // 搭这同一条通道，没有第二条广播 / 落盘路径。
+    expect(harness.sessions[0]?.todos).toEqual([
+      { content: "读代码", status: "completed" },
+      { content: "改实现", status: "in_progress", priority: "high" },
+    ]);
+
+    // 每次 plan 都是完整快照：第二次直接替换，不追加、不合并。
+    sendPlan(harness.clients[0]!, [{ content: "跑测试", status: "pending" }]);
+    expect(harness.sessions[0]?.todos).toEqual([{ content: "跑测试", status: "pending" }]);
+    // 只更新看板，不重复向子会话发 prompt。
+    expect(harness.clients[0]?.prompts.length).toBe(1);
+  }, 30000);
+
+  it("清洗脏条目：丢弃空文本、截断超长、非法状态/优先级归一、条目数封顶", async () => {
+    const { harness } = await running();
+    sendPlan(harness.clients[0]!, [
+      { content: "  读代码  ", status: "pending" },
+      { content: "", status: "completed" },
+      { content: "   ", status: "completed" },
+      { content: 42, status: "completed" },
+      { content: "x".repeat(260), status: "weird", priority: "urgent" },
+      ...Array.from({ length: 30 }, (_, i) => ({ content: `任务 ${i}`, status: "pending" })),
+    ]);
+
+    const todos = harness.sessions[0]?.todos ?? [];
+    // 条目上限 20：脏数据不能把快照撑爆。
+    expect(todos).toHaveLength(20);
+    // trim 后非空才收，非字符串 content 转字符串（与 wire 的容错一致）。
+    expect(todos[0]).toEqual({ content: "读代码", status: "pending" });
+    expect(todos[1]?.content).toBe("42");
+    // 单条 200 字符封顶（含省略号），别让快照膨胀。
+    expect(todos[2]?.content).toHaveLength(200);
+    expect(todos[2]?.content.endsWith("…")).toBe(true);
+    // 非法 status → pending，非法 priority → 丢弃。
+    expect(todos[2]?.status).toBe("pending");
+    expect(todos[2]).not.toHaveProperty("priority");
+  }, 30000);
+
+  it("忽略带 agentId 的 plan：嵌套子代理的 todo 不能混进本子会话", async () => {
+    const { harness } = await running();
+    const client = harness.clients[0]!;
+    const entries = [{ content: "别人的步骤", status: "in_progress" }];
+
+    // notification / update / update._meta 三个位置都可能带 agentId（wire 实证）。
+    sendPlan(client, entries, { agentId: "agent-1" });
+    client.callbacks.onSessionUpdate?.({
+      sessionId: "sub",
+      update: { sessionUpdate: "plan", entries, agentId: "agent-2" },
+    } as never);
+    client.callbacks.onSessionUpdate?.({
+      sessionId: "sub",
+      update: { sessionUpdate: "plan", entries, _meta: { agentId: "agent-3" } },
+    } as never);
+    expect(harness.sessions[0]?.todos).toBeUndefined();
+
+    // 主代理自己的 plan（不带 agentId）照常写入。
+    sendPlan(client, entries);
+    expect(harness.sessions[0]?.todos).toEqual([{ content: "别人的步骤", status: "in_progress" }]);
+  }, 30000);
+});

@@ -48,6 +48,17 @@ describe("super agent · 子会话归档", () => {
     expect(loaded.damaged).toBe(false);
   });
 
+  it("归档保留子会话的 todolist（重启后时间轴仍有步骤可看）", async () => {
+    const todos = [
+      { content: "读代码", status: "completed" as const },
+      { content: "改实现", status: "in_progress" as const, priority: "high" as const },
+    ];
+    await writeSuperSessionArchive(baseDir, "main-1", [record({ todos })]);
+    const loaded = await readSuperSessionArchive(baseDir, "main-1");
+    // 归档只存记录：todos 是那次运行留下的步骤，必须跟着记录一起回来。
+    expect(loaded.sessions[0]?.todos).toEqual(todos);
+  });
+
   it("没归档过的主会话读出空数组（不是错误）", async () => {
     const loaded = await readSuperSessionArchive(baseDir, "never-existed");
     expect(loaded.sessions).toEqual([]);

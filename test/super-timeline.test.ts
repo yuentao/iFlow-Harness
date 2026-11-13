@@ -6,8 +6,13 @@
  * 进度条 —— 那是伪造。这些用例把「事实 → 节点」的映射钉死。
  */
 import { describe, expect, it } from "vitest";
-import type { SuperSessionUi } from "../shared/super-agent.js";
-import { deriveSuperTimeline, type SuperTimelineKind } from "../shared/super-timeline.js";
+import type { SuperSessionUi, SuperTodoUi } from "../shared/super-agent.js";
+import {
+  deriveSuperTimeline,
+  describeSuperTimelineFacts,
+  SUPER_TODO_DETAIL_SEP,
+  type SuperTimelineKind,
+} from "../shared/super-timeline.js";
 
 function session(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
   return {
@@ -173,5 +178,77 @@ describe("deriveSuperTimeline · 只画真实节点", () => {
     );
     expect(nodes.map((n) => n.kind)).toEqual(["dispatched"]);
     expect(nodes[0]?.tone).toBe("current");
+  });
+});
+
+describe("deriveSuperTimeline · 只用 todolist 节点", () => {
+  const todos: SuperTodoUi[] = [
+    { content: "读代码", status: "completed" },
+    { content: "改实现", status: "in_progress", priority: "high" },
+    { content: "跑测试", status: "pending", priority: "low" },
+  ];
+
+  it("有 todos：只画 todo 节点，一个条目一个，label 是原文且 rawLabel", () => {
+    const nodes = deriveSuperTimeline(session({ todos }));
+    expect(nodes.map((n) => n.kind)).toEqual(["todo", "todo", "todo"]);
+    expect(nodes.map((n) => n.label)).toEqual(["读代码", "改实现", "跑测试"]);
+    // 动态文本绝不过字典；派发 / 启动 / 集成等阶段事实不再占节点。
+    expect(nodes.every((n) => n.rawLabel === true)).toBe(true);
+    for (const forbidden of ["dispatched", "started", "completed", "integration"]) {
+      expect(nodes.map((n) => n.kind)).not.toContain(forbidden);
+    }
+    // wire 不带逐条时间戳，绝不伪造。
+    expect(nodes.every((n) => n.at === undefined)).toBe(true);
+  });
+
+  it("tone 由条目自身状态决定：completed→done、in_progress→current、pending→idle", () => {
+    const nodes = deriveSuperTimeline(session({ todos }));
+    expect(nodes.map((n) => n.tone)).toEqual(["done", "current", "idle"]);
+  });
+
+  it("detail 放状态/优先级的中文说明（只进 title），不含动态文本", () => {
+    const nodes = deriveSuperTimeline(session({ todos }));
+    expect(nodes[0]?.detail).toBe("已完成");
+    expect(nodes[1]?.detail).toBe(`进行中${SUPER_TODO_DETAIL_SEP}高优先级`);
+    expect(nodes[2]?.detail).toBe(`待办${SUPER_TODO_DETAIL_SEP}低优先级`);
+    expect(nodes.every((n) => !n.detail?.includes("读代码"))).toBe(true);
+  });
+
+  it("终态会话不允许 current：残留 in_progress 归为 done", () => {
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      const nodes = deriveSuperTimeline(session({ status, todos, endedAt: 4000 }));
+      expect(nodes.map((n) => n.tone)).toEqual(["done", "done", "idle"]);
+      expect(nodes.some((n) => n.tone === "current")).toBe(false);
+    }
+  });
+
+  it("restored 历史记录不允许 current：不能谎称还在跑", () => {
+    const nodes = deriveSuperTimeline(session({ status: "cancelled", restored: true, todos }));
+    expect(nodes.map((n) => n.tone)).toEqual(["done", "done", "idle"]);
+    expect(nodes.some((n) => n.tone === "current")).toBe(false);
+  });
+
+  it("todos 为空数组 / 缺省：完整回退阶段节点，不空白、不伪造", () => {
+    const withEmpty = deriveSuperTimeline(session({ todos: [], startedAt: 2000 }));
+    expect(withEmpty.map((n) => n.kind)).toEqual(["dispatched", "started"]);
+    const without = deriveSuperTimeline(session({ startedAt: 2000 }));
+    expect(without.map((n) => n.kind)).toEqual(["dispatched", "started"]);
+    expect(withEmpty).toEqual(without);
+  });
+
+  it("describeSuperTimelineFacts：阶段事实拼成中文串供 title 使用", () => {
+    const facts = describeSuperTimelineFacts(
+      session({
+        status: "completed",
+        startedAt: 2000,
+        endedAt: 4000,
+        integration: { mode: "merge", state: "not_needed", at: 5000 },
+      }),
+    );
+    expect(facts).toBe("派发 → 启动 → 已完成 → 无需合并");
+    // 复用阶段逻辑：即使有 todos，facts 仍是阶段事实（不受 todolist 影响）。
+    expect(describeSuperTimelineFacts(session({ todos, startedAt: 2000 }))).toBe(
+      "派发 → 启动",
+    );
   });
 });

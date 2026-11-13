@@ -32,7 +32,9 @@ import {
   superIsolationLabel,
 } from "../../../shared/super-agent";
 import {
+  describeSuperTimelineFacts,
   deriveSuperTimeline,
+  SUPER_TODO_DETAIL_SEP,
   type SuperTimelineNode,
   type SuperTimelineTone,
 } from "../../../shared/super-timeline";
@@ -162,10 +164,14 @@ export function shortBranch(branch: string): string {
 /**
  * 阶段轨节点标签。
  *
- * `attempt` 节点带数字（「第 2 次」），走带参模板；其余标签是固定中文短语，
- * 直接过字典（缺翻译时 `t()` 回落原文）。
+ * - `rawLabel`：子会话自己写的 todolist 原文（动态文本），**绝不过字典** ——
+ *   `t()` 会把用户文本当 key 查，查不到虽回落原文，但一旦与某个字典 key 撞上
+ *   就会被悄悄改写，且这些文本本就不该进翻译表。
+ * - `attempt` 节点带数字（「第 2 次」），走带参模板；
+ * - 其余是固定中文短语，直接过字典（缺翻译时 `t()` 回落原文）。
  */
 function timelineNodeLabel(node: SuperTimelineNode): string {
+  if (node.rawLabel) return node.label;
   if (node.kind === "attempt" && node.attempt !== undefined) return t("第 {0} 次", node.attempt);
   return t(node.label);
 }
@@ -219,14 +225,16 @@ function timelineText(node: SuperTimelineNode): string {
 }
 
 /**
- * 子会话阶段轨：真实节点的横向序列（6px 圆点 + 1px 连接线）。
+ * 子会话时间轨：节点的横向序列（6px 圆点 + 1px 连接线）。
  *
- * 数据全部来自 `deriveSuperTimeline` —— 只画真实发生过的阶段，绝不渲染
- * 「准备 → 运行 → 收尾 → 完成」这种固定模板（用户明确要求过）。纯展示：
- * 不新增点击通道；完整节点与时间戳只进 `title` / `aria-label`。
+ * 数据全部来自 `deriveSuperTimeline` —— 有 todolist 时只画子会话自己建的步骤
+ * （原文），否则降级回真实发生过的阶段事实，绝不渲染固定模板。阶段事实（派发
+ * / 启动 / 集成等）在 todolist 模式下不再占节点，改由 `describeSuperTimelineFacts`
+ * 收进 `title` / `aria-label`。纯展示：不新增点击通道。
  *
- * 只在展开区出现（折叠行只报状态）。轨本身 `min-w-0 overflow-hidden`，在任何
- * 窄屏下都不会撑出横向溢出。
+ * 只在展开区出现（折叠行只报状态）。轨用 `flex-wrap` + 标签 `min-w-0 break-words`：
+ * 节点放不下就换行，最后一条 todo 文本在任何窄屏都完整可见，绝不靠裁切 /
+ * 省略号藏字（超长单条由 shared 层 200 字符上限兜底）。圆点与连接线 `shrink-0`。
  */
 function SuperTimeline({
   session,
@@ -238,22 +246,42 @@ function SuperTimeline({
   className?: string;
 }) {
   const nodes = useMemo(() => deriveSuperTimeline(session), [session]);
-  const described = nodes
-    .map((node) => {
-      const label = timelineNodeLabel(node);
-      return node.at === undefined ? label : `${label} ${formatClock(node.at)}`;
-    })
-    .join(" → ");
+  const hasTodos = nodes.some((node) => node.kind === "todo");
+  // todolist 模式：节点只画步骤原文，派发 / 启动 / 集成等事实挪到 title 前缀，
+  // 每条 todo 附上状态（+ 优先级）说明，仍可在 title / aria-label 里查到。
+  // 状态 / 优先级是静态中文词，逐段过字典；todo 原文绝不过字典。
+  const described = hasTodos
+    ? [
+        describeSuperTimelineFacts(session),
+        ...nodes.map((node) => {
+          const label = timelineNodeLabel(node);
+          const detail = node.detail
+            ? `（${node.detail
+                .split(SUPER_TODO_DETAIL_SEP)
+                .map((part) => t(part))
+                .join(SUPER_TODO_DETAIL_SEP)}）`
+            : "";
+          return `${label}${detail}`;
+        }),
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : nodes
+        .map((node) => {
+          const label = timelineNodeLabel(node);
+          return node.at === undefined ? label : `${label} ${formatClock(node.at)}`;
+        })
+        .join(" → ");
 
   return (
     <span
       role="img"
       aria-label={t("阶段轨：{0}", described)}
       title={described}
-      className={`flex min-w-0 max-w-[50%] shrink items-center gap-1 overflow-hidden ${className}`}
+      className={`flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 ${className}`}
     >
       {nodes.map((node, index) => (
-        <span key={`${node.kind}-${index}`} className="flex shrink-0 items-center gap-1">
+        <span key={`${node.kind}-${index}`} className="flex min-w-0 items-center gap-1">
           {index > 0 && <span className="h-px w-2 shrink-0 bg-border" aria-hidden="true" />}
           <span
             className={`size-1.5 shrink-0 rounded-full ${timelineDot(node)}`}
@@ -261,7 +289,7 @@ function SuperTimeline({
           />
           {labeled && (
             <span
-              className={`shrink-0 whitespace-nowrap text-ui-micro font-medium ${timelineText(node)}`}
+              className={`min-w-0 break-words text-ui-micro font-medium ${timelineText(node)}`}
             >
               {timelineNodeLabel(node)}
             </span>
