@@ -118,6 +118,7 @@ type PanelInternals = {
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
+  onSessionUpdate: (n: unknown) => void;
   refreshSuperWaitHeartbeat: () => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
@@ -318,5 +319,44 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(calls).toHaveLength(0);
     expect(p.pendingSuperReportPrompts).toHaveLength(0);
     expect(p.store.getState().superWaiting).toBe(false);
+  });
+
+  it("思考通道的委派围栏只进转录：不派发子会话、不报「无法解析」", () => {
+    const toasts: string[] = [];
+    vi.spyOn(p.store, "sendToast").mockImplementation(((...args: unknown[]) => {
+      if (typeof args[1] === "string") toasts.push(args[1]);
+      return 1;
+    }) as PanelInternals["store"]["sendToast"]);
+
+    const directive = [
+      "```super-agent",
+      '{"tasks":[{"title":"思考里误派发","task":"这不应该发生"}]}',
+      "```",
+    ].join("\n");
+    const malformed = ["```super-agent", "{载荷不是合法 JSON}", "```"].join("\n");
+
+    p.onSessionUpdate({
+      sessionId: "sw-session",
+      update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: directive } },
+    });
+    p.onSessionUpdate({
+      sessionId: "sw-session",
+      update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: malformed } },
+    });
+
+    // 思考流不参与委派扫描：既不派发，也不对写坏的围栏弹解析警告。
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(toasts.some((m) => m.includes("无法解析"))).toBe(false);
+    // 但思考内容照常进转录（思考过程该显示还是显示，只是切成纯文本）。
+    expect(
+      p.store.getState().blocks.some((b) => b.kind === "thought" && b.text.includes("super-agent")),
+    ).toBe(true);
+
+    // 正文通道的扫描没被动过：同一份合法围栏仍会派发一次。
+    p.onSessionUpdate({
+      sessionId: "sw-session",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: directive } },
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
 });
