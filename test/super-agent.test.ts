@@ -1736,7 +1736,7 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     expect(directive?.display).toEqual({ kind: "raw", reason: "invalid_json" });
   });
 
-  it("未闭合的畸形围栏不产出半截卡片（宿主继续续扫，渲染整段仍是文本）", () => {
+  it("未闭合的畸形围栏不产出半截卡片（宿主继续续扫，渲染切出 pending 占位段）", () => {
     const unclosed = [
       "```super-agent",
       '{"tasks":[{"title":"带围栏","task":"第一步：读代码',
@@ -1748,7 +1748,9 @@ describe("super agent · 宿主与渲染共用块解析", () => {
     expect(scan.blocks).toHaveLength(0);
     expect(scan.invalidBlocks).toHaveLength(0);
     expect(scan.pendingOpen).toBeDefined();
-    expect(splitSuperDirectiveSegments(unclosed)).toEqual([{ kind: "text", text: unclosed }]);
+    expect(splitSuperDirectiveSegments(unclosed)).toEqual([
+      { kind: "pending", language: "super-agent" },
+    ]);
   });
 
   // 实测（2026-11-12 用户截图）：模型不按 markdown 围栏写委派，而写成**工具调用式**

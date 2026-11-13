@@ -5,13 +5,14 @@
  * 协议围栏（```super-agent / ```super-agent-actions）是给宿主读的指令，按
  * 普通 JSON 代码块渲染时是一堵难以阅读的 JSON 墙。这些用例钉住：
  *
- *  - 纯函数切分：普通文本段与协议段分开，未闭合围栏不切；
+ *  - 纯函数切分：普通文本段与协议段分开，未闭合围栏切出 pending 段；
  *  - 委派卡：每个任务书渲染成**一张独立卡片**（标题 / 正文 / 附件 / 序号 chip），
  *    不再有「委派子会话 / N 个任务」那种汇总卡，也不再出现裸 JSON；
  *  - 容错提示：载荷没能完整解析时，拆出的任务书带一条诚实提示；
  *  - 操作卡：动作中文名 + 目标子会话 id；
  *  - 非法 JSON / 未知形状 / 未知语言：退化为「原始协议块」卡，不抛异常；
- *  - 未闭合围栏（流式中间态）：仍是普通代码块，不渲染半截卡片；
+ *  - 未闭合围栏（流式中间态）：「正在编写任务书…」占位卡（不展示载荷、不宣称已派发，
+ *    也不渲染半截卡片或原始 JSON 代码块）；
  *  - 混排：普通段落 / 列表 / 普通代码块照常走 Markdown。
  */
 import { act } from "react";
@@ -172,10 +173,44 @@ describe("splitSuperDirectiveSegments", () => {
     expect(displays).toEqual(["tasks", "actions"]);
   });
 
-  it("未闭合的围栏不切分（整段仍是文本）", () => {
+  it("未闭合围栏切出 pending 段：开栏行与半截载荷都不进文本段", () => {
     const unclosed = ["```super-agent", '{"tasks": [{"title": "甲", "task": "乙"}]'].join("\n");
     const segments = splitSuperDirectiveSegments(unclosed);
-    expect(segments).toEqual([{ kind: "text", text: unclosed }]);
+    expect(segments).toEqual([{ kind: "pending", language: "super-agent" }]);
+  });
+
+  it("未闭合围栏 + 已写出部分 JSON：前缀是文本段，之后是 pending 段，没有尾随文本", () => {
+    const unclosed = [
+      "我先拆两件事。",
+      "```super-agent",
+      '{"tasks": [{"title": "甲", "task": "乙"',
+    ].join("\n");
+    const segments = splitSuperDirectiveSegments(unclosed);
+    expect(segments).toEqual([
+      { kind: "text", text: "我先拆两件事。\n" },
+      { kind: "pending", language: "super-agent" },
+    ]);
+    // pending 之后不再有任何文本段（半截载荷绝不回流给 Markdown）。
+    expect(segments[segments.length - 1]?.kind).toBe("pending");
+  });
+
+  it("收栏后同一段文本不再有 pending 段，改切出任务卡", () => {
+    const unclosed = [
+      "我先拆两件事。",
+      "```super-agent",
+      '{"tasks": [{"title": "甲", "task": "乙"',
+    ].join("\n");
+    expect(splitSuperDirectiveSegments(unclosed).map((segment) => segment.kind)).toEqual([
+      "text",
+      "pending",
+    ]);
+
+    const closed = `${unclosed}]}\n\`\`\``;
+    const segments = splitSuperDirectiveSegments(closed);
+    expect(segments.map((segment) => segment.kind)).toEqual(["text", "directive"]);
+    const directive = segments[1];
+    expect(directive?.kind === "directive" ? directive.display.kind : undefined).toBe("tasks");
+    expect(directive?.kind === "directive" ? directive.raw : "").toContain('"tasks"');
   });
 
   it("围栏不在行首（句子里的行内代码）不识别", () => {
@@ -292,15 +327,40 @@ describe("AssistantText 协议块卡片", () => {
     expect(body).toMatch(/字符/);
   });
 
-  it("未闭合围栏（流式中间态）保持普通代码块，不出现卡片", () => {
+  it("未闭合围栏（流式中间态）渲染「正在编写任务书…」占位卡，不再是代码块", () => {
     const unclosed = ["```super-agent", '{"tasks": [{"title": "进行中的任务"'].join("\n");
     expect(() => render(unclosed)).not.toThrow();
     expect(text()).not.toContain("委派子会话");
     expect(taskCards()).toHaveLength(0);
-    const code = container.querySelector("pre code");
-    expect(code).toBeTruthy();
-    expect(code!.className).toContain("language-super-agent");
-    expect(code!.textContent).toContain("进行中的任务");
+    // 进行中 ≠ 已派发：只有占位卡，没有任何任务卡。
+    expect(container.querySelector('[data-testid="super-directive-pending"]')).toBeTruthy();
+    expect(text()).toContain("正在编写任务书…");
+    expect(text()).toContain("收栏后派发");
+    // 半截载荷绝不交回 Markdown：没有代码块，也不出现原始 JSON。
+    expect(container.querySelector("pre code")).toBeNull();
+    expect(text()).not.toContain('"tasks"');
+    expect(text()).not.toContain('"title"');
+    expect(text()).not.toContain("进行中的任务");
+  });
+
+  it("围栏前有正常散文时，散文仍渲染成 Markdown（不被吞掉）", () => {
+    render(
+      [
+        "先看这段说明：",
+        "",
+        "**重点**在下面。",
+        "",
+        "```super-agent",
+        '{"tasks": [{"title": "进行中的任务"',
+      ].join("\n"),
+    );
+    expect(text()).toContain("先看这段说明");
+    // 文本段仍走完整 Markdown 链路（强调样式生效，不是字面星号）。
+    expect(container.querySelector("strong")?.textContent).toBe("重点");
+    expect(text()).not.toContain("**");
+    // 占位卡照常出现，载荷不进 DOM。
+    expect(container.querySelector('[data-testid="super-directive-pending"]')).toBeTruthy();
+    expect(text()).not.toContain("进行中的任务");
   });
 
   // 实测形态（用户截图 2026-11-12）：模型把委派写成工具调用式载荷而不是 markdown
@@ -445,11 +505,14 @@ describe("AssistantText 协议块卡片", () => {
     expect(container.querySelector("pre code.language-super-agent")).toBeNull();
   });
 
-  it("缩进围栏但载荷未收全仍按 pending 降级，不伪造已派发", () => {
+  it("缩进围栏但载荷未收全：渲染编写中占位卡，不伪造已派发", () => {
     const unclosed = ["  ```super-agent", '{"tasks": [{"title": "进行中的任务"'].join("\n");
     render(unclosed);
     expect(taskCards()).toHaveLength(0);
-    expect(container.querySelector("pre code")).toBeTruthy();
+    expect(container.querySelector('[data-testid="super-directive-pending"]')).toBeTruthy();
+    // 半截载荷既不是代码块，也不进 DOM。
+    expect(container.querySelector("pre code")).toBeNull();
+    expect(text()).not.toContain("进行中的任务");
     expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
   });
 
@@ -554,9 +617,13 @@ describe("AssistantText 协议块卡片", () => {
 
   it("载荷未收全时，带尾巴的收栏也不伪造已派发", () => {
     const unclosed = ["```super-agent", '{"tasks": [{"title": "进行中的任务"', "``` 尾巴"].join("\n");
-    expect(splitSuperDirectiveSegments(unclosed)).toEqual([{ kind: "text", text: unclosed }]);
+    expect(splitSuperDirectiveSegments(unclosed)).toEqual([
+      { kind: "pending", language: "super-agent" },
+    ]);
     render(unclosed);
     expect(taskCards()).toHaveLength(0);
+    expect(container.querySelector('[data-testid="super-directive-pending"]')).toBeTruthy();
+    expect(text()).not.toContain("进行中的任务");
     expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
   });
 
