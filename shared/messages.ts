@@ -875,24 +875,13 @@ export interface AuthUiState {
   needsSetup: boolean;
   /** Masked info of stored credentials (never the raw key). */
   saved: { baseUrl: string; modelName: string; keyTail: string } | null;
-  /** All known API profiles (extension-owned + read-only CLI ones), masked. */
+  /** All API profiles, persisted in the kernel's `~/.iflow/settings.json`
+   * (`apiProfiles`) and masked for display. */
   profiles: AuthProfileUi[];
-  /** Credentials found in the terminal CLI's settings.json that are not yet
-   * extension-owned — the onboarding "import existing config" candidates.
-   * Raw keys stay in the host; only the masked tail crosses the wire. */
-  importable: AuthImportCandidateUi[];
   /** The user skipped or finished the first-run wizard (persisted per
    * workspace). Once true the wizard never auto-opens again; the settings
    * modal stays available as the long-term home for everything it covered. */
   onboardingDismissed: boolean;
-}
-
-/** One importable `~/.iflow/settings.json` credential set (masked view). */
-export interface AuthImportCandidateUi {
-  name: string;
-  baseUrl: string;
-  modelName: string;
-  keyTail: string;
 }
 
 /**
@@ -921,7 +910,6 @@ export function validateAuthForm(input: {
 
 export interface AuthProfileUi {
   name: string;
-  source: "extension" | "cli";
   baseUrl: string;
   modelName: string;
   keyTail: string;
@@ -945,7 +933,7 @@ export function initialSessionState(): SessionState {
     pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
-    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], importable: [], onboardingDismissed: false },
+    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], onboardingDismissed: false },
     sessions: [],
     activeSessionId: null,
     replaying: false,
@@ -1812,12 +1800,8 @@ export type WebviewToHost =
   | { type: "clearAuth" }
   /** M3: switch the active API profile and re-authenticate. */
   | { type: "activateProfile"; name: string }
-  /** M3: delete an extension-owned profile. */
+  /** M3: delete a profile (kernel settings.json + SecretStorage cache). */
   | { type: "deleteProfile"; name: string }
-  /** Onboarding: copy a credential set detected in the terminal CLI's
-   * `~/.iflow/settings.json` into SecretStorage (extension-owned) and activate
-   * it. The raw key never leaves the host; `name` matches AuthImportCandidateUi. */
-  | { type: "importCliCredentials"; name: string }
   /** First-run wizard finished or skipped. Persisted in workspaceState so the
    * wizard never auto-opens again in this workspace. */
   | { type: "setOnboardingDismissed"; dismissed: boolean }

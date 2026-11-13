@@ -59,7 +59,6 @@ const AUTH: AuthUiState = {
   needsSetup: true,
   saved: null,
   profiles: [],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -173,23 +172,7 @@ it("validates the API form before saving", () => {
   expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "saveAuth" }));
 });
 
-it("imports a detected CLI credential and advances", () => {
-  renderWizard({
-    ...AUTH,
-    importable: [
-      {
-        name: "终端默认",
-        baseUrl: "https://cli.example.com/v1",
-        modelName: "cli-model",
-        keyTail: "…abcd",
-      },
-    ],
-  });
-  expect(container.textContent).toContain("检测到内核已有凭据");
-  click("导入并激活");
-  expect(beginPending).toHaveBeenCalledWith("profile", "终端默认");
-  expect(send).toHaveBeenCalledWith({ type: "importCliCredentials", name: "终端默认" });
-});
+
 
 it("offers a single escape door instead of skip plus later", () => {
   renderWizard();

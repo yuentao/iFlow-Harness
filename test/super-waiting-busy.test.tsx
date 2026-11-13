@@ -58,7 +58,6 @@ function idleState(superWaiting: boolean): SessionState {
       needsSetup: false,
       saved: null,
       profiles: [],
-      importable: [],
       onboardingDismissed: true,
     },
     sessions: [],

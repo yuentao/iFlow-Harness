@@ -58,7 +58,6 @@ function connectingState(connectEpoch = 0): SessionState {
       needsSetup: false,
       saved: null,
       profiles: [],
-      importable: [],
       onboardingDismissed: true,
     },
     sessions: [],

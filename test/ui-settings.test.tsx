@@ -101,7 +101,6 @@ beforeEach(() => {
           needsSetup: false,
           saved: null,
           profiles: [],
-          importable: [],
           onboardingDismissed: false,
         } as AuthUiState}
       />,
@@ -166,7 +165,6 @@ const BASIC_AUTH: AuthUiState = {
   needsSetup: false,
   saved: null,
   profiles: [],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -219,10 +217,9 @@ const API_AUTH: AuthUiState = {
   needsSetup: false,
   saved: null,
   profiles: [{
-    name: "B", source: "extension", baseUrl: "https://gw.example.com/v1",
+    name: "B", baseUrl: "https://gw.example.com/v1",
     modelName: "model-b", keyTail: "1234", active: false,
   }],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -307,7 +304,6 @@ const EMPTY_AUTH: AuthUiState = {
   needsSetup: true,
   saved: null,
   profiles: [],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -361,7 +357,6 @@ it("does not carry the previous gateway's model into a preset without suggestion
     needsSetup: false,
     saved: { baseUrl: "https://old.example.com/v1", modelName: "old-model", keyTail: "…1111" },
     profiles: [],
-    importable: [],
     onboardingDismissed: false,
   });
   click("智谱 GLM");
@@ -370,18 +365,12 @@ it("does not carry the previous gateway's model into a preset without suggestion
   expect(fields[3]?.value).toBe("");
 });
 
-it("hides the CLI import card once extension credentials exist", () => {
-  renderAuthTabWith({
-    authenticated: true,
-    needsSetup: false,
-    saved: { baseUrl: "https://old.example.com/v1", modelName: "old-model", keyTail: "…1111" },
-    profiles: [],
-    importable: [
-      { name: "终端默认", baseUrl: "https://cli.example.com/v1", modelName: "cli-model", keyTail: "…abcd" },
-    ],
-    onboardingDismissed: false,
-  });
-  expect(container.textContent).not.toContain("检测到内核已有凭据");
+it("renders profile rows without an extension/Core source chip", () => {
+  renderAuthTabWith(API_AUTH);
+  const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("model-b"));
+  expect(row).toBeTruthy();
+  expect(row!.textContent).not.toContain("扩展");
+  expect(row!.textContent).not.toContain("内核");
 });
 
 it("opens provider documentation from the preset guidance", () => {
@@ -402,27 +391,7 @@ it("drops the preset guidance when the user switches to a custom endpoint", () =
   expect(container.textContent).not.toContain("获取 API Key");
 });
 
-it("sends an import command for detected CLI credentials", () => {
-  renderAuthTabWith({
-    authenticated: false,
-    needsSetup: true,
-    saved: null,
-    profiles: [],
-    importable: [
-      {
-        name: "终端默认",
-        baseUrl: "https://cli.example.com/v1",
-        modelName: "cli-model",
-        keyTail: "…abcd",
-      },
-    ],
-    onboardingDismissed: false,
-  });
-  expect(container.textContent).toContain("检测到内核已有凭据");
-  click("导入并激活");
-  expect(beginPending).toHaveBeenCalledWith("profile", "终端默认");
-  expect(send).toHaveBeenCalledWith({ type: "importCliCredentials", name: "终端默认" });
-});
+
 
 /**
  * The turn-end ceilings live under their own toggle and follow it: the row is

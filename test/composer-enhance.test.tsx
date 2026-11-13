@@ -59,7 +59,6 @@ function makeState(activeSessionId: string): SessionState {
       needsSetup: false,
       saved: null,
       profiles: [],
-      importable: [],
       onboardingDismissed: false,
     },
     sessions: [],

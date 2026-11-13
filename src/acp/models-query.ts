@@ -204,21 +204,19 @@ export function readCliSettings(settingsPath?: string): CliSettingsShape | null 
 }
 
 /**
- * Active profile name, extension-first. The panel authenticates its child
- * with SecretStorage creds and the CLI-side api-config-isolation patch keeps
- * the panel-owned fields (apiKey/baseUrl/currentApiProfile…) out of the
- * shared settings.json write-back — so the extension's own record is the
- * authoritative pointer for the panel. The CLI file's currentApiProfile is
- * maintained by the CLI/external tools and lags at whatever was active at the
- * child's startup; it is only a fallback for fresh installs where the user
- * configured profiles outside the panel and the extension has no record yet.
+ * Active profile name, kernel-first. The panel persists its API profiles into
+ * the Core's user settings file (`apiProfiles` / `currentApiProfile`), so that
+ * pointer is the authority; SecretStorage keeps only the runtime credentials
+ * cache and the legacy record, which is the fallback when the kernel pointer
+ * is absent (fresh install / not-yet-migrated window).
  */
 export function resolveActiveProfileName(
   cli: CliSettingsShape | null,
   extensionActive: string | null,
 ): string | null {
-  if (extensionActive?.trim()) return extensionActive.trim();
-  return cli?.currentApiProfile?.trim() || null;
+  const kernelActive = cli?.currentApiProfile?.trim();
+  if (kernelActive) return kernelActive;
+  return extensionActive?.trim() || null;
 }
 
 /**
@@ -276,62 +274,6 @@ export function readActiveEndpoint(settingsPath?: string): ActiveEndpoint | null
   const modelName = active?.modelName ?? settings.modelName ?? null;
   if (!baseUrl || !apiKey) return null;
   return { baseUrl, apiKey, modelName };
-}
-
-/** A credential set from the CLI's settings.json that the panel can copy into
- * SecretStorage in one click (host-side only — the raw key never leaves it). */
-export interface CliImportCandidate {
-  name: string;
-  baseUrl: string;
-  apiKey: string;
-  modelName: string;
-}
-
-/**
- * Detect credentials worth importing from the terminal CLI's config.
- *
- * Sources, in order:
- *  1. Every named `apiProfiles` entry with all three fields (they are
- *     openai-compatible by construction, even when the CLI currently uses
- *     OAuth — the profile is still a valid endpoint the user configured).
- *  2. The top-level endpoint when `selectedAuthType === "openai-compatible"`
- *     (same gate as readActiveEndpoint), for configs written without a named
- *     profile. Its name falls back to the active profile name → model → label.
- *
- * Entries whose name already exists in `existingNames` are skipped: the
- * extension profile shadows them (buildProfileList drops the CLI duplicate),
- * so there is nothing new to import. Duplicate credential sets are collapsed
- * by baseUrl + apiKey + modelName.
- */
-export function cliImportCandidates(
-  settings: CliSettingsShape | null,
-  existingNames: Iterable<string>,
-): CliImportCandidate[] {
-  if (!settings) return [];
-  const taken = new Set([...existingNames].map((name) => name.trim()).filter(Boolean));
-  const seen = new Set<string>();
-  const out: CliImportCandidate[] = [];
-
-  const push = (rawName: string | undefined, p: ProfileShape | CliSettingsShape) => {
-    const baseUrl = p.baseUrl?.trim();
-    const apiKey = p.apiKey?.trim();
-    const modelName = p.modelName?.trim();
-    if (!baseUrl || !apiKey || !modelName) return;
-    const name = rawName?.trim() || modelName;
-    if (!name || taken.has(name)) return;
-    const signature = `${baseUrl}\u0000${apiKey}\u0000${modelName}`;
-    if (seen.has(signature)) return;
-    seen.add(signature);
-    out.push({ name, baseUrl, apiKey, modelName });
-  };
-
-  for (const [name, profile] of Object.entries(settings.apiProfiles ?? {})) {
-    push(name, profile);
-  }
-  if (settings.selectedAuthType === "openai-compatible") {
-    push(settings.currentApiProfile ?? settings.modelName, settings);
-  }
-  return out;
 }
 
 /**
