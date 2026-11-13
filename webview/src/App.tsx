@@ -34,6 +34,7 @@ import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
 import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
+import { isTerminalSuperStatus } from "../../shared/super-agent";
 
 function statusChip(status: AgentStatus, compressing = false, plan = false, superWaiting = false) {
   switch (status) {
@@ -243,6 +244,12 @@ export function App() {
   // 会话会让排队里的汇报落到已被替换的会话上）。它是 orthogonal 于 status 的
   // 标记，所以等待期用户仍然可以发消息、由主会话响应。
   const superWaiting = useChat((s) => s.state?.superWaiting ?? false);
+  // 子会话仍在跑（非终态）时，切换会话 / 模型 / API 配置会让在途的子会话用错
+  // 凭据或模型，或让汇报落到已被替换的主会话。与 superWaiting 分开判定：后者
+  // 只覆盖「主会话空转等汇报」，子会话运行而主会话自己也在生成时同样要锁。
+  const superActive = useChat((s) =>
+    (s.state?.superSessions ?? []).some((session) => !isTerminalSuperStatus(session.status)),
+  );
   const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
@@ -470,9 +477,11 @@ export function App() {
   // Shared gating for the header actions and the Alt+←/→ / Alt+N shortcuts:
   // switching session / mode / model / profile mid-turn would desync the
   // in-flight ACP request, and a profile switch is itself an optimistic lock.
+  // 活跃子会话也并入 locked（它同时是 SettingsModal 的 busy）：在跑的子会话
+  // 用错配置 / 汇报落到被替换的会话，比 mid-turn 切换更隐蔽。busy 保持原义。
   const busy = status === "streaming" || replaying || initializing;
   const switching = pending !== null;
-  const locked = busy || switching;
+  const locked = busy || switching || superActive;
 
   // M1 P1-3: Ctrl/Cmd+Alt+F toggles Focus view from anywhere (also while the
   // composer has focus — Alt+F is not a text-editing chord). Declared BEFORE
