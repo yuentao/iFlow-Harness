@@ -392,6 +392,63 @@ export function sumSuperUsage(sessions: readonly SuperSessionUi[]): {
 // 子会话
 // ---------------------------------------------------------------------------
 
+/**
+ * 子会话自己创建的 todolist 条目 —— 看板时间轴节点的唯一数据来源。
+ *
+ * Wire 来源（probed, CLI 0.5.19）：`todo_write` 的 `rawInput.todos` 被镜像成
+ * `plan` session/update 的 `entries`，且每次推的是**全量快照**，所以宿主侧
+ * 只做「直接替换」，绝不追加 / 合并。字段与 `PlanEntry`（protocol.ts）对齐。
+ */
+export interface SuperTodoUi {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  priority?: "high" | "medium" | "low";
+}
+
+/** 快照膨胀护栏：条目数与单条文本都有上限（看板一行放不下、快照还要落盘）。 */
+export const SUPER_TODOS_MAX_ITEMS = 20;
+export const SUPER_TODO_MAX_CHARS = 200;
+
+/**
+ * 把不可信的 `plan` entries 收敛成干净的 todolist。
+ *
+ * 这是 wire 边界：内核 / 旧归档 / 手改过的记录都可能带脏值。空数组是合法
+ * 结果（等价于「这个子会话没有 todolist」，时间轴会降级回阶段节点）。
+ */
+export function normalizeSuperTodos(entries: unknown): SuperTodoUi[] {
+  if (!Array.isArray(entries)) return [];
+  const out: SuperTodoUi[] = [];
+  for (const entry of entries) {
+    if (out.length >= SUPER_TODOS_MAX_ITEMS) break;
+    if (!entry || typeof entry !== "object") continue;
+    const raw = entry as { content?: unknown; status?: unknown; priority?: unknown };
+    const content =
+      raw.content === undefined || raw.content === null ? "" : String(raw.content).trim();
+    if (!content) continue;
+    const todo: SuperTodoUi = {
+      content:
+        content.length > SUPER_TODO_MAX_CHARS
+          ? `${content.slice(0, SUPER_TODO_MAX_CHARS - 1)}…`
+          : content,
+      status:
+        raw.status === "completed" || raw.status === "in_progress" ? raw.status : "pending",
+    };
+    if (raw.priority === "high" || raw.priority === "medium" || raw.priority === "low") {
+      todo.priority = raw.priority;
+    }
+    out.push(todo);
+  }
+  return out;
+}
+
+/** 恢复历史记录时把残留的 `in_progress` 如实降为 `pending`（进程已死，不能冒充运行中）。 */
+function normalizeRestoredTodos(todos: SuperTodoUi[] | undefined): SuperTodoUi[] | undefined {
+  if (!todos) return undefined;
+  return normalizeSuperTodos(todos).map((todo) =>
+    todo.status === "in_progress" ? { ...todo, status: "pending" as const } : todo,
+  );
+}
+
 export interface SuperSessionUi {
   id: string;
   /** 人类可读标题（模型给的或用户给的）。 */
@@ -433,6 +490,11 @@ export interface SuperSessionUi {
   integration?: SuperIntegration;
   /** 汇报历史（审计用，按时间升序）。 */
   reports: SuperReport[];
+  /**
+   * 子会话自己创建的 todolist 全量快照（看板时间轴的节点来源）。
+   * 由 `plan` session/update 写入；缺省 = 还没建 todo，时间轴降级回阶段节点。
+   */
+  todos?: SuperTodoUi[];
   /**
    * 派发这个子会话的**主会话** id。
    *
@@ -658,6 +720,8 @@ export interface PersistedSuperSession {
   tokens?: SuperTokenUsage;
   integration?: SuperIntegration;
   reports: SuperReport[];
+  /** 子会话的 todolist 快照（记录性内容，重启后仍要能在时间轴上看到）。 */
+  todos?: SuperTodoUi[];
 }
 
 /**
@@ -718,6 +782,7 @@ export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuper
     tokens: session.tokens,
     integration: session.integration,
     reports: session.reports,
+    todos: session.todos,
   };
 }
 
@@ -750,6 +815,7 @@ export function fromPersistedSuperSession(record: PersistedSuperSession): SuperS
     tokens: record.tokens,
     integration: record.integration,
     reports: record.reports,
+    todos: normalizeRestoredTodos(record.todos),
   };
 }
 

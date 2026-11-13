@@ -23,6 +23,7 @@ import {
   MAX_SUPER_ATTACHMENTS,
   MAX_SUPER_SCAN_BUFFER_CHARS,
   normalizeSuperTitle,
+  normalizeSuperTodos,
   reportForSession,
   retrySuperSession,
   salvageSuperTasks,
@@ -823,6 +824,71 @@ describe("super agent · 归档与恢复", () => {
   it("归档往返保留归属主会话", () => {
     const persisted = toPersistedSuperSession(session({ mainSessionId: "main-42" }));
     expect(fromPersistedSuperSession(persisted).mainSessionId).toBe("main-42");
+  });
+
+  it("归档带着 todolist；恢复时 in_progress 归一（进程已死，不能冒充运行中）", () => {
+    const live = session({
+      status: "completed",
+      todos: [
+        { content: "读代码", status: "completed" },
+        { content: "改实现", status: "in_progress", priority: "high" },
+      ],
+    });
+    const persisted = toPersistedSuperSession(live);
+    // 记录性内容（不存运行期字段的原则不变）：重启后时间轴仍要有步骤可看。
+    expect(persisted.todos).toEqual(live.todos);
+
+    const restored = fromPersistedSuperSession(persisted);
+    expect(restored.todos).toEqual([
+      { content: "读代码", status: "completed" },
+      // 进程已经没了：残留的 in_progress 如实降为 pending，不能显示成正在跑。
+      { content: "改实现", status: "pending", priority: "high" },
+    ]);
+  });
+});
+
+describe("super agent · todolist 清洗", () => {
+  it("非数组 / 空数组都是合法的「没有 todolist」", () => {
+    expect(normalizeSuperTodos(undefined)).toEqual([]);
+    expect(normalizeSuperTodos(null)).toEqual([]);
+    expect(normalizeSuperTodos({})).toEqual([]);
+    expect(normalizeSuperTodos([])).toEqual([]);
+  });
+
+  it("只取数组、丢弃脏条目，content trim / 字符串化，空串丢弃", () => {
+    const todos = normalizeSuperTodos([
+      { content: "  读代码  ", status: "in_progress" },
+      null,
+      "不是对象",
+      { content: "", status: "completed" },
+      { content: "   ", status: "completed" },
+      { content: 42 },
+    ]);
+    expect(todos).toEqual([
+      { content: "读代码", status: "in_progress" },
+      { content: "42", status: "pending" },
+    ]);
+  });
+
+  it("单条 200 字符截断（含省略号），status / priority 只认白名单", () => {
+    const [todo] = normalizeSuperTodos([
+      { content: "x".repeat(260), status: "weird", priority: "urgent" },
+    ]);
+    expect(todo?.content).toHaveLength(200);
+    expect(todo?.content.endsWith("…")).toBe(true);
+    expect(todo?.status).toBe("pending");
+    expect(todo).not.toHaveProperty("priority");
+
+    expect(
+      normalizeSuperTodos([{ content: "a", status: "completed", priority: "low" }])[0],
+    ).toEqual({ content: "a", status: "completed", priority: "low" });
+  });
+
+  it("条目数封顶 20，脏数据不能撑爆快照", () => {
+    const todos = normalizeSuperTodos(
+      Array.from({ length: 30 }, (_, i) => ({ content: `任务 ${i}`, status: "pending" })),
+    );
+    expect(todos).toHaveLength(20);
   });
 });
 

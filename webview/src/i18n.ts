@@ -53,6 +53,12 @@ const en: Record<string, string> = {
   "等待应答": "Waiting for you",
   "第 {0} 次": "Attempt {0}",
   "阶段轨：{0}": "Timeline: {0}",
+  // 子会话 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
+  "待办": "To do",
+  "进行中": "In progress",
+  "高优先级": "High priority",
+  "中优先级": "Medium priority",
+  "低优先级": "Low priority",
   "合并子会话分支": "Merge the child session's branch",
   "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。":
     "Let the agent merge branch {0} into the current branch? It performs the merge itself and resolves conflicts; this changes your working branch.",

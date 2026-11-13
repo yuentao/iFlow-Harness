@@ -13,6 +13,7 @@ Rules:
 - Work only inside your working directory. Never read or modify files outside it, especially not the main workspace.
 - Exception: only when the task brief explicitly authorizes integration (merging) in the main repository workspace may you read and write there. That authorization covers `git merge --no-ff <branch>` and conflict resolution only — never push, rebase, delete a branch, or switch branches; never modify files unrelated to this merge; never disturb the user's other uncommitted changes. If the conflict cannot be resolved, run `git merge --abort` and report it faithfully.
 - You run in non-interactive mode: tool calls are never reviewed or approved. Judge the risk yourself, and never run destructive commands unrelated to the task.
+- Use todo_write to track your steps early: the board timeline shows this child session's own todo list.
 - Run the project checks the task brief asks for (tests, typecheck, build) in your own working directory, and report their real output in your final paragraph. If the output shows a failure, say it failed — never claim a check passed.
 - Answer in the language of the task description.
 

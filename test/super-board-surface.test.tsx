@@ -39,15 +39,17 @@ vi.mock("../webview/src/store", () => ({
   ),
 }));
 
-vi.mock("../webview/src/i18n", () => ({
-  t: (s: string, ...args: Array<string | number>) => {
+const translate = vi.hoisted(() =>
+  vi.fn((s: string, ...args: Array<string | number>) => {
     let out = s;
     args.forEach((arg, i) => {
       out = out.replaceAll(`{${i}}`, String(arg));
     });
     return out;
-  },
-}));
+  }),
+);
+
+vi.mock("../webview/src/i18n", () => ({ t: translate }));
 
 const send = vi.fn();
 
@@ -71,6 +73,7 @@ let container: HTMLDivElement;
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   send.mockReset();
+  translate.mockClear();
   class Observer {
     observe() {}
     unobserve() {}
@@ -328,6 +331,64 @@ describe("Super Agent 看板阶段轨", () => {
       expect(described).not.toContain(absent);
     }
     expect(labels().at(-1)!.textContent).toBe("启动");
+  });
+});
+
+describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
+  const longTodo =
+    "复核并汇报这一条特别长的中文任务描述，确认最后一条节点文本在任何窄屏下都完整可见而不是被硬裁掉";
+  const todos = [
+    { content: "读取现有实现", status: "completed" as const },
+    { content: "改写时间轴组件", status: "in_progress" as const, priority: "high" as const },
+    { content: "补充单元测试", status: "pending" as const },
+    { content: longTodo, status: "pending" as const },
+  ];
+
+  function rail(): HTMLElement {
+    const all = container.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    expect(all).toHaveLength(1);
+    return all[0]!;
+  }
+
+  it("只画 todo 节点，最后一条长文本完整可见且不被字典改写", () => {
+    render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
+    expand();
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes("修复登录跳转"),
+    );
+    expect(row).toBeTruthy();
+    act(() => row!.click());
+
+    const el = rail();
+    // 目标：任何窄屏下都不硬裁 —— 换行而不是 overflow-hidden / max-w-[…] 截断。
+    expect(el.className).not.toContain("overflow-hidden");
+    expect(el.className).not.toContain("max-w-[");
+    expect(el.className).toContain("flex-wrap");
+
+    // 4 条 todo = 4 个圆点；阶段事实不再占节点。
+    const dots = Array.from(el.querySelectorAll<HTMLElement>(".rounded-full"));
+    expect(dots).toHaveLength(4);
+
+    // 最后一条长文本完整出现在 DOM（不是省略号、不是被容器切掉）。
+    const labels = Array.from(el.querySelectorAll<HTMLElement>("span.text-ui-micro"));
+    const last = labels.at(-1)!;
+    expect(last.textContent).toBe(longTodo);
+    expect(last.className).toContain("break-words");
+    expect(last.className).not.toContain("whitespace-nowrap");
+
+    // 动态 todo 原文绝不过 i18n 字典（否则可能与字典 key 撞上被悄悄改写）。
+    const keys = translate.mock.calls.map((call) => call[0]);
+    for (const todo of todos) expect(keys).not.toContain(todo.content);
+    // 静态状态词照常过字典（可翻译）。
+    expect(keys).toContain("进行中");
+    expect(keys).toContain("高优先级");
+
+    // 阶段事实挪进 title / aria-label：派发、启动仍可查，todo 状态也在。
+    const described = el.getAttribute("aria-label")!;
+    expect(described).toContain("派发");
+    expect(described).toContain("启动");
+    expect(described).toContain("进行中");
+    expect(described).toContain(longTodo);
   });
 });
 
