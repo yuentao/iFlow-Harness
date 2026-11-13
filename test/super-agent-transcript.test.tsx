@@ -145,7 +145,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     expect(container.textContent).not.toContain("修复登录跳转");
     expect(container.textContent).not.toContain("查看实时操作");
 
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     expect(container.textContent).toContain("修复登录跳转");
     expect(container.textContent).toContain("运行中");
     // P1: actions live in the row detail, not on the line.
@@ -157,7 +157,7 @@ describe("Super Agent 子会话实时操作面板", () => {
 
   it("打开面板时本地无转录 → 向宿主拉取该子会话的全量转录", () => {
     render();
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickRow("修复登录跳转");
     clickText("查看实时操作");
 
@@ -173,7 +173,7 @@ describe("Super Agent 子会话实时操作面板", () => {
 
   it("有转录时渲染 user / tool / text 三类块（工具卡走真实 ToolCard）", () => {
     render({ "super-1": [USER_BLOCK, TOOL_BLOCK, TEXT_BLOCK] });
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickRow("修复登录跳转");
     clickText("查看实时操作");
 
@@ -196,7 +196,7 @@ describe("Super Agent 子会话实时操作面板", () => {
         { kind: "thought", id: "b-thought", text: "先确认 redirect 的判断条件" },
       ],
     });
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickRow("修复登录跳转");
     clickText("查看实时操作");
 
@@ -252,7 +252,7 @@ describe("Super Agent 子会话实时操作面板", () => {
 
   it("实时操作以弹框呈现，头部关闭后回到行内入口", () => {
     render({ "super-1": [USER_BLOCK] });
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickRow("修复登录跳转");
     clickText("查看实时操作");
 
@@ -275,7 +275,7 @@ describe("Super Agent 子会话实时操作面板", () => {
 describe("Super Agent 子会话合并入口", () => {
   it("运行中的子会话不允许合并（按钮置灰，但禁用原因可读）", () => {
     render();
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickRow("修复登录跳转");
 
     const button = [...container.querySelectorAll("button")].find(
@@ -293,7 +293,7 @@ describe("Super Agent 子会话合并入口", () => {
 
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
     render({}, { status: "completed" });
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickRow("修复登录跳转");
     clickText("让智能体合并");
 
@@ -327,7 +327,7 @@ describe("Super Agent 子会话中断确认", () => {
 
   it("行内中断先弹确认框，未确认前不发送 cancel", () => {
     render();
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickLabel("中断该子会话");
 
     expect(send).not.toHaveBeenCalled();
@@ -346,7 +346,7 @@ describe("Super Agent 子会话中断确认", () => {
 
   it("取消中断只关闭确认框，不发送任何消息", () => {
     render();
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickLabel("中断该子会话");
 
     clickTextInDialog("取消", document.querySelector('[role="alertdialog"]')!);
@@ -358,7 +358,7 @@ describe("Super Agent 子会话中断确认", () => {
   it("全部中断先弹确认框，确认后才发送 cancelAll", () => {
     render();
     // 「全部中断」住在展开面板的头部（折叠控件只有开关本身），先展开看板。
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
     clickLabel("全部中断");
 
     expect(send).not.toHaveBeenCalled();
@@ -415,7 +415,7 @@ describe("Super Agent 看板排序与折叠", () => {
       session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
       merged("super-merged", "已合并的任务", 1000),
     ]);
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
 
     // Folded away: only a one-line history row, no card, no title.
     expect(container.textContent).toContain("已完成的 1 个子会话");
@@ -430,7 +430,7 @@ describe("Super Agent 看板排序与折叠", () => {
       session({ id: "super-a", title: "任务甲", status: "running", createdAt: 1000 }),
       session({ id: "super-b", title: "任务乙", status: "running", createdAt: 2000 }),
     ]);
-    clickLabel("展开子会话看板");
+    clickLabel("子会话看板");
 
     const rowButton = (title: string) =>
       [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(title))!;
@@ -451,7 +451,7 @@ describe("Super Agent 看板排序与折叠", () => {
   it("有子会话等待回答时自动展开；全部已完成且已合并后自动收起", () => {
     const boardExpanded = () =>
       container
-        .querySelector('button[aria-label="展开子会话看板"]')
+        .querySelector('button[aria-label="子会话看板"]')
         ?.getAttribute("aria-expanded");
 
     renderMany([
