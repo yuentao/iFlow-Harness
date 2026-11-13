@@ -304,6 +304,7 @@ describe("ui kit guard", () => {
     const names = [
       "export function Button(",
       "export function IconButton(",
+      "export function DisclosureButton(",
       "export function TextInput(",
       "export function CommitTextInput(",
       "export function CommitNumberInput(",

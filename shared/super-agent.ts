@@ -116,6 +116,14 @@ export interface SuperPending {
   questions: UserQuestion[];
   /** 自动按「未回答」继续的绝对截止时间（epoch ms），看板渲染倒计时。 */
   deadline: number;
+  /**
+   * 应答窗口总时长（ms）—— 倒计时比例的分母。
+   *
+   * 必须由宿主按真实的超时常量写入：看板自己猜一个窗口（例如「5 分钟」）
+   * 只会和宿主实际的超时脱钩，用户看到的倒计时与「什么时候真的按未回答继续」
+   * 对不上。宿主常量见 `src/panel/super-agent.ts` 的 `SUPER_PENDING_TIMEOUT_MS`。
+   */
+  timeoutMs: number;
 }
 
 // ---------------------------------------------------------------------------

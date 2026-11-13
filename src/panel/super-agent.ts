@@ -1427,6 +1427,7 @@ export class SuperAgentManager {
         requestId,
         questions,
         deadline: Date.now() + SUPER_PENDING_TIMEOUT_MS,
+        timeoutMs: SUPER_PENDING_TIMEOUT_MS,
       };
       this.apply(id, { type: "needs_input", pending, at: Date.now() });
       this.notifyReport(id);

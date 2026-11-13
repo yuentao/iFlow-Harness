@@ -211,7 +211,7 @@ describe("Super Agent 子会话实时操作面板", () => {
 });
 
 describe("Super Agent 子会话合并入口", () => {
-  it("运行中的子会话不允许合并（按钮置灰）", () => {
+  it("运行中的子会话不允许合并（按钮置灰，但禁用原因可读）", () => {
     render();
     clickLabel("展开子会话看板");
     clickRow("修复登录跳转");
@@ -220,7 +220,13 @@ describe("Super Agent 子会话合并入口", () => {
       (b) => b.textContent === "让智能体合并",
     );
     expect(button).toBeTruthy();
-    expect((button as HTMLButtonElement).disabled).toBe(true);
+    // 置灰用 aria-disabled 而不是 disabled：kit 的 disabled 样式会吞掉
+    // pointer-events，title（唯一写着原因的地方）就读不到了。
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(button!.getAttribute("aria-disabled")).toBe("true");
+    expect(button!.getAttribute("title")).toContain("子会话还没结束，完成后再让智能体合并");
+    // 原因也直接写在行里。
+    expect(container.textContent).toContain("子会话还没结束，完成后再让智能体合并");
   });
 
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
@@ -236,7 +242,7 @@ describe("Super Agent 子会话合并入口", () => {
     expect(dialog!.textContent).toContain("iflow/super/a");
 
     const confirm = [...dialog!.querySelectorAll("button")].find(
-      (b) => b.textContent === "让智能体合并",
+      (b) => b.textContent === "让智能体合并分支",
     );
     expect(confirm).toBeTruthy();
     act(() => confirm!.click());
