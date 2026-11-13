@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -377,40 +377,44 @@ export function App() {
     return () => ro.disconnect();
   }, [hasPendingCard]);
 
-  // The Super Agent bar (top overlay) mirrors --pending-card-h in reverse: it
-  // floats over the scroller, so the transcript must reserve its height as top
-  // clearance or the first message would hide under it. Same var-on-the-wrapper
-  // technique; no children → the var is removed and the padding collapses.
+  // The Super Agent board is part of the header now. Collapsed it takes NO
+  // transcript space at all (--super-bar-h = 0 — the control lives inside the
+  // header row). Expanded, its popup panel hangs below the header and covers
+  // the top of the transcript, so its height is mirrored into --super-bar-h on
+  // the transcript wrapper: MessageList reserves it as top padding, and the
+  // Focus hint / pending-card overlay start below it instead of being painted
+  // over.
   //
-  // A callback ref, not a mount-only effect: the first render is the splash
-  // early-return, so the shell does not exist yet and a `[]` effect would run
-  // once with a null ref and never retry (the transcript then keeps 0px top
-  // clearance and the bar covers the first message).
-  const superBarObserver = useRef<ResizeObserver | null>(null);
-  const attachSuperBar = useCallback((bar: HTMLDivElement | null) => {
-    superBarObserver.current?.disconnect();
-    superBarObserver.current = null;
-    if (!bar) return;
-    // The bar's direct parent is the transcript wrapper the scroll column
-    // lives in (see the tree below); the ref may still be null on the very
-    // first commit of this subtree.
-    const wrapper = transcriptWrapRef.current ?? bar.parentElement;
+  // The panel node arrives through a stable callback ref (SuperAgentBoard
+  // reports it via panelRef) into state. A mount-only effect would be wrong
+  // here: the panel mounts inside the header, i.e. in the same commit that
+  // creates the transcript wrapper, and only an effect (after refs attach) can
+  // reliably read that wrapper.
+  const [superPanelNode, setSuperPanelNode] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const wrapper = transcriptWrapRef.current;
     if (!wrapper) return;
+    if (!superPanelNode) {
+      // Collapsed: the control is inside the header, so nothing covers the
+      // transcript top — drop the reserved clearance.
+      wrapper.style.removeProperty("--super-bar-h");
+      return;
+    }
     const apply = () => {
-      // The shell keeps an 8px pt-2 even with no board inside — measure only
-      // when a child is actually mounted, else clear the reserved clearance.
-      if (bar.firstElementChild && bar.offsetHeight > 0) {
-        wrapper.style.setProperty("--super-bar-h", `${bar.offsetHeight}px`);
-      } else {
-        wrapper.style.removeProperty("--super-bar-h");
-      }
+      // Reserve the panel's own height plus the 8px mt-2 gap above it and an
+      // 8px breathing gap below: the pending-card overlay starts at this
+      // offset, and butting it against the panel's border read as one merged
+      // stacked card.
+      wrapper.style.setProperty("--super-bar-h", `${superPanelNode.offsetHeight + 16}px`);
     };
     apply();
     const ro = new ResizeObserver(apply);
-    ro.observe(bar);
-    superBarObserver.current = ro;
-  }, []);
-  useEffect(() => () => superBarObserver.current?.disconnect(), []);
+    ro.observe(superPanelNode);
+    return () => {
+      ro.disconnect();
+      wrapper.style.removeProperty("--super-bar-h");
+    };
+  }, [superPanelNode]);
 
   // P1-3: screen-reader status announcements. The aria-live region re-announces
   // only when this string changes, so idle re-renders stay silent.
@@ -867,6 +871,12 @@ export function App() {
           ) : (
             statusChip(status ?? "connecting", compressing, isPlanMode(modes), superWaiting)
           )}
+          {/* Super Agent board: collapsed it is one inline control here in the
+              header; expanded it opens a popup panel under the header (the
+              header is its positioned ancestor). Renders nothing when no
+              child sessions exist, so the header never carries an empty
+              control. */}
+          <SuperAgentBoard panelRef={setSuperPanelNode} />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <IconButton
               icon={<Focus className={ICON_TOOLBAR} />}
@@ -987,18 +997,14 @@ export function App() {
           wrapper. pointer-events-none on the shell keeps the empty gutters
           transparent to scroll/click; each card re-enables pointer events on
           itself. */}
-      {/* The transcript column. The Super Agent bar floats at the TOP of the
-          transcript — the same overlay contract as the pending cards at the
-          bottom: absolute over the wrapper, so a delegated child appearing or
-          expanding never squeezes the message list. Its height is mirrored
-          into --super-bar-h (see the ResizeObserver above), which the Focus
-          hint rides below instead of being painted over by the bar. */}
+      {/* The transcript column. The Super Agent board is a header control; only
+          its expanded popup panel hangs over the top of the transcript, so
+          --super-bar-h (mirrored from that panel above) keeps the Focus hint
+          and the pending cards below it. Collapsed it is 0 — the header row
+          owns the control, and nothing covers the transcript. */}
       <div className="flex min-h-0 flex-1 flex-col">
         <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
           <MessageList />
-          <div ref={attachSuperBar} className="pointer-events-none absolute inset-x-0 top-0 z-30 pt-2">
-            <SuperAgentBoard />
-          </div>
           {focusMode && focusHint && (
             <div
               className="pointer-events-none absolute inset-x-0 z-30 flex justify-center"
@@ -1013,10 +1019,11 @@ export function App() {
           {(pendingApproval || pendingPlanExit || pendingQuestions) && (
             <div
               ref={pendingOverlayRef}
-              // Starts below the Super Agent bar: both layers are z-30 and the
-              // cards come later in the DOM, so an expanded board used to be
-              // painted over by the question card. Reserving the bar height
-              // keeps both usable (the card caps itself and scrolls).
+              // Starts below the Super Agent board's expanded popup panel:
+              // both layers are z-30 and the cards come later in the DOM, so
+              // without the reservation the question card would paint over
+              // the panel. Reserving the panel height keeps both usable (the
+              // card caps itself and scrolls). Collapsed → 0, no offset.
               className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex flex-col justify-end gap-2 pb-3"
               style={{ top: "var(--super-bar-h, 0px)" }}
             >

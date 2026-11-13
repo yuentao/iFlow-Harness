@@ -1,26 +1,25 @@
 // @vitest-environment jsdom
 /**
- * Super Agent board — surface material (acrylic + shadow).
+ * Super Agent board — header control + popup panel (structure and material).
  *
- * The board floats OVER the scrolling transcript, so its surface used to be
- * pinned to an opaque `bg-card` — any alpha let the message text underneath
- * ghost through. It is now an acrylic surface (`.super-board-surface` in
- * styles.css: own backdrop-filter + a denser tint mixed from the two
- * existing acrylic tints) with a shadow tier that follows the surface size.
+ * The board used to float over the scrolling transcript (an absolute overlay
+ * with `.super-board-surface`). It is now part of the header: collapsed it is
+ * one 28px inline control after the status chip; expanded it opens a popup
+ * panel anchored under the header (`absolute top-full`).
  *
- * These cases pin the MATERIAL contract, not the pixels:
- *  - the board root carries the acrylic surface class (no opaque card bg);
- *  - the collapsed shelf takes the float shadow tier, the expanded panel the
- *    panel tier (the float tier's spread stays inside a ~38px strip, while
- *    --shadow-panel's -24px spread collapses to nothing at that height);
- *  - the overlay contract survives the material change: pointer-events-auto,
- *    the stream-in entrance, the rounded/overflow-clipped box and the
- *    margins that keep the bar off the transcript edges.
+ * These cases pin the STRUCTURE + MATERIAL contract, not the pixels:
+ *  - the collapsed control is a header-height neutral pill (surface tint,
+ *    border, single hover surface) — not an acrylic overlay;
+ *  - the expanded panel uses the popup acrylic tint (`.acrylic-pop`), NOT
+ *    `.super-board-surface`: the panel lives inside the acrylic header, which
+ *    is a backdrop root, so its own backdrop-filter could only sample the
+ *    header subtree (the transcript text would ghost through sharp — the same
+ *    trap documented on `.acrylic-pop`);
+ *  - the panel keeps the panel-sized drop, the rounded/overflow-clipped box,
+ *    the stream-in entrance and the header-anchored position.
  *
- * The stylesheet half asserts the surface really is acrylic (it declares its
- * own backdrop-filter — the board has no backdrop-filter ancestor, so the
- * blur samples the transcript for real) and that it degrades to an OPAQUE
- * card colour where backdrop-filter is unsupported.
+ * The stylesheet half still pins the `.super-board-surface` rules (the class
+ * stays available) and its opaque fallback where backdrop-filter is missing.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,6 +27,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SuperSessionUi } from "../shared/super-agent";
+import { App } from "../webview/src/App";
 import { SuperAgentBoard } from "../webview/src/components/SuperAgentBoard";
 
 const store = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
@@ -96,53 +96,77 @@ function render(sessions: SuperSessionUi[] = [session()]): void {
   act(() => root.render(<SuperAgentBoard />));
 }
 
-/** The board's root element — the only child the component renders. */
-function boardRoot(): HTMLElement {
-  const el = container.firstElementChild;
+/** Collapsed form: the one inline control in the header. */
+function control(): HTMLButtonElement {
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="展开子会话看板"]');
   expect(el).toBeTruthy();
-  return el as HTMLElement;
+  return el!;
+}
+
+/** Expanded form: the popup panel (labeled region) — null while collapsed. */
+function panel(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
+}
+
+function panelRoot(): HTMLElement {
+  const el = panel();
+  expect(el).toBeTruthy();
+  return el!;
 }
 
 function expand(): void {
-  const button = container.querySelector<HTMLButtonElement>('button[aria-label="展开子会话看板"]');
-  expect(button).toBeTruthy();
-  act(() => button!.click());
+  act(() => control().click());
 }
 
 describe("Super Agent 看板表面材质", () => {
-  it("根节点是亚克力表面，不再是不透明卡片底", () => {
+  it("折叠控件是顶栏内的中性控件，不再是亚克力浮层", () => {
     render();
-    const el = boardRoot();
-    expect(el.classList.contains("super-board-surface")).toBe(true);
-    // The old opaque card background must be gone — it is what the acrylic
-    // surface replaces.
+    const el = control();
+    // Header control species: 28px tall, control radius, neutral field tint.
+    expect(el.classList.contains("h-7")).toBe(true);
+    expect(el.classList.contains("rounded-md")).toBe(true);
+    expect(el.classList.contains("border-border/70")).toBe(true);
+    expect(el.classList.contains("bg-surface/60")).toBe(true);
+    // The old floating-shelf material is gone from the collapsed form.
+    expect(el.classList.contains("super-board-surface")).toBe(false);
+    expect(el.classList.contains("shadow-panel")).toBe(false);
+  });
+
+  it("展开面板走弹层亚克力材质（在亚克力 header 内，自带 blur 会失效）", () => {
+    render();
+    expect(panel()).toBeNull();
+
+    expand();
+    const el = panelRoot();
+    expect(el.classList.contains("acrylic-pop")).toBe(true);
+    // Nested inside the acrylic header → its own backdrop-filter could only
+    // sample the header subtree and the transcript text would ghost through
+    // sharp, so the near-opaque popup tint carries readability instead.
+    expect(el.classList.contains("super-board-surface")).toBe(false);
     expect(el.classList.contains("bg-card")).toBe(false);
   });
 
-  it("折叠态取浮层阴影档，展开态换面板档", () => {
+  it("展开面板锚定在 header 下方，保留入场动画、圆角裁切与留白", () => {
     render();
-    const collapsed = boardRoot();
-    expect(collapsed.classList.contains("shadow-float")).toBe(true);
-    expect(collapsed.classList.contains("shadow-panel")).toBe(false);
-
     expand();
-    const expanded = boardRoot();
-    expect(expanded.classList.contains("shadow-panel")).toBe(true);
-    expect(expanded.classList.contains("shadow-float")).toBe(false);
-  });
-
-  it("保留浮层契约：可点击、入场动画、圆角裁切与边距", () => {
-    render();
-    const el = boardRoot();
-    // The bar sits inside App's pointer-events-none overlay shell, so it has
-    // to re-enable hits for itself.
-    expect(el.classList.contains("pointer-events-auto")).toBe(true);
-    expect(el.classList.contains("stream-in")).toBe(true);
-    expect(el.classList.contains("overflow-hidden")).toBe(true);
-    expect(el.classList.contains("rounded-lg")).toBe(true);
-    for (const margin of ["mx-3", "mt-2", "mb-2"]) {
-      expect(el.classList.contains(margin)).toBe(true);
+    const el = panelRoot();
+    for (const cls of [
+      "absolute",
+      "top-full",
+      "inset-x-3",
+      "z-40",
+      "mt-2",
+      "stream-in",
+      "overflow-hidden",
+      "rounded-lg",
+    ]) {
+      expect(el.classList.contains(cls)).toBe(true);
     }
+    // Body keeps the breathing room: px-3 py-2 on the scroll container.
+    const body = el.lastElementChild as HTMLElement;
+    expect(body.className).toContain("px-3");
+    expect(body.className).toContain("py-2");
+    expect(body.className).toContain("divide-y");
   });
 });
 
@@ -463,12 +487,125 @@ describe("Super Agent 看板子会话行 hover 表面", () => {
     expect(cls(cancel!)).toContain("hover:text-destructive");
   });
 
-  it("看板头部折叠开关保持默认的自绘 hover（不受行级收敛影响）", () => {
+  it("顶栏折叠控件是唯一 hover 表面（hover:bg-accent/40，内部不再叠第二层）", () => {
     render();
-    const headerSwitch = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="展开子会话看板"]',
+    const headerSwitch = control();
+    expect(cls(headerSwitch)).toContain("hover:bg-accent/40");
+    // 旧的 DisclosureButton 自绘档不再出现。
+    expect(cls(headerSwitch)).not.toContain("hover:bg-accent/60");
+    // 控件内部（图标、计数 chip、免确认徽标）没有自己的 hover 底色。
+    const nested = [headerSwitch, ...Array.from(headerSwitch.querySelectorAll("*"))].filter((el) =>
+      cls(el).includes("hover:bg-"),
     );
-    expect(headerSwitch).toBeTruthy();
-    expect(cls(headerSwitch!)).toContain("hover:bg-accent/60");
+    expect(nested).toHaveLength(1);
+    expect(nested[0]).toBe(headerSwitch);
+  });
+});
+
+describe("Super Agent 看板并入顶栏（App 级结构）", () => {
+  /** Full store shape App needs (same mock surface as super-waiting-busy). */
+  function renderApp(sessions: SuperSessionUi[]): void {
+    store.current = {
+      state: {
+        blocks: [],
+        status: "idle",
+        errorMessage: null,
+        stopReason: null,
+        sessionId: "s1",
+        modes: null,
+        commands: [],
+        skills: [],
+        models: [],
+        currentModelId: null,
+        thinkLevel: "auto",
+        pendingApproval: null,
+        pendingPlanExit: null,
+        pendingQuestions: null,
+        pendingProfileSwitch: null,
+        auth: {
+          authenticated: true,
+          needsSetup: false,
+          saved: null,
+          profiles: [],
+          onboardingDismissed: true,
+        },
+        sessions: [],
+        activeSessionId: null,
+        replaying: false,
+        initializing: false,
+        compressing: false,
+        superWaiting: false,
+        superSessions: sessions,
+        queue: [],
+        queuePaused: false,
+        checkpoints: [],
+        nextStepSuggestions: [],
+        nextStepLoading: false,
+      },
+      send,
+      toggleFocusMode: () => {},
+      focusMode: false,
+      headerScrolled: false,
+      editorTheme: "light",
+      pending: null,
+      toasts: [],
+      notify: () => {},
+      dismissToast: () => {},
+      clearMemoryDraft: () => {},
+      memoryDraftRequest: null,
+      superTranscripts: {},
+      hostSettings: {
+        theme: "light",
+        auroraIntensity: 35,
+        uiFontSize: "standard",
+        uiDensity: "standard",
+      },
+    };
+    act(() => root.render(<App />));
+  }
+
+  const boardControl = (): HTMLButtonElement | null =>
+    container.querySelector<HTMLButtonElement>('button[aria-label="展开子会话看板"]');
+
+  it("没有子会话时顶栏不渲染看板控件", () => {
+    renderApp([]);
+    expect(boardControl()).toBeNull();
+  });
+
+  it("折叠控件在 header 内，不再挂在转录顶部的绝对定位浮层里", () => {
+    renderApp([session()]);
+    const control = boardControl();
+    expect(control).toBeTruthy();
+    // 顶栏的一部分：header 里有它。
+    expect(control!.closest("header")).toBeTruthy();
+    // 旧的转录 overlay 壳（pointer-events-none absolute inset-x-0 top-0）已删除。
+    expect(container.querySelector(".pointer-events-none.absolute.inset-x-0.top-0")).toBeNull();
+    // 折叠态不渲染面板。
+    expect(container.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+  });
+
+  it("点击折叠控件展开面板，Esc 关闭面板", () => {
+    renderApp([session()]);
+    act(() => boardControl()!.click());
+    const panel = container.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
+    expect(panel).toBeTruthy();
+    // 面板挂在 header 下方（absolute top-full），不是转录 overlay。
+    expect(panel!.className).toContain("top-full");
+    expect(panel!.closest("header")).toBeTruthy();
+
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(container.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+    // 控件本身仍在顶栏里（只收起，不消失）。
+    expect(boardControl()).toBeTruthy();
+  });
+
+  it("窄屏只隐藏「子会话」文案，控件本身保留", () => {
+    renderApp([session()]);
+    const control = boardControl()!;
+    const label = [...control.querySelectorAll("span")].find((span) => span.textContent === "子会话");
+    expect(label).toBeTruthy();
+    expect(label!.className).toContain("@max-[380px]:hidden");
   });
 });

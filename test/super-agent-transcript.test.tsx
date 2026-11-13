@@ -357,6 +357,8 @@ describe("Super Agent 子会话中断确认", () => {
 
   it("全部中断先弹确认框，确认后才发送 cancelAll", () => {
     render();
+    // 「全部中断」住在展开面板的头部（折叠控件只有开关本身），先展开看板。
+    clickLabel("展开子会话看板");
     clickLabel("全部中断");
 
     expect(send).not.toHaveBeenCalled();
