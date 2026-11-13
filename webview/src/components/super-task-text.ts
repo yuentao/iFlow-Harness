@@ -562,7 +562,7 @@ export function previewSuperTaskBlocks(
 
   const out: SuperTaskBlock[] = [];
   let used = 0;
-  /** 已给出的块合计字数（含末尾省略号），用于算「还有 N 字」。 */
+  /** 已给出的块合计原始字数（块边界路径给出的都是完整块，不含省略号）。 */
   const shownChars = (): number => out.reduce((sum, block) => sum + blockLength(block), 0);
 
   for (const block of blocks) {
@@ -574,16 +574,25 @@ export function previewSuperTaskBlocks(
     }
     if (out.length === 0) {
       // 第一块就超预算：切在句子边界，末尾补省略号。
-      const cut =
-        block.kind === "code"
-          ? { ...block, text: `${cutAtBoundary(block.text, budget)}…` }
-          : { ...block, inlines: cutInlines(block.inlines, budget) };
+      // 统计口径：`consumed` 是**原样保留的原始字数**，省略号只是标记，不计入
+      // 展示内容 —— 否则「还有 N 字」会比实际丢弃的字数少 1。
+      let cut: SuperTaskBlock;
+      let consumed: number;
+      if (block.kind === "code") {
+        const head = cutAtBoundary(block.text, budget);
+        cut = { ...block, text: `${head}…` };
+        consumed = head.length;
+      } else {
+        const result = cutInlines(block.inlines, budget);
+        cut = { ...block, inlines: result.inlines };
+        consumed = result.consumed;
+      }
       out.push(cut);
       return {
         blocks: out,
         truncated: true,
         cutText: true,
-        hiddenChars: Math.max(0, total - shownChars()),
+        hiddenChars: Math.max(0, total - consumed),
       };
     }
     // 块边界截断：给出去的块都是完整的，由卡片另外提示「还有更多」。
@@ -598,26 +607,65 @@ export function previewSuperTaskBlocks(
   return { blocks: out, truncated: false, cutText: false, hiddenChars: 0 };
 }
 
-/** 按字符预算截断行内片段。 */
-function cutInlines(inlines: SuperTaskInline[], budget: number): SuperTaskInline[] {
+/** 把片段截到 `head` 并补省略号（strong 需要重切内层）。 */
+function cutInlineAt(inline: SuperTaskInline, head: string): SuperTaskInline {
+  const text = `${head}…`;
+  if (inline.kind === "strong") return { kind: "strong", text, inlines: splitSuperTaskInlines(text) };
+  return inline.kind === "code" ? { kind: "code", text } : { kind: "text", text };
+}
+
+/**
+ * 按字符预算截断行内片段。
+ *
+ * 溢出时**必须留下可见的截断标记**：末尾补省略号。旧实现在预算恰好在片段边界
+ * 用满时直接 break，尾部片段整段消失而 `cutText` 仍为 true —— 界面上既没有
+ * 省略号也没有提示，读者以为任务书就到那儿了。
+ *
+ * `consumed` 是保留的**原始字数**（省略号不算），供「还有 N 字」与展示一致。
+ */
+function cutInlines(
+  inlines: SuperTaskInline[],
+  budget: number,
+): { inlines: SuperTaskInline[]; consumed: number } {
   const out: SuperTaskInline[] = [];
   let used = 0;
-  for (const inline of inlines) {
-    if (used >= budget) break;
+  let cutMid = false;
+  let index = 0;
+
+  for (; index < inlines.length; index++) {
+    const inline = inlines[index]!;
     const remain = budget - used;
+    if (remain <= 0) break;
     if (inline.text.length <= remain) {
       out.push(inline);
       used += inline.text.length;
       continue;
     }
-    const cut = `${cutAtBoundary(inline.text, remain)}…`;
-    out.push(
-      inline.kind === "strong"
-        ? { kind: "strong", text: cut, inlines: splitSuperTaskInlines(cut) }
-        : { kind: inline.kind, text: cut },
-    );
-    used += remain;
+    if (inline.kind === "strong") {
+      // 递归截断内层：不要把它 join 回纯文本再重切（那样 `npm test` 会失去
+      // 行内代码标记），内层自己会补省略号。
+      const inner = cutInlines(inline.inlines, remain);
+      out.push({
+        kind: "strong",
+        text: inner.inlines.map((item) => item.text).join(""),
+        inlines: inner.inlines,
+      });
+      used += inner.consumed;
+    } else {
+      const head = cutAtBoundary(inline.text, remain);
+      out.push(cutInlineAt(inline, head));
+      used += head.length;
+    }
+    cutMid = true;
+    index += 1;
     break;
   }
-  return out;
+
+  // 还有片段没展示：含「预算正好用满、末尾片段本身完整」这种边界 —— 也要补
+  // 省略号，否则被丢掉的尾部在界面上无声无息。省略号单独成段，不改进已经
+  // 完整给出的片段（塞进行内代码里会读成「这段代码本身被切了」）。
+  const hasRemainder = index < inlines.length;
+  if (!cutMid && hasRemainder) out.push({ kind: "text", text: "…" });
+
+  return { inlines: out, consumed: used };
 }

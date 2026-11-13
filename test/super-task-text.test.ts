@@ -264,4 +264,55 @@ describe("previewSuperTaskBlocks", () => {
     expect(text.length).toBeLessThanOrEqual(61);
     expect(text.endsWith("…")).toBe(true);
   });
+
+  it("预算恰好在行内片段边界用满时，末尾补省略号且剩余字数如实统计", () => {
+    // 200 个「甲」正好用满预算，后面还有一段行内代码 —— 旧实现把它整段静默丢掉。
+    const body = `${"甲".repeat(200)}\`npm test\``;
+    const blocks = parseSuperTaskText(body);
+    const preview = previewSuperTaskBlocks(blocks, 200, 3);
+    expect(preview.truncated).toBe(true);
+    expect(preview.cutText).toBe(true);
+    const first = preview.blocks[0];
+    const rendered =
+      first?.kind === "code" ? first.text : (first?.inlines ?? []).map((inline) => inline.text).join("");
+    // 截断必须可见。
+    expect(rendered.endsWith("…")).toBe(true);
+    // 丢弃的正是 `npm test` 那 8 个字，省略号不算。
+    expect(preview.hiddenChars).toBe("npm test".length);
+  });
+
+  it("正文长度恰好等于预算时不截断", () => {
+    const blocks = parseSuperTaskText("甲".repeat(200));
+    const preview = previewSuperTaskBlocks(blocks, 200, 3);
+    expect(preview.truncated).toBe(false);
+    expect(preview.cutText).toBe(false);
+    expect(preview.hiddenChars).toBe(0);
+  });
+
+  it("块边界截断不补省略号，但剩余字数大于 0", () => {
+    const blocks = parseSuperTaskText("- 甲项\n- 乙项\n- 丙项\n- 丁项");
+    const preview = previewSuperTaskBlocks(blocks, 4, 2);
+    expect(preview.cutText).toBe(false);
+    expect(preview.hiddenChars).toBe(4);
+    const tail =
+      preview.blocks[1]?.kind === "code"
+        ? preview.blocks[1].text
+        : (preview.blocks[1]?.inlines ?? []).map((inline) => inline.text).join("");
+    expect(tail.endsWith("…")).toBe(false);
+  });
+
+  it("strong 内嵌行内代码在预算边界上不被丢掉", () => {
+    const body = `${"甲".repeat(189)}**先跑 \`npm test\` 再继续**`;
+    const blocks = parseSuperTaskText(body);
+    const preview = previewSuperTaskBlocks(blocks, 200, 3);
+    expect(preview.cutText).toBe(true);
+    const first = preview.blocks[0];
+    const strong = first?.kind === "paragraph" ? first.inlines[1] : undefined;
+    expect(strong?.kind).toBe("strong");
+    const inner = strong?.kind === "strong" ? strong.inlines : [];
+    // 内嵌代码仍在，未被截掉；被切掉的只是它后面的「 再继续」。
+    expect(inner.map((inline) => inline.kind)).toEqual(["text", "code", "text"]);
+    expect(inner[1]?.text).toBe("npm test");
+    expect(preview.hiddenChars).toBe(" 再继续".length);
+  });
 });
