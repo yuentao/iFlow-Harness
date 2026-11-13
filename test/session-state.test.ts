@@ -10,6 +10,7 @@ import {
   dropSessionUpdate,
   estimateSessionUsage,
   estimateTokens,
+  estimateTokensChunked,
   estimateMcpContextTokens,
   findToolBlockById,
   formatToolInput,
@@ -1847,6 +1848,34 @@ describe("estimateTokens", () => {
     const cjk = (text.match(/[　-鿿぀-ヿ＀-￯]/g) ?? []).length;
     const other = text.length - cjk;
     expect(got).toBe(Math.ceil(cjk * 1.5 + other * 0.25));
+  });
+});
+
+describe("estimateTokensChunked（不阻塞扩展宿主的事件循环）", () => {
+  it("长文本的估算结果与一次性估算同量级", async () => {
+    const text = "这是一段用于估算的中文文本。".repeat(2000);
+    const chunked = await estimateTokensChunked(text, 8000);
+    const whole = estimateTokens(text);
+    expect(chunked).toBeGreaterThan(0);
+    // 分块边界的误差只有常数级：两者必须同量级（不是精确相等）。
+    expect(Math.abs(chunked - whole) / whole).toBeLessThan(0.05);
+  });
+
+  it("估算期间让出事件循环（定时器能插进来跑）", async () => {
+    let ticked = false;
+    setTimeout(() => {
+      ticked = true;
+    }, 0);
+    const text = "x".repeat(40_000);
+    const tokens = await estimateTokensChunked(text, 8000);
+    expect(tokens).toBeGreaterThan(0);
+    // 全量 BPE 是一次几百毫秒的同步尖峰；分块版本在块与块之间让出事件循环，
+    // 所以排在它前面的定时器有机会跑（= 扩展宿主没有被独占）。
+    expect(ticked).toBe(true);
+  });
+
+  it("空文本返回 0（不触发任何让出）", async () => {
+    expect(await estimateTokensChunked("")).toBe(0);
   });
 });
 

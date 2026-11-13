@@ -886,18 +886,42 @@ export async function removeWorktree(
 /**
  * 把子会话的分支合并回当前分支。
  *
- * 合并失败（冲突）时执行 `git merge --abort` 还原，绝不把用户仓库留在冲突
- * 状态里 —— 冲突由用户在自己的终端里解决。
+ * **只撤销我们自己的合并。** `git merge --abort` 撤销的是「当前仓库里进行中
+ * 的那次合并」—— 如果用户此刻正在他自己的终端里合并，我们这次合并失败后
+ * 无条件 abort 就会把**用户的那次合并**一起撤销掉：用户解决到一半的冲突、
+ * 已暂存的改动、暂存区的状态，全没了。那是替用户毁掉工作。
+ *
+ * 所以这里有两道闸：
+ *  1. 合并**之前**先探测中间态：仓库已经停在 merge / rebase / cherry-pick
+ *     里（那是用户的操作）就根本**不启动**合并，直接如实报错；
+ *  2. 合并**失败之后**只有当「我们启动前没有 MERGE_HEAD、现在有」时才
+ *     abort —— 那说明这个中间态确实是本次合并留下的，撤销它才是清理我们的
+ *     烂摊子，而不是动用户的东西。
+ *
+ * 预演冲突的路径压根不会走到这里（`previewMerge` 发现冲突时连 merge 都不
+ * 启动），仓库从头到尾没被碰过。
  */
 export async function mergeBranch(options: {
   repoRoot: string;
   branch: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
+  // 闸 1：用户正在合并/变基/拣选 → 绝不叠加第二次合并，更不碰他的中间态。
+  const before = await detectInProgress(options.repoRoot);
+  if (before) {
+    return {
+      ok: false,
+      error: `the repository is already in the middle of a ${before}; the merge was not started`,
+    };
+  }
   try {
     await git(options.repoRoot, ["merge", "--no-ff", "--no-edit", options.branch]);
     return { ok: true };
   } catch (error) {
-    await git(options.repoRoot, ["merge", "--abort"]).catch(() => undefined);
+    // 闸 2：只有当 MERGE_HEAD 是本次合并留下的才撤销它。
+    const after = await detectInProgress(options.repoRoot);
+    if (after === "merge") {
+      await git(options.repoRoot, ["merge", "--abort"]).catch(() => undefined);
+    }
     return { ok: false, error: errorMessage(error) };
   }
 }
@@ -985,6 +1009,34 @@ export interface WorkingTreeState {
   untrackedCount: number;
 }
 
+/**
+ * 仓库是否停在 merge / rebase / cherry-pick 中间态（只读探测）。
+ *
+ * 判据是 git 自己的中间态标记文件：MERGE_HEAD / REBASE_HEAD /
+ * CHERRY_PICK_HEAD 存在，就说明**有人**（用户或我们）正在这个仓库里做一次
+ * 合并 / 变基 / 拣选。
+ *
+ * 单独抽出来的原因：自动合并必须能区分「这个中间态是我们自己这次合并留下的」
+ * 与「这是用户先前就在做的」。前者可以撤销，后者绝不能碰 —— 撤销用户的
+ * 合并等于替用户毁掉工作。
+ */
+export async function detectInProgress(
+  repoRoot: string,
+): Promise<WorkingTreeState["inProgress"]> {
+  const has = async (ref: string): Promise<boolean> => {
+    try {
+      await git(repoRoot, ["rev-parse", "-q", "--verify", ref]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await has("MERGE_HEAD")) return "merge";
+  if (await has("REBASE_HEAD")) return "rebase";
+  if (await has("CHERRY_PICK_HEAD")) return "cherry-pick";
+  return null;
+}
+
 export async function inspectWorkingTree(repoRoot: string): Promise<WorkingTreeState> {
   // `git diff HEAD` 覆盖已暂存 + 未暂存的已跟踪改动（不含未跟踪文件）；
   // `--no-renames` 让重命名拆成删除 + 新增两侧，两边路径都进集合（保守）。
@@ -1007,18 +1059,7 @@ export async function inspectWorkingTree(repoRoot: string): Promise<WorkingTreeS
       untrackedCount: 0,
     };
   }
-  const has = async (ref: string): Promise<boolean> => {
-    try {
-      await git(repoRoot, ["rev-parse", "-q", "--verify", ref]);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  let inProgress: WorkingTreeState["inProgress"] = null;
-  if (await has("MERGE_HEAD")) inProgress = "merge";
-  else if (await has("REBASE_HEAD")) inProgress = "rebase";
-  else if (await has("CHERRY_PICK_HEAD")) inProgress = "cherry-pick";
+  const inProgress = await detectInProgress(repoRoot);
   const dirtyCount = trackedPaths.length + untrackedCount;
   return {
     available: true,

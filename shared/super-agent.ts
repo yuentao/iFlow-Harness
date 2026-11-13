@@ -640,6 +640,44 @@ export interface PersistedSuperSession {
   reports: SuperReport[];
 }
 
+/**
+ * 子会话归档的「关键内容」指纹。
+ *
+ * 归档的写放大主要来自高频事件：看板每变一次（进度帧每秒几次）就整份重写
+ * 一次，而进度字段根本不在归档里。宿主用它把变化分成两类：
+ *
+ *  - 指纹变了 → 有**必须立刻落盘**的变化：子会话集合、终态、改动去向
+ *    （集成结果）、归属的主会话。扩展随时可能被重启，这些拖不得；
+ *  - 指纹没变 → 只有展示性字段（汇报历史、摘要、更新时间戳）变了，节流写即可。
+ *
+ * 刻意**不**纳入 `summary` / `reports` / `updatedAt`：它们每次进度帧都在变，
+ * 纳入指纹等于节流失效。
+ */
+export function superArchiveFingerprint(
+  archives: { mainSessionId: string; sessions: readonly PersistedSuperSession[] }[],
+): string {
+  const parts: string[] = [];
+  for (const archive of archives) {
+    parts.push(`owner:${archive.mainSessionId}`);
+    for (const session of archive.sessions) {
+      parts.push(
+        [
+          session.id,
+          session.status,
+          session.mainSessionId ?? "",
+          session.isolation.kind,
+          session.isolation.branch ?? "",
+          session.integration?.state ?? "",
+          session.integration?.needsAction ? "1" : "0",
+          session.attempts ?? "",
+          session.endedAt ?? "",
+        ].join("|"),
+      );
+    }
+  }
+  return parts.join("\n");
+}
+
 /** 活着的子会话 → 落盘记录（剥掉运行期字段）。 */
 export function toPersistedSuperSession(session: SuperSessionUi): PersistedSuperSession {
   return {

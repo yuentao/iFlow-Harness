@@ -13,11 +13,12 @@
  * 归档按**主会话**分文件：一个主会话一个 JSON，写在扩展自己的存储目录
  * （不是仓库里 —— 归档是本机状态，不该污染用户的 git 工作区）。
  *
- * 写入用「临时文件 + rename」的原子替换：进程在写到一半被杀时，磁盘上要么是
- * 旧内容，要么是新内容，不会留下半截 JSON（与转录文件的写法一致）。
+ * 写入用「唯一临时文件 + rename」的原子替换：进程在写到一半被杀时，磁盘上
+ * 要么是旧内容，要么是新内容，不会留下半截 JSON（与转录文件的写法一致）。
  */
 
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { PersistedSuperSession } from "../../shared/super-agent.js";
 
@@ -27,6 +28,34 @@ const ARCHIVE_VERSION = 1;
 interface ArchiveFile {
   version: number;
   sessions: PersistedSuperSession[];
+}
+
+/**
+ * 归档读不出来的原因。
+ *
+ * 「读不出来」与「本来就没有子会话」是两件完全不同的事：后者是正常的空
+ * 归档，前者是**故障**。旧实现把两者都返回成空数组，于是损坏的归档会被
+ * 静默当成「这个会话从没派发过子会话」—— 用户重启后面板空空，且完全看不出
+ * 发生过什么。现在读侧如实区分，并把损坏的原件留底。
+ */
+export type SuperArchiveDamage =
+  /** JSON 解析失败（写到一半被 kill / 并发写交错）。 */
+  | "corrupt-json"
+  /** 结构不对（不是归档文件的形状）。 */
+  | "bad-shape"
+  /** 版本号不认识（多半来自更高版本的扩展）。 */
+  | "unknown-version";
+
+/** 一次归档读取的结果。 */
+export interface SuperSessionArchiveRead {
+  /** 能读出来的子会话记录（损坏时为空 —— 但 `damaged` 为 true）。 */
+  sessions: PersistedSuperSession[];
+  /** 归档是否**读不出来**（false = 真的没有子会话）。 */
+  damaged: boolean;
+  /** 读不出来的原因（damaged 为 true 时有值）。 */
+  damage?: SuperArchiveDamage;
+  /** 损坏原件的备份路径（原件仍在原处，备份是它的一份副本）。 */
+  backupPath?: string;
 }
 
 /** 归档目录（扩展存储下的 `super-sessions`）。 */
@@ -50,42 +79,135 @@ function archivePath(baseDir: string, sessionId: string): string {
 }
 
 /**
+ * 每个归档文件的**串行写链**。
+ *
+ * 同一个主会话的多次写必须排队：并发写同一个目标文件时，即使每次都用
+ * 「临时文件 + rename」，两次 rename 之间的顺序也不受保证 —— 后写的可能
+ * 先落地，写出的内容就是**上一次**的（丢更新）；而共享固定临时文件名时更
+ * 糟：两次写共用一个临时文件，A 写一半 B 覆写，A 再 rename → 落盘的是
+ * 交错出来的半截 JSON。
+ *
+ * 按目标路径排队是最小的粒度：不同主会话的归档互不相干，可以并行写。
+ */
+const pendingWrites = new Map<string, Promise<void>>();
+
+/**
+ * 每个归档文件**最后一次成功写入**的内容。
+ *
+ * 归档的写放大主要来自高频事件：看板每变一次（进度帧每秒几次）就整份重写
+ * 一次，而进度字段根本不在归档里。逐字比对内容，没变就不写 —— 省掉的是
+ * 纯粹的磁盘 IO，不影响任何语义。
+ */
+const lastWritten = new Map<string, string>();
+
+/** 临时文件名的进程内序号（与 pid 一起保证唯一）。 */
+let tmpSeq = 0;
+
+/**
  * 读一个主会话的子会话归档。
  *
- * 文件不存在（从未派发过子会话）返回空数组；文件损坏（写到一半被 kill）
- * 同样返回空数组 —— 归档是辅助信息，读不出来不该拖垮整个恢复流程。
+ * 文件不存在（从未派发过子会话）返回「没有子会话」—— 这不是故障。
+ *
+ * 文件读不出来（JSON 损坏 / 结构不对 / 版本不认识）时**如实返回损坏状态**：
+ * 会话列表为空，但 `damaged` 为 true，调用方必须把它当故障提示用户，绝不能
+ * 伪装成「这个会话没有子会话」。损坏的原件会被复制一份 `.corrupt-<时间戳>`
+ * 留底（原文件保持在原处，这样下一次读取仍然能报出「损坏」，而不是变成
+ * 「什么都没有」）。
  */
 export async function readSuperSessionArchive(
   baseDir: string,
   sessionId: string,
-): Promise<PersistedSuperSession[]> {
+): Promise<SuperSessionArchiveRead> {
+  const target = archivePath(baseDir, sessionId);
+  let raw: string;
   try {
-    const raw = await readFile(archivePath(baseDir, sessionId), "utf8");
-    const parsed = JSON.parse(raw) as ArchiveFile;
-    if (parsed?.version !== ARCHIVE_VERSION || !Array.isArray(parsed.sessions)) return [];
-    return parsed.sessions.filter((s): s is PersistedSuperSession => !!s && typeof s.id === "string");
+    raw = await readFile(target, "utf8");
   } catch {
-    return []; // ENOENT（还没归档过）或损坏
+    return { sessions: [], damaged: false }; // ENOENT：还没归档过
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return await damaged(target, "corrupt-json");
+  }
+  const file = parsed as Partial<ArchiveFile> | null;
+  if (!file || typeof file !== "object") {
+    return await damaged(target, "bad-shape");
+  }
+  if (file.version !== ARCHIVE_VERSION) {
+    // 版本不认识多半来自更高版本的扩展：文件本身没坏，别把它当损坏留底，
+    // 但仍然要如实告诉上层「这份归档没读出来」。
+    return { sessions: [], damaged: true, damage: "unknown-version" };
+  }
+  if (!Array.isArray(file.sessions)) {
+    return await damaged(target, "bad-shape");
+  }
+  return {
+    sessions: file.sessions.filter((s): s is PersistedSuperSession => !!s && typeof s.id === "string"),
+    damaged: false,
+  };
 }
 
-/** 原子写一个主会话的子会话归档。 */
+/** 读不出来时的统一返回：留底损坏原件 + 如实标记损坏。 */
+async function damaged(target: string, damage: SuperArchiveDamage): Promise<SuperSessionArchiveRead> {
+  const backupPath = `${target}.corrupt-${Date.now()}`;
+  try {
+    await copyFile(target, backupPath);
+  } catch {
+    // 留底失败不掩盖损坏本身 —— 如实报告损坏，备份路径就不给。
+    return { sessions: [], damaged: true, damage };
+  }
+  return { sessions: [], damaged: true, damage, backupPath };
+}
+
+/**
+ * 原子写一个主会话的子会话归档。
+ *
+ * 三道保障：
+ *  1. 临时文件名**唯一**（pid + 序号）：并发写不会互相踩临时文件；
+ *  2. 同一个目标的写**串行**排队（见 `pendingWrites`）；
+ *  3. 内容与上次成功写入**逐字相同**时直接跳过（见 `lastWritten`）。
+ *
+ * 写完之后 rename 覆盖目标文件 —— 读者要么看到旧内容，要么看到新内容。
+ */
 export async function writeSuperSessionArchive(
   baseDir: string,
   sessionId: string,
   sessions: PersistedSuperSession[],
 ): Promise<void> {
-  const dir = superSessionsDir(baseDir);
-  const target = path.join(dir, superSessionFileName(sessionId));
-  const tmp = `${target}.tmp`;
-  await mkdir(dir, { recursive: true });
-  await writeFile(tmp, JSON.stringify({ version: ARCHIVE_VERSION, sessions } satisfies ArchiveFile), "utf8");
-  await rename(tmp, target);
+  const target = archivePath(baseDir, sessionId);
+  const payload = JSON.stringify({ version: ARCHIVE_VERSION, sessions } satisfies ArchiveFile);
+  // 内容没变就不写 —— 但要先确认文件还在：文件可能已被会话删除 / 孤儿清扫
+  // 删掉，这时「跳过」会让归档再也回不来。
+  if (lastWritten.get(target) === payload && existsSync(target)) return;
+  const previous = pendingWrites.get(target) ?? Promise.resolve();
+  const next = previous.then(() => writeArchiveFile(target, payload));
+  // 存进链里的是「吞掉错误」的版本：一次写失败不能让后续的写全部卡死。
+  pendingWrites.set(target, next.then(() => undefined, () => undefined));
+  await next;
+  // 只有真的写成功才记账 —— 写失败不能被当成「已经落盘」。
+  lastWritten.set(target, payload);
+}
+
+/** 一次原子写：唯一临时文件 → rename 覆盖。 */
+async function writeArchiveFile(target: string, payload: string): Promise<void> {
+  await mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid.toString(36)}-${(tmpSeq++).toString(36)}.tmp`;
+  try {
+    await writeFile(tmp, payload, "utf8");
+    await rename(tmp, target);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** 删除一个主会话的子会话归档（会话被删除时用）。 */
 export async function deleteSuperSessionArchive(baseDir: string, sessionId: string): Promise<void> {
-  await rm(archivePath(baseDir, sessionId), { force: true });
+  const target = archivePath(baseDir, sessionId);
+  await rm(target, { force: true });
+  lastWritten.delete(target);
 }
 
 /** 归档目录里的文件名列表（清理孤儿归档用）。 */

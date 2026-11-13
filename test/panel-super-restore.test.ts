@@ -73,9 +73,10 @@ type PanelInternals = {
     };
     sessionStarted: (meta: { sessionId: string }) => void;
     setSessions: (sessions: unknown[], activeSessionId?: string | null) => void;
+    sendToast: (level: string, message: string, opts?: unknown) => number;
   };
   restoreSuperSessions: (mainSessionId: string) => Promise<void>;
-  persistSuperSessions: () => Promise<void>;
+  persistSuperSessions: (options?: { force?: boolean }) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   currentMainSessionId: () => string | null;
   publishSuperSessions: () => void;
@@ -166,9 +167,94 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
   it("归档写进去再读出来，记录原样回来", async () => {
     await writeSuperSessionArchive(storageDir, "main-1", [record()]);
     const loaded = await readSuperSessionArchive(storageDir, "main-1");
-    expect(loaded).toHaveLength(1);
-    expect(loaded[0]?.isolation.branch).toBe("iflow/super/old");
+    expect(loaded.sessions).toHaveLength(1);
+    expect(loaded.sessions[0]?.isolation.branch).toBe("iflow/super/old");
+    expect(loaded.damaged).toBe(false);
     // 往返一次后仍然是可恢复的历史记录。
-    expect(fromPersistedSuperSession(loaded[0]!).restored).toBe(true);
+    expect(fromPersistedSuperSession(loaded.sessions[0]!).restored).toBe(true);
+  });
+
+  it("归档损坏时如实提示用户，而不是静默清空看板", async () => {
+    // 损坏的归档读出来必须是「损坏」，不能是「没有子会话」—— 否则用户重启后
+    // 只看到空板子，完全看不出发生过什么。
+    const dir = path.join(storageDir, "super-sessions");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "main-1.json"), "{ 截断的 JSON", "utf8");
+
+    const toasts: { level: string; message: string }[] = [];
+    const original = p.store.sendToast.bind(p.store);
+    p.store.sendToast = (level: string, message: string, opts?: unknown) => {
+      toasts.push({ level, message });
+      return original(level, message, opts);
+    };
+
+    await p.restoreSuperSessions("main-1");
+
+    // 记录确实读不出来 → 看板是空的……
+    expect(board()).toEqual([]);
+    // ……但用户**被明确告知**了（而不是静默的空）：警告里带着备份路径。
+    expect(toasts.length).toBeGreaterThan(0);
+    expect(toasts[0]?.level).toBe("warning");
+    expect(toasts[0]?.message).toContain("归档损坏");
+    expect(toasts[0]?.message).toContain(".corrupt-");
+  });
+
+  it("关键变更（恢复出来的子会话）立刻落盘，不等节流窗口", async () => {
+    const manager = p.getSuperAgent() as {
+      restoreSessions: (mainSessionId: string, records: unknown[]) => void;
+    };
+    manager.restoreSessions("main-1", [
+      {
+        id: "super-old",
+        title: "上次没跑完的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+
+    const file = path.join(storageDir, "super-sessions", "main-1.json");
+    // 关键变更不排队：立刻能读到磁盘上的归档。
+    for (let i = 0; i < 100 && !fs.existsSync(file); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(fs.existsSync(file)).toBe(true);
+    const loaded = await readSuperSessionArchive(storageDir, "main-1");
+    expect(loaded.sessions.map((s) => s.id)).toEqual(["super-old"]);
+  });
+
+  it("内容没变时不重复写归档（写放大控制）", async () => {
+    const manager = p.getSuperAgent() as {
+      restoreSessions: (mainSessionId: string, records: unknown[]) => void;
+    };
+    manager.restoreSessions("main-1", [
+      {
+        id: "super-old",
+        title: "上次没跑完的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+    const file = path.join(storageDir, "super-sessions", "main-1.json");
+    for (let i = 0; i < 100 && !fs.existsSync(file); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(fs.existsSync(file)).toBe(true);
+    const first = fs.statSync(file).mtimeMs;
+
+    // 再落一次同样的内容：文件不该被重写（mtime 不变）。
+    await p.persistSuperSessions({ force: true });
+    expect(fs.statSync(file).mtimeMs).toBe(first);
   });
 });
