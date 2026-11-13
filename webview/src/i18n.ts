@@ -1082,6 +1082,7 @@ const en: Record<string, string> = {
   "未知的协议块语言": "Unknown protocol fence language",
   "展开任务说明": "Expand the task description",
   "收起任务说明": "Collapse the task description",
+  "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
   "未指定子会话": "No child session specified",
 };
 

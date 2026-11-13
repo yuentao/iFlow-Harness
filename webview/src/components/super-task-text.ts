@@ -11,10 +11,16 @@
  * 纯函数、无副作用、不碰 DOM —— 可直接单测。
  */
 
-/** 行内片段：普通文本，或一段行内代码。 */
+/**
+ * 行内片段：普通文本、一段行内代码，或一段加粗文本。
+ *
+ * `strong` 的 `text` 是内层纯文本（长度统计/折叠预算用），`inlines` 是内层
+ * **再次切分**后的片段 —— 加粗里的路径与行内代码仍然分别渲染，不会被并成一坨。
+ */
 export type SuperTaskInline =
   | { kind: "text"; text: string }
-  | { kind: "code"; text: string };
+  | { kind: "code"; text: string }
+  | { kind: "strong"; text: string; inlines: SuperTaskInline[] };
 
 /** 任务书正文的一个块。 */
 export type SuperTaskBlock =
@@ -82,6 +88,15 @@ const BACKTICK_STICKY = /(`+)([^`\n]+?)\1/y;
 const PATH_STICKY = /[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)*\.[A-Za-z0-9]{1,8}/y;
 /** 标识符调用：reportPrompt(entries)、SuperReportBuffer.takeSettled(sessions)。 */
 const CALL_STICKY = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\([^()\n]*\)/y;
+/**
+ * 行内加粗：`**…**`。
+ *
+ * 内容必须非空、首尾非空白、内部不含同种标记、且不跨行 —— 未闭合的 `**`
+ * （模型写到一半、或正文里本来就有一个星号）匹配不到，按普通文本原样保留。
+ */
+const BOLD_STAR_STICKY = /\*\*([^\s*](?:[^*\n]*[^\s*])?)\*\*/y;
+/** 行内加粗：`__…__`（标识符里的双下划线由 isWordChar 守卫挡掉）。 */
+const BOLD_UNDERSCORE_STICKY = /__([^\s_](?:[^_\n]*[^\s_])?)__/y;
 
 /** 行首项目符号：`- ` / `* ` / `• `（`**加粗**` 不会被误判：后面不是空白）。 */
 const BULLET_RE = /^\s*[-*•]\s+/;
@@ -96,6 +111,14 @@ const ORDERED_RE = /^\s*(?:[（(]\s*(\d{1,2})\s*[)）]|(\d{1,2})[.)])\s+/;
 const QUOTE_RE = /^\s*>\s?/;
 /** Markdown 标题：`## 目标`。 */
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
+/**
+ * 中文方括号小节：行首 `【前置检查（重要，先做）】`。
+ *
+ * 模型写任务书常用这种「小节标题」而不是 markdown 标题。只有**行首**算标题；
+ * 行中出现的 `【…】`（“说明【重要】这一段”）是普通文字，不切。方括号后面若还
+ * 跟着正文，正文另起段落 —— 绝不把字丢掉。
+ */
+const SECTION_RE = /^\s*【([^【】\n]+)】\s*(.*)$/;
 /** 代码围栏开头。 */
 const FENCE_RE = /^\s*```(.*)$/;
 /** 代码围栏收尾（裸 ```）。 */
@@ -214,11 +237,16 @@ function isCodePath(token: string): boolean {
   return CODE_EXTENSIONS.has(ext);
 }
 
+/** 标识符字符：`my__var__name` 里的双下划线不是加粗标记。 */
+const WORD_CHAR_RE = /[A-Za-z0-9_$]/;
+
 /**
- * 把一段文字切成行内片段（普通文本 / 行内代码）。
+ * 把一段文字切成行内片段（普通文本 / 行内代码 / 加粗）。
  *
- * 扫描是**从左到右逐位置**的：每个位置依次试 URL → 反引号 → 路径 → 标识符调用，
- * 命中的才被切成代码片段，其余原样累加为普通文本（空白因此完整保留）。
+ * 扫描是**从左到右逐位置**的：每个位置依次试加粗 → URL → 反引号 → 路径 →
+ * 标识符调用，命中的才被切成对应片段，其余原样累加为普通文本（空白因此完整
+ * 保留）。加粗的内层会**再切一次**，所以 `**先跑 `npm test`**` 里的行内代码
+ * 仍然成立。
  */
 export function splitSuperTaskInlines(text: string): SuperTaskInline[] {
   const inlines: SuperTaskInline[] = [];
@@ -232,6 +260,36 @@ export function splitSuperTaskInlines(text: string): SuperTaskInline[] {
   };
 
   while (index < text.length) {
+    // 加粗：`**…**` / `__…__`（未闭合时匹配不到，按普通文本留下）。
+    BOLD_STAR_STICKY.lastIndex = index;
+    const boldStar = BOLD_STAR_STICKY.exec(text);
+    if (boldStar) {
+      const inner = boldStar[1] ?? "";
+      const innerInlines = splitSuperTaskInlines(inner);
+      flushPlain();
+      inlines.push({
+        kind: "strong",
+        text: innerInlines.map((inline) => inline.text).join(""),
+        inlines: innerInlines,
+      });
+      index += boldStar[0].length;
+      continue;
+    }
+    BOLD_UNDERSCORE_STICKY.lastIndex = index;
+    const boldUnderscore = BOLD_UNDERSCORE_STICKY.exec(text);
+    const before = index > 0 ? (text[index - 1] ?? "") : "";
+    if (boldUnderscore && !WORD_CHAR_RE.test(before)) {
+      const inner = boldUnderscore[1] ?? "";
+      const innerInlines = splitSuperTaskInlines(inner);
+      flushPlain();
+      inlines.push({
+        kind: "strong",
+        text: innerInlines.map((inline) => inline.text).join(""),
+        inlines: innerInlines,
+      });
+      index += boldUnderscore[0].length;
+      continue;
+    }
     // URL：整段保持普通文本。
     URL_STICKY.lastIndex = index;
     const url = URL_STICKY.exec(text);
@@ -373,6 +431,25 @@ export function parseSuperTaskText(text: string): SuperTaskBlock[] {
       continue;
     }
 
+    // 行首中文方括号小节：【前置检查（重要，先做）】
+    const section = SECTION_RE.exec(line);
+    if (section) {
+      flush();
+      blocks.push({
+        kind: "heading",
+        level: 2,
+        inlines: splitSuperTaskInlines((section[1] ?? "").trim()),
+      });
+      const rest = (section[2] ?? "").trim();
+      index += 1;
+      // 方括号后面还跟着正文：另起一段接上，绝不吞字。
+      if (rest) {
+        bufferKind = "paragraph";
+        bufferLines = [rest];
+      }
+      continue;
+    }
+
     // 引用
     const quote = QUOTE_RE.exec(line);
     if (quote) {
@@ -464,6 +541,8 @@ export interface SuperTaskPreview {
    * 完整的文字看起来像半句），由卡片另外画一条「还有更多」的提示。
    */
   cutText: boolean;
+  /** 折叠态没展示出来的正文字数（不截断时为 0），用于「还有 N 字」提示。 */
+  hiddenChars: number;
 }
 
 /**
@@ -479,10 +558,12 @@ export function previewSuperTaskBlocks(
   maxBlocks: number,
 ): SuperTaskPreview {
   const total = blocks.reduce((sum, block) => sum + blockLength(block), 0);
-  if (total <= budget) return { blocks, truncated: false, cutText: false };
+  if (total <= budget) return { blocks, truncated: false, cutText: false, hiddenChars: 0 };
 
   const out: SuperTaskBlock[] = [];
   let used = 0;
+  /** 已给出的块合计字数（含末尾省略号），用于算「还有 N 字」。 */
+  const shownChars = (): number => out.reduce((sum, block) => sum + blockLength(block), 0);
 
   for (const block of blocks) {
     const length = blockLength(block);
@@ -498,13 +579,23 @@ export function previewSuperTaskBlocks(
           ? { ...block, text: `${cutAtBoundary(block.text, budget)}…` }
           : { ...block, inlines: cutInlines(block.inlines, budget) };
       out.push(cut);
-      return { blocks: out, truncated: true, cutText: true };
+      return {
+        blocks: out,
+        truncated: true,
+        cutText: true,
+        hiddenChars: Math.max(0, total - shownChars()),
+      };
     }
     // 块边界截断：给出去的块都是完整的，由卡片另外提示「还有更多」。
-    return { blocks: out, truncated: true, cutText: false };
+    return {
+      blocks: out,
+      truncated: true,
+      cutText: false,
+      hiddenChars: Math.max(0, total - shownChars()),
+    };
   }
 
-  return { blocks: out, truncated: false, cutText: false };
+  return { blocks: out, truncated: false, cutText: false, hiddenChars: 0 };
 }
 
 /** 按字符预算截断行内片段。 */
@@ -519,7 +610,12 @@ function cutInlines(inlines: SuperTaskInline[], budget: number): SuperTaskInline
       used += inline.text.length;
       continue;
     }
-    out.push({ kind: inline.kind, text: `${cutAtBoundary(inline.text, remain)}…` });
+    const cut = `${cutAtBoundary(inline.text, remain)}…`;
+    out.push(
+      inline.kind === "strong"
+        ? { kind: "strong", text: cut, inlines: splitSuperTaskInlines(cut) }
+        : { kind: inline.kind, text: cut },
+    );
     used += remain;
     break;
   }

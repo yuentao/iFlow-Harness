@@ -457,6 +457,61 @@ describe("AssistantText 协议块卡片", () => {
     expect(ordered[0]!.textContent).toContain("丙项");
   });
 
+  it("任务书里的 **加粗** 渲染成强调文本，DOM 里不留字面星号", () => {
+    render(
+      delegate([
+        { title: "加粗任务", task: "**不要重复实现**，先把检查跑一遍", attachments: [] },
+      ]),
+    );
+    const strong = container.querySelector('[data-testid="super-task-strong"]');
+    expect(strong).toBeTruthy();
+    expect(strong!.textContent).toBe("不要重复实现");
+    expect(strong!.className).toContain("font-medium");
+    expect(text()).not.toContain("**");
+    expect(text()).toContain("先把检查跑一遍");
+  });
+
+  it("独占一行的【小节】渲染成小节标题，行中【…】仍留在正文", () => {
+    render(
+      delegate([
+        {
+          title: "分节任务",
+          task: "【前置检查（重要，先做）】\n先跑 npm test\n\n说明【重要】这一段",
+          attachments: [],
+        },
+      ]),
+    );
+    const heading = container.querySelector('[data-testid="super-task-heading"]');
+    expect(heading).toBeTruthy();
+    expect(heading!.textContent).toBe("前置检查（重要，先做）");
+    expect(heading!.className).toContain("text-ui-label");
+    // 小节标题不再带方括号。
+    expect(text()).not.toContain("【前置检查");
+    // 行中的【…】仍是普通段落文字。
+    const paragraphs = [...container.querySelectorAll('[data-testid="super-task-paragraph"]')];
+    expect(paragraphs.some((p) => p.textContent?.includes("说明【重要】这一段"))).toBe(true);
+  });
+
+  it("代码块与长路径换行显示，不产生横向滚动容器", () => {
+    render(
+      delegate([
+        {
+          title: "长路径",
+          task: "改 src/very/long/path/that/keeps/going/and/going/component-name.tsx\n\n```\nnpx vitest run test/super-task-text.test.ts\n```",
+          attachments: [],
+        },
+      ]),
+    );
+    const pre = container.querySelector('[data-testid="super-task-code"]');
+    expect(pre).toBeTruthy();
+    expect(pre!.className).toContain("whitespace-pre-wrap");
+    expect(pre!.className).not.toContain("overflow-x-auto");
+    // 长路径保持等宽药丸，靠 super-task-code 的 overflow-wrap:anywhere 折行。
+    const code = container.querySelector("code.super-task-code");
+    expect(code).toBeTruthy();
+    expect(code!.textContent).toContain("component-name.tsx");
+  });
+
   it("折叠态按块截断（不切半句），展开后渲染全部块", () => {
     const item = "这是一条比较长的任务说明，用来把任务书正文撑过折叠预览的字符预算，确保折叠态真的会截断。";
     render(
@@ -473,13 +528,19 @@ describe("AssistantText 协议块卡片", () => {
     expect(blocks().length).toBeLessThan(6);
     expect(blocks().length).toBeGreaterThan(0);
     expect(blocks()[blocks().length - 1]!.textContent).not.toContain("…");
-    // 「还有更多」是单独一行提示，不混进正文。
-    expect(container.querySelector('[data-testid="super-task-more"]')!.textContent).toContain("…");
+    // 展开/收起只有一个通道：底部 ghost 按钮，文案带剩余字数，没有孤立的「…」行。
+    expect(container.querySelector('[data-testid="super-task-more"]')).toBeNull();
     const expand = container.querySelector<HTMLButtonElement>('button[aria-label="展开任务说明"]');
     expect(expand).toBeTruthy();
+    expect(expand!.textContent).toContain("展开全文");
+    expect(expand!.textContent).toMatch(/还有 \d+ 字/);
     act(() => expand!.click());
     expect(blocks()).toHaveLength(6);
-    expect(container.querySelector<HTMLButtonElement>('button[aria-label="收起任务说明"]')).toBeTruthy();
+    const collapse = container.querySelector<HTMLButtonElement>('button[aria-label="收起任务说明"]');
+    expect(collapse).toBeTruthy();
+    expect(collapse!.textContent).toBe("收起");
+    // 收起后不再有「还有 N 字」的重复提示。
+    expect(text()).not.toMatch(/还有 \d+ 字/);
   });
 });
 

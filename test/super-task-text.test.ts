@@ -75,6 +75,24 @@ describe("parseSuperTaskText", () => {
     expect(kinds(parseSuperTaskText("## 目标"))).toEqual(["heading"]);
   });
 
+  it("独占一行的中文方括号小节变成 heading，方括号被去掉", () => {
+    const blocks = parseSuperTaskText("【前置检查（重要，先做）】\n- 甲项");
+    expect(kinds(blocks)).toEqual(["heading", "bullet"]);
+    expect(texts(blocks)[0]).toBe("前置检查（重要，先做）");
+  });
+
+  it("行中出现、非独占一行的 【…】 保持普通文本", () => {
+    const blocks = parseSuperTaskText("先做前置检查【重要】再继续");
+    expect(kinds(blocks)).toEqual(["paragraph"]);
+    expect(texts(blocks)).toEqual(["先做前置检查【重要】再继续"]);
+  });
+
+  it("行首小节后面还跟正文时，正文另起段落，不丢字", () => {
+    const blocks = parseSuperTaskText("【目标】把卡片改好");
+    expect(kinds(blocks)).toEqual(["heading", "paragraph"]);
+    expect(texts(blocks)).toEqual(["目标", "把卡片改好"]);
+  });
+
   it("缩进行是上一项的续行，不另起一段", () => {
     const blocks = parseSuperTaskText("- 甲项\n  补充说明\n- 乙项");
     expect(kinds(blocks)).toEqual(["bullet", "bullet"]);
@@ -165,6 +183,40 @@ describe("splitSuperTaskInlines", () => {
     const inlines = splitSuperTaskInlines("目标（第一）：完成");
     expect(inlines.every((inline) => inline.kind === "text")).toBe(true);
   });
+
+  it("**…** 与 __…__ 解析成 strong，内部仍能切路径与行内代码", () => {
+    const inlines = splitSuperTaskInlines("**先跑 `npm test`** 与 __src/panel/panel.ts__");
+    expect(inlines.map((inline) => inline.kind)).toEqual(["strong", "text", "strong"]);
+
+    const star = inlines[0];
+    expect(star?.kind === "strong" ? star.text : "").toBe("先跑 npm test");
+    expect(star?.kind === "strong" ? star.inlines.map((inline) => inline.kind) : []).toEqual([
+      "text",
+      "code",
+    ]);
+
+    const underscore = inlines[2];
+    expect(underscore?.kind === "strong" ? underscore.text : "").toBe("src/panel/panel.ts");
+    expect(
+      underscore?.kind === "strong" ? underscore.inlines.map((inline) => inline.kind) : [],
+    ).toEqual(["code"]);
+  });
+
+  it("未闭合的 ** 保持普通文本（不吐字面星号以外的变化）", () => {
+    const inlines = splitSuperTaskInlines("** 没闭合的说明");
+    expect(inlines.every((inline) => inline.kind === "text")).toBe(true);
+    expect(inlines.map((inline) => inline.text).join("")).toBe("** 没闭合的说明");
+  });
+
+  it("跨行的 ** 不生效", () => {
+    const inlines = splitSuperTaskInlines("**第一行\n第二行**");
+    expect(inlines.every((inline) => inline.kind === "text")).toBe(true);
+  });
+
+  it("标识符里的双下划线不会被当成加粗", () => {
+    const inlines = splitSuperTaskInlines("my__var__name 保持原样");
+    expect(inlines.every((inline) => inline.kind === "text")).toBe(true);
+  });
 });
 
 describe("previewSuperTaskBlocks", () => {
@@ -172,7 +224,22 @@ describe("previewSuperTaskBlocks", () => {
     const blocks = parseSuperTaskText("- 甲项\n- 乙项");
     const preview = previewSuperTaskBlocks(blocks, 200, 3);
     expect(preview.truncated).toBe(false);
+    expect(preview.hiddenChars).toBe(0);
     expect(preview.blocks).toHaveLength(2);
+  });
+
+  it("截断时给出剩余字数（「还有 N 字」的数据源）", () => {
+    const blocks = parseSuperTaskText("- 甲项\n- 乙项\n- 丙项\n- 丁项");
+    const preview = previewSuperTaskBlocks(blocks, 4, 2);
+    expect(preview.truncated).toBe(true);
+    expect(preview.hiddenChars).toBeGreaterThan(0);
+    expect(preview.hiddenChars).toBeLessThanOrEqual(
+      blocks.reduce(
+        (sum, block) =>
+          sum + (block.kind === "code" ? block.text.length : block.inlines.reduce((n, i) => n + i.text.length, 0)),
+        0,
+      ),
+    );
   });
 
   it("超过块数上限时按块截断，末块保持完整", () => {
