@@ -244,8 +244,15 @@ export type SuperIntegrationState =
   | "pr_created"
   /** 集成失败（推送失败 / gh 不可用等），分支保留。 */
   | "failed"
-  /** 没有可集成的改动，或主工作区不满足自动合并条件。 */
-  | "skipped";
+  /** 有改动但主工作区不满足自动合并条件（工作区脏 / 冲突 / git 拒绝），分支仍保留，需要人看一眼。 */
+  | "skipped"
+  /**
+   * 子会话没有产生任何提交 —— 本来就没有东西可合并。
+   *
+   * 不是失败，也不需要人动手：既不该像 `skipped` 那样一直挂在看板上等人，
+   * 也不该派合并子会话。
+   */
+  | "not_needed";
 
 export interface SuperIntegration {
   mode: SuperIntegrationMode;
@@ -299,6 +306,8 @@ export function superIntegrationLabel(integration: SuperIntegration): string {
       return "集成失败";
     case "skipped":
       return "未自动合并";
+    case "not_needed":
+      return "无需合并";
   }
 }
 
@@ -306,7 +315,8 @@ export function superIntegrationLabel(integration: SuperIntegration): string {
  * 集成结果的英文短标签 —— {@link superIntegrationLabel} 的模型面向孪生版本。
  *
  * 措辞与 `prompts/system-prompt.md` 的看板词表对齐（merged automatically /
- * merge conflict / skipped），模型据此判断「分支被保留」还是「已经合进去了」。
+ * merge conflict / skipped / no merge needed），模型据此判断「分支被保留」
+ * 还是「已经合进去了」还是「本来就没有东西可合并」。
  */
 function superIntegrationLabelEn(integration: SuperIntegration): string {
   switch (integration.state) {
@@ -320,6 +330,8 @@ function superIntegrationLabelEn(integration: SuperIntegration): string {
       return "integration failed";
     case "skipped":
       return "not merged automatically";
+    case "not_needed":
+      return "no merge needed";
   }
 }
 
@@ -2311,7 +2323,7 @@ export function summarizeSuperSessions(sessions: readonly SuperSessionUi[]): {
  * 看板分组结果。
  *
  * `visible` 是逐行展开的子会话（已排序）；`folded` 是收成一行历史的那些 ——
- * 已完成且改动已自动合并，看板上再没有可执行动作（合并按钮本来就是灰的）。
+ * 已完成且不再需要人动手（改动已自动合并 / 本来就没有东西可合并）。
  */
 export interface SuperBoardGroups {
   visible: SuperSessionUi[];
@@ -2319,13 +2331,17 @@ export interface SuperBoardGroups {
 }
 
 /**
- * 是否是「已完成且改动已自动合并」的子会话 —— 看板把它折叠起来。
+ * 是否是「已完成且不再需要人动手」的子会话 —— 看板把它折叠起来。
  *
- * 只认 `merged`：`pr_created`（改动在 PR 里）与 `skipped` / `conflict` /
- * `failed`（改动还留在分支上）都还需要人看一眼，不该藏起来。
+ * 认两种：`merged`（改动已进主分支）与 `not_needed`（子会话没有产生任何
+ * 提交，本来就没有东西可合并）。`pr_created`（改动在 PR 里）与 `skipped` /
+ * `conflict` / `failed`（改动还留在分支上）都还需要人看一眼，不该藏起来。
  */
-export function isSuperSessionMerged(session: SuperSessionUi): boolean {
-  return session.status === "completed" && session.integration?.state === "merged";
+export function isSuperSessionSettled(session: SuperSessionUi): boolean {
+  return (
+    session.status === "completed" &&
+    (session.integration?.state === "merged" || session.integration?.state === "not_needed")
+  );
 }
 
 /**
@@ -2335,13 +2351,13 @@ export function isSuperSessionMerged(session: SuperSessionUi): boolean {
  *  - 1 进行中（准备中 / 运行中 / 排队中）。
  *  - 2 失败 / 被中断：还能重试，需要人看一眼。
  *  - 3 已完成但改动还没落地（未自动合并 / 合并冲突 / 集成失败 / 没有集成记录）。
- *  - 4 已完成且改动已自动合并 —— 纯历史，折叠到末尾。
+ *  - 4 已完成且不再需要人处理（已自动合并 / 无需合并）—— 纯历史，折叠到末尾。
  */
 function superBoardRank(session: SuperSessionUi): number {
   if (session.status === "awaiting_input") return 0;
   if (session.status === "preparing" || session.status === "running") return 1;
   if (session.status === "failed" || session.status === "cancelled") return 2;
-  if (isSuperSessionMerged(session)) return 4;
+  if (isSuperSessionSettled(session)) return 4;
   return 3;
 }
 
@@ -2355,7 +2371,7 @@ export function groupSuperSessionsForBoard(sessions: readonly SuperSessionUi[]):
   const visible: SuperSessionUi[] = [];
   const folded: SuperSessionUi[] = [];
   for (const session of sessions) {
-    if (isSuperSessionMerged(session)) folded.push(session);
+    if (isSuperSessionSettled(session)) folded.push(session);
     else visible.push(session);
   }
   const byRank = (a: SuperSessionUi, b: SuperSessionUi): number =>
@@ -2431,6 +2447,7 @@ const SUPER_DIGEST_FOOTER = [
   "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
   "Merging is done by the host, following the integration mode (merge by default, possibly PR): when the \"changes:\" line says merged automatically, do not merge it again;",
   "only when the branch was kept (not merged automatically / merge conflict / no gh CLI) should you run `git merge --no-ff <branch>` yourself (the branch name is on each line above), resolving conflicts by reading the code.",
+  "`changes: no merge needed` means the child produced no commits at all — there is nothing to merge; never dispatch a merge child session for it.",
   "The answers of an answer action are keyed by the question header: a string for a single choice, an array of strings for a multi choice. The sessionId must be the exact id shown above.",
 ].join("\n");
 

@@ -36,6 +36,7 @@ const en: Record<string, string> = {
   "PR 已创建": "PR opened",
   "集成失败": "Integration failed",
   "未自动合并": "Not auto-merged",
+  "无需合并": "No merge needed",
   "该子会话的改动已经合并": "This child's changes are already merged",
   "{0} 个进行中": "{0} running",
   "{0} 个待处理": "{0} need you",

@@ -869,11 +869,11 @@ describe("super agent · 自动集成", () => {
     expect(existsSync(path.join(repo, "child.txt"))).toBe(false);
   }, 30000);
 
-  it("子会话没有产生提交时如实标注跳过（不需要用户动手）", async () => {
+  it("子会话没有产生提交时如实标注无需合并（不需要用户动手）", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "complete", "merge");
     harness.manager.spawn({ title: "改登录", task: "干活" });
-    await until(() => harness.sessions[0]?.integration?.state === "skipped");
+    await until(() => harness.sessions[0]?.integration?.state === "not_needed");
     await until(() => harness.reports.length > 0);
 
     const session = harness.sessions[0]!;

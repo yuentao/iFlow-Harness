@@ -167,7 +167,7 @@ export function deriveSuperTimeline(session: SuperSessionUi): SuperTimelineNode[
     const tone: SuperTimelineTone =
       integration.state === "merged" || integration.state === "pr_created"
         ? "done"
-        : integration.state === "skipped"
+        : integration.state === "skipped" || integration.state === "not_needed"
           ? "idle"
           : "failed";
     const detail = integration.url ?? integration.detail;
