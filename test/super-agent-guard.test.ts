@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   classifyChildShellCommand,
+  classifyChildToolCall,
   extractShellCommand,
   isShellToolCall,
   pickChildPermissionOption,
@@ -14,6 +15,25 @@ const WORKTREE = "J:\\git\\proj\\.iflow\\super\\worktrees\\fix-login-abcd1234";
 
 function ctx(overrides: Partial<ChildShellGuardContext> = {}): ChildShellGuardContext {
   return { cwd: WORKTREE, repoRoot: REPO, ...overrides };
+}
+
+/**
+ * 带「脚本文件读取能力」的上下文 —— 模拟宿主读子会话 worktree 里的脚本。
+ *
+ * 护栏本身零文件系统依赖，读取能力由宿主注入（这里是测试替身）。
+ */
+function ctxWithScripts(
+  files: Record<string, string>,
+  overrides: Partial<ChildShellGuardContext> = {},
+): ChildShellGuardContext {
+  return ctx({
+    ...overrides,
+    readLocalFile: (absolutePath: string) => {
+      const probe = absolutePath.replace(/\\/g, "/").toLowerCase();
+      const hit = Object.keys(files).find((name) => probe.endsWith(name.replace(/\\/g, "/").toLowerCase()));
+      return hit ? files[hit]! : null;
+    },
+  });
 }
 
 describe("子会话 shell 护栏 · 拒绝", () => {
@@ -187,6 +207,205 @@ describe("子会话 shell 护栏 · 放行", () => {
       expect(result.reason).toBeUndefined();
     });
   }
+});
+
+describe("子会话 shell 护栏 · Node 内联脚本与脚本文件", () => {
+  // 命令藏在 JS 里：命令文本里根本没有包管理器词，按词切分看不见。
+  const inlineDenyCases: Array<{ name: string; command: string }> = [
+    {
+      name: "node -e 内联 execSync 跑 npm ci",
+      command: `node -e "require('child_process').execSync('npm ci')"`,
+    },
+    {
+      name: "node --eval 内联 spawnSync 跑 pnpm install（数组写法）",
+      command: `node --eval "require('child_process').spawnSync('pnpm', ['install'])"`,
+    },
+    {
+      name: "node -p 内联 execSync 跑 yarn add",
+      command: `node -p "require('child_process').execSync('yarn add left-pad')"`,
+    },
+    {
+      name: "node --eval= 内联跑 bun install",
+      command: `node --eval="require('child_process').execSync('bun install')"`,
+    },
+    {
+      name: "node -e 内联 execSync 建 junction 指向 node_modules",
+      command: `node -e "require('child_process').execSync('mklink /J node_modules J:/git/proj/node_modules')"`,
+    },
+    {
+      name: "node -e 内联 fs.symlinkSync 指向 node_modules",
+      command: `node -e "require('fs').symlinkSync('J:/git/proj/node_modules','node_modules','junction')"`,
+    },
+  ];
+
+  for (const testCase of inlineDenyCases) {
+    it(testCase.name, () => {
+      const result = classifyChildShellCommand(testCase.command, ctx());
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBeTruthy();
+    });
+  }
+
+  it("node <脚本文件> 内容含 npm ci → 拒绝", () => {
+    const context = ctxWithScripts({
+      "install-deps.js": "const { execSync } = require('child_process');\nexecSync('npm ci');\n",
+    });
+    const result = classifyChildShellCommand("node install-deps.js", context);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBeTruthy();
+  });
+
+  it("node <脚本文件> 内容含 mklink 建联接 → 拒绝", () => {
+    const context = ctxWithScripts({
+      "make-link.js":
+        "require('child_process').execSync('mklink /J node_modules J:/git/proj/node_modules');\n",
+    });
+    const result = classifyChildShellCommand("node make-link.js", context);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toBeTruthy();
+  });
+
+  it("node <脚本文件> 内容用 fs.symlinkSync 指向 node_modules → 拒绝", () => {
+    const context = ctxWithScripts({
+      "link.cjs":
+        "require('fs').symlinkSync('J:/git/proj/node_modules', 'node_modules', 'junction');\n",
+    });
+    const result = classifyChildShellCommand("node link.cjs", context);
+    expect(result.decision).toBe("deny");
+  });
+
+  it("普通 node 脚本（无危险调用）→ 放行", () => {
+    const context = ctxWithScripts({
+      "build.js": "console.log('hello');\nrequire('child_process').execSync('git status');\n",
+    });
+    const result = classifyChildShellCommand("node build.js", context);
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('node -e "require(\'child_process\').execSync(\'npm ci\')" → 拒绝', () => {
+    const result = classifyChildShellCommand(
+      `node -e "require('child_process').execSync('npm ci')"`,
+      ctx(),
+    );
+    expect(result.decision).toBe("deny");
+  });
+
+  it("node 内联 mklink/junction 指向 node_modules → 拒绝", () => {
+    const result = classifyChildShellCommand(
+      `node -e "require('child_process').execSync('mklink /J node_modules J:/git/proj/node_modules')"`,
+      ctx(),
+    );
+    expect(result.decision).toBe("deny");
+  });
+
+  it("普通 node <脚本文件> → 放行", () => {
+    const context = ctxWithScripts({ "ordinary.js": "console.log('build');" });
+    expect(classifyChildShellCommand("node ordinary.js", context).decision).toBe("allow");
+  });
+
+  it("cd 到 worktree 后 npm ci 且 node_modules 不是链接 → 放行", () => {
+    expect(classifyChildShellCommand(`cd "${WORKTREE}" && npm ci`, ctx()).decision).toBe("allow");
+  });
+
+  it("脚本里只是提到 npm ci（不起子进程）→ 放行", () => {
+    const context = ctxWithScripts({
+      "docs.js": "console.log('run npm ci to install dependencies');\n",
+    });
+    const result = classifyChildShellCommand("node docs.js", context);
+    expect(result.decision).toBe("allow");
+  });
+
+  it("脚本读不到（文件不存在 / 没给读取能力）→ 放行，不误伤正常用法", () => {
+    const result = classifyChildShellCommand("node missing.js", ctx());
+    expect(result.decision).toBe("allow");
+    expect(result.reason).toBeUndefined();
+  });
+
+  it("脚本在工作目录之外 → 不读、不拦", () => {
+    const context = ctxWithScripts({
+      "outside.js": "require('child_process').execSync('npm ci');\n",
+    });
+    const result = classifyChildShellCommand("node ../outside.js", context);
+    expect(result.decision).toBe("allow");
+  });
+});
+
+describe("子会话 shell 护栏 · 嵌套壳解包", () => {
+  it('cmd /c "npm ci"（联接存在）→ 拒绝', () => {
+    const result = classifyChildShellCommand('cmd /c "npm ci"', ctx({ nodeModulesIsLink: true }));
+    expect(result.decision).toBe("deny");
+  });
+
+  it('powershell -NoProfile -Command "npm ci"（联接存在）→ 拒绝', () => {
+    const result = classifyChildShellCommand(
+      'powershell -NoProfile -Command "npm ci"',
+      ctx({ nodeModulesIsLink: true }),
+    );
+    expect(result.decision).toBe("deny");
+  });
+
+  it('bash -c "npm ci"（联接存在）→ 拒绝', () => {
+    const result = classifyChildShellCommand('bash -c "npm ci"', ctx({ nodeModulesIsLink: true }));
+    expect(result.decision).toBe("deny");
+  });
+
+  it('sh -c "npm ci"（联接存在）→ 拒绝', () => {
+    const result = classifyChildShellCommand('sh -c "npm ci"', ctx({ nodeModulesIsLink: true }));
+    expect(result.decision).toBe("deny");
+  });
+
+  it('cmd /c "npm ci"（没有联接）→ 放行：包装命令本身不是危险信号', () => {
+    // 包装命令只是写法差异：内层 `npm ci` 在子会话自己的 worktree 里跑是
+    // 允许的（子会话本来就没有依赖，要自己装）。危险来自「装到用户主工作区」
+    // 或「node_modules 是联接」，不是来自 cmd /c 这个壳。
+    const result = classifyChildShellCommand('cmd /c "npm ci"', ctx());
+    expect(result.decision).toBe("allow");
+  });
+});
+
+describe("子会话 shell 护栏 · 处置档位（severity）", () => {
+  it("创建 node_modules 链接 → session 档（预检路径据此终止子会话）", () => {
+    const result = classifyChildShellCommand(
+      'mklink /J node_modules "J:\\git\\proj\\node_modules"',
+      ctx(),
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("session");
+  });
+
+  it("联接存在时的安装 → session 档", () => {
+    const result = classifyChildShellCommand("npm ci", ctx({ nodeModulesIsLink: true }));
+    expect(result.severity).toBe("session");
+  });
+
+  it("装到主工作区 → session 档", () => {
+    const result = classifyChildShellCommand('npm install --prefix "J:\\git\\proj"', ctx());
+    expect(result.severity).toBe("session");
+  });
+
+  it("删自己 worktree 里的 node_modules → tool 档（不因此杀掉子会话）", () => {
+    const result = classifyChildShellCommand("rm -rf node_modules", ctx());
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("tool");
+  });
+
+  it("node 内联装依赖 → tool 档（装到哪儿看不见，但不明确动主工作区）", () => {
+    const result = classifyChildShellCommand(
+      `node -e "require('child_process').execSync('npm ci')"`,
+      ctx(),
+    );
+    expect(result.decision).toBe("deny");
+    expect(result.severity).toBe("tool");
+  });
+
+  it("node 内联装依赖 + worktree 已经是联接 → session 档", () => {
+    const result = classifyChildShellCommand(
+      `node -e "require('child_process').execSync('npm ci')"`,
+      ctx({ nodeModulesIsLink: true }),
+    );
+    expect(result.severity).toBe("session");
+  });
 });
 
 describe("子会话 shell 护栏 · 工具识别与命令提取", () => {

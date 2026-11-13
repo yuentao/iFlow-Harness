@@ -36,7 +36,7 @@
  */
 
 import path from "node:path";
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
@@ -52,6 +52,7 @@ import { errorMessage } from "../acp/jsonrpc.js";
 import { applySessionUpdate, estimateTokens, estimateTokensChunked } from "../../shared/session-state.js";
 import {
   classifyChildShellCommand,
+  classifyChildToolCall,
   extractShellCommand,
   isShellToolCall,
   pickChildPermissionOption,
@@ -1349,6 +1350,38 @@ export class SuperAgentManager {
     return {
       onSessionUpdate: (notification) => {
         const update = notification.update;
+        const session = this.sessions.get(id);
+        if (session && session.isolation.kind !== "repo") {
+          const verdict = classifyChildToolCall(
+            {
+              sessionUpdate: update.sessionUpdate,
+              toolCallId: "toolCallId" in update ? update.toolCallId : undefined,
+              toolName: "toolName" in update ? update.toolName : undefined,
+              kind: "kind" in update ? update.kind : undefined,
+              status: "status" in update ? update.status : undefined,
+              title: "title" in update ? update.title : undefined,
+              args: "args" in update ? update.args : undefined,
+            },
+            {
+              cwd: session.isolation.path,
+              repoRoot: this.deps.repoRoot,
+              nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
+              readLocalFile: (filePath) => {
+                try {
+                  if (statSync(filePath).size > 1024 * 1024) return null;
+                  return readFileSync(filePath, "utf8");
+                } catch {
+                  return null;
+                }
+              },
+            },
+          );
+          if (verdict?.decision === "deny" && verdict.severity === "session") {
+            this.deps.log.warn(`[${id}] 预检拒绝子会话命令并终止会话：${verdict.reason ?? ""}`);
+            void this.cancel(id);
+            return;
+          }
+        }
         // Keep the summary source (the final assistant prose) and the live
         // progress tail.
         if (update.sessionUpdate === "agent_message_chunk") {
