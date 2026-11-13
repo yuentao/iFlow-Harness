@@ -28,6 +28,7 @@ import {
   splitSuperDirectiveSegments,
   summarizeSuperSessions,
   superArchiveFingerprint,
+  superDirectiveDedupeKey,
   superIsolationLabel,
   SUPER_DIGEST_MAX_CHARS,
   sumSuperUsage,
@@ -599,6 +600,61 @@ describe("super agent · 流式扫描缓冲有界", () => {
       }
     }
     expect(dispatched).toEqual(["T"]);
+  });
+});
+
+describe("super agent · 委派载荷跨通道去重键", () => {
+  it("空白差异归一化：同一份载荷得到同一个键", () => {
+    const a = superDirectiveDedupeKey([
+      { title: "改登录", task: "修好 src/auth.ts\n并补测试" },
+    ]);
+    const b = superDirectiveDedupeKey([
+      { title: "  改登录  ", task: "修好   src/auth.ts   并补测试" },
+    ]);
+    expect(b).toBe(a);
+  });
+
+  it("附件顺序不同是同一份载荷", () => {
+    const first = superDirectiveDedupeKey([
+      {
+        title: "看这两个文件",
+        task: "一起读",
+        attachments: [
+          { name: "a.txt", path: "src\\a.txt" },
+          { name: "b.txt", path: "src/b.txt" },
+        ],
+      },
+    ]);
+    const second = superDirectiveDedupeKey([
+      {
+        title: "看这两个文件",
+        task: "一起读",
+        attachments: [
+          { name: "b.txt", path: "src/b.txt" },
+          { name: "a.txt", path: "src/a.txt" },
+        ],
+      },
+    ]);
+    expect(second).toBe(first);
+  });
+
+  it("附件内容不同的载荷得到不同的键", () => {
+    const base = { title: "看文件", task: "一起读" };
+    const one = superDirectiveDedupeKey([
+      { ...base, attachments: [{ name: "a.txt", path: "src/a.txt" }] },
+    ]);
+    const other = superDirectiveDedupeKey([
+      { ...base, attachments: [{ name: "a.txt", path: "src/a.txt", mimeType: "image/png" }] },
+    ]);
+    expect(other).not.toBe(one);
+  });
+
+  it("任务或标题不同则不是同一份载荷", () => {
+    const one = superDirectiveDedupeKey([{ title: "改登录", task: "修好 src/auth.ts" }]);
+    const otherTask = superDirectiveDedupeKey([{ title: "改登录", task: "修好 src/auth.ts 并补测试" }]);
+    const otherTitle = superDirectiveDedupeKey([{ title: "改登录跳转", task: "修好 src/auth.ts" }]);
+    expect(otherTask).not.toBe(one);
+    expect(otherTitle).not.toBe(one);
   });
 });
 

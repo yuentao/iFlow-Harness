@@ -823,6 +823,39 @@ export function normalizeSuperTitle(raw: string, fallback = "子会话"): string
 }
 
 /**
+ * 委派载荷的稳定指纹（跨通道去重）。
+ *
+ * 模型经常把同一份委派写两遍：先在思考里写一遍，再在正文里写一遍（或同一轮
+ * 里重复写）。思考与正文各有一个滚动扫描器（缓冲不能共用，见 panel 的
+ * `superThoughtScan`），所以「同一份载荷」只能在**载荷层**判定：把任务的
+ * title / task / 附件归一化后序列化成一个稳定字符串，宿主按这个键记账，
+ * 命中就跳过该任务。
+ *
+ * 归一化只折叠「语义相同、写法不同」的差异：空白折叠、路径分隔符统一、
+ * 附件顺序排序（宿主按内容复制，不看顺序）。附件名、路径、内联数据与 MIME
+ * 都参与指纹 —— 只差附件的两份委派不是同一份载荷。
+ */
+export function superDirectiveDedupeKey(tasks: readonly SuperTaskSpec[]): string {
+  const normalizeText = (value: string | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+  return JSON.stringify(
+    tasks.map((task) => ({
+      title: normalizeText(task.title),
+      task: normalizeText(task.task),
+      attachments: (task.attachments ?? [])
+        .map((attachment) =>
+          JSON.stringify({
+            name: normalizeText(attachment.name),
+            path: (attachment.path ?? "").replace(/\\/g, "/").trim(),
+            data: attachment.data ?? "",
+            mimeType: (attachment.mimeType ?? "").trim().toLowerCase(),
+          }),
+        )
+        .sort(),
+    })),
+  );
+}
+
+/**
  * 协议块区域（围栏式 / 工具调用式）—— 宿主派发与转录渲染共用的判定结果。
  */
 export interface SuperProtocolRegion {

@@ -82,6 +82,7 @@ import {
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   superArchiveFingerprint,
+  superDirectiveDedupeKey,
   SuperDirectiveScanner,
   SuperReportBuffer,
   type SuperAction,
@@ -705,6 +706,23 @@ export class ChatPanel implements vscode.Disposable {
    * 死区位置，宿主无从裁剪，只有扫描器内部知道哪些前缀可以安全丢掉。
    */
   private readonly superScan = new SuperDirectiveScanner();
+  /**
+   * 思考通道（`agent_thought_chunk`）的委派扫描器。
+   *
+   * 思考与正文是两条**交错**的流：模型经常先把委派块写进思考、再把同一份
+   * 载荷写进正文。两者**不能共用**一个滚动缓冲 —— 交错的消费偏移与围栏
+   * 判定会互相污染（思考里的开栏被正文的收栏接管之类），同一份载荷的派发
+   * 结论会随分片顺序漂移。载荷级去重交给 `superDispatchedDirectives`。
+   */
+  private readonly superThoughtScan = new SuperDirectiveScanner();
+  /**
+   * 本主会话已派发过的委派载荷指纹（`superDirectiveDedupeKey`）。
+   *
+   * 同一份载荷在思考 + 正文里各写一遍、或同一通道重复写，都只派发一次 ——
+   * 否则会开出重复的子会话（双倍 token、两张看板卡）。换会话 / 恢复会话 /
+   * 热重认证时清空：新会话可以重新派发同样的任务。
+   */
+  private readonly superDispatchedDirectives = new Set<string>();
   /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
@@ -5344,6 +5362,9 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
     this.cancelAllPlanExits(vscode.l10n.t("重新认证，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("重新认证，提问已跳过"));
+    // 热重认证的 keepSession 路径原地重载同一个会话（不经过新会话 / 恢复），
+    // 扫描缓冲与去重账本属于旧凭据下的那段对话，这里显式清空。
+    this.resetSuperDirectiveScans();
     // Detach the old client FIRST: dispose() kills its child process, and the
     // resulting exit event must not be mistaken for a crashed session.
     const oldClient = this.client;
@@ -5733,6 +5754,16 @@ export class ChatPanel implements vscode.Disposable {
       this.scanSuperDirectives(n.update.content);
       this.scanSuperActions(n.update.content);
     }
+    // 思考通道同样可能写出委派块（模型边想边派发）。扫描器必须是独立的
+    // 一个 —— 与正文共用滚动缓冲会让两条交错流的消费偏移互相污染。两条
+    // 通道的同一份载荷由 `superDispatchedDirectives` 去重，只派发一次。
+    if (
+      !this.restoring &&
+      n.update.sessionUpdate === "agent_thought_chunk" &&
+      !(n.update as { agentId?: string }).agentId
+    ) {
+      this.scanSuperDirectives(n.update.content, this.superThoughtScan);
+    }
     // Empty-response detection: any visible agent output during the live turn
     // disqualifies it from the "gateway answered empty" retry. Replay updates
     // (session/load) are excluded — they belong to a past turn.
@@ -6111,9 +6142,10 @@ export class ChatPanel implements vscode.Disposable {
     this.store.replaceState(fresh);
     // 看板跟着主会话走：切到 B 就不能还显示着 A 的历史子会话。
     this.publishSuperSessions();
-    // 委派扫描缓冲也换人：上一个会话的助手文本（以及里面没收口的围栏）跟
-    // 新会话无关，留着只会让新会话的扫描基线落在别人的文本上。
-    this.superScan.reset();
+    // 委派扫描状态也换人：上一个会话的助手文本（以及里面没收口的围栏）、
+    // 已派发载荷的账本都跟新会话无关 —— 留着会让新会话的扫描基线落在别人的
+    // 文本上，还会把本该重新派发的指令误判成重复。
+    this.resetSuperDirectiveScans();
     try {
       // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
       // carries ONLY {sessionId} — no modes, no _meta. A prior session/new does
@@ -6787,6 +6819,19 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 换会话 / 恢复会话 / 热重认证时重置委派扫描状态。
+   *
+   * 两个滚动缓冲里是上一个会话的助手文本（可能还有没收口的围栏），去重账本
+   * 里是上一个会话派发过的载荷 —— 三者都跟新会话无关：不清掉会让新会话的
+   * 扫描基线落在别人的文本上，还会把本该重新派发的指令误判成重复。
+   */
+  private resetSuperDirectiveScans(): void {
+    this.superScan.reset();
+    this.superThoughtScan.reset();
+    this.superDispatchedDirectives.clear();
+  }
+
+  /**
    * Scan the MAIN session's assistant text for delegation directives.
    *
    * The directive is a `super-agent` fenced block carrying JSON:
@@ -6798,12 +6843,16 @@ export class ChatPanel implements vscode.Disposable {
    * CLI's own `task` tool) carry an `agentId` and are ignored — v1 supports
    * exactly one level of children.
    */
-  private scanSuperDirectives(content: unknown): void {
+  private scanSuperDirectives(
+    content: unknown,
+    scanner: SuperDirectiveScanner = this.superScan,
+  ): void {
     const text = ChatPanel.chunkText(content);
     if (!text) return;
     // 扫描器自己持有滚动缓冲与消费偏移：扫完就把死区丢掉，缓冲因此不随
-    // 会话长度增长（宿主自己攒字符串的话是无界的）。
-    const scan = this.superScan.push(text);
+    // 会话长度增长（宿主自己攒字符串的话是无界的）。思考与正文各持一个
+    // 实例（见字段注释），调用方决定用哪个。
+    const scan = scanner.push(text);
     if (scan.invalidBlocks.length > 0) {
       // 只报「无法解析」等于让用户和模型都没法自查；带上失败原因与正文长度，
       // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。
@@ -6823,10 +6872,17 @@ export class ChatPanel implements vscode.Disposable {
     let droppedAttachments = 0;
     for (const tasks of scan.blocks) {
       for (const task of tasks) {
+        // 同一份载荷可能被写两遍（思考 + 正文，或同一通道重复）：只派发第一次。
+        const dedupeKey = superDirectiveDedupeKey([task]);
+        if (this.superDispatchedDirectives.has(dedupeKey)) {
+          this.log.info(`super agent: skipped-duplicate directive 「${task.title}」`);
+          continue;
+        }
         const spec = this.prepareSuperSpec(task, (count) => {
           droppedAttachments += count;
         });
         const session = manager.spawn(spec);
+        this.superDispatchedDirectives.add(dedupeKey);
         dispatched++;
         this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
       }
@@ -6837,6 +6893,9 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("子会话委派指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
+    // 全部命中重复（思考和正文各写了一遍）时没有「已经派发」这件事可报 ——
+    // 发一条「已派发 0 个」只会让用户以为出了错。
+    if (dispatched === 0) return;
     // 提示里报实际生效的上限（设置页可调），而不是写死的常量。
     const concurrency = clampMaxConcurrentSuperSessions(
       vscode.workspace
@@ -8931,9 +8990,9 @@ export class ChatPanel implements vscode.Disposable {
     // 看板跟着主会话走：新会话没有历史子会话（活着的子会话仍然可见 ——
     // 它们是正在跑的进程，用户还得能中断它们）。
     this.publishSuperSessions();
-    // 委派扫描缓冲也换人：上一个会话的助手文本（以及里面没收口的围栏）跟
-    // 新会话无关。
-    this.superScan.reset();
+    // 委派扫描状态也换人：上一个会话的助手文本（以及里面没收口的围栏）、
+    // 已派发载荷的账本都跟新会话无关。
+    this.resetSuperDirectiveScans();
     // Open the reset window: until the new session is established (finally),
     // onSessionUpdate drops everything not addressed to the store's own
     // session — this is what catches the abandoned turn's trailing updates
