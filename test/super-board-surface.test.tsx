@@ -144,6 +144,23 @@ describe("Super Agent 看板表面材质", () => {
 });
 
 describe("Super Agent 看板阶段轨", () => {
+  /** 阶段轨元素（折叠行里那个就是第一个；展开只是多渲染一个同样的轨）。 */
+  function rail(): HTMLElement {
+    const el = container.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    expect(el).toBeTruthy();
+    return el as HTMLElement;
+  }
+
+  /** 轨上的圆点（每个真实节点一个）。 */
+  function dots(): HTMLElement[] {
+    return Array.from(rail().querySelectorAll<HTMLElement>(".rounded-full"));
+  }
+
+  /** 节点文案（标签在 DOM 里常驻，窄容器只是被 CSS 隐藏）。 */
+  function labels(): HTMLElement[] {
+    return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-micro"));
+  }
+
   it("只画真实发生过的节点，末节点带当前高亮", () => {
     render([session({ startedAt: 2000, updatedAt: 3000 })]);
     expand();
@@ -162,6 +179,116 @@ describe("Super Agent 看板阶段轨", () => {
     expect(dots[0]!.className).toContain("bg-muted-foreground/60");
     expect(dots[1]!.className).toContain("bg-primary");
     expect(dots[1]!.className).toContain("ring-2");
+  });
+
+  it("queued：出现排队节点且为当前高亮（信息色）", () => {
+    render([session({ status: "preparing", queued: true })]);
+    expand();
+
+    const described = rail().getAttribute("aria-label")!;
+    expect(described).toContain("排队");
+    // 还没启动：没有「启动」节点。
+    expect(described).not.toContain("启动");
+
+    const all = dots();
+    expect(all).toHaveLength(2);
+    expect(all[1]!.className).toContain("bg-info");
+    expect(all[1]!.className).toContain("ring-2");
+
+    const last = labels().at(-1)!;
+    expect(last.textContent).toBe("排队");
+    expect(last.className).toContain("text-info");
+  });
+
+  it("awaiting_input：等待应答是当前节点且用警告色", () => {
+    render([
+      session({
+        status: "awaiting_input",
+        startedAt: 2000,
+        pending: {
+          kind: "question",
+          requestId: "q-1",
+          questions: [],
+          deadline: 305_000,
+          timeoutMs: 300_000,
+        },
+      }),
+    ]);
+    // 有子会话在等应答时看板会自行展开（宿主 useEffect），再点一次反而收起。
+
+    const described = rail().getAttribute("aria-label")!;
+    expect(described).toContain("等待应答");
+
+    const all = dots();
+    expect(all).toHaveLength(3);
+    expect(all[2]!.className).toContain("bg-warning");
+    expect(all[2]!.className).toContain("ring-2");
+
+    const last = labels().at(-1)!;
+    expect(last.textContent).toBe("等待应答");
+    expect(last.className).toContain("text-warning");
+  });
+
+  it("completed + integration=merged：末节点是合并结果（完成态），且没有收尾占位", () => {
+    render([
+      session({
+        status: "completed",
+        startedAt: 2000,
+        endedAt: 4000,
+        integration: { mode: "merge", state: "merged", at: 5000 },
+      }),
+    ]);
+    expand();
+    // 已完成且改动已合并的子会话被折叠进「已完成的 N 个子会话」历史行。
+    const foldedToggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="展开已完成的子会话"]',
+    );
+    expect(foldedToggle).toBeTruthy();
+    act(() => foldedToggle!.click());
+
+    const described = rail().getAttribute("aria-label")!;
+    expect(described).toContain("已完成");
+    // 集成结果（derive 的既有文案「已自动合并」）排在终态节点之后 —— aria-label
+    // 里每个节点后面还跟着时钟，所以用出现顺序而不是 endsWith。
+    expect(described.lastIndexOf("已自动合并")).toBeGreaterThan(described.indexOf("已完成"));
+    expect(described).not.toContain("收尾");
+
+    const all = dots();
+    expect(all).toHaveLength(4);
+    // 终态没有「当前」节点：不该再有 ring 高亮。
+    expect(all.some((dot) => dot.className.includes("ring-2"))).toBe(false);
+
+    const last = labels().at(-1)!;
+    expect(last.textContent).toBe("已自动合并");
+    expect(last.className).toContain("text-muted-foreground");
+    expect(last.className).not.toContain("text-destructive");
+  });
+
+  it("failed：末节点是失败且用错误色", () => {
+    render([session({ status: "failed", error: "进程崩溃", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+
+    const described = rail().getAttribute("aria-label")!;
+    expect(described).toContain("失败");
+
+    const all = dots();
+    expect(all).toHaveLength(3);
+    expect(all[2]!.className).toContain("bg-destructive");
+
+    const last = labels().at(-1)!;
+    expect(last.textContent).toBe("失败");
+    expect(last.className).toContain("text-destructive");
+  });
+
+  it("running（无 endedAt）：轨上没有完成/收尾节点", () => {
+    render([session({ startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+
+    const described = rail().getAttribute("aria-label")!;
+    for (const absent of ["已完成", "收尾", "失败", "已中断", "已自动合并"]) {
+      expect(described).not.toContain(absent);
+    }
+    expect(labels().at(-1)!.textContent).toBe("启动");
   });
 });
 
