@@ -426,13 +426,15 @@ export function AssistantText({ text, streamCaret = false }: { text: string; str
 }
 
 /**
- * 思考卡正文的入口。
+ * 思考卡正文的入口：**纯 Markdown**，不做协议块切分。
  *
- * 模型也会把 `super-agent` 围栏写进思考通道（那里是同一个模型输出流），只渲染
- * Markdown 的话用户看到的是一堵带 `super-agent` 语言标签的 JSON。这里直接复用
- * `AssistantText`：切分逻辑只有一份，文本段仍是完整 Markdown，协议段仍是同一套
- * 卡片材质。思考正文不挂流式光标 —— 未收栏时切分器本就只出文本段，光标没有意义。
+ * 思考通道是模型的内部独白，不是给宿主的指令面 —— 派发只扫助手正文，写进思考
+ * 里的 `super-agent` 围栏不会被派发。旧实现复用 `AssistantText`，于是思考卡里
+ * 会冒出看起来已经派发的任务卡，与事实相反。这里只交给 Markdown：围栏按普通
+ * 代码块渲染（带语言标签），正文按段落渲染，不出现任何卡片。
+ *
+ * 思考正文不挂流式光标 —— 思考卡不是输出终点。
  */
 export function ThoughtText({ text }: { text: string }) {
-  return <AssistantText text={text} />;
+  return <Markdown text={text} />;
 }
