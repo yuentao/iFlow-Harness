@@ -81,6 +81,30 @@ const ACTIONS = [
   "```",
 ].join("\n");
 
+/**
+ * 用户实测截图 2026-11-13 的真实形态：散文 + 独占行围栏 + **单行压缩超长
+ * JSON**（任务书里带换行转义、中文、反斜杠路径、反引号、花括号、ASCII 双引号）
+ * + 独占行收栏。宿主已派发（看板 running），转录却是一堵带 `super-agent`
+ * 语言标签的 JSON 墙。JSON.stringify 不带缩进 → 载荷只有一行，与截图一致。
+ * 原文取自 ~/.iflow/acp/sessions 那一轮 assistant 文本（6111 字符，单任务书）。
+ */
+const REAL_ONE_LINE_TASK = [
+  "项目：j:\\git\\iflow-harness（VSCode 扩展，TypeScript strict + React 19 + Tailwind 4 + vitest 5；Super Agent 多子会话看板）。你负责实现并自验下面这个完整需求。",
+  "【背景：看板与数据】节点文本被截断，`status/title/aria-label` 要一起改。",
+  "1. 数切：`webview/src/components/SuperAgentBoard.tsx:251` 的 SuperTimeline 编排为 `flex min-w-0 max-w-[50%] shrink items-center gap-1 overflow-hidden`，内容是 `shrink-0 items-center gap-1`。",
+  "2. 数据：`src/acp/protocol.ts:312` 已有 `{ sessionStatus: 'plan'; entries: PlanEntry[] }`，L316 `PlanEntry { priority: 'high'|'medium'|'low'; status: 'pending'|'in_progress'|'completed' }`。",
+  "3. 引号与花括号：确认「双引号 \" 与 { PlanEntry }」，路径 j:\\git\\iflow-harness\\a\\b.tsx，跑 `npx vitest run test/super-timeline.test.ts`。",
+  "4. **不要重复实现**，先把检查跑一遍，如实贴真实输出；`rawInput.tools` 的注释要保留。",
+].join("\n");
+
+const REAL_ONE_LINE_DELEGATE = [
+  "已确认走「只用 todo 节点」方案。派一个子会话完成整条链路（数据捕获 → 纯逻辑 → 看板渲染），避免并行改动同一批类型文件时互相看不到。",
+  "",
+  "```super-agent",
+  JSON.stringify({ tasks: [{ title: "时间轴改用子会话 todo", task: REAL_ONE_LINE_TASK }] }),
+  "```",
+].join("\n");
+
 /** 单条协议段的类型（组件的 props 类型不是导出的，用 Parameters 取）。 */
 type DirectiveSegment = Parameters<typeof SuperDirectiveCard>[0]["segment"];
 
@@ -367,6 +391,173 @@ describe("AssistantText 协议块卡片", () => {
     expect(text()).toContain("我来分派两件事");
     expect(text()).toContain("再补一个");
     expect(text()).not.toContain('"tasks"');
+  });
+
+  // 用户实测截图 2026-11-13：主会话把任务书写成「散文 + 独占行围栏 + 单行
+  // 压缩超长 JSON + 独占行收栏」，宿主已派发（看板 running），转录却是一堵带
+  // `super-agent` 语言标签的 JSON 墙。钉住「已派发的块必须每任务一张卡片」。
+  it("真实形态：散文 + 独占行围栏 + 单行压缩超长 JSON 每任务一张卡片，DOM 无裸 JSON", () => {
+    expect(splitSuperDirectiveSegments(REAL_ONE_LINE_DELEGATE).map((s) => s.kind)).toEqual([
+      "text",
+      "directive",
+    ]);
+    render(REAL_ONE_LINE_DELEGATE);
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("时间轴改用子会话 todo");
+    // 折叠态只给前几块（按设计），但绝不能是 JSON 墙：正文已按块排版。
+    expect(cards[0]!.textContent).toContain("项目：j:\\git\\iflow-harness");
+    expect(text()).toContain("已确认走「只用 todo 节点」方案");
+    expect(text()).not.toContain('"tasks"');
+    expect(text()).not.toContain('"title"');
+    expect(container.querySelector("pre code.language-super-agent")).toBeNull();
+    // 展开后整份任务书都可读（单行压缩载荷被还原成结构化正文，不是一堵 JSON）。
+    const expand = container.querySelector<HTMLButtonElement>('button[aria-label="展开任务说明"]');
+    expect(expand).toBeTruthy();
+    act(() => expand!.click());
+    expect(text()).toContain("SuperTimeline");
+    expect(text()).toContain("npx vitest run test/super-timeline.test.ts");
+    expect(text()).not.toContain('"tasks"');
+  });
+
+  // CommonMark 允许围栏行带最多 3 个空格缩进；Markdown 组件照常渲染成带
+  // `super-agent` 语言标签的代码块。切分器旧实现只认「零缩进行首」，于是判
+  // unclosed → 整段退回 Markdown → 又是一堵 JSON 墙（用户截图的观感）。
+  it("收栏带 2 空格缩进（CommonMark 合法围栏）仍出任务卡，不留 JSON 墙", () => {
+    const indented = REAL_ONE_LINE_DELEGATE.replace(/\n```$/, "\n  ```");
+    expect(splitSuperDirectiveSegments(indented).map((s) => s.kind)).toContain("directive");
+    render(indented);
+    expect(taskCards()).toHaveLength(1);
+    expect(taskCards()[0]!.textContent).toContain("时间轴改用子会话 todo");
+    expect(text()).not.toContain('"tasks"');
+    expect(container.querySelector("pre code.language-super-agent")).toBeNull();
+  });
+
+  it("开栏与收栏都带 2 空格缩进时同样出任务卡", () => {
+    const indented = REAL_ONE_LINE_DELEGATE.replace("\n```super-agent\n", "\n  ```super-agent\n").replace(
+      /\n```$/,
+      "\n  ```",
+    );
+    render(indented);
+    expect(taskCards()).toHaveLength(1);
+    expect(taskCards()[0]!.textContent).toContain("时间轴改用子会话 todo");
+    expect(text()).not.toContain('"tasks"');
+    expect(container.querySelector("pre code.language-super-agent")).toBeNull();
+  });
+
+  it("缩进围栏但载荷未收全仍按 pending 降级，不伪造已派发", () => {
+    const unclosed = ["  ```super-agent", '{"tasks": [{"title": "进行中的任务"'].join("\n");
+    render(unclosed);
+    expect(taskCards()).toHaveLength(0);
+    expect(container.querySelector("pre code")).toBeTruthy();
+    expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
+  });
+
+  // marked 实测（2026-11-13）：下面这些围栏写法都会被渲染成 language-super-agent
+  // 代码块。宿主派发了它们，转录就必须出卡片；旧切分器只认「零缩进 + ``` + 语言
+  // 紧贴」，其余形态判未闭合 → 整段退回 Markdown → 又一堵 JSON 墙。
+  it.each([
+    ["收栏带 2 空格缩进", "```super-agent", "  ```"],
+    ["开闭都带 3 空格缩进", "   ```super-agent", "   ```"],
+    ["反引号后带空格", "``` super-agent", "```"],
+    ["波浪线围栏", "~~~super-agent", "~~~"],
+    ["info string 带附加词", "```super-agent json", "```"],
+    ["四个反引号", "````super-agent", "````"],
+    ["大写语言名", "```Super-Agent", "```"],
+  ])("%s 仍出任务卡、不留 JSON 墙", (_name, open, close) => {
+    const source = [
+      "先说明一下。",
+      "",
+      open,
+      '{"tasks":[{"title":"变体任务","task":"变体正文"}]}',
+      close,
+    ].join("\n");
+    render(source);
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("变体任务");
+    expect(cards[0]!.textContent).toContain("变体正文");
+    expect(container.querySelector("pre code")).toBeNull();
+    expect(text()).not.toContain('"tasks"');
+    expect(text()).toContain("先说明一下。");
+  });
+
+  // 真实语料（~/.iflow/acp/sessions，2026-11-13）里的收栏形态：收栏行后面还有
+  // 内容 —— CLI 历史里的 ` ```</arg_value:6124c78e>`，以及模型在收栏同行续写的
+  // 散文。marked 不认这种收栏（CommonMark 要求收栏行后只剩空白），于是代码块
+  // 一路吞到文本末尾：用户看到的正是那堵 JSON 墙，而宿主其实已经派发。
+  it.each([
+    ["收栏同行带 CLI 历史标记", "```super-agent", "```</arg_value:6124c78e>"],
+    ["收栏同行带散文", "```super-agent", "``` 我在这一轮结束？"],
+    ["收栏比开栏短（~~~ 开 / ~~ 收）", "~~~super-agent", "~~"],
+    ["收栏比开栏短（```` 开 / ``` 收）", "````super-agent", "```"],
+  ])("%s 仍出任务卡、不留 JSON 墙", (_name, open, closeLine) => {
+    const source = [
+      "派一个子会话。",
+      "",
+      open,
+      '{"tasks":[{"title":"尾巴收栏任务","task":"收栏行后面还有内容"}]}',
+      closeLine,
+    ].join("\n");
+    const segments = splitSuperDirectiveSegments(source);
+    // 收栏行后面的尾巴不属于协议块：有尾巴时它作为块之后的文本段留在转录里（不丢内容）。
+    expect(segments[0]?.kind).toBe("text");
+    expect(segments[1]?.kind).toBe("directive");
+    if (segments.length > 2) expect(segments[2]?.kind).toBe("text");
+    render(source);
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("尾巴收栏任务");
+    expect(cards[0]!.textContent).toContain("收栏行后面还有内容");
+    expect(container.querySelector("pre code.language-super-agent")).toBeNull();
+    expect(text()).not.toContain('"tasks"');
+    expect(text()).toContain("派一个子会话。");
+  });
+
+  it("收栏同行带尾巴时，尾巴留在卡片之后的文本段里", () => {
+    const source = [
+      "```super-agent",
+      '{"tasks":[{"title":"带尾巴的任务","task":"正文"}]}',
+      "``` 我在这一轮结束。",
+    ].join("\n");
+    render(source);
+    expect(taskCards()).toHaveLength(1);
+    expect(text()).toContain("我在这一轮结束。");
+    // 尾巴不能混进卡片正文。
+    expect(taskCards()[0]!.textContent).not.toContain("我在这一轮结束");
+    expect(container.querySelector("pre code.language-super-agent")).toBeNull();
+  });
+
+  // 收栏是宽容认的，正文必须仍只取 JSON 本身；夹在载荷与收栏之间的散文不能随
+  // 收栏一起被消费掉（它得留在转录里），也不能混进卡片正文。
+  it("JSON 收尾与收栏之间夹散文时，卡片正文只有任务书，散文不丢", () => {
+    const source = [
+      "```super-agent",
+      '{"tasks":[{"title":"夹散文的任务","task":"正文"}]}',
+      "",
+      "这段是模型写在载荷后面的散文。",
+      "```",
+      "",
+      "收栏之后的正文。",
+    ].join("\n");
+    render(source);
+    const cards = taskCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.textContent).toContain("夹散文的任务");
+    expect(cards[0]!.textContent).not.toContain("这段是模型写在载荷后面的散文");
+    expect(text()).toContain("这段是模型写在载荷后面的散文");
+    expect(text()).toContain("收栏之后的正文。");
+    // 载荷本身绝不以 JSON 形式出现。
+    expect(text()).not.toContain('"tasks"');
+    expect(container.querySelector("pre code.language-super-agent")).toBeNull();
+  });
+
+  it("载荷未收全时，带尾巴的收栏也不伪造已派发", () => {
+    const unclosed = ["```super-agent", '{"tasks": [{"title": "进行中的任务"', "``` 尾巴"].join("\n");
+    expect(splitSuperDirectiveSegments(unclosed)).toEqual([{ kind: "text", text: unclosed }]);
+    render(unclosed);
+    expect(taskCards()).toHaveLength(0);
+    expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
   });
 
   it("普通段落 / 列表 / 普通代码块与协议卡共存，Markdown 不丢", () => {

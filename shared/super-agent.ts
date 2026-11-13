@@ -1546,14 +1546,18 @@ interface FenceMatch {
   lineEnd: number;
 }
 
-/** 找下一个独占一行的围栏。 */
-function findFence(text: string, from: number, pattern: RegExp): FenceMatch | null {
+/** 找下一个独占一行的围栏（按行谓词判定）。 */
+function findFence(
+  text: string,
+  from: number,
+  matches: (line: string) => boolean,
+): FenceMatch | null {
   let pos = from;
   while (pos <= text.length) {
     let lineEnd = text.indexOf("\n", pos);
     if (lineEnd === -1) lineEnd = text.length;
     const line = text.slice(pos, lineEnd).replace(/\r$/, "");
-    if (pattern.test(line)) {
+    if (matches(line)) {
       return { lineStart: pos, bodyStart: Math.min(lineEnd + 1, text.length), lineEnd: Math.min(lineEnd + 1, text.length) };
     }
     if (lineEnd === text.length) return null;
@@ -1562,11 +1566,53 @@ function findFence(text: string, from: number, pattern: RegExp): FenceMatch | nu
   return null;
 }
 
-/** 协议围栏开栏：```super-agent 或派生语言（super-agent-actions 等）。 */
-const SUPER_FENCE_OPEN = /^```(super-agent(?:-[A-Za-z0-9_-]+)?)[ \t]*$/;
+/**
+ * 协议围栏的样式（字符 + 长度）。
+ *
+ * 判定必须覆盖 **Markdown 渲染器真正认得的围栏形态**：只要 marked 会把它渲染成
+ * 带 `super-agent` 语言标签的代码块，转录里就必须出卡片，否则就是用户截图里的
+ * 「一堵 JSON 墙」。CommonMark 允许：
+ *  - 最多 3 个空格缩进；
+ *  - ``` 或 ~~~（至少 3 个），收栏必须同字符且不短于开栏；
+ *  - info string 前可有空白，语言取 info string 的第一个词。
+ *
+ * 2026-11-13 用项目自带的 marked 实测：`  ```super-agent`、` ``` super-agent`、
+ * `~~~super-agent`、` ```super-agent json` 全部渲染成 language-super-agent
+ * 代码块 —— 而旧实现只认「零缩进 + ``` + 语言紧贴」，这些形态被判未闭合，
+ * 整段退回 Markdown，于是「宿主派发了、转录仍是一堵 JSON 墙」。
+ */
+interface SuperFenceStyle {
+  char: "`" | "~";
+  /** 围栏字符长度（收栏必须 ≥ 它）。 */
+  length: number;
+}
 
-/** 收栏标记。 */
-const FENCE_MARKER = "```";
+/** info string 的第一个词是否是协议语言（大小写不敏感，含 super-agent-*）。 */
+const SUPER_FENCE_LANGUAGE = /^super-agent(?:-[a-z0-9_-]+)?$/i;
+
+/** 解析一行开栏；不是协议围栏返回 null。 */
+function matchSuperFenceOpenLine(line: string): (SuperFenceStyle & { language: string }) | null {
+  const match = /^( {0,3})(`{3,}|~{3,})([^\r\n]*)$/.exec(line);
+  if (!match) return null;
+  const run = match[2] ?? "";
+  const info = (match[3] ?? "").trim();
+  const word = info.split(/\s+/)[0] ?? "";
+  if (!SUPER_FENCE_LANGUAGE.test(word)) return null;
+  return {
+    char: run.charAt(0) === "~" ? "~" : "`",
+    length: run.length,
+    // 语言统一小写：宿主与渲染都按小写协议名判定，模型的大小写写法不再分叉。
+    language: word.toLowerCase(),
+  };
+}
+
+/** 一行是否是 `style` 的收栏（最多 3 空格缩进、同字符、不短于开栏、其后只剩空白）。 */
+function isSuperFenceCloseLine(line: string, style: SuperFenceStyle): boolean {
+  const match = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(line);
+  if (!match) return false;
+  const run = match[2] ?? "";
+  return run.charAt(0) === style.char && run.length >= style.length;
+}
 
 /**
  * 找下一个独占一行的协议围栏开栏 —— **宿主派发与转录渲染共用的唯一一个入口**。
@@ -1588,12 +1634,15 @@ function findSuperFenceOpen(
     let lineEnd = text.indexOf("\n", pos);
     if (lineEnd === -1) lineEnd = text.length;
     const line = text.slice(pos, lineEnd).replace(/\r$/, "");
-    const match = SUPER_FENCE_OPEN.exec(line);
-    if (match) {
-      const language = match[1] ?? "super-agent";
-      if (accept(language)) {
-        return { language, lineStart: pos, bodyStart: Math.min(lineEnd + 1, text.length) };
-      }
+    const fence = matchSuperFenceOpenLine(line);
+    if (fence && accept(fence.language)) {
+      return {
+        language: fence.language,
+        lineStart: pos,
+        bodyStart: Math.min(lineEnd + 1, text.length),
+        fenceChar: fence.char,
+        fenceLength: fence.length,
+      };
     }
     if (lineEnd === text.length) return null;
     pos = lineEnd + 1;
@@ -1601,21 +1650,53 @@ function findSuperFenceOpen(
   return null;
 }
 
+/** 找到的收栏标记：起点 + 围栏字符长度。 */
+interface FenceCloseMarker {
+  at: number;
+  length: number;
+}
+
+/** 收栏至少要有几个围栏字符（2 个就够 —— 见下面的宽容说明）。 */
+const MIN_CLOSE_RUN = 2;
+
 /**
- * 收栏定位：JSON 结构收尾之后的第一个 ``` 标记。
+ * 收栏定位：JSON 结构收尾之后的第一个收栏标记。
  *
- * 标记必须落在行首（正常围栏），或紧贴载荷收尾（模型把收栏粘在载荷尾巴后面：
- * `...}``` `）。**按「独占一行」的行匹配会漏掉后一种形态** —— 宿主在流式某一帧
- * 恰好看到独占的 ``` 会派发出去，转录侧整段重扫却找不到收栏，于是
- * 「宿主已派发、转录里仍是一堵 JSON 墙」。
+ * 标记必须落在行首（最多 3 空格缩进 —— CommonMark 允许，且 marked 认它），或
+ * 紧贴载荷收尾（模型把收栏粘在载荷尾巴后面：`...}``` `）。**按「零缩进且独占
+ * 一行」匹配会漏掉两种合法形态** —— 宿主在流式某一帧恰好看到独占的 ``` 会派发
+ * 出去，转录侧整段重扫却找不到收栏，于是「宿主已派发、转录里仍是一堵 JSON 墙」。
+ *
+ * 另有两条**刻意的宽容**（2026-11-13 从 `~/.iflow/acp/sessions` 的真实文本里取到，
+ * 判严格就正好是那两堵墙；用项目自带的 marked 实测过）：
+ *  - 收栏行后面还有内容（` ``` 我在这一轮结束？`、历史里的 ` ```</arg_value:…>`）：
+ *    CommonMark 不认它是收栏，marked 会把之后的文本全部吞进代码块 —— 用户看到的
+ *    就是那堵 JSON 墙。载荷结构已经收全，这里认它收口，尾巴留给后面的文本段渲染。
+ *  - 收栏比开栏短（`~~~` 开、`~~` 收）：marked 同样不闭合，同样认它。
+ *
+ * 宽容只作用于「结构已收全」的块（本函数唯一调用点），正文由 JSON 结构决定，
+ * 收栏位置只界定协议区间的终点 —— 不会把散文吞进卡片正文。
  */
-function findCloseMarker(text: string, from: number): number {
-  let at = text.indexOf(FENCE_MARKER, from);
+function findCloseMarker(
+  text: string,
+  from: number,
+  style: SuperFenceStyle,
+): FenceCloseMarker | null {
+  let at = text.indexOf(style.char, from);
   while (at !== -1) {
-    if (at === from || at === 0 || text.charAt(at - 1) === "\n") return at;
-    at = text.indexOf(FENCE_MARKER, at + 1);
+    let runEnd = at;
+    while (runEnd < text.length && text.charAt(runEnd) === style.char) runEnd++;
+    const length = runEnd - at;
+    if (length >= MIN_CLOSE_RUN) {
+      const lineStart = text.lastIndexOf("\n", at - 1) + 1;
+      const indent = text.slice(lineStart, at);
+      if (at === from || (indent.length <= 3 && /^[ \t]*$/.test(indent))) {
+        return { at, length };
+      }
+    }
+    at = text.indexOf(style.char, at + 1);
   }
-  return -1;
+  return null;
 }
 
 /** 正文里的 JSON 结构不可用时最多试几个收栏候选（防病态文本拖死扫描）。 */
@@ -1850,6 +1931,10 @@ export interface SuperDirectiveOpen {
   lineStart: number;
   /** 正文起始偏移（开栏行之后）。 */
   bodyStart: number;
+  /** 围栏字符（` 或 ~）；缺省按反引号处理。 */
+  fenceChar?: "`" | "~";
+  /** 围栏字符长度（收栏必须 ≥ 它）；缺省 3。 */
+  fenceLength?: number;
 }
 
 /**
@@ -1892,11 +1977,15 @@ interface CloseCandidate {
  * 从开栏往后逐个收栏切分正文 —— 任务书正文里自带的 ``` 会把正文切碎，所以
  * 「第一个收栏」未必是块真正的结尾，用候选逐个试才能找到对的那个。
  */
-function collectCloseCandidates(text: string, bodyStart: number): CloseCandidate[] {
+function collectCloseCandidates(
+  text: string,
+  bodyStart: number,
+  style: SuperFenceStyle,
+): CloseCandidate[] {
   const out: CloseCandidate[] = [];
   let searchFrom = bodyStart;
   for (let attempt = 0; attempt < MAX_CLOSE_CANDIDATES; attempt++) {
-    const close = findFence(text, searchFrom, FENCE_CLOSE);
+    const close = findFence(text, searchFrom, (line) => isSuperFenceCloseLine(line, style));
     if (!close) break;
     out.push({
       body: text.slice(bodyStart, close.lineStart).trim(),
@@ -1946,6 +2035,12 @@ export function resolveSuperDirectiveBlock(
   options: { language: string },
 ): SuperDirectiveResolution {
   const lang = directiveLangOf(options.language);
+  // 围栏样式（缺省反引号 × 3）：收栏必须同字符且不短于开栏。缩进、~~~ 与
+  // 更长的反引号围栏都要能收口 —— 这些形态 marked 都会渲染成代码块。
+  const style: SuperFenceStyle = {
+    char: open.fenceChar ?? "`",
+    length: open.fenceLength ?? 3,
+  };
   // 「上一轮扫到哪」故意不参与判定：它是流式优化的产物，拿它当收栏搜索的起点
   // 会让同一个块的结论随流式分片大小漂移（宿主某一帧派出去了，转录侧整段重扫
   // 却判未闭合，退化成 JSON 墙）。
@@ -1958,15 +2053,24 @@ export function resolveSuperDirectiveBlock(
 
   if (structure.status === "complete") {
     // 收栏按字符定位：标记落在行首（正常围栏），或紧贴载荷收尾（模型把收栏
-    // 粘在载荷后面：`...}``` `）。按「独占一行」匹配会漏掉后一种形态。
-    const closeAt = findCloseMarker(text, structure.end + 1);
-    if (closeAt === -1) return { kind: "unclosed" };
+    // 粘在载荷后面：`...}```` `）。按「独占一行」匹配会漏掉后一种形态。
+    const close = findCloseMarker(text, structure.end + 1, style);
+    if (!close) return { kind: "unclosed" };
+    // 载荷收尾与收栏之间夹了东西（散文、CLI 历史里的 `</arg_value:…>` 之类）：
+    // 正文只取 JSON 跨度，**区间终点也停在载荷收尾** —— 夹进来的文本留给后面的
+    // 文本段走 Markdown，不能随收栏一起被消费掉（否则会凭空消失）。
+    const gap = text.slice(structure.end + 1, close.at);
+    const payloadEnd = structure.end + 1;
+    const body = gap.trim()
+      ? text.slice(jsonStart, payloadEnd).trim()
+      : text.slice(open.bodyStart, close.at).trim();
+    const end = gap.trim() ? payloadEnd : close.at + close.length;
     return {
       kind: "closed",
-      body: text.slice(open.bodyStart, closeAt).trim(),
-      closeEnd: closeAt + FENCE_MARKER.length,
+      body,
+      closeEnd: end,
       bodyStart: open.bodyStart,
-      bodyEnd: closeAt,
+      bodyEnd: gap.trim() ? structure.end : close.at,
     };
   }
 
@@ -1977,7 +2081,7 @@ export function resolveSuperDirectiveBlock(
     // 逃生阀：字符串超长仍不闭合的不是流式中间态，是损坏块 —— 按第一个收栏
     // 收口（沿用 MAX_UNCLOSED_SPAN 的原始语义），避免单个坏块永久停住扫描。
     if (text.length - open.bodyStart > MAX_UNCLOSED_SPAN) {
-      const close = findFence(text, open.bodyStart, FENCE_CLOSE);
+      const close = findFence(text, open.bodyStart, (line) => isSuperFenceCloseLine(line, style));
       if (close) {
         return {
           kind: "closed",
@@ -1994,7 +2098,7 @@ export function resolveSuperDirectiveBlock(
   // 结构不完整但字符串都闭合了：可能刚好停在某个值之后（流式中间态），也可能
   // 真的写坏了（少括号 / 裸引号把结构读歪）。先按收栏候选找能解析的正文 ——
   // 能解析就说明块是完整的，直接收口。
-  const candidates = collectCloseCandidates(text, open.bodyStart);
+  const candidates = collectCloseCandidates(text, open.bodyStart, style);
   for (const candidate of candidates) {
     if (isUsableDirectiveBody(lang, candidate.body)) {
       return { kind: "closed", ...candidate, bodyStart: open.bodyStart };
@@ -2010,7 +2114,7 @@ export function resolveSuperDirectiveBlock(
     const salvageLimit = candidates[0] ? Math.min(candidates[0].closeEnd, regionEnd) : regionEnd;
     const salvaged = scanTaskBooks(text, open.bodyStart, salvageLimit);
     if (salvaged.books.length > 0 && !salvaged.pending) {
-      const close = findFence(text, salvaged.end, FENCE_CLOSE);
+      const close = findFence(text, salvaged.end, (line) => isSuperFenceCloseLine(line, style));
       if (close) {
         return {
           kind: "closed",
@@ -2997,7 +3101,7 @@ export type SuperDirectiveSegment =
  * super-agent>`、`super-agent:` + ```json）没有围栏前缀，只探测围栏串会让整段扫描
  * 被跳过 —— 卡片就永远出不来。扫描本身仍是精确判定，探测只是省掉无标记文本的开销。
  */
-const SUPER_RENDER_PROBE = TOOL_STYLE_MARKER;
+const SUPER_RENDER_PROBE = /super-agent/i;
 
 /** 包裹标记里可以连同载荷一起吞掉的字符（不含空白、中文与散文标点）。 */
 const WRAPPER_CHAR = /[`<>|｜\-_/A-Za-z0-9]/;
@@ -3137,7 +3241,7 @@ function describeSuperDirective(language: string, body: string): SuperDirectiveD
  * 才派发」在同一时刻切换。工具调用式载荷同理：JSON 没收全就不切。
  */
 export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment[] {
-  if (!text.includes(SUPER_RENDER_PROBE)) return text ? [{ kind: "text", text }] : [];
+  if (!SUPER_RENDER_PROBE.test(text)) return text ? [{ kind: "text", text }] : [];
   const segments: SuperDirectiveSegment[] = [];
   let textStart = 0;
   for (const region of findSuperProtocolRegions(text)) {
