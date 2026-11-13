@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   Activity,
@@ -15,6 +15,7 @@ import {
   ShieldOff,
   Square,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import type { Block } from "../../../shared/messages";
@@ -362,12 +363,23 @@ function formatCostPrecise(usd: number): string {
  * process; here we only show its status, its summary, its live progress tail,
  * its token usage and its pending request.
  *
- * Presentation: the bar FLOATS at the top of the transcript, same overlay
- * contract as the approval/question cards at the bottom (App.tsx anchors it
- * absolutely over the scroller). It never takes a flex row, so a child
- * appearing or expanding cannot squeeze the message list.
+ * Presentation: the board is part of the header (App.tsx renders it after the
+ * status chip). Collapsed it is ONE inline control — icon + label + counts +
+ * chevron — at the header's control height, so it never takes a transcript
+ * row and a child appearing cannot squeeze the message list. Expanded it
+ * opens a popup panel anchored under the header (`absolute top-full`, the
+ * header is the positioned ancestor) and closes on Esc / outside click.
+ *
+ * Material: the panel is a child of the acrylic header, i.e. it sits INSIDE a
+ * backdrop-filter ancestor. Per Filter Effects L2 that ancestor is a backdrop
+ * root, so the panel's own backdrop-filter could only sample the header's
+ * subtree — the transcript text behind it would ghost through sharp (the same
+ * verified trap documented on .acrylic-pop in styles.css). The panel therefore
+ * uses the popup acrylic tint (.acrylic-pop, near-opaque, panel-sized drop),
+ * exactly like every dropdown that opens out of this header, instead of
+ * .super-board-surface.
  */
-export function SuperAgentBoard() {
+export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement | null) => void }) {
   const sessions = useChat((s) => s.state?.superSessions);
   const send = useChat((s) => s.send);
   const [expanded, setExpanded] = useState(false);
@@ -387,6 +399,18 @@ export function SuperAgentBoard() {
   const [openRow, setOpenRow] = useState<string | null>(null);
   // Ticking clock for the elapsed labels of live children.
   const [, setTick] = useState(0);
+  // The inline header control and the popup panel are siblings (the panel is
+  // absolutely positioned under the header), so the outside-click test has to
+  // check BOTH boxes.
+  const controlRef = useRef<HTMLButtonElement>(null);
+  const panelNodeRef = useRef<HTMLDivElement>(null);
+  const setPanelNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      panelNodeRef.current = node;
+      panelRef?.(node);
+    },
+    [panelRef],
+  );
 
   const list = sessions ?? [];
   // Board order + folding: children that still need attention come first,
@@ -447,156 +471,161 @@ export function SuperAgentBoard() {
     setOpenRow(null);
   }, [allMerged]);
 
+  // Popup dismissal (the panel is a dropdown, not a persistent panel): Esc and
+  // any click outside the control + panel fold it back to the header control.
+  // Same document-level pattern as Dropdown. A modal that is already open
+  // (confirm dialogs and the live-activity dialog portal to document.body)
+  // owns the interaction — a click inside it must not collapse the board, and
+  // its own Esc handler closes it first.
+  useEffect(() => {
+    if (!expanded) return;
+    const onDown = (e: MouseEvent) => {
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const target = e.target as Node;
+      if (controlRef.current?.contains(target)) return;
+      if (panelNodeRef.current?.contains(target)) return;
+      setExpanded(false);
+      setOpenRow(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      // Swallow it: the window-level shortcut would otherwise stop generation.
+      e.stopPropagation();
+      setExpanded(false);
+      setOpenRow(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [expanded]);
+
   // Nothing to manage → the board stays out of the way.
   if (list.length === 0) return null;
 
   return (
-    // `pointer-events-auto` re-enables hits inside App's pointer-events-none
-    // top overlay shell (the gutters around the bar stay transparent to
-    // transcript scroll).
-    //
-    // Material: acrylic + shadow (user request 2026-11-12). `.super-board-
-    // surface` (styles.css) carries the acrylic tint, the backdrop blur and
-    // the acrylic inset rim; the shadow tier rides the existing .shadow-*
-    // classes and follows the surface size — the collapsed shelf is a ~38px
-    // strip where --shadow-panel's -24px spread collapses the projection to
-    // nothing, so it takes the float drop, while the expanded board is a
-    // real panel and takes the panel drop.
-    //
-    // Why the blur really works here: the board is NOT nested inside a
-    // backdrop-filter ancestor. The acrylic header and the acrylic composer
-    // are SIBLINGS of the transcript column, not ancestors of it, so no
-    // backdrop root stands between the board and the transcript — its own
-    // backdrop-filter samples the scrolling message text for real (unlike
-    // .acrylic-pop, which omits the blur because popups always nest inside
-    // an acrylic ancestor and could only sample that subtree's flat tint).
-    // The surface density is chosen in styles.css so the text behind is
-    // blurred into an illegible wash, never readable through the shelf.
-    //
-    // The board keeps `overflow-hidden` for its own rounded corners, and
-    // both dialogs (ConfirmDialog, the live-activity modal) portal to
-    // document.body, so neither the clip nor the backdrop-filter's
-    // containing block can trap them.
-    <div
-      className={`stream-in pointer-events-auto mx-3 mt-2 mb-2 shrink-0 overflow-hidden rounded-lg border border-border/70 super-board-surface ${
-        expanded ? "shadow-panel" : "shadow-float"
-      }`}
-    >
-      {/* Header row: the board's collapsed form is a single line so it never
-          steals space from the transcript. Counts are icon + number chips
-          (the wording lives in the tooltip) — the old "{n} 个进行中" text chips
-          wrapped into a ragged second row at ~360px and pushed the action
-          cluster around. `flex-wrap` is kept only as a last-resort guard so a
-          pathological width wraps whole groups instead of clipping them. */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5">
-        <DisclosureButton
-          expanded={expanded}
-          aria-label={t("展开子会话看板")}
-          title={t("展开子会话看板")}
-          className="h-6 shrink-0 gap-1 rounded-sm px-1"
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-          <span className="shrink-0">{t("子会话")}</span>
-          <span className="rounded-full bg-surface px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
-            {list.length}
-          </span>
-        </DisclosureButton>
-        <div className="flex shrink-0 items-center gap-1">
-          {counts.running > 0 && (
-            <Chip
-              tone="primary"
-              title={t("{0} 个进行中", counts.running)}
-              ariaLabel={t("{0} 个进行中", counts.running)}
-            >
-              <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
-              <span className="tabular-nums">{counts.running}</span>
-            </Chip>
-          )}
-          {counts.awaiting > 0 && (
-            <Chip
-              tone="warning"
-              title={t("{0} 个待处理", counts.awaiting)}
-              ariaLabel={t("{0} 个待处理", counts.awaiting)}
-            >
-              <CircleHelp className="size-2.5" aria-hidden="true" />
-              <span className="tabular-nums">{counts.awaiting}</span>
-            </Chip>
-          )}
-          {counts.done > 0 && (
-            <Chip
-              tone="success"
-              title={t("{0} 个已完成", counts.done)}
-              ariaLabel={t("{0} 个已完成", counts.done)}
-              className="@max-[380px]:hidden"
-            >
-              <Check className="size-2.5" aria-hidden="true" />
-              <span className="tabular-nums">{counts.done}</span>
-            </Chip>
-          )}
-          {counts.failed > 0 && (
-            <Chip
-              tone="danger"
-              title={t("{0} 个未成功", counts.failed)}
-              ariaLabel={t("{0} 个未成功", counts.failed)}
-            >
-              <X className="size-2.5" aria-hidden="true" />
-              <span className="tabular-nums">{counts.failed}</span>
-            </Chip>
-          )}
-          {counts.cancelled > 0 && (
-            <Chip
-              tone="muted"
-              title={t("{0} 个已中断", counts.cancelled)}
-              ariaLabel={t("{0} 个已中断", counts.cancelled)}
-              className="@max-[380px]:hidden"
-            >
-              <Square className="size-2.5" aria-hidden="true" />
-              <span className="tabular-nums">{counts.cancelled}</span>
-            </Chip>
-          )}
-        </div>
+    <>
+      {/* Collapsed form = ONE header control, at the header's own control
+          height (28px) so it sits in the row without changing its rhythm.
+          Counts are icon + number chips (the wording lives in the tooltip);
+          at ≤380px the label collapses to the icon and the badge keeps only
+          its shield, so the row can never wrap or push the header actions.
+          Hover: the button paints the single hover surface (hover:bg-accent/40)
+          — no nested DisclosureButton tint stacked on top of it. */}
+      <button
+        type="button"
+        ref={controlRef}
+        aria-expanded={expanded}
+        aria-label={t("展开子会话看板")}
+        title={t("展开子会话看板")}
+        onClick={() => setExpanded((v) => !v)}
+        className="press flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-surface/60 px-2 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
+      >
+        <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
+        <span className="shrink-0 @max-[380px]:hidden">{t("子会话")}</span>
+        {/* Total count: the one count that survives at ≤380px, where the
+            header also has to fit the status chip and the action cluster. The
+            per-state chips collapse there (see below) and the panel — which
+            auto-opens for a pending question — carries the detail. */}
+        <span className="shrink-0 rounded-full bg-surface px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
+          {list.length}
+        </span>
+        {/* At ≤380px the header row also holds the status chip and the action
+            cluster: the running count is the only non-actionable one, so it
+            yields there (the panel still lists every child). */}
+        {counts.running > 0 && (
+          <Chip
+            tone="primary"
+            title={t("{0} 个进行中", counts.running)}
+            ariaLabel={t("{0} 个进行中", counts.running)}
+            className="@max-[380px]:hidden"
+          >
+            <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
+            <span className="tabular-nums">{counts.running}</span>
+          </Chip>
+        )}
+        {counts.awaiting > 0 && (
+          <Chip
+            tone="warning"
+            title={t("{0} 个待处理", counts.awaiting)}
+            ariaLabel={t("{0} 个待处理", counts.awaiting)}
+            className="@max-[380px]:hidden"
+          >
+            <CircleHelp className="size-2.5" aria-hidden="true" />
+            <span className="tabular-nums">{counts.awaiting}</span>
+          </Chip>
+        )}
+        {counts.failed > 0 && (
+          <Chip
+            tone="danger"
+            title={t("{0} 个未成功", counts.failed)}
+            ariaLabel={t("{0} 个未成功", counts.failed)}
+            className="@max-[380px]:hidden"
+          >
+            <X className="size-2.5" aria-hidden="true" />
+            <span className="tabular-nums">{counts.failed}</span>
+          </Chip>
+        )}
         {/* No-confirmation is a property of every child, not of one row —
-            stated once here instead of a chip repeated on each card.
-            It is NOT hover-only: the fact that a child's shell commands run
-            without approval is the single most consequential thing about
-            child sessions, so it stays on screen (the tooltip only adds the
-            detail). */}
+            stated once here instead of a chip repeated on each card. It is
+            NOT hover-only: a child's shell commands running without approval
+            is the single most consequential fact about child sessions, so it
+            stays on screen; at ≤380px the text collapses but the shield icon
+            and its accessible name remain. */}
         <span
-          className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-ui-micro font-medium text-warning"
+          role="img"
+          aria-label={t("免确认")}
           title={t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
+          className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-ui-micro font-medium text-warning"
         >
           <ShieldOff className="size-3 shrink-0" aria-hidden="true" />
-          {t("免确认")}
+          <span className="@max-[380px]:hidden">{t("免确认")}</span>
         </span>
-        <HelpTip label={t("免确认说明")}>
-          {t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
-        </HelpTip>
-        <div className="ml-auto flex shrink-0 items-center gap-1">
-          {active.length > 0 && (
-            <Button
-              variant="canvas"
-              size="sm"
-              icon={<Square className={ICON_INLINE} />}
-              aria-label={t("全部中断")}
-              title={t("全部中断")}
-              onClick={() => setConfirmCancelAll(active.length)}
-            >
-              <span className="@max-[380px]:hidden">{t("全部中断")}</span>
-            </Button>
-          )}
-        </div>
-      </div>
-      {/* Status changes are announced, not just re-drawn: a child that turns
-          「等待你处理」 must reach a screen reader without the user hunting
-          for the board. Only CHANGES are announced (see above) — opening the
-          panel does not read the whole column out loud. */}
-      <p className="sr-only" role="status" aria-live="polite">
-        {announcement}
-      </p>
+        {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
+      </button>
 
-      {expanded && list.length > 0 && (
-        <div className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto border-t border-border px-2 py-1">
+      {/* Expanded form = a popup panel under the header. `top-full` anchors it
+          to the header's bottom edge (the header is the positioned ancestor);
+          inset-x-3 keeps the same 12px gutter as the header padding. Material:
+          .acrylic-pop — see the component comment (nested inside the acrylic
+          header, so its own backdrop-filter could only sample that subtree). */}
+      {expanded && (
+        <div
+          ref={setPanelNode}
+          role="region"
+          aria-label={t("子会话")}
+          className="stream-in absolute inset-x-3 top-full z-40 mt-2 overflow-hidden rounded-lg border border-border/70 acrylic-pop"
+        >
+          <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+            <span className="flex min-w-0 items-center gap-1.5 text-ui-label font-medium text-foreground">
+              <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
+              <span className="truncate">{t("子会话")}</span>
+            </span>
+            <HelpTip label={t("免确认说明")}>
+              {t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
+            </HelpTip>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              {active.length > 0 && (
+                <Button
+                  variant="canvas"
+                  size="sm"
+                  icon={<Square className={ICON_INLINE} />}
+                  aria-label={t("全部中断")}
+                  title={t("全部中断")}
+                  onClick={() => setConfirmCancelAll(active.length)}
+                >
+                  <span className="@max-[380px]:hidden">{t("全部中断")}</span>
+                </Button>
+              )}
+            </div>
+          </div>
+          {/* Body: same rows as before, just inside the popup. px-3 py-2 keeps
+              the panel's breathing room (the row components add their own
+              px-2/py-1.5 on top). */}
+          <div className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto px-3 py-2">
           {visible.map((session) => (
             <SuperSessionRow
               key={session.id}
@@ -655,8 +684,18 @@ export function SuperAgentBoard() {
               )}
             </div>
           )}
+          </div>
         </div>
       )}
+
+      {/* Status changes are announced, not just re-drawn: a child that turns
+          「等待你处理」 must reach a screen reader without the user hunting
+          for the board. Only CHANGES are announced (see above) — opening the
+          panel does not read the whole column out loud. The region stays
+          mounted while collapsed, so a change is announced without expanding. */}
+      <p className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </p>
 
       {confirmMerge && (
         <ConfirmDialog
@@ -718,7 +757,7 @@ export function SuperAgentBoard() {
           onCancel={() => setConfirmCleanup(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 
