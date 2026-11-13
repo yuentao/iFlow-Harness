@@ -1059,6 +1059,10 @@ function SuperSessionLive({
           }}
           className="min-h-0 flex-1 overflow-y-auto rounded-sm bg-editor/60 px-2 py-2"
         >
+          {/* ONE compact rhythm for the whole log: a flex column with a
+              single 8px gap. .cv-block (14px/20px padding + equal negative
+              margins) is the MAIN transcript's spacing — stacking it with
+              divide-y and py-1 here made rows drift apart unevenly. */}
           {transcript.length === 0 ? (
             <div className="text-ui-caption text-muted-foreground">
               {session.status === "preparing" || session.queued
@@ -1066,7 +1070,7 @@ function SuperSessionLive({
                 : t("暂无输出")}
             </div>
           ) : (
-            <div className="divide-y divide-border/50">
+            <div className="flex flex-col gap-2">
               {transcript.map((block, index) => {
                 const prev = index > 0 ? transcript[index - 1] : undefined;
                 const showAvatar =
@@ -1074,7 +1078,7 @@ function SuperSessionLive({
                   prev.kind !== "text" ||
                   (prev.kind === "text" && prev.system === true);
                 return (
-                  <div key={block.id ?? `idx-${index}`} className="cv-block py-1">
+                  <div key={block.id ?? `idx-${index}`}>
                     <BlockView
                       block={block}
                       chrome="flat"

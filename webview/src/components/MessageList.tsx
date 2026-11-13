@@ -232,6 +232,7 @@ function OutputDetails({
   truncatedChars,
   blockId,
   live = false,
+  chrome = "card",
 }: {
   output: string;
   truncatedChars?: number;
@@ -239,7 +240,12 @@ function OutputDetails({
   blockId?: string;
   /** Tool still running with streamed output (long-running shell command). */
   live?: boolean;
+  /** Surface style inherited from the containing block. `flat` (Super Agent
+   * live pane) drops the framed code box and the transcript-only copy/export
+   * actions — the row keeps its status line and the output text only. */
+  chrome?: BlockChrome;
 }) {
+  const flat = chrome === "flat";
   const send = useChat((s) => s.send);
   const [open, setOpen] = useState(false);
   // Collapse keeps its children MOUNTED for the height animation — so a
@@ -280,19 +286,23 @@ function OutputDetails({
     ) : null;
   const recoverRow =
     truncatedChars || overDisplayCap ? (
-      <div className="flex items-center gap-3 px-3 pb-1.5 text-ui-caption">
+      <div className={`flex items-center gap-3 pb-1.5 text-ui-caption ${flat ? "px-2" : "px-3"}`}>
         {overDisplayCap && !truncatedChars && (
           <span className="font-mono text-muted-foreground">
             {t("仅渲染前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
           </span>
         )}
-        <button
-          className="text-muted-foreground hover:text-foreground"
-          onClick={() => void copyText(output)}
-        >
-          {t("复制全部")}
-        </button>
-        {blockId && (
+        {/* Copy / full-output export are main-transcript affordances; the
+            read-only live pane keeps only the truncation note. */}
+        {!flat && (
+          <button
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => void copyText(output)}
+          >
+            {t("复制全部")}
+          </button>
+        )}
+        {!flat && blockId && (
           <button
             className="text-muted-foreground hover:text-foreground"
             onClick={() => send({ type: "exportToolOutput", blockId })}
@@ -310,7 +320,11 @@ function OutputDetails({
       <>
         <pre
           ref={bodyRef}
-          className="mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+          className={
+            flat
+              ? "mb-1 max-h-64 overflow-auto px-2 py-1 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+              : "mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+          }
         >
           {display}
           {truncated}
@@ -326,7 +340,9 @@ function OutputDetails({
           setOpenedOnce(true);
           setOpen((v) => !v);
         }}
-        className="flex w-full items-center gap-1.5 border-t border-border/60 px-3 py-1.5 text-left text-ui-caption text-muted-foreground hover:text-foreground"
+        className={`flex w-full items-center gap-1.5 text-left text-ui-caption text-muted-foreground hover:text-foreground ${
+          flat ? "px-2 py-1" : "border-t border-border/60 px-3 py-1.5"
+        }`}
       >
         <Caret open={open} />
         {live && <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-hidden />}
@@ -338,7 +354,11 @@ function OutputDetails({
         {openedOnce && (
           <pre
             ref={bodyRef}
-            className="mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+            className={
+              flat
+                ? "mb-1 max-h-64 overflow-auto px-2 py-1 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+                : "mx-3 mb-3 max-h-64 overflow-auto rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+            }
           >
             {display}
           </pre>
@@ -373,7 +393,16 @@ function summarizeToolInput(input: string): { label: string; value: string }[] |
   }
 }
 
-function InputDetails({ input, title }: { input: string; title: string }) {
+function InputDetails({
+  input,
+  title,
+  chrome = "card",
+}: {
+  input: string;
+  title: string;
+  chrome?: BlockChrome;
+}) {
+  const flat = chrome === "flat";
   const [open, setOpen] = useState(false);
   const [openedOnce, setOpenedOnce] = useState(false);
   if (!input) return null;
@@ -381,7 +410,13 @@ function InputDetails({ input, title }: { input: string; title: string }) {
   const summary = summarizeToolInput(input);
   const lineCount = input.trimEnd().split("\n").length;
   const body = (
-    <pre className="tool-card-raw mx-3 mb-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground">
+    <pre
+      className={
+        flat
+          ? "tool-card-raw mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-all px-2 py-1 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+          : "tool-card-raw mx-3 mb-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+      }
+    >
       {input}
     </pre>
   );
@@ -488,8 +523,9 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {/* 在终端中打开/重跑：CLI 自跑的 shell 随工具调用结束（长进程会被
               其超时杀掉），交互/长驻命令属于真实集成终端——输出还能被
-              @terminal 持续订阅。预填不自动执行，重跑立即回车。 */}
-          {presentation.accent === "execute" && block.input && (
+              @terminal 持续订阅。预填不自动执行，重跑立即回车。这些是主转录
+              专属操作，实时弹框只读，不渲染。 */}
+          {!flat && presentation.accent === "execute" && block.input && (
             <>
               <IconButton
                 icon={<SquareTerminal className={ICON_INLINE} />}
@@ -541,8 +577,10 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
           diff={block.diff!}
           chrome={chrome}
           toolCallId={block.toolCallId}
+          /* Hunk keep/revert and the revert/open-diff row are main-transcript
+             affordances; the live pane only shows the diff itself. */
           hunkActions={
-            completedWithDiff && block.diff!.newText !== null
+            !flat && completedWithDiff && block.diff!.newText !== null
               ? {
                   decisions: block.hunkDecisions,
                   onApply: (keep) => send({ type: "applyHunkSelection", toolCallId: block.toolCallId, keep }),
@@ -550,41 +588,42 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
               : undefined
           }
           actions={
-            <>
-              {completedWithDiff && (
-                <>
-                  <Button
-                    variant="canvas"
-                    size={flat ? "sm" : undefined}
-                    className={flat ? undefined : "rounded-lg"}
-                    icon={<Undo2 className="size-3" />}
-                    title={t("将该文件恢复为编辑前内容")}
-                    onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
-                  >
-                    {t("回退此改动")}
-                  </Button>
-                  <Button
-                    variant="canvas"
-                    size={flat ? "sm" : undefined}
-                    className={flat ? undefined : "rounded-lg"}
-                    icon={<Columns2 className="size-3" />}
-                    title={t("在 VSCode diff 视图中查看该变更")}
-                    onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
-                  >
-                    {t("文件对比")}
-                  </Button>
-                </>
-              )}
-            </>
+            flat ? undefined : (
+              <>
+                {completedWithDiff && (
+                  <>
+                    <Button
+                      variant="canvas"
+                      className="rounded-lg"
+                      icon={<Undo2 className="size-3" />}
+                      title={t("将该文件恢复为编辑前内容")}
+                      onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
+                    >
+                      {t("回退此改动")}
+                    </Button>
+                    <Button
+                      variant="canvas"
+                      className="rounded-lg"
+                      icon={<Columns2 className="size-3" />}
+                      title={t("在 VSCode diff 视图中查看该变更")}
+                      onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
+                    >
+                      {t("文件对比")}
+                    </Button>
+                  </>
+                )}
+              </>
+            )
           }
         />
       )}
-      {!hasDiff && block.input && <InputDetails input={block.input} title={block.title} />}
+      {!hasDiff && block.input && <InputDetails input={block.input} title={block.title} chrome={chrome} />}
       <OutputDetails
         output={block.output}
         truncatedChars={block.truncatedChars}
         blockId={block.id}
         live={block.status === "in_progress"}
+        chrome={chrome}
       />
     </div>
   );
@@ -732,7 +771,7 @@ function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome
         <span>{t("耗时")} {duration}</span>
       </div>
       {block.entries.length > 0 && (
-        <div className={flat ? "border-t border-border/50 px-2 py-1.5" : "border-t border-border/60 px-3 py-2"}>
+        <div className={flat ? "px-2 pb-1.5 pt-1" : "border-t border-border/60 px-3 py-2"}>
           <ul className="space-y-2">
             {visible.map((t2) => (
               <li key={t2.toolCallId} className="flex items-center gap-2 text-ui-label">
@@ -1514,7 +1553,9 @@ export const BlockView = memo(function BlockView({
                   descenders, and stays inside the .cv-block wrapper's 20px
                   bottom clip allowance — at the old 14px allowance paint
                   containment sheared 4px off the buttons' bottom edge. */}
-              {canCopy && (
+              {/* Copy / regenerate / remember are main-transcript affordances;
+                  the flat live pane renders text content only. */}
+              {canCopy && chrome !== "flat" && (
                 <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-[18px] items-center gap-0.5 rounded-md bg-card px-1 opacity-0 shadow-card outline-1 outline-[color:var(--border)] transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                   <IconButton
                     icon={<Copy className="size-3" />}

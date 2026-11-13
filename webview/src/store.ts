@@ -1011,6 +1011,21 @@ function createMockHost(): HostApi {
         locations: [],
         diff: null,
       },
+      {
+        kind: "tool",
+        id: "demo-super-tool-3",
+        toolCallId: "demo-super-call-3",
+        toolName: "run_shell_command",
+        title: "run_shell_command",
+        toolKind: "execute",
+        status: "completed",
+        input:
+          "npx vitest run test/session-state.test.ts --reporter=verbose --silent=false --bail=0 --pool=threads --poolOptions.threads.singleThread=false",
+        output:
+          " RUN  v5.0.0 test/session-state.test.ts\n\n ✓ applySessionUpdate > 追加文本块 (3)\n ✓ applySessionUpdate > 工具块更新 (5)\n ✓ block ids > 回填唯一 id (4)\n\n Test Files  1 passed (1)\n      Tests  16 passed (16)",
+        locations: [],
+        diff: null,
+      },
     ],
     "super-demo-2": [
       {

@@ -1131,12 +1131,40 @@ textarea::selection {
   margin-right: 0;
 }
 
+.tool-card-flat.status-pending,
+.tool-card-flat.status-in_progress,
+.tool-card-flat.status-failed {
+  background: none;
+  border-color: transparent;
+}
+/* The shimmer rides the card surface; flat has none, so drop it (the
+   primary-coloured icon + status caption still carry "running"). */
+.tool-card-flat.status-in_progress::before {
+  content: none;
+  animation: none;
+}
+
 /* Flat chrome (Super Agent live pane, `BlockView chrome="flat"`): the tool
-   card keeps its audit rows but has no card surface, so their side padding
-   follows the tighter px-2 header instead of the card's px-3 rhythm. */
+   card keeps its audit rows but has no card surface, so the rows drop their
+   dividers and use the same 8px inline inset as the px-2 header instead of
+   the card's px-3 rhythm. The param rows lose their rounded chip fill too —
+   a filled row inside a flat log row reads as a leftover card surface. */
 .tool-card-flat .tool-card-params,
 .tool-card-flat .tool-card-raw-toggle {
+  border-top: 0;
   padding-inline: var(--space-sm);
+}
+.tool-card-flat .tool-card-params {
+  padding-block: var(--space-xs) 0;
+}
+.tool-card-flat .tool-card-raw-toggle {
+  margin-top: 0;
+  padding-block: var(--space-xs);
+}
+.tool-card-flat .tool-card-param {
+  border-radius: 0;
+  padding-inline: 0;
+  background: none;
 }
 
 /* --- assistant text blocks ------------------------------------------------- */
