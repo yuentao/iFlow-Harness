@@ -414,3 +414,15 @@ export function AssistantText({ text, streamCaret = false }: { text: string; str
     </div>
   );
 }
+
+/**
+ * 思考卡正文的入口。
+ *
+ * 模型也会把 `super-agent` 围栏写进思考通道（那里是同一个模型输出流），只渲染
+ * Markdown 的话用户看到的是一堵带 `super-agent` 语言标签的 JSON。这里直接复用
+ * `AssistantText`：切分逻辑只有一份，文本段仍是完整 Markdown，协议段仍是同一套
+ * 卡片材质。思考正文不挂流式光标 —— 未收栏时切分器本就只出文本段，光标没有意义。
+ */
+export function ThoughtText({ text }: { text: string }) {
+  return <AssistantText text={text} />;
+}

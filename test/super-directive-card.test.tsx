@@ -18,7 +18,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { splitSuperDirectiveSegments } from "../shared/super-agent";
-import { AssistantText, SuperDirectiveCard } from "../webview/src/components/SuperDirectiveCard";
+import { AssistantText, SuperDirectiveCard, ThoughtText } from "../webview/src/components/SuperDirectiveCard";
 
 const send = vi.hoisted(() => vi.fn());
 const useChat = vi.hoisted(() =>
@@ -102,6 +102,10 @@ afterEach(() => {
 
 function render(text: string): void {
   act(() => root.render(<AssistantText text={text} />));
+}
+
+function renderThought(text: string): void {
+  act(() => root.render(<ThoughtText text={text} />));
 }
 
 function renderSegment(segment: DirectiveSegment): void {
@@ -476,5 +480,39 @@ describe("AssistantText 协议块卡片", () => {
     act(() => expand!.click());
     expect(blocks()).toHaveLength(6);
     expect(container.querySelector<HTMLButtonElement>('button[aria-label="收起任务说明"]')).toBeTruthy();
+  });
+});
+
+// 用户截图 2026-11-13：模型把委派块写进思考通道时，思考卡里是一堵带
+// `super-agent` 语言标签的 JSON。思考正文必须与助手正文走同一套切分。
+describe("ThoughtText 思考卡正文", () => {
+  it("思考正文里的完整 super-agent 围栏渲染成任务卡，不再显示语言标签与裸 JSON", () => {
+    renderThought(["先确认归属：", "", DELEGATE, "", "派发完成。"].join("\n"));
+    const cards = taskCards();
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.textContent).toContain("修复登录跳转");
+    expect(cards[1]!.textContent).toContain("补文档");
+    // 卡片前后的思考文字仍是 Markdown 段落。
+    expect(text()).toContain("先确认归属");
+    expect(text()).toContain("派发完成");
+    // 没有代码块，也没有语言标签或裸载荷。
+    expect(container.querySelector("pre code")).toBeNull();
+    expect(container.querySelector(".code-lang")).toBeNull();
+    expect(text()).not.toContain('"tasks"');
+  });
+
+  it("未闭合围栏（流式中间态）不出现卡片，仍是普通代码块", () => {
+    const unclosed = [
+      "思考中：",
+      "",
+      "```super-agent",
+      '{"tasks": [{"title": "进行中的任务"',
+    ].join("\n");
+    renderThought(unclosed);
+    expect(taskCards()).toHaveLength(0);
+    const code = container.querySelector("pre code.language-super-agent");
+    expect(code).toBeTruthy();
+    expect(code!.textContent).toContain("进行中的任务");
+    expect(text()).toContain("思考中");
   });
 });

@@ -57,7 +57,7 @@ import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown, copyText } from "./Markdown";
-import { AssistantText } from "./SuperDirectiveCard";
+import { AssistantText, ThoughtText } from "./SuperDirectiveCard";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
@@ -767,7 +767,7 @@ function ThoughtCard({
       </button>
       <Collapse open={open}>
         <div className="thought-body border-t border-border/60 px-3 py-2 text-ui-label leading-relaxed text-muted-foreground">
-          <Markdown text={block.text} />
+          <ThoughtText text={block.text} />
         </div>
       </Collapse>
     </div>
