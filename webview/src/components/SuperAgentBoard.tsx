@@ -137,6 +137,7 @@ const INTEGRATION_TEXT: Record<SuperIntegrationState, string> = {
   conflict: "text-destructive",
   failed: "text-destructive",
   skipped: "text-muted-foreground",
+  not_needed: "text-muted-foreground",
 };
 
 /**

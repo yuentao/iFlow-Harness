@@ -133,6 +133,25 @@ describe("deriveSuperTimeline · 只画真实节点", () => {
     expect(integration?.detail).toBe("工作区有未提交改动");
   });
 
+  it("integration=not_needed：显示「无需合并」，色调静音", () => {
+    const nodes = deriveSuperTimeline(
+      session({
+        status: "completed",
+        endedAt: 4000,
+        integration: {
+          mode: "merge",
+          state: "not_needed",
+          detail: "无需合并：子会话没有产生任何提交",
+          at: 5000,
+        },
+      }),
+    );
+    const integration = nodes.at(-1);
+    expect(integration?.label).toBe("无需合并");
+    expect(integration?.tone).toBe("idle");
+    expect(integration?.detail).toBe("无需合并：子会话没有产生任何提交");
+  });
+
   it("restored（重启后恢复的历史记录）：不因恢复而多造节点", () => {
     const nodes = deriveSuperTimeline(
       session({

@@ -1612,7 +1612,7 @@ export class SuperAgentManager {
       // 目录删不掉。先登记，实际释放由 prepare() 的 finally 在进程回收之后
       // 执行（与「合并成功后释放隔离」同一时序）。
       record(
-        { state: "skipped", detail: "子会话没有产生任何提交" },
+        { state: "not_needed", detail: "无需合并：子会话没有产生任何提交" },
         "the child session produced no commits",
       );
       this.pendingEmptyRelease.add(id);
@@ -2146,8 +2146,8 @@ export class SuperAgentManager {
         id,
         {
           mode: session.integration?.mode ?? this.deps.integrationMode(),
-          state: "skipped",
-          detail: "子会话没有产生任何提交，工作目录清理未完成（稍后重试）",
+          state: "not_needed",
+          detail: "无需合并：子会话没有产生任何提交，工作目录清理未完成（稍后重试）",
           at: Date.now(),
         },
         "the child session produced no commits and its working directory could not be cleaned up yet",
@@ -2160,8 +2160,8 @@ export class SuperAgentManager {
       id,
       {
         mode: session.integration?.mode ?? this.deps.integrationMode(),
-        state: "skipped",
-        detail: "子会话没有产生任何提交，工作目录已清理",
+        state: "not_needed",
+        detail: "无需合并：子会话没有产生任何提交，工作目录已清理",
         at: Date.now(),
       },
       "the child session produced no commits; its working directory was cleaned up",

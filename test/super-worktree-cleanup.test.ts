@@ -211,7 +211,7 @@ describe("super agent · 没有产生提交时的隔离释放", () => {
     // ……而记录标成已释放（看板据此显示「工作目录与分支已清理」）。
     expect(session.isolation.released).toBe(true);
     // 文案如实：没有产生任何提交 → 工作目录已清理；**不**谎称已合入。
-    expect(session.integration?.state).toBe("skipped");
+    expect(session.integration?.state).toBe("not_needed");
     expect(session.integration?.detail).toContain("没有产生任何提交");
     expect(session.integration?.detail).toContain("工作目录已清理");
     expect(session.integration?.detail).not.toContain("已合入");
@@ -230,7 +230,7 @@ describe("super agent · 没有产生提交时的隔离释放", () => {
     }));
 
     manager.spawn({ title: "改登录", task: "干活" });
-    await until(() => sessions[0]?.integration?.state === "skipped");
+    await until(() => sessions[0]?.integration?.state === "not_needed");
     await until(() => sessions[0]?.integration?.detail?.includes("清理未完成") === true);
 
     const session = sessions[0]!;

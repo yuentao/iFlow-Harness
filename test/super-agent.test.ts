@@ -1092,6 +1092,20 @@ describe("super agent · 看板排序与折叠", () => {
     expect(visible.map((s) => s.id)).toEqual(["running"]);
   });
 
+  it("已完成且无需合并（没有产生任何提交）的子会话也折叠成历史分组", () => {
+    const { visible, folded } = groupSuperSessionsForBoard([
+      session({
+        id: "nothing-to-merge",
+        status: "completed",
+        createdAt: 1000,
+        integration: { mode: "merge", state: "not_needed", at: 2 },
+      }),
+      session({ id: "running", status: "running", createdAt: 2000 }),
+    ]);
+    expect(folded.map((s) => s.id)).toEqual(["nothing-to-merge"]);
+    expect(visible.map((s) => s.id)).toEqual(["running"]);
+  });
+
   it("改动还没落地的已完成子会话不折叠（PR / 未自动合并 / 冲突都要人看）", () => {
     const { visible, folded } = groupSuperSessionsForBoard([
       session({ id: "pr", status: "completed", createdAt: 1000, integration: { mode: "pr", state: "pr_created", at: 2 } }),
