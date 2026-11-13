@@ -618,6 +618,14 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           stacking both would show one question twice. */}
       {!expanded && awaiting.length > 0 && (
         <div
+          // Same ref as the expanded panel: its height is mirrored into
+          // --super-bar-h on the transcript wrapper, otherwise the transcript
+          // top and the main-session pending card (both offset by that
+          // variable) would paint over this strip — at 360px the question card
+          // covered 76% of it and its 「提交回答」 button was unclickable.
+          // The strip and the panel are mutually exclusive, so they never
+          // overwrite each other's measurement.
+          ref={setPanelNode}
           role="region"
           aria-label={t("子会话待答问题")}
           className="stream-in absolute inset-x-3 top-full z-40 mt-1 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-pop px-1 py-1"
