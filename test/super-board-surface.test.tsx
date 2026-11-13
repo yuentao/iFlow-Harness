@@ -143,6 +143,28 @@ describe("Super Agent 看板表面材质", () => {
   });
 });
 
+describe("Super Agent 看板阶段轨", () => {
+  it("只画真实发生过的节点，末节点带当前高亮", () => {
+    render([session({ startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+
+    const rail = container.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    expect(rail).toBeTruthy();
+    // 派发（createdAt 恒有）+ 启动（startedAt 存在）——没有「收尾」「完成」这种
+    // 尚未发生的占位节点。
+    expect(rail!.getAttribute("aria-label")).toContain("派发");
+    expect(rail!.getAttribute("aria-label")).toContain("启动");
+    expect(rail!.getAttribute("aria-label")).not.toContain("已完成");
+
+    const dots = rail!.querySelectorAll(".rounded-full");
+    expect(dots).toHaveLength(2);
+    // 已发生=实心（静音色），当前=主色 + ring 高亮。
+    expect(dots[0]!.className).toContain("bg-muted-foreground/60");
+    expect(dots[1]!.className).toContain("bg-primary");
+    expect(dots[1]!.className).toContain("ring-2");
+  });
+});
+
 describe("Super Agent 看板亚克力材质规则", () => {
   const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
 
