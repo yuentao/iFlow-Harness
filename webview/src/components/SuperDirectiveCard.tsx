@@ -161,7 +161,7 @@ function TaskCard({
         <span className={`${CARD_ICON} bg-primary/12 text-primary`} aria-hidden="true">
           <Users className={ICON_INLINE} />
         </span>
-        <span className="min-w-0 flex-1 break-words text-ui-label font-medium text-foreground/90">
+        <span className="min-w-0 flex-1 break-words text-ui-body font-semibold text-foreground">
           {task.title}
         </span>
         {/* 只有一张卡时不需要「第 1/1 个任务」这种序号 —— 批次信息是多余的层级。 */}
@@ -169,16 +169,6 @@ function TaskCard({
       </div>
       <div className="px-3 py-2">
         <TaskBody blocks={shown} />
-        {/* 折叠态还有内容没给出来：单独一行提示，不在末块尾巴上补省略号 ——
-            一段完整的文字看起来像半句，比不提示更糟。 */}
-        {!open && preview.truncated && !preview.cutText && (
-          <div
-            data-testid="super-task-more"
-            className="text-ui-micro leading-none text-muted-foreground/60"
-          >
-            …
-          </div>
-        )}
         {task.attachments.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
             {task.attachments.map((name, attachmentIndex) => (
@@ -197,7 +187,11 @@ function TaskCard({
             icon={open ? <ChevronUp className={ICON_INLINE} /> : <ChevronDown className={ICON_INLINE} />}
             onClick={() => setOpen((value) => !value)}
           >
-            {open ? t("收起") : t("展开")}
+            {open
+              ? t("收起")
+              : preview.hiddenChars > 0
+                ? t("展开全文（还有 {0} 字）", preview.hiddenChars)
+                : t("展开全文")}
           </Button>
         )}
       </div>
@@ -281,7 +275,7 @@ function TaskBlockView({ block }: { block: SuperTaskBlock }) {
       return (
         <pre
           data-testid="super-task-code"
-          className="overflow-x-auto rounded-md border border-border bg-editor px-2 py-1.5 font-mono text-ui-micro leading-relaxed text-foreground"
+          className="whitespace-pre-wrap break-words rounded-md border border-border bg-editor px-2 py-1.5 font-mono text-ui-micro leading-relaxed text-foreground"
         >
           <code>{block.text}</code>
         </pre>
@@ -289,17 +283,33 @@ function TaskBlockView({ block }: { block: SuperTaskBlock }) {
   }
 }
 
-/** 行内片段 → React 节点：普通文本原样，行内代码套等宽药丸样式。 */
+/**
+ * 行内片段 → React 节点：普通文本原样，行内代码套等宽药丸样式，
+ * 加粗用「更亮的前景色 + medium 字重」强调（正文是 muted，层级因此分明）。
+ */
 function renderTaskInlines(inlines: SuperTaskInline[]): ReactNode[] {
-  return inlines.map((inline, index) =>
-    inline.kind === "code" ? (
-      <code key={index} className="super-task-code">
-        {inline.text}
-      </code>
-    ) : (
-      <Fragment key={index}>{inline.text}</Fragment>
-    ),
-  );
+  return inlines.map((inline, index) => {
+    switch (inline.kind) {
+      case "code":
+        return (
+          <code key={index} className="super-task-code">
+            {inline.text}
+          </code>
+        );
+      case "strong":
+        return (
+          <strong
+            key={index}
+            data-testid="super-task-strong"
+            className="font-medium text-foreground"
+          >
+            {renderTaskInlines(inline.inlines)}
+          </strong>
+        );
+      default:
+        return <Fragment key={index}>{inline.text}</Fragment>;
+    }
+  });
 }
 
 function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
