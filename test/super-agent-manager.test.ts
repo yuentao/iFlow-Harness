@@ -236,7 +236,8 @@ function makeManager(
   repoRoot: string,
   plan: Plan | Plan[] = "complete",
   mode: SuperIntegrationMode = "merge",
-  mainSessionId: string | null = "main-1",
+  /** 归属主会话 id（函数形式 = 运行中可变，用例用来模拟「用户切了会话」）。 */
+  mainSessionId: string | null | (() => string | null) = "main-1",
   /** 并发上限：排队用例显式注入小值，避免依赖某个写死的常量。 */
   maxConcurrent: number = DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
 ): Harness {
@@ -274,7 +275,8 @@ function makeManager(
       transcripts.push({ sessionId, from, blocks });
     },
     currentModel: () => "test-model",
-    currentMainSessionId: () => mainSessionId,
+    currentMainSessionId: () =>
+      typeof mainSessionId === "function" ? mainSessionId() : mainSessionId,
     priceFor: () => ({ input: 1, output: 2 }),
     integrationMode: () => mode,
     maxConcurrentSessions: () => maxConcurrent,
@@ -1312,6 +1314,37 @@ describe("super agent · 归属与归档", () => {
     expect(harness.sessions[0]?.mainSessionId).toBe("main-7");
     expect(harness.manager.archivableMainSessionIds()).toContain("main-7");
   }, 30000);
+
+  // 汇报是投给**某个**主会话的：提示词里的 pendingCount（「还有 N 个在跑」）
+  // 必须只数同一归属下的子会话 —— 混进别人家的孩子，模型会以为自己也该
+  // 等那些不存在于它上下文里的孩子。
+  it("汇报提示词里的 pendingCount 只算同一归属主会话的子会话", async () => {
+    const repo = makeRepo();
+    let owner: string | null = "main-A";
+    // 三个孩子：A 的一个跑完、A 的一个还在跑、B 的一个还在跑。
+    // manual 集成：不跑自动合并（那条路会在临时仓里做 git merge，Windows 上
+    // 清理临时目录时可能撞上还在跑的 git 进程）。
+    const harness = makeManager(repo, ["complete", "hang", "hang"], "manual", () => owner);
+
+    harness.manager.spawn({ title: "A 的活儿", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    owner = "main-A";
+    harness.manager.spawn({ title: "A 的下一个", task: "干活" });
+    await until(() => harness.sessions.filter((s) => s.mainSessionId === "main-A").length >= 2);
+    owner = "main-B";
+    harness.manager.spawn({ title: "B 的活儿", task: "干活" });
+    await until(() => harness.sessions.some((s) => s.mainSessionId === "main-B"));
+
+    const aDone = harness.sessions.find((s) => s.mainSessionId === "main-A" && s.status === "completed");
+    expect(aDone).toBeDefined();
+    const prompt = harness.manager.reportPrompt([
+      { session: aDone!, report: { state: "ready", summary: "干完了", at: Date.now() } },
+    ]);
+    // A 名下只有「A 的下一个」还在跑 → 1；B 的那个不算。
+    expect(prompt).toContain("1 other child session(s) are still running");
+    expect(prompt).not.toContain("2 other child session(s) are still running");
+    await harness.manager.dispose();
+  }, 60000);
 
   it("归档只含该主会话名下的子会话（别的会话的不混进来）", async () => {
     const repo = makeRepo();

@@ -77,16 +77,15 @@ import {
   clampMaxConcurrentSuperSessions,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   extractSuperActions,
-  extractSuperDirectives,
   fromPersistedSuperSession,
   isTerminalSuperStatus,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
   superArchiveFingerprint,
+  SuperDirectiveScanner,
   SuperReportBuffer,
   type SuperAction,
   type SuperAttachment,
-  type SuperPendingFence,
   type SuperReportEntry,
   type SuperSessionUi,
   type SuperTaskSpec,
@@ -698,17 +697,14 @@ export class ChatPanel implements vscode.Disposable {
    * delegation directives (`super-agent` fenced blocks). Scanned per chunk,
    * so a delegation takes effect mid-turn — the main session can open child
    * sessions at any time, not only at turn end.
-   */
-  private superScanText = "";
-  /** How much of `superScanText` has already been consumed (no re-dispatch). */
-  private superScanOffset = 0;
-  /**
-   * 上一个还没闭合的委派围栏（开栏位置 + 已经找过收栏的正文位置）。
    *
-   * 长任务书要横跨几十个 chunk 才收栏，没有这个锚点的话每来一段就要从开栏处
-   * 重扫整段正文；把断点带回去就能续扫。
+   * 扫描器自带**有界缓冲**：扫完就把死区（已经消费、已经扫过且不会再产出
+   * 指令的前缀）丢掉，只留下「未消费的部分 + 尾巴保护 + 正在写的围栏」。
+   * 宿主自己攒字符串的话缓冲会随会话长度线性增长（长会话几百 KB 起，每来
+   * 一个 chunk 还要把整段重扫一遍）—— 公开的 `extractSuperDirectives` 不吐
+   * 死区位置，宿主无从裁剪，只有扫描器内部知道哪些前缀可以安全丢掉。
    */
-  private superPendingOpen: SuperPendingFence | undefined = undefined;
+  private readonly superScan = new SuperDirectiveScanner();
   /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
@@ -722,18 +718,41 @@ export class ChatPanel implements vscode.Disposable {
    * 子会话汇报的缓冲：**逐个即时交付** —— 某个子会话一进入终态，它的汇报
    * 就被取走交给主会话（不必等同一批全部结束）。同一子会话只保留最后一条
    * （blocked → ready 之类的中途状态不重复转述），中途进展只更新看板。
+   *
+   * **按归属主会话分桶**：汇报是投给某个主会话的一次真实 prompt，别人家
+   * 子会话的汇报投进当前会话就是串台（模型会读到不属于自己的孩子，转录
+   * 里也会冒出别的会话的结论）。分桶之后，B 的子会话收尾时它的汇报留在
+   * B 那个桶里等用户切过去。
    */
-  private readonly pendingSuperReports = new SuperReportBuffer();
+  private readonly pendingSuperReports = new Map<string, SuperReportBuffer>();
   /**
    * 已经合并好、等着交给主会话的子会话汇报提示词（先进先出）。
    *
    * 交付方式是**主会话上的一次真实 prompt**（hidden：转录里不出现用户气泡），
    * 不是旁路直连调用 —— 只有让主会话自己读到这批结果，它才能接着推进任务，
    * 而不是把汇报折叠成一条用户看得到、智能体却不知道的系统注记。
+   *
+   * 每条都带**归属主会话**：排队期间用户可能切了会话，A 的汇报不能投进
+   * B 的对话（投错会话 = 串台）。
    */
-  private pendingSuperReportPrompts: string[] = [];
+  private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }> = [];
   /** 汇报 turn 正在跑（drain 的重入锁，与合并队列互斥）。 */
   private superReportRunning = false;
+  /**
+   * 主会话车道（同步互斥）：同一时刻只允许**一个**回合在准备阶段。
+   *
+   * 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合并发
+   * 会让转录顺序错乱、上下文互相污染、token 重复计费。状态位
+   * （status === "streaming"）挡不住这个竞态 —— 状态要等 store.userPrompt()
+   * 才翻成 streaming，而回合在翻状态**之前**还有几个 await 窗口
+   * （ensureClient / assertModeForPrompt）：汇报回合正好能从那个窗口插进来。
+   *
+   * 车道是**同步**申领的（申领与检查之间没有 await）：谁先申领谁先跑。用户
+   * 回合优先 —— 它一进 sendPrompt（那时还没有任何 await）就申领，汇报回合
+   * 看到车道被占就继续排队，等本轮结束再投。状态翻成 streaming 之后车道就
+   * 释放（此后状态位足以挡住第二个回合）。
+   */
+  private mainLane: symbol | null = null;
   /**
    * 等待子会话的心跳。
    *
@@ -6092,6 +6111,9 @@ export class ChatPanel implements vscode.Disposable {
     this.store.replaceState(fresh);
     // 看板跟着主会话走：切到 B 就不能还显示着 A 的历史子会话。
     this.publishSuperSessions();
+    // 委派扫描缓冲也换人：上一个会话的助手文本（以及里面没收口的围栏）跟
+    // 新会话无关，留着只会让新会话的扫描基线落在别人的文本上。
+    this.superScan.reset();
     try {
       // CLI 0.5.19 wire behavior: an empty/short session's loadSession response
       // carries ONLY {sessionId} — no modes, no _meta. A prior session/new does
@@ -6779,10 +6801,9 @@ export class ChatPanel implements vscode.Disposable {
   private scanSuperDirectives(content: unknown): void {
     const text = ChatPanel.chunkText(content);
     if (!text) return;
-    this.superScanText += text;
-    const scan = extractSuperDirectives(this.superScanText, this.superScanOffset, this.superPendingOpen);
-    this.superPendingOpen = scan.pendingOpen;
-    if (scan.end > this.superScanOffset) this.superScanOffset = scan.end;
+    // 扫描器自己持有滚动缓冲与消费偏移：扫完就把死区丢掉，缓冲因此不随
+    // 会话长度增长（宿主自己攒字符串的话是无界的）。
+    const scan = this.superScan.push(text);
     if (scan.invalidBlocks.length > 0) {
       // 只报「无法解析」等于让用户和模型都没法自查；带上失败原因与正文长度，
       // 才能一眼看出是 JSON 写坏了还是任务书太长被截断。
@@ -6937,9 +6958,42 @@ export class ChatPanel implements vscode.Disposable {
     if (entries.length === 0 || this.disposed) return;
     // 这些子会话已经把汇报交上来了：终态不再等于「已完成」。
     for (const entry of entries) this.superReportedChildIds.add(entry.session.id);
-    this.pendingSuperReports.add(entries);
+    // 按**归属主会话**分桶：汇报是投给某个主会话的一次真实 prompt，B 的
+    // 子会话收尾时它的汇报不能投进 A 的对话（串台）。
+    for (const entry of entries) {
+      const key = this.superReportOwnerKey(entry.session);
+      let buffer = this.pendingSuperReports.get(key);
+      if (!buffer) {
+        buffer = new SuperReportBuffer();
+        this.pendingSuperReports.set(key, buffer);
+      }
+      buffer.add([entry]);
+    }
     this.settleSuperReportsIfReady();
     this.syncSuperWaitingState();
+  }
+
+  /**
+   * 汇报缓冲的桶键 = 归属主会话 id。
+   *
+   * 子会话没有归属（派发时面板还没有主会话 id）时跟随当前会话 —— 否则它的
+   * 汇报永远没人接。
+   */
+  private superReportOwnerKey(session: SuperSessionUi): string {
+    return session.mainSessionId ?? this.currentMainSessionId() ?? "";
+  }
+
+  /**
+   * 子会话是否属于**当前**主会话。
+   *
+   * 汇报必须按归属投递：用户在会话 A 开着的时候，会话 B 的子会话收尾，它
+   * 的汇报不能作为一次真实 prompt 投进 A —— 那会把别的会话的结果插进 A
+   * 的上下文（模型读到自己没有的孩子，转录里也冒出别的会话的结论）。
+   */
+  private superBelongsToCurrentMain(session: SuperSessionUi): boolean {
+    const owner = session.mainSessionId;
+    if (!owner) return true; // 没有归属：跟随当前会话
+    return owner === this.currentMainSessionId();
   }
 
   /**
@@ -6947,6 +7001,9 @@ export class ChatPanel implements vscode.Disposable {
    *
    * 门槛是「来源子会话已终态」，不是「这一批全部结束」—— 一个子会话跑完
    * 就交一次，主会话可以立刻接着推进；还在跑的子会话的汇报继续留在缓冲里。
+   *
+   * 只取**当前主会话**的子会话：别的会话的孩子还在跑（或者刚跑完），它的
+   * 汇报要等用户切到那个会话再投。
    *
    * 来源子会话已经被清理（用户点清理 / 合并完释放）时，它的汇报再也没人能
    * 接 —— 如实记一笔然后丢掉，不能让面板卡在忙碌态。
@@ -6959,18 +7016,25 @@ export class ChatPanel implements vscode.Disposable {
     if (this.pendingSuperReports.size === 0) return;
     const live = this.superAgent?.list() ?? [];
     // 来源子会话已不存在：这份汇报没人能接，丢掉（否则面板永久忙碌）。
-    const dropped = this.pendingSuperReports.dropMissing(live);
-    if (dropped.length > 0) {
-      this.log.warn(
-        `super agent: dropped ${dropped.length} child report(s) whose session(s) were cleaned up before delivery: ${dropped.join(", ")}`,
-      );
+    // 用**全部**活子会话判：别的会话的汇报也得保住（只是现在没人接）。
+    for (const buffer of this.pendingSuperReports.values()) {
+      const dropped = buffer.dropMissing(live);
+      if (dropped.length > 0) {
+        this.log.warn(
+          `super agent: dropped ${dropped.length} child report(s) whose session(s) were cleaned up before delivery: ${dropped.join(", ")}`,
+        );
+      }
     }
-    const batch = this.pendingSuperReports.takeSettled(live);
+    // 只取当前主会话那一桶：别的会话的汇报留在它自己的桶里等用户切过去。
+    const buffer = this.pendingSuperReports.get(this.currentMainSessionId() ?? "");
+    if (!buffer || buffer.size === 0) return;
+    const mine = live.filter((session) => this.superBelongsToCurrentMain(session));
+    const batch = buffer.takeSettled(mine);
     if (!batch) return; // 全都还在跑：继续积累。
     const text = this.superAgent?.reportPrompt(batch) ?? "";
     if (!text) return;
     this.log.info(`super agent: queued report for ${batch.length} settled child session(s)`);
-    this.pendingSuperReportPrompts.push(text);
+    this.pendingSuperReportPrompts.push({ mainSessionId: this.currentMainSessionId(), text });
     this.ensureSuperHeartbeat();
     void this.drainSuperReports();
   }
@@ -6985,6 +7049,9 @@ export class ChatPanel implements vscode.Disposable {
    *
    * 逐个即时汇报：每个终态子会话各占一轮（不是一批合并成一轮）—— 后续
    * 子会话结束时会再排一轮。
+   *
+   * 只投**归属当前主会话**的汇报：排队期间用户可能切了会话，A 的汇报不能
+   * 投进 B 的对话。
    */
   private async drainSuperReports(): Promise<void> {
     if (this.disposed || this.superReportRunning) return;
@@ -7003,13 +7070,26 @@ export class ChatPanel implements vscode.Disposable {
         ) {
           break;
         }
-        const text = this.pendingSuperReportPrompts.shift()!;
+        // 只投当前主会话的汇报：别的会话的汇报等用户切过去再投（串台）。
+        const owner = this.currentMainSessionId();
+        const index = this.pendingSuperReportPrompts.findIndex(
+          (item) => item.mainSessionId === owner,
+        );
+        if (index === -1) break;
+        const item = this.pendingSuperReportPrompts[index]!;
         this.clearSuperWaitHeartbeat();
         this.log.info("super agent: delivering the settled child report as a fresh main-session turn");
-        await this.sendPrompt(text, undefined, undefined, undefined, {
+        const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
         });
+        if (!started) {
+          // 回合没跑起来（主会话被别的回合占着）：这条汇报**留在队列里**，
+          // 等空闲时重投 —— 汇报丢了主会话就永远读不到自己孩子的结果。
+          break;
+        }
+        const pos = this.pendingSuperReportPrompts.indexOf(item);
+        if (pos !== -1) this.pendingSuperReportPrompts.splice(pos, 1);
         // 这一轮失败了（端点 / 内核报错）：别在心跳里连续喂下一批，留给用户
         // 处理错误后自然的下一轮。
         if (this.store.getState().status === "error") break;
@@ -7029,6 +7109,9 @@ export class ChatPanel implements vscode.Disposable {
    *
    * Mirrors the gate `sendPrompt` applies, evaluated BEFORE anything is
    * shifted off a queue so a rejected turn can never swallow a report.
+   *
+   * 车道也必须在空闲状态：用户回合还在准备阶段（状态还没翻成 streaming）
+   * 时，汇报回合不能插进来 —— 那是同一时刻第二个回合跑在同一个 ACP 会话上。
    */
   private mainSessionFree(): boolean {
     const state = this.store.getState();
@@ -7037,7 +7120,8 @@ export class ChatPanel implements vscode.Disposable {
       !state.initializing &&
       state.status !== "streaming" &&
       !state.replaying &&
-      !this.historySyncBusy
+      !this.historySyncBusy &&
+      this.mainLane === null
     );
   }
 
@@ -7074,7 +7158,11 @@ export class ChatPanel implements vscode.Disposable {
     if (this.pendingSuperMerges.length > 0) return true;
     // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
     // 继续跑，否则既没有汇报也没有忙碌态刷新。
-    if (this.pendingSuperReports.size > 0) return true;
+    // 缓冲按归属分桶，**任何**桶有欠账都要续命（用户随时可能切到那个
+    // 会话，汇报得能投出去）。
+    for (const buffer of this.pendingSuperReports.values()) {
+      if (buffer.size > 0) return true;
+    }
     return (this.store.getState().superSessions ?? []).some(
       (session) => !isTerminalSuperStatus(session.status),
     );
@@ -7117,15 +7205,22 @@ export class ChatPanel implements vscode.Disposable {
    * 只看子会话状态是不够的：汇报真正投出去之前，面板都该呈现忙碌态 ——
    * 否则用户会看到「无状态」，并在这个窗口点顶栏的「新会话」，把排队里的
    * 汇报落到已被替换的会话上。
+   *
+   * **只看当前主会话的子会话**：别的会话的子会话在跑（或者它的汇报还欠着）
+   * 不该让当前会话显示忙碌 —— 当前会话并不在等它们，它们的汇报会等用户
+   * 切过去再投。
    */
   private superWaitingForReports(liveChildren?: SuperSessionUi[]): boolean {
-    if (this.pendingSuperReportPrompts.length > 0) return true;
+    const owner = this.currentMainSessionId();
+    if (this.pendingSuperReportPrompts.some((item) => item.mainSessionId === owner)) return true;
     if (this.superReportRunning) return true;
-    if (this.pendingSuperReports.size > 0) return true;
+    const buffer = this.pendingSuperReports.get(owner ?? "");
+    if (buffer && buffer.size > 0) return true;
     // 只看**活着的**子会话：归档里的历史子会话早就终态，也永远不会再汇报，
     // 算进来会让忙碌态永远关不掉。
     const live = liveChildren ?? this.superAgent?.list() ?? [];
     for (const session of live) {
+      if (!this.superBelongsToCurrentMain(session)) continue;
       if (!isTerminalSuperStatus(session.status)) return true;
       if (!this.superReportedChildIds.has(session.id)) return true;
     }
@@ -7141,6 +7236,8 @@ export class ChatPanel implements vscode.Disposable {
    */
   private syncSuperWaitingState(): void {
     // 子会话被清理后它的 id 不再有意义 —— 顺手剪掉，别让集合无限增长。
+    // 剪的时候看**全部**活子会话：别的会话的孩子也在这集合里（汇报是按
+    // 归属记的），按当前会话剪会把它们的「已汇报」标记误删。
     const live = this.superAgent?.list() ?? [];
     const liveIds = new Set(live.map((session) => session.id));
     for (const id of [...this.superReportedChildIds]) {
@@ -7157,6 +7254,10 @@ export class ChatPanel implements vscode.Disposable {
    * states that the host is waiting and will continue on its own. Refreshed by
    * the heartbeat; re-sent only when the live/awaiting counts change (progress
    * frames arrive continuously and must not churn the toast stack).
+   *
+   * 计数只算**当前主会话**的子会话：别的会话的孩子在跑，当前会话并不在等
+   * 它们（它们的汇报会等用户切过去再投）—— 混在一起数会让提示与提示词里的
+   * pendingCount 对不上当前会话。
    */
   private refreshSuperWaitHeartbeat(): void {
     if (this.disposed) return;
@@ -7166,7 +7267,9 @@ export class ChatPanel implements vscode.Disposable {
     // 忙碌标记跟常驻提示同源：心跳每 1.5s 刷一次，等待期面板一直是忙碌态。
     this.syncSuperWaitingState();
     const sessions = this.store.getState().superSessions ?? [];
-    const live = sessions.filter((session) => !isTerminalSuperStatus(session.status));
+    const live = sessions
+      .filter((session) => this.superBelongsToCurrentMain(session))
+      .filter((session) => !isTerminalSuperStatus(session.status));
     const awaiting = live.filter((session) => session.status === "awaiting_input").length;
     if (live.length === 0 || !this.mainSessionFree()) {
       this.clearSuperWaitHeartbeat();
@@ -7397,6 +7500,9 @@ export class ChatPanel implements vscode.Disposable {
         ) {
           break;
         }
+        // 合并子会话跑在**主仓工作区**里：主会话正忙着（哪怕还在准备阶段）
+        // 时先让它走完 —— 两边同时改主仓会互相踩。
+        if (this.mainLane !== null) break;
         // 汇报 turn 也占用主会话这同一条车道，等它结束（心跳会再叫我们）。
         if (this.superReportRunning) break;
         // 主仓工作区没有版本隔离：同一时刻只能有一个合并子会话在跑。
@@ -8825,6 +8931,9 @@ export class ChatPanel implements vscode.Disposable {
     // 看板跟着主会话走：新会话没有历史子会话（活着的子会话仍然可见 ——
     // 它们是正在跑的进程，用户还得能中断它们）。
     this.publishSuperSessions();
+    // 委派扫描缓冲也换人：上一个会话的助手文本（以及里面没收口的围栏）跟
+    // 新会话无关。
+    this.superScan.reset();
     // Open the reset window: until the new session is established (finally),
     // onSessionUpdate drops everything not addressed to the store's own
     // session — this is what catches the abandoned turn's trailing updates
@@ -8944,21 +9053,44 @@ export class ChatPanel implements vscode.Disposable {
      * transcript: no user bubble, no session rename, no checkpoint. The agent
      * still receives the prompt, and its answer still streams into the
      * transcript as an assistant message.
+     *
+     * 返回值：true = 这一回合真的在主会话上跑起来了；false = 被拒了（主会话
+     * 正忙 / 正在恢复历史 / 已销毁）或被派发成了子会话。汇报队列靠它决定
+     * 「这条汇报是投出去了」还是「还欠着」—— 汇报丢了主会话就永远读不到
+     * 自己孩子的结果。
      */
     options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const internal = options?.internal === true;
     const hidden = options?.hidden === true;
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
-    if (!trimmed && !hasContexts) return;
+    if (!trimmed && !hasContexts) return false;
     // A `/compress` turn is housekeeping, not conversation: it must not
     // trigger automatic memory extraction. Auto-compression after a real turn
     // is covered separately by maybeAutoCompressOnIdle's return value.
     const isCompressTurn = !hasContexts && trimmed === "/compress";
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
-    if (this.disposed) return;
+    if (this.disposed) return false;
+    // ── 主会话车道 ────────────────────────────────────────────────
+    // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
+    // 并发会让转录顺序错乱、上下文互相污染、token 重复计费。
+    //
+    // 状态位（status === "streaming"）挡不住这个竞态：状态要等
+    // store.userPrompt() 才翻成 streaming，而回合在翻状态**之前**还有几个
+    // await 窗口（expandSkillCall / ensureClient / assertModeForPrompt）——
+    // 汇报回合正好能从那个窗口插进来。
+    //
+    // 车道**同步**申领（申领与检查之间没有 await）：用户回合优先，它一进
+    // sendPrompt（那时还没有任何 await）就占住车道；汇报回合看到车道被占
+    // 就留在队列里等（见 drainSuperReports）。状态翻成 streaming 之后车道
+    // 就释放 —— 那之后状态位足以挡住第二个回合。
+    const laneToken = Symbol("main-lane");
+    const laneBusy = this.mainLane !== null;
+    const releaseLane = (): void => {
+      if (this.mainLane === laneToken) this.mainLane = null;
+    };
     // The main session only DELEGATES: while a turn is streaming, a new user
     // prompt is not queued behind it — it is dispatched as a child session
     // (own CLI process, own worktree), so the main turn is never interleaved
@@ -8968,12 +9100,16 @@ export class ChatPanel implements vscode.Disposable {
     // Host-driven reports (`internal`) never delegate — a report arriving
     // while the main session is busy is dropped, not turned into a child.
     const gateState = this.store.getState();
-    if (gateState.status === "streaming") {
+    if (gateState.status === "streaming" || laneBusy) {
       if (gateState.replaying || this.historySyncBusy) {
         this.log.info("sendPrompt rejected: replay/history-sync in flight");
-        return;
+        return false;
       }
-      if (internal) return;
+      if (internal) return false;
+      // hidden 回合（子会话汇报）：主会话正忙着 —— 这一轮**不跑**，由调用方
+      // 把它留在队列里等空闲时重投。绝不能把它派发成子会话（汇报得投给
+      // 主会话），也绝不能悄悄丢掉（丢了主会话就永远读不到孩子的结果）。
+      if (hidden) return false;
       // A merge request must run in the MAIN workspace, so delegating it to
       // an isolated child session would be wrong (the child's worktree has
       // its own branch). Refuse and say why instead of doing something else.
@@ -8982,7 +9118,7 @@ export class ChatPanel implements vscode.Disposable {
           "warning",
           vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
         );
-        return;
+        return false;
       }
       const contextBlock = hasContexts
         ? assembleContextSections(contexts!, (c) => this.contextSectionTitleEn(c))
@@ -9000,7 +9136,7 @@ export class ChatPanel implements vscode.Disposable {
       const manager = this.getSuperAgent();
       if (!manager) {
         this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
-        return;
+        return false;
       }
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
       this.store.sendToast(
@@ -9017,7 +9153,7 @@ export class ChatPanel implements vscode.Disposable {
           ),
         );
       }
-      return;
+      return false;
     }
     // Context cards (right-click selection + @folder/@problems/@git/@url):
     // each becomes a titled fenced section ahead of the typed text. Sections
@@ -9062,10 +9198,20 @@ export class ChatPanel implements vscode.Disposable {
     // would have produced (that tool is model-invoked and asks for a
     // confirmation the default approval policy denies, so the model cannot be
     // relied on to run it).
+    // 申领车道（**第一个 await 之前**）：从这一刻起，汇报回合不能再插进来。
+    this.mainLane = laneToken;
     const skillCall = parseSkillInvocation(trimmed);
     let typedText = toAgentPromptText(trimmed, this.store.getState().commands);
     if (skillCall) {
-      const expanded = await this.expandSkillCall(skillCall);
+      let expanded: string | null = null;
+      try {
+        expanded = await this.expandSkillCall(skillCall);
+      } catch (error) {
+        // 抛出去之前把车道还回去：否则主会话会被一把没人持有的锁卡住
+        // （之后任何回合都进不来）。
+        releaseLane();
+        throw error;
+      }
       if (expanded) typedText = expanded;
     }
     // The orchestrator's eyes: every main-session turn starts with the live
@@ -9085,7 +9231,8 @@ export class ChatPanel implements vscode.Disposable {
       this.log.info(
         `sendPrompt rejected: initializing=${state.initializing}, status=${state.status}, historySync=${this.historySyncBusy}`,
       );
-      return;
+      releaseLane();
+      return false;
     }
     this.cancelSeen = false;
     // Hoisted for the catch: a profile switch (hot re-auth or full restart)
@@ -9143,6 +9290,10 @@ export class ChatPanel implements vscode.Disposable {
         // 开启：状态翻成 streaming，面板按「正在生成」渲染。
         this.store.beginHiddenTurn();
       }
+      // 状态已经翻成 streaming：从这一刻起状态位足以挡住第二个回合，车道
+      // 可以还回去 —— 否则回合收尾的家务（队列里的下一条消息、汇报投递）
+      // 会被自己的车道挡住。
+      releaseLane();
       // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
       // file changes are revertible. Awaited — a parallel capture would race
       // the agent's writes and bake them into the "before" snapshot. Best
@@ -9180,7 +9331,7 @@ export class ChatPanel implements vscode.Disposable {
       // state (or overwrite its usage estimate) — drop like the catch path.
       if (this.store.getState().sessionId !== promptSessionId) {
         this.log.info(`prompt completed after session switch — dropped (session replaced)`);
-        return;
+        return false;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
       // Completion cue, but a user stop/cancel stays silent. The chime is the
@@ -9239,7 +9390,8 @@ export class ChatPanel implements vscode.Disposable {
       // is nothing to mark and nothing to persist.
       if (this.disposed) {
         this.log.info(`prompt dropped after dispose: ${errorMessage(error)}`);
-        return;
+        releaseLane();
+        return false;
       }
       // Session replaced mid-flight (profile switch cancels the in-flight
       // prompt): the rejection lands after the fresh state is in place, so
@@ -9248,7 +9400,8 @@ export class ChatPanel implements vscode.Disposable {
       // NEW session's file. Drop everything but the log line.
       if (this.store.getState().sessionId !== promptSessionId) {
         this.log.info(`prompt failed after session switch — dropped (session replaced)`);
-        return;
+        releaseLane();
+        return false;
       }
       // R1 (final): prompts run without a timeout — failures here are real
       // errors (CLI died, connection closed), not slow turns. Long turns are
@@ -9272,7 +9425,11 @@ export class ChatPanel implements vscode.Disposable {
       void this.persistActiveTranscript();
       void this.touchActiveSession();
       this.postSound("error");
+      releaseLane();
+      return false;
     }
+    releaseLane();
+    return true;
   }
 
   /**

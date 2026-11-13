@@ -120,7 +120,7 @@ type PanelInternals = {
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
   refreshSuperWaitHeartbeat: () => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
-  pendingSuperReportPrompts: string[];
+  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
   store: {
     getState: () => SessionState;
     sessionStarted: (meta: { sessionId: string }) => void;
@@ -235,7 +235,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     const done = child({ status: "completed", summary: "登录跳转已修好" });
     manager.list = () => [done];
     // 汇报已备好、还没投出去（主会话此刻不空闲）。
-    p.pendingSuperReportPrompts = ["【汇报】修好登录跳转"];
+    p.pendingSuperReportPrompts = [{ mainSessionId: "sw-session", text: "【汇报】修好登录跳转" }];
     p.store.replaceState({ ...p.store.getState(), status: "idle" });
     p.refreshSuperWaitHeartbeat();
     expect(p.store.getState().superWaiting).toBe(true);
@@ -248,7 +248,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     expect(notices.some((n) => n.includes("子会话"))).toBe(true);
     // 排队里的汇报一条都没丢。
     expect(p.pendingSuperReportPrompts).toHaveLength(1);
-    expect(p.pendingSuperReportPrompts[0]).toContain("修好登录跳转");
+    expect(p.pendingSuperReportPrompts[0]?.text).toContain("修好登录跳转");
   });
 
   it("等待期点「新会话」（命令面板 iflow.newSession 路径）：同样被拒绝", async () => {
