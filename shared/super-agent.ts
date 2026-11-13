@@ -742,14 +742,17 @@ export interface SuperInvalidBlock {
  * 围栏还没收起时的续扫锚点。
  *
  * 流式输出里一个块会横跨几十个 chunk，宿主每来一段就重扫一次整段文本；长任务
- * 书（上万字符）加上未闭合的等待期，重扫是平方级的浪费。把「开栏在哪、正文
- * 已经找到哪」带回去，下次就能从断点续扫。
+ * 书（上万字符）加上未闭合的等待期，重扫是平方级的浪费。把「开栏在哪」带回去，
+ * 下次就能从断点续扫。
+ *
+ * 这里**只**记开栏位置：曾经还有一个 `scannedTo`（正文扫到哪），但它只写不读
+ * —— 拿它当收栏搜索的起点会让同一个块的结论随流式分片大小漂移（宿主某一帧
+ * 派发出去了，转录侧整段重扫却判未闭合，退化成 JSON 墙），所以它被删掉了：
+ * 判定不再依赖分片大小，只依赖块本身的内容。
  */
 export interface SuperPendingFence {
   /** 开栏行的行首偏移。 */
   lineStart: number;
-  /** 已经找过收栏（但没找到）的正文位置 —— 下次从这里继续往后找。 */
-  scannedTo: number;
 }
 
 export interface SuperDirectiveScan {
@@ -793,6 +796,41 @@ export interface SuperProtocolRegion {
   pending: boolean;
 }
 
+/** 载荷的来源路径（围栏式 / 工具调用式）。 */
+type PayloadSource = "fence" | "tool";
+
+/**
+ * 载荷区间账本：围栏路径与工具调用式路径共用。
+ *
+ * 为什么按**载荷区间**判重而不是按标记位置：标记只是「协议标记」出现的地方，
+ * 散文里随口一句「I'll use super-agent:」就会把标记放到围栏之外；载荷区间才
+ * 是「同一份载荷」的唯一标识。两条路径认领到同一段区间，就只能派发一次。
+ *
+ * 内容指纹是第二道防线：同一条委派被模型用两种写法各写一遍时（围栏 + 工具
+ * 调用式），区间可能不重叠但内容一样，此时也只算一次。指纹只在**两条路径之
+ * 间**比较：同一路径里写两遍同样的围栏是两段独立的委派，不在这里合并。
+ */
+class PayloadLedger {
+  private readonly spans: Array<{
+    start: number;
+    end: number;
+    fingerprint: string;
+    source: PayloadSource;
+  }> = [];
+
+  /** 认领一段载荷；已经被别的路径认领过则返回 false（重复，不再派发）。 */
+  claim(start: number, end: number, fingerprint: string, source: PayloadSource): boolean {
+    for (const span of this.spans) {
+      // 区间重叠 = 同一份载荷（另一条路径已经消费过它）。
+      if (start < span.end && span.start < end) return false;
+      // 同一份载荷写了两遍（跨路径）。
+      if (span.source !== source && fingerprint.length > 0 && span.fingerprint === fingerprint) return false;
+    }
+    this.spans.push({ start, end, fingerprint, source });
+    return true;
+  }
+}
+
 /**
  * 找出文本里的协议块区域（围栏式 + 工具调用式），按起点排序。
  *
@@ -802,18 +840,54 @@ export interface SuperProtocolRegion {
  * 2026-11-12：模型把围栏开栏粘在前一段散文后面，开栏不在独占一行，载荷是
  * 单行 JSON）。
  *
- * 两类区域互斥：落在围栏块内部的工具调用式载荷不再单独成块（围栏路径已经
- * 消费过它，再算一次会重复派发 / 出两张卡）。围栏块尚未闭合时（流式中间态）
- * 整段归属这个块：后面的文本可能还在写，既不当别的协议块，也不单独派发。
+ * 两类区域互斥，判据是**载荷区间**而不是标记位置：落在围栏载荷区间内（或与
+ * 它重叠）的工具调用式载荷不再单独成块（围栏路径已经消费过它，再算一次会重
+ * 复派发 / 出两张卡）。只看标记位置会漏判：助手在围栏之前的散文里写一句
+ * 「I'll use super-agent:」，标记就落到了围栏跨度之外，同一份载荷于是被两条
+ * 路径各派发一次（宿主开两个子会话、双倍 token、转录出两张重复卡）。
+ *
+ * 两条路径共用同一个 {@link PayloadLedger}：载荷区间重叠、或内容指纹相同，
+ * 就只算一次。围栏块尚未闭合时（流式中间态）整段归属这个块：后面的文本可能
+ * 还在写，既不当别的协议块，也不单独派发。
  */
 export function findSuperProtocolRegions(
   text: string,
   from = 0,
   accept: (language: string) => boolean = () => true,
 ): SuperProtocolRegion[] {
+  return scanSuperProtocolRegions(text, from, accept).regions;
+}
+
+/** 协议块扫描的结果：区域 + 还在等载荷的标记位置。 */
+interface SuperProtocolScan {
+  regions: SuperProtocolRegion[];
+  /**
+   * 还在等载荷的「工具调用式」标记位置（流式中间态）。
+   *
+   * 标记后 80 字符内没有 `{` / `[` 时有两种情况：窗口还没填满（载荷可能下
+   * 一块才到，还在等），或者窗口已经填满、里面确实没有载荷（模型只是随口提了
+   * 一嘴，不会再有载荷了）。只有前者算「还在等」。
+   */
+  waitingToolStart?: number;
+}
+
+/**
+ * 扫出协议块区域（围栏式 + 工具调用式）。
+ *
+ * 两条判定路径共用一个 {@link PayloadLedger}：围栏路径先认领自己那段载荷的
+ * 区间，工具调用式路径随后看到区间重叠（或内容指纹相同）就跳过，同一份载荷
+ * 只派发一次。
+ */
+function scanSuperProtocolRegions(
+  text: string,
+  from: number,
+  accept: (language: string) => boolean,
+): SuperProtocolScan {
   const regions: SuperProtocolRegion[] = [];
   /** 已闭合围栏块的范围（工具调用式载荷落在里面就不再单独成块）。 */
   const fenceSpans: Array<[number, number]> = [];
+  /** 两条路径共用的「已消费载荷」账本。 */
+  const ledger = new PayloadLedger();
   let cursor = from;
   let pending = false;
 
@@ -834,6 +908,9 @@ export function findSuperProtocolRegions(
       break;
     }
     const parsed = open.language === "super-agent" ? parseDirectiveBody(resolved.body) : null;
+    // 围栏路径先认领这段载荷的区间：工具调用式路径随后看到重叠就跳过（同一份
+    // 载荷只派发一次）。坏块也要认领，否则同一段坏 JSON 会被两条路径各报一次。
+    ledger.claim(resolved.bodyStart, resolved.bodyEnd, resolved.body, "fence");
     regions.push({
       language: open.language,
       start: open.lineStart,
@@ -847,9 +924,14 @@ export function findSuperProtocolRegions(
     cursor = resolved.closeEnd;
   }
 
+  let waitingToolStart: number | undefined;
   if (!pending) {
-    for (const match of findToolStylePayloads(text, from)) {
+    const toolStyle = findToolStylePayloads(text, from);
+    waitingToolStart = toolStyle.waitingStart;
+    for (const match of toolStyle.payloads) {
       if (fenceSpans.some(([start, end]) => match.marker >= start && match.marker < end)) continue;
+      // 载荷区间已经被围栏路径认领 → 同一份载荷，不重复派发。
+      if (!ledger.claim(match.start, match.end, match.body, "tool")) continue;
       regions.push({
         language: TOOL_STYLE_MARKER,
         start: match.marker,
@@ -863,7 +945,10 @@ export function findSuperProtocolRegions(
   }
 
   regions.sort((a, b) => a.start - b.start);
-  return regions;
+  return {
+    regions,
+    ...(waitingToolStart === undefined ? {} : { waitingToolStart }),
+  };
 }
 
 /**
@@ -889,6 +974,34 @@ export function extractSuperDirectives(
   fromOffset = 0,
   pending?: SuperPendingFence,
 ): SuperDirectiveScan {
+  const core = scanSuperDirectives(text, fromOffset, pending);
+  return {
+    blocks: core.blocks,
+    invalidBlocks: core.invalidBlocks,
+    end: core.end,
+    ...(core.pendingOpen ? { pendingOpen: core.pendingOpen } : {}),
+  };
+}
+
+/** 扫描的内部结果：比公开形态多两样东西（死区 + 还在等的标记位置）。 */
+interface SuperDirectiveScanCore extends SuperDirectiveScan {
+  /**
+   * 死区：这段前缀已经消费或已经扫过，不会再产出指令，扫描缓冲可以丢掉。
+   *
+   * 正在写的围栏（`pendingOpen`）与还在等载荷的工具调用式标记不在死区里：它
+   * 们的载荷可能下一块才到。
+   */
+  deadEnd: number;
+  /** 还在等载荷的「工具调用式」标记位置（流式中间态）。 */
+  waitingToolStart?: number;
+}
+
+/** 扫描委派指令的内部实现（公开 API 与流式扫描器共用）。 */
+function scanSuperDirectives(
+  text: string,
+  fromOffset = 0,
+  pending?: SuperPendingFence,
+): SuperDirectiveScanCore {
   const blocks: SuperTaskSpec[][] = [];
   const invalidBlocks: SuperInvalidBlock[] = [];
   let end = fromOffset;
@@ -900,12 +1013,13 @@ export function extractSuperDirectives(
 
   // 协议块区域与转录渲染同源（findSuperProtocolRegions）：宿主派发出来的载荷，
   // 转录里一定出卡片。
-  for (const region of findSuperProtocolRegions(text, from)) {
+  const scanned = scanSuperProtocolRegions(text, from, () => true);
+  for (const region of scanned.regions) {
     if (region.pending) {
       // 还没收全（流式中间态）—— 停在这里，等后续 chunk 补齐。正文里的代码
       // 围栏不会让它提前结束：收栏靠 JSON 结构定位，见 resolveSuperDirectiveBlock。
       end = region.start;
-      pendingOpen = { lineStart: region.start, scannedTo: text.length };
+      pendingOpen = { lineStart: region.start };
       break;
     }
     if (region.end > end) end = region.end;
@@ -915,13 +1029,138 @@ export function extractSuperDirectives(
     else if (region.body) invalidBlocks.push({ body: region.body, reason: region.reason ?? "载荷不是合法 JSON" });
   }
 
-  return { blocks, invalidBlocks, end, ...(pendingOpen ? { pendingOpen } : {}) };
+  // 还在等载荷的工具调用式标记：只有落在最后一个完整块**之后**才算「还在等」。
+  // 落在前面说明模型随后已经写出了别的委派块 —— 那个标记只是散文里提了一嘴，
+  // 它的载荷不会再来（真来了也是坏块），留着只会把缓冲一直钉住。
+  let waitingToolStart = scanned.waitingToolStart;
+  if (waitingToolStart !== undefined && waitingToolStart < end) waitingToolStart = undefined;
+
+  // 死区：扫过且不会再产出指令的前缀。三个上界取最小：
+  //
+  // ① 尾巴保护：缓冲末尾固定留 SCAN_TAIL_GUARD_CHARS 个字符。标记可能被切成
+  //    两半（这一帧结尾 "``"、下一帧开头 "`super-agent"），前半截被丢掉，下一
+  //    帧补齐也认不出来 —— 委派静默丢失。
+  // ② 正在写的围栏：载荷下一块才到。
+  // ③ 还在等载荷的工具调用式标记：同上。
+  let deadEnd = Math.max(0, text.length - SCAN_TAIL_GUARD_CHARS);
+  if (pendingOpen) deadEnd = Math.min(deadEnd, pendingOpen.lineStart);
+  if (waitingToolStart !== undefined) deadEnd = Math.min(deadEnd, waitingToolStart);
+
+  return {
+    blocks,
+    invalidBlocks,
+    end,
+    ...(pendingOpen ? { pendingOpen } : {}),
+    deadEnd,
+    ...(waitingToolStart === undefined ? {} : { waitingToolStart }),
+  };
+}
+
+/**
+ * 扫描缓冲的「尾巴保护」长度（字符）。
+ *
+ * 流式输出里标记可能正好被切成两半：这一帧结尾是 "``"，下一帧开头才是
+ * "`super-agent"。扫描只看得到完整标记，于是「这一帧没有标记」—— 如果把扫过
+ * 的前缀整个丢掉，标记的前半截也跟着没了，下一帧补齐也认不出来（委派静默
+ * 丢失）。
+ *
+ * 保留缓冲末尾这么多字符，任何可能还在写的标记都跨不过这个尾巴：围栏标记最长
+ * 十几个字符，工具调用式标记的载荷必须落在标记后 80 字符内
+ * （TOOL_STYLE_PAYLOAD_GAP）。
+ */
+const SCAN_TAIL_GUARD_CHARS = 160;
+
+/**
+ * 扫描缓冲的上限刻度（字符）。
+ *
+ * 实际边界由「死区裁剪」给出：死区之外只剩三样东西 —— 尾巴保护
+ * （SCAN_TAIL_GUARD_CHARS）、正在写的围栏（正文最多 MAX_UNCLOSED_SPAN 字符）
+ * 与没收口的工具调用式载荷（最多 MAX_INCOMPLETE_TOOL_PAYLOAD 字符），三者之和
+ * 就是这个上限量级。超过它说明裁剪没生效 —— 测试据此钉住「缓冲不随会话长度
+ * 增长」。
+ */
+export const MAX_SUPER_SCAN_BUFFER_CHARS = 512 * 1024;
+
+/**
+ * 委派指令的流式扫描器。
+ *
+ * 宿主原来把主会话的助手文本攒在一个只增不减的字符串里：长会话里缓冲无界增长
+ * （每来一个 chunk 还要把整段文本重扫一遍，平方级）。扫描器自己持有滚动缓冲、
+ * 消费偏移与续扫锚点，扫完就把**死区**丢掉（已经消费的块、已经扫过且不会再
+ * 产出指令的散文、不在等的标记），缓冲因此有界。
+ *
+ * 用法：宿主每收到一段助手文本就 `push(chunk)`，拿返回的 `blocks` 去派发。
+ */
+export class SuperDirectiveScanner {
+  /** 滚动缓冲（已裁剪：只保留还没消费、还可能产出指令的部分）。 */
+  private text = "";
+  /** 已消费偏移（相对当前缓冲）。 */
+  private offset = 0;
+  /** 还没收起的围栏（续扫锚点）。 */
+  private pending?: SuperPendingFence;
+
+  /** 当前缓冲长度（诊断与测试用）。 */
+  get bufferLength(): number {
+    return this.text.length;
+  }
+
+  /** 已消费的偏移（相对当前缓冲）。 */
+  get consumed(): number {
+    return this.offset;
+  }
+
+  /** 丢掉全部状态（换会话时用）。 */
+  reset(): void {
+    this.text = "";
+    this.offset = 0;
+    this.pending = undefined;
+  }
+
+  /** 追加一段流式文本，扫出这一段里的委派指令。 */
+  push(chunk: string): SuperDirectiveScan {
+    if (chunk) this.text += chunk;
+    const core = scanSuperDirectives(this.text, this.offset, this.pending);
+    this.pending = core.pendingOpen;
+    if (core.end > this.offset) this.offset = core.end;
+    this.trim(core.deadEnd);
+    return {
+      blocks: core.blocks,
+      invalidBlocks: core.invalidBlocks,
+      end: this.offset,
+      ...(this.pending ? { pendingOpen: this.pending } : {}),
+    };
+  }
+
+  /**
+   * 丢掉死区前缀（缓冲因此不随会话长度增长）。
+   *
+   * 正在写的围栏（`pending`）与还在等载荷的工具调用式标记必须留着：它们的载荷
+   * 可能下一块才到，丢了就再也扫不回来。
+   */
+  private trim(deadEnd: number): void {
+    let drop = Math.min(deadEnd, this.text.length);
+    if (this.pending) drop = Math.min(drop, this.pending.lineStart);
+    if (drop <= 0) return;
+    this.text = this.text.slice(drop);
+    this.offset = Math.max(0, this.offset - drop);
+    if (this.pending) this.pending = { lineStart: this.pending.lineStart - drop };
+  }
 }
 
 /** 委派标记：模型在「工具调用式」输出里用它点名要委派子会话。 */
 const TOOL_STYLE_MARKER = "super-agent";
 /** 标记与载荷之间允许的最大间隔（字符）—— 模型通常在标记后一两行内给出载荷。 */
 const TOOL_STYLE_PAYLOAD_GAP = 80;
+
+/** 工具调用式载荷的扫描结果。 */
+interface ToolStylePayloadScan {
+  payloads: ToolStylePayload[];
+  /** 还在等载荷的标记位置（流式中间态）。 */
+  waitingStart?: number;
+}
+
+/** 没收全的工具调用式载荷超过这个长度就当坏块（否则缓冲会被它一直撑住）。 */
+const MAX_INCOMPLETE_TOOL_PAYLOAD = 256 * 1024;
 
 interface ToolStylePayload {
   /** 解析出的任务；null = 看起来是委派载荷但内容非法（宿主据此提示用户）。 */
@@ -950,21 +1189,40 @@ interface ToolStylePayload {
  * 配对的 JSON → 严格的任务校验。判定链任一环不成立就不派发，模型把协议
  * 示例原样抄回来（占位符任务）同样不会误派发。
  */
-function findToolStylePayloads(text: string, from: number): ToolStylePayload[] {
+function findToolStylePayloads(text: string, from: number): ToolStylePayloadScan {
   const out: ToolStylePayload[] = [];
   let searchFrom = from;
+  let waitingStart: number | undefined;
   while (searchFrom < text.length) {
     const marker = text.indexOf(TOOL_STYLE_MARKER, searchFrom);
     if (marker === -1) break;
     const after = marker + TOOL_STYLE_MARKER.length;
     const start = findPayloadStart(text, after);
     if (start === -1) {
-      // 标记后面还没有载荷（流式中间态）—— 等后续 chunk。
-      break;
+      // 标记后面 80 字符内没有载荷。**不能就此结束扫描**：后面还可能有另一个
+      // 完整的委派载荷（旧实现直接 break，后面的载荷被静默吞掉，既不派发也不
+      // 报错，用户以为派了其实没有）。继续往后找下一个标记。
+      //
+      // 窗口还没填满时，这个标记仍在等载荷（下一块可能就带上 `{`），扫描缓冲
+      // 不能把这一段丢掉；窗口已经填满还找不到，说明模型只是随口提了一嘴，
+      // 不会再有载荷了，那段可以丢。
+      if (text.length < after + TOOL_STYLE_PAYLOAD_GAP) {
+        waitingStart = waitingStart === undefined ? marker : Math.min(waitingStart, marker);
+      }
+      searchFrom = after;
+      continue;
     }
     const close = matchJsonValue(text, start);
     if (close === -1) {
-      // JSON 还没收全（流式中间态）—— 跳过这个标记，继续找后面的。
+      // JSON 还没收全（流式中间态）—— 跳过这个标记，继续找后面的。载荷没收全
+      // 时它还在等：扫描缓冲不能把这一段丢掉（超长的坏载荷除外，它永远不会收
+      // 全，留着只会让缓冲一直涨）。
+      //
+      // 记的是**标记位置**而不是载荷起点：载荷起点之前的标记同样不能丢 ——
+      // 标记没了，下一块补齐的载荷就再也配不上对（委派静默丢失）。
+      if (text.length - start <= MAX_INCOMPLETE_TOOL_PAYLOAD) {
+        waitingStart = waitingStart === undefined ? marker : Math.min(waitingStart, marker);
+      }
       searchFrom = after;
       continue;
     }
@@ -982,7 +1240,7 @@ function findToolStylePayloads(text: string, from: number): ToolStylePayload[] {
     }
     searchFrom = after;
   }
-  return out;
+  return { payloads: out, ...(waitingStart === undefined ? {} : { waitingStart }) };
 }
 
 /** 标记之后的第一个 `{` / `[`（超过间隔就当没有载荷）。 */
@@ -1437,10 +1695,18 @@ export interface SuperDirectiveOpen {
   bodyStart: number;
 }
 
-/** 协议块的边界判定结果。 */
+/**
+ * 协议块的边界判定结果。
+ *
+ * `bodyStart` / `bodyEnd` 是**载荷正文在原文里的区间**（不含开栏行与收栏行）。
+ * 两条判定路径（围栏式 / 工具调用式）共用同一个「已消费载荷区间」账本，靠它
+ * 认出「同一份载荷被两条路径各认领一次」—— 只看标记位置会漏判：助手在围栏
+ * 之前的散文里写一句「I'll use super-agent:」，标记就落到了围栏跨度之外，
+ * 同一份载荷于是被两条路径各派发一次（两个子会话、双倍 token、两张重复卡）。
+ */
 export type SuperDirectiveResolution =
-  | { kind: "closed"; body: string; closeEnd: number }
-  | { kind: "unclosed"; scannedTo: number };
+  | { kind: "closed"; body: string; closeEnd: number; bodyStart: number; bodyEnd: number }
+  | { kind: "unclosed" };
 
 /**
  * 正文是否「可用」（宿主与渲染必须同源判定）。
@@ -1459,6 +1725,8 @@ function isUsableDirectiveBody(lang: SuperDirectiveLang, body: string): boolean 
 interface CloseCandidate {
   body: string;
   closeEnd: number;
+  /** 正文区间的结束偏移（收栏行之前）—— 载荷区间账本用它去重。 */
+  bodyEnd: number;
 }
 
 /**
@@ -1473,7 +1741,11 @@ function collectCloseCandidates(text: string, bodyStart: number): CloseCandidate
   for (let attempt = 0; attempt < MAX_CLOSE_CANDIDATES; attempt++) {
     const close = findFence(text, searchFrom, FENCE_CLOSE);
     if (!close) break;
-    out.push({ body: text.slice(bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd });
+    out.push({
+      body: text.slice(bodyStart, close.lineStart).trim(),
+      closeEnd: close.lineEnd,
+      bodyEnd: close.lineStart,
+    });
     searchFrom = close.lineEnd;
   }
   return out;
@@ -1507,19 +1779,19 @@ function directiveRegionEnd(text: string, bodyStart: number): number {
  * 唯一的例外是「正文还在流式输出中」（任务书的值没收尾）：那是流式的正常中间态，
  * 判未闭合等下一段（见 `scanTaskBooks` 的 pending 判定）。
  *
- * `scannedTo` 只是上一轮扫描位置的提示，**不再参与判定**：拿它当收栏搜索的
- * 起点会让同一个块的结论随流式分片大小漂移 —— 宿主在某一帧派发出去了，
- * 转录侧整段重扫却判定未闭合（转录里退化成 JSON 墙）。
+ * 判定不依赖「上一轮扫到哪」：那是流式优化的产物，拿它当收栏搜索的起点会让同
+ * 同一个块的结论随流式分片大小漂移（宿主某一帧派出去了，转录侧整段重扫却判未闭
+ * 合，退化成 JSON 墙）。
  */
 export function resolveSuperDirectiveBlock(
   text: string,
   open: SuperDirectiveOpen,
-  options: { language: string; scannedTo?: number },
+  options: { language: string },
 ): SuperDirectiveResolution {
   const lang = directiveLangOf(options.language);
-  // `scannedTo`（上一轮已扫到哪）**故意不再参与判定**：它是流式优化的产物，
-  // 拿它当收栏搜索的起点会让同一个块的结论随分片大小漂移 —— 宿主在某一帧
-  // 派发出去了，转录侧整段重扫却判定未闭合（JSON 墙）。
+  // 「上一轮扫到哪」故意不参与判定：它是流式优化的产物，拿它当收栏搜索的起点
+  // 会让同一个块的结论随流式分片大小漂移（宿主某一帧派出去了，转录侧整段重扫
+  // 却判未闭合，退化成 JSON 墙）。
   const regionEnd = directiveRegionEnd(text, open.bodyStart);
   const jsonStart = skipWhitespace(text, open.bodyStart);
   const structure =
@@ -1531,11 +1803,13 @@ export function resolveSuperDirectiveBlock(
     // 收栏按字符定位：标记落在行首（正常围栏），或紧贴载荷收尾（模型把收栏
     // 粘在载荷后面：`...}``` `）。按「独占一行」匹配会漏掉后一种形态。
     const closeAt = findCloseMarker(text, structure.end + 1);
-    if (closeAt === -1) return { kind: "unclosed", scannedTo: text.length };
+    if (closeAt === -1) return { kind: "unclosed" };
     return {
       kind: "closed",
       body: text.slice(open.bodyStart, closeAt).trim(),
       closeEnd: closeAt + FENCE_MARKER.length,
+      bodyStart: open.bodyStart,
+      bodyEnd: closeAt,
     };
   }
 
@@ -1548,10 +1822,16 @@ export function resolveSuperDirectiveBlock(
     if (text.length - open.bodyStart > MAX_UNCLOSED_SPAN) {
       const close = findFence(text, open.bodyStart, FENCE_CLOSE);
       if (close) {
-        return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+        return {
+          kind: "closed",
+          body: text.slice(open.bodyStart, close.lineStart).trim(),
+          closeEnd: close.lineEnd,
+          bodyStart: open.bodyStart,
+          bodyEnd: close.lineStart,
+        };
       }
     }
-    return { kind: "unclosed", scannedTo: text.length };
+    return { kind: "unclosed" };
   }
 
   // 结构不完整但字符串都闭合了：可能刚好停在某个值之后（流式中间态），也可能
@@ -1559,7 +1839,9 @@ export function resolveSuperDirectiveBlock(
   // 能解析就说明块是完整的，直接收口。
   const candidates = collectCloseCandidates(text, open.bodyStart);
   for (const candidate of candidates) {
-    if (isUsableDirectiveBody(lang, candidate.body)) return { kind: "closed", ...candidate };
+    if (isUsableDirectiveBody(lang, candidate.body)) {
+      return { kind: "closed", ...candidate, bodyStart: open.bodyStart };
+    }
   }
 
   // 候选都不可用：用容错拆分确认载荷是否已经写完 —— 拆出完整任务书且末尾没有
@@ -1573,16 +1855,22 @@ export function resolveSuperDirectiveBlock(
     if (salvaged.books.length > 0 && !salvaged.pending) {
       const close = findFence(text, salvaged.end, FENCE_CLOSE);
       if (close) {
-        return { kind: "closed", body: text.slice(open.bodyStart, close.lineStart).trim(), closeEnd: close.lineEnd };
+        return {
+          kind: "closed",
+          body: text.slice(open.bodyStart, close.lineStart).trim(),
+          closeEnd: close.lineEnd,
+          bodyStart: open.bodyStart,
+          bodyEnd: close.lineStart,
+        };
       }
     }
   }
 
-  if (candidates.length === 0) return { kind: "unclosed", scannedTo: text.length };
+  if (candidates.length === 0) return { kind: "unclosed" };
   // 明确的坏块（有收栏却怎么写都解析不了）：取第一个候选收口，交给调用方报
   // 「非法块」或降级展示，绝不无限期等下去（旧实现对 `{` 开头的坏块永远返回
   // 「未闭合」—— 宿主静默吞掉、渲染退化成 JSON 墙）。
-  return { kind: "closed", ...candidates[0]! };
+  return { kind: "closed", ...candidates[0]!, bodyStart: open.bodyStart };
 }
 
 // ---------------------------------------------------------------------------

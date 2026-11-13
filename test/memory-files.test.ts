@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -96,6 +96,48 @@ describe("memory files: settings and paths", () => {
     expect(isWithin(root, path.join(root, "a", "b"))).toBe(true);
     expect(isWithin(root, root)).toBe(true);
     expect(isWithin(root, path.resolve("/tmp/other"))).toBe(false);
+  });
+
+  // 附件通道只放行工作区内路径、会话暂存目录与用户本轮亲自附上的文件。纯词法
+  // 比较挡不住「工作区里的一个链接指向工作区外」—— 词法上它在工作区里，实际
+  // 指向工作区外，于是工作区外的文件会被复制进子会话上下文。
+  it("工作区内指向工作区外的链接判定为越界", () => {
+    const base = mkdtempSync(path.join(os.tmpdir(), "iflow-iswithin-"));
+    const root = path.join(base, "root");
+    const outside = path.join(base, "outside");
+    const link = path.join(root, "link");
+    try {
+      mkdirSync(root);
+      mkdirSync(outside);
+      writeFileSync(path.join(outside, "secret.txt"), "secret");
+      writeFileSync(path.join(root, "inside.txt"), "inside");
+      // Windows 的 junction 不需要管理员权限；POSIX 上等价于目录符号链接。
+      symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+
+      // 工作区里的普通文件照常放行。
+      expect(isWithin(root, path.join(root, "inside.txt"))).toBe(true);
+      // 指向工作区外的链接：越界（拒绝）。
+      expect(isWithin(root, path.join(link, "secret.txt"))).toBe(false);
+      // 链接本身（目录）同样越界。
+      expect(isWithin(root, link)).toBe(false);
+    } finally {
+      // 先摘掉链接（不能顺着它删掉工作区外的目录），再清理临时目录。
+      rmSync(link, { force: true });
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("待创建的文件（路径不存在）仍按词法判断放行", () => {
+    const base = mkdtempSync(path.join(os.tmpdir(), "iflow-iswithin-new-"));
+    const root = path.join(base, "root");
+    try {
+      mkdirSync(root);
+      // 目标还不存在：解析最近的存在的祖先再拼回去，仍在工作区内 → 放行。
+      expect(isWithin(root, path.join(root, "new", "file.txt"))).toBe(true);
+      expect(isWithin(root, path.join(root, "..", "outside", "file.txt"))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("renders ~/.iflow paths for global files", () => {
