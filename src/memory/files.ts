@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -157,13 +158,81 @@ export async function writeAtomic(file: string, content: string): Promise<void> 
   }
 }
 
-/** True when target is inside root (case-insensitive on Windows). */
+/**
+ * True when target is inside root (case-insensitive on Windows).
+ *
+ * 两道判断：词法（`path.relative`）与真实路径（解析符号链接 / Windows
+ * junction）。词法那道挡不住「工作区里的一个链接指向工作区外」—— 附件通道只
+ * 放行工作区内路径、会话暂存目录与用户本轮亲自附上的文件，链接会让工作区外
+ * 的文件被当成工作区内的文件复制进子会话上下文。
+ *
+ * 真实路径解析不出来时（权限 / 环路 / 路径不存在）退回词法判断：**不能因为
+ * 解析不了就把「在范围内」误判成越界**，那会误伤正常路径。
+ */
 export function isWithin(root: string, target: string): boolean {
-  const rel = path.relative(path.resolve(root), path.resolve(target));
+  const rootAbs = path.resolve(root);
+  const targetAbs = path.resolve(target);
+  // 词法判断先做：不在范围内的路径不必碰磁盘。
+  if (!isLexicallyWithin(rootAbs, targetAbs)) return false;
+  return isLexicallyWithin(realPathOrSelf(rootAbs), realPathOrSelf(targetAbs));
+}
+
+/** 词法包含判断（不解符号链接）。 */
+function isLexicallyWithin(root: string, target: string): boolean {
+  const rel = path.relative(root, target);
   if (!rel) return true;
   if (path.isAbsolute(rel)) return false;
   if (rel === ".." || rel.startsWith(`..${path.sep}`)) return false;
   return true;
+}
+
+/**
+ * 真实路径解析结果的缓存。
+ *
+ * TTL 很短：链接可能被改指向，缓存不能长期有效（边界判断要看到当下的指向）。
+ */
+const REAL_PATH_CACHE_TTL_MS = 5_000;
+const REAL_PATH_CACHE_MAX = 1024;
+const realPathCache = new Map<string, { at: number; value: string }>();
+
+/** 解析真实路径；解析不了就原样返回（词法形式）。 */
+function realPathOrSelf(target: string): string {
+  const now = Date.now();
+  const cached = realPathCache.get(target);
+  if (cached && now - cached.at < REAL_PATH_CACHE_TTL_MS) return cached.value;
+  const value = resolveRealPath(target);
+  if (realPathCache.size >= REAL_PATH_CACHE_MAX) {
+    const oldest = realPathCache.keys().next().value;
+    if (oldest !== undefined) realPathCache.delete(oldest);
+  }
+  realPathCache.set(target, { at: now, value });
+  return value;
+}
+
+/**
+ * 解析真实路径（符号链接 / junction 会被解掉）。
+ *
+ * 路径不存在时（待创建的文件）解析它最近的存在的祖先，再把剩下的段拼回去 ——
+ * 这样「工作区里指向工作区外的链接」这种逃逸在新建文件时同样被挡住。
+ */
+function resolveRealPath(target: string): string {
+  const absolute = path.resolve(target);
+  const trailing: string[] = [];
+  let current = absolute;
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return trailing.length === 0 ? real : path.join(real, ...trailing);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // 只有「不存在」才往上找祖先；其它错误（权限 / 环路）直接退回词法形式。
+      if (code !== "ENOENT" && code !== "ENOTDIR") return absolute;
+      const parent = path.dirname(current);
+      if (parent === current) return absolute;
+      trailing.unshift(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
 /** `~/.iflow/...` for home files, workspace-relative for project files. */

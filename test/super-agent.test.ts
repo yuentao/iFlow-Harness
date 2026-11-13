@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   allSuperSessionsSettled,
   applySuperEvent,
@@ -17,6 +20,7 @@ import {
   MAX_CONCURRENT_SUPER_SESSIONS,
   MAX_SUPER_ACTIONS,
   MAX_SUPER_ATTACHMENTS,
+  MAX_SUPER_SCAN_BUFFER_CHARS,
   normalizeSuperTitle,
   reportForSession,
   retrySuperSession,
@@ -27,6 +31,7 @@ import {
   SUPER_DIGEST_MAX_CHARS,
   sumSuperUsage,
   SuperReportBuffer,
+  SuperDirectiveScanner,
   toPersistedSuperSession,
   withUsage,
   type SuperSessionUi,
@@ -419,6 +424,179 @@ describe("super agent · 工具调用式委派载荷", () => {
   it("与 super-agent 无关的 JSON 不会被误派发", () => {
     const scan = extractSuperDirectives('普通文本里的 {"tasks":[{"title":"A","task":"真的任务"}]} 与 super-agent 无关');
     expect(scan.blocks).toHaveLength(0);
+  });
+});
+
+describe("super agent · 重复派发与载荷丢失", () => {
+  // 实测：助手在围栏之前的散文里写一句「I'll use super-agent:」。旧实现的互斥
+  // 判据只看标记位置（标记落在围栏跨度之外），同一份载荷于是被围栏路径与工具
+  // 调用式路径各派发一次：宿主开两个子会话、双倍 token、转录出两张重复卡。
+  it("散文里的 super-agent 标记 + 后面的围栏块：只派发一次", () => {
+    const text = [
+      "好的，我来委派。I'll use super-agent:",
+      "```super-agent",
+      '{"tasks":[{"title":"改登录","task":"修好 src/auth.ts"}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]).toEqual([{ title: "改登录", task: "修好 src/auth.ts" }]);
+  });
+
+  it("同一条委派写成围栏 + 工具调用式两份：也只派发一次", () => {
+    const payload = '{"tasks":[{"title":"A","task":"任务 A"}]}';
+    const text = [
+      "```super-agent",
+      payload,
+      "```",
+      "",
+      "<｜DSML｜tool-super-agent>",
+      payload,
+      "</tool-super-agent>",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("A");
+  });
+
+  // 实测：工具调用式扫描在第一个标记后 80 字符内找不到 { 时直接 break，后面
+  // 的载荷被静默吞掉：既不派发也不报错，用户以为派了其实没有。
+  it("标记后 80 字符内没有载荷：后面的载荷不被吞掉", () => {
+    const preamble =
+      "我先说明一下接下来的安排与分工，这段铺垫话故意写得很长，长到标记与后面的载荷之间已经超过了八十个字符的间隔，所以工具调用式扫描在第一个标记后找不到载荷起点。";
+    const text = [
+      `super-agent: ${preamble}${preamble}`,
+      "<｜DSML｜tool-super-agent>",
+      '{"tasks":[{"title":"B","task":"任务 B"}]}',
+      "</tool-super-agent>",
+    ].join("\n");
+    // 前置条件：第一个标记到载荷起点的距离确实超过 80 字符的间隔。
+    expect(text.indexOf("{")).toBeGreaterThan(text.indexOf("super-agent") + 90);
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("B");
+  });
+
+  it("散文里的标记后没有载荷：不误派发，也不吞掉后面的围栏块", () => {
+    const text = [
+      "super-agent: 这段话里没有载荷，只是随口提了一嘴。",
+      "```super-agent",
+      '{"tasks":[{"title":"C","task":"任务 C"}]}',
+      "```",
+    ].join("\n");
+    const scan = extractSuperDirectives(text);
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("C");
+  });
+});
+
+describe("super agent · 子会话任务书的如实描述", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
+
+  it("不再宣称宿主会拒绝危险命令", () => {
+    // 真实实现：子会话跑在 yolo 模式，CLI 通常根本不发权限请求，依赖护栏只是
+    // 基于命令文本关键词的兜底（还能被 `node -e "..."` 这类写法绕过）。
+    // 提示词却宣称「宿主会拒绝这类命令」—— 模型据此以为有安全网，就敢写危险
+    // 命令。这条断言钉住「不许再吹这个牛」。
+    expect(brief).not.toContain("The host refuses commands that would damage the main workspace");
+  });
+
+  it("如实说明宿主不拦截工具调用、护栏只是关键词兜底", () => {
+    expect(brief).toContain("does **not** intercept your tool calls");
+    expect(brief).toContain("keyword-based guard");
+    expect(brief).toContain("can be bypassed");
+    // 兜底自己：约束落在模型身上。
+    expect(brief).toContain("**You** are the guard here");
+  });
+});
+
+describe("super agent · 流式扫描缓冲有界", () => {
+  it("长时间流式输入下扫描缓冲不无界增长", () => {
+    const scanner = new SuperDirectiveScanner();
+    const chunk = "普通叙述段落，用来把扫描缓冲撑起来，长度足够长以至于缓冲会明显增长。".repeat(4);
+    for (let i = 0; i < 200; i++) {
+      scanner.push(`${chunk}（第 ${i} 段）`);
+    }
+    // 扫过又没有指令的前缀是死区：扫完就该丢掉，缓冲不能随会话长度增长。
+    expect(scanner.bufferLength).toBeLessThan(1024);
+    expect(scanner.bufferLength).toBeLessThanOrEqual(MAX_SUPER_SCAN_BUFFER_CHARS);
+  });
+
+  it("裁剪缓冲不影响后续派发", () => {
+    const scanner = new SuperDirectiveScanner();
+    for (let i = 0; i < 50; i++) scanner.push(`普通叙述 ${i}。`);
+    const scan = scanner.push(
+      ['```super-agent', '{"tasks":[{"title":"A","task":"任务 A"}]}', "```"].join("\n"),
+    );
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("A");
+  });
+
+  it("正在写的围栏不会被裁掉（载荷下一块才到）", () => {
+    const scanner = new SuperDirectiveScanner();
+    scanner.push("```super-agent\n");
+    scanner.push('{"tasks":[{"title":"A","task":"任务 A"}]}');
+    const scan = scanner.push("\n```\n");
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("A");
+  });
+
+  // 标记被切成两半：这一帧结尾只有 "``"，下一帧才是 "`super-agent"。扫描只看
+  // 得到完整标记 —— 如果把扫过的前缀整个丢掉，标记的前半截也跟着没了，下一
+  // 帧补齐也认不出来（委派静默丢失）。
+  //
+  // 载荷离标记足够远（超过工具调用式路径的 80 字符间隔），于是只有围栏路径能
+  // 认出来：这条用例真正盯的是「围栏标记的前半截有没有被裁掉」。
+  it("围栏开栏被切成两半时不会丢失", () => {
+    const scanner = new SuperDirectiveScanner();
+    scanner.push("叙述文字。\n``");
+    // 围栏正文前面垫一大段空白：载荷离「super-agent」标记超过 80 字符，于是
+    // 工具调用式那条兜底路径够不着它 —— 只有「围栏开栏的前半截没被裁掉」这条
+    // 围栏路径能派发出来。这条用例真正盯的就是尾巴保护。
+    const pad = " ".repeat(120);
+    const scan = scanner.push(
+      `\`super-agent\n${pad}\n{"tasks":[{"title":"A","task":"任务 A"}]}\n\`\`\`\n`,
+    );
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("A");
+  });
+
+  // 工具调用式载荷跨 chunk 到达：标记先到，载荷后到。裁剪不能把标记吃掉 ——
+  // 标记没了，下一块的载荷就永远配不上对（委派静默丢失）。
+  it("工具调用式标记先到、载荷后到时不会丢失", () => {
+    const scanner = new SuperDirectiveScanner();
+    scanner.push("<｜DSML｜tool-super-agent>\n");
+    const scan = scanner.push('{"tasks":[{"title":"T","task":"任务 T"}]}\n</tool-super-agent>\n');
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("T");
+  });
+
+  // 工具调用式标记被切成两半（"super-ag" + "ent:"）：半截标记扫描根本认不出来，
+  // 于是这一帧「没有标记」—— 前半截被丢掉的话，下一帧补齐也认不出来（委派静默
+  // 丢失）。这条用例是尾巴保护最尖锐的一条：没有别的路径能兜底。
+  it("工具调用式标记被切成两半时不会丢失", () => {
+    const scanner = new SuperDirectiveScanner();
+    scanner.push("叙述文字。\nsuper-ag");
+    const scan = scanner.push('ent:\n{"tasks":[{"title":"S","task":"任务 S"}]}\n');
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]?.[0]?.title).toBe("S");
+  });
+
+  // 载荷写到一半（JSON 还没收口）：标记必须留着，载荷补齐后才派发。
+  it("工具调用式载荷分三块到达时不会丢失", () => {
+    const scanner = new SuperDirectiveScanner();
+    const dispatched: string[] = [];
+    for (const chunk of [
+      "<｜DSML｜tool-super-agent>\n{\"tasks\":[{\"title\"",
+      ':\"T\",\"task\":\"任务 T\"}]}\n',
+      "</tool-super-agent>\n",
+    ]) {
+      for (const tasks of scanner.push(chunk).blocks) {
+        for (const task of tasks) dispatched.push(task.title);
+      }
+    }
+    expect(dispatched).toEqual(["T"]);
   });
 });
 

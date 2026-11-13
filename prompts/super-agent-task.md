@@ -22,6 +22,6 @@ Dependencies and checks:
 - **Never** link (junction / symlink / mklink / ln -s) the main workspace's `node_modules` into your working directory, and never copy it there either.
 - **Never** run any install or delete operation against the main workspace.
 - If you need dependencies, install them **inside your own worktree** (`npm ci` and the like — the host allows that).
-- The host refuses commands that would damage the main workspace's dependencies (for example creating a link to `node_modules`, or running an install/delete in the main workspace or through such a link). If a command is refused, change your approach and report it faithfully — do not work around the refusal.
+- The host does **not** intercept your tool calls: child sessions run without approval prompts, so nothing stops you from running a command that damages the main workspace's dependencies (linking `node_modules`, or running an install/delete in the main workspace or through such a link). The host only has a keyword-based guard for the most obvious spellings of those commands, and it can be bypassed (for example by hiding the command inside `node -e "..."`). **You** are the guard here: read your own command text before running it, and keep to the rules above. If the host does refuse a command anyway, change your approach and report it faithfully — do not work around the refusal.
 {{submission}}
 When you finish, reply with one paragraph: what you did, the conclusion, and what is left undone. The host relays that paragraph verbatim to the main session.
