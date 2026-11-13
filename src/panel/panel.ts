@@ -1823,7 +1823,13 @@ export class ChatPanel implements vscode.Disposable {
         void this.openImageAttachment(msg.dataUrl);
         break;
       case "saveAuth":
-        await this.saveAuthAndReconnect(msg.baseUrl, msg.apiKey, msg.modelName, msg.profileName ?? null);
+        await this.saveAuthAndReconnect(
+          msg.baseUrl,
+          msg.apiKey,
+          msg.modelName,
+          msg.profileName ?? null,
+          msg.replaceName ?? null,
+        );
         break;
       case "clearAuth":
         await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
@@ -5154,6 +5160,7 @@ export class ChatPanel implements vscode.Disposable {
     apiKey: string | null,
     modelName: string,
     profileName: string | null,
+    replaceName: string | null = null,
   ): Promise<void> {
     const stored = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
     const validation = validateCredentials({
@@ -5170,16 +5177,43 @@ export class ChatPanel implements vscode.Disposable {
     // Upsert as a named profile. Default name: the model (distinct enough for
     // most setups; users can rename by re-saving under a custom name).
     const name = profileName?.trim() || creds.modelName;
+    // `replaceName` is the name this profile had before the edit. When the
+    // user renamed it (or cleared the name field and fell back to the model),
+    // the old key must go — otherwise the list shows the old row next to the
+    // new one. `name === replaceName` (plain edit) is a pure overwrite.
+    const replaced = replaceName?.trim() || null;
     const profiles = await loadProfiles(this.context.secrets);
+    if (replaced && replaced !== name && profiles[replaced]) {
+      delete profiles[replaced];
+    }
     profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
     await saveProfiles(this.context.secrets, profiles);
+
+    // Was this profile the one the panel is running on? Resolve BEFORE the
+    // pointer moves: a rename (A → B) still edits the active profile.
+    const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
+    const activeBefore =
+      workspaceName ||
+      resolveActiveProfileName(readCliSettings(), await getActiveProfileName(this.context.secrets));
+    const isActiveProfile =
+      !!activeBefore && (activeBefore === name || (replaced !== null && activeBefore === replaced));
+
     // The active-profile pointer and credentials slot are global SecretStorage
     // values shared by every VS Code window. The workspace record plus the
     // explicit credentials passed below are the authority for this panel.
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
     await this.rememberWorkspaceModelFor(name, creds.modelName);
 
-    await this.reconnectWithCredentials(creds);
+    // Saving an edit is NOT a profile switch: when the edited profile is the
+    // one this panel is using and a live conversation exists, re-authenticate
+    // hot and reload the SAME session in place (keepSession) — the CLI keeps
+    // running and the transcript survives. A brand-new or non-active profile
+    // keeps the old cold behavior (new session under the new credentials).
+    const state = this.store.getState();
+    const liveSessionId = state.sessionId ?? state.activeSessionId;
+    const keepSession = isActiveProfile && !!this.client && !!liveSessionId;
+
+    await this.reconnectWithCredentials(creds, keepSession);
   }
 
   /** Switch the active API profile and re-authenticate the session. */
