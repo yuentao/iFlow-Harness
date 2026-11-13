@@ -65,7 +65,7 @@
   "已回退 {0} 处改动（保留 {1} 处）: {2}": "Reverted {0} change(s), kept {1}: {2}",
   "逐块回退失败: {0}": "Per-hunk revert failed: {0}",
   "未找到 API 配置: {0}": "API profile not found: {0}",
-  "未找到可导入的内核配置: {0}": "No importable Core profile found: {0}",
+  "无法写入内核配置 {0}": "Failed to write the Core config for {0}",
   "未找到技能「{0}」，已按普通文本发送": "Skill \"{0}\" not found — sent as plain text",
   "重新认证": "re-authentication",
   "已切换 API 配置: {0}": "Switched API profile: {0}",

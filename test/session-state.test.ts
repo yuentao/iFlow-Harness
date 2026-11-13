@@ -1312,8 +1312,7 @@ describe("host-level transitions", () => {
       authenticated: true,
       needsSetup: false,
       saved: { baseUrl: "https://x", modelName: "m", keyTail: "…1234" },
-      profiles: [{ name: "BUZZ", source: "cli", baseUrl: "https://x", modelName: "m", keyTail: "…1234", active: true }],
-      importable: [],
+      profiles: [{ name: "BUZZ", baseUrl: "https://x", modelName: "m", keyTail: "…1234", active: true }],
       onboardingDismissed: false,
     };
     const fresh = newSessionState(state);

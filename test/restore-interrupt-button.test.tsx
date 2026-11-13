@@ -54,7 +54,6 @@ function state(overrides: Partial<SessionState> = {}): SessionState {
       needsSetup: false,
       saved: null,
       profiles: [],
-      importable: [],
       onboardingDismissed: true,
     },
     sessions: [],

@@ -308,10 +308,6 @@ const en: Record<string, string> = {
   "自定义配置": "Custom profile",
   "选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。":
     "Pick a provider preset to fill in the endpoint, or enter any OpenAI-compatible endpoint manually.",
-  "检测到内核已有凭据": "Existing Core credentials detected",
-  "可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。":
-    "Import them as extension profiles from ~/.iflow/settings.json; the key is stored in SecretStorage and managed by the panel.",
-  "导入并激活": "Import & activate",
   "在 DeepSeek 开放平台创建 API Key；端点兼容 OpenAI 协议。":
     "Create an API key on the DeepSeek platform; the endpoint is OpenAI-compatible.",
   "在 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。":
@@ -435,12 +431,10 @@ const en: Record<string, string> = {
   "重启内核": "Restart Core",
   "重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
     "Restart the Core process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
-  "点击配置即切换并重新认证会话；来自内核的配置为只读，可切换但不可在此删除。":
-    "Click a profile to switch and re-authenticate the session. Profiles imported from the Core are read-only: you can switch to them but not delete them here.",
-  "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。":
-    "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving re-authenticates the session via openai-compatible.",
-  "这是只读的内核配置；保存将另存为同名的扩展配置并优先使用它。":
-    "This is a read-only Core profile; saving creates an extension-owned profile with the same name that takes precedence.",
+  "点击配置即切换并重新认证会话；配置与密钥保存在内核配置文件 ~/.iflow/settings.json（本机明文）。":
+    "Click a profile to switch and re-authenticate the session; profiles and keys are stored in the Core config file ~/.iflow/settings.json (plaintext on this machine).",
+  "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。":
+    "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Saving re-authenticates the session via openai-compatible.",
   "正在重新认证…": "Re-authenticating…",
   "等待选择…": "Waiting for your choice…",
   "审批策略": "Approval policies",
@@ -789,8 +783,8 @@ const en: Record<string, string> = {
   "系统": "System",
   "设置分区": "Settings sections",
   "设置如何保存": "How settings are saved",
-  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在内核配置文件，重启内核生效。":
-    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API keys stay in SecretStorage and are never synced. MCP, language and approval mode live in the Core config and apply after a Core restart.",
+  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API 配置与密钥写入内核配置文件 ~/.iflow/settings.json（本机明文）。MCP、语言与审批模式同样在内核配置文件，重启内核生效。":
+    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API profiles and keys are written to the Core config file ~/.iflow/settings.json (plaintext on this machine). MCP, language and approval mode also live in the Core config and apply after a Core restart.",
   "详细说明": "Details",
   "会话": "Session",
   "会话首轮完成后自动生成简短标题。": "Generate a short title after a session's first turn.",

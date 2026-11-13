@@ -4,7 +4,6 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
   applyThinkingRules,
-  cliImportCandidates,
   mcpScopeOf,
   mergeThinkingRulesIntoFile,
   normalizeModelsUrl,
@@ -20,6 +19,13 @@ import {
   thinkingForModelRules,
   updateCliSettings,
 } from "../src/acp/models-query";
+import {
+  deleteKernelApiProfile,
+  migrateKernelApiProfiles,
+  readKernelApiProfiles,
+  setKernelActiveProfile,
+  writeKernelApiProfile,
+} from "../src/acp/api-profiles";
 
 const tempDir = mkdtempSync(path.join(tmpdir(), "iflow-models-"));
 afterAll(() => {
@@ -72,25 +78,22 @@ describe("parseModelsResponse", () => {
 });
 
 describe("resolveActiveProfileName", () => {
-  it("prefers the extension record (isolated home: SecretStorage is the authority)", () => {
+  it("prefers the kernel pointer (settings.json is the persistence authority)", () => {
     expect(
       resolveActiveProfileName({ currentApiProfile: "商汤" }, "BUZZ"),
-    ).toBe("BUZZ");
+    ).toBe("商汤");
+    expect(resolveActiveProfileName({ currentApiProfile: "商汤" }, null)).toBe("商汤");
   });
 
-  it("falls back to the CLI pointer when the extension has no record", () => {
-    expect(resolveActiveProfileName({ currentApiProfile: "商汤" }, null)).toBe("商汤");
+  it("falls back to the panel record when the kernel pointer is absent or blank", () => {
     expect(resolveActiveProfileName({ currentApiProfile: "  " }, "BUZZ")).toBe("BUZZ");
     expect(resolveActiveProfileName({}, "BUZZ")).toBe("BUZZ");
+    expect(resolveActiveProfileName(null, "BUZZ")).toBe("BUZZ");
   });
 
   it("returns null when neither source knows an active profile", () => {
     expect(resolveActiveProfileName({}, null)).toBeNull();
     expect(resolveActiveProfileName(null, null)).toBeNull();
-  });
-
-  it("falls back when there is no settings file at all", () => {
-    expect(resolveActiveProfileName(null, "BUZZ")).toBe("BUZZ");
   });
 });
 
@@ -224,74 +227,98 @@ describe("readActiveEndpoint", () => {
   });
 });
 
-describe("cliImportCandidates", () => {
-  it("returns named profiles that have all three fields", () => {
-    const candidates = cliImportCandidates(
-      {
-        apiProfiles: {
-          work: { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" },
-          incomplete: { baseUrl: "https://b.example.com/v1", apiKey: "sk-b" },
-        },
+describe("kernel API profile store", () => {
+  const kernelFile = (): string =>
+    path.join(tempDir, `kernel-${Math.random().toString(36).slice(2)}.json`);
+  const creds = (suffix: string) => ({
+    baseUrl: `https://${suffix}.example.com/v1`,
+    apiKey: `sk-${suffix}`,
+    modelName: `m-${suffix}`,
+  });
+
+  it("reads only complete profiles", () => {
+    const file = settingsFile({
+      apiProfiles: {
+        work: creds("work"),
+        incomplete: { baseUrl: "https://x/v1", apiKey: "sk-x" },
+        blank: { baseUrl: "", apiKey: "sk", modelName: "m" },
       },
-      [],
+    });
+    expect(readKernelApiProfiles(file)).toEqual({ work: creds("work") });
+    expect(readKernelApiProfiles(path.join(tempDir, "missing-kernel.json"))).toEqual({});
+  });
+
+  it("writes one profile and preserves mcpServers/language/other profiles", () => {
+    const file = settingsFile({
+      language: "zh-CN",
+      mcpServers: { figma: { command: "npx", args: ["-y", "figma-mcp"] } },
+      apiProfiles: { existing: creds("existing") },
+    });
+    expect(writeKernelApiProfile("work", creds("work"), file)).toBe(true);
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.apiProfiles).toEqual({
+      existing: creds("existing"),
+      work: creds("work"),
+    });
+    expect(after.language).toBe("zh-CN");
+    expect(after.mcpServers.figma.args).toEqual(["-y", "figma-mcp"]);
+    expect(existsSync(`${file}.iflow-harness-tmp`)).toBe(false);
+  });
+
+  it("creates a missing file when writing", () => {
+    const file = kernelFile();
+    expect(writeKernelApiProfile("work", creds("work"), file)).toBe(true);
+    expect(JSON.parse(readFileSync(file, "utf8")).apiProfiles.work).toEqual(creds("work"));
+  });
+
+  it("deletes one profile and leaves the others alone", () => {
+    const file = settingsFile({
+      apiProfiles: { keep: creds("keep"), drop: creds("drop") },
+    });
+    expect(deleteKernelApiProfile("drop", file)).toBe(true);
+    expect(JSON.parse(readFileSync(file, "utf8")).apiProfiles).toEqual({ keep: creds("keep") });
+    // Missing file / unknown name are no-ops (nothing to delete).
+    expect(deleteKernelApiProfile("drop", kernelFile())).toBe(true);
+    expect(deleteKernelApiProfile("unknown", file)).toBe(true);
+  });
+
+  it("sets and clears the kernel active pointer, keeping other fields", () => {
+    const file = settingsFile({ language: "en-US", apiProfiles: { work: creds("work") } });
+    expect(setKernelActiveProfile("work", file)).toBe(true);
+    let after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.currentApiProfile).toBe("work");
+    expect(after.language).toBe("en-US");
+    expect(setKernelActiveProfile(null, file)).toBe(true);
+    after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.currentApiProfile).toBeUndefined();
+    expect(after.apiProfiles.work).toEqual(creds("work"));
+  });
+
+  it("migrates missing names only and never overwrites a same-named kernel entry", () => {
+    const file = settingsFile({ apiProfiles: { work: creds("kernel") } });
+    const migrated = migrateKernelApiProfiles(
+      { work: creds("legacy"), personal: creds("personal") },
+      file,
     );
-    expect(candidates).toEqual([
-      { name: "work", baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" },
-    ]);
+    expect(migrated).toEqual(["personal"]);
+    const after = JSON.parse(readFileSync(file, "utf8"));
+    expect(after.apiProfiles.work).toEqual(creds("kernel"));
+    expect(after.apiProfiles.personal).toEqual(creds("personal"));
   });
 
-  it("skips profiles shadowed by an extension-owned name", () => {
-    const candidates = cliImportCandidates(
-      {
-        apiProfiles: {
-          work: { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" },
-        },
-      },
-      ["work"],
-    );
-    expect(candidates).toEqual([]);
+  it("migrates into a missing file", () => {
+    const file = kernelFile();
+    expect(migrateKernelApiProfiles({ work: creds("work") }, file)).toEqual(["work"]);
+    expect(JSON.parse(readFileSync(file, "utf8")).apiProfiles.work).toEqual(creds("work"));
   });
 
-  it("includes the top-level endpoint only for openai-compatible auth", () => {
-    const settings = {
-      selectedAuthType: "openai-compatible",
-      baseUrl: "https://top.example.com/v1",
-      apiKey: "sk-top",
-      modelName: "m-top",
-    };
-    expect(cliImportCandidates(settings, [])).toEqual([
-      { name: "m-top", baseUrl: "https://top.example.com/v1", apiKey: "sk-top", modelName: "m-top" },
-    ]);
-    expect(cliImportCandidates({ ...settings, selectedAuthType: "iflow" }, [])).toEqual([]);
-  });
-
-  it("names the top-level candidate after currentApiProfile", () => {
-    const settings = {
-      selectedAuthType: "openai-compatible",
-      currentApiProfile: "终端默认",
-      baseUrl: "https://top.example.com/v1",
-      apiKey: "sk-top",
-      modelName: "m-top",
-    };
-    expect(cliImportCandidates(settings, [])[0]?.name).toBe("终端默认");
-  });
-
-  it("dedupes the same credential set, preferring the named profile", () => {
-    const raw = { baseUrl: "https://a.example.com/v1", apiKey: "sk-a", modelName: "m-a" };
-    const candidates = cliImportCandidates(
-      {
-        selectedAuthType: "openai-compatible",
-        currentApiProfile: "work",
-        apiProfiles: { work: raw },
-        ...raw,
-      },
-      [],
-    );
-    expect(candidates).toEqual([{ name: "work", ...raw }]);
-  });
-
-  it("returns no candidates without settings", () => {
-    expect(cliImportCandidates(null, [])).toEqual([]);
+  it("never overwrites an existing but unparseable kernel file", () => {
+    const file = path.join(tempDir, `kernel-broken-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(file, "{oops", "utf8");
+    expect(writeKernelApiProfile("work", creds("work"), file)).toBe(false);
+    expect(deleteKernelApiProfile("work", file)).toBe(false);
+    expect(migrateKernelApiProfiles({ work: creds("work") }, file)).toEqual([]);
+    expect(readFileSync(file, "utf8")).toBe("{oops");
   });
 });
 

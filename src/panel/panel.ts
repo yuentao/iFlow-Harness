@@ -22,7 +22,8 @@ import {
   isTransientStreamError,
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
-import { acpSessionFilePath, applyThinkingRules, cliImportCandidates, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
+import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
 import {
   getActiveProfileName,
   loadCredentials,
@@ -649,6 +650,10 @@ export class ChatPanel implements vscode.Disposable {
 
   private editorPanel: vscode.WebviewPanel | undefined;
   private client: AcpClient | null = null;
+  /** One-shot guard for copying SecretStorage-only profiles into the kernel
+   * settings.json (the migration itself is idempotent; this only keeps the
+   * per-snapshot auth build from re-reading/re-writing the file). */
+  private authProfilesMigrated = false;
   private store: SessionStore;
   /** F3 Phase 1: global/project memory files (read/edit, not the CLI agent). */
   private readonly memory: MemoryService;
@@ -1841,9 +1846,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "deleteProfile":
         await this.deleteProfile(msg.name);
-        break;
-      case "importCliCredentials":
-        await this.importCliCredentials(msg.name);
         break;
       case "setOnboardingDismissed":
         await this.context.workspaceState.update(ONBOARDING_DISMISSED_KEY, msg.dismissed === true);
@@ -5085,69 +5087,62 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Everything the auth UI needs from one settings.json read:
-   *  - `profiles`: extension-owned (SecretStorage, editable) merged with the
-   *    CLI ones (read-only source, the user's existing configs); the active
-   *    name drives the `active` flag.
-   *  - `importable`: CLI credentials that are not extension-owned yet — the
-   *    onboarding "import existing config" candidates (masked key tail only;
-   *    the raw key stays in the host).
+   * The API profile list, read from the kernel's settings.json `apiProfiles`
+   * (the single persistence authority). SecretStorage entries are only shown
+   * for names the kernel does not have yet — that happens when the one-time
+   * migration could not write (e.g. an unreadable kernel file); the kernel
+   * entry wins on a collision and an upgrade never hides the user's config.
    */
-  private async buildAuthLists(): Promise<{
-    profiles: AuthUiState["profiles"];
-    importable: AuthUiState["importable"];
-  }> {
-    const extProfiles = await loadProfiles(this.context.secrets);
+  private async buildAuthLists(): Promise<AuthUiState["profiles"]> {
+    const kernelProfiles = readKernelApiProfiles();
+    const legacyProfiles = await loadProfiles(this.context.secrets);
     const cli = readCliSettings();
-    // Active-name resolution is CLI-first: settings.json is what the CLI
-    // loads on startup and what external tools (profile manager / cloud sync)
-    // rewrite behind our back. The extension's own record only fills in for
-    // fresh installs where currentApiProfile isn't set yet.
+    // The kernel pointer is authoritative (resolveActiveProfileName), with the
+    // panel record as fallback; this workspace's own selection wins locally.
     const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
     const activeName = workspaceName || resolveActiveProfileName(cli, await getActiveProfileName(this.context.secrets));
     const list: AuthUiState["profiles"] = [];
-    const push = (name: string, source: "extension" | "cli", p: OpenAiCompatCredentials) => {
+    const push = (name: string, p: OpenAiCompatCredentials) => {
       list.push({
         name,
-        source,
         baseUrl: p.baseUrl,
         modelName: p.modelName,
         keyTail: maskKey(p.apiKey),
         active: name === activeName,
       });
     };
-    for (const [name, p] of Object.entries(extProfiles)) {
-      push(name, "extension", p);
+    for (const [name, p] of Object.entries(kernelProfiles)) push(name, p);
+    for (const [name, p] of Object.entries(legacyProfiles)) {
+      if (!kernelProfiles[name]) push(name, p);
     }
-    for (const [name, p] of Object.entries(cli?.apiProfiles ?? {})) {
-      // CLI profiles whose name collides with an extension profile are shadowed
-      // (the extension one is what authenticate will use).
-      if (!extProfiles[name] && p.baseUrl && p.apiKey && p.modelName) {
-        push(name, "cli", { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName });
-      }
-    }
-    const importable = cliImportCandidates(cli, Object.keys(extProfiles)).map((candidate) => ({
-      name: candidate.name,
-      baseUrl: candidate.baseUrl,
-      modelName: candidate.modelName,
-      keyTail: maskKey(candidate.apiKey),
-    }));
-    return { profiles: list, importable };
+    return list;
   }
 
   private async buildAuthState(authenticated: boolean, needsSetup: boolean): Promise<AuthUiState> {
+    // One-time upgrade of SecretStorage-only profiles into the kernel file.
+    // Idempotent and never overwrites a same-named kernel entry; a write
+    // failure is logged and swallowed (the SecretStorage record still shows
+    // up in the list and keeps working as the runtime cache).
+    if (!this.authProfilesMigrated) {
+      this.authProfilesMigrated = true;
+      const migrated = migrateKernelApiProfiles(await loadProfiles(this.context.secrets));
+      if (migrated.length > 0) {
+        this.log.info(
+          `migrated ${migrated.length} API profile(s) into the kernel settings: ${migrated.join(", ")}`,
+        );
+      }
+    }
     // P7: computed fresh every call — the old cache went stale between write
     // points (e.g. `saved` outliving a deleted profile until the next save).
     // Resolve this workspace's profile first; the SecretStorage credentials
     // slot is shared by all windows and is not a per-panel source of truth.
     const creds = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
-    const { profiles, importable } = await this.buildAuthLists();
+    const profiles = await this.buildAuthLists();
     return {
       authenticated,
       needsSetup,
       saved: creds ? this.maskOf(creds) : null,
       profiles,
-      importable,
       onboardingDismissed: this.context.workspaceState.get<boolean>(
         ONBOARDING_DISMISSED_KEY,
         false,
@@ -5170,9 +5165,9 @@ export class ChatPanel implements vscode.Disposable {
     const stored = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
     const replaced = replaceName?.trim() || null;
     const profiles = await loadProfiles(this.context.secrets);
-    // The row being edited: an extension profile, or the CLI-sourced profile
-    // of the same name (the edit turns it into an extension-owned row).
-    const previous = replaced ? profiles[replaced] ?? this.cliProfileCredentials(replaced) : null;
+    // The row being edited: the kernel profile of that name (the authority),
+    // falling back to the SecretStorage cache for not-yet-migrated entries.
+    const previous = replaced ? this.kernelProfileCredentials(replaced) ?? profiles[replaced] ?? null : null;
     // A blank key on an EDIT means "keep THIS row's key". Falling back to the
     // live/global credentials here would silently copy the active profile's
     // key into an unrelated row (user-reported). No key anywhere → the user
@@ -5212,6 +5207,15 @@ export class ChatPanel implements vscode.Disposable {
     }
     profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
     await saveProfiles(this.context.secrets, profiles);
+    // The kernel settings.json is the persistence authority; the SecretStorage
+    // write above remains the runtime cache used for hot re-authentication.
+    const kernelWritten = writeKernelApiProfile(name, creds);
+    if (kernelWritten && replaced && replaced !== name) deleteKernelApiProfile(replaced);
+    if (!kernelWritten) {
+      // Never report a silent success: the profile only lives in this
+      // window's SecretStorage until the kernel file becomes writable.
+      void vscode.window.showWarningMessage(vscode.l10n.t("无法写入内核配置 {0}", name));
+    }
 
     // "Is this the row the panel is running on?" — by credential IDENTITY,
     // never by the final name: a new profile defaulting to the current model,
@@ -5227,6 +5231,7 @@ export class ChatPanel implements vscode.Disposable {
       // becomes this workspace's selected profile and the panel reconnects
       // under it (explicit `keepSession = false`: never an in-place edit).
       await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
+      setKernelActiveProfile(name);
       await this.rememberWorkspaceModelFor(name, creds.modelName);
       await this.reconnectWithCredentials(creds, false);
       return;
@@ -5243,6 +5248,7 @@ export class ChatPanel implements vscode.Disposable {
     // The edited row is the live one: follow a rename in the pointer, then
     // re-authenticate hot and reload the SAME conversation in place.
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
+    setKernelActiveProfile(name);
     await this.rememberWorkspaceModelFor(name, creds.modelName);
     if (this.restoring || this.connecting) {
       // A connect/restore is in flight and owns the process: tearing it down
@@ -5282,9 +5288,8 @@ export class ChatPanel implements vscode.Disposable {
   private async activateProfile(name: string): Promise<void> {
     if (this.historySyncBusy) return;
     const profiles = await loadProfiles(this.context.secrets);
-    let creds: OpenAiCompatCredentials | null = profiles[name]
-      ? { ...profiles[name] }
-      : this.cliProfileCredentials(name);
+    const kernelCreds = this.kernelProfileCredentials(name);
+    const creds: OpenAiCompatCredentials | null = kernelCreds ?? (profiles[name] ? { ...profiles[name] } : null);
     if (!creds) {
       vscode.window.showWarningMessage(vscode.l10n.t("未找到 API 配置: {0}", name));
       return;
@@ -5316,56 +5321,20 @@ export class ChatPanel implements vscode.Disposable {
     }
     // Do not update the global SecretStorage active pointer or credentials
     // slot: those values are shared by other VS Code windows. This panel's
-    // workspace record and explicit `creds` remain isolated instead.
-    // CLI-sourced profiles are recorded by name too — the next handshake
-    // re-resolves them from settings.json.
+    // workspace record and explicit `creds` remain isolated instead. The
+    // kernel pointer (settings.json currentApiProfile) is the durable record
+    // every window and the terminal CLI agree on.
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
+    setKernelActiveProfile(name);
     if (!this.workspaceModelId(name)) {
       await this.rememberWorkspaceModelFor(name, creds.modelName);
     }
     await this.reconnectWithCredentials(creds, keepSession);
   }
 
-  /** Read a profile from CLI settings.json (read-only source). */
-  private cliProfileCredentials(name: string): OpenAiCompatCredentials | null {
-    const cli = readCliSettings();
-    const p = cli?.apiProfiles?.[name];
-    if (!p?.baseUrl || !p?.apiKey || !p?.modelName) return null;
-    return { baseUrl: p.baseUrl, apiKey: p.apiKey, modelName: p.modelName };
-  }
-
-  /**
-   * Onboarding one-click import: copy a CLI-owned credential set into
-   * SecretStorage, then hand off to the normal activation path (workspace
-   * pointer + optional keep-session dialog + re-auth). The CLI file is never
-   * modified — the extension copy merely takes precedence from now on.
-   */
-  private async importCliCredentials(name: string): Promise<void> {
-    const profiles = await loadProfiles(this.context.secrets);
-    const candidate = cliImportCandidates(readCliSettings(), Object.keys(profiles)).find(
-      (item) => item.name === name,
-    );
-    if (!candidate) {
-      void vscode.window.showWarningMessage(vscode.l10n.t("未找到可导入的内核配置: {0}", name));
-      const auth = this.store.getState().auth;
-      this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
-      return;
-    }
-    // Another window may have imported the same name in the meantime — never
-    // overwrite an existing extension profile.
-    let target = candidate.name;
-    for (let i = 2; profiles[target]; i += 1) target = `${candidate.name} (${i})`;
-    profiles[target] = {
-      baseUrl: candidate.baseUrl,
-      apiKey: candidate.apiKey,
-      modelName: candidate.modelName,
-    };
-    await saveProfiles(this.context.secrets, profiles);
-    // Refresh the list first so a cancelled switch dialog still shows the
-    // imported profile (activateProfile's cancel path only re-pushes state).
-    const auth = this.store.getState().auth;
-    this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
-    await this.activateProfile(target);
+  /** Read a profile from the kernel settings.json — the persistence authority. */
+  private kernelProfileCredentials(name: string): OpenAiCompatCredentials | null {
+    return readKernelApiProfiles()[name] ?? null;
   }
 
   /** Resolve the active profile label for THIS window. */
@@ -5385,7 +5354,7 @@ export class ChatPanel implements vscode.Disposable {
     if (!name?.trim()) return null;
     const trimmed = name.trim();
     const profiles = await loadProfiles(this.context.secrets);
-    const creds = profiles[trimmed] ? { ...profiles[trimmed] } : this.cliProfileCredentials(trimmed);
+    const creds = this.kernelProfileCredentials(trimmed) ?? (profiles[trimmed] ? { ...profiles[trimmed] } : null);
     if (!creds) return null;
     this.log.info(`workspace API profile restored: ${trimmed}`);
     return creds;
@@ -5419,17 +5388,31 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   private async deleteProfile(name: string): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) return;
     const profiles = await loadProfiles(this.context.secrets);
-    if (!profiles[name]) return; // CLI-sourced profiles are read-only
-    delete profiles[name];
-    await saveProfiles(this.context.secrets, profiles);
+    const inSecrets = Object.hasOwn(profiles, trimmed);
+    const inKernel = Object.hasOwn(readKernelApiProfiles(), trimmed);
+    if (!inSecrets && !inKernel) return;
+    if (inSecrets) {
+      delete profiles[trimmed];
+      await saveProfiles(this.context.secrets, profiles);
+    }
+    if (inKernel) {
+      const deleted = deleteKernelApiProfile(trimmed);
+      if (!deleted) {
+        void vscode.window.showWarningMessage(vscode.l10n.t("无法写入内核配置 {0}", trimmed));
+      }
+    }
+    // Drop the kernel's active pointer when it names the deleted row so the
+    // next handshake cannot resolve a profile that no longer exists.
+    if (readCliSettings()?.currentApiProfile?.trim() === trimmed) {
+      setKernelActiveProfile(null);
+    }
     // Drop this workspace's memory of the deleted profile so the next
     // handshake doesn't resolve a stale name (falls back to the global slot).
-    if (this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY) === name) {
+    if (this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() === trimmed) {
       await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
-    }
-    const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
-    if (workspaceName === name) {
       this.store.setAuth(await this.buildAuthState(false, true));
       return; // this workspace's profile was deleted → choose another profile
     }
@@ -5508,11 +5491,10 @@ export class ChatPanel implements vscode.Disposable {
           methodInfo: { apiKey: creds.apiKey, baseUrl: creds.baseUrl, modelName: creds.modelName },
         });
         this.log.info(`hot re-authenticate ok in ${Date.now() - tAuth}ms (CLI kept running)`);
-        // (The old re-stamp of currentApiProfile is gone: the CLI-side
-        // api-config-isolation patch keeps the panel-owned fields out of the
-        // settings write-back entirely, and the active pointer's authority is
-        // the SecretStorage record — resolveActiveProfileName is
-        // extension-first.)
+        // (The old re-stamp of currentApiProfile is gone: the panel writes the
+        // pointer into settings.json itself, and the CLI-side
+        // api-config-isolation patch keeps whatever is already on disk — which
+        // is the value written here. resolveActiveProfileName is kernel-first.)
         // keepSession: reload the SAME conversation in place under the new
         // credentials — the transcript never clears (seamless). Only the
         // CLI-side session object is rebuilt (session/load, same id). The id
@@ -8841,13 +8823,10 @@ export class ChatPanel implements vscode.Disposable {
    * current model stays selectable so the dropdown isn't blank).
    */
   private async queryLiveModels(): Promise<SessionState["models"]> {
-    // Extension-first: the panel's active endpoint is its SecretStorage
-    // credentials — the CLI-side api-config-isolation patch keeps them out of
-    // the shared settings.json, so the shared currentApiProfile is no longer
-    // what this panel's child authenticates with (the old CLI-first rule existed because external
-    // tools rewrote the SHARED currentApiProfile behind our back — that no
-    // longer reaches us). The CLI settings read stays as a fallback for
-    // setups where only CLI-side profiles exist.
+    // Kernel-first: the panel persists its profiles into the shared
+    // settings.json, so the workspace handshake / SecretStorage cache is the
+    // live credential source and `readActiveEndpoint` (the kernel file) is the
+    // final fallback for setups configured outside the panel.
     const endpoint = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
     if (!endpoint) return [];
     try {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, ExternalLink, KeyRound, Lock, Sparkles } from "lucide-react";
+import { ArrowRight, ExternalLink, Lock, Sparkles } from "lucide-react";
 import type { AuthUiState, ModelInfoUi, UiDefaultMode } from "../../../shared/messages";
 import { validateAuthForm } from "../../../shared/messages";
 import { matchProviderPreset, PROVIDER_PRESETS, type ProviderPreset } from "../../../shared/provider-presets";
@@ -157,13 +157,6 @@ export function OnboardingWizard({
     send({ type: "saveAuth", baseUrl, apiKey: apiKey || null, modelName, profileName: null });
     setApiSubmitted(true);
     if (advance) setStep("model");
-  }
-
-  function importCredentials(name: string) {
-    useChat.getState().beginPending("profile", name);
-    send({ type: "importCliCredentials", name });
-    setApiSubmitted(true);
-    setStep("model");
   }
 
   // --- Mode step ------------------------------------------------------------
@@ -349,38 +342,6 @@ export function OnboardingWizard({
                 </div>
               )}
 
-              {auth.importable.length > 0 && (
-                <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
-                  <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
-                    <KeyRound className="size-3.5 shrink-0 text-primary" />
-                    {t("检测到内核已有凭据")}
-                  </div>
-                  <div className="mt-1 space-y-1">
-                    {auth.importable.map((candidate) => (
-                      <div
-                        key={candidate.name}
-                        className="flex items-center gap-1.5 rounded-lg border border-border bg-surface/60 px-2 py-1"
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="text-ui-label font-semibold text-foreground">{candidate.name}</span>
-                          <span className="ml-1.5 min-w-0 truncate font-mono text-ui-caption text-muted-foreground">
-                            {candidate.modelName} · {candidate.keyTail}
-                          </span>
-                        </span>
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          className="shrink-0 whitespace-nowrap"
-                          onClick={() => importCredentials(candidate.name)}
-                        >
-                          {t("导入并激活")}
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <Field label={t("Base URL（OpenAI 兼容）")}>
                 <TextInput
                   mono
@@ -427,7 +388,7 @@ export function OnboardingWizard({
               )}
               <p className="flex items-start gap-1 text-ui-caption leading-relaxed text-muted-foreground/85">
                 <Lock className="mt-0.5 size-3 shrink-0" />
-                {t("凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。")}
+                {t("配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。")}
               </p>
             </div>
           )}

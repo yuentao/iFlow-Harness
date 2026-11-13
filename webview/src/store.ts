@@ -1018,11 +1018,8 @@ function createMockHost(): HostApi {
     needsSetup: false,
     saved: { baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "...9999" },
     profiles: [
-      { name: "BUZZ", source: "cli", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
-      { name: "工作密钥", source: "extension", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
-    ],
-    importable: [
-      { name: "终端默认", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock" },
+      { name: "BUZZ", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
+      { name: "工作密钥", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
     ],
     onboardingDismissed: false,
   };
@@ -1168,12 +1165,11 @@ function createMockHost(): HostApi {
           needsSetup: false,
           saved: { baseUrl: m.baseUrl, modelName: m.modelName, keyTail },
           profiles: [
-            { name, source: "extension", baseUrl: m.baseUrl, modelName: m.modelName, keyTail, active: true },
+            { name, baseUrl: m.baseUrl, modelName: m.modelName, keyTail, active: true },
             ...authState.profiles
               .filter((p) => p.name !== name)
               .map((p) => ({ ...p, active: false })),
           ],
-          importable: authState.importable.filter((c) => c.name !== name),
           onboardingDismissed: authState.onboardingDismissed,
         };
         // The new profile's model becomes the session's current model; the
@@ -1183,48 +1179,6 @@ function createMockHost(): HostApi {
           ...demoMeta.models.filter((x) => x.id !== m.modelName),
         ];
         demoMeta.currentModelId = m.modelName;
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "idle",
-            errorMessage: null,
-            stopReason: "end_turn",
-            ...demoMeta,
-            pendingApproval: null,
-            auth: authState,
-          },
-        });
-        return;
-      }
-      if (m.type === "importCliCredentials") {
-        const candidate = authState.importable.find((c) => c.name === m.name);
-        if (!candidate) return;
-        authState = {
-          authenticated: true,
-          needsSetup: false,
-          saved: { baseUrl: candidate.baseUrl, modelName: candidate.modelName, keyTail: candidate.keyTail },
-          profiles: [
-            {
-              name: candidate.name,
-              source: "extension",
-              baseUrl: candidate.baseUrl,
-              modelName: candidate.modelName,
-              keyTail: candidate.keyTail,
-              active: true,
-            },
-            ...authState.profiles
-              .filter((p) => p.name !== candidate.name)
-              .map((p) => ({ ...p, active: false })),
-          ],
-          importable: authState.importable.filter((c) => c.name !== m.name),
-          onboardingDismissed: authState.onboardingDismissed,
-        };
-        demoMeta.models = [
-          { id: candidate.modelName, name: candidate.modelName },
-          ...demoMeta.models.filter((x) => x.id !== candidate.modelName),
-        ];
-        demoMeta.currentModelId = candidate.modelName;
         broadcast({
           type: "snapshot",
           state: {
@@ -1261,7 +1215,6 @@ function createMockHost(): HostApi {
           needsSetup: true,
           saved: null,
           profiles: authState.profiles.map((p) => ({ ...p, active: false })),
-          importable: authState.importable,
           onboardingDismissed: authState.onboardingDismissed,
         };
         broadcast({
