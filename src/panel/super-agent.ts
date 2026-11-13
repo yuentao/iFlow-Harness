@@ -2285,8 +2285,14 @@ export class SuperAgentManager {
    * 会明确「先处理这批结果、此时不要向用户做最终完整汇报」。
    */
   reportPrompt(entries: { session: SuperSessionUi; report: SuperReport }[]): string {
+    // pendingCount 只统计**同一归属主会话**下还在跑的子会话：这份汇报是投给
+    // 某个主会话的，别人家的子会话跟它无关。混进来算的话，提示词里的
+    // 「还有 N 个在跑」与面板上的「等待 N 个子会话汇报」就对不上当前会话
+    // （用户在会话 A 开着，却看到 B 的孩子也被算成 A 的）。
+    const owner = entries[0]?.session.mainSessionId ?? this.deps.currentMainSessionId() ?? null;
     const pendingCount = this.list().filter(
-      (session) => !isTerminalSuperStatus(session.status),
+      (session) =>
+        !isTerminalSuperStatus(session.status) && (session.mainSessionId ?? owner) === owner,
     ).length;
     return buildSuperReportPrompt(entries, { pendingCount });
   }
