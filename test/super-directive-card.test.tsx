@@ -735,22 +735,26 @@ describe("AssistantText 协议块卡片", () => {
   });
 });
 
-// 用户截图 2026-11-13：模型把委派块写进思考通道时，思考卡里是一堵带
-// `super-agent` 语言标签的 JSON。思考正文必须与助手正文走同一套切分。
+// 用户要求 2026-11-13：思考过程中不渲染委派卡。思考通道是模型的内部独白，
+// 宿主也不会派发写在里面的围栏 —— 思考正文按普通 Markdown 渲染，委派围栏只是
+// 一段带语言标签的代码块，不出现任务卡，也不显示任何派发语义。
 describe("ThoughtText 思考卡正文", () => {
-  it("思考正文里的完整 super-agent 围栏渲染成任务卡，不再显示语言标签与裸 JSON", () => {
+  it("思考正文里的 super-agent 围栏按普通代码块渲染，不出现任务卡与派发语义", () => {
     renderThought(["先确认归属：", "", DELEGATE, "", "派发完成。"].join("\n"));
-    const cards = taskCards();
-    expect(cards).toHaveLength(2);
-    expect(cards[0]!.textContent).toContain("修复登录跳转");
-    expect(cards[1]!.textContent).toContain("补文档");
+    // 不出现任何任务卡、批次序号 chip 或容错提示。
+    expect(taskCards()).toHaveLength(0);
+    expect(container.querySelector('[data-testid="super-task-salvaged"]')).toBeNull();
+    expect(text()).not.toMatch(/第 \d+\/\d+ 个任务/);
+    expect(text()).not.toContain("委派子会话");
+    expect(text()).not.toContain("子会话操作");
+    // 围栏就是普通代码块：语言标签与原始载荷都在，不再被投影成卡片。
+    const code = container.querySelector("pre code.language-super-agent");
+    expect(code).toBeTruthy();
+    expect(code!.textContent).toContain('"tasks"');
+    expect(code!.textContent).toContain("修复登录跳转");
     // 卡片前后的思考文字仍是 Markdown 段落。
     expect(text()).toContain("先确认归属");
     expect(text()).toContain("派发完成");
-    // 没有代码块，也没有语言标签或裸载荷。
-    expect(container.querySelector("pre code")).toBeNull();
-    expect(container.querySelector(".code-lang")).toBeNull();
-    expect(text()).not.toContain('"tasks"');
   });
 
   it("未闭合围栏（流式中间态）不出现卡片，仍是普通代码块", () => {
