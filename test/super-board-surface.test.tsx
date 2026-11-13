@@ -97,7 +97,7 @@ function render(sessions: SuperSessionUi[] = [session()]): void {
 
 /** Collapsed form: the one inline control in the header. */
 function control(): HTMLButtonElement {
-  const el = container.querySelector<HTMLButtonElement>('button[aria-label="展开子会话看板"]');
+  const el = container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
   expect(el).toBeTruthy();
   return el!;
 }
@@ -536,7 +536,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
   }
 
   const boardControl = (): HTMLButtonElement | null =>
-    container.querySelector<HTMLButtonElement>('button[aria-label="展开子会话看板"]');
+    container.querySelector<HTMLButtonElement>('button[aria-label="子会话看板"]');
 
   it("没有子会话时顶栏不渲染看板控件", () => {
     renderApp([]);
@@ -578,5 +578,155 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     const label = [...control.querySelectorAll("span")].find((span) => span.textContent === "子会话");
     expect(label).toBeTruthy();
     expect(label!.className).toContain("@max-[380px]:hidden");
+  });
+
+  it("--super-bar-h：折叠时不设置，展开时是面板高 + 16，收起后移除", () => {
+    // jsdom 不做布局，offsetHeight 恒为 0 —— 先把面板高度 stub 成 240，
+    // 让 App 的高度镜像 effect 走真实代码路径（不是假设值）。
+    const spy = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(240);
+    try {
+      renderApp([session()]);
+      const barHosts = () =>
+        [...container.querySelectorAll<HTMLElement>("*")].filter(
+          (el) => el.style.getPropertyValue("--super-bar-h") !== "",
+        );
+
+      // 折叠：控件在 header 里，转录顶部没有任何覆盖 → 不设置该变量。
+      expect(barHosts()).toHaveLength(0);
+
+      act(() => boardControl()!.click());
+      const hosts = barHosts();
+      expect(hosts).toHaveLength(1);
+      expect(hosts[0]!.style.getPropertyValue("--super-bar-h")).toBe("256px");
+
+      act(() => boardControl()!.click());
+      expect(barHosts()).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+/** 一个正在等用户回答的子会话（看板会自动展开它）。 */
+function askingSession(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
+  return session({
+    id: "super-ask",
+    title: "要覆盖哪些范围",
+    status: "awaiting_input",
+    pending: {
+      kind: "question",
+      requestId: "req-1",
+      deadline: Date.now() + 240_000,
+      timeoutMs: 300_000,
+      questions: [
+        {
+          header: "范围",
+          question: "这一组单测要覆盖哪些范围？",
+          multiSelect: false,
+          options: [{ label: "只覆盖用量估算", description: "范围小、跑得快" }],
+        },
+      ],
+    },
+    ...overrides,
+  });
+}
+
+describe("Super Agent 看板折叠态不隐藏待答问题", () => {
+  /** 折叠态专用的紧凑待答条（与展开面板是两个不同的 region）。 */
+  const pendingStrip = () =>
+    container.querySelector<HTMLElement>('[role="region"][aria-label="子会话待答问题"]');
+  const submitButtons = () =>
+    [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+      (b) => b.getAttribute("aria-label") === "提交回答",
+    );
+
+  it("折叠后待答问题仍在 DOM 里可见，且展开态不会重复渲染两条", () => {
+    render([askingSession()]);
+
+    // 有待答子会话时看板自行展开：问题由面板承载。
+    expect(control().getAttribute("aria-expanded")).toBe("true");
+    expect(panel()).toBeTruthy();
+    expect(pendingStrip()).toBeNull();
+    expect(submitButtons()).toHaveLength(1);
+
+    // 手动收起：面板消失，但问题不能被一起藏起来（旧实现的功能回退）。
+    act(() => control().click());
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    expect(panel()).toBeNull();
+
+    const strip = pendingStrip();
+    expect(strip).toBeTruthy();
+    // 「哪个子会话」+「在等什么」都要读得到。
+    expect(strip!.textContent).toContain("要覆盖哪些范围");
+    expect(strip!.textContent).toContain("这一组单测要覆盖哪些范围？");
+    // 折叠条与展开面板走同一条绝对定位轨道（挂在 header 下方）。
+    expect(strip!.className).toContain("absolute");
+    expect(strip!.className).toContain("top-full");
+    expect(strip!.className).toContain("z-40");
+    // 面板不在 DOM 里 → 同一道题只有一份。
+    expect(submitButtons()).toHaveLength(1);
+  });
+
+  it("折叠态下作答照常回传宿主", () => {
+    render([askingSession()]);
+    act(() => control().click()); // 收起
+
+    const radio = container.querySelector<HTMLElement>('[role="radio"]');
+    expect(radio).toBeTruthy();
+    act(() => radio!.click());
+    act(() => submitButtons()[0]!.click());
+
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "respond",
+      sessionId: "super-ask",
+      answers: { 范围: "只覆盖用量估算" },
+    });
+  });
+
+  it("没有待答子会话时折叠态不渲染待答条", () => {
+    render([session()]);
+    expect(pendingStrip()).toBeNull();
+  });
+});
+
+describe("Super Agent 看板面板的收起通道", () => {
+  it("aria-expanded 随点击翻转，可访问名保持静态", () => {
+    render();
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    expect(control().getAttribute("aria-controls")).toBeNull();
+
+    expand();
+    expect(control().getAttribute("aria-expanded")).toBe("true");
+    // 名字不随状态变化：读屏只念「子会话看板」，展开态由 aria-expanded 表达。
+    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    // 悬停文案仍说明当前动作。
+    expect(control().getAttribute("title")).toBe("收起子会话看板");
+    expect(control().getAttribute("aria-controls")).toBe(panelRoot().id);
+    expect(panelRoot().id).toBe("super-board-panel");
+
+    act(() => control().click());
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    expect(control().getAttribute("aria-controls")).toBeNull();
+  });
+
+  it("外部 mousedown 收起面板，面板内部的 mousedown 不收起", () => {
+    render();
+    expand();
+    expect(panel()).toBeTruthy();
+
+    const inside = panelRoot().querySelector("span");
+    expect(inside).toBeTruthy();
+    act(() => {
+      inside!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    expect(panel()).toBeTruthy();
+
+    act(() => {
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    expect(panel()).toBeNull();
+    expect(control().getAttribute("aria-expanded")).toBe("false");
   });
 });

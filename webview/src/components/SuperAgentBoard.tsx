@@ -162,6 +162,9 @@ export function shortBranch(branch: string): string {
   return match ? `super/…${match[1]}` : branch;
 }
 
+/** Id shared by the header toggle (`aria-controls`) and the expanded panel. */
+const SUPER_BOARD_PANEL_ID = "super-board-panel";
+
 /**
  * 阶段轨节点标签。
  *
@@ -424,6 +427,14 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     () => list.filter((s) => s.status === "preparing" || s.status === "running" || s.status === "awaiting_input"),
     [list],
   );
+  // Children blocked on a human. A pending question is the ONLY thing that
+  // truly needs the user, so it must stay on screen even when the popup is
+  // collapsed — see the collapsed strip below. (`active` cannot be reused:
+  // it also carries preparing/running children, which have no question.)
+  const awaiting = useMemo(
+    () => list.filter((s) => s.status === "awaiting_input" && s.pending !== undefined),
+    [list],
+  );
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
   // Live-region text: announce CHANGES, not the whole board. On mount there
@@ -515,12 +526,19 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           its shield, so the row can never wrap or push the header actions.
           Hover: the button paints the single hover surface (hover:bg-accent/40)
           — no nested DisclosureButton tint stacked on top of it. */}
+      {/* Accessible name is STATIC ("子会话看板"): it names the control, while
+          the open/closed state is already carried by aria-expanded. Baking the
+          action into the name made a screen reader read 「展开子会话看板，已展开」
+          — the name contradicted the state. The hover tooltip still spells out
+          the action (title), and aria-controls points at the panel while it
+          exists. */}
       <button
         type="button"
         ref={controlRef}
         aria-expanded={expanded}
-        aria-label={t("展开子会话看板")}
-        title={t("展开子会话看板")}
+        aria-controls={expanded ? SUPER_BOARD_PANEL_ID : undefined}
+        aria-label={t("子会话看板")}
+        title={expanded ? t("收起子会话看板") : t("展开子会话看板")}
         onClick={() => setExpanded((v) => !v)}
         className="press flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-surface/60 px-2 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
       >
@@ -547,12 +565,16 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             <span className="tabular-nums">{counts.running}</span>
           </Chip>
         )}
+        {/* The awaiting count NEVER hides, not even at ≤380px: it is the only
+            on-screen evidence that a child is blocked on the user. The other
+            per-state chips yield to the header's width budget; this one is a
+            call to action, so it keeps its amber chip (icon + number) — a
+            tooltip alone would hide the one thing the user must notice. */}
         {counts.awaiting > 0 && (
           <Chip
             tone="warning"
             title={t("{0} 个待处理", counts.awaiting)}
             ariaLabel={t("{0} 个待处理", counts.awaiting)}
-            className="@max-[380px]:hidden"
           >
             <CircleHelp className="size-2.5" aria-hidden="true" />
             <span className="tabular-nums">{counts.awaiting}</span>
@@ -587,6 +609,38 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
       </button>
 
+      {/* Collapsed, a pending question STILL hangs under the header. Folding
+          the panel must never hide the one thing that needs the user — the
+          old floating board said so explicitly («唯一需要用户处理的东西，永远
+          不被折叠掉»), and moving the board into the header must not silently
+          drop that rule. Rendered ONLY while collapsed: the expanded panel
+          already carries the same SuperPendingArea inside each row, and
+          stacking both would show one question twice. */}
+      {!expanded && awaiting.length > 0 && (
+        <div
+          role="region"
+          aria-label={t("子会话待答问题")}
+          className="stream-in absolute inset-x-3 top-full z-40 mt-1 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-pop px-1 py-1"
+        >
+          {awaiting.map((session) => (
+            <div key={session.id} className="shrink-0">
+              {/* The panel row names the child; this strip has no row above
+                  it, so it states which child is asking. */}
+              <div className="flex min-w-0 items-center gap-1.5 px-2 pt-1">
+                <CircleHelp className="size-3 shrink-0 text-warning" aria-hidden="true" />
+                <span
+                  className="min-w-0 truncate text-ui-micro font-medium text-foreground"
+                  title={session.title}
+                >
+                  {session.title}
+                </span>
+              </div>
+              <SuperPendingArea session={session} />
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Expanded form = a popup panel under the header. `top-full` anchors it
           to the header's bottom edge (the header is the positioned ancestor);
           inset-x-3 keeps the same 12px gutter as the header padding. Material:
@@ -594,6 +648,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           header, so its own backdrop-filter could only sample that subtree). */}
       {expanded && (
         <div
+          id={SUPER_BOARD_PANEL_ID}
           ref={setPanelNode}
           role="region"
           aria-label={t("子会话")}

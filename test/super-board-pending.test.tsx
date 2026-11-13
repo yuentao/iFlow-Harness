@@ -146,7 +146,7 @@ function rowButton(title: string): HTMLButtonElement {
 
 /** 展开看板（幂等）：有子会话在等回答时看板会自动展开，再点一次反而会收起。 */
 function expandBoard(): void {
-  const toggle = buttonByLabel("展开子会话看板");
+  const toggle = buttonByLabel("子会话看板");
   if (toggle.getAttribute("aria-expanded") === "false") act(() => toggle.click());
 }
 
