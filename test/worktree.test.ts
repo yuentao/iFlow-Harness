@@ -8,6 +8,7 @@ import {
   commitWorktree,
   createWorktree,
   currentBranch,
+  detectInProgress,
   ensureSuperIsolationIgnored,
   inspectWorktreeState,
   inspectWorkingTree,
@@ -311,6 +312,85 @@ describe("worktree · 真实 git 仓库", () => {
     // 仓库没有被留在 MERGING 状态。
     expect(git(repo, "status", "--porcelain")).not.toContain("UU");
     expect(existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(false);
+  }, 30000);
+});
+
+describe("worktree · 只撤销自己的合并", () => {
+  /**
+   * 造一个「用户正在合并、且合并冲突了」的现场：MERGE_HEAD 在，冲突标记在
+   * 文件里 —— 这正是用户在终端里 `git merge` 之后的状态。
+   */
+  function makeUserMergeInProgress(repo: string): void {
+    writeFileSync(path.join(repo, "a.txt"), "main\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "main side");
+    try {
+      git(repo, "merge", "--no-ff", "--no-edit", "iflow/super/user-merge");
+    } catch {
+      // 冲突是预期的。
+    }
+  }
+
+  it("用户自己的合并进行中：本次合并失败也绝不 abort 掉用户的合并", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-user-merge");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("user-merge"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "a.txt"), "child\n", "utf8");
+    git(target, "add", "-A");
+    git(target, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child side");
+
+    // 用户在自己的终端里合并，并且卡在冲突上。
+    makeUserMergeInProgress(repo);
+    expect(existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(true);
+    const conflictedBefore = readText(path.join(repo, "a.txt"));
+
+    // 宿主这时也要合并同一个分支 → 必须让路，绝不能把用户的合并撤掉。
+    const result = await mergeBranch({ repoRoot: repo, branch: "iflow/super/user-merge" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("merge");
+
+    // 用户的合并**原封不动**：MERGE_HEAD 还在，冲突内容还在。
+    expect(existsSync(path.join(repo, ".git", "MERGE_HEAD"))).toBe(true);
+    expect(readText(path.join(repo, "a.txt"))).toBe(conflictedBefore);
+    expect(git(repo, "status", "--porcelain")).toContain("UU");
+  }, 30000);
+
+  it("用户自己的拣选进行中：本次合并失败不碰他的中间态", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-user-cherry-pick");
+    const probe = await probeGitRepo(repo);
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("user-cherry-pick"),
+      baseRef: probe.head!,
+    });
+    writeFileSync(path.join(target, "a.txt"), "child\n", "utf8");
+    git(target, "add", "-A");
+    git(target, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "child side");
+    writeFileSync(path.join(repo, "a.txt"), "main\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "main side");
+
+    // 用户正在拣选（且卡在冲突上）→ CHERRY_PICK_HEAD 存在。
+    try {
+      git(repo, "cherry-pick", "iflow/super/user-cherry-pick");
+    } catch {
+      // 冲突是预期的。
+    }
+    expect(await detectInProgress(repo)).toBe("cherry-pick");
+
+    const result = await mergeBranch({ repoRoot: repo, branch: "iflow/super/user-cherry-pick" });
+    expect(result.ok).toBe(false);
+    // 拣选中间态还在：我们既没启动合并，也没有 abort 任何东西。
+    expect(await detectInProgress(repo)).toBe("cherry-pick");
+    git(repo, "cherry-pick", "--abort");
   }, 30000);
 });
 

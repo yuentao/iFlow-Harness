@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SuperAgentManager, buildTaskPrompt } from "../src/panel/super-agent.js";
+import { SuperAgentManager, buildTaskPrompt, capTail, SUPER_TEXT_MAX_CHARS } from "../src/panel/super-agent.js";
 import type { AcpClient, AcpClientCallbacks } from "../src/acp/client.js";
 import type { ContentBlock, UserQuestion } from "../src/acp/protocol.js";
 import {
@@ -57,7 +57,17 @@ type Plan =
   /** 合并子会话：按任务书里的分支在主仓工作区执行 `git merge --no-ff`。 */
   | "merge"
   /** 合并子会话：什么都不做（用来验证宿主不谎报成功）。 */
-  | "merge-noop";
+  | "merge-noop"
+  /**
+   * `session/new` 挂起，直到测试放行 —— 用来在**准备阶段**中断子会话
+   * （此时子会话还没拿到内核会话，也还没开始跑）。
+   */
+  | "gate-session"
+  /**
+   * 回合正常结束，但**进程回收挂起**直到测试放行 —— 用来观察「回合已结束、
+   * 进程还活着」这段时间里并发额度是怎么算的。
+   */
+  | "commit-gated-dispose";
 
 /** A stand-in for AcpClient — the manager only uses a small surface. */
 class FakeClient {
@@ -73,6 +83,10 @@ class FakeClient {
   includeDirectories: string[] = [];
   /** Resolver for the "commit-a-gated" plan: the test opens the gate explicitly. */
   releasePrompt: (() => void) | null = null;
+  /** Resolver for the "gate-session" plan: releases the pending `session/new`. */
+  releaseSession: (() => void) | null = null;
+  /** Resolver for the "commit-gated-dispose" plan: releases the process teardown. */
+  releaseDispose: (() => void) | null = null;
   private settle: ((value: { stopReason: string }) => void) | null = null;
 
   constructor(
@@ -81,6 +95,12 @@ class FakeClient {
   ) {}
 
   async newSession(): Promise<{ sessionId: string }> {
+    if (this.plan === "gate-session") {
+      // 准备阶段挂起：测试可以在这个窗口里中断子会话。
+      await new Promise<void>((resolve) => {
+        this.releaseSession = resolve;
+      });
+    }
     return { sessionId: `sub-${this.prompts.length}-${Math.random().toString(36).slice(2, 8)}` };
   }
 
@@ -122,7 +142,7 @@ class FakeClient {
         this.settle = resolve;
       });
     }
-    if (this.plan === "edit") {
+    if (this.plan === "edit" || this.plan === "gate-session") {
       // A child that edits its worktree but does NOT commit (the common case:
       // the system prompt forbids committing without an explicit request).
       writeFileSync(path.join(this.cwd, "partial.txt"), "half done\n", "utf8");
@@ -159,7 +179,9 @@ class FakeClient {
       }
       return { stopReason: "end_turn" };
     }
-    if (this.plan === "complete") return { stopReason: "end_turn" };
+    if (this.plan === "complete" || this.plan === "commit-gated-dispose") {
+      return { stopReason: "end_turn" };
+    }
     if (this.plan === "throw") throw new Error("child exploded");
     if (this.plan === "throw-object") {
       // JSON-RPC rejections are plain objects (`{code, message, data}`), not
@@ -177,6 +199,12 @@ class FakeClient {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    // 进程回收挂起：回合已经结束，但「进程还活着」—— 用来观察并发额度。
+    if (this.plan === "commit-gated-dispose") {
+      await new Promise<void>((resolve) => {
+        this.releaseDispose = resolve;
+      });
+    }
     // 真实 AcpClient 的 dispose 会 kill 进程，随后 child 的 exit 回调触发
     // onExit —— 管理层把它当作内核退出。这里照做，否则「先杀进程再落
     // cancelled」的顺序缺陷在测试里永远暴露不出来。
@@ -1449,4 +1477,111 @@ describe("super agent · 归属与归档", () => {
     // 会话本身仍在归档集合里（要写一次空数组把磁盘上的旧记录清掉）。
     expect(harness.manager.archivableMainSessionIds()).toContain("main-1");
   }, 30000);
+});
+
+describe("super agent · 收尾守卫（用户中断后不许落改动）", () => {
+  it("准备阶段被中断的子会话：不代提交、不自动合并，分支与工作目录保留", async () => {
+    const repo = makeRepo();
+    // gate-session：内核会话还没建好就挂起 —— 测试在这个窗口里中断它。
+    const harness = makeManager(repo, "gate-session", "merge");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.clients.length === 1);
+    // 还在准备阶段：子会话没拿到内核会话，也还没开始跑。
+    expect(harness.sessions[0]?.status).toBe("preparing");
+
+    await harness.manager.cancel(spawned.id);
+    expect(harness.sessions[0]?.status).toBe("cancelled");
+
+    // 放行内核会话：子会话会真的跑完并在自己的 worktree 里留下改动。
+    harness.clients[0]!.releaseSession!();
+    await until(() => harness.sessions[0]?.integration !== undefined);
+    await until(() => harness.reports.length > 0);
+
+    const session = harness.sessions[0]!;
+    const branch = session.isolation.branch!;
+    const worktree = session.isolation.path;
+
+    // 改动确实被子会话写出来了（在它自己的 worktree 里）。
+    expect(existsSync(path.join(worktree, "partial.txt"))).toBe(true);
+    // 但**绝不能**进主分支 —— 用户喊停之后不许自动合并。
+    expect(existsSync(path.join(repo, "partial.txt"))).toBe(false);
+    // 也**绝不能**被宿主代提交 —— 分支上只有初始那一个提交。
+    expect(gitOut(worktree, "rev-list", "--count", "HEAD").trim()).toBe("1");
+    expect(gitOut(repo, "log", "--oneline", "master").includes("super-agent")).toBe(false);
+
+    // 集成结果如实记成「已中断、改动保留在分支（未合并）」。
+    expect(session.integration?.state).toBe("skipped");
+    expect(session.integration?.detail).toContain("中断");
+    expect(session.integration?.detail).toContain("未合并");
+    expect(session.integration?.detail).toContain(branch);
+    // 用户主动喊停 → 不该再自动请智能体去合并它。
+    expect(session.integration?.needsAction).toBeFalsy();
+    expect(harness.needMerges).toHaveLength(0);
+
+    // 分支与工作目录都保留着（用户可能还想看看它改了什么）。
+    expect(gitOut(repo, "branch", "--list", branch)).toContain(branch);
+    expect(existsSync(worktree)).toBe(true);
+    expect(session.isolation.released).toBeFalsy();
+  }, 30000);
+
+  it("中断后子会话仍跑完，也不会把它的改动带进主分支", async () => {
+    const repo = makeRepo();
+    // hang-text：子会话先吐一段文字再挂着；取消后内核仍会 resolve。
+    const harness = makeManager(repo, "hang-text", "merge");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    await harness.manager.cancel(spawned.id);
+    expect(harness.sessions[0]?.status).toBe("cancelled");
+
+    await until(() => harness.sessions[0]?.integration !== undefined);
+    const session = harness.sessions[0]!;
+    // 中断 → 没有合并，也没有代提交。
+    expect(session.integration?.state).not.toBe("merged");
+    expect(existsSync(path.join(repo, "partial.txt"))).toBe(false);
+  }, 30000);
+});
+
+describe("super agent · 并发额度按活着的 CLI 进程算", () => {
+  it("回合已结束但进程还活着的子会话继续占着槽位（不超发）", async () => {
+    const repo = makeRepo();
+    // 上限 1。第一个子会话回合结束，但进程回收被挂住 —— 进程还活着。
+    const harness = makeManager(repo, "commit-gated-dispose", "manual", "main-1", 1);
+    harness.manager.spawn({ title: "第一个", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    // 回合结束 ≠ 进程结束：回收还挂着，进程仍然活着。
+    await until(() => Boolean(harness.clients[0]?.releaseDispose));
+
+    // 额度已经被第一个子会话占着 → 第二个只能排队，绝不能再起一个进程。
+    const second = harness.manager.spawn({ title: "第二个", task: "干活" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(harness.clients.length).toBe(1);
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(true);
+
+    // 第一个进程真的被回收之后，槽位才空出来。
+    harness.clients[0]!.releaseDispose!();
+    await until(() => harness.clients.length === 2);
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(false);
+  }, 30000);
+});
+
+describe("super agent · 子会话输出文本有上限", () => {
+  it("超出上限时只保留尾部，并标注前文被截断", () => {
+    const text = `HEAD${"x".repeat(100)}TAIL`;
+    const capped = capTail(text, 20);
+    expect(capped.endsWith("TAIL")).toBe(true);
+    // 头部被丢掉（只剩尾部）—— 这正是「留尾丢头」的目的。
+    expect(capped).not.toContain("HEAD");
+    // 截断必须被标注出来 —— 看板不能装作全文都在。
+    expect(capped.startsWith("…")).toBe(true);
+    expect(capped.length).toBeLessThanOrEqual(21);
+  });
+
+  it("没超上限时原样返回（不加标记）", () => {
+    expect(capTail("短文本", 100)).toBe("短文本");
+  });
+
+  it("上限常量是一个真实的界（不是无限制）", () => {
+    expect(SUPER_TEXT_MAX_CHARS).toBeGreaterThan(0);
+    expect(SUPER_TEXT_MAX_CHARS).toBeLessThan(1_000_000);
+  });
 });

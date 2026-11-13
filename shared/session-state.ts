@@ -1372,6 +1372,44 @@ export function estimateTokens(text: string): number {
 }
 
 /**
+ * 分块估算 token 数，块与块之间把事件循环让出去。
+ *
+ * `estimateTokens` 是一次**同步**的 BPE 调用：几十万字符的文本能吃掉几百
+ * 毫秒 —— 放在扩展宿主的事件循环里就是一次可见的卡顿（面板无响应、快捷键
+ * 延迟、webview 消息排队）。这里按块估算，每块之间让出一次事件循环：单次
+ * 同步占用被压到几毫秒量级，总耗时不变但不再独占事件循环。
+ *
+ * 边界处避免切断代理对（UTF-16 的高低 surrogate）：切在一个代理对中间会
+ * 让分词器看到半个字符。
+ */
+export async function estimateTokensChunked(
+  text: string,
+  chunkChars = 8000,
+): Promise<number> {
+  if (!text) return 0;
+  let total = 0;
+  let index = 0;
+  while (index < text.length) {
+    let end = Math.min(index + chunkChars, text.length);
+    // 别把代理对切成两半。
+    const code = text.charCodeAt(end - 1);
+    if (end < text.length && code >= 0xd800 && code <= 0xdbff) end += 1;
+    total += estimateTokens(text.slice(index, end));
+    index = end;
+    if (index < text.length) await yieldToEventLoop();
+  }
+  return total;
+}
+
+/** 让出一次事件循环（宏任务）：I/O 回调与其它定时器有机会先跑。 */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 0);
+    if (typeof timer.unref === "function") timer.unref();
+  });
+}
+
+/**
  * Estimated context tokens ONE MCP server injects into the model context.
  * The CLI's generator turns every MCP tool into a function declaration
  * (`{name, description, parametersJsonSchema}` — bundle: `bAo` builds

@@ -27,6 +27,7 @@ import {
   salvageSuperTasks,
   splitSuperDirectiveSegments,
   summarizeSuperSessions,
+  superArchiveFingerprint,
   superIsolationLabel,
   SUPER_DIGEST_MAX_CHARS,
   sumSuperUsage,
@@ -34,6 +35,7 @@ import {
   SuperDirectiveScanner,
   toPersistedSuperSession,
   withUsage,
+  type PersistedSuperSession,
   type SuperSessionUi,
 } from "../shared/super-agent.js";
 
@@ -1743,5 +1745,59 @@ describe("super agent · 宿主与渲染共用块解析", () => {
       expect(extractSuperDirectives(full).blocks).toHaveLength(1);
       expect(renderedTitles(full)).toEqual(["甲任务"]);
     });
+  });
+});
+
+describe("super agent · 归档关键内容指纹（写放大的分流依据）", () => {
+  const archive = (sessions: PersistedSuperSession[]) => [{ mainSessionId: "main-1", sessions }];
+
+  it("状态、改动去向、归属变了 → 指纹变（必须立刻落盘）", () => {
+    const base = toPersistedSuperSession(
+      session({ status: "completed", mainSessionId: "main-1" }),
+    );
+    const before = superArchiveFingerprint(archive([base]));
+    // 终态变了。
+    expect(
+      superArchiveFingerprint(archive([{ ...base, status: "cancelled" }])),
+    ).not.toBe(before);
+    // 改动去向变了。
+    expect(
+      superArchiveFingerprint(
+        archive([
+          {
+            ...base,
+            integration: { mode: "merge", state: "merged", at: 1 },
+          },
+        ]),
+      ),
+    ).not.toBe(before);
+    // 归属变了。
+    expect(
+      superArchiveFingerprint(archive([{ ...base, mainSessionId: "main-2" }])),
+    ).not.toBe(before);
+  });
+
+  it("只有展示性字段变了 → 指纹不变（走节流，不必立刻落盘）", () => {
+    const base = toPersistedSuperSession(session({ status: "completed" }));
+    const before = superArchiveFingerprint(archive([base]));
+    const cosmetic = superArchiveFingerprint(
+      archive([
+        {
+          ...base,
+          summary: "又多说了一句",
+          updatedAt: base.updatedAt + 999,
+          reports: [...base.reports, { state: "progress", summary: "干活中", at: 5 }],
+        },
+      ]),
+    );
+    expect(cosmetic).toBe(before);
+  });
+
+  it("子会话集合变了 → 指纹变（增删都要落盘）", () => {
+    const one = toPersistedSuperSession(session({ id: "a" }));
+    const two = toPersistedSuperSession(session({ id: "b" }));
+    expect(superArchiveFingerprint(archive([one, two]))).not.toBe(
+      superArchiveFingerprint(archive([one])),
+    );
   });
 });

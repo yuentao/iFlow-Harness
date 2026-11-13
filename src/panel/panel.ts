@@ -82,6 +82,7 @@ import {
   isTerminalSuperStatus,
   MAX_SUPER_ATTACHMENTS,
   normalizeSuperTitle,
+  superArchiveFingerprint,
   SuperReportBuffer,
   type SuperAction,
   type SuperAttachment,
@@ -204,6 +205,14 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000;
  * Short enough to stay instantaneous for the notification center, long enough
  * to catch same-tick slot collisions. */
 const CARD_TOAST_CONFIRM_MS = 1_500;
+/**
+ * 子会话归档的节流写窗口（毫秒）。
+ *
+ * 只有「展示性字段变了」（进度、汇报历史、时间戳）时才走这条节流路径；终态、
+ * 改动去向、归档归属这些关键变化一律立刻写。800ms 足够把一串进度帧合成一次
+ * 写，又短到不会让「重启后记录丢了」有可感知的窗口。
+ */
+const SUPER_ARCHIVE_THROTTLE_MS = 800;
 /**
  * Size cap for the approval card's diff preview (per side). The wire diff is
  * the tool's FULL old/new text — a whole-file rewrite of a large file would
@@ -738,6 +747,20 @@ export class ChatPanel implements vscode.Disposable {
   /** 常驻提示的状态指纹：子会话进度帧高频触发，指纹不变就不重发。 */
   private superWaitToastKey: string | null = null;
   /**
+   * 子会话归档的节流写定时器（null = 没有待写的节流写）。
+   *
+   * 归档的写放大主要来自高频的进度帧：看板每变一次就整份重写一次，而进度
+   * 根本不在归档里。关键变更（终态 / 改动去向 / 归属）仍然立刻写。
+   */
+  private superArchiveTimer: NodeJS.Timeout | null = null;
+  /**
+   * 上次落盘时的归档「关键内容」指纹。
+   *
+   * 指纹变了 = 有必须立刻落盘的变化（子会话集合 / 状态 / 集成结果 / 归属）；
+   * 指纹没变 = 只有展示性字段变了，节流写即可。
+   */
+  private superArchiveFingerprint = "";
+  /**
    * 已经把汇报交给宿主的子会话 id。
    *
    * 子会话进入终态（completed / failed / cancelled）之后，宿主还要等它把汇报
@@ -1244,8 +1267,9 @@ export class ChatPanel implements vscode.Disposable {
       // 「已中断」, and this is the last chance to record it — the host exits
       // right after, so a fire-and-forget write would likely be lost. The
       // records are what let the next restore show these children (and their
-      // unmerged branches) instead of an empty board.
-      await this.persistSuperSessions();
+      // unmerged branches) instead of an empty board. `force` — the host exits
+      // right after, so a throttled write would never land.
+      await this.persistSuperSessions({ force: true });
     } catch {
       // best-effort teardown
     }
@@ -6362,8 +6386,46 @@ export class ChatPanel implements vscode.Disposable {
    *
    * 返回 Promise：面板关闭时要 await 它 —— 那时宿主随时会退出，fire-and-forget
    * 的写很可能来不及落盘，子会话记录就此丢失。
+   *
+   * **写放大控制**：看板每变一次就会触发一次落盘，而实时进度每秒能变好几次
+   * —— 每次都整份重写归档是纯粹的磁盘 IO 浪费（子会话多时能把 IO 拉满）。
+   * 但**关键变更不能拖**：终态、改动去向、归档归属是「重启后必须还在」的
+   * 事实，扩展随时可能被重启，拖到最后就等于那次运行发生过什么彻底丢了。
+   * 所以按内容分两类：关键内容变了立刻写，只有展示性字段变化时合并到一次
+   * 节流写里（`force` = true 时无视节流，直接写）。
    */
-  private persistSuperSessions(): Promise<void> {
+  private persistSuperSessions(options: { force?: boolean } = {}): Promise<void> {
+    const manager = this.superAgent;
+    if (!manager) return Promise.resolve();
+    const fingerprint = superArchiveFingerprint(
+      manager.archivableMainSessionIds().map((mainSessionId) => ({
+        mainSessionId,
+        sessions: manager.archivableSessions(mainSessionId),
+      })),
+    );
+    const urgent = options.force === true || fingerprint !== this.superArchiveFingerprint;
+    if (urgent) {
+      this.superArchiveFingerprint = fingerprint;
+      // 关键变更立刻写：还没跑的节流写也就不需要了（它写的是同一份内容）。
+      if (this.superArchiveTimer) {
+        clearTimeout(this.superArchiveTimer);
+        this.superArchiveTimer = null;
+      }
+      return this.writeSuperArchives();
+    }
+    if (!this.superArchiveTimer) {
+      const timer = setTimeout(() => {
+        this.superArchiveTimer = null;
+        void this.writeSuperArchives();
+      }, SUPER_ARCHIVE_THROTTLE_MS);
+      if (typeof timer.unref === "function") timer.unref();
+      this.superArchiveTimer = timer;
+    }
+    return Promise.resolve();
+  }
+
+  /** 真正写归档（每个归属主会话一个文件）。 */
+  private writeSuperArchives(): Promise<void> {
     const manager = this.superAgent;
     if (!manager) return Promise.resolve();
     const writes = manager.archivableMainSessionIds().map((mainSessionId) =>
@@ -6391,7 +6453,23 @@ export class ChatPanel implements vscode.Disposable {
    * 保留 —— 它们还在磁盘上，用户照样能清理或让智能体合并。
    */
   private async restoreSuperSessions(mainSessionId: string): Promise<void> {
-    const records = await readSuperSessionArchive(this.superStoreDir(), mainSessionId);
+    const archive = await readSuperSessionArchive(this.superStoreDir(), mainSessionId);
+    // 归档**读不出来**是故障，不是「这个会话没有子会话」。必须如实告诉用户
+    // —— 旧实现把两者都当成空数组，用户重启后只看到空板子，完全看不出发生过
+    // 什么。损坏的原件已由读侧留底（.corrupt-<时间戳>），路径一并报出。
+    if (archive.damaged) {
+      this.log.warn(
+        `super agent: 子会话归档读不出来（${archive.damage ?? "unknown"}），备份：${archive.backupPath ?? "-"}`,
+      );
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "子会话归档损坏，已保留备份；该会话的子会话记录无法恢复（{0}）",
+          archive.backupPath ?? archive.damage ?? "unknown",
+        ),
+      );
+    }
+    const records = archive.sessions;
     if (records.length > 0) {
       const restored = records.map((record) => fromPersistedSuperSession(record));
       this.log.info(`super agent: restored ${restored.length} historical child session(s) for ${mainSessionId}`);

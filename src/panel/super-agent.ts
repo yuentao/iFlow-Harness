@@ -49,7 +49,7 @@ import type {
   UserQuestionsResponse,
 } from "../acp/protocol.js";
 import { errorMessage } from "../acp/jsonrpc.js";
-import { applySessionUpdate, estimateTokens } from "../../shared/session-state.js";
+import { applySessionUpdate, estimateTokens, estimateTokensChunked } from "../../shared/session-state.js";
 import {
   classifyChildShellCommand,
   extractShellCommand,
@@ -118,9 +118,21 @@ export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
  */
 export const SUPER_PROGRESS_MAX_CHARS = 4_000;
 
-/** 实时进度推送节流：流式 chunk 逐个推会让超快照变成噪音，700ms 足够让用户
- * 看到「它在动」，又不会压过主会话的渲染节流。 */
+/** 实时进度推送节流：流式 chunk 不必逐个上屏，但要让看板看得出「它在动」。 */
 export const SUPER_PROGRESS_THROTTLE_MS = 700;
+
+/**
+ * 子会话助手文本（含思考文本）的累计上限。
+ *
+ * 子会话的输出没有天然上限：一次长任务能吐几十万字符。全量留着有两个问题：
+ *  1. 内存 —— 每个子会话都攒着一份纯文本，长会话多起来时是可观的常驻占用；
+ *  2. 收尾时的 token 估算要对这份文本做一次 BPE —— 文本越长，那次同步估算
+ *     在扩展宿主事件循环里占的时间越长（见 `estimateTokensChunked`）。
+ *
+ * 超限时只保留**尾部**（进度尾部、汇报摘要都只看尾部；头部被丢掉不影响
+ * 任何现有语义）。
+ */
+export const SUPER_TEXT_MAX_CHARS = 120_000;
 
 /** 作为视觉块直接送给子会话的图片上限（与主会话的图片附件上限同口径）。 */
 const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -334,6 +346,17 @@ export class SuperAgentManager {
   private readonly lastText = new Map<string, string>();
   /** 每个子会话的思考文本 —— 只用于输出 token 估算（思考也算生成开销）。 */
   private readonly lastThought = new Map<string, string>();
+  /**
+   * 被用户中断的子会话 → 中断发生时的**尝试序号**。
+   *
+   * 为什么不能只看会话状态：终态是粘性的，「完成」也是终态，而收尾代码
+   * （代提交 + 自动合并）恰恰跑在「完成」事件**之后** —— 那时状态已经是
+   * completed。所以「是不是终态」根本区分不出「正常做完」与「用户喊停」。
+   * 这里记的是**用户喊停这件事本身**。
+   *
+   * 值是尝试序号：重试会让序号 +1，于是上一轮的标记自然不再命中新一轮。
+   */
+  private readonly interrupted = new Map<string, number>();
   /** 交给子会话的任务提示 token 估算 —— 内核没上报输入时的兜底下界。 */
   private readonly promptTokens = new Map<string, number>();
   /** 实时进度的节流定时器（每个子会话最多一个在飞）。 */
@@ -589,6 +612,10 @@ export class SuperAgentManager {
     if (!session || isTerminalSuperStatus(session.status)) return false;
     // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
     this.dequeue(id);
+    // 先记「这一轮被用户喊停」：收尾路径（代提交 + 自动合并）靠它决定
+    // 还能不能动这轮的结果。必须落在 apply 之前 —— apply 之后状态已是终态，
+    // 再也分不清「正常完成」与「被中断」。
+    this.interrupted.set(id, session.attempts ?? 1);
     // 先落「已中断」再杀进程：终止进程会触发 AcpClient 的 onExit，而管理层把
     // 内核退出一律记成 failed —— 终态粘性会让随后的 cancelled 被丢弃，手动
     // 停止就显示成失败。先把终态占住，onExit 的失败事件会被幂等地忽略。
@@ -636,6 +663,8 @@ export class SuperAgentManager {
     // 排在自己前面。
     await this.disposeClient(id);
     this.started.delete(id);
+    // 重试是一次**新的尝试**（序号 +1）：上一轮的中断标记不该命中新一轮。
+    this.interrupted.delete(id);
 
     const retry: SuperRetryState = {
       attempt: (session.attempts ?? 1) + 1,
@@ -880,6 +909,8 @@ export class SuperAgentManager {
       // 与 cancel 同理：先落「已中断」再杀进程，否则 onExit 会把这次终止记成
       // 内核异常退出（failed），且终态粘性让随后的 cancelled 无法覆盖。
       if (!isTerminalSuperStatus(session.status)) {
+        // 面板正在关闭 —— 这一轮同样不许落改动、不许自动合并。
+        this.interrupted.set(id, session.attempts ?? 1);
         this.apply(id, { type: "cancelled", at: Date.now() });
       }
       await this.disposeClient(id);
@@ -954,12 +985,29 @@ export class SuperAgentManager {
     }
   }
 
-  /** 已启动且未结束的子会话数（排队中的不占槽位）。 */
+  /**
+   * 占着并发槽位的子会话数（排队中的不占槽位）。
+   *
+   * **额度按「活着的 CLI 进程」算，而不是按会话状态算。** 旧口径只看
+   * 「已启动且状态不是终态」：而一个子会话的回合结束（状态 → completed）到
+   * 它的进程被回收之间，还夹着一段**集成**时间（自动合并 / PR 是串行的，
+   * 排在队尾时可能等很久）。这段时间里它的额度会被释放，新子会话继续起进程
+   * —— 活着的子进程数就会超过上限，集成排队越久涨得越多。
+   *
+   * 现在的口径：
+   *  - 进程还活着（回合已结束、还在集成 / 收尾）→ **仍占槽位**；
+   *  - 还没拿到进程（正在准备隔离环境）→ 也占槽位，否则准备阶段可以无限并发。
+   */
   private activeCount(): number {
     let count = 0;
     for (const id of this.started) {
       const session = this.sessions.get(id);
-      if (session && !isTerminalSuperStatus(session.status)) count++;
+      if (!session) continue;
+      if (this.clients.has(id)) {
+        count++;
+        continue;
+      }
+      if (!isTerminalSuperStatus(session.status)) count++;
     }
     return count;
   }
@@ -1055,6 +1103,18 @@ export class SuperAgentManager {
         : allowedRoots.filter((root) => path.resolve(root) !== path.resolve(isolation.path));
 
     try {
+      // 附件拷贝是异步的 —— 这段时间里用户可能已经中断了这一轮。为一个已经
+      // 被喊停的子会话再起一个 CLI 进程没有意义（它跑完了也不会被采纳）。
+      const ready = this.sessions.get(id);
+      if (
+        !ready ||
+        this.disposed ||
+        isTerminalSuperStatus(ready.status) ||
+        (ready.attempts ?? 1) !== attempt
+      ) {
+        this.started.delete(id);
+        return;
+      }
       const client = await this.deps.createClient({
         cwd: isolation.path,
         allowedRoots,
@@ -1064,6 +1124,20 @@ export class SuperAgentManager {
       });
       if (this.disposed) {
         await client.dispose();
+        return;
+      }
+      // 准备期间用户可能已经中断了这一轮（或这一轮已被一次重试取代）。
+      // 这时**根本不该再把任务交给内核**：子会话会真的跑完，而它的产出随后
+      // 会被收尾路径当成正常结果处理。先把进程收掉，一轮都不跑。
+      const live = this.sessions.get(id);
+      if (
+        !live ||
+        isTerminalSuperStatus(live.status) ||
+        (live.attempts ?? 1) !== attempt ||
+        this.disposed
+      ) {
+        await client.dispose();
+        this.started.delete(id);
         return;
       }
       this.clients.set(id, client);
@@ -1113,8 +1187,19 @@ export class SuperAgentManager {
       const response = await client.prompt({ sessionId, prompt });
       usageReport = response.usage;
       const at = Date.now();
+      // **收尾守卫**：用户已经喊停（或这一轮已被重试取代 / 会话已被清理）时，
+      // 绝不能代提交、绝不能自动合并 —— 用户喊停之后，子会话的代码改动不许
+      // 流进当前分支。分支与 worktree 原样保留，并如实记成
+      // 「已中断，改动保留在分支（未合并）」。
+      const blocked = this.settleBlockReason(id, attempt);
       if (response.stopReason === "cancelled") {
         this.apply(id, { type: "cancelled", at });
+        // 回合被取消：子会话可能已经在 worktree 里改了东西 —— 那些改动留在
+        // 分支上，**没有**被合并。如实记下来，别让看板装作「什么都没发生」。
+        this.recordInterrupted(id, blocked ?? "cancelled");
+        this.notifyReport(id);
+      } else if (blocked) {
+        this.recordInterrupted(id, blocked);
         this.notifyReport(id);
       } else {
         this.apply(id, {
@@ -1127,7 +1212,7 @@ export class SuperAgentManager {
         // 失败 / 中断刻意不提交 —— 重试要能直达未完成的现场。
         // 主仓工作区档（合并子会话）在这里什么都不做：它的产出是合并提交，
         // 绝不能对主仓跑 `git add -A`（那会把用户未提交的其它改动卷进去）。
-        const commit = await this.commitChildWork(id, isolation);
+        const commit = await this.commitChildWork(id, isolation, attempt);
         if (commit.error) {
           this.recordIntegration(id, {
             mode: this.deps.integrationMode(),
@@ -1145,7 +1230,7 @@ export class SuperAgentManager {
             });
           }
           // 自动合并 / PR 只依赖 worktree 里的提交，与子进程无关。
-          await this.integrate(id);
+          await this.integrate(id, attempt);
           // 改动没能自动带回主分支（重叠 / 冲突 / git 拒绝）→ 自动请主会话
           // 智能体合并，不再把这件事留给用户点按钮。
           this.maybeRequestAgentMerge(id);
@@ -1158,7 +1243,7 @@ export class SuperAgentManager {
     } finally {
       // 结算进度与 token 用量：取消/失败也要留下已经产生的开销。
       this.finalizeProgress(id);
-      this.recordUsage(id, model, usageReport);
+      await this.recordUsage(id, model, usageReport);
       // Flush before the process goes away: the last text/tool chunks must
       // reach the webview even if the throttle timer has not fired yet.
       this.flushTranscripts();
@@ -1269,13 +1354,23 @@ export class SuperAgentManager {
         if (update.sessionUpdate === "agent_message_chunk") {
           const text = extractText(update.content);
           if (text) {
-            this.lastText.set(id, (this.lastText.get(id) ?? "") + text);
+            // 累计文本设上限：子会话的输出没有天然上限，不设限的话内存与收尾
+            // 估算的开销都会随输出长度线性增长（只保留尾部即可）。
+            this.lastText.set(
+              id,
+              capTail((this.lastText.get(id) ?? "") + text, SUPER_TEXT_MAX_CHARS),
+            );
             this.scheduleProgress(id);
           }
         }
         if (update.sessionUpdate === "agent_thought_chunk") {
           const text = extractText(update.content);
-          if (text) this.lastThought.set(id, (this.lastThought.get(id) ?? "") + text);
+          if (text) {
+            this.lastThought.set(
+              id,
+              capTail((this.lastThought.get(id) ?? "") + text, SUPER_TEXT_MAX_CHARS),
+            );
+          }
         }
         // And feed EVERY update into the shared reducer so the detail pane
         // renders the same live transcript as the main session (tool cards,
@@ -1437,18 +1532,25 @@ export class SuperAgentManager {
   // --- 集成（自动合并 / PR） -------------------------------------------------
 
   /** 串行执行集成：并发合并同一个工作区会把仓库搅乱。 */
-  private async integrate(id: string): Promise<void> {
+  private async integrate(id: string, attempt: number): Promise<void> {
     this.integrationChain = this.integrationChain
-      .then(() => this.runIntegration(id))
+      .then(() => this.runIntegration(id, attempt))
       .catch((error) => {
         this.deps.log.error(`子会话集成失败：${errorMessage(error)}`);
       });
     await this.integrationChain;
   }
 
-  private async runIntegration(id: string): Promise<void> {
+  private async runIntegration(id: string, attempt: number): Promise<void> {
     const session = this.sessions.get(id);
     if (!session || this.disposed) return;
+    // 收尾守卫（入口）：集成是**串行排队**的，一个子会话可能排了很久才轮到。
+    // 等到它时用户可能早就中断了它 —— 那就不能再把它的改动合进主分支。
+    const blocked = this.settleBlockReason(id, attempt);
+    if (blocked) {
+      this.recordInterrupted(id, blocked);
+      return;
+    }
     const mode = this.deps.integrationMode();
     if (mode === "manual") return;
 
@@ -1549,6 +1651,14 @@ export class SuperAgentManager {
           );
           return;
         }
+      }
+      // 最后一道闸：真正动手合并前再确认一次这一轮仍然算数。
+      // 上面的检查可能已经过时（git 调用要时间，用户随时可能点中断）——
+      // 用户喊停之后，这一轮的改动绝不能进主分支。
+      const stillBlocked = this.settleBlockReason(id, attempt);
+      if (stillBlocked) {
+        this.recordInterrupted(id, stillBlocked);
+        return;
       }
       const result = await mergeBranch({ repoRoot: this.deps.repoRoot, branch: isolation.branch });
       if (result.ok) {
@@ -1669,11 +1779,19 @@ export class SuperAgentManager {
    * **主仓工作区档绝不代提交**：那里的 `git add -A` 会把用户尚未提交的其它
    * 改动一起卷进合并提交 —— 那等于替用户改了他的工作区。合并子会话的产出
    * 是合并提交本身，不需要也不允许宿主再补一刀。
+   *
+   * **被中断的一轮绝不代提交**：用户喊停之后，这一轮的产物不该再被加工成
+   * 提交（守卫见 {@link canSettle}）。
    */
   private async commitChildWork(
     id: string,
     isolation: SuperSessionUi["isolation"],
-  ): Promise<{ committed: boolean; files: number; error?: string }> {
+    attempt: number,
+  ): Promise<{ committed: boolean; files: number; error?: string; interrupted?: boolean }> {
+    // 守卫放在**入口**：调用点再多也绕不过去。
+    if (!this.canSettle(id, attempt)) {
+      return { committed: false, files: 0, interrupted: true };
+    }
     if (isolation.kind !== "git_worktree" || !isolation.path) {
       return { committed: false, files: 0 };
     }
@@ -1702,6 +1820,87 @@ export class SuperAgentManager {
       updatedAt: report.at,
     });
     this.emit();
+  }
+
+  /**
+   * **收尾守卫**：这一轮的收尾动作（宿主代提交 / 自动合并）还算不算数。
+   *
+   * 用户点了中断 → 状态变 cancelled（终态粘性），但内核那边的 promise 照样
+   * 会 resolve（它可能刚好跑完，也可能被 kill 后回一个 cancelled）。收尾代码
+   * 如果只看「内核有没有正常返回」，就会在用户喊停之后继续代提交、并把改动
+   * 自动合并进当前分支 —— 那等于无视用户的停止意图。
+   *
+   * 三个条件缺一不可：
+   *  - 这一轮**没被中断**（`interrupted` 里没有这一轮的序号）；
+   *  - 还是**同一次尝试**（被一次重试取代的那一轮不算数 —— 重试要能直达
+   *    未完成的现场，不能把上一轮的半成品也提交了）；
+   *  - **会话还在**（已被清理掉的会话不算数）。
+   *
+   * 注意这里刻意**不**看会话状态：「完成」也是终态，而收尾恰恰跑在完成
+   * 事件之后 —— 用状态判断会把每一次正常完成都误判成「不许收尾」。
+   */
+  private canSettle(id: string, attempt: number): boolean {
+    return this.settleBlockReason(id, attempt) === null;
+  }
+
+  /**
+   * 收尾被挡住的原因（null = 这一轮仍然算数）。
+   *
+   * 单独抽出来是为了让「如实记录」能说清**为什么**没落改动：是用户喊停、
+   * 还是被一次重试取代 —— 两者对用户的含义完全不同。
+   */
+  private settleBlockReason(
+    id: string,
+    attempt: number,
+  ): "interrupted" | "superseded" | "gone" | null {
+    const session = this.sessions.get(id);
+    if (!session) return "gone";
+    if (this.interrupted.get(id) === attempt) return "interrupted";
+    if ((session.attempts ?? 1) !== attempt) return "superseded";
+    return null;
+  }
+
+  /**
+   * 收尾被挡住时：如实记「改动保留在分支（未合并）」。
+   *
+   * 不能悄悄跳过 —— 看板与主会话汇报都要知道「这个分支还在磁盘上、改动没
+   * 进主分支」，否则用户会以为白跑了一场。`needsAction` 刻意为 false：
+   * 用户是**主动**喊停的，不该再自动派智能体去合并它；分支与工作目录仍在，
+   * 用户想合并时随时可以手动合并或让智能体合并。
+   */
+  private recordInterrupted(
+    id: string,
+    reason: "interrupted" | "superseded" | "cancelled" | "gone",
+  ): void {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    // 已经被一次重试取代：当前这条记录属于**新一轮**，上一轮的结论不能写到
+    // 它头上（会把新一轮自己的集成结果盖掉 —— 分支是共享的，新一轮的结果
+    // 才是权威的）。
+    if (reason === "superseded") return;
+    // 主仓工作区档（合并子会话）：它的结果由 finalizeMergeChild 写回**来源**
+    // 子会话的 integration。而且它的 path 是主仓根 —— 说「改动保留在工作
+    // 目录」是假的。
+    if (session.isolation.kind === "repo") return;
+    // 已经有集成结果（例如合并子会话的只读判定）就别覆盖它。
+    if (session.integration) return;
+    const branch = session.isolation.branch;
+    const what = reason === "cancelled" ? "子会话的回合被取消" : "子会话已被中断";
+    this.recordIntegration(
+      id,
+      {
+        mode: this.deps.integrationMode(),
+        state: "skipped",
+        needsAction: false,
+        detail: branch
+          ? `${what}，改动保留在分支 ${branch}（未合并）`
+          : `${what}，改动保留在工作目录（未合并）`,
+        at: Date.now(),
+      },
+      reason === "cancelled"
+        ? "the child session's turn was cancelled; its changes are kept on the branch and were not merged"
+        : "the child session was interrupted; its changes are kept on the branch and were not merged",
+    );
   }
 
   /**
@@ -2115,6 +2314,7 @@ export class SuperAgentManager {
     this.lastText.delete(id);
     this.lastThought.delete(id);
     this.promptTokens.delete(id);
+    this.interrupted.delete(id);
     this.transcripts.delete(id);
     this.integrationReasonEn.delete(id);
   }
@@ -2165,9 +2365,12 @@ export class SuperAgentManager {
   private progressTail(id: string): string | undefined {
     const text = (this.lastText.get(id) ?? "").trim();
     if (!text) return undefined;
-    return text.length > SUPER_PROGRESS_MAX_CHARS
-      ? `…${text.slice(-SUPER_PROGRESS_MAX_CHARS)}`
-      : text;
+    if (text.length > SUPER_PROGRESS_MAX_CHARS) {
+      const tail = text.slice(-SUPER_PROGRESS_MAX_CHARS);
+      // 缓冲区本身可能已经被 capTail 截断过（它带一个「…」标记）—— 别叠成「……」。
+      return tail.startsWith("…") ? tail : `…${tail}`;
+    }
+    return text;
   }
 
   /**
@@ -2177,16 +2380,19 @@ export class SuperAgentManager {
    * 估算并标记非权威 —— 绝不把估算值冒充成内核数据。输出取
    * `completionTokens` 与全部助手/思考文本估算的较大值（工具循环的多轮生成
    * wire 不带拆分，这是保守下界）。成本只在有单价时计算。
+   *
+   * 文本估算走**分块**版本：一次性的全量 BPE 是几百毫秒级的同步尖峰，放在
+   * 扩展宿主的事件循环里就是一次可见的卡顿（面板无响应、快捷键延迟）。
    */
-  private recordUsage(
+  private async recordUsage(
     id: string,
     model: string | null,
     report: TurnUsageReport | undefined,
-  ): void {
+  ): Promise<void> {
     const session = this.sessions.get(id);
     if (!session) return;
     const text = (this.lastText.get(id) ?? "") + (this.lastThought.get(id) ?? "");
-    const estimatedOutput = estimateTokens(text);
+    const estimatedOutput = await estimateTokensChunked(text);
     const output = Math.max(report?.completionTokens ?? 0, estimatedOutput);
     const input = report?.lastRequestInputTokens ?? this.promptTokens.get(id) ?? 0;
     if (input <= 0 && output <= 0) return;
@@ -2207,11 +2413,14 @@ export class SuperAgentManager {
   private async disposeClient(id: string): Promise<void> {
     const client = this.clients.get(id);
     if (!client) return;
-    this.clients.delete(id);
     try {
       await client.dispose();
     } catch (error) {
       this.deps.log.warn(`子会话进程回收失败：${errorMessage(error)}`);
+    } finally {
+      // 回收完成才摘掉：**进程被杀掉之前它还活着**，并发额度要按活着的进程
+      // 算 —— 提前摘掉会让额度在这个窗口里被提前释放。
+      this.clients.delete(id);
     }
   }
 
@@ -2246,6 +2455,19 @@ function reusableIsolation(
   if (!isolation.path || !existsSync(isolation.path)) return null;
   if (isolation.kind === "git_worktree" && !isolation.branch) return null;
   return isolation;
+}
+
+/**
+ * 截断文本到上限，**保留尾部**并标注截断。
+ *
+ * 子会话的进度尾部、汇报摘要都只看最近的内容，所以丢头留尾不会丢信息；
+ * 反过来留头丢尾会让看板停在最开头的内容上。前面被丢掉的部分用「…」标注
+ * —— 看板与汇报里必须看得出「这里还有内容被截掉了」，不能装作全文都在。
+ */
+export function capTail(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const tail = text.slice(text.length - max);
+  return tail.startsWith("…") ? tail : `…${tail}`;
 }
 
 /**
