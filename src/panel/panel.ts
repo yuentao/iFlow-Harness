@@ -5162,10 +5162,29 @@ export class ChatPanel implements vscode.Disposable {
     profileName: string | null,
     replaceName: string | null = null,
   ): Promise<void> {
+    // `replaceName` is the name this profile had BEFORE the edit (absent for a
+    // brand-new profile). Editing is NOT a profile switch: only the edited row
+    // may change — the active pointer, the live CLI and this workspace's model
+    // record stay untouched unless the edited row is the one the panel is
+    // actually running on (user-reported "编辑别的配置把面板重启了").
     const stored = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets));
+    const replaced = replaceName?.trim() || null;
+    const profiles = await loadProfiles(this.context.secrets);
+    // The row being edited: an extension profile, or the CLI-sourced profile
+    // of the same name (the edit turns it into an extension-owned row).
+    const previous = replaced ? profiles[replaced] ?? this.cliProfileCredentials(replaced) : null;
+    // A blank key on an EDIT means "keep THIS row's key". Falling back to the
+    // live/global credentials here would silently copy the active profile's
+    // key into an unrelated row (user-reported). No key anywhere → the user
+    // has to type one; never borrow another profile's secret.
+    const effectiveKey = apiKey ?? (replaced ? previous?.apiKey ?? null : stored?.apiKey ?? null);
+    if (replaced && !effectiveKey) {
+      this.store.markError(vscode.l10n.t("编辑 API 配置时请填写 API Key"));
+      return;
+    }
     const validation = validateCredentials({
       baseUrl,
-      apiKey: apiKey ?? stored?.apiKey ?? null,
+      apiKey: effectiveKey,
       modelName,
     });
     if (!validation.ok) {
@@ -5177,43 +5196,86 @@ export class ChatPanel implements vscode.Disposable {
     // Upsert as a named profile. Default name: the model (distinct enough for
     // most setups; users can rename by re-saving under a custom name).
     const name = profileName?.trim() || creds.modelName;
-    // `replaceName` is the name this profile had before the edit. When the
-    // user renamed it (or cleared the name field and fell back to the model),
-    // the old key must go — otherwise the list shows the old row next to the
-    // new one. `name === replaceName` (plain edit) is a pure overwrite.
-    const replaced = replaceName?.trim() || null;
-    const profiles = await loadProfiles(this.context.secrets);
-    if (replaced && replaced !== name && profiles[replaced]) {
+    // Renaming onto an existing row would overwrite that row's credentials and
+    // delete the old key (user-reported). Refuse and leave SecretStorage
+    // untouched — a silent clobber is unrecoverable for the user.
+    if (replaced && replaced !== name && profiles[name]) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name),
+      );
+      const auth = this.store.getState().auth;
+      this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
+      return;
+    }
+    if (replaced && replaced !== name) {
       delete profiles[replaced];
     }
     profiles[name] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
     await saveProfiles(this.context.secrets, profiles);
 
-    // Was this profile the one the panel is running on? Resolve BEFORE the
-    // pointer moves: a rename (A → B) still edits the active profile.
-    const workspaceName = this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim();
-    const activeBefore =
-      workspaceName ||
-      resolveActiveProfileName(readCliSettings(), await getActiveProfileName(this.context.secrets));
-    const isActiveProfile =
-      !!activeBefore && (activeBefore === name || (replaced !== null && activeBefore === replaced));
+    // "Is this the row the panel is running on?" — by credential IDENTITY,
+    // never by the final name: a new profile defaulting to the current model,
+    // or a rename landing on the active name, must not be mistaken for an edit
+    // of the active profile. The identity is what the handshake actually uses
+    // (`resolveWorkspaceHandshakeCreds` → global slot), not the CLI settings'
+    // or an old secret's profile name.
+    const isEdit = replaced !== null;
+    const isActiveProfile = isEdit && this.sameCredentials(stored, previous);
 
-    // The active-profile pointer and credentials slot are global SecretStorage
-    // values shared by every VS Code window. The workspace record plus the
-    // explicit credentials passed below are the authority for this panel.
+    if (!isEdit) {
+      // Brand-new profile (incl. OnboardingWizard): unchanged behavior — it
+      // becomes this workspace's selected profile and the panel reconnects
+      // under it (explicit `keepSession = false`: never an in-place edit).
+      await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
+      await this.rememberWorkspaceModelFor(name, creds.modelName);
+      await this.reconnectWithCredentials(creds, false);
+      return;
+    }
+
+    if (!isActiveProfile) {
+      // Editing some OTHER row: save + refresh the list only. No activation,
+      // no reconnect, no pointer move — the panel keeps running as it was.
+      const auth = this.store.getState().auth;
+      this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
+      return;
+    }
+
+    // The edited row is the live one: follow a rename in the pointer, then
+    // re-authenticate hot and reload the SAME conversation in place.
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
     await this.rememberWorkspaceModelFor(name, creds.modelName);
+    if (this.restoring || this.connecting) {
+      // A connect/restore is in flight and owns the process: tearing it down
+      // would kill the handshake the user is waiting for. Persist + refresh,
+      // and say plainly which credentials this connection still uses.
+      const auth = this.store.getState().auth;
+      this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t("API 配置已保存，本次连接仍在用旧凭据；重新连接后生效"),
+      );
+      return;
+    }
+    await this.reconnectWithCredentials(creds, true);
+  }
 
-    // Saving an edit is NOT a profile switch: when the edited profile is the
-    // one this panel is using and a live conversation exists, re-authenticate
-    // hot and reload the SAME session in place (keepSession) — the CLI keeps
-    // running and the transcript survives. A brand-new or non-active profile
-    // keeps the old cold behavior (new session under the new credentials).
-    const state = this.store.getState();
-    const liveSessionId = state.sessionId ?? state.activeSessionId;
-    const keepSession = isActiveProfile && !!this.client && !!liveSessionId;
-
-    await this.reconnectWithCredentials(creds, keepSession);
+  /** True when two credential sets describe the same endpoint ("current
+   * profile" identity: name is NOT part of it — the same credentials may be
+   * saved under a different name, and a fresh profile may default to the
+   * active name without being the active profile). Normalized the way
+   * `validateCredentials` stores values. */
+  private sameCredentials(
+    a: OpenAiCompatCredentials | null,
+    b: OpenAiCompatCredentials | null,
+  ): boolean {
+    if (!a || !b) return false;
+    const norm = (c: OpenAiCompatCredentials) => ({
+      baseUrl: c.baseUrl.trim().replace(/\/+$/, ""),
+      apiKey: c.apiKey.trim(),
+      modelName: c.modelName.trim(),
+    });
+    const x = norm(a);
+    const y = norm(b);
+    return x.baseUrl === y.baseUrl && x.apiKey === y.apiKey && x.modelName === y.modelName;
   }
 
   /** Switch the active API profile and re-authenticate the session. */
@@ -5413,7 +5475,13 @@ export class ChatPanel implements vscode.Disposable {
     // panel anyway). Any failure falls back to the full restart below.
     if (oldClient) {
       const tHot = Date.now();
-      const hotSessionId = this.store.getState().sessionId;
+      // Session id for the hot path: the live one, or — while a restore is
+      // still settling — the session the visible transcript belongs to. The
+      // keepSession reload below reuses the same id: entry and reload MUST
+      // agree, otherwise an edit during restore falls into the cold path and
+      // kills the process that is being restored.
+      const liveState = this.store.getState();
+      const hotSessionId = liveState.sessionId ?? liveState.activeSessionId;
       if (hotSessionId) {
         // Stop a possibly-still-running turn (an errored turn is exactly why
         // users switch profiles; cancel is a no-op on an idle session) and
@@ -5447,16 +5515,24 @@ export class ChatPanel implements vscode.Disposable {
         // extension-first.)
         // keepSession: reload the SAME conversation in place under the new
         // credentials — the transcript never clears (seamless). Only the
-        // CLI-side session object is rebuilt (session/load, same id).
-        // When the live id is still null (connecting/restoring), the visible
-        // transcript belongs to activeSessionId — reload that one instead of
-        // silently falling through to a new session.
-        const keepId = keepSession
-          ? (this.store.getState().activeSessionId ?? hotSessionId)
-          : null;
+        // CLI-side session object is rebuilt (session/load, same id). The id
+        // is exactly the one resolved at entry (`sessionId ?? activeSessionId`),
+        // so an edit during a restore reloads the session the transcript shows.
+        const keepId = keepSession ? hotSessionId : null;
         if (keepId) {
           const reloaded = await this.reloadSessionUnderCreds(keepId, creds);
           if (reloaded) {
+            // Write the reloaded id back to the store — an edit during restore
+            // reloaded `activeSessionId` while `sessionId` was still null.
+            // Any OTHER live session that was not preserved is booked into
+            // `discardedSessionIds` (same semantics as the switch path) so its
+            // trailing updates cannot leak into the fresh state.
+            const staleId = this.store.getState().sessionId;
+            if (staleId && staleId !== keepId) {
+              if (this.discardedSessionIds.size >= DISCARDED_SESSION_IDS_CAP) this.discardedSessionIds.clear();
+              this.discardedSessionIds.add(staleId);
+            }
+            this.store.sessionMeta({ sessionId: keepId });
             this.store.setAuth(await this.buildAuthState(true, false));
             this.log.info(
               `profile switch finished in ${Date.now() - tHot}ms (hot re-auth, session reloaded in place)`,
