@@ -638,6 +638,30 @@ function createMockHost(): HostApi {
         "```",
       ].join("\n"),
     },
+    {
+      kind: "text",
+      // CommonMark 合法、但旧切分器不认的围栏形态：收栏带 2 空格缩进。
+      // marked 会把它渲染成 language-super-agent 代码块，所以浏览器验收需要
+      // 这份样本确认它同样出任务卡（而不是一堵 JSON 墙）。
+      text: [
+        "缩进围栏的委派块也要出卡片：",
+        "",
+        "  ```super-agent",
+        JSON.stringify(
+          {
+            tasks: [
+              {
+                title: "缩进围栏任务",
+                task: "这条任务书的开栏与收栏都带 2 空格缩进（CommonMark 允许最多 3 个空格）。",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "  ```",
+      ].join("\n"),
+    },
     { kind: "plan", id: "demo-plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
   const demoApproval: SessionState["pendingApproval"] = {
