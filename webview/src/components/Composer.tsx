@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type SkillInfo, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
+import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
 import { Button, CANVAS_CHIP, Dropdown, ICON_INLINE, IconButton, MenuItem, SearchInput, fuzzyScore } from "./ui";
@@ -294,6 +295,11 @@ export function Composer() {
   const suggestions = useChat((s) => s.state?.nextStepSuggestions);
   /** The prediction call is running: render the pill in the chips' slot. */
   const suggestionsLoading = useChat((s) => s.state?.nextStepLoading ?? false);
+  // 子会话仍在跑时不能换模型（在途子会话会用错模型）。只供模型下拉用，
+  // 不并入 controlsLocked —— 主会话跑子会话时仍必须能发消息 / enhance。
+  const superActive = useChat((s) =>
+    (s.state?.superSessions ?? []).some((session) => !isTerminalSuperStatus(session.status)),
+  );
 // Hard evidence only: thinking===false comes from an explicit
 // iflow.thinkingModelRules entry (supportsThinking:false) evaluated by the
 // host; unknown (undefined) stays ALLOWED — the CLI's own rejection is
@@ -624,6 +630,8 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
   const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
   const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  // 模型下拉额外跟随活跃子会话；发送 / enhance / 附件仍只看 controlsLocked。
+  const modelLocked = controlsLocked || superActive;
   const sendBlocked = replaying || initializing || pending !== null || needsSetup;
   /** Enter/发送 while a real turn streams → the host spawns a child session. */
   const delegateMode = streaming && !replaying && !initializing;
@@ -1736,7 +1744,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             <Dropdown
               direction="up"
               menuClass="w-60 max-w-[calc(100vw-24px)] max-h-[min(60vh,22rem)] overflow-y-auto"
-              disabled={controlsLocked}
+              disabled={modelLocked}
               onOpenChange={(o) => {
                 setModelMenuOpen(o);
                 setThinkPanel(false);
@@ -1756,7 +1764,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   aria-haspopup="menu"
                   aria-expanded={open}
                   title={t("模型")}
-                  disabled={controlsLocked}
+                  disabled={modelLocked}
                 >
                   <span className="max-w-[130px] truncate @max-[520px]:max-w-[84px] @max-[340px]:max-w-[60px]">
                     {currentModelName}
