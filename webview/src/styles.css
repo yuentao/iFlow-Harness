@@ -1131,6 +1131,14 @@ textarea::selection {
   margin-right: 0;
 }
 
+/* Flat chrome (Super Agent live pane, `BlockView chrome="flat"`): the tool
+   card keeps its audit rows but has no card surface, so their side padding
+   follows the tighter px-2 header instead of the card's px-3 rhythm. */
+.tool-card-flat .tool-card-params,
+.tool-card-flat .tool-card-raw-toggle {
+  padding-inline: var(--space-sm);
+}
+
 /* --- assistant text blocks ------------------------------------------------- */
 /* AI replies read as a conversation, not a wall: a mini brand avatar marks
    the voice, and a hover rail lets the eye track the response column. */

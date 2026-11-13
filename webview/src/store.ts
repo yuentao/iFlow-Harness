@@ -940,6 +940,63 @@ function createMockHost(): HostApi {
     },
   ];
 
+  /**
+   * Live-pane fixture for browser verification. The pane renders with the
+   * flat chrome variant, so the demo buffer needs the block kinds that used to
+   * carry a card surface: reasoning, a completed replace with a structured
+   * diff, and a still-running shell command.
+   */
+  const demoSuperTranscripts: Record<string, Block[]> = {
+    "super-demo-1": [
+      {
+        kind: "text",
+        id: "demo-super-text-1",
+        text: "已定位到 src/auth.ts 的 redirect 分支条件写反了，先修这一处，再补一个 401 回跳的单测。",
+      },
+      {
+        kind: "thought",
+        id: "demo-super-thought-1",
+        text: "先确认 redirect 的判断条件：401 应该回跳到登录页，当前实现把状态码比较写反了；改完再跑一次单测确认没有回归。",
+      },
+      {
+        kind: "tool",
+        id: "demo-super-tool-1",
+        toolCallId: "demo-super-call-1",
+        toolName: "replace",
+        title: "替换内容",
+        toolKind: "edit",
+        status: "completed",
+        output: "已应用 1 处改动",
+        locations: [{ path: "src/auth.ts" }],
+        diff: {
+          path: "src/auth.ts",
+          oldText: "  if (status === 401) {\n    return redirectToLogin();\n  }\n  return next();",
+          newText: "  if (status !== 401) {\n    return next();\n  }\n  return redirectToLogin();",
+        },
+      },
+      {
+        kind: "tool",
+        id: "demo-super-tool-2",
+        toolCallId: "demo-super-call-2",
+        toolName: "run_shell_command",
+        title: "run_shell_command",
+        toolKind: "execute",
+        status: "in_progress",
+        input: "npx vitest run test/auth.test.ts",
+        output: " RUN  v5.0.0 test/auth.test.ts\n\n ✓ test/auth.test.ts (6 tests) 412ms",
+        locations: [],
+        diff: null,
+      },
+    ],
+    "super-demo-2": [
+      {
+        kind: "text",
+        id: "demo-super-text-2",
+        text: "读完了 shared/session-state.ts 的 reducer 与现有用例，正在确认这组单测的覆盖范围。",
+      },
+    ],
+  };
+
   const demoMeta = {
     sessionId: "mock-session",
     superSessions: demoSuperSessions,
@@ -2120,6 +2177,19 @@ function createMockHost(): HostApi {
         // Super Agent board actions. The real host owns the child sessions;
         // the mock mutates the same projection so the board's interactions
         // are exercisable in browser debug mode.
+        if (m.action === "transcript") {
+          // The live pane asks for the full buffer on first open; reply with
+          // the same `superTranscript {from:0}` shape the host sends.
+          const sessionId = m.sessionId;
+          if (!sessionId) return;
+          broadcast({
+            type: "superTranscript",
+            sessionId,
+            from: 0,
+            blocks: demoSuperTranscripts[sessionId] ?? [],
+          });
+          return;
+        }
         if (m.action === "cancel") {
           const target = demoSuperSessions.find((s) => s.id === m.sessionId);
           if (target) {

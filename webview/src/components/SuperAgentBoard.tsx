@@ -1038,7 +1038,7 @@ function SuperSessionLive({
                 : t("暂无输出")}
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="divide-y divide-border/50">
               {transcript.map((block, index) => {
                 const prev = index > 0 ? transcript[index - 1] : undefined;
                 const showAvatar =
@@ -1046,9 +1046,10 @@ function SuperSessionLive({
                   prev.kind !== "text" ||
                   (prev.kind === "text" && prev.system === true);
                 return (
-                  <div key={block.id ?? `idx-${index}`} className="cv-block">
+                  <div key={block.id ?? `idx-${index}`} className="cv-block py-1">
                     <BlockView
                       block={block}
+                      chrome="flat"
                       isLatest={index === transcript.length - 1}
                       turnActive={isActive(session)}
                       canCopy
