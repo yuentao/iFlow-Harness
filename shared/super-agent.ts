@@ -2393,6 +2393,39 @@ export function groupSuperSessionsForBoard(sessions: readonly SuperSessionUi[]):
  */
 export const SUPER_DIGEST_MAX_CHARS = 4000;
 
+/**
+ * 看板每行 summary 的上限。旧值 160 只够放第一句过程描述；提高后仍受
+ * `SUPER_DIGEST_MAX_CHARS` 的整体预算约束 —— `buildSuperDigest` 会从尾部
+ * 丢弃条目并注明省略几个，每轮的固定成本不变。
+ */
+export const SUPER_BOARD_SUMMARY_MAX_CHARS = 480;
+/** 汇报给主会话的摘要上限：足够容纳子会话写在末尾的完整结论。 */
+export const SUPER_REPORT_SUMMARY_MAX_CHARS = 5_000;
+
+/**
+ * 汇报文本按**尾部优先**截断，头尾拼接并带明确省略标记（导出供测试断言，
+ * 宿主侧汇报摘要与看板行共用同一份实现）。
+ *
+ * 子会话把「最终结论 / 验证结果」写在最后一段；旧实现的 `slice(0, 799)`
+ * （宿主 summarize）与 `slice(0, 160)`（看板行）都只留开头，于是 completed
+ * 行与状态上报都以省略号收尾，恰好把用户要的结论砍掉。这里留一小段开头作
+ * 语境、主体留给尾部，中间被丢掉的部分用 `[middle omitted]` 明确标注 ——
+ * 不静默丢结论，也不把半截句子喂给模型。`flatten` 给看板行用：每条信息
+ * 必须只占一行。短文本原样返回（仅 trim / 压平，与旧行为一致）。
+ */
+export function capReportTail(
+  text: string,
+  max = SUPER_REPORT_SUMMARY_MAX_CHARS,
+  flatten = false,
+): string {
+  const value = flatten ? text.replace(/\s+/g, " ").trim() : text.trim();
+  if (value.length <= max) return value;
+  const marker = flatten ? " …[middle omitted]… " : "\n\n…[middle omitted]…\n\n";
+  const head = Math.min(400, Math.max(1, Math.floor(max / 6)));
+  const tail = Math.max(1, max - head - marker.length);
+  return `${value.slice(0, head)}${marker}${value.slice(-tail)}`;
+}
+
 const SUPER_STATUS_LABEL: Record<SuperStatus, string> = {
   preparing: "preparing",
   running: "running",
@@ -2402,10 +2435,12 @@ const SUPER_STATUS_LABEL: Record<SuperStatus, string> = {
   cancelled: "interrupted",
 };
 
-/** 压成一行并截断（看板摘要里每条信息只占一行，避免 JSON 式嵌套）。 */
+/**
+ * 压成一行并按尾部优先截断（看板摘要里每条信息只占一行，避免 JSON 式嵌套）。
+ * 结论 / 失败原因写在末尾，超长时不能再只留开头 —— 见 `capReportTail`。
+ */
 function truncateInline(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  return capReportTail(text, max, true);
 }
 
 /**
@@ -2429,7 +2464,7 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
   } else if (session.status === "failed") {
     parts.push(`failure reason: ${truncateInline(session.error ?? "unknown", 160)}`);
   } else if (session.summary) {
-    parts.push(`summary: ${truncateInline(session.summary, 160)}`);
+    parts.push(`summary: ${truncateInline(session.summary, SUPER_BOARD_SUMMARY_MAX_CHARS)}`);
   }
   if (session.integration) {
     parts.push(

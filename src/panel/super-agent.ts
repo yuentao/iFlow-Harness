@@ -64,6 +64,7 @@ import {
   applySuperEvent,
   buildSuperReportPrompt,
   canRetrySuperSession,
+  capReportTail,
   clampMaxConcurrentSuperSessions,
   isTerminalSuperStatus,
   reportForSession,
@@ -2333,14 +2334,19 @@ export class SuperAgentManager {
   /**
    * 子会话的文本摘要（模型面向：它会作为汇报正文回到主会话）。
    *
-   * 没有正文时的兜底是英文：汇报提示词整体是英文的，兜底夹一句中文会让
+   * 结论写在**末尾**，所以走 `capReportTail` 的尾部优先截断：旧的
+   * `text.slice(0, 799)` 只留开头，把末尾的结论砍掉，才有了「汇报以省略号
+   * 结尾、看不到最终结论」。上限放宽到能容纳完整结论（见 shared 里的
+   * `SUPER_REPORT_SUMMARY_MAX_CHARS`），中间被丢掉的部分带明确省略标记。
+   *
+   * 没有正文时的兜底仍是英文：汇报提示词整体是英文的，兜底夹一句中文会让
    * 模型在对话中间翻语言（与 `shared/super-agent.ts` 的 `describePending`
    * 兜底同一纪律）。
    */
   private summarize(id: string): string {
     const text = (this.lastText.get(id) ?? "").trim();
     if (!text) return "(the child session left no text summary)";
-    return text.length > 800 ? `${text.slice(0, 799)}…` : text;
+    return capReportTail(text);
   }
 
   /** 清理已删除子会话的附属状态（文本缓冲、节流定时器、实时转录）。 */

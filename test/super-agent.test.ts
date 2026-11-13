@@ -9,6 +9,7 @@ import {
   buildSuperMergeRequestPrompt,
   buildSuperReportPrompt,
   canRetrySuperSession,
+  capReportTail,
   clampMaxConcurrentSuperSessions,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
   describeSuperSessionLine,
@@ -30,7 +31,9 @@ import {
   superArchiveFingerprint,
   superDirectiveDedupeKey,
   superIsolationLabel,
+  SUPER_BOARD_SUMMARY_MAX_CHARS,
   SUPER_DIGEST_MAX_CHARS,
+  SUPER_REPORT_SUMMARY_MAX_CHARS,
   sumSuperUsage,
   SuperReportBuffer,
   SuperDirectiveScanner,
@@ -1235,7 +1238,75 @@ describe("super agent · 看板摘要", () => {
       session({ status: "completed", summary: `第一行\n第二行${"长".repeat(300)}` }),
     );
     expect(line).not.toContain("\n");
-    expect(line.length).toBeLessThan(300);
+    // 单行上限已提高到 SUPER_BOARD_SUMMARY_MAX_CHARS：约 306 字符的摘要不再
+    // 被截断，但仍受这个上限约束、不无界增长（整体 4000 预算另有用例覆盖）。
+    expect(line.length).toBeLessThan(SUPER_BOARD_SUMMARY_MAX_CHARS + 240);
+  });
+});
+
+describe("super agent · 汇报截断不丢尾部结论", () => {
+  // 用户反馈（2026-11-13）：completed 行与状态上报里的详细汇报都以省略号
+  // 收尾、看不到最终结论。结论写在汇报末尾，而旧实现只留开头（宿主
+  // summarize 的 799 字符 / 看板行的 160 字符），恰好把结论砍掉了。
+  const conclusion = "最终结论：三项检查全部通过，改动已自动合并到主分支";
+  const longReport = `开始处理。\n${"过程流水账 ".repeat(1200)}\n${conclusion}`;
+
+  it("长汇报经 summarize 的截断逻辑后，尾部结论仍可见且带明确省略标记", () => {
+    // 宿主 summarize() 直接委托 capReportTail(text)：断言这份共用实现的契约。
+    const summary = capReportTail(longReport);
+    expect(summary).toContain(conclusion);
+    expect(summary).toContain("[middle omitted]");
+    expect(summary.startsWith("开始处理")).toBe(true); // 头尾拼接：开头语境也留着
+    expect(summary.length).toBeLessThanOrEqual(SUPER_REPORT_SUMMARY_MAX_CHARS);
+    expect(summary.length).toBeGreaterThan(SUPER_REPORT_SUMMARY_MAX_CHARS - 100);
+  });
+
+  it("短汇报原样返回（不截断、不带省略标记）", () => {
+    const short = `修好了。\n${conclusion}`;
+    expect(capReportTail(short)).toBe(short);
+    expect(capReportTail("   ")).toBe("");
+    expect(capReportTail("x".repeat(200))).toBe("x".repeat(200));
+  });
+
+  it("看板行：长汇报的尾部结论仍可见、压成一行、带明确省略标记", () => {
+    const line = describeSuperSessionLine(
+      session({ status: "completed", summary: longReport }),
+    );
+    expect(line).not.toContain("\n");
+    expect(line).toContain(conclusion);
+    expect(line).toContain("[middle omitted]");
+    expect(line.length).toBeLessThan(SUPER_BOARD_SUMMARY_MAX_CHARS + 240);
+  });
+
+  it("看板行：短汇报原样呈现，不冒出省略标记", () => {
+    const line = describeSuperSessionLine(
+      session({ status: "completed", summary: conclusion }),
+    );
+    expect(line).toContain(conclusion);
+    expect(line).not.toContain("middle omitted");
+  });
+
+  it("汇报正文经 reportForSession → buildSuperReportPrompt 后结论不被二次截断", () => {
+    const done = session({ status: "completed", summary: capReportTail(longReport) });
+    const report = reportForSession(done, 1, "(the child session left no text summary)");
+    expect(report).not.toBeNull();
+    expect(report!.summary).toContain(conclusion);
+    const prompt = buildSuperReportPrompt([{ session: done, report: report! }], { pendingCount: 0 });
+    expect(prompt).toContain(conclusion);
+    expect(prompt).toContain("[middle omitted]");
+  });
+
+  it("看板整体 4000 预算仍生效：超预算从尾部丢弃条目并注明省略数量", () => {
+    const many = Array.from({ length: 120 }, (_, i) =>
+      session({ id: `super-${i}`, title: `任务 ${i}`, status: "completed", summary: longReport }),
+    );
+    const digest = buildSuperDigest(many);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    expect(digest).toMatch(/\d+ more child session\(s\) omitted for budget/);
+    expect(digest).toContain("super-0");
+    expect(digest).not.toContain("super-119");
+    // 单行上限提高没有把结论挤掉：保留下来的行仍能看到尾部结论。
+    expect(digest).toContain(conclusion);
   });
 });
 
