@@ -125,7 +125,12 @@ type PanelInternals = {
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
   superScan: { bufferLength: number; push: (chunk: string) => unknown };
-  scanSuperDirectives: (content: unknown) => void;
+  scanSuperDirectives: (content: unknown, scanner?: unknown) => void;
+  onSessionUpdate: (n: {
+    sessionId: string;
+    update: { sessionUpdate: string; content: { type: string; text: string }; agentId?: string };
+  }) => void;
+  resetSuperDirectiveScans: () => void;
   store: {
     getState: () => SessionState;
     sessionStarted: (meta: { sessionId: string }) => void;
@@ -342,5 +347,50 @@ describe("子会话汇报 · 归属与投递时机", () => {
     // 载荷补齐 → 才派发（说明开栏没被裁掉）。
     p.scanSuperDirectives("\n```\n");
     expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  const directive = (title: string, task: string): string =>
+    ["```super-agent", JSON.stringify({ tasks: [{ title, task }] }), "```"].join("\n");
+  const chunk = (sessionUpdate: "agent_thought_chunk" | "agent_message_chunk", text: string): void => {
+    p.onSessionUpdate({
+      sessionId: "session-A",
+      update: { sessionUpdate, content: { type: "text", text } },
+    });
+  };
+
+  it("只有思考通道写了完整委派块 → 派发 1 个子会话", () => {
+    chunk("agent_thought_chunk", directive("改登录", "修好 src/auth.ts"));
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(toasts.some((t) => t.message.includes("已派发 1 个子会话"))).toBe(true);
+  });
+
+  it("思考块与正文块载荷相同 → 只派发 1 个子会话（不发「已派发 0 个」）", () => {
+    const payload = directive("改登录", "修好 src/auth.ts");
+    chunk("agent_thought_chunk", payload);
+    chunk("agent_message_chunk", payload);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    // 全部命中重复时没有可报的派发数量 —— 不能发「已派发 0 个」。
+    expect(toasts.some((t) => t.message.includes("已派发 0"))).toBe(false);
+    // 首次派发的那一条照常存在（重复条目既不计数也不额外提示）。
+    expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(1);
+  });
+
+  it("思考块与正文块载荷不同 → 各派发 1 个子会话", () => {
+    chunk("agent_thought_chunk", directive("改登录", "修好 src/auth.ts"));
+    chunk("agent_message_chunk", directive("改注册", "修好 src/register.ts"));
+    expect(manager.spawn).toHaveBeenCalledTimes(2);
+    // 计数按**每次扫描批次**报实际生效的派发数：两条流各派发 1 个。
+    expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(2);
+  });
+
+  it("换会话/恢复时清空去重账本：同一载荷在新会话里可以再派发", () => {
+    const payload = directive("改登录", "修好 src/auth.ts");
+    chunk("agent_thought_chunk", payload);
+    chunk("agent_message_chunk", payload);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+
+    p.resetSuperDirectiveScans();
+    chunk("agent_thought_chunk", payload);
+    expect(manager.spawn).toHaveBeenCalledTimes(2);
   });
 });
