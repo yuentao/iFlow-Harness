@@ -144,11 +144,29 @@ describe("Super Agent 看板表面材质", () => {
 });
 
 describe("Super Agent 看板阶段轨", () => {
-  /** 阶段轨元素（折叠行里那个就是第一个；展开只是多渲染一个同样的轨）。 */
-  function rail(): HTMLElement {
-    const el = container.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowButton(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
     expect(el).toBeTruthy();
-    return el as HTMLElement;
+    return el!;
+  }
+
+  /** 展开某一行（阶段轨只在行展开后出现）。 */
+  function openRow(title = "修复登录跳转"): void {
+    act(() => rowButton(title).click());
+  }
+
+  function rails(): NodeListOf<HTMLElement> {
+    return container.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+  }
+
+  /** 阶段轨元素：只在展开后出现，且恰好一个。 */
+  function rail(): HTMLElement {
+    const all = rails();
+    expect(all).toHaveLength(1);
+    return all[0]!;
   }
 
   /** 轨上的圆点（每个真实节点一个）。 */
@@ -161,9 +179,24 @@ describe("Super Agent 看板阶段轨", () => {
     return Array.from(rail().querySelectorAll<HTMLElement>("span.text-ui-micro"));
   }
 
+  it("折叠行只报状态，阶段轨只在展开后出现一次", () => {
+    render([session({ startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+
+    // 折叠：单行只有状态 + 标题 + 耗时，没有任何阶段轨。
+    expect(rails()).toHaveLength(0);
+    expect(rowButton().textContent).toContain("运行中");
+
+    openRow();
+    // 展开：阶段轨恰好一条（不再渲染两条，也不重复状态 chip）。
+    expect(rails()).toHaveLength(1);
+    expect(rowButton().textContent).toContain("运行中");
+  });
+
   it("只画真实发生过的节点，末节点带当前高亮", () => {
     render([session({ startedAt: 2000, updatedAt: 3000 })]);
     expand();
+    openRow();
 
     const rail = container.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
     expect(rail).toBeTruthy();
@@ -184,6 +217,7 @@ describe("Super Agent 看板阶段轨", () => {
   it("queued：出现排队节点且为当前高亮（信息色）", () => {
     render([session({ status: "preparing", queued: true })]);
     expand();
+    openRow();
 
     const described = rail().getAttribute("aria-label")!;
     expect(described).toContain("排队");
@@ -214,7 +248,9 @@ describe("Super Agent 看板阶段轨", () => {
         },
       }),
     ]);
-    // 有子会话在等应答时看板会自行展开（宿主 useEffect），再点一次反而收起。
+    // 有子会话在等应答时看板会自行展开（宿主 useEffect），但行详情仍需手动打开
+    // ——阶段轨只在展开行里出现。
+    openRow();
 
     const described = rail().getAttribute("aria-label")!;
     expect(described).toContain("等待应答");
@@ -245,6 +281,7 @@ describe("Super Agent 看板阶段轨", () => {
     );
     expect(foldedToggle).toBeTruthy();
     act(() => foldedToggle!.click());
+    openRow();
 
     const described = rail().getAttribute("aria-label")!;
     expect(described).toContain("已完成");
@@ -267,6 +304,7 @@ describe("Super Agent 看板阶段轨", () => {
   it("failed：末节点是失败且用错误色", () => {
     render([session({ status: "failed", error: "进程崩溃", startedAt: 2000, endedAt: 4000 })]);
     expand();
+    openRow();
 
     const described = rail().getAttribute("aria-label")!;
     expect(described).toContain("失败");
@@ -283,6 +321,7 @@ describe("Super Agent 看板阶段轨", () => {
   it("running（无 endedAt）：轨上没有完成/收尾节点", () => {
     render([session({ startedAt: 2000, updatedAt: 3000 })]);
     expand();
+    openRow();
 
     const described = rail().getAttribute("aria-label")!;
     for (const absent of ["已完成", "收尾", "失败", "已中断", "已自动合并"]) {

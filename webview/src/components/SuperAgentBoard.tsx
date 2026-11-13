@@ -225,19 +225,16 @@ function timelineText(node: SuperTimelineNode): string {
  * 「准备 → 运行 → 收尾 → 完成」这种固定模板（用户明确要求过）。纯展示：
  * 不新增点击通道；完整节点与时间戳只进 `title` / `aria-label`。
  *
- * `compact` 给折叠行用：容器窄到放不下标签时只留圆点与连接线，把宽度还给
- * 状态 chip 与标题。轨本身 `min-w-0 overflow-hidden`，在任何窄屏下都不会
- * 撑出横向溢出。
+ * 只在展开区出现（折叠行只报状态）。轨本身 `min-w-0 overflow-hidden`，在任何
+ * 窄屏下都不会撑出横向溢出。
  */
 function SuperTimeline({
   session,
   labeled = false,
-  compact = false,
   className = "",
 }: {
   session: SuperSessionUi;
   labeled?: boolean;
-  compact?: boolean;
   className?: string;
 }) {
   const nodes = useMemo(() => deriveSuperTimeline(session), [session]);
@@ -264,9 +261,7 @@ function SuperTimeline({
           />
           {labeled && (
             <span
-              className={`shrink-0 whitespace-nowrap text-ui-micro font-medium ${timelineText(node)}${
-                compact ? " @max-[520px]:hidden" : ""
-              }`}
+              className={`shrink-0 whitespace-nowrap text-ui-micro font-medium ${timelineText(node)}`}
             >
               {timelineNodeLabel(node)}
             </span>
@@ -703,8 +698,10 @@ export function SuperAgentBoard() {
  * One child session row.
  *
  * Collapsed it is a single 32px line — status (icon + label + colour), title,
- * elapsed — and nothing else. Everything diagnostic (branch, summary, tokens,
- * merge result) and every action live in the detail below, opened by clicking
+ * elapsed — and nothing else. The stage rail appears only after expanding,
+ * exactly once; the expanded detail does not repeat the status chip the line
+ * already shows. Everything diagnostic (branch, summary, tokens, merge
+ * result) and every action live in the detail below, opened by clicking
  * the row. Only one row is open at a time, so the board cannot turn into a
  * stack of cards again.
  *
@@ -786,9 +783,6 @@ function SuperSessionRow({
             {chip.icon}
             <span className="text-ui-micro font-medium">{chip.label}</span>
           </span>
-          {/* 真实阶段轨：只画发生过的节点（派生见 shared/super-timeline.ts）。
-              折叠行空间紧张，窄容器下标签自动收起，只留圆点与连接线。 */}
-          <SuperTimeline session={session} labeled compact className="shrink" />
           <span className="min-w-0 flex-1 truncate text-ui-label font-medium" title={titleHint}>
             {session.title}
           </span>
@@ -818,16 +812,8 @@ function SuperSessionRow({
 
       {open && (
         <div className="flex flex-col gap-2 px-2 pb-2 pt-0.5">
-          {/* Same triple encoding as the collapsed row (icon + label +
-              colour) — one status language, not two. */}
-          <div className="flex min-w-0 items-center gap-2">
-            <Chip tone={chip.tone}>
-              {chip.icon}
-              {chip.label}
-            </Chip>
-            {/* 展开态空间充足：同一个组件，标签常显。 */}
-            <SuperTimeline session={session} labeled />
-          </div>
+          {/* 阶段轨只在展开后出现一次：折叠行只报状态，展开区不再重复状态 chip。 */}
+          <SuperTimeline session={session} labeled />
 
           {preview && (
             <div className="whitespace-pre-wrap break-words text-ui-caption text-muted-foreground">
