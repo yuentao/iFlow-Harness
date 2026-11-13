@@ -419,3 +419,56 @@ describe("Super Agent 看板亚克力材质规则", () => {
     expect(css).toMatch(/\.super-board-surface\.shadow-panel\s*\{[^}]*var\(--acrylic-edge\)/);
   });
 });
+
+describe("Super Agent 看板子会话行 hover 表面", () => {
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  const cls = (el: Element): string => el.getAttribute("class") ?? "";
+
+  it("整行是唯一 hover 表面：行内只有一个元素带 hover:bg-accent", () => {
+    render([session({ startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+
+    const row = rowTrigger().parentElement as HTMLElement;
+    expect(row).toBeTruthy();
+    // 行容器持有行级高亮，数值不变。
+    expect(cls(row)).toContain("hover:bg-accent/30");
+
+    // 行自身 + 全部后代一起算，带 hover:bg-accent 的元素恰好一个（就是行）。
+    const withAccent = [row, ...Array.from(row.querySelectorAll("*"))].filter((el) =>
+      cls(el).includes("hover:bg-accent"),
+    );
+    expect(withAccent).toHaveLength(1);
+    expect(withAccent[0]).toBe(row);
+
+    // 行触发器不再自绘深一档的 hover。
+    expect(cls(rowTrigger())).not.toContain("hover:bg-accent/60");
+  });
+
+  it("行内中断按钮不自绘底色，只保留 danger 文字色响应", () => {
+    render([session({ startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+
+    const row = rowTrigger().parentElement as HTMLElement;
+    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断该子会话"]');
+    expect(cancel).toBeTruthy();
+    // 不出现第三层底色（danger 的 destructive/10 或任何 hover 背景）。
+    expect(cls(cancel!)).not.toContain("hover:bg-");
+    expect(cls(cancel!)).toContain("hover:text-destructive");
+  });
+
+  it("看板头部折叠开关保持默认的自绘 hover（不受行级收敛影响）", () => {
+    render();
+    const headerSwitch = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="展开子会话看板"]',
+    );
+    expect(headerSwitch).toBeTruthy();
+    expect(cls(headerSwitch!)).toContain("hover:bg-accent/60");
+  });
+});

@@ -1206,6 +1206,7 @@ export function IconButton({
   label,
   size = "md",
   tone = "default",
+  hoverSurface = "self",
   className = "",
   ref,
   ...rest
@@ -1215,14 +1216,25 @@ export function IconButton({
   label: string;
   size?: "md" | "sm";
   tone?: "default" | "danger" | "primary";
+  /**
+   * Which element paints the hover tint.
+   * - `"self"` (default): the icon button paints its own tint.
+   * - `"row"`: defer to the row that contains it — a row-level action must not
+   *   add a third tint inside an already row-highlighted surface. The tone's
+   *   text-colour response is kept.
+   */
+  hoverSurface?: "self" | "row";
   ref?: Ref<HTMLButtonElement>;
 }) {
+  const rowSurface = hoverSurface === "row";
   const toneClass =
     tone === "danger"
-      ? "hover:bg-destructive/10 hover:text-destructive"
+      ? `${rowSurface ? "" : "hover:bg-destructive/10 "}hover:text-destructive`
       : tone === "primary"
-        ? "text-primary hover:bg-accent/60"
-        : "hover:bg-surface hover:text-foreground";
+        ? `text-primary${rowSurface ? "" : " hover:bg-accent/60"}`
+        : rowSurface
+          ? "hover:text-foreground"
+          : "hover:bg-surface hover:text-foreground";
   return (
     <button
       type="button"
@@ -1256,16 +1268,27 @@ export function DisclosureButton({
   expanded,
   children,
   className = "",
+  hoverSurface = "self",
   ...rest
 }: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "aria-expanded"> & {
   expanded: boolean;
   children: ReactNode;
+  /**
+   * Which element paints the hover tint.
+   * - `"self"` (default): the button is its own hover surface — used by the
+   *   board header switch and the folded finished-children group.
+   * - `"row"`: the surrounding row owns the single hover surface (child rows).
+   *   The button must not paint its own narrower tint on top of it — that
+   *   reads as two stacked highlight bars of different width and depth.
+   */
+  hoverSurface?: "self" | "row";
 }) {
+  const hover = hoverSurface === "row" ? "" : " hover:bg-accent/60";
   return (
     <button
       type="button"
       aria-expanded={expanded}
-      className={`press flex items-center gap-1.5 text-left text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/60 ${className}`}
+      className={`press flex items-center gap-1.5 text-left text-ui-label font-medium text-foreground transition-colors duration-200${hover} ${className}`}
       {...rest}
     >
       {children}
