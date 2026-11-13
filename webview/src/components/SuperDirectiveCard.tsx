@@ -9,19 +9,21 @@
  *
  *  - `super-agent`          → 每个任务书一张独立卡片（标题 + 正文 + 附件）；
  *  - `super-agent-actions`  → 子会话操作卡（动作 + 目标子会话）；
+ *  - 围栏未收栏（流式）      → 「正在编写任务书…」占位卡（不展示载荷、不宣称已派发）；
  *  - 其它 `super-agent-*`   → 原始协议块卡（语言名 + 长度，不整段回灌）；
  *  - 非法 JSON / 形状不符   → 原始协议块卡（含原因），绝不弹 toast。
  *
  * 切分在 shared/super-agent.ts 的 `splitSuperDirectiveSegments`（纯函数，可单测）；
  * 这里只负责投影。它走的判定链与宿主派发同源（围栏 + 工具调用式载荷），所以「宿主
  * 派发了」与「转录出卡片」永远同时发生 —— 只认围栏的旧实现会让工具调用式载荷既派发
- * 成功又显示成一堵 JSON 墙。载荷未收全时纯函数不会切出 directive 段，整段仍走
- * Markdown（普通代码块）—— 流式中间态因此没有半截卡片，收栏后才切换。
+ * 成功又显示成一堵 JSON 墙。载荷未收全时纯函数切出 `pending` 段，这里渲染成占位卡：
+ * 既不把半截围栏交回 Markdown（那正是用户盯着的 JSON 墙），也不伪装成已派发 ——
+ * 收栏后占位卡才跃变为任务卡。
  *
  * 宿主派发不经过本文件：`src/panel/panel.ts` 仍按原逻辑扫描同一段文本。
  */
 import { Fragment, useMemo, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, FileWarning, ListChecks, Users } from "lucide-react";
+import { ChevronDown, ChevronUp, FileWarning, ListChecks, Loader2, Users } from "lucide-react";
 import { t } from "../i18n";
 import {
   splitSuperDirectiveSegments,
@@ -398,29 +400,61 @@ export function SuperDirectiveCard({ segment }: { segment: DirectiveSegment }) {
 }
 
 /**
+ * 围栏已开栏、载荷还没收全：转录里给一张**进行中**占位卡。
+ *
+ * 旧实现把未闭合围栏整段交给 Markdown，于是主 Agent 写任务书的整个过程里，用户
+ * 盯着的是一堵原始 JSON（任务书越长盯得越久）。这里只说明「还在写」：
+ *  - 不展示任何载荷原文（半截 JSON 对用户没有信息量）；
+ *  - 不出现成功勾 / primary 按钮 / 任何「已派发」语义 —— 宿主此刻确实还没派发；
+ *  - 不挂流式 caret：占位卡本身就是输出终点。
+ */
+function PendingDirectiveCard({ language }: { language: string }) {
+  return (
+    <div className={CARD} data-testid="super-directive-pending" role="status">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <Loader2
+          className={`${ICON_INLINE} shrink-0 animate-spin text-muted-foreground`}
+          aria-hidden="true"
+        />
+        <span className="min-w-0 flex-1 truncate text-ui-label font-medium text-foreground/90">
+          {language === "super-agent-actions"
+            ? t("正在编写子会话操作…")
+            : t("正在编写任务书…")}
+        </span>
+        <span className="shrink-0 text-ui-micro text-muted-foreground">{t("收栏后派发")}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
  * 助手正文的统一入口：没有协议围栏时原样交给 Markdown（与改动前逐字节一致，
  * 零回归面）；有围栏时按片段渲染，文本段仍走完整的 Markdown 链路（段落、列表、
- * 代码块、mermaid 等全都不丢）。
+ * 代码块、mermaid 等全都不丢）。未收栏的围栏渲染成「正在编写任务书…」占位卡
+ * （见 {@link PendingDirectiveCard}），绝不把半截载荷交回 Markdown。
  *
- * 流式 caret 只挂在**最后一段且非空**的文本上：若尾巴是一张卡片，卡片本身就
- * 是输出终点，再挂个光标没有意义（卡片收栏前根本不会出现）。
+ * 流式 caret 只挂在**最后一段且非空**的文本上：尾巴若是卡片（任务卡或 pending
+ * 占位卡），卡片本身就是输出终点，再挂个光标没有意义。
  */
 export function AssistantText({ text, streamCaret = false }: { text: string; streamCaret?: boolean }) {
   const segments = useMemo(() => splitSuperDirectiveSegments(text), [text]);
   const onlyText = segments.length === 1 && segments[0]?.kind === "text";
   if (onlyText) return <Markdown text={text} streamCaret={streamCaret} />;
+  // pending 段永远在末尾（它是「正文到此为止」）：尾巴不是非空文本段就不挂 caret。
   const tail = segments[segments.length - 1];
   const caretIndex =
     tail && tail.kind === "text" && tail.text.trim() ? segments.length - 1 : -1;
   return (
     <div className="super-directive-segments">
-      {segments.map((segment, index) =>
-        segment.kind === "text" ? (
-          <Markdown key={index} text={segment.text} streamCaret={index === caretIndex} />
-        ) : (
-          <SuperDirectiveCard key={index} segment={segment} />
-        ),
-      )}
+      {segments.map((segment, index) => {
+        if (segment.kind === "text") {
+          return <Markdown key={index} text={segment.text} streamCaret={index === caretIndex} />;
+        }
+        if (segment.kind === "pending") {
+          return <PendingDirectiveCard key={index} language={segment.language} />;
+        }
+        return <SuperDirectiveCard key={index} segment={segment} />;
+      })}
     </div>
   );
 }

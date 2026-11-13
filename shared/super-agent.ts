@@ -3031,14 +3031,15 @@ export function reportForSession(
 // 于是「宿主已经派发、转录仍是一堵 JSON 墙」（用户实测截图 2026-11-12 —— 看板上有
 // 「等待子会话汇报」，转录里却看不到委派卡）。
 //
-// 流式策略：载荷收全之前不渲染卡片（整段按原样留给 Markdown），收全后才切换成
-// 卡片。理由：
-// ① 未收全的正文是半截 JSON，此时解析必然失败；若此刻就渲染「原始协议块」
-//    卡片，流式期间会反复闪成「解析失败」，比普通代码块更糟；
-// ② 宿主同样要等载荷收全才派发 —— 渲染与派发在同一时刻切换，用户看到卡片出现
-//    就等于这条指令已经完整；
-// ③ 没有「解析中」的临时 UI，未收全时的行为与改动前逐字节一致（普通代码
-//    块），失败面最小。代价只是收栏那一瞬间文字从代码块跃变为卡片。
+// 流式策略：载荷收全之前**不**渲染任务卡（半截 JSON 解析必然失败，闪成「解析
+// 失败」比什么都糟），但也**绝不**把半截围栏交回 Markdown —— 主 Agent 写一份长
+// 任务书要几十秒，那段时间用户盯着的就是一堵原始 JSON（任务书越长盯得越久）。
+// 未收全时切一个 `pending` 段，转录渲染成「正在编写任务书…」占位卡：
+// ① 占位卡只说明「还在写」，**不展示任何载荷原文**，也**不宣称已派发**（宿主
+//    同样要等收栏才派发，此刻确实还没派）；
+// ② 开栏行（`region.start` 就是开栏行行首）与半截载荷都不进文本段，否则
+//    Markdown 会再开一个代码块，绕回那堵 JSON 墙；
+// ③ 收栏后下一次调用切成真卡片 —— 占位卡跃变为任务卡的瞬间，与宿主派发同刻。
 
 export interface SuperDirectiveTask {
   title: string;
@@ -3092,6 +3093,17 @@ export type SuperDirectiveSegment =
       /** 协议块原文：围栏含开栏与收栏行；工具调用式含包裹标记与紧随的收栏行。 */
       raw: string;
       display: SuperDirectiveDisplay;
+    }
+  | {
+      /**
+       * 围栏已开栏、载荷还没收全（流式中间态）。
+       *
+       * 只带围栏语言，**刻意不携带任何载荷原文** —— 半截 JSON 对用户没有信息量，
+       * 转录把它渲染成「正在编写任务书…」占位卡。它明确**不是**「已派发」：
+       * 宿主也要等收栏才派发，收栏后这个段才会变成 `directive`。
+       */
+      kind: "pending";
+      language: string;
     };
 
 /**
@@ -3236,17 +3248,30 @@ function describeSuperDirective(language: string, body: string): SuperDirectiveD
  *  - 工具调用式载荷：标记 + 不远处的 JSON，卡片边界把包裹标记与紧随的收栏行
  *    一并吞掉（{@link toolStyleRegionStart} / {@link toolStyleRegionEnd}）。
  *
- * 围栏之外的内容原样保留给 Markdown。未闭合的围栏不切分：剩余整段仍是文本段
- * （Markdown 会照常渲染成代码块），收栏后下一次调用才切成卡片 —— 与宿主「等收栏
- * 才派发」在同一时刻切换。工具调用式载荷同理：JSON 没收全就不切。
+ * 围栏之外的内容原样保留给 Markdown。未闭合的围栏切出一个 `pending` 段：
+ * `region.start` 就是开栏行行首，所以开栏行与已写出的半截载荷都不进文本段
+ * （否则 Markdown 会再开一个代码块，用户盯着一堵原始 JSON），占位卡由转录渲染；
+ * 收栏后下一次调用才切成卡片 —— 与宿主「等收栏才派发」在同一时刻切换。工具
+ * 调用式载荷仍保持原行为：JSON 没收全就不切，整段留在文本段里。
  */
 export function splitSuperDirectiveSegments(text: string): SuperDirectiveSegment[] {
   if (!SUPER_RENDER_PROBE.test(text)) return text ? [{ kind: "text", text }] : [];
   const segments: SuperDirectiveSegment[] = [];
   let textStart = 0;
   for (const region of findSuperProtocolRegions(text)) {
-    // 载荷没收全（流式中间态）：整段留给 Markdown，等收齐再切。
-    if (region.pending) break;
+    if (region.pending) {
+      // 围栏已开栏、载荷没收全（流式中间态）：正文到此为止。
+      //
+      // 开栏行（`region.start` = `open.lineStart`）与半截载荷都不进文本段 ——
+      // 留在文本段里 Markdown 会再开一个代码块，用户就盯着一堵原始 JSON（任务书
+      // 越长盯得越久）。改切一个 pending 段，渲染成「正在编写任务书…」占位卡；
+      // 占位卡不展示载荷，也不宣称已派发。
+      if (region.start > textStart) {
+        segments.push({ kind: "text", text: text.slice(textStart, region.start) });
+      }
+      segments.push({ kind: "pending", language: region.language });
+      return segments;
+    }
     // 工具调用式载荷的卡片边界要把包裹标记与紧随的收栏行一并吞掉。
     const start = region.language === TOOL_STYLE_MARKER ? toolStyleRegionStart(text, region.start) : region.start;
     const end = region.language === TOOL_STYLE_MARKER ? toolStyleRegionEnd(text, region.end) : region.end;
