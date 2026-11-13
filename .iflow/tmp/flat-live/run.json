@@ -1,0 +1,368 @@
+﻿{
+  "step1.boot": {
+    "pass": true,
+    "viewport": {
+      "w": 520,
+      "h": 800
+    }
+  },
+  "step2.board": {
+    "autoExpanded": true,
+    "ariaExpanded": "true",
+    "pass": true
+  },
+  "step3.dialog": {
+    "rowClick": {
+      "pass": true,
+      "text": "运行中 修复登录跳转 1m 2s"
+    },
+    "liveClick": {
+      "pass": true
+    },
+    "dialog": {
+      "pass": true,
+      "aria": "子会话实时操作",
+      "heading": "修复登录跳转"
+    },
+    "pass": true
+  },
+  "step5a.gaps": {
+    "pass": true,
+    "blockCount": 5,
+    "gaps": [
+      8,
+      8,
+      8,
+      8
+    ],
+    "rects": [
+      {
+        "top": 192,
+        "bottom": 237.5,
+        "h": 45.5,
+        "cls": "stream-in group"
+      },
+      {
+        "top": 245.5,
+        "bottom": 323.25,
+        "h": 77.75,
+        "cls": "overflow-hidden rounded-sm"
+      },
+      {
+        "top": 331.25,
+        "bottom": 568.98,
+        "h": 237.73,
+        "cls": "tool-card tool-card-flat tool-card-edit status-fade overflow-hidden ro"
+      },
+      {
+        "top": 576.98,
+        "bottom": 756.98,
+        "h": 180,
+        "cls": "tool-card tool-card-flat tool-card-execute status-fade overflow-hidden"
+      },
+      {
+        "top": 764.98,
+        "bottom": 842.98,
+        "h": 78,
+        "cls": "tool-card tool-card-flat tool-card-execute status-fade overflow-hidden"
+      }
+    ],
+    "stackClass": "flex flex-col gap-2",
+    "pane": {
+      "scrollTop": 0,
+      "scrollHeight": 667,
+      "clientHeight": 503
+    }
+  },
+  "step5b.flatCards": {
+    "pass": false,
+    "count": 3,
+    "paneBg": "oklab(0.985 -0.000261467 -0.00298858 / 0.6)",
+    "rows": [
+      {
+        "cls": "tool-card tool-card-flat tool-card-edit status-fade overflow-hidden rounded-sm status-completed",
+        "pseudoBefore": {
+          "content": "none",
+          "backgroundImage": "none",
+          "animation": "none"
+        },
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "backgroundImage": "none",
+        "boxShadow": "none",
+        "borderRadius": "4px",
+        "headerPadLeft": "8px",
+        "headerPadTop": "4px",
+        "headerPadBottom": "4px"
+      },
+      {
+        "cls": "tool-card tool-card-flat tool-card-execute status-fade overflow-hidden rounded-sm status-in_progress",
+        "pseudoBefore": {
+          "content": "\"\"",
+          "backgroundImage": "linear-gradient(105deg, rgba(0, 0, 0, 0) 15%, oklab(0.58 0.0382026 -0.216658 / 0.18) 50%, ",
+          "animation": "tool-card-progress"
+        },
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "backgroundColor": "oklab(0.9832 0.0015281 -0.00866631)",
+        "backgroundImage": "none",
+        "boxShadow": "none",
+        "borderRadius": "4px",
+        "headerPadLeft": "8px",
+        "headerPadTop": "4px",
+        "headerPadBottom": "4px"
+      },
+      {
+        "cls": "tool-card tool-card-flat tool-card-execute status-fade overflow-hidden rounded-sm status-completed",
+        "pseudoBefore": {
+          "content": "none",
+          "backgroundImage": "none",
+          "animation": "none"
+        },
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "backgroundImage": "none",
+        "boxShadow": "none",
+        "borderRadius": "4px",
+        "headerPadLeft": "8px",
+        "headerPadTop": "4px",
+        "headerPadBottom": "4px"
+      }
+    ]
+  },
+  "step5c.affordances": {
+    "pass": true,
+    "hits": [],
+    "textHits": [],
+    "buttons": [
+      "收起",
+      "思考过程",
+      "auth.ts",
+      "实时输出",
+      "查看原始参数",
+      "操作输出"
+    ]
+  },
+  "step5d.rawParams": {
+    "pass": true,
+    "click": {
+      "pass": true
+    },
+    "count": 2,
+    "rows": [
+      {
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "borderRadius": "0px",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "paddingLeft": "8px",
+        "h": 27.5
+      },
+      {
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "borderRadius": "0px",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "paddingLeft": "8px",
+        "h": 66.5
+      }
+    ]
+  },
+  "step5e.output": {
+    "pass": true,
+    "click": {
+      "pass": true
+    },
+    "count": 3,
+    "rows": [
+      {
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "borderRadius": "0px",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "paddingLeft": "8px",
+        "h": 27.5,
+        "head": "已应用 1 处改动"
+      },
+      {
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "borderRadius": "0px",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "paddingLeft": "8px",
+        "h": 66.5,
+        "head": " RUN  v5.0.0 test/auth.t"
+      },
+      {
+        "borderWidth": [
+          "0px",
+          "0px",
+          "0px",
+          "0px"
+        ],
+        "borderRadius": "0px",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "paddingLeft": "8px",
+        "h": 164,
+        "head": " RUN  v5.0.0 test/sessio"
+      }
+    ]
+  },
+  "step5f.thought": {
+    "pass": true,
+    "click": {
+      "pass": true,
+      "wasOpen": true
+    },
+    "body": {
+      "borderTopWidth": "0px",
+      "backgroundColor": "rgba(0, 0, 0, 0)",
+      "paddingLeft": "8px",
+      "paddingTop": "4px",
+      "height": 50.3
+    },
+    "collapseHost": {
+      "backgroundColor": "rgba(0, 0, 0, 0)",
+      "borderTopWidth": "0px"
+    },
+    "cardWrap": {
+      "backgroundColor": "rgba(0, 0, 0, 0)",
+      "borderTopWidth": "0px",
+      "borderRadius": "0px",
+      "boxShadow": "none"
+    }
+  },
+  "step5g.narrow": {
+    "pass": true,
+    "pane": {
+      "scrollWidth": 292,
+      "clientWidth": 292,
+      "scrollHeight": 958,
+      "clientHeight": 481
+    },
+    "viewport": {
+      "w": 360,
+      "h": 800
+    },
+    "bodyScroll": {
+      "scrollWidth": 360,
+      "clientWidth": 360
+    },
+    "headers": [
+      {
+        "label": "替换内容",
+        "statusText": "已完成",
+        "statusRight": 305,
+        "paneRight": 331,
+        "inside": true,
+        "clipped": false,
+        "headerScroll": 276,
+        "headerClient": 276
+      },
+      {
+        "label": "执行命令",
+        "statusText": "执行中",
+        "statusRight": 305,
+        "paneRight": 331,
+        "inside": true,
+        "clipped": false,
+        "headerScroll": 276,
+        "headerClient": 276
+      },
+      {
+        "label": "执行命令",
+        "statusText": "已完成",
+        "statusRight": 305,
+        "paneRight": 331,
+        "inside": true,
+        "clipped": false,
+        "headerScroll": 276,
+        "headerClient": 276
+      }
+    ]
+  },
+  "step6.mainCard": {
+    "pass": true,
+    "close": {
+      "pass": true
+    },
+    "dialogClosed": true,
+    "cardCount": 5,
+    "cards": [
+      {
+        "cls": "tool-card tool-card-execute stream-in status-fade card-lift overflow-hidden rounded-lg bor",
+        "backgroundColor": "oklab(0.9832 0.0015281 -0.00866631)",
+        "boxShadow": true,
+        "borderRadius": "8px",
+        "borderWidth": "1px"
+      },
+      {
+        "cls": "tool-card tool-card-search stream-in status-fade card-lift overflow-hidden rounded-lg bord",
+        "backgroundColor": "oklch(1 0 0)",
+        "boxShadow": true,
+        "borderRadius": "8px",
+        "borderWidth": "1px"
+      },
+      {
+        "cls": "tool-card tool-card-mcp stream-in status-fade card-lift overflow-hidden rounded-lg border ",
+        "backgroundColor": "oklch(1 0 0)",
+        "boxShadow": true,
+        "borderRadius": "8px",
+        "borderWidth": "1px"
+      },
+      {
+        "cls": "tool-card tool-card-read stream-in status-fade card-lift overflow-hidden rounded-lg border",
+        "backgroundColor": "oklch(1 0 0)",
+        "boxShadow": true,
+        "borderRadius": "8px",
+        "borderWidth": "1px"
+      },
+      {
+        "cls": "tool-card tool-card-edit stream-in status-fade card-lift overflow-hidden rounded-lg border",
+        "backgroundColor": "oklch(1 0 0)",
+        "boxShadow": true,
+        "borderRadius": "8px",
+        "borderWidth": "1px"
+      }
+    ],
+    "terminalOpenButtons": 1
+  },
+  "shots": [
+    "j:\\git\\iflow-harness\\.iflow\\super\\worktrees\\实时弹框-flat-彻底化-mwfd1pg7-x\\.iflow\\tmp\\flat-live\\01-dialog.png",
+    "j:\\git\\iflow-harness\\.iflow\\super\\worktrees\\实时弹框-flat-彻底化-mwfd1pg7-x\\.iflow\\tmp\\flat-live\\02-raw-params.png",
+    "j:\\git\\iflow-harness\\.iflow\\super\\worktrees\\实时弹框-flat-彻底化-mwfd1pg7-x\\.iflow\\tmp\\flat-live\\03-output.png",
+    "j:\\git\\iflow-harness\\.iflow\\super\\worktrees\\实时弹框-flat-彻底化-mwfd1pg7-x\\.iflow\\tmp\\flat-live\\04-thought.png",
+    "j:\\git\\iflow-harness\\.iflow\\super\\worktrees\\实时弹框-flat-彻底化-mwfd1pg7-x\\.iflow\\tmp\\flat-live\\05-narrow.png",
+    "j:\\git\\iflow-harness\\.iflow\\super\\worktrees\\实时弹框-flat-彻底化-mwfd1pg7-x\\.iflow\\tmp\\flat-live\\06-main-card.png"
+  ]
+}
