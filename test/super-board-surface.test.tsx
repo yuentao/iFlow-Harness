@@ -18,11 +18,10 @@
  *  - the panel keeps the panel-sized drop, the rounded/overflow-clipped box,
  *    the stream-in entrance and the header-anchored position.
  *
- * The stylesheet half still pins the `.super-board-surface` rules (the class
- * stays available) and its opaque fallback where backdrop-filter is missing.
+ * The old `.super-board-surface` stylesheet rules were removed with the
+ * overlay (dead CSS — nothing references the class any more); `.acrylic-pop`
+ * already carries the near-opaque tint this panel needs.
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -413,34 +412,6 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
     expect(described).toContain("启动");
     expect(described).toContain("进行中");
     expect(described).toContain(longTodo);
-  });
-});
-
-describe("Super Agent 看板亚克力材质规则", () => {
-  const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
-
-  it("自带 backdrop-filter（看板不在任何 backdrop-filter 祖先内，能真正采样背后的转录）", () => {
-    const block = css.match(/\.super-board-surface\s*\{([^}]*)\}/);
-    expect(block).toBeTruthy();
-    expect(block![1]).toMatch(/backdrop-filter:\s*blur\(/);
-  });
-
-  it("底色由既有亚克力 tint 混合而来，且无 backdrop-filter 时退回不透明卡片色", () => {
-    const block = css.match(/\.super-board-surface\s*\{([^}]*)\}/);
-    expect(block![1]).toMatch(/color-mix\(in oklab, var\(--acrylic-pop-tint\)/);
-    // No blur → nothing hides the transcript text → the shelf must go opaque.
-    const fallback = css.match(
-      /@supports not \(backdrop-filter: blur\(1px\)\)\s*\{([\s\S]*?)\n\}/,
-    );
-    expect(fallback).toBeTruthy();
-    expect(fallback![1]).toMatch(/\.super-board-surface\s*\{[^}]*background-color:\s*var\(--card\)/);
-  });
-
-  it("两档阴影都走既有 token，并在亚克力表面上保留内描边", () => {
-    expect(css).toMatch(/\.super-board-surface\.shadow-float\s*\{[^}]*var\(--shadow-float\)/);
-    expect(css).toMatch(/\.super-board-surface\.shadow-panel\s*\{[^}]*var\(--shadow-panel\)/);
-    expect(css).toMatch(/\.super-board-surface\.shadow-float\s*\{[^}]*var\(--acrylic-edge\)/);
-    expect(css).toMatch(/\.super-board-surface\.shadow-panel\s*\{[^}]*var\(--acrylic-edge\)/);
   });
 });
 
