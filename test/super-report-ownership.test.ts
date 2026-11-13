@@ -358,10 +358,14 @@ describe("子会话汇报 · 归属与投递时机", () => {
     });
   };
 
-  it("只有思考通道写了完整委派块 → 派发 1 个子会话", () => {
+  it("思考通道里的委派围栏不是指令：合法/写坏的载荷都不派发、不弹提示", () => {
+    // 合法围栏只写在思考里：思考通道不进委派扫描器，不派发、也不报「已派发」。
     chunk("agent_thought_chunk", directive("改登录", "修好 src/auth.ts"));
-    expect(manager.spawn).toHaveBeenCalledTimes(1);
-    expect(toasts.some((t) => t.message.includes("已派发 1 个子会话"))).toBe(true);
+    // 写坏的载荷同样不被扫描：不能因此弹 invalidBlocks 的「无法解析」提示。
+    chunk("agent_thought_chunk", "```super-agent\n{ 这不是 JSON }\n```");
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(toasts.some((t) => t.message.includes("已派发"))).toBe(false);
+    expect(toasts.some((t) => t.message.includes("无法解析"))).toBe(false);
   });
 
   it("思考块与正文块载荷相同 → 只派发 1 个子会话（不发「已派发 0 个」）", () => {
@@ -375,22 +379,26 @@ describe("子会话汇报 · 归属与投递时机", () => {
     expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(1);
   });
 
-  it("思考块与正文块载荷不同 → 各派发 1 个子会话", () => {
+  it("思考块与正文块载荷不同 → 只有正文通道的那一份派发", () => {
     chunk("agent_thought_chunk", directive("改登录", "修好 src/auth.ts"));
+    expect(manager.spawn).not.toHaveBeenCalled();
     chunk("agent_message_chunk", directive("改注册", "修好 src/register.ts"));
-    expect(manager.spawn).toHaveBeenCalledTimes(2);
-    // 计数按**每次扫描批次**报实际生效的派发数：两条流各派发 1 个。
-    expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(2);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    // 主通道派发照常提示；思考通道既不派发也不拖出「无法解析」提示。
+    expect(toasts.filter((t) => t.message.includes("已派发 1 个子会话"))).toHaveLength(1);
+    expect(toasts.some((t) => t.message.includes("无法解析"))).toBe(false);
   });
 
   it("换会话/恢复时清空去重账本：同一载荷在新会话里可以再派发", () => {
     const payload = directive("改登录", "修好 src/auth.ts");
+    // 思考通道先写出同一份载荷：不派发、也不占去重账本。
     chunk("agent_thought_chunk", payload);
+    expect(manager.spawn).not.toHaveBeenCalled();
     chunk("agent_message_chunk", payload);
     expect(manager.spawn).toHaveBeenCalledTimes(1);
 
     p.resetSuperDirectiveScans();
-    chunk("agent_thought_chunk", payload);
+    chunk("agent_message_chunk", payload);
     expect(manager.spawn).toHaveBeenCalledTimes(2);
   });
 });
