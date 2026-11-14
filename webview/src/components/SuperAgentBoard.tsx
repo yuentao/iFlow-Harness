@@ -1061,12 +1061,25 @@ function SuperSessionRow({
               <span className="min-w-0 flex-1 truncate">
                 {releasedIsolationLabel(session.isolation)}
               </span>
-            ) : (
+            ) : session.isolation.branch || session.isolation.path ? (
               <span className="min-w-0 flex-1 truncate font-mono" title={`${session.isolation.branch ?? ""}\n${session.isolation.path}`}>
                 {session.isolation.branch ?? session.isolation.path}
               </span>
+            ) : (
+              // Placeholder isolation: the host has not created the worktree
+              // yet (queued / preparing), so `path` is "" and only `note`
+              // says anything. Rendering the empty string made the row look
+              // like the isolation info was lost.
+              <span className="min-w-0 flex-1 truncate" title={session.isolation.note}>
+                {session.isolation.note}
+              </span>
             )}
-            {session.isolation.kind === "directory" && (
+            {/* A `directory` isolation with an EMPTY path is the placeholder,
+                not a degradation: the row's status chip already says
+                「排队中」/「准备中」, and a warning chip here reads as
+                "worktree creation failed" (a real misreading happened). Only
+                an actual fallback directory earns the chip. */}
+            {session.isolation.kind === "directory" && session.isolation.path !== "" && (
               <Chip tone="warning" title={session.isolation.note}>
                 {t("仅目录隔离")}
               </Chip>

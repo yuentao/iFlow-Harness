@@ -1019,3 +1019,51 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expect(container.textContent).not.toContain("工作目录与分支已清理");
   });
 });
+
+describe("Super Agent 看板隔离行：准备中不误报降级", () => {
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("排队/准备中的占位隔离不显示「仅目录隔离」，改为显示宿主占位说明", () => {
+    render([
+      session({
+        status: "preparing",
+        queued: true,
+        isolation: { kind: "directory", path: "", note: "正在准备隔离环境" },
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    // 状态 chip 已经写着「排队中」，再叠一个警告色降级 chip 只会误读成
+    // 「worktree 创建失败」——占位态不得出现。
+    expect(container.textContent).toContain("排队中");
+    expect(container.textContent).not.toContain("仅目录隔离");
+    // 隔离行不能渲染空字符串：宿主给的中文占位说明要能看到。
+    expect(container.textContent).toContain("正在准备隔离环境");
+  });
+
+  it("真降级（directory + 非空 path）仍显示「仅目录隔离」", () => {
+    render([
+      session({
+        isolation: {
+          kind: "directory",
+          path: "/tmp/fallback",
+          note: "worktree 创建失败（fatal: not a git repository），仅目录隔离",
+        },
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    expect(container.textContent).toContain("仅目录隔离");
+    // 真降级时定位文本仍是那个目录，而不是 note。
+    expect(container.textContent).toContain("/tmp/fallback");
+  });
+});
