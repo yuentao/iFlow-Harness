@@ -76,7 +76,9 @@ import {
   buildSuperDigest,
   buildSuperMergeRequestPrompt,
   clampMaxConcurrentSuperSessions,
+  clampMaxSuperWorktrees,
   DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+  DEFAULT_MAX_SUPER_WORKTREES,
   extractSuperActions,
   fromPersistedSuperSession,
   isTerminalSuperStatus,
@@ -6608,7 +6610,14 @@ export class ChatPanel implements vscode.Disposable {
     // 恢复归档时顺带清扫磁盘上的残留 worktree（只在恢复时触发，不是每次
     // 快照都跑）：上次运行遗留的、已经并入当前分支的空 worktree 与分支，
     // 在这里被收掉 —— 否则它们会一直堆在 `.iflow/super/worktrees/` 下。
-    const swept = await this.getSuperAgent()?.sweepStaleWorktrees?.();
+    // 超过 `iflow.superAgent.maxWorktrees` 的干净残留（含未合并的）按目录
+    // mtime 从旧到新回收目录、保留分支。
+    const maxKeep = clampMaxSuperWorktrees(
+      vscode.workspace
+        .getConfiguration("iflow")
+        .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
+    );
+    const swept = await this.getSuperAgent()?.sweepStaleWorktrees?.({ maxKeep });
     if (swept && (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0)) {
       this.log.info(
         `super agent: 残留清扫 — 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
@@ -6838,6 +6847,19 @@ export class ChatPanel implements vscode.Disposable {
           vscode.workspace
             .getConfiguration("iflow")
             .get<number>("superAgent.maxConcurrent", DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS),
+        ),
+      // 默认关闭 = 子会话正常完成后回收工作目录（分支一律保留）。失败/中断
+      // 从不回收，重试要复用现场。每次实时读，改完对下一个结束的子会话生效。
+      keepWorktree: () =>
+        vscode.workspace
+          .getConfiguration("iflow")
+          .get<boolean>("superAgent.keepWorktree", false),
+      // 磁盘上最多保留多少个已结束子会话的工作目录（0 = 不限制）。
+      maxWorktrees: () =>
+        clampMaxSuperWorktrees(
+          vscode.workspace
+            .getConfiguration("iflow")
+            .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
         ),
       log: this.log,
     });
