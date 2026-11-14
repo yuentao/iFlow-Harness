@@ -335,7 +335,10 @@ describe("AssistantText 协议块卡片", () => {
     // 进行中 ≠ 已派发：只有占位卡，没有任何任务卡。
     expect(container.querySelector('[data-testid="super-directive-pending"]')).toBeTruthy();
     expect(text()).toContain("正在编写任务书…");
-    expect(text()).toContain("收栏后派发");
+    // 占位卡只说「正在编写任务书…」：beta 提交 5a687c3「移除冗余文本」把
+    // PendingDirectiveCard 里的「收栏后派发」提示与对应 i18n 键一起下线了
+    // （UI 意图：不重复解释宿主何时派发），此处随之改为负向断言。
+    expect(text()).not.toContain("收栏后派发");
     // 半截载荷绝不交回 Markdown：没有代码块，也不出现原始 JSON。
     expect(container.querySelector("pre code")).toBeNull();
     expect(text()).not.toContain('"tasks"');

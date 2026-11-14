@@ -534,9 +534,6 @@ export interface PendingProfileSwitchUi {
   profileName: string;
 }
 
-/** One user answer: selected labels, or a free-text "Other" answer. */
-export type UserAnswerValue = string | string[];
-
 /** One entry of the per-workspace recent-session list (M4). */
 export interface SessionSummaryUi {
   id: string;
