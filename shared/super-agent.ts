@@ -969,6 +969,16 @@ export interface SuperProtocolRegion {
   start: number;
   /** 区域终点（围栏收栏之后 / 载荷末尾）。 */
   end: number;
+  /**
+   * 消费偏移：宿主拿它当「已扫到哪」（渲染仍用 {@link end} 的完整区间）。
+   *
+   * **行首收栏只消费到该行行首**：流式里行首的 ``` 既可能是收栏，也可能是下一
+   * 帧才补齐语言的**开栏**（这一帧恰好断在 ` ``` ` 与 `super-agent` 之间）。把
+   * 整行吃掉，等语言补齐时这个围栏就再也认不出来了 —— 实测就是这种分片把后面
+   * 那个合法块整段吞掉（宿主零派发、零提示）。紧贴载荷的收栏（`...}````）没有
+   * 这种歧义，等于 {@link end}。
+   */
+  consumedEnd?: number;
   /** 载荷正文（围栏正文 / 工具调用式载荷原文）。 */
   body: string;
   /** 解析出的任务；null = 载荷非法或不是委派载荷。 */
@@ -1077,34 +1087,61 @@ function scanSuperProtocolRegions(
   while (cursor < text.length) {
     const open = findSuperFenceOpen(text, cursor, accept);
     if (!open) break;
-    const resolved = resolveSuperDirectiveBlock(text, open, { language: open.language });
+    let resolved = resolveSuperDirectiveBlock(text, open, { language: open.language });
     if (resolved.kind === "unclosed") {
-      regions.push({
-        language: open.language,
-        start: open.lineStart,
-        end: open.lineStart,
-        body: "",
-        tasks: null,
-        pending: true,
-      });
-      pending = true;
-      break;
+      // 后面已经出现一个**完整**协议围栏 → 这个开栏被模型放弃了（漏收栏 /
+      // 只在工具调用式包裹里写了一半）。一个真正还在流式输出的围栏后面不可能
+      // 已经有一个完整围栏，所以此时可以安全跳过它继续扫，而不是把扫描永久
+      // 钉在这里（旧实现因此把后面那个合法块整段吞掉：零派发、零提示）。
+      if (!hasLaterClosedProtocolFence(text, open, accept)) {
+        // 真·流式中间态：停在开栏处，等后续 chunk 补齐（消费偏移不越过它）。
+        regions.push({
+          language: open.language,
+          start: open.lineStart,
+          end: open.lineStart,
+          body: "",
+          tasks: null,
+          pending: true,
+        });
+        pending = true;
+        break;
+      }
+      // 载荷其实已经写全的委派块：按载荷收尾收口照常派发 —— 一份写全了的委派
+      // 不该因为模型漏写收栏就静默丢失。载荷没写全 / 非法的块只跳过：**不推进
+      // 消费偏移**，它身后的合法围栏照常解析。
+      //
+      // 动作块不走这条路：它的执行在 `extractSuperActions` 里另有一套判定
+      // （同样跳过被放弃的开栏），这里若收口会让转录出卡而宿主没执行。
+      resolved =
+        directiveLangOf(open.language) === "tasks"
+          ? resolveSuperDirectiveBlock(text, open, {
+              language: open.language,
+              allowImplicitClose: true,
+            })
+          : { kind: "unclosed" };
+      if (resolved.kind === "unclosed") {
+        cursor = open.bodyStart;
+        continue;
+      }
     }
     const parsed = open.language === "super-agent" ? parseDirectiveBody(resolved.body) : null;
     // 围栏路径先认领这段载荷的区间：工具调用式路径随后看到重叠就跳过（同一份
     // 载荷只派发一次）。坏块也要认领，否则同一段坏 JSON 会被两条路径各报一次。
     ledger.claim(resolved.bodyStart, resolved.bodyEnd, resolved.body, "fence");
+    const consumed = consumedEndOfClosedRegion(text, resolved);
     regions.push({
       language: open.language,
       start: open.lineStart,
       end: resolved.closeEnd,
+      consumedEnd: consumed,
       body: resolved.body,
       tasks: parsed && parsed.ok ? parsed.tasks : null,
       ...(parsed && !parsed.ok ? { reason: parsed.reason } : {}),
       pending: false,
     });
     fenceSpans.push([open.lineStart, resolved.closeEnd]);
-    cursor = resolved.closeEnd;
+    // 游标必须严格前进（行首收栏回退到行首也不会退到开栏之前）。
+    cursor = consumed > cursor ? consumed : open.bodyStart;
   }
 
   let waitingToolStart: number | undefined;
@@ -1132,6 +1169,53 @@ function scanSuperProtocolRegions(
     regions,
     ...(waitingToolStart === undefined ? {} : { waitingToolStart }),
   };
+}
+
+/**
+ * 这个开栏之后是否已经出现一个**完整**的协议围栏。
+ *
+ * 是 → 当前开栏被模型放弃了（漏了收栏 / 只在工具调用式包裹里写了一半）：一个
+ * 真正还在流式输出的围栏后面不可能已经有一个完整围栏，所以此时可以安全跳过它
+ * 继续扫，而不是把扫描永久钉在这里。探测是有界的（`maxProbes`）—— 连续几个被
+ * 放弃的开栏后面跟一个完整块时，也能一路跳过去。
+ */
+function hasLaterClosedProtocolFence(
+  text: string,
+  open: SuperDirectiveOpen,
+  accept: (language: string) => boolean,
+  maxProbes = 8,
+): boolean {
+  let cursor = open.bodyStart;
+  for (let probe = 0; probe < maxProbes; probe++) {
+    const next = findSuperFenceOpen(text, cursor, accept);
+    if (!next) return false;
+    if (resolveSuperDirectiveBlock(text, next, { language: next.language }).kind === "closed") return true;
+    cursor = next.bodyStart;
+  }
+  return false;
+}
+
+/**
+ * 一个已闭合协议块实际能消费到哪里（宿主消费偏移 / 扫描游标）。
+ *
+ * **行首收栏不能整行算进已消费区间**：流式里行首的 ``` 既可能是收栏，也可能是
+ * 下一帧才补齐语言的**开栏**（这一帧恰好断在 ` ``` ` 与 `super-agent` 之间）。
+ * 把整行吃掉，等语言补齐时这个围栏就再也认不出来了 —— 实测就是这种分片把后面
+ * 那个合法块整段吞掉（宿主零派发、零提示）。所以行首收栏只消费到**该行行首**，
+ * 下一帧从那里重扫：它若真是开栏就会被认出来；它若真是收栏，重扫只会多走一行
+ * （收栏行不是开栏，不产出任何东西，也不会重复派发 —— 载荷已经在区间之外）。
+ *
+ * 紧贴载荷的收栏（`...}````）不存在这种歧义，照旧整段消费。
+ */
+function consumedEndOfClosedRegion(
+  text: string,
+  resolved: Extract<SuperDirectiveResolution, { kind: "closed" }>,
+): number {
+  const lineStart = text.lastIndexOf("\n", resolved.closeAt - 1) + 1;
+  const prefix = text.slice(lineStart, resolved.closeAt);
+  // 收栏落在行首（最多 3 个空格缩进）→ 只消费到行首；否则是粘在载荷尾巴上的
+  // 收栏，整段消费。
+  return /^[ \t]{0,3}$/.test(prefix) ? lineStart : resolved.closeEnd;
 }
 
 /**
@@ -1205,7 +1289,10 @@ function scanSuperDirectives(
       pendingOpen = { lineStart: region.start };
       break;
     }
-    if (region.end > end) end = region.end;
+    // 消费偏移用 consumedEnd（渲染用 region.end 的完整区间）：行首那行 ``` 可能
+    // 是下一帧才补齐语言的开栏，不能整行算进已消费区间（见 consumedEndOfClosedRegion）。
+    const consumedEnd = region.consumedEnd ?? region.end;
+    if (consumedEnd > end) end = consumedEnd;
     // 动作块（super-agent-actions）由 extractSuperActions 处理，这里只跳过。
     if (region.language !== "super-agent") continue;
     if (region.tasks) blocks.push(region.tasks);
@@ -1707,9 +1794,13 @@ function findCloseMarker(
   text: string,
   from: number,
   style: SuperFenceStyle,
+  limit: number = text.length,
 ): FenceCloseMarker | null {
   let at = text.indexOf(style.char, from);
-  while (at !== -1) {
+  // `at < limit`：收栏只能落在**本块的区域**里。越过下一个协议围栏开栏的 ``` 属于
+  // 后面那个块 —— 拿它收口会把后面那个块整段吞掉（`end` 越过一个尚未解析的合法
+  // 围栏，宿主既不派发也不报错，用户以为派了其实没有）。
+  while (at !== -1 && at < limit) {
     let runEnd = at;
     while (runEnd < text.length && text.charAt(runEnd) === style.char) runEnd++;
     const length = runEnd - at;
@@ -1973,7 +2064,23 @@ export interface SuperDirectiveOpen {
  * 同一份载荷于是被两条路径各派发一次（两个子会话、双倍 token、两张重复卡）。
  */
 export type SuperDirectiveResolution =
-  | { kind: "closed"; body: string; closeEnd: number; bodyStart: number; bodyEnd: number }
+  | {
+      kind: "closed";
+      body: string;
+      /** 协议区间的终点（收栏之后；夹了散文时停在载荷收尾）。 */
+      closeEnd: number;
+      /**
+       * 收栏标记（围栏字符）的起点。
+       *
+       * 消费偏移要用它判断「收栏是不是落在行首」—— 落在行首的 ``` 只消费到
+       * 该行行首，下一帧才可能把它补成下一个围栏的开栏（见
+       * `consumedEndOfClosedRegion`）。没有真实收栏（按载荷收尾收口）时等于
+       * `closeEnd`。
+       */
+      closeAt: number;
+      bodyStart: number;
+      bodyEnd: number;
+    }
   | { kind: "unclosed" };
 
 /**
@@ -1995,6 +2102,15 @@ interface CloseCandidate {
   closeEnd: number;
   /** 正文区间的结束偏移（收栏行之前）—— 载荷区间账本用它去重。 */
   bodyEnd: number;
+  /** 收栏标记（围栏字符）的起点。 */
+  closeAt: number;
+}
+
+/** 收栏行的围栏字符起点（跳过最多 3 个空格缩进）。 */
+function closeMarkerAtLine(text: string, lineStart: number): number {
+  let i = lineStart;
+  while (i < text.length && (text.charAt(i) === " " || text.charAt(i) === "\t")) i++;
+  return i;
 }
 
 /**
@@ -2002,21 +2118,28 @@ interface CloseCandidate {
  *
  * 从开栏往后逐个收栏切分正文 —— 任务书正文里自带的 ``` 会把正文切碎，所以
  * 「第一个收栏」未必是块真正的结尾，用候选逐个试才能找到对的那个。
+ *
+ * `limit` 是收栏搜索的上界（下一个协议围栏开栏之前）：越过它的 ``` 属于后面
+ * 那个块，拿它收口会把那个块整段吞掉。
  */
 function collectCloseCandidates(
   text: string,
   bodyStart: number,
   style: SuperFenceStyle,
+  limit: number = text.length,
 ): CloseCandidate[] {
   const out: CloseCandidate[] = [];
+  // 只把上界之前的部分交给 findFence：它按行扫，截断处正好是下一个围栏的行首。
+  const scoped = limit < text.length ? text.slice(0, limit) : text;
   let searchFrom = bodyStart;
   for (let attempt = 0; attempt < MAX_CLOSE_CANDIDATES; attempt++) {
-    const close = findFence(text, searchFrom, (line) => isSuperFenceCloseLine(line, style));
+    const close = findFence(scoped, searchFrom, (line) => isSuperFenceCloseLine(line, style));
     if (!close) break;
     out.push({
       body: text.slice(bodyStart, close.lineStart).trim(),
       closeEnd: close.lineEnd,
       bodyEnd: close.lineStart,
+      closeAt: closeMarkerAtLine(scoped, close.lineStart),
     });
     searchFrom = close.lineEnd;
   }
@@ -2058,7 +2181,7 @@ function directiveRegionEnd(text: string, bodyStart: number): number {
 export function resolveSuperDirectiveBlock(
   text: string,
   open: SuperDirectiveOpen,
-  options: { language: string },
+  options: { language: string; allowImplicitClose?: boolean },
 ): SuperDirectiveResolution {
   const lang = directiveLangOf(options.language);
   // 围栏样式（缺省反引号 × 3）：收栏必须同字符且不短于开栏。缩进、~~~ 与
@@ -2070,6 +2193,11 @@ export function resolveSuperDirectiveBlock(
   // 「上一轮扫到哪」故意不参与判定：它是流式优化的产物，拿它当收栏搜索的起点
   // 会让同一个块的结论随流式分片大小漂移（宿主某一帧派出去了，转录侧整段重扫
   // 却判未闭合，退化成 JSON 墙）。
+  //
+  // 它同时是**收栏搜索的上界**：越过下一个协议围栏开栏的 ``` 属于后面那个块。
+  // 拿它收口会把后面那个块整段吞掉（实测形态：模型先写了一个漏收栏、载荷却是
+  // 完整 JSON 的块，紧接着又写了一个完整块 —— 后者的开栏被前者当成收栏，两个
+  // 块一起静默丢失：既没派发，也没有任何提示）。
   const regionEnd = directiveRegionEnd(text, open.bodyStart);
   const jsonStart = skipWhitespace(text, open.bodyStart);
   const structure =
@@ -2080,8 +2208,27 @@ export function resolveSuperDirectiveBlock(
   if (structure.status === "complete") {
     // 收栏按字符定位：标记落在行首（正常围栏），或紧贴载荷收尾（模型把收栏
     // 粘在载荷后面：`...}```` `）。按「独占一行」匹配会漏掉后一种形态。
-    const close = findCloseMarker(text, structure.end + 1, style);
-    if (!close) return { kind: "unclosed" };
+    const close = findCloseMarker(text, structure.end + 1, style, regionEnd);
+    if (!close) {
+      // 载荷已经写全，收栏却不在本块区域里。调用方只在「后面已经出现完整围栏」
+      // 时才置位 allowImplicitClose —— 那说明这一块被模型放弃了（漏收栏），
+      // 而它的载荷是一份写全了的委派：按载荷收尾收口照常派发，绝不静默丢掉。
+      // 载荷没写全 / 非法的块不在此列（调用方会跳过它继续扫）。
+      if (options.allowImplicitClose) {
+        const body = text.slice(open.bodyStart, structure.end + 1).trim();
+        if (isUsableDirectiveBody(lang, body)) {
+          return {
+            kind: "closed",
+            body,
+            closeEnd: structure.end + 1,
+            closeAt: structure.end + 1,
+            bodyStart: open.bodyStart,
+            bodyEnd: structure.end,
+          };
+        }
+      }
+      return { kind: "unclosed" };
+    }
     // 载荷收尾与收栏之间夹了东西（散文、CLI 历史里的 `</arg_value:…>` 之类）：
     // 正文只取 JSON 跨度，**区间终点也停在载荷收尾** —— 夹进来的文本留给后面的
     // 文本段走 Markdown，不能随收栏一起被消费掉（否则会凭空消失）。
@@ -2095,6 +2242,7 @@ export function resolveSuperDirectiveBlock(
       kind: "closed",
       body,
       closeEnd: end,
+      closeAt: close.at,
       bodyStart: open.bodyStart,
       bodyEnd: gap.trim() ? structure.end : close.at,
     };
@@ -2107,12 +2255,14 @@ export function resolveSuperDirectiveBlock(
     // 逃生阀：字符串超长仍不闭合的不是流式中间态，是损坏块 —— 按第一个收栏
     // 收口（沿用 MAX_UNCLOSED_SPAN 的原始语义），避免单个坏块永久停住扫描。
     if (text.length - open.bodyStart > MAX_UNCLOSED_SPAN) {
-      const close = findFence(text, open.bodyStart, (line) => isSuperFenceCloseLine(line, style));
+      const scoped = regionEnd < text.length ? text.slice(0, regionEnd) : text;
+      const close = findFence(scoped, open.bodyStart, (line) => isSuperFenceCloseLine(line, style));
       if (close) {
         return {
           kind: "closed",
           body: text.slice(open.bodyStart, close.lineStart).trim(),
           closeEnd: close.lineEnd,
+          closeAt: closeMarkerAtLine(scoped, close.lineStart),
           bodyStart: open.bodyStart,
           bodyEnd: close.lineStart,
         };
@@ -2124,7 +2274,7 @@ export function resolveSuperDirectiveBlock(
   // 结构不完整但字符串都闭合了：可能刚好停在某个值之后（流式中间态），也可能
   // 真的写坏了（少括号 / 裸引号把结构读歪）。先按收栏候选找能解析的正文 ——
   // 能解析就说明块是完整的，直接收口。
-  const candidates = collectCloseCandidates(text, open.bodyStart, style);
+  const candidates = collectCloseCandidates(text, open.bodyStart, style, regionEnd);
   for (const candidate of candidates) {
     if (isUsableDirectiveBody(lang, candidate.body)) {
       return { kind: "closed", ...candidate, bodyStart: open.bodyStart };
@@ -2140,12 +2290,14 @@ export function resolveSuperDirectiveBlock(
     const salvageLimit = candidates[0] ? Math.min(candidates[0].closeEnd, regionEnd) : regionEnd;
     const salvaged = scanTaskBooks(text, open.bodyStart, salvageLimit);
     if (salvaged.books.length > 0 && !salvaged.pending) {
-      const close = findFence(text, salvaged.end, (line) => isSuperFenceCloseLine(line, style));
+      const scoped = regionEnd < text.length ? text.slice(0, regionEnd) : text;
+      const close = findFence(scoped, salvaged.end, (line) => isSuperFenceCloseLine(line, style));
       if (close) {
         return {
           kind: "closed",
           body: text.slice(open.bodyStart, close.lineStart).trim(),
           closeEnd: close.lineEnd,
+          closeAt: closeMarkerAtLine(scoped, close.lineStart),
           bodyStart: open.bodyStart,
           bodyEnd: close.lineStart,
         };
