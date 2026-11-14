@@ -671,12 +671,14 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
   });
 
   /**
-   * 待处理卡浮层的类契约（多卡滚动回归）：浮层是滚动容器，靠
-   * `[&>*:first-child]:mt-auto` 做底部对齐；**不能**用 justify-end ——
-   * flex-end 在滚动容器里会把溢出到起始边之外的内容变成不可达。
-   * 这条断言防的是「有人把 mt-auto 改回 justify-end」。
+   * 待处理卡浮层的类契约（多卡滚动回归 + 堆叠态）：≥2 张卡默认是堆叠态，
+   * 贴底用 justify-end，**不是**滚动容器（顶卡可收缩，内容不会溢出）；
+   * 展开成列表后必须回到滚动容器 + 首卡 `mt-auto` 做底部对齐，且滚动
+   * 容器里**不能**用 justify-end —— flex-end 会把溢出到起始边之外的内容
+   * 变成不可达。这条断言防的是「有人把 mt-auto 改回 justify-end」，也钉住
+   * 堆叠态不得靠滚动伪装成贴底。
    */
-  it("待处理卡浮层是滚动容器，且不用 justify-end 做底部对齐", () => {
+  it("待处理卡浮层：堆叠态贴底不滚动，展开后才是带 mt-auto 的滚动容器", () => {
     const approval = {
       id: "approval-1",
       toolName: "write_file",
@@ -695,14 +697,26 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     };
     renderApp([], { pendingApproval: approval, pendingQuestions: questions });
 
-    const overlay = [...container.querySelectorAll<HTMLElement>("div")].find((el) =>
-      (el.className ?? "").toString().includes("[&>*:first-child]:mt-auto"),
-    );
-    expect(overlay).toBeTruthy();
-    for (const cls of ["min-h-0", "overflow-y-auto", "[&>*:first-child]:mt-auto"]) {
-      expect(overlay!.classList.contains(cls)).toBe(true);
+    const overlay = () => container.querySelector<HTMLElement>("[data-pending-overlay]");
+    const stacked = overlay();
+    expect(stacked).toBeTruthy();
+    expect(stacked!.className).toContain("justify-end");
+    expect(stacked!.classList.contains("overflow-y-auto")).toBe(false);
+    expect(stacked!.className).not.toContain("[&>*]:mt-auto");
+
+    // 计数器是唯一展开入口；展开后三卡完整、列表滚动并贴底。
+    const counter = container.querySelector<HTMLButtonElement>("[data-pending-counter]");
+    expect(counter).toBeTruthy();
+    act(() => counter!.click());
+
+    const list = overlay()!;
+    for (const cls of ["min-h-0", "overflow-y-auto"]) {
+      expect(list.classList.contains(cls)).toBe(true);
     }
-    expect(overlay!.className).not.toContain("justify-end");
+    expect(list.className).not.toContain("justify-end");
+    const firstSlot = list.querySelector<HTMLElement>("[data-pending-slot]");
+    expect(firstSlot).toBeTruthy();
+    expect(firstSlot!.className).toContain("[&>*]:mt-auto");
   });
 });
 

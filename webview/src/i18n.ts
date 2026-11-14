@@ -1091,6 +1091,12 @@ const en: Record<string, string> = {
   "收起任务说明": "Collapse the task description",
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
   "未指定子会话": "No child session specified",
+  // 多张待处理卡的堆叠计数器（审批 / Plan 退出 / 提问）
+  "还有 {0} 个待处理": "{0} more pending",
+  "还有 {0} 个待处理：{1}": "{0} more pending: {1}",
+  "收起待处理卡": "Collapse pending cards",
+  "iFlow 需要你的回答": "iFlow needs your answer",
+  "、": ", ",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
