@@ -720,6 +720,65 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
   });
 });
 
+describe("Super Agent 看板清理动作", () => {
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 详情区里的「清理」按钮（文案恰好是「清理」，不含确认框里的同名按钮）。 */
+  function cleanupButton(): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "清理",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 清理确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
+  const cleanupDialog = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="清理子会话"]');
+
+  it("运行中的子会话不能清理：aria-disabled 且点击不弹确认框", () => {
+    render([session({ status: "running", startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+    act(() => rowTrigger().click());
+
+    const btn = cleanupButton();
+    // 与合并按钮同一范式：aria-disabled（不是 disabled，否则理由读不到）。
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    expect(btn.getAttribute("aria-label")).toBe("子会话还在运行，先中断再清理");
+    expect(btn.getAttribute("title")).toBe("子会话还在运行，先中断再清理");
+    expect(btn.className).toContain("cursor-not-allowed");
+    expect(btn.className).toContain("opacity-40");
+    // 理由在按钮下方可见，不只在 tooltip 里。
+    expect(container.textContent).toContain("子会话还在运行，先中断再清理");
+
+    act(() => btn.click());
+    expect(cleanupDialog()).toBeNull();
+    expect(container.textContent).not.toContain("删除子会话");
+  });
+
+  it("已完成的子会话仍可清理：点击后弹出确认框", () => {
+    render([session({ status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+
+    const btn = cleanupButton();
+    expect(btn.getAttribute("aria-disabled")).toBeNull();
+    expect(container.textContent).not.toContain("子会话还在运行，先中断再清理");
+
+    act(() => btn.click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("删除子会话「修复登录跳转」的工作目录？");
+  });
+});
+
 /** 一个正在等用户回答的子会话（看板会自动展开它）。 */
 function askingSession(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
   return session({
