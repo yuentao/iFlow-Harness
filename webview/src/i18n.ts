@@ -1091,7 +1091,6 @@ const en: Record<string, string> = {
   "保留分支": "Keep branch",
   "正在编写任务书…": "Writing the task brief…",
   "正在编写子会话操作…": "Writing child session actions…",
-  "收栏后派发": "Dispatched once the fence closes",
   "原始协议块": "Raw protocol block",
   "{0} · {1} 字符": "{0} · {1} chars",
   "内容不是合法 JSON": "The body is not valid JSON",

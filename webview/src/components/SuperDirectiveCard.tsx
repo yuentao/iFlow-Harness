@@ -421,7 +421,6 @@ function PendingDirectiveCard({ language }: { language: string }) {
             ? t("正在编写子会话操作…")
             : t("正在编写任务书…")}
         </span>
-        <span className="shrink-0 text-ui-micro text-muted-foreground">{t("收栏后派发")}</span>
       </div>
     </div>
   );
