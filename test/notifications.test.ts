@@ -4,6 +4,7 @@ import {
   OS_NOTIFY_THROTTLE_MS,
   gateOsNotification,
   initOsNotifyGate,
+  isDuplicateNotificationBlock,
   isUserWatching,
   osNotifyAllowed,
 } from "../shared/notifications.js";
@@ -223,6 +224,80 @@ describe("gateOsNotification", () => {
     });
     expect(out.fire).toBe(false);
     expect(out.gate).toBe(gate);
+  });
+
+  it("reports WHY it did not fire — only throttle/cooldown mean a duplicate", () => {
+    // 宿主用这个原因决定提示音要不要响：被节流/冷却吞掉的重复通知没有新信号，
+    // 铃声不该单独响；其余原因（用户在看 / 用户关了系统通知 / 窗口聚焦）铃声
+    // 仍是唯一或附加信号。
+    const watching = gateOsNotification({
+      event: "turnDone",
+      setting: "all",
+      panelVisible: true,
+      windowFocused: true,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+    });
+    expect(watching.reason).toBe("watching");
+    expect(isDuplicateNotificationBlock(watching.reason)).toBe(false);
+
+    const setting = gateOsNotification({
+      event: "turnDone",
+      setting: "off",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+    });
+    expect(setting.reason).toBe("setting");
+    expect(isDuplicateNotificationBlock(setting.reason)).toBe(false);
+
+    const focus = gateOsNotification({
+      event: "turnDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: true,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+    });
+    expect(focus.reason).toBe("focus");
+    expect(isDuplicateNotificationBlock(focus.reason)).toBe(false);
+
+    const fired = gateOsNotification({
+      event: "turnDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+      contentKey: "iFlow 已完成本轮回复",
+    });
+    expect(fired.fire).toBe(true);
+    expect(fired.reason).toBeUndefined();
+
+    const throttled = gateOsNotification({
+      event: "turnDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: OS_NOTIFY_THROTTLE_MS - 1,
+      gate: fired.gate,
+      contentKey: "iFlow 已完成本轮回复",
+    });
+    expect(throttled.reason).toBe("throttle");
+    expect(isDuplicateNotificationBlock(throttled.reason)).toBe(true);
+
+    const cooled = gateOsNotification({
+      event: "turnDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: OS_NOTIFY_THROTTLE_MS * 3,
+      gate: fired.gate,
+      contentKey: "iFlow 已完成本轮回复",
+    });
+    expect(cooled.reason).toBe("cooldown");
+    expect(isDuplicateNotificationBlock(cooled.reason)).toBe(true);
   });
 
   it("suppresses the identical text within the content cooldown (retry-loop storm)", () => {

@@ -165,7 +165,14 @@ import { isWithin, memoryHome } from "../memory/files.js";
 import type { WorkspaceFile, WorkspaceScan } from "../memory/knowledge.js";
 import { attachmentSessionDir, sweepStaleAttachmentDirs } from "./attachments.js";
 import { parseContextWindowOverrides, parseCostTable, resolveContextWindow, resolveCost } from "../../shared/context-window.js";
-import { gateOsNotification, initOsNotifyGate, type OsNotifyEvent, type OsNotifyGate } from "../../shared/notifications.js";
+import {
+  gateOsNotification,
+  initOsNotifyGate,
+  isDuplicateNotificationBlock,
+  type OsNotifyDecision,
+  type OsNotifyEvent,
+  type OsNotifyGate,
+} from "../../shared/notifications.js";
 import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
 import { planSpecContent, planSpecFileName, planChecklistEntries } from "../../shared/plan-spec.js";
@@ -844,6 +851,20 @@ export class ChatPanel implements vscode.Disposable {
    * 状态：终态但没交接汇报的子会话同样算未完成。
    */
   private readonly superReportedChildIds = new Set<string>();
+  /**
+   * 「子会话已全部结束」提示的一次性标记。
+   *
+   * 完成提示必须挂在**真实事件**上：非终态子会话数从 >0 掉到 0 的那一刻。
+   * 旧实现挂在主会话 hidden 汇报回合收尾时判断「此刻还有没有子会话在跑」——
+   * 动作回执（同样是 hidden 回合）在子会话早已全部终态时收尾，于是又响一次
+   * 铃并宣称「子会话已全部结束」，而同一句文案常被 60s 内容冷却吞掉，界面
+   * 上没有任何新通知（用户实测的「突然响铃但没有通知」）。有新的非终态子
+   * 会话出现时重置标记，下一批结束还能再提示一次。
+   */
+  private superSettledAnnounced = false;
+  /** 是否亲眼看见过非终态子会话（即这批子会话确实跑过）。没看见过就谈不上
+   * 「刚刚全部结束」—— 刚打开一个子会话早已终态的会话不该再响一次铃。 */
+  private superRunningObserved = false;
   /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
@@ -2315,10 +2336,23 @@ export class ChatPanel implements vscode.Disposable {
    * throttle (shared/notifications.ts). A visible panel already shows the
    * card — the notification exists exactly for when the user switched away.
    * Delivery itself is fire-and-forget (native toast → in-IDE fallback, see
-   * deliverOsNotification); returns whether the gate fired (informational —
-   * the chime is universal, the toast is additive).
+   * deliverOsNotification). Returns whether the gate fired; callers that also
+   * ring a chime must use `notifyOsDecision` — the completion cue needs the
+   * block REASON (a duplicate dropped by throttle/cooldown must not leave a
+   * lone chime, see `announceTurnDone`).
    */
   private notifyOs(event: OsNotifyEvent, text: string): boolean {
+    return this.notifyOsDecision(event, text).fire;
+  }
+
+  /**
+   * Full gate result — `fire` plus, when it did not fire, WHY. The chime
+   * needs the distinction: a notification dropped because the user is
+   * watching (or because they turned system toasts off) still leaves the
+   * chime as a meaningful cue, while one dropped as a duplicate (throttle /
+   * content cooldown) carries no new information at all.
+   */
+  private notifyOsDecision(event: OsNotifyEvent, text: string): OsNotifyDecision {
     const setting = vscode.workspace.getConfiguration("iflow").get<string>("osNotifications", "approvals");
     const gate = gateOsNotification({
       event,
@@ -2332,10 +2366,32 @@ export class ChatPanel implements vscode.Disposable {
       // identical text within the cooldown window is dropped.
       contentKey: text,
     });
-    if (!gate.fire) return false;
+    if (!gate.fire) return gate;
     this.osNotifyGate = gate.gate;
     void this.deliverOsNotification(text);
-    return true;
+    return gate;
+  }
+
+  /**
+   * Completion cue for a REAL turn (a user turn or a regenerated turn).
+   *
+   * Symmetry rule (2026-11-15): the chime must accompany something the user
+   * can perceive. `notifyOsDecision` decides whether the away-toast fires; when it
+   * did not, the chime still rings unless the drop reason was "duplicate"
+   * (throttle / content cooldown) — those mean the identical 「已完成本轮
+   * 回复」 line was delivered seconds ago and the user got no new signal, so
+   * a lone chime would read as "a notification appeared" while the UI shows
+   * nothing. Every other drop reason (watching, osNotifications off, focused
+   * window) leaves the chime as the user's only cue and must still ring.
+   *
+   * Host-internal turns (Super Agent report / action-receipt deliveries) do
+   * NOT come through here: they are bookkeeping, not user turns (see the
+   * completion branch in `sendPrompt`).
+   */
+  private announceTurnDone(text: string): void {
+    const decision = this.notifyOsDecision("turnDone", text);
+    if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
+    this.postSound("done");
   }
 
   /**
@@ -7624,6 +7680,45 @@ export class ChatPanel implements vscode.Disposable {
       if (!liveIds.has(id)) this.superReportedChildIds.delete(id);
     }
     this.store.setSuperWaiting(this.superWaitingForReports(live));
+    this.announceChildrenSettledIfDone(live);
+  }
+
+  /**
+   * 「子会话已全部结束」提示：只在一个**真实事件**上响一次 —— 非终态子会话
+   * 数从 >0 掉到 0 的那一刻。
+   *
+   * 为什么不能挂在 hidden 汇报回合收尾上：hidden 回合不止是汇报，还有动作
+   * 回执（`queueSuperActionReceipt`）。回执在子会话早已全部终态时也会跑一轮，
+   * 旧实现按「此刻还有没有子会话在跑」判断，于是每份回执都响一次铃并宣称
+   * 「子会话已全部结束」——那件事早就发生过；同一句文案又会被 60s 内容冷却
+   * 吞掉，用户于是只听到铃、界面上没有任何新通知。把提示绑到状态收尾事件
+   * 本身，就既不会重复、也不会在没有事件时响。
+   *
+   * 判据用**全部活子会话**（不分主会话）：看板对活着的子会话一律可见，提示
+   * 与用户能看到的内容保持一致。`superSettledAnnounced` 在新一批非终态子会话
+   * 出现时重置，所以下一批结束还能再提示一次。
+   */
+  private announceChildrenSettledIfDone(live: SuperSessionUi[]): void {
+    if (this.disposed) return;
+    const running = live.filter((session) => !isTerminalSuperStatus(session.status));
+    if (running.length > 0) {
+      // 看见它跑起来了 —— 之后掉到 0 才算「刚刚全部结束」。
+      this.superRunningObserved = true;
+      this.superSettledAnnounced = false;
+      return;
+    }
+    if (live.length === 0) {
+      // 全部被清理 / 从来没派发过：没有事件可宣布，下一批重新开始。
+      this.superRunningObserved = false;
+      this.superSettledAnnounced = false;
+      return;
+    }
+    // 从未观察到它跑过（例如刚切到一个子会话早已终态的会话）就不宣布：
+    // 那不是「刚刚结束」，而是一个过期事实 —— 正是要消灭的假事件。
+    if (!this.superRunningObserved || this.superSettledAnnounced) return;
+    this.superSettledAnnounced = true;
+    this.superRunningObserved = false;
+    this.announceTurnDone(vscode.l10n.t("子会话已全部结束"));
   }
 
   /**
@@ -9719,27 +9814,18 @@ export class ChatPanel implements vscode.Disposable {
       // away-notification (M1 P0-5) with its own gate — no longer mutually
       // exclusive, the exclusivity made the chime unreachable for away users
       // on `osNotifications: all` (user report 2026-10-13).
-      if (result.stopReason !== "cancelled") {
-        // 完成提示按回合来源分档：
-        //  - 用户回合（非 hidden）：照旧「iFlow 已完成本轮回复」+ 提示音。
-        //  - hidden 汇报回合：子会话的汇报是逐个投进来的，每投一次就响一次铃
-        //    等于把「一个子会话干完」误报成「整件事做完了」。还有子会话在跑
-        //    就完全静音；等最后一个也结束的那一轮，才提示一次「子会话已全部
-        //    结束」。
-        const runningChildren = hidden
-          ? (this.superAgent?.list(this.currentMainSessionId()) ?? []).filter(
-              (session) => !isTerminalSuperStatus(session.status),
-            ).length
-          : 0;
-        if (!hidden) {
-          // M1 P0-5: the turn landed while the user is away — tell them it's
-          // ready.
-          this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
-          this.postSound("done");
-        } else if (runningChildren === 0) {
-          this.notifyOs("turnDone", vscode.l10n.t("子会话已全部结束"));
-          this.postSound("done");
-        }
+      if (result.stopReason !== "cancelled" && !hidden) {
+        // 用户回合：照旧「iFlow 已完成本轮回复」+ 提示音（见 announceTurnDone
+        // 的可见信号对称规则）。
+        //
+        // hidden 回合（子会话汇报 / 动作回执）**完全静音**：那是宿主自己的
+        // 记账回合，转录里没有用户气泡、动作回执更不对应任何新事件。旧实现
+        // 按「此刻是否还有子会话在跑」决定要不要响铃，于是动作回执在子会话
+        // 早已全部终态时照样响一次铃并宣称「子会话已全部结束」——同一句文案
+        // 又常被 60s 内容冷却吞掉，结果就是「响了铃、界面上什么通知都没有」
+        // （用户实测）。真正的「子会话全部结束」事件改挂在子会话状态收尾的
+        // 那一刻（announceChildrenSettledIfDone）。
+        this.announceTurnDone(vscode.l10n.t("iFlow 已完成本轮回复"));
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
@@ -9919,12 +10005,12 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
-      // Same completion cue policy as sendPrompt (chime universal, toast
-      // additive) — a regenerated turn landing while the user is away must
-      // announce itself too.
+      // Same completion cue policy as sendPrompt (see announceTurnDone) — a
+      // regenerated turn landing while the user is away must announce itself
+      // too, but a duplicate notification dropped by the content cooldown
+      // must not leave a lone chime behind.
       if (result.stopReason !== "cancelled") {
-        this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
-        this.postSound("done");
+        this.announceTurnDone(vscode.l10n.t("iFlow 已完成本轮回复"));
         // Same turn-end proactive compression policy as sendPrompt.
         const autoCompressed = await this.maybeAutoCompressOnIdle(promptSessionId);
         // Same turn-end follow-up batch as sendPrompt (one merged request),
