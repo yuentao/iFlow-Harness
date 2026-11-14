@@ -2062,10 +2062,10 @@ export function endCompressTurn(state: SessionState): void {
  * hidden prompt —— 智能体读得到，转录里没有用户块）。
  *
  * hidden 回合不写用户块，所以 `beginUserPrompt` 不会把状态翻成 streaming：
- * 那一轮在面板上就成了「无状态」—— 顶栏没有忙碌 chip、顶栏「新会话」也不
- * 禁用，用户点它会把在飞的汇报回合连同排队里的汇报一起废掉（汇报丢失）。
- * 这里显式翻成 streaming：面板按「正在生成」渲染，忙碌锁生效，同一时刻也不会
- * 有第二个 prompt 交叠在同一个 ACP 会话上。
+ * 那一轮在面板上就成了「无状态」—— 转录底部不显示「正在生成」浮动 pill、顶栏
+ * 「新会话」也不禁用，用户点它会把在飞的汇报回合连同排队里的汇报一起废掉
+ * （汇报丢失）。这里显式翻成 streaming：面板按「正在生成」渲染，忙碌锁生效，
+ * 同一时刻也不会有第二个 prompt 交叠在同一个 ACP 会话上。
  *
  * 回合结束仍由 `completePrompt` 收尾（status 回到 idle）。
  */

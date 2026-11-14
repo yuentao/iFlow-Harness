@@ -7332,9 +7332,9 @@ export class ChatPanel implements vscode.Disposable {
    *  ④汇报提示词已备好、还在队列里等主会话空闲；
    *  ⑤汇报正在投进主会话（那一轮是 hidden prompt，status 会变 streaming）。
    *
-   * 只看子会话状态是不够的：汇报真正投出去之前，面板都该呈现忙碌态 ——
-   * 否则用户会看到「无状态」，并在这个窗口点顶栏的「新会话」，把排队里的
-   * 汇报落到已被替换的会话上。
+   * 只看子会话状态是不够的：汇报真正投出去之前，「新会话」都该锁住 ——
+   * 否则用户会在这个窗口点它，把排队里的汇报落到已被替换的会话上（面板上
+   * 此时只有看板计数能看出还在等，顶栏不再有忙碌 chip）。
    *
    * **只看当前主会话的子会话**：别的会话的子会话在跑（或者它的汇报还欠着）
    * 不该让当前会话显示忙碌 —— 当前会话并不在等它们，它们的汇报会等用户
@@ -7361,8 +7361,10 @@ export class ChatPanel implements vscode.Disposable {
    * 把「正在等子会话」这个忙碌标记同步给 webview。
    *
    * 等待期主会话的 `status` 仍然是 "idle" —— 用户还要能发消息并由主会话响应，
-   * 所以不能借用 "streaming"（那会把用户消息派发成子会话）。但面板必须呈现
-   * 忙碌态：顶栏不能是「无状态」，「新会话」也不能可点。
+   * 所以不能借用 "streaming"（那会把用户消息派发成子会话）。但面板必须把
+   * 「新会话」锁住：等待期新建会话会让排队里的汇报落到已被替换的会话上。
+   * 顶栏不再为它渲染忙碌 chip（忙碌信号由转录底部浮动 pill 与子会话看板计数
+   * 承担）。
    */
   private syncSuperWaitingState(): void {
     // 子会话被清理后它的 id 不再有意义 —— 顺手剪掉，别让集合无限增长。
@@ -9412,9 +9414,9 @@ export class ChatPanel implements vscode.Disposable {
         void this.persistActiveTranscript(); // user turn lands even on a crash
       } else {
         // hidden 回合（子会话汇报）：不写用户块 → beginUserPrompt 不会把状态
-        // 翻成 streaming → 那一轮在面板上是「无状态」（顶栏没有忙碌 chip，
-        // 顶栏「新会话」也不禁用，用户点它会把在飞的汇报回合废掉）。这里显式
-        // 开启：状态翻成 streaming，面板按「正在生成」渲染。
+        // 翻成 streaming → 那一轮在面板上不显示「正在生成」浮动 pill，顶栏
+        // 「新会话」也不禁用，用户点它会把在飞的汇报回合废掉。这里显式开启：
+        // 状态翻成 streaming，转录底部浮动 pill 按「正在生成」渲染。
         this.store.beginHiddenTurn();
       }
       // 状态已经翻成 streaming：从这一刻起状态位足以挡住第二个回合，车道
