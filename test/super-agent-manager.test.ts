@@ -240,6 +240,8 @@ function makeManager(
   mainSessionId: string | null | (() => string | null) = "main-1",
   /** 并发上限：排队用例显式注入小值，避免依赖某个写死的常量。 */
   maxConcurrent: number = DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+  /** 隔离回收相关设置（默认：完成后回收工作目录、保留分支）。 */
+  options: { keepWorktree?: boolean; maxWorktrees?: number } = {},
 ): Harness {
   const clients: FakeClient[] = [];
   const sessions: SuperSessionUi[] = [];
@@ -280,6 +282,8 @@ function makeManager(
     priceFor: () => ({ input: 1, output: 2 }),
     integrationMode: () => mode,
     maxConcurrentSessions: () => maxConcurrent,
+    keepWorktree: () => options.keepWorktree ?? false,
+    maxWorktrees: () => options.maxWorktrees ?? 10,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
   return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults };
@@ -619,9 +623,17 @@ describe("super agent · 编排", () => {
 
   it("清理子会话时保留有未合并提交的分支", async () => {
     const repo = makeRepo();
-    // manual 模式：不做自动集成，也就不会在「没有产生任何提交」后自动释放
-    // 隔离 —— worktree 活到测试自己往里提交为止（这正是本例要验的场景）。
-    const harness = makeManager(repo, "complete", "manual");
+    // manual 模式：不做自动集成。keepWorktree=true 让工作目录活到测试自己
+    // 往里提交为止（默认已完成即回收目录、只保留分支，本用例要验的是清理
+    // 路径对未合并分支的处理）。
+    const harness = makeManager(
+      repo,
+      "complete",
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
     const session = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
     // 宿主在 completed 之后还会检查一次 worktree 并可能代提交（`git add -A`）；
@@ -803,7 +815,15 @@ describe("super agent · 自动集成", () => {
   it("合并子会话合入后，worktree 里还有未提交改动时保留目录与分支（绝不丢数据）", async () => {
     const repo = makeRepo();
     // 第一个子会话在 worktree 里提交；第二个是合并子会话（主仓工作区档）。
-    const harness = makeManager(repo, ["commit", "merge"], "manual");
+    // keepWorktree=true：默认完成后会回收目录，而本用例要往目录里写 leftover。
+    const harness = makeManager(
+      repo,
+      ["commit", "merge"],
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
     harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "completed");
     // 宿主在终态之后还会检查 worktree 并可能代提交（`git add -A`）。ready 上报
@@ -1120,7 +1140,16 @@ describe("super agent · 任务提示词", () => {
 describe("super agent · 意外中断后重试", () => {
   it("失败后可以重试，沿用原工作目录与分支，并保留上次的未提交改动", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo, ["throw", "complete"], "manual");
+    // keepWorktree=true：第二轮完成时宿主会代提交 partial.txt，默认回收会
+    // 把目录删掉 —— 本用例要验的是重试复用现场，不是回收。
+    const harness = makeManager(
+      repo,
+      ["throw", "complete"],
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "failed");
 
@@ -1175,7 +1204,16 @@ describe("super agent · 意外中断后重试", () => {
 
   it("工作目录已被删除时重试会新建隔离环境", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo, ["throw", "complete"], "manual");
+    // keepWorktree=true：本用例断言的是「新目录真的建出来了」，默认回收会
+    // 在断言前把它删掉（竞态）。
+    const harness = makeManager(
+      repo,
+      ["throw", "complete"],
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "failed");
     const originalPath = harness.sessions[0]!.isolation.path;

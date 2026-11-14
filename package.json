@@ -229,6 +229,18 @@
           "maximum": 20,
           "markdownDescription": "%iflow.configuration.superAgentMaxConcurrent.description%"
         },
+        "iflow.superAgent.keepWorktree": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%iflow.configuration.superAgentKeepWorktree.description%"
+        },
+        "iflow.superAgent.maxWorktrees": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "%iflow.configuration.superAgentMaxWorktrees.description%"
+        },
         "iflow.osNotifications": {
           "type": "string",
           "enum": [

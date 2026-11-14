@@ -40,6 +40,23 @@ export function clampMaxConcurrentSuperSessions(value: number): number {
   );
 }
 
+/** 磁盘上最多保留多少个已结束子会话的工作目录（设置项 `iflow.superAgent.maxWorktrees`）。 */
+export const DEFAULT_MAX_SUPER_WORKTREES = 10;
+/** 可调范围上限：再多就是放任磁盘堆目录了。 */
+export const MAX_SUPER_WORKTREES = 100;
+
+/**
+ * 把任意来源的保留上限收敛成合法值。
+ *
+ * `0` 是**合法值**，语义是「不限制」（与并发上限不同：那里 0 会把池子卡死，
+ * 这里 0 恰好表示「永不按数量回收」）。非有限数（NaN / Infinity / 运行时
+ * 脏值）回落到默认 10，其余截断取整后夹到 0..100。
+ */
+export function clampMaxSuperWorktrees(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_SUPER_WORKTREES;
+  return Math.min(MAX_SUPER_WORKTREES, Math.max(0, Math.trunc(value)));
+}
+
 // ---------------------------------------------------------------------------
 // 状态
 // ---------------------------------------------------------------------------
@@ -165,6 +182,15 @@ export interface SuperIsolation {
    * 路径去删。
    */
   released?: boolean;
+  /**
+   * 工作目录已回收，**本地分支仍保留**。
+   *
+   * 与 `released` 的区别：`released` 表示「目录与分支都已清理」（合并成功 /
+   * 没有产生任何提交）；`recycled` 只表示目录被删了 —— 分支上有未合并的提交，
+   * 刻意留下待审（Orca 的 “Review N Branches”）。看板据此区分「改动还在分支上」
+   * 与「什么都没有了」。
+   */
+  recycled?: boolean;
   /** 隔离强度的诚实说明（降级时必填）—— 面向用户（中文），只出现在看板气泡里。 */
   note?: string;
   /**

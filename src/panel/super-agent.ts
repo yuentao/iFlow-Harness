@@ -276,6 +276,19 @@ export interface SuperAgentDeps {
    * 排队中的派发不必等重启面板。
    */
   maxConcurrentSessions: () => number;
+  /**
+   * 是否保留正常完成子会话的工作目录（`iflow.superAgent.keepWorktree`，
+   * 每次实时读）。
+   *
+   * 默认 false = 完成即回收目录、**保留分支**（失败/中断从不回收，重试要复用
+   * 现场）。可选是为了让单测与 fixture 不必逐个补齐。
+   */
+  keepWorktree?: () => boolean;
+  /**
+   * 磁盘上最多保留多少个已结束子会话的工作目录
+   * （`iflow.superAgent.maxWorktrees`，每次实时读；0 = 不限制）。
+   */
+  maxWorktrees?: () => number;
   log: {
     info: (msg: string) => void;
     warn: (msg: string) => void;
@@ -787,10 +800,20 @@ export class SuperAgentManager {
    * **孤儿目录（目录在、但已不在 git 注册表里或没有 .git 关联）一律不自动
    * 删**：无法确认里面有没有独有改动，删掉就是丢数据 —— 只记日志请人工确认。
    *
+   * 主循环之后还有**第二阶段：保留上限**（`options.maxKeep`）。主循环只清
+   * 「分支已并入 HEAD」的残留；未合并的干净 worktree 会一直堆着。第二阶段把
+   * 「仍在注册表里、`iflow/super/` 分支、不是活着的子会话、工作目录干净」的
+   * 残留按目录 mtime 升序排列，回收超出 `maxKeep` 的部分 —— **只删目录，
+   * `keepBranch: true`**（分支上可能有还没人审的提交，与主循环里「已合并所以
+   * 连分支一起删」是两回事）。脏目录、未注册的孤儿目录仍然只记日志、不自动删。
+   *
+   * `maxKeep` 为 0 或 undefined = 不限制（`iflow.superAgent.maxWorktrees` 的
+   * 「0 = 不限制」语义）。
+   *
    * 幂等：可重复调用。只删隔离子树下的目录与 `iflow/super/` 分支，绝不碰
    * 主仓工作区，也绝不碰用户自己的分支。
    */
-  async sweepStaleWorktrees(): Promise<SuperSweepResult> {
+  async sweepStaleWorktrees(options: { maxKeep?: number } = {}): Promise<SuperSweepResult> {
     const result: SuperSweepResult = { removed: 0, kept: 0, orphans: [] };
     if (this.disposed) return result;
 
@@ -871,6 +894,59 @@ export class SuperAgentManager {
       // 被清掉的记录也要标成「已释放」，否则看板一直显示待清理。
       this.markWorktreeReleased(target);
     }
+
+    // 第二阶段：保留上限（`iflow.superAgent.maxWorktrees`）。主循环只清
+    // 「分支已并入 HEAD」的；未合并但干净的残留会一直堆在磁盘上。按目录
+    // mtime 从旧到新回收超出的部分 —— **只删目录，分支一律保留**（与主循环
+    // 里「已合并所以连分支一起删」是两回事）。
+    const maxKeep = options.maxKeep ?? 0;
+    if (maxKeep > 0) {
+      const recyclable: { path: string; branch: string; mtimeMs: number }[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const target = path.join(root, entry.name);
+        const key = normalizePathKey(target);
+        const branch = registeredByPath.get(key);
+        // 孤儿（undefined）已在上面记过日志；非 iflow/super/ 分支不碰。
+        if (!branch || !branch.startsWith(SUPER_BRANCH_PREFIX)) continue;
+        if (livePaths.has(key)) continue;
+        // 主循环刚删掉的目录也会走到这里：目录不存在 → 证明不了干净 → 排除。
+        if (await worktreeHasUncommittedChanges(target)) continue;
+        let mtimeMs = 0;
+        try {
+          mtimeMs = (await stat(target)).mtimeMs;
+        } catch {
+          // 读不到 mtime 就按最旧处理（先回收），不阻断清扫。
+          mtimeMs = 0;
+        }
+        recyclable.push({ path: target, branch, mtimeMs });
+      }
+      recyclable.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      const excess = recyclable.length - maxKeep;
+      for (let index = 0; index < excess; index += 1) {
+        const item = recyclable[index]!;
+        const removal = await removeWorktree({
+          repoRoot: this.deps.repoRoot,
+          targetPath: item.path,
+          branch: item.branch,
+          keepBranch: true,
+        });
+        if (!removal.removed) {
+          result.kept += 1;
+          this.deps.log.warn(
+            `super agent: 回收超出保留上限的 worktree ${item.path} 未完成${removal.reason ? `：${removal.reason}` : ""}`,
+          );
+          continue;
+        }
+        result.removed += 1;
+        this.deps.log.info(
+          `super agent: 已回收超出保留上限（${maxKeep}）的 worktree ${item.path}，分支 ${item.branch} 保留`,
+        );
+        this.markWorktreeReleased(item.path, { recycled: true });
+      }
+      // 保留在限额内的那些也是「有意保留」，如实计数。
+      result.kept += Math.max(0, recyclable.length - Math.max(excess, 0));
+    }
     if (result.removed > 0) this.emit();
     return result;
   }
@@ -880,23 +956,32 @@ export class SuperAgentManager {
    *
    * 清扫掉的可能是历史（archived）子会话的工作目录 —— 它们的记录留在归档里，
    * 不打 released 标记的话看板会一直显示「还有工作目录没清理」。
+   *
+   * `recycled` 区分两种清理：主循环里「已合并 → 连分支一起删」只打 released；
+   * 保留上限阶段「只删目录、分支留着待审」额外打 recycled。
    */
-  private markWorktreeReleased(targetPath: string): void {
+  private markWorktreeReleased(
+    targetPath: string,
+    options: { recycled?: boolean } = {},
+  ): void {
     const key = normalizePathKey(targetPath);
+    const mark = (session: SuperSessionUi): SuperSessionUi => ({
+      ...session,
+      isolation: {
+        ...session.isolation,
+        released: true,
+        ...(options.recycled ? { recycled: true } : {}),
+      },
+    });
     const matches = (session: SuperSessionUi): boolean =>
       Boolean(session.isolation.path) && normalizePathKey(session.isolation.path) === key;
     for (const [id, session] of [...this.sessions]) {
       if (!matches(session)) continue;
-      this.sessions.set(id, { ...session, isolation: { ...session.isolation, released: true } });
+      this.sessions.set(id, mark(session));
     }
     for (const [owner, records] of [...this.archived]) {
       if (!records.some(matches)) continue;
-      this.archived.set(
-        owner,
-        records.map((s) =>
-          matches(s) ? { ...s, isolation: { ...s.isolation, released: true } } : s,
-        ),
-      );
+      this.archived.set(owner, records.map((s) => (matches(s) ? mark(s) : s)));
     }
   }
 
@@ -1270,6 +1355,25 @@ export class SuperAgentManager {
       const pendingEmpty = this.pendingEmptyRelease.delete(id);
       if (isCurrentAttempt && pendingEmpty) {
         await this.releaseIsolationWithRetry(id, "empty");
+      }
+      // 终态默认回收（`iflow.superAgent.keepWorktree`，默认关）：正常完成时
+      // 删掉工作目录、**保留分支**，避免合并被跳过 / PR / manual / 中断之外
+      // 的正常收尾把 worktree 永久堆在磁盘上。
+      //
+      // 三条边界，缺一不可：
+      //  - 只对 `completed` 回收：failed / cancelled 刻意保留现场（重试要复用
+      //    未完成的工作目录），`dispose()` 也从不回收；
+      //  - 只对当前 attempt 回收：已被一次重试取代时新的一轮还在用这个目录；
+      //  - 空分支路径（`pendingEmpty`）已经自己处理过目录与分支，不能被这里
+      //    抢先删掉目录 —— 它的后台重试还要继续收尾。
+      const completedNow = this.sessions.get(id)?.status === "completed";
+      if (
+        isCurrentAttempt &&
+        !pendingEmpty &&
+        completedNow &&
+        !this.keepWorktreeEnabled()
+      ) {
+        await this.releaseIsolationWithRetry(id, "recycle");
       }
       // 合并子会话收尾：用只读 git 检测目标分支是否真的并入了当前分支，
       // 再把结果写回来源子会话的 integration（失败/中断同样要如实记）。
@@ -1996,7 +2100,7 @@ export class SuperAgentManager {
    */
   private async releaseIsolationWithRetry(
     id: string,
-    mode: "merged" | "empty",
+    mode: "merged" | "empty" | "recycle",
   ): Promise<void> {
     const outcome = await this.releaseIsolation(id, mode);
     if (!outcome.ok && outcome.retryable) {
@@ -2004,13 +2108,20 @@ export class SuperAgentManager {
     }
   }
 
+  /** `iflow.superAgent.keepWorktree`（默认 false = 完成即回收工作目录）。 */
+  private keepWorktreeEnabled(): boolean {
+    return this.deps.keepWorktree?.() ?? false;
+  }
+
   /**
-   * 释放隔离：删掉 worktree 目录与本地分支，只保留看板记录。
+   * 释放隔离：删掉 worktree 目录（以及某些路径下的本地分支），只保留看板记录。
    *
-   * 两条路径共用一道闸门骨架，差别只在「分支能不能删」的判据：
+   * 三条路径共用一道闸门骨架，差别只在「分支能不能删」的判据：
    *  - `merged`：分支已并入 HEAD → 可以删分支（`isBranchMerged` 复核）；
    *  - `empty`：分支上没有任何独有提交 → 删分支不会丢东西
-   *    （`branchHasUnmergedCommits` 复核，判据是 baseRef..branch 为空）。
+   *    （`branchHasUnmergedCommits` 复核，判据是 baseRef..branch 为空）；
+   *  - `recycle`：正常完成后的默认回收 → 只删目录，**分支一律保留**
+   *    （分支上可能有还没人审的提交，删掉就是丢提交）。
    *
    * 幂等：已释放（`released` 为真）直接成功，可重复调用。
    *
@@ -2019,9 +2130,10 @@ export class SuperAgentManager {
    */
   private async releaseIsolation(
     id: string,
-    mode: "merged" | "empty",
+    mode: "merged" | "empty" | "recycle",
   ): Promise<ReleaseOutcome> {
     if (mode === "merged") return this.releaseMergedIsolation(id);
+    if (mode === "recycle") return this.releaseWorktreeKeepingBranch(id);
     return this.releaseEmptyIsolation(id);
   }
 
@@ -2193,6 +2305,61 @@ export class SuperAgentManager {
   }
 
   /**
+   * 终态默认回收：删掉工作目录，**分支一律保留**。
+   *
+   * 这是「子会话正常完成」的默认收尾（`iflow.superAgent.keepWorktree` 默认
+   * 关闭）。与 `merged` / `empty` 两条路径的关键差别：这里**没有**「分支可以
+   * 删」的前提 —— 正常完成不等于改动已经落地（自动合并可能被跳过、PR 模式
+   * 只推送、manual 模式什么都不做），分支上很可能有还没人审的提交。删目录
+   * 只是不再让工作副本占着磁盘，分支原样留着（Orca 的 “Review N Branches”）。
+   *
+   * 闸门：
+   *  1. `released` 已为真 → 磁盘上早没了，直接成功（幂等）；
+   *  2. 工作目录还有未提交改动 → **不删**（删目录就是丢数据），有意保留、不重试；
+   *  3. 目录删不掉 → 可重试（子进程刚退出、文件仍被占用这类磁盘层面的偶发失败）。
+   */
+  private async releaseWorktreeKeepingBranch(id: string): Promise<ReleaseOutcome> {
+    const session = this.get(id);
+    if (!session) return { ok: true };
+    const isolation = session.isolation;
+    if (isolation.kind !== "git_worktree") return { ok: true };
+    if (!isolation.path || !isolation.branch) return { ok: true };
+    if (isolation.released) return { ok: true };
+
+    if (await worktreeHasUncommittedChanges(isolation.path)) {
+      this.deps.log.warn(
+        `super agent: ${id} 的工作目录还有未提交改动，保留 worktree 与分支 ${isolation.branch}`,
+      );
+      return { ok: false, retryable: false, reason: "工作目录还有未提交改动" };
+    }
+
+    const result = await removeWorktree({
+      repoRoot: this.deps.repoRoot,
+      targetPath: isolation.path,
+      branch: isolation.branch,
+      keepBranch: true,
+    });
+    if (!result.removed) {
+      const reason = result.reason ?? "工作目录未能删除";
+      this.deps.log.warn(
+        `super agent: ${id} 工作目录回收未完成（removed=${result.removed}）：${reason}`,
+      );
+      return { ok: false, retryable: true, reason };
+    }
+    if (!result.branchKept) {
+      // keepBranch=true 时不该发生；真发生了就是分支被删了 —— 如实记日志，
+      // 但目录已经没了，只能继续（无法恢复）。
+      this.deps.log.warn(`super agent: ${id} 回收工作目录时分支 ${isolation.branch} 未被保留`);
+    }
+
+    this.markRecycled(id);
+    this.deps.log.info(
+      `super agent: ${id} 已完成，回收工作目录并保留分支 ${isolation.branch}`,
+    );
+    return { ok: true };
+  }
+
+  /**
    * 释放失败后的有限后台重试。
    *
    * 只重试**可重试**的失败（目录删不掉这类磁盘层面的偶发失败）。有意保留
@@ -2203,7 +2370,7 @@ export class SuperAgentManager {
    */
   private scheduleReleaseRetry(
     id: string,
-    mode: "merged" | "empty",
+    mode: "merged" | "empty" | "recycle",
     reason: string,
   ): void {
     if (this.disposed) return;
@@ -2231,7 +2398,7 @@ export class SuperAgentManager {
   /** 后台重试的一次尝试。 */
   private async runReleaseRetry(
     id: string,
-    mode: "merged" | "empty",
+    mode: "merged" | "empty" | "recycle",
     reason: string,
   ): Promise<void> {
     if (this.disposed) return;
@@ -2258,6 +2425,22 @@ export class SuperAgentManager {
     const updated = this.updateSessionRecord(id, (session) => ({
       ...session,
       isolation: { ...session.isolation, released: true },
+    }));
+    if (updated) this.emit();
+  }
+
+  /**
+   * 把一条子会话记录标成「工作目录已回收、本地分支仍保留」。
+   *
+   * 与 {@link markReleased} 的区别只在语义：`released` 是「目录与分支都清理
+   * 干净了」，`recycled` 是「目录删了，但分支上有未合并的提交留着待审」。
+   * 两者都打 `released` 是因为「磁盘上不再有需要用户收拾的目录」这个事实
+   * 相同（看板据此不再显示「待清理」）。
+   */
+  private markRecycled(id: string): void {
+    const updated = this.updateSessionRecord(id, (session) => ({
+      ...session,
+      isolation: { ...session.isolation, released: true, recycled: true },
     }));
     if (updated) this.emit();
   }
