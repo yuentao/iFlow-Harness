@@ -133,7 +133,12 @@ export function Markdown({
   // stable for the throttle window) always converge to the final content.
   const [renderText, setRenderText] = useState(text);
   const lastSet = useRef(Date.now());
+  // `pending` = renderText is behind `text` and a trailing timer is armed.
   const pending = useRef(false);
+  // The trailing timer must always paint the NEWEST text, not the text of the
+  // effect run that armed it (see the re-arm note below).
+  const latestText = useRef(text);
+  latestText.current = text;
   useEffect(() => {
     const throttle = PARSE_THROTTLE_MS(text.length);
     if (throttle === 0) {
@@ -143,23 +148,31 @@ export function Markdown({
     }
     const elapsed = Date.now() - lastSet.current;
     if (elapsed >= throttle) {
+      pending.current = false;
       lastSet.current = Date.now();
       setRenderText(text);
       return;
     }
-    if (pending.current) return;
+    // Re-arm a trailing timer on EVERY update. The previous implementation
+    // armed it once and early-returned while `pending` was true — but React
+    // runs this effect's cleanup (clearTimeout) before the next run, so after
+    // a chunk arrived inside the window no timer was left; when the stream
+    // then stopped, the final text never rendered (the tail looked cut off
+    // while copy, which reads block.text, was complete). Re-arming keeps the
+    // cadence (the next run re-schedules against `lastSet`) and guarantees the
+    // last update converges.
     pending.current = true;
     const timer = window.setTimeout(() => {
       pending.current = false;
       lastSet.current = Date.now();
-      setRenderText(text);
+      setRenderText(latestText.current);
     }, throttle - elapsed);
     return () => window.clearTimeout(timer);
   }, [text]);
   // Converge on unmount: never leave a stale throttled render behind.
   useEffect(() => {
     return () => {
-      if (pending.current) setRenderText(text);
+      if (pending.current) setRenderText(latestText.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount only
   }, []);
