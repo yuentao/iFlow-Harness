@@ -185,6 +185,24 @@ describe("ui kit guard", () => {
     expect(hits).toEqual([]);
   });
 
+  it("lifts only the card-lift row whose dropdown is open", () => {
+    // .card-lift:hover's transform (0.25s transition) makes each row a
+    // stacking context; an absolute z-30 menu inside one row is then painted
+    // under later sibling rows. Chrome 157 headless + CDP (elementFromPoint
+    // over the menu/next-row overlap on McpCard's server list) reproduced it:
+    // the next row covered the open menu for the whole transition window.
+    expect(kitCss).toMatch(
+      /\.card-lift:has\(\[role="?menu"?\]\)\s*\{[^}]*position:\s*relative[^}]*z-index:\s*20/,
+    );
+    // The lift hinges on role="menu" being emitted ONLY while a Dropdown is
+    // open and ONLY from ui.tsx. Dropping the attribute (or duplicating it on
+    // a permanently mounted node) silently disables the rule or lifts every
+    // row. codeOnly keeps the JSX attribute, not a doc-comment mention.
+    const kit = files.find((f) => f.rel === CONTROL_HOME)!.content;
+    expect(codeOnly(kit)).toContain('role="menu"');
+    expect(violations(/role="menu"/, (rel) => rel === CONTROL_HOME)).toEqual([]);
+  });
+
   it("resets the browser's field chrome in the kit stylesheet", () => {
     // Chromium paints decorations a class string cannot override; the kit owns
     // them in styles.css so no field can fall back to browser styling.

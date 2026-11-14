@@ -662,6 +662,25 @@ header.acrylic.header-scrolled {
   transform: translateY(-1px);
 }
 
+/* Open-dropdown rows must out-rank their .card-lift siblings.
+   Root cause (.card-lift:hover above): a non-none transform (here
+   translateY(-1px), with a 0.25s transition) makes EVERY row a stacking
+   context, so the Dropdown's absolute z-30 menu is painted inside its own
+   row and later sibling rows cover it in DOM paint order.
+   Verified on Chrome 157 headless + CDP (elementFromPoint over the menu /
+   next-row overlap on the MCP server list in McpCard.tsx): before this rule
+   the next row's content and more-button won 8/32 menu-item grid points at
+   1200px and the overlap probe at both 1200px and 360px throughout the 0.25s
+   transition (clearing only after it ended); with the rule every probe hits
+   [role=menuitem]. [role=menu] is rendered only while a Dropdown is open and
+   only in components/ui.tsx (its single source), so :has lifts exactly the
+   open row — closed rows stay position:static / z-index:auto. The ui-kit
+   guard asserts both this rule and that single source stay in place. */
+.card-lift:has([role="menu"]) {
+  position: relative;
+  z-index: 20;
+}
+
 /* Press feedback: interactive elements sink 1px on :active. */
 @utility press {
   transition: transform 0.12s var(--ease-out-expo);
