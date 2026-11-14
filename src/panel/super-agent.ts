@@ -227,6 +227,14 @@ export interface SuperAgentDeps {
   /** 需要主会话知道的状态更新（宿主转成给主会话的提示词）。 */
   onReport: (entries: { session: SuperSessionUi; report: SuperReport }[]) => void;
   /**
+   * 子会话**开始等你回答**（`needs_input` 让 `pending` 从空变有值）时触发一次。
+   *
+   * 只通知、不改行为：宿主据此弹系统通知（与主会话的提问卡同一档）。同一个
+   * pending 的重复 apply、恢复出来的历史子会话都不会再触发 —— 用户只需要被
+   * 打扰一次。可选是为了让单测与 fixture 不必逐个补齐。
+   */
+  onNeedInput?: (session: SuperSessionUi) => void;
+  /**
    * 自动集成没能把改动带回主分支（改动与本地未提交改动重叠 / 预演冲突 /
    * git 拒绝合并等），但分支里确实有提交 —— 宿主据此**自动**派出一个合并
    * 子会话（repo 档，跑在主仓工作区里执行 `git merge --no-ff`），而不是把
@@ -2477,6 +2485,12 @@ export class SuperAgentManager {
     const next = applySuperEvent(session, event);
     if (next === session) return;
     this.sessions.set(id, next);
+    // 「开始等你回答」只惊动用户一次：prev 没有 pending、next 有 pending 才算
+    // 真正进入等待（同一 pending 的重复 apply 不会重复通知）。恢复出来的历史
+    // 子会话不在 `sessions` 里，压根走不到这里；`restored` 判断是额外的护栏。
+    if (event.type === "needs_input" && !session.pending && next.pending && !next.restored) {
+      this.deps.onNeedInput?.(next);
+    }
     this.emit();
   }
 

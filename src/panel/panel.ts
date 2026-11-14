@@ -6798,6 +6798,11 @@ export class ChatPanel implements vscode.Disposable {
       onTranscript: (sessionId, from, blocks) =>
         this.postToWebview({ type: "superTranscript", sessionId, from, blocks }),
       onReport: (entries) => this.queueSuperReport(entries),
+      // 子会话在等你回答：与主会话的提问卡同一档通知（`question` 属
+      // approvals 默认档），只弹系统通知、不发提示音 —— 子会话的汇报回合
+      // 已经统一静音，提问是唯一需要当场惊动用户的子会话事件。
+      onNeedInput: (session) =>
+        this.notifyOs("question", vscode.l10n.t("子会话「{0}」在等你回答", session.title)),
       // 自动集成没能把子会话的改动带回主分支 → 自动请智能体合并，
       // 不再把这件事留给用户点看板上的按钮。
       onNeedAgentMerge: (session, reason) => this.scheduleSuperMerge(session.id, reason),
@@ -9491,10 +9496,26 @@ export class ChatPanel implements vscode.Disposable {
       // exclusive, the exclusivity made the chime unreachable for away users
       // on `osNotifications: all` (user report 2026-10-13).
       if (result.stopReason !== "cancelled") {
-        // M1 P0-5: the turn landed while the user is away — tell them it's
-        // ready.
-        this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
-        this.postSound("done");
+        // 完成提示按回合来源分档：
+        //  - 用户回合（非 hidden）：照旧「iFlow 已完成本轮回复」+ 提示音。
+        //  - hidden 汇报回合：子会话的汇报是逐个投进来的，每投一次就响一次铃
+        //    等于把「一个子会话干完」误报成「整件事做完了」。还有子会话在跑
+        //    就完全静音；等最后一个也结束的那一轮，才提示一次「子会话已全部
+        //    结束」。
+        const runningChildren = hidden
+          ? (this.superAgent?.list(this.currentMainSessionId()) ?? []).filter(
+              (session) => !isTerminalSuperStatus(session.status),
+            ).length
+          : 0;
+        if (!hidden) {
+          // M1 P0-5: the turn landed while the user is away — tell them it's
+          // ready.
+          this.notifyOs("turnDone", vscode.l10n.t("iFlow 已完成本轮回复"));
+          this.postSound("done");
+        } else if (runningChildren === 0) {
+          this.notifyOs("turnDone", vscode.l10n.t("子会话已全部结束"));
+          this.postSound("done");
+        }
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();

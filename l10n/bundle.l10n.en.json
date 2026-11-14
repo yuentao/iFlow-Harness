@@ -292,6 +292,8 @@
   "正在等待 {0} 个子会话汇报（完成一个即汇报一个，会自动继续）": "Waiting for {0} child session(s) to report (each one is reported as soon as it finishes); it continues automatically.",
   "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续": "Waiting for {0} child session(s) to report ({1} awaiting your answer); each one is reported as soon as it finishes, and it continues automatically.",
   "还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话": "Child sessions are still running and waiting to report — start a new session once they finish (or interrupt them from the board).",
+  "子会话已全部结束": "All child sessions have finished.",
+  "子会话「{0}」在等你回答": "Child session “{0}” is waiting for your answer.",
   "子会话": "Child session",
   "待办": "To do",
   "进行中": "In progress",
