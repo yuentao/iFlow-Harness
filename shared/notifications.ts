@@ -82,6 +82,44 @@ export function initOsNotifyGate(): OsNotifyGate {
   return { lastFiredAt: {} };
 }
 
+/** Result of the gate: whether to fire, the (possibly updated) gate, and —
+ * when it did not fire — the reason, so the host can decide whether the
+ * chime still has a signal to accompany. */
+export interface OsNotifyDecision {
+  fire: boolean;
+  gate: OsNotifyGate;
+  /** Absent when `fire` is true. */
+  reason?: OsNotifyBlockReason;
+}
+
+/**
+ * Why a notification did NOT fire. The host needs the distinction, not just
+ * the boolean: the completion chime must accompany a signal the user can
+ * actually perceive.
+ *
+ * - `watching`  — panel visible + window focused: the transcript/card is on
+ *                 screen, that IS the visible signal.
+ * - `setting`   — `iflow.osNotifications` turned this kind off: the user
+ *                 opted out of system toasts, so the chime is the only cue.
+ * - `focus`     — turnDone while the window is focused: the user is in the
+ *                 editor, nothing was shown, the chime is the only cue.
+ * - `throttle`  — same kind fired moments ago.
+ * - `cooldown`  — byte-identical text fired inside the content cooldown.
+ *
+ * `throttle`/`cooldown` are the duplicate cases: a near-identical line was
+ * delivered seconds ago, so there is no NEW signal for a chime to accompany
+ * (see `isDuplicateNotificationBlock`).
+ */
+export type OsNotifyBlockReason = "watching" | "setting" | "focus" | "throttle" | "cooldown";
+
+/** True when the block reason means a near-identical notification was
+ * delivered moments ago — a duplicate with nothing new to announce. The
+ * completion chime skips exactly these; every other non-fire reason still
+ * leaves the chime as the user's only signal. */
+export function isDuplicateNotificationBlock(reason: OsNotifyBlockReason | undefined): boolean {
+  return reason === "throttle" || reason === "cooldown";
+}
+
 /**
  * The "is the user looking at the panel?" judgement gating the OS-notification
  * trigger (roadmap P0-5). Watching = panel visible AND the window focused: the
@@ -120,13 +158,19 @@ export function gateOsNotification(args: {
   /** The exact notification text (the host passes the toast body). Enables
    * the content cooldown; omitted = cooldown not consulted (throttle only). */
   contentKey?: string;
-}): { fire: boolean; gate: OsNotifyGate } {
-  if (isUserWatching(args.panelVisible, args.windowFocused)) return { fire: false, gate: args.gate };
-  if (!osNotifyAllowed(args.event, args.setting)) return { fire: false, gate: args.gate };
-  if (args.event === "turnDone" && args.windowFocused) return { fire: false, gate: args.gate };
+}): OsNotifyDecision {
+  if (isUserWatching(args.panelVisible, args.windowFocused)) {
+    return { fire: false, gate: args.gate, reason: "watching" };
+  }
+  if (!osNotifyAllowed(args.event, args.setting)) {
+    return { fire: false, gate: args.gate, reason: "setting" };
+  }
+  if (args.event === "turnDone" && args.windowFocused) {
+    return { fire: false, gate: args.gate, reason: "focus" };
+  }
   const last = args.gate.lastFiredAt[args.event];
   if (last !== undefined && args.nowMs - last < OS_NOTIFY_THROTTLE_MS) {
-    return { fire: false, gate: args.gate };
+    return { fire: false, gate: args.gate, reason: "throttle" };
   }
   const lastContent = args.gate.lastContent;
   if (
@@ -136,7 +180,7 @@ export function gateOsNotification(args: {
     lastContent.text === args.contentKey &&
     args.nowMs - lastContent.atMs < OS_NOTIFY_CONTENT_COOLDOWN_MS
   ) {
-    return { fire: false, gate: args.gate };
+    return { fire: false, gate: args.gate, reason: "cooldown" };
   }
   return {
     fire: true,

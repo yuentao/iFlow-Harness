@@ -382,6 +382,37 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     expect(infoMessage).not.toHaveBeenCalled();
   });
 
+  it("a duplicate turnDone swallowed by the content cooldown leaves no lone chime", async () => {
+    // 用户实测 2026-11-15：偶尔突然响铃，界面上却没有任何通知。away 状态下
+    // 每一轮完成的文案都是同一句「iFlow 已完成本轮回复」，60s 内容冷却把它
+    // 吞掉之后，铃声若照响就只剩噪声 —— 铃声必须伴随一个用户能感知的信号。
+    p.store.userPrompt("第一次");
+    p.store.promptCompleted("end_turn");
+    const sound = vi.spyOn(p, "postSound");
+    await p.regenerate();
+    expect(infoMessage).toHaveBeenCalledTimes(1);
+    expect(sound).toHaveBeenCalledWith("done");
+
+    // 6s 后同一轮再来一次：过了 5s 同类节流，仍在 60s 内容冷却窗口内。
+    vi.advanceTimersByTime(6_000);
+    p.store.userPrompt("第二次");
+    p.store.promptCompleted("end_turn");
+    sound.mockClear();
+    await p.regenerate();
+    expect(infoMessage).toHaveBeenCalledTimes(1); // 没有第二条通知
+    expect(sound).not.toHaveBeenCalled(); // 也没有孤零零的一声铃
+  });
+
+  it("still chimes when the user turned system notifications off (the chime is the only cue)", async () => {
+    setConfigOverrides({ osNotifications: "off" });
+    p.store.userPrompt("再试一次");
+    p.store.promptCompleted("end_turn");
+    const sound = vi.spyOn(p, "postSound");
+    await p.regenerate();
+    expect(infoMessage).not.toHaveBeenCalled();
+    expect(sound).toHaveBeenCalledWith("done");
+  });
+
   it("a failed turn earns no toast — the banner and the error chime carry it", async () => {
     // Policy 2026-10-16 (user restated): OS reminders exist only for the four
     // triggers — question/approval/plan card displayed, turn completed. A
