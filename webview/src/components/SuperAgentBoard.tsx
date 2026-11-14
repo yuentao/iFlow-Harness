@@ -21,12 +21,14 @@ import {
 import type { Block } from "../../../shared/messages";
 import type {
   SuperIntegrationState,
+  SuperIsolation,
   SuperSessionUi,
   SuperStatus,
 } from "../../../shared/super-agent";
 import {
   canRetrySuperSession,
   groupSuperSessionsForBoard,
+  isTerminalSuperStatus,
   sumSuperUsage,
   summarizeSuperSessions,
   superIntegrationLabel,
@@ -308,6 +310,26 @@ function isActive(session: SuperSessionUi): boolean {
   return session.status === "preparing" || session.status === "running" || session.status === "awaiting_input";
 }
 
+/**
+ * 该子会话是否仍占用一个磁盘工作目录。
+ *
+ * `repo` 档的 path 是主仓根 —— 它不是隔离产物，清理时也不能删，所以从不计入
+ * 「工作目录占用」。已释放（合并成功清理 / 终态回收）的目录在磁盘上已不存在。
+ */
+function holdsWorktree(isolation: SuperIsolation): boolean {
+  return isolation.kind !== "repo" && !isolation.released;
+}
+
+/**
+ * 已释放状态的文案（三态）。
+ *
+ * - `recycled`：目录被回收，**本地分支仍保留**（分支上有未合并提交，刻意留下待审）。
+ * - 其余 `released`：目录与分支都已清理（合并成功，或根本没产生提交）。
+ */
+function releasedIsolationLabel(isolation: SuperIsolation): string {
+  return isolation.recycled ? t("工作目录已回收，分支保留") : t("工作目录与分支已清理");
+}
+
 /** Stable empty transcript: returning a fresh `[]` from a zustand selector
  * would change identity on every render. */
 const EMPTY_TRANSCRIPT: Block[] = [];
@@ -388,6 +410,12 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   const [expanded, setExpanded] = useState(false);
   const [confirmMerge, setConfirmMerge] = useState<SuperSessionUi | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState<SuperSessionUi | null>(null);
+  // Bulk cleanup snapshots the reclaimable ids at open time — recomputing while
+  // the dialog is open could silently drop a child that just turned terminal
+  // (or claim one that is still running) between the click and the confirm.
+  const [confirmCleanupAll, setConfirmCleanupAll] = useState<{ count: number; ids: string[] } | null>(
+    null,
+  );
   // Interrupts kill a live process, so both the per-row and the board-wide
   // action go through a confirm dialog like merge / cleanup do. The board-wide
   // variant snapshots the active count at open time — recomputing it while the
@@ -437,6 +465,18 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   );
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
+  // Worktree usage: how many children still hold a directory on disk, and how
+  // many of those are finished (their directory can be reclaimed without
+  // touching the branch). `repo` children never count — they share the main
+  // workspace, which is not an isolation artifact.
+  const worktreeSessions = useMemo(
+    () => list.filter((s) => holdsWorktree(s.isolation)),
+    [list],
+  );
+  const reclaimable = useMemo(
+    () => worktreeSessions.filter((s) => isTerminalSuperStatus(s.status)),
+    [worktreeSessions],
+  );
   // Live-region text: announce CHANGES, not the whole board. On mount there
   // is nothing to announce (the rows are right there to be read), and a
   // change-only feed keeps the board's own text free of a second copy of
@@ -747,6 +787,35 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
               )}
             </div>
           )}
+          {/* Worktree footprint: the board is the only place that shows how
+              much disk the children are holding. The bulk action is offered
+              only for FINISHED children — a live child's directory must not
+              be deleted under a running process (the row action says the same). */}
+          {worktreeSessions.length > 0 && (
+            <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {t("工作目录 {0} 个", worktreeSessions.length)}
+              </span>
+              <span className="tabular-nums">
+                {t("已结束 {0} 个可回收", reclaimable.length)}
+              </span>
+              {reclaimable.length > 0 && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Trash2 className={ICON_INLINE} />}
+                  onClick={() =>
+                    setConfirmCleanupAll({
+                      count: reclaimable.length,
+                      ids: reclaimable.map((s) => s.id),
+                    })
+                  }
+                >
+                  {t("清理已结束")}
+                </Button>
+              )}
+            </div>
+          )}
           </div>
         </div>
       )}
@@ -820,6 +889,25 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           onCancel={() => setConfirmCleanup(null)}
         />
       )}
+      {confirmCleanupAll !== null && (
+        <ConfirmDialog
+          title={t("清理已结束的子会话")}
+          message={t(
+            "将删除 {0} 个子会话的工作目录；分支上一律保留（未合并的提交不会丢），工作目录里未提交的改动会被一并删除，无法恢复。",
+            confirmCleanupAll.count,
+          )}
+          confirmLabel={t("清理已结束")}
+          onConfirm={() => {
+            // One cleanup message per child: the host action is per-session,
+            // and a partial failure must not hide the others.
+            for (const id of confirmCleanupAll.ids) {
+              send({ type: "superAgent", action: "cleanup", sessionId: id });
+            }
+            setConfirmCleanupAll(null);
+          }}
+          onCancel={() => setConfirmCleanupAll(null)}
+        />
+      )}
     </>
   );
 }
@@ -889,9 +977,10 @@ function SuperSessionRow({
   // marker — ride the title tooltip instead of occupying their own lines.
   const titleHint = [
     session.title,
-    // 合并成功时磁盘对象已清理：工具提示不该再给出一条已经不存在的路径。
+    // 已释放要区分两档：合并成功=目录与分支都没了；终态回收=目录删了但分支还在
+    // （未合并的提交留在分支上待审）。说成「都已清理」会让人以为提交也没了。
     session.isolation.released
-      ? t("工作目录与分支已清理")
+      ? releasedIsolationLabel(session.isolation)
       : session.isolation.branch
         ? t("分支 {0}", session.isolation.branch)
         : null,
@@ -969,7 +1058,9 @@ function SuperSessionRow({
           <div className="flex min-w-0 items-center gap-1.5 text-ui-micro text-muted-foreground">
             <GitBranch className="size-3 shrink-0" aria-hidden="true" />
             {session.isolation.released ? (
-              <span className="min-w-0 flex-1 truncate">{t("工作目录与分支已清理")}</span>
+              <span className="min-w-0 flex-1 truncate">
+                {releasedIsolationLabel(session.isolation)}
+              </span>
             ) : (
               <span className="min-w-0 flex-1 truncate font-mono" title={`${session.isolation.branch ?? ""}\n${session.isolation.path}`}>
                 {session.isolation.branch ?? session.isolation.path}
