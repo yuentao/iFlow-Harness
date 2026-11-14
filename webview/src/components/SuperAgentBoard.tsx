@@ -879,6 +879,12 @@ function SuperSessionRow({
         : isActive(session)
           ? t("子会话还没结束，完成后再让智能体合并")
           : t("派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）");
+  // Cleanup deletes the worktree, so it must not race a live child: the
+  // process would keep writing into a directory that no longer exists.
+  // Same wording discipline as the merge action — the reason is a visible
+  // line, not just a tooltip on a greyed-out button.
+  const cleanupBlocked = isActive(session);
+  const cleanupReason = t("子会话还在运行，先中断再清理");
   // Diagnostics — full branch ref, worktree path, retry count, restored
   // marker — ride the title tooltip instead of occupying their own lines.
   const titleHint = [
@@ -1070,7 +1076,17 @@ function SuperSessionRow({
                 variant="canvas"
                 size="sm"
                 icon={<Trash2 className={ICON_INLINE} />}
-                onClick={onCleanup}
+                /* Same reasoning as the merge button: `disabled` would kill
+                   pointer events and hide the explanation, so the block is
+                   expressed with `aria-disabled` plus an early return. */
+                aria-disabled={cleanupBlocked || undefined}
+                aria-label={cleanupBlocked ? cleanupReason : t("清理")}
+                title={cleanupBlocked ? cleanupReason : undefined}
+                className={cleanupBlocked ? "cursor-not-allowed opacity-40" : undefined}
+                onClick={() => {
+                  if (cleanupBlocked) return;
+                  onCleanup();
+                }}
               >
                 {t("清理")}
               </Button>
@@ -1080,6 +1096,11 @@ function SuperSessionRow({
             /* The reason is visible without hover — a greyed-out button with
                no explanation reads as a broken control. */
             <p className="text-ui-micro text-muted-foreground">{mergeReason}</p>
+          )}
+          {cleanupBlocked && (
+            /* Same rule for cleanup: it is only blocked while the child is
+               alive, and that has to be readable without hovering. */
+            <p className="text-ui-micro text-muted-foreground">{cleanupReason}</p>
           )}
         </div>
       )}
