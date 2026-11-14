@@ -984,7 +984,14 @@ function SuperSessionRow({
       : session.isolation.branch
         ? t("分支 {0}", session.isolation.branch)
         : null,
-    session.isolation.released ? null : t("目录 {0}", session.isolation.path),
+    // Placeholder isolation (queued / preparing) has an empty `path`: joining
+    // it would produce a dangling 「目录 」 that reads as lost information.
+    // Say what the host actually said instead — same wording as the detail row.
+    session.isolation.released
+      ? null
+      : session.isolation.path
+        ? t("目录 {0}", session.isolation.path)
+        : (session.isolation.note ?? null),
     (session.attempts ?? 1) > 1 ? t("第 {0} 次尝试", session.attempts ?? 1) : null,
     historical ? t("这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）") : null,
   ]
