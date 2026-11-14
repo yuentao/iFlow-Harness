@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   allSuperSessionsSettled,
   applySuperEvent,
+  buildSuperActionReceiptPrompt,
   buildSuperDigest,
   buildSuperMergeRequestPrompt,
   buildSuperReportPrompt,
@@ -1452,6 +1453,36 @@ describe("super agent · 管理动作协议", () => {
     }));
     const text = ["```super-agent-actions", JSON.stringify({ actions }), "```"].join("\n");
     expect(extractSuperActions(text).actions).toHaveLength(MAX_SUPER_ACTIONS);
+  });
+});
+
+describe("super agent · 动作回执", () => {
+  it("回执区分「已生效」「幂等重复（已终态）」「真未生效」，并劝主会话别重复发", () => {
+    const text = buildSuperActionReceiptPrompt([
+      { action: "cancel", sessionId: "super-a", ok: true, reason: "applied" },
+      {
+        action: "cancel",
+        sessionId: "super-b",
+        ok: true,
+        reason: "already-terminal",
+        detail: "the child session was already completed",
+      },
+      { action: "cancel", sessionId: "super-c", ok: false, reason: "not-found" },
+    ]);
+    expect(text).toContain("[子会话动作回执]");
+    expect(text).toContain("super-a");
+    expect(text).toContain("applied");
+    // 幂等重复：不是失败，但也不能说成「没生效」。
+    expect(text).toContain("already applied (idempotent)");
+    expect(text).toContain("the child session was already completed");
+    // 目标不存在：这才是真的没生效。
+    expect(text).toContain("NOT applied");
+    // 主会话必须被明确告知：已生效的动作不要再发一遍。
+    expect(text).toContain("must NOT be sent again");
+  });
+
+  it("没有回执时不产出提示词（不发空回合）", () => {
+    expect(buildSuperActionReceiptPrompt([])).toBe("");
   });
 });
 

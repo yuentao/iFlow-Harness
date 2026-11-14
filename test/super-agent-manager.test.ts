@@ -677,6 +677,24 @@ describe("super agent · 编排", () => {
     expect(harness.reports.filter((entry) => entry.report.state === "failed")).toHaveLength(0);
   }, 30000);
 
+  it("中断已终态的子会话是幂等重复（不算未生效）；目标不存在才是不生效", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const session = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    // 第一次：真的中断了一个在跑的子会话。
+    const first = await harness.manager.cancel(session.id);
+    expect(first).toEqual({ ok: true, reason: "cancelled", status: "cancelled" });
+    // 第二次：目标已经是终态 —— 幂等重复，意图（「别再跑了」）已经达成，
+    // **不是**「未生效」（报成未生效会让主会话重复发同一个动作）。
+    const second = await harness.manager.cancel(session.id);
+    expect(second.ok).toBe(true);
+    expect(second.reason).toBe("already-terminal");
+    // 目标根本不存在：这才是真的没生效。
+    const missing = await harness.manager.cancel("super-does-not-exist");
+    expect(missing).toEqual({ ok: false, reason: "not-found" });
+  }, 30000);
+
   it("并发超出的派发进排队，槽位空出后自动开跑", async () => {
     const repo = makeRepo();
     const limit = 2;

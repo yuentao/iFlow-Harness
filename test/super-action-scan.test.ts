@@ -220,4 +220,105 @@ describe("super agent · 动作块扫描（分片无关）", () => {
   it("没有围栏时 sawFence 为 false（宿主据此不刷日志）", () => {
     expect(extractSuperActions("只是普通散文，没有任何协议块。").sawFence).toBe(false);
   });
+
+  // (e) 真实故障形态（2026-11-14）：主会话先发一个**漏收栏**的动作块，紧接着
+  // 发一个委派块。动作块的收栏搜索被委派块的开栏截断 → 旧实现判「未闭合」
+  // → 扫描停在 pending → cancel 被**静默丢弃**（子会话还在跑，重发一次才生效）。
+  it("(e) 漏收栏的动作块紧跟委派围栏：动作仍被执行、委派仍被派发", () => {
+    const text = [
+      "先取消旧的那个，再派一个新的：",
+      "```super-agent-actions",
+      JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-old" }] }),
+      "```super-agent",
+      JSON.stringify({ tasks: [{ title: "跑测试", task: "npm test 并汇报真实输出" }] }),
+      "```",
+      "",
+      "结束。",
+    ].join("\n");
+
+    // 整段：动作一次、委派一次。
+    const whole = feed([text]);
+    expect(whole.actions).toEqual([{ action: "cancel", sessionId: "super-old" }]);
+    expect(whole.invalidBlocks).toEqual([]);
+
+    // 每个字符位置切两段：结论不能随分片大小漂移（两条通道各扫各的）。
+    const failures: string[] = [];
+    for (const { at, chunks } of everyTwoWaySplit(text)) {
+      let delegationText = "";
+      let delegationOffset = 0;
+      let tasks = 0;
+      let actionsText = "";
+      let actionsOffset = 0;
+      const actions: SuperAction[] = [];
+      for (const chunk of chunks) {
+        delegationText += chunk;
+        const directive = extractSuperDirectives(delegationText, delegationOffset);
+        if (directive.end > delegationOffset) delegationOffset = directive.end;
+        tasks += directive.blocks.reduce((sum, block) => sum + block.length, 0);
+
+        actionsText += chunk;
+        const scan = extractSuperActions(actionsText, actionsOffset);
+        if (scan.end > actionsOffset) actionsOffset = scan.end;
+        actions.push(...scan.actions);
+      }
+      if (tasks !== 1) {
+        failures.push(`split@${at}: tasks=${tasks}`);
+      }
+      if (actions.length !== 1 || actions[0]?.sessionId !== "super-old") {
+        failures.push(`split@${at}: actions=${JSON.stringify(actions)}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // (f) 动作块与委派块**相邻**书写（各自带收栏）：两者都不该被对方吞掉。
+  it("(f) 动作块与委派块相邻书写：两者各自解析一次（含分片）", () => {
+    const text = [
+      "```super-agent-actions",
+      JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-old" }] }),
+      "```",
+      "```super-agent",
+      JSON.stringify({ tasks: [{ title: "跑测试", task: "npm test 并汇报真实输出" }] }),
+      "```",
+    ].join("\n");
+    const failures: string[] = [];
+    for (const { at, chunks } of everyTwoWaySplit(text)) {
+      let delegationText = "";
+      let delegationOffset = 0;
+      let tasks = 0;
+      let actionsText = "";
+      let actionsOffset = 0;
+      const actions: SuperAction[] = [];
+      for (const chunk of chunks) {
+        delegationText += chunk;
+        const directive = extractSuperDirectives(delegationText, delegationOffset);
+        if (directive.end > delegationOffset) delegationOffset = directive.end;
+        tasks += directive.blocks.reduce((sum, block) => sum + block.length, 0);
+
+        actionsText += chunk;
+        const scan = extractSuperActions(actionsText, actionsOffset);
+        if (scan.end > actionsOffset) actionsOffset = scan.end;
+        actions.push(...scan.actions);
+      }
+      if (tasks !== 1 || actions.length !== 1) {
+        failures.push(`split@${at}: tasks=${tasks} actions=${JSON.stringify(actions)}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // (g) 未闭合的动作围栏必须留下**有内容**的 pending 信号：宿主据此在回合
+  // 收尾时留痕（旧实现零日志零 toast —— 动作被静默丢弃）。
+  it("(g) 未闭合的动作围栏留下 pending 信号（不再是零痕迹）", () => {
+    const text = [
+      "```super-agent-actions",
+      '{"actions":[{"action":"cancel","sessionId":"super-1"}',
+    ].join("\n");
+    const scan = extractSuperActions(text);
+    expect(scan.sawFence).toBe(true);
+    expect(scan.pending).toBe(true);
+    expect(scan.actions).toEqual([]);
+    // 没收完的正文必须带出来（宿主据此写日志，不能只留一句空话）。
+    expect(scan.pendingBody).toContain("cancel");
+  });
 });

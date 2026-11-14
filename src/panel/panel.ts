@@ -73,6 +73,7 @@ import {
 import { CheckpointManager } from "./checkpoints.js";
 import { SuperAgentManager } from "./super-agent.js";
 import {
+  buildSuperActionReceiptPrompt,
   buildSuperDigest,
   buildSuperMergeRequestPrompt,
   clampMaxConcurrentSuperSessions,
@@ -89,6 +90,7 @@ import {
   SuperDirectiveScanner,
   SuperReportBuffer,
   type SuperAction,
+  type SuperActionReceipt,
   type SuperAttachment,
   type SuperReportEntry,
   type SuperSessionUi,
@@ -731,6 +733,30 @@ export class ChatPanel implements vscode.Disposable {
   /** How much of `superActionScanText` has already been executed. */
   private superActionScanOffset = 0;
   /**
+   * 本轮还有一个动作围栏停在「未闭合」状态（围栏开了没收）。
+   *
+   * 流式期间这是正常中间态（载荷可能下一帧才到），所以不在每帧报警；
+   * 但**回合都结束了还停在这里**，说明这个动作块永远不会被执行 ——
+   * 旧实现对此完全静默（零日志、零 toast），故障只能靠用户复述「我发过啊」。
+   * 回合收尾时用它复核并留痕（见 `auditSuperActionsAtSettle`）。
+   */
+  private superActionPending = false;
+  /** 未闭合围栏里那段没收完的正文（日志用，别让痕迹变成一句空话）。 */
+  private superActionPendingBody = "";
+  /**
+   * 最后一条已排队的动作回执文本（去重）。
+   *
+   * 回执是投给主会话的一次 hidden prompt；同一份回执重复排队会让主会话
+   * 反复收到一模一样的「已生效」，白白多跑几轮。
+   */
+  private superActionReceiptLast = "";
+  /**
+   * 「扫到围栏却零动作」的告警是否已经记过（去重）。
+   *
+   * 这条通道每来一段文本都会扫一次，不去重就是同一个问题刷一屏日志。
+   */
+  private superActionZeroWarned = false;
+  /**
    * 子会话汇报的缓冲：**逐个即时交付** —— 某个子会话一进入终态，它的汇报
    * 就被取走交给主会话（不必等同一批全部结束）。同一子会话只保留最后一条
    * （blocked → ready 之类的中途状态不重复转述），中途进展只更新看板。
@@ -752,6 +778,20 @@ export class ChatPanel implements vscode.Disposable {
    * B 的对话（投错会话 = 串台）。
    */
   private pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }> = [];
+  /**
+   * 已经执行完、等着回执给主会话的子会话管理动作（先进先出）。
+   *
+   * **为什么要回执**：主会话的看板摘要是**每轮开篇冻结**的 —— 同一轮里它
+   * 看不到自己刚发的动作有没有生效，于是会**重复发同一个动作**（真实故障：
+   * cancel 了一个早已结束的子会话，看板没变化，智能体又发一次）。
+   * 回执把结果直接送回主会话的上下文，让它当场知道「这次生效了，别再发」。
+   *
+   * 交付方式与子会话汇报一致：**主会话上的一次 hidden prompt**（转录里不出现
+   * 用户气泡），主会话空闲时才投（与汇报共用同一条车道，互斥执行）。
+   * 单独记账而不混进汇报队列：「等待子会话汇报」的忙碌标记不该被一条动作
+   * 回执点亮。
+   */
+  private pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }> = [];
   /** 汇报 turn 正在跑（drain 的重入锁，与合并队列互斥）。 */
   private superReportRunning = false;
   /**
@@ -1311,6 +1351,7 @@ export class ChatPanel implements vscode.Disposable {
     this.superAgent = null;
     this.pendingSuperReports.clear();
     this.pendingSuperReportPrompts = [];
+    this.pendingSuperActionReceipts = [];
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
@@ -7026,14 +7067,59 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
     }
     if (scan.actions.length > 0) void this.runSuperActions(scan.actions);
+    // 围栏开了没收：记住它。流式期间这是正常中间态（载荷下一帧才到），不在
+    // 每帧报警；但**回合都结束了还停在这里**，说明这个动作块永远不会被执行
+    // —— 回合收尾时复核并留痕（见 `auditSuperActionsAtSettle`）。
+    if (scan.pending) {
+      this.superActionPending = true;
+      this.superActionPendingBody = scan.pendingBody ?? "";
+    } else if (this.superActionPending) {
+      // 后来补齐了（或者被后面那个完整围栏顶掉了）—— 不是问题。
+      this.superActionPending = false;
+      this.superActionPendingBody = "";
+    }
     // 静默失败变可见：围栏确实出现过、这一轮也扫完了（不是还在流式等收栏），
     // 却既没有动作也没有非法块 —— 主会话下过指令，宿主什么都没执行。旧实现
     // 在这里什么都不留，故障只能靠用户复述「我发过啊」。只记日志、不弹 toast：
     // 这条通道每来一段文本都会扫一次，弹窗会变成噪音。
-    if (scan.sawFence && !scan.pending && scan.actions.length === 0 && scan.invalidBlocks.length === 0) {
+    //
+    // 去重：同一处「零动作」只记一次（每来一段文本都会扫一次，不去重就是刷屏）。
+    const zeroFence =
+      scan.sawFence && !scan.pending && scan.actions.length === 0 && scan.invalidBlocks.length === 0;
+    if (zeroFence && !this.superActionZeroWarned) {
+      this.superActionZeroWarned = true;
       this.log.warn(
         `super-agent-actions fence produced no actions (scan buffer ${this.superActionScanText.length} chars, consumed offset ${this.superActionScanOffset})`,
       );
+    } else if (!zeroFence) {
+      this.superActionZeroWarned = false;
+    }
+  }
+
+  /**
+   * 回合收尾时复核动作围栏：把「停在未闭合围栏上」变成一条**有内容**的日志。
+   *
+   * 流式期间 pending 是正常中间态（围栏还没写完），每帧都报警只会变成噪音；
+   * 但回合都结束了还停在 pending，说明这个动作块**永远不会被执行** —— 旧实现
+   * 对此完全静默（零日志、零 toast），主会话只能靠重发一次才发现动作没生效。
+   *
+   * 这里**再扫一次**再下结论：回合结束时缓冲里的文本是最终形态，重新扫能
+   * 确认「确实没收栏」而不是「最后一帧恰好还没到」。
+   */
+  private auditSuperActionsAtSettle(): void {
+    if (!this.superActionPending) return;
+    const body = this.superActionPendingBody;
+    this.superActionPending = false;
+    this.superActionPendingBody = "";
+    try {
+      const scan = extractSuperActions(this.superActionScanText, this.superActionScanOffset);
+      // 后来补齐了 → 不是问题（动作已经执行或已被后面那个完整围栏顶掉）。
+      if (!scan.pending) return;
+      this.log.warn(
+        `super-agent-actions fence never closed — the action block was NOT executed (unfinished payload: ${body || "(empty)"}; scan buffer ${this.superActionScanText.length} chars, consumed offset ${this.superActionScanOffset})`,
+      );
+    } catch (error) {
+      this.log.warn(`super agent action audit failed: ${errorMessage(error)}`);
     }
   }
 
@@ -7043,33 +7129,98 @@ export class ChatPanel implements vscode.Disposable {
    * Failures are never silent: an action aimed at a stale id or inapplicable
    * state is counted as ignored and reported once, so the main session can
    * correct itself on the next turn (the board snapshot shows the real state).
+   *
+   * **「未生效」的口径要诚实**：对一个**已经是终态**的子会话再发一次 cancel
+   * 是幂等重复 —— 意图（「别再跑了」）已经达成，宿主什么都不用做。那不是
+   * 「未生效」，报成未生效会让主会话以为动作失败并**重复发同一个动作**
+   * （真实故障）。只有「目标根本不存在」或「状态不适用」才是真的没生效。
+   *
+   * 每个动作的结果汇成一份**回执**投回主会话（hidden prompt）：主会话的
+   * 看板摘要是每轮开篇冻结的，同一轮里它看不到自己动作的效果 —— 没有回执它
+   * 就会重复发同一个动作。
    */
   private async runSuperActions(actions: readonly SuperAction[]): Promise<void> {
     const manager = this.getSuperAgent();
     if (!manager) return;
     let applied = 0;
     let ignored = 0;
+    const receipts: SuperActionReceipt[] = [];
     for (const action of actions) {
       try {
-        let ok = false;
+        let receipt: SuperActionReceipt | undefined;
         switch (action.action) {
-          case "retry":
-            ok = await manager.retry(action.sessionId);
+          case "retry": {
+            const ok = await manager.retry(action.sessionId);
+            receipt = {
+              action: "retry",
+              sessionId: action.sessionId,
+              ok,
+              reason: ok ? "applied" : "not-applicable",
+              ...(ok ? {} : { detail: "the child session is not in a retryable state" }),
+            };
             break;
-          case "cancel":
-            ok = await manager.cancel(action.sessionId);
+          }
+          case "cancel": {
+            const outcome = await manager.cancel(action.sessionId);
+            receipt = {
+              action: "cancel",
+              sessionId: action.sessionId,
+              ok: outcome.ok,
+              reason: outcome.reason === "cancelled" ? "applied" : outcome.reason,
+              ...(outcome.reason === "already-terminal"
+                ? { detail: `the child session was already ${outcome.status}` }
+                : outcome.reason === "not-found"
+                  ? { detail: "no such child session (it may have been cleaned up already)" }
+                  : {}),
+            };
             break;
-          case "answer":
-            ok = manager.respond(action.sessionId, { answers: action.answers });
+          }
+          case "answer": {
+            const ok = manager.respond(action.sessionId, { answers: action.answers });
+            receipt = {
+              action: "answer",
+              sessionId: action.sessionId,
+              ok,
+              reason: ok ? "applied" : "not-applicable",
+              ...(ok ? {} : { detail: "the child session has no pending question" }),
+            };
             break;
-          case "cleanup":
-            ok = (await manager.cleanup(action.sessionId, { keepBranch: action.keepBranch })).ok;
+          }
+          case "cleanup": {
+            const result = await manager.cleanup(action.sessionId, { keepBranch: action.keepBranch });
+            receipt = {
+              action: "cleanup",
+              sessionId: action.sessionId,
+              ok: result.ok,
+              reason: result.ok ? "applied" : "not-applicable",
+              ...(result.ok
+                ? {}
+                : { detail: result.reason ?? "the child session could not be cleaned up" }),
+            };
             break;
+          }
         }
-        if (ok) applied++;
+        if (!receipt) {
+          receipt = {
+            action: action.action,
+            sessionId: action.sessionId,
+            ok: false,
+            reason: "not-applicable",
+            detail: "unknown action",
+          };
+        }
+        receipts.push(receipt);
+        if (receipt.ok) applied++;
         else ignored++;
       } catch (error) {
         ignored++;
+        receipts.push({
+          action: action.action,
+          sessionId: action.sessionId,
+          ok: false,
+          reason: "not-applicable",
+          detail: `the host failed to run the action: ${errorMessage(error)}`,
+        });
         this.log.warn(`super agent action ${action.action} failed: ${errorMessage(error)}`);
       }
     }
@@ -7081,6 +7232,63 @@ export class ChatPanel implements vscode.Disposable {
         "warning",
         vscode.l10n.t("{0} 个子会话管理动作未生效（目标不存在或状态不适用）", ignored),
       );
+    }
+    this.queueSuperActionReceipt(receipts);
+  }
+
+  /**
+   * 把动作执行结果排进主会话的回执队列。
+   *
+   * 走的是与子会话汇报同一条通道：**主会话上的一次 hidden prompt**（转录里
+   * 不出现用户气泡）。主会话正忙着时它留在队列里等空闲时重投 —— 回执绝不
+   * 丢：丢了主会话就永远不知道自己刚发的动作到底生效没有（于是重复发）。
+   */
+  private queueSuperActionReceipt(receipts: readonly SuperActionReceipt[]): void {
+    if (receipts.length === 0 || this.disposed) return;
+    const text = buildSuperActionReceiptPrompt(receipts);
+    if (!text) return;
+    // 同一份回执不重复排队（否则主会话会反复收到一模一样的「已生效」）。
+    if (text === this.superActionReceiptLast) return;
+    this.superActionReceiptLast = text;
+    this.pendingSuperActionReceipts.push({ mainSessionId: this.currentMainSessionId(), text });
+    this.ensureSuperHeartbeat();
+    void this.drainSuperActionReceipts();
+  }
+
+  /**
+   * 投递一条动作回执（与子会话汇报共用同一条车道，互斥执行）。
+   *
+   * 只在主会话**空闲**时投：主会话正忙着的时候它只能排队（hidden 回合不能
+   * 插进正在跑的回合 —— 同一条 ACP 会话上并发两个回合会乱序）。
+   */
+  private async drainSuperActionReceipts(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    const owner = this.currentMainSessionId();
+    const index = this.pendingSuperActionReceipts.findIndex(
+      (item) => item.mainSessionId === owner,
+    );
+    if (index === -1) return;
+    if (!this.mainSessionFree()) return;
+    if (this.superMergeRunning || this.pendingSuperMerges.length > 0 || this.superMergeChildRunning()) {
+      return;
+    }
+    const item = this.pendingSuperActionReceipts[index]!;
+    this.superReportRunning = true;
+    try {
+      this.clearSuperWaitHeartbeat();
+      this.log.info("super agent: delivering the child-session action receipt as a fresh main-session turn");
+      const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
+        delegateOnBusy: false,
+        hidden: true,
+      });
+      // 回合没跑起来（主会话被别的回合占着）：这条回执**留在队列里**，等空闲
+      // 时重投 —— 回执丢了主会话就会重复发同一个动作。
+      if (!started) return;
+      this.pendingSuperActionReceipts.splice(index, 1);
+    } catch (error) {
+      this.log.warn(`super agent action receipt delivery failed: ${errorMessage(error)}`);
+    } finally {
+      this.superReportRunning = false;
     }
   }
 
@@ -7313,6 +7521,7 @@ export class ChatPanel implements vscode.Disposable {
     }
     this.refreshSuperWaitHeartbeat();
     void this.drainSuperReports();
+    void this.drainSuperActionReceipts();
     void this.drainSuperMerges();
     if (!this.hasSuperWork()) this.stopSuperHeartbeat();
   }
@@ -7321,6 +7530,9 @@ export class ChatPanel implements vscode.Disposable {
   private hasSuperWork(): boolean {
     if (this.disposed) return false;
     if (this.pendingSuperReportPrompts.length > 0) return true;
+    // 待投递的动作回执也算「还有活儿」：心跳停了回执就永远投不出去，主会话
+    // 于是不知道自己刚发的动作生效没有（→ 重复发同一个动作）。
+    if (this.pendingSuperActionReceipts.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
     // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
     // 继续跑，否则既没有汇报也没有忙碌态刷新。
@@ -9499,6 +9711,9 @@ export class ChatPanel implements vscode.Disposable {
         return false;
       }
       this.store.promptCompleted(result.stopReason, result.usage);
+      // 回合收尾：复核动作围栏 —— 回合都结束了还停在未闭合围栏上，说明这个
+      // 动作块永远不会被执行。旧实现对此完全静默（零日志、零 toast）。
+      this.auditSuperActionsAtSettle();
       // Completion cue, but a user stop/cancel stays silent. The chime is the
       // universal cue (postSound); the native toast is the ADDITIVE
       // away-notification (M1 P0-5) with its own gate — no longer mutually
