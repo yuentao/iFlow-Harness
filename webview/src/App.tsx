@@ -384,6 +384,31 @@ export function App() {
     return () => ro.disconnect();
   }, [hasPendingCard]);
 
+  // The overlay is a scroll container when the stacked cards outgrow the
+  // shell, and every card autofocuses its safe action on mount. The browser's
+  // focus scroll then lands anywhere between the two edges: with cards
+  // arriving one by one, 3 cards at 360×800 left scrollTop=446 of max 687 —
+  // the newest card (the one that just took focus and needs the answer) was
+  // cut off below the fold. Stick to the bottom whenever the card SET
+  // changes: bottom is where the newest card lives (that is also what
+  // `[&>*:first-child]:mt-auto` means when the stack fits). Keyed on the ids
+  // so a content-only re-render never fights a user who scrolled up.
+  const pendingCardSet = `${pendingApproval?.id ?? ""}|${pendingPlanExit?.id ?? ""}|${pendingQuestions?.id ?? ""}`;
+  useEffect(() => {
+    const overlay = pendingOverlayRef.current;
+    if (!overlay) return;
+    const stick = () => {
+      overlay.scrollTop = overlay.scrollHeight;
+    };
+    stick();
+    // One frame later as well: the autofocus pass (and lazily rendered card
+    // bodies) can change the scroll height after this effect ran.
+    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame(stick) : null;
+    return () => {
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [pendingCardSet]);
+
   // The Super Agent board is part of the header now. Collapsed it takes NO
   // transcript space at all (--super-bar-h = 0 — the control lives inside the
   // header row). Expanded, its popup panel hangs below the header and covers
@@ -408,6 +433,13 @@ export function App() {
       return;
     }
     const apply = () => {
+      // A callback delivered for a node that already left the document must
+      // not write a bogus `0 + 16` into the wrapper: unmounting the board has
+      // to leave the clearance at zero.
+      if (!superPanelNode.isConnected) {
+        wrapper.style.removeProperty("--super-bar-h");
+        return;
+      }
       // Reserve the panel's own height plus the 8px mt-2 gap above it and an
       // 8px breathing gap below: the pending-card overlay starts at this
       // offset, and butting it against the panel's border read as one merged
