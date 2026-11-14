@@ -396,6 +396,68 @@ it("renders profile rows without an extension/Core source chip", () => {
   expect(row!.textContent).not.toContain("内核");
 });
 
+const MULTI_AUTH: AuthUiState = {
+  ...BASIC_AUTH,
+  profiles: [
+    { name: "A", baseUrl: "https://a.example.com/v1", modelName: "model-a", keyTail: "1111", active: true },
+    { name: "B", baseUrl: "https://b.example.com/v1", modelName: "model-b", keyTail: "2222", active: false },
+    { name: "C", baseUrl: "https://c.example.com/v1", modelName: "model-c", keyTail: "3333", active: false },
+  ],
+};
+
+describe("API 配置行更多菜单", () => {
+  const previousObserver = (globalThis as unknown as Record<string, unknown>).ResizeObserver;
+  beforeEach(() => {
+    class Observer {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    (globalThis as unknown as Record<string, unknown>).ResizeObserver = Observer;
+  });
+  afterEach(() => {
+    if (previousObserver === undefined) {
+      delete (globalThis as unknown as Record<string, unknown>).ResizeObserver;
+    } else {
+      (globalThis as unknown as Record<string, unknown>).ResizeObserver = previousObserver;
+    }
+  });
+
+  const moreButton = (name: string) =>
+    container.querySelector<HTMLButtonElement>(`button[aria-label="配置 ${name} 的操作"]`);
+  const rowOf = (name: string) => moreButton(name)?.closest<HTMLElement>(".card-lift");
+  const overflowMenu = () =>
+    [...container.querySelectorAll<HTMLElement>('[role="menu"]')].find((menu) =>
+      menu.textContent?.includes("编辑") && menu.textContent?.includes("删除"),
+    );
+
+  it("hides the overflow action for the active API profile", () => {
+    renderAuthTabWith(MULTI_AUTH);
+    expect(moreButton("A")).toBeNull();
+    expect(moreButton("B")).toBeTruthy();
+    expect(moreButton("C")).toBeTruthy();
+  });
+
+  it("raises only the row whose overflow menu is open", () => {
+    renderAuthTabWith(MULTI_AUTH);
+    const button = moreButton("B");
+    expect(button).toBeTruthy();
+    expect(rowOf("B")?.className).not.toContain("z-20");
+    expect(rowOf("C")?.className).not.toContain("z-20");
+
+    act(() => button!.click());
+    expect(overflowMenu()).toBeTruthy();
+    expect(button!.getAttribute("aria-expanded")).toBe("true");
+    expect(rowOf("B")?.className).toContain("relative z-20");
+    expect(rowOf("C")?.className).not.toContain("z-20");
+
+    act(() => button!.click());
+    expect(overflowMenu()).toBeUndefined();
+    expect(button!.getAttribute("aria-expanded")).toBe("false");
+    expect(rowOf("B")?.className).not.toContain("z-20");
+  });
+});
+
 it("opens provider documentation from the preset guidance", () => {
   renderAuthTabWith(EMPTY_AUTH);
   click("DeepSeek");

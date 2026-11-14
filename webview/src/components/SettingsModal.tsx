@@ -958,6 +958,14 @@ function ApiConfigSection({
   // Modal delete confirm (same dialog as sessions / MCP rows — the host delete
   // is irreversible: the profile's key leaves SecretStorage for good).
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  // .card-lift's hover transform makes every row a stacking context. While a
+  // menu is open its row must outrank later siblings, or the menu's z-30 stays
+  // trapped beneath the next row's more button.
+  const [openMenuProfile, setOpenMenuProfile] = useState<string | null>(null);
+  // Ignore stale names after a profile becomes active or is deleted.
+  const raisedProfileName = openMenuProfile && auth.profiles.some((p) => !p.active && p.name === openMenuProfile)
+    ? openMenuProfile
+    : null;
 
   const editingProfile = editing?.name ? auth.profiles.find((p) => p.name === editing.name) : undefined;
   const keyPlaceholder = (() => {
@@ -1185,88 +1193,99 @@ function ApiConfigSection({
         </div>
       ) : (
         <div className="space-y-2">
-          {auth.profiles.map((p) => (
-            <div
-              key={p.name}
-              className={`card-lift flex items-center gap-1.5 rounded-lg border px-2 py-1.5 shadow-card transition-colors duration-200 ${
-                p.active ? "border-primary/50 bg-primary/10" : "border-border"
-              }`}
-            >
-              <button
-                className="flex min-w-0 flex-1 items-center gap-1.5 text-left disabled:pointer-events-none disabled:opacity-40"
-                title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
-                disabled={busy || p.active}
-                onClick={() => {
-                  if (p.active) return;
-                  // Same optimistic switch lock as the header dropdown —
-                  // without it every switcher stayed live during the
-                  // re-auth round trip (the old AuthCard list bug).
-                  useChat.getState().beginPending("profile", p.name);
-                  send({ type: "activateProfile", name: p.name });
-                }}
+          {auth.profiles.map((p) => {
+            const menuOpen = raisedProfileName === p.name;
+            return (
+              <div
+                key={p.name}
+                className={`card-lift flex items-center gap-1.5 rounded-lg border px-2 py-1.5 shadow-card transition-colors duration-200 ${
+                  p.active ? "border-primary/50 bg-primary/10" : "border-border"
+                } ${menuOpen ? "relative z-20" : ""}`}
               >
-                <span
-                  className={`size-2.5 shrink-0 rounded-full ${
-                    p.active ? "bg-primary shadow-[0_0_0_3px] shadow-primary/25" : "border border-muted-foreground/50"
-                  }`}
-                />
-                <span className="min-w-0">
-                  <span className="block truncate text-ui-label font-semibold text-foreground">{p.name}</span>
-                  <span className="block truncate font-mono text-ui-caption text-muted-foreground">
-                    {p.modelName} · {p.keyTail}
-                  </span>
-                </span>
-              </button>
-              <Dropdown
-                align="right"
-                menuClass="w-[10rem]"
-                disabled={busy}
-                trigger={(open) => (
-                  <button
-                    type="button"
-                    aria-haspopup="menu"
-                    aria-expanded={open}
-                    aria-label={t("配置 {0} 的操作", p.name)}
-                    title={t("更多操作")}
-                    disabled={busy}
-                    className={`press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40 ${
-                      open ? "bg-accent/60 text-foreground" : ""
+                <button
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left disabled:pointer-events-none disabled:opacity-40"
+                  title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
+                  disabled={busy || p.active}
+                  onClick={() => {
+                    if (p.active) return;
+                    // Same optimistic switch lock as the header dropdown —
+                    // without it every switcher stayed live during the
+                    // re-auth round trip (the old AuthCard list bug).
+                    useChat.getState().beginPending("profile", p.name);
+                    send({ type: "activateProfile", name: p.name });
+                  }}
+                >
+                  <span
+                    className={`size-2.5 shrink-0 rounded-full ${
+                      p.active ? "bg-primary shadow-[0_0_0_3px] shadow-primary/25" : "border border-muted-foreground/50"
                     }`}
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate text-ui-label font-semibold text-foreground">{p.name}</span>
+                    <span className="block truncate font-mono text-ui-caption text-muted-foreground">
+                      {p.modelName} · {p.keyTail}
+                    </span>
+                  </span>
+                </button>
+                {!p.active && (
+                  <Dropdown
+                    align="right"
+                    menuClass="w-[10rem]"
+                    disabled={busy}
+                    onOpenChange={(open) =>
+                      setOpenMenuProfile((current) => {
+                        if (open) return p.name;
+                        return current === p.name ? null : current;
+                      })
+                    }
+                    trigger={(open) => (
+                      <button
+                        type="button"
+                        aria-haspopup="menu"
+                        aria-expanded={open}
+                        aria-label={t("配置 {0} 的操作", p.name)}
+                        title={t("更多操作")}
+                        disabled={busy}
+                        className={`press shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-40 ${
+                          open ? "bg-accent/60 text-foreground" : ""
+                        }`}
+                      >
+                        <MoreHorizontal className="size-3.5" />
+                      </button>
+                    )}
                   >
-                    <MoreHorizontal className="size-3.5" />
-                  </button>
+                    {(close) => (
+                      <>
+                        <button
+                          role="menuitem"
+                          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-foreground hover:bg-accent/60"
+                          onClick={() => {
+                            close();
+                            openEdit(p.name);
+                          }}
+                        >
+                          <Pencil className="size-3.5 shrink-0" />
+                          {t("编辑")}
+                        </button>
+                        <button
+                          role="menuitem"
+                          data-variant="danger"
+                          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-destructive hover:bg-destructive/10"
+                          onClick={() => {
+                            close();
+                            setConfirmingDelete(p.name);
+                          }}
+                        >
+                          <Trash2 className="size-3.5 shrink-0" />
+                          {t("删除")}
+                        </button>
+                      </>
+                    )}
+                  </Dropdown>
                 )}
-              >
-                {(close) => (
-                  <>
-                    <button
-                      role="menuitem"
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-foreground hover:bg-accent/60"
-                      onClick={() => {
-                        close();
-                        openEdit(p.name);
-                      }}
-                    >
-                      <Pencil className="size-3.5 shrink-0" />
-                      {t("编辑")}
-                    </button>
-                    <button
-                      role="menuitem"
-                      data-variant="danger"
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-destructive hover:bg-destructive/10"
-                      onClick={() => {
-                        close();
-                        setConfirmingDelete(p.name);
-                      }}
-                    >
-                      <Trash2 className="size-3.5 shrink-0" />
-                      {t("删除")}
-                    </button>
-                  </>
-                )}
-              </Dropdown>
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
       )}
       <Hint>
