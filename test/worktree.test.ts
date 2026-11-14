@@ -815,3 +815,176 @@ describe("worktree · 删除可靠性与状态判定", () => {
     expect(state.clean).toBe(true);
   }, 30000);
 });
+
+describe("worktree · 创建可靠性（重试 / 串行 / 超时 / 清理）", () => {
+  /** 注入用的 runner：转发到真实 git，让目标目录真的被建出来。 */
+  function realGitRunner(cwd: string, args: string[]) {
+    const stdout = execFileSync("git", args, {
+      cwd,
+      windowsHide: true,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return Promise.resolve({ stdout, stderr: "" });
+  }
+
+  const isWorktreeAdd = (args: string[]): boolean =>
+    args.includes("worktree") && args.includes("add");
+
+  it("首次 git 调用失败、第二次成功 → attempts=2，目标目录真的建出来", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-retry-once");
+    const probe = await probeGitRepo(repo);
+    let addCalls = 0;
+    const runner = async (cwd: string, args: string[], timeoutMs: number) => {
+      if (isWorktreeAdd(args)) {
+        addCalls += 1;
+        if (addCalls === 1) {
+          throw new Error("Command failed: git worktree add\nfatal: simulated transient failure");
+        }
+      }
+      return realGitRunner(cwd, args);
+    };
+
+    const created = await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("retry-once"),
+      baseRef: probe.head!,
+      deps: { gitRunner: runner, retryDelaysMs: [] },
+    });
+
+    expect(created.attempts).toBe(2);
+    expect(addCalls).toBe(2);
+    expect(existsSync(path.join(target, "a.txt"))).toBe(true);
+    expect(readText(path.join(target, "a.txt"))).toBe("one\n");
+    expect(git(target, "branch", "--show-current").trim()).toBe("iflow/super/retry-once");
+  }, 30000);
+
+  it("目标目录预先存在导致首次失败 → 重试前被清掉，第二次成功", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-preexisting");
+    const probe = await probeGitRepo(repo);
+    // 非空目录：git worktree add 会直接 fatal（空目录反而是允许的）。
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, "stale.txt"), "leftover\n", "utf8");
+
+    const created = await createWorktree({
+      repoRoot: repo,
+      targetPath: target,
+      branch: superBranchName("preexisting"),
+      baseRef: probe.head!,
+      deps: { retryDelaysMs: [] },
+    });
+
+    expect(created.attempts).toBe(2);
+    // 残留文件被清掉，换来的是真正的 checkout 结果。
+    expect(existsSync(path.join(target, "stale.txt"))).toBe(false);
+    expect(readText(path.join(target, "a.txt"))).toBe("one\n");
+  }, 30000);
+
+  it("并发创建被串行化：任意时刻最多一个创建在跑", async () => {
+    const repo = makeRepo();
+    const probe = await probeGitRepo(repo);
+    let active = 0;
+    let maxActive = 0;
+    const runner = async (cwd: string, args: string[]) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        // 放大窗口：并发时这里会看到 active > 1。
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await realGitRunner(cwd, args);
+      } finally {
+        active -= 1;
+      }
+    };
+
+    const [first, second] = await Promise.all([
+      createWorktree({
+        repoRoot: repo,
+        targetPath: targetPath("wt-serial-a"),
+        branch: superBranchName("serial-a"),
+        baseRef: probe.head!,
+        deps: { gitRunner: runner, retryDelaysMs: [] },
+      }),
+      createWorktree({
+        repoRoot: repo,
+        targetPath: targetPath("wt-serial-b"),
+        branch: superBranchName("serial-b"),
+        baseRef: probe.head!,
+        deps: { gitRunner: runner, retryDelaysMs: [] },
+      }),
+    ]);
+
+    expect(first.attempts).toBe(1);
+    expect(second.attempts).toBe(1);
+    expect(maxActive).toBe(1);
+    expect(existsSync(path.join(first.path, "a.txt"))).toBe(true);
+    expect(existsSync(path.join(second.path, "a.txt"))).toBe(true);
+  }, 30000);
+
+  it("win32 的 worktree add 带 -c core.longpaths=true，非 win32 不带", async () => {
+    const repo = makeRepo();
+    const probe = await probeGitRepo(repo);
+    const seen: string[][] = [];
+    const runner = async (cwd: string, args: string[]) => {
+      if (isWorktreeAdd(args)) seen.push(args);
+      return realGitRunner(cwd, args);
+    };
+
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: targetPath("wt-longpaths-win"),
+      branch: superBranchName("longpaths-win"),
+      baseRef: probe.head!,
+      deps: { gitRunner: runner, platform: "win32" },
+    });
+    await createWorktree({
+      repoRoot: repo,
+      targetPath: targetPath("wt-longpaths-linux"),
+      branch: superBranchName("longpaths-linux"),
+      baseRef: probe.head!,
+      deps: { gitRunner: runner, platform: "linux" },
+    });
+
+    expect(seen).toHaveLength(2);
+    const winArgs = seen[0]!;
+    // 全局选项必须在子命令之前，否则 git 会当成 worktree 的参数拒绝。
+    expect(winArgs.slice(0, 2)).toEqual(["-c", "core.longpaths=true"]);
+    expect(winArgs.indexOf("-c")).toBeLessThan(winArgs.indexOf("worktree"));
+    expect(seen[1]).not.toContain("core.longpaths=true");
+  }, 30000);
+
+  it("三次全失败 → 抛出的错误包含最后一次的真实 stderr", async () => {
+    const repo = makeRepo();
+    const target = targetPath("wt-always-fails");
+    const probe = await probeGitRepo(repo);
+    let calls = 0;
+    const runner = async (_cwd: string, args: string[]) => {
+      // 清理步骤（prune / rev-parse）也会走这个 runner —— 只数真正的 add。
+      if (isWorktreeAdd(args)) {
+        calls += 1;
+        throw new Error(
+          `Command failed: git worktree add\nfatal: could not create work tree dir (attempt ${calls})`,
+        );
+      }
+      throw new Error("Command failed: git\nfatal: cleanup probe failed");
+    };
+
+    await expect(
+      createWorktree({
+        repoRoot: repo,
+        targetPath: target,
+        branch: superBranchName("always-fails"),
+        baseRef: probe.head!,
+        deps: { gitRunner: runner, retryDelaysMs: [] },
+      }),
+    ).rejects.toThrow(/fatal: could not create work tree dir \(attempt 3\)/);
+
+    expect(calls).toBe(3);
+    expect(existsSync(target)).toBe(false);
+    // 一次都没真正建出分支 —— 不该留下占着名字的空分支。
+    expect(() => git(repo, "rev-parse", "--verify", "refs/heads/iflow/super/always-fails")).toThrow();
+  }, 30000);
+});
