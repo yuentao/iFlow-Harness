@@ -122,26 +122,54 @@ function render(sessions: SuperSessionUi[]): void {
   act(() => root.render(<SuperAgentBoard />));
 }
 
+// The board panel is PORTALED to document.body (it must sit outside the
+
+// acrylic header's backdrop root to blur the real backdrop), so the board's
+
+// own content — the question area included — is queried on the document;
+
+// the React mount only holds the collapsed control.
+
 function buttonByLabel(label: string): HTMLButtonElement {
-  const button = [...container.querySelectorAll("button")].find(
+
+  const button = [...document.body.querySelectorAll("button")].find(
+
     (b) => b.getAttribute("aria-label") === label,
+
   );
+
   expect(button).toBeTruthy();
+
   return button as HTMLButtonElement;
+
 }
+
+
 
 function buttonByText(text: string): HTMLButtonElement {
-  const button = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text);
+
+  const button = [...document.body.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text);
+
   expect(button).toBeTruthy();
+
   return button as HTMLButtonElement;
+
 }
 
+
+
 function rowButton(title: string): HTMLButtonElement {
-  const button = [...container.querySelectorAll("button")].find((b) =>
-    (b.textContent ?? "").includes(title),
+
+  const button = [...document.body.querySelectorAll("button")].find(
+
+    (b) => (b.textContent ?? "").includes(title),
+
   );
+
   expect(button).toBeTruthy();
+
   return button as HTMLButtonElement;
+
 }
 
 /** 展开看板（幂等）：有子会话在等回答时看板会自动展开，再点一次反而会收起。 */
@@ -154,44 +182,44 @@ describe("看板提问区与主会话提问卡同源", () => {
   it("单选题是 radiogroup，多选题是 checkbox 语义，选项 description 可见", () => {
     render([askingSession()]);
 
-    const radioGroup = container.querySelector('[role="radiogroup"]');
+    const radioGroup = document.body.querySelector('[role="radiogroup"]');
     expect(radioGroup).toBeTruthy();
     expect(radioGroup!.getAttribute("aria-label")).toBe("这一组单测要覆盖哪些范围？");
     expect(radioGroup!.querySelectorAll('[role="radio"]').length).toBe(2);
 
     // 多选：项目里的「checkboxgroup」= role=group + role=checkbox 子项
     // （ARIA 没有 checkboxgroup 这个 role，kit 的 OptionGroup 就是这么编码的）。
-    const multiGroup = [...container.querySelectorAll('[role="group"]')].find(
+    const multiGroup = [...document.body.querySelectorAll('[role="group"]')].find(
       (g) => g.getAttribute("aria-label") === "要准备哪些夹具？",
     );
     expect(multiGroup).toBeTruthy();
     expect(multiGroup!.querySelectorAll('[role="checkbox"]').length).toBe(2);
 
     // 选项的副文案不能被丢弃 —— 它是用户判断该选哪个的依据。
-    expect(container.textContent).toContain("范围小、跑得快");
-    expect(container.textContent).toContain("更完整，但要多写夹具");
-    expect(container.textContent).toContain("用 mkdtemp");
-    expect(container.textContent).toContain("注入式实现");
+    expect(document.body.textContent).toContain("范围小、跑得快");
+    expect(document.body.textContent).toContain("更完整，但要多写夹具");
+    expect(document.body.textContent).toContain("用 mkdtemp");
+    expect(document.body.textContent).toContain("注入式实现");
   });
 
   it("提供自由文本作答入口", () => {
     render([askingSession()]);
-    const custom = container.querySelector<HTMLButtonElement>('button[aria-label="填写自定义回答"]');
+    const custom = document.body.querySelector<HTMLButtonElement>('button[aria-label="填写自定义回答"]');
     expect(custom).toBeTruthy();
     act(() => custom!.click());
-    const input = container.querySelector<HTMLInputElement>('input[aria-label*="自定义回答"]');
+    const input = document.body.querySelector<HTMLInputElement>('input[aria-label*="自定义回答"]');
     expect(input).toBeTruthy();
   });
 
   it("展示按宿主真实截止时间计算的「未回答按未回答继续」倒计时", () => {
     render([askingSession()]);
     // 宿主给的 deadline 是 4 分钟后、窗口 5 分钟：安静档显示「约 4 分钟后按未回答继续」。
-    expect(container.textContent).toContain("分钟后按未回答继续");
+    expect(document.body.textContent).toContain("分钟后按未回答继续");
   });
 
   it("作答后把答案回传给宿主（按 header 索引）", () => {
     render([askingSession()]);
-    const firstRadio = container.querySelectorAll('[role="radio"]')[0]!;
+    const firstRadio = document.body.querySelectorAll('[role="radio"]')[0]!;
     act(() => firstRadio.click());
     act(() => buttonByText("提交回答").click());
 
@@ -218,7 +246,7 @@ describe("看板提问区与主会话提问卡同源", () => {
 describe("看板的安全事实常驻可见", () => {
   it("「免确认」不依赖 hover 就出现在看板上，并说明 shell 也直接执行", () => {
     render([baseSession()]);
-    const marker = container.querySelector<HTMLElement>('[title*="shell"]');
+    const marker = document.body.querySelector<HTMLElement>('[title*="shell"]');
     expect(marker).toBeTruthy();
     expect(marker!.textContent).toContain("免确认");
     // 可见，不是只有读屏/hover 才拿得到的隐藏文本。
@@ -249,7 +277,7 @@ describe("看板状态编码", () => {
 
   it("状态变化会被 aria-live 播报（首次挂载不念，变了才念）", () => {
     render([baseSession({ id: "a", title: "准备中的任务", status: "preparing" })]);
-    const live = container.querySelector('[aria-live="polite"]');
+    const live = document.body.querySelector('[aria-live="polite"]');
     expect(live).toBeTruthy();
     // 刚打开看板时不必把整列状态念一遍。
     expect(live!.textContent).toBe("");
@@ -267,7 +295,7 @@ describe("看板计数 chip 的可访问名", () => {
       baseSession({ id: "a", title: "任务甲", status: "running" }),
       baseSession({ id: "b", title: "任务乙", status: "running" }),
     ]);
-    const chips = [...container.querySelectorAll('[aria-label]')].filter((el) =>
+    const chips = [...document.body.querySelectorAll('[aria-label]')].filter((el) =>
       (el.getAttribute("aria-label") ?? "").includes("个进行中"),
     );
     expect(chips.length).toBeGreaterThan(0);
@@ -289,7 +317,7 @@ describe("合并按钮的禁用原因", () => {
     act(() => buttonByLabel("展开已完成的子会话").click());
     act(() => rowButton("已合并的任务").click());
 
-    const merge = [...container.querySelectorAll("button")].find((b) =>
+    const merge = [...document.body.querySelectorAll("button")].find((b) =>
       (b.textContent ?? "").includes("让智能体合并"),
     );
     expect(merge).toBeTruthy();
@@ -300,7 +328,7 @@ describe("合并按钮的禁用原因", () => {
     expect(merge!.getAttribute("aria-label")).toContain("该子会话的改动已经合并");
     // 原因不再逐行重复：规则统一收在看板头的帮助按钮里（见
     // test/super-board-surface.test.tsx 的「看板帮助说明」用例）。
-    expect(container.textContent).not.toContain("该子会话的改动已经合并");
+    expect(document.body.textContent).not.toContain("该子会话的改动已经合并");
 
     // 置灰状态下点了也不能派发合并。
     act(() => merge!.click());

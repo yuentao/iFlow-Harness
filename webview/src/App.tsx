@@ -367,8 +367,9 @@ export function App() {
   //
   // The panel node arrives through a stable callback ref (SuperAgentBoard
   // reports it via panelRef) into state. A mount-only effect would be wrong
-  // here: the panel mounts inside the header, i.e. in the same commit that
-  // creates the transcript wrapper, and only an effect (after refs attach) can
+  // here: the panel mounts in the same commit that creates the transcript
+  // wrapper (it is PORTALED to document.body, but the ref callback still
+  // fires in that commit), and only an effect (after refs attach) can
   // reliably read that wrapper.
   const [superPanelNode, setSuperPanelNode] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -858,11 +859,13 @@ export function App() {
           ) : (
             statusChip(status ?? "connecting", compressing, isPlanMode(modes))
           )}
-          {/* Super Agent board: collapsed it is one inline control here in the
-              header; expanded it opens a popup panel under the header (the
-              header is its positioned ancestor). Renders nothing when no
-              child sessions exist, so the header never carries an empty
-              control. */}
+                    {/* Super Agent board: collapsed it is one inline control here in
+                        the header; expanded it opens a popup panel under the header.
+                        The panel is PORTALED to document.body (so it sits outside the
+                        acrylic header's backdrop root and can blur the real backdrop)
+                        and is positioned in viewport coordinates from the header's
+                        rect. Renders nothing when no child sessions exist, so the
+                        header never carries an empty control. */}
           <SuperAgentBoard panelRef={setSuperPanelNode} />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <IconButton

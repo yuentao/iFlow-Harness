@@ -5,22 +5,25 @@
  * The board used to float over the scrolling transcript (an absolute overlay
  * with `.super-board-surface`). It is now part of the header: collapsed it is
  * one 28px inline control after the status chip; expanded it opens a popup
- * panel anchored under the header (`absolute top-full`).
+ * panel anchored under the header.
  *
  * These cases pin the STRUCTURE + MATERIAL contract, not the pixels:
  *  - the collapsed control is a header-height neutral pill (surface tint,
  *    border, single hover surface) — not an acrylic overlay;
- *  - the expanded panel uses the popup acrylic tint (`.acrylic-pop`), NOT
- *    `.super-board-surface`: the panel lives inside the acrylic header, which
- *    is a backdrop root, so its own backdrop-filter could only sample the
- *    header subtree (the transcript text would ghost through sharp — the same
- *    trap documented on `.acrylic-pop`);
+ *  - the expanded panel is PORTALED to document.body: it must sit OUTSIDE
+ *    the acrylic header, which is a backdrop root — a panel inside it can
+ *    only sample the header subtree, so the transcript text behind it
+ *    ghosts through sharp (the trap documented on `.acrylic-pop`);
+ *  - being outside every backdrop root, the panel carries the frosted
+ *    material (`.acrylic-frosted`: translucent tint + a real backdrop blur)
+ *    — the app's only true frosted surface;
  *  - the panel keeps the panel-sized drop, the rounded/overflow-clipped box,
- *    the stream-in entrance and the header-anchored position.
+ *    the stream-in entrance and the header-anchored position (viewport
+ *    coordinates now — a portal has no CSS anchor).
  *
- * The old `.super-board-surface` stylesheet rules were removed with the
- * overlay (dead CSS — nothing references the class any more); `.acrylic-pop`
- * already carries the near-opaque tint this panel needs.
+ * Because the panel lives on document.body, the panel-side assertions below
+ * query the DOCUMENT (the React mount only holds the collapsed control).
+ * The semantics of every assertion are unchanged.
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -102,9 +105,13 @@ function control(): HTMLButtonElement {
   return el!;
 }
 
-/** Expanded form: the popup panel (labeled region) — null while collapsed. */
+/**
+ * Expanded form: the popup panel (labeled region) — null while collapsed.
+ *
+ * The panel is PORTALED to document.body, so it is queried on the document.
+ */
 function panel(): HTMLElement | null {
-  return container.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
+  return document.body.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
 }
 
 function panelRoot(): HTMLElement {
@@ -131,36 +138,52 @@ describe("Super Agent 看板表面材质", () => {
     expect(el.classList.contains("shadow-panel")).toBe(false);
   });
 
-  it("展开面板走弹层亚克力材质（在亚克力 header 内，自带 blur 会失效）", () => {
+  it("展开面板走真亚克力材质（portal 出 header，自带 backdrop blur）", () => {
     render();
     expect(panel()).toBeNull();
 
     expand();
     const el = panelRoot();
-    expect(el.classList.contains("acrylic-pop")).toBe(true);
-    // Nested inside the acrylic header → its own backdrop-filter could only
-    // sample the header subtree and the transcript text would ghost through
-    // sharp, so the near-opaque popup tint carries readability instead.
+    // 真亚克力：半透明底 + backdrop blur（.acrylic-frosted）。旧的
+    // .acrylic-pop 是近不透明底色且没有 blur —— 转录文字原样透出来，
+    // 视觉很脏。
+    expect(el.classList.contains("acrylic-frosted")).toBe(true);
+    expect(el.classList.contains("acrylic-pop")).toBe(false);
     expect(el.classList.contains("super-board-surface")).toBe(false);
     expect(el.classList.contains("bg-card")).toBe(false);
+  });
+
+  it("展开面板 portal 到 document.body：不在 header 内，才能采到真 backdrop", () => {
+    render();
+    expand();
+    const el = panelRoot();
+    // Portal 宿主是 body（不是 header 的子树）。
+    expect(el.parentElement).toBe(document.body);
+    // 脱离 header 的 backdrop root —— 否则 blur 只能采到 header 子树，
+    // 背后的转录文字会原样透出来。
+    expect(el.closest("header")).toBeNull();
+    // 折叠控件仍在原处（被移走的只有浮层）。
+    expect(container.contains(control())).toBe(true);
   });
 
   it("展开面板锚定在 header 下方，保留入场动画、圆角裁切与留白", () => {
     render();
     expand();
     const el = panelRoot();
-    for (const cls of [
-      "absolute",
-      "top-full",
-      "inset-x-3",
-      "z-40",
-      "mt-2",
-      "stream-in",
-      "overflow-hidden",
-      "rounded-lg",
-    ]) {
+    // Portal 没有 CSS 锚点：面板改为 fixed + 视口坐标（left / right / top）。
+    for (const cls of ["fixed", "z-35", "stream-in", "overflow-hidden", "rounded-lg"]) {
       expect(el.classList.contains(cls)).toBe(true);
     }
+    // 旧的 CSS 锚点（top-full / inset-x-3）需要 header 当定位祖先，
+    // portal 之后不再成立。
+    expect(el.classList.contains("absolute")).toBe(false);
+    expect(el.classList.contains("top-full")).toBe(false);
+    expect(el.classList.contains("inset-x-3")).toBe(false);
+    // 位置由内联样式给出：左右各留 12px 边距（与 header 的 px-3 一致），
+    // 顶边贴着 header 下沿 + 8px 间隙。
+    expect(el.style.left).toBe("12px");
+    expect(el.style.right).toBe("12px");
+    expect(el.style.top).toBe("8px");
     // Body keeps the breathing room: px-3 py-2 on the scroll container.
     const body = el.lastElementChild as HTMLElement;
     expect(body.className).toContain("px-3");
@@ -172,7 +195,7 @@ describe("Super Agent 看板表面材质", () => {
 describe("Super Agent 看板阶段轨", () => {
   /** 行触发器（状态 + 标题 + 耗时那一行）。 */
   function rowButton(title = "修复登录跳转"): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
     );
     expect(el).toBeTruthy();
@@ -185,7 +208,7 @@ describe("Super Agent 看板阶段轨", () => {
   }
 
   function rails(): NodeListOf<HTMLElement> {
-    return container.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    return document.body.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
   }
 
   /** 阶段轨元素：只在展开后出现，且恰好一个。 */
@@ -224,7 +247,7 @@ describe("Super Agent 看板阶段轨", () => {
     expand();
     openRow();
 
-    const rail = container.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    const rail = document.body.querySelector<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
     expect(rail).toBeTruthy();
     // 派发（createdAt 恒有）+ 启动（startedAt 存在）——没有「收尾」「完成」这种
     // 尚未发生的占位节点。
@@ -302,7 +325,7 @@ describe("Super Agent 看板阶段轨", () => {
     ]);
     expand();
     // 已完成且改动已合并的子会话被折叠进「已完成的 N 个子会话」历史行。
-    const foldedToggle = container.querySelector<HTMLButtonElement>(
+    const foldedToggle = document.body.querySelector<HTMLButtonElement>(
       'button[aria-label="展开已完成的子会话"]',
     );
     expect(foldedToggle).toBeTruthy();
@@ -368,7 +391,7 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
   ];
 
   function rail(): HTMLElement {
-    const all = container.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
+    const all = document.body.querySelectorAll<HTMLElement>('[role="img"][aria-label^="阶段轨："]');
     expect(all).toHaveLength(1);
     return all[0]!;
   }
@@ -376,7 +399,7 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
   it("只画 todo 节点，最后一条长文本完整可见且不被字典改写", () => {
     render([session({ status: "running", startedAt: 2000, updatedAt: 3000, todos })]);
     expand();
-    const row = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const row = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes("修复登录跳转"),
     );
     expect(row).toBeTruthy();
@@ -417,7 +440,7 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
 
 describe("Super Agent 看板子会话行 hover 表面", () => {
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
     );
     expect(el).toBeTruthy();
@@ -552,23 +575,28 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
     expect(control!.closest("header")).toBeTruthy();
     // 旧的转录 overlay 壳（pointer-events-none absolute inset-x-0 top-0）已删除。
     expect(container.querySelector(".pointer-events-none.absolute.inset-x-0.top-0")).toBeNull();
-    // 折叠态不渲染面板。
-    expect(container.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+    // 折叠态不渲染面板（整个文档里都没有）。
+    expect(document.body.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
   });
 
   it("点击折叠控件展开面板，Esc 关闭面板", () => {
     renderApp([session()]);
     act(() => boardControl()!.click());
-    const panel = container.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
+    const panel = document.body.querySelector<HTMLElement>('[role="region"][aria-label="子会话"]');
     expect(panel).toBeTruthy();
-    // 面板挂在 header 下方（absolute top-full），不是转录 overlay。
-    expect(panel!.className).toContain("top-full");
-    expect(panel!.closest("header")).toBeTruthy();
+    // 面板 portal 到 body：不在 header 的子树里（header 的 backdrop root
+    // 会让面板自己的 blur 采到 header 子树，背后的转录文字原样透出）。
+    expect(panel!.parentElement).toBe(document.body);
+    expect(panel!.closest("header")).toBeNull();
+    // 真亚克力材质 + fixed 视口定位。
+    expect(panel!.className).toContain("acrylic-frosted");
+    expect(panel!.className).toContain("fixed");
+    expect(panel!.style.top).toBe("8px");
 
     act(() => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
-    expect(container.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+    expect(document.body.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
     // 控件本身仍在顶栏里（只收起，不消失）。
     expect(boardControl()).toBeTruthy();
   });
@@ -632,7 +660,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
       renderApp([askingSession()]);
       // 有待答子会话时看板自行展开；手动收起后待答条挂在 header 下方。
       act(() => boardControl()!.click());
-      expect(container.querySelector('[role="region"][aria-label="子会话待答问题"]')).toBeTruthy();
+      expect(document.body.querySelector('[role="region"][aria-label="子会话待答问题"]')).toBeTruthy();
 
       // 折叠态的 strip 同样镜像高度（旧实现为 0，转录首条与主会话提问卡
       // 因此无预留地盖住它）。
@@ -664,7 +692,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
       // 最后一个子会话消失（被清理 / 会话切换）→ 看板整体不渲染。
       renderApp([]);
       expect(boardControl()).toBeNull();
-      expect(container.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+      expect(document.body.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
       // 卸载必须清掉变量：否则转录会一直留一条 334px 的空白。
       expect(barHosts()).toHaveLength(0);
     });
@@ -723,7 +751,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
 describe("Super Agent 看板清理动作", () => {
   /** 行触发器（状态 + 标题 + 耗时那一行）。 */
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
     );
     expect(el).toBeTruthy();
@@ -732,7 +760,7 @@ describe("Super Agent 看板清理动作", () => {
 
   /** 详情区里的「清理」按钮（文案恰好是「清理」，不含确认框里的同名按钮）。 */
   function cleanupButton(): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
       (b) => (b.textContent ?? "").trim() === "清理",
     );
     expect(el).toBeTruthy();
@@ -757,11 +785,11 @@ describe("Super Agent 看板清理动作", () => {
     expect(btn.className).toContain("opacity-40");
     // 理由不再逐行重复：行首状态 chip 已说明子会话还在运行，规则统一
     // 收在看板头的帮助按钮里（见「看板帮助说明」那组用例）。
-    expect(container.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
 
     act(() => btn.click());
     expect(cleanupDialog()).toBeNull();
-    expect(container.textContent).not.toContain("删除子会话");
+    expect(document.body.textContent).not.toContain("删除子会话");
   });
 
   it("已完成的子会话仍可清理：点击后弹出确认框", () => {
@@ -771,7 +799,7 @@ describe("Super Agent 看板清理动作", () => {
 
     const btn = cleanupButton();
     expect(btn.getAttribute("aria-disabled")).toBeNull();
-    expect(container.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
 
     act(() => btn.click());
     const dialog = cleanupDialog();
@@ -783,7 +811,7 @@ describe("Super Agent 看板清理动作", () => {
 describe("Super Agent 看板帮助说明", () => {
   /** 行触发器（状态 + 标题 + 耗时那一行）。 */
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
     );
     expect(el).toBeTruthy();
@@ -798,7 +826,7 @@ describe("Super Agent 看板帮助说明", () => {
     act(() => rowTrigger().click());
 
     // 展开面板 header 里的帮助按钮（HelpTip 的触发器）。
-    const tip = container.querySelector<HTMLButtonElement>('button[aria-label="看板说明"]');
+    const tip = document.body.querySelector<HTMLButtonElement>('button[aria-label="看板说明"]');
     expect(tip).toBeTruthy();
     // 气泡是 hover / focus 才渲染的：focus 走 HelpTip 内部 button 的 onFocus。
     act(() => tip!.focus());
@@ -809,8 +837,8 @@ describe("Super Agent 看板帮助说明", () => {
     expect(bubble!.textContent).toContain("子会话还在运行时不能合并");
     expect(bubble!.textContent).toContain("子会话还在运行时不能清理");
     // 规则只在这里说一次：行内不再重复那两句禁用原因。
-    expect(container.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
-    expect(container.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
+    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
   });
 });
 
@@ -841,9 +869,9 @@ function askingSession(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi 
 describe("Super Agent 看板折叠态不隐藏待答问题", () => {
   /** 折叠态专用的紧凑待答条（与展开面板是两个不同的 region）。 */
   const pendingStrip = () =>
-    container.querySelector<HTMLElement>('[role="region"][aria-label="子会话待答问题"]');
+    document.body.querySelector<HTMLElement>('[role="region"][aria-label="子会话待答问题"]');
   const submitButtons = () =>
-    [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+    [...document.body.querySelectorAll<HTMLButtonElement>("button")].filter(
       (b) => b.getAttribute("aria-label") === "提交回答",
     );
 
@@ -866,10 +894,14 @@ describe("Super Agent 看板折叠态不隐藏待答问题", () => {
     // 「哪个子会话」+「在等什么」都要读得到。
     expect(strip!.textContent).toContain("要覆盖哪些范围");
     expect(strip!.textContent).toContain("这一组单测要覆盖哪些范围？");
-    // 折叠条与展开面板走同一条绝对定位轨道（挂在 header 下方）。
-    expect(strip!.className).toContain("absolute");
-    expect(strip!.className).toContain("top-full");
-    expect(strip!.className).toContain("z-40");
+    // 折叠条与展开面板走同一条轨道（portal 到 body，fixed + 视口坐标）。
+    expect(strip!.className).toContain("fixed");
+    expect(strip!.className).toContain("z-35");
+    // 真亚克力材质（半透明底 + backdrop blur）。
+    expect(strip!.className).toContain("acrylic-frosted");
+    // Portal 宿主是 body，不在 header 的子树里。
+    expect(strip!.parentElement).toBe(document.body);
+    expect(strip!.closest("header")).toBeNull();
     // 面板不在 DOM 里 → 同一道题只有一份。
     expect(submitButtons()).toHaveLength(1);
   });
@@ -878,7 +910,7 @@ describe("Super Agent 看板折叠态不隐藏待答问题", () => {
     render([askingSession()]);
     act(() => control().click()); // 收起
 
-    const radio = container.querySelector<HTMLElement>('[role="radio"]');
+    const radio = document.body.querySelector<HTMLElement>('[role="radio"]');
     expect(radio).toBeTruthy();
     act(() => radio!.click());
     act(() => submitButtons()[0]!.click());
@@ -941,17 +973,17 @@ describe("Super Agent 看板面板的收起通道", () => {
 describe("Super Agent 看板工作目录占用与批量清理", () => {
   /** 行触发器（状态 + 标题 + 耗时那一行）。 */
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
     );
     expect(el).toBeTruthy();
     return el!;
   }
 
-  /** 统计行里的「清理已结束」按钮（确认框里的同名按钮走 portal，不在 container 里）。 */
+  /** 统计行里的「清理已结束」按钮（确认框里的同名按钮走 portal，不在面板里）。 */
   function bulkButton(): HTMLButtonElement | null {
     return (
-      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      [...panelRoot().querySelectorAll<HTMLButtonElement>("button")].find(
         (b) => (b.textContent ?? "").trim() === "清理已结束",
       ) ?? null
     );
@@ -1050,15 +1082,15 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expand();
     act(() => rowTrigger().click());
 
-    expect(container.textContent).toContain("工作目录已回收，分支保留");
-    expect(container.textContent).not.toContain("工作目录与分支已清理");
+    expect(document.body.textContent).toContain("工作目录已回收，分支保留");
+    expect(document.body.textContent).not.toContain("工作目录与分支已清理");
   });
 });
 
 describe("Super Agent 看板隔离行：准备中不误报降级", () => {
   /** 行触发器（状态 + 标题 + 耗时那一行）。 */
   function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
-    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
       (b.textContent ?? "").includes(title),
     );
     expect(el).toBeTruthy();
@@ -1085,10 +1117,10 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
 
     // 状态 chip 已经写着「排队中」，再叠一个警告色降级 chip 只会误读成
     // 「worktree 创建失败」——占位态不得出现。
-    expect(container.textContent).toContain("排队中");
-    expect(container.textContent).not.toContain("仅目录隔离");
+    expect(document.body.textContent).toContain("排队中");
+    expect(document.body.textContent).not.toContain("仅目录隔离");
     // 隔离行不能渲染空字符串：宿主给的中文占位说明要能看到。
-    expect(container.textContent).toContain("正在准备隔离环境");
+    expect(document.body.textContent).toContain("正在准备隔离环境");
   });
 
   it("真降级（directory + 非空 path）仍显示「仅目录隔离」", () => {
@@ -1104,9 +1136,9 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     expand();
     act(() => rowTrigger().click());
 
-    expect(container.textContent).toContain("仅目录隔离");
+    expect(document.body.textContent).toContain("仅目录隔离");
     // 真降级时定位文本仍是那个目录，而不是 note。
-    expect(container.textContent).toContain("/tmp/fallback");
+    expect(document.body.textContent).toContain("/tmp/fallback");
   });
 
   it("占位隔离的行标题 tooltip 不拼出空「目录 」，改说宿主占位说明", () => {

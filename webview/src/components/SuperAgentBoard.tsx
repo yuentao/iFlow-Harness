@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   Activity,
@@ -166,6 +175,29 @@ export function shortBranch(branch: string): string {
 
 /** Id shared by the header toggle (`aria-controls`) and the expanded panel. */
 const SUPER_BOARD_PANEL_ID = "super-board-panel";
+
+/**
+ * Geometry of the portaled board surfaces.
+ *
+ * The panel used to be `absolute inset-x-3 top-full` inside the header, so
+ * the 12px gutter and the gap under the header came from CSS. A portal has
+ * no CSS anchor, so both are computed from the header's rect instead:
+ *  - `BOARD_GUTTER` = the header's own px-3 padding (left/right inset),
+ *  - `BOARD_PANEL_GAP` / `BOARD_STRIP_GAP` = the old mt-2 / mt-1.
+ */
+const BOARD_GUTTER = 12;
+const BOARD_PANEL_GAP = 8;
+const BOARD_STRIP_GAP = 4;
+
+/** Viewport anchor for the portaled surfaces (null until measured). */
+interface BoardAnchor {
+  /** Left edge of the surface, in viewport pixels. */
+  left: number;
+  /** Distance from the viewport's right edge to the surface's right edge. */
+  right: number;
+  /** Bottom edge of the header, in viewport pixels. */
+  bottom: number;
+}
 
 /**
  * 阶段轨节点标签。
@@ -392,17 +424,24 @@ function formatCostPrecise(usd: number): string {
  * status chip). Collapsed it is ONE inline control — icon + label + counts +
  * chevron — at the header's control height, so it never takes a transcript
  * row and a child appearing cannot squeeze the message list. Expanded it
- * opens a popup panel anchored under the header (`absolute top-full`, the
- * header is the positioned ancestor) and closes on Esc / outside click.
+ * opens a popup panel anchored under the header and closes on Esc / outside
+ * click.
  *
- * Material: the panel is a child of the acrylic header, i.e. it sits INSIDE a
- * backdrop-filter ancestor. Per Filter Effects L2 that ancestor is a backdrop
- * root, so the panel's own backdrop-filter could only sample the header's
- * subtree — the transcript text behind it would ghost through sharp (the same
- * verified trap documented on .acrylic-pop in styles.css). The panel therefore
- * uses the popup acrylic tint (.acrylic-pop, near-opaque, panel-sized drop),
- * exactly like every dropdown that opens out of this header, instead of
- * .super-board-surface.
+ * Material: the panel is PORTALED to document.body (the same move
+ * ConfirmDialog makes), so it sits OUTSIDE the acrylic header — and outside
+ * every backdrop root. As a child of the header it was part of that
+ * backdrop root: per Filter Effects L2 its own backdrop-filter could only
+ * sample the header's subtree, so the transcript text behind it ghosted
+ * through sharp (the trap documented on .acrylic-pop in styles.css), and the
+ * panel had to fall back to a near-opaque tint. Out here the panel carries
+ * .acrylic-frosted — a translucent tint plus a real backdrop blur — so the
+ * transcript behind it is frosted into a matte backdrop instead of reading
+ * through. It is the only true frosted surface in the app.
+ *
+ * Positioning: a portal has no CSS anchor (the old `absolute top-full
+ * inset-x-3` needed the header to be the positioned ancestor), so the panel
+ * is placed in viewport coordinates from the header's rect and re-measured
+ * whenever the header moves or resizes.
  */
 export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement | null) => void }) {
   const sessions = useChat((s) => s.state?.superSessions);
@@ -465,6 +504,71 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   );
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
+
+  // --- anchoring for the portaled surfaces --------------------------------
+  // The panel and the collapsed pending strip are portaled to document.body
+  // (see the component comment: only a surface outside every backdrop root
+  // can blur the real backdrop). A portal has no CSS anchor, so their
+  // position is computed from the header's rect instead — the panel keeps
+  // the header's own 12px gutter and hangs right under the header's bottom
+  // edge, exactly like the old `absolute inset-x-3 top-full` did.
+  const [anchor, setAnchor] = useState<BoardAnchor | null>(null);
+  const measureAnchor = useCallback(() => {
+    const control = controlRef.current;
+    if (!control) return;
+    // Anchor to the header (the surfaces span its full width minus the
+    // gutter); fall back to the control itself when the board is rendered
+    // outside a header.
+    const host = control.closest("header") as HTMLElement | null;
+    const rect = (host ?? control).getBoundingClientRect();
+    const viewport = window.innerWidth;
+    const left = Math.max(BOARD_GUTTER, Math.round(rect.left + BOARD_GUTTER));
+    let right = Math.round(viewport - rect.right + BOARD_GUTTER);
+    // The header spans the viewport, so `right` lands on the gutter. A host
+    // that does not (or a layout that has not happened yet) must not push
+    // the surface off-screen — clamp it back to the gutter.
+    if (!Number.isFinite(right) || right < BOARD_GUTTER || right > viewport - BOARD_GUTTER) {
+      right = BOARD_GUTTER;
+    }
+    const bottom = Math.round(rect.bottom);
+    setAnchor((prev) =>
+      prev && prev.left === left && prev.right === right && prev.bottom === bottom
+        ? prev
+        : { left, right, bottom },
+    );
+  }, []);
+  // Re-measure while a surface is on screen, and whenever the header moves
+  // or resizes: the surfaces are fixed to the viewport now, so a stale
+  // anchor would detach them from the header.
+  useLayoutEffect(() => {
+    if (!expanded && awaiting.length === 0) return;
+    measureAnchor();
+    const host = controlRef.current?.closest("header") as HTMLElement | null;
+    window.addEventListener("resize", measureAnchor);
+    let observer: ResizeObserver | undefined;
+    if (host && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(measureAnchor);
+      observer.observe(host);
+    }
+    return () => {
+      window.removeEventListener("resize", measureAnchor);
+      observer?.disconnect();
+    };
+  }, [expanded, awaiting.length, measureAnchor]);
+  // Inline style for a portaled surface. Until the first measurement the
+  // surface is hidden (the layout effect above measures before the first
+  // paint, so it never flashes at the wrong spot).
+  const surfaceStyle = useCallback(
+    (gap: number): CSSProperties | undefined =>
+      anchor
+        ? {
+            left: `${anchor.left}px`,
+            right: `${anchor.right}px`,
+            top: `${anchor.bottom + gap}px`,
+          }
+        : undefined,
+    [anchor],
+  );
   // Worktree usage: how many children still hold a directory on disk, and how
   // many of those are finished (their directory can be reclaimed without
   // touching the branch). `repo` children never count — they share the main
@@ -656,179 +760,189 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           drop that rule. Rendered ONLY while collapsed: the expanded panel
           already carries the same SuperPendingArea inside each row, and
           stacking both would show one question twice. */}
-      {!expanded && awaiting.length > 0 && (
-        <div
-          // Same ref as the expanded panel: its height is mirrored into
-          // --super-bar-h on the transcript wrapper, otherwise the transcript
-          // top and the main-session pending card (both offset by that
-          // variable) would paint over this strip — at 360px the question card
-          // covered 76% of it and its 「提交回答」 button was unclickable.
-          // The strip and the panel are mutually exclusive, so they never
-          // overwrite each other's measurement.
-          ref={setPanelNode}
-          role="region"
-          aria-label={t("子会话待答问题")}
-          className="stream-in absolute inset-x-3 top-full z-40 mt-1 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-pop px-1 py-1"
-        >
-          {awaiting.map((session) => (
-            <div key={session.id} className="shrink-0">
-              {/* The panel row names the child; this strip has no row above
-                  it, so it states which child is asking. */}
-              <div className="flex min-w-0 items-center gap-1.5 px-2 pt-1">
-                <CircleHelp className="size-3 shrink-0 text-warning" aria-hidden="true" />
-                <span
-                  className="min-w-0 truncate text-ui-micro font-medium text-foreground"
-                  title={session.title}
-                >
-                  {session.title}
-                </span>
+      {!expanded &&
+        awaiting.length > 0 &&
+        createPortal(
+          <div
+            // Same ref as the expanded panel: its height is mirrored into
+            // --super-bar-h on the transcript wrapper, otherwise the transcript
+            // top and the main-session pending card (both offset by that
+            // variable) would paint over this strip — at 360px the question card
+            // covered 76% of it and its 「提交回答」 button was unclickable.
+            // The strip and the panel are mutually exclusive, so they never
+            // overwrite each other's measurement.
+            ref={setPanelNode}
+            role="region"
+            aria-label={t("子会话待答问题")}
+            style={surfaceStyle(BOARD_STRIP_GAP)}
+            className={`stream-in fixed z-35 max-h-[40vh] overflow-y-auto rounded-lg border border-border/70 acrylic-frosted px-1 py-1${anchor ? "" : " invisible"}`}
+          >
+            {awaiting.map((session) => (
+              <div key={session.id} className="shrink-0">
+                {/* The panel row names the child; this strip has no row above
+                    it, so it states which child is asking. */}
+                <div className="flex min-w-0 items-center gap-1.5 px-2 pt-1">
+                  <CircleHelp className="size-3 shrink-0 text-warning" aria-hidden="true" />
+                  <span
+                    className="min-w-0 truncate text-ui-micro font-medium text-foreground"
+                    title={session.title}
+                  >
+                    {session.title}
+                  </span>
+                </div>
+                <SuperPendingArea session={session} />
               </div>
-              <SuperPendingArea session={session} />
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>,
+          document.body,
+        )}
 
-      {/* Expanded form = a popup panel under the header. `top-full` anchors it
-          to the header's bottom edge (the header is the positioned ancestor);
-          inset-x-3 keeps the same 12px gutter as the header padding. Material:
-          .acrylic-pop — see the component comment (nested inside the acrylic
-          header, so its own backdrop-filter could only sample that subtree). */}
-      {expanded && (
-        <div
-          id={SUPER_BOARD_PANEL_ID}
-          ref={setPanelNode}
-          role="region"
-          aria-label={t("子会话")}
-          className="stream-in absolute inset-x-3 top-full z-40 mt-2 overflow-hidden rounded-lg border border-border/70 acrylic-pop"
-        >
-          <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-            <span className="flex min-w-0 items-center gap-1.5 text-ui-label font-medium text-foreground">
-              <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
-              <span className="truncate">{t("子会话")}</span>
-            </span>
-            {/* The board's ONE help bubble: every rule that used to be
-                spelled out under each row lives here now (what a child may
-                do, when merge / cleanup become available). The row's status
-                chip already says a child is still running — repeating the
-                reason in every expanded row was noise, and it made the
-                board unreadable at a glance. */}
-            <HelpTip label={t("看板说明")}>
-              <div className="flex flex-col gap-1">
-                <span>{t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}</span>
-                <span>{t("子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并")}</span>
-                <span>{t("子会话还在运行时不能清理，需要先中断它")}</span>
+      {/* Expanded form = a popup panel under the header. It is PORTALED to
+          document.body (the same move ConfirmDialog makes) so it sits
+          outside the acrylic header — and outside every backdrop root, which
+          is what lets its own backdrop-filter frost the transcript behind it
+          instead of letting the text read through sharp. Position: viewport
+          coordinates measured from the header's rect (see the anchoring block
+          above); the 12px gutter and the gap under the header are preserved.
+          Material: .acrylic-frosted — the app's only true frosted surface. */}
+      {expanded &&
+        createPortal(
+          <div
+            id={SUPER_BOARD_PANEL_ID}
+            ref={setPanelNode}
+            role="region"
+            aria-label={t("子会话")}
+            style={surfaceStyle(BOARD_PANEL_GAP)}
+            className={`stream-in fixed z-35 overflow-hidden rounded-lg border border-border/70 acrylic-frosted${anchor ? "" : " invisible"}`}
+          >
+            <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+              <span className="flex min-w-0 items-center gap-1.5 text-ui-label font-medium text-foreground">
+                <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
+                <span className="truncate">{t("子会话")}</span>
+              </span>
+              {/* The board's ONE help bubble: every rule that used to be
+                  spelled out under each row lives here now (what a child may
+                  do, when merge / cleanup become available). The row's status
+                  chip already says a child is still running — repeating the
+                  reason in every expanded row was noise, and it made the
+                  board unreadable at a glance. */}
+              <HelpTip label={t("看板说明")}>
+                <div className="flex flex-col gap-1">
+                  <span>{t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}</span>
+                  <span>{t("子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并")}</span>
+                  <span>{t("子会话还在运行时不能清理，需要先中断它")}</span>
+                </div>
+              </HelpTip>
+              <div className="ml-auto flex shrink-0 items-center gap-1">
+                {active.length > 0 && (
+                  <Button
+                    variant="canvas"
+                    size="sm"
+                    icon={<Square className={ICON_INLINE} />}
+                    aria-label={t("全部中断")}
+                    title={t("全部中断")}
+                    onClick={() => setConfirmCancelAll(active.length)}
+                  >
+                    <span className="@max-[380px]:hidden">{t("全部中断")}</span>
+                  </Button>
+                )}
               </div>
-            </HelpTip>
-            <div className="ml-auto flex shrink-0 items-center gap-1">
-              {active.length > 0 && (
-                <Button
-                  variant="canvas"
-                  size="sm"
-                  icon={<Square className={ICON_INLINE} />}
-                  aria-label={t("全部中断")}
-                  title={t("全部中断")}
-                  onClick={() => setConfirmCancelAll(active.length)}
-                >
-                  <span className="@max-[380px]:hidden">{t("全部中断")}</span>
-                </Button>
-              )}
             </div>
-          </div>
-          {/* Body: same rows as before, just inside the popup. px-3 py-2 keeps
-              the panel's breathing room (the row components add their own
-              px-2/py-1.5 on top). */}
-          <div className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto px-3 py-2">
-          {visible.map((session) => (
-            <SuperSessionRow
-              key={session.id}
-              session={session}
-              open={openRow === session.id}
-              onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
-              onMerge={() => setConfirmMerge(session)}
-              onCleanup={() => setConfirmCleanup(session)}
-              onCancel={() => setConfirmCancel(session)}
-            />
-          ))}
-          {/* Finished + already merged children collapse into ONE history row:
-              their changes are in the working tree, so there is nothing left
-              to act on — they only get in the way of the live ones. */}
-          {folded.length > 0 && (
-            <div className="shrink-0">
-              <DisclosureButton
-                expanded={showFolded}
-                aria-label={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
-                title={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
-                className="w-full rounded-sm px-2 py-1.5"
-                onClick={() => setShowFolded((v) => !v)}
-              >
-                {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-                <span className="shrink-0">{t("已完成的 {0} 个子会话", folded.length)}</span>
-                <Chip tone="success">{t("已自动合并")}</Chip>
-              </DisclosureButton>
-              {showFolded && (
-                <div className="divide-y divide-border/40 border-t border-border/40">
-                  {folded.map((session) => (
-                    <SuperSessionRow
-                      key={session.id}
-                      session={session}
-                      open={openRow === session.id}
-                      onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
-                      onMerge={() => setConfirmMerge(session)}
-                      onCleanup={() => setConfirmCleanup(session)}
-                      onCancel={() => setConfirmCancel(session)}
-                    />
-                  ))}
+            {/* Body: same rows as before, just inside the popup. px-3 py-2 keeps
+                the panel's breathing room (the row components add their own
+                px-2/py-1.5 on top). */}
+            <div className="max-h-[40vh] divide-y divide-border/50 overflow-y-auto px-3 py-2">
+              {visible.map((session) => (
+                <SuperSessionRow
+                  key={session.id}
+                  session={session}
+                  open={openRow === session.id}
+                  onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
+                  onMerge={() => setConfirmMerge(session)}
+                  onCleanup={() => setConfirmCleanup(session)}
+                  onCancel={() => setConfirmCancel(session)}
+                />
+              ))}
+              {/* Finished + already merged children collapse into ONE history row:
+                  their changes are in the working tree, so there is nothing left
+                  to act on — they only get in the way of the live ones. */}
+              {folded.length > 0 && (
+                <div className="shrink-0">
+                  <DisclosureButton
+                    expanded={showFolded}
+                    aria-label={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
+                    title={showFolded ? t("收起已完成的子会话") : t("展开已完成的子会话")}
+                    className="w-full rounded-sm px-2 py-1.5"
+                    onClick={() => setShowFolded((v) => !v)}
+                  >
+                    {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
+                    <span className="shrink-0">{t("已完成的 {0} 个子会话", folded.length)}</span>
+                    <Chip tone="success">{t("已自动合并")}</Chip>
+                  </DisclosureButton>
+                  {showFolded && (
+                    <div className="divide-y divide-border/40 border-t border-border/40">
+                      {folded.map((session) => (
+                        <SuperSessionRow
+                          key={session.id}
+                          session={session}
+                          open={openRow === session.id}
+                          onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
+                          onMerge={() => setConfirmMerge(session)}
+                          onCleanup={() => setConfirmCleanup(session)}
+                          onCancel={() => setConfirmCancel(session)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {(totals.input > 0 || totals.output > 0) && (
+                <div
+                  className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground"
+                  title={t("按公开单价估算，仅供参考")}
+                >
+                  <span className="font-medium text-foreground">{t("子会话合计开销")}</span>
+                  <span className="tabular-nums">
+                    {t("输入 {0} · 输出 {1}", formatTokens(totals.input), formatTokens(totals.output))}
+                  </span>
+                  {totals.estimatedCost !== null && (
+                    <span className="tabular-nums">{formatCostPrecise(totals.estimatedCost)}</span>
+                  )}
+                </div>
+              )}
+              {/* Worktree footprint: the board is the only place that shows how
+                  much disk the children are holding. The bulk action is offered
+                  only for FINISHED children — a live child's directory must not
+                  be deleted under a running process (the row action says the same). */}
+              {worktreeSessions.length > 0 && (
+                <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {t("工作目录 {0} 个", worktreeSessions.length)}
+                  </span>
+                  <span className="tabular-nums">
+                    {t("已结束 {0} 个可回收", reclaimable.length)}
+                  </span>
+                  {reclaimable.length > 0 && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={<Trash2 className={ICON_INLINE} />}
+                      onClick={() =>
+                        setConfirmCleanupAll({
+                          count: reclaimable.length,
+                          ids: reclaimable.map((s) => s.id),
+                        })
+                      }
+                    >
+                      {t("清理已结束")}
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
-          )}
-          {(totals.input > 0 || totals.output > 0) && (
-            <div
-              className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground"
-              title={t("按公开单价估算，仅供参考")}
-            >
-              <span className="font-medium text-foreground">{t("子会话合计开销")}</span>
-              <span className="tabular-nums">
-                {t("输入 {0} · 输出 {1}", formatTokens(totals.input), formatTokens(totals.output))}
-              </span>
-              {totals.estimatedCost !== null && (
-                <span className="tabular-nums">{formatCostPrecise(totals.estimatedCost)}</span>
-              )}
-            </div>
-          )}
-          {/* Worktree footprint: the board is the only place that shows how
-              much disk the children are holding. The bulk action is offered
-              only for FINISHED children — a live child's directory must not
-              be deleted under a running process (the row action says the same). */}
-          {worktreeSessions.length > 0 && (
-            <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 text-ui-micro text-muted-foreground">
-              <span className="font-medium text-foreground">
-                {t("工作目录 {0} 个", worktreeSessions.length)}
-              </span>
-              <span className="tabular-nums">
-                {t("已结束 {0} 个可回收", reclaimable.length)}
-              </span>
-              {reclaimable.length > 0 && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon={<Trash2 className={ICON_INLINE} />}
-                  onClick={() =>
-                    setConfirmCleanupAll({
-                      count: reclaimable.length,
-                      ids: reclaimable.map((s) => s.id),
-                    })
-                  }
-                >
-                  {t("清理已结束")}
-                </Button>
-              )}
-            </div>
-          )}
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
 
       {/* Status changes are announced, not just re-drawn: a child that turns
           「等待你处理」 must reach a screen reader without the user hunting
