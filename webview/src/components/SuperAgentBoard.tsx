@@ -707,8 +707,18 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
               <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
               <span className="truncate">{t("子会话")}</span>
             </span>
-            <HelpTip label={t("免确认说明")}>
-              {t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
+            {/* The board's ONE help bubble: every rule that used to be
+                spelled out under each row lives here now (what a child may
+                do, when merge / cleanup become available). The row's status
+                chip already says a child is still running — repeating the
+                reason in every expanded row was noise, and it made the
+                board unreadable at a glance. */}
+            <HelpTip label={t("看板说明")}>
+              <div className="flex flex-col gap-1">
+                <span>{t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}</span>
+                <span>{t("子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并")}</span>
+                <span>{t("子会话还在运行时不能清理，需要先中断它")}</span>
+              </div>
             </HelpTip>
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {active.length > 0 && (
@@ -952,9 +962,10 @@ function SuperSessionRow({
   // What survives is the record — the branch and its worktree — so the merge
   // and cleanup actions stay available.
   const historical = session.restored === true;
-  // Why the merge action is unavailable right now. Spelled out in words so
-  // it can be shown under the buttons, read by a screen reader and hovered
-  // as a tooltip — a greyed-out button without a reason reads as broken.
+  // Why the merge action is unavailable right now. The RULE is stated once,
+  // in the board header's help bubble; this string only feeds the button's
+  // title / aria-label, so a greyed-out button still says why it is greyed
+  // out for a screen reader and on hover.
   const mergeBlocked =
     !session.isolation.branch ||
     session.integration?.state === "merged" ||
@@ -969,8 +980,8 @@ function SuperSessionRow({
           : t("派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）");
   // Cleanup deletes the worktree, so it must not race a live child: the
   // process would keep writing into a directory that no longer exists.
-  // Same wording discipline as the merge action — the reason is a visible
-  // line, not just a tooltip on a greyed-out button.
+  // Same discipline as the merge action — the rule lives in the board
+  // header's help bubble, and the button keeps it in title / aria-label.
   const cleanupBlocked = isActive(session);
   const cleanupReason = t("子会话还在运行，先中断再清理");
   // Diagnostics — full branch ref, worktree path, retry count, restored
@@ -1136,6 +1147,11 @@ function SuperSessionRow({
             {(session.attempts ?? 1) > 1 && <span>{t("第 {0} 次尝试", session.attempts ?? 1)}</span>}
           </div>
 
+          {/* No visible reason line under the buttons any more: the board
+              header's help bubble states the merge / cleanup rules once, and
+              the row's status chip already says the child is still running.
+              The greyed-out buttons keep their full reason in title /
+              aria-label. */}
           <div className="flex flex-wrap items-center gap-1">
             {/* A restored child has no live transcript (its process died with
                 the previous extension lifetime) and cannot be retried —
@@ -1167,10 +1183,11 @@ function SuperSessionRow({
               size="sm"
               icon={<GitMerge className={ICON_INLINE} />}
               /* `aria-disabled` instead of `disabled`: the kit's disabled
-                 style kills pointer events, so the `title` (the only place
-                 the reason was written) could never be read. aria-disabled
-                 keeps the button focusable and its title/aria-label
-                 readable, and the reason is spelled out under the row. */
+                 style kills pointer events, so the `title` (where the
+                 reason now lives) could never be read. aria-disabled keeps
+                 the button focusable and its title/aria-label readable; the
+                 rule itself is stated once in the board header's help
+                 bubble. */
               aria-disabled={mergeBlocked || undefined}
               aria-label={mergeBlocked ? mergeReason : t("让智能体合并")}
               title={mergeReason}
@@ -1188,7 +1205,7 @@ function SuperSessionRow({
                 size="sm"
                 icon={<Trash2 className={ICON_INLINE} />}
                 /* Same reasoning as the merge button: `disabled` would kill
-                   pointer events and hide the explanation, so the block is
+                   pointer events and hide the reason, so the block is
                    expressed with `aria-disabled` plus an early return. */
                 aria-disabled={cleanupBlocked || undefined}
                 aria-label={cleanupBlocked ? cleanupReason : t("清理")}
@@ -1203,16 +1220,6 @@ function SuperSessionRow({
               </Button>
             )}
           </div>
-          {mergeBlocked && (
-            /* The reason is visible without hover — a greyed-out button with
-               no explanation reads as a broken control. */
-            <p className="text-ui-micro text-muted-foreground">{mergeReason}</p>
-          )}
-          {cleanupBlocked && (
-            /* Same rule for cleanup: it is only blocked while the child is
-               alive, and that has to be readable without hovering. */
-            <p className="text-ui-micro text-muted-foreground">{cleanupReason}</p>
-          )}
         </div>
       )}
 

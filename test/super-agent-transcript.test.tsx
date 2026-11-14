@@ -273,7 +273,7 @@ describe("Super Agent 子会话实时操作面板", () => {
 });
 
 describe("Super Agent 子会话合并入口", () => {
-  it("运行中的子会话不允许合并（按钮置灰，但禁用原因可读）", () => {
+  it("运行中的子会话不允许合并（按钮置灰，禁用原因由帮助按钮统一说明）", () => {
     render();
     clickLabel("子会话看板");
     clickRow("修复登录跳转");
@@ -287,8 +287,9 @@ describe("Super Agent 子会话合并入口", () => {
     expect((button as HTMLButtonElement).disabled).toBe(false);
     expect(button!.getAttribute("aria-disabled")).toBe("true");
     expect(button!.getAttribute("title")).toContain("子会话还没结束，完成后再让智能体合并");
-    // 原因也直接写在行里。
-    expect(container.textContent).toContain("子会话还没结束，完成后再让智能体合并");
+    // 原因不再逐行重复：行首的状态 chip 已经说明子会话还在运行，
+    // 完整规则统一收在看板头的帮助按钮里（见下一组用例）。
+    expect(container.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
   });
 
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {

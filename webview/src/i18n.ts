@@ -26,6 +26,12 @@ const en: Record<string, string> = {
   "已中断": "Interrupted",
   "子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批":
     "Child sessions always run without confirmation — tool calls, shell included, execute directly and are never prompted for approval",
+  // 看板头帮助按钮（HelpTip）里的统一说明：免确认 / 合并规则 / 清理规则。
+  "看板说明": "Board help",
+  "子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并":
+    "A running child session cannot be merged; merge it after it finishes. A child session whose changes are already merged, or that has no branch to merge, cannot be merged either",
+  "子会话还在运行时不能清理，需要先中断它":
+    "A running child session cannot be cleaned up; interrupt it first",
   "子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。":
     "The child session is waiting for your answer; if you do not answer, it continues with “no answer” when the countdown ends.",
   "按未回答继续": "it continues with “no answer”",
@@ -88,7 +94,6 @@ const en: Record<string, string> = {
   "第 {0} 次尝试": "Attempt {0}",
   "仅目录隔离": "Directory isolation only",
   "主仓工作区（无隔离）": "Main workspace (no isolation)",
-  "免确认说明": "No-confirmation note",
   "待回答": "Needs answer",
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
