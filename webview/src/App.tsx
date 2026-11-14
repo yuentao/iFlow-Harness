@@ -23,9 +23,7 @@ import { Button, Chip, ConfirmDialog, Dropdown, ICON_INLINE, ICON_TOOLBAR, IconB
 import { MessageList } from "./components/MessageList";
 import { SuperAgentBoard } from "./components/SuperAgentBoard";
 import { Composer } from "./components/Composer";
-import { ApprovalCard } from "./components/ApprovalCard";
-import { PlanExitCard } from "./components/PlanExitCard";
-import { QuestionCard } from "./components/QuestionCard";
+import { PendingCards } from "./components/PendingCards";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
@@ -350,64 +348,14 @@ export function App() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // Pending-action cards float over the transcript (see the JSX below). Their
-  // height is variable (plan editor, expanded custom answers), so a ResizeObserver
-  // mirrors it into --pending-card-h on the wrapper; MessageList reads it as the
-  // scroll content's bottom padding so the newest message can always be scrolled
-  // clear of the card. Writing a CSS var keeps this off React's render path.
-  // The overlay shell now spans the whole wrapper (definite height for card
-  // max-h-full capping), so measure the packed cards instead of the shell:
-  // wrapper height − topmost card offsetTop = stack height + gaps + pb-3.
-  const pendingOverlayRef = useRef<HTMLDivElement>(null);
+  // Pending-action cards (approval / plan-exit / question) own their overlay
+  // in PendingCards: it mirrors its visible height into --pending-card-h on
+  // this wrapper (MessageList reads it as the transcript's bottom padding and
+  // the "生成中" pill rides on it) and switches between the single-card layout
+  // and the stacked layout. Keeping the writer next to the overlay means the
+  // stacked height (counter + peek edges + top card) is measured from the
+  // same elements that draw it.
   const transcriptWrapRef = useRef<HTMLDivElement>(null);
-  const hasPendingCard = Boolean(pendingApproval || pendingPlanExit || pendingQuestions);
-  useEffect(() => {
-    const wrapper = transcriptWrapRef.current;
-    if (!wrapper) return;
-    const overlay = pendingOverlayRef.current;
-    if (!overlay) {
-      wrapper.style.removeProperty("--pending-card-h");
-      return;
-    }
-    const apply = () => {
-      const first = overlay.firstElementChild;
-      if (!first) {
-        wrapper.style.removeProperty("--pending-card-h");
-        return;
-      }
-      wrapper.style.setProperty("--pending-card-h", `${wrapper.offsetHeight - (first as HTMLElement).offsetTop}px`);
-    };
-    apply();
-    const ro = new ResizeObserver(apply);
-    ro.observe(overlay);
-    for (const child of overlay.children) ro.observe(child);
-    return () => ro.disconnect();
-  }, [hasPendingCard]);
-
-  // The overlay is a scroll container when the stacked cards outgrow the
-  // shell, and every card autofocuses its safe action on mount. The browser's
-  // focus scroll then lands anywhere between the two edges: with cards
-  // arriving one by one, 3 cards at 360×800 left scrollTop=446 of max 687 —
-  // the newest card (the one that just took focus and needs the answer) was
-  // cut off below the fold. Stick to the bottom whenever the card SET
-  // changes: bottom is where the newest card lives (that is also what
-  // `[&>*:first-child]:mt-auto` means when the stack fits). Keyed on the ids
-  // so a content-only re-render never fights a user who scrolled up.
-  const pendingCardSet = `${pendingApproval?.id ?? ""}|${pendingPlanExit?.id ?? ""}|${pendingQuestions?.id ?? ""}`;
-  useEffect(() => {
-    const overlay = pendingOverlayRef.current;
-    if (!overlay) return;
-    const stick = () => {
-      overlay.scrollTop = overlay.scrollHeight;
-    };
-    stick();
-    // One frame later as well: the autofocus pass (and lazily rendered card
-    // bodies) can change the scroll height after this effect ran.
-    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame(stick) : null;
-    return () => {
-      if (raf !== null) cancelAnimationFrame(raf);
-    };
-  }, [pendingCardSet]);
 
   // The Super Agent board is part of the header now. Collapsed it takes NO
   // transcript space at all (--super-bar-h = 0 — the control lives inside the
@@ -1055,32 +1003,16 @@ export function App() {
               </div>
             </div>
           )}
-          {(pendingApproval || pendingPlanExit || pendingQuestions) && (
-            <div
-              ref={pendingOverlayRef}
-              // Starts below the Super Agent board's expanded popup panel:
-              // both layers are z-30 and the cards come later in the DOM, so
-              // without the reservation the question card would paint over
-              // the panel. Reserving the panel height keeps both usable (the
-              // card caps itself and scrolls). Collapsed → 0, no offset.
-              //
-              // min-h-0 + overflow-y-auto is the last-resort fallback: each
-              // card caps itself at max-h-full, but approval + plan + question
-              // can coexist, and their sum can exceed the shell. The shell
-              // then scrolls instead of letting the stack grow past its top
-              // edge over the header. Bottom alignment is done with
-              // first:mt-auto rather than justify-end — in a scroll container
-              // flex-end makes the overflow above the start edge unreachable.
-              // (overflow-hidden is deliberately NOT used: it would cut off a
-              // card's title and close affordances.)
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex min-h-0 flex-col gap-2 overflow-y-auto pb-3 [&>*:first-child]:mt-auto"
-              style={{ top: "var(--super-bar-h, 0px)" }}
-            >
-              {pendingApproval && <ApprovalCard approval={pendingApproval} />}
-              {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
-              {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
-            </div>
-          )}
+          {/* Pending-action cards (approval / plan-exit / question). The
+              component owns the overlay shell, the stacked-vs-list switch and
+              the --pending-card-h measurement; it starts below the Super Agent
+              board's expanded popup panel via the same --super-bar-h offset.
+              A single card renders exactly as before. */}
+          <PendingCards
+            pendingApproval={pendingApproval}
+            pendingPlanExit={pendingPlanExit}
+            pendingQuestions={pendingQuestions}
+          />
         </div>
       </div>
 
