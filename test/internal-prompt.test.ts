@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { ChatPanel } from "../src/panel/panel.js";
 import { stripFileMentions } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
@@ -432,6 +432,7 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
         status: string;
         nextStepSuggestions?: string[];
         nextStepLoading?: boolean;
+        superSessions?: Array<{ status: string }>;
       };
       sessionStarted: (meta: { sessionId: string }) => void;
       setSessions: (sessions: SessionEntry[], activeSessionId?: string | null) => void;
@@ -542,6 +543,46 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     expect(p.store.getState().sessions[0]?.label).toBe(clampSessionLabel(FIRST_REQUEST));
     expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试"]);
     expect(p.memory.applyExtractionResult).not.toHaveBeenCalled();
+  });
+
+  it("skips next steps and memory while child sessions are still running", async () => {
+    // 主会话回合先结束、子会话还在跑：它们的结果还没进对话，此时提炼
+    // 下一步/记忆是残缺的，子会话汇报后那一轮会自然补上。
+    p.store.getState().superSessions = [{ status: "running" }];
+    queueCompletion({ text: JSON.stringify({ title: "登录改用 PKCE" }), reason: "complete" });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+
+    expect(completionMock.state.calls).toHaveLength(1);
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).toContain("[Title]");
+    expect(sent).not.toContain("[Next steps]");
+    expect(sent).not.toContain("[Long-term memory]");
+    expect(sent).not.toContain('"facts"');
+    expect(p.store.getState().sessions[0]?.label).toBe("登录改用 PKCE");
+    expect(p.store.getState().nextStepSuggestions).toEqual([]);
+    expect(p.memory.beginExtraction).not.toHaveBeenCalled();
+    expect(p.memory.applyExtractionResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps the full batch once every child session reached a terminal state", async () => {
+    p.store.getState().superSessions = [{ status: "completed" }, { status: "cancelled" }];
+    queueCompletion({
+      text: JSON.stringify({
+        title: "登录改用 PKCE",
+        nextSteps: ["运行测试"],
+        facts: [{ text: "项目统一用 pnpm 安装依赖", scope: "global", category: "convention", confidence: 0.9 }],
+      }),
+      reason: "complete",
+    });
+    await p.runTurnFollowup(SESSION_ID, { allowTitle: true, conversationTasks: true });
+
+    expect(completionMock.state.calls).toHaveLength(1);
+    const sent = completionMock.state.calls[0]?.prompt ?? "";
+    expect(sent).toContain("[Title]");
+    expect(sent).toContain("[Next steps]");
+    expect(sent).toContain("[Long-term memory]");
+    expect(p.store.getState().nextStepSuggestions).toEqual(["运行测试"]);
+    expect(p.memory.applyExtractionResult).toHaveBeenCalledTimes(1);
   });
 
   it("sends nothing when no task is eligible", async () => {
@@ -668,6 +709,7 @@ const SHIPPED_TEMPLATES = [
   "followup-next-steps",
   "followup-memory",
   "model-metadata",
+  "super-agent-task",
   "asset-gen",
   "asset-gen-nouns",
   "asset-gen-contracts",
@@ -680,6 +722,52 @@ describe("prompt templates (prompts/)", () => {
     for (const name of SHIPPED_TEMPLATES) {
       expect(existsSync(path.join(here, "..", "prompts", `${name}.md`), "utf8")).toBe(true);
     }
+  });
+
+  it("makes the main session an orchestrator that only delegates, plans, manages and reports", () => {
+    // The host can only dispatch what the main agent writes: if this mandate is
+    // dropped, the agent silently goes back to doing everything itself and
+    // child sessions only appear when the user asks for them. The boundary is
+    // strict — implementation is never kept in the main session.
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("You are the orchestrator: delegation, planning, management and reporting");
+    expect(text).toContain("The children do the work");
+    expect(text).toContain("Decompose the user's task yourself, then delegate");
+    expect(text).toContain("Implementation work is never kept here");
+    expect(text).toContain("```super-agent");
+    expect(text).toContain("## When to split");
+    expect(text).toContain("## What stays in this session");
+    expect(text).toContain("Never edit a delegated file yourself");
+    expect(text).toContain("children cannot delegate further");
+    // Zero-execution mandate: the main session runs no checks itself, and
+    // verification is delegated like any other unit of work.
+    expect(text).toContain("This session executes nothing");
+    expect(text).toContain("no tests, no typecheck, no build, no shell command, and no file edits");
+    expect(text).toContain("running the project's checks and reporting their real output goes to a child");
+    expect(text).toContain("never re-run it here");
+    // The child side owns the checks and has to report them honestly.
+    const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
+    expect(brief).toContain("Run the project checks the task brief asks for");
+    expect(brief).toContain("never claim a check passed");
+  });
+
+  it("gives the main session no git exception: an unmerged branch goes to a merge child session", () => {
+    // 主会话连 git 也不跑：分支没能自动合并时，派一个合并子会话去做，
+    // 主会话只读汇报。旧提示词给主会话留了「自己 merge」这条例外。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    // 新分工：明确不跑 git + 派合并子会话。
+    expect(text).toContain("This session runs no git either");
+    expect(text).toContain("you never run git yourself");
+    expect(text).toContain("dispatch a merge child session");
+    expect(text).toContain("dispatch a merge child session to do it");
+    expect(text).toContain("means you dispatch a merge child session for it");
+    // 旧分工：「你自己合并」整句消失（用完整句子断言，不用裸 git merge 串）。
+    expect(text).not.toContain(
+      "Only when the board shows the branch was **kept** (未自动合并 / 合并冲突 / no gh CLI) do you merge it yourself: run `git merge --no-ff <branch>` in the main workspace (the branch is on the board) and resolve conflicts by reading the code.",
+    );
+    expect(text).not.toContain(
+      "a finished child with `未自动合并` needs you to merge its branch yourself (or tell the user exactly why it was left alone).",
+    );
   });
 
   it("fills every placeholder in the assembled prompts", () => {

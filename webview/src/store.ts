@@ -3,6 +3,7 @@ import {
   applyBlockPatch,
   evictBlockPayloads,
   type ApprovalRule,
+  type Block,
   type HostSettingsUi,
   type HostToWebview,
   type KnowledgeDocUi,
@@ -19,6 +20,7 @@ import {
 } from "../../shared/messages";
 import { normalizeModelId } from "../../shared/context-window";
 import { collectTurnChanges } from "../../shared/turn-changes";
+import type { SuperSessionUi } from "../../shared/super-agent";
 
 declare const acquireVsCodeApi: () => { postMessage: (msg: unknown) => void };
 
@@ -41,6 +43,28 @@ const UI_DENSITY_SCALES: Record<UiDensity, number> = {
   standard: 1,
   comfortable: 1.12,
 };
+
+/**
+ * Keep only the transcripts of child sessions that still exist. The board and
+ * `state.superSessions` share one source of truth, so a cleaned-up child's
+ * transcript must not linger in the webview heap.
+ */
+function pruneSuperTranscripts(
+  transcripts: Record<string, Block[]>,
+  sessions: SuperSessionUi[] | undefined,
+): Record<string, Block[]> {
+  if (!sessions || sessions.length === 0) {
+    return Object.keys(transcripts).length === 0 ? transcripts : {};
+  }
+  const keep = new Set(sessions.map((s) => s.id));
+  let changed = false;
+  const next: Record<string, Block[]> = {};
+  for (const [id, blocks] of Object.entries(transcripts)) {
+    if (keep.has(id)) next[id] = blocks;
+    else changed = true;
+  }
+  return changed ? next : transcripts;
+}
 
 function applyUiScale(fontSize: UiFontSize, density: UiDensity): void {
   const style = document.documentElement.style;
@@ -81,6 +105,7 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   contextWindowOverrides: [],
   costTable: [],
   thinkingModelRules: [],
+  superAgentMaxConcurrent: 5,
 };
 
 // --- turn-finished / turn-failed sound cues (Web Audio, no asset files) ------
@@ -156,8 +181,16 @@ function playCue(kind: "done" | "error"): void {
  */
 function createMockHost(): HostApi {
   const broadcast = (msg: HostToWebview) => {
+    // postMessage structured-clones every payload; the mock dispatches a plain
+    // object, so nested arrays would keep their identity and zustand's
+    // reference equality would skip the re-render. Clone the projections we
+    // mutate in place (the Super Agent board is the only one today).
+    const payload: HostToWebview =
+      msg.type === "snapshot" && msg.state
+        ? { ...msg, state: { ...msg.state, superSessions: msg.state.superSessions ? [...msg.state.superSessions] : undefined } }
+        : msg;
     window.setTimeout(
-      () => window.dispatchEvent(new MessageEvent("message", { data: { ...msg, locale: "zh-cn" } })),
+      () => window.dispatchEvent(new MessageEvent("message", { data: { ...payload, locale: "zh-cn" } })),
       60,
     );
   };
@@ -536,6 +569,99 @@ function createMockHost(): HostApi {
         "```",
       ].join("\n"),
     },
+    {
+      kind: "text",
+      // Mock a delegation turn: one ```super-agent block carrying THREE task
+      // briefs. The transcript renders each brief as its own card (the mock
+      // host is the frontend's dev surface, so browser iteration needs a
+      // sample that exercises the split-card layout).
+      text: [
+        "这三个任务书我拆给三个子会话并行做：",
+        "",
+        "```super-agent",
+        JSON.stringify(
+          {
+            tasks: [
+              {
+                title: "修复登录跳转",
+                task: [
+                  "修好 src/auth.ts 的登录跳转：redirect 分支的条件写反了，401 回跳到登录页而不是首页。",
+                  "",
+                  "具体步骤：",
+                  "1. 读 src/auth.ts，找到 redirect 判断那一行，把条件改成 authError.code === 401。",
+                  "2. 补一个覆盖 401 回跳的单测（test/auth.test.ts），断言回跳目标 URL。",
+                  "3. 跑 npx vitest run test/auth.test.ts 与 npm run typecheck 验证。",
+                  "",
+                  "约束：不要顺手重构 auth.ts 的其它逻辑，改动越少越好。",
+                ].join("\n"),
+                attachments: [{ path: "src/auth.ts" }],
+              },
+              {
+                title: "补 README 的登录章节",
+                task: "更新 README 的登录章节，说明 API Profile 的切换方式与凭据只存在 SecretStorage。",
+                attachments: [{ path: "README.md" }],
+              },
+              {
+                title: "核对 CI 脚本",
+                task: "确认 release workflow 与 CHANGELOG 顶部版本一致，并跑一遍 npm run typecheck。",
+                attachments: [{ path: ".github/workflows/release.yml" }],
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n"),
+    },
+    {
+      kind: "text",
+      // Single-task delegation sample: exercises the "one card, no 1/1 chip"
+      // branch in SuperDirectiveCard (the 3-task block above only covers the
+      // batch layout).
+      text: [
+        "这一件只需要一个子会话：",
+        "",
+        "```super-agent",
+        JSON.stringify(
+          {
+            tasks: [
+              {
+                title: "只跑一次 typecheck",
+                task: "在仓库根目录运行 npm run typecheck，把真实输出（通过/失败与错误行）如实汇报。",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "```",
+      ].join("\n"),
+    },
+    {
+      kind: "text",
+      // CommonMark 合法、但旧切分器不认的围栏形态：收栏带 2 空格缩进。
+      // marked 会把它渲染成 language-super-agent 代码块，所以浏览器验收需要
+      // 这份样本确认它同样出任务卡（而不是一堵 JSON 墙）。
+      text: [
+        "缩进围栏的委派块也要出卡片：",
+        "",
+        "  ```super-agent",
+        JSON.stringify(
+          {
+            tasks: [
+              {
+                title: "缩进围栏任务",
+                task: "这条任务书的开栏与收栏都带 2 空格缩进（CommonMark 允许最多 3 个空格）。",
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "  ```",
+      ].join("\n"),
+    },
     { kind: "plan", id: "demo-plan", entries: [{ content: "M1 最小面板", status: "completed" }, { content: "M2 工具可视化 + 审批", status: "in_progress" }] },
   ];
   const demoApproval: SessionState["pendingApproval"] = {
@@ -688,8 +814,231 @@ function createMockHost(): HostApi {
       settleMockTurn();
     }, 6_000);
   }
+  /**
+   * Super Agent demo children — one running, one waiting for the user, one
+   * finished. Mirrors the real host projection so the board can be exercised
+   * in browser debug mode (the mock host is the frontend's dev surface).
+   */
+  const demoSuperSessions: SuperSessionUi[] = [
+    {
+      id: "super-demo-1",
+      title: "修复登录跳转",
+      task: "修复 src/auth.ts 的登录跳转逻辑并补一个单测",
+      status: "running",
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/fix-login-x7",
+        branch: "iflow/super/fix-login-x7",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 65_000,
+      updatedAt: Date.now() - 2_000,
+      startedAt: Date.now() - 62_000,
+      model: "glm-5.3-flash-free",
+      progress:
+        "已定位到 src/auth.ts 的 redirect 分支条件写反了。\n正在补一个覆盖 401 回跳的单测。",
+      reports: [
+        { state: "progress", summary: "读取 src/auth.ts 与相关单测", at: Date.now() - 50_000 },
+      ],
+    },
+    {
+      id: "super-demo-2",
+      title: "补充会话状态单测",
+      task: "为 shared/session-state.ts 的 reducer 补一组单测",
+      status: "awaiting_input",
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/add-tests-k3",
+        branch: "iflow/super/add-tests-k3",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 120_000,
+      updatedAt: Date.now() - 20_000,
+      startedAt: Date.now() - 118_000,
+      pending: {
+        kind: "question",
+        requestId: "super-demo-2-question-1",
+        questions: [
+          {
+            header: "测试范围",
+            question: "这一组单测要覆盖压缩卡还是只覆盖用量估算？",
+            multiSelect: false,
+            options: [
+              { label: "只覆盖用量估算", description: "范围小、跑得快" },
+              { label: "连压缩卡一起覆盖", description: "更完整，但要多写夹具" },
+            ],
+          },
+        ],
+        deadline: Date.now() + 240_000,
+        timeoutMs: 300_000,
+      },
+      reports: [],
+    },
+    {
+      id: "super-demo-3",
+      title: "梳理依赖",
+      task: "梳理 package.json 的依赖，找出冗余项",
+      status: "completed",
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/deps-m2",
+        branch: "iflow/super/deps-m2",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 300_000,
+      updatedAt: Date.now() - 180_000,
+      startedAt: Date.now() - 298_000,
+      endedAt: Date.now() - 180_000,
+      summary: "已梳理依赖：未发现冗余项；gpt-tokenizer 与 cytoscape 均为运行时必需。",
+      model: "deepseek-v4-pro",
+      progress: "依赖梳理完成：未发现冗余项。",
+      tokens: {
+        input: 18_420,
+        output: 2_140,
+        cachedRead: 6_000,
+        estimatedCost: 0.0227,
+        authoritative: true,
+      },
+      integration: {
+        mode: "merge",
+        state: "merged",
+        detail: "已合入 main",
+        at: Date.now() - 179_000,
+      },
+      reports: [
+        {
+          state: "progress",
+          summary: "已扫描 package.json 与 node_modules 引用",
+          at: Date.now() - 260_000,
+        },
+        {
+          state: "ready",
+          summary: "已梳理依赖：未发现冗余项。",
+          at: Date.now() - 180_000,
+        },
+      ],
+    },
+    {
+      id: "super-demo-4",
+      title: "整理文档配图",
+      task: "把 docs/images 里的截图按章节重命名",
+      status: "completed",
+      isolation: {
+        kind: "directory",
+        path: "C:/Users/demo/.vscode-iflow/super-dirs/docs-m4",
+        note: "当前目录不是 git 仓库，仅目录隔离",
+      },
+      createdAt: Date.now() - 420_000,
+      updatedAt: Date.now() - 400_000,
+      startedAt: Date.now() - 418_000,
+      endedAt: Date.now() - 400_000,
+      summary: "已按章节重命名 12 张截图；没有删改任何文件内容。",
+      model: "glm-5.3-flash-free",
+      progress: "已按章节重命名 12 张截图。",
+      tokens: {
+        input: 7_300,
+        output: 880,
+        estimatedCost: 0.0083,
+        authoritative: true,
+      },
+      reports: [],
+    },
+    {
+      id: "super-demo-5",
+      title: "重构 MCP 配置解析",
+      task: "把 shared/mcp-catalog.ts 的解析逻辑拆成可单测的小函数",
+      status: "failed",
+      attempts: 1,
+      isolation: {
+        kind: "git_worktree",
+        path: "C:/Users/demo/.vscode-iflow/super-worktrees/api-a1b2c3d/mcp-parse-r8",
+        branch: "iflow/super/mcp-parse-r8",
+        baseRef: "a1b2c3d",
+      },
+      createdAt: Date.now() - 540_000,
+      updatedAt: Date.now() - 500_000,
+      startedAt: Date.now() - 538_000,
+      endedAt: Date.now() - 500_000,
+      error: "子会话内核退出（code=1）",
+      reports: [],
+    },
+  ];
+
+  /**
+   * Live-pane fixture for browser verification. The pane renders with the
+   * flat chrome variant, so the demo buffer needs the block kinds that used to
+   * carry a card surface: reasoning, a completed replace with a structured
+   * diff, and a still-running shell command.
+   */
+  const demoSuperTranscripts: Record<string, Block[]> = {
+    "super-demo-1": [
+      {
+        kind: "text",
+        id: "demo-super-text-1",
+        text: "已定位到 src/auth.ts 的 redirect 分支条件写反了，先修这一处，再补一个 401 回跳的单测。",
+      },
+      {
+        kind: "thought",
+        id: "demo-super-thought-1",
+        text: "先确认 redirect 的判断条件：401 应该回跳到登录页，当前实现把状态码比较写反了；改完再跑一次单测确认没有回归。",
+      },
+      {
+        kind: "tool",
+        id: "demo-super-tool-1",
+        toolCallId: "demo-super-call-1",
+        toolName: "replace",
+        title: "替换内容",
+        toolKind: "edit",
+        status: "completed",
+        output: "已应用 1 处改动",
+        locations: [{ path: "src/auth.ts" }],
+        diff: {
+          path: "src/auth.ts",
+          oldText: "  if (status === 401) {\n    return redirectToLogin();\n  }\n  return next();",
+          newText: "  if (status !== 401) {\n    return next();\n  }\n  return redirectToLogin();",
+        },
+      },
+      {
+        kind: "tool",
+        id: "demo-super-tool-2",
+        toolCallId: "demo-super-call-2",
+        toolName: "run_shell_command",
+        title: "run_shell_command",
+        toolKind: "execute",
+        status: "in_progress",
+        input: "npx vitest run test/auth.test.ts",
+        output: " RUN  v5.0.0 test/auth.test.ts\n\n ✓ test/auth.test.ts (6 tests) 412ms",
+        locations: [],
+        diff: null,
+      },
+      {
+        kind: "tool",
+        id: "demo-super-tool-3",
+        toolCallId: "demo-super-call-3",
+        toolName: "run_shell_command",
+        title: "run_shell_command",
+        toolKind: "execute",
+        status: "completed",
+        input:
+          "npx vitest run test/session-state.test.ts --reporter=verbose --silent=false --bail=0 --pool=threads --poolOptions.threads.singleThread=false",
+        output:
+          " RUN  v5.0.0 test/session-state.test.ts\n\n ✓ applySessionUpdate > 追加文本块 (3)\n ✓ applySessionUpdate > 工具块更新 (5)\n ✓ block ids > 回填唯一 id (4)\n\n Test Files  1 passed (1)\n      Tests  16 passed (16)",
+        locations: [],
+        diff: null,
+      },
+    ],
+    "super-demo-2": [
+      {
+        kind: "text",
+        id: "demo-super-text-2",
+        text: "读完了 shared/session-state.ts 的 reducer 与现有用例，正在确认这组单测的覆盖范围。",
+      },
+    ],
+  };
+
   const demoMeta = {
     sessionId: "mock-session",
+    superSessions: demoSuperSessions,
     modes: { currentModeId: "smart", availableModes: [
       { id: "smart", name: "Smart" }, { id: "yolo", name: "YOLO" },
       { id: "default", name: "Default" }, { id: "plan", name: "Plan" },
@@ -765,11 +1114,8 @@ function createMockHost(): HostApi {
     needsSetup: false,
     saved: { baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "...9999" },
     profiles: [
-      { name: "BUZZ", source: "cli", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
-      { name: "工作密钥", source: "extension", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
-    ],
-    importable: [
-      { name: "终端默认", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock" },
+      { name: "BUZZ", baseUrl: "https://api.buzzgw.com/v1", modelName: "glm-5.3-flash-free", keyTail: "…mock", active: false },
+      { name: "工作密钥", baseUrl: "https://api.example.com/v1", modelName: "deepseek-v4-pro", keyTail: "…9999", active: true },
     ],
     onboardingDismissed: false,
   };
@@ -809,9 +1155,45 @@ function createMockHost(): HostApi {
       },
     });
   }
+  // Mirrors the host's connectEpoch counter so the splash can be exercised
+  // outside VSCode: restartCli re-enters `connecting` with a bumped epoch,
+  // then the "fresh Core" finishes booting and the panel comes back.
+  let mockConnectEpoch = 0;
   return {
     postMessage(msg) {
       const m = msg as WebviewToHost;
+      if (m.type === "restartCli") {
+        broadcast({
+          type: "snapshot",
+          state: {
+            blocks: [],
+            status: "connecting",
+            errorMessage: null,
+            stopReason: null,
+            ...demoMeta,
+            connectEpoch: mockConnectEpoch + 1,
+            pendingApproval: null,
+            auth: authState,
+          },
+        });
+        mockConnectEpoch += 1;
+        setTimeout(() => {
+          broadcast({
+            type: "snapshot",
+            state: {
+              blocks: demoBlocks,
+              status: "idle",
+              errorMessage: null,
+              stopReason: "end_turn",
+              ...demoMeta,
+              connectEpoch: mockConnectEpoch,
+              pendingApproval: null,
+              auth: authState,
+            },
+          });
+        }, 1500);
+        return;
+      }
       if (m.type === "ready") {
         broadcast({ type: "theme", kind: mockTheme });
         broadcast({ type: "hostSettings", ...mockHostSettings });
@@ -879,12 +1261,11 @@ function createMockHost(): HostApi {
           needsSetup: false,
           saved: { baseUrl: m.baseUrl, modelName: m.modelName, keyTail },
           profiles: [
-            { name, source: "extension", baseUrl: m.baseUrl, modelName: m.modelName, keyTail, active: true },
+            { name, baseUrl: m.baseUrl, modelName: m.modelName, keyTail, active: true },
             ...authState.profiles
               .filter((p) => p.name !== name)
               .map((p) => ({ ...p, active: false })),
           ],
-          importable: authState.importable.filter((c) => c.name !== name),
           onboardingDismissed: authState.onboardingDismissed,
         };
         // The new profile's model becomes the session's current model; the
@@ -894,48 +1275,6 @@ function createMockHost(): HostApi {
           ...demoMeta.models.filter((x) => x.id !== m.modelName),
         ];
         demoMeta.currentModelId = m.modelName;
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "idle",
-            errorMessage: null,
-            stopReason: "end_turn",
-            ...demoMeta,
-            pendingApproval: null,
-            auth: authState,
-          },
-        });
-        return;
-      }
-      if (m.type === "importCliCredentials") {
-        const candidate = authState.importable.find((c) => c.name === m.name);
-        if (!candidate) return;
-        authState = {
-          authenticated: true,
-          needsSetup: false,
-          saved: { baseUrl: candidate.baseUrl, modelName: candidate.modelName, keyTail: candidate.keyTail },
-          profiles: [
-            {
-              name: candidate.name,
-              source: "extension",
-              baseUrl: candidate.baseUrl,
-              modelName: candidate.modelName,
-              keyTail: candidate.keyTail,
-              active: true,
-            },
-            ...authState.profiles
-              .filter((p) => p.name !== candidate.name)
-              .map((p) => ({ ...p, active: false })),
-          ],
-          importable: authState.importable.filter((c) => c.name !== m.name),
-          onboardingDismissed: authState.onboardingDismissed,
-        };
-        demoMeta.models = [
-          { id: candidate.modelName, name: candidate.modelName },
-          ...demoMeta.models.filter((x) => x.id !== candidate.modelName),
-        ];
-        demoMeta.currentModelId = candidate.modelName;
         broadcast({
           type: "snapshot",
           state: {
@@ -972,7 +1311,6 @@ function createMockHost(): HostApi {
           needsSetup: true,
           saved: null,
           profiles: authState.profiles.map((p) => ({ ...p, active: false })),
-          importable: authState.importable,
           onboardingDismissed: authState.onboardingDismissed,
         };
         broadcast({
@@ -1874,6 +2212,85 @@ function createMockHost(): HostApi {
         settleMockTurn();
         return;
       }
+      if (m.type === "superAgent") {
+        // Super Agent board actions. The real host owns the child sessions;
+        // the mock mutates the same projection so the board's interactions
+        // are exercisable in browser debug mode.
+        if (m.action === "transcript") {
+          // The live pane asks for the full buffer on first open; reply with
+          // the same `superTranscript {from:0}` shape the host sends.
+          const sessionId = m.sessionId;
+          if (!sessionId) return;
+          broadcast({
+            type: "superTranscript",
+            sessionId,
+            from: 0,
+            blocks: demoSuperTranscripts[sessionId] ?? [],
+          });
+          return;
+        }
+        if (m.action === "cancel") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target) {
+            target.status = "cancelled";
+            target.pending = undefined;
+            target.endedAt = Date.now();
+            target.updatedAt = Date.now();
+          }
+        } else if (m.action === "cancelAll") {
+          for (const session of demoSuperSessions) {
+            if (session.status === "running" || session.status === "preparing" || session.status === "awaiting_input") {
+              session.status = "cancelled";
+              session.pending = undefined;
+              session.endedAt = Date.now();
+              session.updatedAt = Date.now();
+            }
+          }
+        } else if (m.action === "respond") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target?.pending) {
+            target.pending = undefined;
+            target.status = "running";
+            target.updatedAt = Date.now();
+          }
+        } else if (m.action === "retry") {
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target && (target.status === "failed" || target.status === "cancelled")) {
+            target.status = "running";
+            target.attempts = (target.attempts ?? 1) + 1;
+            target.error = undefined;
+            target.summary = undefined;
+            target.pending = undefined;
+            target.integration = undefined;
+            target.endedAt = undefined;
+            target.startedAt = Date.now();
+            target.updatedAt = Date.now();
+          }
+        } else if (m.action === "cleanup") {
+          const index = demoSuperSessions.findIndex((s) => s.id === m.sessionId);
+          if (index >= 0) demoSuperSessions.splice(index, 1);
+        } else if (m.action === "merge") {
+          // Mirror the real host: the click becomes a request to the MAIN
+          // agent, which performs the merge itself.
+          demoBlocks.push({
+            kind: "user",
+            text: "请把子会话的分支合并到当前分支（mock 请求，由智能体执行）",
+          });
+          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
+          if (target) {
+            target.integration = {
+              mode: "merge",
+              state: "merged",
+              detail: "智能体已合入 main",
+              at: Date.now(),
+            };
+            target.updatedAt = Date.now();
+          }
+          demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+        }
+        broadcastDemo(mockStatus, null);
+        return;
+      }
       if (m.type === "cancel") {
         // Mirror the real host: stop → idle with stopReason "cancelled", the
         // pending permission request is settled, and the queue keeps
@@ -2136,6 +2553,15 @@ export interface ToastItem {
 
 interface ChatStore {
   state: SessionState | null;
+  /**
+   * Live transcripts of the main session's child sessions, keyed by child id.
+   *
+   * They ride their OWN `superTranscript` channel (never the main `blocks`),
+   * so the detail pane renders the exact same block components as the main
+   * transcript without breaking the blockPatch anchor. Pruned to the
+   * sessions that still exist on every snapshot / patch.
+   */
+  superTranscripts: Record<string, Block[]>;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
   /**
@@ -2207,6 +2633,7 @@ import { setLocale } from "./i18n";
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
+  superTranscripts: {},
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
   modelMetadata: { state: "idle" },
@@ -2237,25 +2664,30 @@ export const useChat = create<ChatStore>((set, get) => ({
     // listeners — Composer registers those itself, so no re-dispatch happens here.
     if (msg.type === "snapshot") {
       setLocale(msg.locale);
+      const state = evict(msg.state);
+      const superTranscripts = pruneSuperTranscripts(
+        get().superTranscripts,
+        state.superSessions,
+      );
       // A pending switch is cleared as soon as the host confirms the value.
       const pending = get().pending;
       if (pending) {
         const confirmed =
           (pending.kind === "profile" &&
-            msg.state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
-          (pending.kind === "model" && msg.state.currentModelId === pending.target) ||
-          (pending.kind === "mode" && msg.state.modes?.currentModeId === pending.target) ||
-          (pending.kind === "think" && msg.state.thinkLevel === pending.target);
+            state.auth.profiles.find((p) => p.name === pending.target)?.active) ||
+          (pending.kind === "model" && state.currentModelId === pending.target) ||
+          (pending.kind === "mode" && state.modes?.currentModeId === pending.target) ||
+          (pending.kind === "think" && state.thinkLevel === pending.target);
         if (confirmed) {
           if (pendingTimer) {
             clearTimeout(pendingTimer);
             pendingTimer = null;
           }
-          set({ pending: null, state: evict(msg.state) });
+          set({ pending: null, state, superTranscripts });
           return;
         }
       }
-      set({ state: evict(msg.state) });
+      set({ state, superTranscripts });
       return;
     }
     if (msg.type === "blockPatch") {
@@ -2270,6 +2702,10 @@ export const useChat = create<ChatStore>((set, get) => ({
         return;
       }
       const state: SessionState = evict({ ...msg.tail, blocks });
+      const superTranscripts = pruneSuperTranscripts(
+        get().superTranscripts,
+        state.superSessions,
+      );
       const pending = get().pending;
       if (pending) {
         const confirmed =
@@ -2283,11 +2719,30 @@ export const useChat = create<ChatStore>((set, get) => ({
             clearTimeout(pendingTimer);
             pendingTimer = null;
           }
-          set({ pending: null, state });
+          set({ pending: null, state, superTranscripts });
           return;
         }
       }
-      set({ state });
+      set({ state, superTranscripts });
+      return;
+    }
+    if (msg.type === "superTranscript") {
+      set((s) => {
+        const prev = s.superTranscripts[msg.sessionId] ?? [];
+        if (msg.from > 0 && msg.from > prev.length) {
+          // A patch was missed (should not happen with ordered postMessage):
+          // ask for the full transcript; the reply comes back with from = 0.
+          get().send({ type: "superAgent", action: "transcript", sessionId: msg.sessionId });
+          return s;
+        }
+        const next =
+          msg.from <= 0 ? msg.blocks : [...prev.slice(0, msg.from), ...msg.blocks];
+        // Same payload budget as the main transcript: a long-running child can
+        // accumulate large tool outputs, and the detail pane only mounts a
+        // window of blocks at a time.
+        const capped = evictBlockPayloads(next, EVICT_KEEP_BLOCKS);
+        return { superTranscripts: { ...s.superTranscripts, [msg.sessionId]: capped } };
+      });
       return;
     }
     if (msg.type === "hostSettings") {

@@ -2,7 +2,7 @@
   "name": "iflow-harness",
   "displayName": "%iflow.displayName%",
   "description": "%iflow.description%",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "publisher": "yuantao",
   "author": {
@@ -212,6 +212,35 @@
           "default": "",
           "markdownDescription": "%iflow.configuration.approvalMode.description%"
         },
+        "iflow.superAgent.integration": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "pr",
+            "manual"
+          ],
+          "default": "merge",
+          "markdownDescription": "%iflow.configuration.superAgentIntegration.description%"
+        },
+        "iflow.superAgent.maxConcurrent": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "markdownDescription": "%iflow.configuration.superAgentMaxConcurrent.description%"
+        },
+        "iflow.superAgent.keepWorktree": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "%iflow.configuration.superAgentKeepWorktree.description%"
+        },
+        "iflow.superAgent.maxWorktrees": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "%iflow.configuration.superAgentMaxWorktrees.description%"
+        },
         "iflow.osNotifications": {
           "type": "string",
           "enum": [
@@ -396,6 +425,7 @@
     "lint:deps": "knip",
     "harness": "node scripts/harness.mjs",
     "probe:memory": "node test/fixtures/probe-memory.mjs",
+    "probe:restore-concurrency": "node test/fixtures/probe-restore-concurrency.mjs",
     "vendor:cli": "node scripts/vendor-cli.mjs",
     "defaults:sync": "node scripts/vendor-cli.mjs --sync-defaults",
     "package": "npm run vendor:cli -- --force && npm run build && vsce package --no-dependencies"

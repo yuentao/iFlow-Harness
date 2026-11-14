@@ -99,4 +99,32 @@ describe("memory discovery", () => {
     });
     expect(files.filter((f) => f.role === "hierarchy")).toHaveLength(0);
   });
+
+  it("skips dot-prefixed directories in the recursive scan", async () => {
+    const home = tempDir("iflow-home-");
+    const root = tempDir("iflow-ws-");
+    // Super Agent worktree copy (tool metadata tree) and a generic hidden dir.
+    const worktree = path.join(root, ".iflow", "super", "worktrees", "wt");
+    const hidden = path.join(root, ".hidden");
+    const nested = path.join(root, "nested");
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(hidden, { recursive: true });
+    mkdirSync(nested, { recursive: true });
+
+    writeFileSync(path.join(worktree, "AGENTS.md"), "worktree copy", "utf8");
+    writeFileSync(path.join(hidden, "AGENTS.md"), "hidden", "utf8");
+    writeFileSync(path.join(nested, "AGENTS.md"), "nested", "utf8");
+
+    const files = await discoverMemoryFiles({
+      cwd: root,
+      workspaceRoots: [root],
+      home,
+      maxRecursiveFiles: 50,
+    });
+
+    const hierarchy = files.filter((f) => f.role === "hierarchy");
+    expect(hierarchy.map((f) => path.relative(root, f.path).replace(/\\/g, "/"))).toEqual([
+      "nested/AGENTS.md",
+    ]);
+  });
 });

@@ -19,6 +19,7 @@ import {
   applySessionUpdate,
   attachSynthesizedDiff,
   beginCompressTurn,
+  beginHiddenTurn,
   beginUserPrompt,
   clearPendingQuestions,
   closeOpenSubAgents,
@@ -157,6 +158,10 @@ export class SessionStore {
   /** Back to the splash state (profile-switch reconnect: old CLI is down, new one booting). */
   markConnecting(): void {
     this.state.status = "connecting";
+    // Strictly-increasing marker for the splash (see SessionState.connectEpoch):
+    // `connecting` alone cannot tell a fresh boot from the superseded handshake
+    // it replaced, so the elapsed timer would keep running the old attempt.
+    this.state.connectEpoch = (this.state.connectEpoch ?? 0) + 1;
     this.flush();
   }
 
@@ -248,6 +253,30 @@ export class SessionStore {
    */
   setCheckpoints(checkpoints: SessionState["checkpoints"]): void {
     this.state.checkpoints = checkpoints;
+    this.flush();
+  }
+
+  /**
+   * Super Agent — publish the child-session projection. Non-blocks metadata,
+   * so it rides the blockPatch tail channel exactly like the queue and the
+   * checkpoint index (the children's own transcripts never enter `blocks`).
+   */
+  setSuperSessions(sessions: SessionState["superSessions"]): void {
+    this.state.superSessions = sessions;
+    this.flush();
+  }
+
+  /**
+   * Super Agent — 宿主是否正在等子会话的结果（等待汇报期间）。
+   *
+   * 这是**正交**的忙碌标记：它不改 `status`，所以等待期用户仍能发消息并由
+   * 主会话响应；面板只用它禁用顶栏「新会话」（顶栏不再为它渲染忙碌 chip，
+   * 忙碌信号由转录底部浮动 pill 与子会话看板计数承担）。
+   * 幂等：同值不推 —— 心跳每 1.5s 调一次，不能每次都刷快照。
+   */
+  setSuperWaiting(waiting: boolean): void {
+    if ((this.state.superWaiting ?? false) === waiting) return;
+    this.state.superWaiting = waiting;
     this.flush();
   }
 
@@ -511,6 +540,19 @@ export class SessionStore {
    * `promptCompleted` like any other turn). */
   endCompressTurn(): void {
     endCompressTurn(this.state);
+    this.flush();
+  }
+
+  /**
+   * 开启一个**不落用户气泡**的宿主驱动回合（Super Agent 的子会话汇报）。
+   *
+   * hidden 回合不写用户块，`beginUserPrompt` 不会把状态翻成 streaming ——
+   * 那一轮在面板上是「无状态」。这里显式翻成 streaming：转录底部浮动 pill
+   * 按「正在生成」渲染，顶栏「新会话」禁用。回合结束仍由 `promptCompleted`
+   * 收尾。
+   */
+  beginHiddenTurn(): void {
+    beginHiddenTurn(this.state);
     this.flush();
   }
 

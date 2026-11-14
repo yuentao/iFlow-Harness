@@ -201,6 +201,11 @@
      is the deliberate exception (near-opaque — see the .acrylic-pop rule). */
   --acrylic-tint: oklch(1 0 0 / 38%);
   --acrylic-pop-tint: oklch(1 0 0 / 90%);
+  /* Frosted acrylic (真亚克力): the surface sits ON TOP of a real blurred
+     backdrop, so the tint stays translucent enough for the blur to read as
+     glass — 84% (a 90%+ tint hides the blur completely). The blur, not the
+     tint, is what removes the competing text behind the surface. */
+  --acrylic-frosted-tint: oklch(1 0 0 / 84%);
   --acrylic-edge: oklch(1 0 0 / 70%);
   --acrylic-highlight: linear-gradient(
     to bottom,
@@ -299,6 +304,9 @@
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
   --acrylic-pop-tint: oklch(0.25 0.024 285 / 88%);
+  /* Dark frosted acrylic: same 84% as the light theme (the blur carries the
+     separation, the tint only keeps the board's own text readable). */
+  --acrylic-frosted-tint: oklch(0.25 0.024 285 / 84%);
   --acrylic-edge: oklch(1 0 0 / 10%);
   --acrylic-highlight: linear-gradient(
     to bottom,
@@ -553,6 +561,38 @@ header.acrylic.header-scrolled {
     var(--shadow-panel);
 }
 
+/* --- frosted acrylic (真亚克力): the one surface that blurs the REAL backdrop
+   ------------------------------------------------------------------------- */
+/* The Super Agent board panel is PORTALED to document.body, so it is not a
+   descendant of any backdrop-filter element any more. Per Filter Effects L2
+   only a surface OUTSIDE every backdrop root can blur what is actually behind
+   it — as a child of the acrylic header (the old layout) its own blur could
+   only sample the header subtree, and the transcript text behind it ghosted
+   through sharp (the trap documented on .acrylic-pop above). Out here the
+   blur frosts that text into a matte backdrop instead of letting it read
+   through.
+
+   Tint: --acrylic-frosted-tint (84%). Transparent enough that the blur reads
+   as glass — a 90%+ tint hides it — and opaque enough that the board's own
+   text keeps its contrast; the BLUR is what removes the competing text, not
+   the tint.
+
+   backdrop-filter budget: this adds ONE blurred layer, and only while the
+   board is expanded (the collapsed control carries no blur), so the
+   simultaneously-mounted count stays inside the ≤5 budget noted above.
+
+   Standard property only — see the trap note on .acrylic (esbuild folds a
+   sibling -webkit- alias into the prefixed form, and modern Chromium, the
+   only engine a VSCode webview runs on, dropped that alias). */
+.acrylic-frosted {
+  background-color: var(--acrylic-frosted-tint);
+  background-image: var(--acrylic-highlight);
+  backdrop-filter: blur(36px) saturate(1.7);
+  box-shadow:
+    inset 0 0 0 1px var(--acrylic-edge),
+    var(--shadow-panel);
+}
+
 /* Dropdown menu entrance: quick fade + slight rise, anchored to the trigger
    edge (down = rise from below, up = settle from above). */
 @utility dropdown-in {
@@ -574,6 +614,11 @@ header.acrylic.header-scrolled {
 @supports not (backdrop-filter: blur(1px)) {
   .acrylic {
     background-color: var(--panel);
+  }
+  /* No blur available → the frosted surface would read as a washed-out
+     transparent sheet; fall back to the near-opaque popup tint. */
+  .acrylic-frosted {
+    background-color: var(--acrylic-pop-tint);
   }
 }
 
@@ -1073,6 +1118,42 @@ textarea::selection {
   margin-right: 0;
 }
 
+.tool-card-flat.status-pending,
+.tool-card-flat.status-in_progress,
+.tool-card-flat.status-failed {
+  background: none;
+  border-color: transparent;
+}
+/* The shimmer rides the card surface; flat has none, so drop it (the
+   primary-coloured icon + status caption still carry "running"). */
+.tool-card-flat.status-in_progress::before {
+  content: none;
+  animation: none;
+}
+
+/* Flat chrome (Super Agent live pane, `BlockView chrome="flat"`): the tool
+   card keeps its audit rows but has no card surface, so the rows drop their
+   dividers and use the same 8px inline inset as the px-2 header instead of
+   the card's px-3 rhythm. The param rows lose their rounded chip fill too —
+   a filled row inside a flat log row reads as a leftover card surface. */
+.tool-card-flat .tool-card-params,
+.tool-card-flat .tool-card-raw-toggle {
+  border-top: 0;
+  padding-inline: var(--space-sm);
+}
+.tool-card-flat .tool-card-params {
+  padding-block: var(--space-xs) 0;
+}
+.tool-card-flat .tool-card-raw-toggle {
+  margin-top: 0;
+  padding-block: var(--space-xs);
+}
+.tool-card-flat .tool-card-param {
+  border-radius: 0;
+  padding-inline: 0;
+  background: none;
+}
+
 /* --- assistant text blocks ------------------------------------------------- */
 /* AI replies read as a conversation, not a wall: a mini brand avatar marks
    the voice, and a hover rail lets the eye track the response column. */
@@ -1376,6 +1457,22 @@ pre {
   border: 1px solid var(--border);
   padding: 1px 5px;
   border-radius: var(--radius-inner);
+}
+
+/* Inline code inside a super-agent task brief (the delegation card body is not
+   inside a `.md` container, so the markdown rule above never reaches it).
+   Declared as its own class — a Tailwind `bg-*` utility on <code> would lose to
+   VSCode's unlayered injected `body code` defaults, and the ui-kit guard
+   rejects `bg-*` on <code> for the same reason. */
+.super-task-code {
+  background: var(--editor);
+  color: var(--color-info);
+  border: 1px solid var(--border);
+  padding: 1px 4px;
+  border-radius: var(--radius-inner);
+  font-family: var(--font-mono);
+  font-size: var(--ui-font-micro);
+  overflow-wrap: anywhere;
 }
 
 /* Pseudo code-blocks (Markdown.tsx `.code-lines`): the model wrapped every

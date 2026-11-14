@@ -95,17 +95,17 @@ export function hasKnowledgeChanges(change: KnowledgeChange): boolean {
 
 export function summarizeKnowledgeChanges(change: KnowledgeChange, maxPerList = 80): string {
   const list = (values: string[], label: string): string => {
-    if (values.length === 0) return `${label}：无`;
+    if (values.length === 0) return `${label}: none`;
     const shown = values.slice(0, maxPerList);
-    const more = values.length > shown.length ? `\n… 另有 ${values.length - shown.length} 个` : "";
-    return `${label}：\n${shown.map((v) => `- ${v}`).join("\n")}${more}`;
+    const more = values.length > shown.length ? `\n… and ${values.length - shown.length} more` : "";
+    return `${label}:\n${shown.map((v) => `- ${v}`).join("\n")}${more}`;
   };
   return [
-    list(change.added, "新增文件"),
+    list(change.added, "Added files"),
     "",
-    list(change.modified, "修改文件"),
+    list(change.modified, "Modified files"),
     "",
-    list(change.deleted, "删除文件"),
+    list(change.deleted, "Deleted files"),
   ].join("\n");
 }
 
@@ -229,11 +229,11 @@ export function buildWorkspaceTreeSummary(
     .join("\n");
   return [
     truncated
-      ? `采样文件数：${sample.length}+（已达扫描上限）`
-      : `采样文件数：${sample.length} / ${files.length}`,
+      ? `Sampled files: ${sample.length}+ (scan limit reached)`
+      : `Sampled files: ${sample.length} / ${files.length}`,
     "",
-    "## 顶层结构",
-    tree || "（无）",
+    "## Top-level structure",
+    tree || "(none)",
   ].join("\n");
 }
 
@@ -275,8 +275,8 @@ export async function buildWorkspaceDigest(
   return [
     tree,
     "",
-    "## 关键文件摘录",
-    excerpts.length > 0 ? excerpts.join("\n\n") : "（未找到关键文件）",
+    "## Key file excerpts",
+    excerpts.length > 0 ? excerpts.join("\n\n") : "(no key files found)",
   ].join("\n");
 }
 
@@ -311,7 +311,7 @@ export async function buildChangedKeyExcerpts(
     excerpts.push(`### ${file.rel}\n${clipped.trim()}`);
     used += clipped.length;
   }
-  return excerpts.length > 0 ? excerpts.join("\n\n") : "（无关键文件内容变化）";
+  return excerpts.length > 0 ? excerpts.join("\n\n") : "(no key file content changes)";
 }
 
 /** Incremental-refresh prompt (wording in `prompts/knowledge-incremental.md`):
@@ -325,7 +325,7 @@ export function buildIncrementalKnowledgePrompt(
   changedExcerpts: string,
 ): string {
   const previous = previousIndex.length > 12_000
-    ? `${previousIndex.slice(0, 12_000).trimEnd()}\n\n…（旧索引已截断）`
+    ? `${previousIndex.slice(0, 12_000).trimEnd()}\n\n… (previous index truncated)`
     : previousIndex;
   return renderPrompt("knowledge-incremental", {
     previous: previous.trim(),
@@ -342,6 +342,6 @@ export function sanitizeGeneratedMarkdown(raw: string): string {
   const fence = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i.exec(text);
   if (fence?.[1]) text = fence[1].trim();
   if (!/^#\s+/.test(text)) text = `# 项目知识索引\n\n${text}`;
-  if (text.length > 20_000) text = `${text.slice(0, 20_000).trimEnd()}\n\n…（已截断）`;
+  if (text.length > 20_000) text = `${text.slice(0, 20_000).trimEnd()}\n\n… (truncated)`;
   return `${text.trimEnd()}\n`;
 }

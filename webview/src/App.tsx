@@ -21,10 +21,9 @@ import { t } from "./i18n";
 import { copyText } from "./components/Markdown";
 import { Button, Chip, ConfirmDialog, Dropdown, ICON_INLINE, ICON_TOOLBAR, IconButton, SearchInput, TextInput } from "./components/ui";
 import { MessageList } from "./components/MessageList";
+import { SuperAgentBoard } from "./components/SuperAgentBoard";
 import { Composer } from "./components/Composer";
-import { ApprovalCard } from "./components/ApprovalCard";
-import { PlanExitCard } from "./components/PlanExitCard";
-import { QuestionCard } from "./components/QuestionCard";
+import { PendingCards } from "./components/PendingCards";
 import { ProfileSwitchCard } from "./components/ProfileSwitchCard";
 import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
@@ -33,6 +32,7 @@ import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
 import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
+import { isTerminalSuperStatus } from "../../shared/super-agent";
 
 function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
@@ -44,17 +44,31 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
       );
     // UI-audit 4.2 P0: idle shows NO chip — VSCode's status bar already carries
     // the agent state, and a permanent "ready" pill with an infinite ping was
-    // pure decoration stealing attention from the transcript. Busy/error states
-    // still announce themselves.
+    // pure decoration stealing attention from the transcript.
+    // 顶栏只保留有独立信息量的状态：连接中 / 错误，以及 streaming 下本轮特有
+    // 的「正在压缩」「正在规划」。默认的「生成中」不再占顶栏（转录底部已有
+    // 浮动 pill 显示正在生成 / 正在压缩 / 正在规划 / 正在创建新会话…，重复的
+    // 信号只会在窄屏挤掉会话标题）；宿主等待子会话汇报（superWaiting）同样
+    // 不渲染 chip —— 忙碌信号由子会话看板的计数承担，superWaiting 本身仍只
+    // 用于禁用顶栏「新会话」按钮。
     case "idle":
       return null;
     case "streaming":
-      return (
-        <Chip tone="primary">
-          <Loader2 className="size-2.5 animate-spin" />{" "}
-          {compressing ? t("正在压缩") : plan ? t("正在规划") : t("生成中")}
-        </Chip>
-      );
+      if (compressing) {
+        return (
+          <Chip tone="primary">
+            <Loader2 className="size-2.5 animate-spin" /> {t("正在压缩")}
+          </Chip>
+        );
+      }
+      if (plan) {
+        return (
+          <Chip tone="primary">
+            <Loader2 className="size-2.5 animate-spin" /> {t("正在规划")}
+          </Chip>
+        );
+      }
+      return null;
     case "error":
       return (
         <Chip tone="danger">
@@ -230,6 +244,17 @@ export function App() {
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
   const compressing = useChat((s) => s.state?.compressing ?? false);
+  // 宿主正在等子会话汇报：禁用顶栏「新会话」（等待期新建会话会让排队里的
+  // 汇报落到已被替换的会话上）。它是 orthogonal 于 status 的标记，所以等待期
+  // 用户仍然可以发消息、由主会话响应。顶栏不再为它渲染忙碌 chip —— 忙碌信号
+  // 由转录底部浮动 pill 与子会话看板计数承担。
+  const superWaiting = useChat((s) => s.state?.superWaiting ?? false);
+  // 子会话仍在跑（非终态）时，切换会话 / 模型 / API 配置会让在途的子会话用错
+  // 凭据或模型，或让汇报落到已被替换的主会话。与 superWaiting 分开判定：后者
+  // 只覆盖「主会话空转等汇报」，子会话运行而主会话自己也在生成时同样要锁。
+  const superActive = useChat((s) =>
+    (s.state?.superSessions ?? []).some((session) => !isTerminalSuperStatus(session.status)),
+  );
   const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
@@ -323,39 +348,61 @@ export function App() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // Pending-action cards float over the transcript (see the JSX below). Their
-  // height is variable (plan editor, expanded custom answers), so a ResizeObserver
-  // mirrors it into --pending-card-h on the wrapper; MessageList reads it as the
-  // scroll content's bottom padding so the newest message can always be scrolled
-  // clear of the card. Writing a CSS var keeps this off React's render path.
-  // The overlay shell now spans the whole wrapper (definite height for card
-  // max-h-full capping), so measure the packed cards instead of the shell:
-  // wrapper height − topmost card offsetTop = stack height + gaps + pb-3.
-  const pendingOverlayRef = useRef<HTMLDivElement>(null);
+  // Pending-action cards (approval / plan-exit / question) own their overlay
+  // in PendingCards: it mirrors its visible height into --pending-card-h on
+  // this wrapper (MessageList reads it as the transcript's bottom padding and
+  // the "生成中" pill rides on it) and switches between the single-card layout
+  // and the stacked layout. Keeping the writer next to the overlay means the
+  // stacked height (counter + peek edges + top card) is measured from the
+  // same elements that draw it.
   const transcriptWrapRef = useRef<HTMLDivElement>(null);
-  const hasPendingCard = Boolean(pendingApproval || pendingPlanExit || pendingQuestions);
+
+  // The Super Agent board is part of the header now. Collapsed it takes NO
+  // transcript space at all (--super-bar-h = 0 — the control lives inside the
+  // header row). Expanded, its popup panel hangs below the header and covers
+  // the top of the transcript, so its height is mirrored into --super-bar-h on
+  // the transcript wrapper: MessageList reserves it as top padding, and the
+  // Focus hint / pending-card overlay start below it instead of being painted
+  // over.
+  //
+  // The panel node arrives through a stable callback ref (SuperAgentBoard
+  // reports it via panelRef) into state. A mount-only effect would be wrong
+  // here: the panel mounts in the same commit that creates the transcript
+  // wrapper (it is PORTALED to document.body, but the ref callback still
+  // fires in that commit), and only an effect (after refs attach) can
+  // reliably read that wrapper.
+  const [superPanelNode, setSuperPanelNode] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     const wrapper = transcriptWrapRef.current;
     if (!wrapper) return;
-    const overlay = pendingOverlayRef.current;
-    if (!overlay) {
-      wrapper.style.removeProperty("--pending-card-h");
+    if (!superPanelNode) {
+      // Collapsed: the control is inside the header, so nothing covers the
+      // transcript top — drop the reserved clearance.
+      wrapper.style.removeProperty("--super-bar-h");
       return;
     }
     const apply = () => {
-      const first = overlay.firstElementChild;
-      if (!first) {
-        wrapper.style.removeProperty("--pending-card-h");
+      // A callback delivered for a node that already left the document must
+      // not write a bogus `0 + 16` into the wrapper: unmounting the board has
+      // to leave the clearance at zero.
+      if (!superPanelNode.isConnected) {
+        wrapper.style.removeProperty("--super-bar-h");
         return;
       }
-      wrapper.style.setProperty("--pending-card-h", `${wrapper.offsetHeight - (first as HTMLElement).offsetTop}px`);
+      // Reserve the panel's own height plus the 8px mt-2 gap above it and an
+      // 8px breathing gap below: the pending-card overlay starts at this
+      // offset, and butting it against the panel's border read as one merged
+      // stacked card.
+      wrapper.style.setProperty("--super-bar-h", `${superPanelNode.offsetHeight + 16}px`);
     };
     apply();
     const ro = new ResizeObserver(apply);
-    ro.observe(overlay);
-    for (const child of overlay.children) ro.observe(child);
-    return () => ro.disconnect();
-  }, [hasPendingCard]);
+    ro.observe(superPanelNode);
+    return () => {
+      ro.disconnect();
+      wrapper.style.removeProperty("--super-bar-h");
+    };
+  }, [superPanelNode]);
 
   // P1-3: screen-reader status announcements. The aria-live region re-announces
   // only when this string changes, so idle re-renders stay silent.
@@ -387,21 +434,31 @@ export function App() {
   // splash with no feedback and no escape hatch; the live seconds plus a
   // patience-threshold restart affordance give the user both. The hook sits
   // BEFORE the splash early-return (hook-count stability, see liveMessage).
+  // A host restart keeps `connecting` (the successor handshake owns this same
+  // screen), so connectEpoch is what says "this is a NEW boot": without it the
+  // bar keeps counting the superseded attempt and 「重启内核」 reads as a dead
+  // button.
+  const connectEpoch = useChat((s) => s.state?.connectEpoch ?? 0);
   const connectingSince = useRef<number | null>(null);
+  const epochSeen = useRef(connectEpoch);
   const [connectingElapsed, setConnectingElapsed] = useState(0);
   useEffect(() => {
     if (status !== "connecting") {
+      epochSeen.current = connectEpoch;
       connectingSince.current = null;
       setConnectingElapsed(0);
       return;
     }
-    if (connectingSince.current === null) connectingSince.current = Date.now();
+    if (connectingSince.current === null || epochSeen.current !== connectEpoch) {
+      epochSeen.current = connectEpoch;
+      connectingSince.current = Date.now();
+    }
     const tick = () =>
       setConnectingElapsed(Math.max(0, Math.floor((Date.now() - (connectingSince.current ?? Date.now())) / 1000)));
     tick();
     const iv = setInterval(tick, 1000);
     return () => clearInterval(iv);
-  }, [status]);
+  }, [status, connectEpoch]);
 
   // The error banner is host-owned (errorMessage rides the snapshot); a local
   // dismiss hides it until a DIFFERENT error arrives.
@@ -412,9 +469,11 @@ export function App() {
   // Shared gating for the header actions and the Alt+←/→ / Alt+N shortcuts:
   // switching session / mode / model / profile mid-turn would desync the
   // in-flight ACP request, and a profile switch is itself an optimistic lock.
+  // 活跃子会话也并入 locked（它同时是 SettingsModal 的 busy）：在跑的子会话
+  // 用错配置 / 汇报落到被替换的会话，比 mid-turn 切换更隐蔽。busy 保持原义。
   const busy = status === "streaming" || replaying || initializing;
   const switching = pending !== null;
-  const locked = busy || switching;
+  const locked = busy || switching || superActive;
 
   // M1 P1-3: Ctrl/Cmd+Alt+F toggles Focus view from anywhere (also while the
   // composer has focus — Alt+F is not a text-editing chord). Declared BEFORE
@@ -453,13 +512,16 @@ export function App() {
         return;
       }
       if (e.key.toLowerCase() === "n") {
+        // 等待子会话汇报期间不能新建会话（与顶栏「新会话」按钮同一语义）：
+        // 排队里的汇报会落到已被替换的会话上。
+        if (superWaiting) return;
         e.preventDefault();
         send({ type: "newSession" });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send]);
+  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode
@@ -496,7 +558,7 @@ export function App() {
           className="splash-hint"
           title={t("首次启动或配置了多个 MCP server 时较久")}
         >
-          {t("正在启动 …")}
+          {connectEpoch > 0 ? t("正在重新启动内核 …") : t("正在启动 …")}
           {status === "connecting" && connectingElapsed >= 3 && (
             <span className="ml-1 font-mono tabular-nums opacity-70">{connectingElapsed}s</span>
           )}
@@ -797,6 +859,14 @@ export function App() {
           ) : (
             statusChip(status ?? "connecting", compressing, isPlanMode(modes))
           )}
+                    {/* Super Agent board: collapsed it is one inline control here in
+                        the header; expanded it opens a popup panel under the header.
+                        The panel is PORTALED to document.body (so it sits outside the
+                        acrylic header's backdrop root and can blur the real backdrop)
+                        and is positioned in viewport coordinates from the header's
+                        rect. Renders nothing when no child sessions exist, so the
+                        header never carries an empty control. */}
+          <SuperAgentBoard panelRef={setSuperPanelNode} />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             <IconButton
               icon={<Focus className={ICON_TOOLBAR} />}
@@ -810,7 +880,18 @@ export function App() {
             <IconButton
               icon={<Plus className={ICON_TOOLBAR} />}
               label={t("新会话")}
-              disabled={locked}
+              // IconButton 的默认 title 就是 label —— 只有需要解释「为什么现在
+              // 不能/能新建会话」时才覆盖它（title={undefined} 会把默认
+              // tooltip 抹掉）。
+              {...(superWaiting
+                ? { title: t("子会话还在运行并等待汇报，暂时不能新建会话") }
+                : replaying
+                  ? { title: t("取消正在进行的会话恢复并新建会话") }
+                  : {})}
+              // 恢复中（replaying）不禁用：宿主会放弃这次恢复并立刻新建会话，
+              // 用户不必等恢复跑完再点一次。其余忙碌态（生成中 / 正在创建新
+              // 会话 / 正在切换会话）仍然禁用。
+              disabled={switching || superWaiting || (busy && !replaying)}
               onClick={() => send({ type: "newSession" })}
             />
             {/* Settings hub: profiles & credentials, MCP servers, approval
@@ -906,26 +987,36 @@ export function App() {
           wrapper. pointer-events-none on the shell keeps the empty gutters
           transparent to scroll/click; each card re-enables pointer events on
           itself. */}
-      <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
-        <MessageList />
-        {focusMode && focusHint && (
-          <div className="pointer-events-none absolute inset-x-0 top-1 z-30 flex justify-center">
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card">
-              <Focus className="size-3 shrink-0" />
-              {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
+      {/* The transcript column. The Super Agent board is a header control; only
+          its expanded popup panel hangs over the top of the transcript, so
+          --super-bar-h (mirrored from that panel above) keeps the Focus hint
+          and the pending cards below it. Collapsed it is 0 — the header row
+          owns the control, and nothing covers the transcript. */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div ref={transcriptWrapRef} className="relative flex min-h-0 flex-1 flex-col">
+          <MessageList />
+          {focusMode && focusHint && (
+            <div
+              className="pointer-events-none absolute inset-x-0 z-30 flex justify-center"
+              style={{ top: "calc(var(--super-bar-h, 0px) + 0.25rem)" }}
+            >
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-border acrylic-pop px-2.5 py-1 text-ui-caption text-muted-foreground shadow-card">
+                <Focus className="size-3 shrink-0" />
+                {t("Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）")}
+              </div>
             </div>
-          </div>
-        )}
-        {(pendingApproval || pendingPlanExit || pendingQuestions) && (
-          <div
-            ref={pendingOverlayRef}
-            className="pointer-events-none absolute inset-0 z-30 flex flex-col justify-end gap-2 pb-3"
-          >
-            {pendingApproval && <ApprovalCard approval={pendingApproval} />}
-            {pendingPlanExit && <PlanExitCard pending={pendingPlanExit} />}
-            {pendingQuestions && <QuestionCard pending={pendingQuestions} />}
-          </div>
-        )}
+          )}
+          {/* Pending-action cards (approval / plan-exit / question). The
+              component owns the overlay shell, the stacked-vs-list switch and
+              the --pending-card-h measurement; it starts below the Super Agent
+              board's expanded popup panel via the same --super-bar-h offset.
+              A single card renders exactly as before. */}
+          <PendingCards
+            pendingApproval={pendingApproval}
+            pendingPlanExit={pendingPlanExit}
+            pendingQuestions={pendingQuestions}
+          />
+        </div>
       </div>
 
       <Composer />

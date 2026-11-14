@@ -18,6 +18,7 @@ import type {
   McpPromptView,
 } from "../src/acp/protocol.js";
 import type { ApprovalRule } from "./approval-policy.js";
+import type { SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
@@ -533,9 +534,6 @@ export interface PendingProfileSwitchUi {
   profileName: string;
 }
 
-/** One user answer: selected labels, or a free-text "Other" answer. */
-export type UserAnswerValue = string | string[];
-
 /** One entry of the per-workspace recent-session list (M4). */
 export interface SessionSummaryUi {
   id: string;
@@ -746,6 +744,16 @@ export interface SessionState {
   replaying: boolean;
   /** True while a new session is being created (host busy; UI locks switches). */
   initializing: boolean;
+  /**
+   * Monotonic count of Core boot attempts that re-entered `connecting` (hot
+   * restart / profile-switch reconnect). A restart keeps the splash on
+   * `connecting` — the successor handshake owns the same screen — so without
+   * this marker the splash's elapsed timer keeps counting the SUPERSEDED
+   * boot and the 「重启内核」 escape reads as a dead button. Non-blocks
+   * metadata, so it rides the existing blockPatch tail channel; absent in
+   * mock hosts and pre-restart snapshots (treated as 0 by the webview).
+   */
+  connectEpoch?: number;
   /** True while the host drives a `/compress` turn (overflow auto-compress,
    * turn-end proactive compress, or the 立即压缩 pill action). The webview
    * renders the streaming indicator as 正在压缩 instead of plain generating. */
@@ -794,6 +802,30 @@ export interface SessionState {
    */
   checkpoints?: CheckpointUi[];
   /**
+   * Super Agent — the main session's child sessions (sub-sessions). Each one
+   * runs in its OWN CLI process inside its own git worktree, so several of
+   * them can edit the same project without stepping on each other. The
+   * transcript of a sub-session never enters `blocks` (it would pollute the
+   * main transcript and break the blockPatch anchor) — the main session only
+   * sees this projection. Non-blocks metadata, so it rides the blockPatch
+   * tail channel.
+   */
+  superSessions?: SuperSessionUi[];
+  /**
+   * 宿主正在等子会话的结果（还有子会话没进终态，或它们的汇报还没投进主会话）。
+   *
+   * 这是一个**正交**的忙碌标记：它不改 `status`，所以「等待期间用户仍然可以
+   * 发消息、并且由主会话响应」这条语义不受影响 —— `status` 一旦变成
+   * "streaming"，`sendPrompt` 就会把用户的消息派发成子会话（那是「主会话正在
+   * 生成」的语义，不是「主会话在等子会话」）。
+   *
+   * 面板用它做一件事：禁用「新会话」——等待期点「新会话」会让排队里的汇报
+   * 落到已被替换的会话上（汇报丢失 / 归属错位）。顶栏不再为它渲染忙碌 chip，
+   * 忙碌信号由转录底部浮动 pill 与子会话看板计数承担。
+   * 非 blocks 元数据，所以它搭 blockPatch 的 tail 通道。
+   */
+  superWaiting?: boolean;
+  /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
    * outside the agent session). Non-blocks metadata: it rides the blockPatch
@@ -840,24 +872,13 @@ export interface AuthUiState {
   needsSetup: boolean;
   /** Masked info of stored credentials (never the raw key). */
   saved: { baseUrl: string; modelName: string; keyTail: string } | null;
-  /** All known API profiles (extension-owned + read-only CLI ones), masked. */
+  /** All API profiles, persisted in the kernel's `~/.iflow/settings.json`
+   * (`apiProfiles`) and masked for display. */
   profiles: AuthProfileUi[];
-  /** Credentials found in the terminal CLI's settings.json that are not yet
-   * extension-owned — the onboarding "import existing config" candidates.
-   * Raw keys stay in the host; only the masked tail crosses the wire. */
-  importable: AuthImportCandidateUi[];
   /** The user skipped or finished the first-run wizard (persisted per
    * workspace). Once true the wizard never auto-opens again; the settings
    * modal stays available as the long-term home for everything it covered. */
   onboardingDismissed: boolean;
-}
-
-/** One importable `~/.iflow/settings.json` credential set (masked view). */
-export interface AuthImportCandidateUi {
-  name: string;
-  baseUrl: string;
-  modelName: string;
-  keyTail: string;
 }
 
 /**
@@ -886,7 +907,6 @@ export function validateAuthForm(input: {
 
 export interface AuthProfileUi {
   name: string;
-  source: "extension" | "cli";
   baseUrl: string;
   modelName: string;
   keyTail: string;
@@ -910,7 +930,7 @@ export function initialSessionState(): SessionState {
     pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
-    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], importable: [], onboardingDismissed: false },
+    auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], onboardingDismissed: false },
     sessions: [],
     activeSessionId: null,
     replaying: false,
@@ -919,6 +939,7 @@ export function initialSessionState(): SessionState {
     usage: emptySessionUsage(),
     queue: [],
     queuePaused: false,
+    superWaiting: false,
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
@@ -1406,6 +1427,9 @@ export interface HostSettingsUi {
   contextWindowOverrides: string[];
   costTable: string[];
   thinkingModelRules: ThinkingModelRuleUi[];
+  /** Simultaneously running child sessions (`iflow.superAgent.maxConcurrent`).
+   * Extra dispatches queue in FIFO order instead of being rejected. */
+  superAgentMaxConcurrent: number;
 }
 
 export type HostToWebview =
@@ -1432,6 +1456,17 @@ export type HostToWebview =
       /** Current non-blocks metadata (status, approvals, modes, …). */
       tail: SessionSnapshotTail;
     }
+  /**
+   * Super Agent — one child session's live transcript.
+   *
+   * A child session runs in its OWN CLI process, so its transcript never
+   * enters the main `blocks` (that would pollute the main transcript and
+   * break the blockPatch anchor). This message carries it on a separate
+   * channel instead: blocks from index `from` to the end are re-sent, so the
+   * webview keeps merging incrementally. `from === 0` means full replacement
+   * (first open / resync / request).
+   */
+  | { type: "superTranscript"; sessionId: string; from: number; blocks: Block[] }
   | {
       type: "toast";
       level: "info" | "warning" | "error";
@@ -1638,6 +1673,45 @@ export type WebviewToHost =
   | { type: "cancel" }
   /** CLI 0.5.19 only supports whole-turn cancellation. */
   | { type: "stopSubagent"; sessionId: string; agentId: string }
+  /**
+   * Super Agent — operate on a child session of the main session.
+   *
+   * Child sessions are created ONLY by the agent's own delegation protocol
+   * (a `super-agent` fenced block in its reply — the host dispatches it), so
+   * this message carries management actions only; there is no manual create
+   * path.
+   *  - `cancel` / `cancelAll`: interrupt one or every child session.
+   *  - `respond`: answer an ask_user_question raised BY a child session.
+   *    Approvals are NOT part of this loop — child sessions always run in
+   *    no-confirmation mode, so the host allows their tool calls itself.
+   *  - `cleanup`: drop the child session and its worktree; `keepBranch`
+   *    preserves the git branch (the default keeps it when the branch still
+   *    carries unmerged commits).
+   *  - `merge`: ask the MAIN AGENT to merge the child's branch back into the
+   *    current branch — the agent runs the git command itself and resolves
+   *    conflicts. The host only verifies (`git merge-base --is-ancestor`)
+   *    that the branch landed and records the integration; it never runs a
+   *    mechanical `git merge` on the user's working copy. Completed children
+   *    are otherwise merged automatically according to
+   *    `iflow.superAgent.integration`.
+   *  - `transcript`: fetch a child's live transcript on demand (the board's
+   *    read-only panel opens, or its local cache is shorter than the host's).
+   *    It never touches the main transcript.
+   *  - `retry`: re-run a child that was interrupted (`failed` / `cancelled`).
+   *    The host reuses the same record and working directory so any
+   *    uncommitted work left by the interrupted run stays visible; the new
+   *    child is told it is a retry and to inspect the current state first.
+   */
+  | {
+      type: "superAgent";
+      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript" | "retry";
+      /** Target child session (absent for cancelAll). */
+      sessionId?: string;
+      /** respond: the answers map (ask_user_question), keyed by header. */
+      answers?: Record<string, string | string[]>;
+      /** cleanup: keep the git branch. */
+      keepBranch?: boolean;
+    }
   | { type: "newSession" }
   | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }
@@ -1707,18 +1781,24 @@ export type WebviewToHost =
   | { type: "pickAttachments" }
   /** Open a user-attached image (data URL) in VSCode's image preview. */
   | { type: "openImage"; dataUrl: string }
-  /** M3: store openai-compatible credentials and authenticate a fresh session. */
-  | { type: "saveAuth"; baseUrl: string; apiKey: string | null; modelName: string; profileName?: string | null }
+  /** M3: store openai-compatible credentials and authenticate a fresh session.
+   * `replaceName` is the name the edited profile had BEFORE this save (absent
+   * for a new profile): the host deletes that stale key when the profile was
+   * renamed, so editing never leaves a duplicate row behind. */
+  | {
+      type: "saveAuth";
+      baseUrl: string;
+      apiKey: string | null;
+      modelName: string;
+      profileName?: string | null;
+      replaceName?: string | null;
+    }
   /** M3: forget stored credentials (CLI keeps its own). */
   | { type: "clearAuth" }
   /** M3: switch the active API profile and re-authenticate. */
   | { type: "activateProfile"; name: string }
-  /** M3: delete an extension-owned profile. */
+  /** M3: delete a profile (kernel settings.json + SecretStorage cache). */
   | { type: "deleteProfile"; name: string }
-  /** Onboarding: copy a credential set detected in the terminal CLI's
-   * `~/.iflow/settings.json` into SecretStorage (extension-owned) and activate
-   * it. The raw key never leaves the host; `name` matches AuthImportCandidateUi. */
-  | { type: "importCliCredentials"; name: string }
   /** First-run wizard finished or skipped. Persisted in workspaceState so the
    * wizard never auto-opens again in this workspace. */
   | { type: "setOnboardingDismissed"; dismissed: boolean }
@@ -1876,6 +1956,62 @@ export type WebviewToHost =
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the
 // host's CLI-history matching, and the webview composer's ↑/↓ recall)
 // ---------------------------------------------------------------------------
+
+/**
+ * The agent-facing attachment block header — a PROTOCOL literal.
+ *
+ * The host appends this header + a `- name → path` list to the prompt it
+ * sends to the CLI, and the CLI records that text verbatim in
+ * `~/.iflow/acp/sessions/<id>.json`. When the user later deletes a message,
+ * the host matches the transcript prompt against the recorded CLI turn and
+ * has to recognise the attachment block to tell "the CLI turn is this prompt
+ * plus the attachment list" from "this prompt is merely a prefix of some
+ * other turn".
+ *
+ * Producer and consumer MUST use the same literal. When only the producer is
+ * translated (the model-facing prompts were switched to English), the
+ * consumer stops recognising what the producer writes: the delete silently
+ * degrades to a transcript-only delete and the message stays in the model's
+ * context.
+ *
+ * English because it is model-facing text (the model reads it). The
+ * transcript-side note (`（文件：name → path）`, see `normalizeUserPromptText`)
+ * stays Chinese — that one is user-facing.
+ */
+export const AGENT_ATTACHMENT_HEADER =
+  "The user attached the following local files (read them as needed):";
+
+/**
+ * Header variants written by older builds — accepted so that deleting a
+ * message in a session recorded before the switch to English still finds the
+ * CLI turn. The Chinese spelling is the pre-2026-11-12 host wording; the
+ * "these local files" one is the English l10n bundle's translation of it.
+ */
+const LEGACY_AGENT_ATTACHMENT_HEADERS = [
+  "用户附带以下本地文件（可按需读取）：",
+  "The user attached these local files (read them as needed):",
+];
+
+/**
+ * Does `text` contain an agent-facing attachment block (a header line
+ * followed by a `- name → path` list)?
+ *
+ * Used by the host to tell "the CLI turn is this prompt plus the attachment
+ * list" from "this prompt is merely a prefix of some other turn" — the
+ * latter must NOT match, or a delete would cut the wrong turn out of the
+ * model's context.
+ */
+export function hasAgentAttachmentBlock(text: string): boolean {
+  const headers = [AGENT_ATTACHMENT_HEADER, ...LEGACY_AGENT_ATTACHMENT_HEADERS];
+  for (const header of headers) {
+    const at = text.indexOf(header);
+    if (at < 0) continue;
+    // The header must be followed by the `- name → path` list — a bare
+    // mention of the header text is not an attachment block.
+    if (/^\n- /.test(text.slice(at + header.length))) return true;
+  }
+  return false;
+}
 
 /**
  * Canonical form of a user prompt for cross-store matching (transcript block

@@ -32,7 +32,7 @@ describe("context-source assembly (P0-4)", () => {
     const long = "x".repeat(50);
     const out = truncateChars(long, 20);
     expect(out.startsWith("x".repeat(20))).toBe(true);
-    expect(out).toContain("已截断，共 50 字符");
+    expect(out).toContain("… (truncated, 50 characters total)");
   });
 
   it("formatContextSection fences a body containing ``` without escape", () => {
@@ -88,7 +88,7 @@ describe("folder listing (P0-4 @/)", () => {
     const rels = Array.from({ length: FOLDER_LISTING_MAX + 5 }, (_, i) => `d/f${String(i).padStart(4, "0")}`);
     const body = buildFolderListing(rels, "d");
     expect(body.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(FOLDER_LISTING_MAX);
-    expect(body).toContain(`仅列出前 ${FOLDER_LISTING_MAX} 项`);
+    expect(body).toContain(`… (${FOLDER_LISTING_MAX + 5} entries total, showing the first ${FOLDER_LISTING_MAX})`);
   });
 });
 
@@ -105,19 +105,19 @@ describe("problems / git / url formatters (P0-4)", () => {
   });
 
   it("clean porcelain status maps to the clean-workspace note", () => {
-    expect(formatGitStatus("")).toBe("（工作区干净，无未提交变更）");
+    expect(formatGitStatus("")).toBe("(working tree clean, no uncommitted changes)");
     expect(formatGitStatus(" M src/a.ts\n?? new.ts\r\n")).toBe("   M src/a.ts\n  ?? new.ts");
   });
 
   it("git report composes status + diff + truncation marker", () => {
     const report = buildGitReport(" M a.ts", "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n", true);
-    expect(report).toContain("状态（git status --porcelain）：");
+    expect(report).toContain("Status (git status --porcelain):");
     expect(report).toContain("  M a.ts");
-    expect(report).toContain("变更内容（git diff，未含未跟踪文件的正文）：");
+    expect(report).toContain("Changes (git diff, untracked file bodies not included):");
     expect(report).toContain("diff --git a/a.ts");
-    expect(report).toContain("已截断");
+    expect(report).toContain("… (diff exceeds the limit, truncated)");
     // diff-only-clean case: no diff section
-    expect(buildGitReport("", "", false)).not.toContain("变更内容");
+    expect(buildGitReport("", "", false)).not.toContain("Changes (git diff");
   });
 
   it("html extraction drops script/style, decodes entities, keeps text lines", () => {
@@ -134,12 +134,12 @@ describe("problems / git / url formatters (P0-4)", () => {
     const html = `<html><head><title>上海潘哆呐科技 | Pandona Studio</title>` +
       `<meta name="description" content="专注网站建设、SAAS平台 &amp; AI应用" />` +
       `</head><body><div id="app"></div><noscript>需启用 JS</noscript></body></html>`;
-    expect(extractHtmlText(html)).toBe("标题：上海潘哆呐科技 | Pandona Studio\n描述：专注网站建设、SAAS平台 & AI应用");
+    expect(extractHtmlText(html)).toBe("Title: 上海潘哆呐科技 | Pandona Studio\nDescription: 专注网站建设、SAAS平台 & AI应用");
   });
 
   it("SPA fallback uses og:description when name=description absent", () => {
     const html = `<html><head><meta property="og:description" content="OG 描述" /></head><body><div id="app"></div></body></html>`;
-    expect(extractHtmlText(html)).toBe("描述：OG 描述");
+    expect(extractHtmlText(html)).toBe("Description: OG 描述");
   });
 
   it("SPA with no title/description extracts to empty (host replies error)", () => {
@@ -150,7 +150,7 @@ describe("problems / git / url formatters (P0-4)", () => {
 
   it("metaContent matches either attribute order and decodes entities", () => {
     const html = `<head><title>A &amp; B</title><meta content="先 content 后 name" name="description" /></head><body></body>`;
-    expect(extractMetaFallback(html)).toBe("标题：A & B\n描述：先 content 后 name");
+    expect(extractMetaFallback(html)).toBe("Title: A & B\nDescription: 先 content 后 name");
   });
 
   it("decodeResponseText honors charset, normalizes GBK, falls back on junk", () => {

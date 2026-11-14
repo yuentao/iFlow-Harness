@@ -121,6 +121,61 @@ describe("ui kit guard", () => {
     expect(violations(/text-\[\d+(\.\d+)?px\]|rounded-\[\d+(\.\d+)?px\]/, () => false)).toEqual([]);
   });
 
+  it("keeps color utilities on tokens the theme defines", () => {
+    // Tailwind emits NOTHING for an unknown color name — no error, no warning,
+    // just a missing rule. `bg-canvas` (never defined in `@theme inline`) left
+    // the floating super-agent board with no background at all, so the
+    // transcript text underneath ghosted straight through it (b684a44).
+    const themeColors = new Set(
+      [...kitCss.matchAll(/--color-([a-z][a-z0-9-]*)\s*:/g)].map((match) => match[1]!),
+    );
+    expect(themeColors.has("card")).toBe(true);
+    expect(themeColors.has("canvas")).toBe(false);
+
+    // Utilities that share a color prefix but are not colors. Kept minimal: one
+    // entry per name actually present in the sources today.
+    const NOT_A_COLOR = new Set([
+      // Tailwind's built-in color keywords.
+      "transparent",
+      "current",
+      "white",
+      "black",
+      // Border side / width / box-sizing / style / outline reset.
+      "b",
+      "t",
+      "l",
+      "r",
+      "y",
+      "b-0",
+      "box",
+      "dashed",
+      "none",
+      // Text alignment.
+      "center",
+      "left",
+      "right",
+      // Button variant name (`outline-primary` / `outline-danger`), not a utility.
+      "danger",
+    ]);
+    const isNotColor = (name: string): boolean =>
+      NOT_A_COLOR.has(name) || name.startsWith("ui-") || name.startsWith("gradient-");
+
+    const hits: string[] = [];
+    for (const file of files) {
+      codeOnly(file.content)
+        .split("\n")
+        .forEach((line, i) => {
+          const pattern = /(?<![A-Za-z0-9_-])(?:bg|text|border|ring|outline|fill|stroke|from|via|to)-([a-z][a-z0-9-]*)/g;
+          for (const match of line.matchAll(pattern)) {
+            const name = match[1]!;
+            if (isNotColor(name) || themeColors.has(name)) continue;
+            hits.push(`${file.rel}:${i + 1}: ${match[0]}`);
+          }
+        });
+    }
+    expect(hits).toEqual([]);
+  });
+
   it("keeps overlay menus on the float shadow token", () => {
     // `acrylic-pop` carries the panel-sized drop (negative spread), which
     // collapses on trigger-anchored overlays. Those must carry `shadow-float`
@@ -249,6 +304,7 @@ describe("ui kit guard", () => {
     const names = [
       "export function Button(",
       "export function IconButton(",
+      "export function DisclosureButton(",
       "export function TextInput(",
       "export function CommitTextInput(",
       "export function CommitNumberInput(",

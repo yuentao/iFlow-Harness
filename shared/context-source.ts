@@ -35,7 +35,7 @@ export const CONTEXT_CHAR_LIMITS = {
 /** Hard-cap a string, appending a truncation marker the model can see. */
 export function truncateChars(text: string, max: number): string {
   if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n…（已截断，共 ${text.length} 字符）`;
+  return `${text.slice(0, max)}\n… (truncated, ${text.length} characters total)`;
 }
 
 /** Fence chosen so a body containing ``` still cannot break out. */
@@ -118,7 +118,7 @@ export function buildFolderListing(rels: readonly string[], folderRel: string): 
   const capped = names.slice(0, FOLDER_LISTING_MAX);
   const lines = capped.map((n) => `- ${n}`);
   if (names.length > capped.length) {
-    lines.push(`…（共 ${names.length} 项，仅列出前 ${FOLDER_LISTING_MAX} 项）`);
+    lines.push(`… (${names.length} entries total, showing the first ${FOLDER_LISTING_MAX})`);
   }
   return lines.join("\n");
 }
@@ -177,11 +177,11 @@ export function buildTerminalReport(entries: readonly TerminalCommandEntryUi[]):
   for (const e of entries) {
     const meta: string[] = [];
     if (e.cwd) meta.push(e.cwd);
-    meta.push(e.running ? "仍在运行" : e.exitCode === null ? "已结束" : `退出码 ${e.exitCode}`);
-    const lines = [`$ ${e.commandLine}`, `（${meta.join(" · ")}）`];
-    if (e.droppedChars > 0) lines.push(`…（更早的输出已截断，共 ${e.droppedChars} 字符）`);
+    meta.push(e.running ? "still running" : e.exitCode === null ? "finished" : `exit code ${e.exitCode}`);
+    const lines = [`$ ${e.commandLine}`, `(${meta.join(" · ")})`];
+    if (e.droppedChars > 0) lines.push(`… (earlier output truncated, ${e.droppedChars} characters dropped)`);
     const body = e.output.trimEnd();
-    lines.push(body === "" ? "（无输出）" : body);
+    lines.push(body === "" ? "(no output)" : body);
     sections.push(lines.join("\n"));
   }
   return sections.join("\n\n---\n\n");
@@ -198,17 +198,17 @@ export function formatGitStatus(porcelain: string): string {
     .split("\n")
     .map((l) => l.replace(/\r$/, ""))
     .filter((l) => l.trim() !== "");
-  if (lines.length === 0) return "（工作区干净，无未提交变更）";
+  if (lines.length === 0) return "(working tree clean, no uncommitted changes)";
   return lines.map((l) => `  ${l}`).join("\n");
 }
 
 /** Compose the @git card body from status + diff outputs (either may be ""). */
 export function buildGitReport(statusPorcelain: string, diff: string, truncated: boolean): string {
-  const parts: string[] = ["状态（git status --porcelain）：", formatGitStatus(statusPorcelain)];
+  const parts: string[] = ["Status (git status --porcelain):", formatGitStatus(statusPorcelain)];
   if (diff.trim() !== "") {
-    parts.push("", "变更内容（git diff，未含未跟踪文件的正文）：", diff.trimEnd());
+    parts.push("", "Changes (git diff, untracked file bodies not included):", diff.trimEnd());
   }
-  if (truncated) parts.push("", "…（diff 超过上限已截断）");
+  if (truncated) parts.push("", "… (diff exceeds the limit, truncated)");
   return parts.join("\n");
 }
 
@@ -275,8 +275,8 @@ export function extractMetaFallback(html: string): string {
   const title = decodeHtmlEntities(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").replace(/\s+/g, " ").trim();
   const description =
     metaContent(html, "name", "description") || metaContent(html, "property", "og:description");
-  if (title !== "") lines.push(`标题：${title}`);
-  if (description !== "") lines.push(`描述：${description}`);
+  if (title !== "") lines.push(`Title: ${title}`);
+  if (description !== "") lines.push(`Description: ${description}`);
   return lines.join("\n");
 }
 

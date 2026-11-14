@@ -35,6 +35,7 @@ import followupTitle from "./followup-title.md";
 import knowledge from "./knowledge.md";
 import knowledgeIncremental from "./knowledge-incremental.md";
 import modelMetadata from "./model-metadata.md";
+import superAgentTask from "./super-agent-task.md";
 import systemPrompt from "./system-prompt.md";
 
 /** CRLF normalised to LF, trailing blank lines dropped. */
@@ -56,6 +57,7 @@ const templates: Record<string, string> = {
   knowledge: normalize(knowledge),
   "knowledge-incremental": normalize(knowledgeIncremental),
   "model-metadata": normalize(modelMetadata),
+  "super-agent-task": normalize(superAgentTask),
   "system-prompt": normalize(systemPrompt),
 };
 

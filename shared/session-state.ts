@@ -18,6 +18,7 @@ import { estimateCost } from "./context-window.js";
 import {
   emptySessionUsage,
   initialSessionState,
+  hasAgentAttachmentBlock,
   normalizeUserPromptText,
   type Block,
   type InjectedContextItem,
@@ -1371,6 +1372,44 @@ export function estimateTokens(text: string): number {
 }
 
 /**
+ * 分块估算 token 数，块与块之间把事件循环让出去。
+ *
+ * `estimateTokens` 是一次**同步**的 BPE 调用：几十万字符的文本能吃掉几百
+ * 毫秒 —— 放在扩展宿主的事件循环里就是一次可见的卡顿（面板无响应、快捷键
+ * 延迟、webview 消息排队）。这里按块估算，每块之间让出一次事件循环：单次
+ * 同步占用被压到几毫秒量级，总耗时不变但不再独占事件循环。
+ *
+ * 边界处避免切断代理对（UTF-16 的高低 surrogate）：切在一个代理对中间会
+ * 让分词器看到半个字符。
+ */
+export async function estimateTokensChunked(
+  text: string,
+  chunkChars = 8000,
+): Promise<number> {
+  if (!text) return 0;
+  let total = 0;
+  let index = 0;
+  while (index < text.length) {
+    let end = Math.min(index + chunkChars, text.length);
+    // 别把代理对切成两半。
+    const code = text.charCodeAt(end - 1);
+    if (end < text.length && code >= 0xd800 && code <= 0xdbff) end += 1;
+    total += estimateTokens(text.slice(index, end));
+    index = end;
+    if (index < text.length) await yieldToEventLoop();
+  }
+  return total;
+}
+
+/** 让出一次事件循环（宏任务）：I/O 回调与其它定时器有机会先跑。 */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, 0);
+    if (typeof timer.unref === "function") timer.unref();
+  });
+}
+
+/**
  * Estimated context tokens ONE MCP server injects into the model context.
  * The CLI's generator turns every MCP tool into a function declaration
  * (`{name, description, parametersJsonSchema}` — bundle: `bAo` builds
@@ -1941,7 +1980,20 @@ export function newSessionState(state: SessionState): SessionState {
   // The recent-session list is workspace-scoped and must survive resets.
   fresh.sessions = state.sessions;
   fresh.activeSessionId = state.activeSessionId;
+  // Super Agent board: the child-session projection is WORKSPACE-scoped, not
+  // transcript-scoped — the children belong to the panel, not to the block
+  // list being swapped. Dropping it here blanked the board on every session
+  // switch and left it blank until the manager happened to emit again (which
+  // never happens for a finished child) — so after a restart, restoring a
+  // historical session showed no children at all. The manager re-publishes
+  // the scoped projection right after the switch anyway.
+  fresh.superSessions = state.superSessions;
   fresh.replaying = state.replaying;
+  // Connection-scoped like status/auth: a restart does replaceState FIRST and
+  // then markConnecting (which stamps the next epoch), so dropping the counter
+  // here would restart every restart back to 1 and the splash could not tell
+  // the second restart apart from the first (its timer would keep running).
+  fresh.connectEpoch = state.connectEpoch;
   // Token usage is per-session; a new session starts from a zeroed counter
   // (the chip shows ↑0 ↓0 instead of hiding — the CLI does not yet report
   // usage, so the host's transcript estimate starts fresh here).
@@ -2003,6 +2055,24 @@ export function beginCompressTurn(state: SessionState): void {
 export function endCompressTurn(state: SessionState): void {
   state.compressing = false;
   if (state.status === "streaming") state.status = "idle";
+}
+
+/**
+ * 开启一个**不落用户气泡**的宿主驱动回合（Super Agent 的子会话汇报：
+ * hidden prompt —— 智能体读得到，转录里没有用户块）。
+ *
+ * hidden 回合不写用户块，所以 `beginUserPrompt` 不会把状态翻成 streaming：
+ * 那一轮在面板上就成了「无状态」—— 转录底部不显示「正在生成」浮动 pill、顶栏
+ * 「新会话」也不禁用，用户点它会把在飞的汇报回合连同排队里的汇报一起废掉
+ * （汇报丢失）。这里显式翻成 streaming：面板按「正在生成」渲染，忙碌锁生效，
+ * 同一时刻也不会有第二个 prompt 交叠在同一个 ACP 会话上。
+ *
+ * 回合结束仍由 `completePrompt` 收尾（status 回到 idle）。
+ */
+export function beginHiddenTurn(state: SessionState): void {
+  state.status = "streaming";
+  state.stopReason = null;
+  state.errorMessage = null;
 }
 
 // --- transcript restore (M4: CLI does not replay history on session/load) ----
@@ -2566,11 +2636,12 @@ function cliEntryUserText(entry: unknown): string | null {
 
 /** A CLI user turn matches a transcript prompt on exact text, or on the prompt
  * being a prefix whose remainder is the agent-side attachment block (sendPrompt
- * appends `用户附带以下本地文件…` after the typed text; the transcript records the
- * same list as `（文件：…）` note lines that normalizeUserPromptText strips). */
+ * appends `AGENT_ATTACHMENT_HEADER` + the file list after the typed text; the
+ * transcript records the same list as `（文件：…）` note lines that
+ * normalizeUserPromptText strips). */
 function cliTurnMatches(hay: string, needle: string): boolean {
   return hay === needle ||
-    (hay.startsWith(needle) && /(?:^|\n)用户附带以下本地文件[\s\S]*：\n- /u.test(hay.slice(needle.length)));
+    (hay.startsWith(needle) && hasAgentAttachmentBlock(hay.slice(needle.length)));
 }
 
 /** Outcome of locating a deletion's truncation point in the CLI history. */

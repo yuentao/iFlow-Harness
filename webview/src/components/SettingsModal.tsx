@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, Download, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
@@ -144,7 +144,7 @@ export function SettingsModal({
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <HelpTip label={t("设置如何保存")} align="left">
-            {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在内核配置文件，重启内核生效。")}
+            {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API 配置与密钥写入内核配置文件 ~/.iflow/settings.json（本机明文）。MCP、语言与审批模式同样在内核配置文件，重启内核生效。")}
           </HelpTip>
           <Button
             variant="ghost"
@@ -560,6 +560,18 @@ function ChatSection() {
           detail={t("每会话一次，会产生一次轻量模型调用。")}
           checked={settings.autoTitle}
           onChange={(autoTitle) => update({ autoTitle })}
+        />
+      </SettingsGroup>
+      <SettingsGroup title={t("子会话")}>
+        <NumberRow
+          label={t("并发上限")}
+          description={t("同时运行的子会话数量上限。")}
+          detail={t("默认 5，范围 1–20。超出的派发会排队，等有空位再启动；调低后已在运行的子会话不受影响。")}
+          value={settings.superAgentMaxConcurrent}
+          min={1}
+          max={20}
+          unit={t("个")}
+          onCommit={(superAgentMaxConcurrent) => update({ superAgentMaxConcurrent })}
         />
       </SettingsGroup>
       <SettingsGroup title={t("回合结束后")} hint={t("可能产生额外的模型调用")}>
@@ -1021,6 +1033,10 @@ function ApiConfigSection({
       apiKey: form.apiKey.trim() === "" ? null : form.apiKey.trim(),
       modelName: form.modelName.trim(),
       profileName: form.profileName.trim() || null,
+      // Editing an existing profile: tell the host which key to drop if the
+      // user renamed it (or cleared the name) — otherwise the old row lingers
+      // next to the new one. A new profile has no previous name.
+      replaceName: editing?.name ?? null,
     });
     // Stay in the modal: the list re-renders with the new active profile once
     // the host's re-auth snapshot lands (the switch chip covers the wait).
@@ -1030,11 +1046,6 @@ function ApiConfigSection({
   if (editing) {
     return (
       <div className="space-y-3">
-        {editing.name && editingProfile?.source === "cli" && (
-          <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-            {t("这是只读的内核配置；保存将另存为同名的扩展配置并优先使用它。")}
-          </p>
-        )}
         <div className="space-y-1">
           <div className="text-ui-caption text-muted-foreground">{t("服务商预设")}</div>
           <div className="flex flex-wrap gap-1">
@@ -1124,59 +1135,15 @@ function ApiConfigSection({
         </ActionRow>
         <Hint>
           {t(
-            "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。",
+            "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。",
           )}
         </Hint>
       </div>
     );
   }
 
-  // Import is an onboarding shortcut: once this panel has working extension
-  // credentials, the CLI profiles below remain switchable but a permanent
-  // "import me" banner would just nag.
-  const showImport = auth.importable.length > 0 && (auth.needsSetup || auth.saved === null);
-
   return (
     <div className="space-y-3">
-      {showImport && (
-        <div className="rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2">
-          <div className="flex items-center gap-1.5 text-ui-label font-semibold text-foreground">
-            <Download className="size-3.5 shrink-0 text-primary" />
-            {t("检测到内核已有凭据")}
-          </div>
-          <Hint className="mt-1">
-            {t("可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。")}
-          </Hint>
-          <div className="mt-2 space-y-2">
-            {auth.importable.map((candidate) => (
-              <div
-                key={candidate.name}
-                className="flex items-center gap-1.5 rounded-lg border border-border bg-surface/60 px-2 py-1"
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  <span className="text-ui-label font-semibold text-foreground">{candidate.name}</span>
-                  <span className="ml-1.5 font-mono text-ui-caption text-muted-foreground">
-                    {candidate.modelName} · {candidate.keyTail}
-                  </span>
-                </span>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  className="shrink-0 whitespace-nowrap"
-                  disabled={busy}
-                  title={`${candidate.baseUrl} · ${candidate.modelName}（${candidate.keyTail}）`}
-                  onClick={() => {
-                    useChat.getState().beginPending("profile", candidate.name);
-                    send({ type: "importCliCredentials", name: candidate.name });
-                  }}
-                >
-                  {t("导入并激活")}
-                </Button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
       {auth.needsSetup && (
         <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
           {t("连接 iFlow 需要配置 API 凭据")}
@@ -1244,12 +1211,7 @@ function ApiConfigSection({
                   }`}
                 />
                 <span className="min-w-0">
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate text-ui-label font-semibold text-foreground">{p.name}</span>
-                    <Chip tone={p.source === "extension" ? "muted" : "info"}>
-                      {p.source === "extension" ? t("扩展") : t("内核")}
-                    </Chip>
-                  </span>
+                  <span className="block truncate text-ui-label font-semibold text-foreground">{p.name}</span>
                   <span className="block truncate font-mono text-ui-caption text-muted-foreground">
                     {p.modelName} · {p.keyTail}
                   </span>
@@ -1288,20 +1250,18 @@ function ApiConfigSection({
                       <Pencil className="size-3.5 shrink-0" />
                       {t("编辑")}
                     </button>
-                    {p.source === "extension" && (
-                      <button
-                        role="menuitem"
-                        data-variant="danger"
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-destructive hover:bg-destructive/10"
-                        onClick={() => {
-                          close();
-                          setConfirmingDelete(p.name);
-                        }}
-                      >
-                        <Trash2 className="size-3.5 shrink-0" />
-                        {t("删除")}
-                      </button>
-                    )}
+                    <button
+                      role="menuitem"
+                      data-variant="danger"
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui-label text-destructive hover:bg-destructive/10"
+                      onClick={() => {
+                        close();
+                        setConfirmingDelete(p.name);
+                      }}
+                    >
+                      <Trash2 className="size-3.5 shrink-0" />
+                      {t("删除")}
+                    </button>
                   </>
                 )}
               </Dropdown>
@@ -1310,7 +1270,7 @@ function ApiConfigSection({
         </div>
       )}
       <Hint>
-        {t("点击配置即切换并重新认证会话；来自内核的配置为只读，可切换但不可在此删除。")}
+        {t("点击配置即切换并重新认证会话；配置与密钥保存在内核配置文件 ~/.iflow/settings.json（本机明文）。")}
       </Hint>
 
       <SettingsDisclosure title={t("模型元数据")} hint={t("高级，可选填")}>

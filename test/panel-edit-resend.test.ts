@@ -234,18 +234,18 @@ describe("ChatPanel edit & resend (P1-9 wiring)", () => {
     const first = send("first turn");
     await flush();
     // first turn still streaming…
-    const second = send("second turn"); // → queued, status stays streaming
+    const spawn = vi.fn(() => ({ id: "super-1" }));
+    Object.assign(p, { getSuperAgent: () => ({ spawn }) });
+    const second = send("second turn"); // → dispatched as a child session
     await flush();
     void second;
+    expect(spawn).toHaveBeenCalledTimes(1);
 
     await p.handleWebviewMessage({ type: "editAndResend", blockId: firstUserId(), text: "edited" });
     expect(notices.some((n) => n.includes("请先完成当前操作"))).toBe(true);
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
     await flush();
-    // The queued second turn auto-dispatched — settle it so the test exits
-    // with no dangling prompt promise.
-    calls[1]!.resolve({ stopReason: "end_turn" });
-    await flush();
+    expect(calls).toHaveLength(1); // the child session never touches this CLI
   });
 });

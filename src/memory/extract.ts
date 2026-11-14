@@ -28,9 +28,9 @@ export function normalizeFact(text: string): string {
 
 /**
  * Transcript excerpt for the memory task: the newest blocks, clipped to the
- * byte budget, as `用户：… / 助手：…` lines. The instruction text and the JSON
- * envelope spec live in the merged turn-end prompt (shared/turn-followup.ts),
- * so this stays a pure data builder.
+ * byte budget, as `User: … / Assistant: …` lines. The instruction text and the
+ * JSON envelope spec live in the merged turn-end prompt
+ * (shared/turn-followup.ts), so this stays a pure data builder.
  */
 export function buildExtractionConversation(
   blocks: readonly Block[],
@@ -50,7 +50,7 @@ export function buildExtractionConversation(
     const trimmed = text.trim();
     const clipped = trimmed.length > remaining ? trimmed.slice(trimmed.length - remaining) : trimmed;
     if (!clipped) break;
-    lines.unshift(`${block.kind === "user" ? "用户" : "助手"}：${clipped}`);
+    lines.unshift(`${block.kind === "user" ? "User" : "Assistant"}: ${clipped}`);
     used += clipped.length;
   }
   return lines.join("\n");

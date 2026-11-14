@@ -19,6 +19,111 @@ function isEnglish(): boolean {
 }
 
 const en: Record<string, string> = {
+  // Super Agent (child sessions of the main session)
+  "子会话": "Child sessions",
+  "准备中": "Preparing",
+  "等待你处理": "Needs you",
+  "已中断": "Interrupted",
+  "子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批":
+    "Child sessions always run without confirmation — tool calls, shell included, execute directly and are never prompted for approval",
+  // 看板头帮助按钮（HelpTip）里的统一说明：免确认 / 合并规则 / 清理规则。
+  "看板说明": "Board help",
+  "子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并":
+    "A running child session cannot be merged; merge it after it finishes. A child session whose changes are already merged, or that has no branch to merge, cannot be merged either",
+  "子会话还在运行时不能清理，需要先中断它":
+    "A running child session cannot be cleaned up; interrupt it first",
+  "子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。":
+    "The child session is waiting for your answer; if you do not answer, it continues with “no answer” when the countdown ends.",
+  "按未回答继续": "it continues with “no answer”",
+  "子会话 {0}：{1}": "Child session {0}: {1}",
+  "让智能体合并分支": "Let the agent merge the branch",
+  "已自动合并": "Auto-merged",
+  "合并冲突": "Merge conflict",
+  "PR 已创建": "PR opened",
+  "集成失败": "Integration failed",
+  "未自动合并": "Not auto-merged",
+  "无需合并": "No merge needed",
+  "该子会话的改动已经合并": "This child's changes are already merged",
+  "{0} 个进行中": "{0} running",
+  "{0} 个待处理": "{0} need you",
+  "{0} 个已完成": "{0} done",
+  "{0} 个未成功": "{0} unfinished",
+  "{0} 个已中断": "{0} stopped",
+  "全部中断": "Interrupt all",
+  "子会话看板": "Child-session board",
+  "展开子会话看板": "Expand the child-session board",
+  "收起子会话看板": "Collapse the child-session board",
+  "子会话待答问题": "Child session waiting for your answer",
+  "展开已完成的子会话": "Expand the finished child sessions",
+  "收起已完成的子会话": "Collapse the finished child sessions",
+  "已完成的 {0} 个子会话": "Finished child sessions ({0})",
+  "派发": "Dispatch",
+  "启动": "Started",
+  "等待应答": "Waiting for you",
+  "第 {0} 次": "Attempt {0}",
+  "阶段轨：{0}": "Timeline: {0}",
+  // 子会话 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
+  "待办": "To do",
+  "进行中": "In progress",
+  "高优先级": "High priority",
+  "中优先级": "Medium priority",
+  "低优先级": "Low priority",
+  "合并子会话分支": "Merge the child session's branch",
+  "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。":
+    "Let the agent merge branch {0} into the current branch? It performs the merge itself and resolves conflicts; this changes your working branch.",
+  "让智能体合并": "Let the agent merge",
+  "子会话还没结束，完成后再让智能体合并":
+    "The child session has not finished; merge it after it completes",
+  "派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）":
+    "Dispatch a merge child session to merge this child's branch into the current branch (it resolves conflicts itself)",
+  "该子会话没有可合并的分支": "This child session has no branch to merge",
+  "清理子会话": "Clean up the child session",
+  "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。":
+    "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",
+  "清理": "Clean up",
+  "子会话还在运行，先中断再清理": "Stop the child session before cleaning it up",
+  "中断该子会话": "Interrupt this child session",
+  "中断子会话": "Interrupt the child session",
+  "中断": "Interrupt",
+  "中断子会话「{0}」？子会话进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。":
+    "Interrupt child session “{0}”? Its process stops immediately and this task is neither committed nor merged automatically; changes already written to its working directory are kept, and you can retry later.",
+  "中断全部 {0} 个进行中的子会话？它们各自的进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。":
+    "Interrupt all {0} running child sessions? Each process stops immediately and their tasks are neither committed nor merged automatically; changes already written to their working directories are kept, and you can retry later.",
+  "重试该子会话（沿用原工作目录，保留已有改动）":
+    "Retry this child session (reuses its working directory and keeps existing changes)",
+  "第 {0} 次尝试": "Attempt {0}",
+  "仅目录隔离": "Directory isolation only",
+  "主仓工作区（无隔离）": "Main workspace (no isolation)",
+  "待回答": "Needs answer",
+  "分支 {0}": "Branch {0}",
+  "目录 {0}": "Directory {0}",
+  "工作目录与分支已清理": "Working directory and branch cleaned up",
+  "工作目录已回收，分支保留": "Working directory reclaimed; branch kept",
+  "工作目录 {0} 个": "{0} working directories",
+  "已结束 {0} 个可回收": "{0} finished and reclaimable",
+  "清理已结束": "Clean up finished",
+  "清理已结束的子会话": "Clean up finished child sessions",
+  "将删除 {0} 个子会话的工作目录；分支上一律保留（未合并的提交不会丢），工作目录里未提交的改动会被一并删除，无法恢复。":
+    "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in the working directories are deleted permanently.",
+  "收起摘要": "Hide summary",
+  "查看摘要": "Show summary",
+  "查看实时操作": "Show live activity",
+  "子会话实时操作": "Child session live activity",
+  "上次运行": "From a previous run",
+  "这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
+    "This child session had already finished in a previous run (a historical record restored after the extension restarted)",
+  "准备中…": "Preparing…",
+  "暂无输出": "No output yet",
+  "需要确认执行工具调用": "Needs confirmation to run a tool call",
+  "子会话请求批准执行计划": "The child session asks to execute its plan",
+  "批准": "Approve",
+  "子会话需要你回答": "The child session needs an answer",
+  "提交回答": "Send answer",
+  "子会话合计开销": "Total child-session usage",
+  "输入 {0} · 输出 {1}": "Input {0} · Output {1}",
+  "按公开单价估算，仅供参考": "Estimated at published prices; indicative only",
+  "输入为内核上报的末次请求上下文；输出按子会话文本估算":
+    "Input is the core-reported context of the final request; output is estimated from the child's text",
   "本轮变更": "Changes this turn",
   "变更说明": "Changes-this-turn help",
   "1 个文件已更改": "1 file changed",
@@ -177,6 +282,11 @@ const en: Record<string, string> = {
   "更新任务清单": "Updating todos",
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
+  // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
+  "子会话还在运行并等待汇报，暂时不能新建会话":
+    "Child sessions are still running and waiting to report — new session is unavailable for now",
+  // 恢复进行中：「新会话」按钮可点（宿主会放弃恢复并立刻新建会话）
+  "取消正在进行的会话恢复并新建会话": "Cancel the session restore in progress and start a new session",
   "删除会话 {0}": "Delete session {0}",
   // M4 P1-8 session pin & archive
   "置顶": "Pin",
@@ -221,10 +331,6 @@ const en: Record<string, string> = {
   "自定义配置": "Custom profile",
   "选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。":
     "Pick a provider preset to fill in the endpoint, or enter any OpenAI-compatible endpoint manually.",
-  "检测到内核已有凭据": "Existing Core credentials detected",
-  "可从 ~/.iflow/settings.json 导入为扩展配置；密钥写入 SecretStorage 后由面板管理。":
-    "Import them as extension profiles from ~/.iflow/settings.json; the key is stored in SecretStorage and managed by the panel.",
-  "导入并激活": "Import & activate",
   "在 DeepSeek 开放平台创建 API Key；端点兼容 OpenAI 协议。":
     "Create an API key on the DeepSeek platform; the endpoint is OpenAI-compatible.",
   "在 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。":
@@ -348,12 +454,10 @@ const en: Record<string, string> = {
   "重启内核": "Restart Core",
   "重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
     "Restart the Core process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
-  "点击配置即切换并重新认证会话；来自内核的配置为只读，可切换但不可在此删除。":
-    "Click a profile to switch and re-authenticate the session. Profiles imported from the Core are read-only: you can switch to them but not delete them here.",
-  "凭据保存在 VSCode SecretStorage，不写入磁盘明文；保存后将以 openai-compatible 方式重新认证会话。":
-    "Credentials are stored in VSCode SecretStorage, never in plaintext on disk. Saving re-authenticates the session via openai-compatible.",
-  "这是只读的内核配置；保存将另存为同名的扩展配置并优先使用它。":
-    "This is a read-only Core profile; saving creates an extension-owned profile with the same name that takes precedence.",
+  "点击配置即切换并重新认证会话；配置与密钥保存在内核配置文件 ~/.iflow/settings.json（本机明文）。":
+    "Click a profile to switch and re-authenticate the session; profiles and keys are stored in the Core config file ~/.iflow/settings.json (plaintext on this machine).",
+  "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。":
+    "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Saving re-authenticates the session via openai-compatible.",
   "正在重新认证…": "Re-authenticating…",
   "等待选择…": "Waiting for your choice…",
   "审批策略": "Approval policies",
@@ -593,6 +697,7 @@ const en: Record<string, string> = {
     "Update the index from changes only; no model call when nothing changed",
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 …": "Starting …",
+  "正在重新启动内核 …": "Restarting the Core …",
   "首次启动或配置了多个 MCP server 时较久":
     "Slower on first launch or with multiple MCP servers",
   // P1: edit & resend, session search, aria-live announcements
@@ -603,6 +708,9 @@ const en: Record<string, string> = {
   "等待选择切换 API 配置的会话处理方式": "Choose how the session is handled when switching API profiles",
   "自定义回答": "Custom answer",
   "其他": "Other",
+  "填写自定义回答": "Write a custom answer",
+  "输入自定义回答，回车确认": "Type a custom answer, press Enter to confirm",
+  "已选 {0} 项": "{0} selected",
   "正在连接 iFlow…": "Connecting to iFlow…",
   "正在生成回复…": "Generating response…",
   "正在规划…": "Planning…",
@@ -698,12 +806,17 @@ const en: Record<string, string> = {
   "系统": "System",
   "设置分区": "Settings sections",
   "设置如何保存": "How settings are saved",
-  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API Key 只存 SecretStorage，不同步。MCP、语言与审批模式写在内核配置文件，重启内核生效。":
-    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API keys stay in SecretStorage and are never synced. MCP, language and approval mode live in the Core config and apply after a Core restart.",
+  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API 配置与密钥写入内核配置文件 ~/.iflow/settings.json（本机明文）。MCP、语言与审批模式同样在内核配置文件，重启内核生效。":
+    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API profiles and keys are written to the Core config file ~/.iflow/settings.json (plaintext on this machine). MCP, language and approval mode also live in the Core config and apply after a Core restart.",
   "详细说明": "Details",
   "会话": "Session",
   "会话首轮完成后自动生成简短标题。": "Generate a short title after a session's first turn.",
   "每会话一次，会产生一次轻量模型调用。": "Once per session; one lightweight model call.",
+  "并发上限": "Concurrency limit",
+  "同时运行的子会话数量上限。": "Maximum number of child sessions running at the same time.",
+  "默认 5，范围 1–20。超出的派发会排队，等有空位再启动；调低后已在运行的子会话不受影响。":
+    "Defaults to 5, adjustable from 1 to 20. Extra dispatches queue and start as slots free up; lowering the limit does not interrupt sessions already running.",
+  "个": "sessions",
   "回复完成后推测下一步操作，显示在输入框上方。":
     "Predict likely next actions after a reply and show them above the composer.",
   "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。":
@@ -967,6 +1080,35 @@ const en: Record<string, string> = {
   "正在写入项目知识…": "Writing project knowledge…",
   "正在生成…": "Generating…",
   "生成失败": "Generation failed",
+  // super-agent 协议块卡片（转录里取代裸 JSON 代码块）
+  "第 {0}/{1} 个任务": "Task {0}/{1}",
+  "载荷未能完整解析，以下任务书仅供阅读，可能尚未派发":
+    "The payload could not be fully parsed; the task briefs below are for reading only and may not have been dispatched yet.",
+  "子会话操作": "Child session actions",
+  "{0} 个动作": "{0} action(s)",
+  "回答": "Answer",
+  "{0} 个回答": "{0} answer(s)",
+  "保留分支": "Keep branch",
+  "正在编写任务书…": "Writing the task brief…",
+  "正在编写子会话操作…": "Writing child session actions…",
+  "原始协议块": "Raw protocol block",
+  "{0} · {1} 字符": "{0} · {1} chars",
+  "内容不是合法 JSON": "The body is not valid JSON",
+  "缺少 tasks 数组": "Missing the tasks array",
+  "缺少 actions 数组": "Missing the actions array",
+  "没有可展示的任务": "No task to display",
+  "没有可展示的动作": "No action to display",
+  "未知的协议块语言": "Unknown protocol fence language",
+  "展开任务说明": "Expand the task description",
+  "收起任务说明": "Collapse the task description",
+  "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
+  "未指定子会话": "No child session specified",
+  // 多张待处理卡的堆叠计数器（审批 / Plan 退出 / 提问）
+  "还有 {0} 个待处理": "{0} more pending",
+  "还有 {0} 个待处理：{1}": "{0} more pending: {1}",
+  "收起待处理卡": "Collapse pending cards",
+  "iFlow 需要你的回答": "iFlow needs your answer",
+  "、": ", ",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

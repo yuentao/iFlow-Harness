@@ -11,6 +11,16 @@ import type { SessionUsageUi } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * 面板在用户文本前注入看板快照（首轮也注入 —— 空看板的 `[子会话看板]`
+ * 标记是主会话与子会话的角色信号）。断言用户文本时先把它剥掉。
+ */
+function userText(raw: string): string {
+  if (!raw.startsWith("[子会话看板]")) return raw;
+  const split = raw.indexOf("\n\n");
+  return split === -1 ? "" : raw.slice(split + 2).trim();
+}
+
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
@@ -259,16 +269,16 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
 });
 
 /**
- * Wiring check: the hook sits on the settled-turn path, and the compress turn
- * lands BEFORE the next queued message dispatches (the queued prompt rides the
- * smaller context).
+ * Wiring check: the hook sits on the settled-turn path — the compress turn
+ * lands before the NEXT prompt is sent, so that prompt rides the smaller
+ * context. (Streaming-time input no longer queues locally: the host dispatches
+ * it as a child session, so this test sends the follow-up after the settle.)
  */
-describe("sendPrompt turn-end wiring → proactive compress → queue order", () => {
+describe("sendPrompt turn-end wiring → proactive compress before the next prompt", () => {
   let panel: ChatPanel;
   let p: PanelInternals & {
     handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
     panelVisible: boolean;
-    enqueuePrompt: (text: string) => void;
   };
   let storageDir: string;
   let promptTexts: string[];
@@ -314,18 +324,21 @@ describe("sendPrompt turn-end wiring → proactive compress → queue order", ()
     fs.rmSync(storageDir, { recursive: true, force: true });
   });
 
-  it("settled turn auto-compresses at ≥95%, then the queued message rides the compressed context", async () => {
+  it("settled turn auto-compresses at ≥95%, then the next prompt rides the compressed context", async () => {
     const st = p.store.getState() as { status: string; usage?: SessionUsageUi | null };
     st.status = "idle";
     st.usage = usage(1000, 970);
-    // Queue a follow-up BEFORE the turn settles (Steer semantics).
-    p.enqueuePrompt("next question");
     await p.handleWebviewMessage({ type: "sendPrompt", text: "first question" });
     // sendPrompt is fired-and-forgotten by the message router; wait for the
-    // whole chain (prompt → compress → queue dispatch) to settle.
-    const deadline = Date.now() + 2000;
-    while (promptTexts.length < 3 && Date.now() < deadline) await flush();
-    expect(promptTexts).toEqual(["first question", "/compress", "next question"]);
+    // prompt → compress chain to settle.
+    const compressDeadline = Date.now() + 2000;
+    while (promptTexts.length < 2 && Date.now() < compressDeadline) await flush();
+    expect(promptTexts.map(userText)).toEqual(["first question", "/compress"]);
+
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "next question" });
+    const nextDeadline = Date.now() + 2000;
+    while (promptTexts.length < 3 && Date.now() < nextDeadline) await flush();
+    expect(promptTexts.map(userText)).toEqual(["first question", "/compress", "next question"]);
   });
 });
 
@@ -400,7 +413,7 @@ describe("turn-end follow-up gating", () => {
 
   it("keeps only the title task after a user-typed /compress turn", async () => {
     await p.handleWebviewMessage({ type: "sendPrompt", text: "/compress" });
-    expect(promptTexts).toEqual(["/compress"]);
+    expect(promptTexts.map(userText)).toEqual(["/compress"]);
     expect(followups).toEqual([
       { sessionId: "followup-gate-session", opts: { allowTitle: true, conversationTasks: false } },
     ]);

@@ -2,8 +2,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { App } from "../webview/src/App";
 import { SettingsModal, type SettingsTab } from "../webview/src/components/SettingsModal";
 import type { AuthUiState, HostSettingsUi } from "../shared/messages";
+import type { SuperSessionUi, SuperStatus } from "../shared/super-agent";
 
 const send = vi.hoisted(() => vi.fn());
 const updateHostSetting = vi.hoisted(() => vi.fn());
@@ -39,10 +41,28 @@ const hostSettings = vi.hoisted(() => ({
   contextWindowOverrides: [],
   costTable: [],
   thinkingModelRules: [],
+  superAgentMaxConcurrent: 5,
 } as HostSettingsUi));
 const chat = vi.hoisted(() => ({
   pending: null as { kind: string; target: string } | null,
-  state: null as { pendingProfileSwitch: { id: string; profileName: string } | null } | null,
+  // 新增用例需要把完整的 SessionState 投影塞进来；既有用例只写
+  // pendingProfileSwitch，Record 让两种形状都能赋值。
+  state: null as Record<string, unknown> | null,
+  // App / Composer 渲染时订阅的顶层字段（渲染路径不调用，但 selector 要取到）。
+  toggleFocusMode: () => {},
+  focusMode: false,
+  headerScrolled: false,
+  setHeaderScrolled: () => {},
+  editorTheme: "light",
+  promptSeq: 0,
+  toasts: [] as unknown[],
+  notify: () => {},
+  dismissToast: () => {},
+  clearMemoryDraft: () => {},
+  memoryDraftRequest: null,
+  composerDraftRequest: null,
+  beginPending: () => {},
+  superTranscripts: {} as Record<string, unknown>,
 }));
 const modelMetadata = vi.hoisted(() => ({
   state: "idle" as "idle" | "searching" | "done" | "error",
@@ -61,12 +81,16 @@ vi.mock("../webview/src/store", () => ({
       state: typeof chat.state;
     }) => unknown) =>
       selector({ send, updateHostSetting, hostSettings, modelMetadata, ...chat }),
-    { getState: () => ({ beginPending }) },
+    { getState: () => ({ beginPending, send, ...chat, hostSettings, modelMetadata, updateHostSetting }) },
   ),
 }));
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: string[]) => s.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)] ?? ""),
+  modeDisplay: () => ({ label: "mode", desc: "" }),
 }));
+// 新增用例只断言顶栏 / 设置页 / Composer 三处切换；转录与子会话看板不参与。
+vi.mock("../webview/src/components/MessageList", () => ({ MessageList: () => null }));
+vi.mock("../webview/src/components/SuperAgentBoard", () => ({ SuperAgentBoard: () => null }));
 
 let root: Root;
 let container: HTMLDivElement;
@@ -100,7 +124,6 @@ beforeEach(() => {
           needsSetup: false,
           saved: null,
           profiles: [],
-          importable: [],
           onboardingDismissed: false,
         } as AuthUiState}
       />,
@@ -165,7 +188,6 @@ const BASIC_AUTH: AuthUiState = {
   needsSetup: false,
   saved: null,
   profiles: [],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -218,10 +240,9 @@ const API_AUTH: AuthUiState = {
   needsSetup: false,
   saved: null,
   profiles: [{
-    name: "B", source: "extension", baseUrl: "https://gw.example.com/v1",
+    name: "B", baseUrl: "https://gw.example.com/v1",
     modelName: "model-b", keyTail: "1234", active: false,
   }],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -306,7 +327,6 @@ const EMPTY_AUTH: AuthUiState = {
   needsSetup: true,
   saved: null,
   profiles: [],
-  importable: [],
   onboardingDismissed: false,
 };
 
@@ -360,7 +380,6 @@ it("does not carry the previous gateway's model into a preset without suggestion
     needsSetup: false,
     saved: { baseUrl: "https://old.example.com/v1", modelName: "old-model", keyTail: "…1111" },
     profiles: [],
-    importable: [],
     onboardingDismissed: false,
   });
   click("智谱 GLM");
@@ -369,18 +388,12 @@ it("does not carry the previous gateway's model into a preset without suggestion
   expect(fields[3]?.value).toBe("");
 });
 
-it("hides the CLI import card once extension credentials exist", () => {
-  renderAuthTabWith({
-    authenticated: true,
-    needsSetup: false,
-    saved: { baseUrl: "https://old.example.com/v1", modelName: "old-model", keyTail: "…1111" },
-    profiles: [],
-    importable: [
-      { name: "终端默认", baseUrl: "https://cli.example.com/v1", modelName: "cli-model", keyTail: "…abcd" },
-    ],
-    onboardingDismissed: false,
-  });
-  expect(container.textContent).not.toContain("检测到内核已有凭据");
+it("renders profile rows without an extension/Core source chip", () => {
+  renderAuthTabWith(API_AUTH);
+  const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("model-b"));
+  expect(row).toBeTruthy();
+  expect(row!.textContent).not.toContain("扩展");
+  expect(row!.textContent).not.toContain("内核");
 });
 
 it("opens provider documentation from the preset guidance", () => {
@@ -401,27 +414,7 @@ it("drops the preset guidance when the user switches to a custom endpoint", () =
   expect(container.textContent).not.toContain("获取 API Key");
 });
 
-it("sends an import command for detected CLI credentials", () => {
-  renderAuthTabWith({
-    authenticated: false,
-    needsSetup: true,
-    saved: null,
-    profiles: [],
-    importable: [
-      {
-        name: "终端默认",
-        baseUrl: "https://cli.example.com/v1",
-        modelName: "cli-model",
-        keyTail: "…abcd",
-      },
-    ],
-    onboardingDismissed: false,
-  });
-  expect(container.textContent).toContain("检测到内核已有凭据");
-  click("导入并激活");
-  expect(beginPending).toHaveBeenCalledWith("profile", "终端默认");
-  expect(send).toHaveBeenCalledWith({ type: "importCliCredentials", name: "终端默认" });
-});
+
 
 /**
  * The turn-end ceilings live under their own toggle and follow it: the row is
@@ -488,5 +481,140 @@ describe("回合末 timeout rows follow their toggle", () => {
     expect(number("记忆提取超时")).toBe("90");
     expect(number("压缩超时")).toBe("0");
     expect(number("自动压缩阈值")).toBe("95");
+  });
+});
+
+/**
+ * 活跃子会话期间三处「切换」必须一起禁用：历史会话下拉、设置页 API 配置
+ * 切换、模型下拉。切换会让在跑的子会话用错凭据/模型，或让汇报落到被替换的
+ * 主会话；但主会话仍必须能发消息（Composer 发送按钮不受影响）。
+ */
+describe("活跃子会话禁用会话/模型/凭据切换", () => {
+  function child(status: SuperStatus): SuperSessionUi {
+    return {
+      id: `child-${status}`,
+      title: "子任务",
+      task: "执行任务",
+      status,
+      isolation: { kind: "worktree" },
+      createdAt: 0,
+      updatedAt: 0,
+      reports: [],
+    } as SuperSessionUi;
+  }
+
+  /** 最小完整投影：顶栏历史下拉、设置页 profile 行、Composer 模型下拉都要出现。 */
+  function appState(superSessions: SuperSessionUi[]): Record<string, unknown> {
+    return {
+      blocks: [],
+      status: "idle",
+      errorMessage: null,
+      errorAdvice: null,
+      stopReason: null,
+      sessionId: "s1",
+      modes: null,
+      commands: [],
+      skills: [],
+      models: [{ id: "model-a", name: "Model A" }],
+      currentModelId: "model-a",
+      thinkLevel: "auto",
+      pendingApproval: null,
+      pendingPlanExit: null,
+      pendingQuestions: null,
+      pendingProfileSwitch: null,
+      auth: {
+        authenticated: true,
+        needsSetup: false,
+        saved: null,
+        profiles: [
+          { name: "A", baseUrl: "https://a.example.com/v1", modelName: "model-a", keyTail: "1111", active: true },
+          { name: "B", baseUrl: "https://gw.example.com/v1", modelName: "model-b", keyTail: "1234", active: false },
+        ],
+        onboardingDismissed: true,
+      },
+      sessions: [{ id: "s1", label: "会话 1", updatedAt: 0 }],
+      activeSessionId: "s1",
+      replaying: false,
+      initializing: false,
+      compressing: false,
+      superWaiting: false,
+      superSessions,
+      queue: [],
+      queuePaused: false,
+      checkpoints: [],
+      nextStepSuggestions: [],
+      nextStepLoading: false,
+    };
+  }
+
+  function renderApp(superSessions: SuperSessionUi[]): void {
+    chat.state = appState(superSessions);
+    act(() => root.render(<App />));
+  }
+
+  const historyButton = () =>
+    document.querySelector<HTMLButtonElement>('button[title="历史会话（选择后恢复该会话上下文）"]');
+  const modelButton = () => document.querySelector<HTMLButtonElement>('button[title="模型"]');
+  const sendButton = () =>
+    [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "发送") as
+      | HTMLButtonElement
+      | undefined;
+  const profileButton = () =>
+    [...document.querySelectorAll("button")].find((b) => b.textContent?.includes("model-b")) as
+      | HTMLButtonElement
+      | undefined;
+
+  /** 空输入时发送按钮本来就禁用，先写入草稿才能验证「仍可用」。 */
+  function typeDraft(): void {
+    const textarea = container.querySelector("textarea");
+    expect(textarea).toBeTruthy();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(textarea, "继续");
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function openSettings(): void {
+    const gear = container.querySelector<HTMLButtonElement>('button[aria-label="设置"]');
+    expect(gear).toBeTruthy();
+    act(() => gear!.click());
+  }
+
+  beforeEach(() => {
+    class Observer {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords(): [] {
+        return [];
+      }
+    }
+    (globalThis as unknown as Record<string, unknown>).ResizeObserver = Observer;
+    (globalThis as unknown as Record<string, unknown>).IntersectionObserver = Observer;
+  });
+
+  for (const status of ["preparing", "running", "awaiting_input"] as const) {
+    it(`子会话 ${status}：历史下拉 / API 配置 / 模型下拉禁用，发送仍可用`, () => {
+      renderApp([child(status)]);
+      expect(historyButton()).toBeTruthy();
+      expect(historyButton()!.disabled).toBe(true);
+      expect(modelButton()).toBeTruthy();
+      expect(modelButton()!.disabled).toBe(true);
+      typeDraft();
+      expect(sendButton()).toBeTruthy();
+      expect(sendButton()!.disabled).toBe(false);
+      openSettings();
+      expect(profileButton()).toBeTruthy();
+      expect(profileButton()!.disabled).toBe(true);
+    });
+  }
+
+  it("子会话全部终态：三处恢复可用", () => {
+    renderApp([child("completed"), child("failed"), child("cancelled")]);
+    expect(historyButton()!.disabled).toBe(false);
+    expect(modelButton()!.disabled).toBe(false);
+    openSettings();
+    expect(profileButton()!.disabled).toBe(false);
   });
 });

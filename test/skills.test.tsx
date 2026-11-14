@@ -151,7 +151,6 @@ function makeState(): SessionState {
       needsSetup: false,
       saved: null,
       profiles: [],
-      importable: [],
       onboardingDismissed: false,
     },
   } as SessionState;

@@ -19,16 +19,23 @@ import type { AssetKind } from "./messages.js";
  * `#` heading for their description).
  */
 
-/** Minimal loader-valid frontmatter per kind (also the empty-answer fallback). */
+/**
+ * Minimal loader-valid frontmatter per kind (also the empty-answer fallback).
+ *
+ * The stub descriptions are English: the CLI loader turns them into the
+ * agent's / skill's description, which the model reads as part of the tool
+ * surface — a Chinese fragment there would mix languages inside an otherwise
+ * English prompt.
+ */
 function requiredFrontmatter(kind: AssetKind, name: string): string {
   const safeName = name.trim() || "generated";
   switch (kind) {
     case "command":
       return `---\ndescription: ${safeName}\n---\n`;
     case "agent":
-      return `---\nname: ${safeName}\ndescription: 何时委派到此子代理\nallowed-tools: Read, Grep, Glob\n---\n`;
+      return `---\nname: ${safeName}\ndescription: When to delegate to this sub-agent\nallowed-tools: Read, Grep, Glob\n---\n`;
     default:
-      return `---\nname: ${safeName}\ndescription: 使用场景说明\n---\n`;
+      return `---\nname: ${safeName}\ndescription: Describe the intended use case here\n---\n`;
   }
 }
 

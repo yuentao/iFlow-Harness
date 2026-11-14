@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
   AlertTriangle,
-  ArrowDown,
-  ArrowUp,
   Brain,
   Check,
   ChevronDown,
@@ -17,22 +15,20 @@ import {
   ListOrdered,
   Loader2,
   Paperclip,
-  Pencil,
-  Play,
   SendHorizontal,
   Sparkles,
   Square,
   SquareTerminal,
-  Trash2,
   Wand2,
   X,
   Zap,
 } from "lucide-react";
-import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type QueuedPromptUi, type SkillInfo, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
+import { collectUserPromptTexts, type ContextRefUi, type FileHitUi, type ModelInfoUi, type SkillInfo, type SlashCommand, type ThinkLevel } from "../../../shared/messages";
 import { SKILL_COMMAND } from "../../../shared/skills";
+import { isTerminalSuperStatus } from "../../../shared/super-agent";
 import { useChat } from "../store";
 import { modeDisplay, t } from "../i18n";
-import { Button, CANVAS_CHIP, ConfirmDialog, Dropdown, ICON_INLINE, IconButton, MenuItem, SearchInput, fuzzyScore } from "./ui";
+import { Button, CANVAS_CHIP, Dropdown, ICON_INLINE, IconButton, MenuItem, SearchInput, fuzzyScore } from "./ui";
 
 /** One attached image (base64, no data: prefix). */
 export interface ImageAttachment {
@@ -108,7 +104,6 @@ function formatCost(usd: number): string {
 const EMPTY_COMMANDS: SlashCommand[] = [];
 const EMPTY_SKILLS: SkillInfo[] = [];
 const EMPTY_MODELS: ModelInfoUi[] = [];
-const EMPTY_QUEUE: QueuedPromptUi[] = [];
 
 /**
  * Session token usage, read as PRIMITIVE selectors — postMessage re-clones the
@@ -275,155 +270,9 @@ function SessionUsageChip() {
   );
 }
 
-/** QueueStrip's edit round-trip ids share one counter with the Composer's
- * queueEdited listener matching (module-level: the strip is a sibling). */
+/** Round-trip id for the host's `queueEdited` reply (the queue strip that
+ * used to consume it is gone; the listener stays for protocol parity). */
 const queueEditSeqGlobal = { current: 0 };
-
-/**
- * M2 P0-3 queued-message strip. Subscribes to the queue ARRAY itself — the
- * same isolation pattern as SessionUsageChip: blockPatch re-clones the tail,
- * so only this small strip re-renders when the queue changes, never the
- * whole Composer. Renders nothing while the queue is empty and unpaused.
- */
-function QueueStrip() {
-  const queue = useChat((s) => s.state?.queue ?? EMPTY_QUEUE);
-  const paused = useChat((s) => s.state?.queuePaused ?? false);
-  const send = useChat((s) => s.send);
-  // P1-8: the 3s armed pill was the product's second confirm language;
-  // destructive actions now all share the modal ConfirmDialog.
-  const [confirmClear, setConfirmClear] = useState(false);
-  // The strip collapses to a one-line summary by default: the transcript echo
-  // bubble (P1-11) already shows the queued content right above the streaming
-  // pill, so an always-expanded entry list stacked a second copy of the same
-  // text and crowded the bottom area mid-turn. Click the header to manage
-  // entries (interrupt / take back / reorder / delete).
-  const [expanded, setExpanded] = useState(false);
-  if (queue.length === 0 && !paused) return null;
-  const act = (action: "edit" | "delete" | "move" | "sendNow" | "resume" | "clear", id?: string, delta?: number): void => {
-    send({ type: "queueAction", action, id, delta });
-  };
-  // UI-audit 4.6: 24px hit area (the icons stay 14px) — 12px targets were
-  // easy to miss in a dense row. Row actions use IconButton (sm), header
-  // actions use the dense Button variants.
-  return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface/70 shadow-card">
-      <div className={`flex items-center gap-1.5 px-2.5 py-1 ${expanded && queue.length > 0 ? "border-b border-border/60" : ""}`}>
-        <button
-          type="button"
-          className="flex min-w-0 items-center gap-1.5 rounded disabled:cursor-default"
-          title={expanded ? t("收起") : t("展开")}
-          disabled={queue.length === 0}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          <ListOrdered className="size-3.5 shrink-0 text-primary" />
-          <span className="text-ui-caption font-medium text-foreground">
-            {t("队列 · {0} 条待发送", queue.length)}
-          </span>
-          {queue.length > 0 && (
-            <ChevronDown className={`size-3 shrink-0 text-muted-foreground transition-transform duration-150 ${expanded ? "rotate-180" : ""}`} />
-          )}
-        </button>
-        {paused && (
-          <span className="inline-flex items-center gap-1 rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-ui-caption text-warning">
-            <AlertTriangle className="size-2.5" /> {t("已暂停")}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          {paused && queue.length > 0 && (
-            <Button
-              variant="primary-soft"
-              size="sm"
-              icon={<Play className={ICON_INLINE} />}
-              title={t("继续依序发送队列")}
-              onClick={() => act("resume")}
-            >
-              {t("继续")}
-            </Button>
-          )}
-          {queue.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={<Trash2 className={ICON_INLINE} />}
-              className="hover:text-destructive"
-              title={t("清空队列")}
-              onClick={() => setConfirmClear(true)}
-            >
-              {t("清空")}
-            </Button>
-          )}
-        </div>
-      </div>
-      {expanded && queue.length > 0 && (
-        <ul className="max-h-32 overflow-y-auto">
-          {queue.map((q, i) => (
-            <li
-              key={q.id}
-              className="group flex items-center gap-1.5 border-b border-border/40 px-2.5 py-1 last:border-b-0 hover:bg-accent/30"
-            >
-              <span className="w-4 shrink-0 text-right font-mono text-ui-caption text-muted-foreground/80">{i + 1}</span>
-              <span className="min-w-0 flex-1 truncate text-ui-caption text-foreground" title={q.text}>
-                {q.text || t("（附件消息）")}
-              </span>
-              {q.attachments.length > 0 && (
-                <span className="shrink-0 rounded border border-border bg-surface px-1 font-mono text-ui-micro text-muted-foreground">
-                  {t("附件 {0}", q.attachments.length)}
-                </span>
-              )}
-              <span className="flex shrink-0 items-center gap-0.5 opacity-40 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                <IconButton
-                  icon={<Play className={ICON_INLINE} />}
-                  label={t("打断并立即发送")}
-                  size="sm"
-                  onClick={() => act("sendNow", q.id)}
-                />
-                <IconButton
-                  icon={<Pencil className={ICON_INLINE} />}
-                  label={t("取回编辑")}
-                  size="sm"
-                  onClick={() => send({ type: "queueAction", action: "edit", id: q.id, requestId: ++queueEditSeqGlobal.current })}
-                />
-                <IconButton
-                  icon={<ArrowUp className={ICON_INLINE} />}
-                  label={t("上移")}
-                  size="sm"
-                  disabled={i === 0}
-                  onClick={() => act("move", q.id, -1)}
-                />
-                <IconButton
-                  icon={<ArrowDown className={ICON_INLINE} />}
-                  label={t("下移")}
-                  size="sm"
-                  disabled={i === queue.length - 1}
-                  onClick={() => act("move", q.id, 1)}
-                />
-                <IconButton
-                  icon={<X className={ICON_INLINE} />}
-                  label={t("删除")}
-                  size="sm"
-                  tone="danger"
-                  onClick={() => act("delete", q.id)}
-                />
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {confirmClear && (
-        <ConfirmDialog
-          title={t("清空队列")}
-          message={t("确定清空队列中全部 {0} 条待发送消息吗？", queue.length)}
-          confirmLabel={t("清空")}
-          onConfirm={() => {
-            setConfirmClear(false);
-            act("clear");
-          }}
-          onCancel={() => setConfirmClear(false)}
-        />
-      )}
-    </div>
-  );
-}
 
 export function Composer() {
   // P2-1 selector split: the composer previously subscribed to the whole
@@ -446,6 +295,11 @@ export function Composer() {
   const suggestions = useChat((s) => s.state?.nextStepSuggestions);
   /** The prediction call is running: render the pill in the chips' slot. */
   const suggestionsLoading = useChat((s) => s.state?.nextStepLoading ?? false);
+  // 子会话仍在跑时不能换模型（在途子会话会用错模型）。只供模型下拉用，
+  // 不并入 controlsLocked —— 主会话跑子会话时仍必须能发消息 / enhance。
+  const superActive = useChat((s) =>
+    (s.state?.superSessions ?? []).some((session) => !isTerminalSuperStatus(session.status)),
+  );
 // Hard evidence only: thinking===false comes from an explicit
 // iflow.thinkingModelRules entry (supportsThinking:false) evaluated by the
 // host; unknown (undefined) stays ALLOWED — the CLI's own rejection is
@@ -766,19 +620,21 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
 
   // Stop is only meaningful for a real generation: beginReplay() also reports
   // status "streaming", so replaying and initializing must be excluded there.
-  // M2 P0-3: streaming no longer locks the composer — Enter while generating
-  // ENQUEUES the message (host-owned queue, dispatched when the turn settles).
-  // The switches that would desync the agent (model/profile dropdowns,
-  // attachments, enhance) keep the original mid-turn lock; only replay/init/
-  // an in-flight switch block sending entirely (the host enqueue gate rejects
-  // replay too, so the webview must not offer it).
+  // The main session only DELEGATES: streaming does not lock the composer, and
+  // Enter while generating is not queued locally — the host dispatches that
+  // message as a child session (own process, own worktree). The switches that
+  // would desync the agent (model/profile dropdowns, attachments, enhance)
+  // keep the original mid-turn lock; only replay/init/an in-flight switch
+  // block sending entirely.
   const streaming = status === "streaming";
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
   const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
   const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
+  // 模型下拉额外跟随活跃子会话；发送 / enhance / 附件仍只看 controlsLocked。
+  const modelLocked = controlsLocked || superActive;
   const sendBlocked = replaying || initializing || pending !== null || needsSetup;
-  /** Enter/发送 while a real turn streams → the host queues this message. */
-  const enqueueMode = streaming && !replaying && !initializing;
+  /** Enter/发送 while a real turn streams → the host spawns a child session. */
+  const delegateMode = streaming && !replaying && !initializing;
   // The permission mode is a session-level setting the agent re-reads per turn
   // (set_mode is an independent JSON-RPC request; CLI 0.5.19 applies it without
   // touching the in-flight prompt), so it stays switchable while streaming or
@@ -1422,8 +1278,6 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         title={t("拖拽调整高度")}
         onMouseDown={startResize}
       />
-      {/* M2 P0-3: queued-message strip (own subscription to state.queue). */}
-      <QueueStrip />
       {dragOver && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg bg-primary/5 text-ui-label font-medium text-primary">
           {t("拖放文件以添加附件")}
@@ -1724,7 +1578,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         <textarea
           ref={taRef}
           value={text}
-          placeholder={enqueueMode ? t("排队发送（Enter）") : t("向 iFlow 提问…")}
+          placeholder={delegateMode ? t("派发为子会话（Enter）") : t("向 iFlow 提问…")}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
           className="min-h-0 w-full flex-1 resize-none bg-transparent px-3 py-3 text-ui-body leading-relaxed text-foreground outline-none placeholder:text-muted-foreground/80"
           onChange={(e) => {
@@ -1890,7 +1744,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             <Dropdown
               direction="up"
               menuClass="w-60 max-w-[calc(100vw-24px)] max-h-[min(60vh,22rem)] overflow-y-auto"
-              disabled={controlsLocked}
+              disabled={modelLocked}
               onOpenChange={(o) => {
                 setModelMenuOpen(o);
                 setThinkPanel(false);
@@ -1910,7 +1764,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   aria-haspopup="menu"
                   aria-expanded={open}
                   title={t("模型")}
-                  disabled={controlsLocked}
+                  disabled={modelLocked}
                 >
                   <span className="max-w-[130px] truncate @max-[520px]:max-w-[84px] @max-[340px]:max-w-[60px]">
                     {currentModelName}
@@ -2104,8 +1958,9 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             />
             {/* P1-7: stop and send share ONE slot (swap in place) — the old
                 separate stop button made the primary action area jump every
-                time a turn started/ended. Queuing stays on Enter (the
-                textarea's enqueueMode placeholder says so). */}
+                time a turn started/ended. Sending while generating stays on
+                Enter, where the host dispatches a child session (the
+                textarea's delegateMode placeholder says so). */}
             {canStop ? (
               <Button
                 variant="emphasis"
@@ -2117,13 +1972,13 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               </Button>
             ) : (
               <Button
-                variant={enqueueMode ? "primary-soft" : "primary"}
-                icon={enqueueMode ? <ListOrdered className={ICON_INLINE} /> : <SendHorizontal className={ICON_INLINE} />}
-                title={enqueueMode ? t("排队发送 (Enter)") : t("发送 (Enter)")}
+                variant={delegateMode ? "primary-soft" : "primary"}
+                icon={delegateMode ? <ListOrdered className={ICON_INLINE} /> : <SendHorizontal className={ICON_INLINE} />}
+                title={delegateMode ? t("派发为子会话 (Enter)") : t("发送 (Enter)")}
                 disabled={sendBlocked || (!text.trim() && images.length === 0 && attachments.length === 0 && contexts.length === 0)}
                 onClick={submit}
               >
-                <span className="@max-[340px]:hidden">{enqueueMode ? t("排队") : t("发送")}</span>
+                <span className="@max-[340px]:hidden">{delegateMode ? t("派发") : t("发送")}</span>
               </Button>
             )}
           </div>

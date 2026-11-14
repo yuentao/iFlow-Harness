@@ -1,17 +1,10 @@
 import { useEffect, useRef, useState, useId } from "react";
-import { HelpCircle, Check, Plus } from "lucide-react";
-import type { PendingQuestionsUi, UserAnswerValue } from "../../../shared/messages";
+import { HelpCircle, Check } from "lucide-react";
+import type { PendingQuestionsUi } from "../../../shared/messages";
 import { useChat } from "../store";
 import { t } from "../i18n";
-import { Button, CountdownBar, HelpTip, ICON_INLINE, OptionCard, OptionGroup, TextInput } from "./ui";
-
-/**
- * When any option's description exceeds this length, the option row switches
- * from horizontal wrap (cards of uneven height, cramped 260px columns with
- * broken line-wraps) to a single-column full-width list, which stays readable
- * for long copy.
- */
-const LONG_DESCRIPTION_CHARS = 30;
+import { Button, CountdownBar, HelpTip, ICON_INLINE } from "./ui";
+import { QuestionBody, type QuestionAnswerMap } from "./QuestionBody";
 
 /**
  * ask_user_question card (iFlow `_iflow/user/questions`). One section per
@@ -20,6 +13,10 @@ const LONG_DESCRIPTION_CHARS = 30;
  * arrow-key navigation — plus a free-text 「其他」 field. Answers are keyed by
  * the question's `header` — the wire contract the CLI's tool bridge expects.
  * Dismissing answers nothing: the agent proceeds with "no answer".
+ *
+ * The question/option rendering itself lives in `QuestionBody` — the Super
+ * Agent board answers the same `ask_user_question` payload and must not
+ * maintain a second, poorer copy of it.
  *
  * Note: like ApprovalCard, questions arrive mid-prompt (status is
  * "streaming"), so buttons must NOT be gated on streaming state — the agent
@@ -30,49 +27,15 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
   const [answered, setAnswered] = useState(false);
   const titleId = useId();
   const descId = useId();
-  // Per-question selection state: header → Set<label>, plus free text.
-  const [selected, setSelected] = useState<Record<string, Set<string>>>(() => ({}));
-  const [custom, setCustom] = useState<Record<string, string>>({});
-  const [customOpen, setCustomOpen] = useState<Record<string, boolean>>({});
-
-  const toggle = (header: string, label: string, multiSelect: boolean) => {
-    setSelected((prev) => {
-      const current = prev[header] ?? new Set<string>();
-      const next = new Set(current);
-      if (multiSelect) {
-        if (next.has(label)) next.delete(label);
-        else next.add(label);
-      } else {
-        next.clear();
-        next.add(label);
-      }
-      return { ...prev, [header]: next };
-    });
-  };
-
-  const buildAnswers = (): Record<string, UserAnswerValue> => {
-    const answers: Record<string, UserAnswerValue> = {};
-    for (const q of pending.questions) {
-      const picks = selected[q.header] ?? new Set<string>();
-      const free = custom[q.header]?.trim() ?? "";
-      if (free) {
-        // Free text wins over selections for that question.
-        answers[q.header] = free;
-      } else if (picks.size === 1 && !q.multiSelect) {
-        answers[q.header] = [...picks][0]!;
-      } else if (picks.size > 0) {
-        answers[q.header] = [...picks];
-      }
-      // Unanswered questions are simply omitted — the CLI formats them as
-      // "no answer".
-    }
-    return answers;
-  };
+  // The answer map lives here: QuestionBody owns the selection state and
+  // reports the derived answers back, so submitting needs no second source
+  // of truth.
+  const [answers, setAnswers] = useState<QuestionAnswerMap>({});
 
   const submit = () => {
     if (answered) return;
     setAnswered(true);
-    send({ type: "answerQuestions", id: pending.id, answers: buildAnswers() });
+    send({ type: "answerQuestions", id: pending.id, answers });
   };
 
   const dismiss = () => {
@@ -124,84 +87,12 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
         id={descId}
         className="min-h-0 flex-auto space-y-3 overflow-y-auto px-3 py-3 text-ui-label"
       >
-        {pending.questions.map((q) => {
-          const picks = selected[q.header] ?? new Set<string>();
-          const isCustomOpen = customOpen[q.header] ?? false;
-          const vertical = q.options.some((opt) => (opt.description?.length ?? 0) > LONG_DESCRIPTION_CHARS);
-          return (
-            <div key={q.header}>
-              <p className="mb-2 flex items-start gap-1.5 leading-snug">
-                <span className="mt-px shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-ui-caption font-medium text-primary">
-                  {q.header}
-                </span>
-                <span className="min-w-0 text-foreground/90">{q.question}</span>
-              </p>
-              <OptionGroup
-                ariaLabel={q.question}
-                multi={q.multiSelect}
-                className={vertical ? "grid gap-1.5" : "flex flex-wrap gap-1.5"}
-              >
-                {q.options.map((opt) => (
-                  <OptionCard
-                    key={opt.label}
-                    type={q.multiSelect ? "checkbox" : "radio"}
-                    checked={picks.has(opt.label)}
-                    disabled={answered}
-                    title={opt.description}
-                    label={opt.label}
-                    description={opt.description}
-                    className={vertical ? "w-full" : "max-w-[min(260px,100%)]"}
-                    onClick={() => toggle(q.header, opt.label, q.multiSelect)}
-                  />
-                ))}
-                <Button
-                  variant="canvas"
-                  disabled={answered}
-                  aria-label={t("填写自定义回答")}
-                  icon={<Plus className={`${ICON_INLINE} shrink-0`} />}
-                  className={`justify-start rounded-lg px-2.5 ${vertical ? "" : "py-1"} ${
-                    isCustomOpen || custom[q.header]?.trim() ? "" : "border-dashed"
-                  } ${
-                    isCustomOpen || custom[q.header]?.trim()
-                      ? "border-primary/60 bg-primary/10 text-primary"
-                      : "text-muted-foreground"
-                  }`}
-                  onClick={() => setCustomOpen((p) => ({ ...p, [q.header]: !p[q.header] }))}
-                >
-                  {t("其他")}
-                  {vertical && <span className="text-muted-foreground/80">{t("自定义回答")}</span>}
-                </Button>
-              </OptionGroup>
-              {isCustomOpen && (
-                <TextInput
-                  autoFocus
-                  aria-label={`${t("自定义回答")}: ${q.header}`}
-                  placeholder={t("输入自定义回答，回车确认")}
-                  className="mt-2 w-full"
-                  value={custom[q.header] ?? ""}
-                  onChange={(e) => setCustom((p) => ({ ...p, [q.header]: e.target.value }))}
-                  onKeyDown={(e) => {
-                    // IME-safe (same discipline as the Composer textarea): a
-                    // composition-confirming Enter must not act at all.
-                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                    // Milestone 14 §4.5: Enter commits THIS answer and folds the
-                    // field back so the card shows the typed text; it does not
-                    // answer every question at once. The whole card commits
-                    // deliberately (提交回答 button, or Ctrl/Cmd + Enter).
-                    if (e.key !== "Enter") return;
-                    if (e.ctrlKey || e.metaKey) submit();
-                    else setCustomOpen((p) => ({ ...p, [q.header]: false }));
-                  }}
-                />
-              )}
-              {q.multiSelect && picks.size > 1 && (
-                <p className="mt-1 text-ui-caption text-muted-foreground">
-                  {t("已选 {0} 项", picks.size)}
-                </p>
-              )}
-            </div>
-          );
-        })}
+        <QuestionBody
+          questions={pending.questions}
+          disabled={answered}
+          onAnswersChange={setAnswers}
+          onSubmit={submit}
+        />
       </div>
       <div className="shrink-0">
         <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动继续")} />

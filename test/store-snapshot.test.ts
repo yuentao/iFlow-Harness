@@ -15,6 +15,7 @@ import {
   type HostToWebview,
   type SessionState,
 } from "../shared/messages.js";
+import { newSessionState } from "../shared/session-state.js";
 import type { SessionNotification } from "../src/acp/protocol.js";
 
 function notify(update: SessionNotification["update"], sessionId = "s1"): SessionNotification {
@@ -523,6 +524,38 @@ describe("SessionStore.setCompressing (metadata-only tail channel)", () => {
     const len = messages.length;
     store.setCompressing(false);
     expect(messages.length).toBe(len);
+  });
+});
+
+describe("SessionStore.markConnecting (restart epoch marker)", () => {
+  it("stamps a strictly-increasing connectEpoch on the tail, surviving replaceState", () => {
+    const { store, messages } = makeStore();
+    store.markConnected(); // v1 full snapshot — no restart yet
+    const first = messages[0]!;
+    if (first.type !== "snapshot") throw new Error("unreachable");
+    expect(first.state.connectEpoch ?? 0).toBe(0);
+
+    store.markConnecting();
+    const restart = messages[1]!;
+    if (restart.type !== "blockPatch") throw new Error("unreachable");
+    expect(restart.blocks).toEqual([]);
+    expect(restart.tail.status).toBe("connecting");
+    expect(restart.tail.connectEpoch).toBe(1);
+
+    // restartCli does replaceState(newSessionState(...)) BEFORE markConnecting:
+    // the epoch is connection-scoped and must survive the swap, or the SECOND
+    // restart would land back on 1 and the splash could not tell it apart from
+    // the first (its elapsed bar would keep running the superseded boot).
+    store.replaceState(newSessionState(store.getState()));
+    const carried = messages.at(-1)!;
+    if (carried.type !== "snapshot") throw new Error("unreachable");
+    expect(carried.state.connectEpoch).toBe(1);
+
+    store.markConnecting();
+    const second = messages.at(-1)!;
+    if (second.type !== "blockPatch") throw new Error("unreachable");
+    expect(second.tail.status).toBe("connecting");
+    expect(second.tail.connectEpoch).toBe(2);
   });
 });
 
