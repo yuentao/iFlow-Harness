@@ -1,15 +1,13 @@
 // @vitest-environment jsdom
 /**
- * 等待子会话汇报期间的面板呈现（webview 侧）。
+ * 顶栏状态 chip 的语义（webview 侧）。
  *
- * 用户原话：「主会话等待子会话汇报和处理汇报时的状态应该是(正在生成)状态，
- * 不应该出现无状态」—— idle 时顶栏本来没有任何状态 chip（UI-audit 4.2 的
- * 「idle 不显示 chip」），等待期必须例外：顶栏要有转圈的忙碌 chip，且
- * 顶栏「新会话」必须禁用（等待期新建会话会让排队里的汇报落到已被替换的
- * 会话上）。
- *
- * 忙碌态来自宿主权威的正交标记 `superWaiting`（不改 `status`），所以等待期
- * 用户仍然可以发消息、由主会话响应。
+ * 历史：等待子会话汇报期间（`superWaiting`，不改 `status` 的正交标记）曾在
+ * 顶栏挂一个转圈的「生成中」chip。现在顶栏不再承载重复的忙碌信号——转录
+ * 底部已经有浮动 pill（正在生成 / 正在压缩 / 正在规划 / 正在创建新会话…），
+ * 窄屏下顶栏的重复 chip 只会把会话标题挤到不可读；子会话的忙碌程度由看板
+ * 计数承担。`superWaiting` 仍然必须禁用顶栏「新会话」——等待期新建会话会让
+ * 排队里的汇报落到已被替换的会话上。
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -34,6 +32,8 @@ vi.mock("../webview/src/i18n", () => ({
     });
     return out;
   },
+  // Composer 的模式下拉在 modes 非空时会调用它（Plan 模式用例需要）。
+  modeDisplay: (mode: { id: string; name: string }) => ({ label: mode.name || mode.id, desc: "" }),
 }));
 
 function idleState(superWaiting: boolean): SessionState {
@@ -101,9 +101,9 @@ afterEach(() => {
   container.remove();
 });
 
-function render(superWaiting: boolean): void {
+function renderState(overrides: Partial<SessionState> = {}): void {
   holder.state = {
-    state: idleState(superWaiting),
+    state: { ...idleState(false), ...overrides },
     send,
     toggleFocusMode: () => {},
     focusMode: false,
@@ -126,6 +126,10 @@ function render(superWaiting: boolean): void {
   act(() => root.render(<App />));
 }
 
+function render(superWaiting: boolean): void {
+  renderState({ superWaiting });
+}
+
 /** 顶栏的「新会话」图标按钮（aria-label = 新会话）。 */
 function newSessionButton(): HTMLButtonElement | undefined {
   return [...container.querySelectorAll("button")].find(
@@ -133,14 +137,15 @@ function newSessionButton(): HTMLButtonElement | undefined {
   ) as HTMLButtonElement | undefined;
 }
 
-describe("等待子会话汇报期间的顶栏", () => {
-  it("等待期顶栏不是「无状态」：显示转圈的忙碌 chip", () => {
+describe("顶栏忙碌 chip", () => {
+  it("等待子会话汇报时顶栏不再显示「生成中」chip", () => {
     render(false);
     // idle 且没有在等子会话 → 顶栏没有任何状态 chip（既有行为）。
     expect(container.textContent).not.toContain("生成中");
 
+    // 等待期同样不占顶栏：忙碌信号交给转录底部 pill 与看板计数。
     render(true);
-    expect(container.textContent).toContain("生成中");
+    expect(container.textContent).not.toContain("生成中");
   });
 
   it("等待期顶栏「新会话」按钮禁用，并说明原因", () => {
@@ -155,5 +160,30 @@ describe("等待子会话汇报期间的顶栏", () => {
     expect(button).toBeTruthy();
     expect(button!.disabled).toBe(true);
     expect(button!.getAttribute("title")).toContain("子会话");
+  });
+});
+
+describe("streaming 状态的顶栏 chip", () => {
+  it("普通生成中不显示 chip（转录底部 pill 已承担）", () => {
+    renderState({ status: "streaming" });
+    expect(container.textContent).not.toContain("生成中");
+  });
+
+  it("压缩中仍显示「正在压缩」", () => {
+    renderState({ status: "streaming", compressing: true });
+    expect(container.textContent).toContain("正在压缩");
+    expect(container.textContent).not.toContain("生成中");
+  });
+
+  it("Plan 模式仍显示「正在规划」", () => {
+    renderState({
+      status: "streaming",
+      modes: {
+        currentModeId: "plan",
+        availableModes: [{ id: "plan", name: "Plan", kind: "plan" }],
+      },
+    });
+    expect(container.textContent).toContain("正在规划");
+    expect(container.textContent).not.toContain("生成中");
   });
 });

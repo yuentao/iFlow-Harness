@@ -36,7 +36,7 @@ import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
 import { isTerminalSuperStatus } from "../../shared/super-agent";
 
-function statusChip(status: AgentStatus, compressing = false, plan = false, superWaiting = false) {
+function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
     case "connecting":
       return (
@@ -46,25 +46,31 @@ function statusChip(status: AgentStatus, compressing = false, plan = false, supe
       );
     // UI-audit 4.2 P0: idle shows NO chip — VSCode's status bar already carries
     // the agent state, and a permanent "ready" pill with an infinite ping was
-    // pure decoration stealing attention from the transcript. Busy/error states
-    // still announce themselves.
-    // 唯一例外：宿主正在等子会话汇报（superWaiting）。主会话此刻没有自己的
-    // 回合，但流程没断 —— 显示「无状态」会让人以为卡住了，还会顺手点顶栏的
-    // 「新会话」，把排队里的汇报落到已被替换的会话上。
+    // pure decoration stealing attention from the transcript.
+    // 顶栏只保留有独立信息量的状态：连接中 / 错误，以及 streaming 下本轮特有
+    // 的「正在压缩」「正在规划」。默认的「生成中」不再占顶栏（转录底部已有
+    // 浮动 pill 显示正在生成 / 正在压缩 / 正在规划 / 正在创建新会话…，重复的
+    // 信号只会在窄屏挤掉会话标题）；宿主等待子会话汇报（superWaiting）同样
+    // 不渲染 chip —— 忙碌信号由子会话看板的计数承担，superWaiting 本身仍只
+    // 用于禁用顶栏「新会话」按钮。
     case "idle":
-      return superWaiting ? (
-        <Chip tone="primary">
-          <Loader2 className="size-2.5 animate-spin" />{" "}
-          <span className="@max-[320px]:hidden">{t("生成中")}</span>
-        </Chip>
-      ) : null;
+      return null;
     case "streaming":
-      return (
-        <Chip tone="primary">
-          <Loader2 className="size-2.5 animate-spin" />{" "}
-          {compressing ? t("正在压缩") : plan ? t("正在规划") : t("生成中")}
-        </Chip>
-      );
+      if (compressing) {
+        return (
+          <Chip tone="primary">
+            <Loader2 className="size-2.5 animate-spin" /> {t("正在压缩")}
+          </Chip>
+        );
+      }
+      if (plan) {
+        return (
+          <Chip tone="primary">
+            <Loader2 className="size-2.5 animate-spin" /> {t("正在规划")}
+          </Chip>
+        );
+      }
+      return null;
     case "error":
       return (
         <Chip tone="danger">
@@ -869,7 +875,7 @@ export function App() {
               <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
             </Chip>
           ) : (
-            statusChip(status ?? "connecting", compressing, isPlanMode(modes), superWaiting)
+            statusChip(status ?? "connecting", compressing, isPlanMode(modes))
           )}
           {/* Super Agent board: collapsed it is one inline control here in the
               header; expanded it opens a popup panel under the header (the
