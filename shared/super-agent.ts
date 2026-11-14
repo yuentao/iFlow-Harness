@@ -2762,6 +2762,81 @@ export interface SuperActionScan {
   invalidBlocks: string[];
   /** 扫描结束位置（消费偏移，同一段文本不会被执行两次）。 */
   end: number;
+  /**
+   * 文本里至少出现过一次 `super-agent-actions` 围栏开栏。
+   *
+   * 宿主用它把「扫到围栏却零产出」的静默失败变成一条日志（不弹 toast）：
+   * 围栏存在说明主会话确实下过指令，什么都没执行说明扫描把它丢了 —— 那正是
+   * 「主会话发了合法围栏、宿主没执行且完全静默」这种故障的现场。
+   */
+  sawFence: boolean;
+  /**
+   * 扫描停在未闭合的围栏上（流式中间态，等后续 chunk 补齐）。
+   *
+   * 宿主据此区分「还在写」与「写完了却什么都没解析出来」：前者不该记日志
+   * （下一帧就可能补齐），后者必须留痕。
+   */
+  pending: boolean;
+}
+
+/**
+ * 动作围栏的扫描边界：下一个协议围栏开栏之前。
+ *
+ * 收栏只能在**本块的区域里**找。越过下一个 `super-agent*` 开栏的 ``` 属于后面
+ * 那个块 —— 拿它收口会把后面那个块整段吞掉（`end` 越过一个尚未解析的合法
+ * 围栏），宿主既不执行也不报错。真实故障就是这种形态：模型先写了一个漏收栏
+ * 的动作围栏（或把载荷包在工具调用式标记里），紧接着又写了一个完整动作块，
+ * 后者被前者的收栏搜索吃掉，两个块都静默丢失。
+ */
+function actionsFenceLimit(text: string, open: SuperDirectiveOpen): number {
+  const next = findSuperFenceOpen(text, open.bodyStart, () => true);
+  return next ? next.lineStart : text.length;
+}
+
+/** 在「下一个协议围栏之前」解析一个动作围栏（收栏不会越界到后面的块）。 */
+function resolveActionsFence(text: string, open: SuperDirectiveOpen): SuperDirectiveResolution {
+  const limit = actionsFenceLimit(text, open);
+  return resolveSuperDirectiveBlock(limit < text.length ? text.slice(0, limit) : text, open, {
+    language: "super-agent-actions",
+  });
+}
+
+/**
+ * 这个开栏之后是否已经出现一个**完整**的动作围栏。
+ *
+ * 是 → 当前这个开栏被模型放弃了（漏了收栏 / 只在工具调用式包裹里写了一半）：
+ * 一个真正还在流式输出的围栏后面不可能已经有一个完整围栏，所以此时可以安全
+ * 跳过它继续扫，而不是把扫描永久钉在这里。
+ */
+function hasLaterClosedActionsFence(text: string, open: SuperDirectiveOpen): boolean {
+  const next = findSuperFenceOpen(text, open.bodyStart, (language) => language === "super-agent-actions");
+  if (!next) return false;
+  return resolveActionsFence(text, next).kind === "closed";
+}
+
+/**
+ * 一个已闭合动作块实际能消费到哪里。
+ *
+ * **行首收栏不能整行算进已消费区间**：流式里行首的 ``` 既可能是收栏，也可能
+ * 是下一帧才补齐语言的**开栏**（这一帧恰好断在 ` ``` ` 与 `super-agent-actions`
+ * 之间）。把整行吃掉，等语言补齐时这个围栏就再也认不出来了 —— 实测就是这种
+ * 分片把后面那个合法块整段吞掉（宿主零动作、零提示）。所以行首收栏只消费到
+ * **该行行首**，下一帧从那里重扫：它若真是开栏就会被认出来；它若真是收栏，
+ * 重扫只会多走一行（收栏行不是开栏，不产出任何东西，也不会重复执行 ——
+ * 载荷已经在区间之外）。
+ *
+ * 紧贴载荷的收栏（`...}````）不存在这种歧义，照旧整段消费。
+ */
+function consumedEndOfClosedActionBlock(
+  text: string,
+  resolved: Extract<SuperDirectiveResolution, { kind: "closed" }>,
+): number {
+  const markerStart = resolved.bodyEnd;
+  const lineStart = text.lastIndexOf("\n", markerStart - 1) + 1;
+  const prefix = text.slice(lineStart, markerStart);
+  // 收栏落在行首（最多 3 个空格缩进）→ 只消费到行首；否则是粘在载荷尾巴上的
+  // 收栏，整段消费。
+  return /^[ \t]{0,3}$/.test(prefix) ? lineStart : resolved.closeEnd;
 }
 
 /**
@@ -2770,30 +2845,46 @@ export interface SuperActionScan {
  * 与委派指令同构：逐块解析、未闭合就停在开栏处等待后续 chunk、解析失败只
  * 记不入执行。刻意**静默忽略**「占位符 id」（模型把协议示例原样抄回来）：
  * 这种块不是错误，不该给用户弹警告。
+ *
+ * 不变量：`end` 只推进到「最后一个被成功解析 / 明确跳过的协议块结束处」，
+ * 绝不越过一个尚未解析的合法围栏 —— 宿主把 `end` 当消费偏移，越过去就等于
+ * 把那个块丢掉且不留任何痕迹。
  */
 export function extractSuperActions(text: string, fromOffset = 0): SuperActionScan {
   const actions: SuperAction[] = [];
   const invalidBlocks: string[] = [];
   let end = fromOffset;
   let cursor = fromOffset;
+  let sawFence = false;
+  let pending = false;
 
   while (cursor < text.length) {
     const open = findSuperFenceOpen(text, cursor, (language) => language === "super-agent-actions");
     if (!open) break;
-    const resolved = resolveSuperDirectiveBlock(text, open, { language: "super-agent-actions" });
+    sawFence = true;
+    const resolved = resolveActionsFence(text, open);
     if (resolved.kind === "unclosed") {
-      // 还没闭合（流式中间态）—— 等后续 chunk 补齐，不能提前执行半截动作。
-      end = open.lineStart;
+      // 后面已经有一个完整动作块 → 这个开栏被放弃了，跳过它继续扫（不推进
+      // end：它本身没有被解析，消费偏移不能越过它身后的合法围栏）。
+      if (hasLaterClosedActionsFence(text, open)) {
+        cursor = open.bodyStart;
+        continue;
+      }
+      // 真的还在流式输出 —— 停在开栏处，等后续 chunk 补齐，不能提前执行半截动作。
+      pending = true;
+      if (open.lineStart > end) end = open.lineStart;
       break;
     }
     const parsed = parseActionBody(resolved.body);
     if (parsed === null) invalidBlocks.push(resolved.body);
     else actions.push(...parsed);
-    cursor = resolved.closeEnd;
-    end = resolved.closeEnd;
+    const consumed = consumedEndOfClosedActionBlock(text, resolved);
+    // 游标必须严格前进（收栏行回退到行首也不会退到开栏之前）。
+    cursor = consumed > cursor ? consumed : open.bodyStart;
+    if (consumed > end) end = consumed;
   }
 
-  return { actions: actions.slice(0, MAX_SUPER_ACTIONS), invalidBlocks, end };
+  return { actions: actions.slice(0, MAX_SUPER_ACTIONS), invalidBlocks, end, sawFence, pending };
 }
 
 /** 解析动作块正文。null = 格式非法（要提示），[] = 合法但无可执行动作（静默）。 */

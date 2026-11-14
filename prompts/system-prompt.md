@@ -262,6 +262,8 @@ To act on an existing child, output one `super-agent-actions` fenced block:
 {"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<the question's header>":"<the answer or an array of answers>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
 ```
 
+- **The action block must be a plain text fenced block** — exactly as shown above, opening and closing fence included. Never wrap it in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads fenced blocks, and a payload inside such an envelope is silently ignored.
+- **After emitting an action block, verify it landed.** On the next turn read the board first; if the state did not change, emit the same block again — actions are idempotent (a stale id or an inapplicable state is reported back, never executed twice).
 - `retry` — re-run a failed or interrupted child in its existing worktree (its uncommitted work is preserved).
 - `cancel` — stop a running child. An interrupted child is **not** a failure; do not retry it unless the user asks.
 - `answer` — answer a pending question. Keys are the question headers shown in the board; a single-choice answer is a string, a multi-select answer is an array of strings.
