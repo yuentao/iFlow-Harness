@@ -201,6 +201,11 @@
      is the deliberate exception (near-opaque — see the .acrylic-pop rule). */
   --acrylic-tint: oklch(1 0 0 / 38%);
   --acrylic-pop-tint: oklch(1 0 0 / 90%);
+  /* Frosted acrylic (真亚克力): the surface sits ON TOP of a real blurred
+     backdrop, so the tint stays translucent enough for the blur to read as
+     glass — 84% (a 90%+ tint hides the blur completely). The blur, not the
+     tint, is what removes the competing text behind the surface. */
+  --acrylic-frosted-tint: oklch(1 0 0 / 84%);
   --acrylic-edge: oklch(1 0 0 / 70%);
   --acrylic-highlight: linear-gradient(
     to bottom,
@@ -299,6 +304,9 @@
 
   --acrylic-tint: oklch(0.23 0.022 285 / 40%);
   --acrylic-pop-tint: oklch(0.25 0.024 285 / 88%);
+  /* Dark frosted acrylic: same 84% as the light theme (the blur carries the
+     separation, the tint only keeps the board's own text readable). */
+  --acrylic-frosted-tint: oklch(0.25 0.024 285 / 84%);
   --acrylic-edge: oklch(1 0 0 / 10%);
   --acrylic-highlight: linear-gradient(
     to bottom,
@@ -553,6 +561,38 @@ header.acrylic.header-scrolled {
     var(--shadow-panel);
 }
 
+/* --- frosted acrylic (真亚克力): the one surface that blurs the REAL backdrop
+   ------------------------------------------------------------------------- */
+/* The Super Agent board panel is PORTALED to document.body, so it is not a
+   descendant of any backdrop-filter element any more. Per Filter Effects L2
+   only a surface OUTSIDE every backdrop root can blur what is actually behind
+   it — as a child of the acrylic header (the old layout) its own blur could
+   only sample the header subtree, and the transcript text behind it ghosted
+   through sharp (the trap documented on .acrylic-pop above). Out here the
+   blur frosts that text into a matte backdrop instead of letting it read
+   through.
+
+   Tint: --acrylic-frosted-tint (84%). Transparent enough that the blur reads
+   as glass — a 90%+ tint hides it — and opaque enough that the board's own
+   text keeps its contrast; the BLUR is what removes the competing text, not
+   the tint.
+
+   backdrop-filter budget: this adds ONE blurred layer, and only while the
+   board is expanded (the collapsed control carries no blur), so the
+   simultaneously-mounted count stays inside the ≤5 budget noted above.
+
+   Standard property only — see the trap note on .acrylic (esbuild folds a
+   sibling -webkit- alias into the prefixed form, and modern Chromium, the
+   only engine a VSCode webview runs on, dropped that alias). */
+.acrylic-frosted {
+  background-color: var(--acrylic-frosted-tint);
+  background-image: var(--acrylic-highlight);
+  backdrop-filter: blur(36px) saturate(1.7);
+  box-shadow:
+    inset 0 0 0 1px var(--acrylic-edge),
+    var(--shadow-panel);
+}
+
 /* Dropdown menu entrance: quick fade + slight rise, anchored to the trigger
    edge (down = rise from below, up = settle from above). */
 @utility dropdown-in {
@@ -574,6 +614,11 @@ header.acrylic.header-scrolled {
 @supports not (backdrop-filter: blur(1px)) {
   .acrylic {
     background-color: var(--panel);
+  }
+  /* No blur available → the frosted surface would read as a washed-out
+     transparent sheet; fall back to the near-opaque popup tint. */
+  .acrylic-frosted {
+    background-color: var(--acrylic-pop-tint);
   }
 }
 

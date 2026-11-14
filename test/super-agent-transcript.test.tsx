@@ -116,14 +116,18 @@ function render(
   act(() => root.render(<SuperAgentBoard />));
 }
 
+// The board panel is PORTALED to document.body (it must sit outside the
+// acrylic header's backdrop root to blur the real backdrop), so every
+// panel-side query runs on the document — the React mount only holds the
+// collapsed control.
 function clickText(text: string): void {
-  const button = [...container.querySelectorAll("button")].find((b) => b.textContent === text);
+  const button = [...document.body.querySelectorAll("button")].find((b) => b.textContent === text);
   expect(button).toBeTruthy();
   act(() => button!.click());
 }
 
 function clickLabel(label: string): void {
-  const button = [...container.querySelectorAll("button")].find(
+  const button = [...document.body.querySelectorAll("button")].find(
     (b) => b.getAttribute("aria-label") === label,
   );
   expect(button).toBeTruthy();
@@ -132,7 +136,7 @@ function clickLabel(label: string): void {
 
 /** Expand one child's detail by clicking its single-line row. */
 function clickRow(title: string): void {
-  const button = [...container.querySelectorAll("button")].find(
+  const button = [...document.body.querySelectorAll("button")].find(
     (b) => (b.textContent ?? "").includes(title),
   );
   expect(button).toBeTruthy();
@@ -142,17 +146,17 @@ function clickRow(title: string): void {
 describe("Super Agent 子会话实时操作面板", () => {
   it("折叠时无行；展开看板只显示单行；再展开该行才出现「查看实时操作」", () => {
     render();
-    expect(container.textContent).not.toContain("修复登录跳转");
-    expect(container.textContent).not.toContain("查看实时操作");
+    expect(document.body.textContent).not.toContain("修复登录跳转");
+    expect(document.body.textContent).not.toContain("查看实时操作");
 
     clickLabel("子会话看板");
-    expect(container.textContent).toContain("修复登录跳转");
-    expect(container.textContent).toContain("运行中");
+    expect(document.body.textContent).toContain("修复登录跳转");
+    expect(document.body.textContent).toContain("运行中");
     // P1: actions live in the row detail, not on the line.
-    expect(container.textContent).not.toContain("查看实时操作");
+    expect(document.body.textContent).not.toContain("查看实时操作");
 
     clickRow("修复登录跳转");
-    expect(container.textContent).toContain("查看实时操作");
+    expect(document.body.textContent).toContain("查看实时操作");
   });
 
   it("打开面板时本地无转录 → 向宿主拉取该子会话的全量转录", () => {
@@ -268,7 +272,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.body.textContent).not.toContain(USER_TASK);
     // The row keeps a single entry point — no inline pane state left behind.
-    expect(container.textContent).toContain("查看实时操作");
+    expect(document.body.textContent).toContain("查看实时操作");
   });
 });
 
@@ -278,7 +282,7 @@ describe("Super Agent 子会话合并入口", () => {
     clickLabel("子会话看板");
     clickRow("修复登录跳转");
 
-    const button = [...container.querySelectorAll("button")].find(
+    const button = [...document.body.querySelectorAll("button")].find(
       (b) => b.textContent === "让智能体合并",
     );
     expect(button).toBeTruthy();
@@ -289,7 +293,7 @@ describe("Super Agent 子会话合并入口", () => {
     expect(button!.getAttribute("title")).toContain("子会话还没结束，完成后再让智能体合并");
     // 原因不再逐行重复：行首的状态 chip 已经说明子会话还在运行，
     // 完整规则统一收在看板头的帮助按钮里（见下一组用例）。
-    expect(container.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
+    expect(document.body.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
   });
 
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
@@ -405,7 +409,7 @@ describe("Super Agent 看板排序与折叠", () => {
     ]);
     // 有子会话等待回答 → 看板自动展开，不需要（也不应该）再点一次。
 
-    const text = container.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text.indexOf("等我回答的任务")).toBeGreaterThanOrEqual(0);
     expect(text.indexOf("等我回答的任务")).toBeLessThan(text.indexOf("进行中的任务"));
     expect(text.indexOf("进行中的任务")).toBeLessThan(text.indexOf("待合并的任务"));
@@ -419,11 +423,11 @@ describe("Super Agent 看板排序与折叠", () => {
     clickLabel("子会话看板");
 
     // Folded away: only a one-line history row, no card, no title.
-    expect(container.textContent).toContain("已完成的 1 个子会话");
-    expect(container.textContent).not.toContain("已合并的任务");
+    expect(document.body.textContent).toContain("已完成的 1 个子会话");
+    expect(document.body.textContent).not.toContain("已合并的任务");
 
     clickLabel("展开已完成的子会话");
-    expect(container.textContent).toContain("已合并的任务");
+    expect(document.body.textContent).toContain("已合并的任务");
   });
 
   it("一次只展开一行详情", () => {
@@ -434,9 +438,9 @@ describe("Super Agent 看板排序与折叠", () => {
     clickLabel("子会话看板");
 
     const rowButton = (title: string) =>
-      [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(title))!;
+      [...document.body.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(title))!;
     const entryCount = () =>
-      [...container.querySelectorAll("button")].filter((b) => b.textContent === "查看实时操作").length;
+      [...document.body.querySelectorAll("button")].filter((b) => b.textContent === "查看实时操作").length;
 
     clickRow("任务甲");
     expect(rowButton("任务甲").getAttribute("aria-expanded")).toBe("true");
@@ -450,6 +454,7 @@ describe("Super Agent 看板排序与折叠", () => {
   });
 
   it("有子会话等待回答时自动展开；全部已完成且已合并后自动收起", () => {
+    // 折叠控件留在 header 里（只有浮层被 portal 出去），所以这里查挂载点。
     const boardExpanded = () =>
       container
         .querySelector('button[aria-label="子会话看板"]')
@@ -459,7 +464,7 @@ describe("Super Agent 看板排序与折叠", () => {
       session({ id: "super-ask", title: "等我回答的任务", status: "awaiting_input", createdAt: 1000 }),
     ]);
     expect(boardExpanded()).toBe("true");
-    expect(container.textContent).toContain("等我回答的任务");
+    expect(document.body.textContent).toContain("等我回答的任务");
 
     renderMany([merged("super-m", "已合并的任务", 1000)]);
     expect(boardExpanded()).toBe("false");
