@@ -387,3 +387,28 @@ it("keeps the plan editor usable inside the scroll body", () => {
   // min-h-40 stops the editor collapsing to 0 inside the scroll body.
   expect(textarea!.classList.contains("min-h-40")).toBe(true);
 });
+
+/**
+ * Diff preview cap contract: the approval card is already capped by the
+ * overlay shell, so the diff must take a coarse container-relative cap
+ * (45vh) instead of arithmetic on the viewport height — a `100vh` guess
+ * ignored the header, the Super Agent board and the resizable Composer and
+ * pushed the card past the shell.
+ */
+it("caps the approval diff preview at 45vh, never with viewport arithmetic", () => {
+  act(() =>
+    root.render(
+      <ApprovalCard
+        approval={{
+          ...APPROVAL,
+          toolKind: "edit",
+          diff: { path: "webview/src/App.tsx", oldText: "a\nb", newText: "a\nc" },
+        }}
+      />,
+    ),
+  );
+  const diff = container.querySelector<HTMLElement>(".diff-scroll");
+  expect(diff).toBeTruthy();
+  expect(diff!.classList.contains("max-h-[45vh]")).toBe(true);
+  expect(container.innerHTML).not.toContain("calc(100vh");
+});

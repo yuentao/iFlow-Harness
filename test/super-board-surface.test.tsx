@@ -475,7 +475,7 @@ describe("Super Agent 看板子会话行 hover 表面", () => {
 
 describe("Super Agent 看板并入顶栏（App 级结构）", () => {
   /** Full store shape App needs (same mock surface as super-waiting-busy). */
-  function renderApp(sessions: SuperSessionUi[]): void {
+  function renderApp(sessions: SuperSessionUi[], patch: Record<string, unknown> = {}): void {
     store.current = {
       state: {
         blocks: [],
@@ -512,6 +512,7 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
         checkpoints: [],
         nextStepSuggestions: [],
         nextStepLoading: false,
+        ...patch,
       },
       send,
       toggleFocusMode: () => {},
@@ -651,6 +652,57 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
       expect(barHosts()).toHaveLength(1);
       expect(barValue()).toBe("256px");
     });
+  });
+
+  it("--super-bar-h：看板完全卸载后变量被移除（不留残留）", () => {
+    withStubHeights(() => {
+      renderApp([askingSession()]);
+      // 有待答子会话 → 面板挂载 → 转录顶部预留面板高度。
+      expect(barHosts()).toHaveLength(1);
+      expect(barValue()).toBe("256px");
+
+      // 最后一个子会话消失（被清理 / 会话切换）→ 看板整体不渲染。
+      renderApp([]);
+      expect(boardControl()).toBeNull();
+      expect(container.querySelector('[role="region"][aria-label="子会话"]')).toBeNull();
+      // 卸载必须清掉变量：否则转录会一直留一条 334px 的空白。
+      expect(barHosts()).toHaveLength(0);
+    });
+  });
+
+  /**
+   * 待处理卡浮层的类契约（多卡滚动回归）：浮层是滚动容器，靠
+   * `[&>*:first-child]:mt-auto` 做底部对齐；**不能**用 justify-end ——
+   * flex-end 在滚动容器里会把溢出到起始边之外的内容变成不可达。
+   * 这条断言防的是「有人把 mt-auto 改回 justify-end」。
+   */
+  it("待处理卡浮层是滚动容器，且不用 justify-end 做底部对齐", () => {
+    const approval = {
+      id: "approval-1",
+      toolName: "write_file",
+      title: "Write a.ts",
+      toolKind: "edit" as const,
+      locations: [],
+      options: [{ optionId: "reject-1", name: "拒绝", kind: "reject_once" as const }],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
+    };
+    const questions = {
+      id: "q-1",
+      questions: [{ header: "范围", question: "覆盖哪些范围？", options: [], multiSelect: false }],
+      deadline: Date.now() + 60_000,
+      timeoutMs: 60_000,
+    };
+    renderApp([], { pendingApproval: approval, pendingQuestions: questions });
+
+    const overlay = [...container.querySelectorAll<HTMLElement>("div")].find((el) =>
+      (el.className ?? "").toString().includes("[&>*:first-child]:mt-auto"),
+    );
+    expect(overlay).toBeTruthy();
+    for (const cls of ["min-h-0", "overflow-y-auto", "[&>*:first-child]:mt-auto"]) {
+      expect(overlay!.classList.contains(cls)).toBe(true);
+    }
+    expect(overlay!.className).not.toContain("justify-end");
   });
 });
 
