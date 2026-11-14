@@ -7026,6 +7026,15 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
     }
     if (scan.actions.length > 0) void this.runSuperActions(scan.actions);
+    // 静默失败变可见：围栏确实出现过、这一轮也扫完了（不是还在流式等收栏），
+    // 却既没有动作也没有非法块 —— 主会话下过指令，宿主什么都没执行。旧实现
+    // 在这里什么都不留，故障只能靠用户复述「我发过啊」。只记日志、不弹 toast：
+    // 这条通道每来一段文本都会扫一次，弹窗会变成噪音。
+    if (scan.sawFence && !scan.pending && scan.actions.length === 0 && scan.invalidBlocks.length === 0) {
+      this.log.warn(
+        `super-agent-actions fence produced no actions (scan buffer ${this.superActionScanText.length} chars, consumed offset ${this.superActionScanOffset})`,
+      );
+    }
   }
 
   /**
