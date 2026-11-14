@@ -140,9 +140,13 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
   const actionVerb = KIND_ACTION[approval.toolKind.toLowerCase()] ?? "执行";
   const actionTarget = primary?.path || approval.toolName;
 
+  // Height cap + internal scroll (same shape as QuestionCard): the card caps
+  // at the overlay wrapper (max-h-full) instead of growing upward, so a long
+  // title / big diff can never paint over the header. Header, countdown and
+  // actions stay shrink-0; only the body scrolls.
   return (
     <div
-      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 shrink-0 rounded-xl border border-primary/40"
+      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 flex max-h-full shrink-0 flex-col rounded-xl border border-primary/40"
       role="alertdialog"
       aria-labelledby={titleId}
       aria-describedby={descId}
@@ -157,7 +161,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
         }
       }}
     >
-      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <ShieldCheck className="size-3.5 shrink-0 text-primary" />
         {/* Eyebrow + action: the eyebrow keeps the "iFlow is asking" framing,
             the heading states WHAT would run so the decision is legible
@@ -188,35 +192,46 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           </HelpTip>
         </span>
       </div>
-      <div className="space-y-2 px-3 py-3 text-ui-label">
-        {/* break-words + scroll cap: the wire title is uncapped (whole shell
-            commands / descriptions); unbroken tokens used to punch through
-            the card border, long ones grew the shrink-0 card unbounded.
-            The tool name no longer rides here — the heading carries it. */}
-        <p id={descId} className="max-h-40 select-text overflow-y-auto break-words text-foreground/90">
-          {approval.title}
-        </p>
-        {primary && (
-          <p className="text-ui-caption text-muted-foreground">
-            <FileRef path={primary.path} line={primary.line} />
+      {/* Scroll body: takes whatever is left after the shrink-0 header /
+          countdown / actions and scrolls internally. The wire title is
+          uncapped (whole shell commands / descriptions), so it belongs in
+          here rather than in a nested scroll cap. The tool name no longer
+          rides here — the heading carries it. */}
+      <div className="min-h-0 flex-auto overflow-y-auto">
+        <div className="space-y-2 px-3 py-3 text-ui-label">
+          {/* break-words: unbroken tokens used to punch through the card
+              border; wrapping keeps long shell commands inside. */}
+          <p id={descId} className="select-text break-words text-foreground/90">
+            {approval.title}
           </p>
+          {primary && (
+            <p className="text-ui-caption text-muted-foreground">
+              <FileRef path={primary.path} line={primary.line} />
+            </p>
+          )}
+        </div>
+        {/* Pre-execution diff preview (edit tools only): the wire request
+            itself carries old/new text, so the user approves the CHANGE, not
+            a title. Read-only DiffView — hunk editing belongs to the
+            post-completion tool card, not the approval gate.
+            Height: a coarse cap only. The card is already capped by the
+            overlay, so guessing from 100vh (which ignored the header and the
+            Super Agent board) is wrong; 45vh keeps the diff scrollable while
+            leaving room for the header/countdown/actions below. */}
+        {approval.diff && (
+          <div className="border-t border-border/60">
+            <DiffView diff={approval.diff} maxHeightClass="max-h-[45vh]" />
+          </div>
         )}
       </div>
-      {/* Pre-execution diff preview (edit tools only): the wire request itself
-          carries old/new text, so the user approves the CHANGE, not a title.
-          Read-only DiffView — hunk editing belongs to the post-completion
-          tool card, not the approval gate. */}
-      {approval.diff && (
-        <div className="border-t border-border/60">
-          <DiffView diff={approval.diff} maxHeightClass="max-h-[max(120px,calc(100vh-360px))]" />
-        </div>
-      )}
-      <CountdownBar
-        deadline={approval.deadline}
-        timeoutMs={approval.timeoutMs}
-        quietLabel={t("自动拒绝")}
-      />
-      <div ref={actionsRef} role="group" aria-label={t("审批操作")} className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
+      <div className="shrink-0">
+        <CountdownBar
+          deadline={approval.deadline}
+          timeoutMs={approval.timeoutMs}
+          quietLabel={t("自动拒绝")}
+        />
+      </div>
+      <div ref={actionsRef} role="group" aria-label={t("审批操作")} className="flex shrink-0 flex-wrap gap-1.5 border-t border-border/60 px-3 py-2">
         {options.map((opt) => {
           const label = OPTION_LABEL[opt.kind] ?? opt.name;
           const isSafeSide = rejectOption?.optionId === opt.optionId;
