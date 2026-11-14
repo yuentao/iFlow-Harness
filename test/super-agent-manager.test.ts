@@ -230,6 +230,8 @@ interface Harness {
     failed: boolean;
     detail: string;
   }[];
+  /** 「子会话在等你回答」的通知（宿主据此弹系统通知）。 */
+  needInputs: SuperSessionUi[];
 }
 
 function makeManager(
@@ -249,6 +251,7 @@ function makeManager(
   const transcripts: { sessionId: string; from: number; blocks: Block[] }[] = [];
   const needMerges: { session: SuperSessionUi; reason: string }[] = [];
   const mergeResults: Harness["mergeResults"] = [];
+  const needInputs: SuperSessionUi[] = [];
   const manager = new SuperAgentManager({
     repoRoot,
     createClient: async (params) => {
@@ -266,6 +269,9 @@ function makeManager(
     },
     onReport: (entries) => {
       reports.push(...entries);
+    },
+    onNeedInput: (session) => {
+      needInputs.push(session);
     },
     onNeedAgentMerge: (session, reason) => {
       needMerges.push({ session, reason });
@@ -286,7 +292,7 @@ function makeManager(
     maxWorktrees: () => options.maxWorktrees ?? 10,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   });
-  return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults };
+  return { manager, clients, sessions, reports, transcripts, needMerges, mergeResults, needInputs };
 }
 
 /**
@@ -467,6 +473,89 @@ describe("super agent · 编排", () => {
     expect((answered as { answers: Record<string, string> }).answers).toEqual({ 方案: "A" });
     expect(harness.sessions[0]?.status).toBe("running");
     expect(harness.sessions[0]?.pending).toBeUndefined();
+  }, 30000);
+
+  it("子会话开始等你回答时通知一次 onNeedInput（宿主据此弹系统通知）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    expect(harness.needInputs).toHaveLength(0);
+
+    const questions: UserQuestion[] = [
+      { header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A" }] },
+    ];
+    const pendingCall = harness.clients[0]!.callbacks.onUserQuestions?.({
+      sessionId: "sub-1",
+      questions,
+    } as never);
+
+    await until(() => harness.sessions[0]?.status === "awaiting_input");
+    // 恰好一次，且带的是子会话记录（宿主用它取标题）。
+    expect(harness.needInputs).toHaveLength(1);
+    expect(harness.needInputs[0]?.title).toBe("改登录");
+    expect(harness.needInputs[0]?.pending?.kind).toBe("question");
+
+    // 应答后不再有第二次通知。
+    harness.manager.respond(harness.sessions[0]!.id, { answers: { 方案: "A" } });
+    await pendingCall;
+    expect(harness.needInputs).toHaveLength(1);
+  }, 30000);
+
+  it("同一 pending 的重复 apply 不重复通知", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+
+    const pendingCall = harness.clients[0]!.callbacks.onUserQuestions?.({
+      sessionId: "sub-1",
+      questions: [{ header: "方案", question: "用哪个方案？", multiSelect: false, options: [{ label: "A" }] }],
+    } as never);
+    await until(() => harness.sessions[0]?.status === "awaiting_input");
+    expect(harness.needInputs).toHaveLength(1);
+
+    // 同一个 pending 再 apply 一次（看板重放 / 迟到事件）：用户已经看到这条
+    // 通知了，不该再被惊动。
+    const pending = harness.sessions[0]!.pending!;
+    (harness.manager as unknown as {
+      apply: (id: string, event: { type: "needs_input"; pending: unknown; at: number }) => void;
+    }).apply(spawned.id, { type: "needs_input", pending, at: Date.now() });
+    expect(harness.needInputs).toHaveLength(1);
+
+    harness.manager.respond(spawned.id, { answers: { 方案: "A" } });
+    await pendingCall;
+  }, 30000);
+
+  it("恢复出来的历史子会话收到 needs_input 也不通知", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-old",
+        title: "上次没跑完的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+
+    (harness.manager as unknown as {
+      apply: (id: string, event: { type: "needs_input"; pending: unknown; at: number }) => void;
+    }).apply("super-old", {
+      type: "needs_input",
+      pending: { kind: "question", requestId: "q1", questions: [], deadline: 0, timeoutMs: 0 },
+      at: Date.now(),
+    });
+
+    // 历史子会话没有进程，也不在看板上等你回答 —— 不该弹通知。
+    expect(harness.needInputs).toHaveLength(0);
+    expect(harness.manager.get("super-old")?.status).toBe("cancelled");
   }, 30000);
 
   it("任务说明连同工作目录一起交给子会话", async () => {
