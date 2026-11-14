@@ -215,6 +215,37 @@ describe("PendingCards", () => {
     expect(counter().textContent).toContain("还有 2 个待处理");
   });
 
+  it("同一 kind 换实例（新 id）：新卡成为堆顶，旧实例的戳不残留", () => {
+    render({ pendingApproval: APPROVAL, pendingQuestions: QUESTIONS });
+    // Question arrived second → it is the fully visible card.
+    expect(slot("questions").getAttribute("aria-hidden")).toBeNull();
+    expect(slot("approval").getAttribute("aria-hidden")).toBe("true");
+
+    // The host replaces the approval with ANOTHER approval (same kind, new id)
+    // inside one render cycle. Arrival order is keyed on the instance, so B is
+    // newer than the question and must take the top spot; a kind-only key
+    // would keep the stale stamp and leave the question on top.
+    const APPROVAL_B: PendingApprovalUi = { ...APPROVAL, id: "approval-2", title: "Write b.ts" };
+    render({ pendingApproval: APPROVAL_B, pendingQuestions: QUESTIONS });
+
+    const top = slot("approval");
+    expect(top.getAttribute("aria-hidden")).toBeNull();
+    expect(top.hasAttribute("inert")).toBe(false);
+    expect(top.style.height).toBe("");
+    expect(top.textContent).toContain("Write b.ts");
+    expect(slot("questions").getAttribute("aria-hidden")).toBe("true");
+    expect(slot("questions").style.height).toBe("8px");
+    expect(counter().textContent).toContain("还有 1 个待处理");
+
+    // Stale-key sweep: drop the approval, then bring the ORIGINAL A back. It
+    // must get a fresh stamp (beating the older question), which only holds if
+    // A's key was deleted when B replaced it.
+    render({ pendingQuestions: QUESTIONS });
+    render({ pendingApproval: APPROVAL, pendingQuestions: QUESTIONS });
+    expect(slot("approval").getAttribute("aria-hidden")).toBeNull();
+    expect(slot("questions").getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("三卡清空回到初始态：无残留卡片/计数器，清掉 --pending-card-h", () => {
     arriveAllThree();
     act(() => counter().click()); // expanded → reset must also collapse

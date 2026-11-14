@@ -33,16 +33,26 @@ import { QuestionCard } from "./QuestionCard";
  * reordering DOM nodes (a move would drop focus and could remount cards).
  *
  * Newest-arrival detection: the three pending fields carry no timestamps, so
- * each kind gets a monotonic stamp the first time it appears
- * (`useRef<Map<kind, number>>`), cleared when the kind disappears. A fixed
- * priority would be wrong — e.g. a question that arrives after an approval
- * must be the one fully visible.
+ * each pending INSTANCE gets a monotonic stamp the first time it appears
+ * (`useRef<Map<instanceKey, number>>`), dropped when the instance disappears.
+ * The key MUST include the id, not just the kind: the host can swap one
+ * pending card for another of the same kind within a single snapshot
+ * (approval A → approval B, same `kind`, new `id`), and a kind-only key would
+ * keep the stale stamp so the replacement never reaches the top. A fixed
+ * priority would be wrong too — e.g. a question that arrives after an
+ * approval must be the one fully visible.
  */
 
 type PendingKind = "approval" | "planExit" | "questions";
 
 interface PendingEntry {
   kind: PendingKind;
+  /**
+   * Identity of this pending instance (`${kind}:${id}`), stable while the host
+   * keeps the same request and different once it replaces it. Used only for
+   * arrival ordering; the DOM stays keyed by `kind` so cards never remount.
+   */
+  key: string;
   /** Card heading, used for the counter's accessible name. */
   summary: string;
   node: ReactNode;
@@ -65,7 +75,7 @@ export function PendingCards({
   const listId = useId();
   const overlayRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLElement | null>(null);
-  const stampsRef = useRef<Map<PendingKind, number>>(new Map());
+  const stampsRef = useRef<Map<string, number>>(new Map());
   const stampSeqRef = useRef(0);
 
   // Stable DOM order (approval → planExit → questions) so React never moves a
@@ -73,35 +83,53 @@ export function PendingCards({
   const present = useMemo<PendingEntry[]>(() => {
     const list: PendingEntry[] = [];
     if (pendingApproval) {
-      list.push({ kind: "approval", summary: t("iFlow 请求执行"), node: <ApprovalCard approval={pendingApproval} /> });
+      list.push({
+        kind: "approval",
+        key: `approval:${pendingApproval.id}`,
+        summary: t("iFlow 请求执行"),
+        node: <ApprovalCard approval={pendingApproval} />,
+      });
     }
     if (pendingPlanExit) {
       list.push({
         kind: "planExit",
+        key: `planExit:${pendingPlanExit.id}`,
         summary: t("iFlow 请求退出 Plan 模式"),
         node: <PlanExitCard pending={pendingPlanExit} />,
       });
     }
     if (pendingQuestions) {
-      list.push({ kind: "questions", summary: t("iFlow 需要你的回答"), node: <QuestionCard pending={pendingQuestions} /> });
+      list.push({
+        kind: "questions",
+        key: `questions:${pendingQuestions.id}`,
+        summary: t("iFlow 需要你的回答"),
+        node: <QuestionCard pending={pendingQuestions} />,
+      });
     }
     return list;
   }, [pendingApproval, pendingPlanExit, pendingQuestions]);
 
-  // Stamp on first appearance, drop when the kind disappears, then rank by
-  // stamp. Runs during render (idempotent) so the very first paint already
-  // knows which card is the newest — an effect would flash the wrong top card.
+  // Stamp on first appearance, drop every key that is no longer present, then
+  // rank by stamp. Keying on `${kind}:${id}` is what makes a same-kind
+  // replacement (approval A → approval B) count as a fresh arrival; the sweep
+  // deletes the old instance's key in the same pass, so the map cannot grow
+  // across replacements. Runs during render (idempotent) so the very first
+  // paint already knows which card is the newest — an effect would flash the
+  // wrong top card.
   const { topKind, hiddenKinds } = useMemo(() => {
     const stamps = stampsRef.current;
-    const kinds = present.map((entry) => entry.kind);
-    for (const kind of kinds) {
-      if (!stamps.has(kind)) stamps.set(kind, ++stampSeqRef.current);
+    const keys = present.map((entry) => entry.key);
+    for (const key of keys) {
+      if (!stamps.has(key)) stamps.set(key, ++stampSeqRef.current);
     }
-    for (const kind of [...stamps.keys()]) {
-      if (!kinds.includes(kind)) stamps.delete(kind);
+    for (const key of [...stamps.keys()]) {
+      if (!keys.includes(key)) stamps.delete(key);
     }
-    const ranked = [...kinds].sort((a, b) => (stamps.get(b) ?? 0) - (stamps.get(a) ?? 0));
-    return { topKind: ranked[0], hiddenKinds: ranked.slice(1) };
+    const ranked = [...present].sort((a, b) => (stamps.get(b.key) ?? 0) - (stamps.get(a.key) ?? 0));
+    return {
+      topKind: ranked[0]?.kind,
+      hiddenKinds: ranked.slice(1).map((entry) => entry.kind),
+    };
   }, [present]);
 
   const count = present.length;
