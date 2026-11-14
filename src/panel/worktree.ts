@@ -46,9 +46,29 @@ import {
 
 const execFileAsync = promisify(execFileCb);
 
-/** 单条 git 命令的超时。worktree add 可能会 checkout 一棵大目录树。 */
+/** 单条 git 命令的默认超时（只读探测、提交、合并等，都是秒级操作）。 */
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER = 16 * 1024 * 1024;
+
+/**
+ * `git worktree add` 单独的超时。
+ *
+ * 它是唯一会把整棵工作树写进磁盘的命令：大仓库 + 并发 checkout + 杀软扫描，
+ * 30s 是**能跑完**的常见耗时而不是天花板，共用 30s 会把「慢」误判成「坏」。
+ * 更长的超时只影响卡死场景的报错延迟，不影响正常路径。
+ */
+export const WORKTREE_CREATE_TIMEOUT_MS = 120_000;
+
+/**
+ * worktree 创建失败后的重试退避（毫秒），共 3 次尝试 = 首次 + 2 次重试。
+ *
+ * 首次失败多半是瞬时冲突（并发 checkout / 杀软刚锁住刚建的目录 / 索引写
+ * 竞争），隔一点时间再试通常就过去了。
+ */
+const WORKTREE_CREATE_RETRY_DELAYS_MS = [300, 1_000];
+
+/** worktree 创建的最大尝试次数（首次 + 两次重试）。 */
+const WORKTREE_CREATE_MAX_ATTEMPTS = 3;
 
 /** worktree 分支的命名空间（与用户的分支隔开，清理时可整体识别）。 */
 export const SUPER_BRANCH_PREFIX = "iflow/super/";
@@ -478,8 +498,164 @@ export interface WorktreeCreateResult {
   path: string;
   branch: string;
   baseRef: string;
+  /** 建出 worktree 用掉的尝试次数（1 = 一次成功；重试成功时 > 1）。 */
+  attempts: number;
   /** worktree 内依赖预置的结果（最好努力；跳过 / 失败都不影响 worktree 可用）。 */
   dependencies?: DependencyPresetResult;
+}
+
+/** 跑一条 git 命令（单测注入用；生产代码走真实 git）。 */
+export type WorktreeGitRunner = (
+  cwd: string,
+  args: string[],
+  timeoutMs: number,
+) => Promise<{ stdout: string; stderr: string }>;
+
+const defaultGitRunner: WorktreeGitRunner = (cwd, args, timeoutMs) =>
+  git(cwd, args, { timeoutMs });
+
+/**
+ * `createWorktree` 的可注入依赖（**仅供单测**；生产代码一律不传）。
+ *
+ * 抽成注入而不是 mock 整个模块：重试、清理、串行化都是**本模块内部**的行为，
+ * 注入让测试能精确制造「第一次 git 失败」这种真实世界里偶发、但没法稳定
+ * 复现的场景。
+ */
+export interface WorktreeCreateDeps {
+  gitRunner?: WorktreeGitRunner;
+  /** 删除目录（默认 `fs.rm` 递归，不跟随链接）。 */
+  removeDir?: (targetPath: string) => Promise<void>;
+  /** 平台判定（默认 `process.platform`）：决定是否带 `-c core.longpaths=true`。 */
+  platform?: NodeJS.Platform;
+  /** 重试退避序列（默认 300ms / 1000ms；测试注入空数组免等待）。 */
+  retryDelaysMs?: number[];
+}
+
+/**
+ * 创建串行化的模块级 promise 链。
+ *
+ * 多个子会话同时 prepare 时会并发走到这里：并发 `git worktree add` 会在同一个
+ * 仓库里争 index / 锁目录（实测同一瞬间三个任务失败，unique 后缀只差几毫秒），
+ * 紧随其后的依赖预置还会并发建三万级硬链接。串起来以后每个 worktree 都是
+ * 「建目录 → checkout → 预置依赖」完整跑完，下一个才开始。
+ *
+ * 链在失败后必须继续可用：`createLock` 接的是**吞掉错误**的 promise，某次
+ * 创建失败不会让后续调用永久挂起（调用方拿到的 `run` 仍然如实 reject）。
+ * 只读探测（`probeGitRepo` 等）不进这条链 —— 它们不写仓库，没有争用。
+ */
+let createLock: Promise<unknown> = Promise.resolve();
+
+function withCreateLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = createLock.then(task, task);
+  createLock = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * `git worktree add` 的参数。
+ *
+ * `-c core.longpaths=true` 是**全局**选项，必须排在 `worktree` 子命令之前；
+ * 只在 Windows 上加 —— 深层路径（node_modules 里的链接树之类）很容易超过
+ * 260 字符，git 默认按短路径处理，checkout 中途就会失败。
+ */
+function worktreeAddArgs(
+  options: { targetPath: string; branch: string; baseRef: string },
+  platform: NodeJS.Platform,
+): string[] {
+  const args: string[] = [];
+  if (platform === "win32") args.push("-c", "core.longpaths=true");
+  args.push(
+    "worktree",
+    "add",
+    "-b",
+    options.branch,
+    gitPath(options.targetPath),
+    options.baseRef,
+  );
+  return args;
+}
+
+/**
+ * 清掉一次失败尝试的现场：残留目录、worktree 元数据、以及**空**分支。
+ *
+ * `git worktree add` 失败时可能已经建了一半目录，也可能已经建出分支却没能
+ * 登记 worktree —— 不清理的话下一次尝试会撞上「目录已存在」，或者留下一个
+ * 指向 baseRef 的空分支占着名字。
+ *
+ * 分支只在**它的 sha 与 baseRef 完全相同**时才删：那说明它是本次失败尝试刚
+ * 建出来的空分支；一旦有独有提交（子会话的工作）就绝不删。
+ */
+async function cleanupFailedWorktree(options: {
+  repoRoot: string;
+  targetPath: string;
+  branch: string;
+  baseRef: string;
+  runGit: WorktreeGitRunner;
+  removeDir: (targetPath: string) => Promise<void>;
+}): Promise<void> {
+  await options.removeDir(options.targetPath).catch(() => undefined);
+  await options
+    .runGit(options.repoRoot, ["worktree", "prune"], GIT_TIMEOUT_MS)
+    .catch(() => undefined);
+  try {
+    const branchSha = (
+      await options.runGit(
+        options.repoRoot,
+        ["rev-parse", "--verify", `refs/heads/${options.branch}`],
+        GIT_TIMEOUT_MS,
+      )
+    ).stdout.trim();
+    if (!branchSha) return;
+    const baseSha = (
+      await options.runGit(
+        options.repoRoot,
+        ["rev-parse", "--verify", options.baseRef],
+        GIT_TIMEOUT_MS,
+      )
+    ).stdout.trim();
+    // 分支上有独有提交 → 那是工作，不是残留，绝不删。
+    if (!baseSha || branchSha !== baseSha) return;
+    await options.runGit(
+      options.repoRoot,
+      ["branch", "-D", options.branch],
+      GIT_TIMEOUT_MS,
+    );
+  } catch {
+    // 分支不存在（首次尝试就没建出来）/ 删除失败：下一次尝试自己会处理。
+  }
+}
+
+/**
+ * 丢弃一个建失败的 worktree 现场（目录 + 元数据 + 空分支）。
+ *
+ * 给 `createWorktree` 的内部重试与 `super-agent` 的降级兜底共用：即使
+ * `createWorktree` 已经清理过，降级前再确认一次也是幂等的（目录不存在时
+ * `rm -f` 直接返回，`prune` 对干净仓库是空操作）。
+ */
+export async function discardFailedWorktree(options: {
+  repoRoot: string;
+  targetPath: string;
+  branch?: string;
+  baseRef?: string;
+  /** 单测注入。 */
+  removeDir?: (targetPath: string) => Promise<void>;
+}): Promise<void> {
+  const removeDir = options.removeDir ?? defaultRemoveDir;
+  if (!options.branch) {
+    await removeDir(options.targetPath).catch(() => undefined);
+    await defaultGitRunner(options.repoRoot, ["worktree", "prune"], GIT_TIMEOUT_MS).catch(
+      () => undefined,
+    );
+    return;
+  }
+  await cleanupFailedWorktree({
+    repoRoot: options.repoRoot,
+    targetPath: options.targetPath,
+    branch: options.branch,
+    baseRef: options.baseRef ?? "HEAD",
+    runGit: defaultGitRunner,
+    removeDir,
+  });
 }
 
 /**
@@ -487,6 +663,14 @@ export interface WorktreeCreateResult {
  * `targetPath`。
  *
  * `targetPath` 必须**不存在**（git 的硬要求），因此调用方只建父目录。
+ *
+ * 三段纪律（都来自 2026-11 的实测事故：同一瞬间并发派发的三个子会话全部
+ * 建 worktree 失败，只能重派任务）：
+ *  1. **串行**：整段（mkdir + `worktree add` + 依赖预置）过模块级互斥链，
+ *     并发派发变成排队，不再并发 checkout / 并发建硬链接树；
+ *  2. **重试**：首次 + 2 次重试（300ms / 1000ms），每次失败先清现场（残留
+ *     目录、worktree 元数据、空分支）再重来；
+ *  3. **专用超时**：`worktree add` 用 120s，其余 git 命令仍是 30s。
  *
  * 建完立刻预置独立的 `node_modules`（硬链接树），并在**返回前** await 完成
  * —— 调用方拿到 worktree 就会 spawn 子会话，晚于这一步就来不及了。预置是
@@ -497,26 +681,50 @@ export async function createWorktree(options: {
   targetPath: string;
   branch: string;
   baseRef: string;
+  /** 单测注入（生产代码不传）。 */
+  deps?: WorktreeCreateDeps;
 }): Promise<WorktreeCreateResult> {
-  await mkdir(path.dirname(options.targetPath), { recursive: true });
-  await git(options.repoRoot, [
-    "worktree",
-    "add",
-    "-b",
-    options.branch,
-    gitPath(options.targetPath),
-    options.baseRef,
-  ]);
-  const dependencies = await presetWorktreeDependencies({
-    repoRoot: options.repoRoot,
-    worktreePath: options.targetPath,
+  const runGit = options.deps?.gitRunner ?? defaultGitRunner;
+  const removeDir = options.deps?.removeDir ?? defaultRemoveDir;
+  const platform = options.deps?.platform ?? process.platform;
+  const retryDelays = options.deps?.retryDelaysMs ?? WORKTREE_CREATE_RETRY_DELAYS_MS;
+  const args = worktreeAddArgs(options, platform);
+
+  return withCreateLock(async () => {
+    await mkdir(path.dirname(options.targetPath), { recursive: true });
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= WORKTREE_CREATE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await runGit(options.repoRoot, args, WORKTREE_CREATE_TIMEOUT_MS);
+        const dependencies = await presetWorktreeDependencies({
+          repoRoot: options.repoRoot,
+          worktreePath: options.targetPath,
+        });
+        return {
+          path: options.targetPath,
+          branch: options.branch,
+          baseRef: options.baseRef,
+          attempts: attempt,
+          dependencies,
+        };
+      } catch (error) {
+        lastError = error;
+        await cleanupFailedWorktree({
+          repoRoot: options.repoRoot,
+          targetPath: options.targetPath,
+          branch: options.branch,
+          baseRef: options.baseRef,
+          runGit,
+          removeDir,
+        });
+        const delay = retryDelays[attempt - 1];
+        if (delay !== undefined) await sleep(delay);
+      }
+    }
+    throw new Error(
+      `worktree creation failed after ${WORKTREE_CREATE_MAX_ATTEMPTS} attempts: ${errorMessage(lastError)}`,
+    );
   });
-  return {
-    path: options.targetPath,
-    branch: options.branch,
-    baseRef: options.baseRef,
-    dependencies,
-  };
 }
 
 /** worktree 是否还有未合并到 baseRef 的提交。 */
@@ -1198,10 +1406,14 @@ export async function listWorktrees(repoRoot: string): Promise<{ path: string; b
   }
 }
 
-async function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+async function git(
+  cwd: string,
+  args: string[],
+  options?: { timeoutMs?: number },
+): Promise<{ stdout: string; stderr: string }> {
   const result = await execFileAsync("git", args, {
     cwd,
-    timeout: GIT_TIMEOUT_MS,
+    timeout: options?.timeoutMs ?? GIT_TIMEOUT_MS,
     windowsHide: true,
     maxBuffer: GIT_MAX_BUFFER,
     encoding: "utf8",

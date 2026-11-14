@@ -91,6 +91,7 @@ import {
   createPullRequest,
   createWorktree,
   currentBranch,
+  discardFailedWorktree,
   ensureSuperIsolationIgnored,
   ghAvailable,
   inspectWorkingTree,
@@ -1138,8 +1139,19 @@ export class SuperAgentManager {
         } catch (error) {
           // 建 worktree 失败不能让整个委派失败 —— 退回目录隔离，并把真实原因
           // 交给子会话与看板（否则它只看到「空目录、不是 git 仓库」）。
-          const reason = truncateForPrompt(errorMessage(error).replace(/\s+/g, " "), 200);
-          this.deps.log.warn(`worktree 创建失败，退回目录隔离：${reason}`);
+          const fullReason = errorMessage(error);
+          // 降级前再确认一次现场已清干净：残留目录会让下一次重试直接撞上
+          // 「目录已存在」，空分支则占着分支名。清理是幂等的。
+          await discardFailedWorktree({
+            repoRoot: this.deps.repoRoot,
+            targetPath: target,
+            branch,
+            baseRef: probe.head,
+          });
+          // 日志保留**完整** stderr（多次重试后最后一次的原文），排查时才看得
+          // 出 git 到底抱怨什么；看板 note 仍截断到 200 字符。
+          const reason = truncateForPrompt(fullReason.replace(/\s+/g, " "), 200);
+          this.deps.log.warn(`worktree 创建失败，退回目录隔离：\n${fullReason}`);
           const dir = path.join(superIsolationDir(this.deps.repoRoot, "dirs"), `${slug}-${unique}`);
           await mkdir(dir, { recursive: true });
           isolation = {
