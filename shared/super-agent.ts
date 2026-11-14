@@ -2929,7 +2929,18 @@ export interface SuperActionScan {
    * （下一帧就可能补齐），后者必须留痕。
    */
   pending: boolean;
+  /**
+   * 停在未闭合围栏上时，那段**没收完**的正文（截断到 {@link MAX_PENDING_BODY_CHARS}）。
+   *
+   * 宿主用它把「动作块没被执行」变成一条**有内容**的日志（不再是一句
+   * 「扫到围栏却零动作」的空话）：回合都结束了还停在这里，说明这个动作块
+   * 永远不会被执行 —— 旧实现对此完全静默。
+   */
+  pendingBody?: string;
 }
+
+/** pending 正文在日志里最多留多少字符。 */
+export const MAX_PENDING_BODY_CHARS = 400;
 
 /**
  * 动作围栏的扫描边界：下一个协议围栏开栏之前。
@@ -2945,25 +2956,60 @@ function actionsFenceLimit(text: string, open: SuperDirectiveOpen): number {
   return next ? next.lineStart : text.length;
 }
 
-/** 在「下一个协议围栏之前」解析一个动作围栏（收栏不会越界到后面的块）。 */
-function resolveActionsFence(text: string, open: SuperDirectiveOpen): SuperDirectiveResolution {
+/**
+ * 在「下一个协议围栏之前」解析一个动作围栏（收栏不会越界到后面的块）。
+ *
+ * `allowImplicitClose` **默认关闭**：围栏还没写完时不能提前执行（流式中间态
+ * 的硬不变量 —— 见 `test/super-agent.test.ts`「未闭合的块不提前执行」）。
+ * 只有在「后面确实还有一个完整协议围栏」时，调用方才确认这个开栏已经被模型
+ * 放弃（漏了收栏），这时才按载荷收尾收口 —— 与委派侧的做法一致。
+ *
+ * 真实故障（2026-11-14）：主会话先发一个**漏收栏**的动作块，紧接着发一个委派
+ * 块。动作块的收栏搜索被委派块的开栏截断（`actionsFenceLimit`），载荷写全却
+ * 找不到收栏 → 判「未闭合」→ 扫描停在 pending → 动作永远不执行，且零日志零
+ * 提示（用户重发一次才生效）。
+ */
+function resolveActionsFence(
+  text: string,
+  open: SuperDirectiveOpen,
+  options?: { allowImplicitClose?: boolean },
+): SuperDirectiveResolution {
   const limit = actionsFenceLimit(text, open);
   return resolveSuperDirectiveBlock(limit < text.length ? text.slice(0, limit) : text, open, {
     language: "super-agent-actions",
+    ...(options?.allowImplicitClose === true ? { allowImplicitClose: true } : {}),
   });
 }
 
+/** 放弃围栏的探测上限（连续几个被放弃的开栏后面跟一个完整块时，也要能跳过去）。 */
+const MAX_ABANDONED_FENCE_PROBES = 8;
+
 /**
- * 这个开栏之后是否已经出现一个**完整**的动作围栏。
+ * 这个开栏之后是否已经出现一个**完整**的协议围栏（任意 `super-agent*` 语言）。
  *
  * 是 → 当前这个开栏被模型放弃了（漏了收栏 / 只在工具调用式包裹里写了一半）：
  * 一个真正还在流式输出的围栏后面不可能已经有一个完整围栏，所以此时可以安全
  * 跳过它继续扫，而不是把扫描永久钉在这里。
+ *
+ * **放宽到「任意协议围栏」**（2026-11-14）：旧实现只认 `super-agent-actions`。
+ * 动作块后面紧跟一个**委派**围栏时（模型漏收栏的真实形态），委派围栏不算数 →
+ * 扫描被永久钉在 pending → 动作既不执行也不留任何痕迹（静默丢弃）。
  */
-function hasLaterClosedActionsFence(text: string, open: SuperDirectiveOpen): boolean {
-  const next = findSuperFenceOpen(text, open.bodyStart, (language) => language === "super-agent-actions");
-  if (!next) return false;
-  return resolveActionsFence(text, next).kind === "closed";
+function hasLaterClosedSuperFence(text: string, open: SuperDirectiveOpen): boolean {
+  let cursor = open.bodyStart;
+  for (let probe = 0; probe < MAX_ABANDONED_FENCE_PROBES; probe++) {
+    const next = findSuperFenceOpen(text, cursor, () => true);
+    if (!next) return false;
+    // 探测「后面那个围栏是不是真的完整」：动作围栏按动作侧的规则解析，其余
+    // 按委派侧的规则解析（都不带隐式收口 —— 这里要的是「真的有收栏」）。
+    const resolved =
+      next.language === "super-agent-actions"
+        ? resolveActionsFence(text, next)
+        : resolveSuperDirectiveBlock(text, next, { language: next.language });
+    if (resolved.kind === "closed") return true;
+    cursor = next.bodyStart;
+  }
+  return false;
 }
 
 /**
@@ -3009,23 +3055,43 @@ export function extractSuperActions(text: string, fromOffset = 0): SuperActionSc
   let cursor = fromOffset;
   let sawFence = false;
   let pending = false;
+  let pendingBody: string | undefined;
 
   while (cursor < text.length) {
     const open = findSuperFenceOpen(text, cursor, (language) => language === "super-agent-actions");
     if (!open) break;
     sawFence = true;
-    const resolved = resolveActionsFence(text, open);
+    let resolved = resolveActionsFence(text, open);
     if (resolved.kind === "unclosed") {
-      // 后面已经有一个完整动作块 → 这个开栏被放弃了，跳过它继续扫（不推进
-      // end：它本身没有被解析，消费偏移不能越过它身后的合法围栏）。
-      if (hasLaterClosedActionsFence(text, open)) {
-        cursor = open.bodyStart;
-        continue;
+      // 后面已经有一个完整**协议**围栏（任意 super-agent* 语言）→ 这个开栏被
+      // 模型放弃了（漏了收栏）：按载荷收尾收口照常执行 —— 一份写全了的动作
+      // 不该因为漏写一个收栏被静默丢掉（真实故障 2026-11-14：动作块漏收栏 +
+      // 紧跟一个委派块 → 旧实现判 pending → cancel 被静默丢弃）。
+      //
+      // 判据必须包含委派围栏：旧实现只认 `super-agent-actions`，委派围栏不算数
+      // → 扫描被永久钉在 pending（动作既不执行也不留任何痕迹）。
+      //
+      // 反过来，**没有**后面的完整围栏时它就是流式中间态：围栏还没写完，
+      // 不能提前执行半截动作（`test/super-agent.test.ts` 的硬不变量）。
+      if (hasLaterClosedSuperFence(text, open)) {
+        const implicit = resolveActionsFence(text, open, { allowImplicitClose: true });
+        if (implicit.kind !== "closed") {
+          // 载荷本身没写全 → 跳过这个被放弃的开栏继续扫（不推进 end：它本身
+          // 没有被解析，消费偏移不能越过它身后的合法围栏）。
+          cursor = open.bodyStart;
+          continue;
+        }
+        resolved = implicit;
+      } else {
+        // 真的还在流式输出 —— 停在开栏处，等后续 chunk 补齐。
+        pending = true;
+        // 没收完的正文：宿主据此留痕（「动作块没被执行」必须有内容，不能是空话）。
+        pendingBody = text
+          .slice(open.bodyStart, Math.min(text.length, open.bodyStart + MAX_PENDING_BODY_CHARS))
+          .trim();
+        if (open.lineStart > end) end = open.lineStart;
+        break;
       }
-      // 真的还在流式输出 —— 停在开栏处，等后续 chunk 补齐，不能提前执行半截动作。
-      pending = true;
-      if (open.lineStart > end) end = open.lineStart;
-      break;
     }
     const parsed = parseActionBody(resolved.body);
     if (parsed === null) invalidBlocks.push(resolved.body);
@@ -3036,7 +3102,14 @@ export function extractSuperActions(text: string, fromOffset = 0): SuperActionSc
     if (consumed > end) end = consumed;
   }
 
-  return { actions: actions.slice(0, MAX_SUPER_ACTIONS), invalidBlocks, end, sawFence, pending };
+  return {
+    actions: actions.slice(0, MAX_SUPER_ACTIONS),
+    invalidBlocks,
+    end,
+    sawFence,
+    pending,
+    ...(pendingBody ? { pendingBody } : {}),
+  };
 }
 
 /** 解析动作块正文。null = 格式非法（要提示），[] = 合法但无可执行动作（静默）。 */
@@ -3185,6 +3258,74 @@ export function buildSuperReportPrompt(
       : [
           "Finally give the user one complete report: what each child session did, the conclusion, where the changes went, and any failures or remaining issues. Do not invent results that are not in the reports, and do not claim that you performed those changes yourself.",
         ]),
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 「子会话动作回执」提示词
+// ---------------------------------------------------------------------------
+
+/**
+ * 一次子会话管理动作的执行结果（回执用）。
+ *
+ * `ok` 的口径是「**意图是否达成**」，不是「宿主有没有真的动过手」：
+ * 对一个**已经是终态**的子会话再发一次 cancel，宿主什么都不用做，意图已经
+ * 达成 —— 那是幂等重复，**不算未生效**。只有「目标根本不存在」或「状态不适用」
+ * 才是真的没生效。
+ */
+export interface SuperActionReceipt {
+  /** 动作种类。 */
+  action: "retry" | "cancel" | "cleanup" | "answer";
+  /** 目标子会话 id。 */
+  sessionId: string;
+  /** 意图是否达成。 */
+  ok: boolean;
+  /** 结果分类（给主会话看的机器可读口径）。 */
+  reason: "applied" | "already-terminal" | "not-found" | "not-applicable";
+  /** 补充说明（英文，短句）。 */
+  detail?: string;
+}
+
+/** 动作种类的英文短标签（模型面向）。 */
+const SUPER_ACTION_LABEL_EN: Record<SuperActionReceipt["action"], string> = {
+  retry: "retry",
+  cancel: "cancel",
+  cleanup: "cleanup",
+  answer: "answer",
+};
+
+/**
+ * 构造「动作回执」提示词 —— 投给主会话的一次 hidden prompt。
+ *
+ * **为什么要回执**：主会话的看板摘要是**每轮开篇冻结**的，同一轮里它看不到
+ * 自己刚发的动作有没有生效 —— 于是它会**重复发同一个动作**（真实故障：cancel
+ * 了一个已经结束的子会话，主会话以为没生效，又发一次）。回执把结果直接送回
+ * 主会话的上下文，让它当场知道「这次生效了，别再发」。
+ *
+ * **正文是英文**：与子会话汇报提示词同款约定（子会话跑的是同一份英文系统提示）。
+ * 协议标记（`[子会话动作回执]`）保持原样：宿主与模型约定用它识别「这是回执」。
+ */
+export function buildSuperActionReceiptPrompt(receipts: readonly SuperActionReceipt[]): string {
+  if (receipts.length === 0) return "";
+  const lines = receipts.map((receipt) => {
+    const outcome =
+      receipt.reason === "applied"
+        ? "applied"
+        : receipt.reason === "already-terminal"
+          ? "already applied (idempotent) — the child session was already finished, so there was nothing left to stop"
+          : receipt.reason === "not-found"
+            ? "NOT applied — no such child session (it may have been cleaned up already)"
+            : "NOT applied — the child session is not in a state where this action applies";
+    const detail = receipt.detail ? ` (${receipt.detail})` : "";
+    return `- ${SUPER_ACTION_LABEL_EN[receipt.action]} child session #${receipt.sessionId}: ${outcome}${detail}`;
+  });
+  return [
+    "[子会话动作回执]",
+    "The host executed the child-session management actions from your previous message. This is not a user message, and it is not something you said earlier.",
+    ...lines,
+    "",
+    "Actions reported as applied — including idempotent repeats of an already-finished child session — must NOT be sent again: repeating them cannot change the outcome and only wastes a turn.",
+    "For an action that was NOT applied, check the board for the current child-session ids and send a corrected action instead of repeating the same one.",
   ].join("\n");
 }
 

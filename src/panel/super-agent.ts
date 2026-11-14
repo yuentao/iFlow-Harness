@@ -81,6 +81,7 @@ import {
   type SuperPending,
   type SuperReport,
   type SuperSessionUi,
+  type SuperStatus,
   type SuperTaskSpec,
   type SuperTodoUi,
   type SuperTokenUsage,
@@ -173,6 +174,24 @@ export interface SuperSweepResult {
   /** 疑似残留的目录（不在 git worktree 注册表里）—— 只记日志，不自动删。 */
   orphans: string[];
 }
+
+/**
+ * 「中断子会话」的结果。
+ *
+ * `ok` 的口径是「**意图是否达成**」，不是「宿主有没有真的动过手」：
+ *  - `cancelled`：真的中断了一个在跑的子会话；
+ *  - `already-terminal`：目标**已经是终态** —— 幂等重复，意图（「别再跑了」）
+ *    已经达成，宿主什么都不用做。**不是**「未生效」；
+ *  - `not-found`：目标根本不存在（可能已被清理）—— 这才是真的没生效。
+ *
+ * 把它单列出来，是因为「幂等重复」被报成「未生效」会让主会话以为动作失败，
+ * 然后**重复发同一个动作**（真实故障：主会话 cancel 一个早已结束的子会话，
+ * 看到「未生效」就又发一次）。
+ */
+export type SuperCancelOutcome =
+  | { ok: true; reason: "cancelled"; status: SuperStatus }
+  | { ok: true; reason: "already-terminal"; status: SuperStatus }
+  | { ok: false; reason: "not-found" };
 
 /** 扩展名 → MIME：复制来的图片除了落盘，也作为图片块直接给模型看。 */
 const IMAGE_MIME_BY_EXT = new Map<string, string>([
@@ -632,10 +651,22 @@ export class SuperAgentManager {
     return false;
   }
 
-  /** 中断一个子会话（终止其 CLI 进程与当前轮次）。 */
-  async cancel(id: string): Promise<boolean> {
+  /**
+   * 中断一个子会话（终止其 CLI 进程与当前轮次）。
+   *
+   * 返回**区分后的结果**：对一个**已经是终态**的子会话再发一次 cancel 是幂等
+   * 重复 —— 意图（「别再跑了」）已经达成，宿主什么都不用做。这**不是**「未生效」：
+   * 报成未生效会让主会话以为动作失败，然后**重复发同一个动作**（真实故障：
+   * cancel 了一个早已结束的子会话，主会话看不到生效，于是又发一次）。
+   * 只有「目标根本不存在」才是真的没生效。
+   */
+  async cancel(id: string): Promise<SuperCancelOutcome> {
     const session = this.sessions.get(id);
-    if (!session || isTerminalSuperStatus(session.status)) return false;
+    if (!session) return { ok: false, reason: "not-found" };
+    if (isTerminalSuperStatus(session.status)) {
+      // 幂等重复：目标已经不在跑 —— 意图已达成，如实说成「已终态」，不是失败。
+      return { ok: true, reason: "already-terminal", status: session.status };
+    }
     // 还在排队的话先撤掉 —— 否则槽位空出后 pump 会把它启动起来。
     this.dequeue(id);
     // 先记「这一轮被用户喊停」：收尾路径（代提交 + 自动合并）靠它决定
@@ -659,7 +690,7 @@ export class SuperAgentManager {
     // 这里补一次判定，否则来源子会话的 integration 会永远停在旧状态。
     if (!session.cliSessionId) await this.finalizeMergeChild(id);
     this.notifyReport(id);
-    return true;
+    return { ok: true, reason: "cancelled", status: "cancelled" };
   }
 
   /** 中断全部子会话，返回被中断的数量。 */
