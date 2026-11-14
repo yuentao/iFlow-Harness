@@ -274,8 +274,8 @@ describe("看板计数 chip 的可访问名", () => {
   });
 });
 
-describe("合并按钮的禁用原因可见", () => {
-  it("已合并时按钮置灰但原因可读（aria-disabled + title + 可见文案）", () => {
+describe("合并按钮的禁用原因", () => {
+  it("已合并时按钮置灰但原因可读（aria-disabled + title + aria-label）", () => {
     render([
       baseSession({
         id: "m",
@@ -298,8 +298,9 @@ describe("合并按钮的禁用原因可见", () => {
     expect(merge!.getAttribute("aria-disabled")).toBe("true");
     expect(merge!.getAttribute("title")).toContain("该子会话的改动已经合并");
     expect(merge!.getAttribute("aria-label")).toContain("该子会话的改动已经合并");
-    // 原因也直接写在行里，不依赖 hover。
-    expect(container.textContent).toContain("该子会话的改动已经合并");
+    // 原因不再逐行重复：规则统一收在看板头的帮助按钮里（见
+    // test/super-board-surface.test.tsx 的「看板帮助说明」用例）。
+    expect(container.textContent).not.toContain("该子会话的改动已经合并");
 
     // 置灰状态下点了也不能派发合并。
     act(() => merge!.click());

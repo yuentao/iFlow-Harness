@@ -755,8 +755,9 @@ describe("Super Agent 看板清理动作", () => {
     expect(btn.getAttribute("title")).toBe("子会话还在运行，先中断再清理");
     expect(btn.className).toContain("cursor-not-allowed");
     expect(btn.className).toContain("opacity-40");
-    // 理由在按钮下方可见，不只在 tooltip 里。
-    expect(container.textContent).toContain("子会话还在运行，先中断再清理");
+    // 理由不再逐行重复：行首状态 chip 已说明子会话还在运行，规则统一
+    // 收在看板头的帮助按钮里（见「看板帮助说明」那组用例）。
+    expect(container.textContent).not.toContain("子会话还在运行，先中断再清理");
 
     act(() => btn.click());
     expect(cleanupDialog()).toBeNull();
@@ -776,6 +777,40 @@ describe("Super Agent 看板清理动作", () => {
     const dialog = cleanupDialog();
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("删除子会话「修复登录跳转」的工作目录？");
+  });
+});
+
+describe("Super Agent 看板帮助说明", () => {
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("看板头的帮助按钮统一说明合并与清理规则", () => {
+    render();
+    expand();
+    // 行也展开：旧实现下那两句禁用原因就出现在这里，所以下面的
+    // not.toContain 断言才是有效的（行内详情区确实渲染了）。
+    act(() => rowTrigger().click());
+
+    // 展开面板 header 里的帮助按钮（HelpTip 的触发器）。
+    const tip = container.querySelector<HTMLButtonElement>('button[aria-label="看板说明"]');
+    expect(tip).toBeTruthy();
+    // 气泡是 hover / focus 才渲染的：focus 走 HelpTip 内部 button 的 onFocus。
+    act(() => tip!.focus());
+    const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(bubble).toBeTruthy();
+    // 免确认 / 合并规则 / 清理规则，一条一行，都在同一个气泡里。
+    expect(bubble!.textContent).toContain("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批");
+    expect(bubble!.textContent).toContain("子会话还在运行时不能合并");
+    expect(bubble!.textContent).toContain("子会话还在运行时不能清理");
+    // 规则只在这里说一次：行内不再重复那两句禁用原因。
+    expect(container.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
+    expect(container.textContent).not.toContain("子会话还在运行，先中断再清理");
   });
 });
 
