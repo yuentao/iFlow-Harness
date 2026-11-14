@@ -93,6 +93,13 @@ const en: Record<string, string> = {
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
   "工作目录与分支已清理": "Working directory and branch cleaned up",
+  "工作目录已回收，分支保留": "Working directory reclaimed; branch kept",
+  "工作目录 {0} 个": "{0} working directories",
+  "已结束 {0} 个可回收": "{0} finished and reclaimable",
+  "清理已结束": "Clean up finished",
+  "清理已结束的子会话": "Clean up finished child sessions",
+  "将删除 {0} 个子会话的工作目录；分支上一律保留（未合并的提交不会丢），工作目录里未提交的改动会被一并删除，无法恢复。":
+    "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in the working directories are deleted permanently.",
   "收起摘要": "Hide summary",
   "查看摘要": "Show summary",
   "查看实时操作": "Show live activity",

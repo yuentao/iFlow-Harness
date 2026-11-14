@@ -902,3 +902,120 @@ describe("Super Agent 看板面板的收起通道", () => {
     expect(control().getAttribute("aria-expanded")).toBe("false");
   });
 });
+
+describe("Super Agent 看板工作目录占用与批量清理", () => {
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 统计行里的「清理已结束」按钮（确认框里的同名按钮走 portal，不在 container 里）。 */
+  function bulkButton(): HTMLButtonElement | null {
+    return (
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (b) => (b.textContent ?? "").trim() === "清理已结束",
+      ) ?? null
+    );
+  }
+
+  /** 批量清理确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
+  const bulkDialog = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="清理已结束的子会话"]');
+
+  /** 已释放的隔离记录；recycled=true 表示目录已回收、分支仍保留。 */
+  function releasedIsolation(recycled: boolean): SuperSessionUi["isolation"] {
+    return {
+      kind: "git_worktree",
+      path: "/tmp/wt",
+      branch: "iflow/super/a",
+      released: true,
+      ...(recycled ? { recycled: true } : {}),
+    };
+  }
+
+  it("终态且未释放：显示占用与可回收计数，确认后逐个发出 cleanup", () => {
+    render([
+      session({ id: "super-a", title: "修复登录跳转", status: "completed", startedAt: 2000, endedAt: 4000 }),
+      session({ id: "super-b", title: "补充单测", status: "failed", startedAt: 2000, endedAt: 4000 }),
+    ]);
+    expand();
+
+    const text = panelRoot().textContent ?? "";
+    expect(text).toContain("工作目录 2 个");
+    expect(text).toContain("已结束 2 个可回收");
+
+    const btn = bulkButton();
+    expect(btn).toBeTruthy();
+    act(() => btn!.click());
+
+    const dialog = bulkDialog();
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain("将删除 2 个子会话的工作目录");
+    expect(dialog!.textContent).toContain("分支上一律保留");
+
+    const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "清理已结束",
+    );
+    expect(confirm).toBeTruthy();
+    act(() => confirm!.click());
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(1, {
+      type: "superAgent",
+      action: "cleanup",
+      sessionId: "super-a",
+    });
+    expect(send).toHaveBeenNthCalledWith(2, {
+      type: "superAgent",
+      action: "cleanup",
+      sessionId: "super-b",
+    });
+    expect(bulkDialog()).toBeNull();
+  });
+
+  it("运行中的子会话不计入可回收，也不出现「清理已结束」按钮", () => {
+    render([session({ status: "running", startedAt: 2000, updatedAt: 3000 })]);
+    expand();
+
+    const text = panelRoot().textContent ?? "";
+    expect(text).toContain("工作目录 1 个");
+    expect(text).toContain("已结束 0 个可回收");
+    expect(bulkButton()).toBeNull();
+    expect(bulkDialog()).toBeNull();
+  });
+
+  it("全部已释放时计数行不渲染", () => {
+    render([
+      session({
+        status: "completed",
+        startedAt: 2000,
+        endedAt: 4000,
+        isolation: releasedIsolation(true),
+      }),
+    ]);
+    expand();
+
+    expect(panelRoot().textContent ?? "").not.toContain("个可回收");
+    expect(bulkButton()).toBeNull();
+  });
+
+  it("recycled 的子会话展开后说「工作目录已回收，分支保留」", () => {
+    render([
+      session({
+        status: "completed",
+        startedAt: 2000,
+        endedAt: 4000,
+        isolation: releasedIsolation(true),
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    expect(container.textContent).toContain("工作目录已回收，分支保留");
+    expect(container.textContent).not.toContain("工作目录与分支已清理");
+  });
+});
