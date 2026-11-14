@@ -246,9 +246,10 @@ export function App() {
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
   const compressing = useChat((s) => s.state?.compressing ?? false);
-  // 宿主正在等子会话汇报：顶栏显示忙碌 chip，并禁用「新会话」（等待期新建
-  // 会话会让排队里的汇报落到已被替换的会话上）。它是 orthogonal 于 status 的
-  // 标记，所以等待期用户仍然可以发消息、由主会话响应。
+  // 宿主正在等子会话汇报：禁用顶栏「新会话」（等待期新建会话会让排队里的
+  // 汇报落到已被替换的会话上）。它是 orthogonal 于 status 的标记，所以等待期
+  // 用户仍然可以发消息、由主会话响应。顶栏不再为它渲染忙碌 chip —— 忙碌信号
+  // 由转录底部浮动 pill 与子会话看板计数承担。
   const superWaiting = useChat((s) => s.state?.superWaiting ?? false);
   // 子会话仍在跑（非终态）时，切换会话 / 模型 / API 配置会让在途的子会话用错
   // 凭据或模型，或让汇报落到已被替换的主会话。与 superWaiting 分开判定：后者
