@@ -1,5 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreIssues": {
+    "shared/messages.ts": ["exports", "types"],
+    "src/acp/protocol.ts": ["exports", "types"],
+    "src/acp/jsonrpc.ts": ["exports", "types"]
+  },
   "workspaces": {
     ".": {
       "entry": [
@@ -15,11 +20,6 @@
       ],
       "ignoreExportsUsedInFile": true,
       "ignoreDependencies": ["node-notifier"],
-      "ignoreIssues": {
-        "shared/messages.ts": ["exports", "types"],
-        "src/acp/protocol.ts": ["exports", "types"],
-        "src/acp/jsonrpc.ts": ["exports", "types"]
-      },
       "vite": {
         "config": ["webview/vite.config.ts"]
       }
