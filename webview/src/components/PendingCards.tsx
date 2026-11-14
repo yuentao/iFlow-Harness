@@ -137,17 +137,46 @@ export function PendingCards({
     const wrapper = overlay.parentElement;
     if (!wrapper) return;
     wrapperRef.current = wrapper;
+    // `data-pending-top` sits on the slot wrapper in the single-card / list
+    // layout, and that slot is `display: contents` — it has no box, so its
+    // getBoundingClientRect() is all zeros (measured: the band then clamps to
+    // the overlay's full height, e.g. 900px instead of the card's 310px).
+    // Resolve the real card before measuring.
+    const measureTarget = () => {
+      const probe = overlay.querySelector<HTMLElement>("[data-pending-top]");
+      if (!probe) return null;
+      if (getComputedStyle(probe).display !== "contents") return probe;
+      return probe.firstElementChild instanceof HTMLElement ? probe.firstElementChild : null;
+    };
     const apply = () => {
-      const top = overlay.querySelector<HTMLElement>("[data-pending-top]");
+      const top = measureTarget();
       if (!top) {
         wrapper.style.removeProperty("--pending-card-h");
         return;
       }
       const overlayRect = overlay.getBoundingClientRect();
-      const topRect = top.getBoundingClientRect();
-      // Measure viewport rects, not offsetTop: the overlay is absolutely
-      // positioned, so offsetTop chains are relative to different boxes.
-      const band = overlayRect.bottom - topRect.top;
+      // Layout box, not viewport rect: getBoundingClientRect includes the
+      // card's `stream-in` entrance transform (translateY(8px)), and a
+      // transform change never fires the ResizeObserver — the first measure
+      // would then stay stale by ~9px (measured 300.5px vs the real 310px).
+      // `offsetTop` is relative to the overlay itself (it is the positioned
+      // ancestor — verified in the browser) and includes its pb-3.
+      //
+      // Expanded is special: the counter is `sticky top-0` in the scroll
+      // container, and a sticky box's offsetTop follows the scroll offset
+      // (measured 0px when scrolled to the bottom, 870px instead of 900.5px
+      // when partially scrolled), so it cannot be measured like a normal box.
+      // There the list fills the shell and the counter pins to its top edge —
+      // the painted band is the whole overlay. Keyed on "the counter exists
+      // and is sticky" (count >= 2), not on `expanded` alone: after the other
+      // cards are answered the counter disappears while `expanded` is still
+      // true, and a lone card must fall back to the normal measurement.
+      const band =
+        expanded && count >= 2
+          ? overlay.clientHeight
+          : top.offsetParent === overlay
+            ? overlay.clientHeight - top.offsetTop
+            : overlayRect.bottom - top.getBoundingClientRect().top;
       const height = Math.max(0, Math.min(band, overlayRect.height));
       wrapper.style.setProperty("--pending-card-h", `${height}px`);
     };
@@ -155,6 +184,10 @@ export function PendingCards({
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(apply) : null;
     observer?.observe(overlay);
     for (const child of Array.from(overlay.children)) observer?.observe(child);
+    // The card itself can grow without the overlay changing size (the overlay
+    // is inset-sized), so observe the measured element too.
+    const target = measureTarget();
+    if (target) observer?.observe(target);
     return () => observer?.disconnect();
   }, [layoutKey]);
 
