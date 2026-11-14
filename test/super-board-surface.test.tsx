@@ -1030,6 +1030,13 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     return el!;
   }
 
+  /** 行标题 span 的 tooltip 文本（分支 / 目录 / 尝试次数 / 历史标记）。 */
+  function rowTitleHint(): string {
+    const el = rowTrigger().querySelector<HTMLElement>("[title]");
+    expect(el).toBeTruthy();
+    return el!.getAttribute("title") ?? "";
+  }
+
   it("排队/准备中的占位隔离不显示「仅目录隔离」，改为显示宿主占位说明", () => {
     render([
       session({
@@ -1065,5 +1072,40 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     expect(container.textContent).toContain("仅目录隔离");
     // 真降级时定位文本仍是那个目录，而不是 note。
     expect(container.textContent).toContain("/tmp/fallback");
+  });
+
+  it("占位隔离的行标题 tooltip 不拼出空「目录 」，改说宿主占位说明", () => {
+    render([
+      session({
+        status: "preparing",
+        queued: true,
+        isolation: { kind: "directory", path: "", note: "正在准备隔离环境" },
+      }),
+    ]);
+    expand();
+
+    const hint = rowTitleHint();
+    // 空 path 拼出的「目录 」会读成隔离信息丢失；占位态根本没有目录可报。
+    expect(hint).not.toContain("目录 ");
+    expect(hint).toContain("正在准备隔离环境");
+    // 也不留空行（.filter(Boolean) 必须把空值整项剔掉）。
+    expect(hint).toBe(hint.trim());
+    expect(hint.split("\n").every((line) => line.trim() !== "")).toBe(true);
+  });
+
+  it("真降级的行标题 tooltip 仍带「目录 <path>」", () => {
+    render([
+      session({
+        isolation: {
+          kind: "directory",
+          path: "/tmp/fallback",
+          note: "worktree 创建失败（fatal: not a git repository），仅目录隔离",
+        },
+      }),
+    ]);
+    expand();
+
+    const hint = rowTitleHint();
+    expect(hint).toContain("目录 /tmp/fallback");
   });
 });
