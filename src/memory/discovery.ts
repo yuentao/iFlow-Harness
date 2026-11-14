@@ -183,7 +183,12 @@ export async function discoverMemoryFiles(options: MemoryDiscoveryOptions): Prom
         if (entry.isSymbolicLink()) continue;
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
+          // Skip the fixed list (node_modules/dist/vendor …) plus every
+          // dot-prefixed directory: those are tool / VCS metadata trees
+          // (.git, .next, .iflow/super/worktrees worktree copies, …) that
+          // must never surface as auto-discovered project memory.
           if (IGNORE_DIRS.has(entry.name)) continue;
+          if (entry.name.startsWith(".")) continue;
           await walk(full);
           continue;
         }
