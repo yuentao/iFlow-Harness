@@ -307,3 +307,83 @@ it("commits the whole question card only from the explicit submit button", () =>
   });
   expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "answerQuestions", id: "q-1" }));
 });
+
+/**
+ * Overlay height contract (narrow-window regression): the pending cards are
+ * bottom-aligned in a shell that starts below the header. Each card must cap
+ * at that shell (max-h-full) and scroll its BODY internally, so a long
+ * approval title / diff / plan can never grow the card upward over the header
+ * (which made the header controls unclickable). The decision row must stay
+ * outside the scroll body: it is the one thing that must never scroll away.
+ */
+function expectCappedCard(root: Element, actionRowLabel: string) {
+  expect(root.classList.contains("max-h-full")).toBe(true);
+  expect(root.classList.contains("flex-col")).toBe(true);
+
+  const bodies = [...root.querySelectorAll<HTMLElement>("*")].filter(
+    (el) => el.classList.contains("min-h-0") && el.classList.contains("overflow-y-auto"),
+  );
+  // Exactly one scroll body — a second one would mean a nested scroll region
+  // (the old title/diff/plan caps) competing with the card-level scroll.
+  expect(bodies).toHaveLength(1);
+  const body = bodies[0]!;
+
+  const actions = root.querySelector<HTMLElement>(
+    `[role="group"][aria-label="${actionRowLabel}"]`,
+  );
+  expect(actions).toBeTruthy();
+  // DOM structure, not just a class-name string: the action row is a sibling
+  // of the scroll body, never a descendant of it.
+  expect(body.contains(actions!)).toBe(false);
+  expect(root.contains(actions!)).toBe(true);
+
+  return { body, actions: actions! };
+}
+
+it("caps the approval card and keeps its action row outside the scroll body", () => {
+  act(() => root.render(<ApprovalCard approval={APPROVAL} />));
+  const { body, actions } = expectCappedCard(container.firstElementChild!, "审批操作");
+  expect(body.querySelectorAll("button")).toHaveLength(0);
+  expect(actions.querySelectorAll("button")).toHaveLength(2);
+});
+
+it("caps the plan card and keeps its action row outside the scroll body", () => {
+  act(() => root.render(<PlanExitCard pending={PLAN} />));
+  const { actions } = expectCappedCard(container.firstElementChild!, "计划审批操作");
+  expect([...actions.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+    "批准计划",
+    "拒绝计划",
+    "重新规划",
+  ]);
+});
+
+it("caps the question card and keeps its action row outside the scroll body", () => {
+  act(() => root.render(<QuestionCard pending={QUESTIONS} />));
+  const { actions } = expectCappedCard(container.firstElementChild!, "回答操作");
+  expect(actions.querySelectorAll("button")).toHaveLength(2);
+});
+
+it("keeps the approval actions rendered when the title is long enough to overflow", () => {
+  // 200 lines is far taller than any 360×800 viewport's available card height.
+  const longTitle = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+  act(() => root.render(<ApprovalCard approval={{ ...APPROVAL, title: longTitle }} />));
+  const { body, actions } = expectCappedCard(container.firstElementChild!, "审批操作");
+  // The long title really lives in the scroll body…
+  expect(body.textContent).toContain("line 199");
+  // …and the decision buttons are still there, outside it.
+  expect([...actions.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+    "允许一次",
+    "拒绝",
+  ]);
+});
+
+it("keeps the plan editor usable inside the scroll body", () => {
+  act(() => root.render(<PlanExitCard pending={PLAN} />));
+  const edit = [...container.querySelectorAll("button")].find((b) => b.textContent === "编辑");
+  act(() => edit!.click());
+  const { body } = expectCappedCard(container.firstElementChild!, "计划审批操作");
+  const textarea = body.querySelector("textarea");
+  expect(textarea).toBeTruthy();
+  // min-h-40 stops the editor collapsing to 0 inside the scroll body.
+  expect(textarea!.classList.contains("min-h-40")).toBe(true);
+});

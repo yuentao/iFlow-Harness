@@ -92,9 +92,13 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     return () => window.removeEventListener("keydown", handler);
   }, [answered, answer]);
 
+  // Same height contract as QuestionCard / ApprovalCard: the card caps at the
+  // overlay wrapper (max-h-full) and the plan body scrolls internally, so a
+  // long plan can never grow upward over the header. Header, countdown and
+  // actions stay shrink-0 (the decision buttons are always reachable).
   return (
     <div
-      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 shrink-0 rounded-xl border border-primary/40"
+      className="acrylic stream-in glow-ring card-lift pointer-events-auto mx-3 flex max-h-full shrink-0 flex-col rounded-xl border border-primary/40"
       role="alertdialog"
       aria-labelledby={titleId}
       aria-describedby={descId}
@@ -109,7 +113,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
         }
       }}
     >
-      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <ClipboardCheck className="size-3.5 shrink-0 text-primary" />
         <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -137,7 +141,10 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           </Button>
         </span>
       </div>
-      <div id={descId} className="space-y-2 px-3 py-3 text-ui-label">
+      {/* Scroll body: whatever height is left after the shrink-0 header /
+          countdown / actions. The plan text is uncapped (the agent's full
+          plan), so it scrolls here instead of growing the card upward. */}
+      <div id={descId} className="min-h-0 flex-auto space-y-2 overflow-y-auto px-3 py-3 text-ui-label">
         <p className="text-ui-caption text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
         {editing ? (
           <TextArea
@@ -145,31 +152,31 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
             mono
             aria-label={t("编辑计划")}
             /* mono + generous height: the plan is source-like markdown the
-               user edits verbatim; min-height keeps short plans usable,
-               max-h-64 caps the shrink-0 card like the render mode. The
-               edit-scope caveat lives in the tooltip, not repeated here —
-               the edit-mode primary button says it outright. */
+               user edits verbatim; min-h-40 keeps the editor usable inside
+               the scroll body (it must never collapse to 0), max-h-64 keeps
+               its own internal scroll bounded. The edit-scope caveat lives in
+               the tooltip, not repeated here — the edit-mode primary button
+               says it outright. */
             className="max-h-64 min-h-40 w-full border-primary/40 p-2 text-ui-caption leading-relaxed text-foreground/90 focus:border-primary/60"
             value={planText}
             onChange={(e) => setPlanText(e.target.value)}
           />
         ) : (
-          /* Markdown render + scroll cap: the plan text is uncapped (the
-             agent's full plan); unbroken tokens used to punch through
-             the card border, long ones grew the shrink-0 card unbounded. The
-             cap now lives on the wrapper so the .md table/pre scroll rules
-             stay intact inside. */
-          <div className="max-h-48 overflow-y-auto rounded-lg border border-border/60 bg-editor/60 p-2">
+          /* Markdown render: no nested scroll cap — the outer scroll body
+             owns the height, so .md table/pre rules stay intact inside. */
+          <div className="rounded-lg border border-border/60 bg-editor/60 p-2">
             <Markdown text={planText} />
           </div>
         )}
       </div>
-      <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动拒绝")} />
+      <div className="shrink-0">
+        <CountdownBar deadline={pending.deadline} timeoutMs={pending.timeoutMs} quietLabel={t("自动拒绝")} />
+      </div>
       <div
         ref={actionsRef}
         role="group"
         aria-label={t("计划审批操作")}
-        className="flex flex-wrap gap-1.5 border-t border-border/60 px-3 py-2"
+        className="flex shrink-0 flex-wrap gap-1.5 border-t border-border/60 px-3 py-2"
       >
         <Button variant="primary" size="sm" disabled={answered} aria-label={t("批准计划")} onClick={() => answer(true)}>
           {t("批准计划")}

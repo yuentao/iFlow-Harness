@@ -1024,7 +1024,17 @@ export function App() {
               // without the reservation the question card would paint over
               // the panel. Reserving the panel height keeps both usable (the
               // card caps itself and scrolls). Collapsed → 0, no offset.
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex flex-col justify-end gap-2 pb-3"
+              //
+              // min-h-0 + overflow-y-auto is the last-resort fallback: each
+              // card caps itself at max-h-full, but approval + plan + question
+              // can coexist, and their sum can exceed the shell. The shell
+              // then scrolls instead of letting the stack grow past its top
+              // edge over the header. Bottom alignment is done with
+              // first:mt-auto rather than justify-end — in a scroll container
+              // flex-end makes the overflow above the start edge unreachable.
+              // (overflow-hidden is deliberately NOT used: it would cut off a
+              // card's title and close affordances.)
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex min-h-0 flex-col gap-2 overflow-y-auto pb-3 [&>*:first-child]:mt-auto"
               style={{ top: "var(--super-bar-h, 0px)" }}
             >
               {pendingApproval && <ApprovalCard approval={pendingApproval} />}
