@@ -748,6 +748,19 @@ export class ChatPanel implements vscode.Disposable {
   /** {@link superToolCallWarned} 的容量上限（工具帧数量不设界，Set 必须有界）。 */
   private static readonly SUPER_TOOL_CALL_WARN_CAP = 100;
   /**
+   * 已执行过管理动作的结构化工具调用（`toolCallId` + 载荷指纹）。
+   *
+   * 派发侧有 `superDispatchedDirectives` 载荷账本兜底，动作侧没有 —— 同一条
+   * 工具帧在 pending / in_progress 两帧各带一次载荷时，`cancel` 靠管理器幂等
+   * 不会出大事，但 `cleanup` / `retry` 的第二次会报「未生效」（假失败），
+   * `cleanup` 甚至可能并发操作同一个 worktree。按「工具调用 + 载荷」去重：
+   * 同一次调用只执行一次，不同调用即使载荷相同也各自执行（那是模型的真实
+   * 意图，不能吞）。集合有上限，换会话时清空。
+   */
+  private readonly superToolCallActionsDone = new Set<string>();
+  /** {@link superToolCallActionsDone} 的容量上限。 */
+  private static readonly SUPER_TOOL_CALL_ACTIONS_CAP = 100;
+  /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
    * delegation buffer: the two protocols have independent fences and
@@ -7060,6 +7073,7 @@ export class ChatPanel implements vscode.Disposable {
     this.superScan.reset();
     this.superDispatchedDirectives.clear();
     this.superToolCallWarned.clear();
+    this.superToolCallActionsDone.clear();
   }
 
   /**
@@ -7165,6 +7179,11 @@ export class ChatPanel implements vscode.Disposable {
     const name = (update.toolName ?? update.title ?? "").trim();
     const kind = classifySuperToolName(name);
     if (!kind) return;
+    // Wire 实证（CLI 0.5.19，见 protocol.ts 的 `args` 注释）：原始参数只随
+    // `tool_call_update(in_progress)` 到达，pending 帧通常没有 args。此时还
+    // 不能下结论 —— 下一帧就会带载荷；在这里弹「未派发子会话」是误报
+    // （用户先看到「没派」，紧接着又看到真的派了）。
+    if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
     const parsed = parseSuperToolCall(kind, update.args);
     if (!parsed.ok) {
       this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
@@ -7173,8 +7192,32 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(
       `super agent: accepted structured ${kind} tool call (${update.toolCallId || "no-id"})`,
     );
-    if (kind === "dispatch") this.dispatchSuperTasks(parsed.tasks);
-    else void this.runSuperActions(parsed.actions);
+    if (kind === "dispatch") {
+      this.dispatchSuperTasks(parsed.tasks);
+      return;
+    }
+    // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷
+    // 账本（派发侧有 `superDispatchedDirectives`），不去重就会执行两次 ——
+    // `cleanup` / `retry` 的第二次会报假失败，`cleanup` 还可能并发操作同一个
+    // worktree。按「工具调用 + 载荷」去重，不同调用照常各自执行。
+    const actionKey = `${update.toolCallId || "no-id"}#${parsed.text}`;
+    if (this.superToolCallActionsDone.has(actionKey)) {
+      this.log.info(
+        `super agent: skipped-duplicate structured actions tool call (${update.toolCallId || "no-id"})`,
+      );
+      return;
+    }
+    this.rememberSuperToolCallActions(actionKey);
+    void this.runSuperActions(parsed.actions);
+  }
+
+  /** 记住一条已执行的动作工具调用（有界 Set，超了丢最早一条）。 */
+  private rememberSuperToolCallActions(key: string): void {
+    if (this.superToolCallActionsDone.size >= ChatPanel.SUPER_TOOL_CALL_ACTIONS_CAP) {
+      const oldest = this.superToolCallActionsDone.values().next().value;
+      if (oldest !== undefined) this.superToolCallActionsDone.delete(oldest);
+    }
+    this.superToolCallActionsDone.add(key);
   }
 
   /**

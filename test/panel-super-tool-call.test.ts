@@ -220,4 +220,60 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(1);
     expect(manager.spawn).not.toHaveBeenCalled();
   });
+
+  it("pending 帧不带 args 时不误报「未派发」，随后 in_progress 照常派发一次", () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    // wire 实证：args 只随 tool_call_update(in_progress) 到达，pending 帧没有 args。
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ status: "pending" }),
+    });
+    // 此时还没有载荷，不能弹「未派发子会话」—— 下一帧就会派发。
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        sessionUpdate: "tool_call_update",
+        status: "in_progress",
+        args: { tasks: [{ title: "后续帧派发", task: "正文" }] },
+      }),
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+  });
+
+  it("同一条 actions 工具帧 pending + in_progress 各带 args 时只执行一次", async () => {
+    const args = { actions: [{ action: "cancel", sessionId: "super-x" }] };
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({ toolName: "super-agent-actions", status: "pending", args }),
+    });
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        sessionUpdate: "tool_call_update",
+        toolName: "super-agent-actions",
+        status: "in_progress",
+        args,
+      }),
+    });
+    await waitFor(() => manager.cancel.mock.calls.length > 0);
+    // 同一 toolCallId 的重复帧不重复执行（cleanup/retry 的假失败、并发 worktree
+    // 操作都由此避免）。
+    expect(manager.cancel).toHaveBeenCalledTimes(1);
+
+    // 另一次工具调用即使载荷相同也是模型的真实意图，必须各自执行。
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        toolCallId: "tc-2",
+        toolName: "super-agent-actions",
+        status: "in_progress",
+        args,
+      }),
+    });
+    await waitFor(() => manager.cancel.mock.calls.length > 1);
+    expect(manager.cancel).toHaveBeenCalledTimes(2);
+  });
 });
