@@ -7,7 +7,22 @@
  * via ACP_MOCK_MODE env ("timeout_prompt" never answers a prompt;
  * "sandbox_escape" makes the "agent" ask the client to fs/write_text_file a
  * path outside the session dir, so tests can verify boundary rejection).
+ *
+ * Optional environment dump: with ACP_MOCK_ENV_DUMP pointing at a file, the
+ * agent writes its own process.env there before reading any stdin — that lets
+ * a test assert exactly what spawn env the host handed the CLI (e.g. the
+ * main-session-only IFLOW_SUPER_TOOL gate). Best effort only.
  */
+import { writeFileSync } from "node:fs";
+
+const envDumpPath = process.env.ACP_MOCK_ENV_DUMP;
+if (envDumpPath) {
+  try {
+    writeFileSync(envDumpPath, JSON.stringify(process.env));
+  } catch {
+    // Diagnostics convenience; never fail the mock agent over it.
+  }
+}
 
 let buffer = "";
 const pendingEscapeReplies = []; // resolvers for sandbox_escape write replies
