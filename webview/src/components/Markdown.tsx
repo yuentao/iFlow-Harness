@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { useChat } from "../store";
@@ -91,6 +91,73 @@ const SANITIZE_CONFIG = {
   FORBID_ATTR: ["style", "target"],
 };
 
+/**
+ * P2-3 parse cache: `marked.parse` + DOMPurify + hljs highlighting is O(text)
+ * and used to run again for every render of a block. The same source shows
+ * up more than once (a plan body and the message quoting it, a directive
+ * segment and its parent block), and every completed block was re-parsed
+ * whenever the transcript re-rendered (usage refresh, toasts, a sibling
+ * block changing). The cache maps the raw markdown source to the sanitized
+ * HTML.
+ *
+ * Capacity is bounded on BOTH axes — entry count and total characters
+ * (source + html) — so a long streaming answer can never grow the cache
+ * without limit. Eviction is LRU: a hit moves the entry to the newest
+ * position, the oldest entries are dropped first.
+ *
+ * The key carries a version tag: the parse inputs (marked `gfm`/`breaks`,
+ * the DOMPurify config, the code renderer) are module constants today, but
+ * changing any of them must invalidate the cached HTML.
+ */
+const PARSE_CACHE_VERSION = "md-v1";
+const PARSE_CACHE_MAX_ENTRIES = 32;
+const PARSE_CACHE_MAX_CHARS = 512_000;
+
+interface ParseCacheEntry {
+  html: string;
+  /** Characters held by this entry (key + html) — the char budget unit. */
+  cost: number;
+}
+
+const parseCache = new Map<string, ParseCacheEntry>();
+let parseCacheChars = 0;
+
+/** Drop least-recently-used entries until both budgets fit again. */
+function evictParseCache(): void {
+  for (const [key, entry] of parseCache) {
+    if (parseCache.size <= PARSE_CACHE_MAX_ENTRIES && parseCacheChars <= PARSE_CACHE_MAX_CHARS) break;
+    parseCache.delete(key);
+    parseCacheChars -= entry.cost;
+  }
+}
+
+/**
+ * Parse + sanitize markdown, memoized across component instances. The
+ * returned HTML is byte-identical to a direct `marked.parse` +
+ * `DOMPurify.sanitize` run — the cache only skips work that would have
+ * produced the very same string.
+ */
+function renderMarkdown(text: string): string {
+  const key = `${PARSE_CACHE_VERSION}|${text}`;
+  const hit = parseCache.get(key);
+  if (hit) {
+    // LRU touch: re-insert so the entry counts as the most recently used.
+    parseCache.delete(key);
+    parseCache.set(key, hit);
+    return hit.html;
+  }
+  const html = DOMPurify.sanitize(marked.parse(text, { async: false }) as string, SANITIZE_CONFIG);
+  const cost = key.length + html.length;
+  // A single entry larger than the whole budget is never cached — it would
+  // evict everything else and still not fit.
+  if (cost <= PARSE_CACHE_MAX_CHARS) {
+    parseCache.set(key, { html, cost });
+    parseCacheChars += cost;
+    evictParseCache();
+  }
+  return html;
+}
+
 // Copy helper: prefer the async Clipboard API; fall back to a hidden textarea
 // for webview contexts where the API is unavailable.
 export function copyText(text: string): Promise<void> {
@@ -118,14 +185,13 @@ export function copyText(text: string): Promise<void> {
 // longer ride the text end — the parent renders ONE hover/focus action bar
 // per message. Markdown keeps only the code-block copy button and the
 // streaming caret appended to the last element.
-export function Markdown({
-  text,
-  streamCaret = false,
-}: {
+export interface MarkdownProps {
   text: string;
   /** Streaming tail: append a thin caret at the text end ("still writing"). */
   streamCaret?: boolean;
-}) {
+}
+
+function MarkdownImpl({ text, streamCaret = false }: MarkdownProps) {
   const send = useChat((s) => s.send);
   const ref = useRef<HTMLDivElement>(null);
   // Throttled text: during streaming the block grows every ~80ms; parse the
@@ -176,10 +242,11 @@ export function Markdown({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount only
   }, []);
-  const html = useMemo(
-    () => DOMPurify.sanitize(marked.parse(renderText, { async: false }) as string, SANITIZE_CONFIG),
-    [renderText],
-  );
+  // Cached parse: the HTML for a given source never changes, so repeated
+  // renders of the same text (and other blocks carrying the same text)
+  // reuse the sanitized HTML instead of re-running marked + DOMPurify +
+  // hljs.
+  const html = useMemo(() => renderMarkdown(renderText), [renderText]);
 
   // Fenced code blocks get a copy button. The HTML is set via
   // dangerouslySetInnerHTML (no React handlers), so we wrap each <pre> in a
@@ -404,3 +471,15 @@ export function Markdown({
     />
   );
 }
+
+/**
+ * P2-3 memo: the transcript re-renders on every store update (token usage
+ * refresh, toasts, streaming patches) while most markdown blocks are
+ * untouched. `text` and `streamCaret` are primitives, so the comparison is
+ * exact — an unchanged block skips the render entirely (no parse, no DOM
+ * write, no injection pass). The comparator folds `streamCaret: undefined`
+ * and `streamCaret: false` together: both render identically.
+ */
+export const Markdown = memo(MarkdownImpl, (a, b) =>
+  a.text === b.text && (a.streamCaret ?? false) === (b.streamCaret ?? false),
+);
