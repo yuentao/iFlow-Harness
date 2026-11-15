@@ -1,0 +1,178 @@
+/**
+ * super-agent-loader.cjs
+ *
+ * Decision layer for the super-agent-tool-refactor MOD.
+ *
+ * Background (verified in the CLI 0.5.19 bundle, byte-for-byte):
+ *   The built-in tool base class `Li` is
+ *
+ *     Li=class{name;displayName;description;icon;kind;parameterSchema;
+ *       isOutputMarkdown;canUpdateOutput;aliases;
+ *       constructor(A,e,t,r,n,s,a=!0,o=!1,l=[]){...}
+ *       get schema(){return{name:this.name,description:this.description,
+ *                            parameters:this.parameterSchema}}
+ *       validateToolParams(A){return null}
+ *       getDescription(A){return JSON.stringify(A)}
+ *       shouldConfirmExecute(A,e){return Promise.resolve(!1)}
+ *       toolLocations(A){return[]}}
+ *
+ *   Every tool is registered inside Config.createToolRegistry() through the
+ *   local registrar `t(r,...n)` -> `new r(...n)` + `registry.registerTool`.
+ *   The patched call site (see apply-patch.mjs) hands this module the four
+ *   in-scope minified bindings:
+ *
+ *     base  = Li  (tool base class)
+ *     kinds = Fi  ({Read,Edit,Delete,Move,Search,Execute,Think,Fetch,Other})
+ *     icons = Mi  ({FileSearch,Folder,Globe,Hammer,LightBulb,Pencil,Regex,
+ *                   Terminal})
+ *     types = Dt  (Gemini schema Type enum: STRING/OBJECT/ARRAY/BOOLEAN/...)
+ *
+ *   and registers the returned class only when IFLOW_SUPER_TOOL=1.
+ *
+ * Why execute() only acknowledges:
+ *   Dispatching a child session means spawning a separate CLI process, an
+ *   ACP session and a git worktree — all of that lives in the HOST, not in
+ *   the CLI. The CLI only has to make the tool call visible on the wire: the
+ *   ACP adapter emits `tool_call` / `tool_call_update` with `toolName` and
+ *   `args` (the parsed parameter object), so the host reads `tasks` from
+ *   those args and starts the children itself. Returning a fixed ack keeps
+ *   the model's tool loop moving without inventing a second dispatch channel
+ *   inside the CLI. The ack shape `{llmContent, returnDisplay}` is the same
+ *   contract every other simple tool returns (verified against todo_write /
+ *   list_directory / web_search).
+ *
+ * shouldConfirmExecute() returns false on purpose: the tool performs no I/O
+ * and no side effect inside the CLI (the host owns the actual dispatch), so
+ * asking the user for a per-call approval would only add a click that cannot
+ * change anything. NOTE: with the CLI's "smart approval" mode the smart
+ * engine still evaluates every tool call and may ask — that gate lives
+ * outside shouldConfirmExecute and is not bypassed here.
+ *
+ * NOTE: this module MUST NOT write to stdout — in ACP mode stdout carries the
+ * NDJSON protocol stream and a stray line corrupts the wire.
+ */
+
+"use strict";
+
+const TOOL_NAME = "super-agent";
+const DISPLAY_NAME = "Super Agent";
+
+const DESCRIPTION =
+  "Delegate work to one or more child sessions. Each child session runs in its own git worktree on its own branch, " +
+  "so several children can change this project at once without stepping on each other. " +
+  "Pass `tasks` (each with a short `title`, a self-contained `task` brief, and optional `attachments` paths). " +
+  "The host starts the children and reports their results back to you; this call only returns an acknowledgement. " +
+  "Prefer this tool over writing a super-agent fenced code block by hand.";
+
+const ACK = "Delegation request accepted.";
+
+/**
+ * Build the tool class from the bindings injected at the anchor.
+ * Returns null for unusable input so the call site can skip registration.
+ */
+function create(bag) {
+  if (!bag || typeof bag.base !== "function") return null;
+  const Base = bag.base;
+  const kinds = bag.kinds || {};
+  const icons = bag.icons || {};
+  const types = bag.types || {};
+
+  const T_OBJECT = types.OBJECT || "OBJECT";
+  const T_STRING = types.STRING || "STRING";
+  const T_ARRAY = types.ARRAY || "ARRAY";
+
+  class SuperAgentTool extends Base {
+    static Name = TOOL_NAME;
+    static DisplayName = DISPLAY_NAME;
+
+    constructor(config) {
+      super(
+        TOOL_NAME,
+        DISPLAY_NAME,
+        DESCRIPTION,
+        icons.Hammer || "hammer",
+        kinds.Other || "other",
+        {
+          type: T_OBJECT,
+          properties: {
+            tasks: {
+              type: T_ARRAY,
+              description:
+                "Tasks to delegate. Each one becomes an independent child session with its own git worktree.",
+              items: {
+                type: T_OBJECT,
+                properties: {
+                  title: {
+                    type: T_STRING,
+                    description: "Short label for the child session (keep it under 24 characters).",
+                  },
+                  task: {
+                    type: T_STRING,
+                    description:
+                      "Self-contained brief: the child cannot see this conversation, so state the goal, the relevant files, what done means, and how to verify it.",
+                  },
+                  attachments: {
+                    type: T_ARRAY,
+                    description:
+                      "Optional extra files the child needs, as workspace-relative or absolute paths.",
+                    items: { type: T_STRING },
+                  },
+                },
+                required: ["title", "task"],
+              },
+            },
+          },
+          required: ["tasks"],
+        },
+        true,
+        false,
+        []
+      );
+      this.config = config;
+    }
+
+    validateToolParams(params) {
+      if (!params || !Array.isArray(params.tasks) || params.tasks.length === 0) {
+        return "tasks must be a non-empty array";
+      }
+      for (let i = 0; i < params.tasks.length; i++) {
+        const task = params.tasks[i];
+        if (!task || typeof task !== "object") return `tasks[${i}] must be an object`;
+        if (typeof task.title !== "string" || task.title.length === 0) {
+          return `tasks[${i}].title must be a non-empty string`;
+        }
+        if (typeof task.task !== "string" || task.task.length === 0) {
+          return `tasks[${i}].task must be a non-empty string`;
+        }
+        if (task.attachments !== undefined && !Array.isArray(task.attachments)) {
+          return `tasks[${i}].attachments must be an array of strings`;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * The ACP adapter uses getDescription(params) as the tool-call title.
+     * The base implementation is JSON.stringify(params) — a whole task list
+     * in the title — so keep it to a short label.
+     */
+    getDescription(params) {
+      const count = params && Array.isArray(params.tasks) ? params.tasks.length : 0;
+      if (count === 1) return "Delegate 1 task";
+      return `Delegate ${count} tasks`;
+    }
+
+    /** No side effect inside the CLI: the host owns the actual dispatch. */
+    shouldConfirmExecute() {
+      return Promise.resolve(false);
+    }
+
+    async execute() {
+      return { llmContent: ACK, returnDisplay: ACK };
+    }
+  }
+
+  return SuperAgentTool;
+}
+
+module.exports = { create, TOOL_NAME };

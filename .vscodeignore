@@ -5,6 +5,10 @@
 src/**
 test/**
 docs/**
+# Committed in-repo fork snapshot is source only. The generated vendor/iflow-cli
+# copy (and its node_modules exception below) is what ships in the VSIX.
+vendor/iflow-fork/
+vendor/iflow-fork/**
 # Workspace runtime data (knowledge index, .iflow/specs plans, approvals).
 .iflow/**
 scripts/**

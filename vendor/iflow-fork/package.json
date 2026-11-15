@@ -1,0 +1,31 @@
+{
+  "name": "@yuentao/iflow-cli",
+  "version": "0.5.19-custom.12",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iflow-ai/iflow-cli.git"
+  },
+  "scripts": {
+    "release": "npm publish --ignore-scripts --tag latest"
+  },
+  "bin": {
+    "iflow": "bundle/entry.js"
+  },
+  "files": [
+    "bundle/",
+    "vendors/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "node-notifier": "^10.0.1"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}
