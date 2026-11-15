@@ -7066,6 +7066,11 @@ export class ChatPanel implements vscode.Disposable {
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
       IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile(),
+      // 子会话绝不能拿到主会话的内置 `super-agent` 工具开关：那个工具负责
+      // 派发子会话，给了子会话就等于允许无限套娃。AcpClient 把 process.env
+      // 铺在 options.env 之下，这里用 undefined 显式抹掉该键（Node 的 spawn
+      // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
+      IFLOW_SUPER_TOOL: undefined,
     };
     if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
     const client = new AcpClient(
@@ -8303,6 +8308,12 @@ export class ChatPanel implements vscode.Disposable {
       const systemPromptFile = await this.materializeSystemPrompt();
       const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
+      // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
+      // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含
+      // 该工具，所以这一行暂时是惰性的）。只有主会话该拿到派发能力 ——
+      // 子会话的 spawnEnv 显式抹掉这个键（见 createSuperClient），否则
+      // 子会话也能再派子会话。
+      spawnEnv.IFLOW_SUPER_TOOL = "1";
 
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
