@@ -11,6 +11,15 @@ await esbuild.build({
   format: "cjs",
   platform: "node",
   target: "node20",
+  // The host bundle is the largest artifact that ships in the VSIX (it
+  // inlines every dependency plus the prompt templates). esbuild does not
+  // minify by default, which left dist/extension.cjs at ~4.2 MB.
+  minify: true,
+  // Minification renames identifiers; keep function/class names intact so
+  // stack traces and the panel's error banners still name the real class
+  // (the custom error classes rely on `this.name` anyway, but a minified
+  // anonymous helper in a stack trace is much harder to act on).
+  keepNames: true,
   sourcemap: true,
   // Prompt templates ship as text inside the bundle instead of as readable
   // `prompts/*.md` files in the VSIX (see .vscodeignore). The CLI's
