@@ -2824,7 +2824,20 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
   return parts.join(" | ");
 }
 
-const SUPER_DIGEST_HINT = "Dispatch by writing a ```super-agent fenced block as plain text (body: {\"tasks\":[{\"title\",\"task\"}]}). There is no super-agent tool in this session's tool registry: a tool call fails with \"not found in registry\" and dispatches nothing — if that happened, re-send the block as text.";
+/**
+ * 模型面向的委派协议提示（英文，与 `prompts/system-prompt.md` 同一套词表）。
+ *
+ * 空看板与非空看板都带上它：首轮还没有子会话时，模型最容易凭空发明一个
+ * `super-agent` 工具调用；CLI 的 registry 里没有这个工具，会报 "not found in
+ * registry"，宿主一个子会话都派不出去，用户还看不到任何提示（2026-11-15
+ * 用户实测）。所以这里必须明确「唯一通道是正文围栏」并给出失败自愈指令。
+ *
+ * 载荷示例必须是**合法 JSON**：`{"title","task"}` 这类缺冒号的简写会被
+ * `parseDirectiveBody` 判成「载荷不是合法 JSON」（进 `invalidBlocks`），
+ * 模型照抄示例就会零派发。改用带引号的占位符 —— 示例本身可解析，而原样
+ * 抄回仍会被占位符规则拒掉，不会派发一条垃圾任务。
+ */
+const SUPER_DIGEST_HINT = "Dispatch by writing a ```super-agent fenced block as plain text (body: {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}). There is no super-agent tool in this session's tool registry: a tool call fails with \"not found in registry\" and dispatches nothing — if that happened, re-send the block as text.";
 
 const SUPER_DIGEST_FOOTER = [
   "",
