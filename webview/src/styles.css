@@ -1998,13 +1998,23 @@ pre {
    - `@property` registers the gradient angle as an <angle>, which is the only
      way Chromium can interpolate `conic-gradient(from var(--...))`. The two
      pseudo-element rings inherit the animated value from their parent.
-   - Four additive mask strips (top/bottom/left/right) punch the CENTRE out:
-     only ~2px of the edge is painted, so the label, count chips and chevron
-     are never covered. Deliberately NOT using `mask-composite: exclude` —
-     older VSCode webview Chromium builds don't implement the standard value,
-     and additive strips work everywhere. `-webkit-mask` and standard `mask`
-     are both emitted; Chromium honours either spelling, so an esbuild CSS
-     fold (trap #22) can't silently kill the effect.
+   - The ring is ONE composite mask, not four strips: `padding: 2px` plus
+     `mask: <opaque> content-box, <opaque>` with `mask-composite: exclude`
+     paints the padding band and punches out the content box. Both layers are
+     shaped by the same `border-radius`, so the band keeps a uniform ~2px width
+     all the way around — including the corners.
+     Superseded design (the bug this replaces): four AXIS-ALIGNED strips
+     (top/bottom 100%x2px + left/right 2pxx100%, composite `add`). Pixel-diffed
+     in Chromium (glow layer on vs off, same frozen animation phase) that mask
+     is a 2.00px band on all four straight edges, but where the rounded arc
+     turns inward the strips stop short: the band collapsed to 0.75px at the
+     45° diagonal of every corner and left an L-shaped notch beside the arc.
+     That is what read as "the four corners are cut".
+     `mask-composite` is safe here: the standard value shipped in Chromium 120
+     and VSCode ^1.90 webviews are Chromium 122+; `-webkit-mask-composite: xor`
+     is the long-standing alias. `-webkit-mask` and standard `mask` are both
+     emitted; Chromium honours either spelling, so an esbuild CSS fold (trap
+     #22) can't silently kill the effect.
    - ::after is the crisp rim; ::before is a blurred twin for the soft bloom.
      `filter: blur()` is ink overflow only — no layout impact, no horizontal
      scrollbar, and nothing clips the button's own :focus-visible box-shadow.
@@ -2039,6 +2049,11 @@ pre {
   content: "";
   position: absolute;
   inset: 0;
+  /* The band's width. Padding (not a hard-coded radius) is what makes the ring
+     follow the button's own rounded corner: the content box is inset by this
+     much on every side and its corner radius is reduced by the same amount, so
+     the painted band stays exactly this wide around the whole outline. */
+  padding: 2px;
   border-radius: inherit;
   background: conic-gradient(
     from var(--super-entry-angle),
@@ -2050,16 +2065,17 @@ pre {
     transparent 315deg,
     transparent 360deg
   );
+  /* Ring = everything MINUS the content box. One shape, one radius → the band
+     is continuous through all four corners (the old four axis-aligned strips
+     pinched to a hairline on the diagonals). */
   -webkit-mask:
-    linear-gradient(#000, #000) top / 100% 2px no-repeat,
-    linear-gradient(#000, #000) bottom / 100% 2px no-repeat,
-    linear-gradient(#000, #000) left / 2px 100% no-repeat,
-    linear-gradient(#000, #000) right / 2px 100% no-repeat;
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
   mask:
-    linear-gradient(#000, #000) top / 100% 2px no-repeat,
-    linear-gradient(#000, #000) bottom / 100% 2px no-repeat,
-    linear-gradient(#000, #000) left / 2px 100% no-repeat,
-    linear-gradient(#000, #000) right / 2px 100% no-repeat;
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
 }
 
 /* Soft bloom: a blurred, slightly dimmer copy of the same rim. */
