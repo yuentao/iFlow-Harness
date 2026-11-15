@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { execFile as execFileCb } from "node:child_process";
+import { createHash } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -766,13 +767,20 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly superScan = new SuperDirectiveScanner();
   /**
-   * 本主会话已派发过的委派载荷指纹（`superDirectiveDedupeKey`）。
+   * 本主会话已派发过的委派载荷指纹（`superDirectiveDedupeKey` 的 SHA-256 摘要）。
    *
    * 同一份载荷在正文通道里被重复写出时只派发一次 —— 否则会开出重复的
    * 子会话（双倍 token、两张看板卡）。换会话 / 恢复会话 / 热重认证时清空：
    * 新会话可以重新派发同样的任务。
+   *
+   * **有界**：载荷数量不设界，账本必须有上限（见
+   * {@link SUPER_DISPATCHED_DIRECTIVES_CAP}），否则长时间运行的会话会一直涨；
+   * 每条只存 32 个 hex 字符的摘要（原始键会带上附件的 base64 内联数据，
+   * 单条可达 MB 级）。
    */
   private readonly superDispatchedDirectives = new Set<string>();
+  /** {@link superDispatchedDirectives} 的容量上限（同 `superToolCallActionsDone` 的做法）。 */
+  private static readonly SUPER_DISPATCHED_DIRECTIVES_CAP = 100;
   /**
    * 已为「名字命中但载荷取不出来」的结构化工具调用弹过提示的 toolCallId。
    *
@@ -6338,6 +6346,11 @@ export class ChatPanel implements vscode.Disposable {
     const activeId = sessions[0]?.id ?? null;
     this.store.setSessions(sessions, activeId);
     await this.persistSessions(sessions, activeId);
+    // The session is gone — its title-ledger entry must go with it, otherwise
+    // the set keeps one string per deleted session forever (unbounded growth
+    // over a long-lived panel), and a session id that ever came back would
+    // silently lose its AI title.
+    this.titledSessionIds.delete(id);
   }
 
   /** M4 P1-8: toggle pinned / archived on a persisted session (switcher
@@ -7325,7 +7338,7 @@ export class ChatPanel implements vscode.Disposable {
     for (const tasks of blocks) {
       for (const task of tasks) {
         // 同一份载荷在正文里被重复写出时只派发第一次。
-        const dedupeKey = superDirectiveDedupeKey([task]);
+        const dedupeKey = ChatPanel.superDirectiveFingerprint(superDirectiveDedupeKey([task]));
         if (this.superDispatchedDirectives.has(dedupeKey)) {
           this.log.info(`super agent: skipped-duplicate directive 「${task.title}」`);
           continue;
@@ -7334,7 +7347,7 @@ export class ChatPanel implements vscode.Disposable {
           droppedAttachments += count;
         });
         const session = manager.spawn(spec);
-        this.superDispatchedDirectives.add(dedupeKey);
+        this.rememberDispatchedDirective(dedupeKey);
         dispatched++;
         this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
       }
@@ -7417,6 +7430,39 @@ export class ChatPanel implements vscode.Disposable {
       if (oldest !== undefined) this.superToolCallActionsDone.delete(oldest);
     }
     this.superToolCallActionsDone.add(key);
+  }
+
+  /**
+   * 委派载荷指纹：账本只存 SHA-256 摘要，不存整份载荷键。
+   *
+   * `superDirectiveDedupeKey` 会把附件的内联数据（base64 图片/文件，可达
+   * MB 级）一起序列化进键 —— 直接把键存进集合等于把附件内容在内存里再留
+   * 一份。摘要后每条账目只有 32 个 hex 字符（16 字节摘要），两条不同载荷
+   * 撞车的概率 ~2⁻¹²⁸，可以当作「同键即同载荷」。
+   */
+  private static superDirectiveFingerprint(dedupeKey: string): string {
+    return createHash("sha256").update(dedupeKey).digest("hex").slice(0, 32);
+  }
+
+  /**
+   * 记住一条已派发的委派载荷（有界 FIFO 账本，超了丢最早一条）。
+   *
+   * 与 {@link superToolCallActionsDone} / {@link superToolCallWarned} 同一套
+   * 有界集合做法：载荷数量不设界，账本必须有上限，否则长时间运行的会话会
+   * 一直涨。
+   *
+   * 淘汰的代价（诚实说明）：被淘汰的载荷若再次出现在正文里，会被当成新
+   * 载荷**再派发一次**（多开一个子会话）。触发条件很窄 —— 先有 100 条不同
+   * 载荷被派发过，模型再逐字重写其中一条；那时会话早已有上百个子会话，
+   * 多开一个的代价比账本无限增长小。跨通道去重（思考里写一遍、正文里再写
+   * 一遍）的真实场景发生在同一轮内，落在窗口之内，不受影响。
+   */
+  private rememberDispatchedDirective(fingerprint: string): void {
+    if (this.superDispatchedDirectives.size >= ChatPanel.SUPER_DISPATCHED_DIRECTIVES_CAP) {
+      const oldest = this.superDispatchedDirectives.values().next().value;
+      if (oldest !== undefined) this.superDispatchedDirectives.delete(oldest);
+    }
+    this.superDispatchedDirectives.add(fingerprint);
   }
 
   /**
