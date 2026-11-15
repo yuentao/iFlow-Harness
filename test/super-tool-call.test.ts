@@ -126,4 +126,44 @@ describe("parseSuperToolCall", () => {
     expect(parseSuperToolCall("dispatch", { foo: 1 }).ok).toBe(false);
     expect(parseSuperToolCall("actions", { actions: [] }).ok).toBe(false);
   });
+
+  it("任务正文含 ``` 围栏与换行时仍能完整切出（收栏按 JSON 结构定位）", () => {
+    const task = '第一行\n```super-agent\n{"tasks":[]}\n```\n最后一行';
+    const parsed = parseSuperToolCall("dispatch", { tasks: [{ title: "带围栏", task }] });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks.flat()[0]?.task).toBe(task);
+  });
+
+  it("长任务书里的裸引号 / 反斜杠 / 反引号原样保留", () => {
+    const task =
+      '实现 "foo" 与 C:\\path\\to\\file，并保留 `code` 与 \\" 转义；'.repeat(40) + '结尾"';
+    const parsed = parseSuperToolCall("dispatch", [{ title: '引号 "x"', task }]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks.flat()[0]?.task).toBe(task.trim());
+    expect(parsed.tasks.flat()[0]?.title).toBe('引号 "x"');
+  });
+
+  it("直接数组载荷（含 JSON 字符串形式）同样可解析", () => {
+    const parsed = parseSuperToolCall(
+      "dispatch",
+      '[{"title":"数组","task":"直接数组载荷"}]',
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks.flat()[0]?.task).toBe("直接数组载荷");
+  });
+
+  it("actions 的 answers 含反引号与换行时原样保留", () => {
+    const answer = "第一行\n```js\nconst a = 1;\n```";
+    const parsed = parseSuperToolCall("actions", {
+      actions: [{ action: "answer", sessionId: "super-a", answers: { "问题": answer } }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.actions[0]?.action).toBe("answer");
+    if (parsed.actions[0]?.action !== "answer") return;
+    expect(parsed.actions[0].answers["问题"]).toBe(answer);
+  });
 });
