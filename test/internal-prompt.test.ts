@@ -763,6 +763,29 @@ describe("prompt templates (prompts/)", () => {
     expect(brief).toContain("never claim a check passed");
   });
 
+  it("removes the `task` tool from the main session and routes every delegation through child sessions", () => {
+    // 宿主在 session/new 的 settings.disallowed_tools 里剔除 `task`：主会话的工具
+    // 列表里根本没有它。提示词若还写「用 task 探索 / 用 task 并行」，模型会去调一个
+    // 不存在的工具，然后零派发（2026-11-15 用户实测：主会话优先调进程内子代理）。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("This session has no `task` tool");
+    expect(text).toContain('settings.disallowed_tools: ["task"]');
+    // 委派只有一条通道：super-agent 子会话。
+    expect(text).toContain("delegation always goes through child sessions");
+    expect(text).toContain("is a child session's job: dispatch it with `super-agent`");
+    // 子会话保留 `task`，那是它自己进程内子代理的机制。
+    expect(text).toContain("Child sessions keep `task` for their own in-process subagents");
+    const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
+    expect(brief).toContain("run in-process subagents with the `task` tool");
+    expect(brief).toContain("you have no `super-agent` tool");
+    // 旧的「task 优先」整句必须消失，否则又把模型指向进程内子代理。
+    expect(text).not.toContain("for file search prefer 'task' to save context");
+    expect(text).not.toContain("Use multi 'task' tools when the user asks for parallel execution");
+    expect(text).not.toContain('use task(subagent_type="frontend-tester")');
+    expect(text).not.toContain("route high-volume or speculative exploration through 'task'");
+    expect(text).not.toContain("Run one via the Task tool with the slash invocation");
+  });
+
   it("gives the main session no git exception: an unmerged branch goes to a merge child session", () => {
     // 主会话连 git 也不跑：分支没能自动合并时，派一个合并子会话去做，
     // 主会话只读汇报。旧提示词给主会话留了「自己 merge」这条例外。
