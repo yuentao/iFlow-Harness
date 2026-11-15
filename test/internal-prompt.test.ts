@@ -731,6 +731,16 @@ describe("prompt templates (prompts/)", () => {
     // strict — implementation is never kept in the main session.
     const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
     expect(text).toContain("You are the orchestrator: delegation, planning, management and reporting");
+    // 优先级必须覆盖整份提示词：Tool Usage / Security 段也在教「本会话怎么跑 shell」，
+    // 只写「the workflows above」会把那几段留在覆盖范围之外，两段直接自相矛盾。
+    expect(text).toContain(
+      "Where anything in this prompt tells you to implement, run a command, run a check or run git, this section takes precedence in this session",
+    );
+    expect(text).not.toContain("Where the workflows above tell you to implement");
+    // 读到 Tool Usage 段时就该知道那些 shell 指令属于子会话，而不是读到后面才发现矛盾。
+    expect(text).toContain(
+      "These command-execution instructions apply to child sessions — the main session (the one that receives the child-session board) runs no shell commands at all; it delegates them.",
+    );
     expect(text).toContain("The children do the work");
     expect(text).toContain("Decompose the user's task yourself, then delegate");
     expect(text).toContain("Implementation work is never kept here");
