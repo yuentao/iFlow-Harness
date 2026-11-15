@@ -3211,3 +3211,154 @@ describe("next-step suggestions", () => {
     expect(state.nextStepLoading).toBe(false);
   });
 });
+
+describe("tool block lookup index (upsertToolBlock)", () => {
+  const toolCall = (toolCallId: string): SessionNotification["update"] => ({
+    sessionUpdate: "tool_call",
+    toolCallId,
+    toolName: "replace",
+    title: `Editing ${toolCallId}`,
+    kind: "edit",
+    status: "pending",
+  });
+  const toolUpdate = (toolCallId: string, text: string): SessionNotification["update"] => ({
+    sessionUpdate: "tool_call_update",
+    toolCallId,
+    status: "completed",
+    content: [{ type: "content", content: { type: "text", text } }],
+  });
+  /** Block content without the host-minted ids — the id counter is global, so
+   *  two parallel runs never mint the same ids. */
+  const shape = (blocks: Block[]): unknown[] =>
+    blocks.map((block) => {
+      const copy = { ...block } as Record<string, unknown>;
+      delete copy["id"];
+      return copy;
+    });
+  const toolCount = (blocks: Block[]): number =>
+    blocks.filter((block) => block.kind === "tool").length;
+
+  it("updates a deep tool block in place instead of appending a duplicate", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify(toolCall("t1")));
+    // 150 later blocks: the tool block is deep in the transcript — the old
+    // reverse scan had to walk the whole array on every tool frame.
+    for (let i = 0; i < 150; i++) beginUserPrompt(state, `msg ${i}`);
+    const before = state.blocks.length;
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    expect(state.blocks).toHaveLength(before);
+    expect(toolCount(state.blocks)).toBe(1);
+    expect(state.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1", status: "completed" });
+  });
+
+  it("agrees frame by frame with a full-scan reference run", () => {
+    const warm = initialSessionState();
+    const cold = initialSessionState();
+    const frames: SessionNotification["update"][] = [
+      toolCall("t1"),
+      toolCall("t2"),
+      toolUpdate("t1", "one"),
+      toolCall("t3"),
+      toolUpdate("t1", "two"),
+      toolUpdate("t2", "three"),
+      toolUpdate("t3", "four"),
+    ];
+    for (const frame of frames) {
+      applySessionUpdate(warm, notify(frame));
+      // A FRESH array has no index entry → the reference run always takes the
+      // old full-scan path. Both runs must end up with the same transcript.
+      cold.blocks = [...cold.blocks];
+      applySessionUpdate(cold, notify(frame));
+      expect(shape(warm.blocks)).toEqual(shape(cold.blocks));
+    }
+  });
+
+  it("resolves to the LAST occurrence, exactly like the old reverse scan", () => {
+    const state = initialSessionState();
+    const first: ToolBlock = {
+      kind: "tool",
+      toolCallId: "dup",
+      toolName: "replace",
+      title: "first",
+      toolKind: "edit",
+      status: "pending",
+      output: "one",
+      locations: [],
+      diff: null,
+    };
+    const second: ToolBlock = { ...first, output: "two" };
+    state.blocks = [first, { kind: "text", text: "between" }, second];
+    applySessionUpdate(state, notify(toolUpdate("dup", "done")));
+    // The last one wins (the reverse scan hit it first) — the earlier block
+    // stays untouched.
+    expect(state.blocks[2]).toMatchObject({ status: "completed", output: "done" });
+    expect(state.blocks[0]).toMatchObject({ status: "pending", output: "one" });
+    expect(state.blocks).toHaveLength(3);
+  });
+
+  it("rebuilds the index when a mid-insert shifts the cached position", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "hello");
+    applySessionUpdate(state, notify(toolCall("t1")));
+    expect(state.blocks.map((b) => b.kind)).toEqual(["user", "tool"]);
+    // The injected-context card is spliced in BEFORE the first user block →
+    // every later block shifts by one (the cached position goes stale).
+    appendInjectedContext(state, [{ kind: "system", label: "系统提示词", content: "rules" }]);
+    expect(state.blocks.map((b) => b.kind)).toEqual(["injected", "user", "tool"]);
+    // The update must land on the ORIGINAL tool block (now at index 2).
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    expect(state.blocks).toHaveLength(3);
+    expect(toolCount(state.blocks)).toBe(1);
+    expect(state.blocks[2]).toMatchObject({ kind: "tool", toolCallId: "t1", status: "completed" });
+  });
+
+  it("re-appends after the tool block was truncated away (same verdict as the old scan)", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "hello");
+    applySessionUpdate(state, notify(toolCall("t1")));
+    const user = state.blocks[0];
+    if (!user || user.kind !== "user") throw new Error("expected a user block");
+    deleteUserMessageById(state, user.id!);
+    expect(state.blocks).toHaveLength(0);
+    // The tool block is gone → the update creates a fresh one (the old scan
+    // reached the same verdict).
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1", status: "completed" });
+  });
+
+  it("scopes the index per block list (a fresh list never inherits another's index)", () => {
+    const a = initialSessionState();
+    const b = initialSessionState();
+    applySessionUpdate(a, notify(toolCall("t1")));
+    expect(a.blocks).toHaveLength(1);
+    expect(b.blocks).toHaveLength(0);
+    // The same toolCallId in another list is a DIFFERENT tool block — the
+    // index must not leak across lists.
+    applySessionUpdate(b, notify(toolCall("t1")));
+    expect(b.blocks).toHaveLength(1);
+    expect(b.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1" });
+  });
+
+  it("is idempotent: the same tool frame twice leaves one block with the same content", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify(toolCall("t1")));
+    const update = toolUpdate("t1", "done");
+    applySessionUpdate(state, notify(update));
+    const after = shape(state.blocks);
+    applySessionUpdate(state, notify(update));
+    expect(state.blocks).toHaveLength(1);
+    expect(toolCount(state.blocks)).toBe(1);
+    expect(shape(state.blocks)).toEqual(after);
+  });
+
+  it("keeps the blocks array reference stable across tool frames", () => {
+    const state = initialSessionState();
+    const before = state.blocks;
+    applySessionUpdate(state, notify(toolCall("t1")));
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    // The reducer mutates in place — the array identity must not change (the
+    // webview's identity-stable contract depends on it).
+    expect(state.blocks).toBe(before);
+  });
+});

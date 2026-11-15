@@ -131,6 +131,14 @@ type PanelInternals = {
     update: { sessionUpdate: string; content: { type: string; text: string }; agentId?: string };
   }) => void;
   resetSuperDirectiveScans: () => void;
+  /** 委派载荷去重账本（有界 FIFO）。 */
+  superDispatchedDirectives: Set<string>;
+  /** 往去重账本里记一条（有界 FIFO 的记账入口）。 */
+  rememberDispatchedDirective: (fingerprint: string) => void;
+  /** 已经拿到 AI 标题的会话 id 账本。 */
+  titledSessionIds: Set<string>;
+  /** 从会话列表里忘掉一个会话（删除路径的公共落点）。 */
+  forgetSession: (id: string) => Promise<void>;
   store: {
     getState: () => SessionState;
     sessionStarted: (meta: { sessionId: string }) => void;
@@ -400,5 +408,59 @@ describe("子会话汇报 · 归属与投递时机", () => {
     p.resetSuperDirectiveScans();
     chunk("agent_message_chunk", payload);
     expect(manager.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  describe("委派载荷账本 · 有界", () => {
+    const cap = (
+      ChatPanel as unknown as { SUPER_DISPATCHED_DIRECTIVES_CAP: number }
+    ).SUPER_DISPATCHED_DIRECTIVES_CAP;
+
+    it("账本不超过上限：超过后淘汰最旧的一条（长期运行不再无界增长）", () => {
+      expect(cap).toBeGreaterThan(0);
+      // 直接灌进记账入口：比派发路径更快，且不依赖扫描器的分帧时机。
+      for (let i = 0; i < cap + 20; i += 1) p.rememberDispatchedDirective(`fp-${i}`);
+      // 上限是硬约束：账本不得随派发次数线性增长。
+      expect(p.superDispatchedDirectives.size).toBe(cap);
+      // 淘汰的是最旧的（先进先出）—— 最新的那条必须在。
+      expect(p.superDispatchedDirectives.has("fp-0")).toBe(false);
+      expect(p.superDispatchedDirectives.has(`fp-${cap + 19}`)).toBe(true);
+      // 再灌一条仍然不越界（淘汰与写入是同一步）。
+      p.rememberDispatchedDirective("fp-overflow");
+      expect(p.superDispatchedDirectives.size).toBe(cap);
+    });
+
+    it("窗口内的同一份载荷仍然只派发一次（有界化不能破坏去重语义）", () => {
+      const payload = directive("改登录", "修好 src/auth.ts");
+      chunk("agent_message_chunk", payload);
+      expect(manager.spawn).toHaveBeenCalledTimes(1);
+      // 同一份载荷再写一遍：命中账本，不重复开子会话。
+      chunk("agent_message_chunk", payload);
+      expect(manager.spawn).toHaveBeenCalledTimes(1);
+      // 不同载荷照常派发。
+      chunk("agent_message_chunk", directive("改注册", "修好 src/register.ts"));
+      expect(manager.spawn).toHaveBeenCalledTimes(2);
+    });
+
+    it("账本里存的是定长指纹，不是整份载荷键（附件可达 MB 级）", () => {
+      const payload = directive("带附件", "把图贴进去");
+      chunk("agent_message_chunk", payload);
+      expect(p.superDispatchedDirectives.size).toBe(1);
+      for (const entry of p.superDispatchedDirectives) {
+        // 摘要化的指纹：固定长度、纯 hex —— 载荷原文（含 base64 附件）不入账。
+        expect(entry).toMatch(/^[0-9a-f]{32}$/);
+      }
+    });
+  });
+
+  describe("AI 标题账本 · 会话删除时清理", () => {
+    it("删除会话时清掉它的标题账本条目，别人的条目不受影响", async () => {
+      p.titledSessionIds.add("session-A");
+      p.titledSessionIds.add("session-B");
+      await p.forgetSession("session-A");
+      // 被删会话的条目必须走（否则账本随删除次数无界增长）。
+      expect(p.titledSessionIds.has("session-A")).toBe(false);
+      // 没被删的会话照旧保留（不能误删）。
+      expect(p.titledSessionIds.has("session-B")).toBe(true);
+    });
   });
 });
