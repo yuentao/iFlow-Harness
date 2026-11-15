@@ -1046,8 +1046,37 @@ export class ChatPanel implements vscode.Disposable {
    * Set by any user-facing cancel while a prompt turn is in flight, reset at
    * the next sendPrompt. The auto-retry paths consult it so a Stop pressed
    * during a retry wait never resurrects the prompt behind the user's back.
+   * `promptWithRetry` also consults it at the top of every attempt: a Stop
+   * pressed before the request went out settles the turn as cancelled
+   * instead of starting it (see `promptRequestSessionId`).
    */
   private cancelSeen = false;
+  /**
+   * `session/prompt` 请求真正发出的那一刻记录会话 id（null = 本轮还没发出）。
+   *
+   * `session/cancel` 打的是 CLI 里**当前在飞的请求**：bundle 实证
+   * `cancelPendingPrompt()` 在 `pendingPrompt` 为空时直接抛
+   * `Not currently generating`，而 `pendingPrompt` 只在 `prompt()` 里赋值。
+   * 宿主的回合在状态翻成 streaming 之后还要先拍一轮 checkpoint 快照
+   * （`captureWorkspaceSnapshot`）才发请求 —— 用户在这个窗口点停止，cancel
+   * 落在「上一轮早已结束的控制器」上被静默丢掉，本轮随后照常开跑。这正是
+   * 「点好几次才停得下来」的根因之一：`cancelSeen` 让未发出的回合就地收尾，
+   * 这个字段只用来判断「该不该给 CLI 发 cancel」。
+   */
+  private promptRequestSessionId: string | null = null;
+  /** 本轮在飞请求是否已经发过一次 `session/cancel`（同一回合内不重复发）。 */
+  private cancelSentForPrompt = false;
+  /**
+   * 用户按过停止的**主会话** id（null = 没有压住）。
+   *
+   * 停止的语义是「先停下来」：宿主的自动回合（子会话汇报 / 被改道的用户
+   * 消息补投）会在这一轮结束后立刻接上下一轮，用户于是看到「刚点停止又在
+   * 生成」，只能反复点（实测：一条排队汇报就是一次点击）。这里把自动回合
+   * 压到用户下一次主动发消息为止 —— 排队内容一条都不丢，只是不再自动开跑。
+   *
+   * 看板动作回执不在此列：那是用户刚在看板上操作的回执，用户期望它立刻送达。
+   */
+  private autoTurnsStoppedFor: string | null = null;
   /**
    * Whether the CURRENT prompt attempt produced any visible agent output
    * (text / thought / tool call / plan — see `isAgentOutputUpdate`). Set in
@@ -1466,6 +1495,8 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperReportPrompts = [];
     this.pendingSuperActionReceipts = [];
     this.pendingDelegatedUserTurns = [];
+    this.autoTurnsStoppedFor = null;
+    this.promptRequestSessionId = null;
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
@@ -3998,7 +4029,17 @@ export class ChatPanel implements vscode.Disposable {
     this.clearPostRejectionWatchdog();
     const sessionId = this.store.getState().sessionId;
     if (!sessionId) return;
-    client?.cancel(sessionId);
+    // Stop means "stop". Host-driven turns (child-session reports / re-delivered
+    // user messages) would otherwise start the NEXT turn the instant this one
+    // settles, flipping the panel straight back to 正在生成 — a single click
+    // then reads as "nothing happened" and users click again and again
+    // (measured: one cancel per queued report turn). Hold those automatic
+    // turns until the user sends the next message; nothing is dropped.
+    if (this.store.getState().status === "streaming") {
+      this.autoTurnsStoppedFor = this.currentMainSessionId();
+      this.announceDeferredAutoTurns();
+    }
+    this.sendTurnCancel(sessionId, client);
     // Stopping a Plan-exit card must leave the session in the mode the panel
     // shows. `session/set_mode` has no echo notification, so nothing would
     // notice the CLI drifting out of Plan mode here — the user-reported
@@ -4008,6 +4049,53 @@ export class ChatPanel implements vscode.Disposable {
     if (skippedPlanExits > 0 && client) {
       void this.assertModeForPrompt(client, sessionId);
     }
+  }
+
+  /**
+   * Tell the session to stop — but only when it actually owns a request.
+   *
+   * The CLI's `session/cancel` acts on the request currently in flight
+   * (`AcpSession.pendingPrompt`, verified in the vendor bundle): when nothing
+   * is in flight `cancelPendingPrompt()` throws `Not currently generating`,
+   * and aborting a finished controller changes nothing. The host's turn is
+   * "streaming" before the request goes out (the checkpoint snapshot runs in
+   * between), so a Stop in that window used to be silently dropped and the
+   * turn ran to completion anyway — the user had to click again once the
+   * request was really in flight. `cancelSeen` makes the pending turn settle
+   * as cancelled without issuing it (see `promptWithRetry`), and this method
+   * keeps the wire clean by sending at most one cancel per in-flight request.
+   */
+  private sendTurnCancel(sessionId: string, client: AcpClient | null): void {
+    if (this.promptRequestSessionId !== sessionId) return;
+    if (this.cancelSentForPrompt) return;
+    this.cancelSentForPrompt = true;
+    try {
+      client?.cancel(sessionId);
+    } catch (error) {
+      // A dying client must never swallow the click (and must not surface as
+      // an unhandled rejection out of the webview message router).
+      this.log.warn(`session/cancel failed: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 用户停止后如实告诉用户还有多少自动回合被压住。
+   *
+   * 静默压制会让「我明明点了停止，怎么还有东西在等」变成新的困惑；数量为 0
+   * 时保持安静（每次停止都弹一条会变成噪声）。
+   */
+  private announceDeferredAutoTurns(): void {
+    const owner = this.currentMainSessionId();
+    const pending =
+      this.pendingSuperReportPrompts.filter((item) => item.mainSessionId === owner).length +
+      this.pendingDelegatedUserTurns.filter((item) => item.mainSessionId === owner).length;
+    if (pending === 0) return;
+    this.store.sendToast(
+      "info",
+      vscode.l10n.t("已停止生成；还有 {0} 项子会话结果待处理，发送下一条消息后继续", pending),
+    );
+    // 常驻「等待子会话」提示的文案也要跟着变（它默认写着「会自动继续」）。
+    this.refreshSuperWaitHeartbeat();
   }
 
   private cancelAllApprovals(reason: string): void {
@@ -7622,6 +7710,9 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async drainDelegatedUserTurns(): Promise<void> {
     if (this.disposed || this.superReportRunning) return;
+    // 用户按过停止：自动回合不许在这一轮结束后立刻接上（否则一次停止看起来
+    // 毫无作用，用户只能反复点）。条目留在队列里，用户下次主动发消息即恢复。
+    if (this.autoTurnsHeld()) return;
     if (this.pendingDelegatedUserTurns.length === 0) return;
     const owner = this.currentMainSessionId();
     if (!this.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner)) return;
@@ -7629,6 +7720,9 @@ export class ChatPanel implements vscode.Disposable {
     try {
       while (true) {
         if (this.disposed) return;
+        // 与 drainSuperReports 同因：drain 在跑的时候用户按了停止，循环不能
+        // 立刻把下一条补投接上。
+        if (this.autoTurnsHeld()) break;
         if (!this.mainSessionFree()) break;
         // 与汇报 turn 同款门控：一轮失败后别在心跳里连续喂下一条。
         if (this.store.getState().status === "error") break;
@@ -7811,10 +7905,19 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async drainSuperReports(): Promise<void> {
     if (this.disposed || this.superReportRunning) return;
+    // Stop means "stop": do not auto-start the next child-report turn the
+    // instant the cancelled one settles (that is what made a single click look
+    // ineffective and users click several times). Reports stay queued — the
+    // user's next message releases the hold — so nothing is lost.
+    if (this.autoTurnsHeld()) return;
     this.superReportRunning = true;
     try {
       while (this.pendingSuperReportPrompts.length > 0) {
         if (this.disposed) return;
+        // The loop may already be running when the user presses Stop on the
+        // report turn it just delivered — re-check every iteration, or the
+        // next queued report would start the instant this one settles.
+        if (this.autoTurnsHeld()) break;
         if (!this.mainSessionFree()) break;
         // 合并子会话在**主仓工作区**里跑 git merge：主会话这时若也去改主仓
         // 的文件，两边会互相踩（合并提交可能卷进主会话的半成品改动）。
@@ -7879,6 +7982,16 @@ export class ChatPanel implements vscode.Disposable {
       !this.historySyncBusy &&
       this.mainLane === null
     );
+  }
+
+  /**
+   * 用户的停止是否还压着宿主自动回合（子会话汇报 / 被改道消息补投）。
+   *
+   * 只看**当前主会话**：A 会话被停止不该影响 B 会话的汇报投递。解除点是用户
+   * 下一次主动发消息（sendPrompt / regenerate），此前排队内容一条不丢。
+   */
+  private autoTurnsHeld(): boolean {
+    return this.autoTurnsStoppedFor !== null && this.autoTurnsStoppedFor === this.currentMainSessionId();
   }
 
   /**
@@ -8080,11 +8193,24 @@ export class ChatPanel implements vscode.Disposable {
       this.clearSuperWaitHeartbeat();
       return;
     }
-    const key = `${live.length}:${awaiting}`;
+    // 用户按过停止：自动投递被压住，提示必须如实改写 —— 此时还写「会自动
+    // 继续」就是在骗人（用户会盯着面板等一个永远不会来的自动回合）。
+    const held = this.autoTurnsHeld();
+    const key = `${live.length}:${awaiting}:${held ? "held" : "auto"}`;
     if (key === this.superWaitToastKey && this.superWaitToastId !== null) return;
     this.clearSuperWaitHeartbeat();
-    const message =
-      awaiting > 0
+    const message = held
+      ? awaiting > 0
+        ? vscode.l10n.t(
+            "已停止；{0} 个子会话仍在运行（其中 {1} 个等待你的回答），发送下一条消息后继续收取汇报",
+            live.length,
+            awaiting,
+          )
+        : vscode.l10n.t(
+            "已停止；{0} 个子会话仍在运行，发送下一条消息后继续收取汇报",
+            live.length,
+          )
+      : awaiting > 0
         ? vscode.l10n.t(
             "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
             live.length,
@@ -9692,8 +9818,14 @@ export class ChatPanel implements vscode.Disposable {
     // fresh transcript (onSessionUpdate filters them per session, but stop
     // the source too). This also closes the command-palette entry, which
     // bypasses the webview's disabled 新会话 button.
+    // 新会话不继承上一个会话的「用户已停止」压制。
+    this.autoTurnsStoppedFor = null;
     const inFlight = this.store.getState().sessionId;
     if (inFlight) {
+      // 还在准备阶段（还没发出 session/prompt）的回合：cancel 到不了 CLI
+      // （同 sendTurnCancel 的理由），用 cancelSeen 让它就地收尾，否则它会
+      // 在我们刚放弃的会话上照常开跑。
+      this.cancelSeen = true;
       try {
         this.client?.cancel(inFlight);
       } catch {
@@ -9890,6 +10022,9 @@ export class ChatPanel implements vscode.Disposable {
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return false;
+    // 用户自己开口 = 明确「继续」：解除 Stop 对宿主自动回合的压制
+    // （见 autoTurnsStoppedFor）。排队内容一直在队列里，这里只是放开闸门。
+    if (!internal && !hidden) this.autoTurnsStoppedFor = null;
     // ── 主会话车道 ────────────────────────────────────────────────
     // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
     // 并发会让转录顺序错乱、上下文互相污染、token 重复计费。
@@ -10339,6 +10474,8 @@ export class ChatPanel implements vscode.Disposable {
     if (!regenText) return;
     const isCompressTurn = regenText === "/compress";
     this.cancelSeen = false;
+    // 用户主动发起的一轮同样算「继续」：解除 Stop 对自动回合的压制。
+    this.autoTurnsStoppedFor = null;
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
@@ -11230,6 +11367,12 @@ export class ChatPanel implements vscode.Disposable {
     let compressToastId: number | null = null;
     try {
       for (;;) {
+        // A Stop pressed while this turn was still being prepared (the
+        // checkpoint snapshot runs between `userPrompt` — which flips the
+        // status to streaming — and the request going out) must not be lost.
+        // The CLI has nothing in flight yet, so `session/cancel` cannot reach
+        // it; settle the turn locally as cancelled instead of starting it.
+        if (this.cancelSeen) return { stopReason: "cancelled" };
         const blocks: ContentBlock[] = compressNext
           ? [{ type: "text", text: "/compress" }]
           : prompt;
@@ -11256,7 +11399,7 @@ export class ChatPanel implements vscode.Disposable {
           // per-call timeout at all, so they keep the AcpClient option's
           // behaviour (unset = no ceiling: a user task may run for hours).
           const compressTimeoutMs = isCompressAttempt ? this.compressTimeoutMs() : undefined;
-          const result = await client.prompt({ sessionId, prompt: blocks }, compressTimeoutMs);
+          const result = await this.awaitPrompt(client, sessionId, blocks, compressTimeoutMs);
           if (!compressNext) {
             // Empty-response gate (see EMPTY_RESPONSE_RETRY_DELAYS_MS): the
             // gateway answered 200 with no content, the CLI recorded an empty
@@ -11399,6 +11542,26 @@ export class ChatPanel implements vscode.Disposable {
       // The "正在压缩" indicator must never outlive the loop (a failed
       // compress or a Stop mid-compress would otherwise strand the pill).
       this.store.setCompressing(false);
+    }
+  }
+
+  /**
+   * Issue one `session/prompt` and track that the CLI now owns a request for
+   * this session — the gate `sendTurnCancel` needs before it may write
+   * `session/cancel` (see `promptRequestSessionId`).
+   */
+  private async awaitPrompt(
+    client: AcpClient,
+    sessionId: string,
+    blocks: ContentBlock[],
+    timeoutMs?: number,
+  ): Promise<PromptResponse> {
+    this.promptRequestSessionId = sessionId;
+    this.cancelSentForPrompt = false;
+    try {
+      return await client.prompt({ sessionId, prompt: blocks }, timeoutMs);
+    } finally {
+      this.promptRequestSessionId = null;
     }
   }
 

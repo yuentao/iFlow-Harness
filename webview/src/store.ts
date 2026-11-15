@@ -2888,10 +2888,14 @@ export const useChat = create<ChatStore>((set, get) => ({
   },
   send: (msg) => {
     // Debounce: identical messages fired within the window (double-clicks on
-    // send / revert / switch buttons) are dropped.
+    // send / revert / switch buttons) are dropped. `cancel` is exempt — it is
+    // the user's Stop click, and silently swallowing it is the "clicking Stop
+    // does nothing" bug class. The host already sends at most one
+    // `session/cancel` per in-flight request (`sendTurnCancel`), so letting
+    // every click through cannot turn into a cancel storm.
     const key = JSON.stringify(msg);
     const now = Date.now();
-    if (key === lastSentKey && now - lastSentAt < SEND_DEBOUNCE_MS) return;
+    if (msg.type !== "cancel" && key === lastSentKey && now - lastSentAt < SEND_DEBOUNCE_MS) return;
     lastSentKey = key;
     lastSentAt = now;
     if (msg.type === "sendPrompt") {

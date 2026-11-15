@@ -553,3 +553,122 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(toasts.at(-1)?.message).toContain("成功 1 个");
   });
 });
+
+/**
+ * 「停止生成」的宿主语义（用户报告：正在生成时点停止很难停下来，要点好几次）。
+ *
+ * 两层实证根因：
+ *  1. 状态先翻成 streaming、`session/prompt` 后发出 —— 中间还要拍一轮
+ *     checkpoint 快照。这个窗口里的 `session/cancel` 到不了 CLI（vendor
+ *     bundle 实证：`cancelPendingPrompt()` 在没有在飞请求时直接抛
+ *     "Not currently generating"），点击被静默丢掉，本轮随后照常跑完，用户
+ *     只能再点一次。
+ *  2. cancel 生效后，宿主排队中的自动回合（子会话汇报 / 被改道消息补投）
+ *     会在同一拍接上下一轮，面板立刻又变回「正在生成」，一次停止看起来
+ *     毫无作用（见 panel-super-waiting 的压制用例）。
+ *
+ * 这里用**真实的** promptWithRetry（不 mock），因为根因修复就在它里面。
+ */
+describe("ChatPanel 停止生成", () => {
+  type StopInternals = {
+    client: { cancel: (id: string) => void; prompt?: (req: unknown, timeoutMs?: number) => Promise<{ stopReason: string }> } | null;
+    cancelSeen: boolean;
+    promptRequestSessionId: string | null;
+    cancelSentForPrompt: boolean;
+    autoTurnsStoppedFor: string | null;
+    ensureClient: () => Promise<unknown>;
+    captureWorkspaceSnapshot: (sessionId: string, text: string) => Promise<string | null>;
+    promptWithRetry: (client: unknown, sessionId: string, prompt: unknown) => Promise<{ stopReason: string }>;
+    persistActiveTranscript: () => Promise<void>;
+    touchActiveSession: () => Promise<void>;
+    maybeGenerateAiTitle: (id: string) => Promise<void>;
+    handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
+    store: {
+      getState: () => SessionState;
+      sessionStarted: (meta: { sessionId: string }) => void;
+    };
+  };
+
+  let panel: ChatPanel;
+  let p: StopInternals;
+  let storageDir: string;
+  let client: { cancel: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    setConfigOverrides({ checkpoints: false });
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-stop-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as StopInternals;
+    client = { cancel: vi.fn(), prompt: vi.fn() };
+    p.client = client;
+    p.ensureClient = async () => client;
+    p.persistActiveTranscript = async () => {};
+    p.touchActiveSession = async () => {};
+    p.maybeGenerateAiTitle = async () => {};
+    p.store.sessionStarted({ sessionId: "stop-session" });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await panel.dispose();
+    fs.rmSync(storageDir, { recursive: true, force: true });
+  });
+
+  it("请求还没发出时按停止：这一轮不会被发出去，按 cancelled 收尾", async () => {
+    // Hold the turn inside the checkpoint-snapshot window — the status is
+    // already "streaming" (the Stop button is on screen) but the CLI has no
+    // request yet, which is exactly where the old cancel was silently lost.
+    let releaseSnapshot!: (value: string | null) => void;
+    p.captureWorkspaceSnapshot = () =>
+      new Promise<string | null>((resolve) => {
+        releaseSnapshot = resolve;
+      });
+
+    const turn = p.handleWebviewMessage({ type: "sendPrompt", text: "跑个长任务" });
+    await flush();
+    expect(p.store.getState().status).toBe("streaming");
+
+    await p.handleWebviewMessage({ type: "cancel" });
+    // Nothing in flight on the CLI → no cancel notification (it would be a
+    // no-op rejected as "Not currently generating").
+    expect(client.cancel).not.toHaveBeenCalled();
+
+    releaseSnapshot(null);
+    await turn;
+    await flush();
+
+    // The turn never reached the CLI: the click actually stopped it.
+    expect(client.prompt).not.toHaveBeenCalled();
+    expect(p.store.getState().status).toBe("idle");
+    expect(p.store.getState().stopReason).toBe("cancelled");
+  });
+
+  it("请求在飞时连点两次停止：只发一次 session/cancel，settle 后回到 idle", async () => {
+    let releasePrompt!: (value: { stopReason: string }) => void;
+    client.prompt.mockImplementation(
+      () =>
+        new Promise<{ stopReason: string }>((resolve) => {
+          releasePrompt = resolve;
+        }),
+    );
+
+    // No snapshot hold here: this turn reaches the CLI and stays in flight.
+    p.captureWorkspaceSnapshot = async () => null;
+    const turn = p.handleWebviewMessage({ type: "sendPrompt", text: "跑个长任务" });
+    await flush();
+    expect(client.prompt).toHaveBeenCalledTimes(1);
+    expect(p.store.getState().status).toBe("streaming");
+
+    await p.handleWebviewMessage({ type: "cancel" });
+    await p.handleWebviewMessage({ type: "cancel" });
+    // One in-flight request = one cancel; repeats are not re-sent (the CLI
+    // rejects the second with "Not currently generating").
+    expect(client.cancel).toHaveBeenCalledExactlyOnceWith("stop-session");
+
+    releasePrompt({ stopReason: "cancelled" });
+    await turn;
+    await flush();
+    expect(p.store.getState().status).toBe("idle");
+    expect(p.store.getState().stopReason).toBe("cancelled");
+  });
+});
