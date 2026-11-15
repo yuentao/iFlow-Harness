@@ -1,6 +1,16 @@
 ﻿import { describe, it, expect, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  rmdirSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -26,6 +36,8 @@ import {
 } from "../src/panel/worktree.js";
 
 const roots: string[] = [];
+/** 装着 symlink/junction 的临时父目录（清理时先拆链接，再删目录）。 */
+const linkParents: string[] = [];
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, {
@@ -59,12 +71,53 @@ function targetPath(name: string): string {
   return path.join(dir, name);
 }
 
+/**
+ * 造一个「链接形态的仓库根」：真实仓库在 `repo`，另一个路径通过 symlink /
+ * junction 指向它。
+ *
+ * 这是在复刻 macOS CI 的真实形态：`os.tmpdir()` 给的是 `/var/folders/...`，
+ * 而 git 的 `rev-parse --show-toplevel` / `worktree list` 输出的是 realpath
+ * 形式 `/private/var/folders/...`。Windows 上的目录联接（junction）同样会被
+ * git 解析成目标路径，因此这个坑在 Windows 上也能 1:1 复现（不需要管理员
+ * 权限），macOS / Linux 用普通目录符号链接。
+ *
+ * 建立失败时返回真实仓库路径 —— 调用方据此 `ctx.skip()`，绝不静默假装跑过。
+ */
+function makeLinkedRepo(repo: string): string {
+  const parent = mkdtempSync(path.join(tmpdir(), "iflow-wt-link-"));
+  const link = path.join(parent, "link");
+  try {
+    symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    rmSync(parent, { recursive: true, force: true });
+    return repo;
+  }
+  linkParents.push(parent);
+  return link;
+}
+
+/** 拆掉 makeLinkedRepo 建的链接（Windows junction 要用 rmdir，POSIX 用 unlink）。 */
+function removeLinkedRoot(parent: string): void {
+  const link = path.join(parent, "link");
+  try {
+    unlinkSync(link);
+  } catch {
+    try {
+      rmdirSync(link);
+    } catch {
+      // 已经不在 / 不是链接：下面的递归删除会兜底。
+    }
+  }
+  rmSync(parent, { recursive: true, force: true });
+}
+
 /** Read a file with CRLF normalized (checkout may translate line endings). */
 function readText(file: string): string {
   return readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 }
 
 afterAll(() => {
+  for (const parent of linkParents) removeLinkedRoot(parent);
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
@@ -174,6 +227,60 @@ describe("worktree · 真实 git 仓库", () => {
       baseRef: probe.head!,
     });
     expect(git(sub, "status", "--porcelain").trim()).toBe("");
+  }, 30000);
+
+  /**
+   * macOS CI 回归（2026-11-16）：`os.tmpdir()` 在 macOS 上是
+   * `/var/folders/...`，而 git 的 `rev-parse --show-toplevel` 输出 realpath
+   * 形式 `/private/var/folders/...`。旧实现直接拿两者做 `path.relative`，
+   * 相对路径「逃出」仓库根（以 `..` 开头）就静默 return —— exclude 一个字
+   * 都没写，主工作区于是被 `.iflow/` 弄脏（CI 实测）。
+   *
+   * Windows 的目录联接（junction）会被 git 同样解析成目标路径，因此同一
+   * 形态在 Windows 上也能真实复现，不需要管理员权限。
+   */
+  it("链接形态的仓库根（macOS /var → /private/var）：exclude 仍按仓库根写入", async (ctx) => {
+    const realRepo = makeRepo();
+    const repo = makeLinkedRepo(realRepo);
+    if (repo === realRepo) ctx.skip();
+
+    const sub = path.join(repo, "pkg");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(path.join(sub, "b.txt"), "x\n", "utf8");
+    git(realRepo, "add", "-A");
+    git(realRepo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "sub");
+
+    // 先证明夹具真的构造出了「同一目录两种写法」：git 给的是链接目标。
+    // 个别平台/文件系统上 git 可能原样返回链接路径 —— 那样就没有回归场景，
+    // 明确跳过而不是制造一条假失败。
+    const toplevel = path.resolve(git(repo, "rev-parse", "--show-toplevel").trim());
+    if (toplevel.toLowerCase() === path.resolve(repo).toLowerCase()) ctx.skip();
+
+    await ensureSuperIsolationIgnored(sub);
+    const excludeFile = path.join(realRepo, ".git", "info", "exclude");
+    const exclude = readFileSync(excludeFile, "utf8");
+    expect(exclude).toContain("pkg/.iflow/super/");
+
+    // 幂等：重复调用不会重复写。
+    await ensureSuperIsolationIgnored(sub);
+    expect(
+      readFileSync(excludeFile, "utf8")
+        .split(/\r?\n/)
+        .filter((line) => line.trim() === "pkg/.iflow/super/"),
+    ).toHaveLength(1);
+
+    const probe = await probeGitRepo(sub);
+    const target = worktreePathFor(sub, "linked", "x");
+    await createWorktree({
+      repoRoot: sub,
+      targetPath: target,
+      branch: superBranchName("linked-x"),
+      baseRef: probe.head!,
+    });
+    expect(readText(path.join(target, "a.txt"))).toBe("one\n");
+    // 关键：隔离子树在两种路径写法下都不出现在 status 里。
+    expect(git(sub, "status", "--porcelain").trim()).toBe("");
+    expect(git(repo, "status", "--porcelain").trim()).toBe("");
   }, 30000);
 
   it("worktree 里改文件不影响主工作区", async () => {

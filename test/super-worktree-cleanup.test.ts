@@ -17,7 +17,17 @@
  */
 import { describe, it, expect, afterAll, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  rmdirSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SuperAgentManager } from "../src/panel/super-agent.js";
@@ -35,6 +45,8 @@ vi.mock("../src/panel/worktree.js", async (importOriginal) => {
 });
 
 const roots: string[] = [];
+/** 装着 symlink/junction 的临时父目录（清理时先拆链接，再删目录）。 */
+const linkParents: string[] = [];
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, {
@@ -61,6 +73,45 @@ function makeRepo(): string {
 interface MadeWorktree {
   path: string;
   branch: string;
+}
+
+/**
+ * 造一个「链接形态的仓库根」：真实仓库在 `repo`，另一个路径通过 symlink /
+ * junction 指向它。
+ *
+ * 复刻 macOS CI 的真实形态：`os.tmpdir()` 给 `/var/folders/...`，git 的
+ * `rev-parse --show-toplevel` 与 `worktree list --porcelain` 却输出 realpath
+ * 形式 `/private/var/folders/...`。Windows 的目录联接会被 git 同样解析成
+ * 目标路径（不需要管理员权限），所以这个坑在 Windows 上也能真实复现。
+ *
+ * 建立失败时返回真实仓库路径 —— 调用方据此 `ctx.skip()`。
+ */
+function makeLinkedRepo(repo: string): string {
+  const parent = mkdtempSync(path.join(tmpdir(), "iflow-super-link-"));
+  const link = path.join(parent, "link");
+  try {
+    symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    rmSync(parent, { recursive: true, force: true });
+    return repo;
+  }
+  linkParents.push(parent);
+  return link;
+}
+
+/** 拆掉 makeLinkedRepo 建的链接（Windows junction 用 rmdir，POSIX 用 unlink）。 */
+function removeLinkedRoot(parent: string): void {
+  const link = path.join(parent, "link");
+  try {
+    unlinkSync(link);
+  } catch {
+    try {
+      rmdirSync(link);
+    } catch {
+      // 已经不在 / 不是链接：下面的递归删除会兜底。
+    }
+  }
+  rmSync(parent, { recursive: true, force: true });
 }
 
 /**
@@ -192,6 +243,7 @@ type Internals = {
 };
 
 afterAll(() => {
+  for (const parent of linkParents) removeLinkedRoot(parent);
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
@@ -405,6 +457,64 @@ describe("super agent · 残留 worktree 清扫", () => {
     const second = await manager.sweepStaleWorktrees();
     expect(second.removed).toBe(0);
     expect(second.kept).toBe(0);
+
+    await manager.dispose();
+  }, 30000);
+
+  /**
+   * macOS CI 回归（2026-11-16）：`git worktree list --porcelain` 输出的是
+   * realpath 形式（`/private/var/...`），而目录枚举基于调用方手里的
+   * `repoRoot`（`/var/...`）。旧实现直接比较两者 → 注册表里的 worktree
+   * 全被判成孤儿目录，清扫恒为 0（CI 实测 `expected +0 to be 2`）。
+   */
+  it("链接形态的仓库根：清扫仍能认出注册表里的 worktree 并删掉", async (ctx) => {
+    const realRepo = makeRepo();
+    const repo = makeLinkedRepo(realRepo);
+    if (repo === realRepo) ctx.skip();
+    const { manager } = makeManager(repo);
+    const worktree = makeWorktree(repo, "linked-stale");
+    manager.restoreSessions("main-1", [archivedRecord("super-linked", worktree, repo)]);
+
+    // 夹具证明：git 注册的路径与目录枚举的写法确实不同。个别平台/文件系统
+    // 上 git 可能原样返回链接路径 —— 那样就没有回归场景，明确跳过。
+    const toplevel = path.resolve(git(repo, "rev-parse", "--show-toplevel").trim());
+    if (toplevel.toLowerCase() === path.resolve(repo).toLowerCase()) ctx.skip();
+
+    const result = await manager.sweepStaleWorktrees();
+    expect(result.orphans).toHaveLength(0);
+    expect(result.removed).toBe(1);
+    expect(result.kept).toBe(0);
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(branchExists(repo, worktree.branch)).toBe(false);
+    // 记录照旧标记为已释放，看板不会一直显示待清理。
+    expect(manager.get("super-linked")?.isolation.released).toBe(true);
+
+    await manager.dispose();
+  }, 30000);
+
+  it("链接形态的仓库根：保留上限回收也生效（只删目录、分支全部保留）", async (ctx) => {
+    const realRepo = makeRepo();
+    const repo = makeLinkedRepo(realRepo);
+    if (repo === realRepo) ctx.skip();
+    const { manager } = makeManager(repo);
+    const oldest = makeWorktree(repo, "linked-oldest", { commit: "a\n" });
+    const newest = makeWorktree(repo, "linked-newest", { commit: "b\n" });
+    // 目录 mtime 决定回收顺序：显式设置，避免依赖创建顺序的时钟精度。
+    const base = Date.now() - 60_000;
+    utimesSync(oldest.path, new Date(base), new Date(base));
+    utimesSync(newest.path, new Date(base + 10_000), new Date(base + 10_000));
+    manager.restoreSessions("main-1", [
+      archivedRecord("super-linked-oldest", oldest, repo),
+      archivedRecord("super-linked-newest", newest, repo),
+    ]);
+
+    const result = await manager.sweepStaleWorktrees({ maxKeep: 1 });
+    expect(result.removed).toBe(1);
+    expect(existsSync(oldest.path)).toBe(false);
+    expect(existsSync(newest.path)).toBe(true);
+    // 回收只删目录，分支一律保留（上面可能有还没人审的提交）。
+    expect(branchExists(repo, oldest.branch)).toBe(true);
+    expect(branchExists(repo, newest.branch)).toBe(true);
 
     await manager.dispose();
   }, 30000);
