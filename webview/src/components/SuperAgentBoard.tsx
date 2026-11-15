@@ -689,7 +689,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         aria-label={t("子会话看板")}
         title={expanded ? t("收起子会话看板") : t("展开子会话看板")}
         onClick={() => setExpanded((v) => !v)}
-        className="press relative isolate flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-surface/60 px-2 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
+        className="press relative isolate flex h-7 shrink-0 items-center gap-2.5 rounded-md border border-border/70 bg-surface/60 px-3 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
       >
         {/* Running-child edge glow (Apple-Intelligence-like): a masked conic
             gradient flows around the control's border. Rendered ONLY while at
@@ -698,54 +698,66 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             pointer-events-none in CSS, no text — the accessible name, hit area,
             focus ring and layout are untouched. */}
         {hasActiveChild && <span className="super-entry-glow" aria-hidden="true" />}
-        <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
-        <span className="shrink-0 @max-[380px]:hidden">{t("子会话")}</span>
-        {/* Total count: the one count that survives at ≤380px, where the
-            header also has to fit the status chip and the action cluster. The
-            per-state chips collapse there (see below) and the panel — which
-            auto-opens for a pending question — carries the detail. */}
-        <span className="shrink-0 rounded-full bg-surface px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
-          {list.length}
+        {/* Two gap tiers, both from the kit's optical spacing set: 6px inside
+            a cluster (icon ↔ label ↔ total read as one unit, and the
+            per-state chips are one species) and 10px between clusters
+            (control gap-2.5). The old single 6px gap made the label, the
+            total and three chips read as one crowded block. */}
+        <span className="flex shrink-0 items-center gap-1.5">
+          <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
+          <span className="shrink-0 @max-[380px]:hidden">{t("子会话")}</span>
+          {/* Total count: the one count that survives at ≤380px, where the
+              header also has to fit the status chip and the action cluster. The
+              per-state chips collapse there (see below) and the panel — which
+              auto-opens for a pending question — carries the detail. */}
+          <span className="shrink-0 rounded-full bg-surface px-1.5 py-px text-ui-micro font-medium tabular-nums text-muted-foreground">
+            {list.length}
+          </span>
         </span>
-        {/* At ≤380px the header row also holds the status chip and the action
-            cluster: the running count is the only non-actionable one, so it
-            yields there (the panel still lists every child). */}
-        {counts.running > 0 && (
-          <Chip
-            tone="primary"
-            title={t("{0} 个进行中", counts.running)}
-            ariaLabel={t("{0} 个进行中", counts.running)}
-            className="@max-[380px]:hidden"
-          >
-            <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
-            <span className="tabular-nums">{counts.running}</span>
-          </Chip>
-        )}
-        {/* The awaiting count NEVER hides, not even at ≤380px: it is the only
-            on-screen evidence that a child is blocked on the user. The other
-            per-state chips yield to the header's width budget; this one is a
-            call to action, so it keeps its amber chip (icon + number) — a
-            tooltip alone would hide the one thing the user must notice. */}
-        {counts.awaiting > 0 && (
-          <Chip
-            tone="warning"
-            title={t("{0} 个待处理", counts.awaiting)}
-            ariaLabel={t("{0} 个待处理", counts.awaiting)}
-          >
-            <CircleHelp className="size-2.5" aria-hidden="true" />
-            <span className="tabular-nums">{counts.awaiting}</span>
-          </Chip>
-        )}
-        {counts.failed > 0 && (
-          <Chip
-            tone="danger"
-            title={t("{0} 个未成功", counts.failed)}
-            ariaLabel={t("{0} 个未成功", counts.failed)}
-            className="@max-[380px]:hidden"
-          >
-            <X className="size-2.5" aria-hidden="true" />
-            <span className="tabular-nums">{counts.failed}</span>
-          </Chip>
+        {(counts.running > 0 || counts.awaiting > 0 || counts.failed > 0) && (
+          <span className="flex shrink-0 items-center gap-1.5">
+            {/* At ≤380px the header row also holds the status chip and the
+                action cluster: the running count is the only non-actionable
+                one, so it yields there (the panel still lists every child). */}
+            {counts.running > 0 && (
+              <Chip
+                tone="primary"
+                title={t("{0} 个进行中", counts.running)}
+                ariaLabel={t("{0} 个进行中", counts.running)}
+                className="@max-[380px]:hidden"
+              >
+                <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
+                <span className="tabular-nums">{counts.running}</span>
+              </Chip>
+            )}
+            {/* The awaiting count NEVER hides, not even at ≤380px: it is the
+                only on-screen evidence that a child is blocked on the user. The
+                other per-state chips yield to the header's width budget; this
+                one is a call to action, so it keeps its amber chip (icon +
+                number) — a tooltip alone would hide the one thing the user must
+                notice. */}
+            {counts.awaiting > 0 && (
+              <Chip
+                tone="warning"
+                title={t("{0} 个待处理", counts.awaiting)}
+                ariaLabel={t("{0} 个待处理", counts.awaiting)}
+              >
+                <CircleHelp className="size-2.5" aria-hidden="true" />
+                <span className="tabular-nums">{counts.awaiting}</span>
+              </Chip>
+            )}
+            {counts.failed > 0 && (
+              <Chip
+                tone="danger"
+                title={t("{0} 个未成功", counts.failed)}
+                ariaLabel={t("{0} 个未成功", counts.failed)}
+                className="@max-[380px]:hidden"
+              >
+                <X className="size-2.5" aria-hidden="true" />
+                <span className="tabular-nums">{counts.failed}</span>
+              </Chip>
+            )}
+          </span>
         )}
         {/* No-confirmation is a property of every child, not of one row —
             stated once here instead of a chip repeated on each card. It is
