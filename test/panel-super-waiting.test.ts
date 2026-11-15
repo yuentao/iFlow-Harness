@@ -121,6 +121,7 @@ type PanelInternals = {
   onSessionUpdate: (n: unknown) => void;
   refreshSuperWaitHeartbeat: () => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
+  drainSuperReports: () => Promise<void>;
   pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
   store: {
     getState: () => SessionState;
@@ -295,6 +296,92 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
     await flush();
     // 全部终态且汇报都投出去了 → 忙碌态消失。
     expect(p.store.getState().superWaiting).toBe(false);
+  });
+
+  it("用户按停止后：排队的子会话汇报不会立刻接上，下一条消息后才继续", async () => {
+    const done = child({ status: "completed", summary: "登录跳转已修好" });
+    manager.list = () => [done];
+
+    // 一轮用户回合正在跑。
+    const turn = p.handleWebviewMessage({ type: "sendPrompt", text: "跑个长任务" });
+    await flush();
+    expect(p.store.getState().status).toBe("streaming");
+    expect(calls).toHaveLength(1);
+
+    // 期间有两条子会话汇报备好、排在队列里等主会话空闲。
+    p.pendingSuperReportPrompts = [
+      { mainSessionId: "sw-session", text: "【汇报】子会话 A 完成" },
+      { mainSessionId: "sw-session", text: "【汇报】子会话 B 完成" },
+    ];
+
+    // 用户按停止：这一轮按 cancelled 收尾。
+    await p.handleWebviewMessage({ type: "cancel" });
+    calls[0]!.resolve({ stopReason: "cancelled" });
+    await turn;
+    await flush();
+    await flush();
+    await flush();
+
+    // 关键：自动回合被压住 —— 面板停在 idle，不会在同一拍又变回「正在生成」；
+    // 排队内容一条不丢（用户原话：点停止很难停下来，要点好几次）。
+    expect(p.store.getState().status).toBe("idle");
+    expect(p.store.getState().stopReason).toBe("cancelled");
+    expect(calls).toHaveLength(1);
+    expect(p.pendingSuperReportPrompts).toHaveLength(2);
+
+    // 用户主动发下一条消息 = 解除压制。
+    const next = p.handleWebviewMessage({ type: "sendPrompt", text: "继续推进" });
+    await flush();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.prompt[0]!.text).toContain("继续推进");
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await next;
+    await flush();
+    await flush();
+
+    // 回合结束后汇报才被投递（逐条即时汇报，顺序不变）。
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.prompt[0]!.text).toContain("子会话 A");
+    // 在飞的那一条仍记在队列里（投递成功才出队）—— 剩下的继续排队。
+    expect(p.pendingSuperReportPrompts.map((item) => item.text)).toEqual([
+      "【汇报】子会话 A 完成",
+      "【汇报】子会话 B 完成",
+    ]);
+
+    calls[2]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    await flush();
+    expect(calls[3]!.prompt[0]!.text).toContain("子会话 B");
+    calls[3]!.resolve({ stopReason: "end_turn" });
+    await flush();
+  });
+
+  it("停止的正是汇报回合本身：drain 循环不会立刻接上下一条汇报", async () => {
+    const done = child({ status: "completed", summary: "登录跳转已修好" });
+    manager.list = () => [done];
+    p.pendingSuperReportPrompts = [
+      { mainSessionId: "sw-session", text: "【汇报】子会话 A 完成" },
+      { mainSessionId: "sw-session", text: "【汇报】子会话 B 完成" },
+    ];
+
+    // 主会话空闲 → drain 立刻投第一条汇报（hidden 回合，status streaming）。
+    void p.drainSuperReports();
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(p.store.getState().status).toBe("streaming");
+
+    // 用户按停止 —— 停的就是这一条汇报回合。
+    await p.handleWebviewMessage({ type: "cancel" });
+    calls[0]!.resolve({ stopReason: "cancelled" });
+    await flush();
+    await flush();
+    await flush();
+
+    // 循环内的压制检查生效：第二条汇报留在队列里，不会在同一拍接上。
+    expect(calls).toHaveLength(1);
+    expect(p.store.getState().status).toBe("idle");
+    expect(p.pendingSuperReportPrompts).toHaveLength(1);
+    expect(p.pendingSuperReportPrompts[0]?.text).toContain("子会话 B");
   });
 
   it("来源子会话被清理：无从投递的汇报被丢弃，忙碌态不残留", async () => {

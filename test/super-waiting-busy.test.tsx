@@ -187,3 +187,65 @@ describe("streaming 状态的顶栏 chip", () => {
     expect(container.textContent).not.toContain("生成中");
   });
 });
+
+/**
+ * 停止按钮（用户报告：正在生成时点停止很难停下来，要点好几次）。
+ *
+ * 点击层的两条硬约束：
+ *  1. 真实生成期间必须有停止键，点击就发出 `{type:"cancel"}`；
+ *  2. 它与 ESC **同一语义**（同一个 canStop），不被待处理审批/提问卡门控 ——
+ *     否则该槽位会换成可点的「发送/派发」，用户点在原停止位置反而派发出
+ *     一个子会话（实测的语义错位）。
+ */
+function stopButton(): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll("button")].find(
+    (b) => b.getAttribute("title") === "停止生成",
+  ) as HTMLButtonElement | undefined;
+}
+
+function delegateButton(): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll("button")].find(
+    (b) => b.getAttribute("title") === "派发为子会话 (Enter)",
+  ) as HTMLButtonElement | undefined;
+}
+
+describe("生成中的停止按钮", () => {
+  it("生成中显示停止键，点击发出 cancel", () => {
+    renderState({ status: "streaming" });
+    const button = stopButton();
+    expect(button).toBeTruthy();
+    expect(button!.disabled).toBe(false);
+    act(() => button!.click());
+    expect(send).toHaveBeenCalledWith({ type: "cancel" });
+  });
+
+  it("回放历史（status 同样是 streaming）不提供停止", () => {
+    renderState({ status: "streaming", replaying: true });
+    expect(stopButton()).toBeUndefined();
+  });
+
+  it("有提问卡时仍可停止，且该槽位不会变成派发键", () => {
+    renderState({
+      status: "streaming",
+      pendingQuestions: {
+        id: "q-1",
+        questions: [
+          {
+            header: "framework",
+            question: "Which framework?",
+            options: [{ label: "React", description: "React 19 with hooks" }],
+            multiSelect: false,
+          },
+        ],
+        deadline: Date.now() + 60_000,
+        timeoutMs: 60_000,
+      },
+    });
+    const button = stopButton();
+    expect(button).toBeTruthy();
+    expect(button!.disabled).toBe(false);
+    expect(delegateButton()).toBeUndefined();
+    act(() => button!.click());
+    expect(send).toHaveBeenCalledWith({ type: "cancel" });
+  });
+});

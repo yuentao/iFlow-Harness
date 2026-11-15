@@ -61,6 +61,12 @@ type FakeClient = {
 type PanelInternals = {
   client: FakeClient | null;
   panelVisible: boolean;
+  /**
+   * 新语义：只有 CLI 手里真的持有这一轮的 `session/prompt` 时才发
+   * `session/cancel`（没在飞时那个通知是无效的，CLI 会以
+   * "Not currently generating" 拒绝）。测试显式模拟「请求在飞」。
+   */
+  promptRequestSessionId: string | null;
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
   ensureClient: () => Promise<unknown>;
   promptWithRetry: (client: unknown, sessionId: string, prompt: unknown) => Promise<{ stopReason: string }>;
@@ -139,6 +145,10 @@ describe("ChatPanel plan-mode sync", () => {
   });
 
   it("re-asserts the mode after Stop cancels a pending Plan-exit card", async () => {
+    // A Plan-exit card only exists while the turn is genuinely running, i.e.
+    // the CLI owns a `session/prompt` request — that is what makes the cancel
+    // reach it (see sendTurnCancel).
+    p.promptRequestSessionId = "s-mode";
     const pending = p.requestPlanExitFromUser({ sessionId: "s-mode", plan: "do the thing" });
     await flush();
     expect(order).toEqual([]);
@@ -154,9 +164,19 @@ describe("ChatPanel plan-mode sync", () => {
   });
 
   it("does not push the mode on a Stop with no Plan card pending", async () => {
+    p.promptRequestSessionId = "s-mode";
     await p.handleWebviewMessage({ type: "cancel" });
     await flush();
     expect(client.setMode).not.toHaveBeenCalled();
     expect(client.cancel).toHaveBeenCalledWith("s-mode");
+  });
+
+  it("sends no session/cancel when the turn's request has not gone out yet", async () => {
+    // The host flips the status to streaming before the request is issued
+    // (checkpoint snapshot); a cancel there is a no-op in the CLI and used to
+    // be silently lost. The click now settles the turn locally instead.
+    await p.handleWebviewMessage({ type: "cancel" });
+    await flush();
+    expect(client.cancel).not.toHaveBeenCalled();
   });
 });
