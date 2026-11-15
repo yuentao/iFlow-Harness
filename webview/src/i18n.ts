@@ -204,8 +204,6 @@ const en: Record<string, string> = {
   "操作输出": "Output",
   "实时输出": "Live output",
   "执行参数": "Execution details",
-  "查看原始参数": "View raw details",
-  "收起原始参数": "Hide raw details",
   "技能任务": "Skill task",
   "读取文件": "Read file",
   "搜索文件": "Search files",

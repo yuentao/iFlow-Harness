@@ -625,6 +625,51 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("补开发期同步说明");
     expect(container.querySelector(".tool-card")).toBeNull();
   });
+
+  it("通用工具卡只留结构化执行参数，不再提供「查看原始参数」折叠入口", () => {
+    renderBlock(
+      toolBlock({
+        toolName: "search_file_content",
+        title: "search_file_content",
+        toolKind: "search",
+        input: '{"pattern":"handleClick","path":"src/App.tsx"}',
+        output: "2 matches",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>(".tool-card");
+    expect(card).toBeTruthy();
+    // 工具名 / 状态照常展示。
+    expect(card!.textContent).toContain("搜索文件");
+    expect(card!.textContent).toContain("已完成");
+    // 结构化参数就是审计面：键与值都摊在卡上。
+    expect(card!.textContent).toContain("执行参数");
+    expect(card!.textContent).toContain("handleClick");
+    // 折叠入口与它展开的原始 JSON 一并下线（issue #166 同源）。
+    expect(card!.querySelector(".tool-card-raw-toggle")).toBeNull();
+    expect(card!.querySelector(".tool-card-raw")).toBeNull();
+    expect(card!.textContent).not.toContain('{"pattern"');
+    expect(
+      [...card!.querySelectorAll("button")].some((b) => (b.textContent ?? "").includes("原始参数")),
+    ).toBe(false);
+  });
+
+  it("无结构化参数的降级态仍把原始参数直接摊开，不折叠也不隐藏", () => {
+    renderBlock(
+      toolBlock({
+        toolName: "run_shell_command",
+        title: "run_shell_command",
+        toolKind: "execute",
+        input: "Get-ChildItem src -Recurse",
+        output: "",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>(".tool-card");
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("执行命令");
+    expect(card!.textContent).toContain("执行参数");
+    expect(card!.textContent).toContain("Get-ChildItem src -Recurse");
+    expect(card!.querySelector(".tool-card-raw-toggle")).toBeNull();
+  });
 });
 
 describe("shortBranch", () => {
