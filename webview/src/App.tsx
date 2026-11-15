@@ -32,7 +32,7 @@ import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
 import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
-import { isTerminalSuperStatus } from "../../shared/super-agent";
+import { hasActiveSuperSession } from "../../shared/super-agent";
 
 function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
@@ -252,9 +252,12 @@ export function App() {
   // 子会话仍在跑（非终态）时，切换会话 / 模型 / API 配置会让在途的子会话用错
   // 凭据或模型，或让汇报落到已被替换的主会话。与 superWaiting 分开判定：后者
   // 只覆盖「主会话空转等汇报」，子会话运行而主会话自己也在生成时同样要锁。
-  const superActive = useChat((s) =>
-    (s.state?.superSessions ?? []).some((session) => !isTerminalSuperStatus(session.status)),
-  );
+  //
+  // P-2-1 原子订阅：只订阅列表**引用**（宿主推新数组时才变），布尔值由
+  // useMemo 派生。旧写法把 `.some()` 写在 selector 里 —— selector 在每次
+  // store 更新时都求值（流式期间 12.5 次/秒），等于每秒把整张子会话表扫一遍。
+  const superSessions = useChat((s) => s.state?.superSessions);
+  const superActive = useMemo(() => hasActiveSuperSession(superSessions), [superSessions]);
   const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);

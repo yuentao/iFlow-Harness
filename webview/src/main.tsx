@@ -13,10 +13,14 @@ let scrollIdleTimer: number | undefined;
 document.addEventListener(
   "scroll",
   () => {
-    document.documentElement.classList.add("scrolling");
+    const root = document.documentElement;
+    // The class stays on for the whole 700ms idle window, so nearly every
+    // scroll event would re-add a class that is already there — a redundant
+    // DOM mutation per event. Check first and only write on the transition.
+    if (!root.classList.contains("scrolling")) root.classList.add("scrolling");
     window.clearTimeout(scrollIdleTimer);
     scrollIdleTimer = window.setTimeout(() => {
-      document.documentElement.classList.remove("scrolling");
+      root.classList.remove("scrolling");
     }, 700);
   },
   { capture: true, passive: true },

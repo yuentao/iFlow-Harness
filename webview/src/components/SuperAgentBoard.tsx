@@ -37,6 +37,7 @@ import type {
 import {
   canRetrySuperSession,
   groupSuperSessionsForBoard,
+  hasActiveSuperSession,
   isTerminalSuperStatus,
   sumSuperUsage,
   summarizeSuperSessions,
@@ -467,8 +468,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   // At most one row's detail is open: the board must never read as a stack of
   // expanded cards. Pending questions are exempt (they render outside this).
   const [openRow, setOpenRow] = useState<string | null>(null);
-  // Ticking clock for the elapsed labels of live children.
-  const [, setTick] = useState(0);
+  // Ticking clock for the elapsed labels of live children. The value is the
+  // wall-clock instant the labels are rendered against (the rows read `now`
+  // instead of calling Date.now() during render), so the state only has to
+  // change when that instant actually moved on.
+  const [now, setNow] = useState(() => Date.now());
   // The inline header control and the popup panel are siblings (the panel is
   // absolutely positioned under the header), so the outside-click test has to
   // check BOTH boxes.
@@ -506,7 +510,9 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   // `isTerminalSuperStatus` is the single source of truth in shared/super-agent.ts,
   // so a board of only completed/failed/cancelled children renders NO decorative
   // layer at all — a completely static control with no extra DOM, no animation.
-  const hasActiveChild = list.some((s) => !isTerminalSuperStatus(s.status));
+  // Memoized on the list: the board re-renders every second while a child is
+  // running (the elapsed clock), and the flag only changes with the list.
+  const hasActiveChild = useMemo(() => hasActiveSuperSession(list), [list]);
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
 
@@ -609,7 +615,20 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
 
   useEffect(() => {
     if (active.length === 0) return;
-    const timer = window.setInterval(() => setTick((v) => v + 1), 1000);
+    // Value comparison (same shape as `CountdownSeconds` in ui.tsx): the
+    // board must only be woken when the rendered second actually moved.
+    // The old code bumped a counter unconditionally, so every tick re-rendered
+    // the whole board — every row, the live pane and the portaled panel —
+    // even when the elapsed label it exists for had not changed.
+    let last = Math.floor(Date.now() / 1000);
+    const tick = () => {
+      const second = Math.floor(Date.now() / 1000);
+      if (second === last) return;
+      last = second;
+      setNow(second * 1000);
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
   }, [active.length]);
 
@@ -880,6 +899,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                 <SuperSessionRow
                   key={session.id}
                   session={session}
+                  now={now}
                   open={openRow === session.id}
                   onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                   onMerge={() => setConfirmMerge(session)}
@@ -909,6 +929,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                         <SuperSessionRow
                           key={session.id}
                           session={session}
+                          now={now}
                           open={openRow === session.id}
                           onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                           onMerge={() => setConfirmMerge(session)}
@@ -1076,6 +1097,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
  */
 function SuperSessionRow({
   session,
+  now,
   open,
   onToggle,
   onMerge,
@@ -1083,6 +1105,9 @@ function SuperSessionRow({
   onCancel,
 }: {
   session: SuperSessionUi;
+  /** Wall-clock instant the elapsed label is rendered against — the board's
+   * ticking state (it only advances when the rendered second changes). */
+  now: number;
   open: boolean;
   onToggle: () => void;
   onMerge: () => void;
@@ -1093,7 +1118,7 @@ function SuperSessionRow({
   const [showLive, setShowLive] = useState(false);
   const chip = statusVisual(session);
   const started = session.startedAt ?? session.createdAt;
-  const ended = session.endedAt ?? Date.now();
+  const ended = session.endedAt ?? now;
   const preview = session.progress ?? session.summary;
   // A restored child ran in a PREVIOUS extension lifetime: its CLI process
   // is gone, so there is no live transcript to show and nothing to retry.
@@ -1362,7 +1387,7 @@ function SuperSessionRow({
       )}
 
       {showLive && (
-        <SuperSessionLive session={session} onClose={() => setShowLive(false)} />
+        <SuperSessionLive session={session} now={now} onClose={() => setShowLive(false)} />
       )}
     </div>
   );
@@ -1382,9 +1407,12 @@ function SuperSessionRow({
  */
 function SuperSessionLive({
   session,
+  now,
   onClose,
 }: {
   session: SuperSessionUi;
+  /** Wall-clock instant the 「已运行」 label is rendered against. */
+  now: number;
   onClose: () => void;
 }) {
   const send = useChat((s) => s.send);
@@ -1395,7 +1423,7 @@ function SuperSessionLive({
   const liveStick = useRef(true);
   const chip = statusVisual(session);
   const started = session.startedAt ?? session.createdAt;
-  const ended = session.endedAt ?? Date.now();
+  const ended = session.endedAt ?? now;
 
   useEffect(() => {
     const el = liveRef.current;
