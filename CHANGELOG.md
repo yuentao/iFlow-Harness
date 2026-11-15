@@ -3,6 +3,15 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.1.1] - 2026-11-15
+
+- 变更 主会话机械剔除 `task` 工具：`src/panel/panel.ts` 新增 `MAIN_SESSION_DISALLOWED_TOOLS = ["task"]` 与 `mainSessionSettings()`，主会话的每一次 `session/new` / `session/load`（新建、恢复、keep-session 切 Profile、删除消息的截断与回滚重载）都带 `settings.disallowed_tools: ["task"]`，子会话刻意不带——子代理的活交给子会话，主会话只做委派
+- 变更 提示词改为「子会话优先」：`prompts/system-prompt.md` 移除全部「用 `task` 工具」的指示（prefer 'task' / CRITICAL use task / Proactively use task / Use multi 'task' tools / Run one via the Task tool / use task(subagent_type="frontend-tester") / Delegate via task），改为派发子会话；Super Agent 段声明主会话没有 `task` 工具（限定主会话，子会话保留 `task`）；`prompts/super-agent-task.md` 明确子会话可用 `task` 跑进程内子代理、但不能派发子会话，交付责任仍在自己身上
+- 修复 Super Agent 段的优先级只覆盖「the workflows above」、与 Tool Usage / Security 段的 shell 指令冲突：优先级扩到整份提示词，并在 `## Tool Usage` 补一句「主会话不跑任何 shell 命令」，修掉与「This session executes nothing」的矛盾
+- 新增 真实 CLI 探针 `test/fixtures/probe-main-session-task.mjs`：同一 CLI 进程内 A（带 `disallowed_tools: ["task"]`）/ B（不带，对照）两会话对比，`--load` 模式覆盖 `session/load` 恢复路径；A 出现 task 调用即 FAIL，对照为 0 判 INCONCLUSIVE（exit 3）。实测 A=0 次（模型回 `NO_TASK_TOOL`）、B=3 帧且真的跑出 `stdout hi, exit code 0`，`--load` 后 A 仍为 0
+- 新增 单测：`test/panel-session-tools.test.ts`（5 例）覆盖主会话 6 个 `newSession` / `loadSession` 调用点的 settings；`test/super-agent-manager.test.ts` 断言子会话请求不带 settings；`test/internal-prompt.test.ts` 补提示词契约与负向断言
+- 诚实边界：剔除只作用于主会话，子会话与一次性辅助会话仍保留 `task`；`disallowed_tools` 依赖内置 CLI 把请求 settings 映射到 `Config.excludeTools`（0.5.19 实测），换 CLI 版本需重跑探针
+
 ## [3.1.0] - 2026-11-15
 
 - 新增 内置工具 `super-agent`（vendored CLI 的 `super-agent-tool-refactor` Mod）：派发主通道从「正文围栏」升级为**真工具调用**，参数 `{"tasks":[{"title","task","attachments"?}]}`；工具本身只回 `Delegation request accepted.`，真正派发由宿主从 wire 的 `tool_call` args 完成；注册受 `IFLOW_SUPER_TOOL=1` 门控（宿主只给主会话注入），子会话与一次性辅助会话不注册；子代理工具面排除该工具（`Cui=["task","super-agent"]`），防嵌套派发；Plan 模式的只读白名单不含它（规划模式仍走正文围栏）；`IFLOW_SUPER_TOOL_DEBUG=1` 可在注册失败时输出 stderr 诊断
