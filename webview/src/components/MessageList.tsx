@@ -53,6 +53,7 @@ import type {
   ToolBlock,
 } from "../../../shared/messages";
 import { isPlanMode, MAX_TOOL_OUTPUT_DISPLAY_CHARS, splitSystemPromptSections } from "../../../shared/messages";
+import { useShallow } from "zustand/react/shallow";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -682,20 +683,41 @@ function agentAccent(type: string | null): { border: string; icon: string; chip:
  * newest steps stay visible because during streaming they arrive at the tail. */
 const SUB_AGENT_VISIBLE_STEPS = 4;
 
-function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome?: BlockChrome }) {
+const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome?: BlockChrome }) {
   const flat = chrome === "flat";
   const [expanded, setExpanded] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   /** First-open latch for the lazy-mounted read-only transcript body. */
   const [transcriptMounted, setTranscriptMounted] = useState(false);
   const send = useChat((s) => s.send);
-  const state = useChat((s) => s.state);
+  // Narrow subscription: the stop affordance keys off four session flags and
+  // nothing else. Subscribing the whole state re-rendered every SubAgent card
+  // (and its nested entry list) on each snapshot — usage ticks, board updates,
+  // queue churn — even when nothing this card paints had changed.
+  const sessionStreaming = useChat((s) => {
+    const st = s.state;
+    return !!st && st.status === "streaming" && !!st.sessionId && !st.initializing && !st.replaying;
+  });
+  // The stop action has to name the session it cancels; a primitive selector
+  // keeps that off the whole-state subscription too.
+  const sessionId = useChat((s) => s.state?.sessionId ?? null);
   const active = block.status === "pending" || block.status === "in_progress";
-  const canStop = active && state?.status === "streaming" && !!state.sessionId && !state.initializing && !state.replaying;
+  const canStop = active && sessionStreaming;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (!active || block.startedAt === undefined) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const startedAt = block.startedAt;
+    if (!active || startedAt === undefined) return;
+    // Only the rendered second changes the label; a raw setNow every tick
+    // re-rendered the whole card for nothing. Same discipline as
+    // CountdownSeconds: skip setState when the derived value is equal.
+    let last = Math.floor((Date.now() - startedAt) / 1000);
+    const tick = () => {
+      const secs = Math.floor((Date.now() - startedAt) / 1000);
+      if (secs === last) return;
+      last = secs;
+      setNow(Date.now());
+    };
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [active, block.startedAt]);
   // P2-13: em dash placeholder — the literal word 未知 read as a rendering
@@ -778,7 +800,7 @@ function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome
             label={t("停止此子代理")}
             size="sm"
             tone="danger"
-            onClick={() => send({ type: "stopSubagent", sessionId: state!.sessionId!, agentId: block.agentId })}
+            onClick={() => send({ type: "stopSubagent", sessionId: sessionId!, agentId: block.agentId })}
           />
         )}
       </div>
@@ -838,7 +860,7 @@ function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome
       )}
     </div>
   );
-}
+});
 
 function ReadOnlySubAgentEntry({ block, chrome = "card" }: { block: Block; chrome?: BlockChrome }) {
   if (block.kind === "subagent") return null; // Rendered once in the tree above.
@@ -1703,7 +1725,44 @@ export function pickStreamingNotice(
   return countdown ?? warning;
 }
 
-function MessageListInner({ state }: { state: SessionState }) {
+/** Stable fallback so the shallow comparison only sees a fresh array when the
+ * host actually replaced it (MessageList gates state non-null, but the
+ * selector must still answer if the snapshot is cleared mid-unmount). */
+const EMPTY_BLOCKS: Block[] = [];
+
+/**
+ * The subset of `SessionState` this transcript paints. Selecting it shallowly
+ * keeps unrelated metadata churn (usage ticks while streaming, the sub-session
+ * board, toasts, MCP catalog …) from re-rendering the whole tree on every
+ * snapshot; `blocks` identity is what streaming / history restoration mutates.
+ *
+ * `canReviewTurn` (shared/turn-changes.ts) reads a subset of these same
+ * fields; the single narrowing assertion at its call site keeps its signature
+ * untouched without widening this subscription back to the whole state.
+ */
+function useMessageListState() {
+  return useChat(
+    useShallow((s) => ({
+      sessionId: s.state?.sessionId ?? null,
+      blocks: s.state?.blocks ?? EMPTY_BLOCKS,
+      checkpoints: s.state?.checkpoints,
+      activeSessionId: s.state?.activeSessionId ?? null,
+      replaying: s.state?.replaying ?? false,
+      initializing: s.state?.initializing ?? false,
+      status: s.state?.status ?? "idle",
+      compressing: s.state?.compressing ?? false,
+      modes: s.state?.modes ?? null,
+      queue: s.state?.queue,
+      pendingApproval: s.state?.pendingApproval ?? null,
+      pendingQuestions: s.state?.pendingQuestions ?? null,
+      pendingPlanExit: s.state?.pendingPlanExit ?? null,
+      pendingProfileSwitch: s.state?.pendingProfileSwitch ?? null,
+    })),
+  );
+}
+
+function MessageListInner() {
+  const state = useMessageListState();
   const turnsWithDiffs = useMemo(() => turnsWithChanges(state.blocks), [state.blocks]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const setHeaderScrolled = useChat((s) => s.setHeaderScrolled);
@@ -2004,9 +2063,12 @@ function MessageListInner({ state }: { state: SessionState }) {
     !state.pendingQuestions &&
     lastUserText !== null;
 
-  const onRegenerate = () => {
+  // Stable identity — BlockView is memo'd, so a fresh arrow per render would
+  // re-render every mounted block on each streaming chunk and defeat the
+  // tail-only repaint the memo + block.id keys exist for.
+  const onRegenerate = useCallback(() => {
     useChat.getState().send({ type: "regenerate" });
-  };
+  }, []);
 
   const onRemember = useCallback((text: string) => {
     useChat.getState().requestMemoryDraft(text);
@@ -2171,7 +2233,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                   onRemember={onRemember}
                   onEditingChange={handleEditingChange}
                 />
-                {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state, turnId) && (
+                {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state as SessionState, turnId) && (
                   <TurnChanges key={turnId} sessionId={state.sessionId!} userBlockId={turnId} />
                 )}
               </div>
@@ -2297,6 +2359,11 @@ function MessageListInner({ state }: { state: SessionState }) {
   );
 }
 
+// Zero-prop memo wrapper: MessageList still subscribes the snapshot identity
+// (it feeds the boundary's resetKey), but that must not drag the transcript
+// tree along — the inner shallow subscription drives every real update.
+const MemoMessageListInner = memo(MessageListInner);
+
 export function MessageList() {
   const state = useChat((s) => s.state);
   if (!state) return null;
@@ -2307,7 +2374,7 @@ export function MessageList() {
   // a transient bad chunk heals without reopening the tab.
   return (
     <ErrorBoundary variant="inline" resetKey={state}>
-      <MessageListInner state={state} />
+      <MemoMessageListInner />
     </ErrorBoundary>
   );
 }
