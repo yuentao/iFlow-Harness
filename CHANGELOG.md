@@ -3,6 +3,11 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.2.1] - 2026-11-15
+
+- 修复 macOS / 符号链接（含 Windows 目录联接）形态工作区下 Super Agent 隔离失效：`git rev-parse --show-toplevel` 与 `worktree list --porcelain` 输出的是 **realpath** 形式（macOS 的 `/var/folders/...` → `/private/var/folders/...`，目录联接被解析成目标路径），而 `repoRoot` 可能仍是链接形式，旧实现直接做 `path.relative` 词法比较，导致 `.git/info/exclude` 静默没写（隔离目录把主工作区弄脏）、残留清扫与保留上限回收把注册表里的 worktree 全判成孤儿目录（恒 0 回收）；现在 `realPathOrLexical` 在路径不存在时解析最近已存在祖先、新增 `comparisonPathKey` 统一比较键，exclude 的相对路径两侧都 realpath 归一、`listWorktrees` 归一输出路径、`sweepStaleWorktrees` 的注册表 / 活会话 / 目录枚举统一用归一键，并补 symlink/junction 形态仓库根的回归用例（`src/panel/worktree.ts` + `src/panel/super-agent.ts`）
+- 修复 慢 CI runner 上 `test/checkpoints.test.ts` 真实 shadow-git 用例超时：该 describe 每个用例要 spawn 10–40 个 `git` 进程（init/config/ls-files/add/write-tree/commit-tree/update-ref/checkout/cat-file，prune 用例还带 `gc --prune=now`），冷 `windows-latest` runner 叠加 4 并行 worker 可达本地 2–3 倍，触发全局 5s 默认（CI run #31 的 `pruneToKeptShas`）；给该 describe 加 suite 级 30s 上限，断言、跳过门与夹具一律不变，只放宽天花板让慢 git spawn 不被判成逻辑失败
+
 ## [3.2.0] - 2026-11-15
 
 - 新增/修复 首个经 OIDC Trusted Publishing 直发 Marketplace 的版本：`release.yml` 在 GitHub Release 之后追加 `npx --yes @vscode/vsce@4.1.1 publish --oidc --packagePath "iflow-harness-<版本>.vsix"`，`permissions` 补 `id-token: write`（保留 `contents: write` 供 `gh release`），配合门户侧 publisher `yuantao` 的 Trusted Publishing policy；内置定制 CLI fork 改为项目内快照 `vendor/iflow-fork/`，`vendor:cli` 默认源随之切换，CI 打包自足、不再依赖旁侧 `../iflow-fork`；Super Agent 四项修复——系统提示词写死的并发 4 改按 `maxConcurrent` 设置拆分并补守卫、补投 streaming 中被改道的用户消息以修复 regenerate 丢失附件、委派卡恢复独立表面与工具操作卡区分、看板入口为运行中子会话加高光动效；gallery 实测 3.1.1 已于 2026-11-15 发布且 Marketplace 版本号必须递增，故 bump 到 3.2.0 作为首次 OIDC 发布版本
