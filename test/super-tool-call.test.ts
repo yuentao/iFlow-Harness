@@ -44,6 +44,39 @@ describe("classifySuperToolName", () => {
   });
 });
 
+describe("classifySuperToolName · 命名空间前缀", () => {
+  it("接受 `__` / `.` 分隔的命名空间前缀（内置工具注册名可能带前缀）", () => {
+    const cases: Array<[string, "dispatch" | "actions"]> = [
+      ["iflow__super-agent", "dispatch"],
+      ["server__super-agent", "dispatch"],
+      ["mcp__server__super-agent", "dispatch"],
+      ["iflow.super-agent", "dispatch"],
+      ["super.agent", "dispatch"],
+      ["IFLOW__Super_Agent", "dispatch"],
+      ["iflow__super-agent-actions", "actions"],
+      ["server.super_agent_actions", "actions"],
+      ["iflow.super-agent-actions", "actions"],
+    ];
+    for (const [name, expected] of cases) {
+      expect(classifySuperToolName(name)).toBe(expected);
+    }
+  });
+
+  it("前缀形态仍然严格：整串与最后一段都不等于目标就落空", () => {
+    for (const name of [
+      "super-agent-guard",
+      "super-agent-tool-v2",
+      "iflow__super-agent-guard",
+      "server.super-agent-tool-v2",
+      "iflow__super-agent-actions-extra",
+      "super.agent.guard",
+      "iflow__super_agent_extra",
+    ]) {
+      expect(classifySuperToolName(name)).toBeNull();
+    }
+  });
+});
+
 describe("synthesizeSuperToolCallBlock", () => {
   it("对象参数包成对应围栏", () => {
     const text = synthesizeSuperToolCallBlock("dispatch", {

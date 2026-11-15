@@ -12,9 +12,11 @@
  * 这里刻意不复制任何校验逻辑：载荷合法性、任务 / 动作结构、占位符过滤、
  * 上限截断全部沿用协议解析器，两条通道的语义因此不会漂移。
  *
- * 名字判定**严格归一**：小写化并去掉 `_` / `-` / 空白后必须整串等于
- * `superagent` / `superagentactions`。不做前缀 / 包含匹配 —— `super-agent-guard`
- * 这类名字必须落空（那是 shell 护栏的模块名，误判成派发会把正常工具帧当载荷）。
+ * 名字判定**严格归一**（见 {@link classifySuperToolName}）：先把
+ * `_` / `-` / `.` / `/` / `:` / 空白折叠掉再整串比较 `superagent` /
+ * `superagentactions`；整串不命中时才把 `__` / `.` 当作命名空间分隔符，取最后
+ * 一段再比较。不做包含 / 前缀匹配 —— `super-agent-guard`、`super-agent-tool-v2`
+ * 这类名字必须落空（前者是 shell 护栏的模块名，误判成派发会把正常工具帧当载荷）。
  */
 
 import {
@@ -30,17 +32,38 @@ export type SuperToolCallKind = "dispatch" | "actions";
 /**
  * 把工具名归一成协议类别。
  *
- * 归一化只做「大小写 + 分隔符 + 空白」折叠：`super-agent` / `super_agent` /
- * `superAgent` / `  Super Agent  ` 都算 dispatch；`super-agent-actions` /
- * `super_agent_actions` 算 actions。其它一律 null —— 严格整串相等，不做
- * 前缀或包含匹配（见模块头注释）。
+ * 归一化分两步，两步都是**整串比较**（不做包含 / 前缀匹配）：
+ *  1. 整串折叠（小写 + 去掉 `_` / `-` / `.` / `/` / `:` / 空白）后等于
+ *     `superagent` / `superagentactions` —— 覆盖裸名、snake / camel，以及
+ *     `super.agent` 这种纯分隔符拆写；
+ *  2. 整串不命中时，把 `__` 与 `.` 当作**命名空间分隔符**，取最后一段再按
+ *     第 1 步折叠比较 —— 覆盖 `iflow__super-agent`、`server.super-agent`
+ *     这类带前缀的工具名（内置工具上线后注册名可能带命名空间）。
+ *
+ * 仍然严格：`super-agent-guard`、`super-agent-tool-v2` 这类名字落空（见模块
+ * 头注释），命名空间前缀也不会把它们的最后一段救回来。
  */
 export function classifySuperToolName(name: string): SuperToolCallKind | null {
   if (typeof name !== "string") return null;
-  const normalized = name.toLowerCase().replace(/[_\-\s]/g, "");
-  if (normalized === "superagent") return "dispatch";
-  if (normalized === "superagentactions") return "actions";
-  return null;
+  const lower = name.trim().toLowerCase();
+  if (!lower) return null;
+
+  const kindOf = (collapsed: string): SuperToolCallKind | null => {
+    if (collapsed === "superagent") return "dispatch";
+    if (collapsed === "superagentactions") return "actions";
+    return null;
+  };
+  const collapse = (value: string): string => value.replace(/[_\-\s.\/:]+/g, "");
+
+  const whole = kindOf(collapse(lower));
+  if (whole) return whole;
+
+  // 命名空间形态：只认 `__` / `.`，取最后一段。单段名字已经在上面判过，
+  // 这里不再重复（也避免把 `superagent` 本身拆坏）。
+  const segments = lower.split(/__|\./);
+  if (segments.length < 2) return null;
+  const last = segments[segments.length - 1] ?? "";
+  return kindOf(collapse(last));
 }
 
 /**

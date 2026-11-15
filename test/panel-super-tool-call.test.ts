@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import type { RequestPermissionRequest, RequestPermissionResponse } from "../src/acp/protocol.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 import type { SessionState } from "../shared/messages.js";
 
@@ -83,6 +84,7 @@ type PanelInternals = {
   superAgent: unknown;
   onSessionUpdate: (n: { sessionId: string; update: ToolCallFrame }) => void;
   sendPrompt: (...args: unknown[]) => Promise<boolean>;
+  autoApproveSuperAgentTool: (req: RequestPermissionRequest) => RequestPermissionResponse | null;
   log: { lines: { level: string; message: string }[] };
   store: {
     getState: () => SessionState;
@@ -275,5 +277,72 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
     await waitFor(() => manager.cancel.mock.calls.length > 1);
     expect(manager.cancel).toHaveBeenCalledTimes(2);
+  });
+
+  // --- 内置工具权限请求：直接放行、不弹审批卡 -------------------------------
+
+  function permissionRequest(over: {
+    toolName?: string;
+    title?: string;
+    options?: RequestPermissionRequest["options"];
+  } = {}): RequestPermissionRequest {
+    return {
+      sessionId: "tool-session",
+      toolCall: {
+        toolCallId: "tc-perm",
+        toolName: over.toolName ?? "super-agent",
+        title: over.title ?? "",
+        kind: "other",
+        locations: [],
+      },
+      options: over.options ?? [
+        { optionId: "allow-always", name: "Always", kind: "allow_always" },
+        { optionId: "allow-once", name: "Allow", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    };
+  }
+
+  it("dispatch / actions 内置工具直接允许，优先 allow_always", () => {
+    expect(p.autoApproveSuperAgentTool(permissionRequest())).toEqual({
+      outcome: { outcome: "selected", optionId: "allow-always" },
+    });
+    expect(
+      p.autoApproveSuperAgentTool(permissionRequest({ toolName: "iflow__super-agent-actions" })),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow-always" } });
+  });
+
+  it("没有 allow_always 时回退到任一 allow 项；toolName 为空时用 title", () => {
+    const response = p.autoApproveSuperAgentTool(
+      permissionRequest({
+        toolName: "",
+        title: "super-agent",
+        options: [
+          { optionId: "reject", name: "Reject", kind: "reject_once" },
+          { optionId: "allow-once", name: "Allow", kind: "allow_once" },
+        ],
+      }),
+    );
+    expect(response).toEqual({ outcome: { outcome: "selected", optionId: "allow-once" } });
+  });
+
+  it("没有允许项时按取消路径返回 cancelled（绝不伪造 optionId）", () => {
+    const response = p.autoApproveSuperAgentTool(
+      permissionRequest({
+        options: [{ optionId: "reject", name: "Reject", kind: "reject_once" }],
+      }),
+    );
+    expect(response).toEqual({ outcome: { outcome: "cancelled" } });
+  });
+
+  it("其它工具不自动放行（返回 null，继续走规则表 / 审批卡）", () => {
+    expect(
+      p.autoApproveSuperAgentTool(
+        permissionRequest({ toolName: "run_shell_command", title: "echo hi" }),
+      ),
+    ).toBeNull();
+    expect(
+      p.autoApproveSuperAgentTool(permissionRequest({ toolName: "super-agent-guard" })),
+    ).toBeNull();
   });
 });
