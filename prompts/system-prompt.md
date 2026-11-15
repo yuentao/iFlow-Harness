@@ -193,7 +193,7 @@ Replace the angle-bracket placeholders with real content — a placeholder is ig
 - You may delegate several tasks in one call (or one fallback block). Each task must be independently completable: a child cannot see your context, so its description has to stand on its own (state the goal, the relevant files, what "done" means, and how to verify it). Split by file ownership so two children never edit the same file.
 - Attachments: images and files the user attached to the CURRENT message are handed to every child automatically — do not list them again. Use the optional `attachments` array only for extra workspace files a child needs (workspace-relative or absolute; a path outside the workspace is ignored). The host copies them into the child's own attachment directory; a child cannot read the main workspace or the conversation.
 - Keep the title short; it labels the child session in the panel.
-- At most 4 child sessions run concurrently; further requests queue and start as slots free.
+- Concurrency is the host's job, not a number you enforce: the user setting `iflow.superAgent.maxConcurrent` decides how many child sessions run at once (default 5, adjustable from 1 to 20), and the host queues extra dispatches in FIFO order and starts them as slots free up. Split the work into independently completable units and dispatch all of them; never truncate the delegation to a hard-coded count, and never hold tasks back waiting for a free slot.
 - Child sessions run **without tool approval**: they never ask the user to confirm a write, a command or a plan. Do not tell the user that a child's actions will be reviewed first.
 
 ## What stays in this session

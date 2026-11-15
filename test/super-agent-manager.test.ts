@@ -732,6 +732,27 @@ describe("super agent · 编排", () => {
     expect(harness.sessions.filter((s) => s.queued).length).toBe(1);
   }, 30000);
 
+  it("上限 10 时第 11 个派发排队，槽位空出后自动开跑", async () => {
+    // 用户把 iflow.superAgent.maxConcurrent 设为 10（2026-11-15 实测场景）：
+    // 宿主不能把派发截断到 4，第 11 个任务只是 FIFO 排队，不拒绝也不丢。
+    const repo = makeRepo();
+    const limit = 10;
+    const harness = makeManager(repo, "hang", "merge", "main-1", limit);
+    const ids: string[] = [];
+    for (let i = 0; i < limit + 1; i++) {
+      ids.push(harness.manager.spawn({ title: `任务 ${i}`, task: "干活" }).id);
+    }
+    await until(() => harness.clients.length >= limit);
+    expect(harness.clients.length).toBe(limit);
+    expect(harness.sessions.filter((s) => s.queued).length).toBe(1);
+
+    // 腾出一个槽位 → 第 11 个自动开跑。
+    await harness.manager.cancel(ids[0]!);
+    await until(() => harness.clients.length === limit + 1);
+    expect(harness.clients.length).toBe(limit + 1);
+    expect(harness.sessions.filter((s) => s.queued).length).toBe(0);
+  }, 30000);
+
   it("面板关闭时终止全部子进程，但保留 worktree", async () => {
     const repo = makeRepo();
     const harness = makeManager(repo, "hang");

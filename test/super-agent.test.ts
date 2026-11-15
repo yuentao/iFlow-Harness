@@ -1647,6 +1647,12 @@ describe("子会话并发上限", () => {
     expect(clampMaxConcurrentSuperSessions("8" as unknown as number)).toBe(5);
     expect(clampMaxConcurrentSuperSessions(Number.POSITIVE_INFINITY)).toBe(5);
   });
+
+  it("用户把上限设为 10 时按 10 生效（实现层从不截断到 4）", () => {
+    // 2026-11-15 实测：maxConcurrent=10 却只派 4 个，根因是 system prompt
+    // 里写死 "At most 4"，不是 clamp。锁住 clamp 对 10 的返回值。
+    expect(clampMaxConcurrentSuperSessions(10)).toBe(10);
+  });
 });
 
 describe("super agent · 宿主与渲染共用块解析", () => {
