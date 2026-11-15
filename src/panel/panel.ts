@@ -49,6 +49,7 @@ import type {
   ExitPlanModeResponse,
   McpStatusReport,
   McpServerStatusView,
+  ToolCallBase,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
@@ -96,6 +97,10 @@ import {
   type SuperSessionUi,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
+import {
+  classifySuperToolName,
+  parseSuperToolCall,
+} from "../../shared/super-tool-call.js";
 import {
   deleteSuperSessionArchive,
   listSuperSessionArchiveFiles,
@@ -730,6 +735,18 @@ export class ChatPanel implements vscode.Disposable {
    * 新会话可以重新派发同样的任务。
    */
   private readonly superDispatchedDirectives = new Set<string>();
+  /**
+   * 已为「名字命中但载荷取不出来」的结构化工具调用弹过提示的 toolCallId。
+   *
+   * 模型把派发写成 `super-agent` / `super-agent-actions` 工具调用时，内核
+   * registry 里根本没有这两个工具 —— 旧实现既不执行也不提示，用户以为已经
+   * 派了。兜底解析失败要留痕，但同一条工具帧会在 pending / in_progress /
+   * completed 之间来回推，按 toolCallId 去重才不会刷屏。集合有上限（超了丢
+   * 最早一条），换会话 / 恢复会话 / 热重认证时清空。
+   */
+  private readonly superToolCallWarned = new Set<string>();
+  /** {@link superToolCallWarned} 的容量上限（工具帧数量不设界，Set 必须有界）。 */
+  private static readonly SUPER_TOOL_CALL_WARN_CAP = 100;
   /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
@@ -5936,6 +5953,20 @@ export class ChatPanel implements vscode.Disposable {
       this.scanSuperDirectives(n.update.content);
       this.scanSuperActions(n.update.content);
     }
+    // 结构化工具调用兜底：模型有时把派发 / 管理写成 `super-agent` /
+    // `super-agent-actions` 工具调用（内核 registry 里没有这两个工具），
+    // 旧实现既不执行也不提示，用户以为已经派了。这里从 args 取载荷，按
+    // 同一套协议执行。只认主会话自己的工具帧（带 agentId 的 SubAgent 事件
+    // 跳过），且只看「即将执行」的两帧 —— completed / failed 帧重放同一份
+    // 载荷没有意义。
+    if (
+      !this.restoring &&
+      (n.update.sessionUpdate === "tool_call" || n.update.sessionUpdate === "tool_call_update") &&
+      !(n.update as { agentId?: string }).agentId &&
+      (n.update.status === "pending" || n.update.status === "in_progress")
+    ) {
+      this.handleSuperToolCall(n.update);
+    }
     // 思考通道（`agent_thought_chunk`）只进转录：思考里写出的委派围栏不是
     // 指令，不派发任务、不执行动作，也不因写坏的载荷弹「无法解析」提示。
     // 模型边想边写出同一份载荷时，只有正文里的那一份会被上面的扫描消费。
@@ -7028,6 +7059,7 @@ export class ChatPanel implements vscode.Disposable {
   private resetSuperDirectiveScans(): void {
     this.superScan.reset();
     this.superDispatchedDirectives.clear();
+    this.superToolCallWarned.clear();
   }
 
   /**
@@ -7058,6 +7090,18 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     if (scan.blocks.length === 0) return;
+    this.dispatchSuperTasks(scan.blocks);
+  }
+
+  /**
+   * 把解析出的委派任务交给子会话管理器。
+   *
+   * 正文围栏（{@link scanSuperDirectives}）与结构化工具调用
+   * （{@link handleSuperToolCall}）共用这一段：去重键、附件丢弃计数、
+   * toast 文案都不允许两条通道各写一份 —— 同一份载荷从两条路径同时到达时，
+   * `superDirectiveDedupeKey` 必须能看见同一个账本，否则会双开子会话。
+   */
+  private dispatchSuperTasks(blocks: readonly SuperTaskSpec[][]): void {
     const manager = this.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法委派子会话"));
@@ -7065,7 +7109,7 @@ export class ChatPanel implements vscode.Disposable {
     }
     let dispatched = 0;
     let droppedAttachments = 0;
-    for (const tasks of scan.blocks) {
+    for (const tasks of blocks) {
       for (const task of tasks) {
         // 同一份载荷在正文里被重复写出时只派发第一次。
         const dedupeKey = superDirectiveDedupeKey([task]);
@@ -7100,6 +7144,64 @@ export class ChatPanel implements vscode.Disposable {
     this.store.sendToast(
       "info",
       vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, concurrency),
+    );
+  }
+
+  /**
+   * 结构化工具调用兜底。
+   *
+   * 模型把派发 / 管理写成 `super-agent` / `super-agent-actions` 工具调用时，
+   * 内核 registry 里没有这两个工具 —— 旧实现既不执行也不提示，用户以为已经
+   * 派了，实际什么都没发生。这里从 `args` 取载荷、包成对应围栏文本，再交给
+   * 现有解析器（`shared/super-tool-call.ts` 复用 `extractSuperDirectives` /
+   * `extractSuperActions`，不复制校验逻辑）。
+   *
+   * 失败**必须留痕**：名字命中了却取不出可用载荷时记一条日志并弹一次 toast
+   * （按 toolCallId 去重）。绝不伪造派发 —— 载荷坏了就当没派，明确告诉用户。
+   *
+   * 工具帧本身仍照常进 store（失败的工具卡是可见性，不能屏蔽）。
+   */
+  private handleSuperToolCall(update: ToolCallBase): void {
+    const name = (update.toolName ?? update.title ?? "").trim();
+    const kind = classifySuperToolName(name);
+    if (!kind) return;
+    const parsed = parseSuperToolCall(kind, update.args);
+    if (!parsed.ok) {
+      this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
+      return;
+    }
+    this.log.info(
+      `super agent: accepted structured ${kind} tool call (${update.toolCallId || "no-id"})`,
+    );
+    if (kind === "dispatch") this.dispatchSuperTasks(parsed.tasks);
+    else void this.runSuperActions(parsed.actions);
+  }
+
+  /**
+   * 名字命中但载荷不可用：日志 + 一次性 toast。
+   *
+   * 同一条工具帧会在 pending / in_progress / completed 之间反复推送，按
+   * toolCallId 去重（没有 id 时退化为「名字 + 状态」）。集合有上限：工具帧
+   * 数量本身不设界，不能让它无限增长；换会话时由
+   * {@link resetSuperDirectiveScans} 清空。
+   */
+  private warnUnsupportedSuperToolCall(update: ToolCallBase, name: string, reason: string): void {
+    const key = update.toolCallId || `${name}#${update.status ?? ""}`;
+    if (this.superToolCallWarned.has(key)) return;
+    if (this.superToolCallWarned.size >= ChatPanel.SUPER_TOOL_CALL_WARN_CAP) {
+      const oldest = this.superToolCallWarned.values().next().value;
+      if (oldest !== undefined) this.superToolCallWarned.delete(oldest);
+    }
+    this.superToolCallWarned.add(key);
+    this.log.warn(
+      `super agent: tool call 「${name}」 (${update.toolCallId || "no-id"}) yielded no usable payload: ${reason}`,
+    );
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t(
+        "模型尝试调用不存在的 super-agent 工具（{0}，registry 中不存在），未派发子会话",
+        name,
+      ),
     );
   }
 
