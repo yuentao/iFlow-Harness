@@ -142,6 +142,24 @@ try {
 
 const maybe = gitAvailable ? it : it.skip;
 
+/**
+ * Suite-level ceiling for the REAL-git cases below. They spawn 10–40 `git`
+ * processes each (init/config/ls-files/add/write-tree/commit-tree/update-ref/
+ * checkout/cat-file, plus `gc --prune=now` in the prune cases), so wall time is
+ * dominated by process spawn + filesystem, not by assertions.
+ *
+ * Measured on a warm Windows dev box (2026-11-16): the whole describe block
+ * runs 1–3s per case locally, `pruneToKeptShas` 2.2s solo / 2.8s with
+ * `--maxWorkers=4` (`captures a turn` 2.4s). A cold windows-latest runner with
+ * 4 parallel workers multiplies that ~2–3x, which blew the global 5s default on
+ * `pruneToKeptShas` (CI run #31). 30s is pure headroom: every assertion, skip
+ * gate and fixture stays exactly as before — this only widens the ceiling so
+ * slow git spawns are not reported as a logic failure. The two pure cases that
+ * live in this block inherit it too; they never touch git (1–5ms) and a wider
+ * timeout cannot hide a hang in code that runs no subprocess.
+ */
+const REAL_GIT_TIMEOUT_MS = 30_000;
+
 function tempDir(prefix: string): string {
   return mkdtempSync(path.join(tmpdir(), prefix));
 }
@@ -150,7 +168,7 @@ function silentLog() {
   return { info: () => {}, warn: () => {} };
 }
 
-describe("CheckpointManager (real shadow git)", () => {
+describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }, () => {
   maybe("captures a turn, then restores tracked files to the snapshot", async () => {
     const work = tempDir("iflow-cp-work-");
     const store = tempDir("iflow-cp-store-");
