@@ -5,8 +5,14 @@ node_modules/
 dist/
 UI/
 webview/dist/
-# Vendored iFlow CLI copy (created by scripts/vendor-cli.mjs at package time).
-vendor/
+# Generated vendored CLI artifacts (created by scripts/vendor-cli.mjs at package
+# time). The committed in-repo fork snapshot below is the CI default source.
+vendor/*
+!vendor/iflow-fork/
+!vendor/iflow-fork/**
+# node_modules/ above matches at every depth; re-include the snapshot's deps.
+!vendor/iflow-fork/node_modules/
+!vendor/iflow-fork/node_modules/**
 
 *.vsix
 
