@@ -842,3 +842,88 @@ describe("ThoughtText 思考卡正文", () => {
     expect(text()).toContain("思考中");
   });
 });
+
+/**
+ * 委派卡独立表面（2026-11-15）：内置 `super-agent` 工具上线后，委派卡与
+ * 「工具操作卡」ToolCard（`bg-card + border-border + shadow-card`、单行头部）
+ * 常并排出现在转录里。这里钉住委派家族的专属材质，防止有人再把它改回通用
+ * 卡材质 —— 两种卡读起来一模一样正是本次要修的反馈。
+ */
+describe("委派卡独立表面（与工具操作卡区分）", () => {
+  const TOOL_CARD_CLASSES = ["bg-card", "shadow-card", "tool-card", "border-border/60"];
+
+  it("任务书卡：淡主色底 + 主色描边 + 强调条 + eyebrow + 高一级标题，不带工具卡材质", () => {
+    render(DELEGATE);
+    const card = taskCards()[0]!;
+    expect(card.classList.contains("super-directive-card")).toBe(true);
+    expect(card.className).toContain("bg-primary/10");
+    expect(card.className).toContain("border-primary/35");
+    expect(card.className).toContain("shadow-float");
+    for (const cls of TOOL_CARD_CLASSES) {
+      expect(card.classList.contains(cls)).toBe(false);
+    }
+    // 顶部主色强调条：工具卡没有这一层。
+    expect(card.firstElementChild!.className).toContain("bg-primary/60");
+    // 两行头部：eyebrow 家族标签 + 16px 任务标题（工具卡 label 是 13px）。
+    expect(card.textContent).toContain("委派指令");
+    const title = [...card.querySelectorAll("span")].find(
+      (span) => span.textContent === "修复登录跳转",
+    );
+    expect(title).toBeTruthy();
+    expect(title!.className).toContain("text-ui-title");
+    // 独立图标徽章（Users），不是工具卡的裸 `.tool-icon`。
+    const badge = card.querySelector<HTMLElement>('[class*="border-primary/30"]');
+    expect(badge).toBeTruthy();
+    expect(badge!.querySelector("svg")).toBeTruthy();
+  });
+
+  it("窄屏先收缩标题：序号 chip 外套 shrink-0，标题列可收缩换行", () => {
+    render(DELEGATE);
+    const head = taskCards()[0]!.children[1] as HTMLElement;
+    expect(head.className).toContain("flex");
+    const titleColumn = head.children[1] as HTMLElement;
+    expect(titleColumn.className).toContain("min-w-0");
+    const chipSlot = head.lastElementChild as HTMLElement;
+    expect(chipSlot.className).toContain("shrink-0");
+    expect(chipSlot.querySelector(".chip-fade")?.className).toContain("shrink-0");
+    expect(chipSlot.textContent).toContain("第 1/2 个任务");
+  });
+
+  it("单任务卡没有序号 chip，独立表面照常存在", () => {
+    render(DELEGATE_ONE);
+    const card = taskCards()[0]!;
+    expect(card.classList.contains("super-directive-card")).toBe(true);
+    expect(card.className).toContain("bg-primary/10");
+    expect(text()).not.toMatch(/第 \d+\/\d+ 个任务/);
+  });
+
+  it("进行中占位卡同样独立，但徽章与 eyebrow 保持中性，文案不丢", () => {
+    const unclosed = ["```super-agent", '{"tasks": [{"title": "进行中的任务"'].join("\n");
+    render(unclosed);
+    const pending = container.querySelector<HTMLElement>(
+      '[data-testid="super-directive-pending"]',
+    )!;
+    expect(pending.classList.contains("super-directive-card")).toBe(true);
+    expect(pending.className).toContain("bg-primary/10");
+    for (const cls of TOOL_CARD_CLASSES) expect(pending.classList.contains(cls)).toBe(false);
+    expect(pending.getAttribute("role")).toBe("status");
+    expect(pending.textContent).toContain("正在编写任务书…");
+    expect(pending.textContent).toContain("委派指令");
+    // 中性徽章不宣称已派发。
+    expect(pending.querySelector('[class*="bg-surface/60"]')).toBeTruthy();
+  });
+
+  it("操作卡与原始协议块卡也用同一独立表面", () => {
+    render(ACTIONS);
+    const actionsCard = container.querySelector<HTMLElement>(".super-directive-card")!;
+    expect(actionsCard.className).toContain("bg-primary/10");
+    expect(actionsCard.className).not.toContain("bg-card");
+    expect(actionsCard.textContent).toContain("子会话操作");
+    expect(actionsCard.textContent).toContain("3 个动作");
+
+    render(["```super-agent", '{"tasks": [oops]}', "```"].join("\n"));
+    const rawCard = container.querySelector<HTMLElement>(".super-directive-card")!;
+    expect(rawCard.className).toContain("bg-primary/10");
+    expect(rawCard.textContent).toContain("原始协议块");
+  });
+});
