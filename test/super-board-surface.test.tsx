@@ -140,6 +140,66 @@ describe("Super Agent 看板表面材质", () => {
     expect(el.classList.contains("shadow-panel")).toBe(false);
   });
 
+  /**
+   * 呼吸感：这一粒控件曾经是「8px 内边距 + 全部 6px 行间距」的一整块密集
+   * 元素（图标、文案、总数、三个状态 chip、免确认徽标、chevron 等距排开）。
+   * 现在用两档间距——水平内边距 12px（布局间距 token，随 --ui-density 缩放）、
+   * 簇间 10px（控件内部光学间距的上限）、簇内 6px——高度仍是 28px 单行档，
+   * 顶栏节奏不变。
+   */
+  it("折叠控件用两档间距留出呼吸感：12px 内边距 / 10px 簇间 / 6px 簇内", () => {
+    render([
+      session({ id: "super-running", status: "running" }),
+      session({ id: "super-awaiting", status: "awaiting_input" }),
+      session({ id: "super-failed", status: "failed", error: "进程崩溃" }),
+    ]);
+    const el = control();
+
+    // 单行 28px 控件档：不靠 py-* 撑高，也不换行。
+    expect(el.classList.contains("h-7")).toBe(true);
+    expect(el.className).not.toMatch(/(^|\s)py-/);
+    expect(el.classList.contains("flex-nowrap")).toBe(false);
+
+    // 横向留白：内边距 12px（px-3），行间距 10px（gap-2.5）——不再是旧的
+    // px-2 + gap-1.5。
+    expect(el.classList.contains("px-3")).toBe(true);
+    expect(el.classList.contains("gap-2.5")).toBe(true);
+    expect(el.classList.contains("px-2")).toBe(false);
+    expect(el.classList.contains("gap-1.5")).toBe(false);
+
+    // 两个簇各自用 6px 光学间距：身份簇（图标 + 文案 + 总数）与状态 chip 簇。
+    const clusters = [...el.children].filter(
+      (child): child is HTMLElement =>
+        child.tagName === "SPAN" && child.classList.contains("gap-1.5"),
+    );
+    expect(clusters).toHaveLength(2);
+    expect(clusters[0]!.querySelector("svg")).toBeTruthy();
+    expect(clusters[0]!.textContent).toContain("子会话");
+    expect(clusters[0]!.textContent).toContain("3");
+    // 运行中 / 待处理 / 未成功各一个 chip（aria-label 让 chip 带 role="img"）。
+    expect(clusters[1]!.querySelectorAll('[role="img"]')).toHaveLength(3);
+
+    // 簇之外只剩免确认徽标与 chevron（可访问名不变）。
+    const inFlow = [...el.children].filter(
+      (child) => !child.classList.contains("super-entry-glow"),
+    );
+    expect(inFlow).toHaveLength(4);
+    expect(inFlow.at(-1)!.tagName.toLowerCase()).toBe("svg");
+    expect(el.getAttribute("aria-label")).toBe("子会话看板");
+  });
+
+  it("没有任何运行中/待处理/未成功时状态簇整体不渲染（不留一段空行间距）", () => {
+    render([session({ status: "completed", endedAt: 4000 })]);
+    const el = control();
+    const clusters = [...el.children].filter(
+      (child): child is HTMLElement =>
+        child.tagName === "SPAN" && child.classList.contains("gap-1.5"),
+    );
+    // 只剩身份簇；状态簇连壳都不在，簇间 10px 不会因为空簇多算一次。
+    expect(clusters).toHaveLength(1);
+    expect(el.textContent).not.toContain("个进行中");
+  });
+
   it("展开面板走真亚克力材质（portal 出 header，自带 backdrop blur）", () => {
     render();
     expect(panel()).toBeNull();
