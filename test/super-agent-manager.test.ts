@@ -81,6 +81,8 @@ class FakeClient {
   allowedRoots: string[] = [];
   /** 传给 CLI 的 `--include-directories`（工作目录之外的额外可读写根）。 */
   includeDirectories: string[] = [];
+  /** `session/new` 的请求参数（断言子会话不传主会话的 settings）。 */
+  newSessionRequests: Array<Record<string, unknown> | undefined> = [];
   /** Resolver for the "commit-a-gated" plan: the test opens the gate explicitly. */
   releasePrompt: (() => void) | null = null;
   /** Resolver for the "gate-session" plan: releases the pending `session/new`. */
@@ -94,7 +96,8 @@ class FakeClient {
     private readonly plan: Plan,
   ) {}
 
-  async newSession(): Promise<{ sessionId: string }> {
+  async newSession(request?: Record<string, unknown>): Promise<{ sessionId: string }> {
+    this.newSessionRequests.push(request);
     if (this.plan === "gate-session") {
       // 准备阶段挂起：测试可以在这个窗口里中断子会话。
       await new Promise<void>((resolve) => {
@@ -335,6 +338,20 @@ describe("super agent · 编排", () => {
     expect(client?.cwd).toBe(session?.isolation.path);
     expect(client?.allowedRoots).toEqual([session?.isolation.path]);
     expect(client?.cwd).not.toBe(repo);
+  }, 30000);
+
+  it("子会话的 session/new 不带主会话 settings（子会话必须保留 task 工具）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo);
+    harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const request = harness.clients[0]?.newSessionRequests[0];
+    expect(request).toBeDefined();
+    // 主会话经 `settings.disallowed_tools: ["task"]` 机械剔除 task；
+    // 子会话刻意不传 settings —— 进程内子代理只允许在子会话里跑。
+    expect(request?.settings).toBeUndefined();
+    expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
   }, 30000);
 
   it("子会话被推到 yolo 模式（刻意完全自主，不因审批往返停顿）", async () => {
@@ -713,6 +730,27 @@ describe("super agent · 编排", () => {
     await until(() => harness.clients.length === limit + 1);
     expect(harness.clients.length).toBe(limit + 1);
     expect(harness.sessions.filter((s) => s.queued).length).toBe(1);
+  }, 30000);
+
+  it("上限 10 时第 11 个派发排队，槽位空出后自动开跑", async () => {
+    // 用户把 iflow.superAgent.maxConcurrent 设为 10（2026-11-15 实测场景）：
+    // 宿主不能把派发截断到 4，第 11 个任务只是 FIFO 排队，不拒绝也不丢。
+    const repo = makeRepo();
+    const limit = 10;
+    const harness = makeManager(repo, "hang", "merge", "main-1", limit);
+    const ids: string[] = [];
+    for (let i = 0; i < limit + 1; i++) {
+      ids.push(harness.manager.spawn({ title: `任务 ${i}`, task: "干活" }).id);
+    }
+    await until(() => harness.clients.length >= limit);
+    expect(harness.clients.length).toBe(limit);
+    expect(harness.sessions.filter((s) => s.queued).length).toBe(1);
+
+    // 腾出一个槽位 → 第 11 个自动开跑。
+    await harness.manager.cancel(ids[0]!);
+    await until(() => harness.clients.length === limit + 1);
+    expect(harness.clients.length).toBe(limit + 1);
+    expect(harness.sessions.filter((s) => s.queued).length).toBe(0);
   }, 30000);
 
   it("面板关闭时终止全部子进程，但保留 worktree", async () => {

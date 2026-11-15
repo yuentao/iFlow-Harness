@@ -20,6 +20,7 @@ function isEnglish(): boolean {
 
 const en: Record<string, string> = {
   // Super Agent (child sessions of the main session)
+  "委派指令": "Delegation directive",
   "子会话": "Child sessions",
   "准备中": "Preparing",
   "等待你处理": "Needs you",
@@ -1081,9 +1082,13 @@ const en: Record<string, string> = {
   "正在生成…": "Generating…",
   "生成失败": "Generation failed",
   // super-agent 协议块卡片（转录里取代裸 JSON 代码块）
+  "子会话委派": "Child-session delegation",
+  "{0} 个任务": "{0} task(s)",
   "第 {0}/{1} 个任务": "Task {0}/{1}",
   "载荷未能完整解析，以下任务书仅供阅读，可能尚未派发":
     "The payload could not be fully parsed; the task briefs below are for reading only and may not have been dispatched yet.",
+  "工具参数未能完整解析，任务列表暂不可用，以下保留原始参数":
+    "The tool arguments could not be fully parsed, so the task list is unavailable. The raw arguments are kept below.",
   "子会话操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",

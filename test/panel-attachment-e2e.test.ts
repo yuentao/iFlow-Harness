@@ -138,4 +138,56 @@ describe("agent attachment header · end-to-end (panel → CLI)", () => {
     expect(sent[0]).not.toContain(AGENT_ATTACHMENT_HEADER);
     expect(hasAgentAttachmentBlock(sent[0]!)).toBe(false);
   });
+
+  it("streaming variant: delegated attachments are backfilled to the main session too", async () => {
+    const p = panel as unknown as {
+      promptWithRetry: (
+        _c: unknown,
+        _s: string,
+        prompt: Array<{ type: string; text?: string }>,
+      ) => Promise<{ stopReason: string }>;
+    };
+    const prompts: Array<Array<{ type: string; text?: string }>> = [];
+    let resolveFirst: ((v: { stopReason: string }) => void) | null = null;
+    let callIndex = 0;
+    p.promptWithRetry = vi.fn((_c: unknown, _s: string, prompt: Array<{ type: string; text?: string }>) => {
+      prompts.push(prompt);
+      callIndex += 1;
+      if (callIndex === 1) {
+        // 第一回合保持 streaming，逼出「改道派发子会话」那条路径。
+        return new Promise<{ stopReason: string }>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return Promise.resolve({ stopReason: "end_turn" });
+    }) as unknown as typeof p.promptWithRetry;
+    const spawn = vi.fn(() => ({ id: "super-1" }));
+    Object.assign(p, { getSuperAgent: () => ({ spawn }) });
+
+    const first = send({ text: "first turn" });
+    await flush();
+    await send({
+      text: "look at this",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+      files: [{ name: "note.txt", path: "C:/tmp/note.txt" }],
+    });
+    await flush();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(prompts).toHaveLength(1); // streaming 期间绝不并发第二个主会话 prompt
+
+    resolveFirst!({ stopReason: "end_turn" });
+    await first;
+    await flush();
+
+    // 回合结束后的补投回合：主会话也拿到与 idle 发送同构的附件头/路径与图片块。
+    expect(prompts).toHaveLength(2);
+    const recorded = prompts[1]!.map((part) => part.text ?? "").join("\n");
+    expect(recorded).toContain("[补投用户消息]");
+    expect(recorded).toContain("look at this");
+    expect(recorded).toContain(AGENT_ATTACHMENT_HEADER);
+    expect(recorded).toContain("- note.txt → C:/tmp/note.txt");
+    expect(hasAgentAttachmentBlock(recorded)).toBe(true);
+    expect(prompts[1]).toContainEqual({ type: "image", data: "QUJD", mimeType: "image/png" });
+    expect(spawn).toHaveBeenCalledTimes(1); // 补投不二次派发
+  });
 });

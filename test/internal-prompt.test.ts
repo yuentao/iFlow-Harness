@@ -731,10 +731,32 @@ describe("prompt templates (prompts/)", () => {
     // strict — implementation is never kept in the main session.
     const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
     expect(text).toContain("You are the orchestrator: delegation, planning, management and reporting");
+    // 优先级必须覆盖整份提示词：Tool Usage / Security 段也在教「本会话怎么跑 shell」，
+    // 只写「the workflows above」会把那几段留在覆盖范围之外，两段直接自相矛盾。
+    expect(text).toContain(
+      "Where anything in this prompt tells you to implement, run a command, run a check or run git, this section takes precedence in this session",
+    );
+    expect(text).not.toContain("Where the workflows above tell you to implement");
+    // 读到 Tool Usage 段时就该知道那些 shell 指令属于子会话，而不是读到后面才发现矛盾。
+    expect(text).toContain(
+      "These command-execution instructions apply to child sessions — the main session (the one that receives the child-session board) runs no shell commands at all; it delegates them.",
+    );
     expect(text).toContain("The children do the work");
     expect(text).toContain("Decompose the user's task yourself, then delegate");
     expect(text).toContain("Implementation work is never kept here");
     expect(text).toContain("```super-agent");
+    // 派发首选内置工具：CLI 已注册 `super-agent` 工具，工具调用就是主通道。
+    // 缺了这段声明，模型会退回手写围栏（浪费 token）或改用进程内 task 工具。
+    expect(text).toContain("Dispatching means calling the `super-agent` tool");
+    expect(text).toContain('{"tasks":[{"title"');
+    // 只有工具不在列表时（Plan 模式 / 旧 bundle）才退回正文围栏。
+    expect(text).toContain("Only when the tool is absent from your tool list");
+    expect(text).toContain("Do not hand-write the fenced block while the tool is available");
+    // `task` 是进程内子代理：无 worktree 隔离、不上看板，不能拿来派发。
+    expect(text).toContain("Do not use the `task` tool for this");
+    // 管理动作仍然只有正文围栏这一条通道（没有 actions 工具）。
+    expect(text).toContain("Management actions go through the fenced block only");
+    expect(text).toContain("there is no `super-agent-actions` tool");
     expect(text).toContain("## When to split");
     expect(text).toContain("## What stays in this session");
     expect(text).toContain("Never edit a delegated file yourself");
@@ -749,6 +771,51 @@ describe("prompt templates (prompts/)", () => {
     const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
     expect(brief).toContain("Run the project checks the task brief asks for");
     expect(brief).toContain("never claim a check passed");
+  });
+
+  it("keeps the child-session concurrency limit configurable instead of hard-coding 4", () => {
+    // 模型会照着提示词里的数字自我约束：写死的 "At most 4 child sessions" 曾让
+    // 用户把 iflow.superAgent.maxConcurrent 设成 10 后仍只派 4 个任务
+    //（2026-11-15 实测）。实现层的上限来自设置且每次实时读取，提示词不得再写死数字。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).not.toContain("At most 4 child sessions run concurrently");
+    expect(text).not.toMatch(/At most [0-9]+ child sessions run concurrently/);
+    expect(text).toContain("`iflow.superAgent.maxConcurrent`");
+    expect(text).toContain("default 5, adjustable from 1 to 20");
+    expect(text).toContain("the host queues extra dispatches in FIFO order");
+    expect(text).toContain("never truncate the delegation to a hard-coded count");
+  });
+
+  it("declares that the main session has no `task` tool while child sessions keep it, and routes every delegation through child sessions", () => {
+    // 宿主在 session/new 的 settings.disallowed_tools 里剔除 `task`（宿主行为由
+    // test/panel-session-tools.test.ts 覆盖，这里只校验提示词措辞）。提示词若还写
+    // 「用 task 探索 / 用 task 并行」，模型会去调一个不存在的工具，然后零派发
+    // （2026-11-15 用户实测：主会话优先调进程内子代理）。
+    // 同一份模板也作为子会话的 system prompt，所以「没有 task」必须显式限定主会话，
+    // 否则子会话会误以为自己也不能用 `task`，与 prompts/super-agent-task.md 矛盾。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("the main session — the one that receives the child-session board — has no `task` tool");
+    expect(text).toContain('settings.disallowed_tools: ["task"]');
+    // 无条件的裸句必须消失（子会话读到会误判）。
+    expect(text).not.toContain("this session has no `task` tool");
+    expect(text).not.toContain("This session has no `task` tool");
+    // 委派只有一条通道：super-agent 子会话。
+    expect(text).toContain("delegation always goes through child sessions");
+    expect(text).toContain("is a child session's job: dispatch it with `super-agent`");
+    // 子会话保留 `task`，那是它自己进程内子代理的机制。
+    expect(text).toContain("Child sessions keep `task` for their own in-process subagents");
+    const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
+    expect(brief).toContain("run in-process subagents with the `task` tool");
+    expect(brief).toContain("you have no `super-agent` tool");
+    // 旧的「task 优先」整句必须消失，否则又把模型指向进程内子代理。
+    expect(text).not.toContain("for file search prefer 'task' to save context");
+    expect(text).not.toContain("it is CRITICAL that you use 'task' with subagent_type=explore-agent");
+    expect(text).not.toContain("Proactively use 'task' with specialized agents");
+    expect(text).not.toContain("Delegate via `task`; `subagent_type` must exactly match the name in the agent list");
+    expect(text).not.toContain("Use multi 'task' tools when the user asks for parallel execution");
+    expect(text).not.toContain('use task(subagent_type="frontend-tester")');
+    expect(text).not.toContain("route high-volume or speculative exploration through 'task'");
+    expect(text).not.toContain("Run one via the Task tool with the slash invocation");
   });
 
   it("gives the main session no git exception: an unmerged branch goes to a merge child session", () => {

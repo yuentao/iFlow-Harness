@@ -4,6 +4,7 @@ import {
   deriveAllowRule,
   globToRegExp,
   hardDenyReason,
+  isSuperAgentToolRequest,
   matchPathGlob,
   matchRule,
   normalizeApprovalRule,
@@ -68,6 +69,30 @@ describe("hardDenyReason", () => {
 
   it("vetoes the delete tool kind regardless of title", () => {
     expect(hardDenyReason(info({ toolKind: "delete", title: "whatever" }))).toBe("delete");
+  });
+});
+
+describe("isSuperAgentToolRequest", () => {
+  it("toolName 归一为 dispatch / actions 时命中（含命名空间前缀）", () => {
+    expect(isSuperAgentToolRequest(info({ toolName: "super-agent" }))).toBe(true);
+    expect(isSuperAgentToolRequest(info({ toolName: "super_agent" }))).toBe(true);
+    expect(isSuperAgentToolRequest(info({ toolName: "iflow__super-agent" }))).toBe(true);
+    expect(isSuperAgentToolRequest(info({ toolName: "super.agent" }))).toBe(true);
+    expect(isSuperAgentToolRequest(info({ toolName: "super_agent_actions" }))).toBe(true);
+    expect(isSuperAgentToolRequest(info({ toolName: "server.super-agent-actions" }))).toBe(true);
+  });
+
+  it("toolName 为空时退回 title", () => {
+    expect(isSuperAgentToolRequest(info({ toolName: "", title: "super-agent" }))).toBe(true);
+    expect(isSuperAgentToolRequest(info({ toolName: "   ", title: "server__super-agent-actions" }))).toBe(true);
+  });
+
+  it("toolName 有值时不看 title；普通工具与 guard 名字一律不命中", () => {
+    expect(isSuperAgentToolRequest(info({ toolName: "read_file", title: "super-agent" }))).toBe(false);
+    expect(isSuperAgentToolRequest(info({ toolName: "super-agent-guard" }))).toBe(false);
+    expect(isSuperAgentToolRequest(info({ toolName: "super-agent-tool-v2" }))).toBe(false);
+    expect(isSuperAgentToolRequest(info({ toolKind: "execute", title: "npm test" }))).toBe(false);
+    expect(isSuperAgentToolRequest(info())).toBe(false);
   });
 });
 

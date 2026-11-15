@@ -25,6 +25,8 @@
  * query the DOCUMENT (the React mount only holds the collapsed control).
  * The semantics of every assertion are unchanged.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -136,6 +138,66 @@ describe("Super Agent 看板表面材质", () => {
     // The old floating-shelf material is gone from the collapsed form.
     expect(el.classList.contains("super-board-surface")).toBe(false);
     expect(el.classList.contains("shadow-panel")).toBe(false);
+  });
+
+  /**
+   * 呼吸感：这一粒控件曾经是「8px 内边距 + 全部 6px 行间距」的一整块密集
+   * 元素（图标、文案、总数、三个状态 chip、免确认徽标、chevron 等距排开）。
+   * 现在用两档间距——水平内边距 12px（布局间距 token，随 --ui-density 缩放）、
+   * 簇间 10px（控件内部光学间距的上限）、簇内 6px——高度仍是 28px 单行档，
+   * 顶栏节奏不变。
+   */
+  it("折叠控件用两档间距留出呼吸感：12px 内边距 / 10px 簇间 / 6px 簇内", () => {
+    render([
+      session({ id: "super-running", status: "running" }),
+      session({ id: "super-awaiting", status: "awaiting_input" }),
+      session({ id: "super-failed", status: "failed", error: "进程崩溃" }),
+    ]);
+    const el = control();
+
+    // 单行 28px 控件档：不靠 py-* 撑高，也不换行。
+    expect(el.classList.contains("h-7")).toBe(true);
+    expect(el.className).not.toMatch(/(^|\s)py-/);
+    expect(el.classList.contains("flex-nowrap")).toBe(false);
+
+    // 横向留白：内边距 12px（px-3），行间距 10px（gap-2.5）——不再是旧的
+    // px-2 + gap-1.5。
+    expect(el.classList.contains("px-3")).toBe(true);
+    expect(el.classList.contains("gap-2.5")).toBe(true);
+    expect(el.classList.contains("px-2")).toBe(false);
+    expect(el.classList.contains("gap-1.5")).toBe(false);
+
+    // 两个簇各自用 6px 光学间距：身份簇（图标 + 文案 + 总数）与状态 chip 簇。
+    const clusters = [...el.children].filter(
+      (child): child is HTMLElement =>
+        child.tagName === "SPAN" && child.classList.contains("gap-1.5"),
+    );
+    expect(clusters).toHaveLength(2);
+    expect(clusters[0]!.querySelector("svg")).toBeTruthy();
+    expect(clusters[0]!.textContent).toContain("子会话");
+    expect(clusters[0]!.textContent).toContain("3");
+    // 运行中 / 待处理 / 未成功各一个 chip（aria-label 让 chip 带 role="img"）。
+    expect(clusters[1]!.querySelectorAll('[role="img"]')).toHaveLength(3);
+
+    // 簇之外只剩免确认徽标与 chevron（可访问名不变）。
+    const inFlow = [...el.children].filter(
+      (child) => !child.classList.contains("super-entry-glow"),
+    );
+    expect(inFlow).toHaveLength(4);
+    expect(inFlow.at(-1)!.tagName.toLowerCase()).toBe("svg");
+    expect(el.getAttribute("aria-label")).toBe("子会话看板");
+  });
+
+  it("没有任何运行中/待处理/未成功时状态簇整体不渲染（不留一段空行间距）", () => {
+    render([session({ status: "completed", endedAt: 4000 })]);
+    const el = control();
+    const clusters = [...el.children].filter(
+      (child): child is HTMLElement =>
+        child.tagName === "SPAN" && child.classList.contains("gap-1.5"),
+    );
+    // 只剩身份簇；状态簇连壳都不在，簇间 10px 不会因为空簇多算一次。
+    expect(clusters).toHaveLength(1);
+    expect(el.textContent).not.toContain("个进行中");
   });
 
   it("展开面板走真亚克力材质（portal 出 header，自带 backdrop blur）", () => {
@@ -1174,5 +1236,104 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
 
     const hint = rowTitleHint();
     expect(hint).toContain("目录 /tmp/fallback");
+  });
+});
+
+describe("Super Agent 看板入口运行态炫光", () => {
+  /** 装饰层：只在至少一个子会话非终态时挂载。 */
+  const glow = (): HTMLElement | null =>
+    control().querySelector<HTMLElement>(".super-entry-glow");
+
+  it("至少一个非终态子会话：渲染纯装饰层，可访问名/aria-expanded/点击区不变", () => {
+    render([session({ status: "running" })]);
+
+    const el = glow();
+    expect(el).toBeTruthy();
+    // 纯装饰：不进可访问树、无文本、不吃指针事件（后者在 CSS 契约里断言）。
+    expect(el!.getAttribute("aria-hidden")).toBe("true");
+    expect(el!.textContent).toBe("");
+    expect(el!.childElementCount).toBe(0);
+    // 装饰层不改变按钮本身的可访问语义与展开状态。
+    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    // 定位/层叠上下文挂在按钮上，装饰层自己不引入新控件。
+    expect(control().className).toContain("relative");
+    expect(control().className).toContain("isolate");
+    // 装饰层不带任何可交互形态（不是按钮/链接）。
+    expect(el!.querySelector("button, a, input")).toBeNull();
+  });
+
+  it("准备中 / 等你处理同属非终态，炫光层同样出现", () => {
+    for (const status of ["preparing", "awaiting_input"] as const) {
+      render([session({ status })]);
+      expect(glow()).toBeTruthy();
+      expect(glow()!.getAttribute("aria-hidden")).toBe("true");
+    }
+  });
+
+  it("running 混合终态：只要有一个非终态就保留炫光层", () => {
+    render([
+      session({ id: "a", status: "completed" }),
+      session({ id: "b", status: "running" }),
+      session({ id: "c", status: "cancelled" }),
+    ]);
+    expect(glow()).toBeTruthy();
+  });
+
+  it("全部为终态时完全静止：零装饰层 DOM（completed/failed/cancelled 任一组合）", () => {
+    const terminalSets: Array<Array<"completed" | "failed" | "cancelled">> = [
+      ["completed"],
+      ["failed"],
+      ["cancelled"],
+      ["completed", "failed", "cancelled"],
+    ];
+    for (const statuses of terminalSets) {
+      render(statuses.map((status, i) => session({ id: `s${i}`, status })));
+      expect(glow()).toBeNull();
+      // 控件本身仍在（只是没有多余装饰层与动画）。
+      expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    }
+  });
+
+  it("从运行态收敛到全终态后，重新渲染会移除装饰层（无残留动画）", () => {
+    render([session({ status: "running" })]);
+    expect(glow()).toBeTruthy();
+
+    render([session({ status: "completed" })]);
+    expect(glow()).toBeNull();
+  });
+
+  it("CSS 契约：角度动画 + conic-gradient + 复合环形 mask（圆角连续）+ blur 柔光 + reduced-motion 降级", () => {
+    const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
+    const start = css.indexOf(".super-entry-glow {");
+    expect(start).toBeGreaterThan(-1);
+    // 取动效整段（含 @property / keyframes / reduced-motion）。
+    const block = css.slice(css.lastIndexOf("@property --super-entry-angle", start));
+    expect(block).toContain('syntax: "<angle>"');
+    expect(block).toContain("@keyframes super-entry-spin");
+    expect(block).toContain("conic-gradient(");
+    expect(block).toContain("from var(--super-entry-angle)");
+    // 中心被挖空：单个复合环形遮罩 = 外框减 content-box，两层同受
+    // border-radius: inherit 约束，圆角处不会像四条轴向矩形条那样被掐细。
+    expect(block).toContain("-webkit-mask:");
+    expect(block).toContain("mask:");
+    expect(block).toContain("content-box");
+    expect(block).toContain("-webkit-mask-composite: xor");
+    expect(block).toContain("mask-composite: exclude");
+    // 环宽由 padding 给出（内容框内缩同量 → 环沿圆角等宽）。
+    expect(block).toContain("padding: 2px");
+    expect(block).toContain("border-radius: inherit");
+    // 旧实现：四条轴向矩形条，在 45° 对角处只剩 ~0.75px，四角看起来被裁切。
+    expect(block).not.toContain("no-repeat");
+    expect(block).toContain("filter: blur(");
+    expect(block).toContain("pointer-events: none");
+    // 纯装饰层不吃点击；focus ring 由按钮自身 box-shadow 提供，不被裁切。
+    expect(block).not.toContain("overflow: hidden");
+    // 不依赖 backdrop-filter（陷阱 #22）。
+    expect(block).not.toContain("backdrop-filter");
+    // 减弱动效降级为静态角度，不加任意 px 字号/圆角。
+    expect(block).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(block).toContain("animation: none");
+    expect(block).not.toMatch(/text-\[\d+px\]|rounded-\[\d+px\]/);
   });
 });

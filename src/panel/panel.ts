@@ -49,9 +49,11 @@ import type {
   ExitPlanModeResponse,
   McpStatusReport,
   McpServerStatusView,
+  SessionSettings,
+  ToolCallBase,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { extractCorePrompt, isPlanMode, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
+import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
@@ -75,6 +77,7 @@ import { SuperAgentManager } from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
   buildSuperDigest,
+  buildDelegatedUserTurnPrompt,
   buildSuperMergeRequestPrompt,
   clampMaxConcurrentSuperSessions,
   clampMaxSuperWorktrees,
@@ -96,6 +99,10 @@ import {
   type SuperSessionUi,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
+import {
+  classifySuperToolName,
+  parseSuperToolCall,
+} from "../../shared/super-tool-call.js";
 import {
   deleteSuperSessionArchive,
   listSuperSessionArchiveFiles,
@@ -149,6 +156,7 @@ import {
   decideApproval,
   deriveAllowRule,
   hardDenyReason,
+  isSuperAgentToolRequest,
   normalizeApprovalRule,
   parseApprovalPolicy,
   serializeApprovalPolicy,
@@ -371,6 +379,41 @@ const INTERNAL_PROMPT_IDLE_MS = 90_000;
  * that turn's trigger raced a replay / a streaming turn / an error.
  */
 const SUPER_HEARTBEAT_MS = 1_500;
+/**
+ * Tools the MAIN panel session must never receive.
+ *
+ * The user directive is that the main session only DELEGATES: it plans, writes
+ * task briefs, watches the board and reports — every implementation step
+ * belongs to a Super Agent child session, and the in-process `task` sub-agent
+ * may only run there. The system prompt already says so, but the model kept
+ * preferring the in-process `task` tool (observed repeatedly), so the
+ * constraint is now mechanical instead of advisory.
+ *
+ * Wire behavior (verified against the vendored CLI bundle,
+ * vendor/iflow-cli/bundle/iflow.js):
+ *  - `session/new` / `session/load` map the request's `settings.disallowed_tools`
+ *    onto the Config's `excludeTools`
+ *    (`u = {...this.settings.merged, ..., excludeTools: o?.disallowed_tools, ...}`);
+ *    `loadSession` builds its config through the same `newSessionConfig(...,
+ *    settings)`, and its not-found fallback calls `newSession` (settings
+ *    forwarded too).
+ *  - `Config.createToolRegistry()`'s registrar
+ *    (`t = (r, ...n) => { let s = r.name, a = r.Name || s, l = this.getExcludeTools(), ...;
+ *    (l?.includes(s) || l?.includes(a)) && (u = !1); u && register }`) skips
+ *    registration when `excludeTools` matches either the static `Name` or the
+ *    class name.
+ *  - `TaskTool` declares `static Name = "task"`, so `"task"` is the exact key.
+ *
+ * The exclusion is per session: child sessions (SuperAgentManager) deliberately
+ * do NOT pass settings and therefore keep `task` — the main session hands the
+ * sub-agent work down to them.
+ */
+export const MAIN_SESSION_DISALLOWED_TOOLS = ["task"] as const;
+/** Fresh settings object for one main-session `session/new` / `session/load`.
+ * A factory (not a shared object) so no caller can mutate another's copy. */
+export function mainSessionSettings(): SessionSettings {
+  return { disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS] };
+}
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
  * delays the chips — it must never hold the panel in a pseudo-busy state.
@@ -731,6 +774,31 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly superDispatchedDirectives = new Set<string>();
   /**
+   * 已为「名字命中但载荷取不出来」的结构化工具调用弹过提示的 toolCallId。
+   *
+   * 模型把派发写成 `super-agent` / `super-agent-actions` 工具调用时，内核
+   * registry 里根本没有这两个工具 —— 旧实现既不执行也不提示，用户以为已经
+   * 派了。兜底解析失败要留痕，但同一条工具帧会在 pending / in_progress /
+   * completed 之间来回推，按 toolCallId 去重才不会刷屏。集合有上限（超了丢
+   * 最早一条），换会话 / 恢复会话 / 热重认证时清空。
+   */
+  private readonly superToolCallWarned = new Set<string>();
+  /** {@link superToolCallWarned} 的容量上限（工具帧数量不设界，Set 必须有界）。 */
+  private static readonly SUPER_TOOL_CALL_WARN_CAP = 100;
+  /**
+   * 已执行过管理动作的结构化工具调用（`toolCallId` + 载荷指纹）。
+   *
+   * 派发侧有 `superDispatchedDirectives` 载荷账本兜底，动作侧没有 —— 同一条
+   * 工具帧在 pending / in_progress 两帧各带一次载荷时，`cancel` 靠管理器幂等
+   * 不会出大事，但 `cleanup` / `retry` 的第二次会报「未生效」（假失败），
+   * `cleanup` 甚至可能并发操作同一个 worktree。按「工具调用 + 载荷」去重：
+   * 同一次调用只执行一次，不同调用即使载荷相同也各自执行（那是模型的真实
+   * 意图，不能吞）。集合有上限，换会话时清空。
+   */
+  private readonly superToolCallActionsDone = new Set<string>();
+  /** {@link superToolCallActionsDone} 的容量上限。 */
+  private static readonly SUPER_TOOL_CALL_ACTIONS_CAP = 100;
+  /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
    * delegation buffer: the two protocols have independent fences and
@@ -875,6 +943,30 @@ export class ChatPanel implements vscode.Disposable {
     files: { name: string; path: string }[];
   } | null = null;
   /**
+   * 主会话 streaming（含 laneBusy 窗口）时被改道给子会话的用户消息，等本
+   * 回合结束后再以 hidden 回合补投回主会话。
+   *
+   * 背景（2026-11-15 用户实测）：那一路 `sendPrompt` 在 manager.spawn 之后
+   * 直接 return false —— 主会话既收不到 prompt、UI 也没有用户气泡；回合末的
+   * 子会话汇报又明确「不是用户消息」，队列入队路径也已下线，这条消息在主
+   * 会话里就永久丢失。这里只缓存内容形态（原文 + 图片/文件/上下文），**绝不**
+   * 在派发时碰 client.prompt（会与正在跑的回合并发）或 store.userPrompt
+   * （会凭空造一个主会话从未处理过的用户气泡）。
+   *
+   * 交付走 drainDelegatedUserTurns：与子会话汇报 / 动作回执 / 合并请求共用
+   * superReportRunning 这条车道、互斥执行，排队等主会话空闲；每次只投一条，
+   * sendPrompt 真的跑起来才出队，失败/被占用时留着等心跳重投，不丢也不重复。
+   */
+  private pendingDelegatedUserTurns: Array<{
+    mainSessionId: string | null;
+    text: string;
+    images: { data: string; mimeType: string }[];
+    files: { name: string; path: string }[];
+    contexts?: ContextRefUi[];
+    /** 超过子会话附件上限、没交给子会话的数量（补投文本里如实写明）。 */
+    droppedByChild: number;
+  }> = [];
+  /**
    * Freshness baseline for the Mod context report BEFORE the next session
    * creation/load. The report is written at startChat (inside session/new /
    * session/load), so the first prompt's baseline is THIS timestamp — a
@@ -954,8 +1046,37 @@ export class ChatPanel implements vscode.Disposable {
    * Set by any user-facing cancel while a prompt turn is in flight, reset at
    * the next sendPrompt. The auto-retry paths consult it so a Stop pressed
    * during a retry wait never resurrects the prompt behind the user's back.
+   * `promptWithRetry` also consults it at the top of every attempt: a Stop
+   * pressed before the request went out settles the turn as cancelled
+   * instead of starting it (see `promptRequestSessionId`).
    */
   private cancelSeen = false;
+  /**
+   * `session/prompt` 请求真正发出的那一刻记录会话 id（null = 本轮还没发出）。
+   *
+   * `session/cancel` 打的是 CLI 里**当前在飞的请求**：bundle 实证
+   * `cancelPendingPrompt()` 在 `pendingPrompt` 为空时直接抛
+   * `Not currently generating`，而 `pendingPrompt` 只在 `prompt()` 里赋值。
+   * 宿主的回合在状态翻成 streaming 之后还要先拍一轮 checkpoint 快照
+   * （`captureWorkspaceSnapshot`）才发请求 —— 用户在这个窗口点停止，cancel
+   * 落在「上一轮早已结束的控制器」上被静默丢掉，本轮随后照常开跑。这正是
+   * 「点好几次才停得下来」的根因之一：`cancelSeen` 让未发出的回合就地收尾，
+   * 这个字段只用来判断「该不该给 CLI 发 cancel」。
+   */
+  private promptRequestSessionId: string | null = null;
+  /** 本轮在飞请求是否已经发过一次 `session/cancel`（同一回合内不重复发）。 */
+  private cancelSentForPrompt = false;
+  /**
+   * 用户按过停止的**主会话** id（null = 没有压住）。
+   *
+   * 停止的语义是「先停下来」：宿主的自动回合（子会话汇报 / 被改道的用户
+   * 消息补投）会在这一轮结束后立刻接上下一轮，用户于是看到「刚点停止又在
+   * 生成」，只能反复点（实测：一条排队汇报就是一次点击）。这里把自动回合
+   * 压到用户下一次主动发消息为止 —— 排队内容一条都不丢，只是不再自动开跑。
+   *
+   * 看板动作回执不在此列：那是用户刚在看板上操作的回执，用户期望它立刻送达。
+   */
+  private autoTurnsStoppedFor: string | null = null;
   /**
    * Whether the CURRENT prompt attempt produced any visible agent output
    * (text / thought / tool call / plan — see `isAgentOutputUpdate`). Set in
@@ -1373,6 +1494,9 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperReports.clear();
     this.pendingSuperReportPrompts = [];
     this.pendingSuperActionReceipts = [];
+    this.pendingDelegatedUserTurns = [];
+    this.autoTurnsStoppedFor = null;
+    this.promptRequestSessionId = null;
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
@@ -3641,6 +3765,35 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * Super Agent 内置工具（`super-agent` / `super-agent-actions`）的权限请求
+   * 直接放行，不弹审批卡。
+   *
+   * 理由：该工具本身**只回 ack**，真正干活的是宿主 —— `handleSuperToolCall`
+   * 从 `args` 取载荷，交给与正文围栏完全相同的派发 / 动作链路。正文围栏派发
+   * 从来不经审批，所以同一条信任级别的内置工具也不额外加卡；否则模型每派一次
+   * 子会话就要用户点一次，把「随时开启」变成「每次确认」，安全边界却没有任何
+   * 增量（工具不执行任何东西）。
+   *
+   * 只对这一个工具生效：其它工具仍走规则表 / 审批卡，用户的 approvalMode
+   * 语义不变。响应里的 `optionId` **必须是 agent 真正给出的** —— CLI 用
+   * `nativeEnum` 解析，伪造会抛错并卡死回合；没有 allow 选项时按现有取消
+   * 路径回 `cancelled`，绝不伪造批准。
+   */
+  private autoApproveSuperAgentTool(req: RequestPermissionRequest): RequestPermissionResponse | null {
+    if (!isSuperAgentToolRequest(this.approvalRequestInfo(req))) return null;
+    const label = req.toolCall.toolName || req.toolCall.title || "super-agent";
+    const option =
+      req.options.find((o) => o.kind === "allow_always") ??
+      req.options.find((o) => o.kind.startsWith("allow"));
+    if (!option) {
+      this.log.warn(`super agent: "${label}" permission request offers no allow option — cancelling`);
+      return { outcome: { outcome: "cancelled" } };
+    }
+    this.log.info(`super agent: auto-allowed built-in tool "${label}" (${option.kind})`);
+    return { outcome: { outcome: "selected", optionId: option.optionId } };
+  }
+
+  /**
    * Run the rule table over an incoming permission request BEFORE surfacing a
    * card. Returns the wire response to send, or null when the user must still
    * decide (no rule matched, or a hard veto downgraded an allow to ask).
@@ -3876,7 +4029,17 @@ export class ChatPanel implements vscode.Disposable {
     this.clearPostRejectionWatchdog();
     const sessionId = this.store.getState().sessionId;
     if (!sessionId) return;
-    client?.cancel(sessionId);
+    // Stop means "stop". Host-driven turns (child-session reports / re-delivered
+    // user messages) would otherwise start the NEXT turn the instant this one
+    // settles, flipping the panel straight back to 正在生成 — a single click
+    // then reads as "nothing happened" and users click again and again
+    // (measured: one cancel per queued report turn). Hold those automatic
+    // turns until the user sends the next message; nothing is dropped.
+    if (this.store.getState().status === "streaming") {
+      this.autoTurnsStoppedFor = this.currentMainSessionId();
+      this.announceDeferredAutoTurns();
+    }
+    this.sendTurnCancel(sessionId, client);
     // Stopping a Plan-exit card must leave the session in the mode the panel
     // shows. `session/set_mode` has no echo notification, so nothing would
     // notice the CLI drifting out of Plan mode here — the user-reported
@@ -3886,6 +4049,53 @@ export class ChatPanel implements vscode.Disposable {
     if (skippedPlanExits > 0 && client) {
       void this.assertModeForPrompt(client, sessionId);
     }
+  }
+
+  /**
+   * Tell the session to stop — but only when it actually owns a request.
+   *
+   * The CLI's `session/cancel` acts on the request currently in flight
+   * (`AcpSession.pendingPrompt`, verified in the vendor bundle): when nothing
+   * is in flight `cancelPendingPrompt()` throws `Not currently generating`,
+   * and aborting a finished controller changes nothing. The host's turn is
+   * "streaming" before the request goes out (the checkpoint snapshot runs in
+   * between), so a Stop in that window used to be silently dropped and the
+   * turn ran to completion anyway — the user had to click again once the
+   * request was really in flight. `cancelSeen` makes the pending turn settle
+   * as cancelled without issuing it (see `promptWithRetry`), and this method
+   * keeps the wire clean by sending at most one cancel per in-flight request.
+   */
+  private sendTurnCancel(sessionId: string, client: AcpClient | null): void {
+    if (this.promptRequestSessionId !== sessionId) return;
+    if (this.cancelSentForPrompt) return;
+    this.cancelSentForPrompt = true;
+    try {
+      client?.cancel(sessionId);
+    } catch (error) {
+      // A dying client must never swallow the click (and must not surface as
+      // an unhandled rejection out of the webview message router).
+      this.log.warn(`session/cancel failed: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 用户停止后如实告诉用户还有多少自动回合被压住。
+   *
+   * 静默压制会让「我明明点了停止，怎么还有东西在等」变成新的困惑；数量为 0
+   * 时保持安静（每次停止都弹一条会变成噪声）。
+   */
+  private announceDeferredAutoTurns(): void {
+    const owner = this.currentMainSessionId();
+    const pending =
+      this.pendingSuperReportPrompts.filter((item) => item.mainSessionId === owner).length +
+      this.pendingDelegatedUserTurns.filter((item) => item.mainSessionId === owner).length;
+    if (pending === 0) return;
+    this.store.sendToast(
+      "info",
+      vscode.l10n.t("已停止生成；还有 {0} 项子会话结果待处理，发送下一条消息后继续", pending),
+    );
+    // 常驻「等待子会话」提示的文案也要跟着变（它默认写着「会自动继续」）。
+    this.refreshSuperWaitHeartbeat();
   }
 
   private cancelAllApprovals(reason: string): void {
@@ -5761,7 +5971,12 @@ export class ChatPanel implements vscode.Disposable {
       this.context.extensionUri.fsPath;
     this.historySyncBusy = true;
     try {
-      await client.loadSession({ cwd, mcpServers: [], sessionId });
+      await client.loadSession({
+        cwd,
+        mcpServers: [],
+        sessionId,
+        settings: mainSessionSettings(),
+      });
       if (this.disposed || this.client !== client) return false;
     } catch (error) {
       this.log.warn(`keep-session session/load failed: ${errorMessage(error)}`);
@@ -5935,6 +6150,20 @@ export class ChatPanel implements vscode.Disposable {
     ) {
       this.scanSuperDirectives(n.update.content);
       this.scanSuperActions(n.update.content);
+    }
+    // 结构化工具调用兜底：模型有时把派发 / 管理写成 `super-agent` /
+    // `super-agent-actions` 工具调用（内核 registry 里没有这两个工具），
+    // 旧实现既不执行也不提示，用户以为已经派了。这里从 args 取载荷，按
+    // 同一套协议执行。只认主会话自己的工具帧（带 agentId 的 SubAgent 事件
+    // 跳过），且只看「即将执行」的两帧 —— completed / failed 帧重放同一份
+    // 载荷没有意义。
+    if (
+      !this.restoring &&
+      (n.update.sessionUpdate === "tool_call" || n.update.sessionUpdate === "tool_call_update") &&
+      !(n.update as { agentId?: string }).agentId &&
+      (n.update.status === "pending" || n.update.status === "in_progress")
+    ) {
+      this.handleSuperToolCall(n.update);
     }
     // 思考通道（`agent_thought_chunk`）只进转录：思考里写出的委派围栏不是
     // 指令，不派发任务、不执行动作，也不因写坏的载荷弹「无法解析」提示。
@@ -6341,13 +6570,22 @@ export class ChatPanel implements vscode.Disposable {
       // no measurable win, and the probe's meta/modes ordering stays obvious.
       this.contextReportBaseline = Date.now();
       const tProbe = Date.now();
-      const probe = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+      const probe = await client.newSession({
+        cwd: workspaceRoot,
+        mcpServers: [],
+        settings: mainSessionSettings(),
+      });
       this.log.info(`restore: probe session/new ok in ${Date.now() - tProbe}ms`);
       // Abort checkpoint 1 — nothing has been written to the store yet.
       if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
       const probeMeta: NewSessionMeta | undefined = probe._meta;
       const tLoad = Date.now();
-      const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
+      const session = await client.loadSession({
+        cwd: workspaceRoot,
+        mcpServers: [],
+        sessionId,
+        settings: mainSessionSettings(),
+      });
       this.log.info(`restore: session/load ok in ${Date.now() - tLoad}ms`);
       // Abort checkpoint 2 — still nothing written to the store.
       if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
@@ -6992,6 +7230,11 @@ export class ChatPanel implements vscode.Disposable {
     const spawnEnv: NodeJS.ProcessEnv = {
       IFLOW_HARNESS: "1",
       IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile(),
+      // 子会话绝不能拿到主会话的内置 `super-agent` 工具开关：那个工具负责
+      // 派发子会话，给了子会话就等于允许无限套娃。AcpClient 把 process.env
+      // 铺在 options.env 之下，这里用 undefined 显式抹掉该键（Node 的 spawn
+      // 会跳过值为 undefined 的环境变量），即便用户 shell 里设了也不继承。
+      IFLOW_SUPER_TOOL: undefined,
     };
     if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
     const client = new AcpClient(
@@ -7028,6 +7271,8 @@ export class ChatPanel implements vscode.Disposable {
   private resetSuperDirectiveScans(): void {
     this.superScan.reset();
     this.superDispatchedDirectives.clear();
+    this.superToolCallWarned.clear();
+    this.superToolCallActionsDone.clear();
   }
 
   /**
@@ -7058,6 +7303,18 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     if (scan.blocks.length === 0) return;
+    this.dispatchSuperTasks(scan.blocks);
+  }
+
+  /**
+   * 把解析出的委派任务交给子会话管理器。
+   *
+   * 正文围栏（{@link scanSuperDirectives}）与结构化工具调用
+   * （{@link handleSuperToolCall}）共用这一段：去重键、附件丢弃计数、
+   * toast 文案都不允许两条通道各写一份 —— 同一份载荷从两条路径同时到达时，
+   * `superDirectiveDedupeKey` 必须能看见同一个账本，否则会双开子会话。
+   */
+  private dispatchSuperTasks(blocks: readonly SuperTaskSpec[][]): void {
     const manager = this.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法委派子会话"));
@@ -7065,7 +7322,7 @@ export class ChatPanel implements vscode.Disposable {
     }
     let dispatched = 0;
     let droppedAttachments = 0;
-    for (const tasks of scan.blocks) {
+    for (const tasks of blocks) {
       for (const task of tasks) {
         // 同一份载荷在正文里被重复写出时只派发第一次。
         const dedupeKey = superDirectiveDedupeKey([task]);
@@ -7100,6 +7357,93 @@ export class ChatPanel implements vscode.Disposable {
     this.store.sendToast(
       "info",
       vscode.l10n.t("已派发 {0} 个子会话（并发上限 {1}）", dispatched, concurrency),
+    );
+  }
+
+  /**
+   * 结构化工具调用兜底。
+   *
+   * 模型把派发 / 管理写成 `super-agent` / `super-agent-actions` 工具调用时，
+   * 内核 registry 里没有这两个工具 —— 旧实现既不执行也不提示，用户以为已经
+   * 派了，实际什么都没发生。这里从 `args` 取载荷、包成对应围栏文本，再交给
+   * 现有解析器（`shared/super-tool-call.ts` 复用 `extractSuperDirectives` /
+   * `extractSuperActions`，不复制校验逻辑）。
+   *
+   * 失败**必须留痕**：名字命中了却取不出可用载荷时记一条日志并弹一次 toast
+   * （按 toolCallId 去重）。绝不伪造派发 —— 载荷坏了就当没派，明确告诉用户。
+   *
+   * 工具帧本身仍照常进 store（失败的工具卡是可见性，不能屏蔽）。
+   */
+  private handleSuperToolCall(update: ToolCallBase): void {
+    const name = (update.toolName ?? update.title ?? "").trim();
+    const kind = classifySuperToolName(name);
+    if (!kind) return;
+    // Wire 实证（CLI 0.5.19，见 protocol.ts 的 `args` 注释）：原始参数只随
+    // `tool_call_update(in_progress)` 到达，pending 帧通常没有 args。此时还
+    // 不能下结论 —— 下一帧就会带载荷；在这里弹「未派发子会话」是误报
+    // （用户先看到「没派」，紧接着又看到真的派了）。
+    if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
+    const parsed = parseSuperToolCall(kind, update.args);
+    if (!parsed.ok) {
+      this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
+      return;
+    }
+    this.log.info(
+      `super agent: accepted structured ${kind} tool call (${update.toolCallId || "no-id"})`,
+    );
+    if (kind === "dispatch") {
+      this.dispatchSuperTasks(parsed.tasks);
+      return;
+    }
+    // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷
+    // 账本（派发侧有 `superDispatchedDirectives`），不去重就会执行两次 ——
+    // `cleanup` / `retry` 的第二次会报假失败，`cleanup` 还可能并发操作同一个
+    // worktree。按「工具调用 + 载荷」去重，不同调用照常各自执行。
+    const actionKey = `${update.toolCallId || "no-id"}#${parsed.text}`;
+    if (this.superToolCallActionsDone.has(actionKey)) {
+      this.log.info(
+        `super agent: skipped-duplicate structured actions tool call (${update.toolCallId || "no-id"})`,
+      );
+      return;
+    }
+    this.rememberSuperToolCallActions(actionKey);
+    void this.runSuperActions(parsed.actions);
+  }
+
+  /** 记住一条已执行的动作工具调用（有界 Set，超了丢最早一条）。 */
+  private rememberSuperToolCallActions(key: string): void {
+    if (this.superToolCallActionsDone.size >= ChatPanel.SUPER_TOOL_CALL_ACTIONS_CAP) {
+      const oldest = this.superToolCallActionsDone.values().next().value;
+      if (oldest !== undefined) this.superToolCallActionsDone.delete(oldest);
+    }
+    this.superToolCallActionsDone.add(key);
+  }
+
+  /**
+   * 名字命中但载荷不可用：日志 + 一次性 toast。
+   *
+   * 同一条工具帧会在 pending / in_progress / completed 之间反复推送，按
+   * toolCallId 去重（没有 id 时退化为「名字 + 状态」）。集合有上限：工具帧
+   * 数量本身不设界，不能让它无限增长；换会话时由
+   * {@link resetSuperDirectiveScans} 清空。
+   */
+  private warnUnsupportedSuperToolCall(update: ToolCallBase, name: string, reason: string): void {
+    const key = update.toolCallId || `${name}#${update.status ?? ""}`;
+    if (this.superToolCallWarned.has(key)) return;
+    if (this.superToolCallWarned.size >= ChatPanel.SUPER_TOOL_CALL_WARN_CAP) {
+      const oldest = this.superToolCallWarned.values().next().value;
+      if (oldest !== undefined) this.superToolCallWarned.delete(oldest);
+    }
+    this.superToolCallWarned.add(key);
+    this.log.warn(
+      `super agent: tool call 「${name}」 (${update.toolCallId || "no-id"}) yielded no usable payload: ${reason}`,
+    );
+    this.store.sendToast(
+      "warning",
+      vscode.l10n.t(
+        "模型尝试调用不存在的 super-agent 工具（{0}，registry 中不存在），未派发子会话",
+        name,
+      ),
     );
   }
 
@@ -7349,6 +7693,82 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 把 streaming 期间被改道给子会话的用户消息补投回主会话（hidden 回合）。
+   *
+   * 与子会话汇报 / 动作回执 / 合并请求共用同一条车道：`superReportRunning`
+   * 是重入锁（这几个 drain 都在第一个 await 之前同步申领，谁先申领谁跑），
+   * 主会话空闲（mainSessionFree，含 mainLane 空闲）才投，合并队列在跑时先
+   * 让路。心跳会反复调用，所以「被占用 / 失败」的条目只是留在缓冲里等下一
+   * 拍，绝不丢失、绝不重复派发。
+   *
+   * 补投走 `hidden:true + delegateOnBusy:false`：hidden 保证不伪造用户气泡、
+   * 不改名、不拍 checkpoint；`delegateOnBusy:false` 保证它即便撞上 busy 窗口
+   * 也只是被拒（留在缓冲里等下一拍），**不会二次派发子会话**。附件按原始
+   * 形态重新附上（image 块 + AGENT_ATTACHMENT_HEADER 路径清单），文本由
+   * buildDelegatedUserTurnPrompt 如实标注来源，不伪装成子会话汇报、不伪造
+   * 附件内容（全部原件都带回，missingCount 因此恒为 0）。
+   */
+  private async drainDelegatedUserTurns(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    // 用户按过停止：自动回合不许在这一轮结束后立刻接上（否则一次停止看起来
+    // 毫无作用，用户只能反复点）。条目留在队列里，用户下次主动发消息即恢复。
+    if (this.autoTurnsHeld()) return;
+    if (this.pendingDelegatedUserTurns.length === 0) return;
+    const owner = this.currentMainSessionId();
+    if (!this.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner)) return;
+    this.superReportRunning = true;
+    try {
+      while (true) {
+        if (this.disposed) return;
+        // 与 drainSuperReports 同因：drain 在跑的时候用户按了停止，循环不能
+        // 立刻把下一条补投接上。
+        if (this.autoTurnsHeld()) break;
+        if (!this.mainSessionFree()) break;
+        // 与汇报 turn 同款门控：一轮失败后别在心跳里连续喂下一条。
+        if (this.store.getState().status === "error") break;
+        // 合并子会话在主仓工作区里跑 git：与它互斥，等合并走完再投。
+        if (
+          this.superMergeRunning ||
+          this.pendingSuperMerges.length > 0 ||
+          this.superMergeChildRunning()
+        ) {
+          break;
+        }
+        const index = this.pendingDelegatedUserTurns.findIndex(
+          (item) => item.mainSessionId === owner,
+        );
+        if (index === -1) break;
+        const item = this.pendingDelegatedUserTurns[index]!;
+        const text = buildDelegatedUserTurnPrompt({
+          text: item.text,
+          images: item.images,
+          files: item.files,
+          droppedByChild: item.droppedByChild,
+        });
+        this.log.info(
+          "super agent: backfilling a delegated user turn as a fresh main-session hidden turn",
+        );
+        const started = await this.sendPrompt(
+          text,
+          item.images.length > 0 ? item.images : undefined,
+          item.files.length > 0 ? item.files : undefined,
+          item.contexts,
+          { delegateOnBusy: false, hidden: true },
+        );
+        // 没跑起来（主会话被别的回合占着 / 被拒）：留在缓冲里等下一拍重投，
+        // 既不丢这条消息，也不会重复派发子会话。
+        if (!started) break;
+        const pos = this.pendingDelegatedUserTurns.indexOf(item);
+        if (pos !== -1) this.pendingDelegatedUserTurns.splice(pos, 1);
+      }
+    } catch (error) {
+      this.log.warn(`delegated user turn backfill failed: ${errorMessage(error)}`);
+    } finally {
+      this.superReportRunning = false;
+    }
+  }
+
+  /**
    * Live child-session board injected into every main-session turn.
    *
    * Without it the main agent has no way to know a child's state — it would
@@ -7485,10 +7905,19 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async drainSuperReports(): Promise<void> {
     if (this.disposed || this.superReportRunning) return;
+    // Stop means "stop": do not auto-start the next child-report turn the
+    // instant the cancelled one settles (that is what made a single click look
+    // ineffective and users click several times). Reports stay queued — the
+    // user's next message releases the hold — so nothing is lost.
+    if (this.autoTurnsHeld()) return;
     this.superReportRunning = true;
     try {
       while (this.pendingSuperReportPrompts.length > 0) {
         if (this.disposed) return;
+        // The loop may already be running when the user presses Stop on the
+        // report turn it just delivered — re-check every iteration, or the
+        // next queued report would start the instant this one settles.
+        if (this.autoTurnsHeld()) break;
         if (!this.mainSessionFree()) break;
         // 合并子会话在**主仓工作区**里跑 git merge：主会话这时若也去改主仓
         // 的文件，两边会互相踩（合并提交可能卷进主会话的半成品改动）。
@@ -7556,6 +7985,16 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 用户的停止是否还压着宿主自动回合（子会话汇报 / 被改道消息补投）。
+   *
+   * 只看**当前主会话**：A 会话被停止不该影响 B 会话的汇报投递。解除点是用户
+   * 下一次主动发消息（sendPrompt / regenerate），此前排队内容一条不丢。
+   */
+  private autoTurnsHeld(): boolean {
+    return this.autoTurnsStoppedFor !== null && this.autoTurnsStoppedFor === this.currentMainSessionId();
+  }
+
+  /**
    * Keep the heartbeat alive while any Super Agent work is outstanding.
    *
    * Without it, a child finishing while the main session is replaying history
@@ -7578,6 +8017,7 @@ export class ChatPanel implements vscode.Disposable {
     this.refreshSuperWaitHeartbeat();
     void this.drainSuperReports();
     void this.drainSuperActionReceipts();
+    void this.drainDelegatedUserTurns();
     void this.drainSuperMerges();
     if (!this.hasSuperWork()) this.stopSuperHeartbeat();
   }
@@ -7589,6 +8029,9 @@ export class ChatPanel implements vscode.Disposable {
     // 待投递的动作回执也算「还有活儿」：心跳停了回执就永远投不出去，主会话
     // 于是不知道自己刚发的动作生效没有（→ 重复发同一个动作）。
     if (this.pendingSuperActionReceipts.length > 0) return true;
+    // 待补投的「被改道用户消息」同样是欠着主会话的一轮：心跳停了它就永远
+    // 投不出去，那条消息又会像修复前一样在主会话里丢失。
+    if (this.pendingDelegatedUserTurns.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
     // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
     // 继续跑，否则既没有汇报也没有忙碌态刷新。
@@ -7750,11 +8193,24 @@ export class ChatPanel implements vscode.Disposable {
       this.clearSuperWaitHeartbeat();
       return;
     }
-    const key = `${live.length}:${awaiting}`;
+    // 用户按过停止：自动投递被压住，提示必须如实改写 —— 此时还写「会自动
+    // 继续」就是在骗人（用户会盯着面板等一个永远不会来的自动回合）。
+    const held = this.autoTurnsHeld();
+    const key = `${live.length}:${awaiting}:${held ? "held" : "auto"}`;
     if (key === this.superWaitToastKey && this.superWaitToastId !== null) return;
     this.clearSuperWaitHeartbeat();
-    const message =
-      awaiting > 0
+    const message = held
+      ? awaiting > 0
+        ? vscode.l10n.t(
+            "已停止；{0} 个子会话仍在运行（其中 {1} 个等待你的回答），发送下一条消息后继续收取汇报",
+            live.length,
+            awaiting,
+          )
+        : vscode.l10n.t(
+            "已停止；{0} 个子会话仍在运行，发送下一条消息后继续收取汇报",
+            live.length,
+          )
+      : awaiting > 0
         ? vscode.l10n.t(
             "正在等待 {0} 个子会话汇报（其中 {1} 个等待你的回答），完成一个即汇报一个，会自动继续",
             live.length,
@@ -8128,6 +8584,12 @@ export class ChatPanel implements vscode.Disposable {
       const systemPromptFile = await this.materializeSystemPrompt();
       const spawnEnv: NodeJS.ProcessEnv = { IFLOW_HARNESS: "1", IFLOW_HARNESS_CONTEXT_FILE: this.contextReportFile() };
       if (systemPromptFile) spawnEnv.IFLOW_SYSTEM_MD = systemPromptFile;
+      // Vendored CLI 内置 `super-agent` 工具的注册开关（工具实现以
+      // `process.env.IFLOW_SUPER_TOOL === "1"` 为门控；当前 bundle 尚未包含
+      // 该工具，所以这一行暂时是惰性的）。只有主会话该拿到派发能力 ——
+      // 子会话的 spawnEnv 显式抹掉这个键（见 createSuperClient），否则
+      // 子会话也能再派子会话。
+      spawnEnv.IFLOW_SUPER_TOOL = "1";
 
       const client = new AcpClient(
         // Generous control-plane timeout: a CLI with many MCP servers can take
@@ -8182,6 +8644,11 @@ export class ChatPanel implements vscode.Disposable {
             if (this.client !== client || this.disposed) {
               return { outcome: { outcome: "cancelled" } as const };
             }
+            // Super Agent 内置工具（dispatch / actions）只回 ack，真正干活的是
+            // 宿主；与正文围栏派发同一信任级别，直接放行、不弹卡（见
+            // autoApproveSuperAgentTool）。其它工具不受影响。
+            const superTool = this.autoApproveSuperAgentTool(req);
+            if (superTool) return superTool;
             // M4 P1-1: the rule table answers matching requests without a card.
             // A failing pre-review must NEVER strand the agent — degrade to the
             // card (the pre-P1-1 behaviour) instead of rejecting or throwing.
@@ -9351,8 +9818,14 @@ export class ChatPanel implements vscode.Disposable {
     // fresh transcript (onSessionUpdate filters them per session, but stop
     // the source too). This also closes the command-palette entry, which
     // bypasses the webview's disabled 新会话 button.
+    // 新会话不继承上一个会话的「用户已停止」压制。
+    this.autoTurnsStoppedFor = null;
     const inFlight = this.store.getState().sessionId;
     if (inFlight) {
+      // 还在准备阶段（还没发出 session/prompt）的回合：cancel 到不了 CLI
+      // （同 sendTurnCancel 的理由），用 cancelSeen 让它就地收尾，否则它会
+      // 在我们刚放弃的会话上照常开跑。
+      this.cancelSeen = true;
       try {
         this.client?.cancel(inFlight);
       } catch {
@@ -9429,7 +9902,11 @@ export class ChatPanel implements vscode.Disposable {
     const modelsPromise = this.queryLiveModels();
     const tNewSession = Date.now();
     this.contextReportBaseline = tNewSession;
-    const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+    const session = await client.newSession({
+      cwd: workspaceRoot,
+      mcpServers: [],
+      settings: mainSessionSettings(),
+    });
     this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
@@ -9545,6 +10022,9 @@ export class ChatPanel implements vscode.Disposable {
     // A3: the panel was disposed (window close / extension reload) — the
     // store is gone, so there is nothing to send.
     if (this.disposed) return false;
+    // 用户自己开口 = 明确「继续」：解除 Stop 对宿主自动回合的压制
+    // （见 autoTurnsStoppedFor）。排队内容一直在队列里，这里只是放开闸门。
+    if (!internal && !hidden) this.autoTurnsStoppedFor = null;
     // ── 主会话车道 ────────────────────────────────────────────────
     // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
     // 并发会让转录顺序错乱、上下文互相污染、token 重复计费。
@@ -9611,6 +10091,21 @@ export class ChatPanel implements vscode.Disposable {
         return false;
       }
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
+      // 主会话此刻收不到这条消息（本分支马上 return false）：先把原文与附件
+      // 缓存下来，等本回合结束后由 drainDelegatedUserTurns 以 hidden 回合补投。
+      // 绝不在这里碰 client.prompt（会与正在跑的回合并发）或 store.userPrompt
+      // （会造一条主会话从未处理过的用户气泡）。
+      this.pendingDelegatedUserTurns.push({
+        mainSessionId: this.currentMainSessionId(),
+        text: trimmed,
+        images: (images ?? []).map((img) => ({ data: img.data, mimeType: img.mimeType })),
+        files: (files ?? []).map((file) => ({ name: file.name, path: file.path })),
+        ...(contexts?.length ? { contexts } : {}),
+        droppedByChild: droppedAttachments,
+      });
+      // 心跳是「主会话一直没空闲 / 补投失败」时的重试通道：这里就把它点着，
+      // 免得子会话瞬间结束时没有任何事件再唤醒补投。
+      this.ensureSuperHeartbeat();
       this.store.sendToast(
         "info",
         vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),
@@ -9864,6 +10359,10 @@ export class ChatPanel implements vscode.Disposable {
       // 回合结束时补一次投递，并刷新「等待子会话」心跳 —— 主会话空闲而子会话
       // 仍在跑时，这条常驻提示就是「流程没断，宿主在等」的唯一可见证据。
       void this.drainSuperReports();
+      // 本回合里若有用户消息被改道给子会话，现在主会话空闲了 → 补投成下一
+      // 回合（hidden，不伪造用户气泡）。与汇报/合并共用同一条车道，谁先申领
+      // superReportRunning 谁跑；没抢到的留给心跳重投。
+      void this.drainDelegatedUserTurns();
       this.refreshSuperWaitHeartbeat();
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
@@ -9957,18 +10456,26 @@ export class ChatPanel implements vscode.Disposable {
     // A3: the panel was disposed — the store is gone.
     if (this.disposed) return;
     // Walk back to the last user block — that's the prompt we re-run.
-    let lastUserText: string | null = null;
+    let lastUserBlock: Extract<Block, { kind: "user" }> | null = null;
     for (let i = state.blocks.length - 1; i >= 0; i--) {
       const b = state.blocks[i];
       if (!b) continue;
       if (b.kind === "user") {
-        lastUserText = b.text;
+        lastUserBlock = b;
         break;
       }
     }
+    const lastUserText = lastUserBlock?.text ?? null;
     if (!lastUserText || !lastUserText.trim()) return;
-    const isCompressTurn = lastUserText.trim() === "/compress";
+    // beginUserPrompt 把文件写成「（文件：name → path）」注记行、图片存成
+    // data URL —— 这两处是转录里唯一留存的附件形态。规范化后的文本才是原轮
+    // 的纯 prompt（与正常发送时 typedText 的口径一致）。
+    const regenText = normalizeUserPromptText(lastUserText);
+    if (!regenText) return;
+    const isCompressTurn = regenText === "/compress";
     this.cancelSeen = false;
+    // 用户主动发起的一轮同样算「继续」：解除 Stop 对自动回合的压制。
+    this.autoTurnsStoppedFor = null;
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
@@ -9982,21 +10489,50 @@ export class ChatPanel implements vscode.Disposable {
       // Same turn-start mode sync as sendPrompt: a regenerated turn must obey
       // the mode the composer shows, not a possibly drifted CLI copy.
       await this.assertModeForPrompt(client, promptSessionId);
+      // 重新生成必须把原轮的图片/文件一起带回：正常发送会 push image 块并
+      // 追加 AGENT_ATTACHMENT_HEADER 清单，旧实现只发一段 text，模型重跑时
+      // 看不到截图/日志。只从 user 块既有形态取回（data URL + 文件注记行），
+      // 解析不出来就如实不带，绝不伪造附件。
+      const regenImages: { data: string; mimeType: string }[] = [];
+      for (const url of lastUserBlock?.images ?? []) {
+        const match = /^data:([^;,]+);base64,(.*)$/s.exec(url);
+        if (!match) continue;
+        const mimeType = match[1];
+        const data = match[2];
+        if (mimeType && data !== undefined) regenImages.push({ mimeType, data });
+      }
+      const regenFiles: { name: string; path: string }[] = [];
+      for (const line of (lastUserBlock?.text ?? "").split("\n")) {
+        const match = /^（文件：(.*) → (.*)）$/.exec(line);
+        if (!match) continue;
+        const name = match[1];
+        const filePath = match[2];
+        if (name && filePath) regenFiles.push({ name, path: filePath });
+      }
+      const regenAttachmentBlock =
+        regenFiles.length > 0
+          ? `\n\n${AGENT_ATTACHMENT_HEADER}\n${regenFiles
+              .map((f) => `- ${f.name} → ${f.path}`)
+              .join("\n")}`
+          : "";
       // A regenerated turn must carry the SAME agent-facing text the original
       // turn did — including a `/skill <name>` expansion (the raw command
       // would be escaped into prose by toAgentPromptText).
-      const regenText = lastUserText.trim();
       const regenSkill = parseSkillInvocation(regenText);
       const regenExpanded = regenSkill ? await this.expandSkillCall(regenSkill) : null;
       const regenDigest = this.superAgentsDigest();
       const prompt: ContentBlock[] = [
         {
           type: "text",
-          text: [regenDigest, regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands)]
-            .filter(Boolean)
-            .join("\n\n"),
+          text:
+            [regenDigest, regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands)]
+              .filter(Boolean)
+              .join("\n\n") + regenAttachmentBlock,
         },
       ];
+      for (const img of regenImages) {
+        prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
+      }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // Session replaced mid-flight: the completion must not settle the NEW
       // session's state — drop like the sendPrompt success path.
@@ -10628,7 +11164,12 @@ export class ChatPanel implements vscode.Disposable {
           await rename(tmp, file);
           truncated = true;
           reloadAttempted = true;
-          await client.loadSession({ cwd, mcpServers: [], sessionId });
+          await client.loadSession({
+            cwd,
+            mcpServers: [],
+            sessionId,
+            settings: mainSessionSettings(),
+          });
           if (this.disposed || this.client !== client || this.store.getState().sessionId !== sessionId) {
             throw new Error("session changed during history synchronization");
           }
@@ -10641,7 +11182,12 @@ export class ChatPanel implements vscode.Disposable {
           try {
             await writeFile(file, raw, "utf8");
             if (reloadAttempted && !this.disposed && this.client === client) {
-              await client.loadSession({ cwd, mcpServers: [], sessionId });
+              await client.loadSession({
+                cwd,
+                mcpServers: [],
+                sessionId,
+                settings: mainSessionSettings(),
+              });
             }
           } catch (rollbackError) {
             this.log.error(`deleteUserMessage: rollback FAILED: ${this.formatErrorForLog(rollbackError)}`);
@@ -10821,6 +11367,12 @@ export class ChatPanel implements vscode.Disposable {
     let compressToastId: number | null = null;
     try {
       for (;;) {
+        // A Stop pressed while this turn was still being prepared (the
+        // checkpoint snapshot runs between `userPrompt` — which flips the
+        // status to streaming — and the request going out) must not be lost.
+        // The CLI has nothing in flight yet, so `session/cancel` cannot reach
+        // it; settle the turn locally as cancelled instead of starting it.
+        if (this.cancelSeen) return { stopReason: "cancelled" };
         const blocks: ContentBlock[] = compressNext
           ? [{ type: "text", text: "/compress" }]
           : prompt;
@@ -10847,7 +11399,7 @@ export class ChatPanel implements vscode.Disposable {
           // per-call timeout at all, so they keep the AcpClient option's
           // behaviour (unset = no ceiling: a user task may run for hours).
           const compressTimeoutMs = isCompressAttempt ? this.compressTimeoutMs() : undefined;
-          const result = await client.prompt({ sessionId, prompt: blocks }, compressTimeoutMs);
+          const result = await this.awaitPrompt(client, sessionId, blocks, compressTimeoutMs);
           if (!compressNext) {
             // Empty-response gate (see EMPTY_RESPONSE_RETRY_DELAYS_MS): the
             // gateway answered 200 with no content, the CLI recorded an empty
@@ -10990,6 +11542,26 @@ export class ChatPanel implements vscode.Disposable {
       // The "正在压缩" indicator must never outlive the loop (a failed
       // compress or a Stop mid-compress would otherwise strand the pill).
       this.store.setCompressing(false);
+    }
+  }
+
+  /**
+   * Issue one `session/prompt` and track that the CLI now owns a request for
+   * this session — the gate `sendTurnCancel` needs before it may write
+   * `session/cancel` (see `promptRequestSessionId`).
+   */
+  private async awaitPrompt(
+    client: AcpClient,
+    sessionId: string,
+    blocks: ContentBlock[],
+    timeoutMs?: number,
+  ): Promise<PromptResponse> {
+    this.promptRequestSessionId = sessionId;
+    this.cancelSentForPrompt = false;
+    try {
+      return await client.prompt({ sessionId, prompt: blocks }, timeoutMs);
+    } finally {
+      this.promptRequestSessionId = null;
     }
   }
 

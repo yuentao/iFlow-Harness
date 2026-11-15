@@ -2824,8 +2824,26 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
   return parts.join(" | ");
 }
 
+/**
+ * 模型面向的委派协议提示（英文，与 `prompts/system-prompt.md` 同一套词表）。
+ *
+ * 空看板与非空看板都带上它：首轮还没有子会话时，模型最容易凭直觉选错通道。
+ * 内置 CLI 现已注册 `super-agent` 工具（见 AGENTS.md 的
+ * `super-agent-tool-refactor`），所以**首选工具调用**；只有工具不在列表时
+ * （Plan 模式白名单不含它，或旧 bundle 尚未带该工具）才退回正文围栏。管理
+ * 动作（`super-agent-actions`）**只有围栏一条通道**，没有对应工具，这里必须
+ * 写明，避免模型去调一个不存在的工具。
+ *
+ * 载荷示例必须是**合法 JSON**：`{"title","task"}` 这类缺冒号的简写会被
+ * `parseDirectiveBody` 判成「载荷不是合法 JSON」（进 `invalidBlocks`），
+ * 模型照抄示例就会零派发。改用带引号的占位符 —— 示例本身可解析，而原样
+ * 抄回仍会被占位符规则拒掉，不会派发一条垃圾任务。
+ */
+const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. Manage children only by emitting a ```super-agent-actions fenced block — no actions tool exists.";
+
 const SUPER_DIGEST_FOOTER = [
   "",
+  SUPER_DIGEST_HINT,
   "You can manage the child sessions above: emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
   "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
   "Merging is done by the host, following the integration mode (merge by default, possibly PR): when the \"changes:\" line says merged automatically, do not merge it again;",
@@ -2866,7 +2884,10 @@ const SUPER_BOARD_LABEL_EN = "[child-session board]";
  */
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
   if (sessions.length === 0) {
-    return `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. There are no child sessions right now.)`;
+    return (
+      `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. There are no child sessions right now.)` +
+      `\n${SUPER_DIGEST_HINT}`
+    );
   }
   const counts = summarizeSuperSessions(sessions);
   const header =
@@ -3259,6 +3280,75 @@ export function buildSuperReportPrompt(
           "Finally give the user one complete report: what each child session did, the conclusion, where the changes went, and any failures or remaining issues. Do not invent results that are not in the reports, and do not claim that you performed those changes yourself.",
         ]),
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// 「被改道用户消息」的补投提示词
+// ---------------------------------------------------------------------------
+
+/**
+ * 构造「补投用户消息」提示词 —— 投给主会话的一次 hidden prompt。
+ *
+ * 背景（2026-11-15 用户实测）：主会话 streaming（含 laneBusy 窗口）时用户
+ * 发出的消息，宿主会把整条消息改道派发给子会话。`sendPrompt` 当场 return
+ * false，主会话既收不到 prompt、UI 也没有用户气泡；回合末的子会话汇报又明确
+ * 「不是用户消息」，于是这条消息在主会话里永久丢失。宿主把它缓存下来，等本
+ * 回合结束后用这段文本作为**下一回合**补投回主会话。
+ *
+ * 措辞必须如实：这是「用户在生成中发出的、已派发给子会话的消息」，不是
+ * 子会话汇报、不是用户此前说过的话、也不是要重复派发的任务。
+ *
+ * **附件不伪造**：这里只列出调用方实际重新附上的附件（图片块 / 文件路径），
+ * 原文照抄用户消息；`droppedByChild` 是子会话附件上限截断的数量（那些只没
+ * 交给子会话，主会话这里仍全部带回），`missingCount` 是确实无法带回的附件
+ * 数 —— 两者都如实写明，绝不假装某个附件存在。
+ */
+export function buildDelegatedUserTurnPrompt(input: {
+  text: string;
+  images: readonly { mimeType: string }[];
+  files: readonly { name: string; path: string }[];
+  /** 超过子会话附件上限、未被交给子会话的数量。 */
+  droppedByChild?: number;
+  /** 确实无法随补投带回的附件数量。 */
+  missingCount?: number;
+}): string {
+  const lines = [
+    "[补投用户消息]",
+    "This is a message the USER typed while the main session was generating. Because the main session was busy, the host dispatched it as a child session (it is already being handled there), so the main session never received it and no user bubble was recorded. The host is now backfilling it into your context as a fresh hidden turn.",
+    "This is NOT a child-session status report, NOT something you said earlier, and NOT a new instruction to dispatch the same message to a child session again. Read it as the user's own words and continue the task; dispatch only genuinely new follow-up work to child sessions, as usual.",
+    "",
+    "用户原文 / User message (verbatim):",
+    input.text,
+  ];
+  const attachments: string[] = [];
+  if (input.images.length > 0) {
+    attachments.push(`- ${input.images.length} image attachment(s) re-attached below as inline image blocks.`);
+  }
+  for (const file of input.files) {
+    attachments.push(`- file: ${file.name} → ${file.path}`);
+  }
+  if (attachments.length > 0) {
+    lines.push(
+      "",
+      "附件 / Attachments re-attached to THIS turn (originals, not re-created or summarised):",
+      ...attachments,
+    );
+  }
+  const missing = Math.max(0, Math.trunc(input.missingCount ?? 0));
+  if (missing > 0) {
+    lines.push(
+      "",
+      `注意：有 ${missing} 个附件无法随本次补投带回，本回合下方没有它们的图片块或文件路径，请勿假设它们存在。`,
+    );
+  }
+  const dropped = Math.max(0, Math.trunc(input.droppedByChild ?? 0));
+  if (dropped > 0) {
+    lines.push(
+      "",
+      `注意：其中 ${dropped} 个附件超出子会话携带上限，未被交给子会话（上面的列表是补投给主会话的全部原件）。`,
+    );
+  }
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------

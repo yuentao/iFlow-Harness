@@ -1986,3 +1986,106 @@ pre {
 .text-ui-micro {
   font-size: var(--ui-font-micro);
 }
+
+/* --- Super Agent board entry: running-child edge glow --------------------
+   Collapsed board control gets an Apple-Intelligence-like travelling rim
+   light, but ONLY while at least one child session is non-terminal: the
+   decorative <span class="super-entry-glow"> is conditionally mounted by
+   SuperAgentBoard.tsx, so a settled board has no glow layer and no animation
+   at all (nothing left in the DOM, nothing running).
+
+   Implementation notes:
+   - `@property` registers the gradient angle as an <angle>, which is the only
+     way Chromium can interpolate `conic-gradient(from var(--...))`. The two
+     pseudo-element rings inherit the animated value from their parent.
+   - The ring is ONE composite mask, not four strips: `padding: 2px` plus
+     `mask: <opaque> content-box, <opaque>` with `mask-composite: exclude`
+     paints the padding band and punches out the content box. Both layers are
+     shaped by the same `border-radius`, so the band keeps a uniform ~2px width
+     all the way around — including the corners.
+     Superseded design (the bug this replaces): four AXIS-ALIGNED strips
+     (top/bottom 100%x2px + left/right 2pxx100%, composite `add`). Pixel-diffed
+     in Chromium (glow layer on vs off, same frozen animation phase) that mask
+     is a 2.00px band on all four straight edges, but where the rounded arc
+     turns inward the strips stop short: the band collapsed to 0.75px at the
+     45° diagonal of every corner and left an L-shaped notch beside the arc.
+     That is what read as "the four corners are cut".
+     `mask-composite` is safe here: the standard value shipped in Chromium 120
+     and VSCode ^1.90 webviews are Chromium 122+; `-webkit-mask-composite: xor`
+     is the long-standing alias. `-webkit-mask` and standard `mask` are both
+     emitted; Chromium honours either spelling, so an esbuild CSS fold (trap
+     #22) can't silently kill the effect.
+   - ::after is the crisp rim; ::before is a blurred twin for the soft bloom.
+     `filter: blur()` is ink overflow only — no layout impact, no horizontal
+     scrollbar, and nothing clips the button's own :focus-visible box-shadow.
+   - Colors are semi-transparent mixes of existing theme tokens (primary /
+     info / warning), so light and dark themes stay legible with no hard-coded
+     bright hues. No backdrop-filter anywhere here.
+   - Reduced motion freezes the angle at its initial value: a static coloured
+     rim instead of a rotating one (the global `* { animation: none }` rule
+     covers it too; this explicit rule keeps the intent local and testable). */
+@property --super-entry-angle {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+
+@keyframes super-entry-spin {
+  to {
+    --super-entry-angle: 360deg;
+  }
+}
+
+.super-entry-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: super-entry-spin 3.2s linear infinite;
+}
+
+.super-entry-glow::before,
+.super-entry-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* The band's width. Padding (not a hard-coded radius) is what makes the ring
+     follow the button's own rounded corner: the content box is inset by this
+     much on every side and its corner radius is reduced by the same amount, so
+     the painted band stays exactly this wide around the whole outline. */
+  padding: 2px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--super-entry-angle),
+    transparent 0deg,
+    color-mix(in oklab, var(--primary) 95%, transparent) 55deg,
+    color-mix(in oklab, var(--info) 90%, transparent) 120deg,
+    color-mix(in oklab, var(--primary) 85%, transparent) 185deg,
+    color-mix(in oklab, var(--warning) 75%, transparent) 250deg,
+    transparent 315deg,
+    transparent 360deg
+  );
+  /* Ring = everything MINUS the content box. One shape, one radius → the band
+     is continuous through all four corners (the old four axis-aligned strips
+     pinched to a hairline on the diagonals). */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+/* Soft bloom: a blurred, slightly dimmer copy of the same rim. */
+.super-entry-glow::before {
+  filter: blur(4px);
+  opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .super-entry-glow {
+    animation: none;
+  }
+}

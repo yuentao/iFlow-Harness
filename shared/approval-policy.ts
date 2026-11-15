@@ -21,6 +21,8 @@
  * the webview (the management card previews which rules a sample request hits).
  */
 
+import { classifySuperToolName } from "./super-tool-call.js";
+
 /** What a rule does when it matches. `ask` = fall through to the card. */
 export type ApprovalAction = "allow" | "deny" | "ask";
 
@@ -153,6 +155,25 @@ export function hardDenyReason(info: ApprovalRequestInfo): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Super Agent 内置工具（`super-agent` 派发 / `super-agent-actions` 管理）的
+ * 自动放行判定（纯函数，零 VSCode 依赖）。
+ *
+ * 为什么这一类请求不需要审批卡：该工具本身**只回 ack**，真正干活的是宿主
+ * （`ChatPanel.handleSuperToolCall` 从 `args` 取载荷，走与正文围栏完全相同的
+ * 派发 / 动作链路）。宿主自己的正文围栏派发从来不经审批，所以同一条信任级别
+ * 的内置工具也不额外加卡 —— 否则每派一次子会话就要点一次审批，把「随时开启」
+ * 变成「每次确认」，并没有多出任何安全边界。
+ *
+ * 名字取 wire 上的 `toolName`，为空时退回 `title`（CLI 0.5.19 的权限请求经常
+ * 省略 toolName）。归一规则见 `classifySuperToolName`（含命名空间前缀）。
+ */
+export function isSuperAgentToolRequest(info: ApprovalRequestInfo): boolean {
+  const name = info.toolName.trim() || info.title.trim();
+  if (!name) return false;
+  return classifySuperToolName(name) !== null;
 }
 
 /** Compile a glob (`*` intra-segment, `**` cross-segment, `?` single char). */

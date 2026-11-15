@@ -3,6 +3,37 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.2.0] - 2026-11-15
+
+- 新增/修复 首个经 OIDC Trusted Publishing 直发 Marketplace 的版本：`release.yml` 在 GitHub Release 之后追加 `npx --yes @vscode/vsce@4.1.1 publish --oidc --packagePath "iflow-harness-<版本>.vsix"`，`permissions` 补 `id-token: write`（保留 `contents: write` 供 `gh release`），配合门户侧 publisher `yuantao` 的 Trusted Publishing policy；内置定制 CLI fork 改为项目内快照 `vendor/iflow-fork/`，`vendor:cli` 默认源随之切换，CI 打包自足、不再依赖旁侧 `../iflow-fork`；Super Agent 四项修复——系统提示词写死的并发 4 改按 `maxConcurrent` 设置拆分并补守卫、补投 streaming 中被改道的用户消息以修复 regenerate 丢失附件、委派卡恢复独立表面与工具操作卡区分、看板入口为运行中子会话加高光动效；gallery 实测 3.1.1 已于 2026-11-15 发布且 Marketplace 版本号必须递增，故 bump 到 3.2.0 作为首次 OIDC 发布版本
+
+## [3.1.1] - 2026-11-15
+
+- 变更 主会话机械剔除 `task` 工具：`src/panel/panel.ts` 新增 `MAIN_SESSION_DISALLOWED_TOOLS = ["task"]` 与 `mainSessionSettings()`，主会话的每一次 `session/new` / `session/load`（新建、恢复、keep-session 切 Profile、删除消息的截断与回滚重载）都带 `settings.disallowed_tools: ["task"]`，子会话刻意不带——子代理的活交给子会话，主会话只做委派
+- 变更 提示词改为「子会话优先」：`prompts/system-prompt.md` 移除全部「用 `task` 工具」的指示（prefer 'task' / CRITICAL use task / Proactively use task / Use multi 'task' tools / Run one via the Task tool / use task(subagent_type="frontend-tester") / Delegate via task），改为派发子会话；Super Agent 段声明主会话没有 `task` 工具（限定主会话，子会话保留 `task`）；`prompts/super-agent-task.md` 明确子会话可用 `task` 跑进程内子代理、但不能派发子会话，交付责任仍在自己身上
+- 修复 Super Agent 段的优先级只覆盖「the workflows above」、与 Tool Usage / Security 段的 shell 指令冲突：优先级扩到整份提示词，并在 `## Tool Usage` 补一句「主会话不跑任何 shell 命令」，修掉与「This session executes nothing」的矛盾
+- 新增 真实 CLI 探针 `test/fixtures/probe-main-session-task.mjs`：同一 CLI 进程内 A（带 `disallowed_tools: ["task"]`）/ B（不带，对照）两会话对比，`--load` 模式覆盖 `session/load` 恢复路径；A 出现 task 调用即 FAIL，对照为 0 判 INCONCLUSIVE（exit 3）。实测 A=0 次（模型回 `NO_TASK_TOOL`）、B=3 帧且真的跑出 `stdout hi, exit code 0`，`--load` 后 A 仍为 0
+- 新增 单测：`test/panel-session-tools.test.ts`（5 例）覆盖主会话 6 个 `newSession` / `loadSession` 调用点的 settings；`test/super-agent-manager.test.ts` 断言子会话请求不带 settings；`test/internal-prompt.test.ts` 补提示词契约与负向断言
+- 诚实边界：剔除只作用于主会话，子会话与一次性辅助会话仍保留 `task`；`disallowed_tools` 依赖内置 CLI 把请求 settings 映射到 `Config.excludeTools`（0.5.19 实测），换 CLI 版本需重跑探针
+
+## [3.1.0] - 2026-11-15
+
+- 新增 内置工具 `super-agent`（vendored CLI 的 `super-agent-tool-refactor` Mod）：派发主通道从「正文围栏」升级为**真工具调用**，参数 `{"tasks":[{"title","task","attachments"?}]}`；工具本身只回 `Delegation request accepted.`，真正派发由宿主从 wire 的 `tool_call` args 完成；注册受 `IFLOW_SUPER_TOOL=1` 门控（宿主只给主会话注入），子会话与一次性辅助会话不注册；子代理工具面排除该工具（`Cui=["task","super-agent"]`），防嵌套派发；Plan 模式的只读白名单不含它（规划模式仍走正文围栏）；`IFLOW_SUPER_TOOL_DEBUG=1` 可在注册失败时输出 stderr 诊断
+- 变更 系统提示与每轮看板改为「工具优先、正文围栏兜底」：工具在列表里就调用工具，不在（Plan 模式 / 旧 bundle）才写围栏；`super-agent-actions` 管理动作仍只有正文围栏一条通道
+- 新增 宿主自动放行 `super-agent` 工具的权限请求（toolName 优先、title 兜底，命名空间前缀归一后匹配；没有允许项时按取消，绝不伪造 optionId），其它工具与 approvalMode 行为不变
+- 新增 宿主兜底：模型仍以结构化 `tool_call` 发出派发 / 动作时，从 args 取载荷复用现有围栏解析与派发 / 动作链路；`pending` 帧无 args 时等下一帧；动作侧按 `toolCallId` + 载荷指纹去重；载荷取不出来时留日志 + 一次性 toast，绝不伪造派发
+- 修复 模型把 `super-agent` 当工具调用时（内核报 not found in registry）完全无法派发子会话：提示词与看板不再声称「不存在该工具」，并保留失败后的围栏兜底路径
+- 修复 看板提示里的委派载荷示例不是合法 JSON（缺冒号），照抄即零派发
+- 修复 `release.yml` 里 `GITHUB_OUTPUT: ${{ github.output }}` 无效上下文覆盖 runner 真实输出、导致 CI 读不到版本号（只在 GitHub Actions 生效，不影响本地打包）
+- 诚实边界：内置工具只在 `IFLOW_SUPER_TOOL=1` 时注册（面板自动设置）；SMART 审批模式可能仍逐次弹审批；该 Mod 未生成 `.iflow-mod` 用的 `code.js`（需要 pristine bundle 叠加全部 Mod，本地无 pristine 副本，fork 注入这条路径不需要）
+
+## [3.0.1] - 2026-11-15
+
+- 修复 模型把 `super-agent` 当成工具调用（内核 registry 里没有这个工具，报 "not found in registry"）时一个子会话都派不出去、用户还看不到任何提示：系统提示与每轮看板现在明确声明它不是工具、工具调用会零派发，并给出失败后的恢复指令——在同一轮的下一条消息里把围栏块当普通文本重写一遍，不重试工具调用、也不向用户宣称功能不可用
+- 修复 看板提示里的委派载荷示例不是合法 JSON（`{"tasks":[{"title","task"}]}` 缺冒号），模型照抄示例就是零派发：示例改成带引号占位符的合法 JSON（原样抄回仍会被占位符规则拒掉，不会派发垃圾任务）
+- 新增 宿主兜底：主会话的结构化 `tool_call` / `tool_call_update`（工具名 `super-agent` / `super-agent-actions`）从 `args` 取载荷，复用现有围栏解析与派发 / 动作链路；`pending` 帧还没带 `args` 时等下一帧（不误报「未派发」）；动作侧按 `toolCallId` + 载荷指纹去重（同一次调用只执行一次，不同调用即使载荷相同也各自执行）；名字命中但载荷取不出来时留日志 + 一次性 toast，绝不伪造派发
+- 诚实边界：结构化 `tool_call` 帧是否真的出现在 wire 上取决于内核如何对待未知工具，这条兜底是防御性的；真正的保证来自提示词与每轮看板
+
 ## [3.0.0] - 2026-11-15
 
 - 新增 Super Agent 主会话分工（本版头条）：主 Agent 是**协调者而非执行者**——需求澄清、任务书编写、看板管理、读汇报做判断、把复核与缺口派成后续任务、最终汇总留在主会话，**所有产生代码改动的步骤一律交子会话**（改/建文件、重构、写测试、跑 typecheck/test/build、修检查报错，单文件小改也派）；一个可独立完成并验证的工作单元 = 一个子会话，串行或互相依赖的部分打进同一任务但仍由子会话执行；**复核与验证本身就是一个独立工作单元**，和实现一样派给子会话；主会话不跑任何命令（含 git），看板显示分支未合并时派一个在主仓工作区工作的合并子会话执行 `git merge --no-ff`，主会话只读它的汇报

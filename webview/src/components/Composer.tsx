@@ -308,6 +308,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const pending = useChat((s) => s.pending);
   const beginPending = useChat((s) => s.beginPending);
   const send = useChat((s) => s.send);
+  // Stop is only meaningful for a real generation: beginReplay() also reports
+  // status "streaming", so replaying and initializing must be excluded.
+  //
+  // Deliberately NOT gated on a pending approval / question card: those cards
+  // stay interactive while a turn streams (pitfall #12), and the ESC handler
+  // below stops the turn in exactly that state. Gating the button gave one
+  // feature two different rules — worse, the slot then rendered an ENABLED
+  // 发送/派发 button, so clicking where Stop had been dispatched the typed
+  // text as a child session instead of stopping. One semantic: while a real
+  // turn runs, Stop is there.
+  const streaming = status === "streaming";
+  const canStop = streaming && !replaying && !initializing;
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Non-image attachments (chips only — paths ride the sendPrompt message,
@@ -479,12 +491,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     return () => clearTimeout(timer);
   }, [mentionQuery]);
 
-  // ESC 停止生成（与停止按钮同语义）：仅在真实生成中生效（回放/初始化除外）。
+  // ESC 停止生成 —— 与停止按钮**同一个**判定（canStop），不再维护第二套规则。
   // 弹窗内的 ESC（mention/斜杠补全在 textarea onKeyDown、Dropdown 在 document）
   // 都会 stopPropagation，事件只有未被拦截时才到达这里的 window 监听。
-  const canStopForEsc = status === "streaming" && !replaying && !initializing;
   useEffect(() => {
-    if (!canStopForEsc) return;
+    if (!canStop) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.isComposing) return;
       e.preventDefault();
@@ -492,7 +503,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [canStopForEsc]);
+  }, [canStop]);
 
   // P1-4: press "/" anywhere outside an input/textarea/contenteditable to jump
   // focus into the composer. When the textarea is already focused the keystroke
@@ -618,17 +629,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // Stop is only meaningful for a real generation: beginReplay() also reports
-  // status "streaming", so replaying and initializing must be excluded there.
   // The main session only DELEGATES: streaming does not lock the composer, and
   // Enter while generating is not queued locally — the host dispatches that
   // message as a child session (own process, own worktree). The switches that
   // would desync the agent (model/profile dropdowns, attachments, enhance)
   // keep the original mid-turn lock; only replay/init/an in-flight switch
-  // block sending entirely.
-  const streaming = status === "streaming";
+  // block sending entirely. `streaming` / `canStop` are computed up top so the
+  // ESC handler and the Stop button share one rule.
   const hasPendingInteraction = Boolean(pendingApproval || pendingQuestions);
-  const canStop = Boolean(streaming && !replaying && !initializing && !hasPendingInteraction);
   const controlsLocked = streaming || replaying || initializing || pending !== null || hasPendingInteraction;
   // 模型下拉额外跟随活跃子会话；发送 / enhance / 附件仍只看 controlsLocked。
   const modelLocked = controlsLocked || superActive;

@@ -2,8 +2,9 @@
 // Vendor the iFlow CLI into the repo at vendor/iflow-cli so the packaged
 // VSIX works out-of-the-box on machines WITHOUT a globally installed CLI.
 //
-// Resolution priority stays unchanged (see src/acp/cli-locator.ts): an
-// explicitly installed CLI wins; the vendored copy is only the fallback.
+// Runtime resolution stays unchanged (see src/acp/cli-locator.ts):
+// resolveVendoredEntry hard-resolves vendor/iflow-cli/bundle/entry.js; there is
+// no probing / fallback chain to an externally installed CLI.
 //
 // Pruning is NOT guesswork — every pruned item below was verified against
 // CLI 0.5.19 on 2026-09-11 by running the full ACP flow (initialize →
@@ -14,19 +15,36 @@
 //
 // Usage: node scripts/vendor-cli.mjs [--force]
 //        node scripts/vendor-cli.mjs (--version <v> | --from <tgz> | --from-dir <dir>) [--force]
-//   (no source flags)  DEFAULT since 2026-10-17: vendor from the LOCAL fork
-//                      checkout sitting next to this repo — ../iflow-fork
-//                      relative to this repo (J:\git\iflow-fork for
-//                      J:\git\iflow-harness), overridable via IFLOW_VENDOR_FORK_DIR.
-//                      The npm registry is NO LONGER consulted by default: the
-//                      local fork carries the injected *.loader.cjs Mod bundles
-//                      and leads anything published to the @yuentao npm scope.
+//   (no source flags)  DEFAULT since 2026-11-15: vendor from the COMMITTED
+//                      in-repo fork snapshot at vendor/iflow-fork. CI only
+//                      checks out this repo: no sibling ../iflow-fork, no env
+//                      vars, no npm registry. Override IFLOW_VENDOR_FORK_DIR
+//                      to point at a newer local fork checkout. The snapshot
+//                      carries the injected *-loader.cjs Mod bundles, so the
+//                      registry is NOT consulted by default.
 //   --version   opt back into the npm registry path and pin a version
 //   --from      use a local .tgz instead of `npm pack` (offline/air-gapped)
-//   --from-dir  vendor from an INSTALLED CLI directory (same path the default
-//               takes; pass it to point at a different fork checkout).
-//               The dir already has node_modules, so npm install is skipped.
+//   --from-dir  vendor from an INSTALLED CLI directory (e.g. a newer local
+//               fork checkout); the dir already has node_modules, so npm
+//               install is skipped.
 //   --force     re-copy even if vendor/iflow-cli already matches the version
+//
+// 开发期同步新 Mod(2026-11-15 迁入 in-repo 快照后):
+//   1. 在外部 fork checkout 注入新 Mod —— 注入本体在 bundle/iflow.js
+//      与 15 个 *-loader.cjs(含 super-agent-loader.cjs),不在 bundle/entry.js;
+//      iFlowMods 的 apply-patch.mjs 要求锚点唯一 + round-trip 校验。
+//   2. IFLOW_VENDOR_FORK_DIR=<新 fork> 或 `npm run vendor:cli -- --from-dir
+//      <新 fork> --force` 生成 vendor/iflow-cli(裁剪产物)。
+//   3. 把裁剪产物同步回 vendor/iflow-fork/(去掉嵌套 .gitignore)并提交 ——
+//      它才是 CI / 运行期的默认源,是产物快照,不是 Mod 源码仓库。
+//   4. `npm run harness` 对裁剪副本跑完整 ACP 流程验收(改 PRUNE 清单尤其
+//      必须,见 AGENTS.md 陷阱 #21)。
+//   --force 不可省:版本号可能仍是 0.5.19-custom.12,幂等检查只比
+//   package.json version,同版本 ≠ 同内容(Mod 注入可不 bump 版本)。
+//   reverse/ 属分析工作区(reverse/iflow.readable.js ~23 万行可读化产物 +
+//   ANALYSIS.md 行号地图 + map.mjs 指纹重扫),用来给 minified bundle 定位
+//   唯一插入锚点:未随迁移进仓库,也不进 VSIX(PRUNE_DIRS 含 reverse,
+//   2026-09-11 npm run harness 实测背书);CI / 运行期只要裁剪产物。
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -54,46 +72,15 @@ const isSyncDenied = (name) =>
   SYNC_DEFAULT_DENYLIST.some((d) => name === d) || name.startsWith("oauth_creds");
 
 /**
- * The MAIN worktree root — the repo every worktree belongs to.
- *
- * The fork checkout lives next to the MAIN repo (J:\git\iflow-fork), not next
- * to each worktree: a super-agent worktree sits under
- * <main>/.iflow/super/worktrees/<name>, so resolving "../iflow-fork" from
- * that worktree root would look in <main>/.iflow/super/worktrees/ and fail
- * with "no local CLI fork checkout" (hit when running `npm run package`
- * inside a worktree). `git rev-parse --git-common-dir` points at the shared
- * .git of the main worktree, so the fork lookup stays correct no matter which
- * worktree the script is invoked from.
+ * Default source (2026-11-15): the PRUNED in-repo fork snapshot at
+ * vendor/iflow-fork. CI's plain actions/checkout@v4 gets everything it needs:
+ * no sibling ../iflow-fork checkout, no env vars, no npm registry. The
+ * snapshot carries the customized bundle/iflow.js plus every injected
+ * *-loader.cjs Mod; the published @yuentao npm scope still lags behind.
+ * IFLOW_VENDOR_FORK_DIR / --from-dir point at a newer external fork checkout,
+ * --from uses a local tarball, --version opts back into the npm registry.
  */
-function resolveMainRepoRoot() {
-  try {
-    const common = execFileSync(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { cwd: REPO_ROOT, encoding: "utf8", windowsHide: true },
-    ).trim();
-    if (!common) return REPO_ROOT;
-    const root = path.dirname(common);
-    // Only trust it when it really is a checkout of this project.
-    return existsSync(path.join(root, "package.json")) ? root : REPO_ROOT;
-  } catch {
-    return REPO_ROOT;
-  }
-}
-
-const MAIN_REPO_ROOT = resolveMainRepoRoot();
-
-/**
- * Default source (2026-10-17): the LOCAL fork checkout next to the MAIN repo —
- * ../iflow-fork relative to the main repo root (J:\git\iflow-fork for
- * J:\git\iflow-harness; remote product/iflow-fork.git). It carries every
- * injected *.loader.cjs Mod bundle and leads the published @yuentao npm scope,
- * which lags behind (custom.12 is not on npm), so packaging no longer
- * consults the registry by default. The npm path stays reachable via an
- * explicit --version (registry acceptance checks / future publishes);
- * --from / --from-dir still override the source entirely.
- */
-const DEFAULT_LOCAL_FORK_DIR = path.resolve(MAIN_REPO_ROOT, "..", "iflow-fork");
+const IN_REPO_FORK_DIR = path.join(REPO_ROOT, "vendor", "iflow-fork");
 const NPM_PACKAGE = "@yuentao/iflow-cli";
 
 // Directories/files pruned from the package, relative to the package root.
@@ -184,27 +171,28 @@ if (fromDir) {
   fromDir = adoptFromDir(fromDir);
   version = JSON.parse(readFileSync(path.join(fromDir, "package.json"), "utf8")).version;
 } else if (!version && !fromTgz) {
-  // Default source: the local fork checkout, NOT the npm registry. The fork
-  // is the single source of truth for the injected Mod loader bundles;
-  // silently falling back to npm would vendor a fork that lags the local
-  // Mod injections — fail instead and make the operator fix the checkout.
-  const forkDir = process.env.IFLOW_VENDOR_FORK_DIR || DEFAULT_LOCAL_FORK_DIR;
+  // Default source: the committed in-repo fork snapshot, NOT the npm registry
+  // and NOT a sibling checkout. This is what CI's plain actions/checkout@v4
+  // provides; no env vars are required. The published CLI lags the local Mod
+  // injections, so fail loudly if the snapshot is missing instead of silently
+  // vendoring an incomplete package.
+  const forkDir = process.env.IFLOW_VENDOR_FORK_DIR || IN_REPO_FORK_DIR;
   if (!existsSync(path.join(forkDir, "package.json"))) {
     throw new Error(
-      `no local CLI fork checkout at ${forkDir} — packaging vendors from ../iflow-fork (next to the MAIN repo ${MAIN_REPO_ROOT}), not npm. ` +
-      `Clone it next to the main repo (git clone https://git.pandorastudio.cn/product/iflow-fork.git iflow-fork), ` +
-      `or point IFLOW_VENDOR_FORK_DIR / --from-dir at an installed fork, ` +
+      `no CLI fork snapshot at ${forkDir} — packaging defaults to vendor/iflow-fork inside this repo. ` +
+      `Restore the committed snapshot, or point IFLOW_VENDOR_FORK_DIR / --from-dir at an installed fork, ` +
       `or pass --version to opt back into the npm registry path.`,
     );
   }
   fromDir = adoptFromDir(forkDir);
   version = JSON.parse(readFileSync(path.join(fromDir, "package.json"), "utf8")).version;
-  console.log(`[vendor-cli] default source: local fork ${fromDir} (${version})`);
+  const origin = process.env.IFLOW_VENDOR_FORK_DIR ? "IFLOW_VENDOR_FORK_DIR" : "in-repo fork snapshot";
+  console.log(`[vendor-cli] default source: ${origin} ${fromDir} (${version})`);
 }
 
-// (npm dist-tag resolution removed 2026-10-17: the default source is the
-// local fork checkout above, whose version is read off its package.json;
-// the registry is consulted only with an explicit --version.)
+// (npm dist-tag resolution removed 2026-10-17; since 2026-11-15 the default
+// source is the in-repo snapshot above, whose version is read off its
+// package.json. The registry is consulted only with an explicit --version.)
 
 
 // --sync-defaults: refresh the repo's default rule configs from this
@@ -304,7 +292,7 @@ if (!force && existsSync(pkgJsonPath)) {
     const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
     if (pkg.version === version) {
       const note = fromDir
-        ? " (same version ≠ same content: local loader customizations are NOT in the npm source — pass --force to re-vendor from --from-dir)"
+        ? " (same version ≠ same content: Mod injections can change without a version bump — pass --force to re-vendor from the source dir)"
         : " (use --force to redo)";
       console.log(`[vendor-cli] vendor/iflow-cli already at ${version}, skipping${note}`);
       process.exit(0);

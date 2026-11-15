@@ -20,10 +20,24 @@
  * 既不把半截围栏交回 Markdown（那正是用户盯着的 JSON 墙），也不伪装成已派发 ——
  * 收栏后占位卡才跃变为任务卡。
  *
+ * 视觉上这些卡片是**委派家族**，刻意与 MessageList 的「工具操作卡」分开：
+ * 淡主色底 / 主色描边 / 顶部强调条 / 两行头部 / 独立图标徽章。内置
+ * `super-agent` 工具上线后两种卡常并排出现，别再把它改回通用卡材质。
+ *
  * 宿主派发不经过本文件：`src/panel/panel.ts` 仍按原逻辑扫描同一段文本。
  */
 import { Fragment, useMemo, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, FileWarning, ListChecks, Loader2, Users } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  CircleDot,
+  FileWarning,
+  ListChecks,
+  Loader2,
+  Users,
+  X,
+} from "lucide-react";
 import { t } from "../i18n";
 import {
   splitSuperDirectiveSegments,
@@ -33,6 +47,7 @@ import {
   type SuperDirectiveSegment,
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
+import type { ToolBlock } from "../../../shared/messages";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
 import {
@@ -44,19 +59,87 @@ import {
 
 type DirectiveSegment = Extract<SuperDirectiveSegment, { kind: "directive" }>;
 
-/** 卡片表面沿用转录里其它卡的材质：8px 圆角 + 描边 + 卡片底 + 轻投影。 */
-const CARD = "stream-in my-2 overflow-hidden rounded-lg border border-border/60 bg-card shadow-card";
-const CARD_HEAD = "flex items-center gap-2 border-b border-border/60 px-3 py-2";
-const CARD_ICON = "flex size-6 shrink-0 items-center justify-center rounded-md";
+/**
+ * 委派卡独立表面（2026-11-15 恢复）。
+ *
+ * 「工具操作卡」ToolCard 是 `bg-card + border-border + shadow-card` 的单行头部卡
+ * （见 MessageList.tsx 的 ToolCard）。内置 `super-agent` 工具上线后，派发既能走
+ * 工具帧也能走围栏文本，两种卡并排时委派卡沿用同一材质就完全读不出区别；git
+ * 历史里本组件从首版（8c965f4）起就注明「沿用转录里其它卡的材质」，从来没有
+ * 过独立外观。这里按「与工具操作卡明显区分」补一套专属表面：淡主色底 + 主色
+ * 描边 + 顶部主色强调条 + 浅浮层投影，头部是「eyebrow + 标题」两行 + 独立图标
+ * 徽章；圆角仍走转录卡的 8px（card 档），颜色全部走主题 token，深浅主题同构。
+ * 刻意不带 `bg-card` / `shadow-card` / `tool-card`（工具卡材质），不碰
+ * backdrop-filter（陷阱 #22），也不靠 ring 画边（shadow-card 会覆盖 ring）。
+ */
+const DIRECTIVE_CARD =
+  "stream-in super-directive-card overflow-hidden rounded-lg border border-primary/35 bg-primary/10 shadow-float";
+/** 顶部主色强调条：一眼认出「这是派发单，不是工具卡」。 */
+const DIRECTIVE_ACCENT = "h-0.5 bg-primary/60";
+/** 头部两行结构（eyebrow + 标题），与工具卡的单行 label/detail 区分。 */
+const DIRECTIVE_HEAD = "flex items-start gap-2 border-b border-primary/20 px-3 py-2";
+/** 图标徽章：主色底 + 主色描边；工具卡是裸 `.tool-icon` 渐变砖。 */
+const DIRECTIVE_ICON =
+  "flex size-6 shrink-0 items-center justify-center rounded-md border border-primary/30 bg-primary/15 text-primary";
+/** 家族 eyebrow：所有委派卡共用一枚小标签，工具卡没有这一层。 */
+const DIRECTIVE_EYEBROW = "text-ui-micro font-medium tracking-wide text-primary";
+/** 进行中占位卡的图标徽章保持中性 —— 不宣称已派发。 */
+const DIRECTIVE_ICON_MUTED =
+  "flex size-6 shrink-0 items-center justify-center rounded-md border border-border/60 bg-surface/60 text-muted-foreground";
+const DIRECTIVE_EYEBROW_MUTED =
+  "text-ui-micro font-medium tracking-wide text-muted-foreground";
+
+/** 委派卡外壳：统一挂独立表面 + 顶部强调条；`my-2` 由调用点按需给。 */
+function DirectiveSurface({
+  children,
+  className = "",
+  testId,
+  role,
+}: {
+  children: ReactNode;
+  className?: string;
+  testId?: string;
+  role?: "status";
+}) {
+  return (
+    <div className={`${DIRECTIVE_CARD} ${className}`} data-testid={testId} role={role}>
+      <div className={DIRECTIVE_ACCENT} aria-hidden="true" />
+      {children}
+    </div>
+  );
+}
 
 /**
- * 任务卡表面：与 CARD 同材质，但**不带 my-2** —— 一批任务卡之间的间距由外层
- * 的 space-y-2 统一给（卡片自己的外边距会让间距忽大忽小）。
+ * 委派卡头部：图标徽章 + eyebrow + 标题两行 + 右侧 chip。
+ * 标题容器 `min-w-0 flex-1`，chip 外套 `shrink-0` —— 窄屏先收缩标题，
+ * 序号 / 状态 chip 始终完整可见（项目子代理卡同款约定）。
  */
-const TASK_CARD =
-  "stream-in overflow-hidden rounded-lg border border-border/60 bg-card shadow-card";
-/** 任务卡头部：标题可换行（任务标题最长 40 字），所以图标与 chip 顶端对齐。 */
-const TASK_CARD_HEAD = "flex items-start gap-2 border-b border-border/60 px-3 py-2";
+function DirectiveHeader({
+  icon,
+  children,
+  aside,
+  iconClassName = DIRECTIVE_ICON,
+  eyebrowClassName = DIRECTIVE_EYEBROW,
+}: {
+  icon: ReactNode;
+  children: ReactNode;
+  aside?: ReactNode;
+  iconClassName?: string;
+  eyebrowClassName?: string;
+}) {
+  return (
+    <div className={DIRECTIVE_HEAD}>
+      <span className={iconClassName} aria-hidden="true">
+        {icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className={eyebrowClassName}>{t("委派指令")}</div>
+        <div className="mt-0.5 min-w-0">{children}</div>
+      </div>
+      {aside && <span className="shrink-0">{aside}</span>}
+    </div>
+  );
+}
 
 const ACTION_LABELS: Record<string, string> = {
   retry: "重试",
@@ -158,17 +241,21 @@ function TaskCard({
   const shown = open ? blocks : preview.blocks;
   const long = preview.truncated;
   return (
-    <div className={TASK_CARD} data-testid="super-task-card">
-      <div className={TASK_CARD_HEAD}>
-        <span className={`${CARD_ICON} bg-primary/12 text-primary`} aria-hidden="true">
-          <Users className={ICON_INLINE} />
-        </span>
-        <span className="min-w-0 flex-1 break-words text-ui-body font-semibold text-foreground">
+    <DirectiveSurface testId="super-task-card">
+      {/* 只有一张卡时不需要「第 1/1 个任务」这种序号 —— 批次信息是多余的层级。 */}
+      <DirectiveHeader
+        icon={<Users className={ICON_INLINE} />}
+        aside={
+          total > 1 ? (
+            <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>
+          ) : undefined
+        }
+      >
+        {/* 标题层级比工具卡 label 高一档（16px vs 13px），长标题换行而不是挤出 chip。 */}
+        <span className="block break-words text-ui-title font-semibold leading-snug text-foreground">
           {task.title}
         </span>
-        {/* 只有一张卡时不需要「第 1/1 个任务」这种序号 —— 批次信息是多余的层级。 */}
-        {total > 1 && <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>}
-      </div>
+      </DirectiveHeader>
       <div className="px-3 py-2">
         <TaskBody blocks={shown} />
         {task.attachments.length > 0 && (
@@ -197,7 +284,7 @@ function TaskCard({
           </Button>
         )}
       </div>
-    </div>
+    </DirectiveSurface>
   );
 }
 
@@ -316,17 +403,16 @@ function renderTaskInlines(inlines: SuperTaskInline[]): ReactNode[] {
 
 function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
   return (
-    <div className={CARD}>
-      <div className={CARD_HEAD}>
-        <span className={`${CARD_ICON} bg-info/12 text-info`}>
-          <ListChecks className={ICON_INLINE} />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-ui-label font-medium text-foreground/90">
+    <DirectiveSurface className="my-2">
+      <DirectiveHeader
+        icon={<ListChecks className={ICON_INLINE} />}
+        aside={<Chip tone="info">{t("{0} 个动作", actions.length)}</Chip>}
+      >
+        <span className="block truncate text-ui-label font-medium text-foreground/90">
           {t("子会话操作")}
         </span>
-        <Chip tone="info">{t("{0} 个动作", actions.length)}</Chip>
-      </div>
-      <ul className="divide-y divide-border/60">
+      </DirectiveHeader>
+      <ul className="divide-y divide-primary/20">
         {actions.map((action, index) => (
           <li key={index} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
             <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
@@ -346,7 +432,7 @@ function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
           </li>
         ))}
       </ul>
-    </div>
+    </DirectiveSurface>
   );
 }
 
@@ -360,25 +446,289 @@ function RawCard({
   reason: SuperDirectiveRawReason;
 }) {
   return (
-    <div className={CARD}>
-      <div className={CARD_HEAD}>
-        <span className={`${CARD_ICON} bg-warning/12 text-warning`}>
-          <FileWarning className={ICON_INLINE} />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-ui-label font-medium text-foreground/90">
+    <DirectiveSurface className="my-2">
+      <DirectiveHeader
+        icon={<FileWarning className={ICON_INLINE} />}
+        iconClassName="flex size-6 shrink-0 items-center justify-center rounded-md border border-warning/30 bg-warning/15 text-warning"
+        eyebrowClassName={DIRECTIVE_EYEBROW_MUTED}
+        aside={
+          <Chip tone="warning" truncate>
+            {language}
+          </Chip>
+        }
+      >
+        <span className="block truncate text-ui-label font-medium text-foreground/90">
           {t("原始协议块")}
         </span>
-        <Chip tone="warning" truncate>
-          {language}
-        </Chip>
-      </div>
+      </DirectiveHeader>
       <div className="px-3 py-2">
         <div className="text-ui-caption text-muted-foreground">{t(RAW_REASONS[reason])}</div>
         <div className="mt-1 text-ui-micro text-muted-foreground/80">
           {t("{0} · {1} 字符", language, raw.length)}
         </div>
       </div>
+    </DirectiveSurface>
+  );
+}
+
+/**
+ * 内置 `super-agent` 工具调用的独立委派卡。
+ *
+ * wire 实证（vendor/iflow-fork/bundle/super-agent-loader.cjs）：
+ * `TOOL_NAME = "super-agent"`，`args` 是 `{tasks:[{title,task,attachments?}]}`，
+ * 工具只回 `Delegation request accepted.`。这条调用照常进 store 成为
+ * `ToolBlock`，但转录层不能再走通用 ToolCard —— 用户看到的「工具操作 /
+ * 执行参数 / 原始 JSON」正是上一轮没修到的那层。这里复用围栏委派卡的
+ * 独立表面，不碰宿主派发逻辑，也不修改 shared/super-tool-call.ts。
+ */
+interface SuperToolTaskView {
+  title: string;
+  task: string;
+  attachments: number;
+}
+
+type SuperToolCallParse =
+  | { ok: true; tasks: SuperToolTaskView[] }
+  | { ok: false; reason: "pending" | "invalid" };
+
+/** 折叠态任务书预览预算：与围栏任务卡同源，按块截断而不是切半句。 */
+const SUPER_TOOL_PREVIEW_CHARS = 200;
+const SUPER_TOOL_PREVIEW_BLOCKS = 2;
+
+/**
+ * 从 ToolBlock.input（host 用 formatToolInput 格式化过的 args JSON）解析任务书。
+ * 只在完整 JSON + 每个任务都有 title/task 时给出可读列表；空载荷、半截 JSON、
+ * 形状不符一律降级，绝不把坏载荷拆成看起来已派发的任务。
+ */
+function parseSuperToolCallInput(input: ToolBlock["input"]): SuperToolCallParse {
+  if (!input || !input.trim()) return { ok: false, reason: "pending" };
+  let payload: unknown;
+  try {
+    payload = JSON.parse(input) as unknown;
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { ok: false, reason: "invalid" };
+  }
+  const tasks = (payload as { tasks?: unknown }).tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) return { ok: false, reason: "invalid" };
+  const parsed: SuperToolTaskView[] = [];
+  for (const entry of tasks) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, reason: "invalid" };
+    }
+    const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
+    if (typeof record.title !== "string" || !record.title.trim()) {
+      return { ok: false, reason: "invalid" };
+    }
+    if (typeof record.task !== "string" || !record.task.trim()) {
+      return { ok: false, reason: "invalid" };
+    }
+    const attachments = record.attachments;
+    if (
+      attachments !== undefined &&
+      (!Array.isArray(attachments) || attachments.some((name) => typeof name !== "string"))
+    ) {
+      return { ok: false, reason: "invalid" };
+    }
+    parsed.push({
+      title: record.title,
+      task: record.task,
+      attachments: Array.isArray(attachments) ? attachments.length : 0,
+    });
+  }
+  return { ok: true, tasks: parsed };
+}
+
+/** 状态 chip 留在独立卡内，沿用 ToolCard 的四态文案但穿委派家族表面。 */
+function SuperToolStatusChip({ status }: { status: ToolBlock["status"] }) {
+  if (status === "completed") {
+    return (
+      <Chip tone="success" className="chip-in">
+        <Check className={ICON_INLINE} aria-hidden="true" /> {t("已完成")}
+      </Chip>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Chip tone="danger" className="chip-in">
+        <X className={ICON_INLINE} aria-hidden="true" /> {t("失败")}
+      </Chip>
+    );
+  }
+  if (status === "pending") {
+    return (
+      <Chip tone="muted" className="chip-in">
+        <CircleDot className={ICON_INLINE} aria-hidden="true" /> {t("等待执行")}
+      </Chip>
+    );
+  }
+  return (
+    <Chip tone="primary" className="chip-in">
+      <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" /> {t("执行中")}
+    </Chip>
+  );
+}
+
+/** 单条任务书：标题 + 序号 + 附件数 + 可展开的正文摘要。 */
+function SuperToolTaskRow({
+  task,
+  index,
+  total,
+}: {
+  task: SuperToolTaskView;
+  index: number;
+  total: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const blocks = useMemo(() => parseSuperTaskText(task.task), [task.task]);
+  const preview = useMemo(
+    () => previewSuperTaskBlocks(blocks, SUPER_TOOL_PREVIEW_CHARS, SUPER_TOOL_PREVIEW_BLOCKS),
+    [blocks],
+  );
+  const shown = open ? blocks : preview.blocks;
+  return (
+    <li data-testid="super-tool-call-task" className="min-w-0 px-3 py-2">
+      <div className="flex min-w-0 flex-wrap items-start gap-2">
+        {total > 1 && (
+          <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>
+        )}
+        <span className="min-w-0 flex-1 break-words text-ui-label font-semibold leading-snug text-foreground">
+          {task.title}
+        </span>
+        {task.attachments > 0 && (
+          <Chip tone="muted">{t("附件 {0}", task.attachments)}</Chip>
+        )}
+      </div>
+      <div className="mt-1 min-w-0">
+        <TaskBody blocks={shown} />
+      </div>
+      {preview.truncated && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-1"
+          aria-label={open ? t("收起任务说明") : t("展开任务说明")}
+          icon={
+            open ? (
+              <ChevronUp className={ICON_INLINE} aria-hidden="true" />
+            ) : (
+              <ChevronDown className={ICON_INLINE} aria-hidden="true" />
+            )
+          }
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open
+            ? t("收起")
+            : preview.hiddenChars > 0
+              ? t("展开全文（还有 {0} 字）", preview.hiddenChars)
+              : t("展开全文")}
+        </Button>
+      )}
+    </li>
+  );
+}
+
+/** 原始参数折叠项：保留 ToolCard 的审计能力，但不再以「执行参数」糊在卡面上。 */
+function SuperToolRawParams({ input }: { input: ToolBlock["input"] }) {
+  const [open, setOpen] = useState(false);
+  const [openedOnce, setOpenedOnce] = useState(false);
+  if (!input) return null;
+  return (
+    <div className="border-t border-primary/20 px-3 py-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-expanded={open}
+        icon={
+          open ? (
+            <ChevronUp className={ICON_INLINE} aria-hidden="true" />
+          ) : (
+            <ChevronDown className={ICON_INLINE} aria-hidden="true" />
+          )
+        }
+        onClick={() => {
+          setOpenedOnce(true);
+          setOpen((value) => !value);
+        }}
+      >
+        {open ? t("收起原始参数") : t("查看原始参数")}
+      </Button>
+      {openedOnce && open && (
+        <pre
+          data-testid="super-tool-call-raw"
+          className="mt-1 max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+        >
+          {input}
+        </pre>
+      )}
     </div>
+  );
+}
+
+/** tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。 */
+export function SuperToolCallCard({ block }: { block: ToolBlock }) {
+  const parsed = useMemo(() => parseSuperToolCallInput(block.input), [block.input]);
+  const tasks = parsed.ok ? parsed.tasks : [];
+  return (
+    <DirectiveSurface
+      className="my-2"
+      testId="super-tool-call-card"
+      role={parsed.ok ? undefined : "status"}
+    >
+      <DirectiveHeader
+        icon={<Users className={ICON_INLINE} />}
+        aside={<SuperToolStatusChip status={block.status} />}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-ui-title font-semibold leading-snug text-foreground">
+            {t("子会话委派")}
+          </span>
+          {parsed.ok && <Chip tone="primary">{t("{0} 个任务", tasks.length)}</Chip>}
+        </div>
+      </DirectiveHeader>
+      {parsed.ok ? (
+        <ul data-testid="super-tool-call-tasks" className="divide-y divide-primary/20">
+          {tasks.map((task, index) => (
+            <SuperToolTaskRow key={index} task={task} index={index} total={tasks.length} />
+          ))}
+        </ul>
+      ) : parsed.reason === "pending" ? (
+        <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
+          <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+          <span>{t("正在编写任务书…")}</span>
+        </div>
+      ) : (
+        // 载荷解析不出来时**不假装有任务书**：如实说明这里只保留了原始参数，
+        // 且参数本身直接摊开（折叠起来等于让用户点两次才看到唯一的内容）。
+        <div className="space-y-2 px-3 py-2">
+          <div
+            data-testid="super-tool-call-invalid"
+            className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
+          >
+            <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
+            <span>{t("工具参数未能完整解析，任务列表暂不可用，以下保留原始参数")}</span>
+          </div>
+          {block.input && (
+            <pre
+              data-testid="super-tool-call-raw"
+              className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+            >
+              {block.input}
+            </pre>
+          )}
+        </div>
+      )}
+      {parsed.ok && <SuperToolRawParams input={block.input} />}
+      {block.output && (
+        <div className="border-t border-primary/20 px-3 py-2">
+          <pre className="max-w-full whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/60 px-3 py-2 font-mono text-ui-caption leading-relaxed text-foreground">
+            {block.output}
+          </pre>
+        </div>
+      )}
+    </DirectiveSurface>
   );
 }
 
@@ -410,19 +760,19 @@ export function SuperDirectiveCard({ segment }: { segment: DirectiveSegment }) {
  */
 function PendingDirectiveCard({ language }: { language: string }) {
   return (
-    <div className={CARD} data-testid="super-directive-pending" role="status">
-      <div className="flex items-center gap-2 px-3 py-2">
-        <Loader2
-          className={`${ICON_INLINE} shrink-0 animate-spin text-muted-foreground`}
-          aria-hidden="true"
-        />
-        <span className="min-w-0 flex-1 truncate text-ui-label font-medium text-foreground/90">
+    <DirectiveSurface className="my-2" testId="super-directive-pending" role="status">
+      <DirectiveHeader
+        icon={<Loader2 className={`${ICON_INLINE} animate-spin`} />}
+        iconClassName={DIRECTIVE_ICON_MUTED}
+        eyebrowClassName={DIRECTIVE_EYEBROW_MUTED}
+      >
+        <span className="block truncate text-ui-label font-medium text-foreground/90">
           {language === "super-agent-actions"
             ? t("正在编写子会话操作…")
             : t("正在编写任务书…")}
         </span>
-      </div>
-    </div>
+      </DirectiveHeader>
+    </DirectiveSurface>
   );
 }
 
