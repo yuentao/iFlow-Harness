@@ -389,8 +389,9 @@ function OutputDetails({
 
 /**
  * The tool's concrete invocation args (shell command line / params JSON) so
- * users can audit WHAT ran, not just which tool ran. Same lazy-mount
- * discipline as OutputDetails (pitfall #27): folded bodies cost zero DOM.
+ * users can audit WHAT ran, not just which tool ran. Structured JSON renders
+ * as a param list; anything else (a shell command, free-form text) stays laid
+ * open verbatim — the folded raw-JSON body is gone (issue #166).
  * Skipped when the card title already carries the full command verbatim
  * (CLI's "Running: <cmd>" titles) — no point duplicating it.
  */
@@ -422,12 +423,9 @@ function InputDetails({
   chrome?: BlockChrome;
 }) {
   const flat = chrome === "flat";
-  const [open, setOpen] = useState(false);
-  const [openedOnce, setOpenedOnce] = useState(false);
   if (!input) return null;
   if (title.includes(input)) return null;
   const summary = summarizeToolInput(input);
-  const lineCount = input.trimEnd().split("\n").length;
   const body = (
     <pre
       className={
@@ -439,60 +437,26 @@ function InputDetails({
       {input}
     </pre>
   );
+  // The structured params ARE the audit surface — the 「查看原始参数」fold
+  // that duplicated them as raw JSON is gone (issue #166; the delegation card
+  // dropped its own fold first). Input with no parseable summary (a shell
+  // command, free-form text) keeps that raw text laid open instead of hidden.
   if (summary && summary.length > 0) {
     return (
-      <>
-        <div className="tool-card-params">
-          <div className="tool-card-section-label">{t("执行参数")}</div>
-          <div className="tool-card-param-list">
-            {summary.map(({ label, value }) => (
-              <div className="tool-card-param" key={label}>
-                <span className="tool-card-param-key">{label}</span>
-                <span className="tool-card-param-value" title={value}>{value}</span>
-              </div>
-            ))}
-          </div>
+      <div className="tool-card-params">
+        <div className="tool-card-section-label">{t("执行参数")}</div>
+        <div className="tool-card-param-list">
+          {summary.map(({ label, value }) => (
+            <div className="tool-card-param" key={label}>
+              <span className="tool-card-param-key">{label}</span>
+              <span className="tool-card-param-value" title={value}>{value}</span>
+            </div>
+          ))}
         </div>
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => {
-            setOpenedOnce(true);
-            setOpen((v) => !v);
-          }}
-          className="tool-card-raw-toggle"
-        >
-          <Caret open={open} />
-          {open ? t("收起原始参数") : t("查看原始参数")}
-        </button>
-        <Collapse open={open}>
-          {openedOnce && body}
-        </Collapse>
-      </>
+      </div>
     );
   }
-  if (lineCount < 3 && input.length < 120) {
-    return <div className="tool-card-params"><div className="tool-card-section-label">{t("执行参数")}</div>{body}</div>;
-  }
-  return (
-    <>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => {
-          setOpenedOnce(true);
-          setOpen((v) => !v);
-        }}
-        className="tool-card-raw-toggle"
-      >
-        <Caret open={open} />
-        {open ? t("收起原始参数") : t("查看原始参数")}
-      </button>
-      <Collapse open={open}>
-        {openedOnce && body}
-      </Collapse>
-    </>
-  );
+  return <div className="tool-card-params"><div className="tool-card-section-label">{t("执行参数")}</div>{body}</div>;
 }
 
 function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: BlockChrome }) {
