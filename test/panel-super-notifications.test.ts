@@ -238,6 +238,17 @@ describe("Super Agent 回合的完成提示", () => {
     expect(sound).not.toHaveBeenCalled();
   });
 
+  it("hidden 回合不误触发被改道用户消息的补投（也不伪造用户气泡）", async () => {
+    const internals = p as unknown as { pendingDelegatedUserTurns: unknown[] };
+    // runHiddenTurn 显式传 undefined 附件 + delegateOnBusy:false —— 它是宿主
+    // 记账回合，不是「streaming 中被改道的用户消息」，不该进补投缓冲。
+    await runHiddenTurn("【汇报】子会话 A 完成");
+    await flush();
+    expect(calls).toHaveLength(1); // 只有这一轮 hidden prompt，没有补投出来的第二轮
+    expect(internals.pendingDelegatedUserTurns).toHaveLength(0);
+    expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(0);
+  });
+
   it("非 hidden 的用户回合：仍提示「iFlow 已完成本轮回复」，不因有子会话在跑而静音", async () => {
     children = [child({ status: "running" })];
     const { notify, sound } = spyCues();

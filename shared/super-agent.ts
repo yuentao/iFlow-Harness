@@ -3283,6 +3283,75 @@ export function buildSuperReportPrompt(
 }
 
 // ---------------------------------------------------------------------------
+// 「被改道用户消息」的补投提示词
+// ---------------------------------------------------------------------------
+
+/**
+ * 构造「补投用户消息」提示词 —— 投给主会话的一次 hidden prompt。
+ *
+ * 背景（2026-11-15 用户实测）：主会话 streaming（含 laneBusy 窗口）时用户
+ * 发出的消息，宿主会把整条消息改道派发给子会话。`sendPrompt` 当场 return
+ * false，主会话既收不到 prompt、UI 也没有用户气泡；回合末的子会话汇报又明确
+ * 「不是用户消息」，于是这条消息在主会话里永久丢失。宿主把它缓存下来，等本
+ * 回合结束后用这段文本作为**下一回合**补投回主会话。
+ *
+ * 措辞必须如实：这是「用户在生成中发出的、已派发给子会话的消息」，不是
+ * 子会话汇报、不是用户此前说过的话、也不是要重复派发的任务。
+ *
+ * **附件不伪造**：这里只列出调用方实际重新附上的附件（图片块 / 文件路径），
+ * 原文照抄用户消息；`droppedByChild` 是子会话附件上限截断的数量（那些只没
+ * 交给子会话，主会话这里仍全部带回），`missingCount` 是确实无法带回的附件
+ * 数 —— 两者都如实写明，绝不假装某个附件存在。
+ */
+export function buildDelegatedUserTurnPrompt(input: {
+  text: string;
+  images: readonly { mimeType: string }[];
+  files: readonly { name: string; path: string }[];
+  /** 超过子会话附件上限、未被交给子会话的数量。 */
+  droppedByChild?: number;
+  /** 确实无法随补投带回的附件数量。 */
+  missingCount?: number;
+}): string {
+  const lines = [
+    "[补投用户消息]",
+    "This is a message the USER typed while the main session was generating. Because the main session was busy, the host dispatched it as a child session (it is already being handled there), so the main session never received it and no user bubble was recorded. The host is now backfilling it into your context as a fresh hidden turn.",
+    "This is NOT a child-session status report, NOT something you said earlier, and NOT a new instruction to dispatch the same message to a child session again. Read it as the user's own words and continue the task; dispatch only genuinely new follow-up work to child sessions, as usual.",
+    "",
+    "用户原文 / User message (verbatim):",
+    input.text,
+  ];
+  const attachments: string[] = [];
+  if (input.images.length > 0) {
+    attachments.push(`- ${input.images.length} image attachment(s) re-attached below as inline image blocks.`);
+  }
+  for (const file of input.files) {
+    attachments.push(`- file: ${file.name} → ${file.path}`);
+  }
+  if (attachments.length > 0) {
+    lines.push(
+      "",
+      "附件 / Attachments re-attached to THIS turn (originals, not re-created or summarised):",
+      ...attachments,
+    );
+  }
+  const missing = Math.max(0, Math.trunc(input.missingCount ?? 0));
+  if (missing > 0) {
+    lines.push(
+      "",
+      `注意：有 ${missing} 个附件无法随本次补投带回，本回合下方没有它们的图片块或文件路径，请勿假设它们存在。`,
+    );
+  }
+  const dropped = Math.max(0, Math.trunc(input.droppedByChild ?? 0));
+  if (dropped > 0) {
+    lines.push(
+      "",
+      `注意：其中 ${dropped} 个附件超出子会话携带上限，未被交给子会话（上面的列表是补投给主会话的全部原件）。`,
+    );
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // 「子会话动作回执」提示词
 // ---------------------------------------------------------------------------
 

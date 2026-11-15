@@ -7,6 +7,7 @@ import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
+import { AGENT_ATTACHMENT_HEADER } from "../shared/messages.js";
 import type { QueuedPromptUi, SessionState } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +73,13 @@ type PanelInternals = {
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
   postToWebview: (message: unknown) => void;
   ensureClient: () => Promise<unknown>;
+  sendPrompt: (
+    text: string,
+    images?: { data: string; mimeType: string }[],
+    files?: { name: string; path: string }[],
+    contexts?: unknown,
+    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
+  ) => Promise<boolean>;
   promptWithRetry: (client: unknown, sessionId: string, prompt: unknown) => Promise<{ stopReason: string }>;
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
@@ -91,10 +99,13 @@ async function flush(): Promise<void> {
 }
 
 /**
- * M2 P0-3 host queue wiring: Enter while streaming enqueues (no user block,
- * no CLI call); the settled turn dispatches the FIFO head; a failed turn
- * pauses with a toast; resume/sendNow/edit/clear act through queueAction;
- * wholesale state swaps clear the queue.
+ * 主会话车道 / Super Agent 派发接线。
+ *
+ * Enter while streaming 不再入本地队列（shared/queue.ts 的入队路径已下线）：
+ * 整条消息（含附件）改道给子会话（独立 CLI 进程 + worktree）。当前回合内不写
+ * 用户块、不碰主会话 CLI；回合结束后由宿主把那条消息以 hidden 回合补投回主
+ * 会话，与子会话汇报 / 合并请求共用同一条车道。另覆盖汇报投递、等待心跳、
+ * 队列动作（resume/sendNow/edit/clear）与整份状态替换时清空队列。
  */
 describe("ChatPanel message queue (P0-3 wiring)", () => {
   let panel: ChatPanel;
@@ -177,9 +188,17 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     expect(spawn.mock.calls[0]?.[0]).toMatchObject({ title: "delegate this", task: "delegate this" });
     expect(queue()).toHaveLength(0); // no local queue entry
     expect(p.store.getState().blocks.length).toBe(blocksBefore); // not appended
-    expect(calls).toHaveLength(1); // CLI untouched
+    expect(calls).toHaveLength(1); // CLI untouched WHILE the main turn runs
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
+    await flush();
+
+    // 本回合收尾后，那条被改道的消息才补投成主会话的下一个 hidden 回合：
+    // 主会话全程不并发，子会话也只派发一次（补投不会二次派发）。
+    expect(calls).toHaveLength(2);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(1);
+    calls[1]!.resolve({ stopReason: "end_turn" });
     await flush();
   });
 
@@ -211,6 +230,59 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
     await flush();
+    // 回合收尾会补投一个 hidden 回合（内容由下面的专门用例断言）；收掉它，
+    // 别留下悬空未决的 prompt。
+    expect(calls).toHaveLength(2);
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
+  });
+
+  it("streaming 带附件消息在回合结束后被补投主会话（含附件块/路径，不二次派发）", async () => {
+    const first = send("first turn");
+    await flush();
+    expect(p.store.getState().status).toBe("streaming");
+    const spawn = vi.fn((_spec: unknown) => ({ id: "super-1" }));
+    Object.assign(p, { getSuperAgent: () => ({ spawn }) });
+    const sendSpy = vi.spyOn(p, "sendPrompt");
+
+    await p.handleWebviewMessage({
+      type: "sendPrompt",
+      text: "look at this",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+      files: [{ name: "note.txt", path: "C:/tmp/note.txt" }],
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1); // 派发当刻绝不并发第二个主会话 prompt
+
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await first;
+    await flush();
+
+    // 补投成主会话的下一个 hidden 回合：原文 + 附件块 + 文件路径清单都在。
+    expect(calls).toHaveLength(2);
+    const backfill = calls[1]!.prompt;
+    const text = backfill.map((b) => b.text ?? "").join("\n");
+    expect(text).toContain("[补投用户消息]");
+    expect(text).toContain("the USER typed while the main session was generating");
+    expect(text).toContain("look at this");
+    expect(text).not.toContain("[子会话状态上报]"); // 不伪装成子会话汇报
+    expect(text).toContain(AGENT_ATTACHMENT_HEADER);
+    expect(text).toContain("- note.txt → C:/tmp/note.txt");
+    expect(backfill).toContainEqual({ type: "image", data: "QUJD", mimeType: "image/png" });
+
+    // 补投走 hidden + delegateOnBusy:false：不伪造用户气泡、绝不二次派发。
+    expect(sendSpy.mock.calls.at(-1)?.[4]).toMatchObject({
+      hidden: true,
+      delegateOnBusy: false,
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(1);
+
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
+    // 出队后不再重复补投。
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(2);
   });
 
   it("child-session reports become the next main-session turn once the current one ends", async () => {

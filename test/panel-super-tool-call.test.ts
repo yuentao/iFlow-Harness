@@ -166,6 +166,54 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(spec.task).toBe("把这件事做完");
   });
 
+  it("工具调用兜底不缓冲用户补投；真有补投时只投一次", async () => {
+    const internals = p as unknown as {
+      pendingDelegatedUserTurns: Array<{
+        mainSessionId: string | null;
+        text: string;
+        images: unknown[];
+        files: unknown[];
+        droppedByChild: number;
+      }>;
+      drainDelegatedUserTurns: () => Promise<void>;
+      currentMainSessionId: () => string | null;
+    };
+    // 结构化工具帧派发的是「模型指令」，不是 streaming 中的用户消息 —— 不进
+    // 补投缓冲，也不会凭空开一个 hidden 回合。
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        args: { tasks: [{ title: "工具式派发", task: "把这件事做完" }] },
+      }),
+    });
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(internals.pendingDelegatedUserTurns).toHaveLength(0);
+    await internals.drainDelegatedUserTurns();
+    expect(p.sendPrompt).not.toHaveBeenCalled();
+
+    // 真有一条被改道的用户消息时：只投一次，出队后不重复补投、不二次派发。
+    internals.pendingDelegatedUserTurns.push({
+      mainSessionId: internals.currentMainSessionId(),
+      text: "生成中发出的消息",
+      images: [],
+      files: [],
+      droppedByChild: 0,
+    });
+    await internals.drainDelegatedUserTurns();
+    expect(p.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(p.sendPrompt).toHaveBeenCalledWith(
+      expect.stringContaining("[补投用户消息]"),
+      undefined,
+      undefined,
+      undefined,
+      { delegateOnBusy: false, hidden: true },
+    );
+    expect(internals.pendingDelegatedUserTurns).toHaveLength(0);
+    await internals.drainDelegatedUserTurns();
+    expect(p.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
   it("重复帧不重复 spawn：同载荷的 in_progress 更新与 completed 帧都跳过", () => {
     const args = { tasks: [{ title: "只派一次", task: "正文" }] };
     p.onSessionUpdate({ sessionId: "tool-session", update: frame({ args }) });

@@ -53,7 +53,7 @@ import type {
   ToolCallBase,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { extractCorePrompt, isPlanMode, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
+import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
@@ -77,6 +77,7 @@ import { SuperAgentManager } from "./super-agent.js";
 import {
   buildSuperActionReceiptPrompt,
   buildSuperDigest,
+  buildDelegatedUserTurnPrompt,
   buildSuperMergeRequestPrompt,
   clampMaxConcurrentSuperSessions,
   clampMaxSuperWorktrees,
@@ -942,6 +943,30 @@ export class ChatPanel implements vscode.Disposable {
     files: { name: string; path: string }[];
   } | null = null;
   /**
+   * 主会话 streaming（含 laneBusy 窗口）时被改道给子会话的用户消息，等本
+   * 回合结束后再以 hidden 回合补投回主会话。
+   *
+   * 背景（2026-11-15 用户实测）：那一路 `sendPrompt` 在 manager.spawn 之后
+   * 直接 return false —— 主会话既收不到 prompt、UI 也没有用户气泡；回合末的
+   * 子会话汇报又明确「不是用户消息」，队列入队路径也已下线，这条消息在主
+   * 会话里就永久丢失。这里只缓存内容形态（原文 + 图片/文件/上下文），**绝不**
+   * 在派发时碰 client.prompt（会与正在跑的回合并发）或 store.userPrompt
+   * （会凭空造一个主会话从未处理过的用户气泡）。
+   *
+   * 交付走 drainDelegatedUserTurns：与子会话汇报 / 动作回执 / 合并请求共用
+   * superReportRunning 这条车道、互斥执行，排队等主会话空闲；每次只投一条，
+   * sendPrompt 真的跑起来才出队，失败/被占用时留着等心跳重投，不丢也不重复。
+   */
+  private pendingDelegatedUserTurns: Array<{
+    mainSessionId: string | null;
+    text: string;
+    images: { data: string; mimeType: string }[];
+    files: { name: string; path: string }[];
+    contexts?: ContextRefUi[];
+    /** 超过子会话附件上限、没交给子会话的数量（补投文本里如实写明）。 */
+    droppedByChild: number;
+  }> = [];
+  /**
    * Freshness baseline for the Mod context report BEFORE the next session
    * creation/load. The report is written at startChat (inside session/new /
    * session/load), so the first prompt's baseline is THIS timestamp — a
@@ -1440,6 +1465,7 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperReports.clear();
     this.pendingSuperReportPrompts = [];
     this.pendingSuperActionReceipts = [];
+    this.pendingDelegatedUserTurns = [];
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
     this.store.setSuperWaiting(false);
@@ -7579,6 +7605,76 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 把 streaming 期间被改道给子会话的用户消息补投回主会话（hidden 回合）。
+   *
+   * 与子会话汇报 / 动作回执 / 合并请求共用同一条车道：`superReportRunning`
+   * 是重入锁（这几个 drain 都在第一个 await 之前同步申领，谁先申领谁跑），
+   * 主会话空闲（mainSessionFree，含 mainLane 空闲）才投，合并队列在跑时先
+   * 让路。心跳会反复调用，所以「被占用 / 失败」的条目只是留在缓冲里等下一
+   * 拍，绝不丢失、绝不重复派发。
+   *
+   * 补投走 `hidden:true + delegateOnBusy:false`：hidden 保证不伪造用户气泡、
+   * 不改名、不拍 checkpoint；`delegateOnBusy:false` 保证它即便撞上 busy 窗口
+   * 也只是被拒（留在缓冲里等下一拍），**不会二次派发子会话**。附件按原始
+   * 形态重新附上（image 块 + AGENT_ATTACHMENT_HEADER 路径清单），文本由
+   * buildDelegatedUserTurnPrompt 如实标注来源，不伪装成子会话汇报、不伪造
+   * 附件内容（全部原件都带回，missingCount 因此恒为 0）。
+   */
+  private async drainDelegatedUserTurns(): Promise<void> {
+    if (this.disposed || this.superReportRunning) return;
+    if (this.pendingDelegatedUserTurns.length === 0) return;
+    const owner = this.currentMainSessionId();
+    if (!this.pendingDelegatedUserTurns.some((item) => item.mainSessionId === owner)) return;
+    this.superReportRunning = true;
+    try {
+      while (true) {
+        if (this.disposed) return;
+        if (!this.mainSessionFree()) break;
+        // 与汇报 turn 同款门控：一轮失败后别在心跳里连续喂下一条。
+        if (this.store.getState().status === "error") break;
+        // 合并子会话在主仓工作区里跑 git：与它互斥，等合并走完再投。
+        if (
+          this.superMergeRunning ||
+          this.pendingSuperMerges.length > 0 ||
+          this.superMergeChildRunning()
+        ) {
+          break;
+        }
+        const index = this.pendingDelegatedUserTurns.findIndex(
+          (item) => item.mainSessionId === owner,
+        );
+        if (index === -1) break;
+        const item = this.pendingDelegatedUserTurns[index]!;
+        const text = buildDelegatedUserTurnPrompt({
+          text: item.text,
+          images: item.images,
+          files: item.files,
+          droppedByChild: item.droppedByChild,
+        });
+        this.log.info(
+          "super agent: backfilling a delegated user turn as a fresh main-session hidden turn",
+        );
+        const started = await this.sendPrompt(
+          text,
+          item.images.length > 0 ? item.images : undefined,
+          item.files.length > 0 ? item.files : undefined,
+          item.contexts,
+          { delegateOnBusy: false, hidden: true },
+        );
+        // 没跑起来（主会话被别的回合占着 / 被拒）：留在缓冲里等下一拍重投，
+        // 既不丢这条消息，也不会重复派发子会话。
+        if (!started) break;
+        const pos = this.pendingDelegatedUserTurns.indexOf(item);
+        if (pos !== -1) this.pendingDelegatedUserTurns.splice(pos, 1);
+      }
+    } catch (error) {
+      this.log.warn(`delegated user turn backfill failed: ${errorMessage(error)}`);
+    } finally {
+      this.superReportRunning = false;
+    }
+  }
+
+  /**
    * Live child-session board injected into every main-session turn.
    *
    * Without it the main agent has no way to know a child's state — it would
@@ -7808,6 +7904,7 @@ export class ChatPanel implements vscode.Disposable {
     this.refreshSuperWaitHeartbeat();
     void this.drainSuperReports();
     void this.drainSuperActionReceipts();
+    void this.drainDelegatedUserTurns();
     void this.drainSuperMerges();
     if (!this.hasSuperWork()) this.stopSuperHeartbeat();
   }
@@ -7819,6 +7916,9 @@ export class ChatPanel implements vscode.Disposable {
     // 待投递的动作回执也算「还有活儿」：心跳停了回执就永远投不出去，主会话
     // 于是不知道自己刚发的动作生效没有（→ 重复发同一个动作）。
     if (this.pendingSuperActionReceipts.length > 0) return true;
+    // 待补投的「被改道用户消息」同样是欠着主会话的一轮：心跳停了它就永远
+    // 投不出去，那条消息又会像修复前一样在主会话里丢失。
+    if (this.pendingDelegatedUserTurns.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
     // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
     // 继续跑，否则既没有汇报也没有忙碌态刷新。
@@ -9856,6 +9956,21 @@ export class ChatPanel implements vscode.Disposable {
         return false;
       }
       manager.spawn({ title, task, ...(attachments.length > 0 ? { attachments } : {}) });
+      // 主会话此刻收不到这条消息（本分支马上 return false）：先把原文与附件
+      // 缓存下来，等本回合结束后由 drainDelegatedUserTurns 以 hidden 回合补投。
+      // 绝不在这里碰 client.prompt（会与正在跑的回合并发）或 store.userPrompt
+      // （会造一条主会话从未处理过的用户气泡）。
+      this.pendingDelegatedUserTurns.push({
+        mainSessionId: this.currentMainSessionId(),
+        text: trimmed,
+        images: (images ?? []).map((img) => ({ data: img.data, mimeType: img.mimeType })),
+        files: (files ?? []).map((file) => ({ name: file.name, path: file.path })),
+        ...(contexts?.length ? { contexts } : {}),
+        droppedByChild: droppedAttachments,
+      });
+      // 心跳是「主会话一直没空闲 / 补投失败」时的重试通道：这里就把它点着，
+      // 免得子会话瞬间结束时没有任何事件再唤醒补投。
+      this.ensureSuperHeartbeat();
       this.store.sendToast(
         "info",
         vscode.l10n.t("主会话正在生成，已把这条消息派发为子会话「{0}」", title),
@@ -10109,6 +10224,10 @@ export class ChatPanel implements vscode.Disposable {
       // 回合结束时补一次投递，并刷新「等待子会话」心跳 —— 主会话空闲而子会话
       // 仍在跑时，这条常驻提示就是「流程没断，宿主在等」的唯一可见证据。
       void this.drainSuperReports();
+      // 本回合里若有用户消息被改道给子会话，现在主会话空闲了 → 补投成下一
+      // 回合（hidden，不伪造用户气泡）。与汇报/合并共用同一条车道，谁先申领
+      // superReportRunning 谁跑；没抢到的留给心跳重投。
+      void this.drainDelegatedUserTurns();
       this.refreshSuperWaitHeartbeat();
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
@@ -10202,17 +10321,23 @@ export class ChatPanel implements vscode.Disposable {
     // A3: the panel was disposed — the store is gone.
     if (this.disposed) return;
     // Walk back to the last user block — that's the prompt we re-run.
-    let lastUserText: string | null = null;
+    let lastUserBlock: Extract<Block, { kind: "user" }> | null = null;
     for (let i = state.blocks.length - 1; i >= 0; i--) {
       const b = state.blocks[i];
       if (!b) continue;
       if (b.kind === "user") {
-        lastUserText = b.text;
+        lastUserBlock = b;
         break;
       }
     }
+    const lastUserText = lastUserBlock?.text ?? null;
     if (!lastUserText || !lastUserText.trim()) return;
-    const isCompressTurn = lastUserText.trim() === "/compress";
+    // beginUserPrompt 把文件写成「（文件：name → path）」注记行、图片存成
+    // data URL —— 这两处是转录里唯一留存的附件形态。规范化后的文本才是原轮
+    // 的纯 prompt（与正常发送时 typedText 的口径一致）。
+    const regenText = normalizeUserPromptText(lastUserText);
+    if (!regenText) return;
+    const isCompressTurn = regenText === "/compress";
     this.cancelSeen = false;
     let promptSessionId: string | null = null;
     try {
@@ -10227,21 +10352,50 @@ export class ChatPanel implements vscode.Disposable {
       // Same turn-start mode sync as sendPrompt: a regenerated turn must obey
       // the mode the composer shows, not a possibly drifted CLI copy.
       await this.assertModeForPrompt(client, promptSessionId);
+      // 重新生成必须把原轮的图片/文件一起带回：正常发送会 push image 块并
+      // 追加 AGENT_ATTACHMENT_HEADER 清单，旧实现只发一段 text，模型重跑时
+      // 看不到截图/日志。只从 user 块既有形态取回（data URL + 文件注记行），
+      // 解析不出来就如实不带，绝不伪造附件。
+      const regenImages: { data: string; mimeType: string }[] = [];
+      for (const url of lastUserBlock?.images ?? []) {
+        const match = /^data:([^;,]+);base64,(.*)$/s.exec(url);
+        if (!match) continue;
+        const mimeType = match[1];
+        const data = match[2];
+        if (mimeType && data !== undefined) regenImages.push({ mimeType, data });
+      }
+      const regenFiles: { name: string; path: string }[] = [];
+      for (const line of (lastUserBlock?.text ?? "").split("\n")) {
+        const match = /^（文件：(.*) → (.*)）$/.exec(line);
+        if (!match) continue;
+        const name = match[1];
+        const filePath = match[2];
+        if (name && filePath) regenFiles.push({ name, path: filePath });
+      }
+      const regenAttachmentBlock =
+        regenFiles.length > 0
+          ? `\n\n${AGENT_ATTACHMENT_HEADER}\n${regenFiles
+              .map((f) => `- ${f.name} → ${f.path}`)
+              .join("\n")}`
+          : "";
       // A regenerated turn must carry the SAME agent-facing text the original
       // turn did — including a `/skill <name>` expansion (the raw command
       // would be escaped into prose by toAgentPromptText).
-      const regenText = lastUserText.trim();
       const regenSkill = parseSkillInvocation(regenText);
       const regenExpanded = regenSkill ? await this.expandSkillCall(regenSkill) : null;
       const regenDigest = this.superAgentsDigest();
       const prompt: ContentBlock[] = [
         {
           type: "text",
-          text: [regenDigest, regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands)]
-            .filter(Boolean)
-            .join("\n\n"),
+          text:
+            [regenDigest, regenExpanded ?? toAgentPromptText(regenText, this.store.getState().commands)]
+              .filter(Boolean)
+              .join("\n\n") + regenAttachmentBlock,
         },
       ];
+      for (const img of regenImages) {
+        prompt.push({ type: "image", data: img.data, mimeType: img.mimeType });
+      }
       const result = await this.promptWithRetry(client, promptSessionId, prompt);
       // Session replaced mid-flight: the completion must not settle the NEW
       // session's state — drop like the sendPrompt success path.
