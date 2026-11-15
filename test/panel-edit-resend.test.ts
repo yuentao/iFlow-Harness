@@ -7,6 +7,7 @@ import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { setConfigOverrides } from "./vscode-stub.js";
+import { AGENT_ATTACHMENT_HEADER } from "../shared/messages.js";
 import type { Block, CheckpointUi } from "../shared/messages.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +63,7 @@ type PanelInternals = {
   store: {
     getState: () => { blocks: Block[]; status: string; checkpoints?: CheckpointUi[] };
     sessionStarted: (meta: { sessionId: string }) => void;
+    replaceState: (state: unknown) => void;
     setCheckpoints: (list: CheckpointUi[]) => void;
     sendToast: (...args: unknown[]) => number;
     appendNotice: (text: string) => void;
@@ -246,6 +248,45 @@ describe("ChatPanel edit & resend (P1-9 wiring)", () => {
     calls[0]!.resolve({ stopReason: "end_turn" });
     await first;
     await flush();
-    expect(calls).toHaveLength(1); // the child session never touches this CLI
+    // 子会话自身不碰这条 CLI；但那条被改道的用户消息会在回合结束后由宿主
+    // 补投成主会话的下一个 hidden 回合（不是新的用户气泡，也不是二次派发）。
+    expect(calls).toHaveLength(2);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(userTexts()).toEqual(["first turn"]);
+    const backfill = calls[1]!.prompt.map((b) => b.text ?? "").join("\n");
+    expect(backfill).toContain("[补投用户消息]");
+    expect(backfill).toContain("second turn");
+    calls[1]!.resolve({ stopReason: "end_turn" });
+    await flush();
+  });
+
+  it("重新生成重新携带原轮的图片块与文件清单", async () => {
+    // 转录里图片是 data URL、文件是 beginUserPrompt 的「（文件：…）」注记行；
+    // 旧实现只发一段 text，模型重跑时看不到截图/日志。
+    p.store.replaceState({
+      ...p.store.getState(),
+      status: "idle",
+      blocks: [
+        {
+          kind: "user",
+          id: "u-image",
+          text: "看这张图\n（文件：note.txt → C:/tmp/note.txt）",
+          images: ["data:image/png;base64,QUJD"],
+        },
+      ],
+    });
+    const turn = p.handleWebviewMessage({ type: "regenerate" });
+    await flush();
+    expect(calls).toHaveLength(1);
+    const prompt = calls[0]!.prompt;
+    const text = prompt[0]!.text ?? "";
+    expect(text).toContain("看这张图");
+    expect(text).not.toContain("（文件："); // 转录注记不混进 agent-facing 文本
+    expect(text).toContain(AGENT_ATTACHMENT_HEADER);
+    expect(text).toContain("- note.txt → C:/tmp/note.txt");
+    expect(prompt).toContainEqual({ type: "image", data: "QUJD", mimeType: "image/png" });
+    calls[0]!.resolve({ stopReason: "end_turn" });
+    await turn;
+    await flush();
   });
 });
