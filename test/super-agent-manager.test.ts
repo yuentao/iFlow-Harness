@@ -81,6 +81,8 @@ class FakeClient {
   allowedRoots: string[] = [];
   /** 传给 CLI 的 `--include-directories`（工作目录之外的额外可读写根）。 */
   includeDirectories: string[] = [];
+  /** `session/new` 的请求参数（断言子会话不传主会话的 settings）。 */
+  newSessionRequests: Array<Record<string, unknown> | undefined> = [];
   /** Resolver for the "commit-a-gated" plan: the test opens the gate explicitly. */
   releasePrompt: (() => void) | null = null;
   /** Resolver for the "gate-session" plan: releases the pending `session/new`. */
@@ -94,7 +96,8 @@ class FakeClient {
     private readonly plan: Plan,
   ) {}
 
-  async newSession(): Promise<{ sessionId: string }> {
+  async newSession(request?: Record<string, unknown>): Promise<{ sessionId: string }> {
+    this.newSessionRequests.push(request);
     if (this.plan === "gate-session") {
       // 准备阶段挂起：测试可以在这个窗口里中断子会话。
       await new Promise<void>((resolve) => {
@@ -335,6 +338,20 @@ describe("super agent · 编排", () => {
     expect(client?.cwd).toBe(session?.isolation.path);
     expect(client?.allowedRoots).toEqual([session?.isolation.path]);
     expect(client?.cwd).not.toBe(repo);
+  }, 30000);
+
+  it("子会话的 session/new 不带主会话 settings（子会话必须保留 task 工具）", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo);
+    harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    const request = harness.clients[0]?.newSessionRequests[0];
+    expect(request).toBeDefined();
+    // 主会话经 `settings.disallowed_tools: ["task"]` 机械剔除 task；
+    // 子会话刻意不传 settings —— 进程内子代理只允许在子会话里跑。
+    expect(request?.settings).toBeUndefined();
+    expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
   }, 30000);
 
   it("子会话被推到 yolo 模式（刻意完全自主，不因审批往返停顿）", async () => {

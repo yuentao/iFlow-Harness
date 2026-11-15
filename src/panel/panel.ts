@@ -49,6 +49,7 @@ import type {
   ExitPlanModeResponse,
   McpStatusReport,
   McpServerStatusView,
+  SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
 import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
@@ -377,6 +378,41 @@ const INTERNAL_PROMPT_IDLE_MS = 90_000;
  * that turn's trigger raced a replay / a streaming turn / an error.
  */
 const SUPER_HEARTBEAT_MS = 1_500;
+/**
+ * Tools the MAIN panel session must never receive.
+ *
+ * The user directive is that the main session only DELEGATES: it plans, writes
+ * task briefs, watches the board and reports — every implementation step
+ * belongs to a Super Agent child session, and the in-process `task` sub-agent
+ * may only run there. The system prompt already says so, but the model kept
+ * preferring the in-process `task` tool (observed repeatedly), so the
+ * constraint is now mechanical instead of advisory.
+ *
+ * Wire behavior (verified against the vendored CLI bundle,
+ * vendor/iflow-cli/bundle/iflow.js):
+ *  - `session/new` / `session/load` map the request's `settings.disallowed_tools`
+ *    onto the Config's `excludeTools`
+ *    (`u = {...this.settings.merged, ..., excludeTools: o?.disallowed_tools, ...}`);
+ *    `loadSession` builds its config through the same `newSessionConfig(...,
+ *    settings)`, and its not-found fallback calls `newSession` (settings
+ *    forwarded too).
+ *  - `Config.createToolRegistry()`'s registrar
+ *    (`t = (r, ...n) => { let s = r.name, a = r.Name || s, l = this.getExcludeTools(), ...;
+ *    (l?.includes(s) || l?.includes(a)) && (u = !1); u && register }`) skips
+ *    registration when `excludeTools` matches either the static `Name` or the
+ *    class name.
+ *  - `TaskTool` declares `static Name = "task"`, so `"task"` is the exact key.
+ *
+ * The exclusion is per session: child sessions (SuperAgentManager) deliberately
+ * do NOT pass settings and therefore keep `task` — the main session hands the
+ * sub-agent work down to them.
+ */
+export const MAIN_SESSION_DISALLOWED_TOOLS = ["task"] as const;
+/** Fresh settings object for one main-session `session/new` / `session/load`.
+ * A factory (not a shared object) so no caller can mutate another's copy. */
+export function mainSessionSettings(): SessionSettings {
+  return { disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS] };
+}
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
  * delays the chips — it must never hold the panel in a pseudo-busy state.
@@ -5821,7 +5857,12 @@ export class ChatPanel implements vscode.Disposable {
       this.context.extensionUri.fsPath;
     this.historySyncBusy = true;
     try {
-      await client.loadSession({ cwd, mcpServers: [], sessionId });
+      await client.loadSession({
+        cwd,
+        mcpServers: [],
+        sessionId,
+        settings: mainSessionSettings(),
+      });
       if (this.disposed || this.client !== client) return false;
     } catch (error) {
       this.log.warn(`keep-session session/load failed: ${errorMessage(error)}`);
@@ -6415,13 +6456,22 @@ export class ChatPanel implements vscode.Disposable {
       // no measurable win, and the probe's meta/modes ordering stays obvious.
       this.contextReportBaseline = Date.now();
       const tProbe = Date.now();
-      const probe = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+      const probe = await client.newSession({
+        cwd: workspaceRoot,
+        mcpServers: [],
+        settings: mainSessionSettings(),
+      });
       this.log.info(`restore: probe session/new ok in ${Date.now() - tProbe}ms`);
       // Abort checkpoint 1 — nothing has been written to the store yet.
       if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
       const probeMeta: NewSessionMeta | undefined = probe._meta;
       const tLoad = Date.now();
-      const session = await client.loadSession({ cwd: workspaceRoot, mcpServers: [], sessionId });
+      const session = await client.loadSession({
+        cwd: workspaceRoot,
+        mcpServers: [],
+        sessionId,
+        settings: mainSessionSettings(),
+      });
       this.log.info(`restore: session/load ok in ${Date.now() - tLoad}ms`);
       // Abort checkpoint 2 — still nothing written to the store.
       if (this.abortRestoreIfRequested(sessionId, outgoingId)) return false;
@@ -9620,7 +9670,11 @@ export class ChatPanel implements vscode.Disposable {
     const modelsPromise = this.queryLiveModels();
     const tNewSession = Date.now();
     this.contextReportBaseline = tNewSession;
-    const session = await client.newSession({ cwd: workspaceRoot, mcpServers: [] });
+    const session = await client.newSession({
+      cwd: workspaceRoot,
+      mcpServers: [],
+      settings: mainSessionSettings(),
+    });
     this.log.info(`session/new ok in ${Date.now() - tNewSession}ms`);
     const meta: NewSessionMeta | undefined = session._meta;
     const store = this.store;
@@ -10819,7 +10873,12 @@ export class ChatPanel implements vscode.Disposable {
           await rename(tmp, file);
           truncated = true;
           reloadAttempted = true;
-          await client.loadSession({ cwd, mcpServers: [], sessionId });
+          await client.loadSession({
+            cwd,
+            mcpServers: [],
+            sessionId,
+            settings: mainSessionSettings(),
+          });
           if (this.disposed || this.client !== client || this.store.getState().sessionId !== sessionId) {
             throw new Error("session changed during history synchronization");
           }
@@ -10832,7 +10891,12 @@ export class ChatPanel implements vscode.Disposable {
           try {
             await writeFile(file, raw, "utf8");
             if (reloadAttempted && !this.disposed && this.client === client) {
-              await client.loadSession({ cwd, mcpServers: [], sessionId });
+              await client.loadSession({
+                cwd,
+                mcpServers: [],
+                sessionId,
+                settings: mainSessionSettings(),
+              });
             }
           } catch (rollbackError) {
             this.log.error(`deleteUserMessage: rollback FAILED: ${this.formatErrorForLog(rollbackError)}`);
