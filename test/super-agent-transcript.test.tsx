@@ -471,6 +471,156 @@ describe("Super Agent 看板排序与折叠", () => {
   });
 });
 
+/**
+ * 内置 `super-agent` 工具调用（vendor/iflow-fork/bundle/super-agent-loader.cjs）：
+ * toolName `super-agent`、args `{tasks:[{title,task,attachments?}]}`，回
+ * `Delegation request accepted.`。上一轮只改了围栏卡，这里钉住 tool 块渲染
+ * 路径确实分派到独立委派卡，而不是通用 ToolCard。
+ */
+describe("内置 super-agent 工具调用卡片", () => {
+  const longTask = Array.from(
+    { length: 6 },
+    (_, i) => `- 第 ${i + 1} 步：在 j:/git/iflow-harness 里核对委派卡表面、任务列表与窄屏布局，确保不回退成通用工具卡。`,
+  ).join("\n");
+  const payload = JSON.stringify({
+    tasks: [
+      { title: "补开发期同步说明", task: longTask, attachments: ["image1.png"] },
+      { title: "修工具委派卡样式", task: "把内置 super-agent 工具调用从通用 ToolCard 分派到独立委派卡。" },
+    ],
+  });
+
+  function toolBlock(overrides: Record<string, unknown> = {}): Block {
+    return {
+      kind: "tool",
+      id: "b-super-tool",
+      toolCallId: "tc-super-1",
+      toolName: "super-agent",
+      title: "Delegate 2 tasks",
+      toolKind: "other",
+      status: "completed",
+      output: "Delegation request accepted.",
+      input: payload,
+      locations: [],
+      diff: null,
+      ...overrides,
+    } as Block;
+  }
+
+  function renderBlock(block: Block): void {
+    store.current = { state: { superSessions: [] }, superTranscripts: {}, send };
+    act(() =>
+      root.render(
+        <BlockView
+          block={block}
+          isLatest
+          turnActive={false}
+          canCopy
+          canRegenerate={false}
+          canDelete={false}
+          showAvatar
+          onRegenerate={() => {}}
+        />,
+      ),
+    );
+  }
+
+  it("super-agent tool_call 渲染成独立委派卡，不再走 ToolCard", () => {
+    renderBlock(toolBlock());
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    // 与 d7f3d72 的围栏委派卡同一独立表面。
+    expect(card!.classList.contains("super-directive-card")).toBe(true);
+    expect(card!.className).toContain("bg-primary/10");
+    expect(card!.className).toContain("border-primary/35");
+    expect(card!.className).toContain("shadow-float");
+    for (const cls of ["bg-card", "shadow-card", "tool-card"]) {
+      expect(card!.classList.contains(cls)).toBe(false);
+    }
+    expect(card!.firstElementChild!.className).toContain("bg-primary/60");
+    // eyebrow + 高一级标题 + 状态 chip 都在独立卡内。
+    expect(card!.textContent).toContain("委派指令");
+    expect(card!.textContent).toContain("子会话委派");
+    expect(card!.textContent).toContain("已完成");
+    const title = [...card!.querySelectorAll("span")].find(
+      (span) => span.textContent === "子会话委派",
+    );
+    expect(title).toBeTruthy();
+    expect(title!.className).toContain("text-ui-title");
+    const head = card!.children[1] as HTMLElement;
+    expect(head.lastElementChild!.className).toContain("shrink-0");
+    // tasks JSON 被投影成可读任务列表，原始 JSON 不在默认卡面。
+    expect(card!.textContent).toContain("2 个任务");
+    expect(card!.textContent).toContain("补开发期同步说明");
+    expect(card!.textContent).toContain("修工具委派卡样式");
+    expect(card!.textContent).toContain("附件 1");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(2);
+    expect(card!.textContent).not.toContain('"tasks"');
+    expect(card!.textContent).toContain("Delegation request accepted.");
+    // 通用工具卡的文案与 DOM 一概不再出现。
+    expect(card!.textContent).not.toContain("工具操作");
+    expect(card!.textContent).not.toContain("执行参数");
+    expect(container.querySelector(".tool-card")).toBeNull();
+    // 任务说明可展开，原始参数仍是折叠项。
+    const expand = [...card!.querySelectorAll("button")].find(
+      (button) => button.getAttribute("aria-label") === "展开任务说明",
+    );
+    expect(expand).toBeTruthy();
+    act(() => expand!.click());
+    expect(card!.textContent).toContain("第 6 步");
+    const rawToggle = [...card!.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("查看原始参数"),
+    );
+    expect(rawToggle).toBeTruthy();
+    act(() => rawToggle!.click());
+    const raw = card!.querySelector('[data-testid="super-tool-call-raw"]');
+    expect(raw).toBeTruthy();
+    expect(raw!.textContent).toContain('"tasks"');
+    expect(raw!.textContent).toContain("补开发期同步说明");
+  });
+
+  it.each([
+    ["非法 JSON", '{"tasks":[oops]}', "工具参数未能完整解析"],
+    ["未收全的半截载荷", '{"tasks":[{"title":"半截任务","task":"还没写完"', "工具参数未能完整解析"],
+    ["参数还没到达", null, "正在编写任务书…"],
+  ])("tasks 解析失败或未完成时诚实降级：%s", (_name, input, expected) => {
+    renderBlock(toolBlock({ input, status: "in_progress", output: "" }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.classList.contains("super-directive-card")).toBe(true);
+    expect(card!.textContent).toContain(expected);
+    expect(card!.textContent).toContain("执行中");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(0);
+    expect(card!.textContent).not.toContain("工具操作");
+    expect(card!.textContent).not.toContain("执行参数");
+    expect(container.querySelector(".tool-card")).toBeNull();
+    // 失败态不折叠原文：那是卡上唯一有价值的内容，默认就摊开。
+    const raw = card!.querySelector('[data-testid="super-tool-call-raw"]');
+    if (input) {
+      expect(raw).toBeTruthy();
+      expect(raw!.textContent).toContain(String(input));
+      expect(
+        [...card!.querySelectorAll("button")].some((button) =>
+          button.textContent?.includes("查看原始参数"),
+        ),
+      ).toBe(false);
+    } else {
+      expect(raw).toBeNull();
+    }
+  });
+
+  it("只接管 dispatch：super-agent-actions 仍走通用工具卡，命名空间形态照常识别", () => {
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
+    expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeTruthy();
+
+    renderBlock(toolBlock({ toolName: "iflow__super-agent" }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("补开发期同步说明");
+    expect(container.querySelector(".tool-card")).toBeNull();
+  });
+});
+
 describe("shortBranch", () => {
   it("只保留 base36 唯一后缀，非 super 分支原样返回", () => {
     expect(shortBranch("iflow/super/修复按钮-mwammvh-1")).toBe("super/…mwammvh-1");

@@ -57,10 +57,11 @@ import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown, copyText } from "./Markdown";
-import { AssistantText } from "./SuperDirectiveCard";
+import { AssistantText, SuperToolCallCard } from "./SuperDirectiveCard";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
+import { classifySuperToolName } from "../../../shared/super-tool-call";
 import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, TextArea, ToastStack } from "./ui";
 import logo from "../assets/iflow.svg";
 
@@ -137,6 +138,23 @@ function toolPresentation(block: ToolBlock): ToolPresentation {
     accent: kind || "other",
   };
   return { ...fallback, label: t(fallback.label), description: t(fallback.description) };
+}
+
+/**
+ * 内置 `super-agent` 工具调用的渲染分派。
+ *
+ * wire 实证（vendor/iflow-fork/bundle/super-agent-loader.cjs）：
+ * `TOOL_NAME = "super-agent"`，标题由 `getDescription()` 给成
+ * `Delegate N tasks`。`tool_call` / `tool_call_update` 仍照常进 store 成为
+ * `ToolBlock`（宿主也照常消费并派发子会话）；这里只决定它不再走通用 ToolCard。
+ *
+ * 判定复用宿主侧的同一个纯函数 `classifySuperToolName`，两边口径不可能漂移；
+ * 只接管 `dispatch`（`super-agent-actions` 保持通用工具卡），
+ * `super-agent-guard` 这类近似名一律落空。
+ */
+function isSuperAgentDispatchTool(block: ToolBlock): boolean {
+  const name = (block.toolName || "").trim();
+  return name !== "" && classifySuperToolName(name) === "dispatch";
 }
 
 /**
@@ -1588,7 +1606,11 @@ export const BlockView = memo(function BlockView({
     case "thought":
       return <ThoughtCard block={block} isLatest={isLatest} turnActive={turnActive} chrome={chrome} />;
     case "tool":
-      return <ToolCard block={block} chrome={chrome} />;
+      return isSuperAgentDispatchTool(block) ? (
+        <SuperToolCallCard block={block} />
+      ) : (
+        <ToolCard block={block} chrome={chrome} />
+      );
     case "subagent":
       return <SubAgentCard block={block} chrome={chrome} />;
     case "compression":
