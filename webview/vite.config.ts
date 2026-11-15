@@ -19,7 +19,21 @@ import tailwindcss from "@tailwindcss/vite";
  * NOTE: these chunks stay STATICALLY imported by the entry (the entry
  * chunk imports them), so they are still part of the first-paint graph —
  * splitting only makes every chunk smaller, it does not defer any code.
- * The panel therefore still loads all of them before the first paint.
+ * The panel therefore still loads all of them before the first paint, and
+ * the first-screen payload grows: 1,060,561 B / 313,636 B gzip across 8
+ * requests, versus 1,019,935 B / 299,675 B gzip across 3 requests without
+ * the split (+4.0% raw, +4.7% gzip — per-chunk gzip loses the shared
+ * dictionary that one big chunk enjoys).
+ *
+ * That byte cost still buys a faster first paint. A/B measured on
+ * 2026-11-16 with headless Chrome 157 + CDP, a cold browser per run, 32
+ * interleaved pairs plus port-swapped and A/A null controls: DOMContentLoaded
+ * and the React first commit (exact MutationObserver timestamp) land ~12.4 ms
+ * / ~10.0 ms earlier with the split (26/32 pairs, −10.6% / −10.1%), while the
+ * A/A null control is chance (4/12, +2.7%). Renderer script time is unchanged,
+ * so the gain is a shorter compile/parse critical path, not less code.
+ * Do NOT revert this split on bundle bytes alone — re-run that measurement
+ * first.
  */
 const VENDOR_CHUNKS: ReadonlyArray<readonly [string, RegExp]> = [
   // React runtime + scheduler — first paint is impossible without it.
