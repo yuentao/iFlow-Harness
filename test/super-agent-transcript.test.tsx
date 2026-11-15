@@ -476,6 +476,9 @@ describe("Super Agent 看板排序与折叠", () => {
  * toolName `super-agent`、args `{tasks:[{title,task,attachments?}]}`，回
  * `Delegation request accepted.`。上一轮只改了围栏卡，这里钉住 tool 块渲染
  * 路径确实分派到独立委派卡，而不是通用 ToolCard。
+ *
+ * issue #166：委派卡只回答「派了什么」——工具回执（`Delegation request
+ * accepted.`）与「(查看原始参数)」折叠项自此不再出现在卡面上。
  */
 describe("内置 super-agent 工具调用卡片", () => {
   const longTask = Array.from(
@@ -555,27 +558,30 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("附件 1");
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(2);
     expect(card!.textContent).not.toContain('"tasks"');
-    expect(card!.textContent).toContain("Delegation request accepted.");
+    // issue #166：卡片底部不再有工具回执/结果区块。
+    expect(card!.textContent).not.toContain("Delegation request accepted.");
     // 通用工具卡的文案与 DOM 一概不再出现。
     expect(card!.textContent).not.toContain("工具操作");
     expect(card!.textContent).not.toContain("执行参数");
     expect(container.querySelector(".tool-card")).toBeNull();
-    // 任务说明可展开，原始参数仍是折叠项。
+    // 任务说明仍可展开。
     const expand = [...card!.querySelectorAll("button")].find(
       (button) => button.getAttribute("aria-label") === "展开任务说明",
     );
     expect(expand).toBeTruthy();
     act(() => expand!.click());
     expect(card!.textContent).toContain("第 6 步");
-    const rawToggle = [...card!.querySelectorAll("button")].find((button) =>
-      button.textContent?.includes("查看原始参数"),
-    );
-    expect(rawToggle).toBeTruthy();
-    act(() => rawToggle!.click());
-    const raw = card!.querySelector('[data-testid="super-tool-call-raw"]');
-    expect(raw).toBeTruthy();
-    expect(raw!.textContent).toContain('"tasks"');
-    expect(raw!.textContent).toContain("补开发期同步说明");
+    // issue #166：「(查看原始参数)」折叠入口与原始参数本身一并下线 ——
+    // 委派卡只回答「派了什么」，原始 JSON 载荷不再回灌进卡面。
+    expect(
+      [...card!.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("查看原始参数"),
+      ),
+    ).toBe(false);
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+    // 原始载荷的 JSON 字段名一个都不该露出来（标题等结构化内容仍在卡上）。
+    expect(card!.textContent).not.toContain('"title"');
+    expect(card!.textContent).not.toContain('"attachments"');
   });
 
   it.each([
