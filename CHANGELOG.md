@@ -3,6 +3,10 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.2.0] - 2026-11-15
+
+- 新增/修复 首个经 OIDC Trusted Publishing 直发 Marketplace 的版本：`release.yml` 在 GitHub Release 之后追加 `npx --yes @vscode/vsce@4.1.1 publish --oidc --packagePath "iflow-harness-<版本>.vsix"`，`permissions` 补 `id-token: write`（保留 `contents: write` 供 `gh release`），配合门户侧 publisher `yuantao` 的 Trusted Publishing policy；内置定制 CLI fork 改为项目内快照 `vendor/iflow-fork/`，`vendor:cli` 默认源随之切换，CI 打包自足、不再依赖旁侧 `../iflow-fork`；Super Agent 四项修复——系统提示词写死的并发 4 改按 `maxConcurrent` 设置拆分并补守卫、补投 streaming 中被改道的用户消息以修复 regenerate 丢失附件、委派卡恢复独立表面与工具操作卡区分、看板入口为运行中子会话加高光动效；gallery 实测 3.1.1 已于 2026-11-15 发布且 Marketplace 版本号必须递增，故 bump 到 3.2.0 作为首次 OIDC 发布版本
+
 ## [3.1.1] - 2026-11-15
 
 - 变更 主会话机械剔除 `task` 工具：`src/panel/panel.ts` 新增 `MAIN_SESSION_DISALLOWED_TOOLS = ["task"]` 与 `mainSessionSettings()`，主会话的每一次 `session/new` / `session/load`（新建、恢复、keep-session 切 Profile、删除消息的截断与回滚重载）都带 `settings.disallowed_tools: ["task"]`，子会话刻意不带——子代理的活交给子会话，主会话只做委派
