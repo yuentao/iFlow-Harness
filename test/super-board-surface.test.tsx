@@ -1243,7 +1243,7 @@ describe("Super Agent 看板入口运行态炫光", () => {
     expect(glow()).toBeNull();
   });
 
-  it("CSS 契约：角度动画 + conic-gradient + 边缘 mask + blur 柔光 + reduced-motion 降级", () => {
+  it("CSS 契约：角度动画 + conic-gradient + 复合环形 mask（圆角连续）+ blur 柔光 + reduced-motion 降级", () => {
     const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
     const start = css.indexOf(".super-entry-glow {");
     expect(start).toBeGreaterThan(-1);
@@ -1253,10 +1253,18 @@ describe("Super Agent 看板入口运行态炫光", () => {
     expect(block).toContain("@keyframes super-entry-spin");
     expect(block).toContain("conic-gradient(");
     expect(block).toContain("from var(--super-entry-angle)");
-    // 中心被挖空：四条边 mask，只在边缘可见，不遮挡内容。
+    // 中心被挖空：单个复合环形遮罩 = 外框减 content-box，两层同受
+    // border-radius: inherit 约束，圆角处不会像四条轴向矩形条那样被掐细。
     expect(block).toContain("-webkit-mask:");
     expect(block).toContain("mask:");
-    expect(block).toContain("2px 100% no-repeat");
+    expect(block).toContain("content-box");
+    expect(block).toContain("-webkit-mask-composite: xor");
+    expect(block).toContain("mask-composite: exclude");
+    // 环宽由 padding 给出（内容框内缩同量 → 环沿圆角等宽）。
+    expect(block).toContain("padding: 2px");
+    expect(block).toContain("border-radius: inherit");
+    // 旧实现：四条轴向矩形条，在 45° 对角处只剩 ~0.75px，四角看起来被裁切。
+    expect(block).not.toContain("no-repeat");
     expect(block).toContain("filter: blur(");
     expect(block).toContain("pointer-events: none");
     // 纯装饰层不吃点击；focus ring 由按钮自身 box-shadow 提供，不被裁切。
