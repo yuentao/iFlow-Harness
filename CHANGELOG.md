@@ -3,6 +3,17 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.1.0] - 2026-11-15
+
+- 新增 内置工具 `super-agent`（vendored CLI 的 `super-agent-tool-refactor` Mod）：派发主通道从「正文围栏」升级为**真工具调用**，参数 `{"tasks":[{"title","task","attachments"?}]}`；工具本身只回 `Delegation request accepted.`，真正派发由宿主从 wire 的 `tool_call` args 完成；注册受 `IFLOW_SUPER_TOOL=1` 门控（宿主只给主会话注入），子会话与一次性辅助会话不注册；子代理工具面排除该工具（`Cui=["task","super-agent"]`），防嵌套派发；Plan 模式的只读白名单不含它（规划模式仍走正文围栏）；`IFLOW_SUPER_TOOL_DEBUG=1` 可在注册失败时输出 stderr 诊断
+- 变更 系统提示与每轮看板改为「工具优先、正文围栏兜底」：工具在列表里就调用工具，不在（Plan 模式 / 旧 bundle）才写围栏；`super-agent-actions` 管理动作仍只有正文围栏一条通道
+- 新增 宿主自动放行 `super-agent` 工具的权限请求（toolName 优先、title 兜底，命名空间前缀归一后匹配；没有允许项时按取消，绝不伪造 optionId），其它工具与 approvalMode 行为不变
+- 新增 宿主兜底：模型仍以结构化 `tool_call` 发出派发 / 动作时，从 args 取载荷复用现有围栏解析与派发 / 动作链路；`pending` 帧无 args 时等下一帧；动作侧按 `toolCallId` + 载荷指纹去重；载荷取不出来时留日志 + 一次性 toast，绝不伪造派发
+- 修复 模型把 `super-agent` 当工具调用时（内核报 not found in registry）完全无法派发子会话：提示词与看板不再声称「不存在该工具」，并保留失败后的围栏兜底路径
+- 修复 看板提示里的委派载荷示例不是合法 JSON（缺冒号），照抄即零派发
+- 修复 `release.yml` 里 `GITHUB_OUTPUT: ${{ github.output }}` 无效上下文覆盖 runner 真实输出、导致 CI 读不到版本号（只在 GitHub Actions 生效，不影响本地打包）
+- 诚实边界：内置工具只在 `IFLOW_SUPER_TOOL=1` 时注册（面板自动设置）；SMART 审批模式可能仍逐次弹审批；该 Mod 未生成 `.iflow-mod` 用的 `code.js`（需要 pristine bundle 叠加全部 Mod，本地无 pristine 副本，fork 注入这条路径不需要）
+
 ## [3.0.1] - 2026-11-15
 
 - 修复 模型把 `super-agent` 当成工具调用（内核 registry 里没有这个工具，报 "not found in registry"）时一个子会话都派不出去、用户还看不到任何提示：系统提示与每轮看板现在明确声明它不是工具、工具调用会零派发，并给出失败后的恢复指令——在同一轮的下一条消息里把围栏块当普通文本重写一遍，不重试工具调用、也不向用户宣称功能不可用
