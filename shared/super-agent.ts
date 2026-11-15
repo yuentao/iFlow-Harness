@@ -83,6 +83,23 @@ export function isTerminalSuperStatus(status: SuperStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
+/**
+ * 是否还有**非终态**子会话（准备中 / 运行中 / 等你处理）。
+ *
+ * 派生值（纯函数）：调用方（webview 顶栏）用它锁住「切会话 / 切模型 / 切 API
+ * 配置」—— 在跑的子会话用错凭据或让汇报落到已被替换的会话，比 mid-turn 切换
+ * 更隐蔽。
+ *
+ * 之所以放在 shared 层而不是让每个调用点各写一遍 `.some(...)`：顶栏的 selector
+ * 会在**每次 store 更新**时求值（流式期间 12.5 次/秒），内联遍历等于每秒把
+ * 整张子会话表扫一遍；这里给出唯一口径，调用方只订阅列表引用、再用 useMemo
+ * 派生这个布尔值。
+ */
+export function hasActiveSuperSession(sessions: readonly SuperSessionUi[] | undefined): boolean {
+  if (!sessions || sessions.length === 0) return false;
+  return sessions.some((session) => !isTerminalSuperStatus(session.status));
+}
+
 // ---------------------------------------------------------------------------
 // 汇报（抄 dsh 的 Report 五态）
 // ---------------------------------------------------------------------------

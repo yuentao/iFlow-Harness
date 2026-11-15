@@ -2503,9 +2503,32 @@ const RESYNC_THROTTLE_MS = 1_000;
  */
 const EVICT_KEEP_BLOCKS = 200;
 
+/**
+ * Eviction memo: input blocks array → evicted blocks array.
+ *
+ * `evictBlockPayloads` is a PURE function of the blocks array (both caps are
+ * constants here) and it is idempotent + identity-stable: nothing to release
+ * → the SAME array comes back. So the result of one pass can be reused for
+ * the same array — the store runs the eviction after every snapshot/patch,
+ * and a metadata-only patch (`applyBlockPatch` hands back `current.blocks`
+ * untouched) now hits this memo instead of re-walking the tail and
+ * re-copying the array.
+ *
+ * WeakMap: the entry dies with the array it describes, so nothing outlives
+ * the transcript it belongs to. Blocks are immutable in the webview (the
+ * reducer always creates new objects), so an array's contents — and hence its
+ * eviction result — never change under us.
+ */
+const evictMemo = new WeakMap<readonly Block[], Block[]>();
+
 /** Apply the payload eviction to an incoming state; identity-stable pass. */
 function evict(state: SessionState): SessionState {
+  const memo = evictMemo.get(state.blocks);
+  if (memo !== undefined) {
+    return memo === state.blocks ? state : { ...state, blocks: memo };
+  }
   const blocks = evictBlockPayloads(state.blocks, EVICT_KEEP_BLOCKS);
+  evictMemo.set(state.blocks, blocks);
   return blocks === state.blocks ? state : { ...state, blocks };
 }
 
