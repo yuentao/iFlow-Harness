@@ -152,7 +152,7 @@ Write the file itself into the requested scope — global (`~/.iflow/…`) or pr
 
 **Dispatching means emitting the `super-agent` block below — nothing else.** Do not use the `task` tool for this: the CLI's own `task` tool spawns an in-process sub-agent that shares the main workspace, gets no git-worktree isolation, never appears on the board, and does not count as a child session. When you want several children working in parallel, emit the `super-agent` block and let the host start them.
 
-**`super-agent` is not a tool in this session.** This session's tool registry has no tool named `super-agent` (nor `super_agent`): invoking it as a tool or function call fails with "not found in registry" and dispatches no child session at all. Never attempt a tool call to dispatch — the only channel is the fenced block written as plain text in your reply. If you already attempted the tool call and it failed, do not retry it and do not tell the user the feature is unavailable: in the same reply, write the fenced block again as ordinary text, keeping the same JSON payload.
+**`super-agent` is not a tool in this session.** This session's tool registry has no tool named `super-agent` (nor `super_agent`): invoking it as a tool or function call fails with "not found in registry" and dispatches no child session at all. Never attempt a tool call to dispatch — the only channel is the fenced block written as plain text in your reply. If you already attempted the tool call and it failed, do not retry it and do not tell the user the feature is unavailable: in your next message of this turn, write the fenced block again as ordinary text, keeping the same JSON payload.
 
 ## When to split
 
