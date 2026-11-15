@@ -27,7 +27,17 @@
  * 宿主派发不经过本文件：`src/panel/panel.ts` 仍按原逻辑扫描同一段文本。
  */
 import { Fragment, useMemo, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, FileWarning, ListChecks, Loader2, Users } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  CircleDot,
+  FileWarning,
+  ListChecks,
+  Loader2,
+  Users,
+  X,
+} from "lucide-react";
 import { t } from "../i18n";
 import {
   splitSuperDirectiveSegments,
@@ -37,6 +47,7 @@ import {
   type SuperDirectiveSegment,
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
+import type { ToolBlock } from "../../../shared/messages";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
 import {
@@ -456,6 +467,267 @@ function RawCard({
           {t("{0} · {1} 字符", language, raw.length)}
         </div>
       </div>
+    </DirectiveSurface>
+  );
+}
+
+/**
+ * 内置 `super-agent` 工具调用的独立委派卡。
+ *
+ * wire 实证（vendor/iflow-fork/bundle/super-agent-loader.cjs）：
+ * `TOOL_NAME = "super-agent"`，`args` 是 `{tasks:[{title,task,attachments?}]}`，
+ * 工具只回 `Delegation request accepted.`。这条调用照常进 store 成为
+ * `ToolBlock`，但转录层不能再走通用 ToolCard —— 用户看到的「工具操作 /
+ * 执行参数 / 原始 JSON」正是上一轮没修到的那层。这里复用围栏委派卡的
+ * 独立表面，不碰宿主派发逻辑，也不修改 shared/super-tool-call.ts。
+ */
+interface SuperToolTaskView {
+  title: string;
+  task: string;
+  attachments: number;
+}
+
+type SuperToolCallParse =
+  | { ok: true; tasks: SuperToolTaskView[] }
+  | { ok: false; reason: "pending" | "invalid" };
+
+/** 折叠态任务书预览预算：与围栏任务卡同源，按块截断而不是切半句。 */
+const SUPER_TOOL_PREVIEW_CHARS = 200;
+const SUPER_TOOL_PREVIEW_BLOCKS = 2;
+
+/**
+ * 从 ToolBlock.input（host 用 formatToolInput 格式化过的 args JSON）解析任务书。
+ * 只在完整 JSON + 每个任务都有 title/task 时给出可读列表；空载荷、半截 JSON、
+ * 形状不符一律降级，绝不把坏载荷拆成看起来已派发的任务。
+ */
+function parseSuperToolCallInput(input: ToolBlock["input"]): SuperToolCallParse {
+  if (!input || !input.trim()) return { ok: false, reason: "pending" };
+  let payload: unknown;
+  try {
+    payload = JSON.parse(input) as unknown;
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { ok: false, reason: "invalid" };
+  }
+  const tasks = (payload as { tasks?: unknown }).tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) return { ok: false, reason: "invalid" };
+  const parsed: SuperToolTaskView[] = [];
+  for (const entry of tasks) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, reason: "invalid" };
+    }
+    const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
+    if (typeof record.title !== "string" || !record.title.trim()) {
+      return { ok: false, reason: "invalid" };
+    }
+    if (typeof record.task !== "string" || !record.task.trim()) {
+      return { ok: false, reason: "invalid" };
+    }
+    const attachments = record.attachments;
+    if (
+      attachments !== undefined &&
+      (!Array.isArray(attachments) || attachments.some((name) => typeof name !== "string"))
+    ) {
+      return { ok: false, reason: "invalid" };
+    }
+    parsed.push({
+      title: record.title,
+      task: record.task,
+      attachments: Array.isArray(attachments) ? attachments.length : 0,
+    });
+  }
+  return { ok: true, tasks: parsed };
+}
+
+/** 状态 chip 留在独立卡内，沿用 ToolCard 的四态文案但穿委派家族表面。 */
+function SuperToolStatusChip({ status }: { status: ToolBlock["status"] }) {
+  if (status === "completed") {
+    return (
+      <Chip tone="success" className="chip-in">
+        <Check className={ICON_INLINE} aria-hidden="true" /> {t("已完成")}
+      </Chip>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Chip tone="danger" className="chip-in">
+        <X className={ICON_INLINE} aria-hidden="true" /> {t("失败")}
+      </Chip>
+    );
+  }
+  if (status === "pending") {
+    return (
+      <Chip tone="muted" className="chip-in">
+        <CircleDot className={ICON_INLINE} aria-hidden="true" /> {t("等待执行")}
+      </Chip>
+    );
+  }
+  return (
+    <Chip tone="primary" className="chip-in">
+      <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" /> {t("执行中")}
+    </Chip>
+  );
+}
+
+/** 单条任务书：标题 + 序号 + 附件数 + 可展开的正文摘要。 */
+function SuperToolTaskRow({
+  task,
+  index,
+  total,
+}: {
+  task: SuperToolTaskView;
+  index: number;
+  total: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const blocks = useMemo(() => parseSuperTaskText(task.task), [task.task]);
+  const preview = useMemo(
+    () => previewSuperTaskBlocks(blocks, SUPER_TOOL_PREVIEW_CHARS, SUPER_TOOL_PREVIEW_BLOCKS),
+    [blocks],
+  );
+  const shown = open ? blocks : preview.blocks;
+  return (
+    <li data-testid="super-tool-call-task" className="min-w-0 px-3 py-2">
+      <div className="flex min-w-0 flex-wrap items-start gap-2">
+        {total > 1 && (
+          <Chip tone="primary">{t("第 {0}/{1} 个任务", index + 1, total)}</Chip>
+        )}
+        <span className="min-w-0 flex-1 break-words text-ui-label font-semibold leading-snug text-foreground">
+          {task.title}
+        </span>
+        {task.attachments > 0 && (
+          <Chip tone="muted">{t("附件 {0}", task.attachments)}</Chip>
+        )}
+      </div>
+      <div className="mt-1 min-w-0">
+        <TaskBody blocks={shown} />
+      </div>
+      {preview.truncated && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-1"
+          aria-label={open ? t("收起任务说明") : t("展开任务说明")}
+          icon={
+            open ? (
+              <ChevronUp className={ICON_INLINE} aria-hidden="true" />
+            ) : (
+              <ChevronDown className={ICON_INLINE} aria-hidden="true" />
+            )
+          }
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open
+            ? t("收起")
+            : preview.hiddenChars > 0
+              ? t("展开全文（还有 {0} 字）", preview.hiddenChars)
+              : t("展开全文")}
+        </Button>
+      )}
+    </li>
+  );
+}
+
+/** 原始参数折叠项：保留 ToolCard 的审计能力，但不再以「执行参数」糊在卡面上。 */
+function SuperToolRawParams({ input }: { input: ToolBlock["input"] }) {
+  const [open, setOpen] = useState(false);
+  const [openedOnce, setOpenedOnce] = useState(false);
+  if (!input) return null;
+  return (
+    <div className="border-t border-primary/20 px-3 py-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-expanded={open}
+        icon={
+          open ? (
+            <ChevronUp className={ICON_INLINE} aria-hidden="true" />
+          ) : (
+            <ChevronDown className={ICON_INLINE} aria-hidden="true" />
+          )
+        }
+        onClick={() => {
+          setOpenedOnce(true);
+          setOpen((value) => !value);
+        }}
+      >
+        {open ? t("收起原始参数") : t("查看原始参数")}
+      </Button>
+      {openedOnce && open && (
+        <pre
+          data-testid="super-tool-call-raw"
+          className="mt-1 max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+        >
+          {input}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/** tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。 */
+export function SuperToolCallCard({ block }: { block: ToolBlock }) {
+  const parsed = useMemo(() => parseSuperToolCallInput(block.input), [block.input]);
+  const tasks = parsed.ok ? parsed.tasks : [];
+  return (
+    <DirectiveSurface
+      className="my-2"
+      testId="super-tool-call-card"
+      role={parsed.ok ? undefined : "status"}
+    >
+      <DirectiveHeader
+        icon={<Users className={ICON_INLINE} />}
+        aside={<SuperToolStatusChip status={block.status} />}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-ui-title font-semibold leading-snug text-foreground">
+            {t("子会话委派")}
+          </span>
+          {parsed.ok && <Chip tone="primary">{t("{0} 个任务", tasks.length)}</Chip>}
+        </div>
+      </DirectiveHeader>
+      {parsed.ok ? (
+        <ul data-testid="super-tool-call-tasks" className="divide-y divide-primary/20">
+          {tasks.map((task, index) => (
+            <SuperToolTaskRow key={index} task={task} index={index} total={tasks.length} />
+          ))}
+        </ul>
+      ) : parsed.reason === "pending" ? (
+        <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
+          <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+          <span>{t("正在编写任务书…")}</span>
+        </div>
+      ) : (
+        // 载荷解析不出来时**不假装有任务书**：如实说明这里只保留了原始参数，
+        // 且参数本身直接摊开（折叠起来等于让用户点两次才看到唯一的内容）。
+        <div className="space-y-2 px-3 py-2">
+          <div
+            data-testid="super-tool-call-invalid"
+            className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
+          >
+            <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
+            <span>{t("工具参数未能完整解析，任务列表暂不可用，以下保留原始参数")}</span>
+          </div>
+          {block.input && (
+            <pre
+              data-testid="super-tool-call-raw"
+              className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+            >
+              {block.input}
+            </pre>
+          )}
+        </div>
+      )}
+      {parsed.ok && <SuperToolRawParams input={block.input} />}
+      {block.output && (
+        <div className="border-t border-primary/20 px-3 py-2">
+          <pre className="max-w-full whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/60 px-3 py-2 font-mono text-ui-caption leading-relaxed text-foreground">
+            {block.output}
+          </pre>
+        </div>
+      )}
     </DirectiveSurface>
   );
 }
