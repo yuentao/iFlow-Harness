@@ -773,6 +773,19 @@ describe("prompt templates (prompts/)", () => {
     expect(brief).toContain("never claim a check passed");
   });
 
+  it("keeps the child-session concurrency limit configurable instead of hard-coding 4", () => {
+    // 模型会照着提示词里的数字自我约束：写死的 "At most 4 child sessions" 曾让
+    // 用户把 iflow.superAgent.maxConcurrent 设成 10 后仍只派 4 个任务
+    //（2026-11-15 实测）。实现层的上限来自设置且每次实时读取，提示词不得再写死数字。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).not.toContain("At most 4 child sessions run concurrently");
+    expect(text).not.toMatch(/At most [0-9]+ child sessions run concurrently/);
+    expect(text).toContain("`iflow.superAgent.maxConcurrent`");
+    expect(text).toContain("default 5, adjustable from 1 to 20");
+    expect(text).toContain("the host queues extra dispatches in FIFO order");
+    expect(text).toContain("never truncate the delegation to a hard-coded count");
+  });
+
   it("declares that the main session has no `task` tool while child sessions keep it, and routes every delegation through child sessions", () => {
     // 宿主在 session/new 的 settings.disallowed_tools 里剔除 `task`（宿主行为由
     // test/panel-session-tools.test.ts 覆盖，这里只校验提示词措辞）。提示词若还写
