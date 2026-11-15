@@ -1253,6 +1253,16 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("re-send the block as text");
   });
 
+  it("看板 hint 的载荷示例是合法 JSON（模型照抄示例不会撞上 invalid payload）", () => {
+    // 2026-11-15 实测：`{"title","task"}` 这种缺冒号的简写会被 parseDirectiveBody
+    // 判成「载荷不是合法 JSON」并进 invalidBlocks —— 模型照抄示例就会零派发。
+    // 示例必须是可解析的 JSON，同时保留占位符（原样抄回按占位符规则拒掉）。
+    const digest = buildSuperDigest([]);
+    const match = /\(body: (\{.*\})\)\. There is no super-agent tool/.exec(digest);
+    expect(match).not.toBeNull();
+    expect(() => JSON.parse(match![1]!)).not.toThrow();
+  });
+
   it("列出每个子会话的 id、状态与摘要，并附管理动作说明", () => {
     const digest = buildSuperDigest([
       session({ id: "super-a", status: "running", summary: "正在补单测" }),
