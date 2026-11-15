@@ -16,7 +16,7 @@ Rules:
 - Use todo_write to track your steps early: the board timeline shows this child session's own todo list.
 - Run the project checks the task brief asks for (tests, typecheck, build) in your own working directory, and report their real output in your final paragraph. If the output shows a failure, say it failed — never claim a check passed.
 - Answer in the language of the task description.
-- You may run in-process subagents with the `task` tool inside your own working directory — they share it and get no extra isolation. You cannot dispatch child sessions (you have no `super-agent` tool), and you must not push the implementation onto anyone else.
+- You may run in-process subagents with the `task` tool inside your own working directory — they share that directory and get no extra isolation, and delivery responsibility stays with you: do not hand the whole task off to anyone else, and you cannot dispatch child sessions (you have no `super-agent` tool).
 
 Dependencies and checks:
 - Your working directory is a separate worktree/directory, isolated from the main workspace; the host may have already provisioned an independent `node_modules` for you (a hard-link copy).
