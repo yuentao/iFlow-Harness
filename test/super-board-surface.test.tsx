@@ -25,6 +25,8 @@
  * query the DOCUMENT (the React mount only holds the collapsed control).
  * The semantics of every assertion are unchanged.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1174,5 +1176,96 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
 
     const hint = rowTitleHint();
     expect(hint).toContain("目录 /tmp/fallback");
+  });
+});
+
+describe("Super Agent 看板入口运行态炫光", () => {
+  /** 装饰层：只在至少一个子会话非终态时挂载。 */
+  const glow = (): HTMLElement | null =>
+    control().querySelector<HTMLElement>(".super-entry-glow");
+
+  it("至少一个非终态子会话：渲染纯装饰层，可访问名/aria-expanded/点击区不变", () => {
+    render([session({ status: "running" })]);
+
+    const el = glow();
+    expect(el).toBeTruthy();
+    // 纯装饰：不进可访问树、无文本、不吃指针事件（后者在 CSS 契约里断言）。
+    expect(el!.getAttribute("aria-hidden")).toBe("true");
+    expect(el!.textContent).toBe("");
+    expect(el!.childElementCount).toBe(0);
+    // 装饰层不改变按钮本身的可访问语义与展开状态。
+    expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    // 定位/层叠上下文挂在按钮上，装饰层自己不引入新控件。
+    expect(control().className).toContain("relative");
+    expect(control().className).toContain("isolate");
+    // 装饰层不带任何可交互形态（不是按钮/链接）。
+    expect(el!.querySelector("button, a, input")).toBeNull();
+  });
+
+  it("准备中 / 等你处理同属非终态，炫光层同样出现", () => {
+    for (const status of ["preparing", "awaiting_input"] as const) {
+      render([session({ status })]);
+      expect(glow()).toBeTruthy();
+      expect(glow()!.getAttribute("aria-hidden")).toBe("true");
+    }
+  });
+
+  it("running 混合终态：只要有一个非终态就保留炫光层", () => {
+    render([
+      session({ id: "a", status: "completed" }),
+      session({ id: "b", status: "running" }),
+      session({ id: "c", status: "cancelled" }),
+    ]);
+    expect(glow()).toBeTruthy();
+  });
+
+  it("全部为终态时完全静止：零装饰层 DOM（completed/failed/cancelled 任一组合）", () => {
+    const terminalSets: Array<Array<"completed" | "failed" | "cancelled">> = [
+      ["completed"],
+      ["failed"],
+      ["cancelled"],
+      ["completed", "failed", "cancelled"],
+    ];
+    for (const statuses of terminalSets) {
+      render(statuses.map((status, i) => session({ id: `s${i}`, status })));
+      expect(glow()).toBeNull();
+      // 控件本身仍在（只是没有多余装饰层与动画）。
+      expect(control().getAttribute("aria-label")).toBe("子会话看板");
+    }
+  });
+
+  it("从运行态收敛到全终态后，重新渲染会移除装饰层（无残留动画）", () => {
+    render([session({ status: "running" })]);
+    expect(glow()).toBeTruthy();
+
+    render([session({ status: "completed" })]);
+    expect(glow()).toBeNull();
+  });
+
+  it("CSS 契约：角度动画 + conic-gradient + 边缘 mask + blur 柔光 + reduced-motion 降级", () => {
+    const css = readFileSync(join(__dirname, "..", "webview", "src", "styles.css"), "utf8");
+    const start = css.indexOf(".super-entry-glow {");
+    expect(start).toBeGreaterThan(-1);
+    // 取动效整段（含 @property / keyframes / reduced-motion）。
+    const block = css.slice(css.lastIndexOf("@property --super-entry-angle", start));
+    expect(block).toContain('syntax: "<angle>"');
+    expect(block).toContain("@keyframes super-entry-spin");
+    expect(block).toContain("conic-gradient(");
+    expect(block).toContain("from var(--super-entry-angle)");
+    // 中心被挖空：四条边 mask，只在边缘可见，不遮挡内容。
+    expect(block).toContain("-webkit-mask:");
+    expect(block).toContain("mask:");
+    expect(block).toContain("2px 100% no-repeat");
+    expect(block).toContain("filter: blur(");
+    expect(block).toContain("pointer-events: none");
+    // 纯装饰层不吃点击；focus ring 由按钮自身 box-shadow 提供，不被裁切。
+    expect(block).not.toContain("overflow: hidden");
+    // 不依赖 backdrop-filter（陷阱 #22）。
+    expect(block).not.toContain("backdrop-filter");
+    // 减弱动效降级为静态角度，不加任意 px 字号/圆角。
+    expect(block).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(block).toContain("animation: none");
+    expect(block).not.toMatch(/text-\[\d+px\]|rounded-\[\d+px\]/);
   });
 });

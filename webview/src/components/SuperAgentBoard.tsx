@@ -502,6 +502,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     () => list.filter((s) => s.status === "awaiting_input" && s.pending !== undefined),
     [list],
   );
+  // Edge glow on the collapsed control: ANY non-terminal child counts.
+  // `isTerminalSuperStatus` is the single source of truth in shared/super-agent.ts,
+  // so a board of only completed/failed/cancelled children renders NO decorative
+  // layer at all — a completely static control with no extra DOM, no animation.
+  const hasActiveChild = list.some((s) => !isTerminalSuperStatus(s.status));
   const counts = useMemo(() => summarizeSuperSessions(list), [list]);
   const totals = useMemo(() => sumSuperUsage(list), [list]);
 
@@ -684,8 +689,15 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         aria-label={t("子会话看板")}
         title={expanded ? t("收起子会话看板") : t("展开子会话看板")}
         onClick={() => setExpanded((v) => !v)}
-        className="press flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-surface/60 px-2 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
+        className="press relative isolate flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border/70 bg-surface/60 px-2 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
       >
+        {/* Running-child edge glow (Apple-Intelligence-like): a masked conic
+            gradient flows around the control's border. Rendered ONLY while at
+            least one child is non-terminal, so a settled board has no extra
+            DOM layer and no animation at all. Pure decoration: aria-hidden and
+            pointer-events-none in CSS, no text — the accessible name, hit area,
+            focus ring and layout are untouched. */}
+        {hasActiveChild && <span className="super-entry-glow" aria-hidden="true" />}
         <Users className={`${ICON_INLINE} shrink-0 text-muted-foreground`} aria-hidden="true" />
         <span className="shrink-0 @max-[380px]:hidden">{t("子会话")}</span>
         {/* Total count: the one count that survives at ≤380px, where the
