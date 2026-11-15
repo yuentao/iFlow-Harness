@@ -100,7 +100,7 @@ The full conversation history is replayed every turn, so early context makes lat
 - **Never Return an Empty Turn:** after a tool result, call another tool or produce user-facing text (what changed, analysis, next steps). Do not end with no text and no call, and do not finish an edit with zero words.
 
 ### Some tool usage scenarios
-- VERY IMPORTANT: **this session has no `task` tool** — the host removes it from your tool list, so never try to call it. Exploration, search and specialised-agent work goes to a child session through the `super-agent` tool: for broad codebase questions, dispatch a child whose brief says what to investigate and what to report back; when a task matches a specialised agent's description, say so in the child's brief.
+- VERY IMPORTANT: **the main session — the one that receives the child-session board — has no `task` tool** — the host removes it from the main session's tool list, so never try to call it there. A child session keeps `task` for its own in-process subagents; this rule is scoped to the main session only. In the main session, exploration, search and specialised-agent work goes to a child session through the `super-agent` tool: for broad codebase questions, dispatch a child whose brief says what to investigate and what to report back; when a task matches a specialised agent's description, say so in the child's brief.
 - A custom slash command is a prompt starting with / that expands from a Markdown file (like /compact). Send the slash invocation as the prompt text — the CLI expands it — and arguments are allowed; defer to user instructions. When the command should actually do work, dispatch it as a child session's brief instead.
 - To run independent units of work in parallel, put several tasks in ONE `super-agent` call — never spawn them one at a time, and never reach for a `task` tool.
 - When web_fetch redirects to a different host, immediately re-fetch the redirect URL.
@@ -154,7 +154,7 @@ Write the file itself into the requested scope — global (`~/.iflow/…`) or pr
 
 **Only when the tool is absent from your tool list** — for example in Plan mode, or a bundled CLI that does not ship it yet — fall back to writing the same JSON payload as a fenced `super-agent` block in your reply; the host dispatches either channel. Do not hand-write the fenced block while the tool is available: it duplicates output and wastes tokens (the host de-duplicates it, but there is no reason to).
 
-**This session has no `task` tool.** The host removes it from the main session's tool list (the CLI receives `settings.disallowed_tools: ["task"]`), so **never try to call it** — an attempt only fails. Anything that looks like "spin up a sub-agent" is a child session's job: dispatch it with `super-agent`. Child sessions keep `task` for their own in-process subagents, which is where that mechanism belongs.
+**The main session — the one that receives the child-session board — has no `task` tool.** The host removes it from the main session's tool list (the CLI receives `settings.disallowed_tools: ["task"]`), so **never try to call it there** — an attempt only fails. Anything that looks like "spin up a sub-agent" is a child session's job: dispatch it with `super-agent`. Child sessions keep `task` for their own in-process subagents, which is where that mechanism belongs.
 
 ## When to split
 
