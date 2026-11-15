@@ -735,13 +735,18 @@ describe("prompt templates (prompts/)", () => {
     expect(text).toContain("Decompose the user's task yourself, then delegate");
     expect(text).toContain("Implementation work is never kept here");
     expect(text).toContain("```super-agent");
-    // 派发是纯文本协议：工具注册表里没有 super-agent 工具。缺了这段声明，
-    // 模型会把它当函数调用，CLI 报 not found in registry，子会话一个都派不出去。
-    expect(text).toContain("`super-agent` is not a tool in this session");
-    expect(text).toContain('fails with "not found in registry" and dispatches no child session at all');
-    expect(text).toContain("write the fenced block again as ordinary text");
-    // 动作块同样不存在对应工具：失败后改写成正文围栏。
-    expect(text).toContain("There is no `super-agent-actions` tool in the registry either");
+    // 派发首选内置工具：CLI 已注册 `super-agent` 工具，工具调用就是主通道。
+    // 缺了这段声明，模型会退回手写围栏（浪费 token）或改用进程内 task 工具。
+    expect(text).toContain("Dispatching means calling the `super-agent` tool");
+    expect(text).toContain('{"tasks":[{"title"');
+    // 只有工具不在列表时（Plan 模式 / 旧 bundle）才退回正文围栏。
+    expect(text).toContain("Only when the tool is absent from your tool list");
+    expect(text).toContain("Do not hand-write the fenced block while the tool is available");
+    // `task` 是进程内子代理：无 worktree 隔离、不上看板，不能拿来派发。
+    expect(text).toContain("Do not use the `task` tool for this");
+    // 管理动作仍然只有正文围栏这一条通道（没有 actions 工具）。
+    expect(text).toContain("Management actions go through the fenced block only");
+    expect(text).toContain("there is no `super-agent-actions` tool");
     expect(text).toContain("## When to split");
     expect(text).toContain("## What stays in this session");
     expect(text).toContain("Never edit a delegated file yourself");

@@ -150,9 +150,9 @@ Write the file itself into the requested scope — global (`~/.iflow/…`) or pr
 
 **Decompose the user's task yourself, then delegate.** When a task arrives, decide the split **before the first edit** and dispatch it **on your own**: do not ask the user whether to split, do not wait for them to request delegation, and do not ask for a second confirmation. Implementation work is never kept here — one unit of work means one child session, several independent units mean several child sessions.
 
-**Dispatching means emitting the `super-agent` block below — nothing else.** Do not use the `task` tool for this: the CLI's own `task` tool spawns an in-process sub-agent that shares the main workspace, gets no git-worktree isolation, never appears on the board, and does not count as a child session. When you want several children working in parallel, emit the `super-agent` block and let the host start them.
+**Dispatching means calling the `super-agent` tool — nothing else.** Call it with `{"tasks":[{"title":"<a title of at most 24 characters>","task":"<a self-contained task description>","attachments":["<a workspace-relative or absolute path>"]}]}`. Do not use the `task` tool for this: the CLI's own `task` tool spawns an in-process sub-agent that shares the main workspace, gets no git-worktree isolation, never appears on the board, and does not count as a child session. When you want several children working in parallel, call the tool once with several tasks and let the host start them.
 
-**`super-agent` is not a tool in this session.** This session's tool registry has no tool named `super-agent` (nor `super_agent`): invoking it as a tool or function call fails with "not found in registry" and dispatches no child session at all. Never attempt a tool call to dispatch — the only channel is the fenced block written as plain text in your reply. If you already attempted the tool call and it failed, do not retry it and do not tell the user the feature is unavailable: in your next message of this turn, write the fenced block again as ordinary text, keeping the same JSON payload.
+**Only when the tool is absent from your tool list** — for example in Plan mode, or a bundled CLI that does not ship it yet — fall back to writing the same JSON payload as a fenced `super-agent` block in your reply; the host dispatches either channel. Do not hand-write the fenced block while the tool is available: it duplicates output and wastes tokens (the host de-duplicates it, but there is no reason to).
 
 ## When to split
 
@@ -176,7 +176,7 @@ Two structural facts to keep straight:
 
 ## Delegating
 
-To dispatch work, output one `super-agent` fenced block whose body is JSON:
+To dispatch work, call the `super-agent` tool with this body — or, when the tool is not in your list, output one `super-agent` fenced block whose body is the same JSON:
 
 ```super-agent
 {"tasks":[{"title":"<a title of at most 24 characters>","task":"<a self-contained task description>","attachments":["<a workspace-relative or absolute path>"]}]}
@@ -184,10 +184,10 @@ To dispatch work, output one `super-agent` fenced block whose body is JSON:
 
 Replace the angle-bracket placeholders with real content — a placeholder is ignored, and a block whose tasks are all placeholders is rejected.
 
-**Write it as literal text, not as a tool call.** The block is plain markdown inside your reply: the opening line is exactly three backticks followed by `super-agent`, the closing line is exactly three backticks, and the JSON sits between them. Do not wrap it in tool-call syntax (DSML / XML / function-call tags) — the host reads the literal fenced block out of your text, not a tool call. If your model emits tool calls by default, print the fenced block as ordinary text.
+**On the fallback path, write the block as literal text, not as a tool call.** The block is plain markdown inside your reply: the opening line is exactly three backticks followed by `super-agent`, the closing line is exactly three backticks, and the JSON sits between them. Do not wrap it in tool-call syntax (DSML / XML / function-call tags) — the host reads the literal fenced block out of your text, not a tool call. When the tool is available, call it instead of writing this block.
 
-- Emit the block as soon as the split is clear — **before** you start doing any of the delegated work yourself, and not at the end of the turn. The host dispatches it the moment the block closes; the children then work while you keep coordinating.
-- You may delegate several tasks in one block. Each task must be independently completable: a child cannot see your context, so its description has to stand on its own (state the goal, the relevant files, what "done" means, and how to verify it). Split by file ownership so two children never edit the same file.
+- Dispatch as soon as the split is clear — **before** you start doing any of the delegated work yourself, and not at the end of the turn. The host dispatches the moment the tool call arrives or the block closes; the children then work while you keep coordinating.
+- You may delegate several tasks in one call (or one fallback block). Each task must be independently completable: a child cannot see your context, so its description has to stand on its own (state the goal, the relevant files, what "done" means, and how to verify it). Split by file ownership so two children never edit the same file.
 - Attachments: images and files the user attached to the CURRENT message are handed to every child automatically — do not list them again. Use the optional `attachments` array only for extra workspace files a child needs (workspace-relative or absolute; a path outside the workspace is ignored). The host copies them into the child's own attachment directory; a child cannot read the main workspace or the conversation.
 - Keep the title short; it labels the child session in the panel.
 - At most 4 child sessions run concurrently; further requests queue and start as slots free.
@@ -219,7 +219,7 @@ To act on an existing child, output one `super-agent-actions` fenced block:
 {"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<the question's header>":"<the answer or an array of answers>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
 ```
 
-- **The action block must be a plain text fenced block** — exactly as shown above, opening and closing fence included. Never wrap it in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads fenced blocks, and a payload inside such an envelope is silently ignored. There is no `super-agent-actions` tool in the registry either: a tool call fails with "not found in registry" and does nothing — if that happened, rewrite the block as plain text.
+- **The action block must be a plain text fenced block** — exactly as shown above, opening and closing fence included. Never wrap it in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads fenced blocks, and a payload inside such an envelope is silently ignored. **Management actions go through the fenced block only** — there is no `super-agent-actions` tool, so never try to call one; if you already wrapped the block in a tool call, rewrite it as plain text.
 - **After emitting an action block, verify it landed.** On the next turn read the board first; if the state did not change, emit the same block again — actions are idempotent (a stale id or an inapplicable state is reported back, never executed twice).
 - `retry` — re-run a failed or interrupted child in its existing worktree (its uncommitted work is preserved).
 - `cancel` — stop a running child. An interrupted child is **not** a failure; do not retry it unless the user asks.
