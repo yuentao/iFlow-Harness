@@ -630,44 +630,15 @@ function SuperToolTaskRow({
   );
 }
 
-/** 原始参数折叠项：保留 ToolCard 的审计能力，但不再以「执行参数」糊在卡面上。 */
-function SuperToolRawParams({ input }: { input: ToolBlock["input"] }) {
-  const [open, setOpen] = useState(false);
-  const [openedOnce, setOpenedOnce] = useState(false);
-  if (!input) return null;
-  return (
-    <div className="border-t border-primary/20 px-3 py-2">
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-expanded={open}
-        icon={
-          open ? (
-            <ChevronUp className={ICON_INLINE} aria-hidden="true" />
-          ) : (
-            <ChevronDown className={ICON_INLINE} aria-hidden="true" />
-          )
-        }
-        onClick={() => {
-          setOpenedOnce(true);
-          setOpen((value) => !value);
-        }}
-      >
-        {open ? t("收起原始参数") : t("查看原始参数")}
-      </Button>
-      {openedOnce && open && (
-        <pre
-          data-testid="super-tool-call-raw"
-          className="mt-1 max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
-        >
-          {input}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-/** tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。 */
+/**
+ * tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。
+ *
+ * 卡片只回答「派了什么」：标题 + 任务列表 + 状态 chip。底部**不再**有
+ * 「(查看原始参数)」折叠项与工具回执/结果区块（issue #166）——原始 JSON
+ * 参数与 `Delegation request accepted.` 这类回执对用户零信息量，反而把
+ * 卡片底部撑成一堵噪音。解析失败时原始参数仍按原样摊开（那一态它就是
+ * 唯一有价值的正文，见下方 invalid 分支）。
+ */
 export function SuperToolCallCard({ block }: { block: ToolBlock }) {
   const parsed = useMemo(() => parseSuperToolCallInput(block.input), [block.input]);
   const tasks = parsed.ok ? parsed.tasks : [];
@@ -718,14 +689,6 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
               {block.input}
             </pre>
           )}
-        </div>
-      )}
-      {parsed.ok && <SuperToolRawParams input={block.input} />}
-      {block.output && (
-        <div className="border-t border-primary/20 px-3 py-2">
-          <pre className="max-w-full whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/60 px-3 py-2 font-mono text-ui-caption leading-relaxed text-foreground">
-            {block.output}
-          </pre>
         </div>
       )}
     </DirectiveSurface>
