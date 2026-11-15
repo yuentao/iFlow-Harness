@@ -141,8 +141,20 @@ export async function ensureSuperIsolationIgnored(repoRoot: string): Promise<voi
     const topLevel = top.stdout.trim();
     if (!relativeExclude || !topLevel) return;
     excludePath = path.resolve(repoRoot, relativeExclude);
-    const relativeRoot = path.relative(topLevel, path.join(repoRoot, SUPER_ISOLATION_ROOT));
-    if (!relativeRoot || relativeRoot.startsWith("..")) return;
+    // git 给的是 **realpath** 形式（macOS 的 `/var` → `/private/var`、Windows
+    // 目录联接会被解析成目标路径），而 repoRoot 可能还是链接形式。两侧都先
+    // 归一，否则 path.relative 会返回一条以 `..` 开头的「逃出仓库根」的路径，
+    // 下面的守卫直接 return —— exclude 一个字都没写，主工作区被弄脏。
+    const topLevelReal = await realPathOrLexical(topLevel);
+    const isolationReal = await realPathOrLexical(path.join(repoRoot, SUPER_ISOLATION_ROOT));
+    const relativeRoot = path.relative(topLevelReal, isolationReal);
+    if (
+      !relativeRoot ||
+      relativeRoot.startsWith("..") ||
+      path.isAbsolute(relativeRoot)
+    ) {
+      return;
+    }
     pattern = `${relativeRoot.replace(/\\/g, "/")}/`;
   } catch {
     return;
@@ -843,14 +855,51 @@ function normalizePathKey(p: string): string {
   return trimmed.toLowerCase();
 }
 
-/** 真实路径（失败时退回词法形式）。去掉 Windows 的 `\\?\` 前缀。 */
+/**
+ * realpath 归一（不存在时退回**最近已存在祖先**的 realpath + 余下片段）。
+ *
+ * 为什么要一路走到祖先：`.iflow/super` 在第一次委派时还不存在，若直接对整条
+ * 路径 realpath，失败就退回词法形式 —— 调用方手里的 `/var/...` 与 git 给的
+ * `/private/var/...` 依旧是两种写法（2026-11-16 macOS CI 的失败形态）。先解析
+ * 已存在的那一段、剩下的按词法拼回去，两种写法才会归到一起。
+ *
+ * 去掉 Windows 的 `\\?\` 前缀；任何异常都不抛出。
+ */
 async function realPathOrLexical(p: string): Promise<string> {
+  const resolved = path.resolve(p);
   try {
-    const real = await realpath(p);
-    return real.startsWith("\\\\?\\") ? real.slice(4) : real;
+    return stripWindowsPrefix(await realpath(resolved));
   } catch {
-    return path.resolve(p);
+    const parent = path.dirname(resolved);
+    if (parent === resolved) return resolved;
+    try {
+      return path.join(
+        stripWindowsPrefix(await realPathOrLexical(parent)),
+        path.basename(resolved),
+      );
+    } catch {
+      return resolved;
+    }
   }
+}
+
+/** 去掉 Windows 扩展长度前缀（`\\?\C:\…` → `C:\…`）。 */
+function stripWindowsPrefix(p: string): string {
+  return p.startsWith("\\\\?\\") ? p.slice(4) : p;
+}
+
+/**
+ * 路径比较键（异步：realpath 归一之后再比较）。
+ *
+ * git 的 `rev-parse --show-toplevel` 与 `worktree list --porcelain` 输出的是
+ * **realpath** 形式 —— macOS 上 `os.tmpdir()` 的 `/var/folders/...` 会变成
+ * `/private/var/folders/...`，Windows 上目录联接（junction）会被解析成目标
+ * 路径。而调用方手里的 repoRoot / 目录枚举结果常常还是链接形式：直接比较会
+ * 把同一个目录判成两个（2026-11-16 macOS CI 实测：exclude 一个字没写、残留
+ * 清扫恒 0 回收）。
+ */
+export async function comparisonPathKey(p: string): Promise<string> {
+  return normalizePathKey(await realPathOrLexical(p));
 }
 
 /** 路径是否存在（用 lstat：不跟随链接，链接本身存在就算存在）。 */
@@ -1378,7 +1427,7 @@ export async function createPullRequest(options: {
   }
 }
 
-/** worktree 列表（porcelain 输出）。 */
+/** worktree 列表（porcelain 输出；路径已做 realpath 归一）。 */
 export async function listWorktrees(repoRoot: string): Promise<{ path: string; branch: string | null }[]> {
   try {
     const { stdout } = await git(repoRoot, ["worktree", "list", "--porcelain"]);
@@ -1400,7 +1449,17 @@ export async function listWorktrees(repoRoot: string): Promise<{ path: string; b
         currentPath = null;
       }
     }
-    return result;
+    // git 打印的是 realpath 形式，而调用方手里的路径常常还是链接形式
+    // （macOS `/var` → `/private/var`、Windows 目录联接）。统一归一到真实
+    // 路径，残留清扫才能把它与自己的目录枚举结果对上。
+    return await Promise.all(
+      result.map(async (item) => ({
+        ...item,
+        path: await realPathOrLexical(
+          path.isAbsolute(item.path) ? item.path : path.resolve(repoRoot, item.path),
+        ),
+      })),
+    );
   } catch {
     return [];
   }

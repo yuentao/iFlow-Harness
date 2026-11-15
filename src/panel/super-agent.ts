@@ -89,6 +89,7 @@ import {
 import {
   branchHasUnmergedCommits,
   commitWorktree,
+  comparisonPathKey,
   createPullRequest,
   createWorktree,
   currentBranch,
@@ -869,7 +870,11 @@ export class SuperAgentManager {
     const registered = await listWorktrees(this.deps.repoRoot);
     const registeredByPath = new Map<string, string | null>();
     for (const item of registered) {
-      registeredByPath.set(normalizePathKey(item.path), item.branch);
+      // 比较键必须是 realpath 归一的：git 报的是真实路径，而我们的目录枚举
+      // 基于 repoRoot（可能是 symlink / junction 形式）。只做词法归一的话，
+      // macOS 上（`/var` → `/private/var`）注册表里的 worktree 会全部被判成
+      // 孤儿目录，清扫恒为 0。
+      registeredByPath.set(await comparisonPathKey(item.path), item.branch);
     }
 
     // 活着的子会话正在用的工作目录：绝不能删（它还在跑）。
@@ -877,13 +882,13 @@ export class SuperAgentManager {
     for (const session of this.sessions.values()) {
       if (isTerminalSuperStatus(session.status)) continue;
       if (!session.isolation.path) continue;
-      livePaths.add(normalizePathKey(session.isolation.path));
+      livePaths.add(await comparisonPathKey(session.isolation.path));
     }
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const target = path.join(root, entry.name);
-      const key = normalizePathKey(target);
+      const key = await comparisonPathKey(target);
       const branch = registeredByPath.get(key);
       if (branch === undefined) {
         // 孤儿目录：不在 git 的 worktree 注册表里（半删残留 / 手删过 .git）。
@@ -945,7 +950,7 @@ export class SuperAgentManager {
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const target = path.join(root, entry.name);
-        const key = normalizePathKey(target);
+        const key = await comparisonPathKey(target);
         const branch = registeredByPath.get(key);
         // 孤儿（undefined）已在上面记过日志；非 iflow/super/ 分支不碰。
         if (!branch || !branch.startsWith(SUPER_BRANCH_PREFIX)) continue;
