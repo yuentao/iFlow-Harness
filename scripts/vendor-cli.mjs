@@ -28,6 +28,23 @@
 //               fork checkout); the dir already has node_modules, so npm
 //               install is skipped.
 //   --force     re-copy even if vendor/iflow-cli already matches the version
+//
+// 开发期同步新 Mod(2026-11-15 迁入 in-repo 快照后):
+//   1. 在外部 fork checkout 注入新 Mod —— 注入本体在 bundle/iflow.js
+//      与 15 个 *-loader.cjs(含 super-agent-loader.cjs),不在 bundle/entry.js;
+//      iFlowMods 的 apply-patch.mjs 要求锚点唯一 + round-trip 校验。
+//   2. IFLOW_VENDOR_FORK_DIR=<新 fork> 或 `npm run vendor:cli -- --from-dir
+//      <新 fork> --force` 生成 vendor/iflow-cli(裁剪产物)。
+//   3. 把裁剪产物同步回 vendor/iflow-fork/(去掉嵌套 .gitignore)并提交 ——
+//      它才是 CI / 运行期的默认源,是产物快照,不是 Mod 源码仓库。
+//   4. `npm run harness` 对裁剪副本跑完整 ACP 流程验收(改 PRUNE 清单尤其
+//      必须,见 AGENTS.md 陷阱 #21)。
+//   --force 不可省:版本号可能仍是 0.5.19-custom.12,幂等检查只比
+//   package.json version,同版本 ≠ 同内容(Mod 注入可不 bump 版本)。
+//   reverse/ 属分析工作区(reverse/iflow.readable.js ~23 万行可读化产物 +
+//   ANALYSIS.md 行号地图 + map.mjs 指纹重扫),用来给 minified bundle 定位
+//   唯一插入锚点:未随迁移进仓库,也不进 VSIX(PRUNE_DIRS 含 reverse,
+//   2026-09-11 npm run harness 实测背书);CI / 运行期只要裁剪产物。
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
