@@ -2364,6 +2364,38 @@ function ToastCard({ toast, dismiss }: { toast: ToastItem; dismiss: (id: number)
  * invalid HTML and used to swallow the whole action. */
 function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppressCompressAction?: boolean }) {
   const dismiss = useChat((s) => s.dismissToast);
+  const clickable =
+    toast.sticky || !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || toast.action);
+  // Host-owned waits (displayOnly + no action — e.g. 「正在等待 N 个子会话汇报」
+  // and the auto-compress turn) are pure status lines sitting on top of the
+  // transcript, and they never go away while the work runs, so they end up
+  // covering the text the user is trying to read (user screenshot
+  // 2026-11-15). Hovering therefore yields: the pill fades out AND drops
+  // pointer events, handing its box (clicks + text selection) back to the
+  // transcript; the next pointermove that leaves that box brings it back.
+  //
+  // Why not pure CSS `:hover { opacity: 0; pointer-events: none }`? That is a
+  // circular hit test — dropping pointer-events removes the hover that hides
+  // it, so the pill flickers. The box is captured before it yields instead.
+  // Actionable toasts (countdown retry / 立即压缩 / sticky decisions) are
+  // deliberately excluded: their click target must never vanish under the
+  // pointer.
+  const yieldable = !clickable && toast.displayOnly === true && !toast.action;
+  const [yielded, setYielded] = useState(false);
+  const yieldWrap = useRef<HTMLDivElement | null>(null);
+  const yieldBox = useRef<{ left: number; top: number; right: number; bottom: number } | null>(null);
+  useEffect(() => {
+    if (!yielded) return;
+    const onMove = (e: PointerEvent) => {
+      const box = yieldBox.current;
+      if (!box) return;
+      if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) {
+        setYielded(false);
+      }
+    };
+    window.addEventListener("pointermove", onMove, { passive: true });
+    return () => window.removeEventListener("pointermove", onMove);
+  }, [yielded]);
   // A preview-bearing sticky notice is a decision, not a status line.
   if (toast.sticky && toast.preview && toast.preview.length > 0) {
     return <ToastCard toast={toast} dismiss={dismiss} />;
@@ -2420,10 +2452,11 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
         {toast.action.label}
       </Button>
     );
-  const clickable =
-    toast.sticky || !(toast.countdownDeadline !== undefined || toast.displayOnly || toast.persistent || toast.action);
-  return (
-    <FloatPill tone={tone} className="pointer-events-auto stream-in max-w-[92%]">
+  const pill = (
+    <FloatPill
+      tone={tone}
+      className={yieldable ? "stream-in max-w-full" : "pointer-events-auto stream-in max-w-[92%]"}
+    >
       {clickable ? (
         <button
           type="button"
@@ -2441,6 +2474,32 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
         <IconButton icon={<X className={ICON_INLINE} />} label={t("关闭")} size="sm" onClick={() => dismiss(toast.id)} />
       ) : null}
     </FloatPill>
+  );
+  if (!yieldable) return pill;
+  // The wrapper keeps the hit area while shown (the pill inherits
+  // `pointer-events: auto` from it) and becomes click-through once yielded, so
+  // the invisible capsule never swallows a selection drag on the transcript.
+  // `opacity` lives on the wrapper, not the pill: `stream-in` keeps its final
+  // keyframe applied (`fill-mode: both`), and an animation's opacity would
+  // out-rank the utility class on the same element.
+  return (
+    <div
+      ref={yieldWrap}
+      data-toast-yield={yielded ? "hidden" : "shown"}
+      onPointerEnter={(e) => {
+        if (yielded || e.pointerType === "touch") return;
+        const rect = yieldWrap.current?.getBoundingClientRect();
+        yieldBox.current = rect
+          ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+          : null;
+        setYielded(true);
+      }}
+      className={`flex max-w-[92%] justify-center transition-opacity duration-150 motion-reduce:transition-none ${
+        yielded ? "pointer-events-none opacity-0" : "pointer-events-auto"
+      }`}
+    >
+      {pill}
+    </div>
   );
 }
 

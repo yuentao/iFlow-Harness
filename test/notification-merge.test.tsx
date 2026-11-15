@@ -360,4 +360,64 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
     // The host owns this pill's lifecycle — clicking must not imply a cancel.
     expect(pill.querySelector("button")).toBeNull();
   });
+
+  it("yields a display-only wait pill on hover so the transcript underneath can be read", () => {
+    // 2026-11-15 user report: the persistent 「正在等待 N 个子会话汇报」pill sits
+    // on top of the transcript for the whole batch and hides the text beneath.
+    const WAIT = "正在等待 3 个子会话汇报（完成一个即汇报一个，会自动继续）";
+    render(streamingState("idle"), [
+      { id: 21, level: "info", message: WAIT, displayOnly: true, persistent: true, toastId: 30 },
+    ]);
+    const wrap = container.querySelector<HTMLElement>("[data-toast-yield]")!;
+    expect(wrap).toBeTruthy();
+    expect(wrap.dataset.toastYield).toBe("shown");
+    // Hover must be reachable: the wrapper owns the hit area (the kit pill used
+    // to carry pointer-events-auto alone, so a hover could never be observed).
+    expect(wrap.className).toContain("pointer-events-auto");
+    expect(wrap.className).not.toContain("opacity-0");
+    expect(wrap.className).toContain("transition-opacity");
+    // Reduced motion switches instantly instead of fading.
+    expect(wrap.className).toContain("motion-reduce:transition-none");
+
+    // React synthesises pointerenter from pointerover (relatedTarget null = from
+    // outside), which is what a real mouse crossing the pill produces.
+    act(() => {
+      wrap.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+    });
+    expect(wrap.dataset.toastYield).toBe("hidden");
+    expect(wrap.className).toContain("opacity-0");
+    // Hidden AND click-through: an invisible capsule must not swallow a
+    // selection drag or a click meant for the text below it.
+    expect(wrap.className).toContain("pointer-events-none");
+    // Still mounted and still host-owned — no dismiss, no re-render side effect.
+    expect(wrap.textContent).toContain(WAIT);
+    expect(store.current.dismissToast).not.toHaveBeenCalled();
+
+    // The pill's box was captured on entry (jsdom reports 0x0): moving the
+    // pointer away restores it.
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 480, clientY: 300 }));
+    });
+    expect(wrap.dataset.toastYield).toBe("shown");
+    expect(wrap.className).not.toContain("opacity-0");
+  });
+
+  it("never yields an actionable toast under the pointer", () => {
+    // The countdown retry (and any action-bearing notice) must keep its click
+    // target: hover-hiding it would make the pill vanish from under the cursor.
+    render(streamingState("idle"), [
+      countdownToast(),
+      {
+        id: 22,
+        level: "warning",
+        message: COMPRESS_WARN,
+        action: { actionId: "compress", label: "立即压缩" },
+      },
+    ]);
+    expect(container.querySelector("[data-toast-yield]")).toBeNull();
+    const retry = [...container.querySelectorAll(".rounded-full")].find((el) => el.textContent?.includes(RATE_LIMIT));
+    expect(retry?.className).toContain("pointer-events-auto");
+    const compress = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("立即压缩"));
+    expect(compress).toBeTruthy();
+  });
 });
