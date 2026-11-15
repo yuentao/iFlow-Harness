@@ -10,7 +10,12 @@ on:
   workflow_dispatch:
 
 permissions:
+  # `gh release create/edit/upload` below needs write access; keep `contents:
+  # write` (the official OIDC sample uses `contents: read`, which would break
+  # the existing GitHub Release flow).
   contents: write
+  # Allow GitHub Actions to mint an OIDC token for `vsce publish --oidc`.
+  id-token: write
 
 jobs:
   release:
@@ -116,3 +121,8 @@ jobs:
               rm -f /tmp/release_notes.md
               ;;
           esac
+
+      # Publish the VSIX built above to the Visual Studio Marketplace via OIDC
+      # trusted publishing; --packagePath reuses it instead of repackaging.
+      - name: Publish to VS Code Marketplace (OIDC trusted publishing)
+        run: npx --yes @vscode/vsce@4.1.1 publish --oidc --packagePath "iflow-harness-${{ steps.changelog.outputs.version }}.vsix"
