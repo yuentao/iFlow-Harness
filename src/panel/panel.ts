@@ -154,6 +154,7 @@ import {
   decideApproval,
   deriveAllowRule,
   hardDenyReason,
+  isSuperAgentToolRequest,
   normalizeApprovalRule,
   parseApprovalPolicy,
   serializeApprovalPolicy,
@@ -3668,6 +3669,35 @@ export class ChatPanel implements vscode.Disposable {
       paths: (toolCall.locations ?? []).map((l) => l.path),
       cwd: this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
     };
+  }
+
+  /**
+   * Super Agent 内置工具（`super-agent` / `super-agent-actions`）的权限请求
+   * 直接放行，不弹审批卡。
+   *
+   * 理由：该工具本身**只回 ack**，真正干活的是宿主 —— `handleSuperToolCall`
+   * 从 `args` 取载荷，交给与正文围栏完全相同的派发 / 动作链路。正文围栏派发
+   * 从来不经审批，所以同一条信任级别的内置工具也不额外加卡；否则模型每派一次
+   * 子会话就要用户点一次，把「随时开启」变成「每次确认」，安全边界却没有任何
+   * 增量（工具不执行任何东西）。
+   *
+   * 只对这一个工具生效：其它工具仍走规则表 / 审批卡，用户的 approvalMode
+   * 语义不变。响应里的 `optionId` **必须是 agent 真正给出的** —— CLI 用
+   * `nativeEnum` 解析，伪造会抛错并卡死回合；没有 allow 选项时按现有取消
+   * 路径回 `cancelled`，绝不伪造批准。
+   */
+  private autoApproveSuperAgentTool(req: RequestPermissionRequest): RequestPermissionResponse | null {
+    if (!isSuperAgentToolRequest(this.approvalRequestInfo(req))) return null;
+    const label = req.toolCall.toolName || req.toolCall.title || "super-agent";
+    const option =
+      req.options.find((o) => o.kind === "allow_always") ??
+      req.options.find((o) => o.kind.startsWith("allow"));
+    if (!option) {
+      this.log.warn(`super agent: "${label}" permission request offers no allow option — cancelling`);
+      return { outcome: { outcome: "cancelled" } };
+    }
+    this.log.info(`super agent: auto-allowed built-in tool "${label}" (${option.kind})`);
+    return { outcome: { outcome: "selected", optionId: option.optionId } };
   }
 
   /**
@@ -8327,6 +8357,11 @@ export class ChatPanel implements vscode.Disposable {
             if (this.client !== client || this.disposed) {
               return { outcome: { outcome: "cancelled" } as const };
             }
+            // Super Agent 内置工具（dispatch / actions）只回 ack，真正干活的是
+            // 宿主；与正文围栏派发同一信任级别，直接放行、不弹卡（见
+            // autoApproveSuperAgentTool）。其它工具不受影响。
+            const superTool = this.autoApproveSuperAgentTool(req);
+            if (superTool) return superTool;
             // M4 P1-1: the rule table answers matching requests without a card.
             // A failing pre-review must NEVER strand the agent — degrade to the
             // card (the pre-P1-1 behaviour) instead of rejecting or throwing.
