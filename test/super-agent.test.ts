@@ -1243,7 +1243,14 @@ describe("super agent · 看板摘要", () => {
     // 空看板若返回空串，首轮主会话会被误判成子会话而自己动手干活。
     const digest = buildSuperDigest([]);
     expect(digest).toContain("[子会话看板]");
+    // 哨兵必须打头：面板按前缀判定这一轮是不是主会话。
+    expect(digest.startsWith("[子会话看板]")).toBe(true);
     expect(digest.trim().length).toBeGreaterThan(0);
+    // 首轮还没有子会话，也必须明确「没有 super-agent 工具、只能用正文围栏」——
+    // 否则模型会尝试工具调用，CLI registry 报 not found，派发完全失效。
+    expect(digest).toContain("no super-agent tool in this session's tool registry");
+    expect(digest).toContain("not found in registry");
+    expect(digest).toContain("re-send the block as text");
   });
 
   it("列出每个子会话的 id、状态与摘要，并附管理动作说明", () => {
@@ -1264,6 +1271,10 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("completed");
     expect(digest).toContain("merged automatically");
     expect(digest).toContain("super-agent-actions");
+    // 非空分支同样要带委派协议提示：有子会话在跑时模型仍可能改用工具调用。
+    expect(digest).toContain("no super-agent tool in this session's tool registry");
+    expect(digest).toContain("not found in registry");
+    expect(digest).toContain("re-send the block as text");
     // 用户中断不计入失败：摘要里应分开呈现。
     expect(digest).toContain("0 failed");
     expect(digest).toContain("0 interrupted");

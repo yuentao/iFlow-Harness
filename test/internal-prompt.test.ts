@@ -735,6 +735,13 @@ describe("prompt templates (prompts/)", () => {
     expect(text).toContain("Decompose the user's task yourself, then delegate");
     expect(text).toContain("Implementation work is never kept here");
     expect(text).toContain("```super-agent");
+    // 派发是纯文本协议：工具注册表里没有 super-agent 工具。缺了这段声明，
+    // 模型会把它当函数调用，CLI 报 not found in registry，子会话一个都派不出去。
+    expect(text).toContain("`super-agent` is not a tool in this session");
+    expect(text).toContain('fails with "not found in registry" and dispatches no child session at all');
+    expect(text).toContain("write the fenced block again as ordinary text");
+    // 动作块同样不存在对应工具：失败后改写成正文围栏。
+    expect(text).toContain("There is no `super-agent-actions` tool in the registry either");
     expect(text).toContain("## When to split");
     expect(text).toContain("## What stays in this session");
     expect(text).toContain("Never edit a delegated file yourself");

@@ -2824,8 +2824,11 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
   return parts.join(" | ");
 }
 
+const SUPER_DIGEST_HINT = "Dispatch by writing a ```super-agent fenced block as plain text (body: {\"tasks\":[{\"title\",\"task\"}]}). There is no super-agent tool in this session's tool registry: a tool call fails with \"not found in registry\" and dispatches nothing — if that happened, re-send the block as text.";
+
 const SUPER_DIGEST_FOOTER = [
   "",
+  SUPER_DIGEST_HINT,
   "You can manage the child sessions above: emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
   "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
   "Merging is done by the host, following the integration mode (merge by default, possibly PR): when the \"changes:\" line says merged automatically, do not merge it again;",
@@ -2866,7 +2869,10 @@ const SUPER_BOARD_LABEL_EN = "[child-session board]";
  */
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
   if (sessions.length === 0) {
-    return `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. There are no child sessions right now.)`;
+    return (
+      `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. There are no child sessions right now.)` +
+      `\n${SUPER_DIGEST_HINT}`
+    );
   }
   const counts = summarizeSuperSessions(sessions);
   const header =

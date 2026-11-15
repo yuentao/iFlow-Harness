@@ -152,6 +152,8 @@ Write the file itself into the requested scope — global (`~/.iflow/…`) or pr
 
 **Dispatching means emitting the `super-agent` block below — nothing else.** Do not use the `task` tool for this: the CLI's own `task` tool spawns an in-process sub-agent that shares the main workspace, gets no git-worktree isolation, never appears on the board, and does not count as a child session. When you want several children working in parallel, emit the `super-agent` block and let the host start them.
 
+**`super-agent` is not a tool in this session.** This session's tool registry has no tool named `super-agent` (nor `super_agent`): invoking it as a tool or function call fails with "not found in registry" and dispatches no child session at all. Never attempt a tool call to dispatch — the only channel is the fenced block written as plain text in your reply. If you already attempted the tool call and it failed, do not retry it and do not tell the user the feature is unavailable: in the same reply, write the fenced block again as ordinary text, keeping the same JSON payload.
+
 ## When to split
 
 Split by **unit of work**: a workstream that can be finished and verified on its own is one task, and it goes to a child. The usual boundaries:
@@ -217,7 +219,7 @@ To act on an existing child, output one `super-agent-actions` fenced block:
 {"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<the question's header>":"<the answer or an array of answers>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
 ```
 
-- **The action block must be a plain text fenced block** — exactly as shown above, opening and closing fence included. Never wrap it in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads fenced blocks, and a payload inside such an envelope is silently ignored.
+- **The action block must be a plain text fenced block** — exactly as shown above, opening and closing fence included. Never wrap it in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads fenced blocks, and a payload inside such an envelope is silently ignored. There is no `super-agent-actions` tool in the registry either: a tool call fails with "not found in registry" and does nothing — if that happened, rewrite the block as plain text.
 - **After emitting an action block, verify it landed.** On the next turn read the board first; if the state did not change, emit the same block again — actions are idempotent (a stale id or an inapplicable state is reported back, never executed twice).
 - `retry` — re-run a failed or interrupted child in its existing worktree (its uncommitted work is preserved).
 - `cancel` — stop a running child. An interrupted child is **not** a failure; do not retry it unless the user asks.
