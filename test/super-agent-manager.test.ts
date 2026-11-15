@@ -319,7 +319,22 @@ afterAll(() => {
 describe("super agent · 编排", () => {
   it("派发的子会话在自己的 worktree 里跑，边界只含 worktree", async () => {
     const repo = makeRepo();
-    const harness = makeManager(repo);
+    // 本用例验的是「隔离环境真的建出来了、它就是子会话的 cwd」，因此必须
+    // 让 worktree 活过断言：正常完成后的默认收尾会**立刻**删掉工作目录
+    // （`keepWorktree` 默认关；「没有产生任何提交」还会走空分支释放路径），
+    // 于是 existsSync 与回收赛跑 —— Windows 上 git 慢一个节拍就侥幸通过，
+    // ubuntu 上 git 快就直接 false（2026-11-15 CI 实测形态）。这里按本文件
+    // 其它需要保留现场的用例同样处理：keepWorktree=true + 子会话提交一次 +
+    // manual 集成（不触发自动合并，也就不会被「合并成功即释放」删掉）。
+    // 默认回收 / 分支保留的语义由 test/super-worktree-recycle.test.ts 专门覆盖。
+    const harness = makeManager(
+      repo,
+      "commit",
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
     harness.manager.spawn({ title: "改登录", task: "修好 src/auth.ts" });
     await until(() => harness.sessions[0]?.status === "completed");
 
@@ -338,6 +353,12 @@ describe("super agent · 编排", () => {
     expect(client?.cwd).toBe(session?.isolation.path);
     expect(client?.allowedRoots).toEqual([session?.isolation.path]);
     expect(client?.cwd).not.toBe(repo);
+
+    // 收尾信号：宿主在 finally 里回收进程（dispose）之前已经把 worktree 里的
+    // 收尾 git（`git status` 之类）跑完，之后不会再动这个目录。等它再结束，
+    // 否则单跑这一个用例时 afterAll 的 `rmSync` 可能在 Windows 上撞上仍以
+    // worktree 为 cwd 的 git 进程，报 EPERM（目录留在临时目录里）。
+    await until(() => Boolean(harness.clients[0]?.disposed));
   }, 30000);
 
   it("子会话的 session/new 不带主会话 settings（子会话必须保留 task 工具）", async () => {
