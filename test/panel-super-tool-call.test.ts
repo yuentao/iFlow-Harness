@@ -248,6 +248,40 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     expect(manager.cancel).toHaveBeenCalledWith("super-x");
   });
 
+  it("super-agent 工具收到纯 actions 载荷：走动作链路，不派发、不 warn", async () => {
+    // 用户实测：模型把管理动作塞进 super-agent 工具的 {"actions":[...]}，
+    // 旧逻辑按派发解析 → 「工具参数未能完整解析」。合并载荷必须按动作执行。
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        toolName: "super-agent",
+        status: "in_progress",
+        args: { actions: [{ action: "cancel", sessionId: "super-merged" }] },
+      }),
+    });
+
+    await waitFor(() => manager.cancel.mock.calls.length > 0);
+    expect(manager.cancel).toHaveBeenCalledWith("super-merged");
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(0);
+  });
+
+  it("命名空间形态的 super-agent 工具收到 actions 载荷同样走动作链路", async () => {
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        toolName: "iflow__super-agent",
+        status: "in_progress",
+        args: { actions: [{ action: "cancel", sessionId: "super-ns" }] },
+      }),
+    });
+
+    await waitFor(() => manager.cancel.mock.calls.length > 0);
+    expect(manager.cancel).toHaveBeenCalledWith("super-ns");
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
   it("名字命中但 args 为空：只留痕（一次 toast + 日志），不 spawn", () => {
     const toast = vi.spyOn(p.store, "sendToast");
     p.onSessionUpdate({

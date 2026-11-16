@@ -216,13 +216,13 @@ Children outlive your turn: you usually finish the dispatching turn while they a
 
 ## Managing
 
-To act on an existing child, output one `super-agent-actions` fenced block:
+To act on an existing child, prefer calling the `super-agent` tool with an `actions` array; only when that tool is absent from your list, or its schema has no `actions` parameter, write a `super-agent-actions` fenced block instead:
 
 ```super-agent-actions
 {"actions":[{"action":"retry","sessionId":"super-..."},{"action":"cancel","sessionId":"super-..."},{"action":"answer","sessionId":"super-...","answers":{"<the question's header>":"<the answer or an array of answers>"}},{"action":"cleanup","sessionId":"super-...","keepBranch":true}]}
 ```
 
-- **The action block must be a plain text fenced block** — exactly as shown above, opening and closing fence included. Never wrap it in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads fenced blocks, and a payload inside such an envelope is silently ignored. **Management actions go through the fenced block only** — there is no `super-agent-actions` tool, so never try to call one; if you already wrapped the block in a tool call, rewrite it as plain text.
+- **Tool first, fenced block as fallback.** If the `super-agent` tool's schema exposes an `actions` parameter, call that tool with `{"actions":[…]}` using the same JSON body as the example below — the host executes those actions. A single call carries either `tasks` or `actions`, never both. Only when the tool is not in your list, or its schema has no `actions` parameter, emit the plain-text fenced block shown above. **If you emit a fenced block, it must be plain text** — exactly as shown above, opening and closing fence included. Never wrap a fenced block in a tool call or any other envelope (`<tool_name>super-agent-actions</tool_name>`, `<tool_call>…</tool_call>`, DSML markers, …): the host only reads plain-text fenced blocks, and a payload inside such an envelope is silently ignored. If you already wrapped the block in a tool call, rewrite it as plain text.
 - **After emitting an action block, verify it landed.** On the next turn read the board first; if the state did not change, emit the same block again — actions are idempotent (a stale id or an inapplicable state is reported back, never executed twice).
 - `retry` — re-run a failed or interrupted child in its existing worktree (its uncommitted work is preserved).
 - `cancel` — stop a running child. An interrupted child is **not** a failure; do not retry it unless the user asks.

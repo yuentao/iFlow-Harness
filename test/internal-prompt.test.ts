@@ -754,9 +754,12 @@ describe("prompt templates (prompts/)", () => {
     expect(text).toContain("Do not hand-write the fenced block while the tool is available");
     // `task` 是进程内子代理：无 worktree 隔离、不上看板，不能拿来派发。
     expect(text).toContain("Do not use the `task` tool for this");
-    // 管理动作仍然只有正文围栏这一条通道（没有 actions 工具）。
-    expect(text).toContain("Management actions go through the fenced block only");
-    expect(text).toContain("there is no `super-agent-actions` tool");
+    // 管理动作：工具优先（super-agent 的 actions 参数），围栏仅作兜底。
+    expect(text).toContain("Tool first, fenced block as fallback");
+    expect(text).toContain("If the `super-agent` tool's schema exposes an `actions` parameter");
+    expect(text).toContain(
+      "Only when the tool is not in your list, or its schema has no `actions` parameter",
+    );
     expect(text).toContain("## When to split");
     expect(text).toContain("## What stays in this session");
     expect(text).toContain("Never edit a delegated file yourself");

@@ -13,6 +13,7 @@ import {
   classifySuperToolName,
   parseSuperDelegationTasks,
   parseSuperToolCall,
+  resolveSuperToolCallKind,
   synthesizeSuperToolCallBlock,
 } from "../shared/super-tool-call.js";
 import { extractSuperActions, extractSuperDirectives } from "../shared/super-agent.js";
@@ -199,6 +200,45 @@ describe("parseSuperToolCall", () => {
     expect(parsed.actions[0]?.action).toBe("answer");
     if (parsed.actions[0]?.action !== "answer") return;
     expect(parsed.actions[0].answers["问题"]).toBe(answer);
+  });
+});
+
+describe("合并载荷纠偏 · super-agent 工具的 actions 参数", () => {
+  const actionArgs = { actions: [{ action: "cancel", sessionId: "super-x" }] };
+
+  it("dispatch 名字 + 纯 actions 载荷 → 识别为 actions 并解析出动作", () => {
+    expect(resolveSuperToolCallKind("dispatch", actionArgs)).toBe("actions");
+    const parsed = parseSuperToolCall("dispatch", actionArgs);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.kind).toBe("actions");
+    expect(parsed.tasks).toEqual([]);
+    expect(parsed.actions).toEqual([{ action: "cancel", sessionId: "super-x" }]);
+  });
+
+  it("字符串 JSON 载荷同样被识别为 actions", () => {
+    const parsed = parseSuperToolCall("dispatch", JSON.stringify(actionArgs));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.kind).toBe("actions");
+    expect(parsed.actions[0]?.sessionId).toBe("super-x");
+  });
+
+  it("有 tasks 时不改判（派发优先），两者都带也不误吞", () => {
+    const withTasks = { tasks: [{ title: "甲", task: "做事" }] };
+    expect(resolveSuperToolCallKind("dispatch", withTasks)).toBe("dispatch");
+    expect(resolveSuperToolCallKind("dispatch", { ...withTasks, ...actionArgs })).toBe("dispatch");
+  });
+
+  it("空 actions 不改判：照派发解析并明确失败，不静默成功", () => {
+    expect(resolveSuperToolCallKind("dispatch", { actions: [] })).toBe("dispatch");
+    expect(parseSuperToolCall("dispatch", { actions: [] }).ok).toBe(false);
+  });
+
+  it("反向不改判：actions 工具带 tasks 仍按 actions 处理", () => {
+    expect(resolveSuperToolCallKind("actions", { tasks: [{ title: "甲", task: "做事" }] })).toBe(
+      "actions",
+    );
   });
 });
 
