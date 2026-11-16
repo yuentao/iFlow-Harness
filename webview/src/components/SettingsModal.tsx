@@ -42,6 +42,7 @@ import { McpSection } from "./McpCard";
 import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
 import { AssetSection } from "./AssetCard";
+import { QqSettings } from "./QqSettings";
 
 /**
  * Unified settings modal — the single home for everything the gear opens:
@@ -55,7 +56,7 @@ import { AssetSection } from "./AssetCard";
  * nav rail (left on wide viewports, top tab strip when narrow, via the
  * @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "chat" | "appearance" | "policy" | "mcp" | "memory" | "assets" | "runtime";
+export type SettingsTab = "api" | "chat" | "appearance" | "policy" | "mcp" | "memory" | "assets" | "qq" | "runtime";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -117,6 +118,7 @@ export function SettingsModal({
         { id: "mcp", icon: Server, label: t("MCP 与工具") },
         { id: "memory", icon: Brain, label: t("记忆与知识") },
         { id: "assets", icon: Sparkles, label: t("技能与命令") },
+        { id: "qq", icon: Globe, label: t("QQ 机器人") },
       ],
     },
     { label: t("系统"), tabs: [{ id: "runtime", icon: Database, label: t("运行与数据") }] },
@@ -233,10 +235,52 @@ export function SettingsModal({
           {tab === "mcp" && <McpTab busy={busy} onHeader={setSectionHeader} />}
           {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
           {tab === "assets" && <AssetSection busy={busy} onHeader={setSectionHeader} />}
+          {tab === "qq" && <QqSection />}
           {tab === "runtime" && <RuntimeSection />}
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+/**
+ * 「QQ 机器人」页：把纯展示的 QqSettings 接到宿主通道上。
+ *
+ * 三条通道严格分离：普通设置 → `qqSettingsPatch`，凭据 → `qqSecretsWrite`
+ * （只带用户编辑过的字段），连接/配对/解绑动作 → `qqConfigAction`。凭据
+ * 草稿只存在于本组件的编辑态，绝不随设置补丁回传。
+ */
+function QqSection() {
+  const qqSettings = useChat((s) => s.qqSettings);
+  const qqStatus = useChat((s) => s.qqStatus);
+  const qqBindCode = useChat((s) => s.qqBindCode);
+  const send = useChat((s) => s.send);
+  /** 仅编辑态：组件把凭据回显在密码框里，落盘由宿主负责。 */
+  const [secretDrafts, setSecretDrafts] = useState<{ botToken?: string; appSecret?: string }>({});
+
+  return (
+    <QqSettings
+      value={{ ...qqSettings, ...secretDrafts }}
+      onChange={(patch) => {
+        const { botToken, appSecret, ...settings } = patch;
+        if (botToken !== undefined || appSecret !== undefined) {
+          setSecretDrafts((prev) => ({
+            ...prev,
+            ...(botToken !== undefined ? { botToken } : {}),
+            ...(appSecret !== undefined ? { appSecret } : {}),
+          }));
+        }
+        if (Object.keys(settings).length > 0) {
+          send({ type: "qqSettingsPatch", patch: settings });
+        }
+      }}
+      onSecretsCommit={(secrets) => send({ type: "qqSecretsWrite", ...secrets })}
+      onTestConnection={() => send({ type: "qqConfigAction", action: "testConnection" })}
+      onGenerateBindCode={() => send({ type: "qqConfigAction", action: "generateBindCode" })}
+      onUnbind={() => send({ type: "qqConfigAction", action: "unbind" })}
+      status={qqStatus ?? undefined}
+      bindCode={qqBindCode ?? undefined}
+    />
   );
 }
 

@@ -1108,6 +1108,11 @@ const en: Record<string, string> = {
   "接口地址要以 http:// 或 https:// 开头": "The endpoint must start with http:// or https://",
   "请填写模型名称": "Enter a model name",
   // QQ 远程任务（设置页）
+  "QQ 机器人": "QQ bot",
+  "已保存；输入新值并在失焦后提交，清空并失焦可删除。":
+    "Saved; enter a new value and commit on blur, or clear the field and blur to delete it.",
+  "输入后失焦即提交给宿主，面板不保存明文。":
+    "Submitted to the host when the field loses focus; the panel stores no plaintext.",
   "需要注意": "Needs attention",
   "连接状态未知": "Connection status unknown",
   "配对码": "Pairing code",

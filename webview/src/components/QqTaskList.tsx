@@ -2,6 +2,7 @@ import { useState } from "react";
 import { BellRing, Check, GitBranch, RefreshCw, ShieldCheck, X } from "lucide-react";
 import type { QqTaskUi } from "../../../shared/messages";
 import { t } from "../i18n";
+import { useChat } from "../store";
 import { ActionRow, Button, Chip, Hint, ICON_INLINE, IconButton, TextInput } from "./ui";
 
 /**
@@ -253,5 +254,41 @@ export function QqTaskList({ tasks, onAction }: QqTaskListProps) {
         </>
       )}
     </div>
+  );
+}
+
+/** Stable empty list: a zustand selector must not mint a new array per render. */
+const EMPTY_QQ_TASKS: QqTaskUi[] = [];
+
+/**
+ * 远程任务区的宿主接线层（Wave3-C）。
+ *
+ * `QqTaskList` 保持纯展示；这一层只做两件事：读 store 的 `qqTasks` 投影，
+ * 把行内动作统一转成 `qqTaskAction` 消息。没有任务时渲染 null —— 远程任务
+ * 区只在真的存在任务时出现在看板附近。
+ */
+export function QqTasksPanel() {
+  const tasks = useChat((s) => s.state?.qqTasks) ?? EMPTY_QQ_TASKS;
+  const send = useChat((s) => s.send);
+  if (tasks.length === 0) return null;
+  return (
+    <section
+      aria-label={t("远程任务")}
+      className="mx-3 my-1 shrink-0 overflow-hidden rounded-lg border border-border/60 bg-panel/40"
+    >
+      <div className="max-h-[30vh] overflow-y-auto px-3 py-2">
+        <QqTaskList
+          tasks={tasks}
+          onAction={(taskId, action, text) =>
+            send({
+              type: "qqTaskAction",
+              taskId,
+              action,
+              ...(text !== undefined ? { text } : {}),
+            })
+          }
+        />
+      </div>
+    </section>
   );
 }

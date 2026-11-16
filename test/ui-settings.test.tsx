@@ -153,7 +153,7 @@ it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("运行与数据");
 });
 
-it("groups the eight tabs under four named sections", () => {
+it("groups the nine tabs under four named sections", () => {
   for (const group of ["账户", "工作方式", "扩展", "系统"]) {
     expect(container.textContent).toContain(group);
   }
@@ -161,7 +161,7 @@ it("groups the eight tabs under four named sections", () => {
   const tablist = container.querySelector('[role="tablist"]');
   expect(tablist).toBeTruthy();
   const tabs = container.querySelectorAll('[role="tab"]');
-  expect(tabs).toHaveLength(8);
+  expect(tabs).toHaveLength(9);
   expect([...tabs].filter((el) => el.getAttribute("tabindex") === "0")).toHaveLength(1);
 });
 

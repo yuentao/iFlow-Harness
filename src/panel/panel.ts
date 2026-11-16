@@ -2058,9 +2058,9 @@ export class ChatPanel implements vscode.Disposable {
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
     this.log.trace(`webview → host: ${msg.type}`);
-    // 协议债（本波不改 shared/）：`qqConfigAction` 声明在 HostToWebview 上
-    // （方向写反了），因此不在 WebviewToHost 的联合里。按运行时形状接收，
-    // 让设置页的三类动作（连测试 / 生成配对码 / 解绑）照样能到宿主。
+    // `qqConfigAction`（连测试 / 生成配对码 / 解绑）是 webview→host 命令；
+    // 它历史上只声明在 HostToWebview 上（方向写反），Wave3-C2 已在
+    // WebviewToHost 补上声明。这段运行时守卫保留，兼容尚未重建的旧 webview。
     const qqAction = (msg as { type?: unknown; action?: unknown });
     if (
       qqAction.type === "qqConfigAction" &&
