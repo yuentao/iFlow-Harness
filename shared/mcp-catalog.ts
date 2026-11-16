@@ -52,7 +52,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "filesystem",
     title: "Filesystem",
     category: "core",
-    description: "允许 agent 读写/搜索在本机目录（按参数限定到所选根）",
+    description: "让智能体在你指定的本机目录里读写、搜索文件",
     docsUrl: "https://github.com/modelcontextprotocol/servers",
     transport: "stdio",
     command: "npx",
@@ -60,7 +60,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     fields: [
       {
         key: "directory",
-        label: "允许根目录（agent 可读写/搜索在此）",
+        label: "允许访问的目录（智能体只能在这里读写、搜索）",
         required: true,
         placeholder: "如 J:\\projects\\demo",
       },
@@ -71,7 +71,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "playwright",
     title: "Playwright",
     category: "browser",
-    description: "浏览器自动化：navigate/click/screenshot，前端「改完即看」验证",
+    description: "浏览器自动化：打开页面、点击、截图，改完前端立刻看效果",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     transport: "stdio",
     command: "npx",
@@ -83,7 +83,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "chrome-devtools",
     title: "Chrome DevTools",
     category: "browser",
-    description: "Chrome 开发者工具：console/network/performance 与页面操作",
+    description: "Chrome 开发者工具：看控制台、网络请求和性能，并操作页面",
     docsUrl: "https://github.com/chrome-devtools/chrome-devtools-mcp",
     transport: "stdio",
     command: "npx",
@@ -95,7 +95,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "memory",
     title: "Memory",
     category: "core",
-    description: "知识图谱记忆（实体/关系/观察），跨轮沉淀",
+    description: "用知识图谱记住实体与关系，跨对话沉淀",
     docsUrl: "https://github.com/modelcontextprotocol/servers",
     transport: "stdio",
     command: "npx",
@@ -107,7 +107,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "time",
     title: "Time",
     category: "core",
-    description: "当前时间、时钟与_timezone_ 换算",
+    description: "当前时间、时钟与时区换算",
     docsUrl: "https://github.com/modelcontextprotocol/servers",
     transport: "stdio",
     command: "npx",
@@ -119,7 +119,7 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
     name: "sequential-thinking",
     title: "Sequential Thinking",
     category: "workflow",
-    description: "逐步思考工具（可分支/ revise 的建模步）",
+    description: "把思路一步步拆开，可以分叉、也可以回头修改",
     docsUrl: "https://github.com/modelcontextprotocol/servers",
     transport: "stdio",
     command: "npx",
@@ -129,9 +129,23 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
 ];
 
 /**
+ * Display label for one of a template's form field keys.
+ *
+ * `buildCatalogConfig` reports blanks as internal keys (`missing`) because the
+ * caller uses them for logic; what the user reads must be the label the form
+ * actually renders — "directory" means nothing to someone who never saw the
+ * JSON. An unknown key falls back to the key itself so a missing field is
+ * still reported (never silently dropped).
+ */
+export function catalogFieldLabel(entry: McpCatalogEntry, key: string): string {
+  return entry.fields.find((field) => field.key === key)?.label ?? key;
+}
+
+/**
  * Build the `mcpServers` entry config from a template plus form values.
  * Pure: unknown value keys are ignored; a blank required slot is reported in
- * `missing` (the caller shows the field label, nothing is written).
+ * `missing` as the field key (the caller shows `catalogFieldLabel`, nothing is
+ * written).
  */
 export function buildCatalogConfig(
   entry: McpCatalogEntry,

@@ -6,6 +6,20 @@
  * card displayed, turn completed. A failed turn keeps its in-panel banner +
  * error chime but earns no toast (the old `turnFailed` event kind is gone,
  * matching the setting description that never promised failure toasts).
+ *
+ * Completion is split by SUBJECT, not by transport (2026-11-16 user request):
+ * 「子会话完成」 and 「主会话汇报完成」 used to ride the same `turnDone` event,
+ * so one child finishing and the main session finishing its report turn were
+ * indistinguishable (same event kind, same text, same chime — the child case
+ * even claimed 「子会话已全部结束」). They are now separate events:
+ *   - `childDone`   — ONE child session entered a terminal state. Fires per
+ *                     child (light cue), never aggregated.
+ *   - `superReport` — the main session's hidden report turn settled. That is
+ *                     the main session finishing real work, so it keeps the
+ *                     regular completion chime.
+ * Both live only in the `all` tier (the `approvals` tier stays the blocking
+ * card trio) and both honour the same focus gate as `turnDone`: a finished
+ * turn/child must not ping a user reading code in a focused window.
  * The host additionally defers card-event toasts and re-checks, when the
  * toast fires, that the card still owns its webview pending slot: parallel
  * permission requests (the CLI runs a turn's function calls through
@@ -22,13 +36,13 @@
  *   visibility — the user is NOT watching (panel visible AND window focused
  *              — a watching user already sees the card; a visible panel in an
  *              unfocused window counts as away, see `isUserWatching`)
- *   focus    — turnDone additionally requires the window unfocused (roadmap
- *              trigger 3 is "整轮完成且窗口失焦": a finished turn must not
- *              ping a user who is merely reading code in another editor tab
- *              of a focused window). The blocking card events (approval /
- *              question / plan) ignore focus — the agent is stuck waiting
- *              for that card, so even a focused window with a hidden panel
- *              earns the interrupt.
+ *   focus    — turnDone / childDone / superReport additionally require the
+ *              window unfocused (roadmap trigger 3 is "整轮完成且窗口失焦": a
+ *              finished turn must not ping a user who is merely reading code
+ *              in another editor tab of a focused window). The blocking card
+ *              events (approval / question / plan) ignore focus — the agent
+ *              is stuck waiting for that card, so even a focused window with
+ *              a hidden panel earns the interrupt.
  *   throttle — the same event kind at most once per window (a burst of
  *              parallel tool approvals must not stack 10 native toasts)
  *   content  — the same event kind with byte-identical text is additionally
@@ -44,7 +58,17 @@
  * stays thin and the semantics are pinned by unit tests.
  */
 
-export type OsNotifyEvent = "approval" | "question" | "plan" | "turnDone";
+export type OsNotifyEvent =
+  | "approval"
+  | "question"
+  | "plan"
+  | "turnDone"
+  /** ONE child session reached a terminal state (completed / failed /
+   * cancelled) — a per-child light cue, never an aggregate 「all done」 line. */
+  | "childDone"
+  /** The main session's hidden Super Agent report turn settled — the main
+   * session finishing real work, so it keeps the regular completion cue. */
+  | "superReport";
 
 /** Same-kind burst suppression window. */
 export const OS_NOTIFY_THROTTLE_MS = 5_000;
@@ -57,9 +81,11 @@ export const OS_NOTIFY_CONTENT_COOLDOWN_MS = 60_000;
 
 /** Events the `approvals` (default) tier covers: an agent is BLOCKED on the
  * user until the displayed card is answered, so these are the ones worth
- * interrupting for. A failed turn is NOT here — policy 2026-10-16 keeps OS
- * reminders to the four card/completion triggers (the queue pause and the
- * in-panel banner + error chime still announce failures, just not via toast). */
+ * interrupting for. None of the completion events (turnDone / childDone /
+ * superReport) is here — they stay in the `all` tier only. A failed turn is
+ * NOT here either — policy 2026-10-16 keeps OS reminders to the four
+ * card/completion triggers (the queue pause and the in-panel banner + error
+ * chime still announce failures, just not via toast). */
 const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question", "plan"]);
 
 /** Setting tier allows this event kind? The `setting` values are the
@@ -101,8 +127,9 @@ export interface OsNotifyDecision {
  *                 screen, that IS the visible signal.
  * - `setting`   — `iflow.osNotifications` turned this kind off: the user
  *                 opted out of system toasts, so the chime is the only cue.
- * - `focus`     — turnDone while the window is focused: the user is in the
- *                 editor, nothing was shown, the chime is the only cue.
+ * - `focus`     — turnDone / childDone / superReport while the window is
+ *                 focused: the user is in the editor, nothing was shown, the
+ *                 chime is the only cue.
  * - `throttle`  — same kind fired moments ago.
  * - `cooldown`  — byte-identical text fired inside the content cooldown.
  *
@@ -165,11 +192,23 @@ export function gateOsNotification(args: {
   if (!osNotifyAllowed(args.event, args.setting)) {
     return { fire: false, gate: args.gate, reason: "setting" };
   }
-  if (args.event === "turnDone" && args.windowFocused) {
+  if (
+    (args.event === "turnDone" || args.event === "childDone" || args.event === "superReport") &&
+    args.windowFocused
+  ) {
     return { fire: false, gate: args.gate, reason: "focus" };
   }
+  // Same-kind burst suppression. `childDone` is exempt: every child session
+  // is its own event with its own title, and two children finishing seconds
+  // apart must both be announced (the 5s throttle would silently swallow the
+  // second one). Duplicate protection still comes from the content cooldown
+  // below, which is keyed on event + exact text (i.e. the child title).
   const last = args.gate.lastFiredAt[args.event];
-  if (last !== undefined && args.nowMs - last < OS_NOTIFY_THROTTLE_MS) {
+  if (
+    args.event !== "childDone" &&
+    last !== undefined &&
+    args.nowMs - last < OS_NOTIFY_THROTTLE_MS
+  ) {
     return { fire: false, gate: args.gate, reason: "throttle" };
   }
   const lastContent = args.gate.lastContent;

@@ -104,8 +104,8 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
     delete process.env.ACP_MOCK_ENV_DUMP;
     delete process.env.IFLOW_SUPER_TOOL;
     delete process.env.IFLOW_HOME;
-    fs.rmSync(storageDir, { recursive: true, force: true });
-    fs.rmSync(iflowHome, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   function readDumpedEnv(file: string): NodeJS.ProcessEnv {

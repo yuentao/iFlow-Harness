@@ -150,7 +150,7 @@ describe("turn-end proactive compression (maybeAutoCompressOnIdle)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const setUsage = (u: SessionUsageUi | null) => {
@@ -321,7 +321,7 @@ describe("sendPrompt turn-end wiring → proactive compress before the next prom
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("settled turn auto-compresses at ≥95%, then the next prompt rides the compressed context", async () => {
@@ -408,7 +408,7 @@ describe("turn-end follow-up gating", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("keeps only the title task after a user-typed /compress turn", async () => {
@@ -465,7 +465,7 @@ describe("compress turn ceiling (iflow.compressTimeoutSeconds)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   /** Fake client that records the per-call timeout the panel passes down

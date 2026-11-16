@@ -46,7 +46,7 @@ function isDefaultMode(value: string): value is UiDefaultMode {
 function stepTitle(step: Step): string {
   switch (step) {
     case "connect":
-      return t("连接 iFlow");
+      return t("连接模型服务");
     case "model":
       return t("选择模型");
     case "mode":
@@ -148,7 +148,7 @@ export function OnboardingWizard({
     const apiKey = draft.apiKey.trim();
     const error =
       validateAuthForm({ baseUrl, modelName, apiKey: apiKey || undefined }) ??
-      (!apiKey && !auth.saved ? t("API Key 不能为空") : null);
+      (!apiKey && !auth.saved ? t("请填写 API Key") : null);
     if (error) {
       setApiError(t(error));
       return;
@@ -231,12 +231,12 @@ export function OnboardingWizard({
   const savedModelLabel = currentModelId ?? auth.saved?.modelName ?? t("尚未选择");
   const connectionLabel = auth.authenticated && !auth.needsSetup
     ? `${auth.saved?.modelName ?? savedModelLabel}`
-    : t("尚未配置（可稍后在设置中完成）");
+    : t("尚未配置（稍后可在设置里完成）");
 
   return (
     <ModalShell
       wide
-      ariaLabel={t("初始化引导")}
+      ariaLabel={t("初次设置")}
       title={stepTitle(step)}
       icon={<Sparkles className={`${ICON_INLINE} shrink-0 text-primary`} />}
       onClose={skip}
@@ -277,7 +277,7 @@ export function OnboardingWizard({
           <div
             className="flex flex-1 items-center gap-1"
             role="progressbar"
-            aria-label={t("初始化进度")}
+            aria-label={t("设置进度")}
             aria-valuemin={1}
             aria-valuemax={STEPS.length}
             aria-valuenow={index + 1}
@@ -305,13 +305,13 @@ export function OnboardingWizard({
                 <div className="min-w-0">
                   <h2 className="text-ui-label font-semibold text-foreground">{t("欢迎使用 心流·驭光")}</h2>
                   <p className="text-ui-caption leading-relaxed text-muted-foreground">
-                    {t("连接模型服务后即可开始对话；其他设置都能在 ⚙ 中修改。")}
+                    {t("连上模型服务就能开始对话，其他设置随时能在 ⚙ 里改。")}
                   </p>
                 </div>
               </div>
 
               <p className="text-ui-caption leading-relaxed text-muted-foreground">
-                {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
+                {t("选一个服务商预设可自动填好接口地址，也可以手动填写任意兼容 OpenAI 的接口。")}
               </p>
               <div className="flex flex-wrap gap-1">
                 {PROVIDER_PRESETS.map((option) => (
@@ -342,7 +342,7 @@ export function OnboardingWizard({
                 </div>
               )}
 
-              <Field label={t("Base URL（OpenAI 兼容）")}>
+              <Field label={t("接口地址（Base URL）")}>
                 <TextInput
                   mono
                   ref={baseUrlRef}
@@ -358,7 +358,7 @@ export function OnboardingWizard({
                   mono
                   ref={apiKeyRef}
                   value={draft.apiKey}
-                  placeholder={auth.saved?.keyTail ? t("已保存（{0}）— 留空保持不变", auth.saved.keyTail) : "sk-…"}
+                  placeholder={auth.saved?.keyTail ? t("已保存（{0}），留空则不改", auth.saved.keyTail) : "sk-…"}
                   onChange={(e) => updateDraft({ apiKey: e.target.value })}
                 />
               </Field>
@@ -388,7 +388,7 @@ export function OnboardingWizard({
               )}
               <p className="flex items-start gap-1 text-ui-caption leading-relaxed text-muted-foreground/85">
                 <Lock className="mt-0.5 size-3 shrink-0" />
-                {t("配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。")}
+                {t("保存后会用新配置重新连接。配置与密钥以明文保存在本机 iFlow 配置中。")}
               </p>
             </div>
           )}
@@ -396,21 +396,21 @@ export function OnboardingWizard({
           {step === "model" && (
             <div className="space-y-2">
               <p className="text-ui-label leading-relaxed text-muted-foreground">
-                {t("选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。")}
+                {t("这是新会话默认使用的模型，随时可以在面板顶部的模型菜单里切换。")}
               </p>
               {models.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center">
                   <div className="text-ui-label font-semibold text-foreground">
                     {connecting
-                      ? t("正在连接内核并获取模型列表…")
+                      ? t("正在连接并读取可用模型…")
                       : auth.needsSetup
                         ? t("尚未连接")
-                        : t("暂无可用模型列表")}
+                        : t("暂时拿不到模型列表")}
                   </div>
                   <p className="mt-1 text-ui-caption leading-relaxed text-muted-foreground">
                     {auth.needsSetup && !connecting
-                      ? t("保存凭据后会自动获取模型；也可以稍后在模型下拉中选择。")
-                      : t("可点击下方按钮重新获取。")}
+                      ? t("保存配置后会自动读取模型；也可以稍后在模型菜单里选择。")
+                      : t("可以点下面的按钮再试一次。")}
                   </p>
                   <div className="mt-2 flex justify-center gap-1.5">
                     <Button onClick={() => send({ type: "refreshModels" })}>
@@ -418,7 +418,7 @@ export function OnboardingWizard({
                     </Button>
                     {auth.needsSetup && (
                       <Button onClick={() => setStep("connect")}>
-                        {t("返回填写凭据")}
+                        {t("返回填写配置")}
                       </Button>
                     )}
                   </div>
@@ -442,7 +442,7 @@ export function OnboardingWizard({
                   >
                     {visibleModels.length === 0 && (
                       <div className="px-2 py-3 text-center text-ui-label text-muted-foreground">
-                        {t("无匹配模型")}
+                        {t("没有匹配的模型")}
                       </div>
                     )}
                     {visibleModels.map((model) => (
@@ -472,7 +472,7 @@ export function OnboardingWizard({
           {step === "mode" && (
             <div className="space-y-2">
               <p className="text-ui-label leading-relaxed text-muted-foreground">
-                {t("选择新会话默认的权限模式；点击选项后当前会话也会立即切换。之后可在设置 → 审批策略中细化规则。")}
+                {t("新会话默认用这个权限模式；点选后当前会话也会立即切换。之后可以在「设置 → 权限与审批」里细化规则。")}
               </p>
               <OptionGroup ariaLabel={t("默认权限模式")} className="space-y-1">
                 {modeOptions.map((mode) => {
@@ -498,7 +498,7 @@ export function OnboardingWizard({
                 <Sparkles className={`mx-auto ${ICON_DISPLAY} text-primary`} />
                 <div className="mt-1 text-ui-body font-semibold text-foreground">{t("配置完成")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
-                  {t("可以开始对话了；其余设置在 ⚙ 中随时可改。")}
+                  {t("可以开始对话了，其余设置在 ⚙ 里随时能改。")}
                 </p>
               </div>
               <div className="space-y-1 rounded-lg border border-border bg-surface/60 px-2.5 py-2 text-ui-caption">
@@ -508,12 +508,12 @@ export function OnboardingWizard({
               <div className="rounded-lg border border-dashed border-border px-2.5 py-2">
                 <div className="text-ui-caption font-semibold text-foreground">{t("继续配置")}</div>
                 <p className="mt-0.5 text-ui-caption leading-relaxed text-muted-foreground">
-                  {t("这些能力可以稍后再设置。")}
+                  {t("这几项可以稍后再配。")}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Button onClick={() => finish("appearance")}>{t("外观与交互")}</Button>
                   <Button onClick={() => finish("mcp")}>{t("MCP 服务器")}</Button>
-                  <Button onClick={() => finish("policy")}>{t("审批策略")}</Button>
+                  <Button onClick={() => finish("policy")}>{t("权限与审批")}</Button>
                   <Button onClick={() => finish("memory")}>{t("记忆")}</Button>
                 </div>
               </div>

@@ -53,17 +53,66 @@ import type {
   ToolBlock,
 } from "../../../shared/messages";
 import { isPlanMode, MAX_TOOL_OUTPUT_DISPLAY_CHARS, splitSystemPromptSections } from "../../../shared/messages";
+import { useShallow } from "zustand/react/shallow";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
+import { initializingLabel } from "../initializing-label";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown, copyText } from "./Markdown";
-import { AssistantText, SuperToolCallCard } from "./SuperDirectiveCard";
+import { AssistantText, SuperActionsToolCallCard, SuperToolCallCard } from "./SuperDirectiveCard";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
-import { classifySuperToolName } from "../../../shared/super-tool-call";
+import { classifySuperToolName, resolveSuperToolCallKind } from "../../../shared/super-tool-call";
 import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, TextArea, ToastStack } from "./ui";
 import logo from "../assets/iflow.svg";
+
+/** How long the copy action keeps its "已复制" state before reverting. */
+const COPY_FEEDBACK_MS = 2000;
+
+/**
+ * Copy feedback for the transcript's copy affordances (tool output / user
+ * message / assistant message). The three call sites used to fire
+ * `void copyText(...)` — success and failure looked identical, so a clipboard
+ * denial (webview without clipboard permission) silently did nothing.
+ *
+ * Success flips the icon to Check for COPY_FEEDBACK_MS (same language as the
+ * markdown code-block copy button); failure raises one error toast. A second
+ * copy inside the window restarts the timer instead of stacking state.
+ */
+function useCopied(): { copied: boolean; copy: (text: string) => void } {
+  const notify = useChat((s) => s.notify);
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const copy = useCallback(
+    (text: string) => {
+      // copyText can THROW synchronously (no clipboard API + no
+      // document.execCommand in older webviews) — route that through the same
+      // rejection branch as a denied writeText.
+      Promise.resolve()
+        .then(() => copyText(text))
+        .then(
+          () => {
+            if (timer.current) clearTimeout(timer.current);
+            setCopied(true);
+            timer.current = setTimeout(() => {
+              timer.current = null;
+              setCopied(false);
+            }, COPY_FEEDBACK_MS);
+          },
+          () => notify(t("复制失败"), "error"),
+        );
+    },
+    [notify],
+  );
+  return { copied, copy };
+}
 
 const KIND_ICON: Record<string, typeof Eye> = {
   read: Eye,
@@ -148,10 +197,22 @@ function toolPresentation(block: ToolBlock): ToolPresentation {
  * `Delegate N tasks`。`tool_call` / `tool_call_update` 仍照常进 store 成为
  * `ToolBlock`（宿主也照常消费并派发子会话）；这里只决定它不再走通用 ToolCard。
  *
- * 判定复用宿主侧的同一个纯函数 `classifySuperToolName`，两边口径不可能漂移；
- * 只接管 `dispatch`（`super-agent-actions` 保持通用工具卡），
- * `super-agent-guard` 这类近似名一律落空。
+ * 判定复用宿主侧的同一组纯函数（`classifySuperToolName` /
+ * `resolveSuperToolCallKind`），两边口径不可能漂移：
+ *  - `super-agent-actions` 名字 → 子会话操作卡；
+ *  - `super-agent`（含命名空间形态 `iflow__super-agent`）带「有 actions、
+ *    无 tasks」载荷 → 宿主已纠偏执行动作，渲染也必须走同一张操作卡；
+ *  - 其余 dispatch → 委派卡；
+ *  - `super-agent-guard` 这类近似名一律落空。
  */
+function isSuperAgentActionsTool(block: ToolBlock): boolean {
+  const name = (block.toolName || "").trim();
+  if (!name) return false;
+  const kind = classifySuperToolName(name);
+  if (kind === "actions") return true;
+  return kind === "dispatch" && resolveSuperToolCallKind(kind, block.input) === "actions";
+}
+
 function isSuperAgentDispatchTool(block: ToolBlock): boolean {
   const name = (block.toolName || "").trim();
   return name !== "" && classifySuperToolName(name) === "dispatch";
@@ -265,6 +326,7 @@ function OutputDetails({
 }) {
   const flat = chrome === "flat";
   const send = useChat((s) => s.send);
+  const { copied, copy } = useCopied();
   const [open, setOpen] = useState(false);
   // Collapse keeps its children MOUNTED for the height animation — so a
   // folded tool output used to pin its whole text (up to 64K chars) in the
@@ -307,17 +369,19 @@ function OutputDetails({
       <div className={`flex items-center gap-3 pb-1.5 text-ui-caption ${flat ? "px-2" : "px-3"}`}>
         {overDisplayCap && !truncatedChars && (
           <span className="font-mono text-muted-foreground">
-            {t("仅渲染前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
+            {t("为省内存只显示前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
           </span>
         )}
         {/* Copy / full-output export are main-transcript affordances; the
             read-only live pane keeps only the truncation note. */}
         {!flat && (
           <button
-            className="text-muted-foreground hover:text-foreground"
-            onClick={() => void copyText(output)}
+            className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
+            title={copied ? t("已复制") : t("复制全部")}
+            onClick={() => copy(output)}
           >
-            {t("复制全部")}
+            {copied && <Check className="size-3 text-primary" />}
+            {copied ? t("已复制") : t("复制全部")}
           </button>
         )}
         {!flat && blockId && (
@@ -388,8 +452,9 @@ function OutputDetails({
 
 /**
  * The tool's concrete invocation args (shell command line / params JSON) so
- * users can audit WHAT ran, not just which tool ran. Same lazy-mount
- * discipline as OutputDetails (pitfall #27): folded bodies cost zero DOM.
+ * users can audit WHAT ran, not just which tool ran. Structured JSON renders
+ * as a param list; anything else (a shell command, free-form text) stays laid
+ * open verbatim — the folded raw-JSON body is gone (issue #166).
  * Skipped when the card title already carries the full command verbatim
  * (CLI's "Running: <cmd>" titles) — no point duplicating it.
  */
@@ -421,12 +486,9 @@ function InputDetails({
   chrome?: BlockChrome;
 }) {
   const flat = chrome === "flat";
-  const [open, setOpen] = useState(false);
-  const [openedOnce, setOpenedOnce] = useState(false);
   if (!input) return null;
   if (title.includes(input)) return null;
   const summary = summarizeToolInput(input);
-  const lineCount = input.trimEnd().split("\n").length;
   const body = (
     <pre
       className={
@@ -438,60 +500,26 @@ function InputDetails({
       {input}
     </pre>
   );
+  // The structured params ARE the audit surface — the 「查看原始参数」fold
+  // that duplicated them as raw JSON is gone (issue #166; the delegation card
+  // dropped its own fold first). Input with no parseable summary (a shell
+  // command, free-form text) keeps that raw text laid open instead of hidden.
   if (summary && summary.length > 0) {
     return (
-      <>
-        <div className="tool-card-params">
-          <div className="tool-card-section-label">{t("执行参数")}</div>
-          <div className="tool-card-param-list">
-            {summary.map(({ label, value }) => (
-              <div className="tool-card-param" key={label}>
-                <span className="tool-card-param-key">{label}</span>
-                <span className="tool-card-param-value" title={value}>{value}</span>
-              </div>
-            ))}
-          </div>
+      <div className="tool-card-params">
+        <div className="tool-card-section-label">{t("执行参数")}</div>
+        <div className="tool-card-param-list">
+          {summary.map(({ label, value }) => (
+            <div className="tool-card-param" key={label}>
+              <span className="tool-card-param-key">{label}</span>
+              <span className="tool-card-param-value" title={value}>{value}</span>
+            </div>
+          ))}
         </div>
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => {
-            setOpenedOnce(true);
-            setOpen((v) => !v);
-          }}
-          className="tool-card-raw-toggle"
-        >
-          <Caret open={open} />
-          {open ? t("收起原始参数") : t("查看原始参数")}
-        </button>
-        <Collapse open={open}>
-          {openedOnce && body}
-        </Collapse>
-      </>
+      </div>
     );
   }
-  if (lineCount < 3 && input.length < 120) {
-    return <div className="tool-card-params"><div className="tool-card-section-label">{t("执行参数")}</div>{body}</div>;
-  }
-  return (
-    <>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => {
-          setOpenedOnce(true);
-          setOpen((v) => !v);
-        }}
-        className="tool-card-raw-toggle"
-      >
-        <Caret open={open} />
-        {open ? t("收起原始参数") : t("查看原始参数")}
-      </button>
-      <Collapse open={open}>
-        {openedOnce && body}
-      </Collapse>
-    </>
-  );
+  return <div className="tool-card-params"><div className="tool-card-section-label">{t("执行参数")}</div>{body}</div>;
 }
 
 function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: BlockChrome }) {
@@ -578,7 +606,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
             ))}
           {block.evicted && (
             <span
-              title={t("为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留")}
+              title={t("为了不让长会话占用太多内存，这块输出与差异已从界面释放；回退和导出仍使用完整记录")}
             >
               {flat ? (
                 <span className="text-ui-micro text-muted-foreground">{t("内容已释放")}</span>
@@ -614,7 +642,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
                       variant="canvas"
                       className="rounded-lg"
                       icon={<Undo2 className="size-3" />}
-                      title={t("将该文件恢复为编辑前内容")}
+                      title={t("把这个文件恢复成修改前的内容")}
                       onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
                     >
                       {t("回退此改动")}
@@ -623,7 +651,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
                       variant="canvas"
                       className="rounded-lg"
                       icon={<Columns2 className="size-3" />}
-                      title={t("在 VSCode diff 视图中查看该变更")}
+                      title={t("在 VSCode 的差异视图里查看这次改动")}
                       onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
                     >
                       {t("文件对比")}
@@ -655,7 +683,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
 function localizeStepTitle(title: string): string {
   if (/^task$/i.test(title.trim())) return t("子代理");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
-  if (m) return t("启动子代理（{0}）：{1}", m[1], m[2]);
+  if (m) return t("启动子代理 {0}：{1}", m[1], m[2]);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
   if (m) return t("读取 {0}", m[1]);
   m = /^Running:\s*([\s\S]*)$/.exec(title);
@@ -682,20 +710,41 @@ function agentAccent(type: string | null): { border: string; icon: string; chip:
  * newest steps stay visible because during streaming they arrive at the tail. */
 const SUB_AGENT_VISIBLE_STEPS = 4;
 
-function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome?: BlockChrome }) {
+const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome?: BlockChrome }) {
   const flat = chrome === "flat";
   const [expanded, setExpanded] = useState(false);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   /** First-open latch for the lazy-mounted read-only transcript body. */
   const [transcriptMounted, setTranscriptMounted] = useState(false);
   const send = useChat((s) => s.send);
-  const state = useChat((s) => s.state);
+  // Narrow subscription: the stop affordance keys off four session flags and
+  // nothing else. Subscribing the whole state re-rendered every SubAgent card
+  // (and its nested entry list) on each snapshot — usage ticks, board updates,
+  // queue churn — even when nothing this card paints had changed.
+  const sessionStreaming = useChat((s) => {
+    const st = s.state;
+    return !!st && st.status === "streaming" && !!st.sessionId && !st.initializing && !st.replaying;
+  });
+  // The stop action has to name the session it cancels; a primitive selector
+  // keeps that off the whole-state subscription too.
+  const sessionId = useChat((s) => s.state?.sessionId ?? null);
   const active = block.status === "pending" || block.status === "in_progress";
-  const canStop = active && state?.status === "streaming" && !!state.sessionId && !state.initializing && !state.replaying;
+  const canStop = active && sessionStreaming;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (!active || block.startedAt === undefined) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const startedAt = block.startedAt;
+    if (!active || startedAt === undefined) return;
+    // Only the rendered second changes the label; a raw setNow every tick
+    // re-rendered the whole card for nothing. Same discipline as
+    // CountdownSeconds: skip setState when the derived value is equal.
+    let last = Math.floor((Date.now() - startedAt) / 1000);
+    const tick = () => {
+      const secs = Math.floor((Date.now() - startedAt) / 1000);
+      if (secs === last) return;
+      last = secs;
+      setNow(Date.now());
+    };
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [active, block.startedAt]);
   // P2-13: em dash placeholder — the literal word 未知 read as a rendering
@@ -778,12 +827,12 @@ function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome
             label={t("停止此子代理")}
             size="sm"
             tone="danger"
-            onClick={() => send({ type: "stopSubagent", sessionId: state!.sessionId!, agentId: block.agentId })}
+            onClick={() => send({ type: "stopSubagent", sessionId: sessionId!, agentId: block.agentId })}
           />
         )}
       </div>
       <div className={`flex flex-wrap gap-3 font-mono text-ui-caption text-muted-foreground ${flat ? "px-2 pb-1" : "px-3 pb-2"}`}>
-        <span title={t("子代理 token 为转录估算，包含子代理")}>
+        <span title={t("token 数为按对话估算，包含子代理")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
         <span>{t("耗时")} {duration}</span>
@@ -813,7 +862,7 @@ function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome
             className="mt-2 flex items-center gap-1 text-ui-caption text-muted-foreground hover:text-foreground"
           >
             {transcriptOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-            {transcriptOpen ? t("收起") : t("只读转录")}
+            {transcriptOpen ? t("收起") : t("查看完整记录")}
           </button>
           <Collapse open={transcriptOpen}>
             {/* Lazy mount (same discipline as OutputDetails): a folded
@@ -838,7 +887,7 @@ function SubAgentCard({ block, chrome = "card" }: { block: SubAgentBlock; chrome
       )}
     </div>
   );
-}
+});
 
 function ReadOnlySubAgentEntry({ block, chrome = "card" }: { block: Block; chrome?: BlockChrome }) {
   if (block.kind === "subagent") return null; // Rendered once in the tree above.
@@ -996,6 +1045,7 @@ function UserMessage({
   onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   const send = useChat((s) => s.send);
+  const { copied, copy } = useCopied();
   // UI-audit 4.3 P1: ONE hover/focus action bar per message (copy / edit /
   // delete / rollback) inside the bubble, hidden until hover/focus — the old
   // floating icon row (40% visible forever) competed with the reading flow.
@@ -1071,7 +1121,7 @@ function UserMessage({
             />
             <div className="mt-2 flex items-center justify-end gap-1.5">
               <span className="mr-auto text-ui-caption text-muted-foreground">
-                {checkpoint && !checkpoint.partial ? t("重发将先回滚该轮文件变更并删除其后的对话") : t("重发将删除该消息及其后所有对话")}
+                {checkpoint && !checkpoint.partial ? t("重发会先把这一轮的文件改回原样，并删除之后的对话") : t("重发会删除这条消息和之后的所有对话")}
               </span>
               <Button variant="ghost" size="sm" onClick={cancelEdit}>
                 {t("取消")}
@@ -1106,7 +1156,7 @@ function UserMessage({
         )}
         {block.evicted && (!block.images || block.images.length === 0) && (
           <div className="mt-2">
-            <span title={t("为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录")}>
+            <span title={t("为了不让长会话占用太多内存，附件图片已从界面释放；完整记录仍然保留")}>
               <Chip tone="muted">{t("附件图片已释放")}</Chip>
             </span>
           </div>
@@ -1123,11 +1173,11 @@ function UserMessage({
           <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-3 items-center gap-0.5 rounded-md border border-border bg-card px-1 opacity-0 shadow-card transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
             <button
               className={barBtnClass()}
-              title={t("复制")}
-              aria-label={t("复制")}
-              onClick={() => void copyText(block.text)}
+              title={copied ? t("已复制") : t("复制")}
+              aria-label={copied ? t("已复制") : t("复制")}
+              onClick={() => copy(block.text)}
             >
-              <Copy className="size-3" />
+              {copied ? <Check className="size-3 text-primary" /> : <Copy className="size-3" />}
             </button>
             {canDelete && block.id && (
               <button
@@ -1153,8 +1203,8 @@ function UserMessage({
             {showRollback && (
               <button
                 className={barBtnClass()}
-                title={t("回滚到此轮之前")}
-                aria-label={t("回滚到此轮之前")}
+                title={t("回滚到这一轮之前")}
+                aria-label={t("回滚到这一轮之前")}
                 onClick={() => setConfirmRollback(true)}
               >
                 <History className="size-3" />
@@ -1168,28 +1218,28 @@ function UserMessage({
 
       {confirmRollback && (
         <ConfirmDialog
-          title={t("回滚到此轮之前")}
+          title={t("回滚到这一轮之前")}
           message={
             canRollbackFiles
-              ? t("选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。")
-              : t("该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。")
+              ? t("选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
+              : t("这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。")
           }
           onCancel={() => setConfirmRollback(false)}
           actions={[
             {
               label: t("文件"),
-              title: canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("只把工作区文件恢复到这一轮之前") : t("这一轮的快照不完整，无法恢复文件"),
               disabled: !canRollbackFiles,
               onClick: () => rollback("files"),
             },
             {
               label: t("对话"),
-              title: t("仅删除该消息及其后所有对话"),
+              title: t("只删除这条消息及之后的所有对话"),
               onClick: () => rollback("conversation"),
             },
             {
               label: t("全部"),
-              title: canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("恢复文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法恢复文件"),
               disabled: !canRollbackFiles,
               variant: "primary",
               onClick: () => rollback("both"),
@@ -1424,7 +1474,7 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
                   {item.scope === "both" && <Chip tone="warning">{t("项目级覆盖全局")}</Chip>}
                   {item.scope === "project" && <Chip tone="info">{t("项目级")}</Chip>}
                   {item.scope === "global" && <Chip tone="muted">{t("全局")}</Chip>}
-                  {item.connected === false && <Chip tone="warning">{t("未随请求注入")}</Chip>}
+                  {item.connected === false && <Chip tone="warning">{t("这次请求没有带上")}</Chip>}
                 </div>
               ) : (
                 <div key={idx} className="min-w-0">
@@ -1527,6 +1577,9 @@ export const BlockView = memo(function BlockView({
   /** F3 Phase 2: open the quick-add memory dialog with this assistant text. */
   onRemember?: (text: string) => void;
 }) {
+  // Copy feedback for the assistant-message action bar (one hook per block is
+  // fine — the state is a single boolean + timer, and BlockView is memo'd).
+  const { copied, copy } = useCopied();
   switch (block.kind) {
     case "user":
       return (
@@ -1576,10 +1629,10 @@ export const BlockView = memo(function BlockView({
               {canCopy && chrome !== "flat" && (
                 <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-[18px] items-center gap-0.5 rounded-md bg-card px-1 opacity-0 shadow-card outline-1 outline-[color:var(--border)] transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                   <IconButton
-                    icon={<Copy className="size-3" />}
-                    label={t("复制")}
+                    icon={copied ? <Check className="size-3 text-primary" /> : <Copy className="size-3" />}
+                    label={copied ? t("已复制") : t("复制")}
                     size="sm"
-                    onClick={() => void copyText(block.text)}
+                    onClick={() => copy(block.text)}
                   />
                   {isLatest && canCopy && canRegenerate && (
                     <IconButton
@@ -1606,7 +1659,9 @@ export const BlockView = memo(function BlockView({
     case "thought":
       return <ThoughtCard block={block} isLatest={isLatest} turnActive={turnActive} chrome={chrome} />;
     case "tool":
-      return isSuperAgentDispatchTool(block) ? (
+      return isSuperAgentActionsTool(block) ? (
+        <SuperActionsToolCallCard block={block} />
+      ) : isSuperAgentDispatchTool(block) ? (
         <SuperToolCallCard block={block} />
       ) : (
         <ToolCard block={block} chrome={chrome} />
@@ -1703,7 +1758,45 @@ export function pickStreamingNotice(
   return countdown ?? warning;
 }
 
-function MessageListInner({ state }: { state: SessionState }) {
+/** Stable fallback so the shallow comparison only sees a fresh array when the
+ * host actually replaced it (MessageList gates state non-null, but the
+ * selector must still answer if the snapshot is cleared mid-unmount). */
+const EMPTY_BLOCKS: Block[] = [];
+
+/**
+ * The subset of `SessionState` this transcript paints. Selecting it shallowly
+ * keeps unrelated metadata churn (usage ticks while streaming, the sub-session
+ * board, toasts, MCP catalog …) from re-rendering the whole tree on every
+ * snapshot; `blocks` identity is what streaming / history restoration mutates.
+ *
+ * `canReviewTurn` (shared/turn-changes.ts) reads a subset of these same
+ * fields; the single narrowing assertion at its call site keeps its signature
+ * untouched without widening this subscription back to the whole state.
+ */
+function useMessageListState() {
+  return useChat(
+    useShallow((s) => ({
+      sessionId: s.state?.sessionId ?? null,
+      blocks: s.state?.blocks ?? EMPTY_BLOCKS,
+      checkpoints: s.state?.checkpoints,
+      activeSessionId: s.state?.activeSessionId ?? null,
+      replaying: s.state?.replaying ?? false,
+      initializing: s.state?.initializing ?? false,
+      initializingReason: s.state?.initializingReason ?? null,
+      status: s.state?.status ?? "idle",
+      compressing: s.state?.compressing ?? false,
+      modes: s.state?.modes ?? null,
+      queue: s.state?.queue,
+      pendingApproval: s.state?.pendingApproval ?? null,
+      pendingQuestions: s.state?.pendingQuestions ?? null,
+      pendingPlanExit: s.state?.pendingPlanExit ?? null,
+      pendingProfileSwitch: s.state?.pendingProfileSwitch ?? null,
+    })),
+  );
+}
+
+function MessageListInner() {
+  const state = useMessageListState();
   const turnsWithDiffs = useMemo(() => turnsWithChanges(state.blocks), [state.blocks]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const setHeaderScrolled = useChat((s) => s.setHeaderScrolled);
@@ -2004,9 +2097,12 @@ function MessageListInner({ state }: { state: SessionState }) {
     !state.pendingQuestions &&
     lastUserText !== null;
 
-  const onRegenerate = () => {
+  // Stable identity — BlockView is memo'd, so a fresh arrow per render would
+  // re-render every mounted block on each streaming chunk and defeat the
+  // tail-only repaint the memo + block.id keys exist for.
+  const onRegenerate = useCallback(() => {
     useChat.getState().send({ type: "regenerate" });
-  };
+  }, []);
 
   const onRemember = useCallback((text: string) => {
     useChat.getState().requestMemoryDraft(text);
@@ -2105,7 +2201,7 @@ function MessageListInner({ state }: { state: SessionState }) {
               {/* UI-audit 4.3 P1: quiet empty state — one sentence, three plain
                   example lines, one bottom hint; no glow panel, no float. */}
               <div className="text-ui-title font-semibold text-foreground">
-                {t("有什么可以帮你?")}
+                {t("有什么可以帮你？")}
               </div>
               <div className="mt-3 flex flex-col items-stretch gap-1.5">
                 {EXAMPLE_PROMPTS.map((ex) => (
@@ -2121,7 +2217,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                 ))}
               </div>
               <p className="mt-3 text-ui-caption leading-relaxed text-muted-foreground/80">
-                {t("输入 / 查看命令 · @  引用文件")}
+                {t("输入 / 查看命令 · @ 引用文件")}
               </p>
             </div>
           )}
@@ -2171,7 +2267,7 @@ function MessageListInner({ state }: { state: SessionState }) {
                   onRemember={onRemember}
                   onEditingChange={handleEditingChange}
                 />
-                {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state, turnId) && (
+                {atTurnEnd && turnId && turnsWithDiffs.has(turnId) && canReviewTurn(state as SessionState, turnId) && (
                   <TurnChanges key={turnId} sessionId={state.sessionId!} userBlockId={turnId} />
                 )}
               </div>
@@ -2240,7 +2336,7 @@ function MessageListInner({ state }: { state: SessionState }) {
           <FloatPill tone={mergedNotice ? "warning" : "primary"} size="sm">
             <Loader2 className="size-3 animate-spin" />
             {state.initializing
-              ? t("正在创建新会话…")
+              ? initializingLabel(state.initializingReason)
               : mergedNotice
                 ? (
                   <>
@@ -2297,6 +2393,11 @@ function MessageListInner({ state }: { state: SessionState }) {
   );
 }
 
+// Zero-prop memo wrapper: MessageList still subscribes the snapshot identity
+// (it feeds the boundary's resetKey), but that must not drag the transcript
+// tree along — the inner shallow subscription drives every real update.
+const MemoMessageListInner = memo(MessageListInner);
+
 export function MessageList() {
   const state = useChat((s) => s.state);
   if (!state) return null;
@@ -2307,7 +2408,7 @@ export function MessageList() {
   // a transient bad chunk heals without reopening the tab.
   return (
     <ErrorBoundary variant="inline" resetKey={state}>
-      <MessageListInner state={state} />
+      <MemoMessageListInner />
     </ErrorBoundary>
   );
 }

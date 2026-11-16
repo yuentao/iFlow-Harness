@@ -951,6 +951,140 @@ textarea::selection {
   animation: chip-in 0.32s var(--ease-spring) both;
 }
 
+/* 委派成功 → 飞入看板（SuperDelegationFly.tsx）。
+   起点是转录里的委派卡，终点是顶栏看板控件；两者坐标由组件量好后写进
+   --fly-dx / --fly-dy。轨迹走真实抛体感的**弧线**而非直线：三层嵌套各管
+   一个维度——外层 X 匀速（linear），中层 Y 缓出（ease-out-quad，即抛体
+   到达顶点的 y=2t−t²），内层只做缩放淡出。X/Y 故意用不同 timing-function，
+   于是中点 (x≈50%, y≈77%) 明显偏离起点→终点连线，合成抛物线；若两层共用
+   同一缓动，比例恒定就又变回直线了。缩放 / 淡出节奏沿用原先的 ease-out-expo
+   （抵达前缩到 0.12、末端淡出），不引入新视觉语言。纯装饰：pointer-events:none
+   + aria-hidden，portal 到 body 避开创建块（陷阱 #22）。
+
+   X/Y 分轴时长都为 0.64s，与 SuperDelegationFly.tsx 的 FLY_DURATION_MS 一致；
+   每条动画都 fill:both，animationend 只认外层（其余两层冒泡上来会被忽略）。 */
+@keyframes super-delegation-fly-x {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(var(--fly-dx), 0, 0);
+  }
+}
+
+/* Y = dy · (2t − t²)：cubic-bezier(0.25, 0.46, 0.45, 0.94) 是 ease-out-quad，
+   在 t≈0.5 时已走完约 77% 纵向距离，配合匀速 X 即为抛物弧。 */
+@keyframes super-delegation-fly-rise {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(0, var(--fly-dy), 0);
+  }
+}
+
+@keyframes super-delegation-fly-body {
+  0% {
+    opacity: 0.1;
+    transform: scale(1);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(0.96);
+  }
+  72% {
+    opacity: 1;
+    transform: scale(0.42);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.12);
+  }
+}
+
+/* 定位基准层：只吃 X 位移。视觉样式全部下放到 .super-delegation-fly-body，
+   让缩放只作用于可见体本身（边框、底色、阴影一起缩）。 */
+.super-delegation-fly {
+  position: fixed;
+  z-index: 50;
+  width: 28px;
+  height: 28px;
+  pointer-events: none;
+  will-change: transform;
+  animation: super-delegation-fly-x 0.64s linear both;
+}
+
+/* 抛体上升层：只吃 Y 位移（缓出），与外层 X 的 linear 形成弧线。 */
+.super-delegation-fly-rise {
+  width: 28px;
+  height: 28px;
+  pointer-events: none;
+  will-change: transform;
+  animation: super-delegation-fly-rise 0.64s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+}
+
+/* 可见体：缩放 + 淡出，节奏沿用旧的单层关键帧。 */
+.super-delegation-fly-body {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-control);
+  border: 1px solid color-mix(in oklab, var(--primary) 45%, transparent);
+  background: color-mix(in oklab, var(--primary) 16%, var(--card));
+  color: var(--primary);
+  box-shadow: var(--shadow-float);
+  pointer-events: none;
+  transform-origin: center center;
+  will-change: transform, opacity;
+  animation: super-delegation-fly-body 0.64s var(--ease-out-expo) both;
+}
+
+.super-delegation-fly-count {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-control);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: var(--text-ui-micro);
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 飞入抵达：看板控件一次短脉冲（jump-pulse 同语言，收敛在自身高度内）。 */
+@keyframes super-board-received {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 48%, transparent);
+  }
+  65% {
+    box-shadow: 0 0 0 8px color-mix(in oklab, var(--primary) 0%, transparent);
+  }
+  100% {
+    box-shadow: none;
+  }
+}
+
+.super-board-received {
+  animation: super-board-received 0.48s var(--ease-spring) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* JS 已经直接跳过飞入；CSS 这层兜住用户中途改系统设置的竞态。 */
+  .super-delegation-fly {
+    display: none !important;
+  }
+  .super-board-received {
+    animation: none;
+  }
+}
+
 /* Per-status card tint: in_progress glows primary, failed glows destructive,
    completed/pending stay neutral. Pairs with .status-fade transitions. */
 .status-pending {

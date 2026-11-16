@@ -3015,7 +3015,7 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
     expect(block.notice).toContain("2 个 MCP 服务器、");
     expect(block.notice).toContain("1 个 MCP 服务器未连接");
-    expect(block.notice).toContain("1 个为项目级");
+    expect(block.notice).toContain("1 个来自项目配置");
     expect(block.tokens).toBe(
       estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules") +
         estimateTokens(declarations) + estimateTokens(projectDeclarations),
@@ -3209,5 +3209,288 @@ describe("next-step suggestions", () => {
     setNextStepLoading(state, true);
     beginUserPrompt(state, "下一步做什么？");
     expect(state.nextStepLoading).toBe(false);
+  });
+});
+
+describe("tool block lookup index (upsertToolBlock)", () => {
+  const toolCall = (toolCallId: string): SessionNotification["update"] => ({
+    sessionUpdate: "tool_call",
+    toolCallId,
+    toolName: "replace",
+    title: `Editing ${toolCallId}`,
+    kind: "edit",
+    status: "pending",
+  });
+  const toolUpdate = (toolCallId: string, text: string): SessionNotification["update"] => ({
+    sessionUpdate: "tool_call_update",
+    toolCallId,
+    status: "completed",
+    content: [{ type: "content", content: { type: "text", text } }],
+  });
+  /** Block content without the host-minted ids — the id counter is global, so
+   *  two parallel runs never mint the same ids. */
+  const shape = (blocks: Block[]): unknown[] =>
+    blocks.map((block) => {
+      const copy = { ...block } as Record<string, unknown>;
+      delete copy["id"];
+      return copy;
+    });
+  const toolCount = (blocks: Block[]): number =>
+    blocks.filter((block) => block.kind === "tool").length;
+
+  it("updates a deep tool block in place instead of appending a duplicate", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify(toolCall("t1")));
+    // 150 later blocks: the tool block is deep in the transcript — the old
+    // reverse scan had to walk the whole array on every tool frame.
+    for (let i = 0; i < 150; i++) beginUserPrompt(state, `msg ${i}`);
+    const before = state.blocks.length;
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    expect(state.blocks).toHaveLength(before);
+    expect(toolCount(state.blocks)).toBe(1);
+    expect(state.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1", status: "completed" });
+  });
+
+  it("agrees frame by frame with a full-scan reference run", () => {
+    const warm = initialSessionState();
+    const cold = initialSessionState();
+    const frames: SessionNotification["update"][] = [
+      toolCall("t1"),
+      toolCall("t2"),
+      toolUpdate("t1", "one"),
+      toolCall("t3"),
+      toolUpdate("t1", "two"),
+      toolUpdate("t2", "three"),
+      toolUpdate("t3", "four"),
+    ];
+    for (const frame of frames) {
+      applySessionUpdate(warm, notify(frame));
+      // A FRESH array has no index entry → the reference run always takes the
+      // old full-scan path. Both runs must end up with the same transcript.
+      cold.blocks = [...cold.blocks];
+      applySessionUpdate(cold, notify(frame));
+      expect(shape(warm.blocks)).toEqual(shape(cold.blocks));
+    }
+  });
+
+  it("resolves to the LAST occurrence, exactly like the old reverse scan", () => {
+    const state = initialSessionState();
+    const first: ToolBlock = {
+      kind: "tool",
+      toolCallId: "dup",
+      toolName: "replace",
+      title: "first",
+      toolKind: "edit",
+      status: "pending",
+      output: "one",
+      locations: [],
+      diff: null,
+    };
+    const second: ToolBlock = { ...first, output: "two" };
+    state.blocks = [first, { kind: "text", text: "between" }, second];
+    applySessionUpdate(state, notify(toolUpdate("dup", "done")));
+    // The last one wins (the reverse scan hit it first) — the earlier block
+    // stays untouched.
+    expect(state.blocks[2]).toMatchObject({ status: "completed", output: "done" });
+    expect(state.blocks[0]).toMatchObject({ status: "pending", output: "one" });
+    expect(state.blocks).toHaveLength(3);
+  });
+
+  it("rebuilds the index when a mid-insert shifts the cached position", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "hello");
+    applySessionUpdate(state, notify(toolCall("t1")));
+    expect(state.blocks.map((b) => b.kind)).toEqual(["user", "tool"]);
+    // The injected-context card is spliced in BEFORE the first user block →
+    // every later block shifts by one (the cached position goes stale).
+    appendInjectedContext(state, [{ kind: "system", label: "系统提示词", content: "rules" }]);
+    expect(state.blocks.map((b) => b.kind)).toEqual(["injected", "user", "tool"]);
+    // The update must land on the ORIGINAL tool block (now at index 2).
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    expect(state.blocks).toHaveLength(3);
+    expect(toolCount(state.blocks)).toBe(1);
+    expect(state.blocks[2]).toMatchObject({ kind: "tool", toolCallId: "t1", status: "completed" });
+  });
+
+  it("re-appends after the tool block was truncated away (same verdict as the old scan)", () => {
+    const state = initialSessionState();
+    beginUserPrompt(state, "hello");
+    applySessionUpdate(state, notify(toolCall("t1")));
+    const user = state.blocks[0];
+    if (!user || user.kind !== "user") throw new Error("expected a user block");
+    deleteUserMessageById(state, user.id!);
+    expect(state.blocks).toHaveLength(0);
+    // The tool block is gone → the update creates a fresh one (the old scan
+    // reached the same verdict).
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1", status: "completed" });
+  });
+
+  it("scopes the index per block list (a fresh list never inherits another's index)", () => {
+    const a = initialSessionState();
+    const b = initialSessionState();
+    applySessionUpdate(a, notify(toolCall("t1")));
+    expect(a.blocks).toHaveLength(1);
+    expect(b.blocks).toHaveLength(0);
+    // The same toolCallId in another list is a DIFFERENT tool block — the
+    // index must not leak across lists.
+    applySessionUpdate(b, notify(toolCall("t1")));
+    expect(b.blocks).toHaveLength(1);
+    expect(b.blocks[0]).toMatchObject({ kind: "tool", toolCallId: "t1" });
+  });
+
+  it("is idempotent: the same tool frame twice leaves one block with the same content", () => {
+    const state = initialSessionState();
+    applySessionUpdate(state, notify(toolCall("t1")));
+    const update = toolUpdate("t1", "done");
+    applySessionUpdate(state, notify(update));
+    const after = shape(state.blocks);
+    applySessionUpdate(state, notify(update));
+    expect(state.blocks).toHaveLength(1);
+    expect(toolCount(state.blocks)).toBe(1);
+    expect(shape(state.blocks)).toEqual(after);
+  });
+
+  it("keeps the blocks array reference stable across tool frames", () => {
+    const state = initialSessionState();
+    const before = state.blocks;
+    applySessionUpdate(state, notify(toolCall("t1")));
+    applySessionUpdate(state, notify(toolUpdate("t1", "done")));
+    // The reducer mutates in place — the array identity must not change (the
+    // webview's identity-stable contract depends on it).
+    expect(state.blocks).toBe(before);
+  });
+});
+
+/**
+ * 委派类工具调用的任务结构（`ToolBlock.superTasks`）。
+ *
+ * 单一真源 = **宿主实际派发了什么**。两个原因让卡片不能只回解 `input`：
+ *  - `input` 是有损展示串（单个字符串值截断 300 字符、整串上限 4096 字符），
+ *    长任务书会被从中间切断，回解必然失败；
+ *  - 模型调内置 `super-agent` 工具时**有时漏掉 `title`**（wire 实证），派发器
+ *    容忍（回退 task 首行、照常派发），卡片此前却判成解析失败 —— 把一次真的
+ *    派发谎报成失败。
+ *
+ * 宿主因此从**原始 args** 解析一次，把结构随快照下发（附件只给数量，本体不进
+ * 快照 —— 陷阱 #27 纪律）。
+ */
+describe("委派工具调用的任务结构（superTasks）", () => {
+  const dispatchArgs = { tasks: [{ task: "只读审查 src/panel/panel.ts" }] };
+
+  it("从原始 args 解析出任务（缺 title 也认，回退 task 首行）", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        title: "Delegate 1 task",
+        status: "pending",
+        args: dispatchArgs,
+      }),
+    );
+    const block = state.blocks[0];
+    expect(block?.kind).toBe("tool");
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toEqual([
+      {
+        title: "只读审查 src/panel/panel.ts",
+        task: "只读审查 src/panel/panel.ts",
+        attachmentCount: 0,
+      },
+    ]);
+  });
+
+  it("附件只给数量，附件本体不进快照", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        status: "pending",
+        args: {
+          tasks: [
+            {
+              title: "带附件",
+              task: "做点事",
+              attachments: ["a.png", { path: "C:/tmp/b.png", name: "b.png" }],
+            },
+          ],
+        },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks?.[0]?.attachmentCount).toBe(2);
+    expect(JSON.stringify(block.superTasks)).not.toContain("C:/tmp/b.png");
+  });
+
+  it("后续不带 args 的更新帧不会抹掉已解析的任务列表", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        status: "in_progress",
+        args: dispatchArgs,
+      }),
+    );
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        status: "completed",
+        content: [
+          { type: "content", content: { type: "text", text: "Delegation request accepted." } },
+        ],
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toHaveLength(1);
+    expect(block.superTasks?.[0]?.title).toBe("只读审查 src/panel/panel.ts");
+  });
+
+  it("非委派工具不带该字段（热路径不做多余解析）", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-other",
+        toolName: "run_shell_command",
+        status: "pending",
+        args: { command: "Get-ChildItem" },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+  });
+
+  it("派发类工具的载荷不可用时不编造任务（字段留空）", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-bad",
+        toolName: "super-agent",
+        status: "pending",
+        args: { tasks: [] },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
   });
 });

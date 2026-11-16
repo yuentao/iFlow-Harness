@@ -150,7 +150,7 @@ export function QuestionBody({
               <TextInput
                 autoFocus
                 aria-label={`${t("自定义回答")}: ${q.header}`}
-                placeholder={t("输入自定义回答，回车确认")}
+                placeholder={t("输入你的回答，回车确认")}
                 className="mt-2 w-full"
                 value={custom[q.header] ?? ""}
                 onChange={(e) => changeCustom(q.header, e.target.value)}

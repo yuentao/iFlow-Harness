@@ -168,7 +168,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
             without reading the body first. */}
         <span className="block min-w-0 space-y-0.5">
           <span className="block text-ui-micro text-muted-foreground/85 tracking-wide">
-            {t("iFlow 请求执行")}
+            {t("iFlow 想执行一项操作")}
           </span>
           <span id={titleId} className="block truncate text-ui-label font-semibold leading-tight">
             {t(actionVerb)}
@@ -181,10 +181,10 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
           <HelpTip label={t("审批说明")} align="right">
             <span className="block space-y-1">
               <span className="block">
-                {t("允许会立即执行该工具；「始终允许」会在本次会话内记住该工具。")}
+                {t("「允许一次」只执行这一次；「始终允许」会让本次会话记住这个操作，之后不再询问。")}
               </span>
               <span className="block">
-                {t("拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。")}
+                {t("拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 权限与审批」。")}
               </span>
               {/* The shortcut line lives once, in the actions row — repeating
                   it here made the same hint compete with itself. */}

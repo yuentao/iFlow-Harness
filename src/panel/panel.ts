@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { execFile as execFileCb } from "node:child_process";
+import { createHash } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -97,6 +98,7 @@ import {
   type SuperAttachment,
   type SuperReportEntry,
   type SuperSessionUi,
+  type SuperStatus,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
@@ -383,11 +385,12 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * Tools the MAIN panel session must never receive.
  *
  * The user directive is that the main session only DELEGATES: it plans, writes
- * task briefs, watches the board and reports — every implementation step
- * belongs to a Super Agent child session, and the in-process `task` sub-agent
- * may only run there. The system prompt already says so, but the model kept
- * preferring the in-process `task` tool (observed repeatedly), so the
- * constraint is now mechanical instead of advisory.
+ * task briefs, watches the board and reports — every implementation step AND
+ * every investigation (reading files, searching code, running commands) belongs
+ * to a Super Agent child session. The system prompt already says so, but the
+ * model kept calling `task`, `read_file` and `run_shell_command` in the main
+ * session (2026-11-15 / 2026-11-16 user reports), so the constraint is now
+ * mechanical instead of advisory.
  *
  * Wire behavior (verified against the vendored CLI bundle,
  * vendor/iflow-cli/bundle/iflow.js):
@@ -402,13 +405,76 @@ const SUPER_HEARTBEAT_MS = 1_500;
  *    (l?.includes(s) || l?.includes(a)) && (u = !1); u && register }`) skips
  *    registration when `excludeTools` matches either the static `Name` or the
  *    class name.
- *  - `TaskTool` declares `static Name = "task"`, so `"task"` is the exact key.
+ *
+ * Provenance of the names below (scanned 2026-11-16 across
+ * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name = "<name>"` in
+ * the bundle, but "declared" is not "registered" — this comment must not claim
+ * a tool is withheld when the registrar never creates it:
+ *  - registered by `createToolRegistry()`'s `t(...)` calls: read_file (L1246),
+ *    read_many_files (L1453), glob (L1323), search_file_content (L1259,
+ *    L1317), list_directory (L950), image_read (L1247), web_fetch (L2153,
+ *    L2466), web_search (L2108, L4131), ReadCommandOutput (L2444),
+ *    write_file (L1452), replace (L1631, L4335), xml_escape (L4256),
+ *    run_shell_command (L1719), task (L4138)
+ *  - `lsp_goto_definition` / `lsp_find_references` / `lsp_hover` (L4417 /
+ *    L4421 / L4425): conditionally registered — the registration site is
+ *    `this.lspManager && (t(Vut, this, this.lspManager), t(Wut, ...),
+ *    t(zut, ...))`. `lspManager` is constructed unconditionally in the Config
+ *    constructor (`this.lspManager = new H0e(this.getProjectRoot())`), so in
+ *    practice the three are always registered; the guard is still real, so they
+ *    are described as conditional rather than unconditional.
+ *  - `multi_edit` (L3160): declared but NOT registered in this bundle version —
+ *    its class `Aut` is never passed to `t(...)` inside `createToolRegistry()`
+ *    (its only other reference is `Aut.Name` in a write-tool detector at
+ *    L3222). This entry is therefore a silent no-op today; it is kept
+ *    deliberately as a defensive one, so that a future CLI version which does
+ *    register `multi_edit` is gated automatically. Do not read it as proof that
+ *    the tool is currently being withheld.
+ * Names that do NOT exist in the bundle are deliberately absent — `"grep"` and
+ * `"ls"` are not registered tool names (the search/list tools are
+ * `search_file_content` / `list_directory`), so listing them would be a silent
+ * no-op as well.
+ *
+ * Kept available on purpose: `todo_write` / `todo_read` (the orchestrator's own
+ * planning), `ask_user_question` (requirements), and the `super-agent` tool
+ * itself — it is the dispatch channel and is registered by the loader
+ * (`super-agent-loader.cjs`, `static Name = "super-agent"`), not by the bundle.
  *
  * The exclusion is per session: child sessions (SuperAgentManager) deliberately
- * do NOT pass settings and therefore keep `task` — the main session hands the
- * sub-agent work down to them.
+ * do NOT pass settings and therefore keep every tool — the main session hands
+ * both the implementation and the investigation down to them.
+ *
+ * Side effect (deliberate, not hidden): the `@iflow` chat participant and
+ * `iflow.askSelection` reuse this panel session, so they lose file reads and
+ * shell commands too; slash commands that need to inspect the workspace (e.g.
+ * `/init`) likewise have to be delegated.
  */
-export const MAIN_SESSION_DISALLOWED_TOOLS = ["task"] as const;
+export const MAIN_SESSION_DISALLOWED_TOOLS = [
+  // in-process sub-agents — the main session delegates to Super Agent children
+  "task",
+  // reading / exploring
+  "read_file",
+  "read_many_files",
+  "glob",
+  "search_file_content",
+  "list_directory",
+  "image_read",
+  "web_fetch",
+  "web_search",
+  "ReadCommandOutput",
+  "lsp_goto_definition",
+  "lsp_find_references",
+  "lsp_hover",
+  // writing
+  "write_file",
+  "replace",
+  // defensive: declared at L3160 but not registered in this bundle version
+  // (class `Aut` is never passed to `t(...)`); kept for future CLI versions
+  "multi_edit",
+  "xml_escape",
+  // executing
+  "run_shell_command",
+] as const;
 /** Fresh settings object for one main-session `session/new` / `session/load`.
  * A factory (not a shared object) so no caller can mutate another's copy. */
 export function mainSessionSettings(): SessionSettings {
@@ -766,13 +832,20 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly superScan = new SuperDirectiveScanner();
   /**
-   * 本主会话已派发过的委派载荷指纹（`superDirectiveDedupeKey`）。
+   * 本主会话已派发过的委派载荷指纹（`superDirectiveDedupeKey` 的 SHA-256 摘要）。
    *
    * 同一份载荷在正文通道里被重复写出时只派发一次 —— 否则会开出重复的
    * 子会话（双倍 token、两张看板卡）。换会话 / 恢复会话 / 热重认证时清空：
    * 新会话可以重新派发同样的任务。
+   *
+   * **有界**：载荷数量不设界，账本必须有上限（见
+   * {@link SUPER_DISPATCHED_DIRECTIVES_CAP}），否则长时间运行的会话会一直涨；
+   * 每条只存 32 个 hex 字符的摘要（原始键会带上附件的 base64 内联数据，
+   * 单条可达 MB 级）。
    */
   private readonly superDispatchedDirectives = new Set<string>();
+  /** {@link superDispatchedDirectives} 的容量上限（同 `superToolCallActionsDone` 的做法）。 */
+  private static readonly SUPER_DISPATCHED_DIRECTIVES_CAP = 100;
   /**
    * 已为「名字命中但载荷取不出来」的结构化工具调用弹过提示的 toolCallId。
    *
@@ -896,6 +969,8 @@ export class ChatPanel implements vscode.Disposable {
   private superWaitToastId: number | null = null;
   /** 常驻提示的状态指纹：子会话进度帧高频触发，指纹不变就不重发。 */
   private superWaitToastKey: string | null = null;
+  /** 「已停止 · N 项待处理」常驻带动作提示的 toast id（null = 当前没显示）。 */
+  private deferredAutoTurnsToastId: number | null = null;
   /**
    * 子会话归档的节流写定时器（null = 没有待写的节流写）。
    *
@@ -920,19 +995,15 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly superReportedChildIds = new Set<string>();
   /**
-   * 「子会话已全部结束」提示的一次性标记。
+   * 每个子会话上一次被宿主看到的 SuperStatus（key = childId）。
    *
-   * 完成提示必须挂在**真实事件**上：非终态子会话数从 >0 掉到 0 的那一刻。
-   * 旧实现挂在主会话 hidden 汇报回合收尾时判断「此刻还有没有子会话在跑」——
-   * 动作回执（同样是 hidden 回合）在子会话早已全部终态时收尾，于是又响一次
-   * 铃并宣称「子会话已全部结束」，而同一句文案常被 60s 内容冷却吞掉，界面
-   * 上没有任何新通知（用户实测的「突然响铃但没有通知」）。有新的非终态子
-   * 会话出现时重置标记，下一批结束还能再提示一次。
+   * 完成提示按**子会话逐个**判定：只有「上一次非终态、这一次终态」才是真实
+   * 的收尾事件。旧的聚合实现（非终态数 >0 → 0 时提示「子会话已全部结束」）
+   * 把两个子会话的完成混成一次、还会在恢复归档/刚打开看板时把早已终态的
+   * 事实当成新事件；按 id 记状态后：首次看到就终态 = 没有事件（不提示）、
+   * 重复 sync = 状态没变（不重复提示）、子会话从 list 消失 = 清记录。
    */
-  private superSettledAnnounced = false;
-  /** 是否亲眼看见过非终态子会话（即这批子会话确实跑过）。没看见过就谈不上
-   * 「刚刚全部结束」—— 刚打开一个子会话早已终态的会话不该再响一次铃。 */
-  private superRunningObserved = false;
+  private superLastStatus = new Map<string, SuperStatus>();
   /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
@@ -1342,10 +1413,23 @@ export class ChatPanel implements vscode.Disposable {
         if (state.pendingApproval) {
           text = `$(bell) iFlow: ${vscode.l10n.t("等待审批")}${model}`;
           background = new vscode.ThemeColor("statusBarItem.warningBackground");
+        } else if (state.superWaiting && state.superHeld) {
+          // 用户按了停止：汇报被压在队列里，主会话并没有在生成。旧实现把它和
+          // 真 streaming 渲染成同一串「生成中」+ 转圈，而 composer 明明显示
+          // 「发送」—— 用户看到的就是「卡住了」。如实写已停止 + 待处理数量，
+          // 不转圈；下一步动作放在 hover tooltip 与常驻提示里。
+          const pending = state.superPendingCount ?? 0;
+          text = pending > 0
+            ? `$(history) iFlow: ${vscode.l10n.t("已停止 · {0} 项待处理", pending)}${model}`
+            : `$(history) iFlow: ${vscode.l10n.t("已停止")}${model}`;
         } else if (state.superWaiting) {
-          // 等待子会话汇报：主会话此刻没有自己的回合，但流程没断 —— 状态栏
-          // 不能显示 idle 的 $(check)，否则读起来就是「没事可做」。
-          text = `$(sync~spin) iFlow: ${vscode.l10n.t("生成中")}${model}`;
+          // 子会话确实还在跑 / 在等你回答：如实用「进行中 / 等待你处理」，
+          // 不能说「生成中」——那是主回合的语义，此刻主会话是 idle。
+          const kids = state.superSessions ?? [];
+          const awaiting = kids.some((session) => session.status === "awaiting_input");
+          text = awaiting
+            ? `$(bell) iFlow: ${vscode.l10n.t("等待你处理")}${model}`
+            : `$(sync~spin) iFlow: ${vscode.l10n.t("子会话进行中")}${model}`;
         } else {
           text = `$(check) iFlow${mode}${model}`;
         }
@@ -1371,8 +1455,16 @@ export class ChatPanel implements vscode.Disposable {
    */
   private statusBarTooltip(state: SessionState): string {
     const base = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
+    // 压住态必须告诉用户「下一步是什么」，否则「已停止 · N 项待处理」照样像
+    // 死锁。它比用量信息更重要，所以即使没有用量也要出现在 tooltip 里。
+    const heldTip = state.superHeld
+      ? vscode.l10n.t(
+          "已停止：还有 {0} 项子会话结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
+          state.superPendingCount ?? 0,
+        )
+      : null;
     const u = state.usage;
-    if (!u || u.totalTokens <= 0) return base;
+    if (!u || u.totalTokens <= 0) return heldTip ? `${base}\n\n${heldTip}` : base;
     const used = u.contextUsed ?? u.inputTokens;
     const rows: string[] = [];
     if (u.contextWindow) {
@@ -1398,7 +1490,7 @@ export class ChatPanel implements vscode.Disposable {
     if (u.prefillTokens && u.prefillTokens > 0) {
       rows.push(
         vscode.l10n.t(
-          "预填充 {0} tokens（系统提示词 / 记忆 / 工具声明）",
+          "每次请求固定携带 {0} tokens（系统提示词、记忆与工具说明）",
           u.prefillTokens.toLocaleString(),
         ),
       );
@@ -1423,7 +1515,8 @@ export class ChatPanel implements vscode.Disposable {
         : `$${u.estimatedCost.toFixed(2)}`;
       rows.push(vscode.l10n.t("预估成本 {0}（按公开单价估算）", cost));
     }
-    return `${base}\n\n**${vscode.l10n.t("会话用量")}**\n\n${rows.map((r) => `- ${r}`).join("\n")}`;
+    const usageTip = `${base}\n\n**${vscode.l10n.t("会话用量")}**\n\n${rows.map((r) => `- ${r}`).join("\n")}`;
+    return heldTip ? `${usageTip}\n\n${heldTip}` : usageTip;
   }
 
   /**
@@ -1496,6 +1589,7 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperActionReceipts = [];
     this.pendingDelegatedUserTurns = [];
     this.autoTurnsStoppedFor = null;
+    this.clearDeferredAutoTurnsToast();
     this.promptRequestSessionId = null;
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
@@ -1599,7 +1693,17 @@ export class ChatPanel implements vscode.Disposable {
   private wireWebview(webview: vscode.Webview): void {
     webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
     webview.html = this.buildHtml(webview);
-    webview.onDidReceiveMessage((msg: WebviewToHost) => void this.handleWebviewMessage(msg));
+    // One catch for the whole route: a rejected branch (workspaceState.update,
+    // persistSessions, a transcript/attachment write, …) used to become a
+    // silent unhandled rejection — the user saw nothing at all. Log it and
+    // surface it as a toast; never swallow it.
+    webview.onDidReceiveMessage((msg: WebviewToHost) => {
+      void this.handleWebviewMessage(msg).catch((error: unknown) => {
+        const detail = errorMessage(error);
+        this.log.error(`webview message failed (${msg.type}): ${detail}`);
+        this.store.sendToast("error", vscode.l10n.t("操作失败：{0}", detail));
+      });
+    });
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -1722,11 +1826,11 @@ export class ChatPanel implements vscode.Disposable {
       [
         {
           label: globalLabel,
-          description: vscode.l10n.t("跨项目生效（~/.iflow/AGENTS.md）"),
+          description: vscode.l10n.t("所有项目通用（保存在本机 iFlow 配置里）"),
         },
         {
           label: projectLabel,
-          description: vscode.l10n.t("仅当前项目（AGENTS.md）"),
+          description: vscode.l10n.t("仅当前项目（保存在项目目录里）"),
         },
       ],
       { placeHolder: vscode.l10n.t("这条记忆保存到哪里？") },
@@ -2258,7 +2362,7 @@ export class ChatPanel implements vscode.Disposable {
         void this.sendApprovalPolicy();
         break;
       case "saveApprovalPolicy":
-        this.saveApprovalPolicy(msg.rules);
+        await this.saveApprovalPolicy(msg.rules);
         break;
       case "dismissApprovalRuleDraft":
         this.approvalDraft = null;
@@ -2328,7 +2432,12 @@ export class ChatPanel implements vscode.Disposable {
     try {
       await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
     } catch (error) {
-      this.log.warn(`failed to update ${key}: ${errorMessage(error)}`);
+      const detail = errorMessage(error);
+      this.log.warn(`failed to update ${key}: ${detail}`);
+      // A silent failure made the control look like it "snapped back" on its
+      // own — say which setting could not be written (the value the user sees
+      // is the one VSCode still has on disk).
+      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", key));
     }
   }
 
@@ -2445,8 +2554,12 @@ export class ChatPanel implements vscode.Disposable {
    * sound + chime overlap is the accepted price of the cue never vanishing
    * again (set `osNotifications: approvals` for a chime-only away cue).
    * Synthesized in the webview (Web Audio), no asset files.
+   *
+   * `child` is the third, deliberately lighter cue: ONE child session settled
+   * (completed / failed / cancelled). It must be distinguishable from `done`
+   * by ear — a child finishing is progress, not the main session finishing.
    */
-  private postSound(kind: "done" | "error"): void {
+  private postSound(kind: "done" | "error" | "child"): void {
     const cfg = vscode.workspace.getConfiguration("iflow");
     if (cfg.get<boolean>("soundFeedback", true) === false) return;
     this.postToWebview({ type: "playSound", kind });
@@ -2497,25 +2610,51 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Completion cue for a REAL turn (a user turn or a regenerated turn).
+   * Shared completion cue: native toast (gated) + chime (universal, subject-
+   * specific).
    *
    * Symmetry rule (2026-11-15): the chime must accompany something the user
-   * can perceive. `notifyOsDecision` decides whether the away-toast fires; when it
-   * did not, the chime still rings unless the drop reason was "duplicate"
-   * (throttle / content cooldown) — those mean the identical 「已完成本轮
-   * 回复」 line was delivered seconds ago and the user got no new signal, so
-   * a lone chime would read as "a notification appeared" while the UI shows
+   * can perceive. `notifyOsDecision` decides whether the away-toast fires;
+   * when it did not, the chime still rings unless the drop reason was
+   * "duplicate" (throttle / content cooldown) — those mean an identical line
+   * was delivered moments ago and the user got no new signal, so a lone
+   * chime would read as "a notification appeared" while the UI shows
    * nothing. Every other drop reason (watching, osNotifications off, focused
    * window) leaves the chime as the user's only cue and must still ring.
    *
-   * Host-internal turns (Super Agent report / action-receipt deliveries) do
-   * NOT come through here: they are bookkeeping, not user turns (see the
-   * completion branch in `sendPrompt`).
+   * The three wrappers below are DIFFERENT subjects and must stay separate
+   * (2026-11-16 user request) — same event/chime for all of them made 「一个
+   * 子会话干完」 and 「主会话汇报完」 indistinguishable:
+   *   - announceTurnDone    → `turnDone`,    done 音, 「iFlow 已完成本轮回复」
+   *   - announceSuperReport → `superReport`, done 音, 「主会话已汇报子会话结果」
+   *   - announceChildDone   → `childDone`,   child 音, 「子会话「{0}」已…」
+   * Host bookkeeping turns that are NOT reports (action receipts, delegated
+   * user-turn backfill) never call any of these — they stay silent.
    */
-  private announceTurnDone(text: string): void {
-    const decision = this.notifyOsDecision("turnDone", text);
+  private announceCue(event: OsNotifyEvent, text: string, kind: "done" | "child"): void {
+    const decision = this.notifyOsDecision(event, text);
     if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
-    this.postSound("done");
+    this.postSound(kind);
+  }
+
+  /** A REAL user turn (typed prompt or regenerate) finished. */
+  private announceTurnDone(text: string): void {
+    this.announceCue("turnDone", text, "done");
+  }
+
+  /**
+   * The main session's hidden Super Agent report turn settled: the main agent
+   * has read the child results and reported back. That IS main-session work
+   * finishing, so it keeps the regular completion chime — but on its own OS
+   * event (`superReport`) so it is never conflated with a child settling.
+   */
+  private announceSuperReport(text: string): void {
+    this.announceCue("superReport", text, "done");
+  }
+
+  /** ONE child session reached a terminal state (per-child light cue). */
+  private announceChildDone(text: string): void {
+    this.announceCue("childDone", text, "child");
   }
 
   /**
@@ -2637,7 +2776,7 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) return;
       if (!raw) {
         this.log.warn(`asset generation returned nothing (kind=${kind})`);
-        reply("", vscode.l10n.t("生成失败（网关无响应或未配置模型），请重试或直接手写内容"));
+        reply("", vscode.l10n.t("生成失败（服务无响应，或没有配置模型），请重试或直接手写内容"));
         return;
       }
       this.log.info(`asset draft generated (kind=${kind}, ${raw.length} chars)`);
@@ -2874,7 +3013,7 @@ export class ChatPanel implements vscode.Disposable {
       ?? (await loadCredentials(this.context.secrets).catch(() => null))
       ?? readActiveEndpoint();
     if (!endpoint) {
-      this.postToWebview({ type: "modelMetadataState", state: "error", error: vscode.l10n.t("未配置 API 凭据，无法联网检索模型数据") });
+      this.postToWebview({ type: "modelMetadataState", state: "error", error: vscode.l10n.t("还没有配置 API Key，无法联网检索模型数据。请先在设置里填写 API Key 并保存。") });
       return;
     }
     this.metadataBusy = true;
@@ -2936,7 +3075,7 @@ export class ChatPanel implements vscode.Disposable {
       // the model — an ungrounded row is dropped, never written to settings.
       const entries = parseModelMetadata(answer, sources);
       if (entries.length === 0) {
-        const reasonText = vscode.l10n.t("联网检索未返回可解析的数据");
+        const reasonText = vscode.l10n.t("联网检索没有返回可用的数据");
         this.postToWebview({ type: "modelMetadataState", state: "error", error: reasonText });
         this.store.sendToast("error", reasonText);
         return;
@@ -3424,16 +3563,16 @@ export class ChatPanel implements vscode.Disposable {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const uri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.joinPath(defaultDir, `iflow-acp-log-${stamp}.ndjson`),
-      filters: { "NDJSON log": ["ndjson", "log", "txt"] },
+      filters: { [vscode.l10n.t("通信日志")]: ["ndjson", "log", "txt"] },
     });
     if (!uri) return;
     try {
       await vscode.workspace.fs.writeFile(uri, Buffer.from(this.wireLog.dump(), "utf8"));
       void vscode.window.showInformationMessage(
-        vscode.l10n.t("ACP 日志已导出（{0} 帧，已脱敏）：{1}", this.wireLog.size, uri.fsPath),
+        vscode.l10n.t("通信日志已导出（{0} 条记录，敏感信息已隐去）：{1}", this.wireLog.size, uri.fsPath),
       );
     } catch (error) {
-      void vscode.window.showErrorMessage(vscode.l10n.t("导出 ACP 日志失败：{0}", errorMessage(error)));
+      void vscode.window.showErrorMessage(vscode.l10n.t("导出通信日志失败：{0}", errorMessage(error)));
     }
   }
 
@@ -3544,6 +3683,23 @@ export class ChatPanel implements vscode.Disposable {
     if (actionId === "queue-diagnostics") {
       if (typeof toastId === "number") this.store.dismissToast(toastId);
       void this.sendDiagnosticsFix();
+      return;
+    }
+    if (actionId === "resume-super-turns") {
+      // 常驻「已停止 · N 项待处理」提示的「继续处理」：用户明确要放开压制。
+      // 队列里的汇报一条不丢，这里只是把闸门打开并立刻恢复投递。
+      const deferredId = this.deferredAutoTurnsToastId;
+      this.clearDeferredAutoTurnsToast();
+      if (typeof toastId === "number" && toastId !== deferredId) {
+        // 兜住异常回包：动作来自别的 toast 时也把它收掉（会被 clear 收掉的那条不再重复）。
+        this.store.dismissToast(toastId);
+      }
+      if (this.autoTurnsHeld()) {
+        this.autoTurnsStoppedFor = null;
+        this.syncSuperWaitingState();
+        void this.drainSuperReports();
+        void this.drainDelegatedUserTurns();
+      }
       return;
     }
     if (typeof toastId === "number") this.store.dismissToast(toastId);
@@ -3732,9 +3888,23 @@ export class ChatPanel implements vscode.Disposable {
     return [...project, ...global];
   }
 
-  private persistApprovalRules(rules: ApprovalRule[]): void {
+  /**
+   * Persist the global rule table. Returns false when the write rejected —
+   * the in-memory table is rolled back so the panel never acts on rules that
+   * would be gone after a window reload (the caller answers with a toast /
+   * a saveResult:"failed" push instead of claiming 已保存).
+   */
+  private async persistApprovalRules(rules: ApprovalRule[]): Promise<boolean> {
+    const previous = this.approvalRules;
     this.approvalRules = rules;
-    void this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
+    try {
+      await this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
+      return true;
+    } catch (error) {
+      this.approvalRules = previous;
+      this.log.warn(`approval policy write failed: ${errorMessage(error)}`);
+      return false;
+    }
   }
 
   /** Bump a matched GLOBAL rule's hit counter (project rules are read-only —
@@ -3748,7 +3918,7 @@ export class ChatPanel implements vscode.Disposable {
       changed = true;
       return { ...r, hits: (r.hits ?? 0) + 1 };
     });
-    if (changed) this.persistApprovalRules(next);
+    if (changed) void this.persistApprovalRules(next);
   }
 
   /** The wire facts a decision is made from (see ApprovalRequestInfo: CLI
@@ -3869,29 +4039,39 @@ export class ChatPanel implements vscode.Disposable {
     return true;
   }
 
-  /** Push the current tables (+ any pending draft) to the policy card. */
-  private async sendApprovalPolicy(): Promise<void> {
+  /** Push the current tables (+ any pending draft) to the policy card.
+   * `saveResult` is only set when this push answers a save request: the card
+   * waits for it before flashing 已保存 (a fire-and-forget send used to flash
+   * success before the host had written anything). */
+  private async sendApprovalPolicy(saveResult?: "ok" | "failed"): Promise<void> {
     const { global, project } = await this.loadApprovalRules();
     this.postToWebview({
       type: "approvalPolicy",
       rules: global,
       projectRules: project,
       draft: this.approvalDraft,
+      ...(saveResult ? { saveResult } : {}),
     });
   }
 
   /** Save the global table (replace semantics — see shared/messages.ts). */
-  private saveApprovalPolicy(rules: readonly ApprovalRule[]): void {
+  private async saveApprovalPolicy(rules: readonly ApprovalRule[]): Promise<void> {
     const clean: ApprovalRule[] = [];
     for (const raw of rules.slice(0, APPROVAL_RULES_MAX)) {
       const rule = normalizeApprovalRule(raw, `rule-${clean.length + 1}`);
       if (rule && !clean.some((r) => r.id === rule.id)) clean.push(rule);
     }
-    this.persistApprovalRules(clean);
     // Saving from the card resolves the draft either way (the user either
     // kept it in `rules` or threw it away).
     this.approvalDraft = null;
-    void this.sendApprovalPolicy();
+    const ok = await this.persistApprovalRules(clean);
+    if (!ok) {
+      this.store.sendToast("warning", vscode.l10n.t("审批规则保存失败，已保留原规则"));
+    }
+    // Push the (possibly rolled-back) table either way: the card uses this
+    // reply to stop its saving state, and on failure it must show what is
+    // actually persisted rather than the user's unsaved draft.
+    await this.sendApprovalPolicy(ok ? "ok" : "failed");
   }
 
 
@@ -4082,20 +4262,33 @@ export class ChatPanel implements vscode.Disposable {
    * 用户停止后如实告诉用户还有多少自动回合被压住。
    *
    * 静默压制会让「我明明点了停止，怎么还有东西在等」变成新的困惑；数量为 0
-   * 时保持安静（每次停止都弹一条会变成噪声）。
+   * 时保持安静（每次停止都弹一条会变成噪声）。提示常驻并带「继续处理」动作：
+   * 一次性的 toast 转瞬即逝，用户看到的就是「点了停止、按钮还禁着、没人告诉我
+   * 出路」的死锁。压制解除（下一条消息 / 新建会话 / 面板关闭 / 点了动作）时
+   * 由 clearDeferredAutoTurnsToast 收掉，绝不常驻到下一轮。
    */
   private announceDeferredAutoTurns(): void {
-    const owner = this.currentMainSessionId();
-    const pending =
-      this.pendingSuperReportPrompts.filter((item) => item.mainSessionId === owner).length +
-      this.pendingDelegatedUserTurns.filter((item) => item.mainSessionId === owner).length;
+    const pending = this.pendingAutoTurnCount();
     if (pending === 0) return;
-    this.store.sendToast(
+    this.clearDeferredAutoTurnsToast();
+    this.deferredAutoTurnsToastId = this.store.sendToast(
       "info",
-      vscode.l10n.t("已停止生成；还有 {0} 项子会话结果待处理，发送下一条消息后继续", pending),
+      vscode.l10n.t("已停止；还有 {0} 项子会话结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
+      {
+        persistent: true,
+        action: { actionId: "resume-super-turns", label: vscode.l10n.t("继续处理") },
+      },
     );
     // 常驻「等待子会话」提示的文案也要跟着变（它默认写着「会自动继续」）。
     this.refreshSuperWaitHeartbeat();
+  }
+
+  /** 收掉「已停止 · N 项待处理」常驻提示（压制解除的各条路径共用）。 */
+  private clearDeferredAutoTurnsToast(): void {
+    if (this.deferredAutoTurnsToastId !== null) {
+      this.store.dismissToast(this.deferredAutoTurnsToastId);
+      this.deferredAutoTurnsToastId = null;
+    }
   }
 
   private cancelAllApprovals(reason: string): void {
@@ -5316,7 +5509,7 @@ export class ChatPanel implements vscode.Disposable {
       this.postToWebview({
         type: "mcpServers",
         ...this.readMcpScopes(),
-        error: vscode.l10n.t("无项目上下文（未打开工作区），无法保存项目级 MCP 配置"),
+        error: vscode.l10n.t("没有打开工作区，无法保存项目级 MCP 配置"),
       });
       return;
     }
@@ -5493,8 +5686,13 @@ export class ChatPanel implements vscode.Disposable {
     const name = profileName?.trim() || creds.modelName;
     // Renaming onto an existing row would overwrite that row's credentials and
     // delete the old key (user-reported). Refuse and leave SecretStorage
-    // untouched — a silent clobber is unrecoverable for the user.
-    if (replaced && replaced !== name && profiles[name]) {
+    // untouched — a silent clobber is unrecoverable for the user. The kernel
+    // file is checked too: a profile that lives only there (written by the CLI
+    // or not yet migrated into SecretStorage) must not be clobbered either.
+    const kernelNames = new Set(
+      Object.keys(readCliSettings()?.apiProfiles ?? {}).map((key) => key.trim()),
+    );
+    if (replaced && replaced !== name && (profiles[name] || kernelNames.has(name))) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name),
       );
@@ -5550,14 +5748,17 @@ export class ChatPanel implements vscode.Disposable {
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
     setKernelActiveProfile(name);
     await this.rememberWorkspaceModelFor(name, creds.modelName);
-    if (this.restoring || this.connecting) {
-      // A connect/restore is in flight and owns the process: tearing it down
-      // would kill the handshake the user is waiting for. Persist + refresh,
-      // and say plainly which credentials this connection still uses.
+    if (this.restoring || this.connecting || this.historySyncBusy) {
+      // A connect/restore/history reload is in flight and owns the process:
+      // tearing it down would kill the handshake the user is waiting for (and
+      // `reconnectWithCredentials` would bail out silently on
+      // `historySyncBusy`, leaving the list showing the OLD values with zero
+      // feedback — the user reads that as "保存失败"). Persist + refresh, and
+      // say plainly which credentials this connection still uses.
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
       void vscode.window.showInformationMessage(
-        vscode.l10n.t("API 配置已保存，本次连接仍在用旧凭据；重新连接后生效"),
+        vscode.l10n.t("API 配置已保存；本次连接仍在用旧凭据，重新连接后生效"),
       );
       return;
     }
@@ -5693,7 +5894,11 @@ export class ChatPanel implements vscode.Disposable {
     const profiles = await loadProfiles(this.context.secrets);
     const inSecrets = Object.hasOwn(profiles, trimmed);
     const inKernel = Object.hasOwn(readKernelApiProfiles(), trimmed);
-    if (!inSecrets && !inKernel) return;
+    if (!inSecrets && !inKernel) {
+      this.postToWebview({ type: "profileDeleteResult", name: trimmed, ok: false });
+      return;
+    }
+    let kernelWriteFailed = false;
     if (inSecrets) {
       delete profiles[trimmed];
       await saveProfiles(this.context.secrets, profiles);
@@ -5701,7 +5906,11 @@ export class ChatPanel implements vscode.Disposable {
     if (inKernel) {
       const deleted = deleteKernelApiProfile(trimmed);
       if (!deleted) {
-        void vscode.window.showWarningMessage(vscode.l10n.t("无法写入内核配置 {0}", trimmed));
+        kernelWriteFailed = true;
+        // In-panel receipt: the profile is still in the kernel file, so the
+        // row stays listed and the user must learn why (the old
+        // showWarningMessage landed outside the panel's notification stack).
+        this.store.sendToast("warning", vscode.l10n.t("无法写入内核配置 {0}", trimmed));
       }
     }
     // Drop the kernel's active pointer when it names the deleted row so the
@@ -5714,9 +5923,11 @@ export class ChatPanel implements vscode.Disposable {
     if (this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() === trimmed) {
       await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
       this.store.setAuth(await this.buildAuthState(false, true));
+      this.postToWebview({ type: "profileDeleteResult", name: trimmed, ok: !kernelWriteFailed });
       return; // this workspace's profile was deleted → choose another profile
     }
     this.store.setAuth(await this.buildAuthState(this.store.getState().auth.authenticated, false));
+    this.postToWebview({ type: "profileDeleteResult", name: trimmed, ok: !kernelWriteFailed });
   }
 
   /** Tear down the current CLI connection and start fresh with new credentials.
@@ -6338,6 +6549,11 @@ export class ChatPanel implements vscode.Disposable {
     const activeId = sessions[0]?.id ?? null;
     this.store.setSessions(sessions, activeId);
     await this.persistSessions(sessions, activeId);
+    // The session is gone — its title-ledger entry must go with it, otherwise
+    // the set keeps one string per deleted session forever (unbounded growth
+    // over a long-lived panel), and a session id that ever came back would
+    // silently lose its AI title.
+    this.titledSessionIds.delete(id);
   }
 
   /** M4 P1-8: toggle pinned / archived on a persisted session (switcher
@@ -6418,7 +6634,7 @@ export class ChatPanel implements vscode.Disposable {
     const lockState = this.store.getState();
     const lockClient = this.client;
     this.historySyncBusy = true;
-    this.store.setInitializing(true);
+    this.store.setInitializing(true, "deleteSession");
     // Only the ACTIVE session's pending cards belong to what is being deleted.
     // Cancelling them unconditionally (all sessions) silently rejected a live
     // approval while the user deleted an unrelated session from the switcher.
@@ -6492,7 +6708,7 @@ export class ChatPanel implements vscode.Disposable {
     if (init && !init.agentCapabilities.loadSession) {
       this.log.warn("loadSession capability not declared by CLI");
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("当前内核不支持会话恢复（loadSession 能力未声明）"),
+        vscode.l10n.t("当前内核不支持恢复历史会话"),
       );
       return false;
     }
@@ -6603,7 +6819,7 @@ export class ChatPanel implements vscode.Disposable {
       if (restored.blocks.length === 0) {
         restored.blocks.push({
           kind: "text",
-          text: vscode.l10n.t("已恢复会话上下文（内核未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。"),
+          text: vscode.l10n.t("已恢复会话。内核没有保存这条会话的历史记录，所以这里看不到之前的消息，但可以继续对话。"),
         });
       }
       // Structural isolation (user directive): a restored transcript carries
@@ -6931,7 +7147,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "子会话归档损坏，已保留备份；该会话的子会话记录无法恢复（{0}）",
+          "子会话记录已损坏，原文件已备份；这条会话的子会话记录无法恢复（{0}）",
           archive.backupPath ?? archive.damage ?? "unknown",
         ),
       );
@@ -7299,7 +7515,7 @@ export class ChatPanel implements vscode.Disposable {
       const first = scan.invalidBlocks[0]!;
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话委派指令无法解析（{0}，载荷 {1} 字符），已忽略", first.reason, first.body.length),
+        vscode.l10n.t("子会话派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
       );
     }
     if (scan.blocks.length === 0) return;
@@ -7317,7 +7533,7 @@ export class ChatPanel implements vscode.Disposable {
   private dispatchSuperTasks(blocks: readonly SuperTaskSpec[][]): void {
     const manager = this.getSuperAgent();
     if (!manager) {
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法委派子会话"));
+      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
       return;
     }
     let dispatched = 0;
@@ -7325,7 +7541,7 @@ export class ChatPanel implements vscode.Disposable {
     for (const tasks of blocks) {
       for (const task of tasks) {
         // 同一份载荷在正文里被重复写出时只派发第一次。
-        const dedupeKey = superDirectiveDedupeKey([task]);
+        const dedupeKey = ChatPanel.superDirectiveFingerprint(superDirectiveDedupeKey([task]));
         if (this.superDispatchedDirectives.has(dedupeKey)) {
           this.log.info(`super agent: skipped-duplicate directive 「${task.title}」`);
           continue;
@@ -7334,7 +7550,7 @@ export class ChatPanel implements vscode.Disposable {
           droppedAttachments += count;
         });
         const session = manager.spawn(spec);
-        this.superDispatchedDirectives.add(dedupeKey);
+        this.rememberDispatchedDirective(dedupeKey);
         dispatched++;
         this.log.info(`super agent: dispatched ${session.id} 「${spec.title}」`);
       }
@@ -7342,7 +7558,7 @@ export class ChatPanel implements vscode.Disposable {
     if (droppedAttachments > 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话委派指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
+        vscode.l10n.t("子会话派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
     // 全部命中重复时没有「已经派发」这件事可报 ——
@@ -7388,10 +7604,13 @@ export class ChatPanel implements vscode.Disposable {
       this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
       return;
     }
+    // 载荷纠偏：新版 `super-agent` 工具同时收 tasks / actions，模型做管理动作
+    // 时可能只传 `{"actions":[…]}`（名字仍是 dispatch）。分流以解析器纠偏后的
+    // kind 为准 —— 管理动作走动作链路，既不派发子会话，也不是「未派发」失败。
     this.log.info(
-      `super agent: accepted structured ${kind} tool call (${update.toolCallId || "no-id"})`,
+      `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
-    if (kind === "dispatch") {
+    if (parsed.kind === "dispatch") {
       this.dispatchSuperTasks(parsed.tasks);
       return;
     }
@@ -7420,6 +7639,39 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 委派载荷指纹：账本只存 SHA-256 摘要，不存整份载荷键。
+   *
+   * `superDirectiveDedupeKey` 会把附件的内联数据（base64 图片/文件，可达
+   * MB 级）一起序列化进键 —— 直接把键存进集合等于把附件内容在内存里再留
+   * 一份。摘要后每条账目只有 32 个 hex 字符（16 字节摘要），两条不同载荷
+   * 撞车的概率 ~2⁻¹²⁸，可以当作「同键即同载荷」。
+   */
+  private static superDirectiveFingerprint(dedupeKey: string): string {
+    return createHash("sha256").update(dedupeKey).digest("hex").slice(0, 32);
+  }
+
+  /**
+   * 记住一条已派发的委派载荷（有界 FIFO 账本，超了丢最早一条）。
+   *
+   * 与 {@link superToolCallActionsDone} / {@link superToolCallWarned} 同一套
+   * 有界集合做法：载荷数量不设界，账本必须有上限，否则长时间运行的会话会
+   * 一直涨。
+   *
+   * 淘汰的代价（诚实说明）：被淘汰的载荷若再次出现在正文里，会被当成新
+   * 载荷**再派发一次**（多开一个子会话）。触发条件很窄 —— 先有 100 条不同
+   * 载荷被派发过，模型再逐字重写其中一条；那时会话早已有上百个子会话，
+   * 多开一个的代价比账本无限增长小。跨通道去重（思考里写一遍、正文里再写
+   * 一遍）的真实场景发生在同一轮内，落在窗口之内，不受影响。
+   */
+  private rememberDispatchedDirective(fingerprint: string): void {
+    if (this.superDispatchedDirectives.size >= ChatPanel.SUPER_DISPATCHED_DIRECTIVES_CAP) {
+      const oldest = this.superDispatchedDirectives.values().next().value;
+      if (oldest !== undefined) this.superDispatchedDirectives.delete(oldest);
+    }
+    this.superDispatchedDirectives.add(fingerprint);
+  }
+
+  /**
    * 名字命中但载荷不可用：日志 + 一次性 toast。
    *
    * 同一条工具帧会在 pending / in_progress / completed 之间反复推送，按
@@ -7441,7 +7693,7 @@ export class ChatPanel implements vscode.Disposable {
     this.store.sendToast(
       "warning",
       vscode.l10n.t(
-        "模型尝试调用不存在的 super-agent 工具（{0}，registry 中不存在），未派发子会话",
+        "模型调用了不存在的 super-agent 工具（{0}，工具列表里没有它），未派发子会话",
         name,
       ),
     );
@@ -7941,6 +8193,9 @@ export class ChatPanel implements vscode.Disposable {
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
+          // 这一轮是「主会话汇报子会话结果」：收尾时用 superReport 事件 +
+          // done 音（与单个子会话收尾的 childDone + child 音区分开）。
+          reportTurn: true,
         });
         if (!started) {
           // 回合没跑起来（主会话被别的回合占着）：这条汇报**留在队列里**，
@@ -7992,6 +8247,19 @@ export class ChatPanel implements vscode.Disposable {
    */
   private autoTurnsHeld(): boolean {
     return this.autoTurnsStoppedFor !== null && this.autoTurnsStoppedFor === this.currentMainSessionId();
+  }
+
+  /**
+   * 当前主会话被压住 / 待投递的自动回合数（子会话汇报 + 被改道用户消息补投）。
+   * `announceDeferredAutoTurns` 的提示数量、`syncSuperWaitingState` 写给 webview
+   * 的 `superPendingCount` 与状态栏文案共用这一处口径 —— 分开数迟早会漂移。
+   */
+  private pendingAutoTurnCount(): number {
+    const owner = this.currentMainSessionId();
+    return (
+      this.pendingSuperReportPrompts.filter((item) => item.mainSessionId === owner).length +
+      this.pendingDelegatedUserTurns.filter((item) => item.mainSessionId === owner).length
+    );
   }
 
   /**
@@ -8112,6 +8380,10 @@ export class ChatPanel implements vscode.Disposable {
    * 「新会话」锁住：等待期新建会话会让排队里的汇报落到已被替换的会话上。
    * 顶栏不再为它渲染忙碌 chip（忙碌信号由转录底部浮动 pill 与子会话看板计数
    * 承担）。
+   *
+   * 例外：用户按了「停止」压住汇报时（`superHeld`），「新会话」必须放行 ——
+   * 否则用户点完停止就再无出路（唯一的解锁是发下一条消息，而那条一次性 toast
+   * 转瞬即逝），面板看起来就是永久卡住。状态栏也不再把压住态谎报成「生成中」。
    */
   private syncSuperWaitingState(): void {
     // 子会话被清理后它的 id 不再有意义 —— 顺手剪掉，别让集合无限增长。
@@ -8122,46 +8394,60 @@ export class ChatPanel implements vscode.Disposable {
     for (const id of [...this.superReportedChildIds]) {
       if (!liveIds.has(id)) this.superReportedChildIds.delete(id);
     }
-    this.store.setSuperWaiting(this.superWaitingForReports(live));
-    this.announceChildrenSettledIfDone(live);
+    this.store.setSuperWaiting(
+      this.superWaitingForReports(live),
+      this.autoTurnsHeld(),
+      this.pendingAutoTurnCount(),
+    );
+    this.syncChildSettledAnnouncements(live);
   }
 
   /**
-   * 「子会话已全部结束」提示：只在一个**真实事件**上响一次 —— 非终态子会话
-   * 数从 >0 掉到 0 的那一刻。
+   * 子会话逐个完成提示：每个子会话**各自**从非终态迁移到终态
+   * （completed / failed / cancelled）时提示一次。
    *
-   * 为什么不能挂在 hidden 汇报回合收尾上：hidden 回合不止是汇报，还有动作
-   * 回执（`queueSuperActionReceipt`）。回执在子会话早已全部终态时也会跑一轮，
-   * 旧实现按「此刻还有没有子会话在跑」判断，于是每份回执都响一次铃并宣称
-   * 「子会话已全部结束」——那件事早就发生过；同一句文案又会被 60s 内容冷却
-   * 吞掉，用户于是只听到铃、界面上没有任何新通知。把提示绑到状态收尾事件
-   * 本身，就既不会重复、也不会在没有事件时响。
+   * 为什么放弃聚合判定（旧的「非终态数 >0 掉到 0 → 子会话已全部结束」）：
+   *  ①聚合把多个子会话的收尾混成一次 —— 用户要的是「每个子会话各提示一次」，
+   *    两个子会话先后完成应各响一声，而不是等到最后一个才响。
+   *  ②聚合无法区分「刚刚结束」与「早就结束」：恢复归档、刚打开看板时非终态数
+   *    本来就是 0，任何额外一次 sync 都可能误报一个过期事实。
+   *  ③「全部结束」的文案与用户回合完成共用 turnDone 事件和 done 音，导致
+   *    「子会话干完」与「主会话干完」在通知通道上无法区分（2026-11-16 需求）。
    *
    * 判据用**全部活子会话**（不分主会话）：看板对活着的子会话一律可见，提示
-   * 与用户能看到的内容保持一致。`superSettledAnnounced` 在新一批非终态子会话
-   * 出现时重置，所以下一批结束还能再提示一次。
+   * 与用户能看到的内容保持一致。状态记录按 childId 保存，子会话被清理后
+   * 顺手剪掉，避免集合无限增长。
    */
-  private announceChildrenSettledIfDone(live: SuperSessionUi[]): void {
+  private syncChildSettledAnnouncements(live: SuperSessionUi[]): void {
     if (this.disposed) return;
-    const running = live.filter((session) => !isTerminalSuperStatus(session.status));
-    if (running.length > 0) {
-      // 看见它跑起来了 —— 之后掉到 0 才算「刚刚全部结束」。
-      this.superRunningObserved = true;
-      this.superSettledAnnounced = false;
-      return;
+    const liveIds = new Set(live.map((session) => session.id));
+    for (const id of [...this.superLastStatus.keys()]) {
+      if (!liveIds.has(id)) this.superLastStatus.delete(id);
     }
-    if (live.length === 0) {
-      // 全部被清理 / 从来没派发过：没有事件可宣布，下一批重新开始。
-      this.superRunningObserved = false;
-      this.superSettledAnnounced = false;
-      return;
+    for (const session of live) {
+      const previous = this.superLastStatus.get(session.id);
+      this.superLastStatus.set(session.id, session.status);
+      // 首次看到它（恢复归档 / 刚打开看板）：这不是「刚刚结束」，是过期事实。
+      if (previous === undefined) continue;
+      // 上次就已经终态：重复 sync（心跳每 1.5s 一次）不能重复提示。
+      if (isTerminalSuperStatus(previous)) continue;
+      // preparing / running / awaiting_input 都还不是完成。
+      if (!isTerminalSuperStatus(session.status)) continue;
+      this.announceChildSettled(session);
     }
-    // 从未观察到它跑过（例如刚切到一个子会话早已终态的会话）就不宣布：
-    // 那不是「刚刚结束」，而是一个过期事实 —— 正是要消灭的假事件。
-    if (!this.superRunningObserved || this.superSettledAnnounced) return;
-    this.superSettledAnnounced = true;
-    this.superRunningObserved = false;
-    this.announceTurnDone(vscode.l10n.t("子会话已全部结束"));
+  }
+
+  /** 一个子会话刚刚收尾：按终态分别给文案（事件与音色由 announceChildDone 统一）。 */
+  private announceChildSettled(session: SuperSessionUi): void {
+    const title = session.title;
+    if (session.status === "completed") {
+      this.announceChildDone(vscode.l10n.t("子会话「{0}」已完成", title));
+    } else if (session.status === "failed") {
+      this.announceChildDone(vscode.l10n.t("子会话「{0}」已失败", title));
+    } else {
+      // 终态只剩 cancelled（isTerminalSuperStatus 已过滤）。
+      this.announceChildDone(vscode.l10n.t("子会话「{0}」已中断", title));
+    }
   }
 
   /**
@@ -8252,7 +8538,17 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "cancel": {
         if (!msg.sessionId) return;
-        await manager.cancel(msg.sessionId);
+        const outcome = await manager.cancel(msg.sessionId);
+        // 与 cancelAll / cleanup / retry 一致，单个中断也要有可见回执。
+        // 按 SuperCancelOutcome 的真实 reason 区分文案：幂等重复（已终态）
+        // 不是失败，但要如实告诉用户「无需中断」，避免以为刚才那下没生效。
+        if (outcome.reason === "cancelled") {
+          this.store.sendToast("info", vscode.l10n.t("已中断子会话"));
+        } else if (outcome.reason === "already-terminal") {
+          this.store.sendToast("info", vscode.l10n.t("这个子会话已经结束了，不用再中断"));
+        } else {
+          this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
+        }
         break;
       }
       case "cancelAll": {
@@ -8279,6 +8575,35 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+      case "cleanupBatch": {
+        const ids = msg.sessionIds ?? [];
+        if (ids.length === 0) return;
+        // 串行清理：每个目标都要删 worktree / 跑 git 探测，并发只会互相抢锁。
+        // 逐条 toast 会把转录刷满（N 条重复），因此这里只聚合结果、发**一条**
+        // 汇总回执；单个清理仍走上面的 `cleanup` 分支，回执保持原样。
+        let cleaned = 0;
+        let branchesKept = 0;
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            const result = await manager.cleanup(id, { keepBranch: msg.keepBranch });
+            if (result.ok) {
+              cleaned += 1;
+              if (result.branchKept) branchesKept += 1;
+            } else {
+              failed += 1;
+              this.log.warn(
+                `super agent: 批量清理未能完成 ${id}：${result.reason ?? "未知原因"}`,
+              );
+            }
+          } catch (error) {
+            failed += 1;
+            this.log.warn(`super agent: 批量清理 ${id} 失败：${errorMessage(error)}`);
+          }
+        }
+        this.reportSuperCleanupBatch(cleaned, failed, branchesKept);
+        break;
+      }
       case "merge": {
         if (!msg.sessionId) return;
         await this.requestSuperMerge(msg.sessionId);
@@ -8294,6 +8619,50 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+    }
+  }
+
+  /**
+   * 批量清理的**唯一一条**回执。
+   *
+   * 看板的「清理已结束」一次清一整批；旧实现让 host 逐个 `cleanup`，于是
+   * 用户看到 N 条一模一样的「已清理子会话」，既不知道整批到哪了、也不知道
+   * 有没有失败。这里按真实聚合结果措辞：全部成功才说「已清理 N 个」，
+   * 有失败一律 warning 级并给出未能清理的数量，分支被保留时如实补一句 ——
+   * **绝不谎报全部成功**。
+   */
+  private reportSuperCleanupBatch(cleaned: number, failed: number, branchesKept: number): void {
+    if (cleaned === 0 && failed === 0) return;
+    if (failed === 0) {
+      if (branchesKept === 0) {
+        this.store.sendToast("info", vscode.l10n.t("已清理 {0} 个子会话", cleaned));
+      } else {
+        this.store.sendToast(
+          "info",
+          vscode.l10n.t("已清理 {0} 个子会话，{1} 个分支已保留", cleaned, branchesKept),
+        );
+      }
+      return;
+    }
+    if (cleaned === 0) {
+      this.store.sendToast("warning", vscode.l10n.t("未能清理这 {0} 个子会话", failed));
+      return;
+    }
+    if (branchesKept === 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("已清理 {0} 个子会话，{1} 个未能清理", cleaned, failed),
+      );
+    } else {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "已清理 {0} 个子会话，{1} 个未能清理，{2} 个分支已保留",
+          cleaned,
+          failed,
+          branchesKept,
+        ),
+      );
     }
   }
 
@@ -8925,13 +9294,13 @@ export class ChatPanel implements vscode.Disposable {
       const result = applyThinkingRules(rules);
       if (result.skippedInvalid) {
         void vscode.window.showWarningMessage(
-          vscode.l10n.t("思考能力规则同步失败：~/.iflow/thinking-models.json 格式错误，已保留原文件"),
+          vscode.l10n.t("思考能力规则同步失败：本机 iFlow 配置里的思考能力规则格式有误，已保留原文件"),
         );
         return;
       }
       if (result.added + result.changed > 0) {
         void vscode.window.showInformationMessage(
-          vscode.l10n.t("已同步 {0} 思考能力规则到 ~/.iflow/thinking-models.json，生效下次会话启动", result.added + result.changed),
+          vscode.l10n.t("已同步 {0} 条思考能力规则到本机 iFlow 配置，下次会话启动时生效", result.added + result.changed),
         );
       }
     } catch {
@@ -9229,8 +9598,8 @@ export class ChatPanel implements vscode.Disposable {
     const items: InjectedContextItem[] = [];
     items.push({
       kind: "system",
-      label: vscode.l10n.t("系统提示词（未随会话捕获）"),
-      content: vscode.l10n.t("内核未启用上下文报告（acp-context-report Mod），系统提示词正文无法透明展示。"),
+      label: vscode.l10n.t("系统提示词（本次会话没有捕获到）"),
+      content: vscode.l10n.t("当前内核没有提供上下文报告，无法展示系统提示词的完整内容。"),
     });
     items.push(...(await this.memory.injectedContextItems()));
     return items;
@@ -9612,23 +9981,36 @@ export class ChatPanel implements vscode.Disposable {
    * Per user directive the CLI's hardcoded `_meta` catalog is NEVER used as a
    * fallback: an unreachable or empty endpoint yields an empty list (the CLI's
    * current model stays selectable so the dropdown isn't blank).
+   *
+   * The detailed variant exists because "no endpoint configured", "endpoint
+   * unreachable" and "endpoint reachable but returned zero models" all used to
+   * collapse into `[]` — a user-triggered refresh could then neither explain
+   * itself nor avoid lying about the cause.
    */
-  private async queryLiveModels(): Promise<SessionState["models"]> {
+  private async queryLiveModelsDetailed(): Promise<
+    | { ok: true; models: SessionState["models"] }
+    | { ok: false; reason: "no-endpoint" | "unreachable"; message?: string }
+  > {
     // Kernel-first: the panel persists its profiles into the shared
     // settings.json, so the workspace handshake / SecretStorage cache is the
     // live credential source and `readActiveEndpoint` (the kernel file) is the
     // final fallback for setups configured outside the panel.
     const endpoint = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
-    if (!endpoint) return [];
+    if (!endpoint) return { ok: false, reason: "no-endpoint" };
     try {
-      return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
+      return { ok: true, models: (await queryModelIds(endpoint)).map((id) => ({ id, name: id })) };
     } catch (error) {
       const message = errorMessage(error);
       this.log.warn(
         vscode.l10n.t("模型列表查询失败（不回退内置目录）: {0}", message),
       );
-      return [];
+      return { ok: false, reason: "unreachable", message };
     }
+  }
+
+  private async queryLiveModels(): Promise<SessionState["models"]> {
+    const result = await this.queryLiveModelsDetailed();
+    return result.ok ? result.models : [];
   }
 
   /** Capability rules as stored in ~/.iflow/thinking-models.json (seeded
@@ -9671,8 +10053,21 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async refreshLiveModels(): Promise<void> {
     if (this.store.getState().initializing) return;
-    const models = await this.queryLiveModels();
-    if (models.length === 0) return;
+    const result = await this.queryLiveModelsDetailed();
+    if (!result.ok || result.models.length === 0) {
+      // The old list stays on screen (a transient failure must not collapse
+      // the dropdown), so the user needs a receipt explaining that nothing
+      // was refreshed — and which of the three causes it was.
+      const message =
+        !result.ok && result.reason === "no-endpoint"
+          ? vscode.l10n.t("还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。")
+          : !result.ok
+            ? vscode.l10n.t("模型列表刷新失败，仍显示上次结果")
+            : vscode.l10n.t("端点未返回任何模型，仍显示上次结果");
+      this.store.sendToast("warning", message);
+      return;
+    }
+    const models = result.models;
     const currentModelId = this.store.getState().currentModelId;
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
       models.unshift({ id: currentModelId, name: currentModelId });
@@ -9763,9 +10158,12 @@ export class ChatPanel implements vscode.Disposable {
     // 子会话的归属（mainSessionId）也对不上 —— 用户看到的是汇报丢失 + 归属
     // 错位。命令面板的 iflow.newSession 绕过 webview 的禁用按钮，所以守卫
     // 必须在宿主侧，不能只靠 UI 禁用。
+    // 例外：用户按了「停止」压住汇报时没有任何回合在飞，排队内容按归属留在
+    // 队列里（切回原会话才投递）—— 此时新建会话不会串台，反而必须放行，
+    // 否则用户点完停止就再无出路（唯一解锁是发消息，而那条 toast 转瞬即逝）。
     // Profile 切换必须能换会话（它走的是另一条路：状态已经被换掉了），用
     // bypassSuperWait 放行。
-    if (!options?.bypassSuperWait && this.superWaitingForReports()) {
+    if (!options?.bypassSuperWait && !this.autoTurnsHeld() && this.superWaitingForReports()) {
       this.log.warn("new session refused: the host is still waiting for child session reports");
       this.store.appendNotice(
         vscode.l10n.t("还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
@@ -9820,6 +10218,7 @@ export class ChatPanel implements vscode.Disposable {
     // bypasses the webview's disabled 新会话 button.
     // 新会话不继承上一个会话的「用户已停止」压制。
     this.autoTurnsStoppedFor = null;
+    this.clearDeferredAutoTurnsToast();
     const inFlight = this.store.getState().sessionId;
     if (inFlight) {
       // 还在准备阶段（还没发出 session/prompt）的回合：cancel 到不了 CLI
@@ -9886,7 +10285,7 @@ export class ChatPanel implements vscode.Disposable {
     this.droppingForReset = true;
     // Lock the UI while the CLI spins up the new session (sessions/mode/model
     // switches must not race the in-flight `session/new`).
-    this.store.setInitializing(true);
+    this.store.setInitializing(true, "newSession");
     try {
     const client = await this.ensureClient();
     // A3: a dispose during the handshake rejects ensureClient with
@@ -10003,15 +10402,22 @@ export class ChatPanel implements vscode.Disposable {
      * still receives the prompt, and its answer still streams into the
      * transcript as an assistant message.
      *
+     * `reportTurn: true` — this hidden turn is the Super Agent report delivery
+     * (the main agent reading child results and reporting back). Only that
+     * flavour of hidden turn earns a completion cue (`announceSuperReport`):
+     * action receipts and delegated-user-turn backfills are bookkeeping and
+     * stay silent.
+     *
      * 返回值：true = 这一回合真的在主会话上跑起来了；false = 被拒了（主会话
      * 正忙 / 正在恢复历史 / 已销毁）或被派发成了子会话。汇报队列靠它决定
      * 「这条汇报是投出去了」还是「还欠着」—— 汇报丢了主会话就永远读不到
      * 自己孩子的结果。
      */
-    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
+    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean; reportTurn?: boolean },
   ): Promise<boolean> {
     const internal = options?.internal === true;
     const hidden = options?.hidden === true;
+    const reportTurn = options?.reportTurn === true;
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return false;
@@ -10024,7 +10430,10 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed) return false;
     // 用户自己开口 = 明确「继续」：解除 Stop 对宿主自动回合的压制
     // （见 autoTurnsStoppedFor）。排队内容一直在队列里，这里只是放开闸门。
-    if (!internal && !hidden) this.autoTurnsStoppedFor = null;
+    if (!internal && !hidden) {
+      this.autoTurnsStoppedFor = null;
+      this.clearDeferredAutoTurnsToast();
+    }
     // ── 主会话车道 ────────────────────────────────────────────────
     // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
     // 并发会让转录顺序错乱、上下文互相污染、token 重复计费。
@@ -10309,18 +10718,20 @@ export class ChatPanel implements vscode.Disposable {
       // away-notification (M1 P0-5) with its own gate — no longer mutually
       // exclusive, the exclusivity made the chime unreachable for away users
       // on `osNotifications: all` (user report 2026-10-13).
-      if (result.stopReason !== "cancelled" && !hidden) {
-        // 用户回合：照旧「iFlow 已完成本轮回复」+ 提示音（见 announceTurnDone
-        // 的可见信号对称规则）。
-        //
-        // hidden 回合（子会话汇报 / 动作回执）**完全静音**：那是宿主自己的
-        // 记账回合，转录里没有用户气泡、动作回执更不对应任何新事件。旧实现
-        // 按「此刻是否还有子会话在跑」决定要不要响铃，于是动作回执在子会话
-        // 早已全部终态时照样响一次铃并宣称「子会话已全部结束」——同一句文案
-        // 又常被 60s 内容冷却吞掉，结果就是「响了铃、界面上什么通知都没有」
-        // （用户实测）。真正的「子会话全部结束」事件改挂在子会话状态收尾的
-        // 那一刻（announceChildrenSettledIfDone）。
-        this.announceTurnDone(vscode.l10n.t("iFlow 已完成本轮回复"));
+      if (result.stopReason !== "cancelled") {
+        if (!hidden) {
+          // 用户回合：照旧「iFlow 已完成本轮回复」+ done 音（见 announceCue
+          // 的可见信号对称规则）。
+          this.announceTurnDone(vscode.l10n.t("iFlow 已完成本轮回复"));
+        } else if (reportTurn) {
+          // 主会话汇报回合：主 Agent 读完子会话结果并汇报回来，那是主会话
+          // 真实的收尾工作，用**独立事件** superReport + 常规 done 音 —— 与
+          // 单个子会话收尾（childDone + child 音）明确分开。
+          this.announceSuperReport(vscode.l10n.t("主会话已汇报子会话结果"));
+        }
+        // 其余 hidden 回合（动作回执 / 被改道用户消息补投）**完全静音**：
+        // 那是宿主自己的记账回合，转录里没有用户气泡，也不对应任何新事件。
+        // 单个子会话的完成提示挂在状态迁移上（syncChildSettledAnnouncements）。
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();
@@ -10476,6 +10887,7 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelSeen = false;
     // 用户主动发起的一轮同样算「继续」：解除 Stop 对自动回合的压制。
     this.autoTurnsStoppedFor = null;
+    this.clearDeferredAutoTurnsToast();
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();
@@ -11118,7 +11530,10 @@ export class ChatPanel implements vscode.Disposable {
    * session file was never written), the transcript deletion stands on its own
    * — the model has nothing to forget.
    */
-  private async deleteUserMessage(blockId: string): Promise<void> {
+  private async deleteUserMessage(
+    blockId: string,
+    reason: "deleteMessage" | "rollback" = "deleteMessage",
+  ): Promise<void> {
     if (this.disposed || this.historySyncBusy) return;
     const state = this.store.getState();
     if (
@@ -11143,7 +11558,7 @@ export class ChatPanel implements vscode.Disposable {
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     const file = acpSessionFilePath(sessionId);
     this.historySyncBusy = true;
-    this.store.setInitializing(true);
+    this.store.setInitializing(true, reason);
     // No cancelAll* here: the entry gate above excludes every pending card and
     // the lock (plus the webview's locked composer) keeps new ones from
     // arriving mid-sync — the agent only pushes cards in response to a prompt.
@@ -11282,7 +11697,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("warning", vscode.l10n.t("该轮没有可用的工作区文件快照，仅截断对话后重发。"));
     }
     // 2. Full truncation (transcript + CLI history + session reload).
-    await this.deleteUserMessage(blockId);
+    await this.deleteUserMessage(blockId, "rollback");
     if (this.disposed) return;
     if (this.store.getState().blocks.some((b) => b.kind === "user" && b.id === blockId)) {
       // The delete refused (or the session moved on mid-sync) — the turn is
@@ -11799,7 +12214,7 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`checkpoint retention: removed ${removed.size} store dir(s), freed ${Math.round(freedBytes / (1024 * 1024))} MB`);
     this.store.sendToast(
       "info",
-      vscode.l10n.t("已按快照上限清理 {0} 个快照仓库（释放约 {1} MB）", removed.size, Math.round(freedBytes / (1024 * 1024))),
+      vscode.l10n.t("已按上限清理 {0} 份旧快照（释放约 {1} MB）", removed.size, Math.round(freedBytes / (1024 * 1024))),
       { durationMs: 8000 },
     );
   }
@@ -11917,7 +12332,7 @@ export class ChatPanel implements vscode.Disposable {
     if (mode === "conversation" || mode === "both") {
       // Reuses the full delete chain: transcript truncation + CLI history
       // truncation + reload, plus the checkpoint-index prune inside it.
-      await this.deleteUserMessage(userBlockId);
+      await this.deleteUserMessage(userBlockId, "rollback");
     }
   }
 

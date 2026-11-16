@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import { ChevronRight, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
-import { MCP_CATALOG, buildCatalogConfig } from "../../../shared/mcp-catalog";
+import { MCP_CATALOG, buildCatalogConfig, catalogFieldLabel } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
 import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, FieldLabel, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
@@ -24,10 +24,10 @@ function validateEntry(entry: Entry): string | null {
   try {
     parsed = JSON.parse(entry.json);
   } catch {
-    return t("JSON 格式不合法");
+    return t("配置格式有误：不是合法的 JSON");
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return t("配置必须是 JSON 对象");
+    return t("配置需要是一个 JSON 对象（用一对大括号包起来）");
   }
   return null;
 }
@@ -451,7 +451,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     if (!catalogForm || pending.current || saving) return;
     const template = MCP_CATALOG.find((c) => c.id === catalogForm.entryId);
     if (!template) {
-      setEditError(t("模板不存在"));
+      setEditError(t("这个模板已经找不到了"));
       setCatalogForm(null);
       return;
     }
@@ -466,7 +466,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     }
     const built = buildCatalogConfig(template, catalogForm.values);
     if (built.missing.length > 0) {
-      setEditError(t("请填写：{0}", built.missing.join(", ")));
+      // Keys stay internal: the user reads the label the form renders, and an
+      // unknown key still falls back to itself (the warning is never dropped).
+      const labels = built.missing.map((key) => catalogFieldLabel(template, key));
+      setEditError(t("还需要填写：{0}", labels.join(", ")));
       return;
     }
     const idx = (entries ?? []).length;
@@ -495,7 +498,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 disabled: candidate === "project" && !projectAvailable,
                 title:
                   candidate === "project" && !projectAvailable
-                    ? t("无项目上下文（未打开工作区）")
+                    ? t("没有项目上下文（还没有打开工作区）")
                     : t("写入 {0}", SCOPE_FILE[candidate]),
               }))}
             />
@@ -629,7 +632,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 const dotTitle =
                   view === undefined
                     ? status === null
-                      ? t("连接状态不可获取（内核未连接或状态上报未启用）")
+                      ? t("拿不到连接状态（内核未连接，或没有开启状态上报）")
                       : t("连接状态读取中…")
                     : statusLabel(view) + (view.error ? ` — ${view.error}` : "");
                 return (
@@ -650,7 +653,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                         return (
                           <Chip
                             tone={clash === "overrides" ? "warning" : "muted"}
-                            title={t("两级同名时内核用项目级配置整体替换全局条目（不合并字段）")}
+                            title={t("项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）")}
                           >
                             {clash === "overrides" ? t("覆盖全局") : t("被项目覆盖")}
                           </Chip>
@@ -659,7 +662,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       {view?.contextTokens !== undefined && (
                         <span
                           className="ml-1 shrink-0 text-ui-label font-mono text-muted-foreground"
-                          title={t("工具声明注入模型上下文约 {0} tokens（估算）", fmtTokens(view.contextTokens))}
+                          title={t("这个服务器的工具说明会占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
                         >
                           ≈{fmtTokens(view.contextTokens)}
                         </span>
@@ -731,10 +734,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           <Hint className="mt-2">
             {scope === "project"
               ? t(
-                  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时内核用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启内核」生效。",
+                  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后要点底部的「重启内核」才会生效。",
                 )
               : t(
-                  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启内核」生效（当前会话自动恢复）。",
+                  "这里改的是全局配置（~/.iflow/settings.json）。保存后要点底部的「重启内核」才会生效，当前会话会自动恢复。",
                 )}
           </Hint>
         </>
@@ -770,7 +773,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     {view ? statusLabel(view) : t("状态不可获取")}
                   </span>
                   {view?.scope === "both" && (
-                    <Chip tone="warning" title={t("两级同名时内核用项目级配置整体替换全局条目（不合并字段）")}>
+                    <Chip tone="warning" title={t("项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）")}>
                       {t("项目级覆盖全局")}
                     </Chip>
                   )}
@@ -779,7 +782,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   {view?.contextTokens !== undefined && (
                     <span
                       className="ml-1.5 shrink-0 text-ui-label font-mono text-muted-foreground"
-                      title={t("工具声明注入模型上下文约 {0} tokens（估算）", fmtTokens(view.contextTokens))}
+                      title={t("这个服务器的工具说明会占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
                     >
                       ≈{fmtTokens(view.contextTokens)} tokens
                     </span>
@@ -801,10 +804,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 {tools.length === 0 && prompts.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
                     {!view || view.status === "disconnected" || view.disabled || view.blocked
-                      ? t("工具声明不可获取（未连接或状态上报未启用）")
+                      ? t("拿不到工具列表（未连接，或没有开启状态上报）")
                       : view.status === "connected"
-                        ? t("该服务器当前暴露无工具与提示")
-                        : t("工具声明读取中…")}
+                        ? t("这个服务器没有提供工具或提示")
+                        : t("正在读取工具列表…")}
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -824,13 +827,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                             {tool.schema !== undefined && !tool.schemaOmitted && (
                               <pre
                                 className="mt-2 max-h-24 overflow-y-auto rounded-md bg-muted/8 px-1.5 py-1 font-mono text-ui-caption leading-snug whitespace-pre-wrap break-all"
-                                title={t("参数 schema")}
+                                title={t("参数结构")}
                               >
                                 {JSON.stringify(tool.schema, null, 2)}
                               </pre>
                             )}
                             {tool.schemaOmitted && (
-                              <div className="mt-1 text-ui-caption text-muted-foreground/80">{t("参数 schema 已省略（上报预算超限）")}</div>
+                              <div className="mt-1 text-ui-caption text-muted-foreground/80">{t("参数结构太大，已省略")}</div>
                             )}
                           </div>
                         ))}
@@ -838,7 +841,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     )}
                     {prompts.length > 0 && (
                       <>
-                        <div className="text-ui-label font-semibold text-foreground">{t("提示 ({0})", String(prompts.length))}</div>
+                        <div className="text-ui-label font-semibold text-foreground">{t("提示词 ({0})", String(prompts.length))}</div>
                         {prompts.map((prompt, pi) => (
                           <div key={pi} className="flex items-center gap-1.5">
                             <span className="shrink-0 font-mono text-ui-label text-foreground">{prompt.name}</span>
@@ -1087,7 +1090,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                           )}
                           {extraKeys.length > 0 && (
                             <div className="truncate rounded-lg border border-border/70 bg-surface/40 px-2 py-1 text-ui-label leading-relaxed text-muted-foreground/85">
-                              {t("额外字段保留：{0}", extraKeys.join(", "))}
+                              {t("这些字段会原样保留：{0}", extraKeys.join(", "))}
                             </div>
                           )}
                             </div>
@@ -1104,10 +1107,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                     error = transportOfConfig(cfg) === "stdio"
                       ? typeof cfg.command === "string" && cfg.command.trim() !== ""
                         ? null
-                        : t("stdio 配置需 command field")
+                        : t("stdio 方式需要填写「命令」")
                       : typeof cfg.url === "string" && cfg.url.trim() !== ""
                         ? null
-                        : t("sse/streamable-http 配置需 url field");
+                        : t("sse / streamable-http 方式需要填写「服务 URL」");
                   }
                   if (!error && entries.some((other, ii) => ii !== editing && other.name.trim() === target.name.trim())) {
                     error = t("名称重复：{0}", target.name.trim());
@@ -1126,7 +1129,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             </ActionRow>
             <Hint>
-              {t("编辑只改本地副本，点击「保存」才写入文件。")}
+              {t("编辑只改本地草稿，点「保存」才会写入文件。")}
             </Hint>
           </div>
         );
@@ -1173,7 +1176,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
               {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             </ActionRow>
             <Hint>
-              {t("安装只把模板本地草稿，点击「保存」才写入文件。")}
+              {t("安装只会把模板填进草稿，点「保存」才会写入文件。")}
             </Hint>
           </div>
         );
@@ -1182,7 +1185,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
       {confirmDelete !== null && entries?.[confirmDelete] && (
         <ConfirmDialog
           title={t("删除 MCP 服务器")}
-          message={t("确定删除「{0}」吗？保存后将从内核配置中移除。", entries[confirmDelete]!.name)}
+          message={t("确定删除「{0}」吗？保存后会从内核配置里移除。", entries[confirmDelete]!.name)}
           onConfirm={() => {
             setEntries((current) => current?.filter((_, j) => j !== confirmDelete) ?? null);
             setSavedFlash(false);

@@ -163,7 +163,7 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function flush(): Promise<void> {

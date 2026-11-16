@@ -207,7 +207,7 @@ type Internals = {
 };
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("super agent · 终态默认回收（keepWorktree=false）", () => {

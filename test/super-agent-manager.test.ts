@@ -313,7 +313,7 @@ async function until(predicate: () => boolean, timeoutMs = 15_000): Promise<void
 }
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("super agent · 编排", () => {
@@ -369,9 +369,10 @@ describe("super agent · 编排", () => {
 
     const request = harness.clients[0]?.newSessionRequests[0];
     expect(request).toBeDefined();
-    // 主会话经 `settings.disallowed_tools: ["task"]` 机械剔除 task；
-    // 子会话刻意不传 settings —— 进程内子代理只允许在子会话里跑。
+    // 主会话经 `settings.disallowed_tools` 机械剔除 task 与全部读取/写入/执行
+    // 工具；子会话刻意不传 settings —— 实现与探查都只允许在子会话里跑。
     expect(request?.settings).toBeUndefined();
+    expect(JSON.stringify(request ?? {})).not.toContain("disallowed_tools");
     expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
   }, 30000);
 
@@ -1273,14 +1274,14 @@ describe("super agent · 任务提示词", () => {
     const text = buildTaskPrompt("改登录", "干活", {
       kind: "directory",
       path: "/tmp/dir",
-      note: "worktree 创建失败（fatal: 路径过长），仅目录隔离",
+      note: "独立工作目录创建失败（fatal: 路径过长），仅目录隔离",
       degradeReason: "worktree creation failed: fatal: path too long",
     });
     expect(text).toContain("worktree creation failed: fatal: path too long");
     expect(text).toContain("do not run git commands");
     expect(text).not.toContain("git add -A && git commit");
     // 面向看板的中文说明只给人看。
-    expect(text).not.toContain("worktree 创建失败");
+    expect(text).not.toContain("独立工作目录创建失败");
   });
 
   it("重试提示词说明上一轮中断、要求先检查现状", () => {
@@ -1383,7 +1384,7 @@ describe("super agent · 意外中断后重试", () => {
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "failed");
     const originalPath = harness.sessions[0]!.isolation.path;
-    rmSync(originalPath, { recursive: true, force: true });
+    rmSync(originalPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 
     expect(await harness.manager.retry(spawned.id)).toBe(true);
     await until(() => harness.sessions[0]?.status === "completed");

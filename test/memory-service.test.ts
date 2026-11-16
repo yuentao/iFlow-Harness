@@ -15,7 +15,7 @@ function tempDir(prefix: string): string {
 }
 
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function makeService(
@@ -482,7 +482,7 @@ describe("MemoryService", () => {
     );
     if (!loadingPill || loadingPill.type !== "toast") throw new Error("no loading pill");
     expect(loadingPill.persistent).toBe(true);
-    expect(loadingPill.message).toContain("提取");
+    expect(loadingPill.message).toContain("可以记住的内容");
     service.finishExtraction(toastId);
 
     service.applyExtractionResult(
@@ -545,7 +545,7 @@ describe("MemoryService", () => {
     );
     if (!pill || pill.type !== "toast") throw new Error("no loading pill");
     expect(pill.persistent).toBe(true);
-    expect(pill.message).toContain("提取");
+    expect(pill.message).toContain("可以记住的内容");
     // A failed or empty merged reply still has to retire the pill, otherwise
     // the WebView sits on a stuck spinner forever.
     service.finishExtraction(toastId);

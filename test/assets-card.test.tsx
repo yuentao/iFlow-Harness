@@ -209,8 +209,7 @@ it("refuses a save whose expected hash drifted on disk (conflict, nothing writte
   contentReply(CMD.path, "draft", "stale-hash");
   click("保存");
   savedReply(1, { conflict: true, ok: false });
-  expect(container.textContent).toContain("磁盘文件已被别写入，请刷新后再编辑");
-  expect(container.textContent).not.toContain("已保存");
+      expect(container.textContent).toContain("文件已经在磁盘上被改过，请刷新后再编辑");  expect(container.textContent).not.toContain("已保存");
 });
 
 it("creates a kind-correct skeleton host-side and re-scans after success", () => {
@@ -238,8 +237,7 @@ it("pre-checks the name rule client-side before any round trip", () => {
   input(container.querySelector("input")!, "bad name!");
   click("创建");
   expect(send.mock.calls.filter(([m]) => m.type === "createAsset")).toHaveLength(0);
-  expect(container.textContent).toContain("名称仅允许");
-});
+      expect(container.textContent).toContain("名称只能用字母");});
 
 it("deletes via ConfirmDialog and removes the row only on Host confirmation", () => {
   stateReply([CMD], [], []);
@@ -258,8 +256,7 @@ it("deletes via ConfirmDialog and removes the row only on Host confirmation", ()
 it("refresh falls back to the scan skeleton and re-requests the state", () => {
   stateReply([CMD], [], []);
   click("刷新");
-  expect(container.textContent).toContain("扫描中…");
-  expect(send.mock.calls.filter(([m]) => m.type === "listAssets")).toHaveLength(2);
+      expect(container.textContent).toContain("读取中…");  expect(send.mock.calls.filter(([m]) => m.type === "listAssets")).toHaveLength(2);
 });
 
 function taValueOK(ta: HTMLTextAreaElement): boolean {

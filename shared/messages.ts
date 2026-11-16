@@ -129,6 +129,25 @@ export interface UserBlock extends BlockBase {
  * open-as-file recover everything the store kept beyond it. */
 export const MAX_TOOL_OUTPUT_DISPLAY_CHARS = 64 * 1024;
 
+/**
+ * One delegated task of a `super-agent` dispatch call, as the HOST parsed it.
+ *
+ * The card renders from this structure rather than from the lossy `input`
+ * display string — see {@link ToolBlock.superTasks} for the full rationale.
+ *
+ * `attachmentCount` is a COUNT on purpose: attachment bodies (file contents,
+ * inlined base64 images) must never enter the snapshot (pitfall #27 discipline
+ * — a pasted image is ≤8MB and would blow the snapshot up).
+ */
+export interface SuperDelegatedTaskUi {
+  /** Task title (the model may omit it; the host falls back to the task's first line). */
+  title: string;
+  /** The full task brief handed to the child session. */
+  task: string;
+  /** How many attachments the task carried (names/bodies never enter the snapshot). */
+  attachmentCount: number;
+}
+
 export interface ToolBlock extends BlockBase {
   kind: "tool";
   toolCallId: string;
@@ -145,8 +164,28 @@ export interface ToolBlock extends BlockBase {
    * otherwise compact JSON with per-value truncation) and caps the length,
    * so raw args — which can carry a whole-file `content` payload — never
    * linger in memory (pitfall #27 discipline). Null/absent = nothing to show.
+   *
+   * NOTE: it is a LOSSY display string on purpose — the delegation card must
+   * NOT parse it back (see `superTasks`).
    */
   input?: string | null;
+  /**
+   * Delegated tasks of a `super-agent` dispatch call, as parsed BY THE HOST.
+   *
+   * Why the card cannot parse `input` back: `input` is a lossy display string
+   * (per-value truncation at 300 chars, whole payload capped at 4096 chars) —
+   * a long task brief gets cut in the middle and the JSON stops being JSON.
+   * On top of that the model sometimes omits `title` (wire evidence), which
+   * the dispatcher tolerates (falls back to the task's first line) while a
+   * stricter card reader would call the whole delegation unparseable — a false
+   * alarm about a delegation that really happened.
+   *
+   * So the host parses the RAW args once and ships the structure; the card
+   * renders it. Null/absent = this is not a dispatch call (or the payload was
+   * unusable) — the card then falls back to parsing `input` for legacy
+   * transcripts, and finally to the honest "unparseable" notice.
+   */
+  superTasks?: SuperDelegatedTaskUi[] | null;
   /**
    * P-1 follow-up: present when `output` exceeded the host STORE cap
    * (`MAX_TOOL_OUTPUT_STORE_CHARS`, 512K, shared/session-state.ts) and was
@@ -289,7 +328,7 @@ export interface InjectedContextItem {
  */
 export interface InjectedContextBlock extends BlockBase {
   kind: "injected";
-  /** One-line summary, e.g. "本次请求自动注入了 3 项内容：系统提示词、记忆、1 个上下文文件". */
+  /** One-line summary, e.g. "这次请求还自动带上了 3 项内容：系统提示词、全局记忆、1 个项目记忆文件". */
   notice: string;
   items: InjectedContextItem[];
   /** Estimated tokens of ALL injected bodies (host-side BPE over the full
@@ -709,6 +748,19 @@ export interface TurnUsageState {
   completionTokens?: number;
 }
 
+/**
+ * Why the host holds the `initializing` busy lock. The header chip used to
+ * claim 「正在创建新会话…」 for every one of these flows (delete session,
+ * delete message, rollback) — the label must name the operation that is
+ * actually in flight.
+ */
+export type InitializingReason =
+  | "newSession"
+  | "deleteSession"
+  | "deleteMessage"
+  | "rollback"
+  | "restore";
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -742,8 +794,15 @@ export interface SessionState {
   activeSessionId: string | null;
   /** True while history is being replayed after `session/load` (M4). */
   replaying: boolean;
-  /** True while a new session is being created (host busy; UI locks switches). */
+  /** True while a host-driven busy flow holds the UI (host busy; UI locks switches). */
   initializing: boolean;
+  /**
+   * Which flow owns the `initializing` lock — drives the busy chip's label
+   * (创建会话 / 删除会话 / 删除消息 / 回滚对话 / 恢复会话). Null whenever
+   * `initializing` is false; absent in older hosts/mock snapshots (the chip
+   * falls back to the new-session wording).
+   */
+  initializingReason?: InitializingReason | null;
   /**
    * Monotonic count of Core boot attempts that re-entered `connecting` (hot
    * restart / profile-switch reconnect). A restart keeps the splash on
@@ -826,6 +885,15 @@ export interface SessionState {
    */
   superWaiting?: boolean;
   /**
+   * 用户按过「停止」：`superWaiting` 是被显式压住的（排队里的汇报还在，等
+   * 下一条消息 / 常驻提示的「继续处理」才投递），不是真的在生成。webview
+   * 据此把「新会话」从死锁里放出来（弹如实确认后允许新建），宿主状态栏也
+   * 不再谎称「生成中」。由 `syncSuperWaitingState()` 与 superWaiting 同源写入。
+   */
+  superHeld?: boolean;
+  /** `superHeld` 时被压住的自动回合数（汇报 + 被改道消息补投），只算当前主会话。 */
+  superPendingCount?: number;
+  /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
    * outside the agent session). Non-blocks metadata: it rides the blockPatch
@@ -896,12 +964,12 @@ export function validateAuthForm(input: {
   apiKey?: string | null;
 }): string | null {
   if (!/^https?:\/\//i.test(input.baseUrl.trim())) {
-    return "Base URL 必须以 http:// 或 https:// 开头";
+    return "接口地址要以 http:// 或 https:// 开头";
   }
   if (input.apiKey !== undefined && !(input.apiKey ?? "").trim()) {
-    return "API Key 不能为空";
+    return "请填写 API Key";
   }
-  if (!input.modelName.trim()) return "模型名称不能为空";
+  if (!input.modelName.trim()) return "请填写模型名称";
   return null;
 }
 
@@ -935,11 +1003,14 @@ export function initialSessionState(): SessionState {
     activeSessionId: null,
     replaying: false,
     initializing: false,
+    initializingReason: null,
     compressing: false,
     usage: emptySessionUsage(),
     queue: [],
     queuePaused: false,
     superWaiting: false,
+    superHeld: false,
+    superPendingCount: 0,
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
@@ -1583,17 +1654,31 @@ export type HostToWebview =
    * `draft` non-null means a 「始终允许」 click derived a rule that is now
    * waiting to be named: the webview opens the policy card in naming mode and
    * either saves it into `rules` or dismisses it. */
-  | { type: "approvalPolicy"; rules: ApprovalRule[]; projectRules: ApprovalRule[]; draft?: ApprovalRule | null }
+  | {
+      type: "approvalPolicy";
+      rules: ApprovalRule[];
+      projectRules: ApprovalRule[];
+      draft?: ApprovalRule | null;
+      /** Present only when this push answers a save request: "ok" = persisted,
+       * "failed" = the write was rolled back (the rules here are the ones still
+       * on disk). The card waits for this before flashing 已保存. */
+      saveResult?: "ok" | "failed";
+    }
+  /** Reply to `deleteProfile`: the row clears its pending chip on receipt.
+   * `ok:false` means the profile is still present (the host also toasts). */
+  | { type: "profileDeleteResult"; name: string; ok: boolean }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. `auroraIntensity`
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
-  /** Turn finished ("done") or failed ("error") — the webview plays a short
-   * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
-   * panel visibility; the webview only synthesizes on receipt. */
-  | { type: "playSound"; kind: "done" | "error" }
+  /** Turn finished ("done") / failed ("error") / one child session settled
+   * ("child") — the webview plays a short synthesized cue. The three are
+   * deliberately distinct sounds: a child finishing is NOT the main turn
+   * finishing, so it gets a lighter single note. Host gates on the
+   * `iflow.soundFeedback` setting; the webview only synthesizes on receipt. */
+  | { type: "playSound"; kind: "done" | "error" | "child" }
   /** Reply to `enhancePrompt` (M1 P1-5): the host ran one internal prompt
    * (never recorded in the transcript) and returns the enhanced text so the
    * composer can fill it back in. `requestId` matches the request; `error`
@@ -1687,6 +1772,11 @@ export type WebviewToHost =
    *  - `cleanup`: drop the child session and its worktree; `keepBranch`
    *    preserves the git branch (the default keeps it when the branch still
    *    carries unmerged commits).
+   *  - `cleanupBatch`: the same cleanup for several children in one request
+   *    (`sessionIds`). The host runs them serially and reports ONE aggregate
+   *    receipt toast instead of one per child — a bulk action should not
+   *    bury the transcript under N identical toasts. A single `cleanup`
+   *    keeps its own per-action receipt.
    *  - `merge`: ask the MAIN AGENT to merge the child's branch back into the
    *    current branch — the agent runs the git command itself and resolves
    *    conflicts. The host only verifies (`git merge-base --is-ancestor`)
@@ -1704,12 +1794,22 @@ export type WebviewToHost =
    */
   | {
       type: "superAgent";
-      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript" | "retry";
-      /** Target child session (absent for cancelAll). */
+      action:
+        | "cancel"
+        | "cancelAll"
+        | "respond"
+        | "cleanup"
+        | "cleanupBatch"
+        | "merge"
+        | "transcript"
+        | "retry";
+      /** Target child session (absent for cancelAll / cleanupBatch). */
       sessionId?: string;
+      /** cleanupBatch: the children to clean up in one serial batch. */
+      sessionIds?: string[];
       /** respond: the answers map (ask_user_question), keyed by header. */
       answers?: Record<string, string | string[]>;
-      /** cleanup: keep the git branch. */
+      /** cleanup / cleanupBatch: keep the git branch. */
       keepBranch?: boolean;
     }
   | { type: "newSession" }

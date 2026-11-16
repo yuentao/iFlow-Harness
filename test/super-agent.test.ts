@@ -1251,8 +1251,9 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("Dispatch by calling the `super-agent` tool");
     expect(digest).toContain("if that tool is not in your list");
     expect(digest).toContain("```super-agent fenced block instead");
-    expect(digest).toContain("Manage children only by emitting a ```super-agent-actions fenced block");
-    expect(digest).toContain("no actions tool exists");
+    expect(digest).toContain("To manage children, call the `super-agent` tool with {\"actions\":[...]}");
+    expect(digest).toContain("otherwise emit a ```super-agent-actions fenced block");
+    expect(digest).toContain("never call a separate `super-agent-actions` tool");
   });
 
   it("看板 hint 的载荷示例是合法 JSON（模型照抄示例不会撞上 invalid payload）", () => {
@@ -1286,7 +1287,7 @@ describe("super agent · 看板摘要", () => {
     // 非空分支同样要带委派协议提示：有子会话在跑时模型仍可能选错派发通道。
     expect(digest).toContain("Dispatch by calling the `super-agent` tool");
     expect(digest).toContain("if that tool is not in your list");
-    expect(digest).toContain("Manage children only by emitting a ```super-agent-actions fenced block");
+    expect(digest).toContain("To manage children, call the `super-agent` tool with {\"actions\":[...]}");
     // 用户中断不计入失败：摘要里应分开呈现。
     expect(digest).toContain("0 failed");
     expect(digest).toContain("0 interrupted");
@@ -1310,6 +1311,19 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("failure reason: 内核拒绝了这次请求");
     expect(digest).toContain("req-7");
     expect(digest).toContain("要覆盖压缩卡吗？");
+  });
+
+  it("失败子会话的看板指令硬性要求 retry、禁止新派等价任务", () => {
+    // 用户实测：failed 子会话的 worktree 里已有大半未提交改动，主会话却用
+    // super-agent 新派了一个等价任务（全新 worktree、从零开始），把半成品全丢了。
+    // 因此看板末尾的英文指令必须把「失败优先 retry、不重派」写成硬规则。
+    const digest = buildSuperDigest([
+      session({ id: "super-failed", status: "failed", error: "内核拒绝了这次请求" }),
+    ]);
+    expect(digest).toContain("A child whose status is `failed` MUST be retried with the `retry` action");
+    expect(digest).toContain("Do NOT dispatch a new, equivalent `super-agent` task");
+    expect(digest).toContain("same working directory");
+    expect(digest).toContain("An `interrupted` child is not a failure");
   });
 
   it("超出字符预算时丢弃尾部条目并注明省略数量", () => {
@@ -1587,11 +1601,11 @@ describe("super agent · 主仓工作区隔离（repo）", () => {
     });
 
   it("看板标签如实说明是主仓工作区，而不是伪造一个分支", () => {
-    expect(superIsolationLabel(repoSession().isolation)).toBe("主仓工作区（无隔离）");
+    expect(superIsolationLabel(repoSession().isolation)).toBe("直接在主工作区（无隔离）");
     expect(superIsolationLabel({ kind: "git_worktree", path: "/wt", branch: "iflow/super/a" })).toBe(
-      "独立 worktree",
+      "独立工作目录",
     );
-    expect(superIsolationLabel({ kind: "directory", path: "/dir" })).toBe("仅目录隔离");
+    expect(superIsolationLabel({ kind: "directory", path: "/dir" })).toBe("只隔离了目录");
   });
 
   it("看板摘要里报的是隔离方式，不是一个不存在的分支", () => {
@@ -1619,7 +1633,7 @@ describe("super agent · 主仓工作区隔离（repo）", () => {
       isolation: { kind: "repo", path: "J:/repo", branch: "iflow/super/ghost" },
     });
     expect(restored.isolation.branch).toBeUndefined();
-    expect(superIsolationLabel(restored.isolation)).toBe("主仓工作区（无隔离）");
+    expect(superIsolationLabel(restored.isolation)).toBe("直接在主工作区（无隔离）");
   });
 
   it("运行中的主仓工作区子会话恢复后仍是「已中断」（进程已经没了）", () => {

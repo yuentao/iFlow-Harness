@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
@@ -8,7 +10,7 @@ import type * as vscode from "vscode";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function makeContext(): vscode.ExtensionContext {
+function makeContext(storageDir: string): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
@@ -35,10 +37,10 @@ function makeContext(): vscode.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscode.ExtensionContext;
 }
@@ -94,10 +96,12 @@ const permissionRequest: RequestPermissionRequest = {
 describe("ChatPanel approval-timeout auto-reject", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers();
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-approval-timeout-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
     p.client = { cancel: vi.fn() };
     p.store.sessionStarted({ sessionId: "timeout-session" });
@@ -107,6 +111,7 @@ describe("ChatPanel approval-timeout auto-reject", () => {
   afterEach(async () => {
     vi.useRealTimers();
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("resolves the cancelled response on timeout and keeps the turn streaming", async () => {

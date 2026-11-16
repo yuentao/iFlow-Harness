@@ -101,7 +101,7 @@ describe("context occupancy warning state machine (P0-6)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const setUsage = (u: SessionUsageUi | null) => {

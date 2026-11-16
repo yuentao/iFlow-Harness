@@ -1,22 +1,19 @@
 /**
- * 完成提示音 / 系统通知在 Super Agent 下的分档（宿主侧）。
+ * 完成提示在 Super Agent 下的分档（宿主侧）。
  *
- * 用户原话（截图）：一个子会话汇报回来就弹一次「iFlow 已完成本轮回复」并响一次
- * 铃 —— 汇报是逐个投给主会话的 hidden 回合，逐个提示等于把「一个子会话干完」
- * 误报成「整件事做完了」。
+ * 历史：第一版把「一个子会话汇报回来」当成「整轮完成」弹「iFlow 已完成本轮
+ * 回复」；第二版改成 hidden 回合一律静音、只在「非终态数 >0 掉到 0」时提示
+ * 「子会话已全部结束」—— 那仍然与用户回合共用 turnDone 事件和 done 音，而且
+ * 聚合判定让「子会话干完」与「主会话干完」在通知通道上无法区分。
  *
- * 第二轮（用户实测 2026-11-15）：**偶尔突然响铃，界面上却没有任何通知**。根因
- * 是提示仍挂在 hidden 回合收尾上：hidden 回合不止汇报，还有动作回执（子会话早
- * 已全部终态时也会跑一轮），于是每份回执都响一次铃并宣称「子会话已全部结束」
- * —— 那件事早就发生过；同一句文案又被 60s 内容冷却吞掉，只剩铃声。
- *
- * 现行契约：
- *  1. hidden 回合（汇报 / 动作回执）**永远不响铃、不弹通知** —— 它是宿主记账，
- *     不是用户的回合。
- *  2. 「子会话已全部结束」只挂在**真实事件**上：非终态子会话数从 >0 掉到 0 的
- *     那一刻提示一次（`syncSuperWaitingState` 驱动），心跳重复刷新不会重复响。
- *  3. 非 hidden 的用户回合保持原文案「iFlow 已完成本轮回复」，不因有子会话在跑
- *     而被静音（那是用户自己的回合）。
+ * 现行契约（2026-11-16 用户确认的粒度）：
+ *  1. **每个子会话**从非终态迁移到终态（completed / failed / cancelled）各提示
+ *     一次：事件 `childDone`、音色 `child`、文案「子会话「{0}」已完成/已失败/
+ *     已中断」。首次看到就终态（恢复归档）、awaiting_input、重复 sync 都不提示。
+ *  2. 主会话**汇报回合**（hidden + reportTurn）收尾：事件 `superReport`、音色
+ *     `done`、文案「主会话已汇报子会话结果」；`cancelled` 不提示。
+ *  3. 动作回执 / 被改道用户消息补投的 hidden 回合仍然完全静音。
+ *  4. 非 hidden 的用户回合保持「iFlow 已完成本轮回复」+ done 音，不变。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -99,7 +96,6 @@ type PromptCall = {
 
 type PanelInternals = {
   superAgent: unknown;
-  superSettledAnnounced: boolean;
   ensureClient: () => Promise<unknown>;
   promptWithRetry: (
     client: unknown,
@@ -111,13 +107,12 @@ type PanelInternals = {
     images?: unknown,
     files?: unknown,
     contexts?: unknown,
-    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
+    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean; reportTurn?: boolean },
   ) => Promise<boolean>;
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
-  notifyOs: (event: string, text: string) => boolean;
   notifyOsDecision: (event: string, text: string) => OsNotifyDecision;
-  postSound: (kind: "done" | "error") => void;
+  postSound: (kind: "done" | "error" | "child") => void;
   syncSuperWaitingState: () => void;
   store: {
     getState: () => SessionState;
@@ -126,7 +121,7 @@ type PanelInternals = {
   };
 };
 
-describe("Super Agent 回合的完成提示", () => {
+describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -165,7 +160,7 @@ describe("Super Agent 回合的完成提示", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function flush(): Promise<void> {
@@ -195,40 +190,53 @@ describe("Super Agent 回合的完成提示", () => {
     };
   }
 
-  async function runHiddenTurn(text: string): Promise<void> {
+  async function runHiddenTurn(
+    text: string,
+    options: { reportTurn?: boolean } = {},
+  ): Promise<void> {
+    calls = [];
     const started = p.sendPrompt(text, undefined, undefined, undefined, {
       hidden: true,
       delegateOnBusy: false,
+      ...options,
     });
     const call = await waitForPrompt();
     call.resolve({ stopReason: "end_turn" });
     await started;
   }
 
-  it("hidden 汇报回合 + 仍有子会话在跑：完全静音", async () => {
-    children = [child({ status: "running" })];
-    const { notify, sound } = spyCues();
+  // ── 主会话汇报回合 ────────────────────────────────────────────────────────
 
-    await runHiddenTurn("【汇报】子会话 A 完成");
-
-    expect(notify).not.toHaveBeenCalled();
-    expect(sound).not.toHaveBeenCalled();
-  });
-
-  it("hidden 汇报回合 + 子会话全部终态：仍然静音（提示改挂在收尾事件上）", async () => {
+  it("hidden 汇报回合（reportTurn）→ superReport 事件 + done 音", async () => {
     children = [child({ status: "completed", summary: "做完了" })];
     const { notify, sound } = spyCues();
 
-    await runHiddenTurn("【汇报】子会话 A 完成");
+    await runHiddenTurn("【汇报】子会话 A 完成", { reportTurn: true });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith("superReport", "主会话已汇报子会话结果");
+    expect(sound).toHaveBeenCalledTimes(1);
+    expect(sound).toHaveBeenCalledWith("done");
+  });
+
+  it("hidden 汇报回合被用户停止（cancelled）→ 不提示", async () => {
+    const { notify, sound } = spyCues();
+    const started = p.sendPrompt("【汇报】子会话 A 完成", undefined, undefined, undefined, {
+      hidden: true,
+      delegateOnBusy: false,
+      reportTurn: true,
+    });
+    const call = await waitForPrompt();
+    call.resolve({ stopReason: "cancelled" });
+    await started;
 
     expect(notify).not.toHaveBeenCalled();
     expect(sound).not.toHaveBeenCalled();
   });
 
-  it("hidden 动作回执回合（子会话早已全部终态）不响铃 —— 「突然响铃但没有通知」的回归", async () => {
-    // 动作回执与汇报共用同一条 hidden 通道。旧实现按「此刻还有没有子会话
-    // 在跑」判断，于是每份回执都响一次铃并宣称「子会话已全部结束」（事件早
-    // 已发生，文案又被 60s 内容冷却吞掉）—— 用户只听到铃，界面上什么都没有。
+  it("hidden 动作回执回合（无 reportTurn）完全静音", async () => {
+    // 动作回执与汇报共用同一条 hidden 通道，但它是宿主记账、不是汇报 ——
+    // 用户既没有新气泡，也没有新结果可看。
     children = [child({ status: "completed" }), child({ id: "super-2", status: "cancelled" })];
     const { notify, sound } = spyCues();
 
@@ -242,14 +250,14 @@ describe("Super Agent 回合的完成提示", () => {
     const internals = p as unknown as { pendingDelegatedUserTurns: unknown[] };
     // runHiddenTurn 显式传 undefined 附件 + delegateOnBusy:false —— 它是宿主
     // 记账回合，不是「streaming 中被改道的用户消息」，不该进补投缓冲。
-    await runHiddenTurn("【汇报】子会话 A 完成");
+    await runHiddenTurn("【汇报】子会话 A 完成", { reportTurn: true });
     await flush();
     expect(calls).toHaveLength(1); // 只有这一轮 hidden prompt，没有补投出来的第二轮
     expect(internals.pendingDelegatedUserTurns).toHaveLength(0);
     expect(p.store.getState().blocks.filter((b) => b.kind === "user")).toHaveLength(0);
   });
 
-  it("非 hidden 的用户回合：仍提示「iFlow 已完成本轮回复」，不因有子会话在跑而静音", async () => {
+  it("非 hidden 的用户回合：仍提示「iFlow 已完成本轮回复」+ done 音", async () => {
     children = [child({ status: "running" })];
     const { notify, sound } = spyCues();
 
@@ -264,27 +272,123 @@ describe("Super Agent 回合的完成提示", () => {
     expect(sound).toHaveBeenCalledWith("done");
   });
 
-  it("子会话全部收尾的那一刻提示一次「子会话已全部结束」，心跳重复刷新不重复响", () => {
+  // ── 单个子会话收尾 ───────────────────────────────────────────────────────
+
+  it("子会话 running → completed：提示一次 childDone + child 音", () => {
     const { notify, sound } = spyCues();
     children = [child({ status: "running" })];
     p.syncSuperWaitingState();
     expect(sound).not.toHaveBeenCalled();
 
-    // 子会话收尾：状态变化驱动同一次同步。
     children = [child({ status: "completed", summary: "做完了" })];
     p.syncSuperWaitingState();
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledWith("turnDone", "子会话已全部结束");
+    expect(notify).toHaveBeenCalledWith("childDone", "子会话「修好登录跳转」已完成");
     expect(sound).toHaveBeenCalledTimes(1);
-    expect(sound).toHaveBeenCalledWith("done");
+    expect(sound).toHaveBeenCalledWith("child");
+  });
 
-    // 心跳（1.5s 一次）与其它看板刷新会反复调它：同一次结束只提示一次。
+  it("重复 sync（心跳每 1.5s 一次）不重复提示", () => {
+    const { sound } = spyCues();
+    children = [child({ status: "running" })];
+    p.syncSuperWaitingState();
+    children = [child({ status: "completed" })];
+    p.syncSuperWaitingState();
     p.syncSuperWaitingState();
     p.syncSuperWaitingState();
     expect(sound).toHaveBeenCalledTimes(1);
   });
 
-  it("新一批子会话开跑后重置标记，下一批结束还能再提示一次", () => {
+  it("新子会话开跑后再完成会再提示一次（按子会话逐个提示）", () => {
+    const { notify, sound } = spyCues();
+    children = [child({ status: "running" })];
+    p.syncSuperWaitingState();
+    children = [child({ status: "completed" })];
+    p.syncSuperWaitingState();
+    expect(sound).toHaveBeenCalledTimes(1);
+
+    children = [child({ status: "completed" }), child({ id: "super-2", status: "running", title: "第二个" })];
+    p.syncSuperWaitingState();
+    children = [
+      child({ status: "completed" }),
+      child({ id: "super-2", status: "completed", title: "第二个" }),
+    ];
+    p.syncSuperWaitingState();
+    expect(sound).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「第二个」已完成");
+  });
+
+  it("两个子会话先后完成：各提示一次（不是等到全部结束才提示）", () => {
+    const { notify, sound } = spyCues();
+    children = [
+      child({ status: "running", title: "A" }),
+      child({ id: "super-2", status: "running", title: "B" }),
+    ];
+    p.syncSuperWaitingState();
+    expect(sound).not.toHaveBeenCalled();
+
+    children = [
+      child({ status: "completed", title: "A" }),
+      child({ id: "super-2", status: "running", title: "B" }),
+    ];
+    p.syncSuperWaitingState();
+    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「A」已完成");
+    expect(sound).toHaveBeenCalledTimes(1);
+
+    children = [
+      child({ status: "completed", title: "A" }),
+      child({ id: "super-2", status: "completed", title: "B" }),
+    ];
+    p.syncSuperWaitingState();
+    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「B」已完成");
+    expect(sound).toHaveBeenCalledTimes(2);
+    expect(sound).toHaveBeenNthCalledWith(1, "child");
+    expect(sound).toHaveBeenNthCalledWith(2, "child");
+  });
+
+  it("恢复归档 / 首次看到就已是终态：不提示", () => {
+    const { notify, sound } = spyCues();
+    // 恢复的归档里子会话早已终态 —— 那是过期事实，不是「刚刚结束」。
+    children = [child({ status: "completed" }), child({ id: "super-2", status: "failed" })];
+    p.syncSuperWaitingState();
+    p.syncSuperWaitingState();
+    expect(notify).not.toHaveBeenCalled();
+    expect(sound).not.toHaveBeenCalled();
+  });
+
+  it("awaiting_input 不是完成：不提示", () => {
+    const { sound } = spyCues();
+    children = [child({ status: "awaiting_input" })];
+    p.syncSuperWaitingState();
+    children = [child({ status: "awaiting_input" })];
+    p.syncSuperWaitingState();
+    expect(sound).not.toHaveBeenCalled();
+  });
+
+  it("failed / cancelled 的文案分别正确", () => {
+    const { notify, sound } = spyCues();
+    children = [child({ status: "running", title: "失败的那个" })];
+    p.syncSuperWaitingState();
+    children = [child({ status: "failed", title: "失败的那个" })];
+    p.syncSuperWaitingState();
+    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「失败的那个」已失败");
+    expect(sound).toHaveBeenLastCalledWith("child");
+
+    children = [
+      child({ status: "failed", title: "失败的那个" }),
+      child({ id: "super-2", status: "running", title: "被中断的那个" }),
+    ];
+    p.syncSuperWaitingState();
+    children = [
+      child({ status: "failed", title: "失败的那个" }),
+      child({ id: "super-2", status: "cancelled", title: "被中断的那个" }),
+    ];
+    p.syncSuperWaitingState();
+    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「被中断的那个」已中断");
+    expect(sound).toHaveBeenCalledTimes(2);
+  });
+
+  it("子会话从看板消失后清掉记录，同 id 再次出现不会当成「刚刚结束」", () => {
     const { sound } = spyCues();
     children = [child({ status: "running" })];
     p.syncSuperWaitingState();
@@ -292,28 +396,35 @@ describe("Super Agent 回合的完成提示", () => {
     p.syncSuperWaitingState();
     expect(sound).toHaveBeenCalledTimes(1);
 
-    children = [child({ status: "completed" }), child({ id: "super-2", status: "running" })];
+    // 清理掉（从 list 消失）：记录被剪掉。
+    children = [];
     p.syncSuperWaitingState();
-    children = [child({ status: "completed" }), child({ id: "super-2", status: "completed" })];
+    // 同一个 id 再次出现且已是终态：首次看到，不提示。
+    children = [child({ status: "completed" })];
     p.syncSuperWaitingState();
-    expect(sound).toHaveBeenCalledTimes(2);
+    expect(sound).toHaveBeenCalledTimes(1);
   });
 
-  it("还在等用户回答的子会话不算「全部结束」", () => {
-    const { sound } = spyCues();
-    children = [child({ status: "awaiting_input" })];
-    p.syncSuperWaitingState();
-    p.syncSuperWaitingState();
-    expect(sound).not.toHaveBeenCalled();
-  });
+  // ── 核心需求：两类完成信号必须不同 ────────────────────────────────────────
 
-  it("被中断（cancelled）也算终态：最后一个子会话被中断时提示一次", () => {
+  it("childDone 与 superReport 是两个不同事件、不同提示音", async () => {
     const { notify, sound } = spyCues();
-    children = [child({ status: "running" })];
+    children = [child({ status: "running", title: "子任务" })];
     p.syncSuperWaitingState();
-    children = [child({ status: "cancelled" })];
+    children = [child({ status: "completed", title: "子任务" })];
     p.syncSuperWaitingState();
-    expect(notify).toHaveBeenCalledWith("turnDone", "子会话已全部结束");
-    expect(sound).toHaveBeenCalledWith("done");
+
+    expect(notify).toHaveBeenLastCalledWith("childDone", "子会话「子任务」已完成");
+    expect(sound).toHaveBeenLastCalledWith("child");
+
+    await runHiddenTurn("【汇报】子会话 A 完成", { reportTurn: true });
+
+    expect(notify).toHaveBeenLastCalledWith("superReport", "主会话已汇报子会话结果");
+    expect(sound).toHaveBeenLastCalledWith("done");
+
+    const events = notify.mock.calls.map((call) => call[0]);
+    expect(events).toContain("childDone");
+    expect(events).toContain("superReport");
+    expect(events[0]).not.toBe(events[events.length - 1]);
   });
 });

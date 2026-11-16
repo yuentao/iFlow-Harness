@@ -24,12 +24,19 @@
  *
  * Isolation semantics (harness mode only):
  *   The panel-owned fields (selectedAuthType, apiKey, baseUrl, searchApiKey,
- *   modelName, currentApiProfile) are NEVER written from the child's memory.
- *   Instead whatever value the file on disk ALREADY has for those keys is
- *   preserved verbatim — so terminal users' credentials survive untouched
- *   (a plain delete would wipe them) while the panel's credentials never
- *   leak. Every other field (apiProfiles catalogue, language, approvalMode,
- *   mcpServers, tokensLimit…) persists normally.
+ *   modelName, currentApiProfile, apiProfiles) are NEVER written from the
+ *   child's memory. Instead whatever value the file on disk ALREADY has for
+ *   those keys is preserved verbatim — so terminal users' credentials survive
+ *   untouched (a plain delete would wipe them) while the panel's credentials
+ *   never leak. `apiProfiles` belongs to the same set: the panel is its only
+ *   author, while the CLI only round-trips the snapshot it read at process
+ *   start — so a saveSettings triggered by hot re-authentication would write
+ *   that stale catalogue back and silently revert (or resurrect) profiles the
+ *   panel just edited/deleted. Because saveSettings rewrites the whole file,
+ *   the disk value must be re-injected whenever it exists; when the disk has
+ *   no such key we must NOT write the in-memory value either (that would
+ *   revive a profile the panel already deleted). Every other field (language,
+ *   approvalMode, mcpServers, tokensLimit…) persists normally.
  *
  * Scope:
  *   - Active ONLY when IFLOW_HARNESS is truthy (set by the harness
@@ -43,7 +50,15 @@
  * the NDJSON protocol stream, and any stray line corrupts the wire.
  */
 
-const STRIP_KEYS = ["selectedAuthType", "apiKey", "baseUrl", "searchApiKey", "modelName", "currentApiProfile"];
+const STRIP_KEYS = [
+  "selectedAuthType",
+  "apiKey",
+  "baseUrl",
+  "searchApiKey",
+  "modelName",
+  "currentApiProfile",
+  "apiProfiles",
+];
 
 function isDisabledByEnv() {
   const v = process.env.IFLOW_API_ISOLATION;
@@ -83,7 +98,6 @@ function intercept(t) {
   if (!t || typeof t !== "object" || !isUserSettingsFile(t.path)) return undefined;
   const s = t.settings;
   if (!s || typeof s !== "object") return undefined;
-  if (!STRIP_KEYS.some((k) => k in s)) return undefined; // nothing to isolate
   // Preserve the on-disk values of the panel-owned keys (terminal users'
   // creds survive verbatim); drop them from the child's memory view.
   let disk = {};
@@ -93,6 +107,14 @@ function intercept(t) {
   } catch {
     disk = {}; // unreadable/invalid — dropping the keys beats leaking them
   }
+  // Nothing to isolate: neither the payload nor the disk carries a
+  // panel-owned key. The disk side matters because saveSettings overwrites
+  // the whole file — a disk-only apiProfiles (created by the panel after the
+  // CLI started) must still be re-injected.
+  const touchesPanelField = STRIP_KEYS.some(
+    (k) => k in s || Object.prototype.hasOwnProperty.call(disk, k),
+  );
+  if (!touchesPanelField) return undefined;
   const merged = {};
   for (const k of Object.keys(s)) {
     if (!STRIP_KEYS.includes(k)) merged[k] = s[k];

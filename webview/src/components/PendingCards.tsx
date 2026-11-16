@@ -86,7 +86,7 @@ export function PendingCards({
       list.push({
         kind: "approval",
         key: `approval:${pendingApproval.id}`,
-        summary: t("iFlow 请求执行"),
+        summary: t("iFlow 想执行一项操作"),
         node: <ApprovalCard approval={pendingApproval} />,
       });
     }
@@ -94,7 +94,7 @@ export function PendingCards({
       list.push({
         kind: "planExit",
         key: `planExit:${pendingPlanExit.id}`,
-        summary: t("iFlow 请求退出 Plan 模式"),
+        summary: t("iFlow 准备开始执行计划"),
         node: <PlanExitCard pending={pendingPlanExit} />,
       });
     }
@@ -102,7 +102,7 @@ export function PendingCards({
       list.push({
         kind: "questions",
         key: `questions:${pendingQuestions.id}`,
-        summary: t("iFlow 需要你的回答"),
+        summary: t("iFlow 有问题想问你"),
         node: <QuestionCard pending={pendingQuestions} />,
       });
     }
@@ -279,13 +279,13 @@ export function PendingCards({
           aria-label={
             expanded
               ? t("收起待处理卡")
-              : t("还有 {0} 个待处理：{1}", hiddenKinds.length, hiddenSummary)
+              : t("还有 {0} 张卡片待处理：{1}", hiddenKinds.length, hiddenSummary)
           }
           data-pending-top=""
           data-pending-counter=""
           onClick={() => setExpanded((value) => !value)}
         >
-          {expanded ? t("收起待处理卡") : t("还有 {0} 个待处理", hiddenKinds.length)}
+          {expanded ? t("收起待处理卡") : t("还有 {0} 张卡片待处理", hiddenKinds.length)}
         </Button>
       )}
       {present.map((entry) => {

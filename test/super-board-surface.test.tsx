@@ -313,8 +313,8 @@ describe("Super Agent 看板阶段轨", () => {
     expect(rail).toBeTruthy();
     // 派发（createdAt 恒有）+ 启动（startedAt 存在）——没有「收尾」「完成」这种
     // 尚未发生的占位节点。
-    expect(rail!.getAttribute("aria-label")).toContain("派发");
-    expect(rail!.getAttribute("aria-label")).toContain("启动");
+    expect(rail!.getAttribute("aria-label")).toContain("已派出");
+    expect(rail!.getAttribute("aria-label")).toContain("已启动");
     expect(rail!.getAttribute("aria-label")).not.toContain("已完成");
 
     const dots = rail!.querySelectorAll(".rounded-full");
@@ -364,7 +364,7 @@ describe("Super Agent 看板阶段轨", () => {
     openRow();
 
     const described = rail().getAttribute("aria-label")!;
-    expect(described).toContain("等待应答");
+    expect(described).toContain("在等你回答");
 
     const all = dots();
     expect(all).toHaveLength(3);
@@ -372,7 +372,7 @@ describe("Super Agent 看板阶段轨", () => {
     expect(all[2]!.className).toContain("ring-2");
 
     const last = labels().at(-1)!;
-    expect(last.textContent).toBe("等待应答");
+    expect(last.textContent).toBe("在等你回答");
     expect(last.className).toContain("text-warning");
   });
 
@@ -438,7 +438,7 @@ describe("Super Agent 看板阶段轨", () => {
     for (const absent of ["已完成", "收尾", "失败", "已中断", "已自动合并"]) {
       expect(described).not.toContain(absent);
     }
-    expect(labels().at(-1)!.textContent).toBe("启动");
+    expect(labels().at(-1)!.textContent).toBe("已启动");
   });
 });
 
@@ -493,8 +493,8 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
 
     // 阶段事实挪进 title / aria-label：派发、启动仍可查，todo 状态也在。
     const described = el.getAttribute("aria-label")!;
-    expect(described).toContain("派发");
-    expect(described).toContain("启动");
+    expect(described).toContain("已派出");
+    expect(described).toContain("已启动");
     expect(described).toContain("进行中");
     expect(described).toContain(longTodo);
   });
@@ -536,7 +536,7 @@ describe("Super Agent 看板子会话行 hover 表面", () => {
     expand();
 
     const row = rowTrigger().parentElement as HTMLElement;
-    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断该子会话"]');
+    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断这个子会话"]');
     expect(cancel).toBeTruthy();
     // 不出现第三层底色（danger 的 destructive/10 或任何 hover 背景）。
     expect(cls(cancel!)).not.toContain("hover:bg-");
@@ -841,13 +841,13 @@ describe("Super Agent 看板清理动作", () => {
     const btn = cleanupButton();
     // 与合并按钮同一范式：aria-disabled（不是 disabled，否则理由读不到）。
     expect(btn.getAttribute("aria-disabled")).toBe("true");
-    expect(btn.getAttribute("aria-label")).toBe("子会话还在运行，先中断再清理");
-    expect(btn.getAttribute("title")).toBe("子会话还在运行，先中断再清理");
+    expect(btn.getAttribute("aria-label")).toBe("子会话还在运行，请先中断再清理");
+    expect(btn.getAttribute("title")).toBe("子会话还在运行，请先中断再清理");
     expect(btn.className).toContain("cursor-not-allowed");
     expect(btn.className).toContain("opacity-40");
     // 理由不再逐行重复：行首状态 chip 已说明子会话还在运行，规则统一
     // 收在看板头的帮助按钮里（见「看板帮助说明」那组用例）。
-    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
 
     act(() => btn.click());
     expect(cleanupDialog()).toBeNull();
@@ -861,12 +861,116 @@ describe("Super Agent 看板清理动作", () => {
 
     const btn = cleanupButton();
     expect(btn.getAttribute("aria-disabled")).toBeNull();
-    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
 
     act(() => btn.click());
     const dialog = cleanupDialog();
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("删除子会话「修复登录跳转」的工作目录？");
+  });
+
+  /** 确认框里的确认按钮（文案与操作同名，与「取消」区分）。 */
+  function dialogConfirm(dialog: HTMLElement, label = "清理"): HTMLButtonElement {
+    const el = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === label,
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 忙碌态的「清理中」按钮（普通态文案是「清理」，不会命中）。 */
+  function busyCleanupButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "清理中",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("确认清理后立即出现 spinner +「清理中」，不等 host 回包", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+
+    act(() => dialogConfirm(dialog!).click());
+
+    // 确认框立即关闭，请求立即发出。
+    expect(cleanupDialog()).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "cleanup",
+      sessionId: "super-a",
+    });
+    // 行首状态 chip 立刻变成「清理中」+ 旋转图标（completed 原本没有 spinner）。
+    const trigger = rowTrigger();
+    expect(trigger.textContent).toContain("清理中");
+    expect(trigger.querySelector(".animate-spin")).toBeTruthy();
+    // 清理按钮同步进入忙碌态：文案、图标、可访问名都更新。
+    const busy = busyCleanupButton();
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-label")).toBe("清理中");
+    expect(busy.getAttribute("title")).toBe("清理中");
+    expect(busy.querySelector(".animate-spin")).toBeTruthy();
+  });
+
+  it("进行态中重复点击清理按钮不会再次发送请求", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    act(() => dialogConfirm(cleanupDialog()!).click());
+    expect(send).toHaveBeenCalledTimes(1);
+
+    const busy = busyCleanupButton();
+    act(() => busy.click());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(cleanupDialog()).toBeNull();
+  });
+
+  it("取消确认框不触发进行态，也不发送请求", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+    const cancel = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "取消",
+    );
+    expect(cancel).toBeTruthy();
+
+    act(() => cancel!.click());
+
+    expect(cleanupDialog()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("清理中");
+    expect(cleanupButton().getAttribute("aria-label")).toBe("清理");
+  });
+
+  it("host 移除子会话后进行态自然消失，不残留到别的会话", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    act(() => dialogConfirm(cleanupDialog()!).click());
+    expect(document.body.textContent).toContain("清理中");
+
+    // 模拟 host 完成清理：super-a 从 superSessions 消失，换成一个未清理的会话。
+    render([
+      session({
+        id: "super-b",
+        title: "另一个任务",
+        status: "failed",
+        startedAt: 2000,
+        endedAt: 4000,
+      }),
+    ]);
+    expect(document.body.textContent).toContain("另一个任务");
+    expect(document.body.textContent).not.toContain("清理中");
   });
 });
 
@@ -895,12 +999,12 @@ describe("Super Agent 看板帮助说明", () => {
     const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
     expect(bubble).toBeTruthy();
     // 免确认 / 合并规则 / 清理规则，一条一行，都在同一个气泡里。
-    expect(bubble!.textContent).toContain("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批");
-    expect(bubble!.textContent).toContain("子会话还在运行时不能合并");
+    expect(bubble!.textContent).toContain("子会话里的工具调用（包括运行命令）会直接执行");
+    expect(bubble!.textContent).toContain("子会话结束之后才能合并");
     expect(bubble!.textContent).toContain("子会话还在运行时不能清理");
     // 规则只在这里说一次：行内不再重复那两句禁用原因。
-    expect(document.body.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
-    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还没结束，等它完成再合并");
+    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
   });
 });
 
@@ -1066,7 +1170,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     };
   }
 
-  it("终态且未释放：显示占用与可回收计数，确认后逐个发出 cleanup", () => {
+  it("终态且未释放：显示占用与可回收计数，确认后只发一条 cleanupBatch", () => {
     render([
       session({ id: "super-a", title: "修复登录跳转", status: "completed", startedAt: 2000, endedAt: 4000 }),
       session({ id: "super-b", title: "补充单测", status: "failed", startedAt: 2000, endedAt: 4000 }),
@@ -1075,7 +1179,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     const text = panelRoot().textContent ?? "";
     expect(text).toContain("工作目录 2 个");
-    expect(text).toContain("已结束 2 个可回收");
+    expect(text).toContain("已结束 2 个可清理");
 
     const btn = bulkButton();
     expect(btn).toBeTruthy();
@@ -1084,7 +1188,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     const dialog = bulkDialog();
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("将删除 2 个子会话的工作目录");
-    expect(dialog!.textContent).toContain("分支上一律保留");
+    expect(dialog!.textContent).toContain("它们的分支都会保留");
 
     const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
       (b) => (b.textContent ?? "").trim() === "清理已结束",
@@ -1092,16 +1196,13 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expect(confirm).toBeTruthy();
     act(() => confirm!.click());
 
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(send).toHaveBeenNthCalledWith(1, {
+    // 批次汇总回执：整批只有一条请求，由宿主串行清理并回一条汇总 toast
+    // （旧实现逐个发 cleanup，用户会看到 N 条重复回执）。
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
       type: "superAgent",
-      action: "cleanup",
-      sessionId: "super-a",
-    });
-    expect(send).toHaveBeenNthCalledWith(2, {
-      type: "superAgent",
-      action: "cleanup",
-      sessionId: "super-b",
+      action: "cleanupBatch",
+      sessionIds: ["super-a", "super-b"],
     });
     expect(bulkDialog()).toBeNull();
   });
@@ -1112,7 +1213,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     const text = panelRoot().textContent ?? "";
     expect(text).toContain("工作目录 1 个");
-    expect(text).toContain("已结束 0 个可回收");
+    expect(text).toContain("已结束 0 个可清理");
     expect(bulkButton()).toBeNull();
     expect(bulkDialog()).toBeNull();
   });
@@ -1128,7 +1229,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     ]);
     expand();
 
-    expect(panelRoot().textContent ?? "").not.toContain("个可回收");
+    expect(panelRoot().textContent ?? "").not.toContain("个可清理");
     expect(bulkButton()).toBeNull();
   });
 
@@ -1144,8 +1245,44 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expand();
     act(() => rowTrigger().click());
 
-    expect(document.body.textContent).toContain("工作目录已回收，分支保留");
-    expect(document.body.textContent).not.toContain("工作目录与分支已清理");
+    expect(document.body.textContent).toContain("工作目录已删除，分支保留");
+    expect(document.body.textContent).not.toContain("工作目录和分支都已删除");
+  });
+
+  it("批量清理确认后每行各自立即显示进行态", () => {
+    render([
+      session({ id: "super-a", title: "修复登录跳转", status: "completed", startedAt: 2000, endedAt: 4000 }),
+      session({ id: "super-b", title: "补充单测", status: "failed", startedAt: 2000, endedAt: 4000 }),
+    ]);
+    expand();
+
+    const btn = bulkButton();
+    expect(btn).toBeTruthy();
+    act(() => btn!.click());
+    const dialog = bulkDialog();
+    expect(dialog).toBeTruthy();
+    const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "清理已结束",
+    );
+    expect(confirm).toBeTruthy();
+
+    act(() => confirm!.click());
+
+    // 一条批次请求 + 一次性的进行态标记（不是 N 条 cleanup）。
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "cleanupBatch",
+      sessionIds: ["super-a", "super-b"],
+    });
+    expect(bulkDialog()).toBeNull();
+    // 两行各自进入进行态，而不是只有第一行或整批一个共用 spinner。
+    const triggerA = rowTrigger("修复登录跳转");
+    const triggerB = rowTrigger("补充单测");
+    expect(triggerA.textContent).toContain("清理中");
+    expect(triggerB.textContent).toContain("清理中");
+    expect(triggerA.querySelector(".animate-spin")).toBeTruthy();
+    expect(triggerB.querySelector(".animate-spin")).toBeTruthy();
   });
 });
 
@@ -1178,9 +1315,9 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     act(() => rowTrigger().click());
 
     // 状态 chip 已经写着「排队中」，再叠一个警告色降级 chip 只会误读成
-    // 「worktree 创建失败」——占位态不得出现。
+    // 「独立工作目录创建失败」——占位态不得出现。
     expect(document.body.textContent).toContain("排队中");
-    expect(document.body.textContent).not.toContain("仅目录隔离");
+    expect(document.body.textContent).not.toContain("只隔离了目录");
     // 隔离行不能渲染空字符串：宿主给的中文占位说明要能看到。
     expect(document.body.textContent).toContain("正在准备隔离环境");
   });
@@ -1191,14 +1328,14 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
         isolation: {
           kind: "directory",
           path: "/tmp/fallback",
-          note: "worktree 创建失败（fatal: not a git repository），仅目录隔离",
+          note: "独立工作目录创建失败（fatal: not a git repository），仅目录隔离",
         },
       }),
     ]);
     expand();
     act(() => rowTrigger().click());
 
-    expect(document.body.textContent).toContain("仅目录隔离");
+    expect(document.body.textContent).toContain("只隔离了目录");
     // 真降级时定位文本仍是那个目录，而不是 note。
     expect(document.body.textContent).toContain("/tmp/fallback");
   });
@@ -1228,7 +1365,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
         isolation: {
           kind: "directory",
           path: "/tmp/fallback",
-          note: "worktree 创建失败（fatal: not a git repository），仅目录隔离",
+          note: "独立工作目录创建失败（fatal: not a git repository），仅目录隔离",
         },
       }),
     ]);
@@ -1236,6 +1373,245 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
 
     const hint = rowTitleHint();
     expect(hint).toContain("目录 /tmp/fallback");
+  });
+});
+
+describe("Super Agent 看板合并 / 重试进行态", () => {
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 详情区里的「让智能体合并」按钮（确认框里的确认按钮文案不同）。 */
+  function mergeButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "让智能体合并",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 忙碌态的合并按钮（普通态文案是「让智能体合并」，不会命中）。 */
+  function busyMergeButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "合并中",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 合并确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
+  const mergeDialog = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="合并子会话分支"]');
+
+  function dialogButton(dialog: HTMLElement, label: string): HTMLButtonElement {
+    const el = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === label,
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 详情区里的「重试」按钮（忙碌态文案是「重试中」）。 */
+  function retryButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      ["重试", "重试中"].includes((b.textContent ?? "").trim()),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 已结束、分支仍在、集成结果为「未自动合并」——合并按钮可用且行不被折叠。 */
+  function mergeableSession(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
+    return session({
+      id: "super-m",
+      status: "completed",
+      startedAt: 2000,
+      endedAt: 4000,
+      integration: { mode: "merge", state: "skipped", detail: "工作区脏", at: 5000 },
+      ...overrides,
+    });
+  }
+
+  it("确认合并后立即出现 spinner +「合并中」，不等 host 回包", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    const dialog = mergeDialog();
+    expect(dialog).toBeTruthy();
+
+    act(() => dialogButton(dialog!, "让智能体合并分支").click());
+
+    // 确认框立即关闭，请求立即发出。
+    expect(mergeDialog()).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "merge",
+      sessionId: "super-m",
+    });
+    // 行首状态 chip 立刻变成「合并中」+ 旋转图标（completed 原本没有 spinner）。
+    const trigger = rowTrigger();
+    expect(trigger.textContent).toContain("合并中");
+    expect(trigger.querySelector(".animate-spin")).toBeTruthy();
+    // 合并按钮同步进入忙碌态：文案、图标、可访问名都更新。
+    const busy = busyMergeButton();
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-label")).toBe("合并中");
+    expect(busy.getAttribute("title")).toBe("合并中");
+    expect(busy.querySelector(".animate-spin")).toBeTruthy();
+    // 「已请求、未合入」绝不能被误报成「已自动合并」。
+    expect(document.body.textContent).not.toContain("已自动合并");
+  });
+
+  it("合并进行态中重复点击不会再次发送请求", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    act(() => dialogButton(mergeDialog()!, "让智能体合并分支").click());
+    expect(send).toHaveBeenCalledTimes(1);
+
+    act(() => busyMergeButton().click());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(mergeDialog()).toBeNull();
+  });
+
+  it("integration 落定后收尾：不再显示「合并中」，结果改为已合并", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    act(() => dialogButton(mergeDialog()!, "让智能体合并分支").click());
+    expect(document.body.textContent).toContain("合并中");
+
+    // 合并子会话跑完：host 把来源行的 integration 改写成 merged（新的 at）。
+    render([
+      mergeableSession({ integration: { mode: "merge", state: "merged", at: 9000 } }),
+    ]);
+
+    expect(document.body.textContent).not.toContain("合并中");
+    // 全部子会话都已合并 → 看板自动收起成顶栏控件：重新展开再读历史行。
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    expand();
+    // 已合并的行折叠进「已完成的 N 个子会话」：展开后读到真实结果。
+    const foldedToggle = document.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="展开已完成的子会话"]',
+    );
+    expect(foldedToggle).toBeTruthy();
+    act(() => foldedToggle!.click());
+    act(() => rowTrigger().click());
+    expect(rowTrigger().querySelector(".animate-spin")).toBeNull();
+    expect(document.body.textContent).toContain("已自动合并");
+  });
+
+  it("取消合并确认框不触发进行态，也不发送请求", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    const dialog = mergeDialog();
+    expect(dialog).toBeTruthy();
+
+    act(() => dialogButton(dialog!, "取消").click());
+
+    expect(mergeDialog()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("合并中");
+    expect(mergeButton().getAttribute("aria-label")).toBe("让智能体合并");
+    expect(mergeButton().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("请求未被受理（没有合并子会话）时兜底超时解锁，不永久转圈", () => {
+    vi.useFakeTimers();
+    try {
+      render([mergeableSession()]);
+      expand();
+      act(() => rowTrigger().click());
+      act(() => mergeButton().click());
+      act(() => dialogButton(mergeDialog()!, "让智能体合并分支").click());
+      expect(document.body.textContent).toContain("合并中");
+
+      // host 拒掉请求（主会话正忙等）不会产生合并子会话：宽限期到点收尾。
+      act(() => {
+        vi.advanceTimersByTime(6_000);
+      });
+
+      expect(document.body.textContent).not.toContain("合并中");
+      expect(mergeButton().getAttribute("aria-label")).toBe("让智能体合并");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("点击重试立即禁用并显示「重试中」，重复点击不重发", () => {
+    render([
+      session({
+        id: "super-r",
+        status: "failed",
+        error: "进程崩溃",
+        startedAt: 2000,
+        endedAt: 4000,
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    act(() => retryButton().click());
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "retry",
+      sessionId: "super-r",
+    });
+    const busy = retryButton();
+    expect(busy.textContent?.trim()).toBe("重试中");
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-label")).toBe("重试中");
+    expect(busy.getAttribute("title")).toBe("重试中");
+    expect(busy.querySelector(".animate-spin")).toBeTruthy();
+    // 行首 chip 同样立即说明「重试中」。
+    expect(rowTrigger().textContent).toContain("重试中");
+
+    // 防连点：进行态下再点一次不会再发。
+    act(() => busy.click());
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("host 受理重试（状态变为运行中）后进行态收尾", () => {
+    render([
+      session({
+        id: "super-r",
+        status: "failed",
+        error: "进程崩溃",
+        startedAt: 2000,
+        endedAt: 4000,
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => retryButton().click());
+    expect(document.body.textContent).toContain("重试中");
+
+    // host 重置 worktree 并起了新进程：status 变化即视为已受理。
+    render([
+      session({
+        id: "super-r",
+        status: "running",
+        attempts: 2,
+        startedAt: 9000,
+        updatedAt: 9000,
+      }),
+    ]);
+
+    expect(document.body.textContent).not.toContain("重试中");
+    expect(rowTrigger().textContent).toContain("运行中");
   });
 });
 

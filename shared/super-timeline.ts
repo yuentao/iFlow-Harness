@@ -94,7 +94,7 @@ function isTerminalStatus(session: SuperSessionUi): boolean {
 /**
  * 从真实字段推导**阶段**轨（宿主观察到的生命周期事实）。
  *
- * 节点顺序：派发 → （第 N 次）→ （排队）→ （启动）→ （等待应答 | 终态）→
+ * 节点顺序：已派出 → （第 N 次）→ （排队）→ （已启动）→ （在等你回答 | 终态）→
  * （集成结果）。括号里的节点只在对应事实存在时出现。
  *
  * 「当前」语义：非终态时最后一个节点标 `current`；终态时最后一个节点带对应
@@ -112,7 +112,7 @@ function deriveStageNodes(session: SuperSessionUi): SuperTimelineNode[] {
     kind: "dispatched",
     ...(createdAt === undefined ? {} : { at: createdAt }),
     tone: "done",
-    label: "派发",
+    label: "已派出",
   });
 
   const attempts = session.attempts ?? 1;
@@ -129,7 +129,7 @@ function deriveStageNodes(session: SuperSessionUi): SuperTimelineNode[] {
 
   const startedAt = finiteAt(session.startedAt);
   if (startedAt !== undefined) {
-    nodes.push({ kind: "started", at: startedAt, tone: "done", label: "启动" });
+    nodes.push({ kind: "started", at: startedAt, tone: "done", label: "已启动" });
   }
 
   if (session.pending) {
@@ -144,7 +144,7 @@ function deriveStageNodes(session: SuperSessionUi): SuperTimelineNode[] {
       kind: "awaiting_input",
       ...(at === undefined ? {} : { at }),
       tone: "current",
-      label: "等待应答",
+      label: "在等你回答",
     });
   }
 

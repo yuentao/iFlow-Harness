@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
@@ -159,8 +160,8 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     // dispose() cancels any still-open dialog (resolves its switch as
     // cancelled) so a test that left the dialog unanswered cannot hang.
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
     vi.restoreAllMocks();
   });
@@ -459,7 +460,7 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
       expect(await p.resolveWorkspaceHandshakeCreds()).toEqual(profiles.A);
     } finally {
       await secondPanel.dispose();
-      await rm(secondStorage, { recursive: true, force: true });
+      await rm(secondStorage, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -547,8 +548,8 @@ describe("ChatPanel saveAuth: 编辑配置的严格 upsert 与热更新", () => 
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
     vi.restoreAllMocks();
   });
@@ -1004,5 +1005,247 @@ describe("ChatPanel saveAuth: 编辑配置的严格 upsert 与热更新", () => 
       expect.stringContaining("本次连接仍在用旧凭据"),
     );
     expect(activeName()).toBe("A");
+  });
+});
+
+/**
+ * 用户真实环境的回归：内核 `~/.iflow/settings.json` 的 apiProfiles 由 CLI 自己
+ * 写过，条目里带着面板不认识的 per-profile 元数据（selectedAuthType /
+ * tokensLimit / expiryDays / balanceProvider / _lastModified /
+ * expiryStartDate），名字是中文；SecretStorage 里没有该条目（内核才是权威）。
+ *
+ * 三个必须守住的点：
+ *  1. 面板保存 = 原地合并该条目 —— 只改 baseUrl / apiKey / modelName，
+ *     CLI 的元数据与其他条目、其他顶层字段一概不动（整体替换是数据丢失）；
+ *  2. 保存后列表必须立刻反映新值（内核写入失败时也一样如实显示，绝不静默）；
+ *  3. 只有「编辑的正是当前在用的那条」才重新认证；忙碌窗口（historySyncBusy）
+ *     跳过重连时必须刷新列表并明确告知本次连接仍用旧凭据。
+ */
+describe("ChatPanel saveAuth: 内核 apiProfiles 原地更新（用户真实形态）", () => {
+  type KernelProfile = {
+    baseUrl: string;
+    apiKey: string;
+    modelName: string;
+    selectedAuthType?: string;
+    tokensLimit?: number;
+    expiryDays?: number;
+    balanceProvider?: string;
+    _lastModified?: number;
+    expiryStartDate?: string;
+  };
+  type KernelSettings = {
+    mcpServers?: Record<string, unknown>;
+    language?: string;
+    approvalMode?: string;
+    currentApiProfile?: string;
+    apiProfiles?: Record<string, KernelProfile>;
+  };
+  type AuthRow = { name: string; baseUrl: string; modelName: string; keyTail: string; active: boolean };
+  type PanelShape = {
+    client: FakeClient | null;
+    historySyncBusy: boolean;
+    handleWebviewMessage: (msg: WebviewToHost) => Promise<void>;
+    reconnectWithCredentials: (
+      creds: { baseUrl: string; apiKey: string; modelName: string },
+      keepSession?: boolean,
+    ) => Promise<void>;
+    store: {
+      getState: () => { auth: { profiles: AuthRow[] } };
+    };
+  };
+
+  const CLI_META = {
+    selectedAuthType: "openai-compatible",
+    tokensLimit: 128000,
+    expiryDays: 7,
+    balanceProvider: "custom",
+    _lastModified: 1_760_000_000_000,
+    expiryStartDate: "2026-11-01T00:00:00.000Z",
+  };
+  const LOCAL = { baseUrl: "https://local.example.com/v1", apiKey: "sk-local-9999", modelName: "glm-4" };
+  const BACKUP = { baseUrl: "https://backup.example.com/v1", apiKey: "sk-backup-8888", modelName: "qwen-max" };
+  const MCP = { apipost: { command: "npx", args: ["apipost-mcp"] } };
+
+  let panel: ChatPanel;
+  let p: PanelShape;
+  let iflowHome: string;
+  let storageDir: string;
+
+  beforeEach(async () => {
+    iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-kernel-save-"));
+    process.env.IFLOW_HOME = iflowHome;
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-kernel-save-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelShape;
+    vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined as never);
+    vi.spyOn(vscode.window, "showWarningMessage").mockResolvedValue(undefined as never);
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    delete process.env.IFLOW_HOME;
+    vi.restoreAllMocks();
+  });
+
+  function secrets(): vscode.SecretStorage {
+    return (panel as unknown as { context: { secrets: vscode.SecretStorage } }).context.secrets;
+  }
+  function workspace(): vscode.Memento {
+    return (panel as unknown as { context: { workspaceState: vscode.Memento } }).context.workspaceState;
+  }
+  function settingsFile(): string {
+    return path.join(iflowHome, "settings.json");
+  }
+  function seedKernel(profiles: Record<string, KernelProfile>): void {
+    const settings: KernelSettings = {
+      mcpServers: MCP,
+      language: "zh-CN",
+      approvalMode: "default",
+      currentApiProfile: "本地网关",
+      apiProfiles: profiles,
+    };
+    writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), "utf8");
+  }
+  function readKernel(): KernelSettings {
+    return JSON.parse(readFileSync(settingsFile(), "utf8")) as KernelSettings;
+  }
+  function authRows(): AuthRow[] {
+    return p.store.getState().auth.profiles;
+  }
+  function stubReconnect(): ReturnType<typeof vi.fn> {
+    const fn = vi.fn(async () => {});
+    p.reconnectWithCredentials = fn as unknown as PanelShape["reconnectWithCredentials"];
+    return fn;
+  }
+
+  it("编辑当前配置：内核条目原地合并（CLI 元数据不丢），并按当前配置重连", async () => {
+    seedKernel({
+      本地网关: { ...LOCAL, ...CLI_META },
+      备用: { ...BACKUP, ...CLI_META },
+    });
+    await workspace().update("iflow.workspaceActiveProfile", "本地网关");
+    const reconnect = stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://local2.example.com/v1",
+      apiKey: null,
+      modelName: "glm-5",
+      profileName: "本地网关",
+      replaceName: "本地网关",
+    });
+
+    const kernel = readKernel();
+    // 三个可编辑字段更新，Key 留空沿用该条目自己的 Key。
+    expect(kernel.apiProfiles?.["本地网关"]).toMatchObject({
+      baseUrl: "https://local2.example.com/v1",
+      apiKey: "sk-local-9999",
+      modelName: "glm-5",
+    });
+    // CLI 自己写的 per-profile 元数据必须原地保留。
+    expect(kernel.apiProfiles?.["本地网关"]).toMatchObject(CLI_META);
+    // 其他条目与其他顶层字段一概不动。
+    expect(kernel.apiProfiles?.["备用"]).toMatchObject({ ...BACKUP, ...CLI_META });
+    expect(kernel.mcpServers).toEqual(MCP);
+    expect(kernel.language).toBe("zh-CN");
+    expect(kernel.approvalMode).toBe("default");
+    expect(kernel.currentApiProfile).toBe("本地网关");
+    // 编辑的正是当前在用的那条 → 热重认证路径（keepSession）。
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(reconnect.mock.calls[0]![1]).toBe(true);
+    expect(reconnect.mock.calls[0]![0]).toMatchObject({ modelName: "glm-5", apiKey: "sk-local-9999" });
+  });
+
+  it("编辑非当前配置（无 workspace 指针）：内核合并、列表立即刷新、不重连", async () => {
+    seedKernel({
+      本地网关: { ...LOCAL, ...CLI_META },
+      备用: { ...BACKUP, ...CLI_META },
+    });
+    // 全局凭据槽是另一条配置：workspace 指针为空时它不是「当前配置」。
+    await secrets().store("iflow.openai-compatible", JSON.stringify(BACKUP));
+    const reconnect = stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://local2.example.com/v1",
+      apiKey: null,
+      modelName: "glm-5",
+      profileName: "本地网关",
+      replaceName: "本地网关",
+    });
+
+    const kernel = readKernel();
+    expect(kernel.apiProfiles?.["本地网关"]).toMatchObject({
+      baseUrl: "https://local2.example.com/v1",
+      modelName: "glm-5",
+      apiKey: "sk-local-9999",
+      ...CLI_META,
+    });
+    // 列表立即反映新值（不能停留在旧值上）。
+    const rows = authRows();
+    expect(rows.find((r) => r.name === "本地网关")).toMatchObject({
+      baseUrl: "https://local2.example.com/v1",
+      modelName: "glm-5",
+    });
+    expect(rows.find((r) => r.name === "备用")).toMatchObject({
+      baseUrl: BACKUP.baseUrl,
+      modelName: BACKUP.modelName,
+    });
+    // 编辑非当前配置不切换、不重连。
+    expect(reconnect).not.toHaveBeenCalled();
+  });
+
+  it("historySyncBusy 期间编辑当前配置：列表照样刷新，并如实提示本次连接仍用旧凭据", async () => {
+    seedKernel({ 本地网关: { ...LOCAL, ...CLI_META } });
+    await workspace().update("iflow.workspaceActiveProfile", "本地网关");
+    await p.handleWebviewMessage({ type: "refreshAuth" });
+    expect(authRows().find((r) => r.name === "本地网关")?.modelName).toBe("glm-4");
+    p.historySyncBusy = true;
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: LOCAL.baseUrl,
+      apiKey: null,
+      modelName: "glm-5",
+      profileName: "本地网关",
+      replaceName: "本地网关",
+    });
+
+    expect(readKernel().apiProfiles?.["本地网关"]).toMatchObject({
+      modelName: "glm-5",
+      ...CLI_META,
+    });
+    // 不得出现「保存了但界面仍旧值、且无任何提示」。
+    expect(authRows().find((r) => r.name === "本地网关")?.modelName).toBe("glm-5");
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringContaining("本次连接仍在用旧凭据"),
+    );
+  });
+
+  it("改名撞上内核里已存在、SecretStorage 里没有的配置：拒绝写入，绝不覆盖对方条目", async () => {
+    seedKernel({
+      本地网关: { ...LOCAL, ...CLI_META },
+      备用: { ...BACKUP, ...CLI_META },
+    });
+    await workspace().update("iflow.workspaceActiveProfile", "本地网关");
+    stubReconnect();
+
+    await p.handleWebviewMessage({
+      type: "saveAuth",
+      baseUrl: "https://hijack.example.com/v1",
+      apiKey: "sk-hijack",
+      modelName: "hijack-model",
+      profileName: "备用",
+      replaceName: "本地网关",
+    });
+
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
+      expect.stringContaining("已存在同名 API 配置"),
+    );
+    const kernel = readKernel();
+    expect(kernel.apiProfiles?.["本地网关"]).toMatchObject({ ...LOCAL, ...CLI_META });
+    expect(kernel.apiProfiles?.["备用"]).toMatchObject({ ...BACKUP, ...CLI_META });
   });
 });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Check, Ellipsis, FileCode2, Undo2 } from "lucide-react";
-import type { ToolDiffUi } from "../../../shared/messages";
-import { computeHunks, diffRows } from "../../../shared/hunks";
+import type { DiffHunkUi, ToolDiffUi } from "../../../shared/messages";
+import { computeHunks, diffRows, type DiffOp } from "../../../shared/hunks";
 import { t } from "../i18n";
 import { Button, FileRef, ICON_INLINE } from "./ui";
 
@@ -33,6 +33,112 @@ const CONTEXT_LINES = 3;
  */
 const INITIAL_RENDER_ROWS = 800;
 const RENDER_ROWS_STEP = 800;
+
+/**
+ * Content-keyed cache of the line alignment (the LCS).
+ *
+ * `shared/hunks.ts#diffRows` is O(oldLines × newLines) — up to the 4M-cell
+ * guard — and a diff body can reach the 256KB cap. Every blockPatch
+ * re-serializes the transcript tail, so the `diff` OBJECT identity changes on
+ * every patch even when its CONTENT did not: a per-render memo keyed on the
+ * diff object therefore missed, and every mounted diff card re-ran the
+ * alignment on every patch.
+ *
+ * The cache is keyed by CONTENT (path + both lengths + a hash of both texts),
+ * never by object identity, so a re-serialized but unchanged diff hits. The
+ * key stays small — no diff body in it — and the hash is O(chars), orders of
+ * magnitude cheaper than the alignment it replaces.
+ *
+ * Capacity is bounded ({@link DIFF_CACHE_LIMIT}) and the OLDEST entry is
+ * evicted first: a Map keeps insertion order, and a hit re-inserts its entry
+ * so it becomes the newest one.
+ */
+const DIFF_CACHE_LIMIT = 16;
+
+/** One cached alignment: both sides split, the op sequence and the hunks. */
+interface DiffAlignment {
+  /** Raw old side (null = the file did not exist before). */
+  oldText: string | null;
+  /** Raw new side (null = the file was deleted). */
+  newText: string | null;
+  /** Split old side (null = the file did not exist before). */
+  oldLines: string[] | null;
+  /** Split new side (null = the file was deleted). */
+  newLines: string[] | null;
+  /** Line alignment of both sides. */
+  ops: DiffOp[];
+  /**
+   * Per-hunk split for the keep/revert decisions. `undefined` = not computed
+   * yet — only editable diffs need it, so it is computed on demand and then
+   * kept in the entry.
+   */
+  hunks: DiffHunkUi[] | null | undefined;
+}
+
+/** The alignment cache (content key → alignment). */
+const diffAlignmentCache = new Map<string, DiffAlignment>();
+
+/** FNV-1a over the text — a cheap content fingerprint for the cache key. */
+function hashText(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/** Content key of a diff: path + both lengths + both text hashes. */
+function diffContentKey(diff: ToolDiffUi): string {
+  const oldText = diff.oldText ?? "";
+  const newText = diff.newText ?? "";
+  return `${diff.path} ${oldText.length} ${newText.length} ${hashText(oldText)} ${hashText(newText)}`;
+}
+
+/** Cached alignment of a diff; computes it on the first miss. */
+function getDiffAlignment(diff: ToolDiffUi): DiffAlignment {
+  const key = diffContentKey(diff);
+  const hit = diffAlignmentCache.get(key);
+  if (hit) {
+    // Refresh the LRU position: a hit becomes the newest entry.
+    diffAlignmentCache.delete(key);
+    diffAlignmentCache.set(key, hit);
+    return hit;
+  }
+  const oldText = diff.oldText;
+  const newText = diff.newText;
+  const oldLines = oldText === null ? null : oldText.split("\n");
+  const newLines = newText === null ? null : newText.split("\n");
+  const alignment: DiffAlignment = {
+    oldText,
+    newText,
+    oldLines,
+    newLines,
+    ops: diffRows(oldLines ?? [], newLines ?? []),
+    hunks: undefined,
+  };
+  diffAlignmentCache.set(key, alignment);
+  while (diffAlignmentCache.size > DIFF_CACHE_LIMIT) {
+    const oldest = diffAlignmentCache.keys().next().value;
+    if (oldest === undefined) break;
+    diffAlignmentCache.delete(oldest);
+  }
+  return alignment;
+}
+
+/**
+ * Per-hunk split for the keep/revert decisions. Computed on demand (only
+ * editable diffs need it — a plain diff card never shows hunk headers) and
+ * then kept in the cache entry, so it survives the re-serialization that
+ * every blockPatch causes.
+ */
+function getDiffHunks(alignment: DiffAlignment): DiffHunkUi[] | null {
+  if (alignment.hunks !== undefined) return alignment.hunks;
+  const { oldText, newText } = alignment;
+  alignment.hunks =
+    oldText !== null && newText !== null ? computeHunks(oldText, newText) : null;
+  return alignment.hunks;
+}
 
 /**
  * Line-level diff renderer for structured tool diffs
@@ -79,10 +185,12 @@ export function DiffView({
   maxHeightClass?: string;
 }) {
   const editable = !!hunkActions && diff.oldText !== null && diff.newText !== null;
-  const hunks = useMemo(
-    () => (editable ? computeHunks(diff.oldText!, diff.newText!) : null),
-    [editable, diff.oldText, diff.newText],
-  );
+  // Content-keyed alignment (see the cache above). The memo is keyed on the
+  // CONTENT, so a diff that was merely re-serialized by a blockPatch keeps
+  // the cached alignment instead of re-running the LCS.
+  const diffKey = useMemo(() => diffContentKey(diff), [diff]);
+  const alignment = useMemo(() => getDiffAlignment(diff), [diffKey]);
+  const hunks = useMemo(() => (editable ? getDiffHunks(alignment) : null), [editable, alignment]);
   const hunkCount = hunks?.length ?? 0;
   const [keep, setKeep] = useState<boolean[]>(() => new Array(hunkCount).fill(true));
   // A new diff, or a fresh commit from outside, resets the local decision set.
@@ -101,8 +209,8 @@ export function DiffView({
   );
 
   const { rows: fullRows, windows } = useMemo(
-    () => buildRows(diff, hunks, keep),
-    [diff, hunks, keep],
+    () => buildRows(alignment, hunks, keep),
+    [alignment, hunks, keep],
   );
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   /** DOM row cap; grows as the user scrolls the diff body (see render). */
@@ -256,7 +364,7 @@ export function DiffView({
               size="sm"
               icon={<Check className={ICON_INLINE} />}
               disabled={!dirty || hunkActions?.busy}
-              title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+              title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
               onClick={() => hunkActions?.onApply([...keep])}
             >
               {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
@@ -265,7 +373,7 @@ export function DiffView({
             <button
               className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={!dirty || hunkActions?.busy}
-              title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+              title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
               onClick={() => hunkActions?.onApply([...keep])}
             >
               <Check className="size-3" /> {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
@@ -308,7 +416,7 @@ function HunkHeader({
         kept ? "bg-surface/50 text-muted-foreground" : "bg-diff-del/40 text-diff-del-fg"
       }`}
     >
-      <span className="font-medium">{t("改动 {0}/{1}", index + 1, total)}</span>
+      <span className="font-medium">{t("第 {0}/{1} 处改动", index + 1, total)}</span>
       <span className="ml-auto flex items-center gap-1">
         <button
           className={`press rounded px-1.5 py-0.5 font-medium transition-colors ${
@@ -336,29 +444,28 @@ function HunkHeader({
 }
 
 function buildRows(
-  diff: ToolDiffUi,
+  alignment: DiffAlignment,
   hunks: { rowStart: number; rowEnd: number }[] | null,
   keep: boolean[],
 ): { rows: DiffRow[]; windows: Array<[number, number]> } {
-  const oldLines = diff.oldText === null ? [] : diff.oldText.split("\n");
-  const newLines = diff.newText === null ? [] : diff.newText.split("\n");
+  const { oldLines, newLines, ops } = alignment;
 
   // File creation: no old content, show everything as additions.
-  if (diff.oldText === null) {
+  if (oldLines === null) {
+    const lines = newLines ?? [];
     return {
-      rows: newLines.map((text, j) => ({ type: "add" as const, n: String(j + 1), text })),
+      rows: lines.map((text, j) => ({ type: "add" as const, n: String(j + 1), text })),
       windows: [],
     };
   }
   // File deletion: no new content, show everything as removals.
-  if (diff.newText === null) {
+  if (newLines === null) {
     return {
       rows: oldLines.map((text, i) => ({ type: "del" as const, n: String(i + 1), text })),
       windows: [],
     };
   }
 
-  const ops = diffRows(oldLines, newLines);
   const rows: DiffRow[] = [];
   let prevHunk = -1;
   for (let index = 0; index < ops.length; index++) {

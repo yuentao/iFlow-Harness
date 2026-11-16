@@ -83,6 +83,23 @@ export function isTerminalSuperStatus(status: SuperStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
+/**
+ * 是否还有**非终态**子会话（准备中 / 运行中 / 等你处理）。
+ *
+ * 派生值（纯函数）：调用方（webview 顶栏）用它锁住「切会话 / 切模型 / 切 API
+ * 配置」—— 在跑的子会话用错凭据或让汇报落到已被替换的会话，比 mid-turn 切换
+ * 更隐蔽。
+ *
+ * 之所以放在 shared 层而不是让每个调用点各写一遍 `.some(...)`：顶栏的 selector
+ * 会在**每次 store 更新**时求值（流式期间 12.5 次/秒），内联遍历等于每秒把
+ * 整张子会话表扫一遍；这里给出唯一口径，调用方只订阅列表引用、再用 useMemo
+ * 派生这个布尔值。
+ */
+export function hasActiveSuperSession(sessions: readonly SuperSessionUi[] | undefined): boolean {
+  if (!sessions || sessions.length === 0) return false;
+  return sessions.some((session) => !isTerminalSuperStatus(session.status));
+}
+
 // ---------------------------------------------------------------------------
 // 汇报（抄 dsh 的 Report 五态）
 // ---------------------------------------------------------------------------
@@ -206,18 +223,18 @@ export interface SuperIsolation {
 /**
  * 隔离种类的看板标签（如实说明隔离强度，不伪造分支）。
  *
- * 「repo」档必须说成「主仓工作区（无隔离）」：这类子会话跑在主仓工作区里，
+ * 「repo」档必须说成「直接在主工作区（无隔离）」：这类子会话跑在主仓工作区里，
  * 没有自己的分支 —— 显示一个不存在的分支名，看板上就会指向一个谁也找不到的
  * 分支。worktree 档的分支名由看板单独显示，这里只说隔离方式。
  */
 export function superIsolationLabel(isolation: SuperIsolation): string {
   switch (isolation.kind) {
     case "git_worktree":
-      return "独立 worktree";
+      return "独立工作目录";
     case "directory":
-      return "仅目录隔离";
+      return "只隔离了目录";
     case "repo":
-      return "主仓工作区（无隔离）";
+      return "直接在主工作区（无隔离）";
   }
 }
 
@@ -329,7 +346,7 @@ export function superIntegrationLabel(integration: SuperIntegration): string {
     case "pr_created":
       return "PR 已创建";
     case "failed":
-      return "集成失败";
+      return "自动处理失败";
     case "skipped":
       return "未自动合并";
     case "not_needed":
@@ -1840,11 +1857,34 @@ function skipWhitespace(text: string, from: number): number {
 /** 解析指令块正文的结果：失败要带原因，宿主才能提示得具体。 */
 type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason: string };
 
+/**
+ * 委派载荷的公共解析结果（公开入口的返回类型）。
+ *
+ * 与私有 {@link DirectiveParse} 同形 —— 公开入口刻意**不新增**语义，只是把
+ * 同一份结果的类型暴露给外部调用方。
+ */
+export type SuperTaskPayloadParse = DirectiveParse;
+
+/**
+ * 委派载荷的公共解析入口（已是 JSON 值）。
+ *
+ * 与内部正文解析使用同一份校验，只是省掉「文本 → 值」这一步：
+ * 工具调用帧的 `args` 本来就是值，不必 JSON.stringify 再 JSON.parse 一趟
+ * （那是热路径，每帧都跑）。
+ */
+export function parseSuperTaskValue(value: unknown): SuperTaskPayloadParse {
+  return parseDirectiveValue(value);
+}
+
 /** 解析指令块正文。 */
 function parseDirectiveBody(body: string): DirectiveParse {
   const parsed = parseJsonLoose(body);
   if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON" };
-  const value = parsed.value;
+  return parseDirectiveValue(parsed.value);
+}
+
+/** 指令块正文（载荷本身已是 JSON 值）的解析 —— 校验逻辑与文本入口完全同源。 */
+function parseDirectiveValue(value: unknown): DirectiveParse {
   const rawTasks = Array.isArray(value)
     ? value
     : typeof value === "object" && value !== null && Array.isArray((value as { tasks?: unknown }).tasks)
@@ -1885,7 +1925,7 @@ function parseDirectiveBody(body: string): DirectiveParse {
  * 静默失效，所以先做一次保守修补再交给 JSON.parse —— 修不好照样失败，绝不
  * 编造内容。
  */
-function parseJsonLoose(text: string): { ok: true; value: unknown } | { ok: false } {
+export function parseJsonLoose(text: string): { ok: true; value: unknown } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(text) };
   } catch {
@@ -1967,7 +2007,7 @@ function nextNonWhitespace(text: string, from: number): string {
  * 而一段被流式扫描的巨型 base64 只会拖垮协议。用户的粘贴图片由宿主自己补
  * 进同一个列表（见 `ChatPanel.currentTurnAttachments`）。
  */
-function parseDirectiveAttachments(raw: unknown): SuperAttachment[] {
+export function parseDirectiveAttachments(raw: unknown): SuperAttachment[] {
   if (!Array.isArray(raw)) return [];
   const out: SuperAttachment[] = [];
   for (const entry of raw) {
@@ -2831,21 +2871,23 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
  * 内置 CLI 现已注册 `super-agent` 工具（见 AGENTS.md 的
  * `super-agent-tool-refactor`），所以**首选工具调用**；只有工具不在列表时
  * （Plan 模式白名单不含它，或旧 bundle 尚未带该工具）才退回正文围栏。管理
- * 动作（`super-agent-actions`）**只有围栏一条通道**，没有对应工具，这里必须
- * 写明，避免模型去调一个不存在的工具。
+ * 动作已合并进同一工具的 `actions` 参数：schema 带它就用工具，否则才退回
+ * `super-agent-actions` 围栏 —— 绝不引导模型去调一个不存在的独立工具。
  *
  * 载荷示例必须是**合法 JSON**：`{"title","task"}` 这类缺冒号的简写会被
  * `parseDirectiveBody` 判成「载荷不是合法 JSON」（进 `invalidBlocks`），
  * 模型照抄示例就会零派发。改用带引号的占位符 —— 示例本身可解析，而原样
  * 抄回仍会被占位符规则拒掉，不会派发一条垃圾任务。
  */
-const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. Manage children only by emitting a ```super-agent-actions fenced block — no actions tool exists.";
+const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. To manage children, call the `super-agent` tool with {\"actions\":[...]} when its schema exposes `actions`; otherwise emit a ```super-agent-actions fenced block — never call a separate `super-agent-actions` tool.";
 
 const SUPER_DIGEST_FOOTER = [
   "",
   SUPER_DIGEST_HINT,
-  "You can manage the child sessions above: emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
+  "You can manage the child sessions above: prefer the `super-agent` tool with an {\"actions\":[...]} body when its schema exposes `actions`; otherwise emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
   "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
+  "A child whose status is `failed` MUST be retried with the `retry` action (same sessionId, same working directory — its uncommitted work is preserved). Do NOT dispatch a new, equivalent `super-agent` task to redo it: that starts a fresh working directory from zero and discards the work the failed child already did.",
+  "Skip `retry` only if the user explicitly asks to abandon the task or its premise is no longer valid — and explain to the user first. Issue one `retry`, never concurrently for the same child. An `interrupted` child is not a failure: do not auto-retry it unless the user asks.",
   "Merging is done by the host, following the integration mode (merge by default, possibly PR): when the \"changes:\" line says merged automatically, do not merge it again;",
   "only when the branch was kept (not merged automatically / merge conflict / no gh CLI) should you run `git merge --no-ff <branch>` yourself (the branch name is on each line above), resolving conflicts by reading the code.",
   "`changes: no merge needed` means the child produced no commits at all — there is nothing to merge; never dispatch a merge child session for it.",

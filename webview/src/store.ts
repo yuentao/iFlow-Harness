@@ -152,12 +152,17 @@ function unlockAudio(): void {
 }
 
 /**
- * Synthesized cues:
- * - "done": rising two-tone chime (E5 → G5), short and positive.
+ * Synthesized cues — three distinct subjects, three distinct sounds:
+ * - "done": rising two-tone chime (E5 → G5), short and positive. A real turn
+ *   finished (user turn, or the main session's Super Agent report turn).
  * - "error": falling double-buzz (A3 → F3, square), unmistakably wrong.
- * Volume kept low (0.08 peak); ~0.35s total, never overlaps the next turn.
+ * - "child": ONE child session settled — a single low, short, quiet note
+ *   (D5 sine, 0.11s, peak 0.06). Deliberately lighter than "done": one child
+ *   finishing is progress, not the whole task finishing, and users asked for
+ *   the two to be tellable apart by ear alone.
+ * Volume kept low (≤0.08 peak); ~0.35s total, never overlaps the next turn.
  */
-function playCue(kind: "done" | "error"): void {
+function playCue(kind: "done" | "error" | "child"): void {
   try {
     unlockAudio();
     if (!audioCtx) return; // AudioContext construction failed in unlockAudio
@@ -165,6 +170,8 @@ function playCue(kind: "done" | "error"): void {
     if (kind === "done") {
       blip(audioCtx, 659.25, t, 0.14, "sine", 0.08);
       blip(audioCtx, 783.99, t + 0.13, 0.2, "sine", 0.08);
+    } else if (kind === "child") {
+      blip(audioCtx, 587.33, t, 0.11, "sine", 0.06);
     } else {
       blip(audioCtx, 220, t, 0.13, "square", 0.05);
       blip(audioCtx, 174.61, t + 0.15, 0.2, "square", 0.05);
@@ -492,7 +499,7 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "本次请求自动注入了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个为项目级",
+      notice: "这次请求还自动带上了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个来自项目配置",
       tokens: 31320,
       items: [
         {
@@ -1379,6 +1386,9 @@ function createMockHost(): HostApi {
           ...authState,
           profiles: authState.profiles.filter((p) => p.name !== m.name),
         };
+        window.dispatchEvent(
+          new MessageEvent("message", { data: { type: "profileDeleteResult", name: m.name, ok: true } }),
+        );
         broadcast({
           type: "snapshot",
           state: {
@@ -2200,6 +2210,8 @@ function createMockHost(): HostApi {
           rules: mockApprovalRules,
           projectRules: [{ id: "proj-lock", label: "项目：拒绝改 lock 文件", enabled: true, action: "deny", path: "**/package-lock.json" }],
           draft: mockApprovalDraft,
+          // Mirror the real host: a save is acknowledged with its outcome.
+          ...(m.type === "saveApprovalPolicy" ? { saveResult: "ok" as const } : {}),
         };
         window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: payload })), 80);
         return;
@@ -2267,26 +2279,44 @@ function createMockHost(): HostApi {
             target.updatedAt = Date.now();
           }
         } else if (m.action === "cleanup") {
-          const index = demoSuperSessions.findIndex((s) => s.id === m.sessionId);
-          if (index >= 0) demoSuperSessions.splice(index, 1);
+          // Mirror the real host's async cleanup (dispose → worktree → git
+          // probe → emit) with a short delay, so the webview's optimistic
+          // 「清理中」 state is observable in the standalone demo.
+          const id = m.sessionId;
+          window.setTimeout(() => {
+            const index = demoSuperSessions.findIndex((s) => s.id === id);
+            if (index >= 0) demoSuperSessions.splice(index, 1);
+            broadcastDemo(mockStatus, null);
+          }, 900);
+          return;
         } else if (m.action === "merge") {
-          // Mirror the real host: the click becomes a request to the MAIN
-          // agent, which performs the merge itself.
+          // Mirror the real host: the click becomes a request that dispatches
+          // a merge child session running asynchronously in the main
+          // workspace. The request block lands immediately, but the result is
+          // delayed so the webview's optimistic 「合并中」 state is observable
+          // in the standalone demo (a synchronous write-back would make the
+          // in-progress state flash by unseen).
           demoBlocks.push({
             kind: "user",
             text: "请把子会话的分支合并到当前分支（mock 请求，由智能体执行）",
           });
-          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
-          if (target) {
-            target.integration = {
-              mode: "merge",
-              state: "merged",
-              detail: "智能体已合入 main",
-              at: Date.now(),
-            };
-            target.updatedAt = Date.now();
-          }
-          demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+          broadcastDemo(mockStatus, null);
+          const id = m.sessionId;
+          window.setTimeout(() => {
+            const target = demoSuperSessions.find((s) => s.id === id);
+            if (target) {
+              target.integration = {
+                mode: "merge",
+                state: "merged",
+                detail: "智能体已合入 main",
+                at: Date.now(),
+              };
+              target.updatedAt = Date.now();
+            }
+            demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+            broadcastDemo(mockStatus, null);
+          }, 1500);
+          return;
         }
         broadcastDemo(mockStatus, null);
         return;
@@ -2503,9 +2533,32 @@ const RESYNC_THROTTLE_MS = 1_000;
  */
 const EVICT_KEEP_BLOCKS = 200;
 
+/**
+ * Eviction memo: input blocks array → evicted blocks array.
+ *
+ * `evictBlockPayloads` is a PURE function of the blocks array (both caps are
+ * constants here) and it is idempotent + identity-stable: nothing to release
+ * → the SAME array comes back. So the result of one pass can be reused for
+ * the same array — the store runs the eviction after every snapshot/patch,
+ * and a metadata-only patch (`applyBlockPatch` hands back `current.blocks`
+ * untouched) now hits this memo instead of re-walking the tail and
+ * re-copying the array.
+ *
+ * WeakMap: the entry dies with the array it describes, so nothing outlives
+ * the transcript it belongs to. Blocks are immutable in the webview (the
+ * reducer always creates new objects), so an array's contents — and hence its
+ * eviction result — never change under us.
+ */
+const evictMemo = new WeakMap<readonly Block[], Block[]>();
+
 /** Apply the payload eviction to an incoming state; identity-stable pass. */
 function evict(state: SessionState): SessionState {
+  const memo = evictMemo.get(state.blocks);
+  if (memo !== undefined) {
+    return memo === state.blocks ? state : { ...state, blocks: memo };
+  }
   const blocks = evictBlockPayloads(state.blocks, EVICT_KEEP_BLOCKS);
+  evictMemo.set(state.blocks, blocks);
   return blocks === state.blocks ? state : { ...state, blocks };
 }
 
@@ -2844,6 +2897,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memoryCandidates" ||
       msg.type === "knowledgeJob" ||
       msg.type === "approvalPolicy" ||
+      msg.type === "profileDeleteResult" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
       msg.type === "contextResolved" ||

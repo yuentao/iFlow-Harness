@@ -143,21 +143,21 @@ export function SettingsModal({
       dismissible={dismissible}
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
-          <HelpTip label={t("设置如何保存")} align="left">
-            {t("面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API 配置与密钥写入内核配置文件 ~/.iflow/settings.json（本机明文）。MCP、语言与审批模式同样在内核配置文件，重启内核生效。")}
+          <HelpTip label={t("设置保存在哪里")} align="left">
+            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言、审批模式保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。")}
           </HelpTip>
           <Button
             variant="ghost"
             className="underline-offset-2 hover:underline"
             onClick={() => send({ type: "openSettings" })}
           >
-            {t("在 VSCode 设置中编辑…")}
+            {t("打开 VSCode 设置")}
           </Button>
           <Button
             className="ml-auto"
             disabled={busy}
             icon={<RefreshCw className={ICON_INLINE} />}
-            title={t("重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效")}
+            title={t("重启内核，当前会话会自动恢复。语言、审批模式与 MCP 的改动在重启后生效。")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();
@@ -456,21 +456,21 @@ function JsonRulesRow({
     try {
       const parsed = JSON.parse(draft);
       if (!Array.isArray(parsed)) {
-        setError(t("条目必须是数组"));
+        setError(t("内容需要是列表（最外层用 [ ]）"));
         return;
       }
       setError(null);
       setDirty(false);
       onCommit(parsed as ThinkingModelRuleUi[]);
     } catch {
-      setError(t("JSON 格式无效"));
+      setError(t("JSON 格式有误，请检查括号与引号"));
     }
   }
   return (
     <div className="px-4 py-4">
       <div className="text-ui-body font-medium leading-snug text-foreground">{t("思考模型规则")}</div>
       <Hint className="mt-1">
-        {t("JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启内核生效。")}
+        {t("用 JSON 列表写明哪些模型支持思考：每项包含 pattern（模型匹配）与 supportsThinking（是否支持）。保存后写入本机 iFlow 配置，重启内核生效。")}
       </Hint>
       <TextArea
         mono
@@ -486,7 +486,7 @@ function JsonRulesRow({
       />
       <ActionRow className="mt-2">
         <Button onClick={apply}>
-          {t("应用")}
+          {t("应用修改")}
         </Button>
         {error && <span className="text-ui-caption text-destructive">{error}</span>}
       </ActionRow>
@@ -556,8 +556,8 @@ function ChatSection() {
       <SettingsGroup title={t("会话")}>
         <ToggleRow
           label={t("自动生成标题")}
-          description={t("会话首轮完成后自动生成简短标题。")}
-          detail={t("每会话一次，会产生一次轻量模型调用。")}
+          description={t("首轮对话结束后，自动给会话起一个简短标题。")}
+          detail={t("每个会话只生成一次，会额外消耗少量 token。")}
           checked={settings.autoTitle}
           onChange={(autoTitle) => update({ autoTitle })}
         />
@@ -565,8 +565,8 @@ function ChatSection() {
       <SettingsGroup title={t("子会话")}>
         <NumberRow
           label={t("并发上限")}
-          description={t("同时运行的子会话数量上限。")}
-          detail={t("默认 5，范围 1–20。超出的派发会排队，等有空位再启动；调低后已在运行的子会话不受影响。")}
+          description={t("最多同时运行几个子会话。")}
+          detail={t("默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的子会话不受影响。")}
           value={settings.superAgentMaxConcurrent}
           min={1}
           max={20}
@@ -574,13 +574,13 @@ function ChatSection() {
           onCommit={(superAgentMaxConcurrent) => update({ superAgentMaxConcurrent })}
         />
       </SettingsGroup>
-      <SettingsGroup title={t("回合结束后")} hint={t("可能产生额外的模型调用")}>
+      <SettingsGroup title={t("回合结束后")} hint={t("每轮结束可能多花一次模型调用")}>
         <div>
           <ToggleRow
             label={t("下一步建议")}
-            description={t("回复完成后推测下一步操作，显示在输入框上方。")}
+            description={t("每轮回复结束后，推测你接下来可能想做什么，显示在输入框上方。")}
             detail={t(
-              "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。",
+              "每轮结束会多调用一次模型（消耗额外 token）。关闭后不再调用，已显示的候选会立即清除。",
             )}
             checked={settings.nextStepSuggestions}
             onChange={(nextStepSuggestions) => update({ nextStepSuggestions })}
@@ -589,9 +589,9 @@ function ChatSection() {
             <DependentRow>
               <NumberRow
                 label={t("下一步预测超时")}
-                description={t("下一步建议的模型调用最长等待秒数。")}
+                description={t("下一步建议最多等多久。")}
                 detail={t(
-                  "回合末的标题、下一步、记忆提取合并为一次模型调用，实际等待时间取所含任务中最宽松的上限；填 0 表示不限制。",
+                  "回合结束时，标题、下一步建议与记忆提取会合并成一次模型调用，实际按其中最长的时间等待。填 0 表示一直等。",
                 )}
                 value={settings.nextStepTimeoutSeconds}
                 min={0}
@@ -605,9 +605,9 @@ function ChatSection() {
         <div>
           <ToggleRow
             label={t("自动压缩上下文")}
-            description={t("上下文占用达到阈值时自动压缩会话。")}
+            description={t("上下文快满时自动压缩会话，腾出空间继续对话。")}
             detail={t(
-              "每轮回复结束后，若上下文占用达到设定阈值，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。",
+              "每轮结束后检查一次，达到设定比例就先压缩再继续。默认关闭；即使关闭，模型报「上下文超出上限」时仍会自动压缩。",
             )}
             checked={settings.autoCompressOnIdle}
             onChange={(autoCompressOnIdle) => update({ autoCompressOnIdle })}
@@ -616,9 +616,9 @@ function ChatSection() {
             <DependentRow>
               <NumberRow
                 label={t("压缩超时")}
-                description={t("压缩会话的最长等待秒数。")}
+                description={t("压缩最多等多久。")}
                 detail={t(
-                  "默认 0（不限制）：压缩一个很大的会话本来就可能需要几分钟。填入秒数后，超时会取消这次压缩并提示你。",
+                  "默认 0，表示一直等——很大的会话压缩几分钟是正常的。填入秒数后，超时会取消这次压缩并提示你。",
                 )}
                 value={settings.compressTimeoutSeconds}
                 min={0}
@@ -628,8 +628,8 @@ function ChatSection() {
               />
               <RangeRow
                 label={t("自动压缩阈值")}
-                description={t("上下文占用达到该比例时自动压缩会话。")}
-                detail={t("可调范围 50–100%。")}
+                description={t("上下文用到多少时开始压缩。")}
+                detail={t("可调 50–100%，默认 95%。")}
                 value={settings.autoCompressThresholdPercent}
                 min={50}
                 max={100}
@@ -641,9 +641,9 @@ function ChatSection() {
         <div>
           <ToggleRow
             label={t("自动提取记忆")}
-            description={t("回复完成后提取可长期保留的偏好候选。")}
+            description={t("每轮结束后，找出值得长期记住的偏好与约定。")}
             detail={t(
-              "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入（会产生额外 token）。",
+              "用当前模型提取候选，必须经你确认才会写入记忆；每轮会多消耗一次 token。",
             )}
             checked={settings.autoMemoryCapture}
             onChange={(autoMemoryCapture) => update({ autoMemoryCapture })}
@@ -652,9 +652,9 @@ function ChatSection() {
             <DependentRow>
               <NumberRow
                 label={t("记忆提取超时")}
-                description={t("自动提取记忆的模型调用最长等待秒数。")}
+                description={t("记忆提取最多等多久。")}
                 detail={t(
-                  "回合末的标题、下一步、记忆提取合并为一次模型调用，实际等待时间取所含任务中最宽松的上限；填 0 表示不限制。",
+                  "回合结束时，标题、下一步建议与记忆提取会合并成一次模型调用，实际按其中最长的时间等待。填 0 表示一直等。",
                 )}
                 value={settings.memoryExtractTimeoutSeconds}
                 min={0}
@@ -681,8 +681,8 @@ function AppearanceSection() {
   ];
   const notificationOptions: Array<{ value: UiOsNotifications; label: string }> = [
     { value: "off", label: t("从不") },
-    { value: "approvals", label: t("仅审批/提问/计划") },
-    { value: "all", label: t("全部完成事件") },
+    { value: "approvals", label: t("仅等待你处理时") },
+    { value: "all", label: t("每轮完成时") },
   ];
   return (
     <div className="space-y-4">
@@ -690,7 +690,7 @@ function AppearanceSection() {
         <ChoiceRow
           label={t("主题")}
           description={t("跟随编辑器主题，或固定为浅色/深色。")}
-          detail={t("设置写入用户 settings.json，可随 VSCode 设置同步。")}
+          detail={t("保存在 VSCode 用户设置里，可随 VSCode 设置同步。")}
           value={settings.theme}
           options={themeOptions}
           onChange={(theme) => update({ theme })}
@@ -698,7 +698,7 @@ function AppearanceSection() {
         <ChoiceRow
           label={t("字号")}
           description={t("调整面板整体字号。")}
-          detail={t("标准为基准，紧凑约 0.92×，大约 1.1×。")}
+          detail={t("以标准为基准：紧凑约 0.92 倍，大约 1.1 倍。")}
           value={settings.uiFontSize}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -709,8 +709,8 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("密度")}
-          description={t("调整控件内边距与间距。")}
-          detail={t("标准为基准，紧凑约 0.92×，宽松约 1.12×。不影响字号。")}
+          description={t("调整控件之间的间距，不改字号。")}
+          detail={t("以标准为基准：紧凑约 0.92 倍，宽松约 1.12 倍。")}
           value={settings.uiDensity}
           options={[
             { value: "compact", label: t("紧凑") },
@@ -729,7 +729,7 @@ function AppearanceSection() {
         />
         <ChoiceRow
           label={t("系统通知")}
-          description={t("面板不可见时发送系统通知。")}
+          description={t("面板不在前台时，用系统通知提醒你。")}
           detail={t("审批/提问/计划阻塞时，或整轮完成时发送。")}
           value={settings.osNotifications}
           options={notificationOptions}
@@ -738,7 +738,7 @@ function AppearanceSection() {
       </SettingsGroup>
       <SettingsGroup title={t("快捷键")}>
         <div className="space-y-2 px-4 py-4">
-          <ShortcutRow keys="Esc" label={t("停止生成（审批卡中为取消/拒绝）")} />
+          <ShortcutRow keys="Esc" label={t("停止生成（在审批卡上为拒绝）")} />
           <ShortcutRow keys="Y / N" label={t("审批允许 / 拒绝")} />
           <ShortcutRow keys="Y / N / R" label={t("计划批准 / 拒绝 / 重新规划")} />
           <ShortcutRow keys="Alt+← / Alt+→" label={t("上一个 / 下一个会话")} />
@@ -750,7 +750,7 @@ function AppearanceSection() {
       <SettingsDisclosure title={t("高级外观")} hint={t("可选")}>
         <RangeRow
           label={t("极光强度")}
-          description={t("背景光斑的不透明度（0–100）。")}
+          description={t("背景光晕的浓淡：0 为关闭，100 最亮。")}
           value={settings.auroraIntensity}
           onCommit={(auroraIntensity) => update({ auroraIntensity })}
         />
@@ -764,7 +764,7 @@ function PermissionDefaults() {
   const settings = useChat((s) => s.hostSettings);
   const update = useChat((s) => s.updateHostSetting);
   const approvalOptions: Array<{ value: UiCliApprovalMode; label: string }> = [
-    { value: "", label: t("不覆写") },
+    { value: "", label: t("跟随内核") },
     { value: "default", label: t("标准") },
     { value: "smart", label: t("智能") },
     { value: "yolo", label: t("免确认") },
@@ -782,7 +782,7 @@ function PermissionDefaults() {
         <ChoiceRow
           label={t("面板默认权限模式")}
           description={t("新会话使用的权限模式。")}
-          detail={t("当前会话可用输入框下方的模式菜单切换。")}
+          detail={t("只影响新会话；当前会话可在输入框下方的模式菜单里切换。")}
           value={settings.defaultMode}
           options={defaultModeOptions}
           onChange={(defaultMode) => update({ defaultMode })}
@@ -791,8 +791,8 @@ function PermissionDefaults() {
       <SettingsDisclosure title={t("内核兼容")} hint={t("重启内核生效")}>
         <ChoiceRow
           label={t("内核默认审批模式")}
-          description={t("写入内核配置的启动审批模式。")}
-          detail={t("写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启内核生效。")}
+          description={t("内核启动时使用的审批模式。")}
+          detail={t("与上面的面板默认模式互不影响；保存后重启内核生效。")}
           value={settings.approvalMode}
           options={approvalOptions}
           onChange={(approvalMode) => update({ approvalMode })}
@@ -816,15 +816,15 @@ function RuntimeSection() {
       <SettingsGroup title={t("启动与会话")}>
         <ToggleRow
           label={t("后台预热内核")}
-          description={t("窗口打开时预热内核，首次打开面板无需等待。")}
-          detail={t("每窗口约 100MB 内存；下次窗口启动生效。")}
+          description={t("窗口打开时提前启动内核，首次打开面板不用等。")}
+          detail={t("每个窗口约 100MB 内存；下次窗口启动生效。")}
           checked={settings.warmStart}
           onChange={(warmStart) => update({ warmStart })}
         />
         <ToggleRow
           label={t("恢复上次会话")}
           description={t("面板启动时恢复上次使用的会话。")}
-          detail={t("无可恢复记录时新建会话。")}
+          detail={t("没有可恢复的记录时会新建会话。")}
           checked={settings.restoreLastSession}
           onChange={(restoreLastSession) => update({ restoreLastSession })}
         />
@@ -839,22 +839,22 @@ function RuntimeSection() {
       <SettingsGroup title={t("检查点")}>
         <ToggleRow
           label={t("启用检查点")}
-          description={t("每轮对话前快照工作区，支持按轮回退。")}
-          detail={t("快照写入独立的影子 git 仓库，不触碰你的 .git。")}
+          description={t("每轮对话前保存一份工作区快照，之后可以按轮回退。")}
+          detail={t("快照放在单独的目录里，不会动你的 Git 仓库。")}
           checked={settings.checkpoints}
           onChange={(checkpoints) => update({ checkpoints })}
         />
         <div className="px-4 py-4">
           <div className="text-ui-body font-medium leading-snug text-foreground">{t("磁盘占用")}</div>
           <Hint className="mt-1">
-            {t("快照保存在工作区存储中；容量上限等参数在「高级」中调整。")}
+            {t("快照会占用磁盘空间，上限等参数在「高级」里调整。")}
           </Hint>
         </div>
       </SettingsGroup>
       <SettingsDisclosure title={t("高级")} hint={t("检查点限额与内核运行时")}>
         <NumberRow
           label={t("最大文件数")}
-          description={t("超过该文件数时关闭快照。")}
+          description={t("工作区文件超过这个数量就不再保存快照。")}
           value={settings.checkpointMaxFiles}
           min={1}
           onCommit={(checkpointMaxFiles) => update({ checkpointMaxFiles })}
@@ -884,15 +884,15 @@ function RuntimeSection() {
         />
         <TextRow
           label={t("存储目录")}
-          description={t("留空使用默认工作区存储。")}
-          detail={t("留空使用默认 workspaceStorage；支持 ~ 与相对路径。")}
+          description={t("快照存放在哪里。")}
+          detail={t("留空则用默认位置；支持 ~ 和相对路径。")}
           value={settings.checkpointDir}
           placeholder="~/.iflow/checkpoints"
           onCommit={(checkpointDir) => update({ checkpointDir })}
         />
         <TextRow
           label={t("Node.js 路径")}
-          description={t("留空自动探测。")}
+          description={t("留空则自动查找。")}
           detail={t("修改后重启内核生效。")}
           value={settings.nodePath}
           placeholder="C:\\Program Files\\nodejs\\node.exe"
@@ -901,7 +901,7 @@ function RuntimeSection() {
         <ChoiceRow
           label={t("内核语言")}
           description={t("内核的显示语言。")}
-          detail={t("写入 ~/.iflow/settings.json；修改后重启内核生效。")}
+          detail={t("修改后重启内核生效。")}
           value={settings.language}
           options={languageOptions}
           onChange={(language) => update({ language })}
@@ -929,8 +929,9 @@ function ShortcutRow({ keys, label }: { keys: string; label: string }) {
  * API profiles & credentials section: the profile list (one click switches —
  * with the same optimistic switch lock the header dropdown uses — edit loads
  * the profile into the form, delete keeps the two-step confirm) and the
- * credential editor. Saving upserts a named profile and re-authenticates the
- * session (host-side, SecretStorage only).
+ * credential editor. Saving upserts a named profile into the kernel config
+ * (`~/.iflow/settings.json`); only the row the panel is actually running on
+ * re-authenticates the session — editing another row just saves it.
  */
 function ApiConfigSection({
   auth,
@@ -966,11 +967,39 @@ function ApiConfigSection({
   const raisedProfileName = openMenuProfile && auth.profiles.some((p) => !p.active && p.name === openMenuProfile)
     ? openMenuProfile
     : null;
+  // Delete receipt: the host answers with `profileDeleteResult` after it
+  // really removed the profile (SecretStorage + kernel file). The row shows a
+  // pending chip until then — the confirm dialog used to close and the row
+  // just lingered with zero feedback while the write was in flight.
+  const [deletingProfile, setDeletingProfile] = useState<string | null>(null);
+  useEffect(() => {
+    if (!deletingProfile) return;
+    const handler = (event: MessageEvent) => {
+      const msg = event.data as { type?: string; name?: string };
+      if (msg?.type !== "profileDeleteResult" || msg.name !== deletingProfile) return;
+      setDeletingProfile(null);
+    };
+    window.addEventListener("message", handler);
+    // Failsafe: a lost reply must not lock the row forever (the host also
+    // surfaces a toast when the delete failed).
+    const timer = setTimeout(() => setDeletingProfile(null), 10_000);
+    return () => {
+      window.removeEventListener("message", handler);
+      clearTimeout(timer);
+    };
+  }, [deletingProfile]);
 
   const editingProfile = editing?.name ? auth.profiles.find((p) => p.name === editing.name) : undefined;
+  // Saving the profile the panel is actually running on re-authenticates the
+  // live session, so it must wait for a free turn. Adding a new profile also
+  // activates it (cold re-auth). Editing any other row only writes the kernel
+  // file — the host does not touch the running session — so it stays
+  // saveable while a turn or a child session is in flight.
+  const editingActiveProfile = editing?.name != null && editingProfile?.active === true;
+  const saveBlocked = busy && (editing?.name == null || editingActiveProfile);
   const keyPlaceholder = (() => {
     const tail = editingProfile?.keyTail ?? auth.saved?.keyTail;
-    return tail ? t("已保存（{0}）— 留空保持不变", tail) : "sk-…";
+    return tail ? t("已保存（{0}），留空则不改", tail) : "sk-…";
   })();
 
   const back = useCallback(() => {
@@ -1084,14 +1113,14 @@ function ApiConfigSection({
             </ActionRow>
           </div>
         )}
-        <Field label={t("配置名称（可选，默认为模型名）")}>
+        <Field label={t("配置名称（可选，默认用模型名）")}>
           <TextInput
             value={form.profileName}
-            placeholder={t("如 BUZZ、工作密钥…")}
+            placeholder={t("如 工作密钥、备用线路")}
             onChange={(e) => setForm((f) => ({ ...f, profileName: e.target.value }))}
           />
         </Field>
-        <Field label={t("Base URL（OpenAI 兼容）")}>
+        <Field label={t("接口地址（Base URL）")}>
           <TextInput
             mono
             value={form.baseUrl}
@@ -1133,17 +1162,20 @@ function ApiConfigSection({
           </div>
         )}
         <ActionRow>
-          <Button variant="primary" disabled={busy} onClick={submit}>
-            {t("保存并激活")}
+          <Button variant="primary" disabled={saveBlocked} onClick={submit}>
+            {t("保存")}
           </Button>
           <Button onClick={back}>
             {t("取消")}
           </Button>
           {formError && <span className="text-ui-label text-destructive">{formError}</span>}
         </ActionRow>
+        {saveBlocked && editingActiveProfile && (
+          <Hint>{t("这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。")}</Hint>
+        )}
         <Hint>
           {t(
-            "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。",
+            "配置与密钥以明文保存在本机 iFlow 配置中。编辑正在使用的配置会重新连接；编辑其他配置只是保存，不会切换。",
           )}
         </Hint>
       </div>
@@ -1154,12 +1186,12 @@ function ApiConfigSection({
     <div className="space-y-3">
       {auth.needsSetup && (
         <p className="rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-          {t("连接 iFlow 需要配置 API 凭据")}
+          {t("还没有 API 配置，暂时无法开始对话")}
         </p>
       )}
       {switching && (
         <p className="flex items-center gap-1.5 text-ui-caption text-muted-foreground">
-          <Chip tone="primary">{awaitingChoice ? t("等待选择…") : t("正在重新认证…")}</Chip>
+          <Chip tone="primary">{awaitingChoice ? t("等待选择…") : t("正在重新连接…")}</Chip>
         </p>
       )}
       {auth.profiles.length > 0 && (
@@ -1167,16 +1199,16 @@ function ApiConfigSection({
           <Button icon={<Plus className={ICON_INLINE} />} disabled={busy} onClick={() => openNew()}>
             {t("添加配置")}
           </Button>
-          <span className="text-ui-caption text-muted-foreground">{t("点击配置即可切换并重新认证")}</span>
+          <span className="text-ui-caption text-muted-foreground">{t("点一下配置即可切换，当前会话会重新连接")}</span>
         </div>
       )}
       {auth.profiles.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border px-3 py-4">
           <div className="text-center text-ui-label font-semibold text-foreground">
-            {t("尚未添加 API 配置")}
+            {t("还没有 API 配置")}
           </div>
           <Hint className="mt-1 text-center">
-            {t("选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。")}
+            {t("选一个服务商预设可自动填好接口地址，也可以手动填写任意兼容 OpenAI 的接口。")}
           </Hint>
           <ActionRow className="mt-2 justify-center">
             {PROVIDER_PRESETS.map((option) => (
@@ -1195,6 +1227,7 @@ function ApiConfigSection({
         <div className="space-y-2">
           {auth.profiles.map((p) => {
             const menuOpen = raisedProfileName === p.name;
+            const deleting = deletingProfile === p.name;
             return (
               <div
                 key={p.name}
@@ -1205,7 +1238,7 @@ function ApiConfigSection({
                 <button
                   className="flex min-w-0 flex-1 items-center gap-1.5 text-left disabled:pointer-events-none disabled:opacity-40"
                   title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
-                  disabled={busy || p.active}
+                  disabled={busy || p.active || deleting}
                   onClick={() => {
                     if (p.active) return;
                     // Same optimistic switch lock as the header dropdown —
@@ -1227,7 +1260,12 @@ function ApiConfigSection({
                     </span>
                   </span>
                 </button>
-                {!p.active && (
+                {deleting ? (
+                  <Chip tone="info">
+                    <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                    {t("删除中…")}
+                  </Chip>
+                ) : !p.active ? (
                   <Dropdown
                     align="right"
                     menuClass="w-[10rem]"
@@ -1282,23 +1320,23 @@ function ApiConfigSection({
                       </>
                     )}
                   </Dropdown>
-                )}
+                ) : null}
               </div>
             );
           })}
         </div>
       )}
       <Hint>
-        {t("点击配置即切换并重新认证会话；配置与密钥保存在内核配置文件 ~/.iflow/settings.json（本机明文）。")}
+        {t("点击配置即可切换，当前会话会用新配置重新连接。配置与密钥以明文保存在本机 iFlow 配置中。")}
       </Hint>
 
       <SettingsDisclosure title={t("模型元数据")} hint={t("高级，可选填")}>
         <div>
           <SettingRow
             label={t("联网补充模型数据")}
-            description={t("联网检索官方资料，由当前模型提炼后追加到下表。")}
+            description={t("联网查官方资料，由当前模型提炼后补进下面的表。")}
             detail={t(
-              "检索由扩展直接发起，不经过内核会话；资料会交给当前模型做一次提炼（产生一次额外 token 消耗）。只追加、不覆盖，在资料中找不到依据的条目会被丢弃。",
+              "检索由面板直接发起，不占用当前会话；资料交给当前模型提炼一次（额外消耗 token）。只补充、不覆盖已有数据；资料里找不到依据的条目会被丢弃。",
             )}
             control={
               <Button
@@ -1344,7 +1382,7 @@ function ApiConfigSection({
               <>
                 <Sparkles className={`${ICON_INLINE} shrink-0 text-primary`} />
                 <span className="min-w-0 flex-1 text-ui-caption leading-relaxed text-muted-foreground">
-                  {t("会调用当前模型提炼检索资料，产生一次额外 token 消耗。")}
+                  {t("检索到的资料会交给当前模型提炼一次，额外消耗 token。")}
                 </span>
               </>
             )}
@@ -1352,14 +1390,14 @@ function ApiConfigSection({
         </div>
         <LinesRow
           label={t("上下文窗口覆写")}
-          description={t("每行「模型名=token数」（如「glm-4.6=200000」）；未知模型回退默认值。")}
+          description={t("每行写「模型名=上下文长度」，如 glm-4.6=200000；没列出的模型用默认值。")}
           value={settings.contextWindowOverrides}
           placeholder="glm-4.6=200000"
           onCommit={(contextWindowOverrides) => updateHostSetting({ contextWindowOverrides })}
         />
         <LinesRow
           label={t("成本单价")}
-          description={t("每行「模型名=输入价,输出价」（USD/百万 token，如「deepseek-v3=0.27,1.1」）。")}
+          description={t("每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。")}
           value={settings.costTable}
           placeholder="deepseek-v3=0.27,1.1"
           onCommit={(costTable) => updateHostSetting({ costTable })}
@@ -1373,8 +1411,9 @@ function ApiConfigSection({
       {confirmingDelete && (
         <ConfirmDialog
           title={t("删除配置")}
-          message={t("确定删除配置「{0}」吗？其密钥将从 SecretStorage 中永久移除。", confirmingDelete)}
+          message={t("配置「{0}」和它的密钥会一起删除，无法恢复。", confirmingDelete)}
           onConfirm={() => {
+            if (confirmingDelete) setDeletingProfile(confirmingDelete);
             send({ type: "deleteProfile", name: confirmingDelete });
             setConfirmingDelete(null);
           }}

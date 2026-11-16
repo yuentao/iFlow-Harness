@@ -48,6 +48,8 @@ import {
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
+import { parseSuperDelegationTasks, parseSuperToolCall } from "../../../shared/super-tool-call";
+import { DELEGATION_ORIGIN_ATTR } from "./SuperDelegationFly";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
 import {
@@ -95,14 +97,22 @@ function DirectiveSurface({
   className = "",
   testId,
   role,
+  origin = false,
 }: {
   children: ReactNode;
   className?: string;
   testId?: string;
   role?: "status";
+  /** true = 这是「委派成功」的起点卡，飞入动效从这里起飞。 */
+  origin?: boolean;
 }) {
   return (
-    <div className={`${DIRECTIVE_CARD} ${className}`} data-testid={testId} role={role}>
+    <div
+      className={`${DIRECTIVE_CARD} ${className}`}
+      data-testid={testId}
+      {...(origin ? { [DELEGATION_ORIGIN_ATTR]: "" } : {})}
+      role={role}
+    >
       <div className={DIRECTIVE_ACCENT} aria-hidden="true" />
       {children}
     </div>
@@ -156,12 +166,12 @@ const ACTION_TONES: Record<string, "primary" | "danger" | "warning" | "info" | "
 };
 
 const RAW_REASONS: Record<SuperDirectiveRawReason, string> = {
-  invalid_json: "内容不是合法 JSON",
-  missing_tasks: "缺少 tasks 数组",
-  empty_tasks: "没有可展示的任务",
-  missing_actions: "缺少 actions 数组",
-  empty_actions: "没有可展示的动作",
-  unknown_language: "未知的协议块语言",
+  invalid_json: "内容格式不对，读不出来",
+  missing_tasks: "里面没有任务列表",
+  empty_tasks: "没有可以显示的任务",
+  missing_actions: "里面没有操作列表",
+  empty_actions: "没有可以显示的操作",
+  unknown_language: "认不出这是什么指令",
 };
 
 /**
@@ -216,7 +226,7 @@ function SalvagedNotice() {
       className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
     >
       <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} />
-      <span>{t("载荷未能完整解析，以下任务书仅供阅读，可能尚未派发")}</span>
+      <span>{t("这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去")}</span>
     </div>
   );
 }
@@ -241,7 +251,7 @@ function TaskCard({
   const shown = open ? blocks : preview.blocks;
   const long = preview.truncated;
   return (
-    <DirectiveSurface testId="super-task-card">
+    <DirectiveSurface testId="super-task-card" origin>
       {/* 只有一张卡时不需要「第 1/1 个任务」这种序号 —— 批次信息是多余的层级。 */}
       <DirectiveHeader
         icon={<Users className={ICON_INLINE} />}
@@ -401,6 +411,32 @@ function renderTaskInlines(inlines: SuperTaskInline[]): ReactNode[] {
   });
 }
 
+/** 动作行列表：围栏动作卡与工具调用动作卡共用，逐项文案与 chip 完全一致。 */
+function ActionRows({ actions }: { actions: SuperDirectiveAction[] }) {
+  return (
+    <ul className="divide-y divide-primary/20">
+      {actions.map((action, index) => (
+        <li key={index} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
+          <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
+            {t(ACTION_LABELS[action.action] ?? action.action)}
+          </Chip>
+          <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
+            {action.sessionId || t("未指定子会话")}
+          </code>
+          {action.keepBranch && (
+            <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
+          )}
+          {action.answerCount !== undefined && (
+            <span className="text-ui-micro text-muted-foreground">
+              {t("{0} 个回答", action.answerCount)}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
   return (
     <DirectiveSurface className="my-2">
@@ -412,26 +448,7 @@ function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
           {t("子会话操作")}
         </span>
       </DirectiveHeader>
-      <ul className="divide-y divide-primary/20">
-        {actions.map((action, index) => (
-          <li key={index} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
-            <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
-              {t(ACTION_LABELS[action.action] ?? action.action)}
-            </Chip>
-            <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
-              {action.sessionId || t("未指定子会话")}
-            </code>
-            {action.keepBranch && (
-              <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
-            )}
-            {action.answerCount !== undefined && (
-              <span className="text-ui-micro text-muted-foreground">
-                {t("{0} 个回答", action.answerCount)}
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
+      <ActionRows actions={actions} />
     </DirectiveSurface>
   );
 }
@@ -458,7 +475,7 @@ function RawCard({
         }
       >
         <span className="block truncate text-ui-label font-medium text-foreground/90">
-          {t("原始协议块")}
+          {t("原始指令内容")}
         </span>
       </DirectiveHeader>
       <div className="px-3 py-2">
@@ -479,7 +496,9 @@ function RawCard({
  * 工具只回 `Delegation request accepted.`。这条调用照常进 store 成为
  * `ToolBlock`，但转录层不能再走通用 ToolCard —— 用户看到的「工具操作 /
  * 执行参数 / 原始 JSON」正是上一轮没修到的那层。这里复用围栏委派卡的
- * 独立表面，不碰宿主派发逻辑，也不修改 shared/super-tool-call.ts。
+ * 独立表面，**不碰宿主派发逻辑**：任务列表优先取宿主解析出的
+ * `block.superTasks`（`input` 是有损展示串，回解不可靠），历史转录才回退到
+ * 共享解析入口（`parseSuperDelegationTasks`，与派发器同一份实现）。
  */
 interface SuperToolTaskView {
   title: string;
@@ -496,49 +515,48 @@ const SUPER_TOOL_PREVIEW_CHARS = 200;
 const SUPER_TOOL_PREVIEW_BLOCKS = 2;
 
 /**
- * 从 ToolBlock.input（host 用 formatToolInput 格式化过的 args JSON）解析任务书。
- * 只在完整 JSON + 每个任务都有 title/task 时给出可读列表；空载荷、半截 JSON、
- * 形状不符一律降级，绝不把坏载荷拆成看起来已派发的任务。
+ * 从 ToolBlock 解析任务书。
+ *
+ * 单一真源 = **宿主解析出的结构**（`block.superTasks`）。两个原因让卡片不能
+ * 只回解 `block.input`：
+ *  - `input` 是宿主故意做成**有损**的展示串（`formatToolInput`：单个字符串
+ *    值截断 300 字符、整串上限 4096 字符）——长任务书会被从中间切断，JSON
+ *    直接不合法；
+ *  - 模型调内置 `super-agent` 工具时**有时漏掉 `title`**（wire 实证：args 是
+ *    `{"tasks":[{"task":"…"}]}`）。宿主派发器容忍这种情况（回退到 task 首行，
+ *    那一轮真的派出了 4 个子会话），而旧卡片要求每条任务都有非空 title → 把
+ *    一次成功的委派谎报成「工具参数未能完整解析」。
+ *
+ * 没有 `superTasks` 时（历史转录 / 恢复会话）才回退去解析 `input`，且回解
+ * 复用与派发器**同一份**实现（`parseSuperDelegationTasks`）—— 两边口径不会
+ * 漂移。两者都失败才走诚实降级：绝不把坏载荷拆成看起来已派发的任务。
  */
-function parseSuperToolCallInput(input: ToolBlock["input"]): SuperToolCallParse {
-  if (!input || !input.trim()) return { ok: false, reason: "pending" };
-  let payload: unknown;
-  try {
-    payload = JSON.parse(input) as unknown;
-  } catch {
-    return { ok: false, reason: "invalid" };
+function parseSuperToolCallPayload(block: ToolBlock): SuperToolCallParse {
+  const host = block.superTasks;
+  if (host && host.length > 0) {
+    return {
+      ok: true,
+      tasks: host.map((task) => ({
+        title: task.title,
+        task: task.task,
+        attachments: task.attachmentCount,
+      })),
+    };
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return { ok: false, reason: "invalid" };
+  const fallback = parseSuperDelegationTasks(block.input);
+  if (fallback && fallback.length > 0) {
+    return {
+      ok: true,
+      tasks: fallback.map((task) => ({
+        title: task.title,
+        task: task.task,
+        attachments: (task.attachments ?? []).length,
+      })),
+    };
   }
-  const tasks = (payload as { tasks?: unknown }).tasks;
-  if (!Array.isArray(tasks) || tasks.length === 0) return { ok: false, reason: "invalid" };
-  const parsed: SuperToolTaskView[] = [];
-  for (const entry of tasks) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      return { ok: false, reason: "invalid" };
-    }
-    const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
-    if (typeof record.title !== "string" || !record.title.trim()) {
-      return { ok: false, reason: "invalid" };
-    }
-    if (typeof record.task !== "string" || !record.task.trim()) {
-      return { ok: false, reason: "invalid" };
-    }
-    const attachments = record.attachments;
-    if (
-      attachments !== undefined &&
-      (!Array.isArray(attachments) || attachments.some((name) => typeof name !== "string"))
-    ) {
-      return { ok: false, reason: "invalid" };
-    }
-    parsed.push({
-      title: record.title,
-      task: record.task,
-      attachments: Array.isArray(attachments) ? attachments.length : 0,
-    });
-  }
-  return { ok: true, tasks: parsed };
+  // 参数还没到达 → pending 占位；到了却读不出来 → 诚实降级。
+  if (!block.input || !block.input.trim()) return { ok: false, reason: "pending" };
+  return { ok: false, reason: "invalid" };
 }
 
 /** 状态 chip 留在独立卡内，沿用 ToolCard 的四态文案但穿委派家族表面。 */
@@ -630,52 +648,27 @@ function SuperToolTaskRow({
   );
 }
 
-/** 原始参数折叠项：保留 ToolCard 的审计能力，但不再以「执行参数」糊在卡面上。 */
-function SuperToolRawParams({ input }: { input: ToolBlock["input"] }) {
-  const [open, setOpen] = useState(false);
-  const [openedOnce, setOpenedOnce] = useState(false);
-  if (!input) return null;
-  return (
-    <div className="border-t border-primary/20 px-3 py-2">
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-expanded={open}
-        icon={
-          open ? (
-            <ChevronUp className={ICON_INLINE} aria-hidden="true" />
-          ) : (
-            <ChevronDown className={ICON_INLINE} aria-hidden="true" />
-          )
-        }
-        onClick={() => {
-          setOpenedOnce(true);
-          setOpen((value) => !value);
-        }}
-      >
-        {open ? t("收起原始参数") : t("查看原始参数")}
-      </Button>
-      {openedOnce && open && (
-        <pre
-          data-testid="super-tool-call-raw"
-          className="mt-1 max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
-        >
-          {input}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-/** tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。 */
+/**
+ * tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。
+ *
+ * 卡片只回答「派了什么」：标题 + 任务列表 + 状态 chip。底部**不再**有
+ * 「(查看原始参数)」折叠项与工具回执/结果区块（issue #166）——原始 JSON
+ * 参数与 `Delegation request accepted.` 这类回执对用户零信息量，反而把
+ * 卡片底部撑成一堵噪音。解析失败时原始参数仍按原样摊开（那一态它就是
+ * 唯一有价值的正文，见下方 invalid 分支）。
+ */
 export function SuperToolCallCard({ block }: { block: ToolBlock }) {
-  const parsed = useMemo(() => parseSuperToolCallInput(block.input), [block.input]);
+  const parsed = useMemo(
+    () => parseSuperToolCallPayload(block),
+    [block.superTasks, block.input],
+  );
   const tasks = parsed.ok ? parsed.tasks : [];
   return (
     <DirectiveSurface
       className="my-2"
       testId="super-tool-call-card"
       role={parsed.ok ? undefined : "status"}
+      origin
     >
       <DirectiveHeader
         icon={<Users className={ICON_INLINE} />}
@@ -708,7 +701,7 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
             className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
           >
             <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
-            <span>{t("工具参数未能完整解析，任务列表暂不可用，以下保留原始参数")}</span>
+            <span>{t("这段任务信息没能完整读取，暂时看不到任务列表，下面是它的原始内容")}</span>
           </div>
           {block.input && (
             <pre
@@ -720,12 +713,99 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
           )}
         </div>
       )}
-      {parsed.ok && <SuperToolRawParams input={block.input} />}
-      {block.output && (
-        <div className="border-t border-primary/20 px-3 py-2">
-          <pre className="max-w-full whitespace-pre-wrap break-all rounded-md border border-border/60 bg-surface/60 px-3 py-2 font-mono text-ui-caption leading-relaxed text-foreground">
-            {block.output}
-          </pre>
+    </DirectiveSurface>
+  );
+}
+
+/**
+ * 内置 `super-agent` 工具承载**管理动作**时的独立操作卡。
+ *
+ * 新版工具 schema 同时收 `tasks` 与 `actions`：模型做 retry/cancel/answer/cleanup
+ * 时仍调这个工具，只是载荷变成 `{"actions":[…]}`。宿主按载荷纠偏执行；转录层
+ * 也必须把这类工具帧从通用 ToolCard 里捞出来，否则用户看到的是「工具操作 /
+ * 执行参数」，而不是围栏动作卡那张一眼能读的「子会话操作」卡。
+ *
+ * 数据来源：`ToolBlock` 目前没有 `superActions` 结构字段（宿主只给 dispatch
+ * 存了 `superTasks`），所以这里回解 `block.input`。它虽是**有损展示串**（单值
+ * 300 字符、整串 4096 字符截断），但动作载荷只有动作名 + 短 sessionId +
+ * 少量回答条目，正常形态远低于上限；解析直接复用宿主同一份
+ * {@link parseSuperToolCall}（内部走 `extractSuperActions`），不复制校验逻辑。
+ * 真被截断到 parse 不出来时走诚实降级，绝不编造动作。
+ *
+ * 刻意**不挂** `data-super-delegation-origin`：那是「委派产生子会话」的语义，
+ * 管理动作不该触发飞入看板动效。
+ */
+type SuperActionsToolParse =
+  | { ok: true; actions: SuperDirectiveAction[] }
+  | { ok: false; reason: "pending" | "invalid" };
+
+function parseSuperActionsToolCall(block: ToolBlock): SuperActionsToolParse {
+  const parsed = parseSuperToolCall("actions", block.input);
+  if (parsed.ok && parsed.actions.length > 0) {
+    return {
+      ok: true,
+      actions: parsed.actions.map((action) => {
+        if (action.action === "answer") {
+          return {
+            action: action.action,
+            sessionId: action.sessionId,
+            answerCount: Object.keys(action.answers ?? {}).length,
+          };
+        }
+        if (action.action === "cleanup" && action.keepBranch) {
+          return { action: action.action, sessionId: action.sessionId, keepBranch: true };
+        }
+        return { action: action.action, sessionId: action.sessionId };
+      }),
+    };
+  }
+  if (!block.input || !block.input.trim()) return { ok: false, reason: "pending" };
+  return { ok: false, reason: "invalid" };
+}
+
+export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
+  const parsed = useMemo(() => parseSuperActionsToolCall(block), [block.input]);
+  return (
+    <DirectiveSurface
+      className="my-2"
+      testId="super-actions-tool-call-card"
+      role={parsed.ok ? undefined : "status"}
+    >
+      <DirectiveHeader
+        icon={<ListChecks className={ICON_INLINE} />}
+        aside={<SuperToolStatusChip status={block.status} />}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-ui-label font-medium text-foreground/90">
+            {t("子会话操作")}
+          </span>
+          {parsed.ok && <Chip tone="info">{t("{0} 个动作", parsed.actions.length)}</Chip>}
+        </div>
+      </DirectiveHeader>
+      {parsed.ok ? (
+        <ActionRows actions={parsed.actions} />
+      ) : parsed.reason === "pending" ? (
+        <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
+          <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+          <span>{t("正在编写子会话操作…")}</span>
+        </div>
+      ) : (
+        <div className="space-y-2 px-3 py-2">
+          <div
+            data-testid="super-actions-tool-call-invalid"
+            className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
+          >
+            <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
+            <span>{t("这段操作信息没能完整读取，暂时看不到操作列表，下面是它的原始内容")}</span>
+          </div>
+          {block.input && (
+            <pre
+              data-testid="super-actions-tool-call-raw"
+              className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+            >
+              {block.input}
+            </pre>
+          )}
         </div>
       )}
     </DirectiveSurface>

@@ -163,11 +163,11 @@ describe("PendingCards", () => {
     arriveAllThree();
 
     const pill = counter();
-    expect(pill.textContent).toContain("还有 2 个待处理");
+    expect(pill.textContent).toContain("还有 2 张卡片待处理");
     expect(pill.getAttribute("aria-expanded")).toBe("false");
     // Hidden cards are plan-exit (arrived second) and approval (arrived first).
     expect(pill.getAttribute("aria-label")).toBe(
-      "还有 2 个待处理：iFlow 请求退出 Plan 模式、iFlow 请求执行",
+      "还有 2 张卡片待处理：iFlow 准备开始执行计划、iFlow 想执行一项操作",
     );
     expect(pill.getAttribute("aria-controls")).toBe(document.querySelector("[data-pending-slot]")!.parentElement!.id);
     // Keyboard-focusable by default (real <button>).
@@ -212,7 +212,7 @@ describe("PendingCards", () => {
     expect(slot("planExit").style.height).toBe("");
     expect(slot("questions").getAttribute("aria-hidden")).toBe("true");
     expect(slot("questions").style.height).toBe("8px");
-    expect(counter().textContent).toContain("还有 2 个待处理");
+    expect(counter().textContent).toContain("还有 2 张卡片待处理");
   });
 
   it("同一 kind 换实例（新 id）：新卡成为堆顶，旧实例的戳不残留", () => {
@@ -235,7 +235,7 @@ describe("PendingCards", () => {
     expect(top.textContent).toContain("Write b.ts");
     expect(slot("questions").getAttribute("aria-hidden")).toBe("true");
     expect(slot("questions").style.height).toBe("8px");
-    expect(counter().textContent).toContain("还有 1 个待处理");
+    expect(counter().textContent).toContain("还有 1 张卡片待处理");
 
     // Stale-key sweep: drop the approval, then bring the ORIGINAL A back. It
     // must get a fresh stamp (beating the older question), which only holds if

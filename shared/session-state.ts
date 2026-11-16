@@ -32,10 +32,12 @@ import {
   type SessionSummaryUi,
   type SessionUsageUi,
   type SubAgentBlock,
+  type SuperDelegatedTaskUi,
   type ToolBlock,
   type ToolDiffUi,
   type UsageBreakdownUi,
 } from "./messages.js";
+import { classifySuperToolName, parseSuperDelegationTasks } from "./super-tool-call.js";
 
 // --- merging helpers -------------------------------------------------------
 
@@ -225,6 +227,122 @@ export function formatToolInput(args: unknown): string | null {
   }
 }
 
+/**
+ * Delegated tasks of a `super-agent` dispatch call, parsed BY THE HOST.
+ *
+ * The transcript card must render from THIS structure, not from the lossy
+ * `input` display string: `input` truncates every string value at 300 chars
+ * and the whole payload at 4096 chars, so a long task brief gets cut in the
+ * middle and stops being JSON. The model also sometimes omits `title` (wire
+ * evidence: a real call whose args were `{"tasks":[{"task":"…"}]}`) — the
+ * dispatcher tolerates that (falls back to the task's first line) while a
+ * stricter reader would call the whole delegation unparseable, i.e. a FALSE
+ * ALARM about a delegation that really happened.
+ *
+ * Cost discipline (this is a hot path — every tool frame passes here): the
+ * parse runs ONLY for dispatch-class tool names; every other tool frame
+ * skips it entirely.
+ *
+ * @returns the parsed tasks, or undefined when this is not a dispatch call or
+ * the payload is unusable (never fabricate).
+ */
+function superTasksForTool(
+  toolName: string | undefined,
+  args: unknown,
+): SuperDelegatedTaskUi[] | undefined {
+  if (classifySuperToolName(toolName ?? "") !== "dispatch") return undefined;
+  const tasks = parseSuperDelegationTasks(args);
+  if (!tasks || tasks.length === 0) return undefined;
+  return tasks.map((task) => ({
+    title: task.title,
+    task: task.task,
+    // Count only: attachment bodies (file contents / inlined base64 images)
+    // must never enter the snapshot (pitfall #27 discipline).
+    attachmentCount: (task.attachments ?? []).length,
+  }));
+}
+
+/**
+ * Tool-block position index: `toolCallId` → index in the block list.
+ *
+ * WHY this exists: the lookup used to be a reverse O(n) scan of the WHOLE
+ * transcript on every tool frame — create AND update alike. A long session
+ * holds thousands of blocks and a streaming shell command pushes dozens of
+ * `tool_call_update` frames per second, so the scan was a real per-frame
+ * cost of the host. Measured on this machine at 5 001 blocks: the whole
+ * `applySessionUpdate` path cost ~29.4µs per tool frame with the scan and
+ * ~17.2µs with the index (~1.7x); the bare reverse scan alone was ~11.5µs.
+ * The index turns the lookup into O(1).
+ *
+ * SAFETY — why a module-level cache may live in a pure reducer:
+ *  1. A tool block only ever ENTERS a block list through {@link upsertToolBlock}.
+ *     The other two producers (the transcript parser and the restored
+ *     transcript) build FRESH arrays, and a fresh array has no cache entry,
+ *     so it takes the cold-start full scan.
+ *  2. The index is therefore always a SUPERSET of the live tool ids: it may
+ *     still list a tool block that was truncated away, but it never misses
+ *     one. "not in the index" ⇒ "no such tool block in the list" ⇒ append —
+ *     the same verdict the old scan reached, in O(1) instead of O(n).
+ *  3. Cached POSITIONS are validated against the live list before use
+ *     (`blocks[i]` must still be a tool block with that toolCallId), so a
+ *     shifted index (mid-insert / truncation) can never resolve to the wrong
+ *     block: it degrades to the original full scan, which also rebuilds the
+ *     index.
+ *
+ * The cache is a WeakMap keyed by the block list itself: it dies with the
+ * list (no leak), it is invisible to JSON serialization and to reference
+ * comparisons, and it never changes the reducer's RESULT — only how fast it
+ * gets there. (A pure tail-window scan was considered first: the old code
+ * already scanned tail-first, so a bounded window would hit most of the
+ * time — but a MISS (the tool block sits deeper than the window, e.g. a
+ * tool whose output keeps streaming while other blocks pile up behind it)
+ * would still have to fall back to a full scan, and a window WITHOUT that
+ * fallback would append a DUPLICATE tool block. The index hits in O(1) in
+ * every case and never changes the verdict.)
+ */
+const toolIndexCache = new WeakMap<Block[], Map<string, number>>();
+
+/**
+ * Build (or rebuild) the tool index for `blocks` — one O(n) pass. The LAST
+ * occurrence of a toolCallId wins, exactly like the old reverse scan.
+ */
+function buildToolIndex(blocks: Block[]): Map<string, number> {
+  const index = new Map<string, number>();
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]!;
+    if (block.kind === "tool") index.set(block.toolCallId, i);
+  }
+  toolIndexCache.set(blocks, index);
+  return index;
+}
+
+/**
+ * Index of the tool block for `toolCallId`, or -1 when the list has none.
+ * Same verdict as the old reverse scan (last occurrence wins), O(1) when the
+ * index is warm.
+ */
+function findToolBlockIndex(blocks: Block[], toolCallId: string): number {
+  const index = toolIndexCache.get(blocks);
+  if (index === undefined) {
+    // Cold start: this list has no index yet (a fresh array — restored or
+    // parsed transcript). One full scan builds it.
+    return buildToolIndex(blocks).get(toolCallId) ?? -1;
+  }
+  const cached = index.get(toolCallId);
+  // Absent from the index ⇒ absent from the list (superset invariant above).
+  if (cached === undefined) return -1;
+  const block = blocks[cached];
+  if (block !== undefined && block.kind === "tool" && block.toolCallId === toolCallId) return cached;
+  // Stale position (the list was spliced): fall back to the original scan and
+  // rebuild the index, so the next lookup is O(1) again.
+  return buildToolIndex(blocks).get(toolCallId) ?? -1;
+}
+
+/** Record a tool block appended at `index` (keeps the index a superset). */
+function recordToolBlock(blocks: Block[], toolCallId: string, index: number): void {
+  toolIndexCache.get(blocks)?.set(toolCallId, index);
+}
+
 /** Upsert the tool block for `patch.toolCallId`. Returns the index of the
  * mutated/appended block (P-1 change reporting). */
 function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
@@ -234,54 +352,60 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
     truncatedChars = output.length - MAX_TOOL_OUTPUT_STORE_CHARS;
     output = output.slice(0, MAX_TOOL_OUTPUT_STORE_CHARS);
   }
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i]!;
-    if (block.kind === "tool" && block.toolCallId === patch.toolCallId) {
-      // Long-running shell commands stream their output as
-      // tool_call_update(in_progress) frames. A frame that reaches the
-      // webview after the terminal update (send ordering across the NDJSON
-      // pipe) must neither resurrect the spinner nor replace the final
-      // output with its tail slice.
-      if (patch.status === "in_progress" && (block.status === "completed" || block.status === "failed")) {
-        return i;
-      }
-      // `patch` carries no `id` key (creation sites below omit it), so the
-      // spread keeps the existing block's id stable across updates. A patch
-      // bringing a NEW diff means the file was edited again — the stale
-      // revert marker no longer applies (C4).
-      const merged: ToolBlock = {
-        ...block,
-        ...patch,
-        output: output || block.output,
-        // An update without fresh output keeps the previous truncation marker.
-        truncatedChars: output ? truncatedChars : block.truncatedChars,
-        // A new update without a diff must not erase the previous diff.
-        diff: patch.diff ?? block.diff,
-        // Args ride only the in_progress update; a later update without args
-        // must not erase the captured command/params.
-        input: patch.input ?? block.input,
-        reverted: patch.diff ? false : block.reverted,
-        // P0-2: per-hunk decisions anchor to the diff text they were derived
-        // from — a new diff invalidates them exactly like the revert marker.
-        hunkDecisions: patch.diff ? undefined : block.hunkDecisions,
-        partiallyReverted: patch.diff ? false : block.partiallyReverted,
-      };
-      // P1: recount only when token-bearing content actually changed — pure
-      // status flips (pending → completed) ride the existing cache, keeping
-      // the hot tool-update path BPE-free. `tokens` survives the spread above
-      // (wire patches never carry it); a real change recounts in place.
-      const contentChanged =
-        merged.diff?.path !== block.diff?.path ||
-        merged.diff?.oldText !== block.diff?.oldText ||
-        merged.diff?.newText !== block.diff?.newText ||
-        merged.title !== block.title ||
-        merged.output !== block.output;
-      if (contentChanged) recountBlockTokens(merged);
-      blocks[i] = merged;
+  const found = findToolBlockIndex(blocks, patch.toolCallId);
+  const existing = found >= 0 ? blocks[found] : undefined;
+  if (existing !== undefined && existing.kind === "tool") {
+    const block = existing;
+    const i = found;
+    // Long-running shell commands stream their output as
+    // tool_call_update(in_progress) frames. A frame that reaches the
+    // webview after the terminal update (send ordering across the NDJSON
+    // pipe) must neither resurrect the spinner nor replace the final
+    // output with its tail slice.
+    if (patch.status === "in_progress" && (block.status === "completed" || block.status === "failed")) {
       return i;
     }
+    // `patch` carries no `id` key (creation sites below omit it), so the
+    // spread keeps the existing block's id stable across updates. A patch
+    // bringing a NEW diff means the file was edited again — the stale
+    // revert marker no longer applies (C4).
+    const merged: ToolBlock = {
+      ...block,
+      ...patch,
+      output: output || block.output,
+      // An update without fresh output keeps the previous truncation marker.
+      truncatedChars: output ? truncatedChars : block.truncatedChars,
+      // A new update without a diff must not erase the previous diff.
+      diff: patch.diff ?? block.diff,
+      // Args ride only the in_progress update; a later update without args
+      // must not erase the captured command/params.
+      input: patch.input ?? block.input,
+      // Same discipline for the parsed delegation structure: the args (and
+      // therefore the task list) arrive with the in_progress frame only — a
+      // later frame without args must not wipe the card's task list.
+      superTasks: patch.superTasks ?? block.superTasks,
+      reverted: patch.diff ? false : block.reverted,
+      // P0-2: per-hunk decisions anchor to the diff text they were derived
+      // from — a new diff invalidates them exactly like the revert marker.
+      hunkDecisions: patch.diff ? undefined : block.hunkDecisions,
+      partiallyReverted: patch.diff ? false : block.partiallyReverted,
+    };
+    // P1: recount only when token-bearing content actually changed — pure
+    // status flips (pending → completed) ride the existing cache, keeping
+    // the hot tool-update path BPE-free. `tokens` survives the spread above
+    // (wire patches never carry it); a real change recounts in place.
+    const contentChanged =
+      merged.diff?.path !== block.diff?.path ||
+      merged.diff?.oldText !== block.diff?.oldText ||
+      merged.diff?.newText !== block.diff?.newText ||
+      merged.title !== block.title ||
+      merged.output !== block.output;
+    if (contentChanged) recountBlockTokens(merged);
+    blocks[i] = merged;
+    return i;
   }
   blocks.push({ ...patch, output, truncatedChars, id: nextBlockId() });
+  recordToolBlock(blocks, patch.toolCallId, blocks.length - 1);
   return blocks.length - 1;
 }
 
@@ -689,6 +813,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: "",
         input: formatToolInput(update.args),
+        superTasks: superTasksForTool(update.toolName, update.args),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
@@ -703,6 +828,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: extractTextOutput(update.content),
         input: formatToolInput(update.args),
+        superTasks: superTasksForTool(update.toolName, update.args),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
@@ -1326,12 +1452,12 @@ export function appendInjectedContext(
     // Scope is host-computed from the two settings files the CLI merges; naming
     // it here is the only place the user learns a server came from the project.
     const projectScoped = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
-    if (projectScoped > 0) parts.push(l10n.t("{0} 个为项目级", String(projectScoped)));
+    if (projectScoped > 0) parts.push(l10n.t("{0} 个来自项目配置", String(projectScoped)));
   }
   const block: Block = {
     kind: "injected",
     id: nextBlockId(),
-    notice: l10n.t("本次请求自动注入了 {0} 项内容：{1}", String(items.length), parts.join("、")),
+    notice: l10n.t("这次请求还自动带上了 {0} 项内容：{1}", String(items.length), parts.join("、")),
     items,
     // Fixed per-request overhead the model carries before the user's text —
     // shown on the collapsed header (and kept after payload eviction).

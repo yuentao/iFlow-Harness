@@ -29,10 +29,30 @@ import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
-import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
+import type { AgentStatus, ErrorAdviceUi, InitializingReason, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
-import { isTerminalSuperStatus } from "../../shared/super-agent";
+import { hasActiveSuperSession } from "../../shared/super-agent";
+
+/**
+ * Label for the `initializing` busy chip. The host reuses that lock for
+ * several async flows (new session, session delete, message delete, rollback,
+ * restore) — claiming 「正在创建新会话…」 for all of them was simply wrong.
+ */
+function initializingLabel(reason: InitializingReason | null | undefined): string {
+  switch (reason) {
+    case "deleteSession":
+      return t("正在删除会话…");
+    case "deleteMessage":
+      return t("正在删除消息…");
+    case "rollback":
+      return t("正在回滚对话…");
+    case "restore":
+      return t("正在恢复会话…");
+    default:
+      return t("正在创建新会话…");
+  }
+}
 
 function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
@@ -72,7 +92,7 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
     case "error":
       return (
         <Chip tone="danger">
-          <span className="size-1.5 rounded-full bg-destructive" /> {t("错误")}
+          <span className="size-1.5 rounded-full bg-destructive" /> {t("出错了")}
         </Chip>
       );
   }
@@ -163,7 +183,7 @@ function ErrorBanner({
       variant="danger-soft"
       className="shrink-0"
       icon={<RefreshCw className={ICON_INLINE} />}
-      title={t("重启内核并重试（会话自动恢复）")}
+      title={t("重启内核后重试，当前会话会自动恢复")}
       onClick={() => send({ type: "restartCli" })}
     >
       {t("重试")}
@@ -243,18 +263,28 @@ export function App() {
   const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  const initializingReason = useChat((s) => s.state?.initializingReason ?? null);
   const compressing = useChat((s) => s.state?.compressing ?? false);
   // 宿主正在等子会话汇报：禁用顶栏「新会话」（等待期新建会话会让排队里的
   // 汇报落到已被替换的会话上）。它是 orthogonal 于 status 的标记，所以等待期
   // 用户仍然可以发消息、由主会话响应。顶栏不再为它渲染忙碌 chip —— 忙碌信号
   // 由转录底部浮动 pill 与子会话看板计数承担。
   const superWaiting = useChat((s) => s.state?.superWaiting ?? false);
+  // 用户按了「停止」：superWaiting 是被压住的（汇报还在队列里，等下一条消息或
+  // 常驻提示的「继续处理」才投递），不是真的在生成。此时「新会话」必须可点 ——
+  // 否则用户点完停止就再无出路，面板看起来永久卡住。pendingCount 用于确认弹窗
+  // 如实告知「有多少项结果、切回原会话才会继续投递」。
+  const superHeld = useChat((s) => s.state?.superHeld ?? false);
+  const superPendingCount = useChat((s) => s.state?.superPendingCount ?? 0);
   // 子会话仍在跑（非终态）时，切换会话 / 模型 / API 配置会让在途的子会话用错
   // 凭据或模型，或让汇报落到已被替换的主会话。与 superWaiting 分开判定：后者
   // 只覆盖「主会话空转等汇报」，子会话运行而主会话自己也在生成时同样要锁。
-  const superActive = useChat((s) =>
-    (s.state?.superSessions ?? []).some((session) => !isTerminalSuperStatus(session.status)),
-  );
+  //
+  // P-2-1 原子订阅：只订阅列表**引用**（宿主推新数组时才变），布尔值由
+  // useMemo 派生。旧写法把 `.some()` 写在 selector 里 —— selector 在每次
+  // store 更新时都求值（流式期间 12.5 次/秒），等于每秒把整张子会话表扫一遍。
+  const superSessions = useChat((s) => s.state?.superSessions);
+  const superActive = useMemo(() => hasActiveSuperSession(superSessions), [superSessions]);
   const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
   const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
@@ -288,6 +318,9 @@ export function App() {
   // Delete keeps a modal confirm (the host delete is irreversible); the armed
   // session is held here so the dialog can render its label.
   const [confirmingDelete, setConfirmingDelete] = useState<SessionSummaryUi | null>(null);
+  // 用户按停止后汇报被压住时点「新会话」：先弹如实确认（结果不丢、切回原会话
+  // 才继续投递），确认后才发 newSession —— 这是被停止后唯一的显式出路。
+  const [confirmNewSessionHeld, setConfirmNewSessionHeld] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   // Inline rename: the id being edited and its draft label. Kept in App so the
   // dropdown's close callback can drop a half-typed name.
@@ -411,10 +444,10 @@ export function App() {
   // and the snapshot render, which React rejects with error #310.
   const liveMessage = useMemo(() => {
     if (status === null) return "";
-    if (pendingApproval) return t("需要审批工具调用");
-    if (pendingPlanExit) return t("需要确认退出计划模式");
-    if (pendingQuestions) return t("有待回答问题需要回答");
-    if (pendingProfileSwitch) return t("等待选择切换 API 配置的会话处理方式");
+    if (pendingApproval) return t("有操作等你批准");
+    if (pendingPlanExit) return t("计划已就绪，等你批准");
+    if (pendingQuestions) return t("iFlow 有问题等你回答");
+    if (pendingProfileSwitch) return t("等你选择切换 API 配置后如何处理当前会话");
     if (status === "connecting") return t("正在连接 iFlow…");
     if (status === "streaming")
       return compressing
@@ -513,15 +546,17 @@ export function App() {
       }
       if (e.key.toLowerCase() === "n") {
         // 等待子会话汇报期间不能新建会话（与顶栏「新会话」按钮同一语义）：
-        // 排队里的汇报会落到已被替换的会话上。
-        if (superWaiting) return;
+        // 排队里的汇报会落到已被替换的会话上。用户按了停止压住汇报时是例外
+        // —— 此时没有汇报在飞，允许新建，否则用户点完停止就再无出路。
+        if (superWaiting && !superHeld) return;
         e.preventDefault();
-        send({ type: "newSession" });
+        if (superHeld) setConfirmNewSessionHeld(true);
+        else send({ type: "newSession" });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting]);
+  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting, superHeld]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode
@@ -556,7 +591,7 @@ export function App() {
         </div>
         <div
           className="splash-hint"
-          title={t("首次启动或配置了多个 MCP server 时较久")}
+          title={t("首次启动，或配置了多个 MCP 服务器时会多等一会儿")}
         >
           {connectEpoch > 0 ? t("正在重新启动内核 …") : t("正在启动 …")}
           {status === "connecting" && connectingElapsed >= 3 && (
@@ -854,7 +889,7 @@ export function App() {
             </Chip>
           ) : initializing ? (
             <Chip tone="primary">
-              <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
+              <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{initializingLabel(initializingReason)}</span>
             </Chip>
           ) : (
             statusChip(status ?? "connecting", compressing, isPlanMode(modes))
@@ -883,16 +918,23 @@ export function App() {
               // IconButton 的默认 title 就是 label —— 只有需要解释「为什么现在
               // 不能/能新建会话」时才覆盖它（title={undefined} 会把默认
               // tooltip 抹掉）。
-              {...(superWaiting
-                ? { title: t("子会话还在运行并等待汇报，暂时不能新建会话") }
-                : replaying
-                  ? { title: t("取消正在进行的会话恢复并新建会话") }
-                  : {})}
+              {...(superWaiting && !superHeld
+                ? { title: t("子会话还在运行，等它们汇报完才能新建会话") }
+                : superWaiting && superHeld
+                  ? { title: t("已停止：可以新建会话，待处理的汇报仍留在原会话") }
+                  : replaying
+                    ? { title: t("取消正在进行的会话恢复并新建会话") }
+                    : {})}
               // 恢复中（replaying）不禁用：宿主会放弃这次恢复并立刻新建会话，
               // 用户不必等恢复跑完再点一次。其余忙碌态（生成中 / 正在创建新
               // 会话 / 正在切换会话）仍然禁用。
-              disabled={switching || superWaiting || (busy && !replaying)}
-              onClick={() => send({ type: "newSession" })}
+              // superWaiting 且是「用户已停止、汇报被压住」时**不禁用** —— 那时
+              // 没有汇报在飞，新建会话不会串台，而是用户停止后唯一的出路。
+              disabled={switching || (superWaiting && !superHeld) || (busy && !replaying)}
+              onClick={() => {
+                if (superWaiting && superHeld) setConfirmNewSessionHeld(true);
+                else send({ type: "newSession" });
+              }}
             />
             {/* Settings hub: profiles & credentials, MCP servers, approval
                 policies. The gear used to open a profile quick-switcher whose
@@ -925,9 +967,9 @@ export function App() {
       )}
       {auth?.needsSetup && !onboardingOpen && (
         <div className="mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-          <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
+          <span className="min-w-0 flex-1">{t("还没配置 API 密钥，现在还不能开始对话。")}</span>
           <Button variant="warning-soft" size="sm" onClick={() => setSettingsTab("api")}>
-            {t("配置")}
+            {t("去配置")}
           </Button>
           <Button variant="warning-soft" size="sm" onClick={() => setOnboardingOpen(true)}>
             {t("重新运行引导")}
@@ -1021,6 +1063,21 @@ export function App() {
 
       <Composer />
 
+      {confirmNewSessionHeld && (
+        <ConfirmDialog
+          title={t("新建会话")}
+          confirmLabel={t("新建会话")}
+          message={t(
+            "你按了停止，还有 {0} 项子会话结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？",
+            superPendingCount,
+          )}
+          onConfirm={() => {
+            setConfirmNewSessionHeld(false);
+            send({ type: "newSession" });
+          }}
+          onCancel={() => setConfirmNewSessionHeld(false)}
+        />
+      )}
       {confirmingDelete && (
         <ConfirmDialog
           title={t("删除会话")}

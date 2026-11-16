@@ -88,7 +88,7 @@ async function makeWorktree(repoRoot: string, name: string) {
 }
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("worktree · 依赖预置（硬链接）", () => {
@@ -182,7 +182,7 @@ describe("worktree · 依赖预置（硬链接）", () => {
     makeNodeModules(repo);
     const { target } = await makeWorktree(repo, "deps-exdev");
     // 先删掉成功预置的树，模拟「第一次预置就跨卷失败」。
-    rmSync(path.join(target, "node_modules"), { recursive: true, force: true });
+    rmSync(path.join(target, "node_modules"), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 
     const result = await presetWorktreeDependencies({
       repoRoot: repo,

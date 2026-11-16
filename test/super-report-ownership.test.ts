@@ -68,6 +68,30 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
   ];
 }
 
+/**
+ * 稳健删除临时目录（只影响清理步骤，不影响任何断言）。
+ *
+ * Windows 上 `fs.rmSync(recursive)` 会在「目录刚被删空、同一瞬间又有新条目
+ * 写进去」时抛 `ENOTEMPTY` —— 面板的归档落盘是异步链，`dispose()` 之后仍可能
+ * 有排队的写回落在 storageDir 里。`rmSync` 自带的 `maxRetries` 只覆盖它自己
+ * 的重试窗口，遇到连续写入仍会失败，所以外层再退避重试几轮；重试耗尽仍失败
+ * 就如实抛出（不吞错误、不跳过用例）。
+ */
+async function rmDirWithRetry(dir: string, attempts = 6, delayMs = 50): Promise<void> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retriable =
+        code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM" || code === "EACCES";
+      if (!retriable || i === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs * (i + 1)));
+    }
+  }
+}
+
 type PromptCall = {
   prompt: Array<{ type: string; text?: string }>;
   resolve: (v: { stopReason: string }) => void;
@@ -131,6 +155,14 @@ type PanelInternals = {
     update: { sessionUpdate: string; content: { type: string; text: string }; agentId?: string };
   }) => void;
   resetSuperDirectiveScans: () => void;
+  /** 委派载荷去重账本（有界 FIFO）。 */
+  superDispatchedDirectives: Set<string>;
+  /** 往去重账本里记一条（有界 FIFO 的记账入口）。 */
+  rememberDispatchedDirective: (fingerprint: string) => void;
+  /** 已经拿到 AI 标题的会话 id 账本。 */
+  titledSessionIds: Set<string>;
+  /** 从会话列表里忘掉一个会话（删除路径的公共落点）。 */
+  forgetSession: (id: string) => Promise<void>;
   store: {
     getState: () => SessionState;
     sessionStarted: (meta: { sessionId: string }) => void;
@@ -183,7 +215,7 @@ describe("子会话汇报 · 归属与投递时机", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    await rmDirWithRetry(storageDir);
   });
 
   async function flush(): Promise<void> {
@@ -400,5 +432,59 @@ describe("子会话汇报 · 归属与投递时机", () => {
     p.resetSuperDirectiveScans();
     chunk("agent_message_chunk", payload);
     expect(manager.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  describe("委派载荷账本 · 有界", () => {
+    const cap = (
+      ChatPanel as unknown as { SUPER_DISPATCHED_DIRECTIVES_CAP: number }
+    ).SUPER_DISPATCHED_DIRECTIVES_CAP;
+
+    it("账本不超过上限：超过后淘汰最旧的一条（长期运行不再无界增长）", () => {
+      expect(cap).toBeGreaterThan(0);
+      // 直接灌进记账入口：比派发路径更快，且不依赖扫描器的分帧时机。
+      for (let i = 0; i < cap + 20; i += 1) p.rememberDispatchedDirective(`fp-${i}`);
+      // 上限是硬约束：账本不得随派发次数线性增长。
+      expect(p.superDispatchedDirectives.size).toBe(cap);
+      // 淘汰的是最旧的（先进先出）—— 最新的那条必须在。
+      expect(p.superDispatchedDirectives.has("fp-0")).toBe(false);
+      expect(p.superDispatchedDirectives.has(`fp-${cap + 19}`)).toBe(true);
+      // 再灌一条仍然不越界（淘汰与写入是同一步）。
+      p.rememberDispatchedDirective("fp-overflow");
+      expect(p.superDispatchedDirectives.size).toBe(cap);
+    });
+
+    it("窗口内的同一份载荷仍然只派发一次（有界化不能破坏去重语义）", () => {
+      const payload = directive("改登录", "修好 src/auth.ts");
+      chunk("agent_message_chunk", payload);
+      expect(manager.spawn).toHaveBeenCalledTimes(1);
+      // 同一份载荷再写一遍：命中账本，不重复开子会话。
+      chunk("agent_message_chunk", payload);
+      expect(manager.spawn).toHaveBeenCalledTimes(1);
+      // 不同载荷照常派发。
+      chunk("agent_message_chunk", directive("改注册", "修好 src/register.ts"));
+      expect(manager.spawn).toHaveBeenCalledTimes(2);
+    });
+
+    it("账本里存的是定长指纹，不是整份载荷键（附件可达 MB 级）", () => {
+      const payload = directive("带附件", "把图贴进去");
+      chunk("agent_message_chunk", payload);
+      expect(p.superDispatchedDirectives.size).toBe(1);
+      for (const entry of p.superDispatchedDirectives) {
+        // 摘要化的指纹：固定长度、纯 hex —— 载荷原文（含 base64 附件）不入账。
+        expect(entry).toMatch(/^[0-9a-f]{32}$/);
+      }
+    });
+  });
+
+  describe("AI 标题账本 · 会话删除时清理", () => {
+    it("删除会话时清掉它的标题账本条目，别人的条目不受影响", async () => {
+      p.titledSessionIds.add("session-A");
+      p.titledSessionIds.add("session-B");
+      await p.forgetSession("session-A");
+      // 被删会话的条目必须走（否则账本随删除次数无界增长）。
+      expect(p.titledSessionIds.has("session-A")).toBe(false);
+      // 没被删的会话照旧保留（不能误删）。
+      expect(p.titledSessionIds.has("session-B")).toBe(true);
+    });
   });
 });

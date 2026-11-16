@@ -125,7 +125,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("恢复主会话时把它的子会话取回看板", async () => {
@@ -195,7 +195,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     // ……但用户**被明确告知**了（而不是静默的空）：警告里带着备份路径。
     expect(toasts.length).toBeGreaterThan(0);
     expect(toasts[0]?.level).toBe("warning");
-    expect(toasts[0]?.message).toContain("归档损坏");
+    expect(toasts[0]?.message).toContain("记录已损坏");
     expect(toasts[0]?.message).toContain(".corrupt-");
   });
 
@@ -231,6 +231,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
   it("内容没变时不重复写归档（写放大控制）", async () => {
     const manager = p.getSuperAgent() as {
       restoreSessions: (mainSessionId: string, records: unknown[]) => void;
+      archivableSessions: (mainSessionId: string) => PersistedSuperSession[];
     };
     manager.restoreSessions("main-1", [
       {
@@ -247,9 +248,14 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
       },
     ]);
     const file = path.join(storageDir, "super-sessions", "main-1.json");
-    for (let i = 0; i < 100 && !fs.existsSync(file); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+
+    // 第一次落盘是 fire-and-forget（管理器 emit → 宿主落盘）。**文件出现不等于
+    // 写链收尾**：归档写是「临时文件 + rename」的串行链，rename 落地之后才记
+    // lastWritten。只轮询 existsSync 会让紧随其后的 force 落在记账之前，被当成
+    // 「内容变了」再写一次（mtime 变动，用例偶发失败）。
+    // 归档写是串行链：再排一次**同样内容**的写并 await 它，就等于等此前所有写
+    //（含 lastWritten 记账）全部完成 —— 这是可 await 的收尾信号，不是猜时间。
+    await writeSuperSessionArchive(storageDir, "main-1", manager.archivableSessions("main-1"));
     expect(fs.existsSync(file)).toBe(true);
     const first = fs.statSync(file).mtimeMs;
 

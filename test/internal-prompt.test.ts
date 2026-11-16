@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { ChatPanel } from "../src/panel/panel.js";
@@ -87,7 +89,7 @@ function queueCompletion(result: CompletionResult | (() => Promise<CompletionRes
 
 const TEST_CREDS = { baseUrl: "https://gateway.test/v1", apiKey: "sk-test-1234", modelName: "test-model" };
 
-function makeContext(): vscode.ExtensionContext {
+function makeContext(storageDir: string): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? store.get(key) : defaultValue) as T,
@@ -118,10 +120,10 @@ function makeContext(): vscode.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscode.ExtensionContext;
 }
@@ -147,8 +149,8 @@ type PanelInternals = {
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
 
-function makePanel() {
-  const panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+function makePanel(storageDir: string) {
+  const panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
   const posted: Array<{ type?: string; error?: string; text?: string }> = [];
   internals(panel).postToWebview = (message) => {
     posted.push(message as { type?: string; error?: string; text?: string });
@@ -180,11 +182,13 @@ describe("stripFileMentions (internal-prompt @-reference neutraliser)", () => {
 describe("ChatPanel internal prompt via direct gateway (enhance regression)", () => {
   let panel: ChatPanel;
   let posted: Array<{ type?: string; error?: string; text?: string }>;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     completionMock.state.calls = [];
     queueCompletion({ text: "", reason: "failed" });
-    panel = makePanel().panel;
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-internal-prompt-storage-"));
+    panel = makePanel(storageDir).panel;
     posted = [];
     internals(panel).postToWebview = (message) => {
       posted.push(message as { type?: string; error?: string; text?: string });
@@ -193,6 +197,7 @@ describe("ChatPanel internal prompt via direct gateway (enhance regression)", ()
 
   afterEach(async () => {
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("returns the completion text on a clean stop", async () => {
@@ -293,11 +298,13 @@ describe("ChatPanel enhance cancellation & session isolation", () => {
   let panel: ChatPanel;
   let posted: Array<{ type?: string; error?: string; text?: string; requestId?: number }>;
   let internalsPanel: PanelInternals;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     completionMock.state.calls = [];
     queueCompletion({ text: "", reason: "failed" });
-    const made = makePanel();
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-enhance-storage-"));
+    const made = makePanel(storageDir);
     panel = made.panel;
     internalsPanel = internals(panel);
     posted = [];
@@ -308,6 +315,7 @@ describe("ChatPanel enhance cancellation & session isolation", () => {
 
   afterEach(async () => {
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   /** Start an enhance whose completion hangs until `release` resolves. */
@@ -454,8 +462,9 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
 
   let panel: ChatPanel;
   let p: FollowupInternals;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     completionMock.state.calls = [];
     queueCompletion({ text: "", reason: "failed" });
     setConfigOverrides({
@@ -464,7 +473,8 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
       nextStepSuggestions: true,
       autoMemoryCapture: true,
     });
-    panel = makePanel().panel;
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-followup-storage-"));
+    panel = makePanel(storageDir).panel;
     p = panel as unknown as FollowupInternals;
     // Persistence is fs-bound in production; these tests assert the store only.
     p.persistSessions = async () => {};
@@ -496,6 +506,7 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     vi.restoreAllMocks();
     setConfigOverrides({});
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("fires ONE call carrying every enabled task and dispatches all three parts", async () => {
@@ -734,7 +745,7 @@ describe("prompt templates (prompts/)", () => {
     // 优先级必须覆盖整份提示词：Tool Usage / Security 段也在教「本会话怎么跑 shell」，
     // 只写「the workflows above」会把那几段留在覆盖范围之外，两段直接自相矛盾。
     expect(text).toContain(
-      "Where anything in this prompt tells you to implement, run a command, run a check or run git, this section takes precedence in this session",
+      "Where anything in this prompt tells you to implement, read a file, search the code, inspect logs, run a command, run a check or run git, this section takes precedence in this session: you implement and investigate by delegating",
     );
     expect(text).not.toContain("Where the workflows above tell you to implement");
     // 读到 Tool Usage 段时就该知道那些 shell 指令属于子会话，而不是读到后面才发现矛盾。
@@ -754,9 +765,12 @@ describe("prompt templates (prompts/)", () => {
     expect(text).toContain("Do not hand-write the fenced block while the tool is available");
     // `task` 是进程内子代理：无 worktree 隔离、不上看板，不能拿来派发。
     expect(text).toContain("Do not use the `task` tool for this");
-    // 管理动作仍然只有正文围栏这一条通道（没有 actions 工具）。
-    expect(text).toContain("Management actions go through the fenced block only");
-    expect(text).toContain("there is no `super-agent-actions` tool");
+    // 管理动作：工具优先（super-agent 的 actions 参数），围栏仅作兜底。
+    expect(text).toContain("Tool first, fenced block as fallback");
+    expect(text).toContain("If the `super-agent` tool's schema exposes an `actions` parameter");
+    expect(text).toContain(
+      "Only when the tool is not in your list, or its schema has no `actions` parameter",
+    );
     expect(text).toContain("## When to split");
     expect(text).toContain("## What stays in this session");
     expect(text).toContain("Never edit a delegated file yourself");
@@ -771,6 +785,42 @@ describe("prompt templates (prompts/)", () => {
     const brief = readFileSync(path.join(here, "..", "prompts", "super-agent-task.md"), "utf8");
     expect(brief).toContain("Run the project checks the task brief asks for");
     expect(brief).toContain("never claim a check passed");
+  });
+
+  it("forbids the main session from reading, writing or running anything and routes it to a child", () => {
+    // 2026-11-16 用户截图实测：主会话仍在 read_file / 跑 npx vitest。提示词必须
+    // 把这些写成硬性禁止，并与宿主的 settings.disallowed_tools 机械门控同口径。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("## Hard prohibitions for the main session (mechanically enforced)");
+    expect(text).toContain("No reading or exploring");
+    expect(text).toContain("No writing");
+    expect(text).toContain("No executing");
+    for (const tool of [
+      "read_file",
+      "read_many_files",
+      "glob",
+      "search_file_content",
+      "list_directory",
+      "image_read",
+      "web_fetch",
+      "web_search",
+      "ReadCommandOutput",
+      "write_file",
+      "replace",
+      "multi_edit",
+      "xml_escape",
+      "run_shell_command",
+    ]) {
+      expect(text).toContain(`\`${tool}\``);
+    }
+    // 探查也必须派子会话：旧的「只读探查可以留在主会话」整句消失。
+    expect(text).not.toContain("read-only exploration to build the plan");
+    expect(text).toContain("Planning that needs the codebase is itself a unit of work");
+    expect(text).toContain("dispatch a child to investigate and report back");
+    expect(text).toContain("which files to read, which question to answer, which commands to run");
+    // 规划与派发通道不受影响。
+    expect(text).toContain("`todo_write` / `todo_read` stay yours for planning");
+    expect(text).toContain("`super-agent` is your dispatch channel");
   });
 
   it("keeps the child-session concurrency limit configurable instead of hard-coding 4", () => {
@@ -795,7 +845,10 @@ describe("prompt templates (prompts/)", () => {
     // 否则子会话会误以为自己也不能用 `task`，与 prompts/super-agent-task.md 矛盾。
     const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
     expect(text).toContain("the main session — the one that receives the child-session board — has no `task` tool");
-    expect(text).toContain('settings.disallowed_tools: ["task"]');
+    expect(text).toContain("settings.disallowed_tools");
+    expect(text).toContain(
+      'carrying `"task"` plus every read/explore, write and execute tool listed above',
+    );
     // 无条件的裸句必须消失（子会话读到会误判）。
     expect(text).not.toContain("this session has no `task` tool");
     expect(text).not.toContain("This session has no `task` tool");
@@ -835,6 +888,21 @@ describe("prompt templates (prompts/)", () => {
     expect(text).not.toContain(
       "a finished child with `未自动合并` needs you to merge its branch yourself (or tell the user exactly why it was left alone).",
     );
+  });
+
+  it("makes retrying a failed child session mandatory and forbids re-dispatching an equivalent task", () => {
+    // 2026-11 用户实测：主会话看到 failed 子会话后新派等价 super-agent 任务，
+    // 新建 worktree 从零开始，丢掉原 worktree 里大半未提交改动。规则必须进
+    // 系统提示（每轮都读），且要与看板 footer 的英文措辞一致。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("A failed child session must be retried, never re-dispatched");
+    expect(text).toContain("Do not dispatch a new, equivalent `super-agent` task");
+    expect(text).toContain("the **same worktree**");
+    // 保留「检查失败=新任务」规则，但要显式区分对象，避免模型对失败子会话也 new task。
+    expect(text).toContain("A failed check is a new task, not a reason to code");
+    expect(text).toContain("not a failed child session");
+    // interrupted 不算失败，不自动 retry。
+    expect(text).toContain("is **not** a failure — do not auto-retry it unless the user asks");
   });
 
   it("fills every placeholder in the assembled prompts", () => {

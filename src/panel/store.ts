@@ -9,6 +9,7 @@ import type {
   Block,
   HostToWebview,
   InjectedContextItem,
+  InitializingReason,
   SessionState,
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
@@ -272,11 +273,25 @@ export class SessionStore {
    * 这是**正交**的忙碌标记：它不改 `status`，所以等待期用户仍能发消息并由
    * 主会话响应；面板只用它禁用顶栏「新会话」（顶栏不再为它渲染忙碌 chip，
    * 忙碌信号由转录底部浮动 pill 与子会话看板计数承担）。
-   * 幂等：同值不推 —— 心跳每 1.5s 调一次，不能每次都刷快照。
+   *
+   * `held` / `pendingCount` 承载「用户按了停止、汇报被压住」这个子状态：webview
+   * 据此把「新会话」从死锁里放出来（弹如实确认后允许新建），宿主状态栏也不再
+   * 把压住态谎报成「生成中」。两者只在 waiting 为真时有意义，清零随 waiting。
+   * 幂等：三字段同值不推 —— 心跳每 1.5s 调一次，不能每次都刷快照。
    */
-  setSuperWaiting(waiting: boolean): void {
-    if ((this.state.superWaiting ?? false) === waiting) return;
+  setSuperWaiting(waiting: boolean, held = false, pendingCount = 0): void {
+    // held / count 只在「等待中」才有意义：压制解除或没有等待时一并清零，
+    // 否则 webview 会拿着上一轮的「已停止 · N 项待处理」错误地放行新会话。
+    const nextHeld = waiting && held;
+    const nextCount = waiting ? pendingCount : 0;
+    if (
+      (this.state.superWaiting ?? false) === waiting &&
+      (this.state.superHeld ?? false) === nextHeld &&
+      (this.state.superPendingCount ?? 0) === nextCount
+    ) return;
     this.state.superWaiting = waiting;
+    this.state.superHeld = nextHeld;
+    this.state.superPendingCount = nextCount;
     this.flush();
   }
 
@@ -509,9 +524,12 @@ export class SessionStore {
     return true;
   }
 
-  /** True while `session/new` is in flight; the webview locks switches. */
-  setInitializing(initializing: boolean): void {
+  /** Hold/release the host busy lock. `reason` tells the webview chip which
+   * operation is in flight (new session / delete / rollback / restore) — it
+   * used to be hardcoded to 「正在创建新会话…」 for all of them. */
+  setInitializing(initializing: boolean, reason: InitializingReason = "newSession"): void {
     this.state.initializing = initializing;
+    this.state.initializingReason = initializing ? reason : null;
     this.flush();
   }
 

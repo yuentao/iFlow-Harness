@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import type { SuperCancelOutcome } from "../src/panel/super-agent.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 import type { SessionState } from "../shared/messages.js";
 
@@ -88,6 +89,14 @@ type PanelInternals = {
   ) => Promise<boolean>;
   /** 主会话助手文本里的动作块扫描（宿主侧入口）。 */
   scanSuperActions: (content: unknown) => void;
+  /** 看板按钮发出的 superAgent 消息走这条宿主路由。 */
+  handleSuperAgentAction: (msg: {
+    type: "superAgent";
+    action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript" | "retry";
+    sessionId?: string;
+    answers?: Record<string, string | string[]>;
+    keepBranch?: boolean;
+  }) => Promise<void>;
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   notifyOs: (event: string, text: string) => boolean;
@@ -97,6 +106,7 @@ type PanelInternals = {
     getState: () => SessionState;
     sessionStarted: (meta: { sessionId: string }) => void;
     replaceState: (state: SessionState) => void;
+    sendToast: (...args: unknown[]) => number;
   };
 };
 
@@ -135,7 +145,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function flush(): Promise<void> {
@@ -217,5 +227,54 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
         .find((item) => item.includes("super-1")) ?? "";
     expect(line).toContain("already applied (idempotent)");
     expect(line).not.toContain("NOT applied");
+  });
+
+  /** 直接驱动看板「单个中断」宿主路由，并抓取 store 发出的 toast。 */
+  async function runCancelAction(
+    outcome: SuperCancelOutcome,
+  ): Promise<{ cancel: ReturnType<typeof vi.fn>; toasts: { level: string; message: string }[] }> {
+    const cancel = vi.fn(async (_id: string) => outcome);
+    p.superAgent = { list: () => [], reportPrompt: () => "", cancel };
+    const toasts: { level: string; message: string }[] = [];
+    vi.spyOn(p.store, "sendToast").mockImplementation(((
+      level: string,
+      message: string,
+    ) => {
+      toasts.push({ level, message });
+      return 1;
+    }) as unknown as PanelInternals["store"]["sendToast"]);
+
+    await p.handleSuperAgentAction({
+      type: "superAgent",
+      action: "cancel",
+      sessionId: "super-1",
+    });
+    return { cancel, toasts };
+  }
+
+  it("看板单个中断（成功）：仍调用 cancel 并发出 info toast 回执", async () => {
+    const { cancel, toasts } = await runCancelAction({
+      ok: true,
+      reason: "cancelled",
+      status: "cancelled",
+    });
+    // 状态推送链走 manager.cancel（其内 apply(cancelled)+emit），确认路由仍到它。
+    expect(cancel).toHaveBeenCalledWith("super-1");
+    expect(toasts).toEqual([{ level: "info", message: "已中断子会话" }]);
+  });
+
+  it("看板单个中断（已终态）：如实提示「无需中断」，不是失败也不是静默", async () => {
+    const { cancel, toasts } = await runCancelAction({
+      ok: true,
+      reason: "already-terminal",
+      status: "completed",
+    });
+    expect(cancel).toHaveBeenCalledWith("super-1");
+    expect(toasts).toEqual([{ level: "info", message: "这个子会话已经结束了，不用再中断" }]);
+  });
+
+  it("看板单个中断（目标不存在）：发出 warning 回执", async () => {
+    const { toasts } = await runCancelAction({ ok: false, reason: "not-found" });
+    expect(toasts).toEqual([{ level: "warning", message: "该子会话不存在或已被清理" }]);
   });
 });

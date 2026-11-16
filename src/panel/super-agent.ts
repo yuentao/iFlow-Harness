@@ -1201,7 +1201,7 @@ export class SuperAgentManager {
           isolation = {
             kind: "directory",
             path: dir,
-            note: `worktree 创建失败（${reason}），仅目录隔离`,
+            note: `独立工作目录创建失败（${reason}），仅目录隔离`,
             degradeReason: `worktree creation failed: ${reason}`,
           };
         }

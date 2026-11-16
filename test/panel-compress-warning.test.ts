@@ -121,7 +121,7 @@ describe("ChatPanel warning pill across manual compress (P0-6 action)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const occupancyHigh = (): void => {

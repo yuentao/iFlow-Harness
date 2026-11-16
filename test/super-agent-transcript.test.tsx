@@ -143,27 +143,27 @@ function clickRow(title: string): void {
   act(() => button!.click());
 }
 
-describe("Super Agent 子会话实时操作面板", () => {
-  it("折叠时无行；展开看板只显示单行；再展开该行才出现「查看实时操作」", () => {
+describe("Super Agent 子会话实时进度面板", () => {
+  it("折叠时无行；展开看板只显示单行；再展开该行才出现「查看实时进度」", () => {
     render();
     expect(document.body.textContent).not.toContain("修复登录跳转");
-    expect(document.body.textContent).not.toContain("查看实时操作");
+    expect(document.body.textContent).not.toContain("查看实时进度");
 
     clickLabel("子会话看板");
     expect(document.body.textContent).toContain("修复登录跳转");
     expect(document.body.textContent).toContain("运行中");
     // P1: actions live in the row detail, not on the line.
-    expect(document.body.textContent).not.toContain("查看实时操作");
+    expect(document.body.textContent).not.toContain("查看实时进度");
 
     clickRow("修复登录跳转");
-    expect(document.body.textContent).toContain("查看实时操作");
+    expect(document.body.textContent).toContain("查看实时进度");
   });
 
   it("打开面板时本地无转录 → 向宿主拉取该子会话的全量转录", () => {
     render();
     clickLabel("子会话看板");
     clickRow("修复登录跳转");
-    clickText("查看实时操作");
+    clickText("查看实时进度");
 
     expect(send).toHaveBeenCalledWith({
       type: "superAgent",
@@ -179,7 +179,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     render({ "super-1": [USER_BLOCK, TOOL_BLOCK, TEXT_BLOCK] });
     clickLabel("子会话看板");
     clickRow("修复登录跳转");
-    clickText("查看实时操作");
+    clickText("查看实时进度");
 
     const text = document.body.textContent ?? "";
     expect(text).toContain(USER_TASK);
@@ -202,7 +202,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     });
     clickLabel("子会话看板");
     clickRow("修复登录跳转");
-    clickText("查看实时操作");
+    clickText("查看实时进度");
 
     const dialog = document.querySelector('[role="dialog"]');
     const flatCard = dialog!.querySelector<HTMLElement>(".tool-card");
@@ -254,15 +254,15 @@ describe("Super Agent 子会话实时操作面板", () => {
     host.remove();
   });
 
-  it("实时操作以弹框呈现，头部关闭后回到行内入口", () => {
+  it("实时进度以弹框呈现，头部关闭后回到行内入口", () => {
     render({ "super-1": [USER_BLOCK] });
     clickLabel("子会话看板");
     clickRow("修复登录跳转");
-    clickText("查看实时操作");
+    clickText("查看实时进度");
 
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
-    expect(dialog!.getAttribute("aria-label")).toBe("子会话实时操作");
+    expect(dialog!.getAttribute("aria-label")).toBe("子会话实时进度");
     expect(dialog!.textContent).toContain(USER_TASK);
 
     const close = document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="收起"]');
@@ -272,7 +272,7 @@ describe("Super Agent 子会话实时操作面板", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.body.textContent).not.toContain(USER_TASK);
     // The row keeps a single entry point — no inline pane state left behind.
-    expect(document.body.textContent).toContain("查看实时操作");
+    expect(document.body.textContent).toContain("查看实时进度");
   });
 });
 
@@ -290,10 +290,10 @@ describe("Super Agent 子会话合并入口", () => {
     // pointer-events，title（唯一写着原因的地方）就读不到了。
     expect((button as HTMLButtonElement).disabled).toBe(false);
     expect(button!.getAttribute("aria-disabled")).toBe("true");
-    expect(button!.getAttribute("title")).toContain("子会话还没结束，完成后再让智能体合并");
+    expect(button!.getAttribute("title")).toContain("子会话还没结束，等它完成再合并");
     // 原因不再逐行重复：行首的状态 chip 已经说明子会话还在运行，
     // 完整规则统一收在看板头的帮助按钮里（见下一组用例）。
-    expect(document.body.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
+    expect(document.body.textContent).not.toContain("子会话还没结束，等它完成再合并");
   });
 
   it("完成态点击后确认框说明由智能体自己合并，确认才发 action=merge", () => {
@@ -305,7 +305,7 @@ describe("Super Agent 子会话合并入口", () => {
     const dialog = document.querySelector('[role="alertdialog"]');
     expect(dialog).toBeTruthy();
     // The request is executed BY the agent, and conflicts are its problem.
-    expect(dialog!.textContent).toContain("它会自己执行合并并解决冲突");
+    expect(dialog!.textContent).toContain("它会自己完成合并并处理冲突");
     expect(dialog!.textContent).toContain("iflow/super/a");
 
     const confirm = [...dialog!.querySelectorAll("button")].find(
@@ -333,7 +333,7 @@ describe("Super Agent 子会话中断确认", () => {
   it("行内中断先弹确认框，未确认前不发送 cancel", () => {
     render();
     clickLabel("子会话看板");
-    clickLabel("中断该子会话");
+    clickLabel("中断这个子会话");
 
     expect(send).not.toHaveBeenCalled();
     const dialog = document.querySelector('[role="alertdialog"]');
@@ -352,7 +352,7 @@ describe("Super Agent 子会话中断确认", () => {
   it("取消中断只关闭确认框，不发送任何消息", () => {
     render();
     clickLabel("子会话看板");
-    clickLabel("中断该子会话");
+    clickLabel("中断这个子会话");
 
     clickTextInDialog("取消", document.querySelector('[role="alertdialog"]')!);
 
@@ -423,7 +423,7 @@ describe("Super Agent 看板排序与折叠", () => {
     clickLabel("子会话看板");
 
     // Folded away: only a one-line history row, no card, no title.
-    expect(document.body.textContent).toContain("已完成的 1 个子会话");
+    expect(document.body.textContent).toContain("已完成并合并的 1 个子会话");
     expect(document.body.textContent).not.toContain("已合并的任务");
 
     clickLabel("展开已完成的子会话");
@@ -440,7 +440,7 @@ describe("Super Agent 看板排序与折叠", () => {
     const rowButton = (title: string) =>
       [...document.body.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(title))!;
     const entryCount = () =>
-      [...document.body.querySelectorAll("button")].filter((b) => b.textContent === "查看实时操作").length;
+      [...document.body.querySelectorAll("button")].filter((b) => b.textContent === "查看实时进度").length;
 
     clickRow("任务甲");
     expect(rowButton("任务甲").getAttribute("aria-expanded")).toBe("true");
@@ -476,6 +476,9 @@ describe("Super Agent 看板排序与折叠", () => {
  * toolName `super-agent`、args `{tasks:[{title,task,attachments?}]}`，回
  * `Delegation request accepted.`。上一轮只改了围栏卡，这里钉住 tool 块渲染
  * 路径确实分派到独立委派卡，而不是通用 ToolCard。
+ *
+ * issue #166：委派卡只回答「派了什么」——工具回执（`Delegation request
+ * accepted.`）与「(查看原始参数)」折叠项自此不再出现在卡面上。
  */
 describe("内置 super-agent 工具调用卡片", () => {
   const longTask = Array.from(
@@ -555,32 +558,35 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("附件 1");
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(2);
     expect(card!.textContent).not.toContain('"tasks"');
-    expect(card!.textContent).toContain("Delegation request accepted.");
+    // issue #166：卡片底部不再有工具回执/结果区块。
+    expect(card!.textContent).not.toContain("Delegation request accepted.");
     // 通用工具卡的文案与 DOM 一概不再出现。
     expect(card!.textContent).not.toContain("工具操作");
     expect(card!.textContent).not.toContain("执行参数");
     expect(container.querySelector(".tool-card")).toBeNull();
-    // 任务说明可展开，原始参数仍是折叠项。
+    // 任务说明仍可展开。
     const expand = [...card!.querySelectorAll("button")].find(
       (button) => button.getAttribute("aria-label") === "展开任务说明",
     );
     expect(expand).toBeTruthy();
     act(() => expand!.click());
     expect(card!.textContent).toContain("第 6 步");
-    const rawToggle = [...card!.querySelectorAll("button")].find((button) =>
-      button.textContent?.includes("查看原始参数"),
-    );
-    expect(rawToggle).toBeTruthy();
-    act(() => rawToggle!.click());
-    const raw = card!.querySelector('[data-testid="super-tool-call-raw"]');
-    expect(raw).toBeTruthy();
-    expect(raw!.textContent).toContain('"tasks"');
-    expect(raw!.textContent).toContain("补开发期同步说明");
+    // issue #166：「(查看原始参数)」折叠入口与原始参数本身一并下线 ——
+    // 委派卡只回答「派了什么」，原始 JSON 载荷不再回灌进卡面。
+    expect(
+      [...card!.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("查看原始参数"),
+      ),
+    ).toBe(false);
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+    // 原始载荷的 JSON 字段名一个都不该露出来（标题等结构化内容仍在卡上）。
+    expect(card!.textContent).not.toContain('"title"');
+    expect(card!.textContent).not.toContain('"attachments"');
   });
 
   it.each([
-    ["非法 JSON", '{"tasks":[oops]}', "工具参数未能完整解析"],
-    ["未收全的半截载荷", '{"tasks":[{"title":"半截任务","task":"还没写完"', "工具参数未能完整解析"],
+    ["非法 JSON", '{"tasks":[oops]}', "这段任务信息没能完整读取"],
+    ["未收全的半截载荷", '{"tasks":[{"title":"半截任务","task":"还没写完"', "这段任务信息没能完整读取"],
     ["参数还没到达", null, "正在编写任务书…"],
   ])("tasks 解析失败或未完成时诚实降级：%s", (_name, input, expected) => {
     renderBlock(toolBlock({ input, status: "in_progress", output: "" }));
@@ -608,16 +614,202 @@ describe("内置 super-agent 工具调用卡片", () => {
     }
   });
 
-  it("只接管 dispatch：super-agent-actions 仍走通用工具卡，命名空间形态照常识别", () => {
-    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
-    expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();
-    expect(container.querySelector(".tool-card")).toBeTruthy();
-
-    renderBlock(toolBlock({ toolName: "iflow__super-agent" }));
+  it("宿主解析出的 superTasks 直接渲染成任务列表（input 有损也不怕）", () => {
+    renderBlock(
+      toolBlock({
+        // input 是宿主故意做成有损的展示串（长任务书会被从中间切断）——
+        // 卡片不靠它解析任务，靠宿主随快照下发的结构。
+        input: '{"tasks":[{"task":"只读审查 src/panel/panel.ts 被截断',
+        superTasks: [
+          {
+            title: "只读审查",
+            task: "只读审查 src/panel/panel.ts\n第二行说明",
+            attachmentCount: 2,
+          },
+        ],
+      }),
+    );
     const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
     expect(card).toBeTruthy();
-    expect(card!.textContent).toContain("补开发期同步说明");
+    expect(card!.textContent).toContain("1 个任务");
+    expect(card!.textContent).toContain("只读审查");
+    expect(card!.textContent).toContain("第二行说明");
+    expect(card!.textContent).toContain("附件 2");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+    expect(card!.textContent).not.toContain("这段任务信息没能完整读取");
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+  });
+
+  it("复现载荷（模型漏了 title）不再谎报「未能完整解析」", () => {
+    // wire 实证的真实载荷：模型调内置 super-agent 工具时漏掉 title，宿主照常
+    // 派发（旧卡片却判成解析失败，把一次真的派发谎报成失败）。
+    renderBlock(
+      toolBlock({
+        input: '{"tasks":[{"task":"任务：只读审查 AGENTS.md 与 src/panel/panel.ts"}]}',
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).not.toContain("这段任务信息没能完整读取");
+    expect(card!.textContent).not.toContain("正在编写任务书…");
+    expect(card!.textContent).toContain("任务：只读审查 AGENTS.md 与 src/panel/panel.ts");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+  });
+
+  it("对象形态的 attachments 也能渲染（附件数照常显示）", () => {
+    renderBlock(
+      toolBlock({
+        input: JSON.stringify({
+          tasks: [
+            {
+              title: "带附件",
+              task: "做点事",
+              attachments: [{ path: "C:/tmp/a.png", name: "a.png" }],
+            },
+          ],
+        }),
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("附件 1");
+    expect(card!.textContent).not.toContain("这段任务信息没能完整读取");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+  });
+
+  const ACTIONS_INPUT = JSON.stringify({
+    actions: [
+      { action: "retry", sessionId: "super-a1" },
+      { action: "cancel", sessionId: "super-a2" },
+      { action: "cleanup", sessionId: "super-a3", keepBranch: true },
+      { action: "answer", sessionId: "super-a4", answers: { q1: "方案 A", q2: "方案 B" } },
+    ],
+  });
+
+  it("super-agent 工具带 actions 载荷渲染成子会话操作卡，不再走通用工具卡", () => {
+    renderBlock(toolBlock({ input: ACTIONS_INPUT }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card).toBeTruthy();
+    // 与围栏 ActionsCard 同一独立表面，不回退到工具卡材质。
+    expect(card!.classList.contains("super-directive-card")).toBe(true);
+    expect(card!.className).toContain("bg-primary/10");
+    expect(card!.className).toContain("border-primary/35");
+    expect(card!.className).toContain("shadow-float");
+    for (const cls of ["bg-card", "shadow-card", "tool-card"]) {
+      expect(card!.classList.contains(cls)).toBe(false);
+    }
+    // 标题、计数、状态 chip 与逐项动作都来自围栏动作卡同一套语言/组件。
+    expect(card!.textContent).toContain("子会话操作");
+    expect(card!.textContent).toContain("4 个动作");
+    expect(card!.textContent).toContain("重试");
+    expect(card!.textContent).toContain("中断");
+    expect(card!.textContent).toContain("清理");
+    expect(card!.textContent).toContain("回答");
+    expect(card!.textContent).toContain("super-a1");
+    expect(card!.textContent).toContain("保留分支");
+    expect(card!.textContent).toContain("2 个回答");
+    expect(card!.textContent).toContain("已完成");
+    expect(card!.textContent).not.toContain("执行参数");
+    expect(card!.querySelectorAll("li")).toHaveLength(4);
+    // 委派卡没有接管这条工具帧；管理动作也不是「委派产生子会话」，不挂飞入起点。
+    expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();
+    expect(card!.hasAttribute("data-super-delegation-origin")).toBe(false);
     expect(container.querySelector(".tool-card")).toBeNull();
+  });
+
+  it("命名空间形态照常识别：actions 载荷走操作卡，tasks 载荷仍是委派卡", () => {
+    renderBlock(toolBlock({ toolName: "iflow__super-agent", input: ACTIONS_INPUT }));
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeNull();
+
+    renderBlock(toolBlock({ toolName: "iflow__super-agent" }));
+    const dispatch = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(dispatch).toBeTruthy();
+    expect(dispatch!.textContent).toContain("补开发期同步说明");
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeNull();
+  });
+
+  it("super-agent-actions 工具名也渲染同一张操作卡", () => {
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: ACTIONS_INPUT, status: "failed" }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("子会话操作");
+    expect(card!.textContent).toContain("4 个动作");
+    expect(card!.textContent).toContain("失败");
+    expect(card!.className).toContain("super-directive-card");
+    expect(container.querySelector(".tool-card")).toBeNull();
+  });
+
+  it("空 actions / 坏 JSON 诚实降级，不假装有动作", () => {
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
+    let card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.getAttribute("role")).toBe("status");
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-invalid"]')).toBeTruthy();
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-raw"]')!.textContent).toContain('{"actions":[]}');
+    expect(card!.textContent).not.toContain("个动作");
+    expect(card!.querySelectorAll("li")).toHaveLength(0);
+
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[oops}' }));
+    card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-invalid"]')).toBeTruthy();
+    expect(card!.textContent).not.toContain("个动作");
+
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: null }));
+    card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card!.textContent).toContain("正在编写子会话操作…");
+    expect(card!.textContent).not.toContain("个动作");
+
+    renderBlock(toolBlock({ toolName: "super-agent-guard", input: ACTIONS_INPUT }));
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeTruthy();
+  });
+
+  it("通用工具卡只留结构化执行参数，不再提供「查看原始参数」折叠入口", () => {
+    renderBlock(
+      toolBlock({
+        toolName: "search_file_content",
+        title: "search_file_content",
+        toolKind: "search",
+        input: '{"pattern":"handleClick","path":"src/App.tsx"}',
+        output: "2 matches",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>(".tool-card");
+    expect(card).toBeTruthy();
+    // 工具名 / 状态照常展示。
+    expect(card!.textContent).toContain("搜索文件");
+    expect(card!.textContent).toContain("已完成");
+    // 结构化参数就是审计面：键与值都摊在卡上。
+    expect(card!.textContent).toContain("执行参数");
+    expect(card!.textContent).toContain("handleClick");
+    // 折叠入口与它展开的原始 JSON 一并下线（issue #166 同源）。
+    expect(card!.querySelector(".tool-card-raw-toggle")).toBeNull();
+    expect(card!.querySelector(".tool-card-raw")).toBeNull();
+    expect(card!.textContent).not.toContain('{"pattern"');
+    expect(
+      [...card!.querySelectorAll("button")].some((b) => (b.textContent ?? "").includes("原始参数")),
+    ).toBe(false);
+  });
+
+  it("无结构化参数的降级态仍把原始参数直接摊开，不折叠也不隐藏", () => {
+    renderBlock(
+      toolBlock({
+        toolName: "run_shell_command",
+        title: "run_shell_command",
+        toolKind: "execute",
+        input: "Get-ChildItem src -Recurse",
+        output: "",
+      }),
+    );
+    const card = container.querySelector<HTMLElement>(".tool-card");
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("执行命令");
+    expect(card!.textContent).toContain("执行参数");
+    expect(card!.textContent).toContain("Get-ChildItem src -Recurse");
+    expect(card!.querySelector(".tool-card-raw-toggle")).toBeNull();
   });
 });
 

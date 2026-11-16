@@ -249,3 +249,47 @@ describe("生成中的停止按钮", () => {
     expect(send).toHaveBeenCalledWith({ type: "cancel" });
   });
 });
+
+describe("停止压住汇报后的「新会话」出路", () => {
+  it("压住态：按钮可点，点击弹出如实确认（数量 + 切回原会话才投递）", () => {
+    renderState({ status: "idle", superWaiting: true, superHeld: true, superPendingCount: 2 });
+    const button = newSessionButton();
+    expect(button).toBeTruthy();
+    expect(button!.disabled).toBe(false);
+
+    act(() => button!.click());
+    // ConfirmDialog 挂在 ModalShell 的 createPortal(..., document.body) 里。
+    expect(document.body.textContent).toContain("还有 2 项子会话结果没处理");
+    expect(document.body.textContent).toContain("切回去才会继续处理");
+    // 确认前不发 newSession。
+    expect(send).not.toHaveBeenCalledWith({ type: "newSession" });
+  });
+
+  it("确认后才发 newSession；取消则什么都不发", () => {
+    renderState({ status: "idle", superWaiting: true, superHeld: true, superPendingCount: 1 });
+    const button = newSessionButton();
+    act(() => button!.click());
+
+    const cancel = [...document.body.querySelectorAll("button")].find(
+      (b) => b.textContent?.includes("取消"),
+    ) as HTMLButtonElement | undefined;
+    expect(cancel).toBeTruthy();
+    act(() => cancel!.click());
+    expect(send).not.toHaveBeenCalledWith({ type: "newSession" });
+
+    act(() => button!.click());
+    const confirm = [...document.body.querySelectorAll("button")].find(
+      (b) => b.textContent?.includes("新建会话"),
+    ) as HTMLButtonElement | undefined;
+    expect(confirm).toBeTruthy();
+    act(() => confirm!.click());
+    expect(send).toHaveBeenCalledWith({ type: "newSession" });
+  });
+
+  it("真在等汇报（非压住态）：按钮仍禁用并说明原因", () => {
+    renderState({ status: "idle", superWaiting: true, superHeld: false, superPendingCount: 0 });
+    const button = newSessionButton();
+    expect(button!.disabled).toBe(true);
+    expect(button!.getAttribute("title")).toContain("子会话");
+  });
+});

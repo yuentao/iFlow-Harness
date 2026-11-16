@@ -92,7 +92,7 @@ function makeLinkedRepo(repo: string): string {
   try {
     symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
   } catch {
-    rmSync(parent, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     return repo;
   }
   linkParents.push(parent);
@@ -111,7 +111,7 @@ function removeLinkedRoot(parent: string): void {
       // 已经不在 / 不是链接：下面的递归删除会兜底。
     }
   }
-  rmSync(parent, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 /**
@@ -244,7 +244,7 @@ type Internals = {
 
 afterAll(() => {
   for (const parent of linkParents) removeLinkedRoot(parent);
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("super agent · 没有产生提交时的隔离释放", () => {

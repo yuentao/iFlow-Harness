@@ -123,7 +123,7 @@ describe("ChatPanel edit & resend (P1-9 wiring)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const send = (text: string): Promise<void> => p.handleWebviewMessage({ type: "sendPrompt", text });

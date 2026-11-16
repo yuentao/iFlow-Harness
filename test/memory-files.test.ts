@@ -123,7 +123,7 @@ describe("memory files: settings and paths", () => {
     } finally {
       // 先摘掉链接（不能顺着它删掉工作区外的目录），再清理临时目录。
       rmSync(link, { force: true });
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -136,7 +136,7 @@ describe("memory files: settings and paths", () => {
       expect(isWithin(root, path.join(root, "new", "file.txt"))).toBe(true);
       expect(isWithin(root, path.join(root, "..", "outside", "file.txt"))).toBe(false);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -158,7 +158,7 @@ describe("memory files: atomic write", () => {
       await writeAtomic(file, "# replaced\n");
       expect(readFileSync(file, "utf8")).toBe("# replaced\n");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

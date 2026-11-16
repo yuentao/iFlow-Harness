@@ -62,19 +62,19 @@ export function QuestionCard({ pending }: { pending: PendingQuestionsUi }) {
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <HelpCircle className="size-3.5 shrink-0 text-primary" />
-        <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 需要你的回答")}</span>
+        <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 有问题想问你")}</span>
         <span className="ml-auto">
           <HelpTip label={t("提问说明")} align="right">
             <span className="block space-y-1">
               <span className="block">
-                {t("agent 正在等待你的回答；卡片未回答前其他操作会被阻塞。")}
+                {t("iFlow 正在等你回答，回答前它会先暂停。")}
               </span>
-              <span className="block">{t("超时未回答会按未回答继续。")}</span>
+              <span className="block">{t("超时没回答，iFlow 会按「未回答」继续往下走。")}</span>
               {/* Milestone 14 §4.5: Enter used to submit the WHOLE card from
                   inside one free-text field, so a two-question ask fired on
                   the first Enter. The keystroke now closes that one field;
                   the whole card commits deliberately (button or Ctrl/Cmd+Enter). */}
-              <span className="block">{t("回车只确认该输入；「提交回答」按钮或 Ctrl/Cmd + 回车提交整卡。")}</span>
+              <span className="block">{t("回车只确认当前输入框；要提交整张卡片，请点「提交回答」或按 Ctrl/Cmd + 回车。")}</span>
             </span>
           </HelpTip>
         </span>

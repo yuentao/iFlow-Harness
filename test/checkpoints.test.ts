@@ -187,8 +187,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v1"); // tracked restored
       expect(existsSync(path.join(work, "new.txt"))).toBe(true); // untracked kept
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -210,8 +210,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       await mgr.restoreFiles("s1", sha2!);
       expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v2");
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -230,8 +230,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       // secret.txt was never tracked → restore leaves the current content.
       expect(readFileSync(path.join(work, "secret.txt"), "utf8")).toBe("after");
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -245,8 +245,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       await mgr.captureTurn("s1", "t1");
       await expect(mgr.restoreFiles("s1", "0".repeat(40))).rejects.toThrow();
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -268,8 +268,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       expect(readFileSync(path.join(work, "keep.txt"), "utf8")).toBe("before");
       expect(readFileSync(path.join(work, "large.bin"), "utf8")).toBe("large-after");
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -286,8 +286,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       await mgr.restoreFiles("s1", sha!);
       expect(readFileSync(path.join(work, "large.bin"), "utf8")).toBe("large");
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -302,8 +302,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       expect(mgr.skippedFiles("s1")).toBe(1);
       await expect(mgr.restoreFiles("s1", sha!)).rejects.toThrow(/no restorable files/);
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -318,8 +318,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       expect(mgr.isEnabled("s1")).toBe(false);
       expect(await mgr.captureTurn("s1", "t1")).toBeNull();
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -339,8 +339,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       await second.restoreFiles("s1", sha!);
       expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v1");
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -357,8 +357,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       await mgr.removeSession("s1", store);
       expect(existsSync(sessionDir)).toBe(false);
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -404,8 +404,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       const after = await CheckpointManager.dirSizeBytes(sessionDir);
       expect(after).toBeLessThan(before);
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -429,8 +429,8 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       await mgr.restoreFiles("s1", head);
       expect(readFileSync(path.join(work, "a.txt"), "utf8")).toBe("v2");
     } finally {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(store, { recursive: true, force: true });
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -466,7 +466,7 @@ describe("CheckpointManager (real shadow git)", { timeout: REAL_GIT_TIMEOUT_MS }
       expect(await CheckpointManager.dirSizeBytes(dir)).toBe(8);
       expect(await CheckpointManager.dirSizeBytes(path.join(dir, "nope"))).toBe(0);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
