@@ -406,20 +406,34 @@ const SUPER_HEARTBEAT_MS = 1_500;
  *    registration when `excludeTools` matches either the static `Name` or the
  *    class name.
  *
- * Every name below is a `static Name = "<name>"` found in the vendored bundle
- * (scanned 2026-11-16 across vendor/iflow-fork/bundle/iflow.js). Names that do
- * NOT exist there are deliberately absent — `"grep"` and `"ls"` are not
- * registered tool names (the search/list tools are `search_file_content` /
- * `list_directory`), so listing them would be a silent no-op:
- *  - reading/exploring: read_file (L1246), read_many_files (L1453),
- *    glob (L1323), search_file_content (L1259, L1317), list_directory (L950),
- *    image_read (L1247), web_fetch (L2153, L2466), web_search (L2108, L4131),
- *    ReadCommandOutput (L2444), lsp_goto_definition (L4417),
- *    lsp_find_references (L4421), lsp_hover (L4425)
- *  - writing: write_file (L1452), replace (L1631, L4335), multi_edit (L3160),
- *    xml_escape (L4256)
- *  - executing: run_shell_command (L1719)
- *  - in-process sub-agents: task (L4138)
+ * Provenance of the names below (scanned 2026-11-16 across
+ * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name = "<name>"` in
+ * the bundle, but "declared" is not "registered" — this comment must not claim
+ * a tool is withheld when the registrar never creates it:
+ *  - registered by `createToolRegistry()`'s `t(...)` calls: read_file (L1246),
+ *    read_many_files (L1453), glob (L1323), search_file_content (L1259,
+ *    L1317), list_directory (L950), image_read (L1247), web_fetch (L2153,
+ *    L2466), web_search (L2108, L4131), ReadCommandOutput (L2444),
+ *    write_file (L1452), replace (L1631, L4335), xml_escape (L4256),
+ *    run_shell_command (L1719), task (L4138)
+ *  - `lsp_goto_definition` / `lsp_find_references` / `lsp_hover` (L4417 /
+ *    L4421 / L4425): conditionally registered — the registration site is
+ *    `this.lspManager && (t(Vut, this, this.lspManager), t(Wut, ...),
+ *    t(zut, ...))`. `lspManager` is constructed unconditionally in the Config
+ *    constructor (`this.lspManager = new H0e(this.getProjectRoot())`), so in
+ *    practice the three are always registered; the guard is still real, so they
+ *    are described as conditional rather than unconditional.
+ *  - `multi_edit` (L3160): declared but NOT registered in this bundle version —
+ *    its class `Aut` is never passed to `t(...)` inside `createToolRegistry()`
+ *    (its only other reference is `Aut.Name` in a write-tool detector at
+ *    L3222). This entry is therefore a silent no-op today; it is kept
+ *    deliberately as a defensive one, so that a future CLI version which does
+ *    register `multi_edit` is gated automatically. Do not read it as proof that
+ *    the tool is currently being withheld.
+ * Names that do NOT exist in the bundle are deliberately absent — `"grep"` and
+ * `"ls"` are not registered tool names (the search/list tools are
+ * `search_file_content` / `list_directory`), so listing them would be a silent
+ * no-op as well.
  *
  * Kept available on purpose: `todo_write` / `todo_read` (the orchestrator's own
  * planning), `ask_user_question` (requirements), and the `super-agent` tool
@@ -454,6 +468,8 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // writing
   "write_file",
   "replace",
+  // defensive: declared at L3160 but not registered in this bundle version
+  // (class `Aut` is never passed to `t(...)`); kept for future CLI versions
   "multi_edit",
   "xml_escape",
   // executing
