@@ -19,7 +19,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { splitSuperDirectiveSegments } from "../shared/super-agent";
-import { AssistantText, SuperDirectiveCard, ThoughtText } from "../webview/src/components/SuperDirectiveCard";
+import { AssistantText, SuperActionsToolCallCard, SuperDirectiveCard, ThoughtText } from "../webview/src/components/SuperDirectiveCard";
+import type { ToolBlock } from "../shared/messages";
 
 const send = vi.hoisted(() => vi.fn());
 const useChat = vi.hoisted(() =>
@@ -925,5 +926,46 @@ describe("委派卡独立表面（与工具操作卡区分）", () => {
     const rawCard = container.querySelector<HTMLElement>(".super-directive-card")!;
     expect(rawCard.className).toContain("bg-primary/10");
     expect(rawCard.textContent).toContain("原始协议块");
+  });
+});
+
+describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () => {
+  function toolBlock(input: string | null, status: ToolBlock["status"] = "completed"): ToolBlock {
+    return {
+      kind: "tool",
+      id: "b-actions",
+      toolCallId: "tc-actions",
+      toolName: "super-agent",
+      title: "Manage child sessions",
+      toolKind: "other",
+      status,
+      output: "Actions executed.",
+      input,
+      locations: [],
+      diff: null,
+    };
+  }
+
+  it("与围栏动作卡的动作行逐项一致，并沿用 ToolBlock 状态 chip，不挂飞入起点", () => {
+    const input = JSON.stringify({
+      actions: [
+        { action: "retry", sessionId: "super-mwc6c04t-c3" },
+        { action: "cleanup", sessionId: "super-mwc6c04t-c4", keepBranch: true },
+        { action: "answer", sessionId: "super-mwc6c04t-c5", answers: { q1: "方案 A" } },
+      ],
+    });
+
+    act(() => root.render(<AssistantText text={ACTIONS} />));
+    const fencedRows = [...container.querySelectorAll("li")].map((li) => li.textContent);
+
+    act(() => root.render(<SuperActionsToolCallCard block={toolBlock(input, "failed")} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.classList.contains("super-directive-card")).toBe(true);
+    expect(card.className).toContain("bg-primary/10");
+    expect(card.textContent).toContain("子会话操作");
+    expect(card.textContent).toContain("3 个动作");
+    expect(card.textContent).toContain("失败");
+    expect(card.hasAttribute("data-super-delegation-origin")).toBe(false);
+    expect([...card.querySelectorAll("li")].map((li) => li.textContent)).toEqual(fencedRows);
   });
 });
