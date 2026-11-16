@@ -461,7 +461,6 @@ const en: Record<string, string> = {
   "Base URL（OpenAI 兼容）": "Base URL (OpenAI-compatible)",
   "模型名称": "Model name",
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
-  "保存并激活": "Save & activate",
   "打开 VSCode 设置…": "Open VSCode Settings…",
   "重启内核": "Restart Core",
   "重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
@@ -470,6 +469,8 @@ const en: Record<string, string> = {
     "Click a profile to switch and re-authenticate the session; profiles and keys are stored in the Core config file ~/.iflow/settings.json (plaintext on this machine).",
   "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。":
     "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Saving re-authenticates the session via openai-compatible.",
+  "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文）；编辑当前配置会重新认证会话，编辑其他配置只保存、不切换。":
+    "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Editing the active profile re-authenticates the session; editing another profile only saves it without switching.",
   "正在重新认证…": "Re-authenticating…",
   "等待选择…": "Waiting for your choice…",
   "审批策略": "Approval policies",
