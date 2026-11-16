@@ -152,23 +152,28 @@ describe("pickQqSettingsUi", () => {
 });
 
 describe("QQ 设置消息契约", () => {
-  it("HostToWebview 含 qqSettings / qqStatus，且保留 qqBindCode 与 qqConfigAction", () => {
+  it("HostToWebview 含 qqSettings / qqStatus，且保留 qqBindCode", () => {
     const settings: HostToWebview = {
       type: "qqSettings",
       values: pickQqSettingsUi({}, { hasBotToken: true, hasAppSecret: true }),
     };
     const status: HostToWebview = { type: "qqStatus", connected: false, detail: "连接被拒绝" };
     const bindCode: HostToWebview = { type: "qqBindCode", code: "K7Q2", expiresAt: 1 };
-    const configAction: HostToWebview = { type: "qqConfigAction", action: "testConnection" };
+
+    // 方向断言：qqConfigAction 是 webview → 宿主的请求，宿主 → webview 的联合
+    // 里必须解析为 never。若哪天又被写回 HostToWebview，这里的类型条件会变成
+    // false，赋值给 `true` 会在 tsc 下报错。
+    type HostConfigAction = Extract<HostToWebview, { type: "qqConfigAction" }>;
+    const hostHasNoConfigAction: [HostConfigAction] extends [never] ? true : false = true;
+    expect(hostHasNoConfigAction).toBe(true);
 
     expect(settings.type).toBe("qqSettings");
     expect(settings.values.hasBotToken).toBe(true);
     expect(status.type).toBe("qqStatus");
     expect(bindCode.code).toBe("K7Q2");
-    expect(configAction.action).toBe("testConnection");
   });
 
-  it("WebviewToHost 含 qqSettingsPatch / qqSecretsWrite，且保留 qqTaskAction", () => {
+  it("WebviewToHost 含 qqSettingsPatch / qqSecretsWrite / qqConfigAction，且保留 qqTaskAction", () => {
     const patch: WebviewToHost = {
       type: "qqSettingsPatch",
       patch: { enabled: true, adapter: "qqbot", maxConcurrentTasks: 4 },
@@ -177,12 +182,14 @@ describe("QQ 设置消息契约", () => {
     const write: WebviewToHost = { type: "qqSecretsWrite", botToken: "" };
     const clearBoth: WebviewToHost = { type: "qqSecretsWrite" };
     const taskAction: WebviewToHost = { type: "qqTaskAction", taskId: "T-1", action: "refresh" };
+    const configAction: WebviewToHost = { type: "qqConfigAction", action: "testConnection" };
 
     expect(patch.type).toBe("qqSettingsPatch");
     expect(patch.patch.adapter).toBe("qqbot");
     expect(write.botToken).toBe("");
     expect(clearBoth.appSecret).toBeUndefined();
     expect(taskAction.action).toBe("refresh");
+    expect(configAction.action).toBe("testConnection");
   });
 
   it("qqSettingsPatch 的补丁只允许设置字段（类型层面 Partial<QqSettingsUi>）", () => {

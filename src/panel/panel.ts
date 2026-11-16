@@ -2058,19 +2058,6 @@ export class ChatPanel implements vscode.Disposable {
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
     this.log.trace(`webview → host: ${msg.type}`);
-    // 协议债（本波不改 shared/）：`qqConfigAction` 声明在 HostToWebview 上
-    // （方向写反了），因此不在 WebviewToHost 的联合里。按运行时形状接收，
-    // 让设置页的三类动作（连测试 / 生成配对码 / 解绑）照样能到宿主。
-    const qqAction = (msg as { type?: unknown; action?: unknown });
-    if (
-      qqAction.type === "qqConfigAction" &&
-      (qqAction.action === "testConnection" ||
-        qqAction.action === "generateBindCode" ||
-        qqAction.action === "unbind")
-    ) {
-      await this.handleQqConfigAction(qqAction.action);
-      return;
-    }
     switch (msg.type) {
       case "ready":
         // The webview (re)booted and lost its transcript anchor: resync()
@@ -2531,6 +2518,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "qqTaskAction":
         await this.handleQqTaskAction(msg.taskId, msg.action, msg.text);
+        break;
+      case "qqConfigAction":
+        await this.handleQqConfigAction(msg.action);
         break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
