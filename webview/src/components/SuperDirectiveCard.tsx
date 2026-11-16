@@ -49,6 +49,7 @@ import {
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
 import { parseSuperDelegationTasks } from "../../../shared/super-tool-call";
+import { DELEGATION_ORIGIN_ATTR } from "./SuperDelegationFly";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
 import {
@@ -96,14 +97,22 @@ function DirectiveSurface({
   className = "",
   testId,
   role,
+  origin = false,
 }: {
   children: ReactNode;
   className?: string;
   testId?: string;
   role?: "status";
+  /** true = 这是「委派成功」的起点卡，飞入动效从这里起飞。 */
+  origin?: boolean;
 }) {
   return (
-    <div className={`${DIRECTIVE_CARD} ${className}`} data-testid={testId} role={role}>
+    <div
+      className={`${DIRECTIVE_CARD} ${className}`}
+      data-testid={testId}
+      {...(origin ? { [DELEGATION_ORIGIN_ATTR]: "" } : {})}
+      role={role}
+    >
       <div className={DIRECTIVE_ACCENT} aria-hidden="true" />
       {children}
     </div>
@@ -242,7 +251,7 @@ function TaskCard({
   const shown = open ? blocks : preview.blocks;
   const long = preview.truncated;
   return (
-    <DirectiveSurface testId="super-task-card">
+    <DirectiveSurface testId="super-task-card" origin>
       {/* 只有一张卡时不需要「第 1/1 个任务」这种序号 —— 批次信息是多余的层级。 */}
       <DirectiveHeader
         icon={<Users className={ICON_INLINE} />}
@@ -652,6 +661,7 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
       className="my-2"
       testId="super-tool-call-card"
       role={parsed.ok ? undefined : "status"}
+      origin
     >
       <DirectiveHeader
         icon={<Users className={ICON_INLINE} />}
