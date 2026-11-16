@@ -45,6 +45,24 @@ await esbuild.build({
   minify: true,
   keepNames: true,
   sourcemap: true,
+  // `import.meta` only exists in ESM. Without this define, esbuild compiles
+  // `import.meta.url` to `({}).url` → `undefined`, `fileURLToPath(undefined)`
+  // throws, and main.ts's entry self-detection swallows the error into `false`
+  // — the panel-spawned bridge then exits 0 with empty stderr and the panel
+  // enters a restart loop (P0). Defining it here keeps the CJS artifact
+  // self-identifying as its own entry.
+  //
+  // esbuild 0.28 rejects call expressions as define values ("Invalid define
+  // value (must be an entity name or JS literal)"), so the define points at a
+  // global identifier that the banner assigns the real URL to. Banner text is
+  // emitted verbatim (not minified), and `globalThis.*` is immune to the
+  // minifier renaming bundle-local bindings.
+  define: {
+    "import.meta.url": "globalThis.__iflowBridgeEntryUrl",
+  },
+  banner: {
+    js: 'globalThis.__iflowBridgeEntryUrl = require("url").pathToFileURL(__filename).href;',
+  },
   logLevel: "info",
 });
 
