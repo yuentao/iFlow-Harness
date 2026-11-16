@@ -53,6 +53,7 @@ import {
 } from "../../../shared/super-timeline";
 import { useChat } from "../store";
 import { t } from "../i18n";
+import { SuperDelegationFly } from "./SuperDelegationFly";
 import { BlockView } from "./MessageList";
 import {
   Button,
@@ -446,8 +447,26 @@ function formatCostPrecise(usd: number): string {
  */
 export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement | null) => void }) {
   const sessions = useChat((s) => s.state?.superSessions);
+  const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
   const send = useChat((s) => s.send);
   const [expanded, setExpanded] = useState(false);
+  // 飞入体抵达后看板控件短暂高亮。定时器受组件卸载清理，避免泄漏。
+  const [received, setReceived] = useState(false);
+  const receivedTimer = useRef<number | null>(null);
+  const onDelegationArrive = useCallback(() => {
+    setReceived(true);
+    if (receivedTimer.current !== null) window.clearTimeout(receivedTimer.current);
+    receivedTimer.current = window.setTimeout(() => {
+      receivedTimer.current = null;
+      setReceived(false);
+    }, 480);
+  }, []);
+  useEffect(
+    () => () => {
+      if (receivedTimer.current !== null) window.clearTimeout(receivedTimer.current);
+    },
+    [],
+  );
   const [confirmMerge, setConfirmMerge] = useState<SuperSessionUi | null>(null);
   const [confirmCleanup, setConfirmCleanup] = useState<SuperSessionUi | null>(null);
   // Bulk cleanup snapshots the reclaimable ids at open time — recomputing while
@@ -682,11 +701,25 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     };
   }, [expanded]);
 
-  // Nothing to manage → the board stays out of the way.
-  if (list.length === 0) return null;
+  // Detector stays mounted even when the board has nothing to show: the
+  // 0→1 transition IS the real delegation signal, so it must observe the
+  // empty roster first. Same element object in both branches → React keeps
+  // the same child at index 0 and its "previous ids" ref survives.
+  const delegationFly = (
+    <SuperDelegationFly
+      sessions={sessions}
+      activeSessionId={activeSessionId}
+      targetRef={controlRef}
+      onArrive={onDelegationArrive}
+    />
+  );
+
+  // Nothing to manage → the board stays out of the way, but the detector lives on.
+  if (list.length === 0) return <>{delegationFly}</>;
 
   return (
     <>
+      {delegationFly}
       {/* Collapsed form = ONE header control, at the header's own control
           height (28px) so it sits in the row without changing its rhythm.
           Counts are icon + number chips (the wording lives in the tooltip);
@@ -708,7 +741,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         aria-label={t("子会话看板")}
         title={expanded ? t("收起子会话看板") : t("展开子会话看板")}
         onClick={() => setExpanded((v) => !v)}
-        className="press relative isolate flex h-7 shrink-0 items-center gap-2.5 rounded-md border border-border/70 bg-surface/60 px-3 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40"
+        className={`press relative isolate flex h-7 shrink-0 items-center gap-2.5 rounded-md border border-border/70 bg-surface/60 px-3 text-ui-label font-medium text-foreground transition-colors duration-200 hover:bg-accent/40${received ? " super-board-received" : ""}`}
       >
         {/* Running-child edge glow (Apple-Intelligence-like): a masked conic
             gradient flows around the control's border. Rendered ONLY while at
