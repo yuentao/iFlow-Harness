@@ -385,11 +385,12 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * Tools the MAIN panel session must never receive.
  *
  * The user directive is that the main session only DELEGATES: it plans, writes
- * task briefs, watches the board and reports — every implementation step
- * belongs to a Super Agent child session, and the in-process `task` sub-agent
- * may only run there. The system prompt already says so, but the model kept
- * preferring the in-process `task` tool (observed repeatedly), so the
- * constraint is now mechanical instead of advisory.
+ * task briefs, watches the board and reports — every implementation step AND
+ * every investigation (reading files, searching code, running commands) belongs
+ * to a Super Agent child session. The system prompt already says so, but the
+ * model kept calling `task`, `read_file` and `run_shell_command` in the main
+ * session (2026-11-15 / 2026-11-16 user reports), so the constraint is now
+ * mechanical instead of advisory.
  *
  * Wire behavior (verified against the vendored CLI bundle,
  * vendor/iflow-cli/bundle/iflow.js):
@@ -404,13 +405,60 @@ const SUPER_HEARTBEAT_MS = 1_500;
  *    (l?.includes(s) || l?.includes(a)) && (u = !1); u && register }`) skips
  *    registration when `excludeTools` matches either the static `Name` or the
  *    class name.
- *  - `TaskTool` declares `static Name = "task"`, so `"task"` is the exact key.
+ *
+ * Every name below is a `static Name = "<name>"` found in the vendored bundle
+ * (scanned 2026-11-16 across vendor/iflow-fork/bundle/iflow.js). Names that do
+ * NOT exist there are deliberately absent — `"grep"` and `"ls"` are not
+ * registered tool names (the search/list tools are `search_file_content` /
+ * `list_directory`), so listing them would be a silent no-op:
+ *  - reading/exploring: read_file (L1246), read_many_files (L1453),
+ *    glob (L1323), search_file_content (L1259, L1317), list_directory (L950),
+ *    image_read (L1247), web_fetch (L2153, L2466), web_search (L2108, L4131),
+ *    ReadCommandOutput (L2444), lsp_goto_definition (L4417),
+ *    lsp_find_references (L4421), lsp_hover (L4425)
+ *  - writing: write_file (L1452), replace (L1631, L4335), multi_edit (L3160),
+ *    xml_escape (L4256)
+ *  - executing: run_shell_command (L1719)
+ *  - in-process sub-agents: task (L4138)
+ *
+ * Kept available on purpose: `todo_write` / `todo_read` (the orchestrator's own
+ * planning), `ask_user_question` (requirements), and the `super-agent` tool
+ * itself — it is the dispatch channel and is registered by the loader
+ * (`super-agent-loader.cjs`, `static Name = "super-agent"`), not by the bundle.
  *
  * The exclusion is per session: child sessions (SuperAgentManager) deliberately
- * do NOT pass settings and therefore keep `task` — the main session hands the
- * sub-agent work down to them.
+ * do NOT pass settings and therefore keep every tool — the main session hands
+ * both the implementation and the investigation down to them.
+ *
+ * Side effect (deliberate, not hidden): the `@iflow` chat participant and
+ * `iflow.askSelection` reuse this panel session, so they lose file reads and
+ * shell commands too; slash commands that need to inspect the workspace (e.g.
+ * `/init`) likewise have to be delegated.
  */
-export const MAIN_SESSION_DISALLOWED_TOOLS = ["task"] as const;
+export const MAIN_SESSION_DISALLOWED_TOOLS = [
+  // in-process sub-agents — the main session delegates to Super Agent children
+  "task",
+  // reading / exploring
+  "read_file",
+  "read_many_files",
+  "glob",
+  "search_file_content",
+  "list_directory",
+  "image_read",
+  "web_fetch",
+  "web_search",
+  "ReadCommandOutput",
+  "lsp_goto_definition",
+  "lsp_find_references",
+  "lsp_hover",
+  // writing
+  "write_file",
+  "replace",
+  "multi_edit",
+  "xml_escape",
+  // executing
+  "run_shell_command",
+] as const;
 /** Fresh settings object for one main-session `session/new` / `session/load`.
  * A factory (not a shared object) so no caller can mutate another's copy. */
 export function mainSessionSettings(): SessionSettings {
