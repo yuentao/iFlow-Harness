@@ -1,7 +1,7 @@
 /**
  * 主会话的 `session/new` / `session/load` 必须携带
- * `settings.disallowed_tools`：既剔除进程内 `task` 子代理，也剔除一切
- * 读取/探查、写入与执行类工具（主会话只做派发）。
+ * `settings.disallowed_tools`：既剔除进程内 `task` 子代理，也剔除读取/探查、
+ * 写入与执行类工具（主会话只做派发）。
  *
  * 用户指令：主会话只做派发，实现与探查工作全部交给 Super Agent 子会话。
  * 提示词已经写明这一点，但模型仍然优先调 `task`、仍然自己 read_file / 跑
@@ -9,6 +9,13 @@
  * `src/panel/panel.ts` 的 `MAIN_SESSION_DISALLOWED_TOOLS` 注释里的 bundle
  * 证据：请求的 `settings.disallowed_tools` → Config 的 `excludeTools` →
  * `createToolRegistry()` 跳过注册同名 `static Name` 的类）。
+ *
+ * 清单里有三个精确性要点，改注释时别丢：① `multi_edit` 在当前 CLI 版本
+ * 只是声明、并未注册，属防御性条目，不能当作「已挡住它」的证据；②
+ * `lsp_goto_definition` / `lsp_find_references` / `lsp_hover` 的注册点被
+ * `this.lspManager &&` 包裹，而 `lspManager` 在 Config 构造函数里无条件创建，
+ * 所以实际恒注册；③ `grep` / `ls` 不是 CLI 的注册名（搜索/列目录叫
+ * `search_file_content` / `list_directory`），写进清单只会静默不生效。
  *
  * 覆盖面板侧**全部**会创建/重载主会话的路径；子会话（SuperAgentManager）
  * 刻意不带 settings —— 那条断言在 test/super-agent-manager.test.ts。

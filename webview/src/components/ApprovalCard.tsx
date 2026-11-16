@@ -184,7 +184,7 @@ export function ApprovalCard({ approval }: { approval: PendingApprovalUi }) {
                 {t("「允许一次」只执行这一次；「始终允许」会让本次会话记住这个操作，之后不再询问。")}
               </span>
               <span className="block">
-                {t("拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 审批策略」。")}
+                {t("拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 权限与审批」。")}
               </span>
               {/* The shortcut line lives once, in the actions row — repeating
                   it here made the same hint compete with itself. */}

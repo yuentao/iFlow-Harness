@@ -31,7 +31,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     keyUrl: "https://platform.deepseek.com/api_keys",
     docsUrl: "https://api-docs.deepseek.com/",
     models: ["deepseek-chat", "deepseek-reasoner"],
-    note: "在 DeepSeek 开放平台创建 API Key；端点兼容 OpenAI 协议。",
+    note: "到 DeepSeek 开放平台创建 API Key，粘贴到 API Key 输入框即可。",
   },
   {
     id: "moonshot",
@@ -40,7 +40,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     keyUrl: "https://platform.moonshot.cn/console/api-keys",
     docsUrl: "https://platform.moonshot.cn/docs",
     models: [],
-    note: "在 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。",
+    note: "到 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。",
   },
   {
     id: "zhipu",
@@ -49,7 +49,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     keyUrl: "https://open.bigmodel.cn/usercenter/apikeys",
     docsUrl: "https://docs.bigmodel.cn/",
     models: [],
-    note: "在智谱开放平台创建 API Key，使用 GLM 系列模型。",
+    note: "到智谱开放平台创建 API Key，用于 GLM 系列模型。",
   },
   {
     id: "dashscope",
@@ -58,7 +58,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     keyUrl: "https://bailian.console.aliyun.com/",
     docsUrl: "https://help.aliyun.com/zh/model-studio/",
     models: [],
-    note: "在阿里云百炼控制台创建 API Key，使用通义千问系列模型。",
+    note: "到阿里云百炼控制台创建 API Key，用于通义千问系列模型。",
   },
   {
     id: "siliconflow",
@@ -67,7 +67,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     keyUrl: "https://cloud.siliconflow.cn/account/ak",
     docsUrl: "https://docs.siliconflow.cn/",
     models: [],
-    note: "在硅基流动控制台创建 API Key，可访问多家开源模型。",
+    note: "到硅基流动控制台创建 API Key，可调用多家开源模型。",
   },
   {
     id: "openrouter",
@@ -76,7 +76,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     keyUrl: "https://openrouter.ai/keys",
     docsUrl: "https://openrouter.ai/docs",
     models: [],
-    note: "在 OpenRouter 创建 API Key，可路由到多家供应商的模型。",
+    note: "到 OpenRouter 创建 API Key，可调用多家供应商的模型。",
   },
   {
     id: "ollama",
@@ -84,7 +84,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     baseUrl: "http://127.0.0.1:11434/v1",
     docsUrl: "https://ollama.com/",
     models: [],
-    note: "本地 Ollama 不校验 API Key，填任意非空值（如 ollama）即可；请确认 Ollama 服务已启动。",
+    note: "Ollama 跑在本机，不校验 API Key，填一个非空值（如 ollama）即可；请先确认 Ollama 已经启动。",
   },
 ];
 

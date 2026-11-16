@@ -1490,7 +1490,7 @@ export class ChatPanel implements vscode.Disposable {
     if (u.prefillTokens && u.prefillTokens > 0) {
       rows.push(
         vscode.l10n.t(
-          "预填充 {0} tokens（系统提示词 / 记忆 / 工具声明）",
+          "每次请求固定携带 {0} tokens（系统提示词、记忆与工具说明）",
           u.prefillTokens.toLocaleString(),
         ),
       );
@@ -8545,7 +8545,7 @@ export class ChatPanel implements vscode.Disposable {
         if (outcome.reason === "cancelled") {
           this.store.sendToast("info", vscode.l10n.t("已中断子会话"));
         } else if (outcome.reason === "already-terminal") {
-          this.store.sendToast("info", vscode.l10n.t("该子会话已经结束，无需中断"));
+          this.store.sendToast("info", vscode.l10n.t("这个子会话已经结束了，不用再中断"));
         } else {
           this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
         }

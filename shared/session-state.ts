@@ -1452,12 +1452,12 @@ export function appendInjectedContext(
     // Scope is host-computed from the two settings files the CLI merges; naming
     // it here is the only place the user learns a server came from the project.
     const projectScoped = mcpItems.filter((i) => i.scope === "project" || i.scope === "both").length;
-    if (projectScoped > 0) parts.push(l10n.t("{0} 个为项目级", String(projectScoped)));
+    if (projectScoped > 0) parts.push(l10n.t("{0} 个来自项目配置", String(projectScoped)));
   }
   const block: Block = {
     kind: "injected",
     id: nextBlockId(),
-    notice: l10n.t("本次请求自动注入了 {0} 项内容：{1}", String(items.length), parts.join("、")),
+    notice: l10n.t("这次请求还自动带上了 {0} 项内容：{1}", String(items.length), parts.join("、")),
     items,
     // Fixed per-request overhead the model carries before the user's text —
     // shown on the collapsed header (and kept after payload eviction).

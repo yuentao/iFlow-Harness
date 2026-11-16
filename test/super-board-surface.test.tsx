@@ -1315,7 +1315,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     act(() => rowTrigger().click());
 
     // 状态 chip 已经写着「排队中」，再叠一个警告色降级 chip 只会误读成
-    // 「worktree 创建失败」——占位态不得出现。
+    // 「独立工作目录创建失败」——占位态不得出现。
     expect(document.body.textContent).toContain("排队中");
     expect(document.body.textContent).not.toContain("只隔离了目录");
     // 隔离行不能渲染空字符串：宿主给的中文占位说明要能看到。
@@ -1328,7 +1328,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
         isolation: {
           kind: "directory",
           path: "/tmp/fallback",
-          note: "worktree 创建失败（fatal: not a git repository），仅目录隔离",
+          note: "独立工作目录创建失败（fatal: not a git repository），仅目录隔离",
         },
       }),
     ]);
@@ -1365,7 +1365,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
         isolation: {
           kind: "directory",
           path: "/tmp/fallback",
-          note: "worktree 创建失败（fatal: not a git repository），仅目录隔离",
+          note: "独立工作目录创建失败（fatal: not a git repository），仅目录隔离",
         },
       }),
     ]);

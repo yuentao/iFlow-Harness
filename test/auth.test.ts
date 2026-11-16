@@ -77,15 +77,15 @@ describe("validateAuthForm (shared webview/host rules, review B3)", () => {
   it("skips the apiKey check when the field is undefined (edit-profile flow)", () => {
     expect(validateAuthForm({ baseUrl: "https://x", modelName: "m" })).toBeNull();
     expect(validateAuthForm({ baseUrl: "https://x", modelName: "m", apiKey: null })).toBe(
-      "API Key 不能为空",
+      "请填写 API Key",
     );
   });
 
   it("returns the first violation as the i18n source string", () => {
     expect(validateAuthForm({ baseUrl: "ftp://x", modelName: "" })).toBe(
-      "Base URL 必须以 http:// 或 https:// 开头",
+      "接口地址要以 http:// 或 https:// 开头",
     );
-    expect(validateAuthForm({ baseUrl: "https://x", modelName: "  " })).toBe("模型名称不能为空");
+    expect(validateAuthForm({ baseUrl: "https://x", modelName: "  " })).toBe("请填写模型名称");
   });
 });
 

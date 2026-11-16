@@ -499,7 +499,7 @@ function createMockHost(): HostApi {
     },
     {
       kind: "injected",
-      notice: "本次请求自动注入了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个为项目级",
+      notice: "这次请求还自动带上了 7 项内容：系统提示词、全局记忆、1 个项目记忆文件、1 个知识库文档、2 个 MCP 服务器、1 个 MCP 服务器未连接、1 个来自项目配置",
       tokens: 31320,
       items: [
         {
