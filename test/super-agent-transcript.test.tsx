@@ -677,16 +677,94 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
   });
 
-  it("只接管 dispatch：super-agent-actions 仍走通用工具卡，命名空间形态照常识别", () => {
-    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
+  const ACTIONS_INPUT = JSON.stringify({
+    actions: [
+      { action: "retry", sessionId: "super-a1" },
+      { action: "cancel", sessionId: "super-a2" },
+      { action: "cleanup", sessionId: "super-a3", keepBranch: true },
+      { action: "answer", sessionId: "super-a4", answers: { q1: "方案 A", q2: "方案 B" } },
+    ],
+  });
+
+  it("super-agent 工具带 actions 载荷渲染成子会话操作卡，不再走通用工具卡", () => {
+    renderBlock(toolBlock({ input: ACTIONS_INPUT }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card).toBeTruthy();
+    // 与围栏 ActionsCard 同一独立表面，不回退到工具卡材质。
+    expect(card!.classList.contains("super-directive-card")).toBe(true);
+    expect(card!.className).toContain("bg-primary/10");
+    expect(card!.className).toContain("border-primary/35");
+    expect(card!.className).toContain("shadow-float");
+    for (const cls of ["bg-card", "shadow-card", "tool-card"]) {
+      expect(card!.classList.contains(cls)).toBe(false);
+    }
+    // 标题、计数、状态 chip 与逐项动作都来自围栏动作卡同一套语言/组件。
+    expect(card!.textContent).toContain("子会话操作");
+    expect(card!.textContent).toContain("4 个动作");
+    expect(card!.textContent).toContain("重试");
+    expect(card!.textContent).toContain("中断");
+    expect(card!.textContent).toContain("清理");
+    expect(card!.textContent).toContain("回答");
+    expect(card!.textContent).toContain("super-a1");
+    expect(card!.textContent).toContain("保留分支");
+    expect(card!.textContent).toContain("2 个回答");
+    expect(card!.textContent).toContain("已完成");
+    expect(card!.textContent).not.toContain("执行参数");
+    expect(card!.querySelectorAll("li")).toHaveLength(4);
+    // 委派卡没有接管这条工具帧；管理动作也不是「委派产生子会话」，不挂飞入起点。
     expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();
-    expect(container.querySelector(".tool-card")).toBeTruthy();
+    expect(card!.hasAttribute("data-super-delegation-origin")).toBe(false);
+    expect(container.querySelector(".tool-card")).toBeNull();
+  });
+
+  it("命名空间形态照常识别：actions 载荷走操作卡，tasks 载荷仍是委派卡", () => {
+    renderBlock(toolBlock({ toolName: "iflow__super-agent", input: ACTIONS_INPUT }));
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeNull();
 
     renderBlock(toolBlock({ toolName: "iflow__super-agent" }));
-    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
-    expect(card).toBeTruthy();
-    expect(card!.textContent).toContain("补开发期同步说明");
+    const dispatch = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(dispatch).toBeTruthy();
+    expect(dispatch!.textContent).toContain("补开发期同步说明");
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeNull();
     expect(container.querySelector(".tool-card")).toBeNull();
+  });
+
+  it("super-agent-actions 工具名也渲染同一张操作卡", () => {
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: ACTIONS_INPUT, status: "failed" }));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("子会话操作");
+    expect(card!.textContent).toContain("4 个动作");
+    expect(card!.textContent).toContain("失败");
+    expect(card!.className).toContain("super-directive-card");
+    expect(container.querySelector(".tool-card")).toBeNull();
+  });
+
+  it("空 actions / 坏 JSON 诚实降级，不假装有动作", () => {
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
+    let card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.getAttribute("role")).toBe("status");
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-invalid"]')).toBeTruthy();
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-raw"]')!.textContent).toContain('{"actions":[]}');
+    expect(card!.textContent).not.toContain("个动作");
+    expect(card!.querySelectorAll("li")).toHaveLength(0);
+
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[oops}' }));
+    card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card!.querySelector('[data-testid="super-actions-tool-call-invalid"]')).toBeTruthy();
+    expect(card!.textContent).not.toContain("个动作");
+
+    renderBlock(toolBlock({ toolName: "super-agent-actions", input: null }));
+    card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]');
+    expect(card!.textContent).toContain("正在编写子会话操作…");
+    expect(card!.textContent).not.toContain("个动作");
+
+    renderBlock(toolBlock({ toolName: "super-agent-guard", input: ACTIONS_INPUT }));
+    expect(container.querySelector('[data-testid="super-actions-tool-call-card"]')).toBeNull();
+    expect(container.querySelector(".tool-card")).toBeTruthy();
   });
 
   it("通用工具卡只留结构化执行参数，不再提供「查看原始参数」折叠入口", () => {

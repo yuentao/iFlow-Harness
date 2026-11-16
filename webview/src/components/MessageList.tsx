@@ -58,11 +58,11 @@ import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown, copyText } from "./Markdown";
-import { AssistantText, SuperToolCallCard } from "./SuperDirectiveCard";
+import { AssistantText, SuperActionsToolCallCard, SuperToolCallCard } from "./SuperDirectiveCard";
 import { DiffView } from "./DiffView";
 import { TurnChanges } from "./TurnChanges";
 import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
-import { classifySuperToolName } from "../../../shared/super-tool-call";
+import { classifySuperToolName, resolveSuperToolCallKind } from "../../../shared/super-tool-call";
 import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, TextArea, ToastStack } from "./ui";
 import logo from "../assets/iflow.svg";
 
@@ -149,10 +149,22 @@ function toolPresentation(block: ToolBlock): ToolPresentation {
  * `Delegate N tasks`。`tool_call` / `tool_call_update` 仍照常进 store 成为
  * `ToolBlock`（宿主也照常消费并派发子会话）；这里只决定它不再走通用 ToolCard。
  *
- * 判定复用宿主侧的同一个纯函数 `classifySuperToolName`，两边口径不可能漂移；
- * 只接管 `dispatch`（`super-agent-actions` 保持通用工具卡），
- * `super-agent-guard` 这类近似名一律落空。
+ * 判定复用宿主侧的同一组纯函数（`classifySuperToolName` /
+ * `resolveSuperToolCallKind`），两边口径不可能漂移：
+ *  - `super-agent-actions` 名字 → 子会话操作卡；
+ *  - `super-agent`（含命名空间形态 `iflow__super-agent`）带「有 actions、
+ *    无 tasks」载荷 → 宿主已纠偏执行动作，渲染也必须走同一张操作卡；
+ *  - 其余 dispatch → 委派卡；
+ *  - `super-agent-guard` 这类近似名一律落空。
  */
+function isSuperAgentActionsTool(block: ToolBlock): boolean {
+  const name = (block.toolName || "").trim();
+  if (!name) return false;
+  const kind = classifySuperToolName(name);
+  if (kind === "actions") return true;
+  return kind === "dispatch" && resolveSuperToolCallKind(kind, block.input) === "actions";
+}
+
 function isSuperAgentDispatchTool(block: ToolBlock): boolean {
   const name = (block.toolName || "").trim();
   return name !== "" && classifySuperToolName(name) === "dispatch";
@@ -1592,7 +1604,9 @@ export const BlockView = memo(function BlockView({
     case "thought":
       return <ThoughtCard block={block} isLatest={isLatest} turnActive={turnActive} chrome={chrome} />;
     case "tool":
-      return isSuperAgentDispatchTool(block) ? (
+      return isSuperAgentActionsTool(block) ? (
+        <SuperActionsToolCallCard block={block} />
+      ) : isSuperAgentDispatchTool(block) ? (
         <SuperToolCallCard block={block} />
       ) : (
         <ToolCard block={block} chrome={chrome} />

@@ -48,7 +48,7 @@ import {
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
-import { parseSuperDelegationTasks } from "../../../shared/super-tool-call";
+import { parseSuperDelegationTasks, parseSuperToolCall } from "../../../shared/super-tool-call";
 import { DELEGATION_ORIGIN_ATTR } from "./SuperDelegationFly";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
@@ -411,6 +411,32 @@ function renderTaskInlines(inlines: SuperTaskInline[]): ReactNode[] {
   });
 }
 
+/** 动作行列表：围栏动作卡与工具调用动作卡共用，逐项文案与 chip 完全一致。 */
+function ActionRows({ actions }: { actions: SuperDirectiveAction[] }) {
+  return (
+    <ul className="divide-y divide-primary/20">
+      {actions.map((action, index) => (
+        <li key={index} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
+          <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
+            {t(ACTION_LABELS[action.action] ?? action.action)}
+          </Chip>
+          <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
+            {action.sessionId || t("未指定子会话")}
+          </code>
+          {action.keepBranch && (
+            <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
+          )}
+          {action.answerCount !== undefined && (
+            <span className="text-ui-micro text-muted-foreground">
+              {t("{0} 个回答", action.answerCount)}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
   return (
     <DirectiveSurface className="my-2">
@@ -422,26 +448,7 @@ function ActionsCard({ actions }: { actions: SuperDirectiveAction[] }) {
           {t("子会话操作")}
         </span>
       </DirectiveHeader>
-      <ul className="divide-y divide-primary/20">
-        {actions.map((action, index) => (
-          <li key={index} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2">
-            <Chip tone={ACTION_TONES[action.action] ?? "muted"}>
-              {t(ACTION_LABELS[action.action] ?? action.action)}
-            </Chip>
-            <code className="min-w-0 break-all font-mono text-ui-micro text-muted-foreground">
-              {action.sessionId || t("未指定子会话")}
-            </code>
-            {action.keepBranch && (
-              <span className="text-ui-micro text-muted-foreground">{t("保留分支")}</span>
-            )}
-            {action.answerCount !== undefined && (
-              <span className="text-ui-micro text-muted-foreground">
-                {t("{0} 个回答", action.answerCount)}
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
+      <ActionRows actions={actions} />
     </DirectiveSurface>
   );
 }
@@ -699,6 +706,101 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
           {block.input && (
             <pre
               data-testid="super-tool-call-raw"
+              className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
+            >
+              {block.input}
+            </pre>
+          )}
+        </div>
+      )}
+    </DirectiveSurface>
+  );
+}
+
+/**
+ * 内置 `super-agent` 工具承载**管理动作**时的独立操作卡。
+ *
+ * 新版工具 schema 同时收 `tasks` 与 `actions`：模型做 retry/cancel/answer/cleanup
+ * 时仍调这个工具，只是载荷变成 `{"actions":[…]}`。宿主按载荷纠偏执行；转录层
+ * 也必须把这类工具帧从通用 ToolCard 里捞出来，否则用户看到的是「工具操作 /
+ * 执行参数」，而不是围栏动作卡那张一眼能读的「子会话操作」卡。
+ *
+ * 数据来源：`ToolBlock` 目前没有 `superActions` 结构字段（宿主只给 dispatch
+ * 存了 `superTasks`），所以这里回解 `block.input`。它虽是**有损展示串**（单值
+ * 300 字符、整串 4096 字符截断），但动作载荷只有动作名 + 短 sessionId +
+ * 少量回答条目，正常形态远低于上限；解析直接复用宿主同一份
+ * {@link parseSuperToolCall}（内部走 `extractSuperActions`），不复制校验逻辑。
+ * 真被截断到 parse 不出来时走诚实降级，绝不编造动作。
+ *
+ * 刻意**不挂** `data-super-delegation-origin`：那是「委派产生子会话」的语义，
+ * 管理动作不该触发飞入看板动效。
+ */
+type SuperActionsToolParse =
+  | { ok: true; actions: SuperDirectiveAction[] }
+  | { ok: false; reason: "pending" | "invalid" };
+
+function parseSuperActionsToolCall(block: ToolBlock): SuperActionsToolParse {
+  const parsed = parseSuperToolCall("actions", block.input);
+  if (parsed.ok && parsed.actions.length > 0) {
+    return {
+      ok: true,
+      actions: parsed.actions.map((action) => {
+        if (action.action === "answer") {
+          return {
+            action: action.action,
+            sessionId: action.sessionId,
+            answerCount: Object.keys(action.answers ?? {}).length,
+          };
+        }
+        if (action.action === "cleanup" && action.keepBranch) {
+          return { action: action.action, sessionId: action.sessionId, keepBranch: true };
+        }
+        return { action: action.action, sessionId: action.sessionId };
+      }),
+    };
+  }
+  if (!block.input || !block.input.trim()) return { ok: false, reason: "pending" };
+  return { ok: false, reason: "invalid" };
+}
+
+export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
+  const parsed = useMemo(() => parseSuperActionsToolCall(block), [block.input]);
+  return (
+    <DirectiveSurface
+      className="my-2"
+      testId="super-actions-tool-call-card"
+      role={parsed.ok ? undefined : "status"}
+    >
+      <DirectiveHeader
+        icon={<ListChecks className={ICON_INLINE} />}
+        aside={<SuperToolStatusChip status={block.status} />}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-ui-label font-medium text-foreground/90">
+            {t("子会话操作")}
+          </span>
+          {parsed.ok && <Chip tone="info">{t("{0} 个动作", parsed.actions.length)}</Chip>}
+        </div>
+      </DirectiveHeader>
+      {parsed.ok ? (
+        <ActionRows actions={parsed.actions} />
+      ) : parsed.reason === "pending" ? (
+        <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
+          <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+          <span>{t("正在编写子会话操作…")}</span>
+        </div>
+      ) : (
+        <div className="space-y-2 px-3 py-2">
+          <div
+            data-testid="super-actions-tool-call-invalid"
+            className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
+          >
+            <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
+            <span>{t("工具参数未能完整解析，动作列表暂不可用，以下保留原始参数")}</span>
+          </div>
+          {block.input && (
+            <pre
+              data-testid="super-actions-tool-call-raw"
               className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
             >
               {block.input}

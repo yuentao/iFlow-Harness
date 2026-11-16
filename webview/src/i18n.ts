@@ -1087,6 +1087,8 @@ const en: Record<string, string> = {
     "The payload could not be fully parsed; the task briefs below are for reading only and may not have been dispatched yet.",
   "工具参数未能完整解析，任务列表暂不可用，以下保留原始参数":
     "The tool arguments could not be fully parsed, so the task list is unavailable. The raw arguments are kept below.",
+  "工具参数未能完整解析，动作列表暂不可用，以下保留原始参数":
+    "The tool arguments could not be fully parsed, so the action list is unavailable. The raw arguments are kept below.",
   "子会话操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
