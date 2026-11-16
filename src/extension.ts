@@ -97,7 +97,7 @@ export function activate(context: vscode.ExtensionContext): void {
         response.markdown(stream);
       } catch (error) {
         response.markdown(
-          vscode.l10n.t("iFlow 出错：{0}", errorMessage(error)),
+          vscode.l10n.t("iFlow 处理失败：{0}", errorMessage(error)),
         );
       }
     },

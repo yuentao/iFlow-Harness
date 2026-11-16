@@ -168,7 +168,7 @@ export class MemoryService {
    * dismissal; null on the direct-post fallback, which the WebView ages
    * normally — same shape as the candidate toast's fallback. */
   private sendExtractingToast(): number | null {
-    const message = vscode.l10n.t("正在提取长期记忆候选…");
+    const message = vscode.l10n.t("正在整理可以记住的内容…");
     if (this.options.sendToast) {
       const toastId = this.options.sendToast("info", message, { displayOnly: true, persistent: true });
       return typeof toastId === "number" ? toastId : null;
@@ -253,7 +253,7 @@ export class MemoryService {
         path: file,
         content: "",
         hash: null,
-        error: vscode.l10n.t("该文件不在可编辑的记忆列表中"),
+        error: vscode.l10n.t("这个文件不在可编辑的记忆文件里"),
       });
       return;
     }
@@ -279,11 +279,11 @@ export class MemoryService {
   async saveFile(input: { path: string; content: string; expectedHash?: string | null }): Promise<void> {
     const target = await this.resolveTarget(input.path);
     if (!target) {
-      this.postSaveError(input.path, vscode.l10n.t("该文件不在可编辑的记忆列表中"));
+      this.postSaveError(input.path, vscode.l10n.t("这个文件不在可编辑的记忆文件里"));
       return;
     }
     if (!target.editable) {
-      this.postSaveError(input.path, vscode.l10n.t("该文件是只读的（位于工作区之外）"));
+      this.postSaveError(input.path, vscode.l10n.t("这个文件是只读的（在工作区之外）"));
       return;
     }
     await this.enqueue(async () => {
@@ -297,7 +297,7 @@ export class MemoryService {
           ok: false,
           conflict: true,
           ...(file ? { file } : {}),
-          error: vscode.l10n.t("文件已在磁盘上发生变化，请重新加载后再保存"),
+          error: vscode.l10n.t("文件已被其他程序改动，请重新打开后再保存"),
         });
         return;
       }
@@ -336,13 +336,13 @@ export class MemoryService {
     if (!target) {
       const error =
         input.scope === "project"
-          ? vscode.l10n.t("没有可用的项目目录，无法写入项目记忆")
-          : vscode.l10n.t("没有可用的全局记忆文件");
+          ? vscode.l10n.t("找不到可用的项目目录，项目记忆无法写入")
+          : vscode.l10n.t("找不到可用的全局记忆文件");
       this.postSaveError(input.path ?? "", error, input.requestId);
       return { ok: false, path: input.path ?? "", error };
     }
     if (!target.editable) {
-      const error = vscode.l10n.t("该文件是只读的（位于工作区之外）");
+      const error = vscode.l10n.t("这个文件是只读的（在工作区之外）");
       this.postSaveError(target.path, error, input.requestId);
       return { ok: false, path: target.path, error };
     }
@@ -373,7 +373,7 @@ export class MemoryService {
   async deleteFacts(input: { path: string; factIds: readonly string[] }): Promise<void> {
     const target = await this.resolveTarget(input.path);
     if (!target || !target.editable) {
-      this.postSaveError(input.path, vscode.l10n.t("该文件不可编辑"));
+      this.postSaveError(input.path, vscode.l10n.t("这个文件不可编辑"));
       return;
     }
     await this.enqueue(async () => {
@@ -523,7 +523,7 @@ export class MemoryService {
       this.options.post({
         type: "toast",
         level: "warning",
-        message: vscode.l10n.t("会话已切换，记忆候选已丢弃"),
+        message: vscode.l10n.t("已切换会话，这次整理的内容已丢弃"),
       });
       return;
     }
@@ -704,7 +704,7 @@ export class MemoryService {
       const previousDoc = previousManifest?.docs.find((doc) => doc.path === KNOWLEDGE_INDEX);
       const previousIndexHash = previousIndex === null ? null : sha256(previousIndex);
       const abortMessage = vscode.l10n.t(
-        "知识索引缺少有效清单或已被手动修改，请点击「全量重建」确认覆盖",
+        "知识索引可能已被手动修改，请点「全量重建」确认覆盖",
       );
       let baselineAbort = false;
       let forceFullNotice: string | null = null;
@@ -716,7 +716,7 @@ export class MemoryService {
             baselineAbort = true;
           } else if (previousManifest.version < 2) {
             if (previousDoc !== undefined && previousDoc.hash === previousIndexHash) {
-              forceFullNotice = vscode.l10n.t("升级知识清单，执行一次全量生成");
+              forceFullNotice = vscode.l10n.t("正在升级知识索引格式，执行一次全量生成");
             } else {
               baselineAbort = true;
             }
@@ -732,7 +732,7 @@ export class MemoryService {
             forceFullNotice = vscode.l10n.t("上次扫描未完整，改为全量生成");
           }
         } else {
-          forceFullNotice = vscode.l10n.t("没有可用的增量基线，改为全量生成");
+          forceFullNotice = vscode.l10n.t("上次的扫描记录不可用，改为全量生成");
         }
         if (truncated && !baselineAbort) {
           forceFullNotice = vscode.l10n.t("工作区文件超过扫描上限，已改为全量生成");

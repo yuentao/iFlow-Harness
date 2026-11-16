@@ -140,7 +140,7 @@ describe("ChatPanel async busy states and failure receipts", () => {
   it("模型列表刷新没有端点时如实提示（区分端点不可达 / 无模型）", async () => {
     const toast = vi.spyOn(p.store, "sendToast");
     await p.refreshLiveModels();
-    expect(toast).toHaveBeenCalledWith("warning", "尚未配置 API 端点，无法刷新模型列表");
+    expect(toast).toHaveBeenCalledWith("warning", "还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。");
   });
 
   it("模型列表刷新时端点不可达 → 「刷新失败，仍显示上次结果」", async () => {

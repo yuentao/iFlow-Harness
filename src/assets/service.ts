@@ -394,7 +394,7 @@ export class AssetsService {
         path: file,
         content: "",
         hash: null,
-        error: vscode.l10n.t("该路径不在可编辑资产范围内（命令/子代理/技能文件）"),
+        error: vscode.l10n.t("这个位置的文件不能在这里编辑（只支持命令、子代理、技能文件）"),
         ...(requestId !== undefined ? { requestId } : {}),
       });
       return;
@@ -432,7 +432,7 @@ export class AssetsService {
         type: "assetSaved",
         path: input.path,
         ok: false,
-        error: vscode.l10n.t("该路径不在可编辑资产范围内（命令/子代理/技能文件）"),
+        error: vscode.l10n.t("这个位置的文件不能在这里编辑（只支持命令、子代理、技能文件）"),
         ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
       });
       return;
@@ -446,7 +446,7 @@ export class AssetsService {
           path: target.path,
           ok: false,
           conflict: true,
-          error: vscode.l10n.t("文件已在磁盘上发生变化，请重新加载后再保存"),
+          error: vscode.l10n.t("文件已被其他程序改动，请重新打开后再保存"),
           ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
         });
         return;
@@ -492,14 +492,14 @@ export class AssetsService {
         ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
       });
     if (!ASSET_NAME_RE.test(input.name)) {
-      reply(false, { error: vscode.l10n.t("名称仅允许字母/数字/-/_（以字母或数字开头）") });
+      reply(false, { error: vscode.l10n.t("名称只能用字母、数字、- 和 _，并且要以字母或数字开头") });
       return;
     }
     const root = this.assetRoots().find(
       (candidate) => candidate.kind === input.kind && candidate.scope === input.scope,
     );
     if (!root) {
-      reply(false, { error: vscode.l10n.t("无项目上下文（未开会话）可创建项目资产") });
+      reply(false, { error: vscode.l10n.t("没有打开的项目会话，无法创建项目级资产") });
       return;
     }
     const file =
@@ -509,7 +509,7 @@ export class AssetsService {
     await this.enqueue(async () => {
       const current = await readIfExists(file);
       if (current !== null) {
-        reply(false, { path: file, conflict: true, error: vscode.l10n.t("同名资产已存在，请编辑它 instead") });
+        reply(false, { path: file, conflict: true, error: vscode.l10n.t("已有同名资产，请直接编辑已有的那个") });
         return;
       }
       try {
@@ -529,7 +529,7 @@ export class AssetsService {
         type: "assetDeleted",
         path: file,
         ok: false,
-        error: vscode.l10n.t("该路径不在可编辑资产范围内（命令/子代理/技能文件）"),
+        error: vscode.l10n.t("这个位置的文件不能在这里编辑（只支持命令、子代理、技能文件）"),
         ...(requestId !== undefined ? { requestId } : {}),
       });
       return;

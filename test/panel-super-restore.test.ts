@@ -195,7 +195,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     // ……但用户**被明确告知**了（而不是静默的空）：警告里带着备份路径。
     expect(toasts.length).toBeGreaterThan(0);
     expect(toasts[0]?.level).toBe("warning");
-    expect(toasts[0]?.message).toContain("归档损坏");
+    expect(toasts[0]?.message).toContain("记录已损坏");
     expect(toasts[0]?.message).toContain(".corrupt-");
   });
 

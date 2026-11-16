@@ -167,7 +167,7 @@ describe("AssetsService", () => {
     await service.createFile({ kind: "command", scope: "global", name: "bad name!", content: "x" });
     const bad = lastMessage(messages, "assetSaved");
     expect(bad.ok).toBe(false);
-    expect(bad.error).toContain("名称仅允许");
+    expect(bad.error).toContain("名称只能用");
 
     await service.createFile({ kind: "command", scope: "global", name: "taken", content: "y" });
     const clash = lastMessage(messages, "assetSaved");
@@ -185,7 +185,7 @@ describe("AssetsService", () => {
     await noCwd.service.createFile({ kind: "command", scope: "project", name: "ghost", content: "x" });
     const ghost = lastMessage(noCwd.messages, "assetSaved");
     expect(ghost.ok).toBe(false);
-    expect(ghost.error).toContain("无项目上下文");
+    expect(ghost.error).toContain("没有打开的项目会话");
   });
 
   it("delete removes skill dirs when empty and rejects structurally invalid targets", async () => {
@@ -213,11 +213,11 @@ describe("AssetsService", () => {
     await service.deleteFile(nested, 4);
     const refused = lastMessage(messages, "assetDeleted");
     expect(refused.ok).toBe(false);
-    expect(refused.error).toContain("不在可编辑资产范围");
+    expect(refused.error).toContain("这个位置的文件不能在这里编辑");
     expect(existsSync(nested)).toBe(true);
 
     await service.readFile(path.join(home, "evil.md"), 5);
     const outside = lastMessage(messages, "assetContent");
-    expect(outside.error).toContain("不在可编辑资产范围");
+    expect(outside.error).toContain("这个位置的文件不能在这里编辑");
   });
 });

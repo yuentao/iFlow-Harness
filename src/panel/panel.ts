@@ -1459,7 +1459,7 @@ export class ChatPanel implements vscode.Disposable {
     // 死锁。它比用量信息更重要，所以即使没有用量也要出现在 tooltip 里。
     const heldTip = state.superHeld
       ? vscode.l10n.t(
-          "已停止：{0} 项子会话结果待处理，发送下一条消息或点常驻提示的「继续处理」后继续收取汇报",
+          "已停止：还有 {0} 项子会话结果待处理。发送下一条消息，或点提示条上的「继续处理」来收取汇报",
           state.superPendingCount ?? 0,
         )
       : null;
@@ -1826,11 +1826,11 @@ export class ChatPanel implements vscode.Disposable {
       [
         {
           label: globalLabel,
-          description: vscode.l10n.t("跨项目生效（~/.iflow/AGENTS.md）"),
+          description: vscode.l10n.t("所有项目通用（保存在本机 iFlow 配置里）"),
         },
         {
           label: projectLabel,
-          description: vscode.l10n.t("仅当前项目（AGENTS.md）"),
+          description: vscode.l10n.t("仅当前项目（保存在项目目录里）"),
         },
       ],
       { placeHolder: vscode.l10n.t("这条记忆保存到哪里？") },
@@ -2776,7 +2776,7 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) return;
       if (!raw) {
         this.log.warn(`asset generation returned nothing (kind=${kind})`);
-        reply("", vscode.l10n.t("生成失败（网关无响应或未配置模型），请重试或直接手写内容"));
+        reply("", vscode.l10n.t("生成失败（服务无响应，或没有配置模型），请重试或直接手写内容"));
         return;
       }
       this.log.info(`asset draft generated (kind=${kind}, ${raw.length} chars)`);
@@ -3013,7 +3013,7 @@ export class ChatPanel implements vscode.Disposable {
       ?? (await loadCredentials(this.context.secrets).catch(() => null))
       ?? readActiveEndpoint();
     if (!endpoint) {
-      this.postToWebview({ type: "modelMetadataState", state: "error", error: vscode.l10n.t("未配置 API 凭据，无法联网检索模型数据") });
+      this.postToWebview({ type: "modelMetadataState", state: "error", error: vscode.l10n.t("还没有配置 API Key，无法联网检索模型数据。请先在设置里填写 API Key 并保存。") });
       return;
     }
     this.metadataBusy = true;
@@ -3075,7 +3075,7 @@ export class ChatPanel implements vscode.Disposable {
       // the model — an ungrounded row is dropped, never written to settings.
       const entries = parseModelMetadata(answer, sources);
       if (entries.length === 0) {
-        const reasonText = vscode.l10n.t("联网检索未返回可解析的数据");
+        const reasonText = vscode.l10n.t("联网检索没有返回可用的数据");
         this.postToWebview({ type: "modelMetadataState", state: "error", error: reasonText });
         this.store.sendToast("error", reasonText);
         return;
@@ -3569,10 +3569,10 @@ export class ChatPanel implements vscode.Disposable {
     try {
       await vscode.workspace.fs.writeFile(uri, Buffer.from(this.wireLog.dump(), "utf8"));
       void vscode.window.showInformationMessage(
-        vscode.l10n.t("ACP 日志已导出（{0} 帧，已脱敏）：{1}", this.wireLog.size, uri.fsPath),
+        vscode.l10n.t("通信日志已导出（{0} 条记录，敏感信息已隐去）：{1}", this.wireLog.size, uri.fsPath),
       );
     } catch (error) {
-      void vscode.window.showErrorMessage(vscode.l10n.t("导出 ACP 日志失败：{0}", errorMessage(error)));
+      void vscode.window.showErrorMessage(vscode.l10n.t("导出通信日志失败：{0}", errorMessage(error)));
     }
   }
 
@@ -4273,7 +4273,7 @@ export class ChatPanel implements vscode.Disposable {
     this.clearDeferredAutoTurnsToast();
     this.deferredAutoTurnsToastId = this.store.sendToast(
       "info",
-      vscode.l10n.t("已停止；还有 {0} 项子会话结果待处理，发送下一条消息或点「继续处理」释放", pending),
+      vscode.l10n.t("已停止；还有 {0} 项子会话结果待处理。发送下一条消息，或点「继续处理」来收取汇报", pending),
       {
         persistent: true,
         action: { actionId: "resume-super-turns", label: vscode.l10n.t("继续处理") },
@@ -5509,7 +5509,7 @@ export class ChatPanel implements vscode.Disposable {
       this.postToWebview({
         type: "mcpServers",
         ...this.readMcpScopes(),
-        error: vscode.l10n.t("无项目上下文（未打开工作区），无法保存项目级 MCP 配置"),
+        error: vscode.l10n.t("没有打开工作区，无法保存项目级 MCP 配置"),
       });
       return;
     }
@@ -5758,7 +5758,7 @@ export class ChatPanel implements vscode.Disposable {
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
       void vscode.window.showInformationMessage(
-        vscode.l10n.t("API 配置已保存，本次连接仍在用旧凭据；重新连接后生效"),
+        vscode.l10n.t("API 配置已保存；本次连接仍在用旧凭据，重新连接后生效"),
       );
       return;
     }
@@ -6708,7 +6708,7 @@ export class ChatPanel implements vscode.Disposable {
     if (init && !init.agentCapabilities.loadSession) {
       this.log.warn("loadSession capability not declared by CLI");
       void vscode.window.showWarningMessage(
-        vscode.l10n.t("当前内核不支持会话恢复（loadSession 能力未声明）"),
+        vscode.l10n.t("当前内核不支持恢复历史会话"),
       );
       return false;
     }
@@ -6819,7 +6819,7 @@ export class ChatPanel implements vscode.Disposable {
       if (restored.blocks.length === 0) {
         restored.blocks.push({
           kind: "text",
-          text: vscode.l10n.t("已恢复会话上下文（内核未持久化该会话的历史记录，故此处无历史消息，但对话可继续）。"),
+          text: vscode.l10n.t("已恢复会话。内核没有保存这条会话的历史记录，所以这里看不到之前的消息，但可以继续对话。"),
         });
       }
       // Structural isolation (user directive): a restored transcript carries
@@ -7147,7 +7147,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast(
         "warning",
         vscode.l10n.t(
-          "子会话归档损坏，已保留备份；该会话的子会话记录无法恢复（{0}）",
+          "子会话记录已损坏，原文件已备份；这条会话的子会话记录无法恢复（{0}）",
           archive.backupPath ?? archive.damage ?? "unknown",
         ),
       );
@@ -7515,7 +7515,7 @@ export class ChatPanel implements vscode.Disposable {
       const first = scan.invalidBlocks[0]!;
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话委派指令无法解析（{0}，载荷 {1} 字符），已忽略", first.reason, first.body.length),
+        vscode.l10n.t("子会话派发指令无法解析（{0}，内容共 {1} 字符），已忽略", first.reason, first.body.length),
       );
     }
     if (scan.blocks.length === 0) return;
@@ -7533,7 +7533,7 @@ export class ChatPanel implements vscode.Disposable {
   private dispatchSuperTasks(blocks: readonly SuperTaskSpec[][]): void {
     const manager = this.getSuperAgent();
     if (!manager) {
-      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法委派子会话"));
+      this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
       return;
     }
     let dispatched = 0;
@@ -7558,7 +7558,7 @@ export class ChatPanel implements vscode.Disposable {
     if (droppedAttachments > 0) {
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("子会话委派指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
+        vscode.l10n.t("子会话派发指令中有 {0} 个附件不可用（不在工作区或暂存目录），已忽略", droppedAttachments),
       );
     }
     // 全部命中重复时没有「已经派发」这件事可报 ——
@@ -7693,7 +7693,7 @@ export class ChatPanel implements vscode.Disposable {
     this.store.sendToast(
       "warning",
       vscode.l10n.t(
-        "模型尝试调用不存在的 super-agent 工具（{0}，registry 中不存在），未派发子会话",
+        "模型调用了不存在的 super-agent 工具（{0}，工具列表里没有它），未派发子会话",
         name,
       ),
     );
@@ -9294,13 +9294,13 @@ export class ChatPanel implements vscode.Disposable {
       const result = applyThinkingRules(rules);
       if (result.skippedInvalid) {
         void vscode.window.showWarningMessage(
-          vscode.l10n.t("思考能力规则同步失败：~/.iflow/thinking-models.json 格式错误，已保留原文件"),
+          vscode.l10n.t("思考能力规则同步失败：本机 iFlow 配置里的思考能力规则格式有误，已保留原文件"),
         );
         return;
       }
       if (result.added + result.changed > 0) {
         void vscode.window.showInformationMessage(
-          vscode.l10n.t("已同步 {0} 思考能力规则到 ~/.iflow/thinking-models.json，生效下次会话启动", result.added + result.changed),
+          vscode.l10n.t("已同步 {0} 条思考能力规则到本机 iFlow 配置，下次会话启动时生效", result.added + result.changed),
         );
       }
     } catch {
@@ -9598,8 +9598,8 @@ export class ChatPanel implements vscode.Disposable {
     const items: InjectedContextItem[] = [];
     items.push({
       kind: "system",
-      label: vscode.l10n.t("系统提示词（未随会话捕获）"),
-      content: vscode.l10n.t("内核未启用上下文报告（acp-context-report Mod），系统提示词正文无法透明展示。"),
+      label: vscode.l10n.t("系统提示词（本次会话没有捕获到）"),
+      content: vscode.l10n.t("当前内核没有提供上下文报告，无法展示系统提示词的完整内容。"),
     });
     items.push(...(await this.memory.injectedContextItems()));
     return items;
@@ -10060,7 +10060,7 @@ export class ChatPanel implements vscode.Disposable {
       // was refreshed — and which of the three causes it was.
       const message =
         !result.ok && result.reason === "no-endpoint"
-          ? vscode.l10n.t("尚未配置 API 端点，无法刷新模型列表")
+          ? vscode.l10n.t("还没有配置 API 端点，无法刷新模型列表。请先在设置里填写 API 端点并保存。")
           : !result.ok
             ? vscode.l10n.t("模型列表刷新失败，仍显示上次结果")
             : vscode.l10n.t("端点未返回任何模型，仍显示上次结果");
@@ -12214,7 +12214,7 @@ export class ChatPanel implements vscode.Disposable {
     this.log.info(`checkpoint retention: removed ${removed.size} store dir(s), freed ${Math.round(freedBytes / (1024 * 1024))} MB`);
     this.store.sendToast(
       "info",
-      vscode.l10n.t("已按快照上限清理 {0} 个快照仓库（释放约 {1} MB）", removed.size, Math.round(freedBytes / (1024 * 1024))),
+      vscode.l10n.t("已按上限清理 {0} 份旧快照（释放约 {1} MB）", removed.size, Math.round(freedBytes / (1024 * 1024))),
       { durationMs: 8000 },
     );
   }
