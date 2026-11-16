@@ -20,6 +20,7 @@ import { HttpOneBotTransport } from "../adapter/http-transport.js";
 import { createDeliveryServer, type DeliveryMessage, type DeliveryServer } from "./delivery-server.js";
 import { createHostClient } from "./host-client.js";
 import { DEFAULT_ONEBOT_PATH, createOneBotSink, type OneBotSink } from "./onebot-sink.js";
+import { resolveSelfId } from "./self-id.js";
 
 /** 单条 QQ 文本消息的字符预算；超长时按行 / 围栏切分。 */
 const OUTBOUND_CHUNK_CHARS = 3000;
@@ -142,7 +143,8 @@ interface BridgeConfig {
   incomingToken: string;
   onebotUrl?: string;
   onebotToken?: string;
-  selfId: string;
+  /** env `IFLOW_QQ_SELF_ID`（宿主可能不传）；真实 selfId 由 `resolveSelfId` 解析。 */
+  envSelfId?: string;
 }
 
 function readConfig(): BridgeConfig {
@@ -154,7 +156,7 @@ function readConfig(): BridgeConfig {
     incomingToken: requireEnv("IFLOW_QQ_INCOMING_TOKEN"),
     onebotUrl: readEnv("IFLOW_QQ_ONEBOT_URL"),
     onebotToken: readEnv("IFLOW_QQ_ONEBOT_TOKEN"),
-    selfId: readEnv("IFLOW_QQ_SELF_ID") ?? "",
+    envSelfId: readEnv("IFLOW_QQ_SELF_ID"),
   };
 }
 
@@ -218,11 +220,19 @@ async function main(): Promise<void> {
       onDeliver: deliver,
     });
 
+    // selfId 决定群聊 @机器人 能否被识别（mentionsBot）：env 优先，否则问一次
+    // OneBot 后端的 get_login_info。取不到只打 stderr 警告，不阻塞启动。
+    const selfId = await resolveSelfId({
+      transport,
+      envSelfId: config.envSelfId,
+      log,
+    });
+
     sink = await createOneBotSink({
       port: config.incomingPort,
       path: DEFAULT_ONEBOT_PATH,
       token: config.incomingToken,
-      selfId: config.selfId,
+      selfId,
       onEvent: (inbound) => {
         // 立刻回 204 给 QQ 后端（10s 上行超时不应拖慢事件入口），失败只记 stderr。
         void hostClient.postEvents({ type: "inbound_message", message: inbound }).then((result) => {
