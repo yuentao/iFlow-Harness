@@ -37,6 +37,12 @@ export function readKernelApiProfiles(settingsPath?: string): ProfileMap {
  * Upsert one profile. A missing file is created; an EXISTING but unparseable
  * file is left alone (returns false) — we never overwrite content we could not
  * read.
+ *
+ * The entry is updated IN PLACE: the CLI writes per-profile metadata into
+ * `apiProfiles` itself (`selectedAuthType`, `tokensLimit`, `expiryDays`,
+ * `balanceProvider`, `_lastModified`, `expiryStartDate`, …). Replacing the
+ * whole object with our three fields silently dropped that data (user-reported
+ * "编辑后配置像没保存"), so only the three editable fields are overwritten.
  */
 export function writeKernelApiProfile(
   name: string,
@@ -46,8 +52,17 @@ export function writeKernelApiProfile(
   const trimmed = name.trim();
   if (!trimmed) return false;
   const file = settingsPath ?? settingsFilePath();
-  const profiles = { ...(readCliSettings(file)?.apiProfiles ?? {}) };
-  profiles[trimmed] = { baseUrl: creds.baseUrl, apiKey: creds.apiKey, modelName: creds.modelName };
+  const existing = readCliSettings(file)?.apiProfiles ?? {};
+  const profiles = { ...existing };
+  const previous = existing[trimmed];
+  const base =
+    previous && typeof previous === "object" && !Array.isArray(previous) ? previous : {};
+  profiles[trimmed] = {
+    ...base,
+    baseUrl: creds.baseUrl,
+    apiKey: creds.apiKey,
+    modelName: creds.modelName,
+  };
   return updateCliSettings({ apiProfiles: profiles }, file, { createIfMissing: true });
 }
 

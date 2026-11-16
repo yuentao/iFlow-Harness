@@ -5622,8 +5622,13 @@ export class ChatPanel implements vscode.Disposable {
     const name = profileName?.trim() || creds.modelName;
     // Renaming onto an existing row would overwrite that row's credentials and
     // delete the old key (user-reported). Refuse and leave SecretStorage
-    // untouched — a silent clobber is unrecoverable for the user.
-    if (replaced && replaced !== name && profiles[name]) {
+    // untouched — a silent clobber is unrecoverable for the user. The kernel
+    // file is checked too: a profile that lives only there (written by the CLI
+    // or not yet migrated into SecretStorage) must not be clobbered either.
+    const kernelNames = new Set(
+      Object.keys(readCliSettings()?.apiProfiles ?? {}).map((key) => key.trim()),
+    );
+    if (replaced && replaced !== name && (profiles[name] || kernelNames.has(name))) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t("已存在同名 API 配置: {0}，请换一个名称", name),
       );
@@ -5679,10 +5684,13 @@ export class ChatPanel implements vscode.Disposable {
     await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, name);
     setKernelActiveProfile(name);
     await this.rememberWorkspaceModelFor(name, creds.modelName);
-    if (this.restoring || this.connecting) {
-      // A connect/restore is in flight and owns the process: tearing it down
-      // would kill the handshake the user is waiting for. Persist + refresh,
-      // and say plainly which credentials this connection still uses.
+    if (this.restoring || this.connecting || this.historySyncBusy) {
+      // A connect/restore/history reload is in flight and owns the process:
+      // tearing it down would kill the handshake the user is waiting for (and
+      // `reconnectWithCredentials` would bail out silently on
+      // `historySyncBusy`, leaving the list showing the OLD values with zero
+      // feedback — the user reads that as "保存失败"). Persist + refresh, and
+      // say plainly which credentials this connection still uses.
       const auth = this.store.getState().auth;
       this.store.setAuth(await this.buildAuthState(auth.authenticated, auth.needsSetup));
       void vscode.window.showInformationMessage(

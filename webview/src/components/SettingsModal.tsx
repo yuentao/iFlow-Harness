@@ -929,8 +929,9 @@ function ShortcutRow({ keys, label }: { keys: string; label: string }) {
  * API profiles & credentials section: the profile list (one click switches —
  * with the same optimistic switch lock the header dropdown uses — edit loads
  * the profile into the form, delete keeps the two-step confirm) and the
- * credential editor. Saving upserts a named profile and re-authenticates the
- * session (host-side, SecretStorage only).
+ * credential editor. Saving upserts a named profile into the kernel config
+ * (`~/.iflow/settings.json`); only the row the panel is actually running on
+ * re-authenticates the session — editing another row just saves it.
  */
 function ApiConfigSection({
   auth,
@@ -1155,7 +1156,7 @@ function ApiConfigSection({
         )}
         <ActionRow>
           <Button variant="primary" disabled={busy} onClick={submit}>
-            {t("保存并激活")}
+            {t("保存")}
           </Button>
           <Button onClick={back}>
             {t("取消")}
@@ -1164,7 +1165,7 @@ function ApiConfigSection({
         </ActionRow>
         <Hint>
           {t(
-            "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。",
+            "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文）；编辑当前配置会重新认证会话，编辑其他配置只保存、不切换。",
           )}
         </Hint>
       </div>
