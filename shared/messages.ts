@@ -1673,10 +1673,12 @@ export type HostToWebview =
    * the background aurora light-spot opacity with it. */
   | { type: "theme"; kind: "dark" | "light"; auroraIntensity?: number }
   | ({ type: "hostSettings" } & HostSettingsUi)
-  /** Turn finished ("done") or failed ("error") — the webview plays a short
-   * synthesized cue. Host gates on the `iflow.soundFeedback` setting and on
-   * panel visibility; the webview only synthesizes on receipt. */
-  | { type: "playSound"; kind: "done" | "error" }
+  /** Turn finished ("done") / failed ("error") / one child session settled
+   * ("child") — the webview plays a short synthesized cue. The three are
+   * deliberately distinct sounds: a child finishing is NOT the main turn
+   * finishing, so it gets a lighter single note. Host gates on the
+   * `iflow.soundFeedback` setting; the webview only synthesizes on receipt. */
+  | { type: "playSound"; kind: "done" | "error" | "child" }
   /** Reply to `enhancePrompt` (M1 P1-5): the host ran one internal prompt
    * (never recorded in the transcript) and returns the enhanced text so the
    * composer can fill it back in. `requestId` matches the request; `error`
