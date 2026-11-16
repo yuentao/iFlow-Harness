@@ -8414,6 +8414,35 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+      case "cleanupBatch": {
+        const ids = msg.sessionIds ?? [];
+        if (ids.length === 0) return;
+        // 串行清理：每个目标都要删 worktree / 跑 git 探测，并发只会互相抢锁。
+        // 逐条 toast 会把转录刷满（N 条重复），因此这里只聚合结果、发**一条**
+        // 汇总回执；单个清理仍走上面的 `cleanup` 分支，回执保持原样。
+        let cleaned = 0;
+        let branchesKept = 0;
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            const result = await manager.cleanup(id, { keepBranch: msg.keepBranch });
+            if (result.ok) {
+              cleaned += 1;
+              if (result.branchKept) branchesKept += 1;
+            } else {
+              failed += 1;
+              this.log.warn(
+                `super agent: 批量清理未能完成 ${id}：${result.reason ?? "未知原因"}`,
+              );
+            }
+          } catch (error) {
+            failed += 1;
+            this.log.warn(`super agent: 批量清理 ${id} 失败：${errorMessage(error)}`);
+          }
+        }
+        this.reportSuperCleanupBatch(cleaned, failed, branchesKept);
+        break;
+      }
       case "merge": {
         if (!msg.sessionId) return;
         await this.requestSuperMerge(msg.sessionId);
@@ -8429,6 +8458,50 @@ export class ChatPanel implements vscode.Disposable {
         }
         break;
       }
+    }
+  }
+
+  /**
+   * 批量清理的**唯一一条**回执。
+   *
+   * 看板的「清理已结束」一次清一整批；旧实现让 host 逐个 `cleanup`，于是
+   * 用户看到 N 条一模一样的「已清理子会话」，既不知道整批到哪了、也不知道
+   * 有没有失败。这里按真实聚合结果措辞：全部成功才说「已清理 N 个」，
+   * 有失败一律 warning 级并给出未能清理的数量，分支被保留时如实补一句 ——
+   * **绝不谎报全部成功**。
+   */
+  private reportSuperCleanupBatch(cleaned: number, failed: number, branchesKept: number): void {
+    if (cleaned === 0 && failed === 0) return;
+    if (failed === 0) {
+      if (branchesKept === 0) {
+        this.store.sendToast("info", vscode.l10n.t("已清理 {0} 个子会话", cleaned));
+      } else {
+        this.store.sendToast(
+          "info",
+          vscode.l10n.t("已清理 {0} 个子会话，{1} 个分支已保留", cleaned, branchesKept),
+        );
+      }
+      return;
+    }
+    if (cleaned === 0) {
+      this.store.sendToast("warning", vscode.l10n.t("未能清理这 {0} 个子会话", failed));
+      return;
+    }
+    if (branchesKept === 0) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("已清理 {0} 个子会话，{1} 个未能清理", cleaned, failed),
+      );
+    } else {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "已清理 {0} 个子会话，{1} 个未能清理，{2} 个分支已保留",
+          cleaned,
+          failed,
+          branchesKept,
+        ),
+      );
     }
   }
 

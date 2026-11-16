@@ -1373,11 +1373,15 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           )}
           confirmLabel={t("清理已结束")}
           onConfirm={() => {
-            // One cleanup message per child: the host action is per-session,
-            // and a partial failure must not hide the others.
-            for (const id of confirmCleanupAll.ids) {
-              send({ type: "superAgent", action: "cleanup", sessionId: id });
-            }
+            // One batched request: the host cleans the whole set serially and
+            // reports a single aggregate receipt. Sending one `cleanup` per
+            // child made the transcript collect N identical toasts and left
+            // the user unable to tell where the batch as a whole stood.
+            send({
+              type: "superAgent",
+              action: "cleanupBatch",
+              sessionIds: confirmCleanupAll.ids,
+            });
             // Mark every child busy at click time so each row shows its own
             // in-progress state while the host cleans them up asynchronously.
             beginCleanup(confirmCleanupAll.ids);

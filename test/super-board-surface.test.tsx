@@ -1170,7 +1170,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     };
   }
 
-  it("终态且未释放：显示占用与可回收计数，确认后逐个发出 cleanup", () => {
+  it("终态且未释放：显示占用与可回收计数，确认后只发一条 cleanupBatch", () => {
     render([
       session({ id: "super-a", title: "修复登录跳转", status: "completed", startedAt: 2000, endedAt: 4000 }),
       session({ id: "super-b", title: "补充单测", status: "failed", startedAt: 2000, endedAt: 4000 }),
@@ -1196,16 +1196,13 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expect(confirm).toBeTruthy();
     act(() => confirm!.click());
 
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(send).toHaveBeenNthCalledWith(1, {
+    // 批次汇总回执：整批只有一条请求，由宿主串行清理并回一条汇总 toast
+    // （旧实现逐个发 cleanup，用户会看到 N 条重复回执）。
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
       type: "superAgent",
-      action: "cleanup",
-      sessionId: "super-a",
-    });
-    expect(send).toHaveBeenNthCalledWith(2, {
-      type: "superAgent",
-      action: "cleanup",
-      sessionId: "super-b",
+      action: "cleanupBatch",
+      sessionIds: ["super-a", "super-b"],
     });
     expect(bulkDialog()).toBeNull();
   });
@@ -1271,7 +1268,13 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     act(() => confirm!.click());
 
-    expect(send).toHaveBeenCalledTimes(2);
+    // 一条批次请求 + 一次性的进行态标记（不是 N 条 cleanup）。
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "cleanupBatch",
+      sessionIds: ["super-a", "super-b"],
+    });
     expect(bulkDialog()).toBeNull();
     // 两行各自进入进行态，而不是只有第一行或整批一个共用 spinner。
     const triggerA = rowTrigger("修复登录跳转");
