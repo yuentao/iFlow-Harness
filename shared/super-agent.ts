@@ -1866,24 +1866,9 @@ type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason
 export type SuperTaskPayloadParse = DirectiveParse;
 
 /**
- * 委派载荷的公共解析入口（JSON 文本）。
- *
- * 这是**唯一**的委派载荷校验实现：缺 title 回退到 task 首行、附件形态归一
- * （字符串与 `{path,name}` 对象都收）、占位符任务跳过、空任务判失败。
- *
- * 宿主派发与转录卡片都必须走它 —— 两边各抄一份校验就会漂移，漂移的方向是
- * 「卡片比派发器更严」：wire 实证模型调内置 `super-agent` 工具时**有时漏掉
- * `title`**，宿主照常派发（那一轮真的开出了 4 个子会话），卡片却判成「工具
- * 参数未能完整解析」，把一次成功的委派谎报成失败。
- */
-export function parseSuperTaskPayload(body: string): SuperTaskPayloadParse {
-  return parseDirectiveBody(body);
-}
-
-/**
  * 委派载荷的公共解析入口（已是 JSON 值）。
  *
- * 与 {@link parseSuperTaskPayload} 同一份校验，只是省掉「文本 → 值」这一步：
+ * 与内部正文解析使用同一份校验，只是省掉「文本 → 值」这一步：
  * 工具调用帧的 `args` 本来就是值，不必 JSON.stringify 再 JSON.parse 一趟
  * （那是热路径，每帧都跑）。
  */
