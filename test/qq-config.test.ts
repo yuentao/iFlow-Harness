@@ -4,6 +4,9 @@ import {
   QQ_RESERVED_BRIDGE_PORTS,
   QQ_SECRET_KEYS,
   buildBridgeEnv,
+  checkQqStartupGate,
+  isAdapterSupported,
+  isWorkspaceCompatible,
   normalizeQqConfig,
   validateQqConfig,
   type QqConfig,
@@ -266,6 +269,64 @@ describe("validateQqConfig", () => {
       "bridge_port_conflict",
       "trusted_policy",
     ]);
+  });
+});
+
+describe("启动门控（checkQqStartupGate）", () => {
+  const root = path.resolve(".");
+
+  it("adapter=onebot 受支持，qqbot 不受支持", () => {
+    expect(isAdapterSupported(makeConfig({ adapter: "onebot" }))).toBe(true);
+    expect(isAdapterSupported(makeConfig({ adapter: "qqbot" }))).toBe(false);
+  });
+
+  it("adapter=qqbot 时门控报 adapter_unsupported 且文案写明未实现", () => {
+    const issues = checkQqStartupGate(makeEnabled({ adapter: "qqbot" }), root);
+    expect(codes(issues)).toEqual(["adapter_unsupported"]);
+    expect(issues[0]?.severity).toBe("error");
+    expect(issues[0]?.message).toContain("尚未实现");
+    expect(issues[0]?.message).toContain("OneBot");
+  });
+
+  it("adapter=onebot 且 workspace 留空时门控通过", () => {
+    expect(checkQqStartupGate(makeEnabled(), root)).toEqual([]);
+    expect(isWorkspaceCompatible(makeConfig({ workspace: "   " }), root)).toBe(true);
+  });
+
+  it("workspace 等于当前工作区根时兼容（忽略大小写与尾部分隔符）", () => {
+    const variant = process.platform === "win32" ? root.toUpperCase() : root;
+    expect(isWorkspaceCompatible(makeConfig({ workspace: root }), root)).toBe(true);
+    expect(isWorkspaceCompatible(makeConfig({ workspace: variant }), root)).toBe(true);
+    expect(isWorkspaceCompatible(makeConfig({ workspace: `${root}${path.sep}` }), root)).toBe(
+      true,
+    );
+  });
+
+  it("workspace 指向其他根或当前根的子目录时报 workspace_not_active_root", () => {
+    const otherRoot = path.resolve(root, "..", "qq-elsewhere");
+    for (const workspace of [otherRoot, path.join(root, "packages", "qq")]) {
+      const issues = checkQqStartupGate(makeEnabled({ workspace }), root);
+      expect(codes(issues)).toEqual(["workspace_not_active_root"]);
+      expect(issues[0]?.severity).toBe("error");
+      expect(issues[0]?.message).toContain("当前工作区");
+    }
+  });
+
+  it("没有激活工作区根时任何非空 workspace 都不兼容", () => {
+    expect(isWorkspaceCompatible(makeConfig({ workspace: root }), undefined)).toBe(false);
+    expect(isWorkspaceCompatible(makeConfig({ workspace: root }), null)).toBe(false);
+    expect(isWorkspaceCompatible(makeConfig({ workspace: root }), "")).toBe(false);
+    // 留空仍兼容：任务就是落在当前（不存在的）工作区上，交给后续启动失败。
+    expect(isWorkspaceCompatible(makeConfig({ workspace: "" }), undefined)).toBe(true);
+  });
+
+  it("qqbot + workspace 不匹配时两个 issue 一起返回", () => {
+    const issues = checkQqStartupGate(
+      makeEnabled({ adapter: "qqbot", workspace: path.resolve(root, "..", "qq-elsewhere") }),
+      root,
+    );
+    expect(codes(issues)).toEqual(["adapter_unsupported", "workspace_not_active_root"]);
+    expect(issues.every((issue) => issue.severity === "error")).toBe(true);
   });
 });
 

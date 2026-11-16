@@ -330,4 +330,47 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(p.isQqTaskAction("delete")).toBe(false);
     expect(p.isQqTaskAction(undefined)).toBe(false);
   });
+
+  it("adapter=qqbot 时拒绝启动：toast 说明未实现，且不留通道现场", async () => {
+    setConfigOverrides({
+      enabled: true,
+      adapter: "qqbot",
+      endpoint: "http://127.0.0.1:3000/",
+      allowedUsers: ["10001"],
+    });
+    const other = new ChatPanel(makeContext(storageDir), {
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    });
+    const op = other as unknown as PanelInternals;
+    const toast = vi.spyOn(op.store, "sendToast").mockImplementation(() => 0);
+    await (other as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
+
+    expect(op.qq).toBeUndefined();
+    expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("尚未实现"));
+    toast.mockRestore();
+    await other.dispose();
+  });
+
+  it("workspace 指向其他目录时拒绝启动：toast 说明只支持当前工作区", async () => {
+    setConfigOverrides({
+      enabled: true,
+      adapter: "onebot",
+      endpoint: "http://127.0.0.1:3000/",
+      allowedUsers: ["10001"],
+      workspace: path.resolve(here, "..", "qq-elsewhere"),
+    });
+    const other = new ChatPanel(makeContext(storageDir), {
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    });
+    const op = other as unknown as PanelInternals;
+    const toast = vi.spyOn(op.store, "sendToast").mockImplementation(() => 0);
+    await (other as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
+
+    expect(op.qq).toBeUndefined();
+    expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("当前工作区"));
+    toast.mockRestore();
+    await other.dispose();
+  });
 });
