@@ -331,3 +331,82 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
     expect(blocked).not.toContain("ls");
   });
 });
+
+/**
+ * 静态守卫：门控是「每个 session 创建点都要带」的逐点契约，行为测试只能覆盖
+ * 当前存在的那几条路径。将来有人新增一个 `client.newSession` / `loadSession`
+ * 调用却忘了 `settings`，运行时不会报错——CLI 会静默把全部工具交回模型。
+ * 这里直接扫描源码字面量，把「漏传」变成红灯。
+ *
+ * 容忍多行与展开写法：只要求同一个调用对象的括号范围内出现
+ * `settings: mainSessionSettings()`。
+ */
+describe("主会话 session settings · 静态守卫（每个创建点都必须带门控）", () => {
+  const panelSource = fs.readFileSync(path.join(here, "..", "src", "panel", "panel.ts"), "utf8");
+
+  /** 从 `(` 开始按括号配对取到调用实参的原始文本（跳过字符串与行注释）。 */
+  function argumentSlice(source: string, openParenIndex: number): string {
+    let depth = 0;
+    let quote: string | null = null;
+    for (let i = openParenIndex; i < source.length; i += 1) {
+      const ch = source[i]!;
+      const prev = i > 0 ? source[i - 1] : "";
+      if (quote) {
+        if (ch === quote && prev !== "\\") quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        const newline = source.indexOf("\n", i);
+        if (newline < 0) break;
+        i = newline;
+        continue;
+      }
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) return source.slice(openParenIndex, i + 1);
+      }
+    }
+    throw new Error(`unbalanced call at ${openParenIndex}`);
+  }
+
+  function sessionCalls(source: string): Array<{ callee: string; line: number; args: string }> {
+    const pattern = /client\.(newSession|loadSession)\s*\(/g;
+    const calls: Array<{ callee: string; line: number; args: string }> = [];
+    for (const match of source.matchAll(pattern)) {
+      const callee = `client.${match[1]}`;
+      const openParen = match.index! + match[0].length - 1;
+      calls.push({
+        callee,
+        line: source.slice(0, match.index!).split("\n").length,
+        args: argumentSlice(source, openParen),
+      });
+    }
+    return calls;
+  }
+
+  it("panel.ts 里每个 client.newSession/loadSession 都带 settings: mainSessionSettings()", () => {
+    const calls = sessionCalls(panelSource);
+    // 扫描器自检：现有六个创建点（新建、恢复探针、恢复加载、Profile 热切换、
+    // 删除消息截断重载、回滚重载），少于此数说明正则/文件路径出了问题，
+    // 不能让「零命中」伪装成通过。
+    expect(calls.length).toBeGreaterThanOrEqual(6);
+    const offenders = calls
+      .filter((call) => !/settings\s*:\s*mainSessionSettings\(\s*\)/.test(call.args))
+      .map((call) => `${call.callee} at panel.ts:${call.line}`);
+    expect(offenders).toEqual([]);
+  });
+
+  it("禁止清单含读/写/执行与 task，保留规划、提问与派发通道", () => {
+    for (const name of ["run_shell_command", "read_file", "write_file", "task"]) {
+      expect(MAIN_SESSION_DISALLOWED_TOOLS).toContain(name);
+    }
+    for (const name of ["super-agent", "todo_write", "todo_read", "ask_user_question"]) {
+      expect(MAIN_SESSION_DISALLOWED_TOOLS).not.toContain(name);
+    }
+  });
+});
