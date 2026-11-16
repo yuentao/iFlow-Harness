@@ -1564,6 +1564,162 @@ export interface HostSettingsUi {
   superAgentMaxConcurrent: number;
 }
 
+/**
+ * QQ 远程任务设置快照（`iflow.qq.*` 的 12 项 + 两个凭据「已配置」标志）。
+ *
+ * **绝不携带明文凭据**：`hasBotToken` / `hasAppSecret` 只是「SecretStorage /
+ * 设置里有没有值」的布尔投影；明文只经 WebviewToHost 的 `qqSecretsWrite`
+ * 单向写入，永不回传、永不进快照。
+ *
+ * 枚举取值与 `package.json` 的 `iflow.qq.*` 声明逐字一致，也是
+ * `shared/qq-task.ts` 的 `QqRemotePolicy` / `QqResultDetail`。
+ */
+export interface QqSettingsUi {
+  enabled: boolean;
+  adapter: "onebot" | "qqbot";
+  endpoint: string;
+  bridgePort: number;
+  allowedUsers: string[];
+  allowedGroups: string[];
+  workspace: string;
+  remotePolicy: "readonly" | "supervised" | "trusted";
+  maxConcurrentTasks: number;
+  rateLimitPerMin: number;
+  resultDetail: "summary" | "standard" | "full";
+  autoMerge: boolean;
+  /** 机器人 Token 是否已配置（qqbot 适配器）。只有布尔，没有明文。 */
+  hasBotToken: boolean;
+  /** App Secret 是否已配置。只有布尔，没有明文。 */
+  hasAppSecret: boolean;
+}
+
+/**
+ * 默认值与裁剪范围 —— **与 src/qq/config.ts 保持同步**（那边是宿主侧权威
+ * 归一化：`normalizeQqConfig`）。shared 层不能 import src/，所以这里只复刻
+ * 默认值、整数四舍五入 + 闭区间裁剪、字符串 trim、白名单去空白/去重，
+ * 非法枚举回退默认；不产出 warnings（告警由宿主侧负责）。
+ */
+const QQ_SETTINGS_DEFAULTS = {
+  enabled: false,
+  adapter: "onebot",
+  endpoint: "",
+  bridgePort: 0,
+  workspace: "",
+  remotePolicy: "supervised",
+  maxConcurrentTasks: 2,
+  rateLimitPerMin: 6,
+  resultDetail: "standard",
+  autoMerge: false,
+} as const;
+
+/** 数字项允许范围（闭区间，先取整再裁剪）——与 src/qq/config.ts 的 RANGES 一致。 */
+const QQ_SETTINGS_RANGES = {
+  bridgePort: { min: 0, max: 65535 },
+  maxConcurrentTasks: { min: 1, max: 10 },
+  rateLimitPerMin: { min: 1, max: 60 },
+} as const;
+
+/** 枚举取值（与 package.json 的 iflow.qq.* enum 一致）。 */
+const QQ_ADAPTERS = ["onebot", "qqbot"] as const;
+const QQ_REMOTE_POLICIES = ["readonly", "supervised", "trusted"] as const;
+const QQ_RESULT_DETAILS = ["summary", "standard", "full"] as const;
+
+function qqReadString(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function qqReadBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function qqReadEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return (allowed as readonly string[]).includes(trimmed) ? (trimmed as T) : fallback;
+}
+
+function qqReadInteger(
+  value: unknown,
+  range: { readonly min: number; readonly max: number },
+  fallback: number,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(range.max, Math.max(range.min, Math.round(value)));
+}
+
+function qqReadIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const id = item.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * 把任意设置快照归一成 {@link QqSettingsUi}。
+ *
+ * 纯函数（零依赖、无副作用）：宿主读 settings.json / VSCode 配置后交给它，
+ * webview 的 demo 快照也用它兜底。**默认值与 clamp 范围与 src/qq/config.ts
+ * 保持同步**；枚举非法回退默认值，数字取整后裁剪，字符串 trim，白名单去
+ * 空白/去重。
+ *
+ * 凭据只以 `hasBotToken` / `hasAppSecret` 布尔透传（来自 `secrets`），
+ * 输入里即便混进 `botToken` / `appSecret` 也**不会**进入返回值。
+ */
+export function pickQqSettingsUi(
+  raw: Record<string, unknown>,
+  secrets: { hasBotToken: boolean; hasAppSecret: boolean },
+): QqSettingsUi {
+  const source: Record<string, unknown> =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    enabled: qqReadBoolean(source.enabled, QQ_SETTINGS_DEFAULTS.enabled),
+    adapter: qqReadEnum(source.adapter, QQ_ADAPTERS, QQ_SETTINGS_DEFAULTS.adapter),
+    endpoint: qqReadString(source.endpoint, QQ_SETTINGS_DEFAULTS.endpoint),
+    bridgePort: qqReadInteger(
+      source.bridgePort,
+      QQ_SETTINGS_RANGES.bridgePort,
+      QQ_SETTINGS_DEFAULTS.bridgePort,
+    ),
+    allowedUsers: qqReadIdList(source.allowedUsers),
+    allowedGroups: qqReadIdList(source.allowedGroups),
+    workspace: qqReadString(source.workspace, QQ_SETTINGS_DEFAULTS.workspace),
+    remotePolicy: qqReadEnum(
+      source.remotePolicy,
+      QQ_REMOTE_POLICIES,
+      QQ_SETTINGS_DEFAULTS.remotePolicy,
+    ),
+    maxConcurrentTasks: qqReadInteger(
+      source.maxConcurrentTasks,
+      QQ_SETTINGS_RANGES.maxConcurrentTasks,
+      QQ_SETTINGS_DEFAULTS.maxConcurrentTasks,
+    ),
+    rateLimitPerMin: qqReadInteger(
+      source.rateLimitPerMin,
+      QQ_SETTINGS_RANGES.rateLimitPerMin,
+      QQ_SETTINGS_DEFAULTS.rateLimitPerMin,
+    ),
+    resultDetail: qqReadEnum(
+      source.resultDetail,
+      QQ_RESULT_DETAILS,
+      QQ_SETTINGS_DEFAULTS.resultDetail,
+    ),
+    autoMerge: qqReadBoolean(source.autoMerge, QQ_SETTINGS_DEFAULTS.autoMerge),
+    hasBotToken: secrets.hasBotToken === true,
+    hasAppSecret: secrets.hasAppSecret === true,
+  };
+}
+
 export type HostToWebview =
   | { type: "turnChanges"; sessionId: string; userBlockId: string; requestId: string; records: TurnChangeUi[]; unavailable: boolean }
   /** A single file's turn changes were reverted; refetch the turn records. */
@@ -1763,7 +1919,13 @@ export type HostToWebview =
    * 分别对应连测试、生成绑定码、解绑；本波只声明协议，宿主尚未接线。 */
   | { type: "qqConfigAction"; action: "testConnection" | "generateBindCode" | "unbind" }
   /** QQ 远程任务（Wave2-B）：绑定码与过期时间（epoch ms），供设置页展示。 */
-  | { type: "qqBindCode"; code: string; expiresAt: number };
+  | { type: "qqBindCode"; code: string; expiresAt: number }
+  /** QQ 远程任务（Wave3-B）：设置页的配置快照。明文凭据绝不在这条消息里，
+   * 只用 `hasBotToken` / `hasAppSecret` 表达「已配置」。 */
+  | { type: "qqSettings"; values: QqSettingsUi }
+  /** QQ 远程任务（Wave3-B）：bridge / 适配器的连接状态；`detail` 是给人看的
+   * 补充说明（例如端点地址或失败原因）。 */
+  | { type: "qqStatus"; connected: boolean; detail?: string };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -2127,7 +2289,14 @@ export type WebviewToHost =
       taskId: string;
       action: "stop" | "approve" | "deny" | "answer" | "merge" | "discard" | "refresh";
       text?: string;
-    };
+    }
+  /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
+   * `hasBotToken` / `hasAppSecret` 是宿主回传的投影，这里只会被忽略——
+   * 凭据走下面的 `qqSecretsWrite`，不进设置补丁。 */
+  | { type: "qqSettingsPatch"; patch: Partial<QqSettingsUi> }
+  /** QQ 远程任务（Wave3-B）：写入凭据。只在用户真的输入了新值时才带上对应
+   * 字段（空串 = 清空该凭据）；两项都缺省时宿主什么也不做。 */
+  | { type: "qqSecretsWrite"; botToken?: string; appSecret?: string };
 
 // ---------------------------------------------------------------------------
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the
