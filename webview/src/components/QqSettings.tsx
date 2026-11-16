@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { AlertTriangle, Link2, PlugZap, Plus, Trash2, Unlink } from "lucide-react";
+import type { QqSettingsUi } from "../../../shared/messages";
 import { t } from "../i18n";
 import {
   ActionRow,
@@ -30,31 +31,23 @@ import {
  * Wave3-B 接线时只需要把这份组件接到真实的 settings 快照）。
  */
 
-export type QqAdapter = "onebot" | "qqbot";
-export type QqRemotePolicy = "readonly" | "supervised" | "trusted";
-export type QqResultDetail = "summary" | "standard" | "full";
+/** 共享契约里的枚举（不重复声明字面量，改契约时这里自动跟随）。 */
+export type QqAdapter = QqSettingsUi["adapter"];
+export type QqRemotePolicy = QqSettingsUi["remotePolicy"];
+export type QqResultDetail = QqSettingsUi["resultDetail"];
 
-/** 对应 `iflow.qq.*` 的 12 项设置（外加两项仅由宿主传入的凭据）。 */
-export interface QqSettingsValue {
-  enabled: boolean;
-  adapter: QqAdapter;
-  endpoint: string;
-  bridgePort: number;
-  allowedUsers: string[];
-  allowedGroups: string[];
-  workspace: string;
-  remotePolicy: QqRemotePolicy;
-  maxConcurrentTasks: number;
-  rateLimitPerMin: number;
-  resultDetail: QqResultDetail;
-  autoMerge: boolean;
-  /**
-   * 机器人凭据（qqbot 适配器）。只读 props，不在组件里存草稿、不落盘：
-   * 宿主负责凭据的读写与遮罩。
-   */
+/**
+ * 组件的受控值：共享设置快照 {@link QqSettingsUi} 加上**仅用于编辑**的凭据
+ * 草稿。
+ *
+ * 快照本身绝不含明文凭据（只有 `hasBotToken` / `hasAppSecret` 布尔）；
+ * `botToken` / `appSecret` 是宿主递进来的临时输入值，组件只在 password 字段
+ * 里回显它们，落盘与遮罩都由宿主负责。
+ */
+export type QqSettingsValue = QqSettingsUi & {
   botToken?: string;
   appSecret?: string;
-}
+};
 
 export interface QqSettingsProps {
   value: QqSettingsValue;
