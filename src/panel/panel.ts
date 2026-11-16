@@ -7,7 +7,7 @@ import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
@@ -53,7 +53,7 @@ import type {
   SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -147,6 +147,7 @@ import {
   reassignBlockIds,
   renameSessionSummary,
   SESSION_LABEL_MAX,
+  setQqTasks,
   snapshotEditDiff,
   sortSessionSummaries,
   synthesizeEditDiff,
@@ -202,6 +203,40 @@ import {
 } from "../../shared/model-metadata.js";
 import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.js";
 import { WireRingBuffer } from "./wire-log.js";
+import { QqService, type QqTaskAction } from "../qq/service.js";
+import { QqTaskStore } from "../qq/store.js";
+import { createQqIpcServer, type QqIpcHandlers } from "../qq/ipc.js";
+import { createBridgeDeliveryClient, type BridgeDeliveryClient } from "../qq/bridge-client.js";
+import {
+  createQqServiceHost,
+  QQ_DEFAULT_SETTLE_TIMEOUT_MS,
+  QqSettleTimeoutError,
+  type QqHostPorts,
+  type QqHostSuperSnapshot,
+} from "../qq/panel-host.js";
+import {
+  applyQqSettingsPatch,
+  createVscodeQqSettingsIo,
+  ensureBridgeSecrets,
+  readQqSettings,
+  writeQqSecrets,
+  type QqSettingsIo,
+} from "../qq/settings-host.js";
+import {
+  buildBridgeEnv,
+  normalizeQqConfig,
+  QQ_SECRET_KEYS,
+  validateQqConfig,
+  type QqConfig,
+} from "../qq/config.js";
+import {
+  generateBindCode,
+  isBindCodeValid,
+  isTerminalSuperStatus as isQqTerminalSuperStatus,
+  QQ_SETTLE_POLL_MS,
+  shouldRestartOnPatch,
+} from "../qq/wiring.js";
+import type { InboundMessage } from "../qq/adapter/types.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** M2 P0-4: async execFile (never sync — trap #18: external process probes
@@ -758,6 +793,21 @@ export interface PanelServices {
  * The handshake's post-connect steps and the session/prompt entry points check
  * it at their checkpoints so a destroyed store is never touched again.
  */
+/**
+ * QQ bridge 的自动重启上限与退避阶梯（宿主 §B2b 第 4 条）。
+ *
+ * bridge 是独立进程：它崩了不代表配置错了，重试有价值；但连续三次都起不来
+ * 基本就是配置/端口问题，继续重起只会刷屏，所以到此为止并如实 toast。
+ * 一旦 `bridge_ready` 成功，`restartCount` 归零 —— 阶梯按「失败连跑」计，而不是
+ * 按进程一生计。
+ */
+const QQ_BRIDGE_MAX_RESTARTS = 3;
+const QQ_BRIDGE_RESTART_DELAYS_MS = [2_000, 5_000, 10_000] as const;
+/** stopQq 的单项上限：关面板不能被一个卡住的 socket 拖死。 */
+const QQ_BRIDGE_STOP_TIMEOUT_MS = 2_000;
+/** 设置改动 → 重启 QQ 服务的防抖窗口（settings.json 一次编辑会触发多帧）。 */
+const QQ_SETTINGS_RESTART_DEBOUNCE_MS = 500;
+
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
     super(message);
@@ -808,6 +858,49 @@ export class ChatPanel implements vscode.Disposable {
    * lazily (the first delegation pays the setup cost).
    */
   private superAgent: SuperAgentManager | null = null;
+  /**
+   * QQ 远程任务通道（Wave3-B2b）的运行期现场。
+   *
+   * 一段式记录：服务、任务落盘、宿主侧 IPC、bridge 子进程、投递客户端、
+   * 启动时的配置快照、设置 IO 与一个一次性配对码。它是**唯一**的「通道是否
+   * 在跑」判据 —— 所有入口（IPC 事件、webview 消息、设置监听）都以
+   * `this.qq` 是否存在为闸门，没有任何入口能在半初始化状态下继续。
+   *
+   * `config` 与 QqService 内部持有的是**同一个对象**：非连接类字段（白名单 /
+   * 策略 / 并发 / 限流 / 详略 / 自动合并）由面板就地热更新，改完即时生效；
+   * 连接类字段（enabled / adapter / endpoint / bridgePort）必须重建服务，
+   * 判定见 `src/qq/wiring.ts` 的 `shouldRestartOnPatch`。
+   */
+  private qq?: {
+    service: QqService;
+    store: QqTaskStore;
+    ipc: { port: number; close(): Promise<void> };
+    bridge?: ChildProcess;
+    delivery?: BridgeDeliveryClient;
+    config: QqConfig;
+    io: QqSettingsIo;
+    bindCode?: { code: string; expiresAt: number };
+    restartCount: number;
+  };
+  /** 主动停止中：bridge 的 exit 事件不得触发自动重启。 */
+  private qqStopping = false;
+  /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
+  private qqConnected = false;
+  private qqLastDetail: string | null = null;
+  /** bridge 的投递端口（`bridge_ready` 上报；健康检查与诊断详情用）。 */
+  private qqDeliveryPort: number | null = null;
+  /** 设置变更 → 重启服务的防抖定时器。 */
+  private qqRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** bridge 崩溃后的重起定时器（与上面的「整服务重启」是两回事）。 */
+  private qqBridgeRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 进行中的启动（并发调用 startQqIfEnabled 时共享同一份工作）。 */
+  private qqStarting: Promise<void> | null = null;
+  /**
+   * 启动代次：`stopQq` 每次递增。异步启动在关键节点复核它 —— 启动途中被
+   * 停用 / 重启时，慢半拍的那个启动必须把自己造出来的现场拆掉，而不是把
+   * 一份陈旧通道装回 `this.qq`。
+   */
+  private qqGeneration = 0;
   /**
    * 待「让智能体合并」的子会话队列。
    *
@@ -1383,6 +1476,19 @@ export class ChatPanel implements vscode.Disposable {
     fileWatcher.onDidCreate(invalidateFileCache);
     fileWatcher.onDidDelete(invalidateFileCache);
     this.context.subscriptions.push(fileWatcher);
+    // QQ 远程任务通道（Wave3-B2b）：设置区的任何改动都可能要求重建服务。
+    // 监听整个 `iflow.qq` 段（等价于 `iflow.qq.` 前缀），再按「是否碰到连接类
+    // 字段」决定重启 —— 改白名单 / 策略这类热更新字段不应打断在跑的任务。
+    this.context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration("iflow.qq")) return;
+        void this.onQqSettingsChanged().catch((error: unknown) => {
+          this.log.warn(`QQ 设置变更处理失败：${errorMessage(error)}`);
+        });
+      }),
+    );
+    // 异步启动，不阻塞激活：设置未启用时只读一次配置就返回。
+    void this.startQqIfEnabled();
     // Status bar entry is the always-visible launcher (no sidebar view anymore).
     this.statusBar.show();
   }
@@ -1601,6 +1707,10 @@ export class ChatPanel implements vscode.Disposable {
       this.diagDebounce = null;
     }
     this.diagBaselineErrors = null;
+    // QQ 通道：bridge 进程、宿主 IPC 监听与任务服务必须一起收掉 —— 否则窗口
+    // 关闭后会留下一个孤立的 node 进程和占用的端口。最多等 2s（见
+    // QQ_BRIDGE_STOP_TIMEOUT_MS），关闭流程不能被一个卡住的 socket 拖死。
+    await this.raceQqTeardown(this.stopQq());
     this.client = null;
     this.memory.dispose();
     this.assets.dispose();
@@ -1670,6 +1780,9 @@ export class ChatPanel implements vscode.Disposable {
     panel.onDidChangeViewState(
       (e) => {
         this.panelVisible = e.webviewPanel.visible;
+        // 面板重新可见：QQ 通道可能在被隐藏期间变化（任务推进 / bridge 重连），
+        // 补一次全量推送，避免设置卡与看板停在旧画面。
+        if (e.webviewPanel.visible) this.pushQqState();
       },
       null,
       this.context.subscriptions,
@@ -1684,6 +1797,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.postSnapshot();
     this.postTheme();
+    this.pushQqState();
     void this.ensureClient().catch((error) => {
       this.log.error("initial connect failed", errorMessage(error));
     });
@@ -1944,6 +2058,19 @@ export class ChatPanel implements vscode.Disposable {
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
     this.log.trace(`webview → host: ${msg.type}`);
+    // 协议债（本波不改 shared/）：`qqConfigAction` 声明在 HostToWebview 上
+    // （方向写反了），因此不在 WebviewToHost 的联合里。按运行时形状接收，
+    // 让设置页的三类动作（连测试 / 生成配对码 / 解绑）照样能到宿主。
+    const qqAction = (msg as { type?: unknown; action?: unknown });
+    if (
+      qqAction.type === "qqConfigAction" &&
+      (qqAction.action === "testConnection" ||
+        qqAction.action === "generateBindCode" ||
+        qqAction.action === "unbind")
+    ) {
+      await this.handleQqConfigAction(qqAction.action);
+      return;
+    }
     switch (msg.type) {
       case "ready":
         // The webview (re)booted and lost its transcript anchor: resync()
@@ -1969,6 +2096,7 @@ export class ChatPanel implements vscode.Disposable {
         // `ready` proves the listener is live.
         this.postTheme();
         this.postHostSettings();
+        this.pushQqState();
         break;
       case "sendPrompt":
         await this.sendPrompt(msg.text, msg.images, msg.files, msg.contexts);
@@ -2394,6 +2522,15 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "exportToolOutput":
         await this.exportToolOutput(msg.blockId);
+        break;
+      case "qqSettingsPatch":
+        await this.handleQqSettingsPatch(msg.patch);
+        break;
+      case "qqSecretsWrite":
+        await this.handleQqSecretsWrite(msg.botToken, msg.appSecret);
+        break;
+      case "qqTaskAction":
+        await this.handleQqTaskAction(msg.taskId, msg.action, msg.text);
         break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different
@@ -8620,6 +8757,901 @@ export class ChatPanel implements vscode.Disposable {
         break;
       }
     }
+  }
+
+  // --- QQ 远程任务通道（Wave3-B2b） -------------------------------------------
+  //
+  // 一条通道 = 一份 QqService + 一个宿主侧 IPC（loopback）+ 一个 bridge 子进程。
+  // 面板只做编排：命令解析 / 白名单 / 审批桥 / 结果回传全在 QqService 与 bridge
+  // 里；本节负责把它们接起来、把生命周期管住、把状态投影给 UI。
+  //
+  // 纪律：
+  //  - 所有入口先判 `this.qq` 是否存在 —— 半启动的现场绝不能被消息驱动；
+  //  - bridge 崩溃只重起 bridge（IPC 与服务保持），连续三次失败才放弃；
+  //  - 主动停止走 `qqStopping` 标记，exit 事件不得触发自动重启；
+  //  - 连接类设置改动重建服务，其余字段就地热更新（见 src/qq/wiring.ts）。
+
+  /** 设置启用 → 启动通道；任何失败都把半启动现场收干净并如实提示。 */
+  private startQqIfEnabled(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    if (this.qqStarting) return this.qqStarting;
+    const task = this.doStartQq()
+      .catch(async (error: unknown) => {
+        const detail = errorMessage(error);
+        if (!this.disposed) this.log.warn(`QQ 通道启动失败：${detail}`);
+        if (!this.disposed) {
+          this.store.sendToast("warning", vscode.l10n.t("QQ 通道启动失败：{0}", detail));
+          this.pushQqStatus(false, detail);
+        }
+        // 半启动的现场必须收干净：绝不能留下 ipc 监听或 bridge 孤儿进程。
+        await this.stopQq().catch(() => undefined);
+      })
+      .finally(() => {
+        this.qqStarting = null;
+      });
+    this.qqStarting = task;
+    return task;
+  }
+
+  /**
+   * 读设置 → 校验 → 建 IPC / 服务 / bridge。
+   *
+   * `enabled=false` 时只读一次配置就返回（不产生任何进程）；校验里有 error
+   * 级问题时**一个零件都不启动**，只提示 —— 半启动的通道比不启动更难排查。
+   */
+  private async doStartQq(): Promise<void> {
+    if (this.qq) return;
+    const generation = this.qqGeneration;
+    const io = createVscodeQqSettingsIo(this.context.secrets);
+    const snapshot = await readQqSettings(io);
+    const { config, warnings } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
+    for (const warning of warnings) this.log.warn(`QQ 设置：${warning}`);
+    if (!config.enabled) {
+      this.log.info("QQ 通道未启用，跳过启动");
+      return;
+    }
+
+    const roots = this.qqWorkspaceRoots();
+    const issues = validateQqConfig(config, roots);
+    for (const issue of issues) {
+      const line = `QQ 配置${issue.severity === "error" ? "错误" : "提示"}（${issue.code}）：${issue.message}`;
+      if (issue.severity === "error") this.log.warn(line);
+      else this.log.info(line);
+    }
+    const errors = issues.filter((issue) => issue.severity === "error");
+    if (errors.length > 0) {
+      const first = errors[0]!;
+      this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动：{0}", first.message));
+      this.pushQqStatus(false, first.message);
+      return;
+    }
+
+    const secrets = await ensureBridgeSecrets(io);
+    const root = path.join(
+      this.context.storageUri?.fsPath ?? this.context.globalStorageUri.fsPath,
+      "qq",
+    );
+    const taskStore = new QqTaskStore(root);
+    const service = new QqService({
+      config,
+      store: taskStore,
+      host: createQqServiceHost(this.createQqHostPorts()),
+      log: (line) => this.log.info(line),
+    });
+    const startedAt = Date.now();
+    const handlers: QqIpcHandlers = {
+      onEvents: async (body) => this.handleQqIpcEvent(body),
+      // bridge 的投递回执通道：当前桥只回 204，没有可消费的数据。
+      onDeliver: async () => ({ ok: true }),
+      onTaskAction: async (taskId, body) => this.handleQqIpcTaskAction(taskId, body),
+      onHealth: async () => ({
+        ok: true,
+        uptimeMs: Date.now() - startedAt,
+        deliveryPort: this.qqDeliveryPort,
+      }),
+    };
+    const ipc = await createQqIpcServer({
+      port: 0,
+      token: secrets.bridgeToken,
+      hmacSecret: secrets.hmacSecret,
+      handlers,
+    });
+    if (generation !== this.qqGeneration || this.disposed || this.qq) {
+      // 绑定 IPC 期间被停用 / 重启（或另一个启动已经装好现场）：这份监听
+      // 不能留，否则会占着一个没人认领的端口。
+      await this.raceQqTeardown(ipc.close());
+      await this.raceQqTeardown(service.stop());
+      return;
+    }
+    // 先把现场挂上再 spawn bridge：bridge_ready 可能在 await 之间到达，
+    // 早一步赋值才接得住那一帧投递端口。
+    const owner: NonNullable<ChatPanel["qq"]> = {
+      service,
+      store: taskStore,
+      ipc,
+      config,
+      io,
+      restartCount: 0,
+    };
+    this.qq = owner;
+    this.log.info(`QQ IPC 已监听 127.0.0.1:${ipc.port}`);
+    try {
+      await this.startQqBridge(owner);
+      // spawn / 服务启动都是 await：期间用户可能已经关掉通道或改了设置。
+      if (generation !== this.qqGeneration || this.disposed) {
+        if (this.qq === owner) this.qq = undefined;
+        await this.disposeQqOwner(owner);
+        return;
+      }
+      await service.start();
+    } catch (error) {
+      if (this.qq === owner) this.qq = undefined;
+      await this.disposeQqOwner(owner);
+      throw error;
+    }
+    if (generation !== this.qqGeneration || this.disposed) {
+      if (this.qq === owner) this.qq = undefined;
+      await this.disposeQqOwner(owner);
+      return;
+    }
+    this.pushQqStatus(false, "QQ bridge 正在启动");
+    this.refreshQqTasks();
+    this.log.info(`QQ 通道已启动（adapter=${config.adapter}）`);
+  }
+
+  /**
+   * spawn bridge 子进程（或崩溃后重新 spawn）。
+   *
+   * `process.execPath` 只作最后兜底：VSCode 桌面端的扩展宿主里它指向编辑器
+   * 可执行文件，直接喂 JS 会另开窗口 —— 所以优先沿用 CLI 那套 node 解析
+   * （`iflow.nodePath` → 自动探测）。
+   *
+   * stdin 必须是 pipe 且保持打开：bridge 把 stdin 关闭当作「上层进程结束」
+   * 的信号会主动退出（见 src/qq/bridge/main.ts），用 ignore 会立刻 EOF。
+   */
+  private async startQqBridge(owner: NonNullable<ChatPanel["qq"]>): Promise<void> {
+    if (this.qq !== owner || this.disposed || this.qqStopping) return;
+    const { bridgeToken, hmacSecret } = await ensureBridgeSecrets(owner.io);
+    const botToken = (await owner.io.getSecret(QQ_SECRET_KEYS.botToken))?.trim() ?? "";
+    // OneBot 的 access token 同时用作反向上报的 Bearer：没有配置时退回
+    // bridge token（稳定、已存在），用户需在 OneBot 侧填同一个值。
+    const onebotToken = botToken.length > 0 ? botToken : "";
+    const incomingToken = onebotToken.length > 0 ? onebotToken : bridgeToken;
+
+    const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
+    const locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
+    // 两次 await 之间通道可能已被停用 / 面板已销毁：绝不能再 spawn。
+    if (this.qq !== owner || this.disposed || this.qqStopping) return;
+    const node = nodePathConfigured || locatedNode || process.execPath;
+    const entry = path.join(this.context.extensionPath, "dist", "qq-bridge.cjs");
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...buildBridgeEnv(owner.config, {
+        hostPort: owner.ipc.port,
+        bridgeToken,
+        hmacSecret,
+        onebotToken,
+        incomingPort: owner.config.bridgePort,
+        incomingToken,
+      }),
+    };
+
+    let child: ChildProcess;
+    try {
+      child = spawn(node, [entry], { env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+    } catch (error) {
+      throw new Error(`无法启动 QQ bridge：${errorMessage(error)}`);
+    }
+    owner.bridge = child;
+    if (this.qq !== owner) {
+      try {
+        child.kill();
+      } catch {
+        // 已经开始但现场已被替换：尽力收掉即可。
+      }
+      return;
+    }
+    this.log.info(`QQ bridge 已 spawn（pid=${child.pid ?? "?"}）`);
+
+    // stderr 逐行进输出通道：bridge 的日志约定就是「一律走 stderr」。
+    let stderrBuffer = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderrBuffer += chunk;
+      const lines = stderrBuffer.split(/\r?\n/u);
+      stderrBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const text = line.trim();
+        if (text.length > 0) this.log.info(`[qq-bridge] ${text.slice(0, 500)}`);
+      }
+    });
+
+    let handled = false;
+    const onGone = (detail: string): void => {
+      if (handled) return;
+      handled = true;
+      void this.onQqBridgeExit(owner, detail);
+    };
+    child.on("exit", (code, signal) => {
+      onGone(`QQ bridge 已退出（${code !== null ? `code ${code}` : `signal ${signal ?? "unknown"}`}）`);
+    });
+    child.on("close", (code, signal) => {
+      onGone(`QQ bridge 已关闭（${code !== null ? `code ${code}` : `signal ${signal ?? "unknown"}`}）`);
+    });
+    child.on("error", (error) => {
+      this.log.warn(`QQ bridge 进程错误：${errorMessage(error)}`);
+      onGone(`QQ bridge 启动失败：${errorMessage(error)}`);
+    });
+  }
+
+  /**
+   * bridge 退出后的处置：主动停止不管，否则按 2s/5s/10s 重起，三次为止。
+   *
+   * 投递客户端绑在**旧 bridge 的端口**上，进程没了就必然失败 —— 先关掉，
+   * 等新 bridge 的 `bridge_ready` 再建。
+   */
+  private async onQqBridgeExit(
+    owner: NonNullable<ChatPanel["qq"]>,
+    detail: string,
+  ): Promise<void> {
+    if (this.qq !== owner) return;
+    if (this.qqStopping || this.disposed) return;
+    owner.delivery?.close();
+    owner.delivery = undefined;
+    this.qqDeliveryPort = null;
+    this.log.warn(detail);
+    this.pushQqStatus(false, detail);
+
+    if (owner.restartCount >= QQ_BRIDGE_MAX_RESTARTS) {
+      this.store.sendToast("warning", vscode.l10n.t("QQ bridge 多次启动失败"));
+      this.pushQqStatus(false, "QQ bridge 多次启动失败");
+      return;
+    }
+    const delay =
+      QQ_BRIDGE_RESTART_DELAYS_MS[
+        Math.min(owner.restartCount, QQ_BRIDGE_RESTART_DELAYS_MS.length - 1)
+      ] ?? 10_000;
+    owner.restartCount += 1;
+    this.log.info(`QQ bridge ${delay}ms 后重启（第 ${owner.restartCount} 次）`);
+    if (this.qqBridgeRestartTimer) clearTimeout(this.qqBridgeRestartTimer);
+    this.qqBridgeRestartTimer = setTimeout(() => {
+      this.qqBridgeRestartTimer = null;
+      if (this.disposed || this.qqStopping || this.qq !== owner) return;
+      void this.startQqBridge(owner).catch((error: unknown) => {
+        const why = errorMessage(error);
+        this.log.warn(`QQ bridge 重启失败：${why}`);
+        this.pushQqStatus(false, why);
+      });
+    }, delay);
+    this.qqBridgeRestartTimer.unref?.();
+  }
+
+  /** 绑定 bridge 的投递端口（bridge_ready 到达时调用）。 */
+  private async attachQqDelivery(
+    owner: NonNullable<ChatPanel["qq"]>,
+    deliveryPort: number,
+  ): Promise<void> {
+    if (this.qq !== owner) return;
+    owner.delivery?.close();
+    const { bridgeToken, hmacSecret } = await ensureBridgeSecrets(owner.io);
+    owner.delivery = createBridgeDeliveryClient({
+      port: deliveryPort,
+      token: bridgeToken,
+      hmacSecret,
+    });
+    this.qqDeliveryPort = deliveryPort;
+    // 一次成功的握手把退避阶梯清零：阶梯按「连续失败」计，不是按进程一生计。
+    owner.restartCount = 0;
+    this.pushQqStatus(
+      true,
+      vscode.l10n.t("QQ bridge 已连接（投递端口 {0}）", deliveryPort),
+    );
+    this.log.info(`QQ bridge 已就绪：deliveryPort=${deliveryPort}`);
+  }
+
+  /** 停掉整条通道（bridge → IPC → 服务），每一项都有 2s 上限。 */
+  private async stopQq(): Promise<void> {
+    // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
+    // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
+    this.qqGeneration += 1;
+    if (this.qqStopping) return;
+    this.qqStopping = true;
+    try {
+      if (this.qqRestartTimer) {
+        clearTimeout(this.qqRestartTimer);
+        this.qqRestartTimer = null;
+      }
+      if (this.qqBridgeRestartTimer) {
+        clearTimeout(this.qqBridgeRestartTimer);
+        this.qqBridgeRestartTimer = null;
+      }
+      const owner = this.qq;
+      this.qq = undefined;
+      this.qqDeliveryPort = null;
+      if (!owner) return;
+      await this.disposeQqOwner(owner);
+      this.pushQqStatus(false, "QQ 通道已停止");
+    } finally {
+      this.qqStopping = false;
+    }
+  }
+
+  /**
+   * 只拆**这一份** owner（bridge → delivery → IPC → 服务）。
+   *
+   * 与 stopQq 分开是为了「启动途中被停用」那条路径：那时 `this.qq` 可能已经
+   * 属于另一份现场（或已被 stopQq 清空），我们不能用 stopQq 去动它，只能把
+   * 自己造出来的这份拆干净。
+   */
+  private async disposeQqOwner(owner: NonNullable<ChatPanel["qq"]>): Promise<void> {
+    const bridge = owner.bridge;
+    owner.bridge = undefined;
+    if (bridge) {
+      // 先关 stdin（bridge 的优雅退出信号），再 kill；两条都是尽力而为。
+      try {
+        bridge.stdin?.end();
+      } catch {
+        // stdin 可能已经关了
+      }
+      if (!bridge.killed) {
+        try {
+          bridge.kill();
+        } catch {
+          // 进程可能已经退出
+        }
+      }
+    }
+    owner.delivery?.close();
+    owner.delivery = undefined;
+    await this.raceQqTeardown(owner.ipc.close());
+    await this.raceQqTeardown(owner.service.stop());
+  }
+
+  /** 单项收尾的硬上限：一个卡住的 socket 不能拖住窗口关闭。 */
+  private async raceQqTeardown(work: Promise<unknown>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        work.then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, QQ_BRIDGE_STOP_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async restartQq(): Promise<void> {
+    // 先等在飞的启动落定：否则 startQqIfEnabled 会把它那个（即将被作废的）
+    // promise 直接还给我们，重启就成了空转。
+    const inFlight = this.qqStarting;
+    if (inFlight) await inFlight.catch(() => undefined);
+    await this.stopQq();
+    await this.startQqIfEnabled();
+  }
+
+  /** 500ms 防抖的整服务重启（settings.json 一次编辑会触发多帧事件）。 */
+  private scheduleQqRestart(): void {
+    if (this.qqRestartTimer) clearTimeout(this.qqRestartTimer);
+    this.qqRestartTimer = setTimeout(() => {
+      this.qqRestartTimer = null;
+      if (this.disposed) return;
+      void this.restartQq().catch((error: unknown) => {
+        const detail = errorMessage(error);
+        this.log.warn(`QQ 服务重启失败：${detail}`);
+        this.store.sendToast("warning", vscode.l10n.t("QQ 服务重启失败：{0}", detail));
+      });
+    }, QQ_SETTINGS_RESTART_DEBOUNCE_MS);
+    this.qqRestartTimer.unref?.();
+  }
+
+  // --- QQ IPC 事件 -----------------------------------------------------------
+
+  /** bridge → 宿主的事件路由（`POST /v1/events`）。 */
+  private async handleQqIpcEvent(body: unknown): Promise<unknown> {
+    const owner = this.qq;
+    if (!owner) return { ok: false, reason: "not_running" };
+    if (!this.isQqRecord(body)) return { ok: false, reason: "bad_request" };
+    const type = body["type"];
+
+    if (type === "bridge_ready") {
+      const port = body["deliveryPort"];
+      if (typeof port !== "number" || !Number.isInteger(port) || port <= 0) {
+        this.log.warn("QQ bridge_ready 缺少有效 deliveryPort");
+        return { ok: false, reason: "bad_request" };
+      }
+      await this.attachQqDelivery(owner, port);
+      return { ok: true };
+    }
+
+    if (type === "inbound_message") {
+      const message = this.coerceQqInboundMessage(body["message"]);
+      if (!message) {
+        this.log.warn("QQ inbound_message 载荷不合法，已丢弃");
+        return { ok: false, reason: "bad_request" };
+      }
+      await owner.service.handleInboundMessage(message);
+      this.refreshQqTasks();
+      return { ok: true };
+    }
+
+    if (type === "task_action") {
+      const taskId = body["taskId"];
+      const action = body["action"];
+      if (typeof taskId !== "string" || !this.isQqTaskAction(action)) {
+        return { ok: false, reason: "bad_request" };
+      }
+      const text = typeof body["text"] === "string" ? body["text"] : undefined;
+      await this.handleQqTaskAction(taskId, action, text);
+      return { ok: true };
+    }
+
+    return { ok: false, reason: "unknown_event" };
+  }
+
+  /** `POST /v1/tasks/:id/action` —— 与 webview 任务操作共用一条路径。 */
+  private async handleQqIpcTaskAction(taskId: string, body: unknown): Promise<unknown> {
+    if (!this.qq) return { ok: false, reason: "not_running" };
+    const action = this.isQqRecord(body) ? body["action"] : undefined;
+    if (!this.isQqTaskAction(action)) return { ok: false, reason: "bad_request" };
+    const text =
+      this.isQqRecord(body) && typeof body["text"] === "string" ? body["text"] : undefined;
+    await this.handleQqTaskAction(taskId, action, text);
+    return { ok: true };
+  }
+
+  private isQqRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  private isQqTaskAction(value: unknown): value is QqTaskAction {
+    return (
+      value === "approve" ||
+      value === "deny" ||
+      value === "answer" ||
+      value === "stop" ||
+      value === "merge" ||
+      value === "discard" ||
+      value === "refresh"
+    );
+  }
+
+  /**
+   * 把 wire 上的入站消息收敛成 `InboundMessage`。
+   *
+   * bridge 是另一个进程：坏帧不能用 `as` 硬转 —— 缺 `attachments` 会让服务
+   * 在 `.map` 上直接抛错。这里逐字段兜底，`mentionsBot` 只在明确为 true 时算
+   * true（无法证明被 @ 就不算，群聊会因此静默丢弃，这是安全的一侧）。
+   */
+  private coerceQqInboundMessage(value: unknown): InboundMessage | null {
+    if (!this.isQqRecord(value)) return null;
+    const chatType = value["chatType"];
+    if (chatType !== "private" && chatType !== "group") return null;
+    const chatId = value["chatId"];
+    const senderId = value["senderId"];
+    const msgId = value["msgId"];
+    const text = value["text"];
+    if (
+      typeof chatId !== "string" ||
+      typeof senderId !== "string" ||
+      typeof msgId !== "string" ||
+      typeof text !== "string"
+    ) {
+      return null;
+    }
+    const rawAttachments = value["attachments"];
+    const attachments = Array.isArray(rawAttachments)
+      ? rawAttachments.filter(
+          (item): item is InboundMessage["attachments"][number] =>
+            this.isQqRecord(item) &&
+            (item["kind"] === "image" || item["kind"] === "file"),
+        )
+      : [];
+    const timestamp = value["timestamp"];
+    return {
+      chatType,
+      chatId,
+      senderId,
+      msgId,
+      text,
+      mentionsBot: value["mentionsBot"] === true,
+      attachments,
+      timestamp: typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : Date.now(),
+    };
+  }
+
+  // --- QQ 宿主端口（QqServiceHost 的实现在这里） -----------------------------
+
+  /**
+   * 把面板能力映射成 `QqHostPorts`。
+   *
+   * 取消 / 合并 / 丢弃全部复用既有的 Super Agent 方法（`cancel` /
+   * `requestSuperMerge` / `cleanup`），本模块**不写第二套 git 逻辑**。
+   */
+  private createQqHostPorts(): QqHostPorts {
+    return {
+      workspaceRoots: () => this.qqWorkspaceRoots(),
+
+      spawnTask: (spec, opts) => {
+        const manager = this.getSuperAgent();
+        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        const session = manager.spawn(
+          { title: spec.title, task: spec.task },
+          {
+            policy: {
+              approval: opts.approval,
+              disallowedTools: opts.disallowedTools,
+              onPermissionRequest: opts.onPermission,
+            },
+          },
+        );
+        // spawn 是同步登记：worktree 与分支在 prepare 里才落地，此刻可能还
+        // 没有 branch —— 缺省即可，最终结果由 readSuper 里的分支补齐。
+        const branch = session.isolation.branch;
+        return branch
+          ? { superSessionId: session.id, branch }
+          : { superSessionId: session.id };
+      },
+
+      /**
+       * 等子会话收尾。
+       *
+       * **为什么是轮询**：`SuperAgentManager` 只暴露一个 `onSessionsChanged`
+       * 回调（面板已经用来把投影写进 store），没有按订阅者分发的事件面；
+       * 为 QQ 通道去改它的公开接口会把「一次 emit → N 个监听」的生命周期
+       * 复杂度带进管理层。轮询 store 里的投影是零侵入的那条路。
+       *
+       * 上限：调用方（适配器）本来就有 2h 兜底；这里再封一层，保证即便被
+       * 单独调用也不会永远挂着。子会话曾被看到、之后又消失 = 被清理，直接
+       * 返回；从未被任何一方看到 = id 无效，抛错让服务记 failed。
+       */
+      waitForSettle: async (superSessionId, timeoutMs) => {
+        const cap =
+          typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+            ? Math.min(timeoutMs, QQ_DEFAULT_SETTLE_TIMEOUT_MS)
+            : QQ_DEFAULT_SETTLE_TIMEOUT_MS;
+        const deadline = Date.now() + cap;
+        let appeared = false;
+        for (;;) {
+          const session = this.findQqSuperSession(superSessionId);
+          if (session) {
+            appeared = true;
+            if (isQqTerminalSuperStatus(session.status)) return;
+          } else if (appeared) {
+            return;
+          } else if (!this.getSuperAgent()?.get(superSessionId)) {
+            throw new Error(`QQ 任务指向的子会话不存在：${superSessionId}`);
+          }
+          const remain = deadline - Date.now();
+          if (remain <= 0) throw new QqSettleTimeoutError(superSessionId, cap);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(QQ_SETTLE_POLL_MS, remain));
+            timer.unref?.();
+          });
+        }
+      },
+
+      cancel: async (superSessionId) => {
+        const manager = this.getSuperAgent();
+        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        // 对已终态的子会话再取消是幂等重复，管理器自己会如实返回。
+        await manager.cancel(superSessionId);
+      },
+
+      /**
+       * 合并回当前分支。
+       *
+       * 合并由**专用合并子会话**在主仓工作区里执行（冲突需要有人读代码），
+       * 因此这是一个异步动作：派发成功也只回报「已派出」，合并结果稍后写进
+       * 看板的 integration。**绝不**在这里谎报 ok=true。
+       */
+      merge: async (superSessionId) => {
+        const manager = this.getSuperAgent();
+        if (!manager) return { ok: false, detail: "Super Agent 不可用（未打开工作区）" };
+        const session = manager.get(superSessionId);
+        if (!session) return { ok: false, detail: "子会话不存在或已被清理" };
+        if (session.integration?.state === "merged") {
+          return { ok: true, detail: "改动已经在当前分支上" };
+        }
+        if (!isQqTerminalSuperStatus(session.status)) {
+          return { ok: false, detail: "子会话还没结束，完成后再合并" };
+        }
+        if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
+          return { ok: false, detail: "该子会话没有可合并的分支（仅目录隔离）" };
+        }
+        const state = this.store.getState();
+        if (
+          state.status === "streaming" ||
+          state.initializing ||
+          state.replaying ||
+          this.historySyncBusy
+        ) {
+          return { ok: false, detail: "主会话正在生成，请稍后再合并" };
+        }
+        await this.requestSuperMerge(superSessionId);
+        return {
+          ok: false,
+          detail: "已派出合并子会话（异步执行），合并结果稍后在看板确认",
+        };
+      },
+
+      discard: async (superSessionId) => {
+        const manager = this.getSuperAgent();
+        if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
+        await manager.cleanup(superSessionId, { keepBranch: false });
+      },
+
+      readSuper: (superSessionId) => {
+        const session = this.findQqSuperSession(superSessionId);
+        if (!session) return null;
+        const snapshot: QqHostSuperSnapshot = { status: session.status };
+        const lastReport =
+          session.reports.length > 0 ? session.reports[session.reports.length - 1] : undefined;
+        // 「最后一条汇报」优先；没有汇报时退回会话摘要。都取不到就不填 ——
+        // 适配器会用占位文案，绝不编造内容。
+        const summary = (lastReport?.summary ?? session.summary ?? "").trim();
+        if (summary.length > 0) snapshot.summary = summary;
+        const branch = session.isolation.branch;
+        if (branch) snapshot.branch = branch;
+        if (session.integration) snapshot.merged = session.integration.state === "merged";
+        return snapshot;
+      },
+
+      notify: (text) => {
+        if (this.disposed) return;
+        this.store.sendToast("info", text);
+      },
+
+      deliver: async (msg) => {
+        const delivery = this.qq?.delivery;
+        if (!delivery) return false; // bridge 没握手：如实回报未送达
+        const result = await delivery.deliver(msg);
+        return result.ok;
+      },
+
+      bindAccount: (code, senderId) => this.bindQqAccount(code, senderId),
+      unbindAccount: () => this.unbindQqAccount(),
+    };
+  }
+
+  /** 子会话快照：优先 store 的投影（webview 看到的那份），再退回管理器。 */
+  private findQqSuperSession(id: string): SuperSessionUi | null {
+    const projected = this.store.getState().superSessions;
+    const fromState = projected?.find((session) => session.id === id);
+    if (fromState) return fromState;
+    return this.getSuperAgent()?.get(id) ?? null;
+  }
+
+  // --- QQ 账号绑定 -----------------------------------------------------------
+
+  /**
+   * 完成一次配对：校验码 → 把发送者写进白名单 → 落盘并热更新。
+   *
+   * 返回的 `message` 只作本地日志（服务侧统一改写回执文案，绝不回显名单）。
+   * 同一发送者重复绑定按幂等成功处理（去重，不重复占位）。
+   */
+  private async bindQqAccount(
+    code: string,
+    senderId: string,
+  ): Promise<{ ok: boolean; message: string }> {
+    const owner = this.qq;
+    if (!owner) return { ok: false, message: "QQ 通道未启动" };
+    if (!isBindCodeValid(owner.bindCode, code, Date.now())) {
+      const expired = owner.bindCode !== undefined && owner.bindCode.expiresAt <= Date.now();
+      return { ok: false, message: expired ? "绑定码已过期" : "绑定码无效" };
+    }
+    const id = senderId.trim();
+    if (id.length === 0) return { ok: false, message: "缺少发送者标识" };
+
+    const fresh = await readQqSettings(owner.io);
+    const users = fresh.allowedUsers.includes(id)
+      ? fresh.allowedUsers
+      : [...fresh.allowedUsers, id];
+    await applyQqSettingsPatch(owner.io, { allowedUsers: users });
+    // 与服务共享同一个 config 对象：白名单立刻生效，不必等重启。
+    owner.config.allowedUsers = users;
+    await this.pushQqSettings();
+    this.log.info(`QQ 账号已绑定：${id}（当前 ${users.length} 个账号）`);
+    return { ok: true, message: `已绑定 ${id}` };
+  }
+
+  /** 解除绑定：清空用户白名单（群白名单不动）。 */
+  private async unbindQqAccount(): Promise<{ ok: boolean; message: string }> {
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    await applyQqSettingsPatch(io, { allowedUsers: [] });
+    if (this.qq) this.qq.config.allowedUsers = [];
+    await this.pushQqSettings();
+    return { ok: true, message: "已解除账号绑定" };
+  }
+
+  // --- QQ 设置 / 凭据 / 状态消息 --------------------------------------------
+
+  /**
+   * 设置区改动 → 落盘 + 推快照 + 同步运行中的服务。
+   *
+   * 落盘走 `applyQqSettingsPatch`（白名单键 + 拒绝脏值）；是否重启由
+   * `syncQqServiceWithSettings` 按连接类字段判定。
+   */
+  private async handleQqSettingsPatch(patch: Partial<QqSettingsUi>): Promise<void> {
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    const result = await applyQqSettingsPatch(io, patch);
+    if (result.ignored.length > 0) {
+      this.log.warn(`QQ 设置补丁忽略了：${result.ignored.join(", ")}`);
+    }
+    await this.onQqSettingsChanged();
+  }
+
+  /** 凭据写入（单向：明文只进 SecretStorage，快照里只有布尔投影）。 */
+  private async handleQqSecretsWrite(botToken?: string, appSecret?: string): Promise<void> {
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    const changed = await writeQqSecrets(io, { botToken, appSecret });
+    if (changed.length > 0) this.log.info(`QQ 凭据已更新：${changed.join(", ")}`);
+    await this.pushQqSettings();
+    // OneBot token 会进 bridge 的环境变量：换了凭据就必须重建 bridge。
+    if (changed.length > 0 && this.qq) this.scheduleQqRestart();
+  }
+
+  /** 设置页 QQ 卡片的三类动作。 */
+  private async handleQqConfigAction(
+    action: "testConnection" | "generateBindCode" | "unbind",
+  ): Promise<void> {
+    switch (action) {
+      case "testConnection": {
+        const delivery = this.qq?.delivery;
+        if (!delivery) {
+          this.pushQqStatus(false, "QQ bridge 未运行");
+          return;
+        }
+        const health = await delivery.health();
+        this.pushQqStatus(
+          health.ok,
+          health.ok
+            ? vscode.l10n.t("QQ bridge 已连接")
+            : vscode.l10n.t("QQ bridge 未响应（status {0}）", String(health.status)),
+        );
+        return;
+      }
+      case "generateBindCode": {
+        if (!this.qq) {
+          this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动，无法生成绑定码"));
+          return;
+        }
+        const bind = generateBindCode();
+        this.qq.bindCode = bind;
+        this.postToWebview({ type: "qqBindCode", code: bind.code, expiresAt: bind.expiresAt });
+        this.store.sendToast("info", vscode.l10n.t("绑定码已生成，5 分钟内有效"));
+        return;
+      }
+      case "unbind": {
+        const result = await this.unbindQqAccount();
+        this.store.sendToast(result.ok ? "info" : "warning", result.message);
+        return;
+      }
+    }
+  }
+
+  /** 看板 / IPC 的任务操作：交给服务执行，然后刷新投影。 */
+  private async handleQqTaskAction(
+    taskId: string,
+    action: QqTaskAction,
+    text?: string,
+  ): Promise<void> {
+    const service = this.qq?.service;
+    if (!service) {
+      this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动"));
+      return;
+    }
+    await service.handleTaskAction(taskId, action, text);
+    this.refreshQqTasks();
+  }
+
+  /**
+   * 配置变更后的统一处理：推快照 → 按需重启或热更新。
+   *
+   * 非连接类字段（白名单 / 策略 / 并发 / 限流 / 详略 / 自动合并）直接写进
+   * 运行中的 config 对象 —— QqService 在每次使用时读它，所以即时生效且不
+   * 打断在跑的任务；连接类字段交给 500ms 防抖的重启。
+   */
+  private async onQqSettingsChanged(): Promise<void> {
+    if (this.disposed) return;
+    await this.pushQqSettings();
+    await this.syncQqServiceWithSettings();
+    this.refreshQqTasks();
+  }
+
+  private async syncQqServiceWithSettings(): Promise<void> {
+    if (this.disposed) return;
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    const snapshot = await readQqSettings(io);
+    const { config, warnings } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
+    for (const warning of warnings) this.log.warn(`QQ 设置：${warning}`);
+
+    if (!config.enabled) {
+      if (this.qq) await this.stopQq();
+      this.pushQqStatus(false, "QQ 通道已停用");
+      return;
+    }
+    if (!this.qq) {
+      await this.startQqIfEnabled();
+      return;
+    }
+    if (
+      shouldRestartOnPatch(this.qq.config, {
+        enabled: config.enabled,
+        adapter: config.adapter,
+        endpoint: config.endpoint,
+        bridgePort: config.bridgePort,
+      })
+    ) {
+      this.scheduleQqRestart();
+      return;
+    }
+    // 热更新：QqService 持有的就是这个对象，改字段即改行为。
+    const live = this.qq.config;
+    live.allowedUsers = [...config.allowedUsers];
+    live.allowedGroups = [...config.allowedGroups];
+    live.workspace = config.workspace;
+    live.remotePolicy = config.remotePolicy;
+    live.maxConcurrentTasks = config.maxConcurrentTasks;
+    live.rateLimitPerMin = config.rateLimitPerMin;
+    live.resultDetail = config.resultDetail;
+    live.autoMerge = config.autoMerge;
+  }
+
+  /** 面板打开 / webview 重连 / 设置变更后的一次性全量推送。 */
+  private pushQqState(): void {
+    this.refreshQqTasks();
+  }
+
+  /** QQ 设置快照（无明文凭据，只有 hasBotToken / hasAppSecret 布尔）。 */
+  private async pushQqSettings(): Promise<void> {
+    if (this.disposed) return;
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    try {
+      const values = await readQqSettings(io);
+      this.postToWebview({ type: "qqSettings", values });
+    } catch (error) {
+      this.log.warn(`QQ 设置读取失败：${errorMessage(error)}`);
+    }
+  }
+
+  /** 连接状态。`detail` 省略 = 沿用上一次的说明（不把它擦成空）。 */
+  private pushQqStatus(connected: boolean, detail?: string): void {
+    if (this.disposed) return;
+    this.qqConnected = connected;
+    if (detail !== undefined) this.qqLastDetail = detail;
+    const message: { type: "qqStatus"; connected: boolean; detail?: string } = {
+      type: "qqStatus",
+      connected,
+    };
+    if (this.qqLastDetail !== null) message.detail = this.qqLastDetail;
+    this.postToWebview(message);
+  }
+
+  /**
+   * 任务看板投影：服务里的任务列表 → `SessionState.qqTasks`。
+   *
+   * 与 `superSessions` 一样是**非 blocks 元数据**，因此复用 store 既有的
+   * 节流快照 / blockPatch 通道（`pushSnapshot`），不自建推送。
+   */
+  private refreshQqTasks(): void {
+    if (this.disposed) return;
+    const service = this.qq?.service;
+    setQqTasks(this.store.getState(), service ? service.listTasks() : []);
+    this.store.pushSnapshot();
+    // 「一次刷新 = 三样都推」：看板条目变化往往伴随状态/设置变化（桥接上、
+    // 任务新建），分开推只会让设置卡与看板短暂不同步。读设置是内存 + 一次
+    // SecretStorage 探测，QQ 消息频率下这点开销可以忽略。
+    void this.pushQqSettings();
+    this.pushQqStatus(this.qqConnected);
+  }
+
+  private qqWorkspaceRoots(): string[] {
+    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
   }
 
   /**
