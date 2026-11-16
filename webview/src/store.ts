@@ -1379,6 +1379,9 @@ function createMockHost(): HostApi {
           ...authState,
           profiles: authState.profiles.filter((p) => p.name !== m.name),
         };
+        window.dispatchEvent(
+          new MessageEvent("message", { data: { type: "profileDeleteResult", name: m.name, ok: true } }),
+        );
         broadcast({
           type: "snapshot",
           state: {
@@ -2200,6 +2203,8 @@ function createMockHost(): HostApi {
           rules: mockApprovalRules,
           projectRules: [{ id: "proj-lock", label: "项目：拒绝改 lock 文件", enabled: true, action: "deny", path: "**/package-lock.json" }],
           draft: mockApprovalDraft,
+          // Mirror the real host: a save is acknowledged with its outcome.
+          ...(m.type === "saveApprovalPolicy" ? { saveResult: "ok" as const } : {}),
         };
         window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: payload })), 80);
         return;
@@ -2885,6 +2890,7 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memoryCandidates" ||
       msg.type === "knowledgeJob" ||
       msg.type === "approvalPolicy" ||
+      msg.type === "profileDeleteResult" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||
       msg.type === "contextResolved" ||

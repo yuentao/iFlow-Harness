@@ -1632,7 +1632,17 @@ export class ChatPanel implements vscode.Disposable {
   private wireWebview(webview: vscode.Webview): void {
     webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
     webview.html = this.buildHtml(webview);
-    webview.onDidReceiveMessage((msg: WebviewToHost) => void this.handleWebviewMessage(msg));
+    // One catch for the whole route: a rejected branch (workspaceState.update,
+    // persistSessions, a transcript/attachment write, …) used to become a
+    // silent unhandled rejection — the user saw nothing at all. Log it and
+    // surface it as a toast; never swallow it.
+    webview.onDidReceiveMessage((msg: WebviewToHost) => {
+      void this.handleWebviewMessage(msg).catch((error: unknown) => {
+        const detail = errorMessage(error);
+        this.log.error(`webview message failed (${msg.type}): ${detail}`);
+        this.store.sendToast("error", vscode.l10n.t("操作失败：{0}", detail));
+      });
+    });
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -2291,7 +2301,7 @@ export class ChatPanel implements vscode.Disposable {
         void this.sendApprovalPolicy();
         break;
       case "saveApprovalPolicy":
-        this.saveApprovalPolicy(msg.rules);
+        await this.saveApprovalPolicy(msg.rules);
         break;
       case "dismissApprovalRuleDraft":
         this.approvalDraft = null;
@@ -2361,7 +2371,12 @@ export class ChatPanel implements vscode.Disposable {
     try {
       await vscode.workspace.getConfiguration("iflow").update(key, value, vscode.ConfigurationTarget.Global);
     } catch (error) {
-      this.log.warn(`failed to update ${key}: ${errorMessage(error)}`);
+      const detail = errorMessage(error);
+      this.log.warn(`failed to update ${key}: ${detail}`);
+      // A silent failure made the control look like it "snapped back" on its
+      // own — say which setting could not be written (the value the user sees
+      // is the one VSCode still has on disk).
+      this.store.sendToast("warning", vscode.l10n.t("设置写入失败：{0}", key));
     }
   }
 
@@ -3782,9 +3797,23 @@ export class ChatPanel implements vscode.Disposable {
     return [...project, ...global];
   }
 
-  private persistApprovalRules(rules: ApprovalRule[]): void {
+  /**
+   * Persist the global rule table. Returns false when the write rejected —
+   * the in-memory table is rolled back so the panel never acts on rules that
+   * would be gone after a window reload (the caller answers with a toast /
+   * a saveResult:"failed" push instead of claiming 已保存).
+   */
+  private async persistApprovalRules(rules: ApprovalRule[]): Promise<boolean> {
+    const previous = this.approvalRules;
     this.approvalRules = rules;
-    void this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
+    try {
+      await this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
+      return true;
+    } catch (error) {
+      this.approvalRules = previous;
+      this.log.warn(`approval policy write failed: ${errorMessage(error)}`);
+      return false;
+    }
   }
 
   /** Bump a matched GLOBAL rule's hit counter (project rules are read-only —
@@ -3798,7 +3827,7 @@ export class ChatPanel implements vscode.Disposable {
       changed = true;
       return { ...r, hits: (r.hits ?? 0) + 1 };
     });
-    if (changed) this.persistApprovalRules(next);
+    if (changed) void this.persistApprovalRules(next);
   }
 
   /** The wire facts a decision is made from (see ApprovalRequestInfo: CLI
@@ -3919,29 +3948,39 @@ export class ChatPanel implements vscode.Disposable {
     return true;
   }
 
-  /** Push the current tables (+ any pending draft) to the policy card. */
-  private async sendApprovalPolicy(): Promise<void> {
+  /** Push the current tables (+ any pending draft) to the policy card.
+   * `saveResult` is only set when this push answers a save request: the card
+   * waits for it before flashing 已保存 (a fire-and-forget send used to flash
+   * success before the host had written anything). */
+  private async sendApprovalPolicy(saveResult?: "ok" | "failed"): Promise<void> {
     const { global, project } = await this.loadApprovalRules();
     this.postToWebview({
       type: "approvalPolicy",
       rules: global,
       projectRules: project,
       draft: this.approvalDraft,
+      ...(saveResult ? { saveResult } : {}),
     });
   }
 
   /** Save the global table (replace semantics — see shared/messages.ts). */
-  private saveApprovalPolicy(rules: readonly ApprovalRule[]): void {
+  private async saveApprovalPolicy(rules: readonly ApprovalRule[]): Promise<void> {
     const clean: ApprovalRule[] = [];
     for (const raw of rules.slice(0, APPROVAL_RULES_MAX)) {
       const rule = normalizeApprovalRule(raw, `rule-${clean.length + 1}`);
       if (rule && !clean.some((r) => r.id === rule.id)) clean.push(rule);
     }
-    this.persistApprovalRules(clean);
     // Saving from the card resolves the draft either way (the user either
     // kept it in `rules` or threw it away).
     this.approvalDraft = null;
-    void this.sendApprovalPolicy();
+    const ok = await this.persistApprovalRules(clean);
+    if (!ok) {
+      this.store.sendToast("warning", vscode.l10n.t("审批规则保存失败，已保留原规则"));
+    }
+    // Push the (possibly rolled-back) table either way: the card uses this
+    // reply to stop its saving state, and on failure it must show what is
+    // actually persisted rather than the user's unsaved draft.
+    await this.sendApprovalPolicy(ok ? "ok" : "failed");
   }
 
 
@@ -5756,7 +5795,11 @@ export class ChatPanel implements vscode.Disposable {
     const profiles = await loadProfiles(this.context.secrets);
     const inSecrets = Object.hasOwn(profiles, trimmed);
     const inKernel = Object.hasOwn(readKernelApiProfiles(), trimmed);
-    if (!inSecrets && !inKernel) return;
+    if (!inSecrets && !inKernel) {
+      this.postToWebview({ type: "profileDeleteResult", name: trimmed, ok: false });
+      return;
+    }
+    let kernelWriteFailed = false;
     if (inSecrets) {
       delete profiles[trimmed];
       await saveProfiles(this.context.secrets, profiles);
@@ -5764,7 +5807,11 @@ export class ChatPanel implements vscode.Disposable {
     if (inKernel) {
       const deleted = deleteKernelApiProfile(trimmed);
       if (!deleted) {
-        void vscode.window.showWarningMessage(vscode.l10n.t("无法写入内核配置 {0}", trimmed));
+        kernelWriteFailed = true;
+        // In-panel receipt: the profile is still in the kernel file, so the
+        // row stays listed and the user must learn why (the old
+        // showWarningMessage landed outside the panel's notification stack).
+        this.store.sendToast("warning", vscode.l10n.t("无法写入内核配置 {0}", trimmed));
       }
     }
     // Drop the kernel's active pointer when it names the deleted row so the
@@ -5777,9 +5824,11 @@ export class ChatPanel implements vscode.Disposable {
     if (this.context.workspaceState.get<string>(WORKSPACE_PROFILE_KEY)?.trim() === trimmed) {
       await this.context.workspaceState.update(WORKSPACE_PROFILE_KEY, undefined);
       this.store.setAuth(await this.buildAuthState(false, true));
+      this.postToWebview({ type: "profileDeleteResult", name: trimmed, ok: !kernelWriteFailed });
       return; // this workspace's profile was deleted → choose another profile
     }
     this.store.setAuth(await this.buildAuthState(this.store.getState().auth.authenticated, false));
+    this.postToWebview({ type: "profileDeleteResult", name: trimmed, ok: !kernelWriteFailed });
   }
 
   /** Tear down the current CLI connection and start fresh with new credentials.
@@ -6486,7 +6535,7 @@ export class ChatPanel implements vscode.Disposable {
     const lockState = this.store.getState();
     const lockClient = this.client;
     this.historySyncBusy = true;
-    this.store.setInitializing(true);
+    this.store.setInitializing(true, "deleteSession");
     // Only the ACTIVE session's pending cards belong to what is being deleted.
     // Cancelling them unconditionally (all sessions) silently rejected a live
     // approval while the user deleted an unrelated session from the switcher.
@@ -9820,23 +9869,36 @@ export class ChatPanel implements vscode.Disposable {
    * Per user directive the CLI's hardcoded `_meta` catalog is NEVER used as a
    * fallback: an unreachable or empty endpoint yields an empty list (the CLI's
    * current model stays selectable so the dropdown isn't blank).
+   *
+   * The detailed variant exists because "no endpoint configured", "endpoint
+   * unreachable" and "endpoint reachable but returned zero models" all used to
+   * collapse into `[]` — a user-triggered refresh could then neither explain
+   * itself nor avoid lying about the cause.
    */
-  private async queryLiveModels(): Promise<SessionState["models"]> {
+  private async queryLiveModelsDetailed(): Promise<
+    | { ok: true; models: SessionState["models"] }
+    | { ok: false; reason: "no-endpoint" | "unreachable"; message?: string }
+  > {
     // Kernel-first: the panel persists its profiles into the shared
     // settings.json, so the workspace handshake / SecretStorage cache is the
     // live credential source and `readActiveEndpoint` (the kernel file) is the
     // final fallback for setups configured outside the panel.
     const endpoint = (await this.resolveWorkspaceHandshakeCreds()) ?? (await loadCredentials(this.context.secrets)) ?? readActiveEndpoint();
-    if (!endpoint) return [];
+    if (!endpoint) return { ok: false, reason: "no-endpoint" };
     try {
-      return (await queryModelIds(endpoint)).map((id) => ({ id, name: id }));
+      return { ok: true, models: (await queryModelIds(endpoint)).map((id) => ({ id, name: id })) };
     } catch (error) {
       const message = errorMessage(error);
       this.log.warn(
         vscode.l10n.t("模型列表查询失败（不回退内置目录）: {0}", message),
       );
-      return [];
+      return { ok: false, reason: "unreachable", message };
     }
+  }
+
+  private async queryLiveModels(): Promise<SessionState["models"]> {
+    const result = await this.queryLiveModelsDetailed();
+    return result.ok ? result.models : [];
   }
 
   /** Capability rules as stored in ~/.iflow/thinking-models.json (seeded
@@ -9879,8 +9941,21 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async refreshLiveModels(): Promise<void> {
     if (this.store.getState().initializing) return;
-    const models = await this.queryLiveModels();
-    if (models.length === 0) return;
+    const result = await this.queryLiveModelsDetailed();
+    if (!result.ok || result.models.length === 0) {
+      // The old list stays on screen (a transient failure must not collapse
+      // the dropdown), so the user needs a receipt explaining that nothing
+      // was refreshed — and which of the three causes it was.
+      const message =
+        !result.ok && result.reason === "no-endpoint"
+          ? vscode.l10n.t("尚未配置 API 端点，无法刷新模型列表")
+          : !result.ok
+            ? vscode.l10n.t("模型列表刷新失败，仍显示上次结果")
+            : vscode.l10n.t("端点未返回任何模型，仍显示上次结果");
+      this.store.sendToast("warning", message);
+      return;
+    }
+    const models = result.models;
     const currentModelId = this.store.getState().currentModelId;
     if (currentModelId && !models.some((m) => m.id === currentModelId)) {
       models.unshift({ id: currentModelId, name: currentModelId });
@@ -10098,7 +10173,7 @@ export class ChatPanel implements vscode.Disposable {
     this.droppingForReset = true;
     // Lock the UI while the CLI spins up the new session (sessions/mode/model
     // switches must not race the in-flight `session/new`).
-    this.store.setInitializing(true);
+    this.store.setInitializing(true, "newSession");
     try {
     const client = await this.ensureClient();
     // A3: a dispose during the handshake rejects ensureClient with
@@ -11334,7 +11409,10 @@ export class ChatPanel implements vscode.Disposable {
    * session file was never written), the transcript deletion stands on its own
    * — the model has nothing to forget.
    */
-  private async deleteUserMessage(blockId: string): Promise<void> {
+  private async deleteUserMessage(
+    blockId: string,
+    reason: "deleteMessage" | "rollback" = "deleteMessage",
+  ): Promise<void> {
     if (this.disposed || this.historySyncBusy) return;
     const state = this.store.getState();
     if (
@@ -11359,7 +11437,7 @@ export class ChatPanel implements vscode.Disposable {
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionUri.fsPath;
     const file = acpSessionFilePath(sessionId);
     this.historySyncBusy = true;
-    this.store.setInitializing(true);
+    this.store.setInitializing(true, reason);
     // No cancelAll* here: the entry gate above excludes every pending card and
     // the lock (plus the webview's locked composer) keeps new ones from
     // arriving mid-sync — the agent only pushes cards in response to a prompt.
@@ -11498,7 +11576,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("warning", vscode.l10n.t("该轮没有可用的工作区文件快照，仅截断对话后重发。"));
     }
     // 2. Full truncation (transcript + CLI history + session reload).
-    await this.deleteUserMessage(blockId);
+    await this.deleteUserMessage(blockId, "rollback");
     if (this.disposed) return;
     if (this.store.getState().blocks.some((b) => b.kind === "user" && b.id === blockId)) {
       // The delete refused (or the session moved on mid-sync) — the turn is
@@ -12133,7 +12211,7 @@ export class ChatPanel implements vscode.Disposable {
     if (mode === "conversation" || mode === "both") {
       // Reuses the full delete chain: transcript truncation + CLI history
       // truncation + reload, plus the checkpoint-index prune inside it.
-      await this.deleteUserMessage(userBlockId);
+      await this.deleteUserMessage(userBlockId, "rollback");
     }
   }
 

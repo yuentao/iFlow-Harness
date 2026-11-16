@@ -29,10 +29,30 @@ import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
-import type { AgentStatus, ErrorAdviceUi, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
+import type { AgentStatus, ErrorAdviceUi, InitializingReason, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
 import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
 import { hasActiveSuperSession } from "../../shared/super-agent";
+
+/**
+ * Label for the `initializing` busy chip. The host reuses that lock for
+ * several async flows (new session, session delete, message delete, rollback,
+ * restore) — claiming 「正在创建新会话…」 for all of them was simply wrong.
+ */
+function initializingLabel(reason: InitializingReason | null | undefined): string {
+  switch (reason) {
+    case "deleteSession":
+      return t("正在删除会话…");
+    case "deleteMessage":
+      return t("正在删除消息…");
+    case "rollback":
+      return t("正在回滚对话…");
+    case "restore":
+      return t("正在恢复会话…");
+    default:
+      return t("正在创建新会话…");
+  }
+}
 
 function statusChip(status: AgentStatus, compressing = false, plan = false) {
   switch (status) {
@@ -243,6 +263,7 @@ export function App() {
   const activeSessionId = useChat((s) => s.state?.activeSessionId ?? null);
   const replaying = useChat((s) => s.state?.replaying ?? false);
   const initializing = useChat((s) => s.state?.initializing ?? false);
+  const initializingReason = useChat((s) => s.state?.initializingReason ?? null);
   const compressing = useChat((s) => s.state?.compressing ?? false);
   // 宿主正在等子会话汇报：禁用顶栏「新会话」（等待期新建会话会让排队里的
   // 汇报落到已被替换的会话上）。它是 orthogonal 于 status 的标记，所以等待期
@@ -868,7 +889,7 @@ export function App() {
             </Chip>
           ) : initializing ? (
             <Chip tone="primary">
-              <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{t("正在创建新会话…")}</span>
+              <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{initializingLabel(initializingReason)}</span>
             </Chip>
           ) : (
             statusChip(status ?? "connecting", compressing, isPlanMode(modes))

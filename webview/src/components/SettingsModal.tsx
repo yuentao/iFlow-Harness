@@ -966,6 +966,27 @@ function ApiConfigSection({
   const raisedProfileName = openMenuProfile && auth.profiles.some((p) => !p.active && p.name === openMenuProfile)
     ? openMenuProfile
     : null;
+  // Delete receipt: the host answers with `profileDeleteResult` after it
+  // really removed the profile (SecretStorage + kernel file). The row shows a
+  // pending chip until then — the confirm dialog used to close and the row
+  // just lingered with zero feedback while the write was in flight.
+  const [deletingProfile, setDeletingProfile] = useState<string | null>(null);
+  useEffect(() => {
+    if (!deletingProfile) return;
+    const handler = (event: MessageEvent) => {
+      const msg = event.data as { type?: string; name?: string };
+      if (msg?.type !== "profileDeleteResult" || msg.name !== deletingProfile) return;
+      setDeletingProfile(null);
+    };
+    window.addEventListener("message", handler);
+    // Failsafe: a lost reply must not lock the row forever (the host also
+    // surfaces a toast when the delete failed).
+    const timer = setTimeout(() => setDeletingProfile(null), 10_000);
+    return () => {
+      window.removeEventListener("message", handler);
+      clearTimeout(timer);
+    };
+  }, [deletingProfile]);
 
   const editingProfile = editing?.name ? auth.profiles.find((p) => p.name === editing.name) : undefined;
   const keyPlaceholder = (() => {
@@ -1195,6 +1216,7 @@ function ApiConfigSection({
         <div className="space-y-2">
           {auth.profiles.map((p) => {
             const menuOpen = raisedProfileName === p.name;
+            const deleting = deletingProfile === p.name;
             return (
               <div
                 key={p.name}
@@ -1205,7 +1227,7 @@ function ApiConfigSection({
                 <button
                   className="flex min-w-0 flex-1 items-center gap-1.5 text-left disabled:pointer-events-none disabled:opacity-40"
                   title={`${p.baseUrl} · ${p.modelName}（${p.keyTail}）`}
-                  disabled={busy || p.active}
+                  disabled={busy || p.active || deleting}
                   onClick={() => {
                     if (p.active) return;
                     // Same optimistic switch lock as the header dropdown —
@@ -1227,7 +1249,12 @@ function ApiConfigSection({
                     </span>
                   </span>
                 </button>
-                {!p.active && (
+                {deleting ? (
+                  <Chip tone="info">
+                    <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                    {t("删除中…")}
+                  </Chip>
+                ) : !p.active ? (
                   <Dropdown
                     align="right"
                     menuClass="w-[10rem]"
@@ -1282,7 +1309,7 @@ function ApiConfigSection({
                       </>
                     )}
                   </Dropdown>
-                )}
+                ) : null}
               </div>
             );
           })}
@@ -1375,6 +1402,7 @@ function ApiConfigSection({
           title={t("删除配置")}
           message={t("确定删除配置「{0}」吗？其密钥将从 SecretStorage 中永久移除。", confirmingDelete)}
           onConfirm={() => {
+            if (confirmingDelete) setDeletingProfile(confirmingDelete);
             send({ type: "deleteProfile", name: confirmingDelete });
             setConfirmingDelete(null);
           }}
