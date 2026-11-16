@@ -171,6 +171,124 @@ function readBody(
   });
 }
 
+/** `verifySignedRequest` 失败时的原因码（HTTP 状态由函数一并给出）。 */
+export type SignedRequestFailureCode =
+  | "unauthorized"
+  | "stale_timestamp"
+  | "bad_signature"
+  | "payload_too_large"
+  | "bad_request"
+  | "replayed";
+
+/** `verifySignedRequest` 的校验参数。 */
+export interface SignedRequestVerifyOptions {
+  token: string;
+  hmacSecret: string;
+  /** 时钟来源（测试可注入）；默认 `Date.now`。 */
+  now?: () => number;
+  /** 允许的时钟偏移，默认 30s（测试可收紧）。 */
+  clockSkewMs?: number;
+  /** 请求体上限，默认 1MB。 */
+  maxBodyBytes?: number;
+  /**
+   * nonce 缓存（nonce → 过期时间）。调用方必须在多个请求之间复用同一个 Map，
+   * 否则重放保护不生效；IPC 服务与 bridge 的 delivery server 各自持有一份。
+   */
+  nonces: Map<string, number>;
+}
+
+export type SignedRequestVerification =
+  | { ok: true; raw: string; payload: unknown }
+  | { ok: false; status: number; code: SignedRequestFailureCode };
+
+/** 清掉已过期的 nonce 记录（懒清扫，调用点在每个请求与定时器上）。 */
+function sweepNonces(nonces: Map<string, number>, at: number): void {
+  for (const [nonce, expiresAt] of nonces) {
+    if (expiresAt <= at) nonces.delete(nonce);
+  }
+}
+
+/**
+ * 校验一个已到达的 HTTP 请求：Bearer → 时间戳窗口 → nonce 头 → 读 body →
+ * HMAC 签名 → 解析 JSON → 重放登记。
+ *
+ * 校验顺序与 `createQqIpcServer` 历史实现逐条一致，换用本函数不改变既有行为。
+ * 失败时返回状态码与原因码，**不写响应**（由调用方决定回复格式）。
+ */
+export async function verifySignedRequest(
+  req: http.IncomingMessage,
+  options: SignedRequestVerifyOptions,
+): Promise<SignedRequestVerification> {
+  const now = options.now ?? (() => Date.now());
+  const clockSkewMs =
+    typeof options.clockSkewMs === "number" && Number.isFinite(options.clockSkewMs)
+      ? Math.max(0, options.clockSkewMs)
+      : CLOCK_SKEW_MS;
+  const maxBodyBytes =
+    typeof options.maxBodyBytes === "number" && Number.isFinite(options.maxBodyBytes)
+      ? Math.max(0, options.maxBodyBytes)
+      : MAX_BODY_BYTES;
+
+  // 1) Bearer token
+  const authorization = headerValue(req.headers, "authorization");
+  const bearer = authorization ? /^Bearer\s+(.+)$/i.exec(authorization.trim())?.[1] : undefined;
+  if (!bearer || !safeEqual(bearer, options.token)) {
+    return { ok: false, status: 401, code: "unauthorized" };
+  }
+
+  // 2) 时间戳 + nonce 必填（时间戳单位与 now() 一致：毫秒）
+  const timestampRaw = headerValue(req.headers, "x-timestamp");
+  const timestamp = timestampRaw ? Number(timestampRaw) : Number.NaN;
+  if (!Number.isFinite(timestamp)) {
+    return { ok: false, status: 401, code: "unauthorized" };
+  }
+  if (Math.abs(now() - timestamp) > clockSkewMs) {
+    return { ok: false, status: 401, code: "stale_timestamp" };
+  }
+  const nonce = headerValue(req.headers, "x-nonce");
+  if (!nonce) {
+    return { ok: false, status: 401, code: "unauthorized" };
+  }
+
+  // 3) 读 body（1MB 上限）
+  let body: { raw: string; tooLarge: boolean };
+  try {
+    body = await readBody(req, maxBodyBytes);
+  } catch {
+    return { ok: false, status: 400, code: "bad_request" };
+  }
+  if (body.tooLarge) {
+    return { ok: false, status: 413, code: "payload_too_large" };
+  }
+
+  // 4) 签名（覆盖原始 body）
+  const signature = headerValue(req.headers, "x-signature");
+  const expected = signBody(body.raw, options.hmacSecret, timestamp, nonce);
+  if (!signature || !safeEqual(signature.trim().toLowerCase(), expected)) {
+    return { ok: false, status: 401, code: "bad_signature" };
+  }
+
+  // 5) 解析 JSON（签名通过之后再做，坏 body 不消耗 nonce）
+  let payload: unknown = null;
+  const method = req.method ?? "GET";
+  if (method !== "GET" && body.raw.trim().length > 0) {
+    try {
+      payload = JSON.parse(body.raw);
+    } catch {
+      return { ok: false, status: 400, code: "bad_request" };
+    }
+  }
+
+  // 6) 重放检查（通过即登记，TTL 5 分钟）
+  sweepNonces(options.nonces, now());
+  if (options.nonces.has(nonce)) {
+    return { ok: false, status: 409, code: "replayed" };
+  }
+  options.nonces.set(nonce, now() + NONCE_TTL_MS);
+
+  return { ok: true, raw: body.raw, payload };
+}
+
 /**
  * 启动本地 IPC 服务。
  *
@@ -189,16 +307,9 @@ export async function createQqIpcServer(options: QqIpcServerOptions): Promise<Qq
   /** nonce → 过期时间（毫秒）。 */
   const nonces = new Map<string, number>();
 
-  const sweepNonces = (): void => {
-    const at = now();
-    for (const [nonce, expiresAt] of nonces) {
-      if (expiresAt <= at) nonces.delete(nonce);
-    }
-  };
-
   // 定期清理：每个请求前也会懒清扫一次，这里的定时器只是防止长期空闲时
   // 映射无限增长。unref 让定时器不阻塞进程退出，close() 时显式清掉。
-  const sweepTimer = setInterval(sweepNonces, 60_000);
+  const sweepTimer = setInterval(() => sweepNonces(nonces, now()), 60_000);
   sweepTimer.unref?.();
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
@@ -210,70 +321,19 @@ export async function createQqIpcServer(options: QqIpcServerOptions): Promise<Qq
       return;
     }
 
-    // 1) Bearer token
-    const authorization = headerValue(req.headers, "authorization");
-    const bearer = authorization ? /^Bearer\s+(.+)$/i.exec(authorization.trim())?.[1] : undefined;
-    if (!bearer || !safeEqual(bearer, token)) {
-      sendJson(res, 401, { ok: false, code: "unauthorized" });
+    // 鉴权 + 读体 + 签名 + 解析 + 重放，全部与 delivery server 共用同一实现。
+    const verification = await verifySignedRequest(req, {
+      token,
+      hmacSecret,
+      now,
+      clockSkewMs,
+      nonces,
+    });
+    if (!verification.ok) {
+      sendJson(res, verification.status, { ok: false, code: verification.code });
       return;
     }
-
-    // 2) 时间戳 + nonce 必填（时间戳同 now() 的单位：毫秒）
-    const timestampRaw = headerValue(req.headers, "x-timestamp");
-    const timestamp = timestampRaw ? Number(timestampRaw) : Number.NaN;
-    if (!Number.isFinite(timestamp)) {
-      sendJson(res, 401, { ok: false, code: "unauthorized" });
-      return;
-    }
-    if (Math.abs(now() - timestamp) > clockSkewMs) {
-      sendJson(res, 401, { ok: false, code: "stale_timestamp" });
-      return;
-    }
-    const nonce = headerValue(req.headers, "x-nonce");
-    if (!nonce) {
-      sendJson(res, 401, { ok: false, code: "unauthorized" });
-      return;
-    }
-
-    // 3) 读 body（1MB 上限）
-    let body: { raw: string; tooLarge: boolean };
-    try {
-      body = await readBody(req, MAX_BODY_BYTES);
-    } catch {
-      sendJson(res, 400, { ok: false, code: "bad_request" });
-      return;
-    }
-    if (body.tooLarge) {
-      sendJson(res, 413, { ok: false, code: "payload_too_large" });
-      return;
-    }
-
-    // 4) 签名（覆盖原始 body）
-    const signature = headerValue(req.headers, "x-signature");
-    const expected = signBody(body.raw, hmacSecret, timestamp, nonce);
-    if (!signature || !safeEqual(signature.trim().toLowerCase(), expected)) {
-      sendJson(res, 401, { ok: false, code: "bad_signature" });
-      return;
-    }
-
-    // 5) 解析 JSON（签名通过之后再做，坏 body 不消耗 nonce）
-    let payload: unknown = null;
-    if (method !== "GET" && body.raw.trim().length > 0) {
-      try {
-        payload = JSON.parse(body.raw);
-      } catch {
-        sendJson(res, 400, { ok: false, code: "bad_request" });
-        return;
-      }
-    }
-
-    // 6) 重放检查（通过即登记，TTL 5 分钟）
-    sweepNonces();
-    if (nonces.has(nonce)) {
-      sendJson(res, 409, { ok: false, code: "replayed" });
-      return;
-    }
-    nonces.set(nonce, now() + NONCE_TTL_MS);
+    const payload = verification.payload;
 
     // 7) 交给处理器；抛错只回 500，绝不把堆栈/原始错误写回给调用方。
     try {
