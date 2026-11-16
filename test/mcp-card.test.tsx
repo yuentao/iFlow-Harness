@@ -224,7 +224,10 @@ it("refuses installing a template whose required field was left blank", () => {
   click("模板目录");
   clickTitle("安装");
   click("安装");
-      expect(container.textContent).toContain("还需要填写：directory");  expect(send.mock.calls.filter(([m]) => m.type === "saveMcpServers")).toHaveLength(0);
+  // The warning names the field the form shows, never the internal JSON key.
+  expect(container.textContent).toContain("还需要填写：允许访问的目录（智能体只能在这里读写、搜索）");
+  expect(container.textContent).not.toContain("还需要填写：directory");
+  expect(send.mock.calls.filter(([m]) => m.type === "saveMcpServers")).toHaveLength(0);
 });
 it("edits command, arg and env rows while preserving unknown keys", () => {
   reply({ a: { command: "node", args: ["-x"], env: { TOKEN: "abc" }, description: "keep me", extra: { kept: true } } });

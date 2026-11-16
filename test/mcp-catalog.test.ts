@@ -1,4 +1,9 @@
-import { MCP_CATALOG, buildCatalogConfig, type McpCatalogEntry } from "../shared/mcp-catalog";
+import {
+  MCP_CATALOG,
+  buildCatalogConfig,
+  catalogFieldLabel,
+  type McpCatalogEntry,
+} from "../shared/mcp-catalog";
 import { expect, it } from "vitest";
 
 it("catalog exposes the six npx-based templates, all stdio", () => {
@@ -55,4 +60,13 @@ it("remote (url) transport shape is builder-supported for future entries", () =>
   const built = buildCatalogConfig(entry, {});
   expect(built.missing).toEqual([]);
   expect(built.config).toEqual({ type: "sse", url: "https://mcp.example.com/mcp" });
+});
+
+it("missing fields resolve to the form label, unknown keys fall back to the key", () => {
+  const fs = MCP_CATALOG.find((entry) => entry.id === "filesystem")!;
+  // Logic keeps the internal key; only the wording shown to the user is the label.
+  expect(buildCatalogConfig(fs, {}).missing).toEqual(["directory"]);
+  expect(catalogFieldLabel(fs, "directory")).toBe("允许访问的目录（智能体只能在这里读写、搜索）");
+  // No label for the key → the key itself, so the warning still names something.
+  expect(catalogFieldLabel(fs, "unknown-key")).toBe("unknown-key");
 });

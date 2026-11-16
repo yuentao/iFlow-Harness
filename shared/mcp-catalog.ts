@@ -129,9 +129,23 @@ export const MCP_CATALOG: readonly McpCatalogEntry[] = [
 ];
 
 /**
+ * Display label for one of a template's form field keys.
+ *
+ * `buildCatalogConfig` reports blanks as internal keys (`missing`) because the
+ * caller uses them for logic; what the user reads must be the label the form
+ * actually renders — "directory" means nothing to someone who never saw the
+ * JSON. An unknown key falls back to the key itself so a missing field is
+ * still reported (never silently dropped).
+ */
+export function catalogFieldLabel(entry: McpCatalogEntry, key: string): string {
+  return entry.fields.find((field) => field.key === key)?.label ?? key;
+}
+
+/**
  * Build the `mcpServers` entry config from a template plus form values.
  * Pure: unknown value keys are ignored; a blank required slot is reported in
- * `missing` (the caller shows the field label, nothing is written).
+ * `missing` as the field key (the caller shows `catalogFieldLabel`, nothing is
+ * written).
  */
 export function buildCatalogConfig(
   entry: McpCatalogEntry,
