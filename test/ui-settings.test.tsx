@@ -680,3 +680,96 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
     expect(profileButton()!.disabled).toBe(false);
   });
 });
+
+/**
+ * 保存按钮的 busy 门控只针对「会打断当前会话」的保存：编辑非当前配置
+ * 只写内核配置文件、宿主不重连，所以生成中或有子会话在跑时也必须能点
+ * （此前一律 disabled，用户读作「没保存成功」）；编辑当前使用中的配置
+ * 才会重新认证会话，busy 时禁用并给出原因；新增配置仍走激活 + 冷重连。
+ */
+describe("API 配置保存按钮的 busy 门控", () => {
+  const previousObserver = (globalThis as unknown as Record<string, unknown>).ResizeObserver;
+  beforeEach(() => {
+    class Observer {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    (globalThis as unknown as Record<string, unknown>).ResizeObserver = Observer;
+  });
+  afterEach(() => {
+    if (previousObserver === undefined) {
+      delete (globalThis as unknown as Record<string, unknown>).ResizeObserver;
+    } else {
+      (globalThis as unknown as Record<string, unknown>).ResizeObserver = previousObserver;
+    }
+  });
+
+  const SAVE_REASON = "当前配置正在使用中，生成中或有子会话运行时无法保存";
+  /** B 变成当前使用的配置（编辑它才会触发重新认证）。 */
+  const ACTIVE_B_AUTH: AuthUiState = {
+    ...MULTI_AUTH,
+    profiles: MULTI_AUTH.profiles.map((p) => ({ ...p, active: p.name === "B" })),
+  };
+
+  function renderApi(auth: AuthUiState, busy: boolean) {
+    act(() => root.render(
+      <SettingsModal
+        tab="api"
+        onTabChange={() => {}}
+        onDismiss={() => {}}
+        dismissible
+        busy={busy}
+        auth={auth}
+      />,
+    ));
+  }
+
+  /** 从行内「更多操作」菜单进入编辑表单（active 行没有菜单，这里都编辑非 active 行）。 */
+  function openEdit(name: string) {
+    const more = container.querySelector<HTMLButtonElement>(`button[aria-label="配置 ${name} 的操作"]`);
+    expect(more).toBeTruthy();
+    act(() => more!.click());
+    const editItem = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (el) => el.textContent?.trim() === "编辑",
+    );
+    expect(editItem).toBeTruthy();
+    act(() => editItem!.click());
+  }
+
+  const saveButton = () =>
+    [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "保存");
+
+  it("busy 时编辑非当前配置仍可保存（只落盘，不重连）", () => {
+    renderApi(MULTI_AUTH, false);
+    openEdit("B");
+    // 表单打开后开始生成 / 子会话启动 → busy 变 true，表单保持。
+    renderApi(MULTI_AUTH, true);
+    const save = saveButton();
+    expect(save).toBeTruthy();
+    expect(save!.disabled).toBe(false);
+    expect(container.textContent).not.toContain(SAVE_REASON);
+    act(() => save!.click());
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "saveAuth", replaceName: "B" }));
+  });
+
+  it("busy 时编辑当前使用的配置：保存禁用并说明原因", () => {
+    renderApi(MULTI_AUTH, false);
+    openEdit("B");
+    renderApi(ACTIVE_B_AUTH, true);
+    const save = saveButton();
+    expect(save).toBeTruthy();
+    expect(save!.disabled).toBe(true);
+    expect(container.textContent).toContain(SAVE_REASON);
+  });
+
+  it("空闲时编辑当前使用的配置可以保存", () => {
+    renderApi(MULTI_AUTH, false);
+    openEdit("B");
+    renderApi(ACTIVE_B_AUTH, false);
+    const save = saveButton();
+    expect(save).toBeTruthy();
+    expect(save!.disabled).toBe(false);
+    expect(container.textContent).not.toContain(SAVE_REASON);
+  });
+});
