@@ -12,6 +12,9 @@
  *
  * 安全默认：
  *  - 白名单不通过时**不回包**（防止探测通道是否存在），只写本地日志。
+ *  - `/qq bind` 是唯一例外：它必须在白名单之前解析（配对码的用途正是让名单
+ *    外的人完成绑定），但仍受频道边界约束（私聊，或允许列表内的群 + @ 机器人），
+ *    且失败文案固定、成功只报账号数，绝不回显白名单。
  *  - 审批超时 / 停止 / 任何异常都按 `deny` 处理，绝不伪造批准。
  *  - 远程策略 `readonly` 会把写入类工具直接放进 `disallowedTools`，而不是
  *    依赖 agent 自觉。
@@ -112,8 +115,18 @@ export interface QqServiceHost {
   readTaskOutcome(superSessionId: string): QqServiceTaskOutcome | null;
   /** 回复一条 QQ 消息；返回是否成功送达。 */
   deliver(msg: QqServiceDeliverInput): Promise<boolean>;
-  /** 完成一次账号绑定。 */
-  bindAccount(code: string): Promise<{ ok: boolean; message: string }>;
+  /**
+   * 完成一次账号绑定。
+   *
+   * `code` 是用户在面板里取到的配对码，`senderId` 是**发起绑定的 QQ 号**
+   * （由服务从入站消息里取出）——宿主必须把它写进白名单，否则绑定毫无作用。
+   * 对同一 `senderId` 重复绑定时应幂等成功（不重复占位、不报错）。
+   *
+   * 返回的 `message` 只作本地日志用：发往 QQ 的回执由 {@link QqService}
+   * 统一生成（失败一律「绑定码无效或已过期」，成功只报账号数），宿主文案
+   * 里带什么都不会外发，避免把白名单内容回显到群聊。
+   */
+  bindAccount(code: string, senderId: string): Promise<{ ok: boolean; message: string }>;
   /** 解除当前账号绑定。 */
   unbindAccount(): Promise<{ ok: boolean; message: string }>;
   /** 本地通知（面板 toast / 日志），不发给 QQ。 */
@@ -151,6 +164,19 @@ export const QQ_APPROVAL_MAX_ATTEMPTS = 3;
 export const QQ_RECENT_TASK_LIMIT = 5;
 /** 看板条目里提示词预览的字符上限。 */
 export const QQ_PROMPT_PREVIEW_CHARS = 80;
+
+/**
+ * 绑定失败统一文案。
+ *
+ * 码错、过期、已被使用一律回同一句：区分原因等于告诉对方「这个码存在过」，
+ * 会被拿去枚举探测。宿主返回的真实原因只写本地日志。
+ */
+export const QQ_BIND_FAILURE_TEXT = "绑定码无效或已过期。";
+
+/** 绑定成功的回执：只报账号数，绝不回显白名单内容。 */
+export function qqBindReceipt(accountCount: number): string {
+  return `已绑定，当前共 ${accountCount} 个账号。`;
+}
 /** `readonly` 策略禁用的写入 / 执行类工具（与主会话黑名单同源）。 */
 export const QQ_READONLY_DISALLOWED_TOOLS: readonly string[] = [
   "write_file",
@@ -533,19 +559,35 @@ export class QqService {
   /**
    * 处理一条来自适配器的入站消息。
    *
-   * 白名单不通过时**不回复**（防止探测），只记本地通知；命令解析失败与
-   * 未知子命令会回一句可读错误（这是用户自己打错的字，不是探测）。
+   * 解析必须**先于**白名单：`/qq bind <配对码>` 的唯一用途就是让尚未在名单里
+   * 的人完成绑定，先校验白名单会让它永远无法成功（这正是此前的死锁）。绑定
+   * 命令只放宽「发送者白名单」这一道门，频道边界照旧（私聊，或允许列表内的
+   * 群 + @ 机器人），避免任意群都能刷绑定。
+   *
+   * 其余意图的白名单不通过时**不回复**（防止探测），只记本地通知；命令解析
+   * 失败与未知子命令会回一句可读错误（这是用户自己打错的字，不是探测）。
    */
   async handleInboundMessage(msg: InboundMessage): Promise<void> {
+    const rawText = typeof msg?.text === "string" ? msg.text : "";
+    const parsed = parseQqCommand(normalizeCommandText(rawText));
+
+    if (parsed.ok && parsed.intent.kind === "bind") {
+      const channel = this.acceptBindChannel(msg);
+      if (!channel.ok) {
+        this.notify(`QQ 绑定请求被忽略：${channel.reason}`);
+        this.log(`QQ 绑定请求被忽略：${channel.reason}`);
+        return;
+      }
+      await this.runCommand(msg, parsed.intent);
+      return;
+    }
+
     const accepted = this.acceptInbound(msg);
     if (!accepted.ok) {
       this.notify(`QQ 消息被忽略：${accepted.reason}`);
       this.log(`QQ 入站消息被忽略：${accepted.reason}`);
       return;
     }
-
-    const rawText = typeof msg.text === "string" ? msg.text : "";
-    const parsed = parseQqCommand(normalizeCommandText(rawText));
 
     let prompt: string | undefined;
     if (parsed.ok) {
@@ -579,6 +621,32 @@ export class QqService {
     }
     if (typeof msg.senderId !== "string" || !this.config.allowedUsers.includes(msg.senderId)) {
       return { ok: false, reason: `发送者 ${String(msg.senderId)} 不在白名单` };
+    }
+    if (msg.chatType === "group") {
+      if (!this.config.allowedGroups.includes(msg.chatId)) {
+        return { ok: false, reason: `群 ${msg.chatId} 不在允许列表` };
+      }
+      if (msg.mentionsBot !== true) {
+        return { ok: false, reason: `群 ${msg.chatId} 的消息没有 @ 机器人` };
+      }
+    }
+    return { ok: true };
+  }
+
+  /**
+   * 绑定命令的准入：跳过发送者白名单，但保留频道边界。
+   *
+   * 只要不额外约束，任何群都能拉机器人去绑别人的配对码；所以群聊仍然要求
+   * 「在 allowedGroups 内 + @ 机器人」，私聊则需要一个可写入白名单的发送者。
+   */
+  private acceptBindChannel(
+    msg: InboundMessage,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (!msg || (msg.chatType !== "private" && msg.chatType !== "group")) {
+      return { ok: false, reason: "无效的会话类型" };
+    }
+    if (typeof msg.senderId !== "string" || msg.senderId.trim().length === 0) {
+      return { ok: false, reason: "缺少发送者标识" };
     }
     if (msg.chatType === "group") {
       if (!this.config.allowedGroups.includes(msg.chatId)) {
@@ -1265,13 +1333,7 @@ export class QqService {
         await this.deliver(msg, buildQqHelpText());
         return;
       case "bind": {
-        let result: { ok: boolean; message: string };
-        try {
-          result = await this.host.bindAccount(intent.code);
-        } catch (error) {
-          result = { ok: false, message: errorText(error) };
-        }
-        await this.deliver(msg, result.message);
+        await this.handleBindCommand(msg, intent.code);
         return;
       }
       case "unbind": {
@@ -1338,6 +1400,39 @@ export class QqService {
         return;
       }
     }
+  }
+
+  /**
+   * 绑定命令：把发送者标识一起交给宿主，回执由服务端统一生成。
+   *
+   * 宿主的 `message` 可能带着配对码细节或白名单内容，一律不外发——失败统一
+   * 回 {@link QQ_BIND_FAILURE_TEXT}（不泄露码是否存在），成功只回账号数。
+   * 同一 senderId 重复绑定的幂等性由宿主保证，这里照常回同样的回执。
+   */
+  private async handleBindCommand(msg: InboundMessage, code: string): Promise<void> {
+    let result: { ok: boolean; message: string };
+    try {
+      result = await this.host.bindAccount(code, msg.senderId);
+    } catch (error) {
+      this.log(`QQ 绑定失败：${errorText(error)}`);
+      await this.deliver(msg, QQ_BIND_FAILURE_TEXT);
+      return;
+    }
+    if (result?.ok !== true) {
+      this.log(`QQ 绑定失败（宿主）：${result?.message ?? "未知原因"}`);
+      await this.deliver(msg, QQ_BIND_FAILURE_TEXT);
+      return;
+    }
+    const count = this.boundAccountCount(msg.senderId);
+    await this.deliver(msg, qqBindReceipt(count));
+    this.log(`QQ 账号 ${msg.senderId} 绑定完成，当前共 ${count} 个账号`);
+  }
+
+  /** 账号数：配置快照里的白名单 + 本次发送者（重复绑定不重复计数）。 */
+  private boundAccountCount(senderId: string): number {
+    const accounts = new Set(this.config.allowedUsers);
+    accounts.add(senderId);
+    return accounts.size;
   }
 
   private formatRecentTasks(): string {
