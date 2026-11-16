@@ -29,6 +29,25 @@ await esbuild.build({
   logLevel: "info",
 });
 
+// QQ bridge sidecar (Wave2-D): a standalone Node process spawned by the panel
+// that speaks OneBot v11 over loopback HTTP. Same output contract as the host
+// bundle (CJS + node20) but nothing VSCode-specific — only node built-ins and
+// repo code are bundled, so no `external` list is needed (`platform: "node"`
+// already externalizes built-ins). Keep this a separate entry: the bridge must
+// be spawnable on its own and must never pull `vscode` into its graph.
+await esbuild.build({
+  entryPoints: ["src/qq/bridge/main.ts"],
+  bundle: true,
+  outfile: "dist/qq-bridge.cjs",
+  format: "cjs",
+  platform: "node",
+  target: "node20",
+  minify: true,
+  keepNames: true,
+  sourcemap: true,
+  logLevel: "info",
+});
+
 // M1 P0-5: ship the notification binaries (macOS terminal-notifier.app +
 // Windows SnoreToast exes) that src/acp/os-notify.ts spawns directly. They
 // are copied from the node-notifier npm package's vendor/ dir (the dependency
