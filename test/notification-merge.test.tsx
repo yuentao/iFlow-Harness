@@ -349,7 +349,7 @@ describe("MessageList — the countdown retry rides the streaming pill", () => {
 
   it("spins the host-owned extraction wait instead of a static info dot", () => {
     render(streamingState("idle"), [
-      { id: 6, level: "info", message: "正在提取长期记忆候选…", displayOnly: true, persistent: true, toastId: 10 },
+      { id: 6, level: "info", message: "正在整理可以记住的内容…", displayOnly: true, persistent: true, toastId: 10 },
     ]);
     const pill = container.querySelector(".rounded-full")!;
     expect(pill.querySelector(".animate-spin")).not.toBeNull();
