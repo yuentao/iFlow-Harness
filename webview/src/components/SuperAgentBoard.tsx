@@ -475,6 +475,71 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
   const [confirmCleanupAll, setConfirmCleanupAll] = useState<{ count: number; ids: string[] } | null>(
     null,
   );
+  // Cleanup is asynchronous on the host side (dispose client → delete the
+  // worktree → git probes → emit). The confirm dialog closes immediately and
+  // the row stays put until the host removes it, so without an optimistic flag
+  // the click looks lost. This set is view-only: a confirmed id goes in at
+  // click time and comes out either when the session disappears from
+  // superSessions (host finished) or via a timeout fallback (cleanup failed
+  // but the session is still on the board — never spin forever).
+  const CLEANUP_PENDING_TIMEOUT_MS = 30_000;
+  const [cleanupPending, setCleanupPending] = useState<ReadonlySet<string>>(() => new Set());
+  const cleanupTimers = useRef<Map<string, number>>(new Map());
+  const beginCleanup = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    setCleanupPending((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    for (const id of ids) {
+      const existing = cleanupTimers.current.get(id);
+      if (existing !== undefined) window.clearTimeout(existing);
+      cleanupTimers.current.set(
+        id,
+        window.setTimeout(() => {
+          cleanupTimers.current.delete(id);
+          setCleanupPending((prev) => {
+            if (!prev.has(id)) return prev;
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }, CLEANUP_PENDING_TIMEOUT_MS),
+      );
+    }
+  }, []);
+  // The host's cleanup emit removes the session from superSessions. Prune the
+  // matching optimistic flag (and its timer) so the row's in-progress state
+  // ends naturally with the row itself — no flash of a finished row still
+  // saying 「清理中」.
+  useEffect(() => {
+    if (cleanupPending.size === 0) return;
+    const present = new Set((sessions ?? []).map((s) => s.id));
+    const stale = [...cleanupPending].filter((id) => !present.has(id));
+    if (stale.length === 0) return;
+    setCleanupPending((prev) => {
+      const next = new Set(prev);
+      for (const id of stale) next.delete(id);
+      return next;
+    });
+    for (const id of stale) {
+      const timer = cleanupTimers.current.get(id);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        cleanupTimers.current.delete(id);
+      }
+    }
+  }, [sessions, cleanupPending]);
+  // The board can unmount mid-cleanup (session switch / panel close): cancel
+  // the fallback timers so no setState fires on an unmounted tree.
+  useEffect(
+    () => () => {
+      for (const timer of cleanupTimers.current.values()) window.clearTimeout(timer);
+      cleanupTimers.current.clear();
+    },
+    [],
+  );
   // Interrupts kill a live process, so both the per-row and the board-wide
   // action go through a confirm dialog like merge / cleanup do. The board-wide
   // variant snapshots the active count at open time — recomputing it while the
@@ -934,6 +999,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   session={session}
                   now={now}
                   open={openRow === session.id}
+                  cleanupPending={cleanupPending.has(session.id)}
                   onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                   onMerge={() => setConfirmMerge(session)}
                   onCleanup={() => setConfirmCleanup(session)}
@@ -964,6 +1030,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                           session={session}
                           now={now}
                           open={openRow === session.id}
+                          cleanupPending={cleanupPending.has(session.id)}
                           onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                           onMerge={() => setConfirmMerge(session)}
                           onCleanup={() => setConfirmCleanup(session)}
@@ -1086,6 +1153,9 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           confirmLabel={t("清理")}
           onConfirm={() => {
             send({ type: "superAgent", action: "cleanup", sessionId: confirmCleanup.id });
+            // Optimistic feedback: the host cleanup is async, so mark the row
+            // busy at click time instead of leaving it looking unresponsive.
+            beginCleanup([confirmCleanup.id]);
             setConfirmCleanup(null);
           }}
           onCancel={() => setConfirmCleanup(null)}
@@ -1105,6 +1175,9 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             for (const id of confirmCleanupAll.ids) {
               send({ type: "superAgent", action: "cleanup", sessionId: id });
             }
+            // Mark every child busy at click time so each row shows its own
+            // in-progress state while the host cleans them up asynchronously.
+            beginCleanup(confirmCleanupAll.ids);
             setConfirmCleanupAll(null);
           }}
           onCancel={() => setConfirmCleanupAll(null)}
@@ -1132,6 +1205,7 @@ function SuperSessionRow({
   session,
   now,
   open,
+  cleanupPending,
   onToggle,
   onMerge,
   onCleanup,
@@ -1142,6 +1216,8 @@ function SuperSessionRow({
    * ticking state (it only advances when the rendered second changes). */
   now: number;
   open: boolean;
+  /** True while the host asynchronously cleans up this child's worktree. */
+  cleanupPending: boolean;
   onToggle: () => void;
   onMerge: () => void;
   onCleanup: () => void;
@@ -1149,7 +1225,13 @@ function SuperSessionRow({
 }) {
   const send = useChat((s) => s.send);
   const [showLive, setShowLive] = useState(false);
-  const chip = statusVisual(session);
+  const chip = cleanupPending
+    ? {
+        tone: "primary" as StatusTone,
+        label: t("清理中"),
+        icon: <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />,
+      }
+    : statusVisual(session);
   const started = session.startedAt ?? session.createdAt;
   const ended = session.endedAt ?? now;
   const preview = session.progress ?? session.summary;
@@ -1399,20 +1481,31 @@ function SuperSessionRow({
               <Button
                 variant="canvas"
                 size="sm"
-                icon={<Trash2 className={ICON_INLINE} />}
+                icon={
+                  cleanupPending ? (
+                    <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                  ) : (
+                    <Trash2 className={ICON_INLINE} />
+                  )
+                }
                 /* Same reasoning as the merge button: `disabled` would kill
                    pointer events and hide the reason, so the block is
-                   expressed with `aria-disabled` plus an early return. */
-                aria-disabled={cleanupBlocked || undefined}
-                aria-label={cleanupBlocked ? cleanupReason : t("清理")}
-                title={cleanupBlocked ? cleanupReason : undefined}
-                className={cleanupBlocked ? "cursor-not-allowed opacity-40" : undefined}
+                   expressed with `aria-disabled` plus an early return. While
+                   cleaning, the busy state blocks a second click too. */
+                aria-disabled={cleanupBlocked || cleanupPending || undefined}
+                aria-label={
+                  cleanupPending ? t("清理中") : cleanupBlocked ? cleanupReason : t("清理")
+                }
+                title={cleanupPending ? t("清理中") : cleanupBlocked ? cleanupReason : undefined}
+                className={
+                  cleanupBlocked || cleanupPending ? "cursor-not-allowed opacity-40" : undefined
+                }
                 onClick={() => {
-                  if (cleanupBlocked) return;
+                  if (cleanupBlocked || cleanupPending) return;
                   onCleanup();
                 }}
               >
-                {t("清理")}
+                {cleanupPending ? t("清理中") : t("清理")}
               </Button>
             )}
           </div>

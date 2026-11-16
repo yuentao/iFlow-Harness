@@ -2267,8 +2267,16 @@ function createMockHost(): HostApi {
             target.updatedAt = Date.now();
           }
         } else if (m.action === "cleanup") {
-          const index = demoSuperSessions.findIndex((s) => s.id === m.sessionId);
-          if (index >= 0) demoSuperSessions.splice(index, 1);
+          // Mirror the real host's async cleanup (dispose → worktree → git
+          // probe → emit) with a short delay, so the webview's optimistic
+          // 「清理中」 state is observable in the standalone demo.
+          const id = m.sessionId;
+          window.setTimeout(() => {
+            const index = demoSuperSessions.findIndex((s) => s.id === id);
+            if (index >= 0) demoSuperSessions.splice(index, 1);
+            broadcastDemo(mockStatus, null);
+          }, 900);
+          return;
         } else if (m.action === "merge") {
           // Mirror the real host: the click becomes a request to the MAIN
           // agent, which performs the merge itself.

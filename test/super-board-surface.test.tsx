@@ -868,6 +868,110 @@ describe("Super Agent 看板清理动作", () => {
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("删除子会话「修复登录跳转」的工作目录？");
   });
+
+  /** 确认框里的确认按钮（文案与操作同名，与「取消」区分）。 */
+  function dialogConfirm(dialog: HTMLElement, label = "清理"): HTMLButtonElement {
+    const el = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === label,
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 忙碌态的「清理中」按钮（普通态文案是「清理」，不会命中）。 */
+  function busyCleanupButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "清理中",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  it("确认清理后立即出现 spinner +「清理中」，不等 host 回包", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+
+    act(() => dialogConfirm(dialog!).click());
+
+    // 确认框立即关闭，请求立即发出。
+    expect(cleanupDialog()).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "cleanup",
+      sessionId: "super-a",
+    });
+    // 行首状态 chip 立刻变成「清理中」+ 旋转图标（completed 原本没有 spinner）。
+    const trigger = rowTrigger();
+    expect(trigger.textContent).toContain("清理中");
+    expect(trigger.querySelector(".animate-spin")).toBeTruthy();
+    // 清理按钮同步进入忙碌态：文案、图标、可访问名都更新。
+    const busy = busyCleanupButton();
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-label")).toBe("清理中");
+    expect(busy.getAttribute("title")).toBe("清理中");
+    expect(busy.querySelector(".animate-spin")).toBeTruthy();
+  });
+
+  it("进行态中重复点击清理按钮不会再次发送请求", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    act(() => dialogConfirm(cleanupDialog()!).click());
+    expect(send).toHaveBeenCalledTimes(1);
+
+    const busy = busyCleanupButton();
+    act(() => busy.click());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(cleanupDialog()).toBeNull();
+  });
+
+  it("取消确认框不触发进行态，也不发送请求", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    const dialog = cleanupDialog();
+    expect(dialog).toBeTruthy();
+    const cancel = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "取消",
+    );
+    expect(cancel).toBeTruthy();
+
+    act(() => cancel!.click());
+
+    expect(cleanupDialog()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("清理中");
+    expect(cleanupButton().getAttribute("aria-label")).toBe("清理");
+  });
+
+  it("host 移除子会话后进行态自然消失，不残留到别的会话", () => {
+    render([session({ id: "super-a", status: "completed", startedAt: 2000, endedAt: 4000 })]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => cleanupButton().click());
+    act(() => dialogConfirm(cleanupDialog()!).click());
+    expect(document.body.textContent).toContain("清理中");
+
+    // 模拟 host 完成清理：super-a 从 superSessions 消失，换成一个未清理的会话。
+    render([
+      session({
+        id: "super-b",
+        title: "另一个任务",
+        status: "failed",
+        startedAt: 2000,
+        endedAt: 4000,
+      }),
+    ]);
+    expect(document.body.textContent).toContain("另一个任务");
+    expect(document.body.textContent).not.toContain("清理中");
+  });
 });
 
 describe("Super Agent 看板帮助说明", () => {
@@ -1146,6 +1250,36 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     expect(document.body.textContent).toContain("工作目录已回收，分支保留");
     expect(document.body.textContent).not.toContain("工作目录与分支已清理");
+  });
+
+  it("批量清理确认后每行各自立即显示进行态", () => {
+    render([
+      session({ id: "super-a", title: "修复登录跳转", status: "completed", startedAt: 2000, endedAt: 4000 }),
+      session({ id: "super-b", title: "补充单测", status: "failed", startedAt: 2000, endedAt: 4000 }),
+    ]);
+    expand();
+
+    const btn = bulkButton();
+    expect(btn).toBeTruthy();
+    act(() => btn!.click());
+    const dialog = bulkDialog();
+    expect(dialog).toBeTruthy();
+    const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "清理已结束",
+    );
+    expect(confirm).toBeTruthy();
+
+    act(() => confirm!.click());
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(bulkDialog()).toBeNull();
+    // 两行各自进入进行态，而不是只有第一行或整批一个共用 spinner。
+    const triggerA = rowTrigger("修复登录跳转");
+    const triggerB = rowTrigger("补充单测");
+    expect(triggerA.textContent).toContain("清理中");
+    expect(triggerB.textContent).toContain("清理中");
+    expect(triggerA.querySelector(".animate-spin")).toBeTruthy();
+    expect(triggerB.querySelector(".animate-spin")).toBeTruthy();
   });
 });
 
