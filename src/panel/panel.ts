@@ -224,6 +224,7 @@ import {
 } from "../qq/settings-host.js";
 import {
   buildBridgeEnv,
+  checkQqStartupGate,
   normalizeQqConfig,
   QQ_SECRET_KEYS,
   validateQqConfig,
@@ -8827,6 +8828,18 @@ export class ChatPanel implements vscode.Disposable {
     const errors = issues.filter((issue) => issue.severity === "error");
     if (errors.length > 0) {
       const first = errors[0]!;
+      this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动：{0}", first.message));
+      this.pushQqStatus(false, first.message);
+      return;
+    }
+
+    // 硬门控：这两项不是「配置写错了」，而是本版本**根本不支持**。其余配置
+    // 再完美也必须拒绝启动 —— 否则会起一个与设置不符的通道（qqbot 实际跑的
+    // 是 OneBot bridge，workspace 实际仍在主工作区执行）。
+    const gateIssues = checkQqStartupGate(config, this.superRepoRoot());
+    if (gateIssues.length > 0) {
+      const first = gateIssues[0]!;
+      this.log.warn(`QQ 配置错误（${first.code}）：${first.message}`);
       this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动：{0}", first.message));
       this.pushQqStatus(false, first.message);
       return;

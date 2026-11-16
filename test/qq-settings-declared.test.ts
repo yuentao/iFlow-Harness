@@ -4,9 +4,10 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 
 /**
- * Wave2-B 只**声明** QQ 远程任务的 12 项设置（读取与实现属下一波）。这些
- * 断言把「声明」钉在磁盘上：键名、类型、默认值、取值范围，以及每个 nls 键
- * 在英文与中文两份 bundle 里都存在且非空 —— 漂移会让设置项静默失色。
+ * QQ 远程任务的 12 项设置声明。这些断言把设置项钉在磁盘上：键名、类型、
+ * 默认值、取值范围，以及每个 nls 键在英文与中文两份 bundle 里都存在且非空
+ * —— 漂移会让设置项静默失色。描述文案同时受「如实」约束：不得再声称
+ * 「只声明、未接线」，且未实现的能力必须写明会被拒绝。
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -131,5 +132,39 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
     expect(enText).toContain("approval");
     expect(enText).toContain("5 minutes");
     expect(enText).toContain("denial");
+  });
+
+  it("描述如实：不再声称「仅声明 / 尚未接线」，并写明未实现的能力会被拒绝", () => {
+    const staleZh = ["仅声明", "尚未接线"];
+    const staleEn = ["only declares", "not wired", "nothing is wired"];
+    for (const key of Object.keys(zh).filter((k) => k.startsWith("iflow.configuration.qq."))) {
+      for (const phrase of staleZh) {
+        expect(zh[key], `中文 nls 的 ${key} 仍含陈旧表述「${phrase}」`).not.toContain(phrase);
+      }
+    }
+    for (const key of Object.keys(en).filter((k) => k.startsWith("iflow.configuration.qq."))) {
+      const lowered = en[key]!.toLowerCase();
+      for (const phrase of staleEn) {
+        expect(lowered, `英文 nls 的 ${key} 仍含陈旧表述「${phrase}」`).not.toContain(phrase);
+      }
+    }
+
+    // qqbot 未实现：适配器描述必须说清楚「选它会拒绝启动」。
+    const zhAdapter = zh["iflow.configuration.qq.adapter.description"] ?? "";
+    expect(zhAdapter).toContain("qqbot");
+    expect(zhAdapter).toContain("尚未实现");
+    expect(zhAdapter).toContain("拒绝启动");
+    const enAdapter = en["iflow.configuration.qq.adapter.description"] ?? "";
+    expect(enAdapter).toContain("qqbot");
+    expect(enAdapter).toContain("not implemented");
+    expect(enAdapter).toContain("refuse");
+
+    // workspace 只支持当前工作区根：描述必须说清楚「指向其他根会拒绝启动」。
+    const zhWorkspace = zh["iflow.configuration.qq.workspace.description"] ?? "";
+    expect(zhWorkspace).toContain("当前工作区根");
+    expect(zhWorkspace).toContain("拒绝启动");
+    const enWorkspace = en["iflow.configuration.qq.workspace.description"] ?? "";
+    expect(enWorkspace).toContain("current workspace root");
+    expect(enWorkspace).toContain("refuse");
   });
 });

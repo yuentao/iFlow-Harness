@@ -2,10 +2,10 @@
  * QQ 远程任务的配置层（Wave2-E）。
  *
  * 职责边界：
- *  - `normalizeQqConfig` / `validateQqConfig` / `buildBridgeEnv` 与 secret 键名
- *    都是**纯逻辑**，不 import vscode，便于单测；
- *  - `readQqConfigFromVscode` 是本模块唯一接触 vscode 的函数（读取
- *    `iflow.qq.*` 12 项后交给 `normalizeQqConfig`）。
+ *  - `normalizeQqConfig` / `validateQqConfig` / `checkQqStartupGate` /
+ *    `buildBridgeEnv` 与 secret 键名都是**纯逻辑**，不 import vscode，便于单测；
+ *  - 读设置的实际入口在 `src/qq/settings-host.ts`（`readQqSettings`），
+ *    本模块只负责把裸值归一化、校验与门控。
  *
  * 归一化纪律：设置来自用户手写的 settings.json，脏值是常态。这里把每一处
  * 「类型不符 / 非法枚举 / 越界裁剪」都收敛到默认值或允许范围，并**如实**记进
@@ -19,7 +19,6 @@
  */
 
 import { isAbsolute, relative, resolve } from "node:path";
-import * as vscode from "vscode";
 import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
@@ -30,7 +29,8 @@ import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
  * QQ 适配器种类（取值与 package.json 的 `iflow.qq.adapter` 枚举逐字一致）。
  *
  * 当前只实现了 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 是 QQ 官方
- * 机器人接口的预留位，新增适配器时在这里追加并同步设置项枚举。
+ * 机器人接口的预留位，**尚无适配器实现**——`checkQqStartupGate` 会拒绝用它
+ * 启动。新增适配器时在这里追加并同步设置项枚举。
  */
 const ADAPTERS = ["onebot", "qqbot"] as const;
 /** 远程执行策略：readonly 只读，supervised 逐次确认，trusted 免确认。 */
@@ -298,7 +298,9 @@ export type QqConfigIssueCode =
   | "workspace_relative"
   | "workspace_not_in_roots"
   | "bridge_port_conflict"
-  | "trusted_policy";
+  | "trusted_policy"
+  | "adapter_unsupported"
+  | "workspace_not_active_root";
 
 export interface QqConfigIssue {
   severity: QqConfigIssueSeverity;
@@ -397,6 +399,82 @@ function isWithinRoot(child: string, root: string): boolean {
   return rel !== ".." && !rel.startsWith("../") && !rel.startsWith("..\\");
 }
 
+/** 两个路径是否指向同一个目录（Windows 大小写不敏感）。 */
+function isSamePath(left: string, right: string): boolean {
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+// ---------------------------------------------------------------------------
+// 启动门控
+// ---------------------------------------------------------------------------
+
+/**
+ * 当前是否真的有可用的适配器实现。
+ *
+ * 只实现了 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 是 QQ 官方机器人
+ * 接口的预留枚举值，**没有适配器实现**。选它会 spawn 的仍是 OneBot bridge，
+ * 与其让用户以为切换成功，不如在启动前直接拒绝。
+ */
+export function isAdapterSupported(config: QqConfig): boolean {
+  return config.adapter === "onebot";
+}
+
+/**
+ * `workspace` 是否与任务实际执行的工作区根兼容。
+ *
+ * 远程任务由 `SuperAgentManager` 在主仓根（当前激活工作区）上起 worktree，
+ * `iflow.qq.workspace` 并不会把 spawn 挪到别处 —— 所以只接受「留空」或
+ * 「恰好等于当前工作区根」；指向其它目录（哪怕是当前根的子目录）都会让
+ * 用户以为任务跑在那里，实际却不是。`activeRoot` 缺失（没打开工作区）时
+ * 任何非空 workspace 都不兼容。
+ */
+export function isWorkspaceCompatible(
+  config: QqConfig,
+  activeRoot?: string | null,
+): boolean {
+  const workspace = config.workspace.trim();
+  if (workspace.length === 0) return true;
+  const root = activeRoot?.trim() ?? "";
+  if (root.length === 0) return false;
+  return isSamePath(workspace, root);
+}
+
+/**
+ * 启动前必须满足的硬门控（只报问题，不做修正）。
+ *
+ * 与 `validateQqConfig` 分开：那些是「配置写错了」（缺 endpoint、白名单为空），
+ * 这些是「这个版本根本不支持」——即使其余配置完美也必须拒绝启动，否则
+ * 面板会如实启动一个与设置不符的通道。
+ *
+ * 调用方负责先判断 `config.enabled`；本函数只看能力与路径兼容性。
+ */
+export function checkQqStartupGate(
+  config: QqConfig,
+  activeRoot?: string | null,
+): QqConfigIssue[] {
+  const issues: QqConfigIssue[] = [];
+
+  if (!isAdapterSupported(config)) {
+    issues.push({
+      severity: "error",
+      code: "adapter_unsupported",
+      message: "QQ 官方适配器尚未实现，请选择 OneBot",
+    });
+  }
+
+  if (!isWorkspaceCompatible(config, activeRoot)) {
+    issues.push({
+      severity: "error",
+      code: "workspace_not_active_root",
+      message: "QQ 任务暂只支持当前工作区，请改为当前工作区根或清空该设置",
+    });
+  }
+
+  return issues;
+}
+
 // ---------------------------------------------------------------------------
 // bridge 环境变量
 // ---------------------------------------------------------------------------
@@ -461,33 +539,3 @@ export const QQ_SECRET_KEYS = {
   /** bridge 子进程向宿主 IPC 出示的 Bearer token（即 `IFLOW_QQ_BRIDGE_TOKEN` 的来源）。 */
   bridgeToken: "iflow.qq.bridge-token",
 } as const;
-
-// ---------------------------------------------------------------------------
-// vscode 薄封装
-// ---------------------------------------------------------------------------
-
-/**
- * 读取 `iflow.qq.*` 并归一化。
- *
- * 本模块唯一接触 vscode 的函数：`get(key)` 不传默认值，键缺失时拿到
- * `undefined`，由 `normalizeQqConfig` 用权威默认值补齐（设置项的默认值由
- * package.json 声明，两者一致）。
- */
-export function readQqConfigFromVscode(): QqNormalizeResult {
-  const section = vscode.workspace.getConfiguration("iflow.qq");
-  const raw: Record<string, unknown> = {
-    enabled: section.get("enabled"),
-    adapter: section.get("adapter"),
-    endpoint: section.get("endpoint"),
-    bridgePort: section.get("bridgePort"),
-    allowedUsers: section.get("allowedUsers"),
-    allowedGroups: section.get("allowedGroups"),
-    workspace: section.get("workspace"),
-    remotePolicy: section.get("remotePolicy"),
-    maxConcurrentTasks: section.get("maxConcurrentTasks"),
-    rateLimitPerMin: section.get("rateLimitPerMin"),
-    resultDetail: section.get("resultDetail"),
-    autoMerge: section.get("autoMerge"),
-  };
-  return normalizeQqConfig(raw);
-}
