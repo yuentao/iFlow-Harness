@@ -9,6 +9,7 @@ import {
   type DeliveryServer,
 } from "../src/qq/bridge/delivery-server.js";
 import { createHostClient } from "../src/qq/bridge/host-client.js";
+import { buildReadyPayload } from "../src/qq/bridge/main.js";
 import {
   createOneBotSink,
   type OneBotSink,
@@ -191,7 +192,12 @@ describe("host-client", () => {
   it("把事件体与可验签的鉴权头投递给假宿主", async () => {
     const host = await startFakeHost();
     const client = createHostClient({ hostPort: host.port, bridgeToken: TOKEN, hmacSecret: SECRET });
-    const payload = { type: "bridge_ready", incomingPort: 4321, pid: 99, startedAt: 1_700_000_000_000 };
+    const payload = buildReadyPayload({
+      incomingPort: 4321,
+      deliveryPort: 4322,
+      pid: 99,
+      startedAt: 1_700_000_000_000,
+    });
 
     const result = await client.postEvents(payload);
 
@@ -213,6 +219,44 @@ describe("host-client", () => {
     const result = await client.postEvents({ type: "x" });
     expect(result.ok).toBe(false);
     expect(result.status).toBe(0);
+  });
+});
+
+describe("bridge_ready 载荷", () => {
+  it("同时上报入站端口与投递端口", () => {
+    const payload = buildReadyPayload({
+      incomingPort: 4321,
+      deliveryPort: 8765,
+      pid: 99,
+      startedAt: 1_700_000_000_000,
+    });
+
+    expect(payload).toEqual({
+      type: "bridge_ready",
+      incomingPort: 4321,
+      deliveryPort: 8765,
+      pid: 99,
+      startedAt: 1_700_000_000_000,
+    });
+    expect(typeof payload.incomingPort).toBe("number");
+    expect(typeof payload.deliveryPort).toBe("number");
+  });
+
+  it("投递端口取 delivery server 的真实监听端口（非 0）", async () => {
+    const { server } = await startDelivery();
+    const { sink } = await startSink();
+
+    expect(server.port).toBeGreaterThan(0);
+    expect(sink.port).toBeGreaterThan(0);
+
+    const payload = buildReadyPayload({
+      incomingPort: sink.port,
+      deliveryPort: server.port,
+      pid: process.pid,
+      startedAt: 1,
+    });
+    expect(payload.deliveryPort).toBe(server.port);
+    expect(payload.incomingPort).toBe(sink.port);
   });
 });
 

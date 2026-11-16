@@ -10,6 +10,9 @@
  * 日志一律走 stderr——stdout 可能被上一层当作协议管道，污染它会打断解析。
  */
 
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chunkQqText } from "../../../shared/qq-task.js";
 import { buildReplyPayload, buildSendGroupMsg, buildSendPrivateMsg } from "../adapter/onebot.js";
 import type { ChatType } from "../adapter/types.js";
@@ -62,6 +65,73 @@ function parsePort(raw: string | undefined, name: string, allowZero: boolean): n
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 已绑定的端口是否可用（取值 1–65535；0 表示尚未 listen，不能上报给宿主）。 */
+function isListeningPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
+}
+
+/** 上报给宿主的启动握手载荷。 */
+export interface BridgeReadyPayload {
+  type: "bridge_ready";
+  /** OneBot 反向 HTTP 事件入口端口（QQ 后端往这里推事件）。 */
+  incomingPort: number;
+  /** 宿主投递入口端口（宿主往这里 POST `/v1/deliver`）。 */
+  deliveryPort: number;
+  pid: number;
+  startedAt: number;
+}
+
+/**
+ * 构造 `bridge_ready` 载荷。
+ *
+ * 端口必须来自两个 server **listen 完成后的** `server.address()`，绝不能用
+ * 传入 `listen(0)` 的自动分配值 0——宿主拿 0 无处可投递，整条回传链路断掉。
+ */
+export function buildReadyPayload(input: {
+  incomingPort: number;
+  deliveryPort: number;
+  pid: number;
+  startedAt: number;
+}): BridgeReadyPayload {
+  return {
+    type: "bridge_ready",
+    incomingPort: input.incomingPort,
+    deliveryPort: input.deliveryPort,
+    pid: input.pid,
+    startedAt: input.startedAt,
+  };
+}
+
+/**
+ * 本模块是否被直接执行（而不是被 import，例如单元测试）。
+ *
+ * 入口是独立 Node 进程（`node dist/src/qq/bridge/main.js`）；被 import 时不应
+ * 产生「读环境变量 / 起监听 / 退出进程」这类副作用。
+ */
+function isDirectEntry(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    const self = normalizeEntryPath(fileURLToPath(import.meta.url));
+    const target = normalizeEntryPath(entry);
+    // Windows 路径大小写不敏感（盘符/目录大小写常与 import.meta.url 不一致）。
+    return process.platform === "win32"
+      ? self.toLowerCase() === target.toLowerCase()
+      : self === target;
+  } catch {
+    return false;
+  }
+}
+
+/** 符号链接/相对路径归一；路径不存在时退回词法形式（Node 可能已解析真实路径）。 */
+function normalizeEntryPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolvePath(path);
+  }
 }
 
 interface BridgeConfig {
@@ -162,6 +232,15 @@ async function main(): Promise<void> {
         });
       },
     });
+
+    // 端口必须在两个 server 都 listen 完成后才读取（create*Server 内部已 await
+    // listening 并回读 server.address()）。任一端口拿不到真实值就当场失败：
+    // 上报 0 会让宿主不知道该往哪投递，整条回传链路静默断掉。
+    if (!isListeningPort(sink.port) || !isListeningPort(delivery.port)) {
+      throw new Error(
+        `bridge failed to bind listening ports (incoming=${sink.port}, delivery=${delivery.port})`,
+      );
+    }
   } catch (error) {
     // 单实例契约：incoming 端口被占用即是「另一个 bridge 已在跑」，可识别地退出。
     const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -177,12 +256,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const ready = await hostClient.postEvents({
-    type: "bridge_ready",
-    incomingPort: sink.port,
-    pid: process.pid,
-    startedAt,
-  });
+  const ready = await hostClient.postEvents(
+    buildReadyPayload({
+      incomingPort: sink.port,
+      deliveryPort: delivery.port,
+      pid: process.pid,
+      startedAt,
+    }),
+  );
   if (!ready.ok) log(`failed to report bridge_ready to host (status ${ready.status})`);
 
   let shuttingDown = false;
@@ -213,7 +294,9 @@ async function main(): Promise<void> {
   }
 }
 
-void main().catch((error: unknown) => {
-  log(`fatal: ${errorMessage(error)}`);
-  process.exit(1);
-});
+if (isDirectEntry()) {
+  void main().catch((error: unknown) => {
+    log(`fatal: ${errorMessage(error)}`);
+    process.exit(1);
+  });
+}
