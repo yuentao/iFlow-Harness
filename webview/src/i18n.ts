@@ -83,6 +83,8 @@ const en: Record<string, string> = {
     "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",
   "清理": "Clean up",
   "清理中": "Cleaning up",
+  "合并中": "Merging",
+  "重试中": "Retrying",
   "子会话还在运行，先中断再清理": "Stop the child session before cleaning it up",
   "中断该子会话": "Interrupt this child session",
   "中断子会话": "Interrupt the child session",

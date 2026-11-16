@@ -1373,6 +1373,245 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
   });
 });
 
+describe("Super Agent 看板合并 / 重试进行态", () => {
+  /** 行触发器（状态 + 标题 + 耗时那一行）。 */
+  function rowTrigger(title = "修复登录跳转"): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      (b.textContent ?? "").includes(title),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 详情区里的「让智能体合并」按钮（确认框里的确认按钮文案不同）。 */
+  function mergeButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "让智能体合并",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 忙碌态的合并按钮（普通态文案是「让智能体合并」，不会命中）。 */
+  function busyMergeButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === "合并中",
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 合并确认框（ConfirmDialog 走 portal 挂在 document.body 上）。 */
+  const mergeDialog = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="合并子会话分支"]');
+
+  function dialogButton(dialog: HTMLElement, label: string): HTMLButtonElement {
+    const el = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => (b.textContent ?? "").trim() === label,
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 详情区里的「重试」按钮（忙碌态文案是「重试中」）。 */
+  function retryButton(): HTMLButtonElement {
+    const el = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      ["重试", "重试中"].includes((b.textContent ?? "").trim()),
+    );
+    expect(el).toBeTruthy();
+    return el!;
+  }
+
+  /** 已结束、分支仍在、集成结果为「未自动合并」——合并按钮可用且行不被折叠。 */
+  function mergeableSession(overrides: Partial<SuperSessionUi> = {}): SuperSessionUi {
+    return session({
+      id: "super-m",
+      status: "completed",
+      startedAt: 2000,
+      endedAt: 4000,
+      integration: { mode: "merge", state: "skipped", detail: "工作区脏", at: 5000 },
+      ...overrides,
+    });
+  }
+
+  it("确认合并后立即出现 spinner +「合并中」，不等 host 回包", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    const dialog = mergeDialog();
+    expect(dialog).toBeTruthy();
+
+    act(() => dialogButton(dialog!, "让智能体合并分支").click());
+
+    // 确认框立即关闭，请求立即发出。
+    expect(mergeDialog()).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "merge",
+      sessionId: "super-m",
+    });
+    // 行首状态 chip 立刻变成「合并中」+ 旋转图标（completed 原本没有 spinner）。
+    const trigger = rowTrigger();
+    expect(trigger.textContent).toContain("合并中");
+    expect(trigger.querySelector(".animate-spin")).toBeTruthy();
+    // 合并按钮同步进入忙碌态：文案、图标、可访问名都更新。
+    const busy = busyMergeButton();
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-label")).toBe("合并中");
+    expect(busy.getAttribute("title")).toBe("合并中");
+    expect(busy.querySelector(".animate-spin")).toBeTruthy();
+    // 「已请求、未合入」绝不能被误报成「已自动合并」。
+    expect(document.body.textContent).not.toContain("已自动合并");
+  });
+
+  it("合并进行态中重复点击不会再次发送请求", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    act(() => dialogButton(mergeDialog()!, "让智能体合并分支").click());
+    expect(send).toHaveBeenCalledTimes(1);
+
+    act(() => busyMergeButton().click());
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(mergeDialog()).toBeNull();
+  });
+
+  it("integration 落定后收尾：不再显示「合并中」，结果改为已合并", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    act(() => dialogButton(mergeDialog()!, "让智能体合并分支").click());
+    expect(document.body.textContent).toContain("合并中");
+
+    // 合并子会话跑完：host 把来源行的 integration 改写成 merged（新的 at）。
+    render([
+      mergeableSession({ integration: { mode: "merge", state: "merged", at: 9000 } }),
+    ]);
+
+    expect(document.body.textContent).not.toContain("合并中");
+    // 全部子会话都已合并 → 看板自动收起成顶栏控件：重新展开再读历史行。
+    expect(control().getAttribute("aria-expanded")).toBe("false");
+    expand();
+    // 已合并的行折叠进「已完成的 N 个子会话」：展开后读到真实结果。
+    const foldedToggle = document.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="展开已完成的子会话"]',
+    );
+    expect(foldedToggle).toBeTruthy();
+    act(() => foldedToggle!.click());
+    act(() => rowTrigger().click());
+    expect(rowTrigger().querySelector(".animate-spin")).toBeNull();
+    expect(document.body.textContent).toContain("已自动合并");
+  });
+
+  it("取消合并确认框不触发进行态，也不发送请求", () => {
+    render([mergeableSession()]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => mergeButton().click());
+    const dialog = mergeDialog();
+    expect(dialog).toBeTruthy();
+
+    act(() => dialogButton(dialog!, "取消").click());
+
+    expect(mergeDialog()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("合并中");
+    expect(mergeButton().getAttribute("aria-label")).toBe("让智能体合并");
+    expect(mergeButton().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("请求未被受理（没有合并子会话）时兜底超时解锁，不永久转圈", () => {
+    vi.useFakeTimers();
+    try {
+      render([mergeableSession()]);
+      expand();
+      act(() => rowTrigger().click());
+      act(() => mergeButton().click());
+      act(() => dialogButton(mergeDialog()!, "让智能体合并分支").click());
+      expect(document.body.textContent).toContain("合并中");
+
+      // host 拒掉请求（主会话正忙等）不会产生合并子会话：宽限期到点收尾。
+      act(() => {
+        vi.advanceTimersByTime(6_000);
+      });
+
+      expect(document.body.textContent).not.toContain("合并中");
+      expect(mergeButton().getAttribute("aria-label")).toBe("让智能体合并");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("点击重试立即禁用并显示「重试中」，重复点击不重发", () => {
+    render([
+      session({
+        id: "super-r",
+        status: "failed",
+        error: "进程崩溃",
+        startedAt: 2000,
+        endedAt: 4000,
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+
+    act(() => retryButton().click());
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      type: "superAgent",
+      action: "retry",
+      sessionId: "super-r",
+    });
+    const busy = retryButton();
+    expect(busy.textContent?.trim()).toBe("重试中");
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    expect(busy.getAttribute("aria-label")).toBe("重试中");
+    expect(busy.getAttribute("title")).toBe("重试中");
+    expect(busy.querySelector(".animate-spin")).toBeTruthy();
+    // 行首 chip 同样立即说明「重试中」。
+    expect(rowTrigger().textContent).toContain("重试中");
+
+    // 防连点：进行态下再点一次不会再发。
+    act(() => busy.click());
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("host 受理重试（状态变为运行中）后进行态收尾", () => {
+    render([
+      session({
+        id: "super-r",
+        status: "failed",
+        error: "进程崩溃",
+        startedAt: 2000,
+        endedAt: 4000,
+      }),
+    ]);
+    expand();
+    act(() => rowTrigger().click());
+    act(() => retryButton().click());
+    expect(document.body.textContent).toContain("重试中");
+
+    // host 重置 worktree 并起了新进程：status 变化即视为已受理。
+    render([
+      session({
+        id: "super-r",
+        status: "running",
+        attempts: 2,
+        startedAt: 9000,
+        updatedAt: 9000,
+      }),
+    ]);
+
+    expect(document.body.textContent).not.toContain("重试中");
+    expect(rowTrigger().textContent).toContain("运行中");
+  });
+});
+
 describe("Super Agent 看板入口运行态炫光", () => {
   /** 装饰层：只在至少一个子会话非终态时挂载。 */
   const glow = (): HTMLElement | null =>

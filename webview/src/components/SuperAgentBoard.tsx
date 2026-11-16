@@ -179,6 +179,113 @@ export function shortBranch(branch: string): string {
 const SUPER_BOARD_PANEL_ID = "super-board-panel";
 
 /**
+ * 视图层的「已点击、等 host 回包」乐观集合 —— merge / retry 共用。
+ *
+ * host 的这两条动作都是异步的（合并要派一个独立 CLI 子会话跑几十秒到几分
+ * 钟；重试要重置 worktree 再起进程），从点击到 store 变化之间存在空窗；
+ * 只靠 host toast 会让来源行「看起来没反应」。点击即把 id 放进集合，等
+ * `resolve` 判定 host 结果落定（或 id 从 superSessions 消失）就清掉，并有
+ * 兜底超时，绝不永久转圈。卸载时清掉全部定时器，避免对已卸载树 setState。
+ *
+ * 与 cleanup 的 `cleanupPending` 是同一套纪律（那套是更早落地的独立实现，
+ * 这里刻意不重构它，避免动到刚合入的代码）。
+ */
+function useSuperActionPending(
+  sessions: readonly SuperSessionUi[] | undefined,
+  timeoutMs: number,
+  resolve: (session: SuperSessionUi | undefined) => boolean,
+  onDrop?: (id: string) => void,
+  hold?: { ms: number; while: (session: SuperSessionUi | undefined) => boolean },
+): { pending: ReadonlySet<string>; begin: (id: string) => void } {
+  const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  const timers = useRef<Map<string, number>>(new Map());
+  // 定时器回调与 resolve effect 都要读**最新**快照：闭包里的 sessions 是
+  // 点击那一刻的，用它判断「合并子会话还在不在跑」会一直看到旧值。
+  const latest = useRef({ sessions, hold });
+  latest.current = { sessions, hold };
+  const drop = useCallback(
+    (id: string) => {
+      const timer = timers.current.get(id);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timers.current.delete(id);
+      }
+      onDrop?.(id);
+      setPending((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
+    [onDrop],
+  );
+  const arm = useCallback(
+    (id: string, ms: number) => {
+      const existing = timers.current.get(id);
+      if (existing !== undefined) window.clearTimeout(existing);
+      timers.current.set(
+        id,
+        window.setTimeout(() => {
+          timers.current.delete(id);
+          const { sessions: list, hold: current } = latest.current;
+          const session = list?.find((s) => s.id === id);
+          // 已受理的合并会跑几十秒到几分钟：只要代表它的合并子会话还在跑就
+          // 续期，不能在半途把按钮解锁、让人以为没在合并。被 host 拒掉的
+          // 请求不会产生合并子会话，到点就收尾（host 的 toast 已说明原因）。
+          if (current && current.while(session)) {
+            arm(id, current.ms);
+            return;
+          }
+          drop(id);
+        }, ms),
+      );
+    },
+    [drop],
+  );
+  const begin = useCallback(
+    (id: string) => {
+      setPending((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      arm(id, timeoutMs);
+    },
+    [arm, timeoutMs],
+  );
+  // Host 结果落定（integration 改写 / 状态变化）或行消失时收尾，清除定时器。
+  useEffect(() => {
+    if (pending.size === 0) return;
+    const byId = new Map((sessions ?? []).map((s) => [s.id, s]));
+    const settled = [...pending].filter((id) => resolve(byId.get(id)));
+    if (settled.length === 0) return;
+    setPending((prev) => {
+      const next = new Set(prev);
+      for (const id of settled) next.delete(id);
+      return next;
+    });
+    for (const id of settled) {
+      const timer = timers.current.get(id);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timers.current.delete(id);
+      }
+      onDrop?.(id);
+    }
+  }, [sessions, pending, resolve, onDrop]);
+  useEffect(
+    () => () => {
+      for (const timer of timers.current.values()) window.clearTimeout(timer);
+      timers.current.clear();
+    },
+    [],
+  );
+  return { pending, begin };
+}
+
+/**
  * Geometry of the portaled board surfaces.
  *
  * The panel used to be `absolute inset-x-3 top-full` inside the header, so
@@ -539,6 +646,95 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
       cleanupTimers.current.clear();
     },
     [],
+  );
+  // 「让智能体合并」在 host 侧是异步的：它派一个跑在主仓工作区的合并子
+  // 会话（几十秒到几分钟），结果由合并子会话跑完时写回**来源**子会话的
+  // integration。所以「已请求、未合入」必须和「已合入」分开显示 —— 来源行
+  // 立刻转圈说「合并中」，等 integration 真的落定（state=merged，或任何
+  // 新的结果 at）才收尾。
+  //
+  // 两条收尾路径，缺一不可：
+  //   ① integration 落定 —— 合并子会话结束时 onMergeResult 回写 at/state；
+  //   ② 请求根本没被受理（已有合并在跑 / 主会话正忙 / 行状态已变），
+  //      integration 永不变，等一个短宽限期仍看不到合并子会话就收尾 ——
+  //      host 的 warning toast 已经说明了原因，不能把按钮锁死几分钟。
+  // 一旦确认「这次请求已被受理」（主仓工作区的合并子会话 + 标题带该分支
+  // 名），超时只**续期**同一个宽限期，绝不谎报已合并；合并子会话一结束、
+  // integration 又没回来（宿主异常），也会在一个宽限期内解锁而不是永久转圈。
+  const MERGE_ACCEPT_GRACE_MS = 6_000;
+  const mergeStarts = useRef<Map<string, number | undefined>>(new Map());
+  const dropMergeStart = useCallback((id: string) => {
+    mergeStarts.current.delete(id);
+  }, []);
+  const mergeSettled = useCallback((session: SuperSessionUi | undefined) => {
+    if (!session) return true; // 来源行已被清理：不必再转圈
+    const startAt = mergeStarts.current.get(session.id);
+    return session.integration?.state === "merged" || session.integration?.at !== startAt;
+  }, []);
+  const mergeInFlight = useCallback(
+    (session: SuperSessionUi | undefined) => {
+      const branch = session?.isolation.branch;
+      if (!branch) return false;
+      // 合并子会话落在主仓工作区（repo 档、没有自己的分支），标题由 host
+      // 写成「合并分支 <branch>」。分支名唯一，用它把「这次请求已被受理」
+      // 与「被拒」区分开：只有真正在跑才值得继续转圈。
+      return (sessions ?? []).some(
+        (s) =>
+          s.isolation.kind === "repo" &&
+          !isTerminalSuperStatus(s.status) &&
+          s.title.includes(branch),
+      );
+    },
+    [sessions],
+  );
+  const mergeHold = useMemo(
+    () => ({ ms: MERGE_ACCEPT_GRACE_MS, while: mergeInFlight }),
+    [mergeInFlight],
+  );
+  const mergeAction = useSuperActionPending(
+    sessions,
+    MERGE_ACCEPT_GRACE_MS,
+    mergeSettled,
+    dropMergeStart,
+    mergeHold,
+  );
+  const beginMerge = useCallback(
+    (id: string, integrationAt: number | undefined) => {
+      mergeStarts.current.set(id, integrationAt);
+      mergeAction.begin(id);
+    },
+    [mergeAction],
+  );
+  // 「重试」的 host 回包通常亚秒级，但点击到回包之间仍有空窗：本地记下
+  // 点击瞬间的 status/attempts，任一变化就说明 host 已受理并收尾；回包丢失
+  // 时用较短的兜底超时解锁，避免一次丢包把按钮永久锁死。
+  const RETRY_PENDING_TIMEOUT_MS = 15_000;
+  const retryStarts = useRef<Map<string, { status: SuperStatus; attempts: number }>>(new Map());
+  const dropRetryStart = useCallback((id: string) => {
+    retryStarts.current.delete(id);
+  }, []);
+  const retrySettled = useCallback((session: SuperSessionUi | undefined) => {
+    if (!session) return true;
+    const start = retryStarts.current.get(session.id);
+    if (!start) return true;
+    return session.status !== start.status || (session.attempts ?? 1) !== start.attempts;
+  }, []);
+  const retryAction = useSuperActionPending(
+    sessions,
+    RETRY_PENDING_TIMEOUT_MS,
+    retrySettled,
+    dropRetryStart,
+  );
+  const beginRetry = useCallback(
+    (session: SuperSessionUi) => {
+      retryStarts.current.set(session.id, {
+        status: session.status,
+        attempts: session.attempts ?? 1,
+      });
+      retryAction.begin(session.id);
+      send({ type: "superAgent", action: "retry", sessionId: session.id });
+    },
+    [retryAction, send],
   );
   // Interrupts kill a live process, so both the per-row and the board-wide
   // action go through a confirm dialog like merge / cleanup do. The board-wide
@@ -1000,8 +1196,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   now={now}
                   open={openRow === session.id}
                   cleanupPending={cleanupPending.has(session.id)}
+                  mergePending={mergeAction.pending.has(session.id)}
+                  retryPending={retryAction.pending.has(session.id)}
                   onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                   onMerge={() => setConfirmMerge(session)}
+                  onRetry={() => beginRetry(session)}
                   onCleanup={() => setConfirmCleanup(session)}
                   onCancel={() => setConfirmCancel(session)}
                 />
@@ -1031,8 +1230,11 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                           now={now}
                           open={openRow === session.id}
                           cleanupPending={cleanupPending.has(session.id)}
+                          mergePending={mergeAction.pending.has(session.id)}
+                          retryPending={retryAction.pending.has(session.id)}
                           onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                           onMerge={() => setConfirmMerge(session)}
+                          onRetry={() => beginRetry(session)}
                           onCleanup={() => setConfirmCleanup(session)}
                           onCancel={() => setConfirmCancel(session)}
                         />
@@ -1107,6 +1309,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           )}
           confirmLabel={t("让智能体合并分支")}
           onConfirm={() => {
+            beginMerge(confirmMerge.id, confirmMerge.integration?.at);
             send({ type: "superAgent", action: "merge", sessionId: confirmMerge.id });
             setConfirmMerge(null);
           }}
@@ -1206,8 +1409,11 @@ function SuperSessionRow({
   now,
   open,
   cleanupPending,
+  mergePending,
+  retryPending,
   onToggle,
   onMerge,
+  onRetry,
   onCleanup,
   onCancel,
 }: {
@@ -1218,17 +1424,33 @@ function SuperSessionRow({
   open: boolean;
   /** True while the host asynchronously cleans up this child's worktree. */
   cleanupPending: boolean;
+  /** True from the merge confirm click until the host records the result. */
+  mergePending: boolean;
+  /** True from the retry click until the host accepts it (status/attempt). */
+  retryPending: boolean;
   onToggle: () => void;
   onMerge: () => void;
+  onRetry: () => void;
   onCleanup: () => void;
   onCancel: () => void;
 }) {
-  const send = useChat((s) => s.send);
   const [showLive, setShowLive] = useState(false);
-  const chip = cleanupPending
+  // Busy states take the chip over: each one is a request the user just made
+  // and is waiting on, so it must outrank the stale status it is replacing
+  // (a merge target is `completed` — without this it would still read
+  // 「已完成」 while the merge child runs). Merge outranks retry only because
+  // the two cannot coexist on one row in practice.
+  const busyChip = cleanupPending
+    ? t("清理中")
+    : mergePending
+      ? t("合并中")
+      : retryPending
+        ? t("重试中")
+        : null;
+  const chip = busyChip
     ? {
         tone: "primary" as StatusTone,
-        label: t("清理中"),
+        label: busyChip,
         icon: <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />,
       }
     : statusVisual(session);
@@ -1449,33 +1671,59 @@ function SuperSessionRow({
               <Button
                 variant="canvas"
                 size="sm"
-                icon={<RotateCcw className={ICON_INLINE} />}
-                title={t("重试该子会话（沿用原工作目录，保留已有改动）")}
-                onClick={() => send({ type: "superAgent", action: "retry", sessionId: session.id })}
+                icon={
+                  retryPending ? (
+                    <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                  ) : (
+                    <RotateCcw className={ICON_INLINE} />
+                  )
+                }
+                /* Click → host round-trip is usually sub-second but not
+                   instant; the busy state blocks a double click and tells the
+                   user the request went out. Same `aria-disabled` discipline
+                   as merge / cleanup (keeps title + aria-label readable). */
+                aria-disabled={retryPending || undefined}
+                aria-label={retryPending ? t("重试中") : t("重试该子会话（沿用原工作目录，保留已有改动）")}
+                title={retryPending ? t("重试中") : t("重试该子会话（沿用原工作目录，保留已有改动）")}
+                className={retryPending ? "cursor-not-allowed opacity-40" : undefined}
+                onClick={() => {
+                  if (retryPending) return;
+                  onRetry();
+                }}
               >
-                {t("重试")}
+                {retryPending ? t("重试中") : t("重试")}
               </Button>
             )}
             <Button
               variant="canvas"
               size="sm"
-              icon={<GitMerge className={ICON_INLINE} />}
+              icon={
+                mergePending ? (
+                  <Loader2 className={`${ICON_INLINE} animate-spin`} />
+                ) : (
+                  <GitMerge className={ICON_INLINE} />
+                )
+              }
               /* `aria-disabled` instead of `disabled`: the kit's disabled
                  style kills pointer events, so the `title` (where the
                  reason now lives) could never be read. aria-disabled keeps
                  the button focusable and its title/aria-label readable; the
                  rule itself is stated once in the board header's help
-                 bubble. */
-              aria-disabled={mergeBlocked || undefined}
-              aria-label={mergeBlocked ? mergeReason : t("让智能体合并")}
-              title={mergeReason}
-              className={mergeBlocked ? "cursor-not-allowed opacity-40" : undefined}
+                 bubble. While merging, the button reports the in-flight
+                 state instead of a reason — a second click must not look
+                 available (the host would only answer with a warning). */
+              aria-disabled={mergeBlocked || mergePending || undefined}
+              aria-label={mergePending ? t("合并中") : mergeBlocked ? mergeReason : t("让智能体合并")}
+              title={mergePending ? t("合并中") : mergeReason}
+              className={
+                mergeBlocked || mergePending ? "cursor-not-allowed opacity-40" : undefined
+              }
               onClick={() => {
-                if (mergeBlocked) return;
+                if (mergeBlocked || mergePending) return;
                 onMerge();
               }}
             >
-              {t("让智能体合并")}
+              {mergePending ? t("合并中") : t("让智能体合并")}
             </Button>
             {!session.isolation.released && (
               <Button
