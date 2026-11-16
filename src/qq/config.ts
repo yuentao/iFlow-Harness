@@ -26,12 +26,12 @@ import * as vscode from "vscode";
 // ---------------------------------------------------------------------------
 
 /**
- * QQ 适配器种类。
+ * QQ 适配器种类（取值与 package.json 的 `iflow.qq.adapter` 枚举逐字一致）。
  *
- * 当前只实现了 OneBot v11（`src/qq/adapter/onebot.ts`）；`official` 是 QQ 官方
+ * 当前只实现了 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 是 QQ 官方
  * 机器人接口的预留位，新增适配器时在这里追加并同步设置项枚举。
  */
-const ADAPTERS = ["onebot", "official"] as const;
+const ADAPTERS = ["onebot", "qqbot"] as const;
 /** 远程执行策略：supervised 逐次确认，trusted 免确认。 */
 const REMOTE_POLICIES = ["supervised", "trusted"] as const;
 /** 回传结果的详细程度。 */
@@ -436,13 +436,19 @@ export function buildBridgeEnv(
 /**
  * QQ 通道的 secret 在 VSCode SecretStorage 里的键名。
  *
- * 键名沿用 `iflow.qq.*` 命名空间（与 `iflow.openai-compatible` 同风格），
- * 只给键，不给值；secret 本体永远由调用方从 SecretStorage 读写。
+ * 键名沿用 `iflow.qq.*` 命名空间（与 `src/acp/auth.ts` 的
+ * `iflow.openai-compatible` / `iflow.profiles` 同风格：全小写、点分段、
+ * 段内用连字符），只给键，不给值；secret 本体永远由调用方从 SecretStorage
+ * 读写。
  */
 export const QQ_SECRET_KEYS = {
+  /** 适配器访问 QQ 开放平台的 access token（qqbot 适配器用；OneBot 走 endpoint + 自己的 token）。 */
   botToken: "iflow.qq.bot-token",
+  /** 适配器应用凭据：qqbot 用它计算签名、换取 access token。 */
   appSecret: "iflow.qq.app-secret",
+  /** 入站回调的签名密钥：校验 QQ 平台推送的事件确实来自本应用。 */
   signingSecret: "iflow.qq.signing-secret",
+  /** bridge 子进程向宿主 IPC 出示的 Bearer token（即 `IFLOW_QQ_BRIDGE_TOKEN` 的来源）。 */
   bridgeToken: "iflow.qq.bridge-token",
 } as const;
 
