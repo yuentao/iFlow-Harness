@@ -223,18 +223,18 @@ export interface SuperIsolation {
 /**
  * 隔离种类的看板标签（如实说明隔离强度，不伪造分支）。
  *
- * 「repo」档必须说成「主仓工作区（无隔离）」：这类子会话跑在主仓工作区里，
+ * 「repo」档必须说成「直接在主工作区（无隔离）」：这类子会话跑在主仓工作区里，
  * 没有自己的分支 —— 显示一个不存在的分支名，看板上就会指向一个谁也找不到的
  * 分支。worktree 档的分支名由看板单独显示，这里只说隔离方式。
  */
 export function superIsolationLabel(isolation: SuperIsolation): string {
   switch (isolation.kind) {
     case "git_worktree":
-      return "独立 worktree";
+      return "独立工作目录";
     case "directory":
-      return "仅目录隔离";
+      return "只隔离了目录";
     case "repo":
-      return "主仓工作区（无隔离）";
+      return "直接在主工作区（无隔离）";
   }
 }
 
@@ -346,7 +346,7 @@ export function superIntegrationLabel(integration: SuperIntegration): string {
     case "pr_created":
       return "PR 已创建";
     case "failed":
-      return "集成失败";
+      return "自动处理失败";
     case "skipped":
       return "未自动合并";
     case "not_needed":

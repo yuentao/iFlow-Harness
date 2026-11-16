@@ -166,12 +166,12 @@ const ACTION_TONES: Record<string, "primary" | "danger" | "warning" | "info" | "
 };
 
 const RAW_REASONS: Record<SuperDirectiveRawReason, string> = {
-  invalid_json: "内容不是合法 JSON",
-  missing_tasks: "缺少 tasks 数组",
-  empty_tasks: "没有可展示的任务",
-  missing_actions: "缺少 actions 数组",
-  empty_actions: "没有可展示的动作",
-  unknown_language: "未知的协议块语言",
+  invalid_json: "内容格式不对，读不出来",
+  missing_tasks: "里面没有任务列表",
+  empty_tasks: "没有可以显示的任务",
+  missing_actions: "里面没有操作列表",
+  empty_actions: "没有可以显示的操作",
+  unknown_language: "认不出这是什么指令",
 };
 
 /**
@@ -226,7 +226,7 @@ function SalvagedNotice() {
       className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
     >
       <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} />
-      <span>{t("载荷未能完整解析，以下任务书仅供阅读，可能尚未派发")}</span>
+      <span>{t("这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去")}</span>
     </div>
   );
 }
@@ -475,7 +475,7 @@ function RawCard({
         }
       >
         <span className="block truncate text-ui-label font-medium text-foreground/90">
-          {t("原始协议块")}
+          {t("原始指令内容")}
         </span>
       </DirectiveHeader>
       <div className="px-3 py-2">
@@ -701,7 +701,7 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
             className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
           >
             <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
-            <span>{t("工具参数未能完整解析，任务列表暂不可用，以下保留原始参数")}</span>
+            <span>{t("这段任务信息没能完整读取，暂时看不到任务列表，下面是它的原始内容")}</span>
           </div>
           {block.input && (
             <pre
@@ -796,7 +796,7 @@ export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
             className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
           >
             <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
-            <span>{t("工具参数未能完整解析，动作列表暂不可用，以下保留原始参数")}</span>
+            <span>{t("这段操作信息没能完整读取，暂时看不到操作列表，下面是它的原始内容")}</span>
           </div>
           {block.input && (
             <pre

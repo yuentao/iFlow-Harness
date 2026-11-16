@@ -167,9 +167,8 @@ it("keeps a still-discovering detail honest instead of claiming no tools", () =>
   });
   clickTitle("详情");
   // toolCount is 0 while discovery runs; that must read as "reading…", not "none".
-  expect(container.textContent).toContain("工具声明读取中…");
-  expect(container.textContent).not.toContain("该服务器当前暴露无工具与提示");
-  expect(container.textContent).toContain("项目级覆盖全局");
+      expect(container.textContent).toContain("正在读取工具列表…");
+      expect(container.textContent).not.toContain("这个服务器没有提供工具或提示");  expect(container.textContent).toContain("项目级覆盖全局");
 });
 it("colors a disconnected detail chip with the danger tone and labels its scope", () => {
   reply({ a: { command: "node" } });
@@ -185,8 +184,7 @@ it("colors a disconnected detail chip with the danger tone and labels its scope"
   clickTitle("详情");
   expect([...container.querySelectorAll("span")].some((s) => s.className.includes("bg-destructive"))).toBe(true);
   expect(container.textContent).toContain("全局");
-  expect(container.textContent).toContain("工具声明不可获取");
-});
+      expect(container.textContent).toContain("拿不到工具列表");});
 it("refresh re-reads disk config and status without a second save in flight", () => {
   reply({ a: { command: "node" } });
   statusReply({ discoveryState: "completed", servers: { a: { status: "connected", toolCount: 0, promptCount: 0, tools: [], prompts: [], contextTokens: 0 } } });
@@ -226,14 +224,12 @@ it("refuses installing a template whose required field was left blank", () => {
   click("模板目录");
   clickTitle("安装");
   click("安装");
-  expect(container.textContent).toContain("请填写：directory");
-  expect(send.mock.calls.filter(([m]) => m.type === "saveMcpServers")).toHaveLength(0);
+      expect(container.textContent).toContain("还需要填写：directory");  expect(send.mock.calls.filter(([m]) => m.type === "saveMcpServers")).toHaveLength(0);
 });
 it("edits command, arg and env rows while preserving unknown keys", () => {
   reply({ a: { command: "node", args: ["-x"], env: { TOKEN: "abc" }, description: "keep me", extra: { kept: true } } });
   clickTitle("编辑");
-  expect(container.textContent).toContain("额外字段保留：extra");
-  input(container.querySelectorAll("input")[1] as unknown as HTMLInputElement, "npx");
+      expect(container.textContent).toContain("这些字段会原样保留：extra");  input(container.querySelectorAll("input")[1] as unknown as HTMLInputElement, "npx");
   input(container.querySelectorAll("input")[2] as unknown as HTMLInputElement, "-y");
   click("添加参数");
   input(container.querySelectorAll("input")[3] as unknown as HTMLInputElement, "--flag");
@@ -249,11 +245,9 @@ it("blocks completing a stdio draft that has no command", () => {
   click("添加");
   input(container.querySelectorAll("input")[0] as unknown as HTMLInputElement, "demo");
   click("完成");
-  expect(container.textContent).toContain("stdio 配置需 command field");
-  input(container.querySelectorAll("input")[1] as unknown as HTMLInputElement, "npx");
+      expect(container.textContent).toContain("stdio 方式需要填写「命令」");  input(container.querySelectorAll("input")[1] as unknown as HTMLInputElement, "npx");
   click("完成");
-  expect(container.textContent).not.toContain("stdio 配置需 command field");
-  click("保存");
+      expect(container.textContent).not.toContain("stdio 方式需要填写「命令」");  click("保存");
   const call = send.mock.calls.at(-1)![0];
   expect(call.type).toBe("saveMcpServers");
   expect(call.servers).toEqual({ demo: { command: "npx" } });
@@ -264,8 +258,7 @@ it("switching transport to sse moves the draft to the remote branch and requires
   input(container.querySelectorAll("input")[0] as unknown as HTMLInputElement, "demo");
   clickTitle("sse");
   click("完成");
-  expect(container.textContent).toContain("sse/streamable-http 配置需 url field");
-  input(container.querySelectorAll("input")[1] as unknown as HTMLInputElement, "https://mcp.example.com/mcp");
+      expect(container.textContent).toContain("sse / streamable-http 方式需要填写「服务 URL」");  input(container.querySelectorAll("input")[1] as unknown as HTMLInputElement, "https://mcp.example.com/mcp");
   click("完成");
   click("保存");
   const call = send.mock.calls.at(-1)![0];

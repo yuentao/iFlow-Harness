@@ -89,7 +89,7 @@ function statusLabel(session: SuperSessionUi): string {
     case "running":
       return t("运行中");
     case "awaiting_input":
-      return t("等待你处理");
+      return t("等你回答");
     case "completed":
       return t("已完成");
     case "failed":
@@ -468,7 +468,7 @@ function holdsWorktree(isolation: SuperIsolation): boolean {
  * - 其余 `released`：目录与分支都已清理（合并成功，或根本没产生提交）。
  */
 function releasedIsolationLabel(isolation: SuperIsolation): string {
-  return isolation.recycled ? t("工作目录已回收，分支保留") : t("工作目录与分支已清理");
+  return isolation.recycled ? t("工作目录已删除，分支保留") : t("工作目录和分支都已删除");
 }
 
 /** Stable empty transcript: returning a fresh `[]` from a zustand selector
@@ -1080,12 +1080,12 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
             and its accessible name remain. */}
         <span
           role="img"
-          aria-label={t("免确认")}
-          title={t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}
+          aria-label={t("不弹审批")}
+          title={t("子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}
           className="flex shrink-0 items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-ui-micro font-medium text-warning"
         >
           <ShieldOff className="size-3 shrink-0" aria-hidden="true" />
-          <span className="@max-[380px]:hidden">{t("免确认")}</span>
+          <span className="@max-[380px]:hidden">{t("不弹审批")}</span>
         </span>
         {expanded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
       </button>
@@ -1165,9 +1165,9 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   board unreadable at a glance. */}
               <HelpTip label={t("看板说明")}>
                 <div className="flex flex-col gap-1">
-                  <span>{t("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批")}</span>
-                  <span>{t("子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并")}</span>
-                  <span>{t("子会话还在运行时不能清理，需要先中断它")}</span>
+                  <span>{t("子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意")}</span>
+                  <span>{t("子会话结束之后才能合并；已经合并过、或者没有改动可合并的子会话，不需要再合并")}</span>
+                  <span>{t("子会话还在运行时不能清理，请先中断它")}</span>
                 </div>
               </HelpTip>
               <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -1218,7 +1218,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                     onClick={() => setShowFolded((v) => !v)}
                   >
                     {showFolded ? <ChevronDown className={ICON_INLINE} /> : <ChevronRight className={ICON_INLINE} />}
-                    <span className="shrink-0">{t("已完成的 {0} 个子会话", folded.length)}</span>
+                    <span className="shrink-0">{t("已完成并合并的 {0} 个子会话", folded.length)}</span>
                     <Chip tone="success">{t("已自动合并")}</Chip>
                   </DisclosureButton>
                   {showFolded && (
@@ -1267,7 +1267,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                     {t("工作目录 {0} 个", worktreeSessions.length)}
                   </span>
                   <span className="tabular-nums">
-                    {t("已结束 {0} 个可回收", reclaimable.length)}
+                    {t("已结束 {0} 个可清理", reclaimable.length)}
                   </span>
                   {reclaimable.length > 0 && (
                     <Button
@@ -1304,7 +1304,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <ConfirmDialog
           title={t("合并子会话分支")}
           message={t(
-            "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。",
+            "让智能体把分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。",
             confirmMerge.isolation.branch ?? "",
           )}
           confirmLabel={t("让智能体合并分支")}
@@ -1320,7 +1320,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <ConfirmDialog
           title={t("中断子会话")}
           message={t(
-            "中断子会话「{0}」？子会话进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。",
+            "中断子会话「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
             confirmCancel.title,
           )}
           confirmLabel={t("中断")}
@@ -1335,7 +1335,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <ConfirmDialog
           title={t("全部中断")}
           message={t(
-            "中断全部 {0} 个进行中的子会话？它们各自的进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。",
+            "中断全部 {0} 个进行中的子会话？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。",
             confirmCancelAll,
           )}
           confirmLabel={t("全部中断")}
@@ -1350,7 +1350,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <ConfirmDialog
           title={t("清理子会话")}
           message={t(
-            "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。",
+            "删除子会话「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。",
             confirmCleanup.title,
           )}
           confirmLabel={t("清理")}
@@ -1368,7 +1368,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
         <ConfirmDialog
           title={t("清理已结束的子会话")}
           message={t(
-            "将删除 {0} 个子会话的工作目录；分支上一律保留（未合并的提交不会丢），工作目录里未提交的改动会被一并删除，无法恢复。",
+            "将删除 {0} 个子会话的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。",
             confirmCleanupAll.count,
           )}
           confirmLabel={t("清理已结束")}
@@ -1476,18 +1476,18 @@ function SuperSessionRow({
     isActive(session);
   const mergeReason =
     session.integration?.state === "merged"
-      ? t("该子会话的改动已经合并")
+      ? t("这个子会话的改动已经合并")
       : !session.isolation.branch
-        ? t("该子会话没有可合并的分支")
+        ? t("这个子会话没有可合并的分支")
         : isActive(session)
-          ? t("子会话还没结束，完成后再让智能体合并")
-          : t("派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）");
+          ? t("子会话还没结束，等它完成再合并")
+          : t("让一个子会话把这条分支合并到当前分支，冲突由它自己解决");
   // Cleanup deletes the worktree, so it must not race a live child: the
   // process would keep writing into a directory that no longer exists.
   // Same discipline as the merge action — the rule lives in the board
   // header's help bubble, and the button keeps it in title / aria-label.
   const cleanupBlocked = isActive(session);
-  const cleanupReason = t("子会话还在运行，先中断再清理");
+  const cleanupReason = t("子会话还在运行，请先中断再清理");
   // Diagnostics — full branch ref, worktree path, retry count, restored
   // marker — ride the title tooltip instead of occupying their own lines.
   const titleHint = [
@@ -1547,7 +1547,7 @@ function SuperSessionRow({
         {isActive(session) && (
           <IconButton
             icon={<Square className={ICON_INLINE} />}
-            label={t("中断该子会话")}
+            label={t("中断这个子会话")}
             size="sm"
             tone="danger"
             hoverSurface="row"
@@ -1603,7 +1603,7 @@ function SuperSessionRow({
                 an actual fallback directory earns the chip. */}
             {session.isolation.kind === "directory" && session.isolation.path !== "" && (
               <Chip tone="warning" title={session.isolation.note}>
-                {t("仅目录隔离")}
+                {t("只隔离了目录")}
               </Chip>
             )}
             {/* A merge child runs in the MAIN workspace: no worktree, no
@@ -1637,11 +1637,11 @@ function SuperSessionRow({
             {session.tokens && (
               <span
                 className="font-mono tabular-nums"
-                title={t("输入为内核上报的末次请求上下文；输出按子会话文本估算")}
+                title={t("输入是上一次请求实际携带的上下文；输出按子会话的文字估算")}
               >
                 ↑{formatTokens(session.tokens.input)} ↓{formatTokens(session.tokens.output)}
                 {session.tokens.estimatedCost !== null && session.tokens.estimatedCost !== undefined && (
-                  <span title={t("预估成本（token 估算 × 公开单价，仅供参考）")}>
+                  <span title={t("预估费用：token 估算 × 公开单价，仅供参考")}>
                     {" "}{formatCost(session.tokens.estimatedCost)}
                   </span>
                 )}
@@ -1668,7 +1668,7 @@ function SuperSessionRow({
                 icon={<Activity className={ICON_INLINE} />}
                 onClick={() => setShowLive(true)}
               >
-                {t("查看实时操作")}
+                {t("查看实时进度")}
               </Button>
             )}
             {!historical && canRetrySuperSession(session) && (
@@ -1687,8 +1687,8 @@ function SuperSessionRow({
                    user the request went out. Same `aria-disabled` discipline
                    as merge / cleanup (keeps title + aria-label readable). */
                 aria-disabled={retryPending || undefined}
-                aria-label={retryPending ? t("重试中") : t("重试该子会话（沿用原工作目录，保留已有改动）")}
-                title={retryPending ? t("重试中") : t("重试该子会话（沿用原工作目录，保留已有改动）")}
+                aria-label={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录，已有的改动会保留")}
+                title={retryPending ? t("重试中") : t("重试这个子会话：沿用原来的工作目录，已有的改动会保留")}
                 className={retryPending ? "cursor-not-allowed opacity-40" : undefined}
                 onClick={() => {
                   if (retryPending) return;
@@ -1822,7 +1822,7 @@ function SuperSessionLive({
       wide
       title={session.title}
       icon={<Activity className={`${ICON_INLINE} shrink-0 text-primary`} />}
-      ariaLabel={t("子会话实时操作")}
+      ariaLabel={t("子会话实时进度")}
       onClose={onClose}
       initialFocus="first"
     >

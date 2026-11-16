@@ -36,7 +36,7 @@ function formatTime(ms: number | null): string {
 function roleLabel(file: MemoryFileUi): string | null {
   if (file.role === "primary") return t("主文件");
   if (file.role === "hierarchy") return t("自动发现");
-  if (file.role === "legacy") return t("遗留文件");
+  if (file.role === "legacy") return t("旧版本文件");
   return null;
 }
 
@@ -178,9 +178,9 @@ function MemoryFileCard({
         {/* The caveat belongs to the injection chip, not a separate grey line. */}
         <Chip
           tone={file.injected ? "info" : "warning"}
-          title={file.injected ? undefined : t("当前内核不会加载此文件")}
+          title={file.injected ? undefined : t("内核目前不会读取这个文件")}
         >
-          {file.injected ? t("已注入") : t("未注入")}
+          {file.injected ? t("已加载") : t("未加载")}
         </Chip>
         <IconButton
           icon={<ExternalLink className={ICON_INLINE} />}
@@ -198,7 +198,7 @@ function MemoryFileCard({
         />
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-ui-caption text-muted-foreground">
-        <span>{file.exists ? t("{0} 字节", file.bytes) : t("尚未创建")}</span>
+        <span>{file.exists ? t("{0} 字节", file.bytes) : t("还没有创建")}</span>
         {file.updatedAt && <span>{t("更新于 {0}", formatTime(file.updatedAt))}</span>}
         <span title={t("约 {0} tokens（BPE 估算）", file.tokens)}>≈{fmtTokens(file.tokens)} tokens</span>
       </div>
@@ -467,7 +467,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
           <div className="truncate font-mono text-ui-caption" title={editing.path}>
             {editing.path}
           </div>
-                      <Hint className="mt-1">{t("记忆在新建会话或恢复会话时加载。当前会话需要重启内核才会读取新内容。")}</Hint>        </div>
+                      <Hint className="mt-1">{t("记忆只在新会话或恢复会话时读取。当前会话要重启内核才会用上新内容。")}</Hint>        </div>
         {conflict && (
           <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
             <AlertTriangle className="mt-0.5 size-3 shrink-0" />
@@ -531,7 +531,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
       )}
 
       <div className="rounded-lg border border-border/70 bg-surface/60 px-2.5 py-1.5 text-ui-label leading-relaxed text-muted-foreground">
-        {t("以下是内核每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。")}
+        {t("这些记忆文件会在每次请求时自动带给模型。它们会随请求一起发送，请不要写入密钥。")}
       </div>
 
       {state === null ? (
@@ -576,7 +576,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               </div>
               {projectFiles.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
-                  {t("当前工作区没有可用的项目记忆文件")}
+                  {t("当前工作区还没有项目记忆文件")}
                 </div>
               ) : (
                 projectFiles.map((file) => (
@@ -645,7 +645,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                       variant="secondary"
                       icon={<RefreshCw className={ICON_INLINE} />}
                       disabled={busy || saving || knowledgeBusy || !state.cwd}
-                      title={t("只根据变化更新索引，无变化时不会调用模型")}
+                      title={t("只按变化更新索引，没有变化就不会调用模型")}
                       onClick={() => generateKnowledge("incremental")}
                     >
                       {t("增量刷新")}
@@ -699,7 +699,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
               )}
               {!knowledge?.index ? (
                 <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-ui-body text-muted-foreground">
-                  {t("尚未生成项目知识。点击「生成项目知识」分析当前工作区。")}
+                  {t("还没有项目知识。点「生成项目知识」分析当前工作区。")}
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -718,7 +718,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                         </span>
                       </span>
                       <Chip tone={doc.injected ? "info" : "muted"}>
-                        {doc.injected ? t("已注入") : t("未注入")}
+                        {doc.injected ? t("已加载") : t("未加载")}
                       </Chip>
                       <span
                         className="shrink-0 font-mono text-ui-caption text-muted-foreground"
@@ -738,7 +738,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                         disabled={busy || saving || knowledgeBusy}
                         onClick={() => toggleKnowledge(doc)}
                       >
-                        {doc.injected ? t("取消注入") : t("注入")}
+                        {doc.injected ? t("停止加载") : t("加载")}
                       </Button>
                     </div>
                   ))}
@@ -748,17 +748,17 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 <div className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-label leading-relaxed text-warning">
                   <AlertTriangle className="mt-0.5 size-3 shrink-0" />
                   <span>
-                    {t("项目知识已注入约 {0} tokens，会随每次请求发送；建议只保留索引或精简文档。", knowledge.injectedTokens)}
+                    {t("项目知识目前会占用约 {0} tokens，而且每次请求都会带上；建议只保留索引，或精简文档内容。", knowledge.injectedTokens)}
                   </span>
                 </div>
               )}
               {knowledge?.managedBy && (
                 <div className="truncate text-ui-caption text-muted-foreground" title={knowledge.managedBy}>
-                  {t("导入位置：{0}", knowledge.managedBy)}
+                  {t("引用位置：{0}", knowledge.managedBy)}
                 </div>
               )}
               <Hint>
-                {t("知识索引生成后写入 .iflow/knowledge/，通过项目记忆的 @ 导入注入；默认只在新建或恢复会话时生效。")}
+                {t("生成的索引会存进 .iflow/knowledge/，并通过项目记忆里的引用一起带给模型；默认只在新会话或恢复会话时生效。")}
               </Hint>
             </div>
           </SettingsDisclosure>
@@ -805,7 +805,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
                 <span className="text-ui-caption text-muted-foreground">
                   {writableTargets.length === 0
                     ? t("请先创建项目记忆文件")
-                    : t("保存后新建会话或重启内核生效")}
+                    : t("保存后要新建会话或重启内核才生效")}
                 </span>
               </div>
             </div>
@@ -824,7 +824,7 @@ export function MemorySection({ busy, onHeader }: { busy: boolean; onHeader: Sec
             >
               {t("重启内核使记忆生效")}
             </Button>
-            <span className="text-ui-caption text-muted-foreground">{t("记忆不会热更新到正在进行的会话。")}</span>
+            <span className="text-ui-caption text-muted-foreground">{t("改动不会影响正在进行的会话。")}</span>
           </div>
         </>
       )}

@@ -1601,11 +1601,11 @@ describe("super agent · 主仓工作区隔离（repo）", () => {
     });
 
   it("看板标签如实说明是主仓工作区，而不是伪造一个分支", () => {
-    expect(superIsolationLabel(repoSession().isolation)).toBe("主仓工作区（无隔离）");
+    expect(superIsolationLabel(repoSession().isolation)).toBe("直接在主工作区（无隔离）");
     expect(superIsolationLabel({ kind: "git_worktree", path: "/wt", branch: "iflow/super/a" })).toBe(
-      "独立 worktree",
+      "独立工作目录",
     );
-    expect(superIsolationLabel({ kind: "directory", path: "/dir" })).toBe("仅目录隔离");
+    expect(superIsolationLabel({ kind: "directory", path: "/dir" })).toBe("只隔离了目录");
   });
 
   it("看板摘要里报的是隔离方式，不是一个不存在的分支", () => {
@@ -1633,7 +1633,7 @@ describe("super agent · 主仓工作区隔离（repo）", () => {
       isolation: { kind: "repo", path: "J:/repo", branch: "iflow/super/ghost" },
     });
     expect(restored.isolation.branch).toBeUndefined();
-    expect(superIsolationLabel(restored.isolation)).toBe("主仓工作区（无隔离）");
+    expect(superIsolationLabel(restored.isolation)).toBe("直接在主工作区（无隔离）");
   });
 
   it("运行中的主仓工作区子会话恢复后仍是「已中断」（进程已经没了）", () => {

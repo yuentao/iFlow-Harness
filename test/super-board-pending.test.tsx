@@ -244,11 +244,12 @@ describe("看板提问区与主会话提问卡同源", () => {
 });
 
 describe("看板的安全事实常驻可见", () => {
-  it("「免确认」不依赖 hover 就出现在看板上，并说明 shell 也直接执行", () => {
+  it("「不弹审批」不依赖 hover 就出现在看板上，并说明运行命令也直接执行", () => {
     render([baseSession()]);
-    const marker = document.body.querySelector<HTMLElement>('[title*="shell"]');
+    const marker = document.body.querySelector<HTMLElement>('[role="img"][aria-label="不弹审批"]');
     expect(marker).toBeTruthy();
-    expect(marker!.textContent).toContain("免确认");
+    expect(marker!.getAttribute("title")).toContain("包括运行命令");
+    expect(marker!.textContent).toContain("不弹审批");
     // 可见，不是只有读屏/hover 才拿得到的隐藏文本。
     expect(marker!.className).not.toContain("sr-only");
     expect(marker!.closest(".sr-only")).toBeNull();
@@ -268,7 +269,7 @@ describe("看板状态编码", () => {
 
     // 文案（第一重）
     expect(preparing.textContent).toContain("准备中");
-    expect(awaiting.textContent).toContain("等待你处理");
+    expect(awaiting.textContent).toContain("等你回答");
     // 形状（第二重）：两个状态的图标不是同一个。
     const iconOf = (row: HTMLElement) => row.querySelector("svg")?.outerHTML ?? "";
     expect(iconOf(preparing)).toBeTruthy();
@@ -324,11 +325,11 @@ describe("合并按钮的禁用原因", () => {
     // 不是 disabled：kit 的 disabled 样式会吞掉 pointer-events，title 就读不到了。
     expect(merge!.hasAttribute("disabled")).toBe(false);
     expect(merge!.getAttribute("aria-disabled")).toBe("true");
-    expect(merge!.getAttribute("title")).toContain("该子会话的改动已经合并");
-    expect(merge!.getAttribute("aria-label")).toContain("该子会话的改动已经合并");
+    expect(merge!.getAttribute("title")).toContain("这个子会话的改动已经合并");
+    expect(merge!.getAttribute("aria-label")).toContain("这个子会话的改动已经合并");
     // 原因不再逐行重复：规则统一收在看板头的帮助按钮里（见
     // test/super-board-surface.test.tsx 的「看板帮助说明」用例）。
-    expect(document.body.textContent).not.toContain("该子会话的改动已经合并");
+    expect(document.body.textContent).not.toContain("这个子会话的改动已经合并");
 
     // 置灰状态下点了也不能派发合并。
     act(() => merge!.click());
