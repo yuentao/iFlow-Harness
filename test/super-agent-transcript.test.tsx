@@ -614,6 +614,69 @@ describe("内置 super-agent 工具调用卡片", () => {
     }
   });
 
+  it("宿主解析出的 superTasks 直接渲染成任务列表（input 有损也不怕）", () => {
+    renderBlock(
+      toolBlock({
+        // input 是宿主故意做成有损的展示串（长任务书会被从中间切断）——
+        // 卡片不靠它解析任务，靠宿主随快照下发的结构。
+        input: '{"tasks":[{"task":"只读审查 src/panel/panel.ts 被截断',
+        superTasks: [
+          {
+            title: "只读审查",
+            task: "只读审查 src/panel/panel.ts\n第二行说明",
+            attachmentCount: 2,
+          },
+        ],
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("1 个任务");
+    expect(card!.textContent).toContain("只读审查");
+    expect(card!.textContent).toContain("第二行说明");
+    expect(card!.textContent).toContain("附件 2");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+    expect(card!.textContent).not.toContain("工具参数未能完整解析");
+    expect(card!.querySelector('[data-testid="super-tool-call-raw"]')).toBeNull();
+  });
+
+  it("复现载荷（模型漏了 title）不再谎报「未能完整解析」", () => {
+    // wire 实证的真实载荷：模型调内置 super-agent 工具时漏掉 title，宿主照常
+    // 派发（旧卡片却判成解析失败，把一次真的派发谎报成失败）。
+    renderBlock(
+      toolBlock({
+        input: '{"tasks":[{"task":"任务：只读审查 AGENTS.md 与 src/panel/panel.ts"}]}',
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).not.toContain("工具参数未能完整解析");
+    expect(card!.textContent).not.toContain("正在编写任务书…");
+    expect(card!.textContent).toContain("任务：只读审查 AGENTS.md 与 src/panel/panel.ts");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+  });
+
+  it("对象形态的 attachments 也能渲染（附件数照常显示）", () => {
+    renderBlock(
+      toolBlock({
+        input: JSON.stringify({
+          tasks: [
+            {
+              title: "带附件",
+              task: "做点事",
+              attachments: [{ path: "C:/tmp/a.png", name: "a.png" }],
+            },
+          ],
+        }),
+      }),
+    );
+    const card = container.querySelector<HTMLElement>('[data-testid="super-tool-call-card"]');
+    expect(card).toBeTruthy();
+    expect(card!.textContent).toContain("附件 1");
+    expect(card!.textContent).not.toContain("工具参数未能完整解析");
+    expect(card!.querySelectorAll('[data-testid="super-tool-call-task"]')).toHaveLength(1);
+  });
+
   it("只接管 dispatch：super-agent-actions 仍走通用工具卡，命名空间形态照常识别", () => {
     renderBlock(toolBlock({ toolName: "super-agent-actions", input: '{"actions":[]}' }));
     expect(container.querySelector('[data-testid="super-tool-call-card"]')).toBeNull();

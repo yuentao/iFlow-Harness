@@ -1857,11 +1857,49 @@ function skipWhitespace(text: string, from: number): number {
 /** 解析指令块正文的结果：失败要带原因，宿主才能提示得具体。 */
 type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason: string };
 
+/**
+ * 委派载荷的公共解析结果（公开入口的返回类型）。
+ *
+ * 与私有 {@link DirectiveParse} 同形 —— 公开入口刻意**不新增**语义，只是把
+ * 同一份结果的类型暴露给外部调用方。
+ */
+export type SuperTaskPayloadParse = DirectiveParse;
+
+/**
+ * 委派载荷的公共解析入口（JSON 文本）。
+ *
+ * 这是**唯一**的委派载荷校验实现：缺 title 回退到 task 首行、附件形态归一
+ * （字符串与 `{path,name}` 对象都收）、占位符任务跳过、空任务判失败。
+ *
+ * 宿主派发与转录卡片都必须走它 —— 两边各抄一份校验就会漂移，漂移的方向是
+ * 「卡片比派发器更严」：wire 实证模型调内置 `super-agent` 工具时**有时漏掉
+ * `title`**，宿主照常派发（那一轮真的开出了 4 个子会话），卡片却判成「工具
+ * 参数未能完整解析」，把一次成功的委派谎报成失败。
+ */
+export function parseSuperTaskPayload(body: string): SuperTaskPayloadParse {
+  return parseDirectiveBody(body);
+}
+
+/**
+ * 委派载荷的公共解析入口（已是 JSON 值）。
+ *
+ * 与 {@link parseSuperTaskPayload} 同一份校验，只是省掉「文本 → 值」这一步：
+ * 工具调用帧的 `args` 本来就是值，不必 JSON.stringify 再 JSON.parse 一趟
+ * （那是热路径，每帧都跑）。
+ */
+export function parseSuperTaskValue(value: unknown): SuperTaskPayloadParse {
+  return parseDirectiveValue(value);
+}
+
 /** 解析指令块正文。 */
 function parseDirectiveBody(body: string): DirectiveParse {
   const parsed = parseJsonLoose(body);
   if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON" };
-  const value = parsed.value;
+  return parseDirectiveValue(parsed.value);
+}
+
+/** 指令块正文（载荷本身已是 JSON 值）的解析 —— 校验逻辑与文本入口完全同源。 */
+function parseDirectiveValue(value: unknown): DirectiveParse {
   const rawTasks = Array.isArray(value)
     ? value
     : typeof value === "object" && value !== null && Array.isArray((value as { tasks?: unknown }).tasks)
@@ -1902,7 +1940,7 @@ function parseDirectiveBody(body: string): DirectiveParse {
  * 静默失效，所以先做一次保守修补再交给 JSON.parse —— 修不好照样失败，绝不
  * 编造内容。
  */
-function parseJsonLoose(text: string): { ok: true; value: unknown } | { ok: false } {
+export function parseJsonLoose(text: string): { ok: true; value: unknown } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(text) };
   } catch {
@@ -1984,7 +2022,7 @@ function nextNonWhitespace(text: string, from: number): string {
  * 而一段被流式扫描的巨型 base64 只会拖垮协议。用户的粘贴图片由宿主自己补
  * 进同一个列表（见 `ChatPanel.currentTurnAttachments`）。
  */
-function parseDirectiveAttachments(raw: unknown): SuperAttachment[] {
+export function parseDirectiveAttachments(raw: unknown): SuperAttachment[] {
   if (!Array.isArray(raw)) return [];
   const out: SuperAttachment[] = [];
   for (const entry of raw) {

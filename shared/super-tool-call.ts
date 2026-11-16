@@ -22,6 +22,8 @@
 import {
   extractSuperActions,
   extractSuperDirectives,
+  parseJsonLoose,
+  parseSuperTaskValue,
   type SuperAction,
   type SuperTaskSpec,
 } from "./super-agent.js";
@@ -165,4 +167,36 @@ export function parseSuperToolCall(
     };
   }
   return { ok: true, kind, text, tasks: [], actions: scan.actions };
+}
+
+/**
+ * 从内置 `super-agent` 工具调用的参数里解析出任务列表。
+ *
+ * 这是**转录卡片**与**宿主 reducer**共用的入口：两者都从「宿主实际派发了
+ * 什么」这一唯一真源取结构，不再各自回解那份有损的展示串（见
+ * `shared/session-state.ts` 的 `formatToolInput`：单个字符串值截断 300 字符、
+ * 整串上限 4096 字符 —— 长任务书会被从中间切断，回解必然失败）。
+ *
+ * 两种输入形态都收：
+ *  - **对象**（wire 的 `tool_call.args` 就是它）：直接进公共解析入口；
+ *  - **JSON 字符串**：先走项目已有的宽松解析 {@link parseJsonLoose}（修原始
+ *    换行 / 尾逗号 / 非法转义），修不好就返回 null —— 绝不编造内容。
+ *
+ * 口径与派发器**完全一致**（复用 {@link parseSuperTaskValue}，不复制校验）：
+ * 缺 `title` 回退到 task 首行、附件同时接受 `string[]` 与 `{path,name}` 对象、
+ * 占位符任务跳过、空任务判失败。因此「宿主派发出去了」与「卡片说有任务」
+ * 不会再出现分叉。
+ *
+ * @returns 解析出的任务列表；载荷不可用时为 null（调用方据此诚实降级）。
+ */
+export function parseSuperDelegationTasks(args: unknown): SuperTaskSpec[] | null {
+  let value: unknown = args;
+  if (typeof args === "string") {
+    const loose = parseJsonLoose(args);
+    if (!loose.ok) return null;
+    value = loose.value;
+  }
+  if (!value || typeof value !== "object") return null;
+  const parsed = parseSuperTaskValue(value);
+  return parsed.ok ? parsed.tasks : null;
 }
