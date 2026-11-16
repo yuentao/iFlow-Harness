@@ -70,7 +70,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <AlertTriangle className="size-7 text-warning" />
           <div className="text-ui-title font-semibold text-foreground">{t("界面渲染异常")}</div>
           <p className="max-w-[320px] text-ui-caption leading-relaxed text-muted-foreground">
-            {t("界面渲染时遇到异常。重新载入面板即可恢复；也可以直接重试。")}
+            {t("重新载入面板即可恢复；也可以直接重试。")}
           </p>
           {retry("canvas")}
         </div>
@@ -82,7 +82,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <AlertTriangle className={`${ICON_DISPLAY} text-warning`} />
           <div className="text-ui-body font-semibold text-foreground">{t("消息区渲染异常")}</div>
           <p className="text-ui-caption leading-relaxed text-muted-foreground">
-            {t("内容渲染时遇到异常，将在下一次更新时自动重试。")}
+            {t("这段内容没能显示出来，下次更新时会自动重试。")}
           </p>
           {retry("warning-soft")}
         </div>

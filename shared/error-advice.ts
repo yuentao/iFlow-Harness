@@ -121,41 +121,41 @@ export function classifyErrorAdvice(message: string): ErrorAdviceUi | null {
   if (CLI_RE.test(message)) {
     return {
       kind: "cli",
-      hint: "扩展包不完整或内核文件被安全软件删除，重新安装扩展后重启窗口即可恢复",
+      hint: "内核文件缺失（安装不完整，或被安全软件删掉了）。重新安装扩展并重启窗口即可恢复。",
       openSettingsTab: "runtime",
     };
   }
   if (OVERFLOW_RE.test(message)) {
     return {
       kind: "overflow",
-      hint: "上下文已超出模型上限且自动压缩未能恢复，可发送 /compress 再次压缩，或开启新会话后继续",
+      hint: "对话已经超出模型能记住的上限，自动压缩也没能救回来。可以发送 /compress 再压一次，或新建会话继续。",
     };
   }
   if (RATE_LIMIT_RE.test(message)) {
     return {
       kind: "rateLimit",
-      hint: "平台速率限制持续触发，可稍候片刻再重试，或在设置中切换到其他模型 / API 配置",
+      hint: "平台一直在限流（请求太频繁）。稍等一下再重试，或在设置里换一个模型 / API 配置。",
       openSettingsTab: "api",
     };
   }
   if (AUTH_RE.test(message)) {
     return {
       kind: "auth",
-      hint: "检查 API Key 是否有效、账户余额/额度是否充足，或在设置中切换到其他 API 配置后重试",
+      hint: "可能是 API 密钥无效、过期，或账户余额 / 额度不够。到设置里检查或换一个 API 配置后再试。",
       openSettingsTab: "api",
     };
   }
   if (MODEL_RE.test(message)) {
     return {
       kind: "model",
-      hint: "当前模型可能已下架或不支持该能力，在设置中重新选择可用模型后重试",
+      hint: "当前模型可能已下架，或没有这项能力。到设置里换一个可用模型再试。",
       openSettingsTab: "api",
     };
   }
   if (NETWORK_RE.test(message)) {
     return {
       kind: "network",
-      hint: "本机网络或代理不可达，检查网络连接与代理设置后点击重试",
+      hint: "网络或代理没连上。检查网络连接和代理设置后重试。",
     };
   }
   return null;

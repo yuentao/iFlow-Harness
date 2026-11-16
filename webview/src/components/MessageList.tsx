@@ -369,7 +369,7 @@ function OutputDetails({
       <div className={`flex items-center gap-3 pb-1.5 text-ui-caption ${flat ? "px-2" : "px-3"}`}>
         {overDisplayCap && !truncatedChars && (
           <span className="font-mono text-muted-foreground">
-            {t("仅渲染前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
+            {t("为省内存只显示前 {0} 字符", MAX_TOOL_OUTPUT_DISPLAY_CHARS.toLocaleString())}
           </span>
         )}
         {/* Copy / full-output export are main-transcript affordances; the
@@ -606,7 +606,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
             ))}
           {block.evicted && (
             <span
-              title={t("为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留")}
+              title={t("为了不让长会话占用太多内存，这块输出与差异已从界面释放；回退和导出仍使用完整记录")}
             >
               {flat ? (
                 <span className="text-ui-micro text-muted-foreground">{t("内容已释放")}</span>
@@ -642,7 +642,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
                       variant="canvas"
                       className="rounded-lg"
                       icon={<Undo2 className="size-3" />}
-                      title={t("将该文件恢复为编辑前内容")}
+                      title={t("把这个文件恢复成修改前的内容")}
                       onClick={() => send({ type: "revertTool", toolCallId: block.toolCallId })}
                     >
                       {t("回退此改动")}
@@ -651,7 +651,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
                       variant="canvas"
                       className="rounded-lg"
                       icon={<Columns2 className="size-3" />}
-                      title={t("在 VSCode diff 视图中查看该变更")}
+                      title={t("在 VSCode 的差异视图里查看这次改动")}
                       onClick={() => send({ type: "openDiff", toolCallId: block.toolCallId })}
                     >
                       {t("文件对比")}
@@ -683,7 +683,7 @@ function ToolCard({ block, chrome = "card" }: { block: ToolBlock; chrome?: Block
 function localizeStepTitle(title: string): string {
   if (/^task$/i.test(title.trim())) return t("子代理");
   let m = /^Launch agent\(([^)]*)\):\s*([\s\S]*)$/.exec(title);
-  if (m) return t("启动子代理（{0}）：{1}", m[1], m[2]);
+  if (m) return t("启动子代理 {0}：{1}", m[1], m[2]);
   m = /^Reading\s+([\s\S]+)$/.exec(title);
   if (m) return t("读取 {0}", m[1]);
   m = /^Running:\s*([\s\S]*)$/.exec(title);
@@ -832,7 +832,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
         )}
       </div>
       <div className={`flex flex-wrap gap-3 font-mono text-ui-caption text-muted-foreground ${flat ? "px-2 pb-1" : "px-3 pb-2"}`}>
-        <span title={t("子代理 token 为转录估算，包含子代理")}>
+        <span title={t("token 数为按对话估算，包含子代理")}>
           {block.tokens === undefined ? "—" : `≈ ${block.tokens.toLocaleString()} tokens`}
         </span>
         <span>{t("耗时")} {duration}</span>
@@ -862,7 +862,7 @@ const SubAgentCard = memo(function SubAgentCard({ block, chrome = "card" }: { bl
             className="mt-2 flex items-center gap-1 text-ui-caption text-muted-foreground hover:text-foreground"
           >
             {transcriptOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-            {transcriptOpen ? t("收起") : t("只读转录")}
+            {transcriptOpen ? t("收起") : t("查看完整记录")}
           </button>
           <Collapse open={transcriptOpen}>
             {/* Lazy mount (same discipline as OutputDetails): a folded
@@ -1121,7 +1121,7 @@ function UserMessage({
             />
             <div className="mt-2 flex items-center justify-end gap-1.5">
               <span className="mr-auto text-ui-caption text-muted-foreground">
-                {checkpoint && !checkpoint.partial ? t("重发将先回滚该轮文件变更并删除其后的对话") : t("重发将删除该消息及其后所有对话")}
+                {checkpoint && !checkpoint.partial ? t("重发会先把这一轮的文件改回原样，并删除之后的对话") : t("重发会删除这条消息和之后的所有对话")}
               </span>
               <Button variant="ghost" size="sm" onClick={cancelEdit}>
                 {t("取消")}
@@ -1156,7 +1156,7 @@ function UserMessage({
         )}
         {block.evicted && (!block.images || block.images.length === 0) && (
           <div className="mt-2">
-            <span title={t("为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录")}>
+            <span title={t("为了不让长会话占用太多内存，附件图片已从界面释放；完整记录仍然保留")}>
               <Chip tone="muted">{t("附件图片已释放")}</Chip>
             </span>
           </div>
@@ -1203,8 +1203,8 @@ function UserMessage({
             {showRollback && (
               <button
                 className={barBtnClass()}
-                title={t("回滚到此轮之前")}
-                aria-label={t("回滚到此轮之前")}
+                title={t("回滚到这一轮之前")}
+                aria-label={t("回滚到这一轮之前")}
                 onClick={() => setConfirmRollback(true)}
               >
                 <History className="size-3" />
@@ -1218,28 +1218,28 @@ function UserMessage({
 
       {confirmRollback && (
         <ConfirmDialog
-          title={t("回滚到此轮之前")}
+          title={t("回滚到这一轮之前")}
           message={
             canRollbackFiles
-              ? t("选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。")
-              : t("该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。")
+              ? t("选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
+              : t("这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。")
           }
           onCancel={() => setConfirmRollback(false)}
           actions={[
             {
               label: t("文件"),
-              title: canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("只把工作区文件恢复到这一轮之前") : t("这一轮的快照不完整，无法恢复文件"),
               disabled: !canRollbackFiles,
               onClick: () => rollback("files"),
             },
             {
               label: t("对话"),
-              title: t("仅删除该消息及其后所有对话"),
+              title: t("只删除这条消息及之后的所有对话"),
               onClick: () => rollback("conversation"),
             },
             {
               label: t("全部"),
-              title: canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("恢复文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法恢复文件"),
               disabled: !canRollbackFiles,
               variant: "primary",
               onClick: () => rollback("both"),
@@ -1474,7 +1474,7 @@ function InjectedContextCard({ block, chrome = "card" }: { block: Extract<Block,
                   {item.scope === "both" && <Chip tone="warning">{t("项目级覆盖全局")}</Chip>}
                   {item.scope === "project" && <Chip tone="info">{t("项目级")}</Chip>}
                   {item.scope === "global" && <Chip tone="muted">{t("全局")}</Chip>}
-                  {item.connected === false && <Chip tone="warning">{t("未随请求注入")}</Chip>}
+                  {item.connected === false && <Chip tone="warning">{t("这次请求没有带上")}</Chip>}
                 </div>
               ) : (
                 <div key={idx} className="min-w-0">
@@ -2201,7 +2201,7 @@ function MessageListInner() {
               {/* UI-audit 4.3 P1: quiet empty state — one sentence, three plain
                   example lines, one bottom hint; no glow panel, no float. */}
               <div className="text-ui-title font-semibold text-foreground">
-                {t("有什么可以帮你?")}
+                {t("有什么可以帮你？")}
               </div>
               <div className="mt-3 flex flex-col items-stretch gap-1.5">
                 {EXAMPLE_PROMPTS.map((ex) => (
@@ -2217,7 +2217,7 @@ function MessageListInner() {
                 ))}
               </div>
               <p className="mt-3 text-ui-caption leading-relaxed text-muted-foreground/80">
-                {t("输入 / 查看命令 · @  引用文件")}
+                {t("输入 / 查看命令 · @ 引用文件")}
               </p>
             </div>
           )}

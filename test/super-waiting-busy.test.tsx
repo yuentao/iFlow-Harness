@@ -259,8 +259,8 @@ describe("停止压住汇报后的「新会话」出路", () => {
 
     act(() => button!.click());
     // ConfirmDialog 挂在 ModalShell 的 createPortal(..., document.body) 里。
-    expect(document.body.textContent).toContain("2 项子会话结果待处理");
-    expect(document.body.textContent).toContain("切回那个会话后才会继续投递");
+    expect(document.body.textContent).toContain("还有 2 项子会话结果没处理");
+    expect(document.body.textContent).toContain("切回去才会继续处理");
     // 确认前不发 newSession。
     expect(send).not.toHaveBeenCalledWith({ type: "newSession" });
   });

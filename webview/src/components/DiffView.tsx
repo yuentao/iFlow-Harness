@@ -364,7 +364,7 @@ export function DiffView({
               size="sm"
               icon={<Check className={ICON_INLINE} />}
               disabled={!dirty || hunkActions?.busy}
-              title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+              title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
               onClick={() => hunkActions?.onApply([...keep])}
             >
               {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
@@ -373,7 +373,7 @@ export function DiffView({
             <button
               className="card-lift press inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-2.5 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={!dirty || hunkActions?.busy}
-              title={t("将回退的块恢复为编辑前内容，保留其余改动")}
+              title={t("把标记为回退的改动恢复成修改前的内容，其余改动保留")}
               onClick={() => hunkActions?.onApply([...keep])}
             >
               <Check className="size-3" /> {t("应用（保留 {0} · 回退 {1}）", keepCount, revertCount)}
@@ -416,7 +416,7 @@ function HunkHeader({
         kept ? "bg-surface/50 text-muted-foreground" : "bg-diff-del/40 text-diff-del-fg"
       }`}
     >
-      <span className="font-medium">{t("改动 {0}/{1}", index + 1, total)}</span>
+      <span className="font-medium">{t("第 {0}/{1} 处改动", index + 1, total)}</span>
       <span className="ml-auto flex items-center gap-1">
         <button
           className={`press rounded px-1.5 py-0.5 font-medium transition-colors ${

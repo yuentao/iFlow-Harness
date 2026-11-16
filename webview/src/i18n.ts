@@ -133,12 +133,12 @@ const en: Record<string, string> = {
   "1 个文件已更改": "1 file changed",
   "{0} 个文件已更改": "{0} files changed",
   "{0} 次修改": "{0} edits",
-  "仅列出已记录的工具差异文件，不保证覆盖全部磁盘修改或代表当前净变更。点击文件在编辑器中打开。": "Lists files with recorded tool diffs; may not cover all disk changes or the current net change. Click a file to open it in the editor.",
+  "这里只列出 iFlow 记录到改动的文件，可能不包含你手动改的内容，也不代表文件现在的最终差异。点击文件可在编辑器中打开。": "Lists files iFlow recorded changes to; manual edits may be missing, and this is not necessarily the file's final diff. Click a file to open it in the editor.",
   "在编辑器中打开": "Open in editor",
   "撤销此文件的本轮修改": "Undo this file's changes from this turn",
-  "该轮次已不可用。": "This turn is no longer available.",
+  "这一轮的变更记录已不可用。": "This turn's change records are no longer available.",
   "正在读取本轮变更…": "Loading turn changes…",
-  "本轮没有可展示的变更记录；这不表示没有文件修改。": "No change records are available for this turn; files may still have changed.",
+  "本轮没有可显示的改动记录；这不表示没有文件修改。": "No change records to show for this turn; this does not mean no files were modified.",
   // loading / topbar
   "连接中…（内核启动可能需要十几秒，配置了多个 MCP server 时更久）":
     "Connecting… (Core startup can take 10+ seconds, longer with multiple MCP servers)",
@@ -147,13 +147,13 @@ const en: Record<string, string> = {
   "API 配置（点击切换后重新认证）": "API profile (click to switch, re-authenticates)",
   "权限模式": "Permission mode",
   "智能": "Smart",
-  "AI 评估风险后决定是否确认": "AI weighs the risk before running tools",
+  "iFlow 会自行判断风险，必要时才征求你的确认": "iFlow judges the risk itself and only asks when it matters",
   "免确认": "Auto-approve",
-  "所有工具直接执行": "Tools run without confirmation",
+  "所有操作直接执行，不再询问": "Every action runs directly — nothing is asked",
   "标准": "Standard",
-  "执行前均需确认": "Confirm before every execution",
+  "每次执行操作前都要你确认": "You confirm before each action runs",
   "规划": "Plan",
-  "只读，仅分析与规划": "Read-only — analyze and plan only",
+  "只读：只分析、出计划，不改动文件": "Read-only: analyze and plan without changing files",
   "模型": "Model",
   "搜索模型…": "Search models…",
   "新会话": "New session",
@@ -171,7 +171,7 @@ const en: Record<string, string> = {
   "正在规划": "Planning",
   "正在压缩": "Compressing",
   "初始化中": "Initializing",
-  "错误": "Error",
+  "出错了": "Something went wrong",
   "管理配置与凭据…": "Manage profiles & credentials…",
   "会话历史": "Session history",
   // approval card
@@ -183,21 +183,21 @@ const en: Record<string, string> = {
   // edit & resend (M4 P1-9)
   "编辑并重发该消息": "Edit and resend this message",
   "重发": "Resend",
-  "重发将先回滚该轮文件变更并删除其后的对话": "Resending first restores this turn's file snapshot, then deletes the conversation after it",
-  "重发将删除该消息及其后所有对话": "Resending deletes this message and everything after it",
+  "重发会先把这一轮的文件改回原样，并删除之后的对话": "Resending first restores this turn's files, then deletes the conversation after it",
+  "重发会删除这条消息和之后的所有对话": "Resending deletes this message and everything after it",
   // turn-level checkpoint rollback (M3 P0-1)
-  "回滚到此轮之前": "Roll back to before this turn",
+  "回滚到这一轮之前": "Roll back to before this turn",
   "文件": "Files",
   "对话": "Chat",
   "全部": "Both",
-  "仅回滚工作区文件到本轮之前": "Restore workspace files to before this turn",
-  "仅删除该消息及其后所有对话": "Delete this message and everything after it",
-  "回滚文件并删除该消息及其后所有对话": "Restore files and delete this message and everything after it",
-  "该轮快照不完整，无法恢复文件": "This turn's snapshot is incomplete; files cannot be restored",
-  "选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。":
+  "只把工作区文件恢复到这一轮之前": "Restore workspace files to before this turn",
+  "只删除这条消息及之后的所有对话": "Delete this message and everything after it",
+  "恢复文件，并删除这条消息及之后的对话": "Restore files and delete this message and everything after it",
+  "这一轮的快照不完整，无法恢复文件": "This turn's snapshot is incomplete, so files cannot be restored",
+  "选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。":
     "Choose the rollback scope: restore files to before this turn, delete this message and everything after it, or both.",
-  "该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。":
-    "This turn's snapshot is incomplete; files cannot be restored — you can only delete this message and everything after it.",
+  "这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。":
+    "This turn's snapshot is incomplete, so files cannot be restored — you can only delete this message and everything after it.",
   "确定清空队列中全部 {0} 条待发送消息吗？": "Clear all {0} queued messages?",
   // tool cards / message list
   "已完成": "Completed",
@@ -233,52 +233,52 @@ const en: Record<string, string> = {
   // long-session memory eviction markers
       "内容已释放": "Content released",
       "加载剩余 {0} 行": "Load remaining {0} rows",  "附件图片已释放": "Attached images released",
-  "为控制长会话内存，该块的输出与差异已自 webview 内存释放；回退与导出仍由 host 完整保留":
-    "Released from webview memory to bound long-session usage; revert & export stay complete on the host",
-  "为控制长会话内存，附件图片已自 webview 内存释放；host 仍保留完整记录":
-    "Attached images released from webview memory to bound long-session usage; the host keeps the full record",
+  "为了不让长会话占用太多内存，这块输出与差异已从界面释放；回退和导出仍使用完整记录":
+    "Released from the UI to keep long sessions light; revert and export still use the full record",
+  "为了不让长会话占用太多内存，附件图片已从界面释放；完整记录仍然保留":
+    "Attached images released from the UI to keep long sessions light; the full record is still kept",
   "回退此改动": "Revert this change",
   "已回退": "Reverted",
   "部分回退": "Partially reverted",
   "保留": "Keep",
   "回退": "Revert",
-  "改动 {0}/{1}": "Change {0}/{1}",
+  "第 {0}/{1} 处改动": "Change {0} of {1}",
   "应用（保留 {0} · 回退 {1}）": "Apply (keep {0} · revert {1})",
   "全部保留": "Keep all",
   "保留此改动": "Keep this change",
   "回退此改动（恢复为编辑前内容）": "Revert this change (restore pre-edit content)",
-  "将回退的块恢复为编辑前内容，保留其余改动": "Restore reverted hunks to their pre-edit content, keeping the rest",
+  "把标记为回退的改动恢复成修改前的内容，其余改动保留": "Restore the changes marked for revert to their pre-edit content, keeping the rest",
   "文件对比": "File diff",
   "任务清单": "Task list",
   "已截断 {0} 字符": "Truncated {0} chars",
-  "仅渲染前 {0} 字符": "Rendering first {0} chars only",
+  "为省内存只显示前 {0} 字符": "Showing the first {0} chars to save memory",
   "复制全部": "Copy all",
   "查看完整输出": "View full output",
   "标记完成": "Mark done",
   "取消勾选": "Uncheck",
   "打开 API 设置": "Open API settings",
   "打开运行时设置": "Open runtime settings",
-  "检查 API Key 是否有效、账户余额/额度是否充足，或在设置中切换到其他 API 配置后重试":
-    "Check that the API key is valid and the account has remaining balance/quota, or switch to another API profile in Settings and retry",
-  "本机网络或代理不可达，检查网络连接与代理设置后点击重试":
-    "The local network or proxy is unreachable — check connectivity/proxy settings, then hit retry",
-  "当前模型可能已下架或不支持该能力，在设置中重新选择可用模型后重试":
-    "The current model may be delisted or lacks this capability — pick an available model in Settings and retry",
-  "扩展包不完整或内核文件被安全软件删除，重新安装扩展后重启窗口即可恢复":
-    "The extension package is incomplete or the bundled Core was removed by security software — reinstall the extension and reload the window",
-  "平台速率限制持续触发，可稍候片刻再重试，或在设置中切换到其他模型 / API 配置":
-    "The platform rate limit keeps triggering — wait a moment and retry, or switch to another model / API profile in Settings",
-  "上下文已超出模型上限且自动压缩未能恢复，可发送 /compress 再次压缩，或开启新会话后继续":
-    "Context exceeded the model limit and auto-compression did not recover it — send /compress to compact again, or start a new session",
+  "可能是 API 密钥无效、过期，或账户余额 / 额度不够。到设置里检查或换一个 API 配置后再试。":
+    "The API key may be invalid or expired, or the account may be out of balance/quota. Check it in Settings, or switch to another API profile and try again.",
+  "网络或代理没连上。检查网络连接和代理设置后重试。":
+    "The network or proxy could not connect. Check your connection and proxy settings, then retry.",
+  "当前模型可能已下架，或没有这项能力。到设置里换一个可用模型再试。":
+    "The current model may be delisted or may not support this. Pick an available model in Settings and try again.",
+  "内核文件缺失（安装不完整，或被安全软件删掉了）。重新安装扩展并重启窗口即可恢复。":
+    "Core files are missing (incomplete install, or removed by security software). Reinstall the extension and reload the window to recover.",
+  "平台一直在限流（请求太频繁）。稍等一下再重试，或在设置里换一个模型 / API 配置。":
+    "The platform is rate-limiting requests. Wait a moment and retry, or switch to another model / API profile in Settings.",
+  "对话已经超出模型能记住的上限，自动压缩也没能救回来。可以发送 /compress 再压一次，或新建会话继续。":
+    "The conversation exceeded what the model can remember and auto-compression could not recover it. Send /compress to compact again, or start a new session to continue.",
   "运行中": "Running",
   "子代理": "Subagent",
   "停止此子代理": "Stop this subagent",
   "已停止": "Stopped",
   "tokens": "tokens",
   "耗时": "Duration",
-  "只读转录": "Read-only transcript",
-  "子代理 token 为转录估算，包含子代理": "Estimated transcript tokens, including child agents",
-  "启动子代理（{0}）：{1}": "Launch agent ({0}): {1}",
+  "查看完整记录": "View full log",
+  "token 数为按对话估算，包含子代理": "Token count is estimated from the conversation and includes subagents",
+  "启动子代理 {0}：{1}": "Launch subagent {0}: {1}",
   "读取 {0}": "Reading {0}",
   "运行：{0}": "Running: {0}",
   "更新任务清单": "Updating todos",
@@ -290,13 +290,13 @@ const en: Record<string, string> = {
   "正在恢复会话…": "Restoring session…",
   "删除中…": "Deleting…",
   // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
-  "子会话还在运行并等待汇报，暂时不能新建会话":
-    "Child sessions are still running and waiting to report — new session is unavailable for now",
+  "子会话还在运行，等它们汇报完才能新建会话":
+    "Child sessions are still running — you can start a new session once they have reported",
   // 用户按了停止、汇报被压住：「新会话」必须放行，否则面板死锁。
-  "已停止；可新建会话，待处理汇报会留在原会话":
-    "Stopped — you can start a new session; deferred results stay with the original session",
-  "有 {0} 项子会话结果待处理（你按了停止，它们被压下了）。新建会话不会丢弃它们：它们按原会话归属留在队列里，切回那个会话后才会继续投递。确定新建吗？":
-    "There are {0} child-session results pending (you pressed Stop, so they are held). Starting a new session will not discard them: they stay queued under their original session and will be delivered when you switch back. Start a new session anyway?",
+  "已停止：可以新建会话，待处理的汇报仍留在原会话":
+    "Stopped — you can start a new session; pending results stay with the original session",
+  "你按了停止，还有 {0} 项子会话结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？":
+    "You pressed Stop and {0} child-session result(s) are still unprocessed. Starting a new session will not lose them: they stay with the original session and are processed when you switch back. Start a new session?",
   // 恢复进行中：「新会话」按钮可点（宿主会放弃恢复并立刻新建会话）
   "取消正在进行的会话恢复并新建会话": "Cancel the session restore in progress and start a new session",
   "删除会话 {0}": "Delete session {0}",
@@ -318,10 +318,10 @@ const en: Record<string, string> = {
   "{0} 个失败": "{0} failed",
   "工具活动": "Tool activity",
   "思考了 {0}s": "Thought for {0}s",
-  "回滚本轮": "Roll back this turn",
+  "回滚这一轮": "Roll back this turn",
   "回滚本轮（文件与对话）": "Roll back this turn (files and conversation)",
-  "有什么可以帮你?": "What can I help with?",
-  "输入 / 查看命令 · @  引用文件": "Type / for commands, @ to reference files",
+  "有什么可以帮你？": "What can I help with?",
+  "输入 / 查看命令 · @ 引用文件": "Type / for commands, @ to reference files",
   // composer
   "发送": "Send",
   "停止": "Stop",
@@ -391,24 +391,24 @@ const en: Record<string, string> = {
   "新会话使用的权限模式；当前会话可用输入框下方的模式菜单切换。":
     "Approval mode for new sessions; switch the current session from the mode menu below the composer.",
   "审批说明": "Approval help",
-  "允许会立即执行该工具；「始终允许」会在本次会话内记住该工具。":
-    "Allow runs the tool immediately; \"Always allow\" remembers it for this session.",
-  "拒绝或取消都不会执行；可在设置 → 审批策略中预审规则。":
-    "Reject or cancel never runs it. Pre-review rules live in Settings → Approval policies.",
+  "「允许一次」只执行这一次；「始终允许」会让本次会话记住这个操作，之后不再询问。":
+    "\"Allow once\" runs it just this time; \"Always allow\" remembers this action for the session and stops asking.",
+  "拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 审批策略」。":
+    "Reject or cancel runs nothing. To set rules in advance, go to Settings → Approval policies.",
   "Y 允许一次 · N 拒绝 · Esc 取消": "Y allow once · N reject · Esc cancel",
   "Y 允许一次 · N/Esc 拒绝": "Y allow once · N/Esc reject",
   "计划说明": "Plan help",
-  "Plan 模式只读分析与规划；批准后会退出 Plan 模式并开始执行。":
-    "Plan mode is read-only analysis and planning; approving exits Plan mode and starts execution.",
-  "批准的计划会保存到 .iflow/specs/ 以便留痕。":
-    "Approved plans are saved under .iflow/specs/ for later review.",
-  "编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。":
-    "Edits are sent to the agent only when you choose Re-plan; Approve executes the original plan.",
+  "Plan 模式只做分析和规划，不改动文件。批准后 iFlow 会开始执行，并可以修改工作区里的文件。":
+    "Plan mode only analyzes and plans — it does not change files. Once you approve, iFlow starts working and can modify files in the workspace.",
+  "批准的计划会存到 .iflow/specs/，方便以后回看。":
+    "Approved plans are saved under .iflow/specs/ so you can review them later.",
+  "编辑的内容只在你点「重新规划」时交给 iFlow；点「批准计划」执行的仍是原计划。":
+    "Your edits are handed to iFlow only when you choose Re-plan; Approve still runs the original plan.",
   "Y 批准 · N 拒绝 · R 重新规划": "Y approve · N reject · R re-plan",
   "提问说明": "Question help",
-  "agent 正在等待你的回答；卡片未回答前其他操作会被阻塞。":
-    "The agent is waiting for your answer; other actions stay blocked until this card is answered.",
-  "超时未回答会按未回答继续。": "If it times out, the agent continues as if unanswered.",
+  "iFlow 正在等你回答，回答前它会先暂停。":
+    "iFlow is waiting for your answer and pauses until you reply.",
+  "超时没回答，iFlow 会按「未回答」继续往下走。": "If it times out, iFlow continues as if unanswered.",
   // pending-card convergence (milestone 14 §4.5)
   "约 {0} 分钟后{1}": "{1} in about {0} min",
   "自动继续": "Auto-continue",
@@ -416,7 +416,7 @@ const en: Record<string, string> = {
   "始终允许": "Always allow",
   "拒绝": "Reject",
   "始终拒绝": "Always reject",
-  "iFlow 请求执行": "iFlow wants to",
+  "iFlow 想执行一项操作": "iFlow wants to run an action",
   "读取": "read",
   "写入": "write",
   "搜索": "search",
@@ -424,8 +424,8 @@ const en: Record<string, string> = {
   "移动": "move",
   "读取网页": "fetch a page",
   "不回答并继续": "Continue without answering",
-  "回车只确认该输入；「提交回答」按钮或 Ctrl/Cmd + 回车提交整卡。":
-    "Enter confirms just that field; the Submit answer button or Ctrl/Cmd+Enter commits the whole card.",
+  "回车只确认当前输入框；要提交整张卡片，请点「提交回答」或按 Ctrl/Cmd + 回车。":
+    "Enter confirms just that field; to submit the whole card, use the Submit answer button or Ctrl/Cmd+Enter.",
   "保存并重新规划": "Save and re-plan",
   "快捷键": "Keyboard shortcuts",
   "停止生成（审批卡中为取消/拒绝）": "Stop generating (cancels/rejects on an approval card)",
@@ -441,8 +441,8 @@ const en: Record<string, string> = {
   "默认模式": "Default mode",
   "继续配置": "Continue configuring",
   "这些能力可以稍后再设置。": "These capabilities can be set up later.",
-  "尚未配置 API 凭据，无法开始对话。": "API credentials are not configured yet — chat is unavailable.",
-  "配置": "Configure",
+  "还没配置 API 密钥，现在还不能开始对话。": "No API key configured yet — you cannot start chatting.",
+  "去配置": "Set it up",
   "重新运行引导": "Run setup again",
   "收起": "Collapse",
   "展开": "Expand",
@@ -640,27 +640,27 @@ const en: Record<string, string> = {
   "确定删除规则「{0}」吗？保存后生效。": "Delete rule \"{0}\"? Takes effect after saving.",
   "确定删除「{0}」吗？保存后将从内核配置中移除。":
     "Delete \"{0}\"? It will be removed from the Core configuration when saved.",
-  "输入框非空，已放弃回填（队列条目仍在）":
-    "Composer is not empty — refill dropped (the queue entry is still there)",
+  "输入框已有内容，没有填入（原条目仍在）":
+    "The composer already has text — nothing was filled in (the original entry is still there)",
   "排队发送 (Enter)": "Queue (Enter)",
   "排队发送（Enter）": "Queue (Enter)",
   "排队": "Queue",
   "添加附件": "Add attachments",
   "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",
-  "{0} 个文件暂存失败，已跳过": "Failed to stage {0} file(s) — skipped",
+  "{0} 个文件添加失败，已跳过": "Failed to add {0} file(s) — skipped",
   "停止生成": "Stop generating",
   "发送 (Enter)": "Send (Enter)",
   "当前上下文 {0} tokens（内核上报）": "Current context {0} tokens (reported by Core)",
-  "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）":
-    "Current context ≈ {0} tokens (host estimate; recomputed from the compressed context after compression)",
+  "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）":
+    "Current context ≈ {0} tokens (local estimate; recomputed from the compaction result after compressing)",
   "输入 {0} tokens · 输出 {1} tokens": "Input {0} tokens · output {1} tokens",
-  "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）· 输出 {1}":
-    "Current context ≈ {0} tokens (host estimate; recomputed from the compressed context after compression) · output {1}",
+  "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）· 输出 {1}":
+    "Current context ≈ {0} tokens (local estimate; recomputed from the compaction result after compressing) · output {1}",
   "当前上下文（用户消息与工具结果，压缩后重算）": "Current context (user messages & tool results; recomputed after compression)",
   "输出（回复与思考）": "Output (replies & thinking)",
   // message list
-  "在 VSCode diff 视图中查看该变更": "Open this change in the VSCode diff view",
-  "将该文件恢复为编辑前内容": "Revert this file to its pre-edit content",
+  "在 VSCode 的差异视图里查看这次改动": "Open this change in the VSCode diff view",
+  "把这个文件恢复成修改前的内容": "Restore this file to its content before the edit",
   "输出": "Output",
   "思考过程": "Thinking",
   "附件图片 {0}": "Attached image {0}",
@@ -677,7 +677,7 @@ const en: Record<string, string> = {
   // P0-3: splash patience line & error toast actions
   "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
     "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
-  "重启内核并重试（会话自动恢复）": "Restart the Core and retry (the session restores automatically)",
+  "重启内核后重试，当前会话会自动恢复": "Restart the Core and retry — this session restores automatically",
   "关闭": "Dismiss",
   "回到最新": "Jump to latest",
   "展开上下文": "Expand context",
@@ -697,7 +697,7 @@ const en: Record<string, string> = {
       "{0} 个知识库文档": "{0} knowledge doc(s)",
         "MCP 未连接": "MCP not connected",
         "MCP 项目级": "MCP project-scope",
-        "未随请求注入": "Not injected with the request",  "{0} 字符": "{0} chars",
+        "这次请求没有带上": "Not included in this request",  "{0} 字符": "{0} chars",
   "{0} 字节": "{0} bytes",
   "diff": "diff",
   // composer / message list (additional — new entries only)
@@ -713,18 +713,18 @@ const en: Record<string, string> = {
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 …": "Starting …",
   "正在重新启动内核 …": "Restarting the Core …",
-  "首次启动或配置了多个 MCP server 时较久":
-    "Slower on first launch or with multiple MCP servers",
+  "首次启动，或配置了多个 MCP 服务器时会多等一会儿":
+    "Takes longer on first launch, or when several MCP servers are configured",
   // P1: edit & resend, session search, aria-live announcements
   "编辑并重发": "Edit & resend",
   "搜索会话…": "Search sessions…",
-  "需要审批工具调用": "Tool approval required",
-  "有待回答问题需要回答": "Question needs answering",
-  "等待选择切换 API 配置的会话处理方式": "Choose how the session is handled when switching API profiles",
+  "有操作等你批准": "An action is waiting for your approval",
+  "iFlow 有问题等你回答": "iFlow has a question for you",
+  "等你选择切换 API 配置后如何处理当前会话": "Choose how to handle this session after switching API profiles",
   "自定义回答": "Custom answer",
   "其他": "Other",
   "填写自定义回答": "Write a custom answer",
-  "输入自定义回答，回车确认": "Type a custom answer, press Enter to confirm",
+  "输入你的回答，回车确认": "Type your answer, press Enter to confirm",
   "已选 {0} 项": "{0} selected",
   "正在连接 iFlow…": "Connecting to iFlow…",
   "正在生成回复…": "Generating response…",
@@ -733,8 +733,8 @@ const en: Record<string, string> = {
   "已停止生成": "Generation stopped",
   "已就绪": "Ready",
   // Plan-mode exit confirmation card
-  "iFlow 请求退出 Plan 模式": "iFlow wants to exit Plan mode",
-  "退出 Plan 模式后将开始执行以下计划：": "The following plan will be executed once Plan mode is exited:",
+  "iFlow 准备开始执行计划": "iFlow is ready to start the plan",
+  "批准后 iFlow 会离开 Plan 模式，按下面的计划开始动手：": "Once approved, iFlow leaves Plan mode and starts working through this plan:",
   "批准计划": "Approve plan",
   "拒绝计划": "Reject plan",
   "重新规划": "Re-plan",
@@ -743,32 +743,32 @@ const en: Record<string, string> = {
   "编辑": "Edit",
   "预览": "Preview",
   "计划审批操作": "Plan approval actions",
-  "需要确认退出计划模式": "Plan exit needs confirmation",
+  "计划已就绪，等你批准": "The plan is ready for your approval",
   // render-error fallback (ErrorBoundary)
   "重试": "Retry",
   "界面渲染异常": "Interface rendering error",
-  "界面渲染时遇到异常。重新载入面板即可恢复；也可以直接重试。":
-    "The interface hit a rendering error. Reload the panel to recover, or just retry.",
+  "重新载入面板即可恢复；也可以直接重试。":
+    "Reload the panel to recover, or just retry.",
   "消息区渲染异常": "Message area rendering error",
-  "内容渲染时遇到异常，将在下一次更新时自动重试。":
-    "Content hit a rendering error — it will retry automatically on the next update.",
+  "这段内容没能显示出来，下次更新时会自动重试。":
+    "This content could not be displayed; it will retry automatically on the next update.",
   // M1: Focus view, context occupancy, cost, prompt enhancement
   "Focus 视图": "Focus view",
   "Focus 视图：只看对话，折叠工具与思考（Ctrl+Alt+F）":
     "Focus view: conversation only, tools and thoughts collapsed (Ctrl+Alt+F)",
   "退出 Focus 视图（Ctrl+Alt+F）": "Exit Focus view (Ctrl+Alt+F)",
   "上下文占用 {0} / {1}（{2}%{3}{4}）": "Context {0} / {1} ({2}%{3}{4})",
-  "，窗口为估算值": ", window is an estimate",
+  "，上限为估算值": ", limit is an estimate",
   "，占用为内核上报值": ", occupancy reported by the Core",
   "当前上下文 {0} tokens（内核上报）· 输出 {1}（估算）":
     "Context {0} tokens (reported by the Core) · output {1} (estimated)",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
-  "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 预填充 {4}":
-    "User {0} · assistant {1} · tools {2} · thoughts {3} · prefill {4}",
-  "预填充 = 系统提示词 / 记忆 / 工具声明，每次请求都携带":
-    "Prefill = system prompt / memory / tool declarations — carried on every request",
-  "估算未含内核内置工具声明与目录清单":
-    "The estimate excludes the Core's built-in tool declarations and directory listing",
+  "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 固定开销 {4}":
+    "User {0} · assistant {1} · tools {2} · thoughts {3} · fixed overhead {4}",
+  "固定开销 = 系统提示词、记忆和工具说明，每次请求都要带上":
+    "Fixed overhead = system prompt, memory and tool descriptions — carried on every request",
+  "估算没有算上内核内置的工具说明和目录清单":
+    "The estimate leaves out the Core's built-in tool descriptions and directory listing",
   "缓存读取 {0} tokens": "Cache read {0} tokens",
   "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",
   "该模型无单价记录，不显示成本": "No unit price recorded for this model — no cost shown",
@@ -786,9 +786,9 @@ const en: Record<string, string> = {
   // turn-end next-step suggestions + General settings tab
   "通用": "General",
   "下一步": "Next",
-  "AI 推测的下一步操作，点击填入输入框": "AI-predicted next actions — click to insert into the composer",
+  "iFlow 猜的下一步，点一下填进输入框": "iFlow's guess at the next step — click to insert it into the composer",
   "关闭建议": "Dismiss suggestions",
-  "预测下一步操作…": "Predicting next steps…",
+  "正在想下一步建议…": "Thinking of next steps…",
   "下一步建议": "Next-step suggestions",
   "每轮回复完成后单独调用一次模型，推测可选的下一步操作并显示在输入框上方（会产生额外 token 消耗）。":
     "After each completed turn, make one extra model call to predict likely next actions and show them above the composer (extra token usage).",
@@ -1125,19 +1125,19 @@ const en: Record<string, string> = {
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
   "未指定子会话": "No child session specified",
   // 多张待处理卡的堆叠计数器（审批 / Plan 退出 / 提问）
-  "还有 {0} 个待处理": "{0} more pending",
-  "还有 {0} 个待处理：{1}": "{0} more pending: {1}",
+  "还有 {0} 张卡片待处理": "{0} more card(s) need you",
+  "还有 {0} 张卡片待处理：{1}": "{0} more card(s) need you: {1}",
   "收起待处理卡": "Collapse pending cards",
-  "iFlow 需要你的回答": "iFlow needs your answer",
+  "iFlow 有问题想问你": "iFlow has a question for you",
   // 对话区反馈：复制回执 / 文件暂存占位 / 请求在飞的进行态
   "复制失败": "Copy failed",
   "搜索中…": "Searching…",
   "解析中…": "Resolving…",
-  "解析上下文超时，请重试": "Resolving the context timed out. Try again.",
+  "读取上下文超时了，请重试": "Reading the context timed out. Try again.",
   "切换中…": "Switching…",
   "正在停止…": "Stopping…",
   "暂存中…": "Staging…",
-  "暂存文件超时，请重试": "Staging the file timed out. Try again.",
+  "添加文件超时了，请重试": "Adding the file timed out. Try again.",
   "、": ", ",
 
   // 2026-11-16 文案优化：设置 / 引导 / 认证 / 审批规则（键变更后的新词条）
@@ -1311,13 +1311,13 @@ export function t(message: string, ...args: Array<string | number>): string {
 export function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
   switch (mode.id) {
     case "smart":
-      return { label: t("智能"), desc: t("AI 评估风险后决定是否确认") };
+      return { label: t("智能"), desc: t("iFlow 会自行判断风险，必要时才征求你的确认") };
     case "yolo":
-      return { label: t("免确认"), desc: t("所有工具直接执行") };
+      return { label: t("免确认"), desc: t("所有操作直接执行，不再询问") };
     case "default":
-      return { label: t("标准"), desc: t("执行前均需确认") };
+      return { label: t("标准"), desc: t("每次执行操作前都要你确认") };
     case "plan":
-      return { label: t("规划"), desc: t("只读，仅分析与规划") };
+      return { label: t("规划"), desc: t("只读：只分析、出计划，不改动文件") };
     default:
       return { label: mode.name || mode.id, desc: "" };
   }
