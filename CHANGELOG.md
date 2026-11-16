@@ -3,6 +3,14 @@
 本文件是版本的唯一来源（single source of truth）：CI 从 `## [x.y.z]` 标题读取
 版本号写入 `package.json`，其下的条目作为该版本的发布摘要。
 
+## [3.2.2] - 2026-11-16
+
+- 修复 主会话工具门控：主会话硬性禁止读取、写入、执行与进程内子代理工具，保留 `super-agent` 委派通道，并补齐新建、恢复和回滚路径的门控覆盖与回归守卫
+- 修复 API Profile 持久化：编辑非当前配置时允许保存，内核配置原地合并并保留磁盘中的 `apiProfiles`，避免切换 Profile 后编辑内容被旧快照覆盖
+- 改进 Super Agent 看板与委派流程：补充停止、重试、清理、合并中的状态反馈，区分子会话进展与主会话汇报，增加委派卡、操作卡和看板入口反馈，并优化委派动效
+- 稳定测试与异步清理：隔离面板测试临时目录，增强 Windows 临时目录清理重试，修正归档写放大测试的确定性，并改善慢环境下的 worktree 测试稳定性
+- 完善用户文案与本地化：重写设置、引导、审批规则、对话状态、看板、资源卡和 MCP 提示，补齐英文翻译并修正 MCP 必填字段提示
+
 ## [3.2.1] - 2026-11-15
 
 - 修复 macOS / 符号链接（含 Windows 目录联接）形态工作区下 Super Agent 隔离失效：`git rev-parse --show-toplevel` 与 `worktree list --porcelain` 输出的是 **realpath** 形式（macOS 的 `/var/folders/...` → `/private/var/folders/...`，目录联接被解析成目标路径），而 `repoRoot` 可能仍是链接形式，旧实现直接做 `path.relative` 词法比较，导致 `.git/info/exclude` 静默没写（隔离目录把主工作区弄脏）、残留清扫与保留上限回收把注册表里的 worktree 全判成孤儿目录（恒 0 回收）；现在 `realPathOrLexical` 在路径不存在时解析最近已存在祖先、新增 `comparisonPathKey` 统一比较键，exclude 的相对路径两侧都 realpath 归一、`listWorktrees` 归一输出路径、`sweepStaleWorktrees` 的注册表 / 活会话 / 目录枚举统一用归一键，并补 symlink/junction 形态仓库根的回归用例（`src/panel/worktree.ts` + `src/panel/super-agent.ts`）
