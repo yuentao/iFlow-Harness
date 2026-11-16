@@ -1046,6 +1046,7 @@ function createMockHost(): HostApi {
   const demoMeta = {
     sessionId: "mock-session",
     superSessions: demoSuperSessions,
+    qqTasks: [] as SessionState["qqTasks"],
     modes: { currentModeId: "smart", availableModes: [
       { id: "smart", name: "Smart" }, { id: "yolo", name: "YOLO" },
       { id: "default", name: "Default" }, { id: "plan", name: "Plan" },
