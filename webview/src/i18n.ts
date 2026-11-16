@@ -1126,6 +1126,15 @@ const en: Record<string, string> = {
   "还有 {0} 个待处理：{1}": "{0} more pending: {1}",
   "收起待处理卡": "Collapse pending cards",
   "iFlow 需要你的回答": "iFlow needs your answer",
+  // 对话区反馈：复制回执 / 文件暂存占位 / 请求在飞的进行态
+  "复制失败": "Copy failed",
+  "搜索中…": "Searching…",
+  "解析中…": "Resolving…",
+  "解析上下文超时，请重试": "Resolving the context timed out. Try again.",
+  "切换中…": "Switching…",
+  "正在停止…": "Stopping…",
+  "暂存中…": "Staging…",
+  "暂存文件超时，请重试": "Staging the file timed out. Try again.",
   "、": ", ",
 };
 

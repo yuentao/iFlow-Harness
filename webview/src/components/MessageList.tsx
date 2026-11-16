@@ -56,6 +56,7 @@ import { isPlanMode, MAX_TOOL_OUTPUT_DISPLAY_CHARS, splitSystemPromptSections } 
 import { useShallow } from "zustand/react/shallow";
 import { useChat, type ToastItem } from "../store";
 import { t } from "../i18n";
+import { initializingLabel } from "../initializing-label";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Markdown, copyText } from "./Markdown";
 import { AssistantText, SuperActionsToolCallCard, SuperToolCallCard } from "./SuperDirectiveCard";
@@ -65,6 +66,53 @@ import { canReviewTurn, turnsWithChanges } from "../../../shared/turn-changes";
 import { classifySuperToolName, resolveSuperToolCallKind } from "../../../shared/super-tool-call";
 import { Button, Chip, ConfirmDialog, CountdownSeconds, FileRef, FloatChip, FloatPill, ICON_INLINE, IconButton, TextArea, ToastStack } from "./ui";
 import logo from "../assets/iflow.svg";
+
+/** How long the copy action keeps its "已复制" state before reverting. */
+const COPY_FEEDBACK_MS = 2000;
+
+/**
+ * Copy feedback for the transcript's copy affordances (tool output / user
+ * message / assistant message). The three call sites used to fire
+ * `void copyText(...)` — success and failure looked identical, so a clipboard
+ * denial (webview without clipboard permission) silently did nothing.
+ *
+ * Success flips the icon to Check for COPY_FEEDBACK_MS (same language as the
+ * markdown code-block copy button); failure raises one error toast. A second
+ * copy inside the window restarts the timer instead of stacking state.
+ */
+function useCopied(): { copied: boolean; copy: (text: string) => void } {
+  const notify = useChat((s) => s.notify);
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const copy = useCallback(
+    (text: string) => {
+      // copyText can THROW synchronously (no clipboard API + no
+      // document.execCommand in older webviews) — route that through the same
+      // rejection branch as a denied writeText.
+      Promise.resolve()
+        .then(() => copyText(text))
+        .then(
+          () => {
+            if (timer.current) clearTimeout(timer.current);
+            setCopied(true);
+            timer.current = setTimeout(() => {
+              timer.current = null;
+              setCopied(false);
+            }, COPY_FEEDBACK_MS);
+          },
+          () => notify(t("复制失败"), "error"),
+        );
+    },
+    [notify],
+  );
+  return { copied, copy };
+}
 
 const KIND_ICON: Record<string, typeof Eye> = {
   read: Eye,
@@ -278,6 +326,7 @@ function OutputDetails({
 }) {
   const flat = chrome === "flat";
   const send = useChat((s) => s.send);
+  const { copied, copy } = useCopied();
   const [open, setOpen] = useState(false);
   // Collapse keeps its children MOUNTED for the height animation — so a
   // folded tool output used to pin its whole text (up to 64K chars) in the
@@ -327,10 +376,12 @@ function OutputDetails({
             read-only live pane keeps only the truncation note. */}
         {!flat && (
           <button
-            className="text-muted-foreground hover:text-foreground"
-            onClick={() => void copyText(output)}
+            className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
+            title={copied ? t("已复制") : t("复制全部")}
+            onClick={() => copy(output)}
           >
-            {t("复制全部")}
+            {copied && <Check className="size-3 text-primary" />}
+            {copied ? t("已复制") : t("复制全部")}
           </button>
         )}
         {!flat && blockId && (
@@ -994,6 +1045,7 @@ function UserMessage({
   onEditingChange?: (blockId: string, editing: boolean) => void;
 }) {
   const send = useChat((s) => s.send);
+  const { copied, copy } = useCopied();
   // UI-audit 4.3 P1: ONE hover/focus action bar per message (copy / edit /
   // delete / rollback) inside the bubble, hidden until hover/focus — the old
   // floating icon row (40% visible forever) competed with the reading flow.
@@ -1121,11 +1173,11 @@ function UserMessage({
           <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-3 items-center gap-0.5 rounded-md border border-border bg-card px-1 opacity-0 shadow-card transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
             <button
               className={barBtnClass()}
-              title={t("复制")}
-              aria-label={t("复制")}
-              onClick={() => void copyText(block.text)}
+              title={copied ? t("已复制") : t("复制")}
+              aria-label={copied ? t("已复制") : t("复制")}
+              onClick={() => copy(block.text)}
             >
-              <Copy className="size-3" />
+              {copied ? <Check className="size-3 text-primary" /> : <Copy className="size-3" />}
             </button>
             {canDelete && block.id && (
               <button
@@ -1525,6 +1577,9 @@ export const BlockView = memo(function BlockView({
   /** F3 Phase 2: open the quick-add memory dialog with this assistant text. */
   onRemember?: (text: string) => void;
 }) {
+  // Copy feedback for the assistant-message action bar (one hook per block is
+  // fine — the state is a single boolean + timer, and BlockView is memo'd).
+  const { copied, copy } = useCopied();
   switch (block.kind) {
     case "user":
       return (
@@ -1574,10 +1629,10 @@ export const BlockView = memo(function BlockView({
               {canCopy && chrome !== "flat" && (
                 <div className="pointer-events-none absolute bottom-0 right-1 z-10 flex translate-y-[18px] items-center gap-0.5 rounded-md bg-card px-1 opacity-0 shadow-card outline-1 outline-[color:var(--border)] transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                   <IconButton
-                    icon={<Copy className="size-3" />}
-                    label={t("复制")}
+                    icon={copied ? <Check className="size-3 text-primary" /> : <Copy className="size-3" />}
+                    label={copied ? t("已复制") : t("复制")}
                     size="sm"
-                    onClick={() => void copyText(block.text)}
+                    onClick={() => copy(block.text)}
                   />
                   {isLatest && canCopy && canRegenerate && (
                     <IconButton
@@ -1727,6 +1782,7 @@ function useMessageListState() {
       activeSessionId: s.state?.activeSessionId ?? null,
       replaying: s.state?.replaying ?? false,
       initializing: s.state?.initializing ?? false,
+      initializingReason: s.state?.initializingReason ?? null,
       status: s.state?.status ?? "idle",
       compressing: s.state?.compressing ?? false,
       modes: s.state?.modes ?? null,
@@ -2280,7 +2336,7 @@ function MessageListInner() {
           <FloatPill tone={mergedNotice ? "warning" : "primary"} size="sm">
             <Loader2 className="size-3 animate-spin" />
             {state.initializing
-              ? t("正在创建新会话…")
+              ? initializingLabel(state.initializingReason)
               : mergedNotice
                 ? (
                   <>

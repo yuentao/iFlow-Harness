@@ -41,6 +41,17 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /** Cap for staging non-image files through the host (base64 round-trip). */
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Failsafes for the composer's request-in-flight indicators. Each control
+ * that locks itself while waiting for a host reply must release even when the
+ * reply never lands (host crash / dropped message) — a spinner stuck forever
+ * is worse than no spinner.
+ */
+const MENTION_SEARCH_TIMEOUT_MS = 10_000;
+const CONTEXT_RESOLVE_TIMEOUT_MS = 15_000;
+const STAGE_TIMEOUT_MS = 30_000;
+const STOP_TIMEOUT_MS = 10_000;
+
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 
 /** UI-audit 4.6: context cards collapse to one-line chips; beyond this many
@@ -327,6 +338,23 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
    * identity from the path: picking the same file twice yields two removable
    * chips instead of one key collision. */
   const [attachments, setAttachments] = useState<Array<{ id: number; name: string; path: string }>>([]);
+  /** Placeholder chips for files currently being staged through the host: the
+   * real chips only appear when `stagedFiles` comes back, so a large paste/drop
+   * used to leave the composer unchanged for seconds. */
+  const [staging, setStaging] = useState<Array<{ id: number; name: string }>>([]);
+  /** requestId → placeholder chip ids + failsafe timer. */
+  const stagingRef = useRef(new Map<number, { ids: number[]; timer: ReturnType<typeof setTimeout> }>());
+  /** @-mention file/folder search in flight (spinner row in the popup). */
+  const [mentionSearching, setMentionSearching] = useState(false);
+  const mentionSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Context cards being resolved by the host (@folder/@problems/@git/@url):
+   * a URL fetch can take seconds, so the chip row shows a placeholder. */
+  const [resolvingContexts, setResolvingContexts] = useState<Array<{ id: number; label: string }>>([]);
+  const resolveTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  /** Stop request in flight: the Stop button spins (and ignores repeats) until
+   * the turn settles or the failsafe fires. */
+  const [stopping, setStopping] = useState(false);
+  const stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** M2 P0-4: context cards above the composer (right-click selection +
    * @folder/@problems/@git/@url). Generalizes the old single code card;
    * each card is removable, the host assembles all of them at send time. */
@@ -347,6 +375,81 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const contextSeq = useRef(0);
   const stageSeq = useRef(0);
   const attachSeq = useRef(0);
+
+  // --- request-in-flight feedback (item: "锁而不示") -----------------------
+  /** Register placeholder chips for one stageFiles round trip. */
+  function trackStaging(requestId: number, names: string[]): void {
+    const entries = names.map((name) => ({ id: ++attachSeq.current, name }));
+    setStaging((prev) => [...prev, ...entries]);
+    const timer = setTimeout(() => {
+      stagingRef.current.delete(requestId);
+      setStaging((prev) => prev.filter((s) => !entries.some((e) => e.id === s.id)));
+      showNote(t("暂存文件超时，请重试"));
+    }, STAGE_TIMEOUT_MS);
+    stagingRef.current.set(requestId, { ids: entries.map((e) => e.id), timer });
+  }
+  /** Drop the placeholders of a stageFiles round trip (reply or timeout). */
+  function settleStaging(requestId: number): void {
+    const entry = stagingRef.current.get(requestId);
+    if (!entry) return;
+    stagingRef.current.delete(requestId);
+    clearTimeout(entry.timer);
+    setStaging((prev) => prev.filter((s) => !entry.ids.includes(s.id)));
+  }
+  /** Show a "resolving" chip until the contextResolved reply (or timeout). */
+  function trackContextResolve(requestId: number, label: string): void {
+    setResolvingContexts((prev) => [...prev, { id: requestId, label }]);
+    const timer = setTimeout(() => {
+      resolveTimers.current.delete(requestId);
+      pendingContextResolves.current.delete(requestId);
+      setResolvingContexts((prev) => prev.filter((c) => c.id !== requestId));
+      showNote(t("解析上下文超时，请重试"));
+    }, CONTEXT_RESOLVE_TIMEOUT_MS);
+    resolveTimers.current.set(requestId, timer);
+  }
+  function settleContextResolve(requestId: number): void {
+    const timer = resolveTimers.current.get(requestId);
+    if (timer) {
+      clearTimeout(timer);
+      resolveTimers.current.delete(requestId);
+    }
+    setResolvingContexts((prev) => prev.filter((c) => c.id !== requestId));
+  }
+  /** Stop the running turn once; the button spins until the turn settles. */
+  function stopGeneration(): void {
+    if (stopping) return;
+    setStopping(true);
+    send({ type: "cancel" });
+    if (stopTimer.current) clearTimeout(stopTimer.current);
+    stopTimer.current = setTimeout(() => {
+      stopTimer.current = null;
+      setStopping(false);
+    }, STOP_TIMEOUT_MS);
+  }
+  // The turn left streaming (cancel landed) → release the Stop spinner early.
+  useEffect(() => {
+    if (!canStop && stopping) {
+      if (stopTimer.current) {
+        clearTimeout(stopTimer.current);
+        stopTimer.current = null;
+      }
+      setStopping(false);
+    }
+  }, [canStop, stopping]);
+  // ESC's window listener only depends on canStop; the ref keeps it on the
+  // CURRENT stopping state instead of the render that registered it.
+  const stopRef = useRef<() => void>(() => {});
+  stopRef.current = stopGeneration;
+  // Unmount: never leave a timer behind (the panel can be closed mid-flight).
+  useEffect(
+    () => () => {
+      if (mentionSearchTimer.current) clearTimeout(mentionSearchTimer.current);
+      if (stopTimer.current) clearTimeout(stopTimer.current);
+      for (const entry of stagingRef.current.values()) clearTimeout(entry.timer);
+      for (const timer of resolveTimers.current.values()) clearTimeout(timer);
+    },
+    [],
+  );
   /** M2 P0-4: resolveContext request id generator + in-flight registry.
    * The reply must match by id against the SET — matching only the latest
    * id silently dropped every slower reply (URL fetches run up to 10s; a
@@ -473,7 +576,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   const searchSeq = useRef(0);
 
   useEffect(() => {
-    if (mentionQuery === null) return;
+    if (mentionQuery === null) {
+      setMentionSearching(false);
+      if (mentionSearchTimer.current) {
+        clearTimeout(mentionSearchTimer.current);
+        mentionSearchTimer.current = null;
+      }
+      return;
+    }
     const raw = mentionQuery.trim();
     if (raw.toLowerCase().startsWith("url:")) return; // URL source: no file search
     // M2 P0-4: "@/…" searches folders (host derives the dir set from the
@@ -484,10 +594,15 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     // W5: read `send` from the store imperatively — its reference is stable,
     // so the effect legitimately depends only on `mentionQuery` (no eslint
     // suppression needed).
-    const timer = setTimeout(
-      () => useChat.getState().send({ type: "searchFiles", requestId, query: q, kind: folder ? "folder" : "file" }),
-      120,
-    );
+    const timer = setTimeout(() => {
+      setMentionSearching(true);
+      if (mentionSearchTimer.current) clearTimeout(mentionSearchTimer.current);
+      mentionSearchTimer.current = setTimeout(() => {
+        mentionSearchTimer.current = null;
+        setMentionSearching(false);
+      }, MENTION_SEARCH_TIMEOUT_MS);
+      useChat.getState().send({ type: "searchFiles", requestId, query: q, kind: folder ? "folder" : "file" });
+    }, 120);
     return () => clearTimeout(timer);
   }, [mentionQuery]);
 
@@ -499,7 +614,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     const handler = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.isComposing) return;
       e.preventDefault();
-      useChat.getState().send({ type: "cancel" });
+      stopRef.current();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -527,9 +642,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       if (msg?.type === "fileList" && msg.requestId === searchSeq.current) {
         setMentionHits(msg.hits ?? []);
         setMentionIndex(0);
+        setMentionSearching(false);
+        if (mentionSearchTimer.current) {
+          clearTimeout(mentionSearchTimer.current);
+          mentionSearchTimer.current = null;
+        }
         return;
       }
-      if (msg?.type === "stagedFiles" && msg.requestId === stageSeq.current) {
+      if (msg?.type === "stagedFiles") {
+        // Accept late replies too: the placeholders may already have been
+        // dropped by the failsafe, but the files ARE staged — settleStaging is
+        // a no-op then and the real chips still land.
+        settleStaging(msg.requestId);
         const failed = msg.paths.filter((p: string | null) => p === null).length;
         const staged: Array<{ id: number; name: string; path: string }> = [];
         for (const p of msg.paths) {
@@ -614,6 +738,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         requestAnimationFrame(() => taRef.current?.focus());
       }
       if (msg?.type === "contextResolved" && pendingContextResolves.current.delete(msg.requestId)) {
+        settleContextResolve(msg.requestId);
         // M2 P0-4: a resolved @folder/@problems/@git/@url source becomes a card.
         if (msg.error) {
           showNote(msg.error);
@@ -650,6 +775,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   // exists (replay/init) or while another switch is in flight.
   const modeLocked = replaying || initializing || pending !== null;
   const currentMode = modes?.availableModes.find((m) => m.id === modes.currentModeId) ?? null;
+  /** Optimistic switch in flight (`store.pending`, cleared by the confirming
+   * snapshot or its 10s failsafe): the trigger shows a spinner instead of its
+   * idle icon — the lock alone looked like a dead control. */
+  const modeSwitching = pending?.kind === "mode";
+  const modelSwitching = pending?.kind === "model" || pending?.kind === "think";
   /** UI-audit 4.6: the trigger shows the display name (matching the menu rows);
    * an unknown / delisted id falls back to the raw id so the chip never lies
    * about what is actually selected. */
@@ -897,6 +1027,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     if (rejected > 0) showNote(t("{0} 个文件超过大小上限（50MB），已跳过", rejected));
     if (storable.length === 0) return;
     const requestId = ++stageSeq.current;
+    // Instant feedback: the bytes still have to be read + round-tripped through
+    // the host, so show placeholder chips now instead of leaving the composer
+    // unchanged for the whole round trip.
+    trackStaging(requestId, storable.map((f) => f.name));
     let pending = storable.length;
     const payloads: { name: string; data: string }[] = [];
     for (const file of storable) {
@@ -1004,9 +1138,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
   /** Attach a folder hit as a context card (M2 P0-4: folders are cards, not
    * inline @paths — the host builds the listing). */
   function resolveFolderContext(relPath: string): void {
+    const requestId = nextContextRequestId();
+    trackContextResolve(requestId, relPath);
     useChat.getState().send({
       type: "resolveContext",
-      requestId: nextContextRequestId(),
+      requestId,
       kind: "folder",
       query: relPath,
     });
@@ -1022,9 +1158,18 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
 
   /** Attach @problems / @git / @terminal as a context card (token consumed). */
   function resolveKeywordContext(kind: "problems" | "git" | "terminal"): void {
+    const requestId = nextContextRequestId();
+    trackContextResolve(
+      requestId,
+      kind === "problems"
+        ? t("工作区诊断（Problems）")
+        : kind === "git"
+          ? t("Git 状态与变更")
+          : t("终端最近输出"),
+    );
     useChat.getState().send({
       type: "resolveContext",
-      requestId: nextContextRequestId(),
+      requestId,
       kind,
       query: "",
     });
@@ -1059,9 +1204,11 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       });
       return;
     }
+    const requestId = nextContextRequestId();
+    trackContextResolve(requestId, target);
     useChat.getState().send({
       type: "resolveContext",
-      requestId: nextContextRequestId(),
+      requestId,
       kind: "url",
       query: target,
     });
@@ -1292,8 +1439,20 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
         </div>
       )}
       {/* non-image attachment chips + rejected-file note */}
-      {attachments.length > 0 && (
+      {(attachments.length > 0 || staging.length > 0) && (
         <div className="mb-2 flex flex-wrap gap-1.5">
+          {staging.map((f) => (
+            <span
+              key={`stage-${f.id}`}
+              className="card-lift inline-flex max-w-[min(260px,100%)] items-center gap-1 rounded-lg border border-dashed border-border bg-surface/80 px-1.5 py-1 text-ui-caption text-muted-foreground shadow-card"
+              title={f.name}
+              aria-label={t("暂存中…")}
+            >
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+              <span className="truncate">{f.name}</span>
+              <span className="shrink-0 text-ui-micro">{t("暂存中…")}</span>
+            </span>
+          ))}
           {attachments.map((f) => (
             <span
               key={f.id}
@@ -1320,9 +1479,21 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           — the raw <pre> used to dominate the composer once a few sources were
           attached. Click a chip for the preview; at most CONTEXT_CHIP_MAX chips
           show, the rest fold into "+N". */}
-      {contexts.length > 0 && (
+      {(contexts.length > 0 || resolvingContexts.length > 0) && (
         <div className="mb-2 flex flex-col gap-1.5">
           <div className="flex flex-wrap items-center gap-1.5">
+            {resolvingContexts.map((r) => (
+              <span
+                key={`resolve-${r.id}`}
+                className="inline-flex max-w-full items-center gap-1 rounded-lg border border-dashed border-border bg-surface/80 px-1.5 py-0.5 text-ui-caption text-muted-foreground shadow-card"
+                title={r.label}
+                aria-label={t("解析中…")}
+              >
+                <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+                <span className="shrink-0">{t("解析中…")}</span>
+                <span className="max-w-[150px] truncate font-mono text-ui-micro">{r.label}</span>
+              </span>
+            ))}
             {(showAllContexts ? contexts : contexts.slice(0, CONTEXT_CHIP_MAX)).map((c) => {
               const Icon = contextIcon(c.kind);
               const open = expandedContextId === c.id;
@@ -1499,8 +1670,17 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             );
           })}
           {mentionKind !== "url" && mentionHits.length === 0 && sourceActions.length === 0 && (
-            <div className="px-3 py-1.5 text-ui-label text-muted-foreground">
-              {mentionKind === "folder" ? t("无匹配文件夹") : t("无匹配文件")}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 text-ui-label text-muted-foreground" aria-live="polite">
+              {mentionSearching ? (
+                <>
+                  <Loader2 className="size-3 shrink-0 animate-spin" />
+                  {t("搜索中…")}
+                </>
+              ) : mentionKind === "folder" ? (
+                t("无匹配文件夹")
+              ) : (
+                t("无匹配文件")
+              )}
             </div>
           )}
           {mentionKind !== "url" &&
@@ -1700,15 +1880,24 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
               trigger={(open) => (
                 <Button
                   variant="canvas"
-                  icon={<Zap className={`${ICON_INLINE} shrink-0 text-primary`} />}
+                  icon={
+                    modeSwitching ? (
+                      <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
+                    ) : (
+                      <Zap className={`${ICON_INLINE} shrink-0 text-primary`} />
+                    )
+                  }
                   className={`${open ? "bg-surface-2" : ""}`}
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  title={t("权限模式")}
+                  aria-busy={modeSwitching || undefined}
+                  title={modeSwitching ? t("切换中…") : t("权限模式")}
                   disabled={modeLocked}
                 >
                   <span className="@max-[340px]:hidden">{currentMode ? modeDisplay(currentMode).label : ""}</span>
-                  <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60 @max-[340px]:hidden`} />
+                  {!modeSwitching && (
+                    <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60 @max-[340px]:hidden`} />
+                  )}
                 </Button>
               )}
             >
@@ -1771,14 +1960,19 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
                   className={`min-w-0${open ? " bg-surface-2" : ""}`}
                   aria-haspopup="menu"
                   aria-expanded={open}
-                  title={t("模型")}
+                  aria-busy={modelSwitching || undefined}
+                  title={modelSwitching ? t("切换中…") : t("模型")}
                   disabled={modelLocked}
                 >
                   <span className="max-w-[130px] truncate @max-[520px]:max-w-[84px] @max-[340px]:max-w-[60px]">
                     {currentModelName}
                   </span>
                   <SessionUsageChip />
-                  <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60`} />
+                  {modelSwitching ? (
+                    <Loader2 className={`${ICON_INLINE} shrink-0 animate-spin text-primary`} />
+                  ) : (
+                    <ChevronDown className={`${ICON_INLINE} shrink-0 opacity-60`} />
+                  )}
                 </Button>
               )}
             >
@@ -1972,11 +2166,14 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             {canStop ? (
               <Button
                 variant="emphasis"
-                icon={<Square className={ICON_INLINE} />}
-                title={t("停止生成")}
-                onClick={() => send({ type: "cancel" })}
+                icon={stopping ? <Loader2 className={`${ICON_INLINE} animate-spin`} /> : <Square className={ICON_INLINE} />}
+                title={stopping ? t("正在停止…") : t("停止生成")}
+                aria-label={stopping ? t("正在停止…") : t("停止生成")}
+                aria-busy={stopping || undefined}
+                disabled={stopping}
+                onClick={stopGeneration}
               >
-                <span className="@max-[340px]:hidden">{t("停止")}</span>
+                <span className="@max-[340px]:hidden">{stopping ? t("正在停止…") : t("停止")}</span>
               </Button>
             ) : (
               <Button
