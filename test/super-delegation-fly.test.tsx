@@ -242,4 +242,45 @@ describe("委派成功飞入看板", () => {
       /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[^}]*\.super-delegation-fly\s*\{\s*display:\s*none/s,
     );
   });
+
+  it("轨迹分三层：外层 X / 中层 Y / 内层缩放淡出，徽标仍在可见体里", () => {
+    render([]);
+    addOriginCard();
+    setStore([session("a")]);
+    act(() => root.render(<SuperAgentBoard />));
+
+    const el = fly();
+    expect(el).toBeTruthy();
+    // 三层嵌套：外层样式容器 → 抛体上升层 → 可见体。
+    const rise = el!.querySelector<HTMLElement>('[data-testid="super-delegation-fly-rise"]');
+    expect(rise).toBeTruthy();
+    expect(rise!.classList.contains("super-delegation-fly-rise")).toBe(true);
+    const body = rise!.querySelector<HTMLElement>(".super-delegation-fly-body");
+    expect(body).toBeTruthy();
+    expect(body!.querySelector('[data-testid="super-delegation-fly-count"]')?.textContent).toBe("1");
+    // 起点/终点坐标仍写在最外层，供两层 transform 各自读取（组件 API 不变）。
+    expect(el!.style.getPropertyValue("--fly-dx")).toBe("340px");
+    expect(el!.style.getPropertyValue("--fly-dy")).toBe("-186px");
+  });
+
+  it("轨迹契约：X/Y 分轴使用不同缓动合成抛物线（非直线），时长与 FLY_DURATION_MS 一致", () => {
+    const css = readFileSync(join(process.cwd(), "webview/src/styles.css"), "utf8");
+    // X 只位移 --fly-dx，且用 linear（匀速水平）。
+    expect(css).toMatch(
+      /@keyframes super-delegation-fly-x\s*\{[\s\S]*?transform:\s*translate3d\(var\(--fly-dx\),\s*0,\s*0\)/,
+    );
+    expect(css).toMatch(
+      /\.super-delegation-fly\s*\{[^}]*animation:\s*super-delegation-fly-x 0\.64s linear both/s,
+    );
+    // Y 只位移 --fly-dy，且用 ease-out-quad（抛体缓出），与 X 的 linear 不同。
+    expect(css).toMatch(
+      /@keyframes super-delegation-fly-rise\s*\{[\s\S]*?transform:\s*translate3d\(0,\s*var\(--fly-dy\),\s*0\)/,
+    );
+    expect(css).toMatch(
+      /animation:\s*super-delegation-fly-rise 0\.64s cubic-bezier\(0\.25,\s*0\.46,\s*0\.45,\s*0\.94\) both/,
+    );
+    // 三层动画都必须是 0.64s，和组件常量同步；旧的直线关键帧已移除。
+    expect(css).toMatch(/animation:\s*super-delegation-fly-body 0\.64s/);
+    expect(css).not.toMatch(/@keyframes super-delegation-fly\s*\{/);
+  });
 });
