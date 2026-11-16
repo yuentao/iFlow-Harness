@@ -114,6 +114,20 @@ describe("normalizeQqConfig", () => {
     expect(warnings).toHaveLength(3);
   });
 
+  it("adapter=qqbot 归一化后保留", () => {
+    const { config, warnings } = normalizeQqConfig({ adapter: "qqbot" });
+    expect(config.adapter).toBe("qqbot");
+    expect(warnings).toEqual([]);
+  });
+
+  it("adapter=official（废弃枚举值）回退 onebot 并告警", () => {
+    const { config, warnings } = normalizeQqConfig({ adapter: "official" });
+    expect(config.adapter).toBe("onebot");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("iflow.qq.adapter");
+    expect(warnings[0]).toContain("onebot / qqbot");
+  });
+
   it("非法枚举值回退默认值并告警，合法值允许首尾空白", () => {
     const invalid = normalizeQqConfig({
       adapter: "napcat",
@@ -289,7 +303,7 @@ describe("buildBridgeEnv", () => {
 
   it("不把配置里的其他字段（含策略 / 白名单）塞进环境变量", () => {
     const env = buildBridgeEnv(
-      makeEnabled({ adapter: "official", autoMerge: true, resultDetail: "detailed" }),
+      makeEnabled({ adapter: "qqbot", autoMerge: true, resultDetail: "detailed" }),
       {
         hostPort: 1,
         bridgeToken: "b",
