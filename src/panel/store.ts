@@ -9,6 +9,7 @@ import type {
   Block,
   HostToWebview,
   InjectedContextItem,
+  InitializingReason,
   SessionState,
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
@@ -523,9 +524,12 @@ export class SessionStore {
     return true;
   }
 
-  /** True while `session/new` is in flight; the webview locks switches. */
-  setInitializing(initializing: boolean): void {
+  /** Hold/release the host busy lock. `reason` tells the webview chip which
+   * operation is in flight (new session / delete / rollback / restore) — it
+   * used to be hardcoded to 「正在创建新会话…」 for all of them. */
+  setInitializing(initializing: boolean, reason: InitializingReason = "newSession"): void {
     this.state.initializing = initializing;
+    this.state.initializingReason = initializing ? reason : null;
     this.flush();
   }
 

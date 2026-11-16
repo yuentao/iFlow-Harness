@@ -748,6 +748,19 @@ export interface TurnUsageState {
   completionTokens?: number;
 }
 
+/**
+ * Why the host holds the `initializing` busy lock. The header chip used to
+ * claim 「正在创建新会话…」 for every one of these flows (delete session,
+ * delete message, rollback) — the label must name the operation that is
+ * actually in flight.
+ */
+export type InitializingReason =
+  | "newSession"
+  | "deleteSession"
+  | "deleteMessage"
+  | "rollback"
+  | "restore";
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -781,8 +794,15 @@ export interface SessionState {
   activeSessionId: string | null;
   /** True while history is being replayed after `session/load` (M4). */
   replaying: boolean;
-  /** True while a new session is being created (host busy; UI locks switches). */
+  /** True while a host-driven busy flow holds the UI (host busy; UI locks switches). */
   initializing: boolean;
+  /**
+   * Which flow owns the `initializing` lock — drives the busy chip's label
+   * (创建会话 / 删除会话 / 删除消息 / 回滚对话 / 恢复会话). Null whenever
+   * `initializing` is false; absent in older hosts/mock snapshots (the chip
+   * falls back to the new-session wording).
+   */
+  initializingReason?: InitializingReason | null;
   /**
    * Monotonic count of Core boot attempts that re-entered `connecting` (hot
    * restart / profile-switch reconnect). A restart keeps the splash on
@@ -983,6 +1003,7 @@ export function initialSessionState(): SessionState {
     activeSessionId: null,
     replaying: false,
     initializing: false,
+    initializingReason: null,
     compressing: false,
     usage: emptySessionUsage(),
     queue: [],
@@ -1633,7 +1654,19 @@ export type HostToWebview =
    * `draft` non-null means a 「始终允许」 click derived a rule that is now
    * waiting to be named: the webview opens the policy card in naming mode and
    * either saves it into `rules` or dismisses it. */
-  | { type: "approvalPolicy"; rules: ApprovalRule[]; projectRules: ApprovalRule[]; draft?: ApprovalRule | null }
+  | {
+      type: "approvalPolicy";
+      rules: ApprovalRule[];
+      projectRules: ApprovalRule[];
+      draft?: ApprovalRule | null;
+      /** Present only when this push answers a save request: "ok" = persisted,
+       * "failed" = the write was rolled back (the rules here are the ones still
+       * on disk). The card waits for this before flashing 已保存. */
+      saveResult?: "ok" | "failed";
+    }
+  /** Reply to `deleteProfile`: the row clears its pending chip on receipt.
+   * `ok:false` means the profile is still present (the host also toasts). */
+  | { type: "profileDeleteResult"; name: string; ok: boolean }
   /** Editor color theme changed ("dark" | "light"); the webview follows it
    * unless the user picked a theme manually in the panel. `auroraIntensity`
    * (0–100) mirrors the `iflow.auroraIntensity` setting — the webview scales

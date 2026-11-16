@@ -72,6 +72,11 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
   const [editError, setEditError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  // Save receipt: the host answers with approvalPolicy.saveResult once the
+  // rules are actually written. Flashing 已保存 on `send()` (the old
+  // behaviour) claimed success before the host had persisted anything.
+  const [saving, setSaving] = useState(false);
+  const saveSeq = useRef(0);
   // A host-derived draft opens the editor exactly once per draft id —
   // later `approvalPolicy` pushes (e.g. after saving) must not reopen it.
   const draftSeen = useRef<string | null>(null);
@@ -84,10 +89,18 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
         rules?: ApprovalRule[];
         projectRules?: ApprovalRule[];
         draft?: ApprovalRule | null;
+        saveResult?: "ok" | "failed";
       };
       if (msg?.type !== "approvalPolicy") return;
       setRules(msg.rules ?? []);
       setProjectRules(msg.projectRules ?? []);
+      if (msg.saveResult) {
+        // Failure keeps the pushed (rolled-back) rules and leaves the flash
+        // off — the host already toasted why.
+        setSaving(false);
+        setSavedFlash(msg.saveResult === "ok");
+        if (msg.saveResult === "ok") setTimeout(() => setSavedFlash(false), 2500);
+      }
       const draft = msg.draft;
       if (draft && draftSeen.current !== draft.id) {
         draftSeen.current = draft.id;
@@ -112,10 +125,16 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
   }, [editing, onHeader]);
 
   function save() {
-    if (!rules) return;
+    if (!rules || saving) return;
     send({ type: "saveApprovalPolicy", rules });
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 2500);
+    setSaving(true);
+    setSavedFlash(false);
+    // Failsafe: the host always answers (saveApprovalPolicy pushes the table
+    // back either way) — this only unlocks the button if that reply is lost.
+    const seq = ++saveSeq.current;
+    setTimeout(() => {
+      if (saveSeq.current === seq) setSaving(false);
+    }, 10_000);
   }
 
   function closeEditor(commit: boolean) {
@@ -243,8 +262,8 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             >
               {t("添加")}
             </Button>
-            <Button variant="primary" disabled={busy || rules === null || savedFlash} onClick={save}>
-              {savedFlash ? t("已保存") : t("保存")}
+            <Button variant="primary" disabled={busy || rules === null || savedFlash || saving} onClick={save}>
+              {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
             </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </ActionRow>

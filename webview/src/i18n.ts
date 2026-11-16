@@ -284,6 +284,11 @@ const en: Record<string, string> = {
   "更新任务清单": "Updating todos",
   "正在恢复历史会话…": "Restoring session…",
   "正在创建新会话…": "Creating new session…",
+  "正在删除会话…": "Deleting session…",
+  "正在删除消息…": "Deleting message…",
+  "正在回滚对话…": "Rolling back the conversation…",
+  "正在恢复会话…": "Restoring session…",
+  "删除中…": "Deleting…",
   // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
   "子会话还在运行并等待汇报，暂时不能新建会话":
     "Child sessions are still running and waiting to report — new session is unavailable for now",
