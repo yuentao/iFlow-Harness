@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { ChatPanel } from "../src/panel/panel.js";
@@ -87,7 +89,7 @@ function queueCompletion(result: CompletionResult | (() => Promise<CompletionRes
 
 const TEST_CREDS = { baseUrl: "https://gateway.test/v1", apiKey: "sk-test-1234", modelName: "test-model" };
 
-function makeContext(): vscode.ExtensionContext {
+function makeContext(storageDir: string): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? store.get(key) : defaultValue) as T,
@@ -118,10 +120,10 @@ function makeContext(): vscode.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscode.ExtensionContext;
 }
@@ -147,8 +149,8 @@ type PanelInternals = {
 
 const internals = (panel: ChatPanel) => panel as unknown as PanelInternals;
 
-function makePanel() {
-  const panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+function makePanel(storageDir: string) {
+  const panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
   const posted: Array<{ type?: string; error?: string; text?: string }> = [];
   internals(panel).postToWebview = (message) => {
     posted.push(message as { type?: string; error?: string; text?: string });
@@ -180,11 +182,13 @@ describe("stripFileMentions (internal-prompt @-reference neutraliser)", () => {
 describe("ChatPanel internal prompt via direct gateway (enhance regression)", () => {
   let panel: ChatPanel;
   let posted: Array<{ type?: string; error?: string; text?: string }>;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     completionMock.state.calls = [];
     queueCompletion({ text: "", reason: "failed" });
-    panel = makePanel().panel;
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-internal-prompt-storage-"));
+    panel = makePanel(storageDir).panel;
     posted = [];
     internals(panel).postToWebview = (message) => {
       posted.push(message as { type?: string; error?: string; text?: string });
@@ -193,6 +197,7 @@ describe("ChatPanel internal prompt via direct gateway (enhance regression)", ()
 
   afterEach(async () => {
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true });
   });
 
   it("returns the completion text on a clean stop", async () => {
@@ -293,11 +298,13 @@ describe("ChatPanel enhance cancellation & session isolation", () => {
   let panel: ChatPanel;
   let posted: Array<{ type?: string; error?: string; text?: string; requestId?: number }>;
   let internalsPanel: PanelInternals;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     completionMock.state.calls = [];
     queueCompletion({ text: "", reason: "failed" });
-    const made = makePanel();
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-enhance-storage-"));
+    const made = makePanel(storageDir);
     panel = made.panel;
     internalsPanel = internals(panel);
     posted = [];
@@ -308,6 +315,7 @@ describe("ChatPanel enhance cancellation & session isolation", () => {
 
   afterEach(async () => {
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true });
   });
 
   /** Start an enhance whose completion hangs until `release` resolves. */
@@ -454,8 +462,9 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
 
   let panel: ChatPanel;
   let p: FollowupInternals;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     completionMock.state.calls = [];
     queueCompletion({ text: "", reason: "failed" });
     setConfigOverrides({
@@ -464,7 +473,8 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
       nextStepSuggestions: true,
       autoMemoryCapture: true,
     });
-    panel = makePanel().panel;
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-followup-storage-"));
+    panel = makePanel(storageDir).panel;
     p = panel as unknown as FollowupInternals;
     // Persistence is fs-bound in production; these tests assert the store only.
     p.persistSessions = async () => {};
@@ -496,6 +506,7 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     vi.restoreAllMocks();
     setConfigOverrides({});
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true });
   });
 
   it("fires ONE call carrying every enabled task and dispatches all three parts", async () => {

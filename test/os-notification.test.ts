@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as vscode from "vscode";
 import { setConfigOverrides } from "./vscode-stub.js";
@@ -10,7 +12,7 @@ import type * as vscodeTypes from "vscode";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function makeContext(): vscodeTypes.ExtensionContext {
+function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? (store.get(key) as T) : defaultValue),
@@ -37,10 +39,10 @@ function makeContext(): vscodeTypes.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscodeTypes.ExtensionContext;
 }
@@ -136,14 +138,16 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let infoMessage: ReturnType<typeof vi.spyOn>;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers();
     nativeFired = false;
     (vscode.window as unknown as { state: { focused: boolean } }).state.focused = false;
     infoMessage = vi.spyOn(vscode.window, "showInformationMessage").mockResolvedValue(undefined as never);
     setConfigOverrides({ osNotifications: "all" });
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers(), osNotify: async () => nativeFired });
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-os-notify-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers(), osNotify: async () => nativeFired });
     p = panel as unknown as PanelInternals;
     p.store.sessionStarted({ sessionId: "notify-session" });
     p.panelVisible = false;
@@ -158,6 +162,7 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true });
   });
 
   it("notifies when an approval card arrives while the panel is hidden; the button opens the panel", async () => {

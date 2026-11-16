@@ -20,7 +20,7 @@ const mockAgent = path.join(here, "mock-acp-agent.mjs");
  * handshake — the right order (kill first, then settle) makes that fast.
  */
 
-function makeContext(): vscode.ExtensionContext {
+function makeContext(storageDir: string): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? store.get(key) : defaultValue) as T,
@@ -47,10 +47,10 @@ function makeContext(): vscode.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscode.ExtensionContext;
 }
@@ -76,19 +76,21 @@ const panelOf = (panel: ChatPanel) =>
 describe("ChatPanel delete-user-message transaction", () => {
   let panel: ChatPanel;
   let iflowHome: string;
+  let storageDir: string;
 
   beforeEach(async () => {
     iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-delete-test-"));
     process.env.IFLOW_HOME = iflowHome;
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+    // Per-test storage dir: transcript writes must never land in the shared
+    // test/transcripts dir (parallel workers race there).
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-delete-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
   });
 
   afterEach(async () => {
     await panel.dispose();
     await rm(iflowHome, { recursive: true, force: true });
-    // The panel's storageUri is this test dir — the successful-delete case
-    // writes an empty-transcript tombstone under test/transcripts/.
-    await rm(path.join(here, "transcripts"), { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true });
     delete process.env.IFLOW_HOME;
   });
 
@@ -176,17 +178,19 @@ describe("ChatPanel delete-user-message transaction", () => {
 
 describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
   let panel: ChatPanel;
+  let storageDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // hang_initialize: the child never answers initialize, so the handshake
     // can only end via the panel's teardown.
     process.env.ACP_MOCK_MODE = "hang_initialize";
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-dispose-storage-"));
     const services: PanelServices = {
       entryOverride: mockAgent,
       workspaceRoot: here,
       watchers: makeWatchers(),
     };
-    panel = new ChatPanel(makeContext(), services);
+    panel = new ChatPanel(makeContext(storageDir), services);
   });
 
   afterEach(async () => {
@@ -196,6 +200,7 @@ describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
     } catch {
       // already disposed
     }
+    await rm(storageDir, { recursive: true, force: true });
     delete process.env.ACP_MOCK_MODE;
   });
 
@@ -246,6 +251,11 @@ describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
  */
 describe("ChatPanel restartCli vs wedged connect (P0-3)", () => {
   let panel: ChatPanel;
+  let storageDir: string;
+
+  beforeEach(async () => {
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-restart-storage-"));
+  });
 
   afterEach(async () => {
     try {
@@ -253,12 +263,13 @@ describe("ChatPanel restartCli vs wedged connect (P0-3)", () => {
     } catch {
       // already disposed
     }
+    await rm(storageDir, { recursive: true, force: true });
     delete process.env.ACP_MOCK_MODE;
   });
 
   it("supersedes a wedged initialize and boots a fresh CLI instead of hanging", async () => {
     process.env.ACP_MOCK_MODE = "hang_initialize";
-    panel = new ChatPanel(makeContext(), {
+    panel = new ChatPanel(makeContext(storageDir), {
       entryOverride: mockAgent,
       workspaceRoot: here,
       watchers: makeWatchers(),
