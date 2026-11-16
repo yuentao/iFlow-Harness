@@ -274,8 +274,8 @@ describe("AssistantText 协议块卡片", () => {
 
     const notice = container.querySelector('[data-testid="super-task-salvaged"]');
     expect(notice).toBeTruthy();
-    expect(notice!.textContent).toContain("载荷未能完整解析");
-    expect(notice!.textContent).toContain("可能尚未派发");
+    expect(notice!.textContent).toContain("这段内容没能完整读取");
+    expect(notice!.textContent).toContain("可能还没有真正派出去");
     // 提示之外，任务书照常展示（用户至少能读到模型想干什么）。
     expect(taskCards()).toHaveLength(1);
     expect(taskCards()[0]!.textContent).toContain("容错拆出的任务");
@@ -306,24 +306,24 @@ describe("AssistantText 协议块卡片", () => {
     const invalid = ["```super-agent", '{"tasks": [oops]}', "```"].join("\n");
     expect(() => render(invalid)).not.toThrow();
     const body = text();
-    expect(body).toContain("原始协议块");
-    expect(body).toContain("内容不是合法 JSON");
+    expect(body).toContain("原始指令内容");
+    expect(body).toContain("内容格式不对，读不出来");
     expect(body).not.toContain("委派子会话");
     expect(taskCards()).toHaveLength(0);
   });
 
   it("JSON 合法但形状不符同样退化", () => {
     render(["```super-agent-actions", '{"foo": 1}', "```"].join("\n"));
-    expect(text()).toContain("原始协议块");
-    expect(text()).toContain("缺少 actions 数组");
+    expect(text()).toContain("原始指令内容");
+    expect(text()).toContain("里面没有操作列表");
   });
 
   it("未知的 super-agent-* 语言退化为原始协议块卡，显示语言与长度", () => {
     const unknown = ["```super-agent-whatever", '{"x": 1}', "```"].join("\n");
     render(unknown);
     const body = text();
-    expect(body).toContain("原始协议块");
-    expect(body).toContain("未知的协议块语言");
+    expect(body).toContain("原始指令内容");
+    expect(body).toContain("认不出这是什么指令");
     expect(body).toContain("super-agent-whatever");
     expect(body).toMatch(/字符/);
   });
@@ -925,7 +925,7 @@ describe("委派卡独立表面（与工具操作卡区分）", () => {
     render(["```super-agent", '{"tasks": [oops]}', "```"].join("\n"));
     const rawCard = container.querySelector<HTMLElement>(".super-directive-card")!;
     expect(rawCard.className).toContain("bg-primary/10");
-    expect(rawCard.textContent).toContain("原始协议块");
+    expect(rawCard.textContent).toContain("原始指令内容");
   });
 });
 

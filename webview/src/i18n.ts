@@ -23,28 +23,29 @@ const en: Record<string, string> = {
   "委派指令": "Delegation directive",
   "子会话": "Child sessions",
   "准备中": "Preparing",
-  "等待你处理": "Needs you",
+  "等你回答": "Waiting for you",
   "已中断": "Interrupted",
-  "子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批":
-    "Child sessions always run without confirmation — tool calls, shell included, execute directly and are never prompted for approval",
-  // 看板头帮助按钮（HelpTip）里的统一说明：免确认 / 合并规则 / 清理规则。
+  "不弹审批": "No approval prompts",
+  "子会话里的工具调用（包括运行命令）会直接执行，不会先征求你的同意":
+    "Tool calls in a child session — shell commands included — run directly, without asking you first",
+  // 看板头帮助按钮（HelpTip）里的统一说明：不弹审批 / 合并规则 / 清理规则。
   "看板说明": "Board help",
-  "子会话还在运行时不能合并，结束后才能合并；已合并的子会话、或没有可合并分支的子会话，同样不能合并":
-    "A running child session cannot be merged; merge it after it finishes. A child session whose changes are already merged, or that has no branch to merge, cannot be merged either",
-  "子会话还在运行时不能清理，需要先中断它":
-    "A running child session cannot be cleaned up; interrupt it first",
-  "子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。":
-    "The child session is waiting for your answer; if you do not answer, it continues with “no answer” when the countdown ends.",
+  "子会话结束之后才能合并；已经合并过、或者没有改动可合并的子会话，不需要再合并":
+    "A child session can be merged only after it finishes; one whose changes are already merged, or that has nothing to merge, does not need merging",
+  "子会话还在运行时不能清理，请先中断它":
+    "A running child session cannot be cleaned up — interrupt it first",
+  "子会话正在等你的回答；不回答的话，倒计时结束后它会按「没有回答」继续。":
+    "The child session is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
   "按未回答继续": "it continues with “no answer”",
   "子会话 {0}：{1}": "Child session {0}: {1}",
   "让智能体合并分支": "Let the agent merge the branch",
   "已自动合并": "Auto-merged",
   "合并冲突": "Merge conflict",
   "PR 已创建": "PR opened",
-  "集成失败": "Integration failed",
+  "自动处理失败": "Could not merge or open a PR",
   "未自动合并": "Not auto-merged",
   "无需合并": "No merge needed",
-  "该子会话的改动已经合并": "This child's changes are already merged",
+  "这个子会话的改动已经合并": "This child session's changes are already merged",
   "{0} 个进行中": "{0} running",
   "{0} 个待处理": "{0} need you",
   "{0} 个已完成": "{0} done",
@@ -57,10 +58,11 @@ const en: Record<string, string> = {
   "子会话待答问题": "Child session waiting for your answer",
   "展开已完成的子会话": "Expand the finished child sessions",
   "收起已完成的子会话": "Collapse the finished child sessions",
-  "已完成的 {0} 个子会话": "Finished child sessions ({0})",
+  "已完成并合并的 {0} 个子会话": "Finished and merged child sessions ({0})",
   "派发": "Dispatch",
-  "启动": "Started",
-  "等待应答": "Waiting for you",
+  "已派出": "Dispatched",
+  "已启动": "Started",
+  "在等你回答": "Waiting for you",
   "第 {0} 次": "Attempt {0}",
   "阶段轨：{0}": "Timeline: {0}",
   // 子会话 todolist 时间轴：状态 / 优先级是静态词（todo 原文是动态文本，不进字典）
@@ -70,49 +72,50 @@ const en: Record<string, string> = {
   "中优先级": "Medium priority",
   "低优先级": "Low priority",
   "合并子会话分支": "Merge the child session's branch",
-  "让智能体把分支 {0} 合并到当前分支？它会自己执行合并并解决冲突，这会改动你当前的工作分支。":
-    "Let the agent merge branch {0} into the current branch? It performs the merge itself and resolves conflicts; this changes your working branch.",
+  "让智能体把分支 {0} 合并到当前分支？它会自己完成合并并处理冲突，你当前的工作分支会被改动。":
+    "Let the agent merge branch {0} into the current branch? It performs the merge itself and handles conflicts; your working branch will change.",
   "让智能体合并": "Let the agent merge",
-  "子会话还没结束，完成后再让智能体合并":
-    "The child session has not finished; merge it after it completes",
-  "派出合并子会话，把该子会话的分支合并到当前分支（冲突由它自行解决）":
-    "Dispatch a merge child session to merge this child's branch into the current branch (it resolves conflicts itself)",
-  "该子会话没有可合并的分支": "This child session has no branch to merge",
+  "子会话还没结束，等它完成再合并":
+    "The child session has not finished — merge it after it completes",
+  "让一个子会话把这条分支合并到当前分支，冲突由它自己解决":
+    "Let a child session merge this branch into the current branch and resolve conflicts itself",
+  "这个子会话没有可合并的分支": "This child session has no branch to merge",
   "清理子会话": "Clean up the child session",
-  "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。":
-    "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",
+  "删除子会话「{0}」的工作目录？分支上未合并的提交会保留；工作目录里尚未提交的改动会被一起删掉，无法恢复。":
+    "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in that directory are deleted for good.",
   "清理": "Clean up",
   "清理中": "Cleaning up",
   "合并中": "Merging",
   "重试中": "Retrying",
-  "子会话还在运行，先中断再清理": "Stop the child session before cleaning it up",
-  "中断该子会话": "Interrupt this child session",
+  "子会话还在运行，请先中断再清理": "The child session is still running — interrupt it before cleaning up",
+  "中断这个子会话": "Interrupt this child session",
   "中断子会话": "Interrupt the child session",
   "中断": "Interrupt",
-  "中断子会话「{0}」？子会话进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。":
-    "Interrupt child session “{0}”? Its process stops immediately and this task is neither committed nor merged automatically; changes already written to its working directory are kept, and you can retry later.",
-  "中断全部 {0} 个进行中的子会话？它们各自的进程会立即终止，本次任务不会自动提交或合并；工作目录里已有的改动会保留，之后可以重试。":
-    "Interrupt all {0} running child sessions? Each process stops immediately and their tasks are neither committed nor merged automatically; changes already written to their working directories are kept, and you can retry later.",
-  "重试该子会话（沿用原工作目录，保留已有改动）":
-    "Retry this child session (reuses its working directory and keeps existing changes)",
+  "中断子会话「{0}」？它会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
+    "Interrupt child session “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
+  "中断全部 {0} 个进行中的子会话？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
+    "Interrupt all {0} running child sessions? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
+  "重试这个子会话：沿用原来的工作目录，已有的改动会保留":
+    "Retry this child session: reuses its working directory and keeps existing changes",
   "第 {0} 次尝试": "Attempt {0}",
-  "仅目录隔离": "Directory isolation only",
-  "主仓工作区（无隔离）": "Main workspace (no isolation)",
+  "独立工作目录": "Its own working directory",
+  "只隔离了目录": "Directory only — no branch isolation",
+  "直接在主工作区（无隔离）": "Runs directly in the main workspace (no isolation)",
   "待回答": "Needs answer",
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
-  "工作目录与分支已清理": "Working directory and branch cleaned up",
-  "工作目录已回收，分支保留": "Working directory reclaimed; branch kept",
+  "工作目录和分支都已删除": "Working directory and branch deleted",
+  "工作目录已删除，分支保留": "Working directory deleted; branch kept",
   "工作目录 {0} 个": "{0} working directories",
-  "已结束 {0} 个可回收": "{0} finished and reclaimable",
+  "已结束 {0} 个可清理": "{0} finished and ready to clean up",
   "清理已结束": "Clean up finished",
   "清理已结束的子会话": "Clean up finished child sessions",
-  "将删除 {0} 个子会话的工作目录；分支上一律保留（未合并的提交不会丢），工作目录里未提交的改动会被一并删除，无法恢复。":
-    "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in the working directories are deleted permanently.",
+  "将删除 {0} 个子会话的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。":
+    "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in those directories are deleted for good.",
   "收起摘要": "Hide summary",
   "查看摘要": "Show summary",
-  "查看实时操作": "Show live activity",
-  "子会话实时操作": "Child session live activity",
+  "查看实时进度": "Show live progress",
+  "子会话实时进度": "Child session live progress",
   "上次运行": "From a previous run",
   "这次子会话在上一次运行里就已经结束（扩展重启后恢复的历史记录）":
     "This child session had already finished in a previous run (a historical record restored after the extension restarted)",
@@ -126,8 +129,8 @@ const en: Record<string, string> = {
   "子会话合计开销": "Total child-session usage",
   "输入 {0} · 输出 {1}": "Input {0} · Output {1}",
   "按公开单价估算，仅供参考": "Estimated at published prices; indicative only",
-  "输入为内核上报的末次请求上下文；输出按子会话文本估算":
-    "Input is the core-reported context of the final request; output is estimated from the child's text",
+  "输入是上一次请求实际携带的上下文；输出按子会话的文字估算":
+    "Input is the context the last request actually carried; output is estimated from the child's text",
   "本轮变更": "Changes this turn",
   "变更说明": "Changes-this-turn help",
   "1 个文件已更改": "1 file changed",
@@ -525,30 +528,30 @@ const en: Record<string, string> = {
   "请求头": "Request headers",
   "添加 header": "Add header",
   "删除 header": "Delete header",
-  "stdio 配置需 command field": "stdio config needs a command field",
-  "sse/streamable-http 配置需 url field": "sse/streamable-http config needs a url field",
-  "额外字段保留：{0}": "Extra fields preserved: {0}",
+  "stdio 方式需要填写「命令」": "The stdio transport needs a command",
+  "sse / streamable-http 方式需要填写「服务 URL」": "The sse / streamable-http transport needs a service URL",
+  "这些字段会原样保留：{0}": "These fields are kept as-is: {0}",
   "名称不能为空": "Name cannot be empty",
-  "JSON 格式不合法": "Invalid JSON",
-  "配置必须是 JSON 对象": "Config must be a JSON object",
+  "配置格式有误：不是合法的 JSON": "Invalid configuration: not valid JSON",
+  "配置需要是一个 JSON 对象（用一对大括号包起来）": "The configuration must be a JSON object (wrapped in a pair of braces)",
   "名称重复：{0}": "Duplicate name: {0}",
-  "编辑只改本地副本，点击「保存」才写入文件。":
-    "Editing only changes a local copy; click Save to write the file.",
-  "安装只把模板本地草稿，点击「保存」才写入文件。":
-    "Installing keeps a local draft only; click Save to write the file.",
+  "编辑只改本地草稿，点「保存」才会写入文件。":
+    "Editing only changes a local draft; click Save to write the file.",
+  "安装只会把模板填进草稿，点「保存」才会写入文件。":
+    "Installing only fills a local draft; click Save to write the file.",
   "配置作用域": "Config scope",
-  "无项目上下文（未打开工作区）": "No project context (no workspace open)",
+  "没有项目上下文（还没有打开工作区）": "No project context (no workspace open yet)",
   "写入 {0}": "Writes to {0}",
   "覆盖全局": "Overrides global",
   "被项目覆盖": "Overridden by project",
   "项目级": "Project scope",
   "项目级覆盖全局": "Project scope (overrides global)",
-  "两级同名时内核用项目级配置整体替换全局条目（不合并字段）":
-    "For a name present in both scopes the Core replaces the global entry with the project one wholesale (fields are not merged)",
-  "全局读写 ~/.iflow/settings.json 的 mcpServers 字段；保存后点击底部「重启内核」生效（当前会话自动恢复）。":
-    "The global scope reads/writes the mcpServers field in ~/.iflow/settings.json; after saving, click Restart Core in the footer to apply (the current session restores automatically).",
-  "项目级读写 <工作区>/.iflow/settings.json 的 mcpServers 字段；与全局同名时内核用项目条目整体替换全局条目（不合并字段）。保存后点击底部「重启内核」生效。":
-    "The project scope reads/writes the mcpServers field in <workspace>/.iflow/settings.json; for a name also present globally, the Core replaces the global entry with the project one wholesale (fields are not merged). After saving, click Restart Core in the footer to apply.",
+  "项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）":
+    "When a server name exists in both scopes, the Core replaces the global entry with the project one wholesale (fields are not merged)",
+  "这里改的是全局配置（~/.iflow/settings.json）。保存后要点底部的「重启内核」才会生效，当前会话会自动恢复。":
+    "This edits the global configuration (~/.iflow/settings.json). Click Restart Core in the footer to apply; the current session restores automatically.",
+  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后要点底部的「重启内核」才会生效。":
+    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Click Restart Core in the footer to apply.",
   "保存中…": "Saving…",
   // MCP status indicators + detail sub-page
   "状态未知": "Status unknown",
@@ -558,26 +561,26 @@ const en: Record<string, string> = {
   "连接中…": "Connecting…",
   "未连接": "Not connected",
   "状态不可获取": "Status unavailable",
-  "连接状态不可获取（内核未连接或状态上报未启用）":
-    "Connection status unavailable (Core not connected, or status reporting not enabled)",
+  "拿不到连接状态（内核未连接，或没有开启状态上报）":
+    "Cannot read the connection status (Core not connected, or status reporting not enabled)",
   "连接状态读取中…": "Reading connection status…",
   "详情": "Details",
   "MCP 服务器详情": "MCP server details",
   "刷新": "Refresh",
   "刷新中…": "Refreshing…",
   "返回": "Back",
-  "工具声明注入模型上下文约 {0} tokens（估算）":
-    "Tool declarations inject ≈{0} tokens into the model context (estimated)",
+  "这个服务器的工具说明会占用约 {0} tokens 上下文（估算）":
+    "This server's tool descriptions take about {0} tokens of context (estimated)",
   "≈{0} tokens": "≈{0} tokens",
   "连接失败：": "Connection failed:",
-  "该服务器当前暴露无工具与提示": "This server currently exposes no tools or prompts",
-  "工具声明读取中…": "Reading tool declarations…",
-  "工具声明不可获取（未连接或状态上报未启用）":
-    "Tool declarations unavailable (not connected, or status reporting not enabled)",
+  "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
+  "正在读取工具列表…": "Reading the tool list…",
+  "拿不到工具列表（未连接，或没有开启状态上报）":
+    "Cannot read the tool list (not connected, or status reporting not enabled)",
   "工具 ({0})": "Tools ({0})",
-  "提示 ({0})": "Prompts ({0})",
-  "参数 schema": "Parameter schema",
-  "参数 schema 已省略（上报预算超限）": "Parameter schema omitted (report budget exceeded)",
+  "提示词 ({0})": "Prompts ({0})",
+  "参数结构": "Parameter structure",
+  "参数结构太大，已省略": "The parameter structure is too large and was omitted",
   // profile-switch choice dialog
   "切换 API 配置": "Switch API profile",
   "取消切换": "Cancel the switch",
@@ -775,7 +778,7 @@ const en: Record<string, string> = {
   "上下文窗口占用": "Context window occupancy",
   "展开全部 {0} 张上下文卡": "Show all {0} context cards",
   "建议": "Suggested",
-  "预估成本（token 估算 × 公开单价，仅供参考）": "Estimated cost (token estimate × published prices, indicative only)",
+  "预估费用：token 估算 × 公开单价，仅供参考": "Estimated cost: token estimate × published prices, indicative only",
   "增强提示词（AI 改写为更清晰的请求）": "Enhance prompt (AI rewrites it into a clearer request)",
   "正在增强，点击取消": "Enhancing… click to cancel",
   "已取消增强": "Enhancement cancelled",
@@ -999,32 +1002,32 @@ const en: Record<string, string> = {
   "项目记忆": "Project memory",
   "主文件": "Primary",
   "自动发现": "Auto-discovered",
-  "遗留文件": "Legacy",
-  "已注入": "Injected",
-  "未注入": "Not injected",
+  "旧版本文件": "Legacy file",
+  "已加载": "Loaded",
+  "未加载": "Not loaded",
   "约 {0} tokens（BPE 估算）": "About {0} tokens (BPE estimate)",
   "打开文件": "Open file",
   "编辑记忆": "Edit memory",
-  "尚未创建": "Not created yet",
+  "还没有创建": "Not created yet",
   "更新于 {0}": "Updated {0}",
-  "当前内核不会加载此文件": "The current Core does not load this file",
+  "内核目前不会读取这个文件": "The Core does not read this file right now",
   "删除这条记忆": "Delete this memory",
   "还有 {0} 条…": "{0} more…",
   "{0} 条记忆": "{0} memories",
   "收起记忆列表": "Collapse memory list",
   "展开全文": "Expand full text",
   "收起全文": "Collapse full text",
-  "记忆在新建会话或恢复会话时加载。当前会话需要重启内核才会读取新内容。":
-    "Memory is loaded when a new session is created or a session is restored. The current session only sees new content after the Core restarts.",
+  "记忆只在新会话或恢复会话时读取。当前会话要重启内核才会用上新内容。":
+    "Memory is read only when a session is created or restored. The current session sees new content after the Core restarts.",
   "重新加载": "Reload",
   "{0} 字符 · ≈{1} tokens": "{0} chars · ≈{1} tokens",
   "已保存 {0}": "Saved {0}",
   "新建会话或重启内核后生效": "Takes effect after a new session or Core restart",
-  "以下是内核每次请求都会自动注入的记忆文件。内容会随请求发送给模型，请勿写入密钥。":
-    "These are the memory files the Core injects into every request. Their content is sent to the model — do not store secrets here.",
+  "这些记忆文件会在每次请求时自动带给模型。它们会随请求一起发送，请不要写入密钥。":
+    "These memory files are carried with every request. Their content is sent to the model — do not store secrets here.",
   "重新扫描": "Rescan",
   "未打开工作区": "No workspace open",
-  "当前工作区没有可用的项目记忆文件": "No project memory files are available in this workspace",
+  "当前工作区还没有项目记忆文件": "This workspace has no project memory file yet",
   "新建项目记忆": "New project memory",
   "添加一条记忆": "Add a memory",
   "全局": "Global",
@@ -1033,13 +1036,13 @@ const en: Record<string, string> = {
     "e.g. This project's test command is npm test; do not modify files under vendor/.",
   "写入中…": "Writing…",
   "保存到{0}": "Save to {0}",
-  "保存后新建会话或重启内核生效": "Takes effect after a new session or Core restart",
+  "保存后要新建会话或重启内核才生效": "Takes effect after a new session or a Core restart",
   "请先创建项目记忆文件": "Create a project memory file first",
   "新建会话": "New session",
   "重启内核使记忆生效": "Restart Core to apply memory",
   "重启内核并恢复当前会话，使记忆立即生效":
     "Restart the Core and restore the current session so memory applies immediately",
-  "记忆不会热更新到正在进行的会话。": "Memory is not hot-reloaded into an ongoing session.",
+  "改动不会影响正在进行的会话。": "Changes do not affect an ongoing session.",
   "文件已在磁盘上发生变化，请重新加载后再保存":
     "The file changed on disk — reload before saving",
   "保存失败": "Save failed",
@@ -1070,8 +1073,8 @@ const en: Record<string, string> = {
   "全部忽略": "Ignore all",
   "自动提取只生成候选，确认后才会写入记忆":
     "Auto-extraction only produces candidates; nothing is written until you confirm",
-  "以下是模型从最近对话中提取的长期记忆候选。请勾选要保留的内容，并确认作用域。":
-    "These long-term memory candidates were extracted from the recent conversation. Check what to keep and confirm the scope.",
+  "这些是模型从最近对话里挑出来的长期记忆候选。勾选你想保留的内容，并确认存到哪一侧。":
+    "These long-term memory candidates were picked out of the recent conversation. Check what to keep and confirm which side it is stored on.",
   "自动提取记忆": "Auto-extract memories",
   "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入。":
     "After each turn, ask the current model for durable preference/convention candidates; nothing is written until you confirm.",
@@ -1081,15 +1084,15 @@ const en: Record<string, string> = {
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",
   "生成项目知识": "Generate project knowledge",
-  "尚未生成项目知识。点击「生成项目知识」分析当前工作区。":
+  "还没有项目知识。点「生成项目知识」分析当前工作区。":
     "No project knowledge yet. Click “Generate project knowledge” to analyze this workspace.",
-  "取消注入": "Stop injecting",
-  "注入": "Inject",
-  "项目知识已注入约 {0} tokens，会随每次请求发送；建议只保留索引或精简文档。":
-    "Project knowledge injects about {0} tokens into every request; keep only the index or trim the docs.",
-  "导入位置：{0}": "Imported by: {0}",
-  "知识索引生成后写入 .iflow/knowledge/，通过项目记忆的 @ 导入注入；默认只在新建或恢复会话时生效。":
-    "The generated index lives in .iflow/knowledge/ and is injected through an @ import in project memory; it takes effect in a new or restored session.",
+  "停止加载": "Stop loading",
+  "加载": "Load",
+  "项目知识目前会占用约 {0} tokens，而且每次请求都会带上；建议只保留索引，或精简文档内容。":
+    "Project knowledge currently takes about {0} tokens and is carried by every request; keep only the index or trim the docs.",
+  "引用位置：{0}": "Referenced from: {0}",
+  "生成的索引会存进 .iflow/knowledge/，并通过项目记忆里的引用一起带给模型；默认只在新会话或恢复会话时生效。":
+    "The generated index lives in .iflow/knowledge/ and reaches the model through a reference in project memory; it takes effect in a new or restored session.",
   "正在扫描工作区…": "Scanning workspace…",
   "正在生成知识索引…": "Generating knowledge index…",
   "正在写入项目知识…": "Writing project knowledge…",
@@ -1099,12 +1102,12 @@ const en: Record<string, string> = {
   "子会话委派": "Child-session delegation",
   "{0} 个任务": "{0} task(s)",
   "第 {0}/{1} 个任务": "Task {0}/{1}",
-  "载荷未能完整解析，以下任务书仅供阅读，可能尚未派发":
-    "The payload could not be fully parsed; the task briefs below are for reading only and may not have been dispatched yet.",
-  "工具参数未能完整解析，任务列表暂不可用，以下保留原始参数":
-    "The tool arguments could not be fully parsed, so the task list is unavailable. The raw arguments are kept below.",
-  "工具参数未能完整解析，动作列表暂不可用，以下保留原始参数":
-    "The tool arguments could not be fully parsed, so the action list is unavailable. The raw arguments are kept below.",
+  "这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去":
+    "This content could not be read in full; the task briefs below are for reference only and may not have been dispatched yet.",
+  "这段任务信息没能完整读取，暂时看不到任务列表，下面是它的原始内容":
+    "This task information could not be read in full, so the task list is unavailable. Its raw content is shown below.",
+  "这段操作信息没能完整读取，暂时看不到操作列表，下面是它的原始内容":
+    "This action information could not be read in full, so the action list is unavailable. Its raw content is shown below.",
   "子会话操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
@@ -1112,14 +1115,14 @@ const en: Record<string, string> = {
   "保留分支": "Keep branch",
   "正在编写任务书…": "Writing the task brief…",
   "正在编写子会话操作…": "Writing child session actions…",
-  "原始协议块": "Raw protocol block",
+  "原始指令内容": "Raw directive content",
   "{0} · {1} 字符": "{0} · {1} chars",
-  "内容不是合法 JSON": "The body is not valid JSON",
-  "缺少 tasks 数组": "Missing the tasks array",
-  "缺少 actions 数组": "Missing the actions array",
-  "没有可展示的任务": "No task to display",
-  "没有可展示的动作": "No action to display",
-  "未知的协议块语言": "Unknown protocol fence language",
+  "内容格式不对，读不出来": "The content is malformed and cannot be read",
+  "里面没有任务列表": "It contains no task list",
+  "里面没有操作列表": "It contains no action list",
+  "没有可以显示的任务": "No task to display",
+  "没有可以显示的操作": "No action to display",
+  "认不出这是什么指令": "This directive type is not recognized",
   "展开任务说明": "Expand the task description",
   "收起任务说明": "Collapse the task description",
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",

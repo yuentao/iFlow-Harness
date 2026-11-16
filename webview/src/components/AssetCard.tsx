@@ -293,7 +293,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
       return;
     }
     if (!ASSET_NAME_RE.test(name)) {
-      setEditError(t("名称仅允许字母/数字/-/_（以字母或数字开头）"));
+      setEditError(t("名称只能用字母、数字、- 和 _，并且要以字母或数字开头"));
       return;
     }
     const requestId = nextRequestId();
@@ -409,7 +409,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="ml-auto text-ui-label text-warning">
-                {t("磁盘文件已被别写入，请刷新后再编辑")}
+                {t("文件已经在磁盘上被改过，请刷新后再编辑")}
               </span>
             )}
             {savedFlash && !saving && (
@@ -427,12 +427,12 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             </Button>
           </SecondaryRow>
           {state === null ? (
-            <div className="py-4 text-center text-ui-body text-muted-foreground">{t("扫描中…")}</div>
+            <div className="py-4 text-center text-ui-body text-muted-foreground">{t("读取中…")}</div>
           ) : (
             <div className="mt-2 space-y-2">
               {items.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border px-2 py-1.5 text-center text-ui-label text-muted-foreground">
-                  {t("尚未定义")}
+                  {t("这里还没有内容")}
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -452,7 +452,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
                           {item.name}
                         </span>
                         {item.shadowed && (
-                          <Chip tone="warning">{t("全局同名遮蔽")}</Chip>
+                          <Chip tone="warning">{t("有同名全局版本，实际用的是它")}</Chip>
                         )}
                         <IconButton
                           icon={<ChevronRight className={ICON_INLINE} />}
@@ -505,7 +505,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
 
           <Hint className="mt-2">
             {t(
-              "扫描与编辑直接读写 ~/.iflow 与 <cwd>/.iflow 的 commands / agents / skills 目录（与内核加载语义：命令递归 .md/.toml，子代理顶层 .md，技能 <目录>/SKILL.md）；当前会话已固定记忆，恢复会话后生效。",
+              "这里的列表直接来自磁盘：全局的在 ~/.iflow 下，项目的在工作区的 .iflow 下。改完的文件要等新建会话或重启内核后才生效。",
             )}
           </Hint>
         </>
@@ -552,7 +552,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
           {editLoading !== null ? (
             <div className="py-3 text-center text-ui-label text-muted-foreground">{t("读取中…")}</div>
           ) : (
-            <Field label={t("文件内容（markdown + frontmatter）")}>
+            <Field label={t("文件内容（Markdown 正文与头部配置）")}>
               <TextArea
                 mono
                 className="min-h-40 text-ui-label leading-relaxed"
@@ -574,12 +574,12 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="text-ui-label text-warning">
-                {t("磁盘文件已被别写入，请刷新后再编辑")}
+                {t("文件已经在磁盘上被改过，请刷新后再编辑")}
               </span>
             )}
           </ActionRow>
           <Hint>
-            {t("保存前对 hash，磁盘漂移即回 conflict（不覆盖）。")}
+            {t("保存前会核对文件是否被改动；如果磁盘上的内容已经变了，会提示你刷新，而不是覆盖它。")}
           </Hint>
         </div>
       )}
@@ -634,7 +634,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             />
           </Field>
           <div className="rounded-lg border border-border/70 bg-surface/40 px-2 py-1.5">
-            <Field label={t("需求描述（用于 AI 生成）")}>
+            <Field label={t("你希望它做什么（用于 AI 生成）")}>
               <TextArea
                 className="min-h-16 leading-relaxed"
                 value={genRequirement}
@@ -657,7 +657,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
               {genError && <span className="text-ui-body text-destructive">{genError}</span>}
             </ActionRow>
           </div>
-          <Field label={t("内容（frontmatter 模板，可直接改）")}>
+          <Field label={t("内容（模板，可直接修改）")}>
             <TextArea
               mono
               className="min-h-40 text-ui-label leading-relaxed"
@@ -677,12 +677,12 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
             {conflict && (
               <span className="text-ui-label text-warning">
-                {t("同名资产已存在，直接编辑它")}
+                {t("已经有同名文件了，直接编辑它即可")}
               </span>
             )}
           </ActionRow>
           <Hint>
-            {t("Host 拼路径从类型/作用域/名称（只字母数字-_），同名即回 conflict（不覆盖）。AI 生成只填充上方内容，点「创建」才写入文件。")}
+            {t("文件路径由类型、保存位置和名称自动拼出（名称只能含字母、数字、- 和 _）。同名文件不会被覆盖；AI 生成只会填好上面的内容，点「创建」才会真正写入文件。")}
           </Hint>
         </div>
       )}
@@ -690,7 +690,7 @@ export function AssetSection({ busy: _, onHeader }: { busy: boolean; onHeader: S
       {confirmDelete !== null && (
         <ConfirmDialog
           title={t("删除资产文件")}
-          message={t("确定删除「{0}」吗？此操作不可撤销。", confirmDelete.split(/[\\/]/).slice(-2).join("/"))}
+          message={t("确定删除「{0}」吗？删除后无法恢复。", confirmDelete.split(/[\\/]/).slice(-2).join("/"))}
           onConfirm={() => {
             deleteAsset(confirmDelete);
           }}

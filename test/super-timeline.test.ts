@@ -42,7 +42,7 @@ describe("deriveSuperTimeline · 只画真实节点", () => {
     for (const forbidden of ["completed", "failed", "cancelled", "integration"]) {
       expect(kinds(session())).not.toContain(forbidden);
     }
-    expect(nodes.at(-1)?.label).toBe("启动");
+    expect(nodes.at(-1)?.label).toBe("已启动");
     // 时间戳来自真实字段。
     expect(nodes[0]?.at).toBe(1000);
     expect(nodes[1]?.at).toBe(2000);
@@ -73,7 +73,7 @@ describe("deriveSuperTimeline · 只画真实节点", () => {
     const last = nodes.at(-1);
     expect(last?.kind).toBe("awaiting_input");
     expect(last?.tone).toBe("current");
-    expect(last?.label).toBe("等待应答");
+    expect(last?.label).toBe("在等你回答");
     expect(last?.at).toBe(5_000); // deadline - timeoutMs
   });
 
@@ -245,10 +245,10 @@ describe("deriveSuperTimeline · 只用 todolist 节点", () => {
         integration: { mode: "merge", state: "not_needed", at: 5000 },
       }),
     );
-    expect(facts).toBe("派发 → 启动 → 已完成 → 无需合并");
+    expect(facts).toBe("已派出 → 已启动 → 已完成 → 无需合并");
     // 复用阶段逻辑：即使有 todos，facts 仍是阶段事实（不受 todolist 影响）。
     expect(describeSuperTimelineFacts(session({ todos, startedAt: 2000 }))).toBe(
-      "派发 → 启动",
+      "已派出 → 已启动",
     );
   });
 });

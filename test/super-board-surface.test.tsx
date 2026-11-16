@@ -313,8 +313,8 @@ describe("Super Agent 看板阶段轨", () => {
     expect(rail).toBeTruthy();
     // 派发（createdAt 恒有）+ 启动（startedAt 存在）——没有「收尾」「完成」这种
     // 尚未发生的占位节点。
-    expect(rail!.getAttribute("aria-label")).toContain("派发");
-    expect(rail!.getAttribute("aria-label")).toContain("启动");
+    expect(rail!.getAttribute("aria-label")).toContain("已派出");
+    expect(rail!.getAttribute("aria-label")).toContain("已启动");
     expect(rail!.getAttribute("aria-label")).not.toContain("已完成");
 
     const dots = rail!.querySelectorAll(".rounded-full");
@@ -364,7 +364,7 @@ describe("Super Agent 看板阶段轨", () => {
     openRow();
 
     const described = rail().getAttribute("aria-label")!;
-    expect(described).toContain("等待应答");
+    expect(described).toContain("在等你回答");
 
     const all = dots();
     expect(all).toHaveLength(3);
@@ -372,7 +372,7 @@ describe("Super Agent 看板阶段轨", () => {
     expect(all[2]!.className).toContain("ring-2");
 
     const last = labels().at(-1)!;
-    expect(last.textContent).toBe("等待应答");
+    expect(last.textContent).toBe("在等你回答");
     expect(last.className).toContain("text-warning");
   });
 
@@ -438,7 +438,7 @@ describe("Super Agent 看板阶段轨", () => {
     for (const absent of ["已完成", "收尾", "失败", "已中断", "已自动合并"]) {
       expect(described).not.toContain(absent);
     }
-    expect(labels().at(-1)!.textContent).toBe("启动");
+    expect(labels().at(-1)!.textContent).toBe("已启动");
   });
 });
 
@@ -493,8 +493,8 @@ describe("Super Agent 看板时间轴 · 子会话 todolist", () => {
 
     // 阶段事实挪进 title / aria-label：派发、启动仍可查，todo 状态也在。
     const described = el.getAttribute("aria-label")!;
-    expect(described).toContain("派发");
-    expect(described).toContain("启动");
+    expect(described).toContain("已派出");
+    expect(described).toContain("已启动");
     expect(described).toContain("进行中");
     expect(described).toContain(longTodo);
   });
@@ -536,7 +536,7 @@ describe("Super Agent 看板子会话行 hover 表面", () => {
     expand();
 
     const row = rowTrigger().parentElement as HTMLElement;
-    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断该子会话"]');
+    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="中断这个子会话"]');
     expect(cancel).toBeTruthy();
     // 不出现第三层底色（danger 的 destructive/10 或任何 hover 背景）。
     expect(cls(cancel!)).not.toContain("hover:bg-");
@@ -841,13 +841,13 @@ describe("Super Agent 看板清理动作", () => {
     const btn = cleanupButton();
     // 与合并按钮同一范式：aria-disabled（不是 disabled，否则理由读不到）。
     expect(btn.getAttribute("aria-disabled")).toBe("true");
-    expect(btn.getAttribute("aria-label")).toBe("子会话还在运行，先中断再清理");
-    expect(btn.getAttribute("title")).toBe("子会话还在运行，先中断再清理");
+    expect(btn.getAttribute("aria-label")).toBe("子会话还在运行，请先中断再清理");
+    expect(btn.getAttribute("title")).toBe("子会话还在运行，请先中断再清理");
     expect(btn.className).toContain("cursor-not-allowed");
     expect(btn.className).toContain("opacity-40");
     // 理由不再逐行重复：行首状态 chip 已说明子会话还在运行，规则统一
     // 收在看板头的帮助按钮里（见「看板帮助说明」那组用例）。
-    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
 
     act(() => btn.click());
     expect(cleanupDialog()).toBeNull();
@@ -861,7 +861,7 @@ describe("Super Agent 看板清理动作", () => {
 
     const btn = cleanupButton();
     expect(btn.getAttribute("aria-disabled")).toBeNull();
-    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
 
     act(() => btn.click());
     const dialog = cleanupDialog();
@@ -999,12 +999,12 @@ describe("Super Agent 看板帮助说明", () => {
     const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
     expect(bubble).toBeTruthy();
     // 免确认 / 合并规则 / 清理规则，一条一行，都在同一个气泡里。
-    expect(bubble!.textContent).toContain("子会话始终免确认：包括 shell 在内的工具调用都直接执行，不会弹审批");
-    expect(bubble!.textContent).toContain("子会话还在运行时不能合并");
+    expect(bubble!.textContent).toContain("子会话里的工具调用（包括运行命令）会直接执行");
+    expect(bubble!.textContent).toContain("子会话结束之后才能合并");
     expect(bubble!.textContent).toContain("子会话还在运行时不能清理");
     // 规则只在这里说一次：行内不再重复那两句禁用原因。
-    expect(document.body.textContent).not.toContain("子会话还没结束，完成后再让智能体合并");
-    expect(document.body.textContent).not.toContain("子会话还在运行，先中断再清理");
+    expect(document.body.textContent).not.toContain("子会话还没结束，等它完成再合并");
+    expect(document.body.textContent).not.toContain("子会话还在运行，请先中断再清理");
   });
 });
 
@@ -1179,7 +1179,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     const text = panelRoot().textContent ?? "";
     expect(text).toContain("工作目录 2 个");
-    expect(text).toContain("已结束 2 个可回收");
+    expect(text).toContain("已结束 2 个可清理");
 
     const btn = bulkButton();
     expect(btn).toBeTruthy();
@@ -1188,7 +1188,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     const dialog = bulkDialog();
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain("将删除 2 个子会话的工作目录");
-    expect(dialog!.textContent).toContain("分支上一律保留");
+    expect(dialog!.textContent).toContain("它们的分支都会保留");
 
     const confirm = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
       (b) => (b.textContent ?? "").trim() === "清理已结束",
@@ -1213,7 +1213,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
 
     const text = panelRoot().textContent ?? "";
     expect(text).toContain("工作目录 1 个");
-    expect(text).toContain("已结束 0 个可回收");
+    expect(text).toContain("已结束 0 个可清理");
     expect(bulkButton()).toBeNull();
     expect(bulkDialog()).toBeNull();
   });
@@ -1229,7 +1229,7 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     ]);
     expand();
 
-    expect(panelRoot().textContent ?? "").not.toContain("个可回收");
+    expect(panelRoot().textContent ?? "").not.toContain("个可清理");
     expect(bulkButton()).toBeNull();
   });
 
@@ -1245,8 +1245,8 @@ describe("Super Agent 看板工作目录占用与批量清理", () => {
     expand();
     act(() => rowTrigger().click());
 
-    expect(document.body.textContent).toContain("工作目录已回收，分支保留");
-    expect(document.body.textContent).not.toContain("工作目录与分支已清理");
+    expect(document.body.textContent).toContain("工作目录已删除，分支保留");
+    expect(document.body.textContent).not.toContain("工作目录和分支都已删除");
   });
 
   it("批量清理确认后每行各自立即显示进行态", () => {
@@ -1317,7 +1317,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     // 状态 chip 已经写着「排队中」，再叠一个警告色降级 chip 只会误读成
     // 「worktree 创建失败」——占位态不得出现。
     expect(document.body.textContent).toContain("排队中");
-    expect(document.body.textContent).not.toContain("仅目录隔离");
+    expect(document.body.textContent).not.toContain("只隔离了目录");
     // 隔离行不能渲染空字符串：宿主给的中文占位说明要能看到。
     expect(document.body.textContent).toContain("正在准备隔离环境");
   });
@@ -1335,7 +1335,7 @@ describe("Super Agent 看板隔离行：准备中不误报降级", () => {
     expand();
     act(() => rowTrigger().click());
 
-    expect(document.body.textContent).toContain("仅目录隔离");
+    expect(document.body.textContent).toContain("只隔离了目录");
     // 真降级时定位文本仍是那个目录，而不是 note。
     expect(document.body.textContent).toContain("/tmp/fallback");
   });

@@ -91,7 +91,7 @@ export function MemoryReviewDialog({
     >
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-3">
         <p className="text-ui-caption leading-relaxed text-muted-foreground">
-          {t("以下是模型从最近对话中提取的长期记忆候选。请勾选要保留的内容，并确认作用域。")}
+          {t("这些是模型从最近对话里挑出来的长期记忆候选。勾选你想保留的内容，并确认存到哪一侧。")}
         </p>
         {candidates.map((candidate) => (
           <div
