@@ -20,6 +20,7 @@
 
 import { isAbsolute, relative, resolve } from "node:path";
 import * as vscode from "vscode";
+import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
 // 枚举取值
@@ -32,14 +33,22 @@ import * as vscode from "vscode";
  * 机器人接口的预留位，新增适配器时在这里追加并同步设置项枚举。
  */
 const ADAPTERS = ["onebot", "qqbot"] as const;
-/** 远程执行策略：supervised 逐次确认，trusted 免确认。 */
-const REMOTE_POLICIES = ["supervised", "trusted"] as const;
+/** 远程执行策略：readonly 只读，supervised 逐次确认，trusted 免确认。 */
+const REMOTE_POLICIES = [
+  "readonly",
+  "supervised",
+  "trusted",
+] as const satisfies readonly QqRemotePolicy[];
 /** 回传结果的详细程度。 */
-const RESULT_DETAILS = ["compact", "standard", "detailed"] as const;
+const RESULT_DETAILS = [
+  "summary",
+  "standard",
+  "full",
+] as const satisfies readonly QqResultDetail[];
 
 export type QqAdapterKind = (typeof ADAPTERS)[number];
-export type QqRemotePolicy = (typeof REMOTE_POLICIES)[number];
-export type QqResultDetail = (typeof RESULT_DETAILS)[number];
+/** 权威类型在 `shared/qq-task.ts`，此处只做转出，避免两份枚举漂移。 */
+export type { QqRemotePolicy, QqResultDetail };
 
 // ---------------------------------------------------------------------------
 // 配置形状与默认值
@@ -367,6 +376,7 @@ export function validateQqConfig(
     });
   }
 
+  // 只有 trusted 是「免确认」；readonly / supervised 都会经过审批，不该报警。
   if (config.remotePolicy === "trusted") {
     issues.push({
       severity: "warning",

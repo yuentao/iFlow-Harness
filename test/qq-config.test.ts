@@ -145,12 +145,27 @@ describe("normalizeQqConfig", () => {
     const trimmed = normalizeQqConfig({
       adapter: "  onebot ",
       remotePolicy: " trusted ",
-      resultDetail: " detailed ",
+      resultDetail: " full ",
     });
     expect(trimmed.config.adapter).toBe("onebot");
     expect(trimmed.config.remotePolicy).toBe("trusted");
-    expect(trimmed.config.resultDetail).toBe("detailed");
+    expect(trimmed.config.resultDetail).toBe("full");
     expect(trimmed.warnings).toEqual([]);
+  });
+
+  it("remotePolicy=readonly 归一化后保留，且不产生免确认 warning", () => {
+    const { config, warnings } = normalizeQqConfig({ remotePolicy: "readonly" });
+    expect(config.remotePolicy).toBe("readonly");
+    expect(warnings).toEqual([]);
+    expect(validateQqConfig(config)).toEqual([]);
+  });
+
+  it("旧枚举值 resultDetail=detailed 回退 standard 并告警", () => {
+    const { config, warnings } = normalizeQqConfig({ resultDetail: "detailed" });
+    expect(config.resultDetail).toBe("standard");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("iflow.qq.resultDetail");
+    expect(warnings[0]).toContain("summary / standard / full");
   });
 
   it("字符串 / 布尔 / 数组类型不符都回退默认值并告警", () => {
@@ -303,7 +318,7 @@ describe("buildBridgeEnv", () => {
 
   it("不把配置里的其他字段（含策略 / 白名单）塞进环境变量", () => {
     const env = buildBridgeEnv(
-      makeEnabled({ adapter: "qqbot", autoMerge: true, resultDetail: "detailed" }),
+      makeEnabled({ adapter: "qqbot", autoMerge: true, resultDetail: "full" }),
       {
         hostPort: 1,
         bridgeToken: "b",
