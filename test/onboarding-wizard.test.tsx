@@ -131,9 +131,9 @@ function connectWithPreset() {
 it("opens directly on the connect step without a separate welcome screen", () => {
   renderWizard();
   expect(container.textContent).toContain("第 1 / 4 步");
-  expect(container.textContent).toContain("连接 iFlow");
+  expect(container.textContent).toContain("连接模型服务");
   expect(container.textContent).toContain("欢迎使用 心流·驭光");
-  expect(container.textContent).toContain("Base URL（OpenAI 兼容）");
+  expect(container.textContent).toContain("接口地址（Base URL）");
   expect(container.textContent).not.toContain("开始配置");
 });
 
@@ -159,7 +159,7 @@ it("prefills a preset and saves the credentials", () => {
     modelName: "deepseek-chat",
     profileName: null,
   });
-  expect(container.textContent).toContain("选择默认使用的模型");
+  expect(container.textContent).toContain("这是新会话默认使用的模型");
   expect(container.textContent).toContain("第 2 / 4 步");
 });
 
@@ -168,7 +168,7 @@ it("validates the API form before saving", () => {
   click("DeepSeek");
   click("保存并继续");
 
-  expect(container.textContent).toContain("API Key 不能为空");
+  expect(container.textContent).toContain("请填写 API Key");
   expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "saveAuth" }));
 });
 
@@ -234,7 +234,7 @@ it("persists the default approval mode and switches the live session", () => {
   connectWithPreset();
   click("下一步");
 
-  expect(container.textContent).toContain("选择新会话默认的权限模式");
+  expect(container.textContent).toContain("新会话默认用这个权限模式");
   expect(container.textContent).toContain("第 3 / 4 步");
   click("yolo");
   expect(updateHostSetting).toHaveBeenCalledWith({ defaultMode: "yolo" });

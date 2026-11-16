@@ -27,7 +27,7 @@ const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "
 const ACTION_LABEL: Record<ApprovalAction, string> = {
   allow: "自动允许",
   deny: "自动拒绝",
-  ask: "弹卡确认",
+  ask: "每次询问",
 };
 
 function ActionIcon({ action }: { action: ApprovalAction }) {
@@ -219,7 +219,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             </div>
           )}
           {!readOnly && typeof rule.hits === "number" && rule.hits > 0 && (
-            <div className="shrink-0 text-ui-label text-muted-foreground/80">{t("命中 {0} 次", rule.hits)}</div>
+            <div className="shrink-0 text-ui-label text-muted-foreground/80">{t("已命中 {0} 次", rule.hits)}</div>
           )}
         </div>
       </div>
@@ -237,12 +237,12 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
             <div className="space-y-2">
               {rules.length === 0 && projectRules.length === 0 && (
                 <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center">
-                  <div className="text-ui-body text-muted-foreground">{t("尚未配置审批规则")}</div>
+                  <div className="text-ui-body text-muted-foreground">{t("还没有审批规则")}</div>
                 </div>
               )}
               {rules.map((rule) => renderRow(rule, false))}
               {projectRules.length > 0 && (
-                <div className="pt-1 text-ui-label text-muted-foreground">{t("项目规则（只读）")}</div>
+                <div className="pt-1 text-ui-label text-muted-foreground">{t("项目内的规则（只读）")}</div>
               )}
               {projectRules.map((rule) => renderRow(rule, true))}
             </div>
@@ -260,7 +260,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
                 setEditError(null);
               }}
             >
-              {t("添加")}
+              {t("添加规则")}
             </Button>
             <Button variant="primary" disabled={busy || rules === null || savedFlash || saving} onClick={save}>
               {saving ? t("保存中…") : savedFlash ? t("已保存") : t("保存")}
@@ -269,7 +269,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           </ActionRow>
           <Hint className="mt-2">
             {t(
-              "审批请求按顺序匹配规则（项目规则优先），首条命中即生效：自动允许 / 自动拒绝 / 弹卡。内置硬底线：rm、git push 等破坏性命令永不被自动允许，命中时仍弹卡确认。",
+              "审批请求会从上往下匹配规则（项目规则优先），第一条命中的规则决定结果：自动允许、自动拒绝或每次询问。破坏性命令（如 rm、git push）永远不会被自动允许，即使命中规则也会先问你。",
             )}
           </Hint>
         </>
@@ -280,7 +280,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           <Field label={t("规则名称")}>
             <TextInput
               value={editing.rule.label}
-              placeholder={t("如 允许读取 src 下文件")}
+              placeholder={t("如 允许读取 src 目录")}
               onChange={(e) => {
                 const v = e.target.value;
                 setEditing({ ...editing, rule: { ...editing.rule, label: v } });
@@ -293,7 +293,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               options={[
                 { value: "allow", label: t("自动允许") },
                 { value: "deny", label: t("自动拒绝") },
-                { value: "ask", label: t("弹卡确认") },
+                { value: "ask", label: t("每次询问") },
               ]}
               value={editing.rule.action}
               onChange={(action) => {
@@ -322,7 +322,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               </ToggleChip>
             ))}
           </div>
-          <Field label={t("路径通配（相对会话目录）")}>
+          <Field label={t("路径范围（相对工作区，支持通配）")}>
             <TextInput
               mono
               value={editing.rule.path ?? ""}
@@ -333,7 +333,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
               }}
             />
           </Field>
-          <Field label={t("命令首词（逗号分隔，仅执行类）")}>
+          <Field label={t("命令开头（逗号分隔，仅对执行类生效）")}>
             <TextInput
               mono
               value={(editing.rule.commands ?? []).join(", ")}
@@ -366,12 +366,12 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
           </div>
           <ActionRow>
             <Button onClick={() => closeEditor(true)}>
-              {t("完成")}
+              {editing.index === null ? t("加入列表") : t("更新列表")}
             </Button>
             {editError && <span className="text-ui-body text-destructive">{editError}</span>}
           </ActionRow>
           <Hint>
-            {t("维度全部留空将匹配所有请求（谨慎）；编辑只改本地副本，点击「保存」才生效。")}
+            {t("所有条件都留空会匹配全部请求，请谨慎使用。这里的修改只作用于列表，点「保存」后才真正生效。")}
           </Hint>
         </div>
       )}
@@ -379,7 +379,7 @@ export function ApprovalPolicySection({ busy, onHeader, defaults }: { busy: bool
       {confirmDelete !== null && (rules ?? []).some((r) => r.id === confirmDelete) && (
         <ConfirmDialog
           title={t("删除审批规则")}
-          message={t("确定删除规则「{0}」吗？保存后生效。", (rules ?? []).find((r) => r.id === confirmDelete)!.label)}
+          message={t("删除规则「{0}」？点「保存」后才会真正生效。", (rules ?? []).find((r) => r.id === confirmDelete)!.label)}
           onConfirm={() => {
             setRules((prev) => (prev ?? []).filter((r) => r.id !== confirmDelete));
             setConfirmDelete(null);

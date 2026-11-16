@@ -268,7 +268,7 @@ it("shows model metadata groups in the account tab", () => {
 
 it("the metadata fetch button starts the web-search fetch", () => {
   renderApiTab();
-  expect(container.textContent).toContain("会调用当前模型提炼检索资料，产生一次额外 token 消耗。");
+  expect(container.textContent).toContain("检索到的资料会交给当前模型提炼一次，额外消耗 token。");
   click("开始检索");
   expect(send).toHaveBeenCalledWith({ type: "fetchModelMetadata" });
 });
@@ -300,7 +300,7 @@ it("keeps the metadata status line out of the disclosure's divided children", ()
   renderApiTab();
   click("模型元数据");
   const hint = [...container.querySelectorAll("span")].find((el) =>
-    el.textContent?.includes("会调用当前模型提炼检索资料"),
+    el.textContent?.includes("检索到的资料会交给当前模型提炼一次"),
   );
   const block = hint?.parentElement?.parentElement;
   const divider = block?.parentElement;
@@ -314,11 +314,11 @@ it("shows a waiting label until the profile-switch choice is answered", () => {
   chat.state = { pendingProfileSwitch: { id: "pswitch-1", profileName: "B" } };
   renderApiTab();
   expect(container.textContent).toContain("等待选择…");
-  expect(container.textContent).not.toContain("正在重新认证…");
+  expect(container.textContent).not.toContain("正在重新连接…");
 
   chat.state = { pendingProfileSwitch: null };
   renderApiTab();
-  expect(container.textContent).toContain("正在重新认证…");
+  expect(container.textContent).toContain("正在重新连接…");
   expect(container.textContent).not.toContain("等待选择…");
 });
 
@@ -349,7 +349,7 @@ function inputs(): HTMLInputElement[] {
 
 it("starts a new profile from a provider preset", () => {
   renderAuthTabWith(EMPTY_AUTH);
-  expect(container.textContent).toContain("选择服务商预设");
+  expect(container.textContent).toContain("选一个服务商预设");
   click("DeepSeek");
   const fields = inputs();
   expect(fields[1]?.value).toBe("https://api.deepseek.com");
@@ -705,7 +705,7 @@ describe("API 配置保存按钮的 busy 门控", () => {
     }
   });
 
-  const SAVE_REASON = "当前配置正在使用中，生成中或有子会话运行时无法保存";
+  const SAVE_REASON = "这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。";
   /** B 变成当前使用的配置（编辑它才会触发重新认证）。 */
   const ACTIVE_B_AUTH: AuthUiState = {
     ...MULTI_AUTH,

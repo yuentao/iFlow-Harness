@@ -1139,6 +1139,159 @@ const en: Record<string, string> = {
   "暂存中…": "Staging…",
   "暂存文件超时，请重试": "Staging the file timed out. Try again.",
   "、": ", ",
+
+  // 2026-11-16 文案优化：设置 / 引导 / 认证 / 审批规则（键变更后的新词条）
+  "设置保存在哪里": "Where settings are saved",
+  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言、审批模式保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。":
+    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP, language and approval mode live in the local iFlow config (keys are plaintext — mind who can read this machine) and apply after a Core restart.",
+  "打开 VSCode 设置": "Open VSCode settings",
+  "重启内核，当前会话会自动恢复。语言、审批模式与 MCP 的改动在重启后生效。":
+    "Restart the Core — the current session comes back automatically. Language, approval mode and MCP changes apply after the restart.",
+  "内容需要是列表（最外层用 [ ]）": "The content must be a list (wrap it in [ ])",
+  "JSON 格式有误，请检查括号与引号": "Invalid JSON — check the brackets and quotes",
+  "用 JSON 列表写明哪些模型支持思考：每项包含 pattern（模型匹配）与 supportsThinking（是否支持）。保存后写入本机 iFlow 配置，重启内核生效。":
+    "List which models support thinking as JSON: each entry has pattern (which models match) and supportsThinking. Saved to the local iFlow config and applied after a Core restart.",
+  "应用修改": "Apply changes",
+  "首轮对话结束后，自动给会话起一个简短标题。":
+    "Give the session a short title once its first turn finishes.",
+  "每个会话只生成一次，会额外消耗少量 token。":
+    "Generated once per session; costs a small amount of extra tokens.",
+  "最多同时运行几个子会话。": "How many child sessions may run at once.",
+  "默认 5，可设 1–20。超出上限的派发会排队，等有空位再开始；调低后已经在跑的子会话不受影响。":
+    "Defaults to 5, adjustable 1–20. Extra dispatches queue up and start when a slot frees; lowering the limit does not interrupt child sessions already running.",
+  "每轮结束可能多花一次模型调用": "Each turn may cost one extra model call",
+  "每轮回复结束后，推测你接下来可能想做什么，显示在输入框上方。":
+    "After each reply, guess what you may want next and show it above the composer.",
+  "每轮结束会多调用一次模型（消耗额外 token）。关闭后不再调用，已显示的候选会立即清除。":
+    "Adds one model call per turn (extra tokens). When off, no call is made and shown suggestions disappear.",
+  "下一步建议最多等多久。": "How long to wait for this suggestion.",
+  "回合结束时，标题、下一步建议与记忆提取会合并成一次模型调用，实际按其中最长的时间等待。填 0 表示一直等。":
+    "At the end of a turn, the title, next-step and memory tasks share one model call, so the wait follows the longest limit among them. 0 means wait indefinitely.",
+  "上下文快满时自动压缩会话，腾出空间继续对话。":
+    "Compress the conversation when context is nearly full, so you can keep going.",
+  "每轮结束后检查一次，达到设定比例就先压缩再继续。默认关闭；即使关闭，模型报「上下文超出上限」时仍会自动压缩。":
+    "Checked after every turn: once occupancy reaches the set percentage, compress before continuing. Off by default; even when off, an overflow error from the model still triggers compression.",
+  "压缩最多等多久。": "How long to wait for compression.",
+  "默认 0，表示一直等——很大的会话压缩几分钟是正常的。填入秒数后，超时会取消这次压缩并提示你。":
+    "0 by default, meaning no limit — a very large session can legitimately take minutes. Once set, an overrunning compression is cancelled and reported.",
+  "上下文用到多少时开始压缩。": "How full the context gets before compression starts.",
+  "可调 50–100%，默认 95%。": "Adjustable 50–100%; default 95%.",
+  "每轮结束后，找出值得长期记住的偏好与约定。":
+    "After each turn, look for preferences and conventions worth remembering.",
+  "用当前模型提取候选，必须经你确认才会写入记忆；每轮会多消耗一次 token。":
+    "The current model proposes candidates; nothing is written until you confirm. Costs one extra call per turn.",
+  "记忆提取最多等多久。": "How long to wait for memory extraction.",
+  "保存在 VSCode 用户设置里，可随 VSCode 设置同步。":
+    "Stored in your VSCode user settings and carried by VSCode Settings Sync.",
+  "以标准为基准：紧凑约 0.92 倍，大约 1.1 倍。":
+    "Standard is the baseline: compact ≈0.92×, large ≈1.1×.",
+  "调整控件之间的间距，不改字号。": "Adjusts spacing between controls; text size stays the same.",
+  "以标准为基准：紧凑约 0.92 倍，宽松约 1.12 倍。":
+    "Standard is the baseline: compact ≈0.92×, comfortable ≈1.12×.",
+  "面板不在前台时，用系统通知提醒你。":
+    "Send a system notification when the panel is not in the foreground.",
+  "仅等待你处理时": "Only when you're needed",
+  "每轮完成时": "When each turn finishes",
+  "停止生成（在审批卡上为拒绝）": "Stop generating (rejects on an approval card)",
+  "背景光晕的浓淡：0 为关闭，100 最亮。":
+    "How strong the background glow is: 0 turns it off, 100 is brightest.",
+  "只影响新会话；当前会话可在输入框下方的模式菜单里切换。":
+    "New sessions only; switch the current one from the mode menu below the composer.",
+  "内核启动时使用的审批模式。": "The approval mode the Core starts with.",
+  "与上面的面板默认模式互不影响；保存后重启内核生效。":
+    "Independent of the panel default above; applies after a Core restart.",
+  "窗口打开时提前启动内核，首次打开面板不用等。":
+    "Start the Core ahead of time when a window opens, so the first panel open is instant.",
+  "每个窗口约 100MB 内存；下次窗口启动生效。":
+    "About 100MB per window; takes effect on the next window start.",
+  "没有可恢复的记录时会新建会话。": "Falls back to a new session when nothing is restorable.",
+  "每轮对话前保存一份工作区快照，之后可以按轮回退。":
+    "Save a workspace snapshot before each turn so you can roll back per turn.",
+  "快照放在单独的目录里，不会动你的 Git 仓库。":
+    "Snapshots live in a separate directory; your own Git repo is never touched.",
+  "快照会占用磁盘空间，上限等参数在「高级」里调整。":
+    "Snapshots take disk space; limits and other options are under「Advanced」.",
+  "工作区文件超过这个数量就不再保存快照。":
+    "Stop taking snapshots when the workspace has more files than this.",
+  "快照存放在哪里。": "Where snapshots are stored.",
+  "留空则用默认位置；支持 ~ 和相对路径。":
+    "Leave empty for the default location; ~ and relative paths are supported.",
+  "留空则自动查找。": "Leave empty to detect it automatically.",
+  "配置名称（可选，默认用模型名）": "Profile name (optional; defaults to the model name)",
+  "如 工作密钥、备用线路": "e.g. Work key, Backup route",
+  "接口地址（Base URL）": "Endpoint (Base URL)",
+  "这是正在使用的配置。正在生成或有子会话在跑，暂时不能保存。":
+    "This is the profile in use. It cannot be saved while a turn is generating or a child session is running.",
+  "配置与密钥以明文保存在本机 iFlow 配置中。编辑正在使用的配置会重新连接；编辑其他配置只是保存，不会切换。":
+    "Profiles and keys are stored in plaintext in the local iFlow config. Editing the profile in use reconnects the session; editing another one only saves it.",
+  "还没有 API 配置，暂时无法开始对话": "No API profile yet — chat is unavailable for now.",
+  "正在重新连接…": "Reconnecting…",
+  "点一下配置即可切换，当前会话会重新连接":
+    "Click a profile to switch; the current session reconnects.",
+  "还没有 API 配置": "No API profiles yet",
+  "选一个服务商预设可自动填好接口地址，也可以手动填写任意兼容 OpenAI 的接口。":
+    "Pick a provider preset to fill in the endpoint, or enter any OpenAI-compatible endpoint yourself.",
+  "点击配置即可切换，当前会话会用新配置重新连接。配置与密钥以明文保存在本机 iFlow 配置中。":
+    "Click a profile to switch; the current session reconnects with it. Profiles and keys are stored in plaintext in the local iFlow config.",
+  "联网查官方资料，由当前模型提炼后补进下面的表。":
+    "Search official docs online, then let the current model extract rows into the tables below.",
+  "检索由面板直接发起，不占用当前会话；资料交给当前模型提炼一次（额外消耗 token）。只补充、不覆盖已有数据；资料里找不到依据的条目会被丢弃。":
+    "The panel runs the search itself (no session involved) and asks the current model for one extraction pass (extra tokens). Existing rows are never overwritten; anything the sources cannot back is dropped.",
+  "检索到的资料会交给当前模型提炼一次，额外消耗 token。":
+    "The retrieved text goes to the current model for one extraction pass — extra tokens.",
+  "每行写「模型名=上下文长度」，如 glm-4.6=200000；没列出的模型用默认值。":
+    "One「model=context length」per line, e.g. glm-4.6=200000. Models not listed use the default.",
+  "每行写「模型名=输入价,输出价」，单位为美元/百万 token，如 deepseek-v3=0.27,1.1。":
+    "One「model=input price,output price」per line, in USD per million tokens, e.g. deepseek-v3=0.27,1.1.",
+  "配置「{0}」和它的密钥会一起删除，无法恢复。":
+    "Profile \"{0}\" and its key are deleted together, and this cannot be undone.",
+  "连接模型服务": "Connect a model provider",
+  "初次设置": "Getting started",
+  "设置进度": "Setup progress",
+  "连上模型服务就能开始对话，其他设置随时能在 ⚙ 里改。":
+    "Connect a model provider to start chatting; everything else stays editable in ⚙.",
+  "已保存（{0}），留空则不改": "Saved (…{0}) — leave empty to keep",
+  "请填写 API Key": "Enter an API key",
+  "保存后会用新配置重新连接。配置与密钥以明文保存在本机 iFlow 配置中。":
+    "Saving reconnects with the new profile. Profiles and keys are stored in plaintext in the local iFlow config.",
+  "这是新会话默认使用的模型，随时可以在面板顶部的模型菜单里切换。":
+    "This is the default model for new sessions; switch it any time from the model menu in the panel header.",
+  "正在连接并读取可用模型…": "Connecting and loading available models…",
+  "暂时拿不到模型列表": "No model list available yet",
+  "保存配置后会自动读取模型；也可以稍后在模型菜单里选择。":
+    "Models load automatically once the profile is saved; you can also pick one later from the model menu.",
+  "可以点下面的按钮再试一次。": "Use the button below to try again.",
+  "返回填写配置": "Back to the profile form",
+  "没有匹配的模型": "No matching models",
+  "新会话默认用这个权限模式；点选后当前会话也会立即切换。之后可以在「设置 → 权限与审批」里细化规则。":
+    "New sessions start in this mode; picking one also switches the current session. Fine-grained rules live in Settings → Permissions & approvals.",
+  "可以开始对话了，其余设置在 ⚙ 里随时能改。":
+    "You can start chatting now; the rest stays editable in ⚙.",
+  "这几项可以稍后再配。": "These can be set up later.",
+  "尚未配置（稍后可在设置里完成）": "Not configured (finish later in Settings)",
+  "切换配置": "Switch profile",
+  "切换到配置「{0}」后，当前对话要怎么处理？":
+    "How should the current conversation be handled after switching to profile \"{0}\"?",
+  "这段对话保留，用新配置接着聊": "Keep this conversation and continue with the new profile",
+  "从一段空白对话重新开始": "Start over with a blank conversation",
+  "每次询问": "Ask every time",
+  "审批请求会从上往下匹配规则（项目规则优先），第一条命中的规则决定结果：自动允许、自动拒绝或每次询问。破坏性命令（如 rm、git push）永远不会被自动允许，即使命中规则也会先问你。":
+    "Approval requests match rules top to bottom (project rules first); the first match decides: auto-allow, auto-deny, or ask. Destructive commands such as rm or git push are never auto-allowed — you are always asked first.",
+  "还没有审批规则": "No approval rules yet",
+  "项目内的规则（只读）": "Rules from the project (read-only)",
+  "已命中 {0} 次": "Matched {0}×",
+  "添加规则": "Add rule",
+  "如 允许读取 src 目录": "e.g. Allow reading the src folder",
+  "路径范围（相对工作区，支持通配）":
+    "Path scope (relative to the workspace; globs allowed)",
+  "命令开头（逗号分隔，仅对执行类生效）":
+    "Command prefix (comma-separated; execute only)",
+  "加入列表": "Add to list",
+  "更新列表": "Update list",
+  "所有条件都留空会匹配全部请求，请谨慎使用。这里的修改只作用于列表，点「保存」后才真正生效。":
+    "Leaving every condition empty matches ALL requests — use with care. Edits only change the list; click Save to apply.",
+  "删除规则「{0}」？点「保存」后才会真正生效。":
+    "Delete rule \"{0}\"? It takes effect once you save.",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {
