@@ -2278,23 +2278,33 @@ function createMockHost(): HostApi {
           }, 900);
           return;
         } else if (m.action === "merge") {
-          // Mirror the real host: the click becomes a request to the MAIN
-          // agent, which performs the merge itself.
+          // Mirror the real host: the click becomes a request that dispatches
+          // a merge child session running asynchronously in the main
+          // workspace. The request block lands immediately, but the result is
+          // delayed so the webview's optimistic 「合并中」 state is observable
+          // in the standalone demo (a synchronous write-back would make the
+          // in-progress state flash by unseen).
           demoBlocks.push({
             kind: "user",
             text: "请把子会话的分支合并到当前分支（mock 请求，由智能体执行）",
           });
-          const target = demoSuperSessions.find((s) => s.id === m.sessionId);
-          if (target) {
-            target.integration = {
-              mode: "merge",
-              state: "merged",
-              detail: "智能体已合入 main",
-              at: Date.now(),
-            };
-            target.updatedAt = Date.now();
-          }
-          demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+          broadcastDemo(mockStatus, null);
+          const id = m.sessionId;
+          window.setTimeout(() => {
+            const target = demoSuperSessions.find((s) => s.id === id);
+            if (target) {
+              target.integration = {
+                mode: "merge",
+                state: "merged",
+                detail: "智能体已合入 main",
+                at: Date.now(),
+              };
+              target.updatedAt = Date.now();
+            }
+            demoBlocks.push({ kind: "text", text: "*（已让智能体合并子会话分支，mock）*" });
+            broadcastDemo(mockStatus, null);
+          }, 1500);
+          return;
         }
         broadcastDemo(mockStatus, null);
         return;
