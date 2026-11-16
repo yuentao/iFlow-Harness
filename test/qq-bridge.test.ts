@@ -15,6 +15,9 @@ import {
   type OneBotSink,
   type OneBotSinkOptions,
 } from "../src/qq/bridge/onebot-sink.js";
+import { resolveSelfId } from "../src/qq/bridge/self-id.js";
+import type { OneBotTransport } from "../src/qq/adapter/http-transport.js";
+import { normalizeOneBotEvent } from "../src/qq/adapter/onebot.js";
 import type { InboundMessage } from "../src/qq/adapter/types.js";
 
 const TOKEN = "test-token";
@@ -430,5 +433,176 @@ describe("delivery-server", () => {
     expect(res.status).toBe(200);
     expect(res.json?.ok).toBe(true);
     expect(typeof res.json?.uptimeMs).toBe("number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selfId 解析：群聊 @机器人 的判定前提
+// ---------------------------------------------------------------------------
+
+interface RecordedAction {
+  action: string;
+  params: Record<string, unknown>;
+}
+
+function fakeOneBotTransport(
+  handler: (action: string, params: Record<string, unknown>) => Promise<unknown>,
+): { transport: OneBotTransport; calls: RecordedAction[] } {
+  const calls: RecordedAction[] = [];
+  return {
+    calls,
+    transport: {
+      post: (action, params = {}) => {
+        calls.push({ action, params });
+        return handler(action, params);
+      },
+    },
+  };
+}
+
+describe("self-id 解析", () => {
+  it("env 有值时直接返回且不调用 get_login_info", async () => {
+    const { transport, calls } = fakeOneBotTransport(async () => ({
+      status: "ok",
+      data: { user_id: 999 },
+    }));
+    const logs: string[] = [];
+
+    const selfId = await resolveSelfId({
+      transport,
+      envSelfId: " 12345 ",
+      log: (line) => logs.push(line),
+    });
+
+    expect(selfId).toBe("12345");
+    expect(calls).toEqual([]);
+    expect(logs).toEqual([]);
+  });
+
+  it("env 为空时调用 get_login_info 并返回 user_id 字符串", async () => {
+    const { transport, calls } = fakeOneBotTransport(async () => ({
+      status: "ok",
+      retcode: 0,
+      data: { user_id: 424242, nickname: "bot" },
+    }));
+    const logs: string[] = [];
+
+    const selfId = await resolveSelfId({
+      transport,
+      envSelfId: "",
+      log: (line) => logs.push(line),
+    });
+
+    expect(selfId).toBe("424242");
+    expect(calls).toEqual([{ action: "get_login_info", params: {} }]);
+    expect(logs).toEqual([]);
+  });
+
+  it("transport 抛错时返回空串并调用 log", async () => {
+    const { transport } = fakeOneBotTransport(async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:3000");
+    });
+    const logs: string[] = [];
+
+    const selfId = await resolveSelfId({
+      transport,
+      envSelfId: "",
+      log: (line) => logs.push(line),
+    });
+
+    expect(selfId).toBe("");
+    expect(logs.some((line) => line.includes("selfId unknown"))).toBe(true);
+  });
+
+  it("get_login_info 超时时返回空串并调用 log", async () => {
+    const { transport } = fakeOneBotTransport(() => new Promise(() => undefined));
+    const logs: string[] = [];
+
+    const selfId = await resolveSelfId({
+      transport,
+      envSelfId: "",
+      timeoutMs: 10,
+      log: (line) => logs.push(line),
+    });
+
+    expect(selfId).toBe("");
+    expect(logs.some((line) => line.includes("selfId unknown"))).toBe(true);
+  });
+
+  it("非 ok 响应时返回空串并调用 log", async () => {
+    const { transport } = fakeOneBotTransport(async () => ({ status: "failed", retcode: 100 }));
+    const logs: string[] = [];
+
+    const selfId = await resolveSelfId({
+      transport,
+      envSelfId: "",
+      log: (line) => logs.push(line),
+    });
+
+    expect(selfId).toBe("");
+    expect(logs.some((line) => line.includes("selfId unknown"))).toBe(true);
+  });
+
+  it("未配置 transport（无 OneBot URL）时返回空串并调用 log", async () => {
+    const logs: string[] = [];
+
+    const selfId = await resolveSelfId({ envSelfId: "", log: (line) => logs.push(line) });
+
+    expect(selfId).toBe("");
+    expect(logs.some((line) => line.includes("selfId unknown"))).toBe(true);
+  });
+
+  it("解析出的 selfId 让群聊 [CQ:at] 被判定为 mentionsBot", async () => {
+    const { transport } = fakeOneBotTransport(async () => ({
+      status: "ok",
+      data: { user_id: 424242 },
+    }));
+    const selfId = await resolveSelfId({ transport, envSelfId: "" });
+    expect(selfId).toBe("424242");
+
+    const inbound = normalizeOneBotEvent(
+      {
+        post_type: "message",
+        message_type: "group",
+        group_id: 555,
+        user_id: 666,
+        message_id: 7,
+        message: `[CQ:at,qq=${selfId}] 开工`,
+      },
+      { selfId },
+    );
+
+    expect(inbound?.mentionsBot).toBe(true);
+    expect(inbound?.text).toBe("开工");
+  });
+
+  it("解析出的 selfId 传给 sink 后群聊 @机器人 能被识别", async () => {
+    const { transport } = fakeOneBotTransport(async () => ({
+      status: "ok",
+      data: { user_id: 424242 },
+    }));
+    const selfId = await resolveSelfId({ transport, envSelfId: "" });
+    const { sink, events } = await startSink({ selfId });
+
+    const res = await request(sink.port, {
+      method: "POST",
+      path: "/onebot/event",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        post_type: "message",
+        message_type: "group",
+        group_id: 555,
+        user_id: 666,
+        message_id: 7,
+        message: [
+          { type: "at", data: { qq: selfId } },
+          { type: "text", data: { text: " 开工" } },
+        ],
+      }),
+    });
+
+    expect(res.status).toBe(204);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.mentionsBot).toBe(true);
   });
 });
