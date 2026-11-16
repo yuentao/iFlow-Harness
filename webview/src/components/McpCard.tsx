@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import { ChevronRight, MoreHorizontal, Pencil, Plus, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 import { useChat } from "../store";
 import { entriesToServers, sameMcpServers, serversToEntries, type McpEntry } from "./mcp-servers";
-import { MCP_CATALOG, buildCatalogConfig } from "../../../shared/mcp-catalog";
+import { MCP_CATALOG, buildCatalogConfig, catalogFieldLabel } from "../../../shared/mcp-catalog";
 import { t } from "../i18n";
 import { ActionRow, Button, Chip, ConfirmDialog, Dropdown, Field, FieldLabel, Hint, ICON_INLINE, IconButton, SecondaryRow, Segmented, TextArea, TextInput, ToolbarRow } from "./ui";
 import type { SectionHeader } from "./SettingsModal";
@@ -466,7 +466,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
     }
     const built = buildCatalogConfig(template, catalogForm.values);
     if (built.missing.length > 0) {
-      setEditError(t("还需要填写：{0}", built.missing.join(", ")));
+      // Keys stay internal: the user reads the label the form renders, and an
+      // unknown key still falls back to itself (the warning is never dropped).
+      const labels = built.missing.map((key) => catalogFieldLabel(template, key));
+      setEditError(t("还需要填写：{0}", labels.join(", ")));
       return;
     }
     const idx = (entries ?? []).length;

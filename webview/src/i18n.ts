@@ -535,6 +535,7 @@ const en: Record<string, string> = {
   "配置格式有误：不是合法的 JSON": "Invalid configuration: not valid JSON",
   "配置需要是一个 JSON 对象（用一对大括号包起来）": "The configuration must be a JSON object (wrapped in a pair of braces)",
   "名称重复：{0}": "Duplicate name: {0}",
+  "还需要填写：{0}": "Still required: {0}",
   "编辑只改本地草稿，点「保存」才会写入文件。":
     "Editing only changes a local draft; click Save to write the file.",
   "安装只会把模板填进草稿，点「保存」才会写入文件。":
