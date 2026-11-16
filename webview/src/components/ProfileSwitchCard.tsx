@@ -30,7 +30,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
     // Cancelling aborts the whole switch host-side (no authenticate). Drop
     // the optimistic row lock here too: the settings list keys its chip off
     // `pending`, so without this it flips from "等待选择…" to
-    // "正在重新认证…" and stays disabled until the 10s timeout.
+    // "正在重新连接…" and stays disabled until the 10s timeout.
     if (keepSession === null) useChat.getState().clearPending();
     send({ type: "respondProfileSwitch", id: pending.id, keepSession });
   };
@@ -38,19 +38,19 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
   return (
     <ModalShell
       role="alertdialog"
-      ariaLabel={t("切换 API 配置")}
-      title={t("切换 API 配置")}
+      ariaLabel={t("切换配置")}
+      title={t("切换配置")}
               icon={<ArrowLeftRight className={`${ICON_INLINE} shrink-0 text-primary`} />}      onClose={() => answer(null)}
       initialFocus="first"
     >
       <div className="space-y-3 px-3 py-3">
         <p className="text-ui-label leading-relaxed text-foreground/90">
-          {t("切换到 API 配置「{0}」后，当前对话如何处理？", pending.profileName)}
+          {t("切换到配置「{0}」后，当前对话要怎么处理？", pending.profileName)}
         </p>
         {/* Option rows (not Button): the two-line body needs a card that grows
             with its content — the button species is a fixed 28px tall and
             overflowed its own border. */}
-        <OptionGroup ariaLabel={t("切换 API 配置")} className="space-y-2">
+        <OptionGroup ariaLabel={t("切换配置")} className="space-y-2">
           <OptionCard
             checked={false}
             emphasis
@@ -59,7 +59,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
             className="w-full"
             icon={<MessageSquare className={`${ICON_INLINE} mt-0.5 shrink-0 text-primary`} />}
             label={<span className="text-ui-label font-semibold">{t("停留在当前会话")}</span>}
-            description={t("保留当前对话，改用新配置继续")}
+            description={t("这段对话保留，用新配置接着聊")}
             onClick={() => answer(true)}
           />
           <OptionCard
@@ -69,7 +69,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
             className="w-full"
             icon={<PlusCircle className={`${ICON_INLINE} mt-0.5 shrink-0 text-muted-foreground`} />}
             label={<span className="text-ui-label font-semibold">{t("开启新会话")}</span>}
-            description={t("以新配置开始新对话")}
+            description={t("从一段空白对话重新开始")}
             onClick={() => answer(false)}
           />
         </OptionGroup>
@@ -77,7 +77,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
 
       <div className="flex items-center justify-end gap-1.5 border-t border-border/60 px-3 py-2">
         <Button variant="secondary" size="sm" disabled={answered} aria-label={t("取消切换")} onClick={() => answer(null)}>
-          {t("取消")}
+          {t("取消切换")}
         </Button>
       </div>
     </ModalShell>
