@@ -284,6 +284,11 @@ const en: Record<string, string> = {
   // Super Agent: 等待子会话汇报期间的「新会话」按钮禁用说明
   "子会话还在运行并等待汇报，暂时不能新建会话":
     "Child sessions are still running and waiting to report — new session is unavailable for now",
+  // 用户按了停止、汇报被压住：「新会话」必须放行，否则面板死锁。
+  "已停止；可新建会话，待处理汇报会留在原会话":
+    "Stopped — you can start a new session; deferred results stay with the original session",
+  "有 {0} 项子会话结果待处理（你按了停止，它们被压下了）。新建会话不会丢弃它们：它们按原会话归属留在队列里，切回那个会话后才会继续投递。确定新建吗？":
+    "There are {0} child-session results pending (you pressed Stop, so they are held). Starting a new session will not discard them: they stay queued under their original session and will be delivered when you switch back. Start a new session anyway?",
   // 恢复进行中：「新会话」按钮可点（宿主会放弃恢复并立刻新建会话）
   "取消正在进行的会话恢复并新建会话": "Cancel the session restore in progress and start a new session",
   "删除会话 {0}": "Delete session {0}",

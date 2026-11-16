@@ -108,6 +108,7 @@ function makeManager(children: SuperSessionUi[]): FakeManager {
 }
 
 type PanelInternals = {
+  client: unknown;
   superAgent: unknown;
   ensureClient: () => Promise<unknown>;
   promptWithRetry: (
@@ -120,6 +121,13 @@ type PanelInternals = {
   handleWebviewMessage: (msg: { type: string; [k: string]: unknown }) => Promise<void>;
   onSessionUpdate: (n: unknown) => void;
   refreshSuperWaitHeartbeat: () => void;
+  syncSuperWaitingState: () => void;
+  updateStatusBar: (state: SessionState) => void;
+  statusBar: { text: string; tooltip: string };
+  autoTurnsStoppedFor: string | null;
+  announceDeferredAutoTurns: () => void;
+  clearDeferredAutoTurnsToast: () => void;
+  handleToastAction: (actionId: string, toastId?: number) => void;
   queueSuperReport: (entries: Array<{ session: SuperSessionUi; report: SuperReport }>) => void;
   drainSuperReports: () => Promise<void>;
   pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
@@ -129,6 +137,7 @@ type PanelInternals = {
     replaceState: (state: SessionState) => void;
     appendNotice: (text: string) => void;
     sendToast: (...args: unknown[]) => number;
+    dismissToast: (id: number) => void;
   };
 };
 
@@ -445,5 +454,154 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
       update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: directive } },
     });
     expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  describe("停止后的状态如实与出路", () => {
+    it("汇报被压住：状态栏显示已停止与待处理数，不再谎称生成中", () => {
+      const state: SessionState = {
+        ...p.store.getState(),
+        status: "idle",
+        superWaiting: true,
+        superHeld: true,
+        superPendingCount: 2,
+      };
+      p.updateStatusBar(state);
+
+      expect(p.statusBar.text).not.toContain("生成中");
+      expect(p.statusBar.text).toContain("已停止");
+      expect(p.statusBar.text).toContain("2 项待处理");
+      expect(p.statusBar.tooltip).toContain("继续处理");
+    });
+
+    it("子会话真在跑或等回答：状态栏如实文案，都不是生成中", () => {
+      const base: SessionState = {
+        ...p.store.getState(),
+        status: "idle",
+        superWaiting: true,
+        superHeld: false,
+        superPendingCount: 0,
+      };
+      p.updateStatusBar({ ...base, superSessions: [child({ status: "running" })] });
+      expect(p.statusBar.text).not.toContain("生成中");
+      expect(p.statusBar.text).toContain("子会话进行中");
+
+      p.updateStatusBar({ ...base, superSessions: [child({ status: "awaiting_input" })] });
+      expect(p.statusBar.text).not.toContain("生成中");
+      expect(p.statusBar.text).toContain("等待你处理");
+    });
+
+    it("syncSuperWaitingState 把 held/pendingCount 与 waiting 同源写进 store", () => {
+      p.pendingSuperReportPrompts = [
+        { mainSessionId: "sw-session", text: "A" },
+        { mainSessionId: "other", text: "B" },
+      ];
+      p.autoTurnsStoppedFor = "sw-session";
+      manager.list = () => [child({ status: "completed" })];
+      p.syncSuperWaitingState();
+
+      const state = p.store.getState();
+      expect(state.superWaiting).toBe(true);
+      expect(state.superHeld).toBe(true);
+      // 只数当前主会话的，别的会话汇报不算进来。
+      expect(state.superPendingCount).toBe(1);
+    });
+
+    it("停止时发常驻带动作提示；发下一条消息解除压制后提示消失", async () => {
+      const sent: Array<{ message: string; opts?: Record<string, unknown> }> = [];
+      const dismissed: number[] = [];
+      vi.spyOn(p.store, "sendToast").mockImplementation(((...args: unknown[]) => {
+        sent.push({ message: String(args[1]), opts: args[2] as Record<string, unknown> });
+        return 42;
+      }) as PanelInternals["store"]["sendToast"]);
+      vi.spyOn(p.store, "dismissToast").mockImplementation(((id: number) => {
+        dismissed.push(id);
+      }) as PanelInternals["store"]["dismissToast"]);
+
+      p.pendingSuperReportPrompts = [{ mainSessionId: "sw-session", text: "【汇报】A 完成" }];
+      p.autoTurnsStoppedFor = "sw-session";
+      p.announceDeferredAutoTurns();
+
+      const deferred = sent.find((s) => s.message.includes("已停止"));
+      expect(deferred).toBeTruthy();
+      expect(deferred!.message).toContain("1 项");
+      expect(deferred!.opts?.persistent).toBe(true);
+      expect((deferred!.opts?.action as { actionId: string } | undefined)?.actionId).toBe(
+        "resume-super-turns",
+      );
+
+      const turn = p.handleWebviewMessage({ type: "sendPrompt", text: "继续" });
+      await flush();
+      expect(dismissed).toContain(42);
+      calls[0]!.resolve({ stopReason: "end_turn" });
+      await turn;
+      await flush();
+    });
+
+    it("点「继续处理」：释放压制、收掉提示并立刻恢复汇报投递", async () => {
+      const dismissed: number[] = [];
+      vi.spyOn(p.store, "dismissToast").mockImplementation(((id: number) => {
+        dismissed.push(id);
+      }) as PanelInternals["store"]["dismissToast"]);
+      vi.spyOn(p.store, "sendToast").mockImplementation(
+        (() => 77) as unknown as PanelInternals["store"]["sendToast"],
+      );
+
+      const done = child({ status: "completed", summary: "A 完成" });
+      manager.list = () => [done];
+      p.pendingSuperReportPrompts = [{ mainSessionId: "sw-session", text: "【汇报】A 完成" }];
+      p.autoTurnsStoppedFor = "sw-session";
+      p.announceDeferredAutoTurns();
+
+      p.handleToastAction("resume-super-turns", 77);
+      expect(dismissed).toContain(77);
+      expect(p.autoTurnsStoppedFor).toBeNull();
+
+      await flush();
+      await flush();
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      expect(calls[0]!.prompt[0]!.text).toContain("A 完成");
+      calls[0]!.resolve({ stopReason: "end_turn" });
+      await flush();
+    });
+
+    it("压住态「新会话」放行；真等待态仍拒绝", async () => {
+      // 守卫放行后要跑完整的新建会话流程：补齐 client 与宿主辅助方法的 mock。
+      const client = {
+        newSession: vi.fn(async () => ({
+          sessionId: "sw-new-session",
+          modes: { currentModeId: "default", availableModes: [{ id: "default" }] },
+          _meta: { models: { currentModelId: "m1" }, availableCommands: [], availableSkills: [] },
+        })),
+        cancel: vi.fn(),
+      };
+      p.client = client;
+      p.ensureClient = async () => client;
+      const extra = p as unknown as Record<string, unknown>;
+      extra.queryLiveModels = async () => [];
+      extra.validateModelForPush = async () => null;
+      extra.setModel = async () => {};
+      extra.applyThinkLevel = async () => {};
+      extra.workspaceModelId = () => null;
+      extra.cleanupEmptySession = async () => {};
+      extra.recordSession = async () => {};
+      extra.restoreSuperSessions = async () => {};
+
+      const done = child({ status: "completed", summary: "A 完成" });
+      manager.list = () => [done];
+      p.pendingSuperReportPrompts = [{ mainSessionId: "sw-session", text: "【汇报】A 完成" }];
+      p.autoTurnsStoppedFor = "sw-session";
+
+      const before = p.store.getState().sessionId;
+      await p.handleWebviewMessage({ type: "newSession" });
+      expect(p.store.getState().sessionId).toBe("sw-new-session");
+      expect(p.store.getState().sessionId).not.toBe(before);
+
+      // 真在等（没按停止）时依旧拒绝：会话不会被换掉。
+      p.autoTurnsStoppedFor = null;
+      p.pendingSuperReportPrompts = [{ mainSessionId: "sw-new-session", text: "【汇报】B 完成" }];
+      await p.handleWebviewMessage({ type: "newSession" });
+      expect(p.store.getState().sessionId).toBe("sw-new-session");
+      expect(client.newSession).toHaveBeenCalledTimes(1);
+    });
   });
 });

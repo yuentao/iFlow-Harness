@@ -249,6 +249,12 @@ export function App() {
   // 用户仍然可以发消息、由主会话响应。顶栏不再为它渲染忙碌 chip —— 忙碌信号
   // 由转录底部浮动 pill 与子会话看板计数承担。
   const superWaiting = useChat((s) => s.state?.superWaiting ?? false);
+  // 用户按了「停止」：superWaiting 是被压住的（汇报还在队列里，等下一条消息或
+  // 常驻提示的「继续处理」才投递），不是真的在生成。此时「新会话」必须可点 ——
+  // 否则用户点完停止就再无出路，面板看起来永久卡住。pendingCount 用于确认弹窗
+  // 如实告知「有多少项结果、切回原会话才会继续投递」。
+  const superHeld = useChat((s) => s.state?.superHeld ?? false);
+  const superPendingCount = useChat((s) => s.state?.superPendingCount ?? 0);
   // 子会话仍在跑（非终态）时，切换会话 / 模型 / API 配置会让在途的子会话用错
   // 凭据或模型，或让汇报落到已被替换的主会话。与 superWaiting 分开判定：后者
   // 只覆盖「主会话空转等汇报」，子会话运行而主会话自己也在生成时同样要锁。
@@ -291,6 +297,9 @@ export function App() {
   // Delete keeps a modal confirm (the host delete is irreversible); the armed
   // session is held here so the dialog can render its label.
   const [confirmingDelete, setConfirmingDelete] = useState<SessionSummaryUi | null>(null);
+  // 用户按停止后汇报被压住时点「新会话」：先弹如实确认（结果不丢、切回原会话
+  // 才继续投递），确认后才发 newSession —— 这是被停止后唯一的显式出路。
+  const [confirmNewSessionHeld, setConfirmNewSessionHeld] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   // Inline rename: the id being edited and its draft label. Kept in App so the
   // dropdown's close callback can drop a half-typed name.
@@ -516,15 +525,17 @@ export function App() {
       }
       if (e.key.toLowerCase() === "n") {
         // 等待子会话汇报期间不能新建会话（与顶栏「新会话」按钮同一语义）：
-        // 排队里的汇报会落到已被替换的会话上。
-        if (superWaiting) return;
+        // 排队里的汇报会落到已被替换的会话上。用户按了停止压住汇报时是例外
+        // —— 此时没有汇报在飞，允许新建，否则用户点完停止就再无出路。
+        if (superWaiting && !superHeld) return;
         e.preventDefault();
-        send({ type: "newSession" });
+        if (superHeld) setConfirmNewSessionHeld(true);
+        else send({ type: "newSession" });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting]);
+  }, [sessions, activeSessionId, locked, status, settingsTab, onboardingOpen, send, superWaiting, superHeld]);
 
   // P2-15: the activation ring alone went unnoticed (tooltips are mouse-only,
   // a11y audit #15). Each time Focus view turns on, a pill announces the mode
@@ -886,16 +897,23 @@ export function App() {
               // IconButton 的默认 title 就是 label —— 只有需要解释「为什么现在
               // 不能/能新建会话」时才覆盖它（title={undefined} 会把默认
               // tooltip 抹掉）。
-              {...(superWaiting
+              {...(superWaiting && !superHeld
                 ? { title: t("子会话还在运行并等待汇报，暂时不能新建会话") }
-                : replaying
-                  ? { title: t("取消正在进行的会话恢复并新建会话") }
-                  : {})}
+                : superWaiting && superHeld
+                  ? { title: t("已停止；可新建会话，待处理汇报会留在原会话") }
+                  : replaying
+                    ? { title: t("取消正在进行的会话恢复并新建会话") }
+                    : {})}
               // 恢复中（replaying）不禁用：宿主会放弃这次恢复并立刻新建会话，
               // 用户不必等恢复跑完再点一次。其余忙碌态（生成中 / 正在创建新
               // 会话 / 正在切换会话）仍然禁用。
-              disabled={switching || superWaiting || (busy && !replaying)}
-              onClick={() => send({ type: "newSession" })}
+              // superWaiting 且是「用户已停止、汇报被压住」时**不禁用** —— 那时
+              // 没有汇报在飞，新建会话不会串台，而是用户停止后唯一的出路。
+              disabled={switching || (superWaiting && !superHeld) || (busy && !replaying)}
+              onClick={() => {
+                if (superWaiting && superHeld) setConfirmNewSessionHeld(true);
+                else send({ type: "newSession" });
+              }}
             />
             {/* Settings hub: profiles & credentials, MCP servers, approval
                 policies. The gear used to open a profile quick-switcher whose
@@ -1024,6 +1042,21 @@ export function App() {
 
       <Composer />
 
+      {confirmNewSessionHeld && (
+        <ConfirmDialog
+          title={t("新建会话")}
+          confirmLabel={t("新建会话")}
+          message={t(
+            "有 {0} 项子会话结果待处理（你按了停止，它们被压下了）。新建会话不会丢弃它们：它们按原会话归属留在队列里，切回那个会话后才会继续投递。确定新建吗？",
+            superPendingCount,
+          )}
+          onConfirm={() => {
+            setConfirmNewSessionHeld(false);
+            send({ type: "newSession" });
+          }}
+          onCancel={() => setConfirmNewSessionHeld(false)}
+        />
+      )}
       {confirmingDelete && (
         <ConfirmDialog
           title={t("删除会话")}
