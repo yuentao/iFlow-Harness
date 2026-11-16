@@ -2863,6 +2863,8 @@ const SUPER_DIGEST_FOOTER = [
   SUPER_DIGEST_HINT,
   "You can manage the child sessions above: emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
   "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
+  "A child whose status is `failed` MUST be retried with the `retry` action (same sessionId, same working directory — its uncommitted work is preserved). Do NOT dispatch a new, equivalent `super-agent` task to redo it: that starts a fresh working directory from zero and discards the work the failed child already did.",
+  "Skip `retry` only if the user explicitly asks to abandon the task or its premise is no longer valid — and explain to the user first. Issue one `retry`, never concurrently for the same child. An `interrupted` child is not a failure: do not auto-retry it unless the user asks.",
   "Merging is done by the host, following the integration mode (merge by default, possibly PR): when the \"changes:\" line says merged automatically, do not merge it again;",
   "only when the branch was kept (not merged automatically / merge conflict / no gh CLI) should you run `git merge --no-ff <branch>` yourself (the branch name is on each line above), resolving conflicts by reading the code.",
   "`changes: no merge needed` means the child produced no commits at all — there is nothing to merge; never dispatch a merge child session for it.",
