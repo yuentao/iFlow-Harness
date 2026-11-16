@@ -17,22 +17,29 @@
  * 的后端），而不是按 `/get_login_info` 这种路径分发。
  *
  * 构建纪律：dist/ 被 gitignore，全新 checkout 里没有 `dist/qq-bridge.cjs`。
- * 文件缺失时用仓库自带的 esbuild（devDependency，node_modules 里已有）现场
- * 构建一次；构建失败则整组 skip 并打印真实原因，绝不静默当通过。
+ * 本文件在 beforeAll 里用仓库自带的 esbuild（devDependency）现场构建，
+ * **选项逐字复刻 esbuild.mjs 的 qq-bridge 入口**（含 `import.meta.url` 的
+ * define + banner）——e2e 要验的就是随 VSIX 发布、面板 spawn 的那份产物，
+ * 用不同选项构建等于验另一个东西。构建失败直接让用例失败，**没有 skip 分支**。
  *
- * 两个用例的分工（见各自注释）：
+ * 三个用例的分工（见各自注释）：
  *  1. `dist/qq-bridge.cjs` —— **真正随 VSIX 发布、面板 spawn 的那个产物**；
- *  2. `dist/src/qq/bridge/main.js`（tsc 产出，`npm run build` 后才有）——
- *     仅作对照：同一份源码换一种模块格式编译，用来把「逻辑坏了」与
- *     「打包坏了」区分开。
+ *     完整回路必须通过（历史 P0：CJS 里 import.meta 被编译成 {}，入口自识别
+ *     恒为 false，进程静默退出 0）；
+ *  2. 回归探针：同一产物在**没有任何 IFLOW_QQ_*** 的环境下必须 exit 1 且
+ *     stderr 报 `missing required environment variable` —— 静默退出 0 即回归；
+ *  3. `dist/qq-bridge.esm.mjs`（esbuild 的 ESM 产物）—— 仅作对照：同一份源码
+ *     换一种模块格式编译，覆盖 `import.meta.url` 判定分支，用来把「逻辑坏了」
+ *     与「打包坏了」区分开。
  */
 
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as esbuild from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createBridgeDeliveryClient, type BridgeDeliveryClient } from "../src/qq/bridge-client.js";
 import { createQqIpcServer, type QqIpcServer } from "../src/qq/ipc.js";
@@ -41,8 +48,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
 /** 随 VSIX 发布的 bridge 产物（panel 实际 spawn 的路径）。 */
 const bridgeBundle = path.join(repoRoot, "dist", "qq-bridge.cjs");
-/** tsc 产出（ESM）；仅作对照，`npm run build` 后才有。 */
-const bridgeEsmEntry = path.join(repoRoot, "dist", "src", "qq", "bridge", "main.js");
+/** 同源码的 ESM 产物（esbuild 现场构建）；仅作对照。 */
+const bridgeEsmEntry = path.join(repoRoot, "dist", "qq-bridge.esm.mjs");
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -63,53 +70,43 @@ const E2E_TIMEOUT_MS = 30_000;
 const READY_TIMEOUT_MS = 20_000;
 
 // ---------------------------------------------------------------------------
-// 构建 dist/qq-bridge.cjs（缺失才构建；失败则 skip 整组）
+// 现场构建产物（选项与 esbuild.mjs 的 qq-bridge 入口保持一致）
 // ---------------------------------------------------------------------------
 
-let buildError: string | null = null;
-
-try {
-  ensureBridgeBundle();
-} catch (error) {
-  buildError = error instanceof Error ? error.message : String(error);
-  // 让失败原因在测试输出里可见（skip 本身不带文案）。
-  console.warn(`[qq-bridge-e2e] skipped: ${buildError}`);
-}
-
-function ensureBridgeBundle(): void {
-  if (existsSync(bridgeBundle) && statSync(bridgeBundle).size > 0) return;
-
-  const esbuildBin = path.join(repoRoot, "node_modules", "esbuild", "bin", "esbuild");
-  if (!existsSync(esbuildBin)) {
-    throw new Error(`missing ${esbuildBin}; run npm ci (or npm run build) before the e2e test`);
-  }
-  try {
-    execFileSync(
-      process.execPath,
-      [
-        esbuildBin,
-        path.join(repoRoot, "src", "qq", "bridge", "main.ts"),
-        "--bundle",
-        "--platform=node",
-        "--target=node20",
-        "--format=cjs",
-        "--outfile=dist/qq-bridge.cjs",
-      ],
-      { cwd: repoRoot, stdio: "pipe" },
-    );
-  } catch (error) {
-    const stderr =
-      error && typeof error === "object" && "stderr" in error
-        ? String((error as { stderr?: unknown }).stderr ?? "")
-        : "";
-    throw new Error(`failed to build dist/qq-bridge.cjs: ${stderr.trim() || String(error)}`);
-  }
-  if (!existsSync(bridgeBundle) || statSync(bridgeBundle).size === 0) {
-    throw new Error("esbuild reported success but dist/qq-bridge.cjs is missing/empty");
+/**
+ * 构建 bridge 产物。
+ *
+ * 选项必须与 `esbuild.mjs` 里 qq-bridge 的构建逐字一致：CJS 产物要靠
+ * `import.meta.url` 的 define + banner 才能自识别为入口（否则 P0 复发）。
+ * esbuild 0.28 不接受调用表达式作 define 值，所以 define 指向一个全局标识符、
+ * banner 给它赋真实 URL——这与 esbuild.mjs 是同一套写法，改一处必须同步另一处。
+ */
+async function buildBridge(outfile: string, format: "cjs" | "esm"): Promise<void> {
+  const isCjs = format === "cjs";
+  await esbuild.build({
+    entryPoints: [path.join(repoRoot, "src", "qq", "bridge", "main.ts")],
+    bundle: true,
+    outfile,
+    format,
+    platform: "node",
+    target: "node20",
+    minify: true,
+    keepNames: true,
+    sourcemap: true,
+    ...(isCjs
+      ? {
+          define: { "import.meta.url": "globalThis.__iflowBridgeEntryUrl" },
+          banner: {
+            js: 'globalThis.__iflowBridgeEntryUrl = require("url").pathToFileURL(__filename).href;',
+          },
+        }
+      : {}),
+    logLevel: "silent",
+  });
+  if (!existsSync(outfile) || statSync(outfile).size === 0) {
+    throw new Error(`esbuild reported success but ${outfile} is missing/empty`);
   }
 }
-
-const describeE2e = buildError === null ? describe : describe.skip;
 
 // ---------------------------------------------------------------------------
 // 假 OneBot 后端（HTTP API 侧）
@@ -477,18 +474,18 @@ function stderrSection(bridge: RunningBridge): string {
 // ---------------------------------------------------------------------------
 
 interface EntryProbe {
-  ok: boolean;
-  detail: string;
+  /** 进程退出码；被超时强杀时为 null。 */
+  code: number | null;
+  stderr: string;
 }
 
 /**
  * 用一个「缺必需 env」的进程探 bridge 的 direct-entry 分支。
  *
- * `src/qq/bridge/main.ts` 的 `isDirectEntry()` 依赖 `import.meta.url`：识别成功
- * 时 `readConfig()` 立即抛 `missing required environment variable
- * IFLOW_QQ_HOST_PORT`（stderr + 退出码 1）；识别失败时整个 main() 不执行，
- * 进程静默退出 0、stderr 为空。于是这条探针能确定地判断产物是否可运行，
- * 且不受 minify 改名影响。
+ * `src/qq/bridge/main.ts` 的 `isDirectEntry()` 识别成功时 `readConfig()` 立即抛
+ * `missing required environment variable IFLOW_QQ_HOST_PORT`（stderr + 退出码 1）；
+ * 识别失败时整个 main() 不执行，进程静默退出 0、stderr 为空。于是这条探针能
+ * 确定地判断产物是否可运行，且不受 minify 改名影响。
  */
 function probeEntry(entry: string): Promise<EntryProbe> {
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -496,7 +493,7 @@ function probeEntry(entry: string): Promise<EntryProbe> {
     if (key.startsWith("IFLOW_QQ_")) delete env[key];
   }
 
-  return new Promise<EntryProbe>((resolve) => {
+  return new Promise<EntryProbe>((resolve, reject) => {
     const child = spawn(process.execPath, [entry], {
       env,
       windowsHide: true,
@@ -516,28 +513,23 @@ function probeEntry(entry: string): Promise<EntryProbe> {
     }, 5_000);
     child.on("error", (error) => {
       clearTimeout(timer);
-      resolve({ ok: false, detail: `spawn failed: ${error.message}` });
+      reject(new Error(`spawn failed: ${error.message}`));
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
-      const ok = stderr.includes("missing required environment variable");
-      const detail = ok
-        ? "direct-entry 识别正常（缺 env 时如期报错）"
-        : `进程静默退出（code=${String(code)}，stderr=${JSON.stringify(stderr.trim().slice(0, 400))}），` +
-          "说明 isDirectEntry() 判定失败：CJS bundle 里 import.meta.url 被 esbuild 替换为空对象";
-      resolve({ ok, detail });
+      resolve({ code, stderr });
     });
   });
 }
-
-let bundleProbe: EntryProbe | undefined;
 
 // ---------------------------------------------------------------------------
 // 生命周期
 // ---------------------------------------------------------------------------
 
 beforeAll(async () => {
-  if (buildError !== null) return;
+  // 构建失败即抛：本组是硬性验收，没有 skip 分支。
+  await buildBridge(bridgeBundle, "cjs");
+  await buildBridge(bridgeEsmEntry, "esm");
 
   fakeOneBot = await startFakeOneBot();
   host = await createQqIpcServer({
@@ -554,11 +546,6 @@ beforeAll(async () => {
       onHealth: async () => ({ ok: true }),
     },
   });
-
-  bundleProbe = await probeEntry(bridgeBundle);
-  if (!bundleProbe.ok) {
-    console.warn(`[qq-bridge-e2e] dist/qq-bridge.cjs 不可运行：${bundleProbe.detail}`);
-  }
 }, E2E_TIMEOUT_MS);
 
 afterAll(async () => {
@@ -576,36 +563,33 @@ afterAll(async () => {
 // 测试
 // ---------------------------------------------------------------------------
 
-describeE2e("QQ bridge 跨进程 e2e", () => {
+describe("QQ bridge 跨进程 e2e", () => {
   it(
     "dist/qq-bridge.cjs（随 VSIX 发布的面板 spawn 产物）：启动上报端口 → 入站上行 → 投递发出",
-    async (ctx) => {
-      const probe = bundleProbe;
-      if (probe && !probe.ok) {
-        const note =
-          `跳过：dist/qq-bridge.cjs 无法运行 —— ${probe.detail}。` +
-          "这是产物级缺陷（esbuild --format=cjs 把 import.meta 编译成 {}，src/qq/bridge/main.ts 的 " +
-          "isDirectEntry() 恒为 false，panel spawn 后 bridge 静默退出 0），需要业务代码修复后才能验收。";
-        console.warn(`[qq-bridge-e2e] ${note}`);
-        ctx.skip(note);
-        return;
-      }
+    async () => {
       await runRoundTrip(bridgeBundle);
     },
     E2E_TIMEOUT_MS,
   );
 
   it(
-    "对照组：dist/src/qq/bridge/main.js（tsc ESM 产物）走同一回路",
-    async (ctx) => {
-      if (!existsSync(bridgeEsmEntry)) {
-        const note =
-          `跳过：${path.relative(repoRoot, bridgeEsmEntry)} 不存在（tsc 尚未产出）；` +
-          "先跑 npm run build 或 tsc -p tsconfig.json 再重跑本用例。";
-        console.warn(`[qq-bridge-e2e] ${note}`);
-        ctx.skip(note);
-        return;
-      }
+    "回归：dist/qq-bridge.cjs 在没有任何 IFLOW_QQ_* 的环境下必须报错退出，而不是静默退出 0",
+    async () => {
+      const probe = await probeEntry(bridgeBundle);
+      // 历史 P0：CJS 产物里 import.meta 被 esbuild 编译成 {}，入口自识别恒为
+      // false，main() 不执行 → 退出码 0 且 stderr 为空。这里把那条症状钉死。
+      expect(
+        probe.code,
+        `dist/qq-bridge.cjs 静默退出（code=${String(probe.code)}，stderr=${JSON.stringify(probe.stderr.trim().slice(0, 400))}）：isDirectEntry() 未能识别入口`,
+      ).toBe(1);
+      expect(probe.stderr).toContain("missing required environment variable");
+    },
+    15_000,
+  );
+
+  it(
+    "对照组：同一份源码的 ESM 产物（import.meta 判定分支）走同一回路",
+    async () => {
       await runRoundTrip(bridgeEsmEntry);
     },
     E2E_TIMEOUT_MS,

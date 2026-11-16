@@ -108,12 +108,37 @@ export function buildReadyPayload(input: {
 /**
  * 本模块是否被直接执行（而不是被 import，例如单元测试）。
  *
- * 入口是独立 Node 进程（`node dist/src/qq/bridge/main.js`）；被 import 时不应
- * 产生「读环境变量 / 起监听 / 退出进程」这类副作用。
+ * 入口是独立 Node 进程（`node dist/qq-bridge.cjs` 或 tsc 产出的
+ * `dist/src/qq/bridge/main.js`）；被 import 时不应产生「读环境变量 / 起监听 /
+ * 退出进程」这类副作用。
+ *
+ * 判定分两条通道，都必须是**防御式**的：
+ *  1. CJS 产物（`dist/qq-bridge.cjs`，panel 实际 spawn 的路径）走
+ *     `require.main === module` —— 不依赖 `import.meta`。esbuild 的
+ *     `--format=cjs` 会把 `import.meta` 编译成空对象，早先只做路径比较时
+ *     `fileURLToPath(undefined)` 抛错被 catch 吞成 false，整个 main() 不执行，
+ *     进程静默退出 0（P0）。esbuild.mjs 现在也 define 了 `import.meta.url`，
+ *     但这里不把可运行性押在打包器配置上。
+ *  2. ESM 产物（tsc 输出 / 测试 import）没有 `require`，退回 `import.meta.url`
+ *     与 `process.argv[1]` 的路径比较。
+ *
+ * 任何异常都不能静默吞成 false：两种判定都不可用时**默认按入口执行**（宁可
+ * 误启动也不能静默退出），并在 stderr 打一行说明——静默退出会让面板无从诊断。
  */
 function isDirectEntry(): boolean {
+  if (typeof require !== "undefined" && typeof module !== "undefined") {
+    try {
+      return require.main === module;
+    } catch {
+      // 非常规 CJS 宿主（require 被替换等）：落到下面的路径比较。
+    }
+  }
+
   const entry = process.argv[1];
-  if (!entry) return false;
+  if (!entry) {
+    log("cannot determine entry mode (no process.argv[1]); assuming direct execution");
+    return true;
+  }
   try {
     const self = normalizeEntryPath(fileURLToPath(import.meta.url));
     const target = normalizeEntryPath(entry);
@@ -121,8 +146,11 @@ function isDirectEntry(): boolean {
     return process.platform === "win32"
       ? self.toLowerCase() === target.toLowerCase()
       : self === target;
-  } catch {
-    return false;
+  } catch (error) {
+    log(
+      `cannot determine entry mode (${errorMessage(error)}); assuming direct execution`,
+    );
+    return true;
   }
 }
 
