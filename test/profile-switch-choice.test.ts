@@ -160,8 +160,8 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
     // dispose() cancels any still-open dialog (resolves its switch as
     // cancelled) so a test that left the dialog unanswered cannot hang.
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
     vi.restoreAllMocks();
   });
@@ -460,7 +460,7 @@ describe("ChatPanel profile-switch session choice (custom modal)", () => {
       expect(await p.resolveWorkspaceHandshakeCreds()).toEqual(profiles.A);
     } finally {
       await secondPanel.dispose();
-      await rm(secondStorage, { recursive: true, force: true });
+      await rm(secondStorage, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -548,8 +548,8 @@ describe("ChatPanel saveAuth: 编辑配置的严格 upsert 与热更新", () => 
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
     vi.restoreAllMocks();
   });
@@ -1083,8 +1083,8 @@ describe("ChatPanel saveAuth: 内核 apiProfiles 原地更新（用户真实形�
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
     vi.restoreAllMocks();
   });

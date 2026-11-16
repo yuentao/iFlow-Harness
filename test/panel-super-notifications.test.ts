@@ -160,7 +160,7 @@ describe("Super Agent 完成提示：子会话 / 主会话汇报分档", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function flush(): Promise<void> {

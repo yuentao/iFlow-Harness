@@ -162,7 +162,7 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     await panel.dispose();
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("notifies when an approval card arrives while the panel is hidden; the button opens the panel", async () => {

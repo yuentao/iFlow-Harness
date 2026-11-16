@@ -125,7 +125,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("恢复主会话时把它的子会话取回看板", async () => {

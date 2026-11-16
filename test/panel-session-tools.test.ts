@@ -210,8 +210,8 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
-    fs.rmSync(iflowHome, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
   });
 

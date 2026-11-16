@@ -111,7 +111,7 @@ describe("ChatPanel approval-timeout auto-reject", () => {
   afterEach(async () => {
     vi.useRealTimers();
     await panel.dispose();
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("resolves the cancelled response on timeout and keeps the turn streaming", async () => {

@@ -66,8 +66,8 @@ describe("skill resolution (CLI SkillScanner semantics)", () => {
   });
 
   afterEach(() => {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   function writeSkill(root: string, dir: string, frontmatter: string, body: string): void {

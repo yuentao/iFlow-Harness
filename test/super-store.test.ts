@@ -35,7 +35,7 @@ describe("super agent · 子会话归档", () => {
   });
 
   afterEach(() => {
-    rmSync(baseDir, { recursive: true, force: true });
+    rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("写进去再读出来，记录原样回来", async () => {

@@ -1,6 +1,6 @@
 {
   "iflow.displayName": "心流·驭光",
-  "iflow.description": "iFlow 内核的 VSCode 图形前端（基于 ACP）：内置执行体、流式对话、逐块 Diff 审批、轮级回退、记忆与知识库、MCP 管理",
+  "iflow.description": "iFlow 内核的 VSCode 图形前端：内置执行体、流式对话、逐块 Diff 审批、轮级回退、记忆与知识库、MCP 管理",
   "iflow.viewContainer.title": "心流·驭光",
   "iflow.view.name": "聊天",
   "command.openPanel.title": "iFlow：打开聊天面板",
@@ -38,9 +38,9 @@
   "iflow.configuration.nextStepTimeoutSeconds.description": "回合末下一步建议的最长等待时间（秒）。回合末的标题生成、下一步建议与记忆提取合并为一次模型调用，实际超时取所启用任务中最宽松的一个。默认 25，范围 0–300（0 表示不限制）。",
   "iflow.configuration.compressTimeoutSeconds.description": "压缩会话的最长等待时间（秒）。默认 0 表示不限制——压缩很大的会话本来就可能需要几分钟；设为非 0 后，超时的压缩会被取消并给出提示。范围 0–600。",
   "iflow.configuration.autoCompressThresholdPercent.description": "上下文占用达到该百分比时触发自动压缩。仅在开启「自动压缩上下文」时生效。默认 95，范围 50–100。",
-  "iflow.configuration.checkpoints.description": "每轮对话前把工作区快照到独立的影子 Git 仓库，从而可以按轮回退文件改动。不会改动你项目自己的 .git，非 Git 目录同样可用。默认开启。",
+  "iflow.configuration.checkpoints.description": "每轮对话前把工作区快照到独立的私有 Git 仓库，从而可以按轮回退文件改动。不会改动你项目自己的 .git，非 Git 目录同样可用。默认开启。",
   "iflow.configuration.checkpointMaxFiles.description": "会话工作区的文件数超过该上限时关闭快照，避免超大工作区拖慢面板。默认 50000。",
-  "iflow.configuration.checkpointMaxFileMB.description": "快照时跳过大于该大小（MB）的文件：这些文件的改动不参与回退，影子仓库也能保持小巧。未改动的文件跨轮共享存储，不会重复占用空间。默认 300，0 表示不限大小。",
+  "iflow.configuration.checkpointMaxFileMB.description": "快照时跳过大于该大小（MB）的文件：这些文件的改动不参与回退，快照仓库也能保持小巧。未改动的文件跨轮共享存储，不会重复占用空间。默认 300，0 表示不限大小。",
   "iflow.configuration.checkpointDir.description": "检查点快照的存放根目录，支持 ~ 与工作区相对路径，每个工作区在根下各有独立子目录。留空则使用 VSCode 默认的工作区存储位置。",
   "iflow.configuration.checkpointMaxTurns.description": "每个会话最多保留多少轮快照，超出后在每轮捕获后清理最旧的快照。默认 0，表示不限制。",
   "iflow.configuration.checkpointMaxSizeMB.description": "所有会话快照的总占用上限（MB）。超出后按最久未使用整体删除会话快照，损坏或没有索引的残留目录也会一并清理。默认 0，表示不限制。",
@@ -49,5 +49,5 @@
   "iflow.statusbar.tooltip": "心流·驭光 — 点击打开聊天面板",
   "command.exportSessionMarkdown.title": "iFlow：导出会话为 Markdown",
   "command.exportSessionJson.title": "iFlow：导出会话为 JSON",
-  "command.exportWireLog.title": "iFlow：导出 ACP 通信日志（已脱敏）"
+  "command.exportWireLog.title": "iFlow：导出内核通信日志（敏感信息已隐去）"
 }

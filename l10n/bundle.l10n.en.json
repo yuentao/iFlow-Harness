@@ -356,6 +356,7 @@
   "这个文件不在可编辑的记忆文件里": "This file is not one of the editable memory files",
   "这个文件是只读的（在工作区之外）": "This file is read-only (it is outside the workspace)",
   "通信日志已导出（{0} 条记录，敏感信息已隐去）：{1}": "Communication log exported ({0} entries, sensitive data redacted): {1}",
+  "通信日志": "Communication log",
   "重新认证，提问已跳过": "Re-authenticating; the pending question was skipped",
   "重新认证，计划审批已跳过": "Re-authenticating; plan approval skipped",
   "错误：{0}": "Error: {0}",

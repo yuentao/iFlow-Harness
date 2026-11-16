@@ -89,8 +89,8 @@ describe("ChatPanel delete-user-message transaction", () => {
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
   });
 
@@ -200,7 +200,7 @@ describe("ChatPanel dispose vs in-flight connect (review A3)", () => {
     } catch {
       // already disposed
     }
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.ACP_MOCK_MODE;
   });
 
@@ -263,7 +263,7 @@ describe("ChatPanel restartCli vs wedged connect (P0-3)", () => {
     } catch {
       // already disposed
     }
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.ACP_MOCK_MODE;
   });
 

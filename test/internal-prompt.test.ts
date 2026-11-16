@@ -197,7 +197,7 @@ describe("ChatPanel internal prompt via direct gateway (enhance regression)", ()
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("returns the completion text on a clean stop", async () => {
@@ -315,7 +315,7 @@ describe("ChatPanel enhance cancellation & session isolation", () => {
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   /** Start an enhance whose completion hangs until `release` resolves. */
@@ -506,7 +506,7 @@ describe("ChatPanel merged turn-end follow-up (one gateway call)", () => {
     vi.restoreAllMocks();
     setConfigOverrides({});
     await panel.dispose();
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("fires ONE call carrying every enabled task and dispatches all three parts", async () => {

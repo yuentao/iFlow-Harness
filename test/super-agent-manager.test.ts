@@ -313,7 +313,7 @@ async function until(predicate: () => boolean, timeoutMs = 15_000): Promise<void
 }
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("super agent · 编排", () => {
@@ -1384,7 +1384,7 @@ describe("super agent · 意外中断后重试", () => {
     const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
     await until(() => harness.sessions[0]?.status === "failed");
     const originalPath = harness.sessions[0]!.isolation.path;
-    rmSync(originalPath, { recursive: true, force: true });
+    rmSync(originalPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 
     expect(await harness.manager.retry(spawned.id)).toBe(true);
     await until(() => harness.sessions[0]?.status === "completed");

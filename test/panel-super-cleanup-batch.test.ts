@@ -125,7 +125,7 @@ describe("Super Agent · 批量清理的汇总回执", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("全部成功：串行清理每个目标，只发一条 info 汇总 toast", async () => {

@@ -145,7 +145,7 @@ describe("ChatPanel message queue (P0-3 wiring)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const send = (text: string): Promise<void> => p.handleWebviewMessage({ type: "sendPrompt", text });
@@ -611,7 +611,7 @@ describe("ChatPanel 停止生成", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("请求还没发出时按停止：这一轮不会被发出去，按 cancelled 收尾", async () => {

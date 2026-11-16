@@ -136,7 +136,7 @@ describe("ChatPanel plan-mode sync", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("re-asserts the panel mode before the prompt goes out", async () => {
