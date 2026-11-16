@@ -990,6 +990,13 @@ function ApiConfigSection({
   }, [deletingProfile]);
 
   const editingProfile = editing?.name ? auth.profiles.find((p) => p.name === editing.name) : undefined;
+  // Saving the profile the panel is actually running on re-authenticates the
+  // live session, so it must wait for a free turn. Adding a new profile also
+  // activates it (cold re-auth). Editing any other row only writes the kernel
+  // file — the host does not touch the running session — so it stays
+  // saveable while a turn or a child session is in flight.
+  const editingActiveProfile = editing?.name != null && editingProfile?.active === true;
+  const saveBlocked = busy && (editing?.name == null || editingActiveProfile);
   const keyPlaceholder = (() => {
     const tail = editingProfile?.keyTail ?? auth.saved?.keyTail;
     return tail ? t("已保存（{0}）— 留空保持不变", tail) : "sk-…";
@@ -1155,7 +1162,7 @@ function ApiConfigSection({
           </div>
         )}
         <ActionRow>
-          <Button variant="primary" disabled={busy} onClick={submit}>
+          <Button variant="primary" disabled={saveBlocked} onClick={submit}>
             {t("保存")}
           </Button>
           <Button onClick={back}>
@@ -1163,6 +1170,9 @@ function ApiConfigSection({
           </Button>
           {formError && <span className="text-ui-label text-destructive">{formError}</span>}
         </ActionRow>
+        {saveBlocked && editingActiveProfile && (
+          <Hint>{t("当前配置正在使用中，生成中或有子会话运行时无法保存")}</Hint>
+        )}
         <Hint>
           {t(
             "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文）；编辑当前配置会重新认证会话，编辑其他配置只保存、不切换。",

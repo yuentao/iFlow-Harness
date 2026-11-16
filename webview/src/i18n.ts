@@ -471,6 +471,8 @@ const en: Record<string, string> = {
     "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Saving re-authenticates the session via openai-compatible.",
   "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文）；编辑当前配置会重新认证会话，编辑其他配置只保存、不切换。":
     "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Editing the active profile re-authenticates the session; editing another profile only saves it without switching.",
+  "当前配置正在使用中，生成中或有子会话运行时无法保存":
+    "This profile is currently in use; it cannot be saved while a turn is generating or a child session is running.",
   "正在重新认证…": "Re-authenticating…",
   "等待选择…": "Waiting for your choice…",
   "审批策略": "Approval policies",
