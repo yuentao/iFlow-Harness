@@ -16,7 +16,7 @@ import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type { QqSettingsIo } from "../src/qq/settings-host.js";
 import type { QqConfig } from "../src/qq/config.js";
-import type { QqTaskUi, SessionState } from "../shared/messages.js";
+import type { QqTaskUi, SessionState, WebviewToHost } from "../shared/messages.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -118,6 +118,7 @@ type PanelInternals = {
   qqWorkspaceRoots: () => string[];
   coerceQqInboundMessage: (value: unknown) => unknown;
   isQqTaskAction: (value: unknown) => boolean;
+  handleWebviewMessage: (msg: WebviewToHost) => Promise<void>;
   handleQqConfigAction: (action: "testConnection" | "generateBindCode" | "unbind") => Promise<void>;
   handleQqTaskAction: (taskId: string, action: string, text?: string) => Promise<void>;
   refreshQqTasks: () => void;
@@ -193,6 +194,21 @@ describe("QQ 通道 · 面板侧接线", () => {
 
     await p.handleQqTaskAction("task-1", "stop");
     expect(handleTaskAction).toHaveBeenCalledWith("task-1", "stop", undefined);
+  });
+
+  it("qqConfigAction 走 webview → host 通道并被识别（不再是 HostToWebview 的误声明）", async () => {
+    // 类型层面：它必须是合法的 WebviewToHost 消息（tsc 在测试配置下会把
+    // 这里标红为不兼容 —— 若方向被写回 HostToWebview 即可发现）。
+    const msg: WebviewToHost = { type: "qqConfigAction", action: "testConnection" };
+    const handler = vi.spyOn(p, "handleQqConfigAction").mockResolvedValue(undefined);
+
+    await p.handleWebviewMessage(msg);
+    expect(handler).toHaveBeenCalledWith("testConnection");
+
+    await p.handleWebviewMessage({ type: "qqConfigAction", action: "generateBindCode" });
+    expect(handler).toHaveBeenLastCalledWith("generateBindCode");
+
+    handler.mockRestore();
   });
 
   it("通道未启动时提问/操作入口安静返回（不崩、不改状态）", async () => {

@@ -2060,7 +2060,10 @@ export class ChatPanel implements vscode.Disposable {
     this.log.trace(`webview → host: ${msg.type}`);
     // `qqConfigAction`（连测试 / 生成配对码 / 解绑）是 webview→host 命令；
     // 它历史上只声明在 HostToWebview 上（方向写反），Wave3-C2 已在
-    // WebviewToHost 补上声明。这段运行时守卫保留，兼容尚未重建的旧 webview。
+    // WebviewToHost 补上声明，「修正消息方向」这次又把 HostToWebview 上的
+    // 误声明移除，下面 switch 里的 `case "qqConfigAction"` 是类型检查过的
+    // 正规通道。这段运行时形状守卫保留，兼容尚未重建、仍按旧声明发送的
+    // 旧 webview（先于 switch 命中，行为与原先一致）。
     const qqAction = (msg as { type?: unknown; action?: unknown });
     if (
       qqAction.type === "qqConfigAction" &&
@@ -2531,6 +2534,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "qqTaskAction":
         await this.handleQqTaskAction(msg.taskId, msg.action, msg.text);
+        break;
+      case "qqConfigAction":
+        await this.handleQqConfigAction(msg.action);
         break;
       default:
         // C10: version-mismatch tripwire — a webview built from a different

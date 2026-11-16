@@ -1915,9 +1915,6 @@ export type HostToWebview =
    * error / idle (cancelled). On `done` the appended rows are already written
    * to the settings, so the following `hostSettings` refresh carries them. */
   | ({ type: "modelMetadataState" } & ModelMetadataStateUi)
-  /** QQ 远程任务（Wave2-B）：设置页 QQ 卡片操作的回执/触发通道。三类动作
-   * 分别对应连测试、生成绑定码、解绑；本波只声明协议，宿主尚未接线。 */
-  | { type: "qqConfigAction"; action: "testConnection" | "generateBindCode" | "unbind" }
   /** QQ 远程任务（Wave2-B）：绑定码与过期时间（epoch ms），供设置页展示。 */
   | { type: "qqBindCode"; code: string; expiresAt: number }
   /** QQ 远程任务（Wave3-B）：设置页的配置快照。明文凭据绝不在这条消息里，
@@ -2290,8 +2287,11 @@ export type WebviewToHost =
       action: "stop" | "approve" | "deny" | "answer" | "merge" | "discard" | "refresh";
       text?: string;
     }
-  /** QQ 远程任务（Wave3-C）：设置页的三类连接动作。此前该消息只在
-   * HostToWebview 上声明（方向写反），这里补上 webview→host 的声明。 */
+  /** QQ 远程任务（Wave3-C 补声明 / Wave2-B 方向修正）：设置页 QQ 卡片的三类
+   * 动作——连测试、生成绑定码、解绑。这是 webview 发给宿主的**请求**（早期
+   * 误声明在 HostToWebview 上，方向写反，panel 只能用运行时形状守卫兜底接收；
+   * 现已从 HostToWebview 移除、只在此处声明）。回执不是同名消息：状态走
+   * `qqStatus`、绑定码走 `qqBindCode`，解绑结果走 toast。 */
   | { type: "qqConfigAction"; action: "testConnection" | "generateBindCode" | "unbind" }
   /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
    * `hasBotToken` / `hasAppSecret` 是宿主回传的投影，这里只会被忽略——
