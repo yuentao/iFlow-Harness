@@ -82,6 +82,7 @@ const en: Record<string, string> = {
   "删除子会话「{0}」的工作目录？分支上未合并的提交会被保留；工作目录里未提交的改动会被一并删除，无法恢复。":
     "Delete the working directory of child session “{0}”? Unmerged commits on its branch are kept, but uncommitted changes in the working directory are deleted permanently.",
   "清理": "Clean up",
+  "清理中": "Cleaning up",
   "子会话还在运行，先中断再清理": "Stop the child session before cleaning it up",
   "中断该子会话": "Interrupt this child session",
   "中断子会话": "Interrupt the child session",
