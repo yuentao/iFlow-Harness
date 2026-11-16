@@ -8377,7 +8377,17 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "cancel": {
         if (!msg.sessionId) return;
-        await manager.cancel(msg.sessionId);
+        const outcome = await manager.cancel(msg.sessionId);
+        // 与 cancelAll / cleanup / retry 一致，单个中断也要有可见回执。
+        // 按 SuperCancelOutcome 的真实 reason 区分文案：幂等重复（已终态）
+        // 不是失败，但要如实告诉用户「无需中断」，避免以为刚才那下没生效。
+        if (outcome.reason === "cancelled") {
+          this.store.sendToast("info", vscode.l10n.t("已中断子会话"));
+        } else if (outcome.reason === "already-terminal") {
+          this.store.sendToast("info", vscode.l10n.t("该子会话已经结束，无需中断"));
+        } else {
+          this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
+        }
         break;
       }
       case "cancelAll": {
