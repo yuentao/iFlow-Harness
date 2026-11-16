@@ -8,6 +8,10 @@
  *
  * 起点是转录里最近一张委派卡（`data-super-delegation-origin`，见
  * SuperDirectiveCard.tsx），终点是顶栏看板控件的 `getBoundingClientRect()`。
+ * 轨迹走真实抛体感的弧线而非直线：三层嵌套各管一个维度——外层 X 匀速
+ * （linear），中层 Y 用缓出模拟「到达顶点」的 y=2t−t²（ease-out-quad），
+ * 内层只做缩放淡出。X/Y 用不同 timing-function 才能合成出中点明显偏离
+ * 起点→终点连线的弧线，见 styles.css 的 keyframes 注释。
  * 整批 N 个子会话只合成一个飞入体（徽标显示 N），同一时刻最多一个飞入体，
  * 避免连续快照刷屏。
  *
@@ -157,14 +161,25 @@ export function SuperDelegationFly({
       className="super-delegation-fly"
       style={style}
       onAnimationEnd={(event) => {
+        // 三层各自有一条动画，都会冒泡到这里；只有外层自己的 X 动画结束
+        // 才算整次飞入抵达，避免中层/内层先结束时提前卸载。
         if (event.target !== event.currentTarget) return;
         finish();
       }}
     >
-      <Users className={ICON_INLINE} />
-      <span data-testid="super-delegation-fly-count" className="super-delegation-fly-count">
-        {fly.count}
-      </span>
+      {/* 轨迹 = 分轴缓动合成：外层走 X（linear），本层走 Y（抛体缓出），
+          内层只管缩放淡出。X/Y timing-function 不同 → 路径是抛物线而非直线。 */}
+      <div
+        data-testid="super-delegation-fly-rise"
+        className="super-delegation-fly-rise"
+      >
+        <div className="super-delegation-fly-body">
+          <Users className={ICON_INLINE} />
+          <span data-testid="super-delegation-fly-count" className="super-delegation-fly-count">
+            {fly.count}
+          </span>
+        </div>
+      </div>
     </div>,
     document.body,
   );
