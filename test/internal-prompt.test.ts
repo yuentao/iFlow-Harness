@@ -734,7 +734,7 @@ describe("prompt templates (prompts/)", () => {
     // 优先级必须覆盖整份提示词：Tool Usage / Security 段也在教「本会话怎么跑 shell」，
     // 只写「the workflows above」会把那几段留在覆盖范围之外，两段直接自相矛盾。
     expect(text).toContain(
-      "Where anything in this prompt tells you to implement, run a command, run a check or run git, this section takes precedence in this session",
+      "Where anything in this prompt tells you to implement, read a file, search the code, inspect logs, run a command, run a check or run git, this section takes precedence in this session: you implement and investigate by delegating",
     );
     expect(text).not.toContain("Where the workflows above tell you to implement");
     // 读到 Tool Usage 段时就该知道那些 shell 指令属于子会话，而不是读到后面才发现矛盾。
@@ -776,6 +776,42 @@ describe("prompt templates (prompts/)", () => {
     expect(brief).toContain("never claim a check passed");
   });
 
+  it("forbids the main session from reading, writing or running anything and routes it to a child", () => {
+    // 2026-11-16 用户截图实测：主会话仍在 read_file / 跑 npx vitest。提示词必须
+    // 把这些写成硬性禁止，并与宿主的 settings.disallowed_tools 机械门控同口径。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("## Hard prohibitions for the main session (mechanically enforced)");
+    expect(text).toContain("No reading or exploring");
+    expect(text).toContain("No writing");
+    expect(text).toContain("No executing");
+    for (const tool of [
+      "read_file",
+      "read_many_files",
+      "glob",
+      "search_file_content",
+      "list_directory",
+      "image_read",
+      "web_fetch",
+      "web_search",
+      "ReadCommandOutput",
+      "write_file",
+      "replace",
+      "multi_edit",
+      "xml_escape",
+      "run_shell_command",
+    ]) {
+      expect(text).toContain(`\`${tool}\``);
+    }
+    // 探查也必须派子会话：旧的「只读探查可以留在主会话」整句消失。
+    expect(text).not.toContain("read-only exploration to build the plan");
+    expect(text).toContain("Planning that needs the codebase is itself a unit of work");
+    expect(text).toContain("dispatch a child to investigate and report back");
+    expect(text).toContain("which files to read, which question to answer, which commands to run");
+    // 规划与派发通道不受影响。
+    expect(text).toContain("`todo_write` / `todo_read` stay yours for planning");
+    expect(text).toContain("`super-agent` is your dispatch channel");
+  });
+
   it("keeps the child-session concurrency limit configurable instead of hard-coding 4", () => {
     // 模型会照着提示词里的数字自我约束：写死的 "At most 4 child sessions" 曾让
     // 用户把 iflow.superAgent.maxConcurrent 设成 10 后仍只派 4 个任务
@@ -798,7 +834,10 @@ describe("prompt templates (prompts/)", () => {
     // 否则子会话会误以为自己也不能用 `task`，与 prompts/super-agent-task.md 矛盾。
     const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
     expect(text).toContain("the main session — the one that receives the child-session board — has no `task` tool");
-    expect(text).toContain('settings.disallowed_tools: ["task"]');
+    expect(text).toContain("settings.disallowed_tools");
+    expect(text).toContain(
+      'carrying `"task"` plus every read/explore, write and execute tool listed above',
+    );
     // 无条件的裸句必须消失（子会话读到会误判）。
     expect(text).not.toContain("this session has no `task` tool");
     expect(text).not.toContain("This session has no `task` tool");

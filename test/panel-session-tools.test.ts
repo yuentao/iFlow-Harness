@@ -1,13 +1,14 @@
 /**
  * 主会话的 `session/new` / `session/load` 必须携带
- * `settings.disallowed_tools: ["task"]`。
+ * `settings.disallowed_tools`：既剔除进程内 `task` 子代理，也剔除一切
+ * 读取/探查、写入与执行类工具（主会话只做派发）。
  *
- * 用户指令：主会话只做派发，实现工作全部交给 Super Agent 子会话；进程内的
- * `task` 子代理只允许在子会话里跑。提示词已经写明这一点，但模型仍然优先调
- * `task`，所以改成机械剔除（见 `src/panel/panel.ts` 的
- * `MAIN_SESSION_DISALLOWED_TOOLS` 注释里的 bundle 证据：请求的
- * `settings.disallowed_tools` → Config 的 `excludeTools` → `createToolRegistry()`
- * 跳过注册 `static Name = "task"` 的 TaskTool）。
+ * 用户指令：主会话只做派发，实现与探查工作全部交给 Super Agent 子会话。
+ * 提示词已经写明这一点，但模型仍然优先调 `task`、仍然自己 read_file / 跑
+ * vitest（2026-11-15 / 2026-11-16 用户实测截图），所以改成机械剔除（见
+ * `src/panel/panel.ts` 的 `MAIN_SESSION_DISALLOWED_TOOLS` 注释里的 bundle
+ * 证据：请求的 `settings.disallowed_tools` → Config 的 `excludeTools` →
+ * `createToolRegistry()` 跳过注册同名 `static Name` 的类）。
  *
  * 覆盖面板侧**全部**会创建/重载主会话的路径；子会话（SuperAgentManager）
  * 刻意不带 settings —— 那条断言在 test/super-agent-manager.test.ts。
@@ -18,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
-import { ChatPanel } from "../src/panel/panel.js";
+import { ChatPanel, MAIN_SESSION_DISALLOWED_TOOLS } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import { acpSessionFilePath } from "../src/acp/models-query.js";
 import { setConfigOverrides } from "./vscode-stub.js";
@@ -27,7 +28,29 @@ import type { SessionState } from "../shared/messages.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** Every main-session request must carry exactly this. */
-const EXPECTED_SETTINGS = { disallowed_tools: ["task"] };
+const EXPECTED_SETTINGS = { disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS] };
+
+/** 读/写/执行三类工具必须全部被剔除；规划与派发通道必须保留。 */
+const REQUIRED_DISALLOWED = [
+  "task",
+  "read_file",
+  "read_many_files",
+  "glob",
+  "search_file_content",
+  "list_directory",
+  "image_read",
+  "web_fetch",
+  "web_search",
+  "ReadCommandOutput",
+  "lsp_goto_definition",
+  "lsp_find_references",
+  "lsp_hover",
+  "write_file",
+  "replace",
+  "multi_edit",
+  "xml_escape",
+  "run_shell_command",
+] as const;
 
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
   const store = new Map<string, unknown>();
@@ -125,7 +148,7 @@ function lastRequest(fn: ReturnType<typeof vi.fn>): Record<string, unknown> {
   return (calls[calls.length - 1]?.[0] ?? {}) as Record<string, unknown>;
 }
 
-describe("主会话 session settings · 剔除 task 工具", () => {
+describe("主会话 session settings · 剔除 task 与读写执行工具", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -283,5 +306,21 @@ describe("主会话 session settings · 剔除 task 工具", () => {
     for (const call of client.loadSession.mock.calls) {
       expect((call[0] as Record<string, unknown>).settings).toEqual(EXPECTED_SETTINGS);
     }
+  });
+
+  it("禁止清单覆盖读/写/执行三类，同时保留规划、提问与派发通道", () => {
+    const blocked: readonly string[] = MAIN_SESSION_DISALLOWED_TOOLS;
+    for (const name of REQUIRED_DISALLOWED) {
+      expect(blocked).toContain(name);
+    }
+    // 主会话自己的规划与需求澄清必须保留；super-agent 是唯一派发通道。
+    expect(blocked).not.toContain("todo_write");
+    expect(blocked).not.toContain("todo_read");
+    expect(blocked).not.toContain("ask_user_question");
+    expect(blocked).not.toContain("super-agent");
+    // `grep` / `ls` 不是 CLI 的注册名（真名是 search_file_content /
+    // list_directory），写进清单只会静默不生效。
+    expect(blocked).not.toContain("grep");
+    expect(blocked).not.toContain("ls");
   });
 });
