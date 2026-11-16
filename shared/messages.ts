@@ -1737,6 +1737,11 @@ export type WebviewToHost =
    *  - `cleanup`: drop the child session and its worktree; `keepBranch`
    *    preserves the git branch (the default keeps it when the branch still
    *    carries unmerged commits).
+   *  - `cleanupBatch`: the same cleanup for several children in one request
+   *    (`sessionIds`). The host runs them serially and reports ONE aggregate
+   *    receipt toast instead of one per child — a bulk action should not
+   *    bury the transcript under N identical toasts. A single `cleanup`
+   *    keeps its own per-action receipt.
    *  - `merge`: ask the MAIN AGENT to merge the child's branch back into the
    *    current branch — the agent runs the git command itself and resolves
    *    conflicts. The host only verifies (`git merge-base --is-ancestor`)
@@ -1754,12 +1759,22 @@ export type WebviewToHost =
    */
   | {
       type: "superAgent";
-      action: "cancel" | "cancelAll" | "respond" | "cleanup" | "merge" | "transcript" | "retry";
-      /** Target child session (absent for cancelAll). */
+      action:
+        | "cancel"
+        | "cancelAll"
+        | "respond"
+        | "cleanup"
+        | "cleanupBatch"
+        | "merge"
+        | "transcript"
+        | "retry";
+      /** Target child session (absent for cancelAll / cleanupBatch). */
       sessionId?: string;
+      /** cleanupBatch: the children to clean up in one serial batch. */
+      sessionIds?: string[];
       /** respond: the answers map (ask_user_question), keyed by header. */
       answers?: Record<string, string | string[]>;
-      /** cleanup: keep the git branch. */
+      /** cleanup / cleanupBatch: keep the git branch. */
       keepBranch?: boolean;
     }
   | { type: "newSession" }
