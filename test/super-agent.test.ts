@@ -1251,8 +1251,9 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("Dispatch by calling the `super-agent` tool");
     expect(digest).toContain("if that tool is not in your list");
     expect(digest).toContain("```super-agent fenced block instead");
-    expect(digest).toContain("Manage children only by emitting a ```super-agent-actions fenced block");
-    expect(digest).toContain("no actions tool exists");
+    expect(digest).toContain("To manage children, call the `super-agent` tool with {\"actions\":[...]}");
+    expect(digest).toContain("otherwise emit a ```super-agent-actions fenced block");
+    expect(digest).toContain("never call a separate `super-agent-actions` tool");
   });
 
   it("看板 hint 的载荷示例是合法 JSON（模型照抄示例不会撞上 invalid payload）", () => {
@@ -1286,7 +1287,7 @@ describe("super agent · 看板摘要", () => {
     // 非空分支同样要带委派协议提示：有子会话在跑时模型仍可能选错派发通道。
     expect(digest).toContain("Dispatch by calling the `super-agent` tool");
     expect(digest).toContain("if that tool is not in your list");
-    expect(digest).toContain("Manage children only by emitting a ```super-agent-actions fenced block");
+    expect(digest).toContain("To manage children, call the `super-agent` tool with {\"actions\":[...]}");
     // 用户中断不计入失败：摘要里应分开呈现。
     expect(digest).toContain("0 failed");
     expect(digest).toContain("0 interrupted");

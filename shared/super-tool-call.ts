@@ -75,24 +75,52 @@ export function classifySuperToolName(name: string): SuperToolCallKind | null {
  * null）。标量与 `null` 一律返回 null —— 协议载荷必须是对象或数组，`"5"`
  * 这种值即使能 parse 也不是载荷。循环引用（JSON.stringify 抛错）同样 null。
  */
-function normalizeArgsJson(args: unknown): string | null {
+/** 把参数归一成 JSON 值（对象 / 数组），供围栏合成与载荷形态判定共用。 */
+function normalizeArgsValue(args: unknown): unknown {
   if (typeof args === "string") {
     const trimmed = args.trim();
     if (!trimmed) return null;
     try {
       const parsed: unknown = JSON.parse(trimmed);
-      if (!parsed || typeof parsed !== "object") return null;
-      return JSON.stringify(parsed);
+      return parsed && typeof parsed === "object" ? parsed : null;
     } catch {
       return null;
     }
   }
-  if (!args || typeof args !== "object") return null;
+  return args && typeof args === "object" ? args : null;
+}
+
+function normalizeArgsJson(args: unknown): string | null {
+  const value = normalizeArgsValue(args);
+  if (!value) return null;
   try {
-    return JSON.stringify(args) ?? null;
+    return JSON.stringify(value) ?? null;
   } catch {
     return null;
   }
+}
+
+/**
+ * 综合工具名与载荷决定真正的协议类别。
+ *
+ * 新版内置 `super-agent` 工具的 schema 同时接受 `tasks` 与 `actions`（见
+ * `vendor/iflow-fork/bundle/super-agent-loader.cjs`）。模型做管理动作时经常
+ * 仍调用这个工具，只传 `{"actions":[…]}`、不带 tasks —— 此时名字归一结果是
+ * dispatch，若照派发解析就「找不到任务」→ 宿主误报「未派发子会话」。因此只
+ * 在「有非空 actions 且没有非空 tasks」时改判成 actions。反向不改判：
+ * `super-agent-actions` 工具历史上只带 actions，保持原语义、避免误吞派发载荷。
+ */
+export function resolveSuperToolCallKind(
+  kind: SuperToolCallKind,
+  args: unknown,
+): SuperToolCallKind {
+  if (kind !== "dispatch") return kind;
+  const value = normalizeArgsValue(args);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return kind;
+  const record = value as Record<string, unknown>;
+  const hasActions = Array.isArray(record.actions) && record.actions.length > 0;
+  const hasTasks = Array.isArray(record.tasks) && record.tasks.length > 0;
+  return hasActions && !hasTasks ? "actions" : kind;
 }
 
 /**
@@ -139,6 +167,11 @@ export type SuperToolCallResult = ({ ok: true } & SuperToolCallPayload) | SuperT
  * 出现 pending 中间态；解析器给不出任何任务 / 动作时按失败返回 —— 「名字命中了
  * 却什么都没派发」正是这次兜底要消灭的静默故障，不能当成成功。
  *
+ * 合并载荷纠偏：新版 `super-agent` 工具同时收 tasks / actions，模型做管理动作
+ * 时可能把它写成 `{"actions":[…]}`（名字仍是 dispatch）。这里先经
+ * {@link resolveSuperToolCallKind} 按载荷改判，返回值的 `kind` 也是纠偏后的值，
+ * 宿主据此分流到动作执行，而不是把空任务当成「未派发」。
+ *
  * 注意：`{"actions":[]}` 这类语法合法但空载的载荷同样按失败返回 —— 宿主会
  * 留一条痕迹，而不是让用户以为指令已经生效。
  */
@@ -146,15 +179,16 @@ export function parseSuperToolCall(
   kind: SuperToolCallKind,
   args: unknown,
 ): SuperToolCallResult {
-  const text = synthesizeSuperToolCallBlock(kind, args);
+  const effectiveKind = resolveSuperToolCallKind(kind, args);
+  const text = synthesizeSuperToolCallBlock(effectiveKind, args);
   if (!text) return { ok: false, reason: "the tool arguments are not a JSON payload" };
-  if (kind === "dispatch") {
+  if (effectiveKind === "dispatch") {
     const scan = extractSuperDirectives(text, 0);
     if (scan.blocks.length === 0) {
       const reason = scan.invalidBlocks[0]?.reason ?? "the payload contains no delegation tasks";
       return { ok: false, reason };
     }
-    return { ok: true, kind, text, tasks: scan.blocks, actions: [] };
+    return { ok: true, kind: effectiveKind, text, tasks: scan.blocks, actions: [] };
   }
   const scan = extractSuperActions(text, 0);
   if (scan.actions.length === 0) {
@@ -166,7 +200,7 @@ export function parseSuperToolCall(
           : "the payload contains no management actions",
     };
   }
-  return { ok: true, kind, text, tasks: [], actions: scan.actions };
+  return { ok: true, kind: effectiveKind, text, tasks: [], actions: scan.actions };
 }
 
 /**

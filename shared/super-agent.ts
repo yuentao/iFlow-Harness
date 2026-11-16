@@ -2886,20 +2886,20 @@ export function describeSuperSessionLine(session: SuperSessionUi): string {
  * 内置 CLI 现已注册 `super-agent` 工具（见 AGENTS.md 的
  * `super-agent-tool-refactor`），所以**首选工具调用**；只有工具不在列表时
  * （Plan 模式白名单不含它，或旧 bundle 尚未带该工具）才退回正文围栏。管理
- * 动作（`super-agent-actions`）**只有围栏一条通道**，没有对应工具，这里必须
- * 写明，避免模型去调一个不存在的工具。
+ * 动作已合并进同一工具的 `actions` 参数：schema 带它就用工具，否则才退回
+ * `super-agent-actions` 围栏 —— 绝不引导模型去调一个不存在的独立工具。
  *
  * 载荷示例必须是**合法 JSON**：`{"title","task"}` 这类缺冒号的简写会被
  * `parseDirectiveBody` 判成「载荷不是合法 JSON」（进 `invalidBlocks`），
  * 模型照抄示例就会零派发。改用带引号的占位符 —— 示例本身可解析，而原样
  * 抄回仍会被占位符规则拒掉，不会派发一条垃圾任务。
  */
-const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. Manage children only by emitting a ```super-agent-actions fenced block — no actions tool exists.";
+const SUPER_DIGEST_HINT = "Dispatch by calling the `super-agent` tool with body {\"tasks\":[{\"title\":\"<title>\",\"task\":\"<self-contained brief>\"}]}; if that tool is not in your list, write the same JSON as a ```super-agent fenced block instead. To manage children, call the `super-agent` tool with {\"actions\":[...]} when its schema exposes `actions`; otherwise emit a ```super-agent-actions fenced block — never call a separate `super-agent-actions` tool.";
 
 const SUPER_DIGEST_FOOTER = [
   "",
   SUPER_DIGEST_HINT,
-  "You can manage the child sessions above: emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
+  "You can manage the child sessions above: prefer the `super-agent` tool with an {\"actions\":[...]} body when its schema exposes `actions`; otherwise emit a ```super-agent-actions code block whose body is {\"actions\":[...]};",
   "Actions: retry (re-run a failed or interrupted child in its existing working directory), cancel (stop a running one), answer (answer a pending question), cleanup (delete the working directory).",
   "A child whose status is `failed` MUST be retried with the `retry` action (same sessionId, same working directory — its uncommitted work is preserved). Do NOT dispatch a new, equivalent `super-agent` task to redo it: that starts a fresh working directory from zero and discards the work the failed child already did.",
   "Skip `retry` only if the user explicitly asks to abandon the task or its premise is no longer valid — and explain to the user first. Issue one `retry`, never concurrently for the same child. An `interrupted` child is not a failure: do not auto-retry it unless the user asks.",

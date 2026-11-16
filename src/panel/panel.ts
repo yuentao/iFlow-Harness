@@ -7401,10 +7401,13 @@ export class ChatPanel implements vscode.Disposable {
       this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
       return;
     }
+    // 载荷纠偏：新版 `super-agent` 工具同时收 tasks / actions，模型做管理动作
+    // 时可能只传 `{"actions":[…]}`（名字仍是 dispatch）。分流以解析器纠偏后的
+    // kind 为准 —— 管理动作走动作链路，既不派发子会话，也不是「未派发」失败。
     this.log.info(
-      `super agent: accepted structured ${kind} tool call (${update.toolCallId || "no-id"})`,
+      `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
-    if (kind === "dispatch") {
+    if (parsed.kind === "dispatch") {
       this.dispatchSuperTasks(parsed.tasks);
       return;
     }
