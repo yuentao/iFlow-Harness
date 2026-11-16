@@ -92,7 +92,7 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
     case "error":
       return (
         <Chip tone="danger">
-          <span className="size-1.5 rounded-full bg-destructive" /> {t("错误")}
+          <span className="size-1.5 rounded-full bg-destructive" /> {t("出错了")}
         </Chip>
       );
   }
@@ -183,7 +183,7 @@ function ErrorBanner({
       variant="danger-soft"
       className="shrink-0"
       icon={<RefreshCw className={ICON_INLINE} />}
-      title={t("重启内核并重试（会话自动恢复）")}
+      title={t("重启内核后重试，当前会话会自动恢复")}
       onClick={() => send({ type: "restartCli" })}
     >
       {t("重试")}
@@ -444,10 +444,10 @@ export function App() {
   // and the snapshot render, which React rejects with error #310.
   const liveMessage = useMemo(() => {
     if (status === null) return "";
-    if (pendingApproval) return t("需要审批工具调用");
-    if (pendingPlanExit) return t("需要确认退出计划模式");
-    if (pendingQuestions) return t("有待回答问题需要回答");
-    if (pendingProfileSwitch) return t("等待选择切换 API 配置的会话处理方式");
+    if (pendingApproval) return t("有操作等你批准");
+    if (pendingPlanExit) return t("计划已就绪，等你批准");
+    if (pendingQuestions) return t("iFlow 有问题等你回答");
+    if (pendingProfileSwitch) return t("等你选择切换 API 配置后如何处理当前会话");
     if (status === "connecting") return t("正在连接 iFlow…");
     if (status === "streaming")
       return compressing
@@ -591,7 +591,7 @@ export function App() {
         </div>
         <div
           className="splash-hint"
-          title={t("首次启动或配置了多个 MCP server 时较久")}
+          title={t("首次启动，或配置了多个 MCP 服务器时会多等一会儿")}
         >
           {connectEpoch > 0 ? t("正在重新启动内核 …") : t("正在启动 …")}
           {status === "connecting" && connectingElapsed >= 3 && (
@@ -919,9 +919,9 @@ export function App() {
               // 不能/能新建会话」时才覆盖它（title={undefined} 会把默认
               // tooltip 抹掉）。
               {...(superWaiting && !superHeld
-                ? { title: t("子会话还在运行并等待汇报，暂时不能新建会话") }
+                ? { title: t("子会话还在运行，等它们汇报完才能新建会话") }
                 : superWaiting && superHeld
-                  ? { title: t("已停止；可新建会话，待处理汇报会留在原会话") }
+                  ? { title: t("已停止：可以新建会话，待处理的汇报仍留在原会话") }
                   : replaying
                     ? { title: t("取消正在进行的会话恢复并新建会话") }
                     : {})}
@@ -967,9 +967,9 @@ export function App() {
       )}
       {auth?.needsSetup && !onboardingOpen && (
         <div className="mx-3 my-1 flex shrink-0 flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-ui-caption leading-relaxed text-warning">
-          <span className="min-w-0 flex-1">{t("尚未配置 API 凭据，无法开始对话。")}</span>
+          <span className="min-w-0 flex-1">{t("还没配置 API 密钥，现在还不能开始对话。")}</span>
           <Button variant="warning-soft" size="sm" onClick={() => setSettingsTab("api")}>
-            {t("配置")}
+            {t("去配置")}
           </Button>
           <Button variant="warning-soft" size="sm" onClick={() => setOnboardingOpen(true)}>
             {t("重新运行引导")}
@@ -1068,7 +1068,7 @@ export function App() {
           title={t("新建会话")}
           confirmLabel={t("新建会话")}
           message={t(
-            "有 {0} 项子会话结果待处理（你按了停止，它们被压下了）。新建会话不会丢弃它们：它们按原会话归属留在队列里，切回那个会话后才会继续投递。确定新建吗？",
+            "你按了停止，还有 {0} 项子会话结果没处理。新建会话不会丢掉它们：结果留在原会话里，切回去才会继续处理。要新建吗？",
             superPendingCount,
           )}
           onConfirm={() => {

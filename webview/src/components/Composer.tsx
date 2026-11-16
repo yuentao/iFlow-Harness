@@ -191,7 +191,7 @@ function usageTooltip(u: Usage): string {
   const breakdownLine =
     u.bdPrefill > 0
       ? t(
-          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 预填充 {4}",
+          "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 固定开销 {4}",
           u.bdUser.toLocaleString(),
           u.bdAssistant.toLocaleString(),
           u.bdTool.toLocaleString(),
@@ -205,14 +205,14 @@ function usageTooltip(u: Usage): string {
           u.bdTool.toLocaleString(),
           u.bdThought.toLocaleString(),
         );
-  const prefillNote = u.bdPrefill > 0 ? t("预填充 = 系统提示词 / 记忆 / 工具声明，每次请求都携带") : "";
-  const caveatLine = !u.usageAuthoritative && u.bdPrefill > 0 ? t("估算未含内核内置工具声明与目录清单") : "";
+  const prefillNote = u.bdPrefill > 0 ? t("固定开销 = 系统提示词、记忆和工具说明，每次请求都要带上") : "";
+  const caveatLine = !u.usageAuthoritative && u.bdPrefill > 0 ? t("估算没有算上内核内置的工具说明和目录清单") : "";
   return u.pct === null
     ? [
         t(
           u.usageAuthoritative
             ? "当前上下文 {0} tokens（内核上报）"
-            : "当前上下文约 {0} tokens（host 估算，压缩后按压缩上下文重算）",
+            : "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）",
           (u.usageAuthoritative ? u.contextUsed : u.inputTokens).toLocaleString(),
         ),
         t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
@@ -228,7 +228,7 @@ function usageTooltip(u: Usage): string {
           u.contextUsed.toLocaleString(),
           (u.contextWindow as number).toLocaleString(),
           u.pct,
-          u.estimated ? t("，窗口为估算值") : "",
+          u.estimated ? t("，上限为估算值") : "",
           u.usageAuthoritative ? t("，占用为内核上报值") : "",
         ),
         t("输入 {0} tokens · 输出 {1} tokens", u.inputTokens.toLocaleString(), u.outputTokens.toLocaleString()),
@@ -384,7 +384,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
     const timer = setTimeout(() => {
       stagingRef.current.delete(requestId);
       setStaging((prev) => prev.filter((s) => !entries.some((e) => e.id === s.id)));
-      showNote(t("暂存文件超时，请重试"));
+      showNote(t("添加文件超时了，请重试"));
     }, STAGE_TIMEOUT_MS);
     stagingRef.current.set(requestId, { ids: entries.map((e) => e.id), timer });
   }
@@ -403,7 +403,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       resolveTimers.current.delete(requestId);
       pendingContextResolves.current.delete(requestId);
       setResolvingContexts((prev) => prev.filter((c) => c.id !== requestId));
-      showNote(t("解析上下文超时，请重试"));
+      showNote(t("读取上下文超时了，请重试"));
     }, CONTEXT_RESOLVE_TIMEOUT_MS);
     resolveTimers.current.set(requestId, timer);
   }
@@ -661,7 +661,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           staged.push({ id: ++attachSeq.current, name: p.split(/[\\/]/).pop() ?? p, path: p });
         }
         if (staged.length > 0) setAttachments((prev) => [...prev, ...staged]);
-        if (failed > 0) showNote(t("{0} 个文件暂存失败，已跳过", failed));
+        if (failed > 0) showNote(t("{0} 个文件添加失败，已跳过", failed));
         return;
       }
       if (msg?.type === "filesPicked") {
@@ -721,7 +721,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
           return;
         }
         if (textRef.current.trim() !== "") {
-          showNote(t("输入框非空，已放弃回填（队列条目仍在）"));
+          showNote(t("输入框已有内容，没有填入（原条目仍在）"));
           return;
         }
         setText(msg.text);
@@ -1720,10 +1720,10 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       {suggestionsLoading && (suggestions?.length ?? 0) === 0 && !suggestionsHidden && (
         <div
           className="mb-2 flex items-center gap-1 rounded-lg border border-border bg-surface/80 px-2 py-1 text-ui-caption text-muted-foreground shadow-card"
-          aria-label={t("预测下一步操作…")}
+          aria-label={t("正在想下一步建议…")}
         >
           <Loader2 className="size-3 shrink-0 animate-spin" />
-          <span className="min-w-0 flex-1 truncate">{t("预测下一步操作…")}</span>
+          <span className="min-w-0 flex-1 truncate">{t("正在想下一步建议…")}</span>
         </div>
       )}
 
@@ -1734,7 +1734,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
       {suggestions && suggestions.length > 0 && !suggestionsHidden && (
         <div
           className="mb-2 flex flex-wrap items-center gap-1.5"
-          aria-label={t("AI 推测的下一步操作，点击填入输入框")}
+          aria-label={t("iFlow 猜的下一步，点一下填进输入框")}
         >
           <span className="inline-flex shrink-0 items-center gap-1 text-ui-caption text-muted-foreground">
             <Sparkles className="size-3" />
@@ -1746,7 +1746,7 @@ const thinkUnsupported = models.find((m) => m.id === currentModelId)?.thinking =
             <button
               key={s}
               className={CANVAS_CHIP}
-              title={t("AI 推测的下一步操作，点击填入输入框")}
+              title={t("iFlow 猜的下一步，点一下填进输入框")}
               onClick={() => applySuggestion(s)}
             >
               <span className="truncate">{s}</span>

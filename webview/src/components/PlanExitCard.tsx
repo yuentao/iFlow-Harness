@@ -115,15 +115,15 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <ClipboardCheck className="size-3.5 shrink-0 text-primary" />
-        <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 请求退出 Plan 模式")}</span>
+        <span id={titleId} className="min-w-0 truncate text-ui-label font-semibold">{t("iFlow 准备开始执行计划")}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           <HelpTip label={t("计划说明")} align="right">
             <span className="block space-y-1">
               <span className="block">
-                {t("Plan 模式只读分析与规划；批准后会退出 Plan 模式并开始执行。")}
+                {t("Plan 模式只做分析和规划，不改动文件。批准后 iFlow 会开始执行，并可以修改工作区里的文件。")}
               </span>
-              <span className="block">{t("批准的计划会保存到 .iflow/specs/ 以便留痕。")}</span>
-              <span className="block">{t("编辑后的内容仅在「重新规划」时发送给 agent；「批准计划」执行原计划。")}</span>
+              <span className="block">{t("批准的计划会存到 .iflow/specs/，方便以后回看。")}</span>
+              <span className="block">{t("编辑的内容只在你点「重新规划」时交给 iFlow；点「批准计划」执行的仍是原计划。")}</span>
               {/* The shortcut line rides once in the actions row below;
                   duplicating it here put the same hint in two places. */}
             </span>
@@ -145,7 +145,7 @@ export function PlanExitCard({ pending }: { pending: PendingPlanExitUi }) {
           countdown / actions. The plan text is uncapped (the agent's full
           plan), so it scrolls here instead of growing the card upward. */}
       <div id={descId} className="min-h-0 flex-auto space-y-2 overflow-y-auto px-3 py-3 text-ui-label">
-        <p className="text-ui-caption text-muted-foreground">{t("退出 Plan 模式后将开始执行以下计划：")}</p>
+        <p className="text-ui-caption text-muted-foreground">{t("批准后 iFlow 会离开 Plan 模式，按下面的计划开始动手：")}</p>
         {editing ? (
           <TextArea
             ref={textareaRef}

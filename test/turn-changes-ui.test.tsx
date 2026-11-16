@@ -58,7 +58,7 @@ it("rolls back the whole turn from the footer", () => {
     checkpoints: [{ userBlockId: "u", turnIndex: 0, sha: "abc", createdAt: 1, partial: false, label: "go" }],
   } }));
   reply({ records: [record("tool", "src/file.ts", 3, 1)] });
-  const rollbackBtn = container.querySelector<HTMLButtonElement>('button[aria-label="回滚本轮"]');
+  const rollbackBtn = container.querySelector<HTMLButtonElement>('button[aria-label="回滚这一轮"]');
   expect(rollbackBtn).toBeTruthy();
   act(() => rollbackBtn!.click());
   const dialog = document.body.querySelector('[role="alertdialog"]');

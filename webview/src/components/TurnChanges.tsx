@@ -144,11 +144,11 @@ function TurnChangesInner({ sessionId, userBlockId }: {
           <span className="text-diff-add-fg">+{additions}</span>
           <span className="text-diff-del-fg">−{deletions}</span>
         </span>}
-        {!!records?.length && <HelpTip label={t("变更说明")} className="ml-auto">{t("仅列出已记录的工具差异文件，不保证覆盖全部磁盘修改或代表当前净变更。点击文件在编辑器中打开。")}</HelpTip>}
+        {!!records?.length && <HelpTip label={t("变更说明")} className="ml-auto">{t("这里只列出 iFlow 记录到改动的文件，可能不包含你手动改的内容，也不代表文件现在的最终差异。点击文件可在编辑器中打开。")}</HelpTip>}
       </div>
       <div className="space-y-2 p-3">
         {(unavailable || !records?.length) && <div role="status" className="text-ui-micro text-muted-foreground">
-          {unavailable ? t("该轮次已不可用。") : records === null ? t("正在读取本轮变更…") : t("本轮没有可展示的变更记录；这不表示没有文件修改。")}
+          {unavailable ? t("这一轮的变更记录已不可用。") : records === null ? t("正在读取本轮变更…") : t("本轮没有可显示的改动记录；这不表示没有文件修改。")}
         </div>}
         {!!records?.length && <ul className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border/60">
           {records.map((item) => <li key={item.key} className="flex items-center bg-editor transition-colors hover:bg-surface">
@@ -186,7 +186,7 @@ function TurnChangesInner({ sessionId, userBlockId }: {
         {!!records?.length && latest && checkpoint && (
           <IconButton
             icon={<History className="size-3" />}
-            label={t("回滚本轮")}
+            label={t("回滚这一轮")}
             size="sm"
             tone="danger"
             onClick={() => setConfirmRollback(true)}
@@ -196,28 +196,28 @@ function TurnChangesInner({ sessionId, userBlockId }: {
     </section>
       {confirmRollback && (
         <ConfirmDialog
-          title={t("回滚到此轮之前")}
+          title={t("回滚到这一轮之前")}
           message={
             canRollbackFiles
-              ? t("选择回滚范围：文件恢复到此轮之前、删除该消息及其后对话，或两者都要。")
-              : t("该轮快照不完整，无法恢复文件，只能删除该消息及其后所有对话。")
+              ? t("选择回滚范围：只把文件恢复到这一轮之前、只删除这条消息及之后的对话，或两者都做。")
+              : t("这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。")
           }
           onCancel={() => setConfirmRollback(false)}
           actions={[
             {
               label: t("文件"),
-              title: canRollbackFiles ? t("仅回滚工作区文件到本轮之前") : t("该轮快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("只把工作区文件恢复到这一轮之前") : t("这一轮的快照不完整，无法恢复文件"),
               disabled: !canRollbackFiles,
               onClick: () => rollback("files"),
             },
             {
               label: t("对话"),
-              title: t("仅删除该消息及其后所有对话"),
+              title: t("只删除这条消息及之后的所有对话"),
               onClick: () => rollback("conversation"),
             },
             {
               label: t("全部"),
-              title: canRollbackFiles ? t("回滚文件并删除该消息及其后所有对话") : t("该轮快照不完整，无法恢复文件"),
+              title: canRollbackFiles ? t("恢复文件，并删除这条消息及之后的对话") : t("这一轮的快照不完整，无法恢复文件"),
               variant: "primary",
               onClick: () => rollback("both"),
             },
