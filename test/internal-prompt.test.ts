@@ -837,6 +837,21 @@ describe("prompt templates (prompts/)", () => {
     );
   });
 
+  it("makes retrying a failed child session mandatory and forbids re-dispatching an equivalent task", () => {
+    // 2026-11 用户实测：主会话看到 failed 子会话后新派等价 super-agent 任务，
+    // 新建 worktree 从零开始，丢掉原 worktree 里大半未提交改动。规则必须进
+    // 系统提示（每轮都读），且要与看板 footer 的英文措辞一致。
+    const text = readFileSync(path.join(here, "..", "prompts", "system-prompt.md"), "utf8");
+    expect(text).toContain("A failed child session must be retried, never re-dispatched");
+    expect(text).toContain("Do not dispatch a new, equivalent `super-agent` task");
+    expect(text).toContain("the **same worktree**");
+    // 保留「检查失败=新任务」规则，但要显式区分对象，避免模型对失败子会话也 new task。
+    expect(text).toContain("A failed check is a new task, not a reason to code");
+    expect(text).toContain("not a failed child session");
+    // interrupted 不算失败，不自动 retry。
+    expect(text).toContain("is **not** a failure — do not auto-retry it unless the user asks");
+  });
+
   it("fills every placeholder in the assembled prompts", () => {
     const assembled = [
       buildFollowupPrompt({

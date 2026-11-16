@@ -1312,6 +1312,19 @@ describe("super agent · 看板摘要", () => {
     expect(digest).toContain("要覆盖压缩卡吗？");
   });
 
+  it("失败子会话的看板指令硬性要求 retry、禁止新派等价任务", () => {
+    // 用户实测：failed 子会话的 worktree 里已有大半未提交改动，主会话却用
+    // super-agent 新派了一个等价任务（全新 worktree、从零开始），把半成品全丢了。
+    // 因此看板末尾的英文指令必须把「失败优先 retry、不重派」写成硬规则。
+    const digest = buildSuperDigest([
+      session({ id: "super-failed", status: "failed", error: "内核拒绝了这次请求" }),
+    ]);
+    expect(digest).toContain("A child whose status is `failed` MUST be retried with the `retry` action");
+    expect(digest).toContain("Do NOT dispatch a new, equivalent `super-agent` task");
+    expect(digest).toContain("same working directory");
+    expect(digest).toContain("An `interrupted` child is not a failure");
+  });
+
   it("超出字符预算时丢弃尾部条目并注明省略数量", () => {
     const many = Array.from({ length: 120 }, (_, i) =>
       session({ id: `super-${i}`, title: `任务 ${i}`, status: "completed", summary: "x".repeat(120) }),
