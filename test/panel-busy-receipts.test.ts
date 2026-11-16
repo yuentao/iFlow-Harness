@@ -19,7 +19,7 @@ import type * as vscode from "vscode";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function makeContext(): vscode.ExtensionContext {
+function makeContext(storageDir: string): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T => (store.has(key) ? store.get(key) : defaultValue) as T,
@@ -46,10 +46,10 @@ function makeContext(): vscode.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscode.ExtensionContext;
 }
@@ -95,18 +95,22 @@ describe("ChatPanel async busy states and failure receipts", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let iflowHome: string;
+  let storageDir: string;
 
   beforeEach(async () => {
     iflowHome = await mkdtemp(path.join(os.tmpdir(), "iflow-busy-test-"));
     process.env.IFLOW_HOME = iflowHome;
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+    // Per-test storage dir: transcript writes must never land in the shared
+    // test/transcripts dir (parallel workers race there).
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-busy-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
   });
 
   afterEach(async () => {
     await panel.dispose();
     await rm(iflowHome, { recursive: true, force: true });
-    await rm(path.join(here, "transcripts"), { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true });
     delete process.env.IFLOW_HOME;
   });
 

@@ -1,5 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
@@ -9,7 +11,7 @@ import type * as vscode from "vscode";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function makeContext(): vscode.ExtensionContext {
+function makeContext(storageDir: string): vscode.ExtensionContext {
   const store = new Map<string, unknown>();
   const state = {
     get: <T>(key: string, defaultValue?: T): T =>
@@ -37,10 +39,10 @@ function makeContext(): vscode.ExtensionContext {
     extensionPath: here,
     extensionMode: 3,
     logPath: here,
-    storageUri: { fsPath: here },
-    globalStorageUri: { fsPath: here },
-    storagePath: here,
-    globalStoragePath: here,
+    storageUri: { fsPath: storageDir },
+    globalStorageUri: { fsPath: storageDir },
+    storagePath: storageDir,
+    globalStoragePath: storageDir,
     asAbsolutePath: (p: string) => path.join(here, p),
   } as unknown as vscode.ExtensionContext;
 }
@@ -90,10 +92,17 @@ function permissionRequest(
 describe("approval diff preview passthrough", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
+  let storageDir: string;
 
-  beforeEach(() => {
-    panel = new ChatPanel(makeContext(), { workspaceRoot: here, watchers: makeWatchers() });
+  beforeEach(async () => {
+    storageDir = await mkdtemp(path.join(os.tmpdir(), "iflow-approval-diff-storage-"));
+    panel = new ChatPanel(makeContext(storageDir), { workspaceRoot: here, watchers: makeWatchers() });
     p = panel as unknown as PanelInternals;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    await rm(storageDir, { recursive: true, force: true });
   });
 
   async function shownApproval(
