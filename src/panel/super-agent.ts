@@ -15,15 +15,20 @@
  *    子会话改回运行中（Orca `worker_done`「恰好发一次」的宿主侧等价物）。
  *  - 内部进展不打扰主会话：只有 ready / blocked / failed / dropped 会上报，
  *    progress 只更新看板（dsh 的 `internal_only` vs `notify`）。
- *  - **子会话始终免确认且完全自主**：内核被推到 `yolo` 模式 —— 这是刻意的产品
- *    语义，子会话必须完全自主、不因审批往返而停顿，也不该把审批变成人工负担。
- *    代价是 `yolo` 下内核通常**不发** `session/request_permission`，所以宿主在
- *    审批点上的依赖护栏（`shared/super-agent-guard.ts`，拦会破坏主工作区依赖的
- *    安装/联接命令）只是**兜底**而非主防线：万一某类工具仍然发审批，宿主就地
- *    自动放行（shell 用 allow_once，危险命令 deny），既不产生待办也不阻塞子会话。
+ *  - **子会话默认免确认且完全自主**（缺省审批策略 `auto`）：内核被推到
+ *    `yolo` 模式 —— 这是刻意的产品语义，子会话必须完全自主、不因审批往返而
+ *    停顿，也不该把审批变成人工负担。代价是 `yolo` 下内核通常**不发**
+ *    `session/request_permission`，所以宿主在审批点上的依赖护栏
+ *    （`shared/super-agent-guard.ts`，拦会破坏主工作区依赖的安装/联接命令）
+ *    只是**兜底**而非主防线：万一某类工具仍然发审批，宿主就地自动放行
+ *    （shell 用 allow_once，危险命令 deny），既不产生待办也不阻塞子会话。
+ *    需要「审批真的发生」的调用方（例如 QQ 远程任务）可以传
+ *    `spawn(spec, { policy })`：`supervised` 不推 `yolo`、把权限请求交给回调
+ *    裁决（未提供/抛错/超时按拒绝），`deny` 直接拒绝。三者都仍然保护依赖
+ *    护栏这条硬底线。
  *    只有 `_iflow/user/questions` 是真正的信息缺口 —— 那是只有人才能回答的，
  *    落到子会话自己的 pending 槽位由看板就地作答（主会话的 pending 是单数槽位，
- *    多子会话并发会互相覆盖）。
+ *    多子会话并发会互相覆盖）。提问不是权限，任何策略下都走这条路。
  *  - **完成后自动带回改动**：按 `iflow.superAgent.integration` 自动合并到主
  *    工作区的当前分支，或推送分支并创建 PR。合并**串行**执行；是否安全先用
  *    `git merge-tree` 在对象库里预演（不碰索引与工作区），因此主工作区有未提交
@@ -42,7 +47,11 @@ import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
 import type {
   ContentBlock,
+  ExitPlanModeRequest,
   ExitPlanModeResponse,
+  PermissionOption,
+  PermissionOptionKind,
+  RequestPermissionRequest,
   RequestPermissionResponse,
   TurnUsageReport,
   UserQuestion,
@@ -115,9 +124,224 @@ import {
 
 /**
  * 提问的自动放行时限（与主会话的审批卡同一纪律：超时就放行/继续，避免 agent
- * 永久阻塞）。审批不走这里 —— 子会话免确认，审批由宿主立即放行。
+ * 永久阻塞）。审批不走这里 —— 缺省策略（auto）下子会话免确认、审批由宿主立即
+ * 放行；`supervised` 策略的审批回调另有 {@link SUPER_PERMISSION_TIMEOUT_MS}。
  */
 export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
+
+// ---------------------------------------------------------------------------
+// 可配置审批策略（Wave3-A）
+// ---------------------------------------------------------------------------
+
+/**
+ * 子会话审批模式。
+ *
+ * - `auto`（缺省）：**完全维持既有行为** —— 内核推 `yolo`，宿主对任何
+ *   `session/request_permission` / `_iflow/plan/exit` 直接放行（shell 仍过依赖
+ *   护栏）。本地现有调用零回归。
+ * - `supervised`：**不推 `yolo`**；权限请求与 Plan 退出先交给策略里的
+ *   `onPermissionRequest` 回调裁决，未提供回调、回调抛错或超时一律按拒绝处理
+ *   （安全默认）。提问不是权限，仍落到看板作答。
+ * - `deny`：**不推 `yolo`**；所有权限请求直接拒绝（取消输出），Plan 退出直接
+ *   拒绝；提问仍走看板。
+ */
+export type SuperApprovalMode = "auto" | "supervised" | "deny";
+
+const SUPER_APPROVAL_MODES: readonly SuperApprovalMode[] = ["auto", "supervised", "deny"];
+
+/**
+ * 交给审批回调的请求摘要。
+ *
+ * `request` 是**原始 wire 请求**（含 `options`），回调可以据此做更细的判断；
+ * `_iflow/plan/exit` 没有权限选项，改在 `plan` 字段里带上计划正文。
+ */
+export interface SuperPermissionRequest {
+  sessionId: string;
+  toolCallId?: string;
+  toolName?: string;
+  /** 工具 kind（`execute` / `edit` / ...，wire 上的 `toolCall.kind`）。 */
+  kind?: string;
+  /** 人类可读摘要：工具标题，或 Plan 正文的单行摘要。 */
+  summary: string;
+  /** 原始权限请求；Plan 退出请求不存在。 */
+  request?: RequestPermissionRequest;
+  /** Plan 退出请求的计划正文（`_iflow/plan/exit` 时存在）。 */
+  plan?: string;
+}
+
+/**
+ * 审批回调的裁决结果。
+ *
+ * 前三个值刻意与 wire 的 `PermissionOptionKind` 同名（`deny` 对应
+ * `reject_once`/`reject_always`），由 {@link resolvePermissionResponse} 映射回
+ * **agent 自己给出的 optionId** —— 宿主绝不伪造 optionId（CLI 用原生枚举解析，
+ * 伪造会抛）。
+ */
+export type SuperPermissionDecision = "allow_once" | "allow_always" | "deny" | "cancel";
+
+const SUPER_PERMISSION_DECISIONS: readonly SuperPermissionDecision[] = [
+  "allow_once",
+  "allow_always",
+  "deny",
+  "cancel",
+];
+
+/** 审批回调的裁决时限（略小于主会话审批卡的 5 分钟，超时按拒绝处理）。 */
+export const SUPER_PERMISSION_TIMEOUT_MS = 4 * 60_000;
+
+/**
+ * spawn 时可选携带的策略。
+ *
+ * 缺省（不传）等价于 `{ approval: "auto" }` —— 现有调用点的行为一个字节都不变。
+ */
+export interface SuperSpawnPolicy {
+  approval: SuperApprovalMode;
+  /**
+   * 传给子会话 `session/new` 的 `settings.disallowed_tools`（与主会话的
+   * `MAIN_SESSION_DISALLOWED_TOOLS` 同名机制）。非空时才会出现在请求里。
+   */
+  disallowedTools?: string[];
+  /**
+   * `supervised` 模式的裁决回调。未提供时按拒绝处理（安全默认），
+   * `auto` / `deny` 模式下不会被调用。
+   */
+  onPermissionRequest?: (request: SuperPermissionRequest) => Promise<SuperPermissionDecision>;
+}
+
+/** 归一化之后的策略（运行时形态：工具名去重、审批模式收敛为合法值）。 */
+export interface ResolvedSuperSpawnPolicy {
+  approval: SuperApprovalMode;
+  disallowedTools: string[];
+  onPermissionRequest?: (request: SuperPermissionRequest) => Promise<SuperPermissionDecision>;
+}
+
+/**
+ * 工具名列表归一化：去掉非字符串、空白项与重复项（保留首次出现的顺序）。
+ *
+ * 这是 wire 边界：策略可能来自面板设置、JSON 或模型生成的指令块，脏值不应
+ * 让 `session/new` 携带一个毫无意义的黑名单。
+ */
+export function normalizeDisallowedTools(raw?: readonly unknown[] | null): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 把 spawn 的可选 policy 归一化成运行时策略。
+ *
+ * 纯函数：不读环境、不碰磁盘。缺省 / null / 脏值（例如被手改成 `"Auto"`）一律
+ * 收敛为 `auto` —— 「不认识就按现状跑」比「猜一个更严格的模式」更安全，因为
+ * 策略缺失时用户期待的是现有行为。
+ */
+export function resolveSpawnPolicy(
+  spec?: { policy?: SuperSpawnPolicy | null } | null,
+): ResolvedSuperSpawnPolicy {
+  const raw = spec?.policy ?? null;
+  const approval =
+    raw && (SUPER_APPROVAL_MODES as readonly string[]).includes(raw.approval)
+      ? raw.approval
+      : "auto";
+  const resolved: ResolvedSuperSpawnPolicy = {
+    approval,
+    disallowedTools: normalizeDisallowedTools(raw?.disallowedTools),
+  };
+  if (raw?.onPermissionRequest) resolved.onPermissionRequest = raw.onPermissionRequest;
+  return resolved;
+}
+
+/** 一个值是否是合法的裁决（回调返回脏值时不采纳，按拒绝处理）。 */
+function isSuperPermissionDecision(value: unknown): value is SuperPermissionDecision {
+  return typeof value === "string" && (SUPER_PERMISSION_DECISIONS as readonly string[]).includes(value);
+}
+
+/**
+ * 执行审批回调并收敛结果。
+ *
+ * 三条安全默认：**没有回调**、**回调抛错**、**超过时限**一律返回 `deny`。
+ * 回调返回非枚举值时同样按拒绝处理 —— 绝不把脏值当成放行。
+ *
+ * `timeoutMs` 是显式参数（默认 {@link SUPER_PERMISSION_TIMEOUT_MS}），便于单测
+ * 用极小的超时验证超时路径，而不必伪造定时器。
+ */
+export async function awaitSuperPermissionDecision(
+  handler: ((request: SuperPermissionRequest) => Promise<SuperPermissionDecision>) | undefined,
+  request: SuperPermissionRequest,
+  timeoutMs: number = SUPER_PERMISSION_TIMEOUT_MS,
+): Promise<SuperPermissionDecision> {
+  if (!handler) return "deny";
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const timedOut = new Promise<SuperPermissionDecision>((resolve) => {
+      timer = setTimeout(() => resolve("deny"), Math.max(0, timeoutMs));
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    const decided = await Promise.race([handler(request), timedOut]);
+    return isSuperPermissionDecision(decided) ? decided : "deny";
+  } catch {
+    return "deny";
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * 把裁决映射回 wire 响应。
+ *
+ * **只用 agent 给出的 option id**：allow 类找不到允许选项、deny 类找不到拒绝
+ * 选项时退回「取消」（与审批超时同一条路），绝不伪造批准。
+ */
+export function resolvePermissionResponse(
+  options: readonly PermissionOption[],
+  decision: SuperPermissionDecision,
+): RequestPermissionResponse {
+  if (decision === "cancel") return { outcome: { outcome: "cancelled" } };
+  const preferred: PermissionOptionKind[] =
+    decision === "allow_once"
+      ? ["allow_once", "allow_always"]
+      : decision === "allow_always"
+        ? ["allow_always", "allow_once"]
+        : ["reject_once", "reject_always"];
+  for (const kind of preferred) {
+    const option = options.find((item) => item.kind === kind);
+    if (option) return { outcome: { outcome: "selected", optionId: option.optionId } };
+  }
+  return { outcome: { outcome: "cancelled" } };
+}
+
+/** 原始权限请求 → 交给策略回调的摘要（保留 wire 请求本体供回调细判）。 */
+export function toSuperPermissionRequest(request: RequestPermissionRequest): SuperPermissionRequest {
+  const tool = request.toolCall;
+  const summary = tool.title ?? tool.toolName ?? "tool permission request";
+  const out: SuperPermissionRequest = {
+    sessionId: request.sessionId,
+    summary,
+    request,
+  };
+  if (tool.toolCallId) out.toolCallId = tool.toolCallId;
+  if (tool.toolName) out.toolName = tool.toolName;
+  if (typeof tool.kind === "string") out.kind = tool.kind;
+  return out;
+}
+
+/** Plan 退出请求 → 交给策略回调的摘要（没有权限选项，改带计划正文）。 */
+export function toSuperPlanExitRequest(request: ExitPlanModeRequest): SuperPermissionRequest {
+  const out: SuperPermissionRequest = {
+    sessionId: request.sessionId,
+    toolName: "plan_exit",
+    summary: truncateForPrompt(request.plan.replace(/\s+/g, " "), 200),
+    plan: request.plan,
+  };
+  return out;
+}
 
 /**
  * 实时进度的尾部上限。子会话的完整转录不进快照，看板只拿一段尾部文本做
@@ -362,11 +586,20 @@ interface SuperQueueEntry {
   id: string;
   /** 仅重试时存在。 */
   retry?: SuperRetryState;
+  /** 审批策略（spawn 时归一化；重试沿用上一轮的那份）。 */
+  policy: ResolvedSuperSpawnPolicy;
 }
 
 export class SuperAgentManager {
   private readonly sessions = new Map<string, SuperSessionUi>();
   private readonly clients = new Map<string, AcpClient>();
+  /**
+   * 每个子会话的审批策略。
+   *
+   * 队列项里也带一份（`SuperQueueEntry.policy`）供 `prepare` 使用；这张表是
+   * **重试**的依据 —— 重试时只拿得到会话记录，拿不到原始的 spawn 参数。
+   */
+  private readonly policies = new Map<string, ResolvedSuperSpawnPolicy>();
   private readonly resolvers = new Map<string, PendingResolver>();
   /**
    * 从磁盘恢复回来的历史子会话，按**归属主会话**分组。
@@ -569,11 +802,18 @@ export class SuperAgentManager {
    * `options.isolation = "repo"` 派的是**主仓工作区档**子会话：它没有
    * worktree、没有自己的分支，直接在主仓根目录里干活（合并子会话专用 ——
    * 合并只能在目标分支所在的工作区发生）。
+   *
+   * `options.policy` 是可选审批策略：**缺省即 `{ approval: "auto" }`**，与既有
+   * 调用点（面板派发 / 合并子会话）的行为逐字节一致。
    */
-  spawn(spec: SuperTaskSpec, options?: { isolation?: "repo" }): SuperSessionUi {
+  spawn(
+    spec: SuperTaskSpec,
+    options?: { isolation?: "repo"; policy?: SuperSpawnPolicy | null },
+  ): SuperSessionUi {
     const now = Date.now();
     const id = `super-${now.toString(36)}-${(this.seq++).toString(36)}`;
     const repoIsolation = options?.isolation === "repo";
+    const policy = resolveSpawnPolicy({ policy: options?.policy ?? null });
     const session: SuperSessionUi = {
       id,
       title: spec.title,
@@ -591,8 +831,9 @@ export class SuperAgentManager {
       reports: [],
     };
     this.sessions.set(id, session);
+    this.policies.set(id, policy);
     if (session.mainSessionId) this.archiveOwners.add(session.mainSessionId);
-    this.queue.push({ spec, id });
+    this.queue.push({ spec, id, policy });
     this.emit();
     this.pump();
     return session;
@@ -732,7 +973,14 @@ export class SuperAgentManager {
     };
     this.sessions.set(id, retrySuperSession(session, Date.now()));
     this.lastText.delete(id);
-    this.queue.push({ spec: { title: session.title, task: session.task }, id, retry });
+    this.queue.push({
+      spec: { title: session.title, task: session.task },
+      id,
+      retry,
+      // 重试是同一份派发的延续：策略必须沿用，否则一次重试会把 supervised
+      // 静默退回 auto（重新变成无审批执行）。
+      policy: this.policies.get(id) ?? resolveSpawnPolicy(null),
+    });
     this.emit();
     this.pump();
     return true;
@@ -776,6 +1024,7 @@ export class SuperAgentManager {
     this.dequeue(id);
     this.started.delete(id);
     this.lastText.delete(id);
+    this.policies.delete(id);
     await this.disposeClient(id);
     this.forgetChild(id);
     // 排队中就被清理的合并子会话不会走到 prepare 的收尾（它根本没启动）——
@@ -1081,6 +1330,7 @@ export class SuperAgentManager {
     this.lastText.clear();
     this.lastThought.clear();
     this.promptTokens.clear();
+    this.policies.clear();
     this.queue.length = 0;
     return kept;
   }
@@ -1108,7 +1358,7 @@ export class SuperAgentManager {
       const next = this.queue.shift();
       if (!next) return;
       this.started.add(next.id);
-      void this.prepare(next.id, next.spec, next.retry);
+      void this.prepare(next.id, next.spec, next.retry, next.policy);
     }
   }
 
@@ -1146,7 +1396,12 @@ export class SuperAgentManager {
     return count;
   }
 
-  private async prepare(id: string, spec: SuperTaskSpec, retry?: SuperRetryState): Promise<void> {
+  private async prepare(
+    id: string,
+    spec: SuperTaskSpec,
+    retry?: SuperRetryState,
+    policy: ResolvedSuperSpawnPolicy = resolveSpawnPolicy(null),
+  ): Promise<void> {
     const session = this.sessions.get(id);
     if (!session || this.disposed || isTerminalSuperStatus(session.status)) {
       // 排队期间被取消 / 清理 / 面板关闭 —— 不要为它建目录或起进程。
@@ -1287,18 +1542,32 @@ export class SuperAgentManager {
       }
       this.clients.set(id, client);
 
-      const { sessionId } = await client.newSession({ cwd: isolation.path, mcpServers: [] });
+      const { sessionId } = await client.newSession({
+        cwd: isolation.path,
+        mcpServers: [],
+        // 工具黑名单与主会话的 `settings.disallowed_tools` 同一机制；**为空时
+        // 不带 settings** —— 缺省策略下 `session/new` 的请求形状必须与既有
+        // 行为逐字节一致（既有测试断言子会话不传 settings）。
+        ...(policy.disallowedTools.length > 0
+          ? { settings: { disallowed_tools: [...policy.disallowedTools] } }
+          : {}),
+      });
       this.apply(id, { type: "started", cliSessionId: sessionId, at: Date.now() });
 
-      // 子会话推 `yolo` 是**刻意的**：子会话必须完全自主，不因审批往返而停顿，
-      // 也不该把审批变成人工负担。代价是 `yolo` 下内核通常**不发**
-      // `session/request_permission`，所以审批点上的依赖护栏（callbacksFor 里的
-      // classifyChildShellCommand）只是**兜底** —— 万一某类工具仍然发审批，就仍然
-      // 自动放行（shell 用 allow_once）+ 拦危险 shell；它不是主防线，不能依赖它。
-      try {
-        await client.setMode(sessionId, "yolo");
-      } catch (error) {
-        this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
+      // 子会话推 `yolo` 是 `auto` 策略**刻意**的语义：子会话完全自主，不因审批
+      // 往返而停顿。代价是 `yolo` 下内核通常**不发** `session/request_permission`，
+      // 所以审批点上的依赖护栏（callbacksFor 里的 classifyChildShellCommand）只是
+      // **兜底** —— 万一某类工具仍然发审批，就仍然自动放行（shell 用 allow_once）
+      // + 拦危险 shell；它不是主防线，不能依赖它。
+      //
+      // `supervised` / `deny` **绝不推 yolo**：它们的全部意义就是让审批真的发生
+      // （远程任务不能静默清零风险）。
+      if (policy.approval === "auto") {
+        try {
+          await client.setMode(sessionId, "yolo");
+        } catch (error) {
+          this.deps.log.warn(`子会话切换到免确认模式失败（改由宿主自动放行）：${errorMessage(error)}`);
+        }
       }
 
       model = this.deps.currentModel();
@@ -1594,66 +1863,14 @@ export class SuperAgentManager {
           if (!nested) this.patchTodos(id, normalizeSuperTodos(update.entries));
         }
       },
-      // 兜底路径：审批自动放行，不产生待办、不打扰主会话。
-      // 子会话推的是 yolo，内核通常根本不发 `session/request_permission`；这里
-      // 只在万一某类工具仍然发审批时生效，所以下面的依赖护栏同样是兜底而非主防线。
-      //
-      // 「自动放行」之前仍过依赖护栏（2026-11-11 事故：子会话把主仓
-      // node_modules 联接进 worktree 后跑 `npm ci`，顺着联接清空了用户依赖）。
-      // 护栏是 `shared/super-agent-guard.ts` 的纯函数表，这里只负责给它喂
-      // 命令文本与隔离上下文，命中即拒绝 —— 模型看到工具被拒后可自行换方案。
-      onRequestPermission: async (request) => {
-        const session = this.sessions.get(id);
-        const shell = isShellToolCall(request.toolCall);
-        if (shell && session) {
-          const command = extractShellCommand(request.toolCall);
-          if (command) {
-            const verdict = classifyChildShellCommand(command, {
-              cwd: session.isolation.path,
-              repoRoot: this.deps.repoRoot,
-              nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
-            });
-            if (verdict.decision === "deny") {
-              this.deps.log.warn(
-                `[${id}] 拒绝子会话命令（保护主工作区依赖）：${verdict.reason ?? ""}`,
-              );
-              const reject =
-                request.options.find((option) => option.kind === "reject_once") ??
-                request.options.find((option) => option.kind.startsWith("reject"));
-              // 拒绝也只能用 agent 自己给出的选项 id（CLI 用原生枚举解析，
-              // 伪造 id 会抛）；没有拒绝选项就按「取消」—— 与审批超时同一条路。
-              if (reject) {
-                return {
-                  outcome: { outcome: "selected", optionId: reject.optionId },
-                } as RequestPermissionResponse;
-              }
-              return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
-            }
-          }
-        }
-        // shell 类必须 `allow_once`：`allow_always` 会让 CLI 对该工具的后续
-        // 调用不再请求权限，宿主护栏就只看得到第一条命令（形同虚设）。
-        const allow = pickChildPermissionOption(request.options, shell);
-        if (!allow) {
-          // 没有任何可放行的选项 —— 只能说「取消」，绝不伪造批准。
-          this.deps.log.warn(
-            `[${id}] 审批请求没有${shell ? " allow_once 允许选项" : "允许选项"}，按取消处理：${
-              request.toolCall.toolName ?? "tool"
-            }`,
-          );
-          return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
-        }
-        this.deps.log.debug?.(
-          `[${id}] 自动放行 ${request.toolCall.toolName ?? "tool"}（免确认模式，${allow.kind}）`,
-        );
-        return {
-          outcome: { outcome: "selected", optionId: allow.optionId },
-        } as RequestPermissionResponse;
-      },
+      // 审批策略（Wave3-A）：缺省 `auto` = 既有行为（`yolo` + 自动放行兜底）；
+      // `supervised` 先问策略回调（未提供/抛错/超时按拒绝）；`deny` 直接拒绝。
+      // 依赖护栏对 `auto` 与 `supervised` 都是硬底线，见 `decidePermission`。
+      onRequestPermission: async (request) => this.decidePermission(id, request),
       onUserQuestions: async (request) =>
         (await this.awaitQuestion(id, request.questions)) as UserQuestionsResponse,
-      // 免确认模式不该卡在计划审批上 —— 计划退出也自动批准。
-      onExitPlanMode: async () => ({ approved: true }) as ExitPlanModeResponse,
+      // `auto`：免确认模式不该卡在计划审批上（自动批准）；其余策略走裁决。
+      onExitPlanMode: async (request) => this.decidePlanExit(id, request),
       onExit: (code) => {
         const session = this.sessions.get(id);
         if (!session || isTerminalSuperStatus(session.status)) return;
@@ -1662,6 +1879,119 @@ export class SuperAgentManager {
       },
       onStderr: (line) => this.deps.log.debug?.(`[${id}] ${line}`),
     };
+  }
+
+  /** 该子会话的审批策略；拿不到时按缺省 `auto`（与既有行为一致）。 */
+  private policyFor(id: string): ResolvedSuperSpawnPolicy {
+    return this.policies.get(id) ?? resolveSpawnPolicy(null);
+  }
+
+  /**
+   * 权限请求裁决。
+   *
+   * - `deny`：直接拒绝（映射到 agent 自己给出的 reject 选项；没有就取消）。
+   * - `supervised` / `auto`：**先过依赖护栏**（保护主工作区依赖的硬底线，
+   *   2026-11-11 事故）；`supervised` 随后交给策略回调，未提供/抛错/超时按拒绝；
+   *   `auto` 走既有的兜底放行（shell 用 `allow_once`，其余 `allow_always`），
+   *   与旧实现逐字等价。
+   */
+  private async decidePermission(
+    id: string,
+    request: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const policy = this.policyFor(id);
+    if (policy.approval === "deny") {
+      this.deps.log.info(
+        `[${id}] 审批策略 deny：拒绝 ${request.toolCall.toolName ?? "tool"}`,
+      );
+      return resolvePermissionResponse(request.options, "deny");
+    }
+
+    // 依赖护栏：对 auto / supervised 都是硬底线 —— 即使审批人点了「允许」，
+    // 会清空主仓依赖的命令也绝不放行。
+    const guarded = this.dependencyGuard(id, request);
+    if (guarded) {
+      this.deps.log.warn(`[${id}] 拒绝子会话命令（保护主工作区依赖）：${guarded.reason ?? ""}`);
+      return resolvePermissionResponse(request.options, "deny");
+    }
+
+    if (policy.approval === "supervised") {
+      const decision = await awaitSuperPermissionDecision(
+        policy.onPermissionRequest,
+        toSuperPermissionRequest(request),
+      );
+      this.deps.log.info(
+        `[${id}] 审批策略 supervised：${request.toolCall.toolName ?? "tool"} → ${decision}`,
+      );
+      return resolvePermissionResponse(request.options, decision);
+    }
+
+    // auto —— 既有兜底放行逻辑（yolo 下通常根本走不到这里）。
+    const shell = isShellToolCall(request.toolCall);
+    // shell 类必须 `allow_once`：`allow_always` 会让 CLI 对该工具的后续
+    // 调用不再请求权限，宿主护栏就只看得到第一条命令（形同虚设）。
+    const allow = pickChildPermissionOption(request.options, shell);
+    if (!allow) {
+      // 没有任何可放行的选项 —— 只能说「取消」，绝不伪造批准。
+      this.deps.log.warn(
+        `[${id}] 审批请求没有${shell ? " allow_once 允许选项" : "允许选项"}，按取消处理：${
+          request.toolCall.toolName ?? "tool"
+        }`,
+      );
+      return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
+    }
+    this.deps.log.debug?.(
+      `[${id}] 自动放行 ${request.toolCall.toolName ?? "tool"}（免确认模式，${allow.kind}）`,
+    );
+    return {
+      outcome: { outcome: "selected", optionId: allow.optionId },
+    } as RequestPermissionResponse;
+  }
+
+  /**
+   * 依赖护栏（纯判定）：shell 命令命中「会破坏主工作区依赖」的规则时返回理由，
+   * 否则返回 null。与审批策略无关 —— 它是所有放行路径的共同底线。
+   */
+  private dependencyGuard(
+    id: string,
+    request: RequestPermissionRequest,
+  ): { reason?: string } | null {
+    const session = this.sessions.get(id);
+    if (!session || !isShellToolCall(request.toolCall)) return null;
+    const command = extractShellCommand(request.toolCall);
+    if (!command) return null;
+    const verdict = classifyChildShellCommand(command, {
+      cwd: session.isolation.path,
+      repoRoot: this.deps.repoRoot,
+      nodeModulesIsLink: isLinkedNodeModules(session.isolation.path),
+    });
+    return verdict.decision === "deny" ? { reason: verdict.reason } : null;
+  }
+
+  /**
+   * Plan 退出裁决。
+   *
+   * `auto` 自动批准（免确认模式不该卡在计划审批上）；`deny` 直接拒绝；
+   * `supervised` 交给同一个策略回调（未提供/抛错/超时按拒绝）。
+   */
+  private async decidePlanExit(
+    id: string,
+    request: ExitPlanModeRequest,
+  ): Promise<ExitPlanModeResponse> {
+    const policy = this.policyFor(id);
+    if (policy.approval === "auto") return { approved: true } as ExitPlanModeResponse;
+    if (policy.approval === "deny") {
+      this.deps.log.info(`[${id}] 审批策略 deny：拒绝 Plan 退出`);
+      return { approved: false } as ExitPlanModeResponse;
+    }
+    const decision = await awaitSuperPermissionDecision(
+      policy.onPermissionRequest,
+      toSuperPlanExitRequest(request),
+    );
+    this.deps.log.info(`[${id}] 审批策略 supervised：Plan 退出 → ${decision}`);
+    return {
+      approved: decision === "allow_once" || decision === "allow_always",
+    } as ExitPlanModeResponse;
   }
 
   /** Lazily create the transcript buffer for a child session. */
