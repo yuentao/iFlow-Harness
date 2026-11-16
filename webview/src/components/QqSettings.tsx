@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { AlertTriangle, Link2, PlugZap, Plus, Trash2, Unlink } from "lucide-react";
 import type { QqSettingsUi } from "../../../shared/messages";
 import { t } from "../i18n";
@@ -55,6 +55,11 @@ export interface QqSettingsProps {
   onTestConnection: () => void;
   onGenerateBindCode: () => void;
   onUnbind: () => void;
+  /**
+   * 凭据提交（密码框失焦）：只带用户真正编辑过的字段；空串表示清空该凭据。
+   * 凭据与普通设置走两条通道，绝不混进 {@link onChange} 的设置补丁。
+   */
+  onSecretsCommit?: (secrets: { botToken?: string; appSecret?: string }) => void;
   /** 最近一次连接检查的结果（宿主回执）。 */
   status?: { connected?: boolean; detail?: string };
   /** 当前有效的配对码与其绝对过期时间（epoch ms）。 */
@@ -179,10 +184,18 @@ export function QqSettings({
   onTestConnection,
   onGenerateBindCode,
   onUnbind,
+  onSecretsCommit,
   status,
   bindCode,
   warnings = [],
 }: QqSettingsProps) {
+  /** 凭据字段是否被用户改过；没改过的空字段失焦不得提交（会误清空）。 */
+  const [secretDirty, setSecretDirty] = useState<{ botToken?: boolean; appSecret?: boolean }>({});
+  function commitSecret(field: "botToken" | "appSecret", next: string): void {
+    if (!secretDirty[field]) return;
+    setSecretDirty((prev) => ({ ...prev, [field]: false }));
+    onSecretsCommit?.({ [field]: next.trim() });
+  }
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -272,7 +285,15 @@ export function QqSettings({
         </Row>
         {value.adapter === "qqbot" && (
           <>
-            <Row label={t("机器人 Token")} description={t("凭据只从宿主传入，面板不保存。")} wide>
+            <Row
+              label={t("机器人 Token")}
+              description={
+                value.hasBotToken
+                  ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
+                  : t("输入后失焦即提交给宿主，面板不保存明文。")
+              }
+              wide
+            >
               <Field label={t("机器人 Token")}>
                 <TextInput
                   type="password"
@@ -280,11 +301,23 @@ export function QqSettings({
                   mono
                   aria-label={t("机器人 Token")}
                   value={value.botToken ?? ""}
-                  onChange={(event) => onChange({ botToken: event.target.value })}
+                  onChange={(event) => {
+                    setSecretDirty((prev) => ({ ...prev, botToken: true }));
+                    onChange({ botToken: event.target.value });
+                  }}
+                  onBlur={(event) => commitSecret("botToken", event.currentTarget.value)}
                 />
               </Field>
             </Row>
-            <Row label={t("App Secret")} description={t("凭据只从宿主传入，面板不保存。")} wide>
+            <Row
+              label={t("App Secret")}
+              description={
+                value.hasAppSecret
+                  ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
+                  : t("输入后失焦即提交给宿主，面板不保存明文。")
+              }
+              wide
+            >
               <Field label={t("App Secret")}>
                 <TextInput
                   type="password"
@@ -292,7 +325,11 @@ export function QqSettings({
                   mono
                   aria-label={t("App Secret")}
                   value={value.appSecret ?? ""}
-                  onChange={(event) => onChange({ appSecret: event.target.value })}
+                  onChange={(event) => {
+                    setSecretDirty((prev) => ({ ...prev, appSecret: true }));
+                    onChange({ appSecret: event.target.value });
+                  }}
+                  onBlur={(event) => commitSecret("appSecret", event.currentTarget.value)}
                 />
               </Field>
             </Row>

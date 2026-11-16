@@ -2290,6 +2290,9 @@ export type WebviewToHost =
       action: "stop" | "approve" | "deny" | "answer" | "merge" | "discard" | "refresh";
       text?: string;
     }
+  /** QQ 远程任务（Wave3-C）：设置页的三类连接动作。此前该消息只在
+   * HostToWebview 上声明（方向写反），这里补上 webview→host 的声明。 */
+  | { type: "qqConfigAction"; action: "testConnection" | "generateBindCode" | "unbind" }
   /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
    * `hasBotToken` / `hasAppSecret` 是宿主回传的投影，这里只会被忽略——
    * 凭据走下面的 `qqSecretsWrite`，不进设置补丁。 */

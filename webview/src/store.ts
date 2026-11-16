@@ -12,11 +12,13 @@ import {
   type MemoryScope,
   type MemoryStateUi,
   type ModelMetadataStateUi,
+  type QqSettingsUi,
   type SessionState,
   type SessionSummaryUi,
   type UiDensity,
   type UiFontSize,
   type WebviewToHost,
+  pickQqSettingsUi,
 } from "../../shared/messages";
 import { normalizeModelId } from "../../shared/context-window";
 import { collectTurnChanges } from "../../shared/turn-changes";
@@ -2616,6 +2618,16 @@ interface ChatStore {
    * sessions that still exist on every snapshot / patch.
    */
   superTranscripts: Record<string, Block[]>;
+  /**
+   * QQ 远程任务设置快照（Wave3-C）。独立于 `state`：`snapshot` / `blockPatch`
+   * 只换转录与会话元数据，绝不覆盖它。默认值由 `pickQqSettingsUi` 归一，
+   * 因此首帧就能渲染完整表单（凭据只有「已配置」布尔）。
+   */
+  qqSettings: QqSettingsUi;
+  /** 最近一次连接检查 / 适配器状态回执；null = 尚未收到。 */
+  qqStatus: { connected: boolean; detail?: string } | null;
+  /** 当前配对码与其绝对过期时间（epoch ms）；null = 没有生效中的配对码。 */
+  qqBindCode: { code: string; expiresAt: number } | null;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
   /**
@@ -2687,6 +2699,9 @@ import { setLocale } from "./i18n";
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
+  qqSettings: pickQqSettingsUi({}, { hasBotToken: false, hasAppSecret: false }),
+  qqStatus: null,
+  qqBindCode: null,
   superTranscripts: {},
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
@@ -2797,6 +2812,18 @@ export const useChat = create<ChatStore>((set, get) => ({
         const capped = evictBlockPayloads(next, EVICT_KEEP_BLOCKS);
         return { superTranscripts: { ...s.superTranscripts, [msg.sessionId]: capped } };
       });
+      return;
+    }
+    if (msg.type === "qqSettings") {
+      set({ qqSettings: msg.values });
+      return;
+    }
+    if (msg.type === "qqStatus") {
+      set({ qqStatus: { connected: msg.connected, detail: msg.detail } });
+      return;
+    }
+    if (msg.type === "qqBindCode") {
+      set({ qqBindCode: { code: msg.code, expiresAt: msg.expiresAt } });
       return;
     }
     if (msg.type === "hostSettings") {
