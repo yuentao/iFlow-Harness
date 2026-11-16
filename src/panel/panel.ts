@@ -3563,7 +3563,7 @@ export class ChatPanel implements vscode.Disposable {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const uri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.joinPath(defaultDir, `iflow-acp-log-${stamp}.ndjson`),
-      filters: { "NDJSON log": ["ndjson", "log", "txt"] },
+      filters: { [vscode.l10n.t("通信日志")]: ["ndjson", "log", "txt"] },
     });
     if (!uri) return;
     try {

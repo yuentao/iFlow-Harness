@@ -109,8 +109,8 @@ describe("ChatPanel async busy states and failure receipts", () => {
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(iflowHome, { recursive: true, force: true });
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(iflowHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     delete process.env.IFLOW_HOME;
   });
 

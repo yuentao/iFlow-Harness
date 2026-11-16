@@ -18,7 +18,7 @@ import {
 
 const tempDir = mkdtempSync(path.join(tmpdir(), "iflow-attachments-test-"));
 afterAll(() => {
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 let rootSeq = 0;

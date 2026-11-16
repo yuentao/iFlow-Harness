@@ -89,7 +89,7 @@ function makeLinkedRepo(repo: string): string {
   try {
     symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
   } catch {
-    rmSync(parent, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     return repo;
   }
   linkParents.push(parent);
@@ -108,7 +108,7 @@ function removeLinkedRoot(parent: string): void {
       // 已经不在 / 不是链接：下面的递归删除会兜底。
     }
   }
-  rmSync(parent, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 /** Read a file with CRLF normalized (checkout may translate line endings). */
@@ -118,7 +118,7 @@ function readText(file: string): string {
 
 afterAll(() => {
   for (const parent of linkParents) removeLinkedRoot(parent);
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("worktree · 命名（纯函数）", () => {
@@ -845,7 +845,7 @@ describe("worktree · 删除可靠性与状态判定", () => {
     });
 
     // 半删现场：.git 被删、其余文件还在。
-    rmSync(path.join(target, ".git"), { force: true, recursive: true });
+    rmSync(path.join(target, ".git"), { force: true, recursive: true, maxRetries: 5, retryDelay: 50 });
     expect(existsSync(target)).toBe(true);
 
     const state = await inspectWorktreeState(target);

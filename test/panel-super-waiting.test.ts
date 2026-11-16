@@ -178,7 +178,7 @@ describe("ChatPanel 等待子会话汇报期间的状态", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function flush(): Promise<void> {

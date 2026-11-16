@@ -102,7 +102,7 @@ describe("approval diff preview passthrough", () => {
 
   afterEach(async () => {
     await panel.dispose();
-    await rm(storageDir, { recursive: true, force: true });
+    await rm(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function shownApproval(
