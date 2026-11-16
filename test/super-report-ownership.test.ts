@@ -68,6 +68,30 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
   ];
 }
 
+/**
+ * 稳健删除临时目录（只影响清理步骤，不影响任何断言）。
+ *
+ * Windows 上 `fs.rmSync(recursive)` 会在「目录刚被删空、同一瞬间又有新条目
+ * 写进去」时抛 `ENOTEMPTY` —— 面板的归档落盘是异步链，`dispose()` 之后仍可能
+ * 有排队的写回落在 storageDir 里。`rmSync` 自带的 `maxRetries` 只覆盖它自己
+ * 的重试窗口，遇到连续写入仍会失败，所以外层再退避重试几轮；重试耗尽仍失败
+ * 就如实抛出（不吞错误、不跳过用例）。
+ */
+async function rmDirWithRetry(dir: string, attempts = 6, delayMs = 50): Promise<void> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retriable =
+        code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM" || code === "EACCES";
+      if (!retriable || i === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs * (i + 1)));
+    }
+  }
+}
+
 type PromptCall = {
   prompt: Array<{ type: string; text?: string }>;
   resolve: (v: { stopReason: string }) => void;
@@ -191,7 +215,7 @@ describe("子会话汇报 · 归属与投递时机", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await panel.dispose();
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    await rmDirWithRetry(storageDir);
   });
 
   async function flush(): Promise<void> {
