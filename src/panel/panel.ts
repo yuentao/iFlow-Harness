@@ -904,6 +904,8 @@ export class ChatPanel implements vscode.Disposable {
   private superWaitToastId: number | null = null;
   /** 常驻提示的状态指纹：子会话进度帧高频触发，指纹不变就不重发。 */
   private superWaitToastKey: string | null = null;
+  /** 「已停止 · N 项待处理」常驻带动作提示的 toast id（null = 当前没显示）。 */
+  private deferredAutoTurnsToastId: number | null = null;
   /**
    * 子会话归档的节流写定时器（null = 没有待写的节流写）。
    *
@@ -1350,10 +1352,23 @@ export class ChatPanel implements vscode.Disposable {
         if (state.pendingApproval) {
           text = `$(bell) iFlow: ${vscode.l10n.t("等待审批")}${model}`;
           background = new vscode.ThemeColor("statusBarItem.warningBackground");
+        } else if (state.superWaiting && state.superHeld) {
+          // 用户按了停止：汇报被压在队列里，主会话并没有在生成。旧实现把它和
+          // 真 streaming 渲染成同一串「生成中」+ 转圈，而 composer 明明显示
+          // 「发送」—— 用户看到的就是「卡住了」。如实写已停止 + 待处理数量，
+          // 不转圈；下一步动作放在 hover tooltip 与常驻提示里。
+          const pending = state.superPendingCount ?? 0;
+          text = pending > 0
+            ? `$(history) iFlow: ${vscode.l10n.t("已停止 · {0} 项待处理", pending)}${model}`
+            : `$(history) iFlow: ${vscode.l10n.t("已停止")}${model}`;
         } else if (state.superWaiting) {
-          // 等待子会话汇报：主会话此刻没有自己的回合，但流程没断 —— 状态栏
-          // 不能显示 idle 的 $(check)，否则读起来就是「没事可做」。
-          text = `$(sync~spin) iFlow: ${vscode.l10n.t("生成中")}${model}`;
+          // 子会话确实还在跑 / 在等你回答：如实用「进行中 / 等待你处理」，
+          // 不能说「生成中」——那是主回合的语义，此刻主会话是 idle。
+          const kids = state.superSessions ?? [];
+          const awaiting = kids.some((session) => session.status === "awaiting_input");
+          text = awaiting
+            ? `$(bell) iFlow: ${vscode.l10n.t("等待你处理")}${model}`
+            : `$(sync~spin) iFlow: ${vscode.l10n.t("子会话进行中")}${model}`;
         } else {
           text = `$(check) iFlow${mode}${model}`;
         }
@@ -1379,8 +1394,16 @@ export class ChatPanel implements vscode.Disposable {
    */
   private statusBarTooltip(state: SessionState): string {
     const base = vscode.l10n.t("心流·驭光 — 点击打开聊天面板");
+    // 压住态必须告诉用户「下一步是什么」，否则「已停止 · N 项待处理」照样像
+    // 死锁。它比用量信息更重要，所以即使没有用量也要出现在 tooltip 里。
+    const heldTip = state.superHeld
+      ? vscode.l10n.t(
+          "已停止：{0} 项子会话结果待处理，发送下一条消息或点常驻提示的「继续处理」后继续收取汇报",
+          state.superPendingCount ?? 0,
+        )
+      : null;
     const u = state.usage;
-    if (!u || u.totalTokens <= 0) return base;
+    if (!u || u.totalTokens <= 0) return heldTip ? `${base}\n\n${heldTip}` : base;
     const used = u.contextUsed ?? u.inputTokens;
     const rows: string[] = [];
     if (u.contextWindow) {
@@ -1431,7 +1454,8 @@ export class ChatPanel implements vscode.Disposable {
         : `$${u.estimatedCost.toFixed(2)}`;
       rows.push(vscode.l10n.t("预估成本 {0}（按公开单价估算）", cost));
     }
-    return `${base}\n\n**${vscode.l10n.t("会话用量")}**\n\n${rows.map((r) => `- ${r}`).join("\n")}`;
+    const usageTip = `${base}\n\n**${vscode.l10n.t("会话用量")}**\n\n${rows.map((r) => `- ${r}`).join("\n")}`;
+    return heldTip ? `${usageTip}\n\n${heldTip}` : usageTip;
   }
 
   /**
@@ -1504,6 +1528,7 @@ export class ChatPanel implements vscode.Disposable {
     this.pendingSuperActionReceipts = [];
     this.pendingDelegatedUserTurns = [];
     this.autoTurnsStoppedFor = null;
+    this.clearDeferredAutoTurnsToast();
     this.promptRequestSessionId = null;
     this.stopSuperHeartbeat();
     // 面板要没了，等待子会话的忙碌标记也一并清掉（别把忙碌态留在快照里）。
@@ -3554,6 +3579,23 @@ export class ChatPanel implements vscode.Disposable {
       void this.sendDiagnosticsFix();
       return;
     }
+    if (actionId === "resume-super-turns") {
+      // 常驻「已停止 · N 项待处理」提示的「继续处理」：用户明确要放开压制。
+      // 队列里的汇报一条不丢，这里只是把闸门打开并立刻恢复投递。
+      const deferredId = this.deferredAutoTurnsToastId;
+      this.clearDeferredAutoTurnsToast();
+      if (typeof toastId === "number" && toastId !== deferredId) {
+        // 兜住异常回包：动作来自别的 toast 时也把它收掉（会被 clear 收掉的那条不再重复）。
+        this.store.dismissToast(toastId);
+      }
+      if (this.autoTurnsHeld()) {
+        this.autoTurnsStoppedFor = null;
+        this.syncSuperWaitingState();
+        void this.drainSuperReports();
+        void this.drainDelegatedUserTurns();
+      }
+      return;
+    }
     if (typeof toastId === "number") this.store.dismissToast(toastId);
   }
 
@@ -4090,20 +4132,33 @@ export class ChatPanel implements vscode.Disposable {
    * 用户停止后如实告诉用户还有多少自动回合被压住。
    *
    * 静默压制会让「我明明点了停止，怎么还有东西在等」变成新的困惑；数量为 0
-   * 时保持安静（每次停止都弹一条会变成噪声）。
+   * 时保持安静（每次停止都弹一条会变成噪声）。提示常驻并带「继续处理」动作：
+   * 一次性的 toast 转瞬即逝，用户看到的就是「点了停止、按钮还禁着、没人告诉我
+   * 出路」的死锁。压制解除（下一条消息 / 新建会话 / 面板关闭 / 点了动作）时
+   * 由 clearDeferredAutoTurnsToast 收掉，绝不常驻到下一轮。
    */
   private announceDeferredAutoTurns(): void {
-    const owner = this.currentMainSessionId();
-    const pending =
-      this.pendingSuperReportPrompts.filter((item) => item.mainSessionId === owner).length +
-      this.pendingDelegatedUserTurns.filter((item) => item.mainSessionId === owner).length;
+    const pending = this.pendingAutoTurnCount();
     if (pending === 0) return;
-    this.store.sendToast(
+    this.clearDeferredAutoTurnsToast();
+    this.deferredAutoTurnsToastId = this.store.sendToast(
       "info",
-      vscode.l10n.t("已停止生成；还有 {0} 项子会话结果待处理，发送下一条消息后继续", pending),
+      vscode.l10n.t("已停止；还有 {0} 项子会话结果待处理，发送下一条消息或点「继续处理」释放", pending),
+      {
+        persistent: true,
+        action: { actionId: "resume-super-turns", label: vscode.l10n.t("继续处理") },
+      },
     );
     // 常驻「等待子会话」提示的文案也要跟着变（它默认写着「会自动继续」）。
     this.refreshSuperWaitHeartbeat();
+  }
+
+  /** 收掉「已停止 · N 项待处理」常驻提示（压制解除的各条路径共用）。 */
+  private clearDeferredAutoTurnsToast(): void {
+    if (this.deferredAutoTurnsToastId !== null) {
+      this.store.dismissToast(this.deferredAutoTurnsToastId);
+      this.deferredAutoTurnsToastId = null;
+    }
   }
 
   private cancelAllApprovals(reason: string): void {
@@ -8041,6 +8096,19 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 当前主会话被压住 / 待投递的自动回合数（子会话汇报 + 被改道用户消息补投）。
+   * `announceDeferredAutoTurns` 的提示数量、`syncSuperWaitingState` 写给 webview
+   * 的 `superPendingCount` 与状态栏文案共用这一处口径 —— 分开数迟早会漂移。
+   */
+  private pendingAutoTurnCount(): number {
+    const owner = this.currentMainSessionId();
+    return (
+      this.pendingSuperReportPrompts.filter((item) => item.mainSessionId === owner).length +
+      this.pendingDelegatedUserTurns.filter((item) => item.mainSessionId === owner).length
+    );
+  }
+
+  /**
    * Keep the heartbeat alive while any Super Agent work is outstanding.
    *
    * Without it, a child finishing while the main session is replaying history
@@ -8158,6 +8226,10 @@ export class ChatPanel implements vscode.Disposable {
    * 「新会话」锁住：等待期新建会话会让排队里的汇报落到已被替换的会话上。
    * 顶栏不再为它渲染忙碌 chip（忙碌信号由转录底部浮动 pill 与子会话看板计数
    * 承担）。
+   *
+   * 例外：用户按了「停止」压住汇报时（`superHeld`），「新会话」必须放行 ——
+   * 否则用户点完停止就再无出路（唯一的解锁是发下一条消息，而那条一次性 toast
+   * 转瞬即逝），面板看起来就是永久卡住。状态栏也不再把压住态谎报成「生成中」。
    */
   private syncSuperWaitingState(): void {
     // 子会话被清理后它的 id 不再有意义 —— 顺手剪掉，别让集合无限增长。
@@ -8168,7 +8240,11 @@ export class ChatPanel implements vscode.Disposable {
     for (const id of [...this.superReportedChildIds]) {
       if (!liveIds.has(id)) this.superReportedChildIds.delete(id);
     }
-    this.store.setSuperWaiting(this.superWaitingForReports(live));
+    this.store.setSuperWaiting(
+      this.superWaitingForReports(live),
+      this.autoTurnsHeld(),
+      this.pendingAutoTurnCount(),
+    );
     this.announceChildrenSettledIfDone(live);
   }
 
@@ -9809,9 +9885,12 @@ export class ChatPanel implements vscode.Disposable {
     // 子会话的归属（mainSessionId）也对不上 —— 用户看到的是汇报丢失 + 归属
     // 错位。命令面板的 iflow.newSession 绕过 webview 的禁用按钮，所以守卫
     // 必须在宿主侧，不能只靠 UI 禁用。
+    // 例外：用户按了「停止」压住汇报时没有任何回合在飞，排队内容按归属留在
+    // 队列里（切回原会话才投递）—— 此时新建会话不会串台，反而必须放行，
+    // 否则用户点完停止就再无出路（唯一解锁是发消息，而那条 toast 转瞬即逝）。
     // Profile 切换必须能换会话（它走的是另一条路：状态已经被换掉了），用
     // bypassSuperWait 放行。
-    if (!options?.bypassSuperWait && this.superWaitingForReports()) {
+    if (!options?.bypassSuperWait && !this.autoTurnsHeld() && this.superWaitingForReports()) {
       this.log.warn("new session refused: the host is still waiting for child session reports");
       this.store.appendNotice(
         vscode.l10n.t("还有子会话在运行并等待汇报，请等它们结束（或在看板上中断）后再新建会话"),
@@ -9866,6 +9945,7 @@ export class ChatPanel implements vscode.Disposable {
     // bypasses the webview's disabled 新会话 button.
     // 新会话不继承上一个会话的「用户已停止」压制。
     this.autoTurnsStoppedFor = null;
+    this.clearDeferredAutoTurnsToast();
     const inFlight = this.store.getState().sessionId;
     if (inFlight) {
       // 还在准备阶段（还没发出 session/prompt）的回合：cancel 到不了 CLI
@@ -10070,7 +10150,10 @@ export class ChatPanel implements vscode.Disposable {
     if (this.disposed) return false;
     // 用户自己开口 = 明确「继续」：解除 Stop 对宿主自动回合的压制
     // （见 autoTurnsStoppedFor）。排队内容一直在队列里，这里只是放开闸门。
-    if (!internal && !hidden) this.autoTurnsStoppedFor = null;
+    if (!internal && !hidden) {
+      this.autoTurnsStoppedFor = null;
+      this.clearDeferredAutoTurnsToast();
+    }
     // ── 主会话车道 ────────────────────────────────────────────────
     // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
     // 并发会让转录顺序错乱、上下文互相污染、token 重复计费。
@@ -10522,6 +10605,7 @@ export class ChatPanel implements vscode.Disposable {
     this.cancelSeen = false;
     // 用户主动发起的一轮同样算「继续」：解除 Stop 对自动回合的压制。
     this.autoTurnsStoppedFor = null;
+    this.clearDeferredAutoTurnsToast();
     let promptSessionId: string | null = null;
     try {
       const client = await this.ensureClient();

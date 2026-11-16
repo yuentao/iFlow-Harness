@@ -826,6 +826,15 @@ export interface SessionState {
    */
   superWaiting?: boolean;
   /**
+   * 用户按过「停止」：`superWaiting` 是被显式压住的（排队里的汇报还在，等
+   * 下一条消息 / 常驻提示的「继续处理」才投递），不是真的在生成。webview
+   * 据此把「新会话」从死锁里放出来（弹如实确认后允许新建），宿主状态栏也
+   * 不再谎称「生成中」。由 `syncSuperWaitingState()` 与 superWaiting 同源写入。
+   */
+  superHeld?: boolean;
+  /** `superHeld` 时被压住的自动回合数（汇报 + 被改道消息补投），只算当前主会话。 */
+  superPendingCount?: number;
+  /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
    * outside the agent session). Non-blocks metadata: it rides the blockPatch
@@ -940,6 +949,8 @@ export function initialSessionState(): SessionState {
     queue: [],
     queuePaused: false,
     superWaiting: false,
+    superHeld: false,
+    superPendingCount: 0,
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
