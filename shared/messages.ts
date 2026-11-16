@@ -129,6 +129,25 @@ export interface UserBlock extends BlockBase {
  * open-as-file recover everything the store kept beyond it. */
 export const MAX_TOOL_OUTPUT_DISPLAY_CHARS = 64 * 1024;
 
+/**
+ * One delegated task of a `super-agent` dispatch call, as the HOST parsed it.
+ *
+ * The card renders from this structure rather than from the lossy `input`
+ * display string — see {@link ToolBlock.superTasks} for the full rationale.
+ *
+ * `attachmentCount` is a COUNT on purpose: attachment bodies (file contents,
+ * inlined base64 images) must never enter the snapshot (pitfall #27 discipline
+ * — a pasted image is ≤8MB and would blow the snapshot up).
+ */
+export interface SuperDelegatedTaskUi {
+  /** Task title (the model may omit it; the host falls back to the task's first line). */
+  title: string;
+  /** The full task brief handed to the child session. */
+  task: string;
+  /** How many attachments the task carried (names/bodies never enter the snapshot). */
+  attachmentCount: number;
+}
+
 export interface ToolBlock extends BlockBase {
   kind: "tool";
   toolCallId: string;
@@ -145,8 +164,28 @@ export interface ToolBlock extends BlockBase {
    * otherwise compact JSON with per-value truncation) and caps the length,
    * so raw args — which can carry a whole-file `content` payload — never
    * linger in memory (pitfall #27 discipline). Null/absent = nothing to show.
+   *
+   * NOTE: it is a LOSSY display string on purpose — the delegation card must
+   * NOT parse it back (see `superTasks`).
    */
   input?: string | null;
+  /**
+   * Delegated tasks of a `super-agent` dispatch call, as parsed BY THE HOST.
+   *
+   * Why the card cannot parse `input` back: `input` is a lossy display string
+   * (per-value truncation at 300 chars, whole payload capped at 4096 chars) —
+   * a long task brief gets cut in the middle and the JSON stops being JSON.
+   * On top of that the model sometimes omits `title` (wire evidence), which
+   * the dispatcher tolerates (falls back to the task's first line) while a
+   * stricter card reader would call the whole delegation unparseable — a false
+   * alarm about a delegation that really happened.
+   *
+   * So the host parses the RAW args once and ships the structure; the card
+   * renders it. Null/absent = this is not a dispatch call (or the payload was
+   * unusable) — the card then falls back to parsing `input` for legacy
+   * transcripts, and finally to the honest "unparseable" notice.
+   */
+  superTasks?: SuperDelegatedTaskUi[] | null;
   /**
    * P-1 follow-up: present when `output` exceeded the host STORE cap
    * (`MAX_TOOL_OUTPUT_STORE_CHARS`, 512K, shared/session-state.ts) and was

@@ -11,6 +11,7 @@
 import { describe, it, expect } from "vitest";
 import {
   classifySuperToolName,
+  parseSuperDelegationTasks,
   parseSuperToolCall,
   synthesizeSuperToolCallBlock,
 } from "../shared/super-tool-call.js";
@@ -198,5 +199,74 @@ describe("parseSuperToolCall", () => {
     expect(parsed.actions[0]?.action).toBe("answer");
     if (parsed.actions[0]?.action !== "answer") return;
     expect(parsed.actions[0].answers["问题"]).toBe(answer);
+  });
+});
+
+/**
+ * `parseSuperDelegationTasks` —— 宿主 reducer 与转录卡片共用的委派载荷解析。
+ *
+ * 口径必须与派发器**完全一致**（复用同一份实现，不复制校验）：模型调内置
+ * `super-agent` 工具时**有时漏掉 `title`**（wire 实证：args 是
+ * `{"tasks":[{"task":"…"}]}`），派发器容忍它（回退到 task 首行、照常派发），
+ * 而卡片此前要求每条任务都有非空 title → 把一次成功的委派谎报成解析失败。
+ */
+describe("parseSuperDelegationTasks", () => {
+  it("缺 title 时回退到 task 首行（与派发器同口径，不判非法）", () => {
+    const tasks = parseSuperDelegationTasks({
+      tasks: [{ task: "只读审查 src/panel/panel.ts\n补充说明在下一行" }],
+    });
+    expect(tasks).not.toBeNull();
+    expect(tasks?.[0]?.title).toBe("只读审查 src/panel/panel.ts");
+    expect(tasks?.[0]?.task).toBe("只读审查 src/panel/panel.ts\n补充说明在下一行");
+  });
+
+  it("显式 title 照常保留（与首行回退并存）", () => {
+    const tasks = parseSuperDelegationTasks({
+      tasks: [{ title: "审查面板", task: "只读审查 src/panel/panel.ts" }],
+    });
+    expect(tasks?.[0]?.title).toBe("审查面板");
+  });
+
+  it("attachments 同时接受 string[] 与 {path,name} 对象数组", () => {
+    const tasks = parseSuperDelegationTasks({
+      tasks: [
+        { title: "甲", task: "做甲", attachments: ["a.png", "docs/b.txt"] },
+        { title: "乙", task: "做乙", attachments: [{ path: "C:/tmp/c.png", name: "c.png" }] },
+      ],
+    });
+    expect(tasks?.[0]?.attachments?.map((a) => a.name)).toEqual(["a.png", "b.txt"]);
+    expect(tasks?.[1]?.attachments?.map((a) => a.name)).toEqual(["c.png"]);
+    expect(tasks?.[1]?.attachments?.[0]?.path).toBe("C:/tmp/c.png");
+  });
+
+  it("字符串形态走宽松解析（原始换行 / 尾逗号都能救回来）", () => {
+    const tasks = parseSuperDelegationTasks('{"tasks":[{"task":"第一行\n第二行",}]}');
+    expect(tasks).not.toBeNull();
+    expect(tasks?.[0]?.task).toBe("第一行\n第二行");
+  });
+
+  it("非法载荷返回 null（绝不编造内容）", () => {
+    for (const args of [
+      undefined,
+      null,
+      5,
+      "",
+      "{bad json",
+      '{"tasks":[]}',
+      '{"tasks":"x"}',
+      { foo: 1 },
+      { tasks: [{ title: "只有标题" }] },
+    ]) {
+      expect(parseSuperDelegationTasks(args)).toBeNull();
+    }
+  });
+
+  it("与派发器同源：解析结果与 parseSuperToolCall 的任务完全一致", () => {
+    const args = { tasks: [{ task: "同一个载荷" }] };
+    const direct = parseSuperDelegationTasks(args);
+    const viaDispatcher = parseSuperToolCall("dispatch", args);
+    expect(viaDispatcher.ok).toBe(true);
+    if (!viaDispatcher.ok) return;
+    expect(direct).toEqual(viaDispatcher.tasks.flat());
   });
 });

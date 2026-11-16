@@ -48,6 +48,7 @@ import {
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
+import { parseSuperDelegationTasks } from "../../../shared/super-tool-call";
 import { Button, Chip, ICON_INLINE } from "./ui";
 import { Markdown } from "./Markdown";
 import {
@@ -479,7 +480,9 @@ function RawCard({
  * 工具只回 `Delegation request accepted.`。这条调用照常进 store 成为
  * `ToolBlock`，但转录层不能再走通用 ToolCard —— 用户看到的「工具操作 /
  * 执行参数 / 原始 JSON」正是上一轮没修到的那层。这里复用围栏委派卡的
- * 独立表面，不碰宿主派发逻辑，也不修改 shared/super-tool-call.ts。
+ * 独立表面，**不碰宿主派发逻辑**：任务列表优先取宿主解析出的
+ * `block.superTasks`（`input` 是有损展示串，回解不可靠），历史转录才回退到
+ * 共享解析入口（`parseSuperDelegationTasks`，与派发器同一份实现）。
  */
 interface SuperToolTaskView {
   title: string;
@@ -496,49 +499,48 @@ const SUPER_TOOL_PREVIEW_CHARS = 200;
 const SUPER_TOOL_PREVIEW_BLOCKS = 2;
 
 /**
- * 从 ToolBlock.input（host 用 formatToolInput 格式化过的 args JSON）解析任务书。
- * 只在完整 JSON + 每个任务都有 title/task 时给出可读列表；空载荷、半截 JSON、
- * 形状不符一律降级，绝不把坏载荷拆成看起来已派发的任务。
+ * 从 ToolBlock 解析任务书。
+ *
+ * 单一真源 = **宿主解析出的结构**（`block.superTasks`）。两个原因让卡片不能
+ * 只回解 `block.input`：
+ *  - `input` 是宿主故意做成**有损**的展示串（`formatToolInput`：单个字符串
+ *    值截断 300 字符、整串上限 4096 字符）——长任务书会被从中间切断，JSON
+ *    直接不合法；
+ *  - 模型调内置 `super-agent` 工具时**有时漏掉 `title`**（wire 实证：args 是
+ *    `{"tasks":[{"task":"…"}]}`）。宿主派发器容忍这种情况（回退到 task 首行，
+ *    那一轮真的派出了 4 个子会话），而旧卡片要求每条任务都有非空 title → 把
+ *    一次成功的委派谎报成「工具参数未能完整解析」。
+ *
+ * 没有 `superTasks` 时（历史转录 / 恢复会话）才回退去解析 `input`，且回解
+ * 复用与派发器**同一份**实现（`parseSuperDelegationTasks`）—— 两边口径不会
+ * 漂移。两者都失败才走诚实降级：绝不把坏载荷拆成看起来已派发的任务。
  */
-function parseSuperToolCallInput(input: ToolBlock["input"]): SuperToolCallParse {
-  if (!input || !input.trim()) return { ok: false, reason: "pending" };
-  let payload: unknown;
-  try {
-    payload = JSON.parse(input) as unknown;
-  } catch {
-    return { ok: false, reason: "invalid" };
+function parseSuperToolCallPayload(block: ToolBlock): SuperToolCallParse {
+  const host = block.superTasks;
+  if (host && host.length > 0) {
+    return {
+      ok: true,
+      tasks: host.map((task) => ({
+        title: task.title,
+        task: task.task,
+        attachments: task.attachmentCount,
+      })),
+    };
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return { ok: false, reason: "invalid" };
+  const fallback = parseSuperDelegationTasks(block.input);
+  if (fallback && fallback.length > 0) {
+    return {
+      ok: true,
+      tasks: fallback.map((task) => ({
+        title: task.title,
+        task: task.task,
+        attachments: (task.attachments ?? []).length,
+      })),
+    };
   }
-  const tasks = (payload as { tasks?: unknown }).tasks;
-  if (!Array.isArray(tasks) || tasks.length === 0) return { ok: false, reason: "invalid" };
-  const parsed: SuperToolTaskView[] = [];
-  for (const entry of tasks) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      return { ok: false, reason: "invalid" };
-    }
-    const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
-    if (typeof record.title !== "string" || !record.title.trim()) {
-      return { ok: false, reason: "invalid" };
-    }
-    if (typeof record.task !== "string" || !record.task.trim()) {
-      return { ok: false, reason: "invalid" };
-    }
-    const attachments = record.attachments;
-    if (
-      attachments !== undefined &&
-      (!Array.isArray(attachments) || attachments.some((name) => typeof name !== "string"))
-    ) {
-      return { ok: false, reason: "invalid" };
-    }
-    parsed.push({
-      title: record.title,
-      task: record.task,
-      attachments: Array.isArray(attachments) ? attachments.length : 0,
-    });
-  }
-  return { ok: true, tasks: parsed };
+  // 参数还没到达 → pending 占位；到了却读不出来 → 诚实降级。
+  if (!block.input || !block.input.trim()) return { ok: false, reason: "pending" };
+  return { ok: false, reason: "invalid" };
 }
 
 /** 状态 chip 留在独立卡内，沿用 ToolCard 的四态文案但穿委派家族表面。 */
@@ -640,7 +642,10 @@ function SuperToolTaskRow({
  * 唯一有价值的正文，见下方 invalid 分支）。
  */
 export function SuperToolCallCard({ block }: { block: ToolBlock }) {
-  const parsed = useMemo(() => parseSuperToolCallInput(block.input), [block.input]);
+  const parsed = useMemo(
+    () => parseSuperToolCallPayload(block),
+    [block.superTasks, block.input],
+  );
   const tasks = parsed.ok ? parsed.tasks : [];
   return (
     <DirectiveSurface

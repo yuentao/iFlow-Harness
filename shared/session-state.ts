@@ -32,10 +32,12 @@ import {
   type SessionSummaryUi,
   type SessionUsageUi,
   type SubAgentBlock,
+  type SuperDelegatedTaskUi,
   type ToolBlock,
   type ToolDiffUi,
   type UsageBreakdownUi,
 } from "./messages.js";
+import { classifySuperToolName, parseSuperDelegationTasks } from "./super-tool-call.js";
 
 // --- merging helpers -------------------------------------------------------
 
@@ -226,6 +228,41 @@ export function formatToolInput(args: unknown): string | null {
 }
 
 /**
+ * Delegated tasks of a `super-agent` dispatch call, parsed BY THE HOST.
+ *
+ * The transcript card must render from THIS structure, not from the lossy
+ * `input` display string: `input` truncates every string value at 300 chars
+ * and the whole payload at 4096 chars, so a long task brief gets cut in the
+ * middle and stops being JSON. The model also sometimes omits `title` (wire
+ * evidence: a real call whose args were `{"tasks":[{"task":"…"}]}`) — the
+ * dispatcher tolerates that (falls back to the task's first line) while a
+ * stricter reader would call the whole delegation unparseable, i.e. a FALSE
+ * ALARM about a delegation that really happened.
+ *
+ * Cost discipline (this is a hot path — every tool frame passes here): the
+ * parse runs ONLY for dispatch-class tool names; every other tool frame
+ * skips it entirely.
+ *
+ * @returns the parsed tasks, or undefined when this is not a dispatch call or
+ * the payload is unusable (never fabricate).
+ */
+function superTasksForTool(
+  toolName: string | undefined,
+  args: unknown,
+): SuperDelegatedTaskUi[] | undefined {
+  if (classifySuperToolName(toolName ?? "") !== "dispatch") return undefined;
+  const tasks = parseSuperDelegationTasks(args);
+  if (!tasks || tasks.length === 0) return undefined;
+  return tasks.map((task) => ({
+    title: task.title,
+    task: task.task,
+    // Count only: attachment bodies (file contents / inlined base64 images)
+    // must never enter the snapshot (pitfall #27 discipline).
+    attachmentCount: (task.attachments ?? []).length,
+  }));
+}
+
+/**
  * Tool-block position index: `toolCallId` → index in the block list.
  *
  * WHY this exists: the lookup used to be a reverse O(n) scan of the WHOLE
@@ -343,6 +380,10 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
       // Args ride only the in_progress update; a later update without args
       // must not erase the captured command/params.
       input: patch.input ?? block.input,
+      // Same discipline for the parsed delegation structure: the args (and
+      // therefore the task list) arrive with the in_progress frame only — a
+      // later frame without args must not wipe the card's task list.
+      superTasks: patch.superTasks ?? block.superTasks,
       reverted: patch.diff ? false : block.reverted,
       // P0-2: per-hunk decisions anchor to the diff text they were derived
       // from — a new diff invalidates them exactly like the revert marker.
@@ -772,6 +813,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: "",
         input: formatToolInput(update.args),
+        superTasks: superTasksForTool(update.toolName, update.args),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
@@ -786,6 +828,7 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: extractTextOutput(update.content),
         input: formatToolInput(update.args),
+        superTasks: superTasksForTool(update.toolName, update.args),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });

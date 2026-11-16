@@ -3362,3 +3362,135 @@ describe("tool block lookup index (upsertToolBlock)", () => {
     expect(state.blocks).toBe(before);
   });
 });
+
+/**
+ * 委派类工具调用的任务结构（`ToolBlock.superTasks`）。
+ *
+ * 单一真源 = **宿主实际派发了什么**。两个原因让卡片不能只回解 `input`：
+ *  - `input` 是有损展示串（单个字符串值截断 300 字符、整串上限 4096 字符），
+ *    长任务书会被从中间切断，回解必然失败；
+ *  - 模型调内置 `super-agent` 工具时**有时漏掉 `title`**（wire 实证），派发器
+ *    容忍（回退 task 首行、照常派发），卡片此前却判成解析失败 —— 把一次真的
+ *    派发谎报成失败。
+ *
+ * 宿主因此从**原始 args** 解析一次，把结构随快照下发（附件只给数量，本体不进
+ * 快照 —— 陷阱 #27 纪律）。
+ */
+describe("委派工具调用的任务结构（superTasks）", () => {
+  const dispatchArgs = { tasks: [{ task: "只读审查 src/panel/panel.ts" }] };
+
+  it("从原始 args 解析出任务（缺 title 也认，回退 task 首行）", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        title: "Delegate 1 task",
+        status: "pending",
+        args: dispatchArgs,
+      }),
+    );
+    const block = state.blocks[0];
+    expect(block?.kind).toBe("tool");
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toEqual([
+      {
+        title: "只读审查 src/panel/panel.ts",
+        task: "只读审查 src/panel/panel.ts",
+        attachmentCount: 0,
+      },
+    ]);
+  });
+
+  it("附件只给数量，附件本体不进快照", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        status: "pending",
+        args: {
+          tasks: [
+            {
+              title: "带附件",
+              task: "做点事",
+              attachments: ["a.png", { path: "C:/tmp/b.png", name: "b.png" }],
+            },
+          ],
+        },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks?.[0]?.attachmentCount).toBe(2);
+    expect(JSON.stringify(block.superTasks)).not.toContain("C:/tmp/b.png");
+  });
+
+  it("后续不带 args 的更新帧不会抹掉已解析的任务列表", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        status: "in_progress",
+        args: dispatchArgs,
+      }),
+    );
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-super",
+        toolName: "super-agent",
+        status: "completed",
+        content: [
+          { type: "content", content: { type: "text", text: "Delegation request accepted." } },
+        ],
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toHaveLength(1);
+    expect(block.superTasks?.[0]?.title).toBe("只读审查 src/panel/panel.ts");
+  });
+
+  it("非委派工具不带该字段（热路径不做多余解析）", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-other",
+        toolName: "run_shell_command",
+        status: "pending",
+        args: { command: "Get-ChildItem" },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+  });
+
+  it("派发类工具的载荷不可用时不编造任务（字段留空）", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-bad",
+        toolName: "super-agent",
+        status: "pending",
+        args: { tasks: [] },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+  });
+});
