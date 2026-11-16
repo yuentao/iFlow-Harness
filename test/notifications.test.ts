@@ -9,9 +9,11 @@ import {
   osNotifyAllowed,
 } from "../shared/notifications.js";
 
+const ALL_EVENTS = ["approval", "question", "plan", "turnDone", "childDone", "superReport"] as const;
+
 describe("osNotifyAllowed", () => {
   it("off blocks every event kind", () => {
-    for (const event of ["approval", "question", "plan", "turnDone"] as const) {
+    for (const event of ALL_EVENTS) {
       expect(osNotifyAllowed(event, "off")).toBe(false);
     }
   });
@@ -24,10 +26,13 @@ describe("osNotifyAllowed", () => {
     // kind is gone from the type system) — the tier is exactly the trio of
     // blocking cards, completion stays in the `all` tier only.
     expect(osNotifyAllowed("turnDone", "approvals")).toBe(false);
+    // 2026-11-16: the two split completion signals are `all`-tier only too.
+    expect(osNotifyAllowed("childDone", "approvals")).toBe(false);
+    expect(osNotifyAllowed("superReport", "approvals")).toBe(false);
   });
 
   it("all covers everything", () => {
-    for (const event of ["approval", "question", "plan", "turnDone"] as const) {
+    for (const event of ALL_EVENTS) {
       expect(osNotifyAllowed(event, "all")).toBe(true);
     }
   });
@@ -110,6 +115,36 @@ describe("gateOsNotification", () => {
     expect(unfocused.fire).toBe(true);
   });
 
+  it("childDone / superReport share the turnDone focus gate", () => {
+    // 2026-11-16: both are completion signals, so a focused window must not
+    // earn a toast for either — the chime is the only cue there.
+    for (const event of ["childDone", "superReport"] as const) {
+      const focused = gateOsNotification({
+        event,
+        setting: "all",
+        panelVisible: false,
+        windowFocused: true,
+        nowMs: 0,
+        gate: initOsNotifyGate(),
+        contentKey: `${event} text`,
+      });
+      expect(focused.fire).toBe(false);
+      expect(focused.reason).toBe("focus");
+      expect(focused.gate.lastFiredAt[event]).toBeUndefined();
+
+      const unfocused = gateOsNotification({
+        event,
+        setting: "all",
+        panelVisible: false,
+        windowFocused: false,
+        nowMs: 0,
+        gate: initOsNotifyGate(),
+        contentKey: `${event} text`,
+      });
+      expect(unfocused.fire).toBe(true);
+    }
+  });
+
   it("blocking events ignore window focus — the agent is stuck", () => {
     for (const event of ["approval", "question", "plan"] as const) {
       const out = gateOsNotification({
@@ -185,6 +220,48 @@ describe("gateOsNotification", () => {
     });
     expect(other.fire).toBe(true);
     expect(other.gate.lastFiredAt).toEqual({ approval: 0, question: 100 });
+  });
+
+  it("childDone is exempt from the 5s same-kind throttle — every child is its own event", () => {
+    // 2026-11-16: two children finishing seconds apart must BOTH be announced;
+    // the per-kind throttle would silently swallow the second one. Duplicate
+    // protection for childDone comes from the content cooldown (event + text).
+    const first = gateOsNotification({
+      event: "childDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 0,
+      gate: initOsNotifyGate(),
+      contentKey: "子会话「A」已完成",
+    });
+    expect(first.fire).toBe(true);
+
+    const second = gateOsNotification({
+      event: "childDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 1_000, // well inside the 5s same-kind throttle window
+      gate: first.gate,
+      contentKey: "子会话「B」已完成",
+    });
+    expect(second.fire).toBe(true);
+    expect(second.gate.lastContent?.text).toBe("子会话「B」已完成");
+
+    // The identical line (same child title + same status) inside the 60s
+    // content cooldown is still dropped — no duplicate toast for one event.
+    const repeat = gateOsNotification({
+      event: "childDone",
+      setting: "all",
+      panelVisible: false,
+      windowFocused: false,
+      nowMs: 2_000,
+      gate: second.gate,
+      contentKey: "子会话「B」已完成",
+    });
+    expect(repeat.fire).toBe(false);
+    expect(repeat.reason).toBe("cooldown");
   });
 
   it("does not consume the gate when the setting rejects the event", () => {

@@ -98,6 +98,7 @@ import {
   type SuperAttachment,
   type SuperReportEntry,
   type SuperSessionUi,
+  type SuperStatus,
   type SuperTaskSpec,
 } from "../../shared/super-agent.js";
 import {
@@ -930,19 +931,15 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly superReportedChildIds = new Set<string>();
   /**
-   * 「子会话已全部结束」提示的一次性标记。
+   * 每个子会话上一次被宿主看到的 SuperStatus（key = childId）。
    *
-   * 完成提示必须挂在**真实事件**上：非终态子会话数从 >0 掉到 0 的那一刻。
-   * 旧实现挂在主会话 hidden 汇报回合收尾时判断「此刻还有没有子会话在跑」——
-   * 动作回执（同样是 hidden 回合）在子会话早已全部终态时收尾，于是又响一次
-   * 铃并宣称「子会话已全部结束」，而同一句文案常被 60s 内容冷却吞掉，界面
-   * 上没有任何新通知（用户实测的「突然响铃但没有通知」）。有新的非终态子
-   * 会话出现时重置标记，下一批结束还能再提示一次。
+   * 完成提示按**子会话逐个**判定：只有「上一次非终态、这一次终态」才是真实
+   * 的收尾事件。旧的聚合实现（非终态数 >0 → 0 时提示「子会话已全部结束」）
+   * 把两个子会话的完成混成一次、还会在恢复归档/刚打开看板时把早已终态的
+   * 事实当成新事件；按 id 记状态后：首次看到就终态 = 没有事件（不提示）、
+   * 重复 sync = 状态没变（不重复提示）、子会话从 list 消失 = 清记录。
    */
-  private superSettledAnnounced = false;
-  /** 是否亲眼看见过非终态子会话（即这批子会话确实跑过）。没看见过就谈不上
-   * 「刚刚全部结束」—— 刚打开一个子会话早已终态的会话不该再响一次铃。 */
-  private superRunningObserved = false;
+  private superLastStatus = new Map<string, SuperStatus>();
   /**
    * 本轮用户消息的附件（图片 base64 + 带路径的文件）。子会话看不到对话，委派
    * 发生时若不带上它们，用户附的截图/日志会在子任务里静默消失。只在本轮流式
@@ -2493,8 +2490,12 @@ export class ChatPanel implements vscode.Disposable {
    * sound + chime overlap is the accepted price of the cue never vanishing
    * again (set `osNotifications: approvals` for a chime-only away cue).
    * Synthesized in the webview (Web Audio), no asset files.
+   *
+   * `child` is the third, deliberately lighter cue: ONE child session settled
+   * (completed / failed / cancelled). It must be distinguishable from `done`
+   * by ear — a child finishing is progress, not the main session finishing.
    */
-  private postSound(kind: "done" | "error"): void {
+  private postSound(kind: "done" | "error" | "child"): void {
     const cfg = vscode.workspace.getConfiguration("iflow");
     if (cfg.get<boolean>("soundFeedback", true) === false) return;
     this.postToWebview({ type: "playSound", kind });
@@ -2545,25 +2546,51 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Completion cue for a REAL turn (a user turn or a regenerated turn).
+   * Shared completion cue: native toast (gated) + chime (universal, subject-
+   * specific).
    *
    * Symmetry rule (2026-11-15): the chime must accompany something the user
-   * can perceive. `notifyOsDecision` decides whether the away-toast fires; when it
-   * did not, the chime still rings unless the drop reason was "duplicate"
-   * (throttle / content cooldown) — those mean the identical 「已完成本轮
-   * 回复」 line was delivered seconds ago and the user got no new signal, so
-   * a lone chime would read as "a notification appeared" while the UI shows
+   * can perceive. `notifyOsDecision` decides whether the away-toast fires;
+   * when it did not, the chime still rings unless the drop reason was
+   * "duplicate" (throttle / content cooldown) — those mean an identical line
+   * was delivered moments ago and the user got no new signal, so a lone
+   * chime would read as "a notification appeared" while the UI shows
    * nothing. Every other drop reason (watching, osNotifications off, focused
    * window) leaves the chime as the user's only cue and must still ring.
    *
-   * Host-internal turns (Super Agent report / action-receipt deliveries) do
-   * NOT come through here: they are bookkeeping, not user turns (see the
-   * completion branch in `sendPrompt`).
+   * The three wrappers below are DIFFERENT subjects and must stay separate
+   * (2026-11-16 user request) — same event/chime for all of them made 「一个
+   * 子会话干完」 and 「主会话汇报完」 indistinguishable:
+   *   - announceTurnDone    → `turnDone`,    done 音, 「iFlow 已完成本轮回复」
+   *   - announceSuperReport → `superReport`, done 音, 「主会话已汇报子会话结果」
+   *   - announceChildDone   → `childDone`,   child 音, 「子会话「{0}」已…」
+   * Host bookkeeping turns that are NOT reports (action receipts, delegated
+   * user-turn backfill) never call any of these — they stay silent.
    */
-  private announceTurnDone(text: string): void {
-    const decision = this.notifyOsDecision("turnDone", text);
+  private announceCue(event: OsNotifyEvent, text: string, kind: "done" | "child"): void {
+    const decision = this.notifyOsDecision(event, text);
     if (!decision.fire && isDuplicateNotificationBlock(decision.reason)) return;
-    this.postSound("done");
+    this.postSound(kind);
+  }
+
+  /** A REAL user turn (typed prompt or regenerate) finished. */
+  private announceTurnDone(text: string): void {
+    this.announceCue("turnDone", text, "done");
+  }
+
+  /**
+   * The main session's hidden Super Agent report turn settled: the main agent
+   * has read the child results and reported back. That IS main-session work
+   * finishing, so it keeps the regular completion chime — but on its own OS
+   * event (`superReport`) so it is never conflated with a child settling.
+   */
+  private announceSuperReport(text: string): void {
+    this.announceCue("superReport", text, "done");
+  }
+
+  /** ONE child session reached a terminal state (per-child light cue). */
+  private announceChildDone(text: string): void {
+    this.announceCue("childDone", text, "child");
   }
 
   /**
@@ -8094,6 +8121,9 @@ export class ChatPanel implements vscode.Disposable {
         const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
           delegateOnBusy: false,
           hidden: true,
+          // 这一轮是「主会话汇报子会话结果」：收尾时用 superReport 事件 +
+          // done 音（与单个子会话收尾的 childDone + child 音区分开）。
+          reportTurn: true,
         });
         if (!started) {
           // 回合没跑起来（主会话被别的回合占着）：这条汇报**留在队列里**，
@@ -8297,45 +8327,55 @@ export class ChatPanel implements vscode.Disposable {
       this.autoTurnsHeld(),
       this.pendingAutoTurnCount(),
     );
-    this.announceChildrenSettledIfDone(live);
+    this.syncChildSettledAnnouncements(live);
   }
 
   /**
-   * 「子会话已全部结束」提示：只在一个**真实事件**上响一次 —— 非终态子会话
-   * 数从 >0 掉到 0 的那一刻。
+   * 子会话逐个完成提示：每个子会话**各自**从非终态迁移到终态
+   * （completed / failed / cancelled）时提示一次。
    *
-   * 为什么不能挂在 hidden 汇报回合收尾上：hidden 回合不止是汇报，还有动作
-   * 回执（`queueSuperActionReceipt`）。回执在子会话早已全部终态时也会跑一轮，
-   * 旧实现按「此刻还有没有子会话在跑」判断，于是每份回执都响一次铃并宣称
-   * 「子会话已全部结束」——那件事早就发生过；同一句文案又会被 60s 内容冷却
-   * 吞掉，用户于是只听到铃、界面上没有任何新通知。把提示绑到状态收尾事件
-   * 本身，就既不会重复、也不会在没有事件时响。
+   * 为什么放弃聚合判定（旧的「非终态数 >0 掉到 0 → 子会话已全部结束」）：
+   *  ①聚合把多个子会话的收尾混成一次 —— 用户要的是「每个子会话各提示一次」，
+   *    两个子会话先后完成应各响一声，而不是等到最后一个才响。
+   *  ②聚合无法区分「刚刚结束」与「早就结束」：恢复归档、刚打开看板时非终态数
+   *    本来就是 0，任何额外一次 sync 都可能误报一个过期事实。
+   *  ③「全部结束」的文案与用户回合完成共用 turnDone 事件和 done 音，导致
+   *    「子会话干完」与「主会话干完」在通知通道上无法区分（2026-11-16 需求）。
    *
    * 判据用**全部活子会话**（不分主会话）：看板对活着的子会话一律可见，提示
-   * 与用户能看到的内容保持一致。`superSettledAnnounced` 在新一批非终态子会话
-   * 出现时重置，所以下一批结束还能再提示一次。
+   * 与用户能看到的内容保持一致。状态记录按 childId 保存，子会话被清理后
+   * 顺手剪掉，避免集合无限增长。
    */
-  private announceChildrenSettledIfDone(live: SuperSessionUi[]): void {
+  private syncChildSettledAnnouncements(live: SuperSessionUi[]): void {
     if (this.disposed) return;
-    const running = live.filter((session) => !isTerminalSuperStatus(session.status));
-    if (running.length > 0) {
-      // 看见它跑起来了 —— 之后掉到 0 才算「刚刚全部结束」。
-      this.superRunningObserved = true;
-      this.superSettledAnnounced = false;
-      return;
+    const liveIds = new Set(live.map((session) => session.id));
+    for (const id of [...this.superLastStatus.keys()]) {
+      if (!liveIds.has(id)) this.superLastStatus.delete(id);
     }
-    if (live.length === 0) {
-      // 全部被清理 / 从来没派发过：没有事件可宣布，下一批重新开始。
-      this.superRunningObserved = false;
-      this.superSettledAnnounced = false;
-      return;
+    for (const session of live) {
+      const previous = this.superLastStatus.get(session.id);
+      this.superLastStatus.set(session.id, session.status);
+      // 首次看到它（恢复归档 / 刚打开看板）：这不是「刚刚结束」，是过期事实。
+      if (previous === undefined) continue;
+      // 上次就已经终态：重复 sync（心跳每 1.5s 一次）不能重复提示。
+      if (isTerminalSuperStatus(previous)) continue;
+      // preparing / running / awaiting_input 都还不是完成。
+      if (!isTerminalSuperStatus(session.status)) continue;
+      this.announceChildSettled(session);
     }
-    // 从未观察到它跑过（例如刚切到一个子会话早已终态的会话）就不宣布：
-    // 那不是「刚刚结束」，而是一个过期事实 —— 正是要消灭的假事件。
-    if (!this.superRunningObserved || this.superSettledAnnounced) return;
-    this.superSettledAnnounced = true;
-    this.superRunningObserved = false;
-    this.announceTurnDone(vscode.l10n.t("子会话已全部结束"));
+  }
+
+  /** 一个子会话刚刚收尾：按终态分别给文案（事件与音色由 announceChildDone 统一）。 */
+  private announceChildSettled(session: SuperSessionUi): void {
+    const title = session.title;
+    if (session.status === "completed") {
+      this.announceChildDone(vscode.l10n.t("子会话「{0}」已完成", title));
+    } else if (session.status === "failed") {
+      this.announceChildDone(vscode.l10n.t("子会话「{0}」已失败", title));
+    } else {
+      // 终态只剩 cancelled（isTerminalSuperStatus 已过滤）。
+      this.announceChildDone(vscode.l10n.t("子会话「{0}」已中断", title));
+    }
   }
 
   /**
@@ -10290,15 +10330,22 @@ export class ChatPanel implements vscode.Disposable {
      * still receives the prompt, and its answer still streams into the
      * transcript as an assistant message.
      *
+     * `reportTurn: true` — this hidden turn is the Super Agent report delivery
+     * (the main agent reading child results and reporting back). Only that
+     * flavour of hidden turn earns a completion cue (`announceSuperReport`):
+     * action receipts and delegated-user-turn backfills are bookkeeping and
+     * stay silent.
+     *
      * 返回值：true = 这一回合真的在主会话上跑起来了；false = 被拒了（主会话
      * 正忙 / 正在恢复历史 / 已销毁）或被派发成了子会话。汇报队列靠它决定
      * 「这条汇报是投出去了」还是「还欠着」—— 汇报丢了主会话就永远读不到
      * 自己孩子的结果。
      */
-    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean },
+    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean; reportTurn?: boolean },
   ): Promise<boolean> {
     const internal = options?.internal === true;
     const hidden = options?.hidden === true;
+    const reportTurn = options?.reportTurn === true;
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return false;
@@ -10599,18 +10646,20 @@ export class ChatPanel implements vscode.Disposable {
       // away-notification (M1 P0-5) with its own gate — no longer mutually
       // exclusive, the exclusivity made the chime unreachable for away users
       // on `osNotifications: all` (user report 2026-10-13).
-      if (result.stopReason !== "cancelled" && !hidden) {
-        // 用户回合：照旧「iFlow 已完成本轮回复」+ 提示音（见 announceTurnDone
-        // 的可见信号对称规则）。
-        //
-        // hidden 回合（子会话汇报 / 动作回执）**完全静音**：那是宿主自己的
-        // 记账回合，转录里没有用户气泡、动作回执更不对应任何新事件。旧实现
-        // 按「此刻是否还有子会话在跑」决定要不要响铃，于是动作回执在子会话
-        // 早已全部终态时照样响一次铃并宣称「子会话已全部结束」——同一句文案
-        // 又常被 60s 内容冷却吞掉，结果就是「响了铃、界面上什么通知都没有」
-        // （用户实测）。真正的「子会话全部结束」事件改挂在子会话状态收尾的
-        // 那一刻（announceChildrenSettledIfDone）。
-        this.announceTurnDone(vscode.l10n.t("iFlow 已完成本轮回复"));
+      if (result.stopReason !== "cancelled") {
+        if (!hidden) {
+          // 用户回合：照旧「iFlow 已完成本轮回复」+ done 音（见 announceCue
+          // 的可见信号对称规则）。
+          this.announceTurnDone(vscode.l10n.t("iFlow 已完成本轮回复"));
+        } else if (reportTurn) {
+          // 主会话汇报回合：主 Agent 读完子会话结果并汇报回来，那是主会话
+          // 真实的收尾工作，用**独立事件** superReport + 常规 done 音 —— 与
+          // 单个子会话收尾（childDone + child 音）明确分开。
+          this.announceSuperReport(vscode.l10n.t("主会话已汇报子会话结果"));
+        }
+        // 其余 hidden 回合（动作回执 / 被改道用户消息补投）**完全静音**：
+        // 那是宿主自己的记账回合，转录里没有用户气泡，也不对应任何新事件。
+        // 单个子会话的完成提示挂在状态迁移上（syncChildSettledAnnouncements）。
       }
       void this.persistActiveTranscript();
       void this.touchActiveSession();

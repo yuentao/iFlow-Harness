@@ -152,12 +152,17 @@ function unlockAudio(): void {
 }
 
 /**
- * Synthesized cues:
- * - "done": rising two-tone chime (E5 → G5), short and positive.
+ * Synthesized cues — three distinct subjects, three distinct sounds:
+ * - "done": rising two-tone chime (E5 → G5), short and positive. A real turn
+ *   finished (user turn, or the main session's Super Agent report turn).
  * - "error": falling double-buzz (A3 → F3, square), unmistakably wrong.
- * Volume kept low (0.08 peak); ~0.35s total, never overlaps the next turn.
+ * - "child": ONE child session settled — a single low, short, quiet note
+ *   (D5 sine, 0.11s, peak 0.06). Deliberately lighter than "done": one child
+ *   finishing is progress, not the whole task finishing, and users asked for
+ *   the two to be tellable apart by ear alone.
+ * Volume kept low (≤0.08 peak); ~0.35s total, never overlaps the next turn.
  */
-function playCue(kind: "done" | "error"): void {
+function playCue(kind: "done" | "error" | "child"): void {
   try {
     unlockAudio();
     if (!audioCtx) return; // AudioContext construction failed in unlockAudio
@@ -165,6 +170,8 @@ function playCue(kind: "done" | "error"): void {
     if (kind === "done") {
       blip(audioCtx, 659.25, t, 0.14, "sine", 0.08);
       blip(audioCtx, 783.99, t + 0.13, 0.2, "sine", 0.08);
+    } else if (kind === "child") {
+      blip(audioCtx, 587.33, t, 0.11, "sine", 0.06);
     } else {
       blip(audioCtx, 220, t, 0.13, "square", 0.05);
       blip(audioCtx, 174.61, t + 0.15, 0.2, "square", 0.05);
