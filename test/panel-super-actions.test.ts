@@ -270,7 +270,7 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
       status: "completed",
     });
     expect(cancel).toHaveBeenCalledWith("super-1");
-    expect(toasts).toEqual([{ level: "info", message: "该子会话已经结束，无需中断" }]);
+    expect(toasts).toEqual([{ level: "info", message: "这个子会话已经结束了，不用再中断" }]);
   });
 
   it("看板单个中断（目标不存在）：发出 warning 回执", async () => {

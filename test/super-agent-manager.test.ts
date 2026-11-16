@@ -1274,14 +1274,14 @@ describe("super agent · 任务提示词", () => {
     const text = buildTaskPrompt("改登录", "干活", {
       kind: "directory",
       path: "/tmp/dir",
-      note: "worktree 创建失败（fatal: 路径过长），仅目录隔离",
+      note: "独立工作目录创建失败（fatal: 路径过长），仅目录隔离",
       degradeReason: "worktree creation failed: fatal: path too long",
     });
     expect(text).toContain("worktree creation failed: fatal: path too long");
     expect(text).toContain("do not run git commands");
     expect(text).not.toContain("git add -A && git commit");
     // 面向看板的中文说明只给人看。
-    expect(text).not.toContain("worktree 创建失败");
+    expect(text).not.toContain("独立工作目录创建失败");
   });
 
   it("重试提示词说明上一轮中断、要求先检查现状", () => {

@@ -328,7 +328,7 @@ export interface InjectedContextItem {
  */
 export interface InjectedContextBlock extends BlockBase {
   kind: "injected";
-  /** One-line summary, e.g. "本次请求自动注入了 3 项内容：系统提示词、记忆、1 个上下文文件". */
+  /** One-line summary, e.g. "这次请求还自动带上了 3 项内容：系统提示词、全局记忆、1 个项目记忆文件". */
   notice: string;
   items: InjectedContextItem[];
   /** Estimated tokens of ALL injected bodies (host-side BPE over the full
@@ -964,12 +964,12 @@ export function validateAuthForm(input: {
   apiKey?: string | null;
 }): string | null {
   if (!/^https?:\/\//i.test(input.baseUrl.trim())) {
-    return "Base URL 必须以 http:// 或 https:// 开头";
+    return "接口地址要以 http:// 或 https:// 开头";
   }
   if (input.apiKey !== undefined && !(input.apiKey ?? "").trim()) {
-    return "API Key 不能为空";
+    return "请填写 API Key";
   }
-  if (!input.modelName.trim()) return "模型名称不能为空";
+  if (!input.modelName.trim()) return "请填写模型名称";
   return null;
 }
 

@@ -34,8 +34,6 @@ const en: Record<string, string> = {
     "A child session can be merged only after it finishes; one whose changes are already merged, or that has nothing to merge, does not need merging",
   "子会话还在运行时不能清理，请先中断它":
     "A running child session cannot be cleaned up — interrupt it first",
-  "子会话正在等你的回答；不回答的话，倒计时结束后它会按「没有回答」继续。":
-    "The child session is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
   "按未回答继续": "it continues with “no answer”",
   "子会话 {0}：{1}": "Child session {0}: {1}",
   "让智能体合并分支": "Let the agent merge the branch",
@@ -48,9 +46,7 @@ const en: Record<string, string> = {
   "这个子会话的改动已经合并": "This child session's changes are already merged",
   "{0} 个进行中": "{0} running",
   "{0} 个待处理": "{0} need you",
-  "{0} 个已完成": "{0} done",
   "{0} 个未成功": "{0} unfinished",
-  "{0} 个已中断": "{0} stopped",
   "全部中断": "Interrupt all",
   "子会话看板": "Child-session board",
   "展开子会话看板": "Expand the child-session board",
@@ -101,7 +97,6 @@ const en: Record<string, string> = {
   "独立工作目录": "Its own working directory",
   "只隔离了目录": "Directory only — no branch isolation",
   "直接在主工作区（无隔离）": "Runs directly in the main workspace (no isolation)",
-  "待回答": "Needs answer",
   "分支 {0}": "Branch {0}",
   "目录 {0}": "Directory {0}",
   "工作目录和分支都已删除": "Working directory and branch deleted",
@@ -112,8 +107,6 @@ const en: Record<string, string> = {
   "清理已结束的子会话": "Clean up finished child sessions",
   "将删除 {0} 个子会话的工作目录；它们的分支都会保留（未合并的提交不会丢），但工作目录里尚未提交的改动会被一起删掉，无法恢复。":
     "Delete the working directories of {0} child sessions? Their branches are all kept (unmerged commits are not lost), but uncommitted changes in those directories are deleted for good.",
-  "收起摘要": "Hide summary",
-  "查看摘要": "Show summary",
   "查看实时进度": "Show live progress",
   "子会话实时进度": "Child session live progress",
   "上次运行": "From a previous run",
@@ -121,9 +114,6 @@ const en: Record<string, string> = {
     "This child session had already finished in a previous run (a historical record restored after the extension restarted)",
   "准备中…": "Preparing…",
   "暂无输出": "No output yet",
-  "需要确认执行工具调用": "Needs confirmation to run a tool call",
-  "子会话请求批准执行计划": "The child session asks to execute its plan",
-  "批准": "Approve",
   "子会话需要你回答": "The child session needs an answer",
   "提交回答": "Send answer",
   "子会话合计开销": "Total child-session usage",
@@ -143,11 +133,8 @@ const en: Record<string, string> = {
   "正在读取本轮变更…": "Loading turn changes…",
   "本轮没有可显示的改动记录；这不表示没有文件修改。": "No change records to show for this turn; this does not mean no files were modified.",
   // loading / topbar
-  "连接中…（内核启动可能需要十几秒，配置了多个 MCP server 时更久）":
-    "Connecting… (Core startup can take 10+ seconds, longer with multiple MCP servers)",
   "历史会话（选择后恢复该会话上下文）": "Recent sessions (pick one to restore its context)",
   "当前会话": "Current session",
-  "API 配置（点击切换后重新认证）": "API profile (click to switch, re-authenticates)",
   "权限模式": "Permission mode",
   "智能": "Smart",
   "iFlow 会自行判断风险，必要时才征求你的确认": "iFlow judges the risk itself and only asks when it matters",
@@ -160,26 +147,18 @@ const en: Record<string, string> = {
   "模型": "Model",
   "搜索模型…": "Search models…",
   "新会话": "New session",
-  "API 凭据配置": "API credentials",
   "主题": "Theme",
   "浅色": "Light",
   "深色": "Dark",
-  "浅色主题": "Light theme",
-  "深色主题": "Dark theme",
   "心流·驭光": "iFlow Harness",
   "连接中": "Connecting",
-  "就绪": "Ready",
   "正在生成": "Generating",
   "生成中": "Generating",
   "正在规划": "Planning",
   "正在压缩": "Compressing",
-  "初始化中": "Initializing",
   "出错了": "Something went wrong",
-  "管理配置与凭据…": "Manage profiles & credentials…",
   "会话历史": "Session history",
   // approval card
-  "工具执行审批": "Tool execution approval",
-  "iFlow 请求执行工具": "iFlow requests to run a tool",
   "取消": "Cancel",
   // user message delete
   "删除该消息及其后所有内容": "Delete this message and everything after it",
@@ -201,7 +180,6 @@ const en: Record<string, string> = {
     "Choose the rollback scope: restore files to before this turn, delete this message and everything after it, or both.",
   "这一轮的快照不完整，无法恢复文件，只能删除这条消息及之后的对话。":
     "This turn's snapshot is incomplete, so files cannot be restored — you can only delete this message and everything after it.",
-  "确定清空队列中全部 {0} 条待发送消息吗？": "Clear all {0} queued messages?",
   // tool cards / message list
   "已完成": "Completed",
   "失败": "Failed",
@@ -277,7 +255,6 @@ const en: Record<string, string> = {
   "子代理": "Subagent",
   "停止此子代理": "Stop this subagent",
   "已停止": "Stopped",
-  "tokens": "tokens",
   "耗时": "Duration",
   "查看完整记录": "View full log",
   "token 数为按对话估算，包含子代理": "Token count is estimated from the conversation and includes subagents",
@@ -316,13 +293,7 @@ const en: Record<string, string> = {
   "搜索会话": "Search sessions",
   "昨天": "Yesterday",
   // UI-audit 4.3: activity group header, action bar, quiet empty state
-  "执行了 {0} 个工具": "Executed {0} tool(s)",
-  "修改 {0} 个文件": "Modified {0} file(s)",
-  "{0} 个失败": "{0} failed",
-  "工具活动": "Tool activity",
-  "思考了 {0}s": "Thought for {0}s",
   "回滚这一轮": "Roll back this turn",
-  "回滚本轮（文件与对话）": "Roll back this turn (files and conversation)",
   "有什么可以帮你？": "What can I help with?",
   "输入 / 查看命令 · @ 引用文件": "Type / for commands, @ to reference files",
   // composer
@@ -331,38 +302,13 @@ const en: Record<string, string> = {
   // settings modal (unified: API profiles / MCP / approval policies)
   "设置": "Settings",
   "高级，可选填": "Advanced (optional)",
-  "点击配置即可切换并重新认证": "Click a profile to switch and re-authenticate",
-  "API 配置": "API profiles",
-  "已保存（{0}）— 留空保持不变": "saved (…{0}) — leave empty to keep",
-  "Base URL 必须以 http:// 或 https:// 开头": "Base URL must start with http:// or https://",
-  "API Key 不能为空": "API key is required",
-  "模型名称不能为空": "Model name is required",
-  "连接 iFlow 需要配置 API 凭据": "Connect to iFlow by configuring API credentials",
   "服务商预设": "Provider presets",
   "自定义": "Custom",
   "获取 API Key": "Get an API key",
   "查看文档": "Documentation",
   "常用模型": "Suggested models",
   "自定义配置": "Custom profile",
-  "选择服务商预设可自动填入端点，也可以手动填写任意 OpenAI 兼容端点。":
-    "Pick a provider preset to fill in the endpoint, or enter any OpenAI-compatible endpoint manually.",
-  "在 DeepSeek 开放平台创建 API Key；端点兼容 OpenAI 协议。":
-    "Create an API key on the DeepSeek platform; the endpoint is OpenAI-compatible.",
-  "在 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。":
-    "Create an API key on the Moonshot platform for Kimi models.",
-  "在智谱开放平台创建 API Key，使用 GLM 系列模型。":
-    "Create an API key on the Zhipu platform for GLM models.",
-  "在阿里云百炼控制台创建 API Key，使用通义千问系列模型。":
-    "Create an API key in the Alibaba Cloud Bailian console for Qwen models.",
-  "在硅基流动控制台创建 API Key，可访问多家开源模型。":
-    "Create an API key in the SiliconFlow console to access many open-source models.",
-  "在 OpenRouter 创建 API Key，可路由到多家供应商的模型。":
-    "Create an API key on OpenRouter to route to models from many providers.",
-  "本地 Ollama 不校验 API Key，填任意非空值（如 ollama）即可；请确认 Ollama 服务已启动。":
-    "Local Ollama does not check the API key — any non-empty value (e.g. ollama) works; make sure the Ollama service is running.",
   // first-run onboarding wizard
-  "初始化引导": "Getting started",
-  "连接 iFlow": "Connect iFlow",
   "选择模型": "Choose a model",
   "第 {0} / {1} 步": "Step {0} of {1}",
   "稍后设置": "Set up later",
@@ -370,34 +316,16 @@ const en: Record<string, string> = {
   "保存并继续": "Save & continue",
   "开始使用": "Start using",
   "欢迎使用 心流·驭光": "Welcome to iFlow Harness",
-  "连接模型服务后即可开始对话；其他设置都能在 ⚙ 中修改。":
-    "Connect a model provider to start chatting; everything else stays editable in the ⚙ settings.",
   "尚未选择": "Not selected",
-  "尚未配置（可稍后在设置中完成）": "Not configured (finish later in settings)",
-  "选择默认使用的模型；随时可以在面板顶部的模型下拉中切换。":
-    "Pick the default model. You can switch at any time from the model dropdown in the panel header.",
-  "正在连接内核并获取模型列表…": "Connecting to Core and fetching models…",
   "尚未连接": "Not connected",
-  "暂无可用模型列表": "No models available yet",
-  "保存凭据后会自动获取模型；也可以稍后在模型下拉中选择。":
-    "Models are fetched automatically once credentials are saved — or pick one later from the dropdown.",
-  "可点击下方按钮重新获取。": "Use the button below to fetch again.",
   "重新获取": "Fetch again",
-  "返回填写凭据": "Back to credentials",
   "当前模型：{0}": "Current model: {0}",
-  "选择新会话默认的权限模式；点击选项后当前会话也会立即切换。之后可在设置 → 审批策略中细化规则。":
-    "Pick the default approval mode for new sessions; clicking an option also switches the current session. Fine-grained rules live in Settings → Approval policies.",
-  "初始化进度": "Setup progress",
   "提示音": "Sound",
   "回复完成或失败时播放提示音。": "Play a cue when a reply finishes or fails.",
   "默认权限模式": "Default approval mode",
-  "新会话使用的权限模式；当前会话可用输入框下方的模式菜单切换。":
-    "Approval mode for new sessions; switch the current session from the mode menu below the composer.",
   "审批说明": "Approval help",
   "「允许一次」只执行这一次；「始终允许」会让本次会话记住这个操作，之后不再询问。":
     "\"Allow once\" runs it just this time; \"Always allow\" remembers this action for the session and stops asking.",
-  "拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 审批策略」。":
-    "Reject or cancel runs nothing. To set rules in advance, go to Settings → Approval policies.",
   "Y 允许一次 · N 拒绝 · Esc 取消": "Y allow once · N reject · Esc cancel",
   "Y 允许一次 · N/Esc 拒绝": "Y allow once · N/Esc reject",
   "计划说明": "Plan help",
@@ -431,75 +359,41 @@ const en: Record<string, string> = {
     "Enter confirms just that field; to submit the whole card, use the Submit answer button or Ctrl/Cmd+Enter.",
   "保存并重新规划": "Save and re-plan",
   "快捷键": "Keyboard shortcuts",
-  "停止生成（审批卡中为取消/拒绝）": "Stop generating (cancels/rejects on an approval card)",
   "审批允许 / 拒绝": "Approve / reject",
   "计划批准 / 拒绝 / 重新规划": "Plan approve / reject / re-plan",
   "上一个 / 下一个会话": "Previous / next session",
   "聚焦输入框": "Focus the composer",
   "切换 Focus 视图": "Toggle Focus view",
   "配置完成": "You're all set",
-  "可以开始对话了；其余设置在 ⚙ 中随时可改。":
-    "You can start chatting now; the rest stays editable in the ⚙ settings.",
   "连接": "Connection",
   "默认模式": "Default mode",
   "继续配置": "Continue configuring",
-  "这些能力可以稍后再设置。": "These capabilities can be set up later.",
   "还没配置 API 密钥，现在还不能开始对话。": "No API key configured yet — you cannot start chatting.",
   "去配置": "Set it up",
   "重新运行引导": "Run setup again",
   "收起": "Collapse",
-  "展开": "Expand",
   "复制错误信息": "Copy error message",
   "已复制": "Copied",
   "扩展": "Extension",
   "内核": "Core",
   "删除 {0}": "Delete {0}",
-  "编辑 {0}": "Edit {0}",
-  "添加 API 配置": "Add API profile",
   "添加配置": "Add profile",
   "编辑配置": "Edit profile",
-  "尚未添加 API 配置": "No API profiles yet",
-  "配置名称（可选，默认为模型名）": "Profile name (optional, defaults to the model name)",
-  "如 BUZZ、工作密钥…": "e.g. BUZZ, work key…",
-  "Base URL（OpenAI 兼容）": "Base URL (OpenAI-compatible)",
   "模型名称": "Model name",
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
-  "打开 VSCode 设置…": "Open VSCode Settings…",
   "重启内核": "Restart Core",
-  "重启内核进程（会话自动恢复），语言 / 审批模式 / MCP 等设置重启后生效":
-    "Restart the Core process (the session restores automatically); language / approval-mode / MCP settings take effect after the restart",
-  "点击配置即切换并重新认证会话；配置与密钥保存在内核配置文件 ~/.iflow/settings.json（本机明文）。":
-    "Click a profile to switch and re-authenticate the session; profiles and keys are stored in the Core config file ~/.iflow/settings.json (plaintext on this machine).",
-  "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文），保存后以 openai-compatible 方式重新认证会话。":
-    "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Saving re-authenticates the session via openai-compatible.",
-  "配置保存在内核配置文件 ~/.iflow/settings.json（本机明文）；编辑当前配置会重新认证会话，编辑其他配置只保存、不切换。":
-    "The configuration is stored in the Core config file ~/.iflow/settings.json (plaintext on this machine). Editing the active profile re-authenticates the session; editing another profile only saves it without switching.",
-  "当前配置正在使用中，生成中或有子会话运行时无法保存":
-    "This profile is currently in use; it cannot be saved while a turn is generating or a child session is running.",
-  "正在重新认证…": "Re-authenticating…",
   "等待选择…": "Waiting for your choice…",
-  "审批策略": "Approval policies",
   "审批规则": "Approval rule",
   "自动允许": "Auto-allow",
   "自动拒绝": "Auto-deny",
   "弹卡确认": "Ask (card)",
-  "尚未配置审批规则": "No approval rules configured",
-  "项目规则（只读）": "Project rules (read-only)",
   "启用": "Enabled",
   "点击启用": "Click to enable",
   "点击停用": "Click to disable",
-  "命中 {0} 次": "hit {0}×",
   "规则名称": "Rule name",
-  "如 允许读取 src 下文件": "e.g. Allow reading files under src",
   "动作": "Action",
-  "路径通配（相对会话目录）": "Path glob (relative to the session cwd)",
-  "命令首词（逗号分隔，仅执行类）": "Command first-words (comma-separated, execute only)",
   "MCP 服务器名": "MCP server name",
   "工具名（精确匹配）": "Tool name (exact match)",
-  "维度全部留空将匹配所有请求（谨慎）；编辑只改本地副本，点击「保存」才生效。":
-    "Leaving every dimension empty matches ALL requests (use with care); editing only changes a local copy — click Save to apply.",
-  "审批请求按顺序匹配规则（项目规则优先），首条命中即生效：自动允许 / 自动拒绝 / 弹卡。内置硬底线：rm、git push 等破坏性命令永不被自动允许，命中时仍弹卡确认。":
-    "Approval requests match rules in order (project rules first); the first match decides: auto-allow / auto-deny / ask. Built-in hard floor: destructive commands such as rm or git push are never auto-allowed — they still show the card.",
   // MCP management card
   "MCP 服务器": "MCP servers",
   "添加 MCP 服务器": "Add MCP server",
@@ -569,10 +463,8 @@ const en: Record<string, string> = {
   "MCP 服务器详情": "MCP server details",
   "刷新": "Refresh",
   "刷新中…": "Refreshing…",
-  "返回": "Back",
   "这个服务器的工具说明会占用约 {0} tokens 上下文（估算）":
     "This server's tool descriptions take about {0} tokens of context (estimated)",
-  "≈{0} tokens": "≈{0} tokens",
   "连接失败：": "Connection failed:",
   "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
   "正在读取工具列表…": "Reading the tool list…",
@@ -583,13 +475,9 @@ const en: Record<string, string> = {
   "参数结构": "Parameter structure",
   "参数结构太大，已省略": "The parameter structure is too large and was omitted",
   // profile-switch choice dialog
-  "切换 API 配置": "Switch API profile",
   "取消切换": "Cancel the switch",
-  "切换到 API 配置「{0}」后，当前对话如何处理？": "How should the current conversation be handled when switching to API profile \"{0}\"?",
   "停留在当前会话": "Stay in the current session",
-  "保留当前对话，改用新配置继续": "Keep the current conversation and continue with the new configuration",
   "开启新会话": "Start a new session",
-  "以新配置开始新对话": "Start new conversation with the new configuration",
   // composer
   "（见附图）": "(see attached image)",
   "移除": "Remove",
@@ -617,19 +505,10 @@ const en: Record<string, string> = {
   "在集成终端重跑该命令": "Re-run this command in the integrated terminal",
   "输入 URL 后回车附加": "Type a URL, then press Enter to attach",
   // M2 P0-3 message queue strip
-  "队列 · {0} 条待发送": "Queue · {0} pending",
-  "已暂停": "paused",
-  "继续依序发送队列": "Resume sending the queue in order",
   "继续": "Resume",
-  "清空队列": "Clear queue",
-  "清空": "Clear",
   "（附件消息）": "(attachment message)",
   "排队中": "Queued",
   "附件 {0}": "{0} attachment(s)",
-  "打断并立即发送": "Interrupt & send now",
-  "取回编辑": "Edit (back to composer)",
-  "上移": "Move up",
-  "下移": "Move down",
   "删除": "Delete",
   // delete confirmation dialogs (ConfirmDialog)
   "删除会话": "Delete session",
@@ -639,15 +518,8 @@ const en: Record<string, string> = {
   "确定删除会话「{0}」吗？此操作不可撤销。": "Delete session \"{0}\"? This cannot be undone.",
   "确定删除该消息及其后所有内容吗？此操作不可撤销。":
     "Delete this message and everything after it? This cannot be undone.",
-  "确定删除配置「{0}」吗？其密钥将从 SecretStorage 中永久移除。":
-    "Delete profile \"{0}\"? Its key will be permanently removed from SecretStorage.",
-  "确定删除规则「{0}」吗？保存后生效。": "Delete rule \"{0}\"? Takes effect after saving.",
-  "确定删除「{0}」吗？保存后将从内核配置中移除。":
-    "Delete \"{0}\"? It will be removed from the Core configuration when saved.",
   "输入框已有内容，没有填入（原条目仍在）":
     "The composer already has text — nothing was filled in (the original entry is still there)",
-  "排队发送 (Enter)": "Queue (Enter)",
-  "排队发送（Enter）": "Queue (Enter)",
   "排队": "Queue",
   "添加附件": "Add attachments",
   "{0} 个文件超过大小上限（50MB），已跳过": "Skipped {0} file(s) over the 50 MB limit",
@@ -658,10 +530,6 @@ const en: Record<string, string> = {
   "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）":
     "Current context ≈ {0} tokens (local estimate; recomputed from the compaction result after compressing)",
   "输入 {0} tokens · 输出 {1} tokens": "Input {0} tokens · output {1} tokens",
-  "当前上下文约 {0} tokens（本地估算；压缩后按压缩结果重算）· 输出 {1}":
-    "Current context ≈ {0} tokens (local estimate; recomputed from the compaction result after compressing) · output {1}",
-  "当前上下文（用户消息与工具结果，压缩后重算）": "Current context (user messages & tool results; recomputed after compression)",
-  "输出（回复与思考）": "Output (replies & thinking)",
   // message list
   "在 VSCode 的差异视图里查看这次改动": "Open this change in the VSCode diff view",
   "把这个文件恢复成修改前的内容": "Restore this file to its content before the edit",
@@ -669,15 +537,10 @@ const en: Record<string, string> = {
   "思考过程": "Thinking",
   "附件图片 {0}": "Attached image {0}",
   "在 VSCode 中打开": "Open in VSCode",
-  "准备好了，向 iFlow 提问吧": "Ready — ask iFlow anything",
-  "下发任务、粘贴代码上下文，或直接描述你想实现的功能":
-    "Assign tasks, paste code context, or just describe what you want to build",
   // P0-4: empty-state example chips & capability hint
   "帮我梳理这个仓库的结构与核心模块": "Walk me through this repository's structure and core modules",
   "给核心模块补充单元测试": "Add unit tests to the core modules",
   "分析这个报错的可能原因并给出修复方案": "Analyze this error's likely causes and propose a fix",
-  "/ 命令 · @ 文件/文件夹 · @problems · @git · @terminal · @url:":
-    "/ commands · @ files/folders · @problems · @git · @terminal · @url:",
   // P0-3: splash patience line & error toast actions
   "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
     "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
@@ -696,7 +559,7 @@ const en: Record<string, string> = {
   "自动注入": "Auto-injected",
   "查看内容": "View content",
   "其余注入类别见展开详情": "Remaining injected categories — see the expanded details",
-      "记忆": "Memory",  "上下文文件": "Context files",
+      "记忆": "Memory",
       "{0} 个项目记忆文件": "{0} project memory file(s)",
       "{0} 个知识库文档": "{0} knowledge doc(s)",
         "MCP 未连接": "MCP not connected",
@@ -712,15 +575,12 @@ const en: Record<string, string> = {
   "全量生成": "full generation",
   "上次生成：{0} · {1} 个文件": "Last generated: {0} · {1} files",
   "全量重建": "Full rebuild",
-  "只根据变化更新索引，无变化时不会调用模型":
-    "Update the index from changes only; no model call when nothing changed",
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 …": "Starting …",
   "正在重新启动内核 …": "Restarting the Core …",
   "首次启动，或配置了多个 MCP 服务器时会多等一会儿":
     "Takes longer on first launch, or when several MCP servers are configured",
   // P1: edit & resend, session search, aria-live announcements
-  "编辑并重发": "Edit & resend",
   "搜索会话…": "Search sessions…",
   "有操作等你批准": "An action is waiting for your approval",
   "iFlow 有问题等你回答": "iFlow has a question for you",
@@ -764,8 +624,6 @@ const en: Record<string, string> = {
   "上下文占用 {0} / {1}（{2}%{3}{4}）": "Context {0} / {1} ({2}%{3}{4})",
   "，上限为估算值": ", limit is an estimate",
   "，占用为内核上报值": ", occupancy reported by the Core",
-  "当前上下文 {0} tokens（内核上报）· 输出 {1}（估算）":
-    "Context {0} tokens (reported by the Core) · output {1} (estimated)",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3}": "User {0} · assistant {1} · tools {2} · thoughts {3}",
   "用户 {0} · 助手 {1} · 工具 {2} · 思考 {3} · 固定开销 {4}":
     "User {0} · assistant {1} · tools {2} · thoughts {3} · fixed overhead {4}",
@@ -776,7 +634,6 @@ const en: Record<string, string> = {
   "缓存读取 {0} tokens": "Cache read {0} tokens",
   "预估成本 {0}（按公开单价估算）": "Estimated cost {0} (at published prices)",
   "该模型无单价记录，不显示成本": "No unit price recorded for this model — no cost shown",
-  "上下文窗口占用": "Context window occupancy",
   "展开全部 {0} 张上下文卡": "Show all {0} context cards",
   "建议": "Suggested",
   "预估费用：token 估算 × 公开单价，仅供参考": "Estimated cost: token estimate × published prices, indicative only",
@@ -788,26 +645,14 @@ const en: Record<string, string> = {
   "已增强输入（再次点击增强可还原）": "Prompt enhanced (click Enhance again to restore)",
   "已还原原始输入": "Original input restored",
   // turn-end next-step suggestions + General settings tab
-  "通用": "General",
   "下一步": "Next",
   "iFlow 猜的下一步，点一下填进输入框": "iFlow's guess at the next step — click to insert it into the composer",
   "关闭建议": "Dismiss suggestions",
   "正在想下一步建议…": "Thinking of next steps…",
   "下一步建议": "Next-step suggestions",
-  "每轮回复完成后单独调用一次模型，推测可选的下一步操作并显示在输入框上方（会产生额外 token 消耗）。":
-    "After each completed turn, make one extra model call to predict likely next actions and show them above the composer (extra token usage).",
-  "默认开启。关闭后不再发起该模型调用，已显示的候选会被清除。":
-    "Enabled by default. When off, no extra call is made and any displayed candidates are cleared.",
   "自动压缩上下文": "Auto-compress context",
-  "默认关闭。未开启时仍会在网关报上下文超限后自动压缩，也可点击提示中的「立即压缩」。":
-    "Off by default. When disabled, compression still runs after the gateway reports context overflow, and the「立即压缩」action remains available.",
-  "界面": "Interface",
   "字号": "Font size",
-  "调整面板中文字的大小；标准档会把常用的 11px 小字提升到约 12px。":
-    "Adjusts text size in the panel; Standard raises the common 11px small text to about 12px.",
   "密度": "Density",
-  "调整控件内边距与间距；不影响字号。":
-    "Adjusts control padding and spacing; does not change text size.",
   "紧凑": "Compact",
   "大": "Large",
   "宽松": "Comfortable",
@@ -824,135 +669,60 @@ const en: Record<string, string> = {
   "工作方式": "Workflow",
   "系统": "System",
   "设置分区": "Settings sections",
-  "设置如何保存": "How settings are saved",
-  "面板设置写入 VSCode 用户 settings.json，可随 VSCode 设置同步；API 配置与密钥写入内核配置文件 ~/.iflow/settings.json（本机明文）。MCP、语言与审批模式同样在内核配置文件，重启内核生效。":
-    "Panel settings are written to your VSCode user settings.json and follow VSCode Settings Sync; API profiles and keys are written to the Core config file ~/.iflow/settings.json (plaintext on this machine). MCP, language and approval mode also live in the Core config and apply after a Core restart.",
   "详细说明": "Details",
   "会话": "Session",
-  "会话首轮完成后自动生成简短标题。": "Generate a short title after a session's first turn.",
-  "每会话一次，会产生一次轻量模型调用。": "Once per session; one lightweight model call.",
   "并发上限": "Concurrency limit",
-  "同时运行的子会话数量上限。": "Maximum number of child sessions running at the same time.",
-  "默认 5，范围 1–20。超出的派发会排队，等有空位再启动；调低后已在运行的子会话不受影响。":
-    "Defaults to 5, adjustable from 1 to 20. Extra dispatches queue and start as slots free up; lowering the limit does not interrupt sessions already running.",
   "个": "sessions",
-  "回复完成后推测下一步操作，显示在输入框上方。":
-    "Predict likely next actions after a reply and show them above the composer.",
-  "每轮回复完成后单独调用一次模型（会产生额外 token）。关闭后不再发起调用，已显示的候选会被清除。":
-    "One extra model call per completed turn (extra token usage). When off, no call is made and displayed candidates are cleared.",
-  "上下文占用达到阈值时自动压缩会话。": "Compress the conversation when context occupancy reaches the threshold.",
-  "每轮回复结束后，若上下文占用达到设定阈值，自动压缩会话后再继续下一轮。默认关闭；网关报超限时仍会自动压缩。":
-    "After a turn settles, if context occupancy reaches the configured threshold, compress the conversation before continuing the next turn. Off by default; compression still runs after the gateway reports context overflow.",
-  "回复完成后提取可长期保留的偏好候选。": "Extract long-term preference candidates after a reply.",
-  "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入（会产生额外 token）。":
-    "After a turn settles, extract long-term preference candidates with the current model; they are written only after you confirm them (extra token usage).",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
-  "标准为基准，紧凑约 0.92×，大约 1.1×。": "Standard is the baseline; compact is about 0.92×, large about 1.1×.",
-  "调整控件内边距与间距。": "Adjust control padding and spacing.",
-  "标准为基准，紧凑约 0.92×，宽松约 1.12×。不影响字号。":
-    "Standard is the baseline; compact about 0.92×, comfortable about 1.12×. Font size is unaffected.",
-  "面板不可见时发送系统通知。": "Send OS notifications while the panel is hidden.",
   "审批/提问/计划阻塞时，或整轮完成时发送。":
     "Sent when an approval, question or plan blocks, or when a turn completes.",
   "高级外观": "Advanced appearance",
   "可选": "Optional",
   "新会话使用的权限模式。": "The permission mode new sessions start with.",
-  "当前会话可用输入框下方的模式菜单切换。": "Switch the current session's mode from the menu below the composer.",
   "内核兼容": "Core compatibility",
-  "写入内核配置的启动审批模式。": "The approval mode the Core starts with.",
-  "窗口打开时预热内核，首次打开面板无需等待。":
-    "Warm up the Core when a window opens so the first panel open is instant.",
-  "每窗口约 100MB 内存；下次窗口启动生效。": "About 100MB per window; takes effect on the next window start.",
   "面板启动时恢复上次使用的会话。": "Restore the last used session when the panel starts.",
-  "无可恢复记录时新建会话。": "Falls back to a new session when nothing is restorable.",
   "VSCode 启动时自动打开聊天面板。": "Open the chat panel automatically when VSCode starts.",
   "下次启动生效。": "Takes effect on the next start.",
-  "每轮对话前快照工作区，支持按轮回退。":
-    "Snapshot the workspace before each turn so file changes can be rolled back per turn.",
-  "快照写入独立的影子 git 仓库，不触碰你的 .git。":
-    "Snapshots go to a separate shadow git repo — your own .git is never touched.",
   "检查点": "Checkpoints",
   "磁盘占用": "Disk usage",
-  "快照保存在工作区存储中；容量上限等参数在「高级」中调整。":
-    "Snapshots live in the workspace storage; adjust the limits under「Advanced」.",
   "高级": "Advanced",
   "检查点限额与内核运行时": "Checkpoint limits & Core runtime",
-  "留空使用默认工作区存储。": "Leave empty for the default workspace storage.",
-  "留空自动探测。": "Leave empty to auto-detect.",
   "修改后重启内核生效。": "Takes effect after a Core restart.",
   "内核的显示语言。": "The display language of the Core.",
   "配置 {0} 的操作": "Actions for {0}",
   "服务器 {0} 的操作": "Actions for server {0}",
   "更多操作": "More actions",
   "技能与命令": "Skills & commands",
-  "设置写入用户 settings.json，可随 VSCode 设置同步。":
-    "Stored in user settings.json and carried by VSCode Settings Sync.",
   "资产类型": "Asset type",
   "技能": "Skills",
   "记忆文件": "Memory files",
   "快速追加": "Quick add",
   "回合结束后": "After each turn",
-  "可能产生额外的模型调用": "May make extra model calls",
   "下一步预测超时": "Next-step prediction timeout",
-  "下一步建议的模型调用最长等待秒数。": "Longest wait (seconds) for the next-step prediction model call.",
   "记忆提取超时": "Memory extraction timeout",
-  "自动提取记忆的模型调用最长等待秒数。": "Longest wait (seconds) for the memory extraction model call.",
-  "回合末的标题、下一步、记忆提取合并为一次模型调用，实际等待时间取所含任务中最宽松的上限；填 0 表示不限制。":
-    "The turn-end title, next-step and memory tasks share ONE model call, so the actual budget is the loosest ceiling among the tasks it carries; 0 means no limit.",
   "压缩超时": "Compression timeout",
-  "压缩会话的最长等待秒数。": "Longest wait (seconds) for a context-compression turn.",
-  "默认 0（不限制）：压缩一个很大的会话本来就可能需要几分钟。填入秒数后，超时会取消这次压缩并提示你。":
-    "0 (no limit) by default: compressing a very large session can legitimately take minutes. Once set, an overrunning compression is cancelled and reported.",
   "自动压缩阈值": "Auto-compress threshold",
-  "上下文占用达到该比例时自动压缩会话。": "Compress the conversation once context occupancy reaches this percentage.",
-  "可调范围 50–100%。": "Adjustable between 50% and 100%.",
   "秒": "s",
   "自动生成标题": "Auto-generate titles",
-  "会话首轮完成后用当前模型生成简短标题（每会话一次，会产生一次轻量调用）。":
-    "Generate a short title with the current model after a session's first turn (once per session, one lightweight call).",
   "主题与排版": "Theme & typography",
   "跟随编辑器": "Follow editor",
-  "跟随编辑器主题，或固定为浅色/深色。设置写入用户 settings.json，可随 VSCode 设置同步。":
-    "Follow the editor theme, or pin light/dark. Stored in user settings.json and carried by VSCode Settings Sync.",
   "极光强度": "Aurora intensity",
-  "背景光斑的不透明度（0–100）。": "Background aurora light-spot opacity (0–100).",
   "提示与通知": "Sound & notifications",
   "系统通知": "OS notifications",
-  "面板不可见时发送系统通知：审批/提问/计划阻塞时，或整轮完成时。":
-    "Send an OS notification while the panel is hidden: on blocking approvals/questions/plans, or when a turn completes.",
-  "仅审批/提问/计划": "Approvals, questions & plans",
-  "全部完成事件": "All completions",
   "从不": "Never",
   "面板默认权限模式": "Default panel approval mode",
   "内核默认审批模式": "Core default approval mode",
-  "写入 ~/.iflow/settings.json；与面板默认模式相互独立，修改后重启内核生效。":
-    "Written to ~/.iflow/settings.json; independent of the panel default and applied after a Core restart.",
-  "不覆写": "Do not override",
   "启动与会话": "Startup & sessions",
   "后台预热内核": "Warm up the Core",
-  "窗口打开时在后台启动内核，首次打开面板无需等待（每窗口约 100MB 内存）。下次窗口启动生效。":
-    "Start the Core in the background when a window opens so the first panel open is instant (about 100MB per window). Takes effect on the next window start.",
   "恢复上次会话": "Restore last session",
-  "面板启动时恢复上次使用的会话；无可恢复记录时新建会话。":
-    "Restore the last used session when the panel starts; fall back to a new session when nothing is restorable.",
   "启动时自动打开面板": "Open the panel on startup",
-  "VSCode 启动时自动打开聊天面板。下次启动生效。":
-    "Open the chat panel automatically when VSCode starts. Takes effect on the next start.",
-  "内核运行时": "Core runtime",
   "重启内核生效": "Takes effect after a Core restart",
   "Node.js 路径": "Node.js path",
-  "留空自动探测；修改后重启内核生效。": "Leave empty to auto-detect; restart the Core after changing.",
   "内核语言": "Core language",
-  "写入 ~/.iflow/settings.json；修改后重启内核生效。":
-    "Written to ~/.iflow/settings.json; takes effect after a Core restart.",
   "跟随内核": "Leave to the Core",
-  "检查点与存储": "Checkpoints & storage",
   "启用检查点": "Enable checkpoints",
-  "每轮对话前把工作区快照到独立的影子 git 仓库，以支持按轮回退。":
-    "Snapshot the workspace into a separate shadow git repo before each turn so file changes can be rolled back per turn.",
   "最大文件数": "Max files",
-  "超过该文件数时关闭快照。": "Disable snapshots when the workspace has more files than this.",
   "单文件上限（MB）": "Max file size (MB)",
   "跳过大于该尺寸的文件；0 表示不限。": "Skip files larger than this; 0 means no limit.",
   "保留轮数": "Turns to keep",
@@ -960,34 +730,10 @@ const en: Record<string, string> = {
   "总大小上限（MB）": "Total size cap (MB)",
   "所有会话快照的总磁盘上限；0 表示不限制。": "Total on-disk cap for all session snapshots; 0 means unlimited.",
   "存储目录": "Storage directory",
-  "留空使用默认 workspaceStorage；支持 ~ 与相对路径。":
-    "Leave empty for the default workspaceStorage; supports ~ and relative paths.",
-  "同步与原始设置": "Sync & raw settings",
-  "需要直接编辑原始 JSON 时，可使用底部的「在 VSCode 设置中编辑…」；面板中的改动已写入同一份用户设置。":
-    "To edit the raw JSON directly, use「在 VSCode 设置中编辑…」at the bottom; panel changes already write to the same user settings.",
-  "这些设置写入 VSCode 用户 settings.json；开启 VSCode 设置同步后会跨设备同步。API Key 保存在 SecretStorage，不会同步。":
-    "These settings are written to your VSCode user settings.json and follow VSCode Settings Sync across machines. API keys stay in SecretStorage and are never synced.",
-  "MCP 服务器配置保存在 ~/.iflow/settings.json，由内核读取；不随 VSCode 设置同步。":
-    "MCP server configuration lives in ~/.iflow/settings.json and is read by the Core; it is not part of VSCode Settings Sync.",
-  "在 VSCode 设置中编辑…": "Edit in VSCode settings…",
-  "已写入用户 settings.json": "Saved to user settings.json",
   "模型元数据": "Model metadata",
   "上下文窗口覆写": "Context window overrides",
-  "每行「模型名=token数」（如「glm-4.6=200000」）；未知模型回退默认值。":
-    "One「model=tokenCount」per line (e.g.「glm-4.6=200000」); unknown models fall back to the default.",
   "成本单价": "Unit prices",
-  "每行「模型名=输入价,输出价」（USD/百万 token，如「deepseek-v3=0.27,1.1」）。":
-    "One「model=inputPrice,outputPrice」per line (USD per million tokens, e.g.「deepseek-v3=0.27,1.1」).",
   "思考模型规则": "Thinking model rules",
-  "JSON 数组，每项含 pattern / supportsThinking 等字段；保存后同步到 ~/.iflow/thinking-models.json，重启内核生效。":
-    "JSON array of rules with pattern / supportsThinking; saved to ~/.iflow/thinking-models.json and applied after a Core restart.",
-  "应用": "Apply",
-  "JSON 格式无效": "Invalid JSON",
-  "条目必须是数组": "The value must be an array",
-  "联网检索官方资料，由当前模型提炼后追加到下表。":
-    "Web-searches official docs and appends the rows the current model extracts below.",
-  "检索由扩展直接发起，不经过内核会话；资料会交给当前模型做一次提炼（产生一次额外 token 消耗）。只追加、不覆盖，在资料中找不到依据的条目会被丢弃。":
-    "The extension runs the search itself (no core session); the retrieved text goes to the current model for one extraction pass, which costs extra tokens. Rows are only appended — anything the cited source cannot back is dropped.",
   "联网补充模型数据": "Fetch model data online",
   "开始检索": "Start search",
   "正在检索…": "Searching…",
@@ -996,8 +742,6 @@ const en: Record<string, string> = {
   "已追加：上下文窗口 {0} 条 · 成本单价 {1} 条 · 思考规则 {2} 条":
     "Appended: {0} context windows · {1} unit prices · {2} thinking rules",
   "检索完成，资料中没有可补充的新数据。": "Search finished; nothing new to add from the retrieved sources.",
-  "会调用当前模型提炼检索资料，产生一次额外 token 消耗。":
-    "Invokes the current model once to extract the rows — this costs extra tokens.",
   // F3 memory manager (Phase 1)
   "全局记忆": "Global memory",
   "项目记忆": "Project memory",
@@ -1077,10 +821,6 @@ const en: Record<string, string> = {
   "这些是模型从最近对话里挑出来的长期记忆候选。勾选你想保留的内容，并确认存到哪一侧。":
     "These long-term memory candidates were picked out of the recent conversation. Check what to keep and confirm which side it is stored on.",
   "自动提取记忆": "Auto-extract memories",
-  "每轮回复结束后用当前模型提取可长期保留的偏好/约定候选；候选必须由你确认后才会写入。":
-    "After each turn, ask the current model for durable preference/convention candidates; nothing is written until you confirm.",
-  "默认开启。关闭后不再发起该模型调用；自动提取只生成候选，不会自动写入。":
-    "Enabled by default. When off, no extra model call is made; extraction only produces candidates and never writes automatically.",
   // F3 Phase 3: project knowledge
   "项目知识库": "Project knowledge",
   "{0} 篇文档": "{0} doc(s)",
@@ -1296,6 +1036,77 @@ const en: Record<string, string> = {
     "Leaving every condition empty matches ALL requests — use with care. Edits only change the list; click Save to apply.",
   "删除规则「{0}」？点「保存」后才会真正生效。":
     "Delete rule \"{0}\"? It takes effect once you save.",
+  // 文案收尾补充：资产 / 记忆 / MCP / 看板等新增词条（2026-11-16）
+  "拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 权限与审批」。": "Reject or cancel runs nothing. To set rules in advance, go to Settings → Permissions & approvals.",
+  "审批操作": "Approval actions",
+  "{0}（{1}）": "{0} ({1})",
+  "取消审批": "Cancel approval",
+  "已删除": "Deleted",
+  "已创建": "Created",
+  "编辑资产文件": "Edit asset file",
+  "资产详情": "Asset details",
+  "新建资产": "New asset",
+  "名称只能用字母、数字、- 和 _，并且要以字母或数字开头": "Use only letters, digits, - and _ in the name, and start it with a letter or digit",
+  "请先描述需求，再生成内容": "Describe what you need before generating",
+  "新建": "New",
+  "工具": "Tools",
+  "文件已经在磁盘上被改过，请刷新后再编辑": "This file changed on disk — refresh before editing",
+  "这里还没有内容": "Nothing here yet",
+  "有同名全局版本，实际用的是它": "A global version with the same name exists and is the one actually used",
+  "这里的列表直接来自磁盘：全局的在 ~/.iflow 下，项目的在工作区的 .iflow 下。改完的文件要等新建会话或重启内核后才生效。": "This list comes straight from disk: global assets live under ~/.iflow, project assets under .iflow in the workspace. Edited files take effect only after you start a new session or restart the core.",
+  "文件内容": "File content",
+  "文件内容（Markdown 正文与头部配置）": "File content (Markdown body and front matter)",
+  "保存前会核对文件是否被改动；如果磁盘上的内容已经变了，会提示你刷新，而不是覆盖它。": "Before saving, the file is checked for outside changes; if it changed on disk you are asked to refresh instead of overwriting it.",
+  "保存位置": "Save location",
+  "如 fix-tests": "e.g. fix-tests",
+  "你希望它做什么（用于 AI 生成）": "What should it do? (used for AI generation)",
+  "如：检查本次改动的类型错误并给出修复步骤": "e.g. Check the type errors in this change and suggest fixes",
+  "生成中…": "Generating…",
+  "AI 生成内容": "Generate with AI",
+  "内容（模板，可直接修改）": "Content (template — edit freely)",
+  "创建中…": "Creating…",
+  "创建": "Create",
+  "已经有同名文件了，直接编辑它即可": "A file with this name already exists — edit it directly",
+  "文件路径由类型、保存位置和名称自动拼出（名称只能用字母、数字、- 和 _，并且要以字母或数字开头）。同名文件不会被覆盖；AI 生成只会填好上面的内容，点「创建」才会真正写入文件。": "The path is built from the type, save location and name (the name may use only letters, digits, - and _, and must start with a letter or digit). Existing files are never overwritten; AI generation only fills in the content above — nothing is written until you click Create.",
+  "删除资产文件": "Delete asset file",
+  "确定删除「{0}」吗？删除后无法恢复。": "Delete \"{0}\"? This cannot be undone.",
+  "预估成本（token 估算 × 公开单价，仅供参考）": "Estimated cost (token estimate × published rates; for reference only)",
+  "派发为子会话（Enter）": "Dispatch as child session (Enter)",
+  "取消增强": "Cancel enhancement",
+  "增强提示词": "Enhance prompt",
+  "派发为子会话 (Enter)": "Dispatch as child session (Enter)",
+  "安装 MCP 模板": "Install MCP template",
+  "模板目录": "Template folder",
+  "这个模板已经找不到了": "This template is no longer available",
+  "安装": "Install",
+  "官方文档": "Official docs",
+  "连接状态不可获取（内核未连接或状态上报未启用）": "Connection status unavailable (core not connected or status reporting disabled)",
+  "参数 {0}": "Argument {0}",
+  "环境变量 {0}": "Environment variable {0}",
+  "请求头 {0}": "Request header {0}",
+  "安装模板": "Install template",
+  "删除 MCP 服务器": "Delete MCP server",
+  "确定删除「{0}」吗？保存后会从内核配置里移除。": "Delete \"{0}\"? It is removed from the core config once you save.",
+  "记忆文件内容": "Memory file content",
+  "只按变化更新索引，没有变化就不会调用模型": "Updates the index from changes only — no model call when nothing changed",
+  "写入目标文件": "Target file",
+  "要记住的内容": "What to remember",
+  "编辑消息": "Edit message",
+  "核心提示词": "Core prompt",
+  "搜索模型": "Search models",
+  "可用模型": "Available models",
+  "回答操作": "Answer actions",
+  "已运行 {0}": "Ran for {0}",
+  "子会话在等你的回答；不回答会在倒计时结束后按「未回答」继续。": "The child session is waiting for your answer; if you do not answer, it continues as “unanswered” when the countdown ends.",
+  "到 DeepSeek 开放平台创建 API Key，粘贴到 API Key 输入框即可。": "Create an API key on the DeepSeek platform and paste it into the API key field.",
+  "到 Moonshot 开放平台创建 API Key，用于 Kimi 系列模型。": "Create an API key on the Moonshot platform for Kimi models.",
+  "到智谱开放平台创建 API Key，用于 GLM 系列模型。": "Create an API key on the Zhipu platform for GLM models.",
+  "到阿里云百炼控制台创建 API Key，用于通义千问系列模型。": "Create an API key in the Alibaba Cloud Bailian console for Qwen models.",
+  "到硅基流动控制台创建 API Key，可调用多家开源模型。": "Create an API key in the SiliconFlow console to use many open-source models.",
+  "到 OpenRouter 创建 API Key，可调用多家供应商的模型。": "Create an API key on OpenRouter to use models from many providers.",
+  "Ollama 跑在本机，不校验 API Key，填一个非空值（如 ollama）即可；请先确认 Ollama 已经启动。": "Ollama runs locally and does not check the API key — any non-empty value (e.g. ollama) works; make sure Ollama is running first.",
+  "接口地址要以 http:// 或 https:// 开头": "The endpoint must start with http:// or https://",
+  "请填写模型名称": "Enter a model name",
 };
 
 export function t(message: string, ...args: Array<string | number>): string {

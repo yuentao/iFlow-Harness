@@ -22,7 +22,7 @@
   "iflow.configuration.autoOpenPanel.description": "VSCode 启动后自动打开聊天面板。默认关闭。",
   "iflow.configuration.language.description": "内核界面语言，保存到本机 iFlow 配置。留空表示不修改内核当前语言。修改后需重启内核才生效。",
   "iflow.configuration.approvalMode.description": "内核审批模式，保存到本机 iFlow 配置：标准（`default`）每次确认，智能（`smart`）自动批准安全的编辑，免确认（`yolo`）全部自动批准，规划（`plan`）只读规划。留空表示不修改内核当前设置。修改后需重启内核才生效，与面板的默认模式相互独立。",
-  "iflow.configuration.superAgentIntegration.description": "子会话完成后，把它的改动带回你的工作区的方式：`merge`（默认）自动合并到当前分支——合并前先预演，只有会覆盖你未提交的改动或仓库正处于合并中途时才跳过并提示，冲突在真正动手前就会被识别；`pr` 推送分支并创建拉取请求（需要 gh 命令行工具）；`manual` 只保留分支，由你在子会话看板里手动合并。子会话始终以免确认模式运行。",
+  "iflow.configuration.superAgentIntegration.description": "子会话完成后，把它的改动带回你的工作区的方式：`merge`（默认）自动合并到当前分支——合并前先预演，只有会覆盖你未提交的改动或仓库正处于合并中途时才跳过并提示，冲突在真正动手前就会被识别；`pr` 推送分支并创建拉取请求（需要 gh 命令行工具）；`manual` 只保留分支，由你在子会话看板里手动合并。子会话始终不弹审批。",
   "iflow.configuration.superAgentMaxConcurrent.description": "同时运行的子会话数量上限。超出的派发按先后顺序排队，等有空位再启动；调低上限不会中断已在运行的子会话。默认 5，范围 1–20，修改后立即生效。",
   "iflow.configuration.superAgentKeepWorktree.description": "子会话正常完成后是否保留它的工作目录。默认关闭：完成后删除工作目录，分支一律保留；开启后工作目录也一并保留，便于你接着手工修改。失败或被中断的子会话始终保留工作目录，重试能直接回到中断前的状态。修改后对下一个结束的子会话生效。",
   "iflow.configuration.superAgentMaxWorktrees.description": "磁盘上最多保留多少个已结束子会话的工作目录。超出时按最后修改时间从旧到新清理，分支一律保留待你审阅；有未提交改动的工作目录不会被清理。默认 10，范围 0–100（0 表示不限制）。",

@@ -3015,7 +3015,7 @@ describe("appendInjectedContext (auto-injected context card)", () => {
     const block = state.blocks[0] as Extract<Block, { kind: "injected" }>;
     expect(block.notice).toContain("2 个 MCP 服务器、");
     expect(block.notice).toContain("1 个 MCP 服务器未连接");
-    expect(block.notice).toContain("1 个为项目级");
+    expect(block.notice).toContain("1 个来自项目配置");
     expect(block.tokens).toBe(
       estimateTokens("full system prompt") + estimateTokens("joined memory") + estimateTokens("# rules") +
         estimateTokens(declarations) + estimateTokens(projectDeclarations),
