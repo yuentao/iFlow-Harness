@@ -28,6 +28,7 @@ import {
   type PendingProfileSwitchUi,
   type PendingQuestionsUi,
   type PlanEntryUi,
+  type QqTaskUi,
   type SessionState,
   type SessionSummaryUi,
   type SessionUsageUi,
@@ -1364,6 +1365,54 @@ export function setNextStepLoading(state: SessionState, loading: boolean): void 
   state.nextStepLoading = loading;
 }
 
+// --- QQ remote tasks (Wave2-B) ----------------------------------------------
+// The QQ board is non-blocks metadata exactly like `superSessions`: it rides
+// the blockPatch tail channel, so NONE of these reducers touches `blocks` and
+// none of them reports a block mutation index (the returned numbers below are
+// projection indices, never feed them to the store's `noteMutationIndex`).
+
+/**
+ * Replace the whole QQ task projection (board refresh / restore).
+ * Returns the new row count.
+ */
+export function setQqTasks(state: SessionState, tasks: QqTaskUi[]): number {
+  state.qqTasks = tasks;
+  return tasks.length;
+}
+
+/**
+ * Insert or replace ONE task by `taskId`.
+ *
+ * - Existing id: the row is REPLACED IN PLACE so the board row does not jump
+ *   while a task progresses (stable ordering).
+ * - New id: APPENDED at the tail. Never spliced into the middle — the board's
+ *   ordering must stay append-only, mirroring the blockPatch tail-anchor
+ *   discipline this projection rides on.
+ *
+ * Returns the task's index in `qqTasks` (a projection index, NOT a transcript
+ * block index).
+ */
+export function upsertQqTask(state: SessionState, task: QqTaskUi): number {
+  const index = state.qqTasks.findIndex((t) => t.taskId === task.taskId);
+  if (index >= 0) {
+    state.qqTasks[index] = task;
+    return index;
+  }
+  state.qqTasks.push(task);
+  return state.qqTasks.length - 1;
+}
+
+/**
+ * Drop one task by id. Returns whether a row was removed; remaining rows keep
+ * their relative order (no reordering on removal).
+ */
+export function removeQqTask(state: SessionState, taskId: string): boolean {
+  const index = state.qqTasks.findIndex((t) => t.taskId === taskId);
+  if (index < 0) return false;
+  state.qqTasks.splice(index, 1);
+  return true;
+}
+
 /** List markers the fallback path strips ("- foo", "1. foo", "2、foo"). */
 const SUGGESTION_MARKER = /^\s*(?:[-*•]|\d+[.)、])\s*/;
 
@@ -2114,6 +2163,9 @@ export function newSessionState(state: SessionState): SessionState {
   // historical session showed no children at all. The manager re-publishes
   // the scoped projection right after the switch anyway.
   fresh.superSessions = state.superSessions;
+  // QQ 远程任务看板同理是面板级、非转录级的投影：会话切换 / 恢复不能把它清空
+  // （清空后要等下一次宿主写入才恢复，而终态任务不会再写）。
+  fresh.qqTasks = state.qqTasks;
   fresh.replaying = state.replaying;
   // Connection-scoped like status/auth: a restart does replaceState FIRST and
   // then markConnecting (which stamps the next epoch), so dropping the counter

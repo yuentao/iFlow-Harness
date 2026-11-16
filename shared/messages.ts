@@ -761,6 +761,60 @@ export type InitializingReason =
   | "rollback"
   | "restore";
 
+/**
+ * QQ 远程任务（Wave2-B）的前端投影：一个来自 QQ 的任务从「收到」走到终态的
+ * 看板条目。它是**非 blocks 元数据**，搭 blockPatch 的 tail 通道，绝不进入
+ * `blocks`——远程任务的转录不污染主会话的渲染真值，也不破坏 blockPatch 的
+ * 尾部锚定。
+ *
+ * 这一波只做投影与设置声明：字段是后续波次（适配层、任务执行、审批）的契约，
+ * 宿主尚未写入运行时数据。自包含类型，刻意不 import 任何 QQ 专属模块。
+ */
+export interface QqTaskUi {
+  /** 宿主内唯一的任务 id（幂等 upsert 的键）。 */
+  taskId: string;
+  /** 展示用短 id（看板/通知里代替长 id）。 */
+  shortId: string;
+  /** 来源会话类型：单聊或群聊。 */
+  chatType: "private" | "group";
+  /** 来源会话 id（QQ 侧 chat id）。 */
+  chatId: string;
+  /** 发起任务的用户 id。 */
+  senderId: string;
+  /** 任务状态机（终态粘性由宿主维护；投影只如实渲染）。 */
+  status:
+    | "received"
+    | "validated"
+    | "queued"
+    | "dispatched"
+    | "running"
+    | "waiting_approval"
+    | "waiting_answer"
+    | "succeeded"
+    | "failed"
+    | "canceled"
+    | "timeout"
+    | "needs_review";
+  /** 任务提示词的截断预览（完整正文不进快照）。 */
+  promptPreview: string;
+  /** 收到任务的时间（epoch ms）。 */
+  createdAt: number;
+  /** 最近一次状态变更的时间（epoch ms）。 */
+  updatedAt: number;
+  /** 任务工作分支（隔离执行时由宿主填写）。 */
+  branch?: string;
+  /** 改动统计：文件数 / 新增行 / 删除行。 */
+  changes?: number;
+  additions?: number;
+  deletions?: number;
+  /** 轮次停止原因（CLI 上报，如 end_turn）。 */
+  stopReason?: string;
+  /** 失败/异常时的可读错误。 */
+  errorMessage?: string;
+  /** 等待用户处置时的摘要（审批或提问）；不含完整载荷。 */
+  pending?: { kind: "approval" | "answer"; summary: string };
+}
+
 export interface SessionState {
   blocks: Block[];
   status: AgentStatus;
@@ -894,6 +948,12 @@ export interface SessionState {
   /** `superHeld` 时被压住的自动回合数（汇报 + 被改道消息补投），只算当前主会话。 */
   superPendingCount?: number;
   /**
+   * QQ 远程任务看板（Wave2-B）：每条来自 QQ 的任务的投影，宿主维护、webview
+   * 只渲染。与 superSessions 同属非 blocks 元数据（搭 blockPatch tail 通道），
+   * 并且在会话切换时保留（任务归属面板/工作区，不随转录替换清空）。
+   */
+  qqTasks: QqTaskUi[];
+  /**
    * Next-step candidates predicted by one dedicated model call at the end of
    * a turn (the host runs it directly against the OpenAI-compatible endpoint,
    * outside the agent session). Non-blocks metadata: it rides the blockPatch
@@ -1011,6 +1071,7 @@ export function initialSessionState(): SessionState {
     superWaiting: false,
     superHeld: false,
     superPendingCount: 0,
+    qqTasks: [],
     checkpoints: [],
     nextStepSuggestions: [],
     nextStepLoading: false,
@@ -1697,7 +1758,12 @@ export type HostToWebview =
    * one throwaway agent turn (web_search only) and reports searching / done /
    * error / idle (cancelled). On `done` the appended rows are already written
    * to the settings, so the following `hostSettings` refresh carries them. */
-  | ({ type: "modelMetadataState" } & ModelMetadataStateUi);
+  | ({ type: "modelMetadataState" } & ModelMetadataStateUi)
+  /** QQ 远程任务（Wave2-B）：设置页 QQ 卡片操作的回执/触发通道。三类动作
+   * 分别对应连测试、生成绑定码、解绑；本波只声明协议，宿主尚未接线。 */
+  | { type: "qqConfigAction"; action: "testConnection" | "generateBindCode" | "unbind" }
+  /** QQ 远程任务（Wave2-B）：绑定码与过期时间（epoch ms），供设置页展示。 */
+  | { type: "qqBindCode"; code: string; expiresAt: number };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -2050,7 +2116,18 @@ export type WebviewToHost =
   /** 3.5 ②: "查看完整输出" on a truncated tool card — the host writes the
    * block's FULL stored output (up to the 512K store cap) to a temp file
    * and opens it in the editor. `blockId` is the stable block id (P4). */
-  | { type: "exportToolOutput"; blockId: string };
+  | { type: "exportToolOutput"; blockId: string }
+  /**
+   * QQ 远程任务（Wave2-B）：看板/通知对单条任务的操作。`taskId` 是宿主分配的
+   * 任务 id；`text` 只在 `answer` 时携带（用户对提问的自由文本作答）。
+   * 本波只声明协议，webview 处理逻辑与宿主执行属后续波次。
+   */
+  | {
+      type: "qqTaskAction";
+      taskId: string;
+      action: "stop" | "approve" | "deny" | "answer" | "merge" | "discard" | "refresh";
+      text?: string;
+    };
 
 // ---------------------------------------------------------------------------
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the

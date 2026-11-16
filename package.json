@@ -241,6 +241,106 @@
           "maximum": 100,
           "markdownDescription": "%iflow.configuration.superAgentMaxWorktrees.description%"
         },
+        "iflow.qq.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.qq.enabled.description%"
+        },
+        "iflow.qq.adapter": {
+          "type": "string",
+          "enum": [
+            "onebot",
+            "qqbot"
+          ],
+          "enumDescriptions": [
+            "%iflow.configuration.qq.adapter.onebot%",
+            "%iflow.configuration.qq.adapter.qqbot%"
+          ],
+          "default": "onebot",
+          "description": "%iflow.configuration.qq.adapter.description%"
+        },
+        "iflow.qq.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "%iflow.configuration.qq.endpoint.description%"
+        },
+        "iflow.qq.bridgePort": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "%iflow.configuration.qq.bridgePort.description%"
+        },
+        "iflow.qq.allowedUsers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%iflow.configuration.qq.allowedUsers.description%"
+        },
+        "iflow.qq.allowedGroups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%iflow.configuration.qq.allowedGroups.description%"
+        },
+        "iflow.qq.workspace": {
+          "type": "string",
+          "default": "",
+          "description": "%iflow.configuration.qq.workspace.description%"
+        },
+        "iflow.qq.remotePolicy": {
+          "type": "string",
+          "enum": [
+            "readonly",
+            "supervised",
+            "trusted"
+          ],
+          "enumDescriptions": [
+            "%iflow.configuration.qq.remotePolicy.readonly%",
+            "%iflow.configuration.qq.remotePolicy.supervised%",
+            "%iflow.configuration.qq.remotePolicy.trusted%"
+          ],
+          "default": "supervised",
+          "description": "%iflow.configuration.qq.remotePolicy.description%"
+        },
+        "iflow.qq.maxConcurrentTasks": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "%iflow.configuration.qq.maxConcurrentTasks.description%"
+        },
+        "iflow.qq.rateLimitPerMin": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "%iflow.configuration.qq.rateLimitPerMin.description%"
+        },
+        "iflow.qq.resultDetail": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "standard",
+            "full"
+          ],
+          "enumDescriptions": [
+            "%iflow.configuration.qq.resultDetail.summary%",
+            "%iflow.configuration.qq.resultDetail.standard%",
+            "%iflow.configuration.qq.resultDetail.full%"
+          ],
+          "default": "standard",
+          "description": "%iflow.configuration.qq.resultDetail.description%"
+        },
+        "iflow.qq.autoMerge": {
+          "type": "boolean",
+          "default": false,
+          "description": "%iflow.configuration.qq.autoMerge.description%"
+        },
         "iflow.osNotifications": {
           "type": "string",
           "enum": [
