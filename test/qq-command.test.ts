@@ -286,6 +286,11 @@ describe("buildQqHelpText", () => {
     expect(help).not.toContain("**");
     expect(help.split("\n").every((line) => !line.trimStart().startsWith("#"))).toBe(true);
   });
+
+  it("answer 如实标注「暂不支持」（提问通道尚未接通）", () => {
+    const help = buildQqHelpText();
+    expect(help).toMatch(/answer .*暂不支持/u);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -319,5 +324,11 @@ describe("formatAck", () => {
 
   it("task 的确认文案说明已收到、排队中", () => {
     expect(formatAck({ kind: "task", prompt: "x" })).toContain("排队");
+  });
+
+  it("answer 的确认文案如实说明暂不支持，不宣称正在提交", () => {
+    const ack = formatAck({ kind: "answer", taskId: "T-1", text: "x" });
+    expect(ack).toContain("暂不支持");
+    expect(ack).not.toContain("正在提交");
   });
 });

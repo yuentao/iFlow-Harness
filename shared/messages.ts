@@ -825,6 +825,12 @@ export interface QqTaskUi {
     | "canceled"
     | "timeout"
     | "needs_review";
+  /**
+   * 任务创建时的执行策略（宿主回填）。`trusted` = 免确认，`supervised` = 工具
+   * 调用需在 QQ 审批，`readonly` = 只读。缺省表示宿主尚未回填（旧记录）——
+   * 投影只如实渲染，绝不自行推导策略。
+   */
+  policy?: "readonly" | "supervised" | "trusted";
   /** 任务提示词的截断预览（完整正文不进快照）。 */
   promptPreview: string;
   /** 收到任务的时间（epoch ms）。 */

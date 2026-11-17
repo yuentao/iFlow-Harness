@@ -1148,6 +1148,10 @@ const en: Record<string, string> = {
   "完整 openid": "Full openid",
   "确认添加": "Add entry",
   "取消添加": "Cancel",
+  "请填写完整的{0}标识。": "Enter the full {0} identifier.",
+  "无效的{0}标识：只能包含字母、数字、下划线或连字符（4–64 位），脱敏后的星号串不能用。":
+    "Invalid {0} identifier: use only letters, digits, underscores or hyphens (4–64 characters); a masked value with asterisks cannot be used.",
+  "该标识已在名单中，无需重复添加。": "That identifier is already in the list.",
   "openid 已脱敏显示，无法在此修改；如需更换请删除后重新添加。":
     "OpenIDs are shown masked and cannot be edited here; delete and re-add an entry to change it.",
   "执行策略": "Execution policy",
@@ -1156,8 +1160,8 @@ const en: Record<string, string> = {
   "只读：可以查看工作区，写文件与执行命令会被拒绝。":
     "Read-only: the workspace can be inspected, but writes and shell commands are rejected.",
   "受监督": "Supervised",
-  "受监督：工具调用需在 QQ 审批，5 分钟未响应按拒绝处理。":
-    "Supervised: tool calls need approval in QQ; no response within 5 minutes counts as a rejection.",
+  "受监督：工具调用需在 QQ 审批，{0} 分钟未响应按拒绝处理。":
+    "Supervised: tool calls need approval in QQ; no response within {0} minutes counts as a rejection.",
   "受信任": "Trusted",
   "受信任：工具调用无需 QQ 审核直接执行，仅建议对自己完全掌控的账号与群使用。":
     "Trusted: tool calls run without QQ review — only for accounts and groups you fully control.",
@@ -1227,6 +1231,9 @@ const en: Record<string, string> = {
   "{0} 个文件": "{0} files",
   "等待你的审批": "Waiting for your approval",
   "等待你的回答": "Waiting for your answer",
+  "需审批": "Needs approval",
+  "提问通道尚未接通，暂不支持在此回答；可停止任务后重新派发。":
+    "The question channel is not connected yet, so answers cannot be sent here; stop the task and dispatch it again.",
   "回答内容": "Your answer",
   "回答任务 {0}": "Answer task {0}",
   "批准": "Approve",

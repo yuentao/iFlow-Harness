@@ -18,7 +18,12 @@ import {
   type QqSettingsPatch,
   type QqSettingsUi,
 } from "../../../shared/messages";
-import { maskQqOpenId, type QqAllowEntry } from "../../../shared/qq-access";
+import {
+  isValidQqId,
+  maskQqOpenId,
+  QQ_APPROVAL_TIMEOUT_MINUTES,
+  type QqAllowEntry,
+} from "../../../shared/qq-access";
 import { t } from "../i18n";
 import {
   ActionRow,
@@ -140,17 +145,35 @@ function AccessList({
 }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
+  /** 添加失败的就地说明：空值 / 格式非法 / 重复都留在这里，绝不静默丢弃。 */
+  const [error, setError] = useState("");
 
   const cancelAdd = () => {
     setAdding(false);
     setDraft("");
+    setError("");
   };
   const commitAdd = () => {
     const openid = draft.trim();
+    if (openid.length === 0) {
+      setError(t("请填写完整的{0}标识。", noun));
+      return;
+    }
+    // 只接受完整原值：脱敏串（含 *）、空白与其它字符一律拒绝，否则保存成功
+    // 却永远匹配不上（用户从界面复制 D754********8D11 是最常见的误操作）。
+    if (!isValidQqId(openid)) {
+      setError(
+        t("无效的{0}标识：只能包含字母、数字、下划线或连字符（4–64 位），脱敏后的星号串不能用。", noun),
+      );
+      return;
+    }
+    // 同一条 openid 已在名单里就不重复追加（读取侧同样按 openid 去重），
+    // 但要明确告诉用户「没添加」——否则看起来像成功。
+    if (entries.some((entry) => entry.openid === openid)) {
+      setError(t("该标识已在名单中，无需重复添加。"));
+      return;
+    }
     cancelAdd();
-    if (openid.length === 0) return;
-    // 同一条 openid 已在名单里就不重复追加（读取侧同样按 openid 去重）。
-    if (entries.some((entry) => entry.openid === openid)) return;
     onChange([...entries, { openid }]);
   };
 
@@ -197,47 +220,60 @@ function AccessList({
         </div>
       ))}
       {adding ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <TextInput
-            autoFocus
-            mono
-            className="min-w-0 flex-1"
-            value={draft}
-            placeholder={t("完整 openid")}
-            aria-label={t("输入{0}的 openid", noun)}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
+        <>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <TextInput
+              autoFocus
+              mono
+              className="min-w-0 flex-1"
+              value={draft}
+              placeholder={t("完整 openid")}
+              aria-label={t("输入{0}的 openid", noun)}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                if (error) setError("");
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelAdd();
+                  return;
+                }
+                if (event.key !== "Enter") return;
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                 event.preventDefault();
-                cancelAdd();
-                return;
-              }
-              if (event.key !== "Enter") return;
-              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-              event.preventDefault();
-              commitAdd();
-            }}
-          />
-          <IconButton
-            size="sm"
-            tone="primary"
-            icon={<Check className={ICON_INLINE} />}
-            label={t("确认添加")}
-            onClick={commitAdd}
-          />
-          <IconButton
-            size="sm"
-            icon={<X className={ICON_INLINE} />}
-            label={t("取消添加")}
-            onClick={cancelAdd}
-          />
-        </div>
+                commitAdd();
+              }}
+            />
+            <IconButton
+              size="sm"
+              tone="primary"
+              icon={<Check className={ICON_INLINE} />}
+              label={t("确认添加")}
+              onClick={commitAdd}
+            />
+            <IconButton
+              size="sm"
+              icon={<X className={ICON_INLINE} />}
+              label={t("取消添加")}
+              onClick={cancelAdd}
+            />
+          </div>
+          {error && (
+            <p role="alert" className="text-ui-caption leading-relaxed text-destructive">
+              {error}
+            </p>
+          )}
+        </>
       ) : (
         <ActionRow>
           <Button
             size="sm"
             icon={<Plus className={ICON_INLINE} />}
-            onClick={() => setAdding(true)}
+            onClick={() => {
+              setError("");
+              setAdding(true);
+            }}
           >
             {addLabel}
           </Button>
@@ -256,7 +292,12 @@ const POLICY_OPTIONS: Array<{ value: QqRemotePolicy; label: string; description:
   {
     value: "supervised",
     label: t("受监督"),
-    description: t("受监督：工具调用需在 QQ 审批，5 分钟未响应按拒绝处理。"),
+    description: t(
+      // 分钟数取自 shared/qq-access.ts（与宿主 QQ_APPROVAL_TIMEOUT_MS 同为 4），
+      // 不在 UI 里写死，避免文案与真实超时再次漂移。
+      "受监督：工具调用需在 QQ 审批，{0} 分钟未响应按拒绝处理。",
+      QQ_APPROVAL_TIMEOUT_MINUTES,
+    ),
   },
   {
     value: "trusted",

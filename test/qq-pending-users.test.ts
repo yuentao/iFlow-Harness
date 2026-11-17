@@ -2,8 +2,9 @@
  * QQ 待审核用户存储（授权模型 2026-11-17）。
  *
  * 钉住的行为：同一 openid 累加次数 / 刷新时间与预览、预览截断、队列上限按
- * `lastSeenAt` 丢最旧、approve 移除、reject 移除并持久化拒绝集合（同一个
- * openid 不会再次出现）、以及所有变更都原子落盘（新实例能读回）。
+ * `firstSeenAt` 保留最早出现的记录（重复消息不刷新淘汰优先级，刷消息挤不掉
+ * 别人）、approve 移除、reject 移除并持久化拒绝集合（同一个 openid 不会再次
+ * 出现）、以及所有变更都原子落盘（新实例能读回）。
  */
 import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
@@ -99,7 +100,7 @@ describe("QqPendingUserStore — 记录与上限", () => {
     expect(truncateQqPreview(emoji).endsWith("😀")).toBe(true);
   });
 
-  it("超过上限时按 lastSeenAt 丢掉最旧的记录", async () => {
+  it("超过上限时保留最早出现的记录，丢弃最新出现的", async () => {
     const store = new QqPendingUserStore(makeRoot());
     for (let index = 0; index < QQ_PENDING_MAX_USERS + 5; index += 1) {
       await store.addOrUpdate({
@@ -111,10 +112,65 @@ describe("QqPendingUserStore — 记录与上限", () => {
     }
     const list = await store.list();
     expect(list).toHaveLength(QQ_PENDING_MAX_USERS);
-    // 最旧的 5 个被丢掉，最新的还在。
-    expect(list.some((user) => user.openid === "open-0")).toBe(false);
-    expect(list.some((user) => user.openid === "open-4")).toBe(false);
-    expect(list.some((user) => user.openid === `open-${QQ_PENDING_MAX_USERS + 4}`)).toBe(true);
+    // 先出现的人保留，刚冒出来的 5 个被丢弃。
+    expect(list.some((user) => user.openid === "open-0")).toBe(true);
+    expect(list.some((user) => user.openid === "open-4")).toBe(true);
+    expect(list.some((user) => user.openid === `open-${QQ_PENDING_MAX_USERS}`)).toBe(false);
+    expect(list.some((user) => user.openid === `open-${QQ_PENDING_MAX_USERS + 4}`)).toBe(false);
+  });
+
+  it("重复消息不刷新淘汰优先级：刷屏的人挤不掉其它待审核记录", async () => {
+    const store = new QqPendingUserStore(makeRoot());
+    for (let index = 0; index < QQ_PENDING_MAX_USERS; index += 1) {
+      await store.addOrUpdate({
+        openid: `open-${index}`,
+        chatType: "private",
+        preview: `第 ${index} 条`,
+        at: index,
+      });
+    }
+
+    // 队首的人疯狂刷消息：lastSeenAt 远超其他人，但 firstSeenAt 不变。
+    for (let burst = 0; burst < 60; burst += 1) {
+      await store.addOrUpdate({
+        openid: "open-0",
+        chatType: "private",
+        preview: `刷屏 ${burst}`,
+        at: 10_000 + burst,
+      });
+    }
+
+    const list = await store.list();
+    expect(list).toHaveLength(QQ_PENDING_MAX_USERS);
+    const ids = list.map((user) => user.openid);
+    for (let index = 0; index < QQ_PENDING_MAX_USERS; index += 1) {
+      expect(ids, `open-${index} 被挤掉了`).toContain(`open-${index}`);
+    }
+    expect(list.find((user) => user.openid === "open-0")?.count).toBe(61);
+  });
+
+  it("队列满时新来的人被丢弃，不挤掉已有记录", async () => {
+    const store = new QqPendingUserStore(makeRoot());
+    for (let index = 0; index < QQ_PENDING_MAX_USERS; index += 1) {
+      await store.addOrUpdate({
+        openid: `open-${index}`,
+        chatType: "private",
+        preview: `第 ${index} 条`,
+        at: index,
+      });
+    }
+
+    const list = await store.addOrUpdate({
+      openid: "newcomer",
+      chatType: "private",
+      preview: "刚来",
+      at: 10_000,
+    });
+    expect(list).toHaveLength(QQ_PENDING_MAX_USERS);
+    const ids = list.map((user) => user.openid);
+    expect(ids).not.toContain("newcomer");
+    expect(ids).toContain("open-0");
+    expect(ids).toContain(`open-${QQ_PENDING_MAX_USERS - 1}`);
   });
 
   it("list 按 lastSeenAt 倒序返回副本", async () => {

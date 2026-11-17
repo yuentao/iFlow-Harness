@@ -23,7 +23,12 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-/** 待审核队列上限：超出时按 `lastSeenAt` 丢掉最旧的（最新的人最可能要看）。 */
+/**
+ * 待审核队列上限：超出时按 `firstSeenAt` **保留最早出现的**记录、丢掉最新
+ * 出现的——排队越久越可能是真正需要处理的人。淘汰只看首次出现时间，同一
+ * 发送者的重复消息（只刷新 `lastSeenAt` / count）不会改变优先级，因此刷消息
+ * 挤不掉别人的记录。
+ */
 export const QQ_PENDING_MAX_USERS = 50;
 /** 拒绝集合上限：只保留最近 100 个，防止文件无限增长。 */
 export const QQ_PENDING_MAX_REJECTED = 100;
@@ -219,8 +224,9 @@ export class QqPendingUserStore {
   /**
    * 记录一条待审核消息：同一 openid 累加次数、刷新 `lastSeenAt` 与预览。
    *
-   * 已在拒绝集合里的人直接忽略（返回当前列表），队列上限按 `lastSeenAt`
-   * 丢弃最旧的记录。
+   * 已在拒绝集合里的人直接忽略（返回当前列表）。队列超过上限时按
+   * `firstSeenAt` **升序保留**（最早出现的优先）——重复消息不会刷新这个时间，
+   * 所以刷消息无法把别人的记录挤出去；被丢弃的是最新出现的那批。
    */
   async addOrUpdate(input: QqPendingUserInput): Promise<QqPendingUser[]> {
     await this.load();
@@ -257,7 +263,9 @@ export class QqPendingUserStore {
     }
 
     if (this.users.length > QQ_PENDING_MAX_USERS) {
-      this.users.sort((left, right) => right.lastSeenAt - left.lastSeenAt);
+      // 只按 firstSeenAt 排序（稳定排序保证同时间戳时先入队的在前）：
+      // 保留先出现的人，丢掉刚冒出来的那批。lastSeenAt 不参与淘汰。
+      this.users.sort((left, right) => left.firstSeenAt - right.firstSeenAt);
       this.users = this.users.slice(0, QQ_PENDING_MAX_USERS);
     }
 
