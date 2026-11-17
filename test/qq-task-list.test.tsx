@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QqTaskUi } from "../shared/messages";
-import { QqTaskList, maskQqChatId } from "../webview/src/components/QqTaskList";
+import { maskQqOpenId } from "../shared/qq-access";
+import { QqTaskList } from "../webview/src/components/QqTaskList";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -73,15 +74,15 @@ describe("QqTaskList", () => {
     const [row] = rows();
     expect(row!.textContent).toContain("#A1");
     expect(row!.textContent).toContain("已完成");
-    // chatId 保留前两位与末两位，中间打码。
-    expect(row!.textContent).toContain("私聊 · 12****90");
+    // chatId 与白名单 / 待审核区同一套脱敏：前 4 + 固定 8 个星号 + 后 4。
+    expect(row!.textContent).toContain("私聊 · 1234********7890");
     expect(row!.textContent).toContain("把 README 的安装段改成内网镜像");
     expect(row!.textContent).toContain("耗时 1 分 30 秒");
     expect(row!.textContent).toContain("iflow/qq/a1");
     expect(row!.textContent).toContain("2 个文件");
     expect(row!.textContent).toContain("+12");
     expect(row!.textContent).toContain("-3");
-    expect(maskQqChatId("123")).toBe("***");
+    expect(maskQqOpenId("1234567890")).toBe("1234********7890");
   });
 
   it("tones the status chip by state", () => {
@@ -121,7 +122,7 @@ describe("QqTaskList", () => {
     expect(onAction).toHaveBeenCalledWith("task-1", "deny");
   });
 
-  it("requires an answer text before submitting an answer", () => {
+  it("提问通道未接通：不提供「提交回答」入口，只如实说明", () => {
     render([
       task({
         status: "waiting_answer",
@@ -129,19 +130,15 @@ describe("QqTaskList", () => {
       }),
     ]);
     expect(container.textContent).toContain("等待你的回答");
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='回答任务 A1']")!;
-    const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (b) => b.textContent?.trim() === "提交回答",
-    )!;
-    expect(submit.disabled).toBe(true);
-
-    act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "pnpm");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(submit.disabled).toBe(false);
-    act(() => submit.click());
-    expect(onAction).toHaveBeenCalledWith("task-1", "answer", "pnpm");
+    expect(container.textContent).toContain("选哪个包管理器？");
+    // 既没有输入框，也没有点了没用的「提交回答」按钮。
+    expect(container.querySelector("input[aria-label='回答任务 A1']")).toBeNull();
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (b) => b.textContent?.trim() === "提交回答",
+      ),
+    ).toBe(false);
+    expect(container.textContent).toContain("提问通道尚未接通，暂不支持在此回答");
   });
 
   it("offers merge and discard for a finished task with a branch", () => {
@@ -150,6 +147,29 @@ describe("QqTaskList", () => {
     expect(onAction).toHaveBeenCalledWith("task-1", "merge");
     clickText("丢弃");
     expect(onAction).toHaveBeenCalledWith("task-1", "discard");
+  });
+
+  it("只在宿主回填 policy 时显示策略 chip：trusted 警告色、supervised 中性", () => {
+    render([
+      task({ taskId: "t-trust", shortId: "TR", status: "running", policy: "trusted" }),
+      task({ taskId: "t-sup", shortId: "SU", status: "running", policy: "supervised" }),
+      task({ taskId: "t-none", shortId: "NO", status: "running" }),
+    ]);
+    const [trusted, supervised, plain] = rows();
+
+    const trustedChips = [...trusted!.querySelectorAll<HTMLElement>(".chip-fade")];
+    expect(trustedChips).toHaveLength(2);
+    expect(trustedChips[1]!.textContent).toBe("免确认");
+    expect(trustedChips[1]!.className).toContain("bg-warning");
+
+    const supervisedChips = [...supervised!.querySelectorAll<HTMLElement>(".chip-fade")];
+    expect(supervisedChips).toHaveLength(2);
+    expect(supervisedChips[1]!.textContent).toBe("需审批");
+    expect(supervisedChips[1]!.className).toContain("bg-surface");
+    expect(supervisedChips[1]!.className).not.toContain("bg-warning");
+
+    // 没有 policy 的行只有状态 chip：看板不猜策略。
+    expect(plain!.querySelectorAll(".chip-fade")).toHaveLength(1);
   });
 
   it("renders only the first fifty rows and says so", () => {

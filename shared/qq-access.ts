@@ -21,6 +21,40 @@ const MASK_EDGE = 4;
 /** 不超过该长度的值视为异常，整体用星号覆盖（原样保留会泄露全部内容）。 */
 const MASK_SAFE_LENGTH = MASK_EDGE * 2;
 
+/**
+ * openid / 群号的长度下限：QQ 群号最短 5 位、openid 常见 32 位，4 是留出余量
+ * 的保守下限（短于此的值几乎都是误粘贴）。
+ */
+export const QQ_ID_MIN_LENGTH = 4;
+/** 长度上限：QQ openid 是 32 位十六进制，64 足够容纳任何已知形态。 */
+export const QQ_ID_MAX_LENGTH = 64;
+
+/**
+ * 合法的 openid / 群号字符集与长度：`[A-Za-z0-9_-]{4,64}`。
+ *
+ * 专门用来挡住「把脱敏串当 id 保存」这条错误路径：{@link maskQqOpenId} 的输出
+ * 一定含 `*`，而 `*` 不在字符集里，所以 `D754********8D11` 会被拒绝；含空白
+ * （复制时常见尾随空格）同样拒绝。校验**不做 trim**：调用方必须先 trim 再校验，
+ * 否则「带空格的完整 id」会被判合法而实际匹配不上。
+ */
+const QQ_ID_PATTERN = /^[A-Za-z0-9_-]+$/u;
+
+/** 该值能否作为 openid / 群号写入白名单（只认完整原值，不接受脱敏串）。 */
+export function isValidQqId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length < QQ_ID_MIN_LENGTH || value.length > QQ_ID_MAX_LENGTH) return false;
+  return QQ_ID_PATTERN.test(value);
+}
+
+/**
+ * `supervised` 策略下等待 QQ 审批的时长（分钟）——UI 文案的唯一来源。
+ *
+ * 宿主侧 `src/qq/service.ts` 的 `QQ_APPROVAL_TIMEOUT_MS`（4 分钟）才是真正执行
+ * 的值；两者必须一致，UI 不再写死「5 分钟」。改动其中一处时另一处必须同步
+ * （下一批应让 service.ts 直接引用本常量，届时这里就是唯一真值）。
+ */
+export const QQ_APPROVAL_TIMEOUT_MINUTES = 4;
+
 /** 一个访问控制条目：完整 openid + 可选备注。 */
 export interface QqAllowEntry {
   /** 完整 openid（QQ 官方接口给的标识，不是 QQ 号）。 */

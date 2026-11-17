@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isValidQqId,
   maskQqOpenId,
   normalizeQqAllowEntries,
   normalizeQqAllowEntry,
@@ -97,5 +98,51 @@ describe("serializeQqAllowEntries", () => {
         { openid: "87654321", note: "测试群" },
       ]),
     ).toEqual(["12345678", { openid: "87654321", note: "测试群" }]);
+  });
+});
+
+describe("isValidQqId", () => {
+  it("接受典型 openid 与数字群号，以及含 _ / - 的 id", () => {
+    for (const value of [
+      "D754D2240C503C2ABE2B236DC1E78D11",
+      "ABCDEF0123456789ABCDEF0123456789",
+      "12345678",
+      "1234567890",
+      "2283901234",
+      "user-2",
+      "open_1",
+      "a-b_C9",
+    ]) {
+      expect(isValidQqId(value), value).toBe(true);
+    }
+  });
+
+  it("拒绝从界面复制来的脱敏串（含星号，永远匹配不上）", () => {
+    expect(isValidQqId("D754********8D11")).toBe(false);
+    expect(isValidQqId("********")).toBe(false);
+    expect(isValidQqId("1234********7890")).toBe(false);
+  });
+
+  it("拒绝含空白 / 空串 / 纯空白", () => {
+    expect(isValidQqId(" D754D2240C503C2ABE2B236DC1E78D11")).toBe(false);
+    expect(isValidQqId("D754D2240C503C2ABE2B236DC1E78D11 ")).toBe(false);
+    expect(isValidQqId("D754 D224")).toBe(false);
+    expect(isValidQqId("D754\tD224")).toBe(false);
+    expect(isValidQqId("D754\nD224")).toBe(false);
+    expect(isValidQqId("")).toBe(false);
+    expect(isValidQqId("   ")).toBe(false);
+  });
+
+  it("拒绝过短 / 超长 / 其它字符与非字符串", () => {
+    expect(isValidQqId("abc")).toBe(false);
+    expect(isValidQqId("a".repeat(65))).toBe(false);
+    expect(isValidQqId("abc@example.com")).toBe(false);
+    expect(isValidQqId("群1234")).toBe(false);
+    expect(isValidQqId("１２３４")).toBe(false);
+    expect(isValidQqId(12345678)).toBe(false);
+    expect(isValidQqId(undefined)).toBe(false);
+    expect(isValidQqId(null)).toBe(false);
+    // 上限本身是合法的（64 位），别把边界判成非法。
+    expect(isValidQqId("a".repeat(64))).toBe(true);
   });
 });

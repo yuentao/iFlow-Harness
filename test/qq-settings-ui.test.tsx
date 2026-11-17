@@ -126,6 +126,16 @@ function setInput(el: HTMLInputElement, value: string): void {
   });
 }
 
+/**
+ * 所有 `role="alert"` 的文本合并。页面里的 warnings 警告块也是 alert，
+ * 「只取第一个」会永远读到警告而不是就地校验错误。
+ */
+function alertText(): string {
+  return [...container.querySelectorAll("[role='alert']")]
+    .map((element) => element.textContent ?? "")
+    .join("\n");
+}
+
 beforeEach(() => {
   onChange = vi.fn();
   onTestConnection = vi.fn();
@@ -189,9 +199,9 @@ describe("QqSettings", () => {
     expect(onChange).toHaveBeenCalledWith({ rateLimitPerMin: 60 });
   });
 
-  it("explains the supervised policy including the 5-minute rejection rule", () => {
+  it("explains the supervised policy including the 4-minute rejection rule", () => {
     render(<Harness />);
-    expect(container.textContent).toContain("5 分钟未响应按拒绝处理");
+    expect(container.textContent).toContain("4 分钟未响应按拒绝处理");
 
     const trigger = container.querySelector<HTMLButtonElement>("button[aria-label='远程任务策略']")!;
     expect(trigger.textContent).toContain("受监督");
@@ -331,6 +341,55 @@ describe("QqSettings", () => {
     // 回灌后立即脱敏：群 openid 与用户 openid 用同一规则。
     expect(container.textContent).toContain("ABCD********6789");
     expect(container.textContent).not.toContain(openid);
+  });
+
+  it("添加用户：脱敏串被就地拒绝，带空格的完整 openid 仍可保存", () => {
+    render(<Harness />);
+    clickText("添加用户");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户的 openid']")!;
+    const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
+
+    // 从界面复制来的脱敏串（含 *）是最常见的误粘贴：必须报错且不写入。
+    setInput(input, "D754********8D11");
+    act(() => confirm.click());
+    expect(onChange).not.toHaveBeenCalled();
+    expect(alertText()).toContain("无效的用户标识");
+    // 输入保留（用户可以修正），不是静默丢弃。
+    expect(input.value).toBe("D754********8D11");
+
+    // 复制常带首尾空白：trim 后是合法完整 id，应正常添加。
+    setInput(input, "  D754D2240C503C2ABE2B236DC1E78D11  ");
+    act(() => confirm.click());
+    expect(onChange).toHaveBeenCalledWith({
+      allowedUsers: [{ openid: "D754D2240C503C2ABE2B236DC1E78D11" }],
+    });
+  });
+
+  it("添加群：过短 / 超长 / 含空格的标识一律拒绝并提示", () => {
+    render(<Harness />);
+    clickText("添加群");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
+
+    for (const bad of ["abc", "a".repeat(65), "1234 5678"]) {
+      setInput(input, bad);
+      act(() => confirm.click());
+      expect(onChange, bad).not.toHaveBeenCalled();
+      expect(alertText(), bad).toContain("无效的群标识");
+    }
+  });
+
+  it("重复添加同一标识会明确报错，而不是静默忽略", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid }] }} />);
+    clickText("添加用户");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户的 openid']")!;
+    const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
+
+    setInput(input, openid);
+    act(() => confirm.click());
+    expect(onChange).not.toHaveBeenCalled();
+    expect(alertText()).toContain("已在名单中");
   });
 
   it("群条目同样带备注：可修改、可清空，且不牵连用户列表", () => {

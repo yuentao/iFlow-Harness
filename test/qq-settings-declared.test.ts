@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
+import { QQ_APPROVAL_TIMEOUT_MINUTES } from "../shared/qq-access.js";
 
 /**
  * QQ 远程任务的 9 项设置声明。这些断言把设置项钉在磁盘上：键名、类型、
@@ -160,16 +161,26 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
     }
   });
 
-  it("supervised 策略写明「QQ 审批 + 5 分钟未响应按拒绝」", () => {
+  it("supervised 策略写明「QQ 审批 + N 分钟未响应按拒绝」（N 取共享常量）", () => {
     const zhText = zh["iflow.configuration.qq.remotePolicy.supervised"] ?? "";
     expect(zhText).toContain("审批");
-    expect(zhText).toContain("5 分钟");
+    expect(zhText).toContain(`${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟`);
     expect(zhText).toContain("拒绝");
 
     const enText = en["iflow.configuration.qq.remotePolicy.supervised"] ?? "";
     expect(enText).toContain("approval");
-    expect(enText).toContain("5 minutes");
+    expect(enText).toContain(`${QQ_APPROVAL_TIMEOUT_MINUTES} minutes`);
     expect(enText).toContain("denial");
+  });
+
+  it("白名单描述提示身份标识的版本库风险", () => {
+    for (const key of [
+      "iflow.configuration.qq.allowedUsers.description",
+      "iflow.configuration.qq.allowedGroups.description",
+    ]) {
+      expect(zh[key] ?? "", `中文 nls 的 ${key}`).toContain("不要提交到版本库");
+      expect(en[key] ?? "", `英文 nls 的 ${key}`).toContain("version-controlled");
+    }
   });
 
   it("描述如实：不再声称「仅声明 / 尚未接线」", () => {

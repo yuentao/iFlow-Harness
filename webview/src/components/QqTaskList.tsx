@@ -1,9 +1,9 @@
-import { useState } from "react";
-import { BellRing, Check, GitBranch, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { BellRing, GitBranch, RefreshCw, ShieldCheck, X } from "lucide-react";
 import type { QqTaskUi } from "../../../shared/messages";
+import { maskQqOpenId } from "../../../shared/qq-access";
 import { t } from "../i18n";
 import { useChat } from "../store";
-import { ActionRow, Button, Chip, Hint, ICON_INLINE, IconButton, TextInput } from "./ui";
+import { ActionRow, Button, Chip, Hint, ICON_INLINE, IconButton } from "./ui";
 
 /**
  * QQ 远程任务看板（Wave3-C）。
@@ -72,12 +72,12 @@ function statusTone(status: QqTaskUi["status"]): "muted" | "success" | "warning"
   }
 }
 
-/** 会话 id 脱敏：保留前两位与末两位，中间固定 4 个星号。 */
-export function maskQqChatId(chatId: string): string {
-  const id = chatId.trim();
-  if (id.length <= 4) return "***";
-  return `${id.slice(0, 2)}****${id.slice(-2)}`;
-}
+/*
+ * chatId（单聊的 openid / 群聊的群 openid）与设置页的白名单、待审核区用同一套
+ * 脱敏：`maskQqOpenId`（前 4 + 固定 8 个星号 + 后 4）。原先这里另有一个
+ * `maskQqChatId`（前 2 + 4 星 + 末 2），同一功能两套口径会让用户以为看到的是
+ * 不同的 id；那个函数只用于展示，已删除。
+ */
 
 /** 耗时：秒 / 分秒 / 时分三档，只用于已产生的时长。 */
 export function formatQqDuration(ms: number): string {
@@ -97,7 +97,6 @@ function TaskRow({
   task: QqTaskUi;
   onAction: QqTaskListProps["onAction"];
 }) {
-  const [answer, setAnswer] = useState("");
   const source = task.chatType === "private" ? t("私聊") : t("群聊");
   const pendingKind = task.pending?.kind;
   const canStop =
@@ -119,8 +118,18 @@ function TaskRow({
       <div className="flex flex-wrap items-center gap-2">
         <span className="shrink-0 font-mono text-ui-caption text-muted-foreground">#{task.shortId}</span>
         <Chip tone={statusTone(task.status)}>{statusLabel(task.status)}</Chip>
+        {/* 策略 chip 只在宿主回填了 policy 时出现：看板不猜，缺省就不显示。 */}
+        {task.policy && (
+          <Chip tone={task.policy === "trusted" ? "warning" : "muted"}>
+            {task.policy === "trusted"
+              ? t("免确认")
+              : task.policy === "supervised"
+                ? t("需审批")
+                : t("只读")}
+          </Chip>
+        )}
         <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
-          {source} · {maskQqChatId(task.chatId)}
+          {source} · {maskQqOpenId(task.chatId)}
         </span>
         <span className="ml-auto shrink-0 text-ui-caption text-muted-foreground">
           {t("耗时 {0}", formatQqDuration(task.updatedAt - task.createdAt))}
@@ -163,26 +172,12 @@ function TaskRow({
           </div>
           <p className="mt-1 break-words text-ui-caption leading-relaxed text-foreground/90">{task.pending.summary}</p>
           {pendingKind === "answer" && (
-            <div className="mt-2 flex items-center gap-1.5">
-              <TextInput
-                className="min-w-0 flex-1"
-                value={answer}
-                placeholder={t("回答内容")}
-                aria-label={t("回答任务 {0}", task.shortId)}
-                onChange={(event) => setAnswer(event.target.value)}
-              />
-              <Button
-                size="sm"
-                icon={<Check className={ICON_INLINE} />}
-                disabled={!answer.trim()}
-                onClick={() => {
-                  onAction(task.taskId, "answer", answer);
-                  setAnswer("");
-                }}
-              >
-                {t("提交回答")}
-              </Button>
-            </div>
+            // 提问通道（_iflow/user/questions）还没接到 QQ：这里原先的「提交回答」
+            // 输入框点了也只是个死路（宿主侧 `answerTask` 恒回「没有等待回答的
+            // 问题」）。如实说明，不保留看似可用的入口。
+            <Hint className="mt-1">
+              {t("提问通道尚未接通，暂不支持在此回答；可停止任务后重新派发。")}
+            </Hint>
           )}
         </div>
       )}

@@ -296,7 +296,9 @@ const HELP_ENTRIES: readonly QqHelpEntry[] = [
   { usage: "stop <任务编号>", description: "停止正在跑的任务" },
   { usage: "approve <任务编号> [验证码]", description: "批准等待审批的任务" },
   { usage: "deny <任务编号>", description: "拒绝等待审批的任务" },
-  { usage: "answer <任务编号> <回答>", description: "回答 agent 的提问" },
+  // 提问通道（_iflow/user/questions）尚未接到 QQ：命令能解析，但执行侧只会
+  // 回「当前没有等待回答的问题」。帮助文本必须如实标注，不能让人以为已接通。
+  { usage: "answer <任务编号> <回答>", description: "暂不支持：提问通道尚未接通" },
   { usage: "merge <任务编号>", description: "把任务分支合并回当前分支" },
   { usage: "discard <任务编号>", description: "丢弃任务分支" },
   { usage: "unbind", description: "解除当前会话的绑定" },
@@ -349,7 +351,8 @@ export function formatAck(intent: QqCommandIntent): string {
     case "deny":
       return "正在拒绝任务。";
     case "answer":
-      return "正在提交回答。";
+      // 不宣称「正在提交」：QQ 侧提问通道未接通，回答不会送达 agent。
+      return "提问通道尚未接通，暂不支持回答。";
     case "merge":
       return "正在合并任务分支。";
     case "discard":
