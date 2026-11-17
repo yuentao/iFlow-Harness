@@ -12,6 +12,10 @@
  * agent writes its own process.env there before reading any stdin — that lets
  * a test assert exactly what spawn env the host handed the CLI (e.g. the
  * main-session-only IFLOW_SUPER_TOOL gate). Best effort only.
+ *
+ * Optional argv dump: with ACP_MOCK_ARGV_DUMP pointing at a file, the agent
+ * writes `process.argv.slice(2)` there (same moment) — the same trick for spawn
+ * ARGS, used to assert the main-session-only `--allowed-mcp-server-names` scope.
  */
 import { writeFileSync } from "node:fs";
 
@@ -21,6 +25,15 @@ if (envDumpPath) {
     writeFileSync(envDumpPath, JSON.stringify(process.env));
   } catch {
     // Diagnostics convenience; never fail the mock agent over it.
+  }
+}
+
+const argvDumpPath = process.env.ACP_MOCK_ARGV_DUMP;
+if (argvDumpPath) {
+  try {
+    writeFileSync(argvDumpPath, JSON.stringify(process.argv.slice(2)));
+  } catch {
+    // Same: diagnostics only.
   }
 }
 

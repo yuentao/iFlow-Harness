@@ -442,7 +442,24 @@ const INTERNAL_PROMPT_IDLE_MS = 90_000;
  */
 const SUPER_HEARTBEAT_MS = 1_500;
 /**
- * Tools the MAIN panel session must never receive.
+ * Tool gating for the MAIN panel session: a WHITELIST for built-in tools plus a
+ * process-level MCP scope — never a blacklist of names.
+ *
+ * Why not a blacklist (2026-11-17 user report): the main session could still
+ * call MCP tools (`new_page` / `take_screenshot` / `evaluate_script`) because
+ * `disallowed_tools` only ever named BUILT-IN tools. MCP tool names are
+ * per-installation — every user configures different servers — so any
+ * enumeration is both incomplete (a server added later walks straight through)
+ * and wrong (it would withhold a tool the user legitimately has). The
+ * structural answer has two halves, and neither contains an MCP name:
+ *  1. `MAIN_SESSION_ALLOWED_TOOLS` → `settings.allowed_tools` → Config
+ *     `coreTools`: a tool is registered ONLY when it is listed, so every other
+ *     built-in tool (and any tool a future CLI version adds) never exists in
+ *     this session.
+ *  2. `buildAcpCommand(..., { disableMcpServers: true })` starts the main
+ *     session's CLI process with zero MCP servers, so `discoverAllTools()` — the
+ *     path that bypasses `coreTools` — has nothing to register.
+ * Adding or removing an MCP server therefore needs NO code change here.
  *
  * The user directive is that the main session only DELEGATES: it plans, writes
  * task briefs, watches the board and reports — every implementation step AND
@@ -453,23 +470,37 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * mechanical instead of advisory.
  *
  * Wire behavior (verified against the vendored CLI bundle,
- * vendor/iflow-cli/bundle/iflow.js):
+ * vendor/iflow-fork/bundle/iflow.js):
  *  - `session/new` / `session/load` map the request's `settings.disallowed_tools`
- *    onto the Config's `excludeTools`
- *    (`u = {...this.settings.merged, ..., excludeTools: o?.disallowed_tools, ...}`);
+ *    onto the Config's `excludeTools`, and `settings.allowed_tools` onto
+ *    `coreTools` (`u = {...this.settings.merged, ..., excludeTools:
+ *    o?.disallowed_tools, ..., coreTools: o?.allowed_tools, ...}`);
  *    `loadSession` builds its config through the same `newSessionConfig(...,
  *    settings)`, and its not-found fallback calls `newSession` (settings
  *    forwarded too).
- *  - `Config.createToolRegistry()`'s registrar
- *    (`t = (r, ...n) => { let s = r.name, a = r.Name || s, l = this.getExcludeTools(), ...;
- *    (l?.includes(s) || l?.includes(a)) && (u = !1); u && register }`) skips
- *    registration when `excludeTools` matches either the static `Name` or the
- *    class name.
+ *  - `coreTools` is a WHITELIST: `createToolRegistry()`'s registrar computes
+ *    `u = o === void 0 ? true : o.some(g => g === s || g === a ||
+ *    g.startsWith(`${s}(`) || g.startsWith(`${a}(`))` and registers the class
+ *    only when `u` is true (`excludeTools` can still veto). `allowed_tools`
+ *    therefore withholds tools by never creating them — including tools a
+ *    future bundle adds, with no list to maintain here.
+ *  - MCP tools are NOT part of that registrar: they arrive later through
+ *    `ToolRegistry.discoverAllTools()` → `mcpClientManager.discoverAllMcpTools()`,
+ *    which does not consult `coreTools`. That is why the main session also
+ *    removes the MCP servers from its CLI process (see `buildAcpCommand`'s
+ *    `disableMcpServers`); the whitelist alone would leave them callable.
+ *  - The same registrar applies `excludeTools` on top of the whitelist
+ *    (`(l?.includes(s) || l?.includes(a)) && (u = !1)`, where `l` is
+ *    `this.getExcludeTools()`), matching either the static `Name` or the class
+ *    name. That is why the second-layer list below strengthens, and never
+ *    replaces, `allowed_tools`.
  *
- * Provenance of the names below (scanned 2026-11-16 across
- * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name = "<name>"` in
- * the bundle, but "declared" is not "registered" — this comment must not claim
- * a tool is withheld when the registrar never creates it:
+ * Provenance of the names below (scanned 2026-11-16 / 2026-11-17 across
+ * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name` in the
+ * bundle — a `"<name>"` literal, or for `exit_plan_mode` / `save_memory` the
+ * schema object's name (`static Name = l2a.name` / `jzn.name`) — but "declared"
+ * is not "registered": this comment must not claim a tool is withheld when the
+ * registrar never creates it:
  *  - registered by `createToolRegistry()`'s `t(...)` calls: read_file (L1246),
  *    read_many_files (L1453), glob (L1323), search_file_content (L1259,
  *    L1317), list_directory (L950), image_read (L1247), web_fetch (L2153,
@@ -495,20 +526,46 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * `search_file_content` / `list_directory`), so listing them would be a silent
  * no-op as well.
  *
- * Kept available on purpose: `todo_write` / `todo_read` (the orchestrator's own
- * planning), `ask_user_question` (requirements), and the `super-agent` tool
- * itself — it is the dispatch channel and is registered by the loader
- * (`super-agent-loader.cjs`, `static Name = "super-agent"`), not by the bundle.
+ * What the main session KEEPS is decided by the whitelist below, not by this
+ * list: `super-agent` (the dispatch channel — registered by the loader,
+ * `super-agent-loader.cjs`, `static Name = "super-agent"`, and it goes through
+ * the same registrar), `todo_write` / `todo_read` (the orchestrator's own
+ * planning), `ask_user_question` (requirements) and `exit_plan_mode` (Plan
+ * mode's only way to hand a plan to the user).
+ *
+ * The list below is the SECOND layer. It is redundant with the whitelist in
+ * this bundle version — both are consumed by the same registrar, and a name that
+ * is not in `coreTools` is never created in the first place — but it is kept
+ * because it states the intent explicitly (these are the tools the main session
+ * must never hold) and it survives a phantom future where `allowed_tools` is
+ * renamed or stops being honored. It names BUILT-IN tools only; MCP tool names
+ * must never appear here or anywhere else (see the header: they are per-user).
  *
  * The exclusion is per session: child sessions (SuperAgentManager) deliberately
  * do NOT pass settings and therefore keep every tool — the main session hands
- * both the implementation and the investigation down to them.
+ * both the implementation and the investigation down to them. The MCP scope is
+ * likewise per PROCESS: only the main session's spawn gets
+ * `--allowed-mcp-server-names`, child spawns do not.
  *
  * Side effect (deliberate, not hidden): the `@iflow` chat participant and
  * `iflow.askSelection` reuse this panel session, so they lose file reads and
  * shell commands too; slash commands that need to inspect the workspace (e.g.
  * `/init`) likewise have to be delegated.
  */
+export const MAIN_SESSION_ALLOWED_TOOLS = [
+  // the ONLY dispatch channel (loader-registered; must be listed or the main
+  // session cannot delegate at all)
+  "super-agent",
+  // the orchestrator's own planning surface
+  "todo_write",
+  "todo_read",
+  // requirements clarification — the answers become the task briefs
+  "ask_user_question",
+  // Plan mode's exit path (`static Name = l2a.name` = "exit_plan_mode" in the
+  // bundle; the host renders its Plan approval card). Without it Plan mode
+  // could never hand a plan over.
+  "exit_plan_mode",
+] as const;
 export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // in-process sub-agents — the main session delegates to Super Agent children
   "task",
@@ -528,6 +585,8 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // writing
   "write_file",
   "replace",
+  // writes ~/.iflow/memory.md; the panel persists memory host-side instead
+  "save_memory",
   // defensive: declared at L3160 but not registered in this bundle version
   // (class `Aut` is never passed to `t(...)`); kept for future CLI versions
   "multi_edit",
@@ -536,9 +595,23 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   "run_shell_command",
 ] as const;
 /** Fresh settings object for one main-session `session/new` / `session/load`.
- * A factory (not a shared object) so no caller can mutate another's copy. */
+ * A factory (not a shared object) so no caller can mutate another's copy.
+ *
+ * `allowed_tools` is the structural gate (only these names are registered at
+ * all); `disallowed_tools` is the explicit second layer. Sending only the
+ * whitelist would already be sufficient in this bundle version, but the belt
+ * costs nothing and keeps the intent legible.
+ *
+ * MCP is NOT addressed here on purpose: `settings` has no per-session MCP scope
+ * (the request's `mcpServers` array is merged ON TOP of the user's configured
+ * servers, so an empty array removes nothing). The main session's MCP servers
+ * are removed at process level instead — see `buildAcpCommand`'s
+ * `disableMcpServers`. */
 export function mainSessionSettings(): SessionSettings {
-  return { disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS] };
+  return {
+    allowed_tools: [...MAIN_SESSION_ALLOWED_TOOLS],
+    disallowed_tools: [...MAIN_SESSION_DISALLOWED_TOOLS],
+  };
 }
 /** Next-step prediction: another fire-and-forget internal prompt, but with a
  * much tighter budget. The user turn already settled, so a slow gateway only
@@ -10852,7 +10925,16 @@ export class ChatPanel implements vscode.Disposable {
         .map((f) => f.uri.fsPath)
         .filter((p) => p !== workspaceRoot);
 
-      const { args } = buildAcpCommand(entry, allowedRoots);
+      // Main-session MCP scope. This CLI process must not hold ANY MCP server:
+      // MCP tools are registered by `discoverAllTools()` AFTER
+      // `createToolRegistry()`, so the `allowed_tools` whitelist cannot stop
+      // them — and their names are per-user (every install configures different
+      // servers), so they must never be enumerated. `--allowed-mcp-server-names`
+      // with a never-matching sentinel filters the resolved server map down to
+      // nothing: nothing is spawned and no MCP tool is ever registered. Child
+      // spawns (createSuperClient) deliberately omit this — children keep their
+      // MCP servers.
+      const { args } = buildAcpCommand(entry, allowedRoots, { disableMcpServers: true });
       // Log the ACTUAL spawn executable (node, not buildAcpCommand's
       // process.execPath default): the old line printed buildAcpCommand's
       // command while AcpClient received `node`, so the log showed

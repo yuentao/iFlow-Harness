@@ -230,7 +230,10 @@ describe("super agent · 审批策略（编排接线）", () => {
     expect(client.modes).toEqual(["yolo"]);
     const request = client.newSessionRequests[0];
     expect(request?.settings).toBeUndefined();
+    // 主会话的白名单（allowed_tools）与 MCP 作用域都是主会话专属，子会话
+    // 一条都不能继承。
     expect(JSON.stringify(request ?? {})).not.toContain("disallowed_tools");
+    expect(JSON.stringify(request ?? {})).not.toContain("allowed_tools");
   });
 
   it("deny：不推 yolo，权限请求与 Plan 退出直接拒绝，提问仍走看板", async () => {

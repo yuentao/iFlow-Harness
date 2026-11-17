@@ -369,10 +369,12 @@ describe("super agent · 编排", () => {
 
     const request = harness.clients[0]?.newSessionRequests[0];
     expect(request).toBeDefined();
-    // 主会话经 `settings.disallowed_tools` 机械剔除 task 与全部读取/写入/执行
-    // 工具；子会话刻意不传 settings —— 实现与探查都只允许在子会话里跑。
+    // 主会话经 `settings.allowed_tools`（白名单）与 `settings.disallowed_tools`
+    // 机械剔除全部读取/写入/执行工具，并在进程级移除 MCP 服务器；子会话刻意
+    // 不传 settings —— 实现与探查都只允许在子会话里跑，MCP 工具也要保留。
     expect(request?.settings).toBeUndefined();
     expect(JSON.stringify(request ?? {})).not.toContain("disallowed_tools");
+    expect(JSON.stringify(request ?? {})).not.toContain("allowed_tools");
     expect(request?.cwd).toBe(harness.sessions[0]?.isolation.path);
   }, 30000);
 
