@@ -3,9 +3,10 @@
  * `QqBotSocket`（见 ./adapter.ts）。
  *
  * 设计纪律：
- *  - **零顶层网络 import**：`ws` 只在真正 connect 且没有注入实现时惰性加载，
- *    因此本模块可被单测用假 WebSocketImpl 驱动，无需在本地装 ws；
- *    同时不引入静态 `import "ws"`，避免 tsc / esbuild 在依赖缺失时硬失败。
+ *  - **ws 静态打包**：`ws` 用顶层静态 `import`，由 esbuild 打进 `dist/extension.cjs`
+ *    （host bundle 只把 `vscode` 标 external；VSIX 里没有 node_modules/ws，绝不能
+ *    在运行期 require 外部包，否则用户机器上就会 Cannot find module 'ws'）。单测仍
+ *    可注入 WebSocketImpl 假实现驱动，不连真实网关。
  *  - **禁全局 fetch**（AGENTS 陷阱 #2）：post 走 node:http(s) 直连，按 URL
  *    协议选模块；只有 2xx 才解析 JSON，非 2xx / 超时 / 非法 JSON 一律 reject。
  *  - **token 不进错误文本**：错误信息只带 method / path / status / 原因，
@@ -16,14 +17,14 @@
 
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { createRequire } from "node:module";
+import WebSocket from "ws";
 import type { QqBotSocket, QqBotTransport } from "./adapter.js";
 
 /** 工厂依赖；所有项都可选，便于测试注入。 */
 export interface NodeQqBotTransportDeps {
   /**
    * ws 包风格的 WebSocket 构造器（`new Impl(url, { headers })`）。
-   * 缺省时惰性 `createRequire(... )("ws")` 加载真实包。
+   * 缺省时使用顶层静态导入的 `ws` 构造器（已随 host bundle 打进产物）。
    */
   WebSocketImpl?: unknown;
   /** post 超时（毫秒）；缺省 15000，<=0 时取缺省。 */
@@ -45,44 +46,16 @@ interface WsLike {
 
 type WsCtor = new (url: string, options?: { headers?: Record<string, string> }) => WsLike;
 
-function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
 function toError(value: unknown, fallback: string): Error {
   if (value instanceof Error) return value;
   const text = typeof value === "string" && value.length > 0 ? value : fallback;
   return new Error(text);
 }
 
-let cachedDefaultCtor: unknown;
-
-/** 惰性加载真实 ws 构造器，失败给可操作的错误（不打印任何凭据）。 */
-function loadDefaultWebSocketCtor(): unknown {
-  if (cachedDefaultCtor !== undefined) return cachedDefaultCtor;
-  try {
-    // 用 __filename（esbuild 打成 CJS 后即 dist/extension.cjs）定位扩展自身的
-    // node_modules；ESM/测试环境下退回 cwd。createRequire 的 specifier 是运行期
-    // 字符串，esbuild 不会把它当静态导入去解析，因此 ws 未安装也能构建。
-    const from = typeof __filename === "string" ? __filename : `${process.cwd()}/`;
-    const required = createRequire(from)("ws") as
-      | { WebSocket?: unknown; default?: unknown }
-      | unknown;
-    const mod = required as { WebSocket?: unknown; default?: unknown } | undefined;
-    cachedDefaultCtor = mod?.WebSocket ?? mod?.default ?? required;
-  } catch (error) {
-    throw new Error(
-      `QQBot: 无法加载 ws（请确认依赖已安装，或注入 WebSocketImpl）：${errorText(error)}`,
-    );
-  }
-  return cachedDefaultCtor;
-}
-
 function resolveCtor(injected: unknown): WsCtor {
-  const ctor = injected !== undefined ? injected : loadDefaultWebSocketCtor();
+  const ctor = injected !== undefined ? injected : WebSocket;
   if (typeof ctor !== "function") {
-    throw new Error("QQBot: WebSocket 构造器不可用（请安装 ws 或注入 WebSocketImpl）");
+    throw new Error("QQBot: WebSocket 构造器不可用（请注入 WebSocketImpl）");
   }
   return ctor as WsCtor;
 }
