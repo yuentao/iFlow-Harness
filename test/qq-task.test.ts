@@ -415,6 +415,20 @@ describe("formatQqTaskSummary", () => {
     expect(full).toContain("+10 -2  src/a.ts");
   });
 
+  it("correlation.worktreePath 只在 full 档输出（/qq status 可观察隔离目录）", () => {
+    const wt = makeTask({
+      correlation: { branch: "iflow/super/qq-task", worktreePath: "/ws/.iflow/super/worktrees/wt-1" },
+    });
+    const full = formatQqTaskSummary(wt, "full");
+    expect(full).toContain("目录  /ws/.iflow/super/worktrees/wt-1");
+
+    // 其余档位不输出本机路径。
+    expect(formatQqTaskSummary(wt, "summary")).not.toContain("worktrees/wt-1");
+    expect(formatQqTaskSummary(wt, "standard")).not.toContain("worktrees/wt-1");
+    // 没有该字段时不占行。
+    expect(formatQqTaskSummary(task, "full")).not.toContain("目录");
+  });
+
   it("结果缺失时如实写未记录，不补造统计", () => {
     const pending = makeTask({ status: "waiting_approval", pending: { kind: "approval", text: "run_shell_command", at: CREATED_AT } });
     const text = formatQqTaskSummary(pending, "standard");
@@ -527,6 +541,29 @@ describe("chunkQqText", () => {
       expect(chunk.length).toBeLessThanOrEqual(60);
     }
     expect(chunks[chunks.length - 1]!.endsWith("```")).toBe(true);
+  });
+
+  it("围栏路径不产生空代码块片：每片必带真实内容（直接调用，不经 toPlainText）", () => {
+    // 旧实现：预算刚好卡在围栏边界时，会发出只有围栏行的片 —— 例如
+    // 「```js\n```」这种空代码块首片。修复后当前片只有围栏行时允许硬切，
+    // 把后续内容切进本片，保证任何片都含非围栏内容。
+    const text = ["```js", "x".repeat(120), "```", "tail content"].join("\n");
+    const chunks = chunkQqText(text, 30);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      const fences = chunk.split("\n").filter((line) => line.trimStart().startsWith("```"));
+      expect(fences.length % 2).toBe(0);
+      const nonFence = chunk
+        .split("\n")
+        .filter((line) => !line.trimStart().startsWith("```"))
+        .join("");
+      // 空代码块片（只有 ``` ）不允许存在：每片都带真实内容。
+      expect(nonFence).not.toBe("");
+    }
+    // 内容保真：代码行全部保留、尾注在最后。
+    const joined = chunks.join("\n");
+    expect(joined.split("\n").filter((line) => line.includes("xxx")).length).toBeGreaterThan(0);
+    expect(joined.endsWith("tail content")).toBe(true);
   });
 
   it("非法 maxChars 抛 RangeError", () => {

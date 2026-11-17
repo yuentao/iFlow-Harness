@@ -806,6 +806,12 @@ export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): strin
     }
   }
 
+  // worktree 隔离目录：correlation 里一直在透传，但此前全仓没有读取者
+  // （纯死数据）。接进 full 档摘要，/qq status 能真正看到任务的工作目录。
+  if (detail === "full" && task.correlation.worktreePath) {
+    lines.push(`目录  ${task.correlation.worktreePath}`);
+  }
+
   lines.push("下一步");
   lines.push(`  /qq status ${task.taskId}`);
   if (detail !== "summary") lines.push(`  /qq log ${task.taskId}`);
@@ -948,7 +954,11 @@ export function chunkQqText(
         lineOffset = 0;
         continue;
       }
-      if (hasContent) break; // 当前片装不下这一行，先发出去
+      // 当前片装不下这一行，先发出去 —— 但**只含围栏行**的片（例如重开的
+      // ``` 头 + 紧跟着的闭合 ``` 行恰好耗尽预算）不能发：那会是一条
+      // ```\n``` 的空代码块。此时不 break，把后续内容硬切进本片，保证
+      // 每片都带真实内容。
+      if (hasContent && parts.some((p) => !p.trimStart().startsWith("```"))) break;
 
       // 还没有内容行：硬切当前行（超长单行 / 预算极小的退化情形）。
       // 至少推进 1 个码点，避免死循环；此时可能略超预算（见函数注释）。

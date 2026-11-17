@@ -43,6 +43,13 @@ export const QQ_PENDING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * 绝不静默吞掉。
  */
 export const QQ_PENDING_MAX_USERS = 50;
+/**
+ * 队列满丢弃提示的冷却窗口（毫秒）：同一 openid 的本地 warning toast
+ * 最多每 10 分钟一条。满队时外部用户每发一条消息都会触发一次丢弃事件，
+ * 没有冷却的话操作者的面板会被同一句提示刷满屏；去重键是 openid，
+ * 不同用户的首次丢弃仍各自提示，不吞真实信号。
+ */
+export const QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS = 10 * 60_000;
 /** 拒绝集合上限：只保留最近 100 个，防止文件无限增长。 */
 export const QQ_PENDING_MAX_REJECTED = 100;
 /** 消息预览字符上限（按码点截断，不会切碎代理对）。 */
