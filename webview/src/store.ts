@@ -2710,7 +2710,7 @@ import { setLocale } from "./i18n";
 
 export const useChat = create<ChatStore>((set, get) => ({
   state: null,
-  qqSettings: pickQqSettingsUi({}, { hasBotToken: false, hasAppSecret: false }),
+  qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
   qqStatus: null,
   qqBindCode: null,
   qqLoginQr: null,

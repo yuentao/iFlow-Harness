@@ -300,11 +300,14 @@ export function validateQqConfig(
     config.allowedUsers.length === 0 &&
     config.allowedGroups.length === 0
   ) {
+    // 只提示不拦启动：QqService.acceptInbound 本身要求白名单命中，空名单
+    // 等于「谁都不能派发任务」，不构成安全风险；而扫码绑定后自动启用时
+    // 白名单往往还是空的，把这里当 error 会让通道永远起不来。
     issues.push({
-      severity: "error",
+      severity: "warning",
       code: "allowlist_empty",
       message:
-        "已启用 QQ 通道，但用户白名单与群白名单都为空：任何 QQ 号都能远程派发任务（等于裸奔）。",
+        "已启用 QQ 通道，但用户白名单与群白名单都为空：目前没有任何账号能派发任务，请先添加允许的用户或群。",
     });
   }
 
@@ -422,8 +425,6 @@ export function checkQqStartupGate(
  * 读写。
  */
 export const QQ_SECRET_KEYS = {
-  /** 适配器访问 QQ 开放平台的 access token（qqbot 适配器用）。 */
-  botToken: "iflow.qq.bot-token",
   /** 适配器应用凭据：qqbot 用它计算签名、换取 access token。 */
   appSecret: "iflow.qq.app-secret",
   /** 入站回调的签名密钥：校验 QQ 平台推送的事件确实来自本应用。 */

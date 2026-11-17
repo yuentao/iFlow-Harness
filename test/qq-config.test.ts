@@ -173,10 +173,10 @@ describe("validateQqConfig", () => {
     expect(validateQqConfig(makeConfig())).toEqual([]);
   });
 
-  it("启用但白名单为空时报 allowlist_empty", () => {
+  it("启用但白名单为空时报 allowlist_empty（warning，不拦启动）", () => {
     const issues = validateQqConfig(makeConfig({ enabled: true }));
     expect(codes(issues)).toEqual(["allowlist_empty"]);
-    expect(issues.every((issue) => issue.severity === "error")).toBe(true);
+    expect(issues.every((issue) => issue.severity === "warning")).toBe(true);
   });
 
   it("启用且白名单齐全时无 issue", () => {
@@ -278,15 +278,14 @@ describe("启动门控（checkQqStartupGate）", () => {
 });
 
 describe("QQ_SECRET_KEYS", () => {
-  it("四个键名互不相同且都限定在 iflow.qq 命名空间", () => {
+  it("三个键名互不相同且都限定在 iflow.qq 命名空间", () => {
     expect(Object.keys(QQ_SECRET_KEYS).sort()).toEqual([
       "appSecret",
-      "botToken",
       "bridgeToken",
       "signingSecret",
     ]);
     const values = Object.values(QQ_SECRET_KEYS);
-    expect(new Set(values).size).toBe(4);
+    expect(new Set(values).size).toBe(3);
     expect(values.every((value) => value.startsWith("iflow.qq."))).toBe(true);
   });
 });

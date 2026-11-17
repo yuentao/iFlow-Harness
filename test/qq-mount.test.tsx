@@ -4,7 +4,7 @@
  *
  * 覆盖两处挂载点与它们对宿主通道的接线：
  *  - 设置弹窗的「QQ 机器人」页签：吃 `qqSettings` 快照、显示连接状态与配对码、
- *    普通改动走 `qqSettingsPatch`、凭据提交走 `qqSecretsWrite`；
+ *    普通改动走 `qqSettingsPatch`（凭据只由扫码写入，页面上没有输入框）；
  *  - 看板附近的「远程任务」区：只在有任务时出现，动作走 `qqTaskAction`。
  *
  * 用真实 store（只 mock `acquireVsCodeApi`），因此同时验证了 store 对
@@ -61,22 +61,14 @@ function render(element: ReactElement): void {
 }
 
 function settings(values: Record<string, unknown> = {}, secrets?: {
-  hasBotToken: boolean;
   hasAppSecret: boolean;
 }): void {
   act(() =>
     useChat.getState().applyHostMessage({
       type: "qqSettings",
-      values: pickQqSettingsUi(values, secrets ?? { hasBotToken: false, hasAppSecret: false }),
+      values: pickQqSettingsUi(values, secrets ?? { hasAppSecret: false }),
     }),
   );
-}
-
-function setInput(el: HTMLInputElement, value: string): void {
-  act(() => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  });
 }
 
 function clickText(text: string): void {
@@ -104,7 +96,7 @@ beforeEach(() => {
   postMessage.mockClear();
   useChat.setState({
     state: null,
-    qqSettings: pickQqSettingsUi({}, { hasBotToken: false, hasAppSecret: false }),
+    qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
     qqStatus: null,
     qqBindCode: null,
   });
@@ -123,7 +115,7 @@ describe("QQ 机器人设置页", () => {
         allowedUsers: ["10001"],
         maxConcurrentTasks: 4,
       },
-      { hasBotToken: true, hasAppSecret: false },
+      { hasAppSecret: true },
     );
     render(
       <SettingsModal
@@ -147,8 +139,9 @@ describe("QQ 机器人设置页", () => {
     expect(container.querySelector<HTMLInputElement>("input[aria-label='允许的用户 1']")!.value).toBe(
       "10001",
     );
-    // hasBotToken 只表达「已配置」，明文永远不回传。
-    expect(container.textContent).toContain("已保存；输入新值并在失焦后提交");
+    // 凭据只由扫码写入：设置页不再有手填输入框。
+    expect(container.querySelector("input[aria-label='机器人 Token']")).toBeNull();
+    expect(container.querySelector("input[aria-label='App Secret']")).toBeNull();
   });
 
   it("keeps QQ settings across session snapshots", () => {
@@ -180,48 +173,6 @@ describe("QQ 机器人设置页", () => {
     expect(postMessage).toHaveBeenCalledWith({
       type: "qqSettingsPatch",
       patch: { enabled: true },
-    });
-  });
-
-  it("submits edited credentials through qqSecretsWrite on blur", () => {
-    settings({});
-    render(
-      <SettingsModal
-        tab="qq"
-        onTabChange={() => {}}
-        onDismiss={() => {}}
-        dismissible
-        busy={false}
-        auth={AUTH}
-      />,
-    );
-    const token = container.querySelector<HTMLInputElement>("input[aria-label='机器人 Token']")!;
-    act(() => token.focus());
-    setInput(token, "secret-token");
-    act(() => token.blur());
-    expect(postMessage).toHaveBeenCalledWith({
-      type: "qqSecretsWrite",
-      botToken: "secret-token",
-    });
-
-    const secret = container.querySelector<HTMLInputElement>("input[aria-label='App Secret']")!;
-    // 未编辑过的字段不提交：只 focus 后失焦不会清空已保存的凭据。
-    act(() => secret.focus());
-    act(() => secret.blur());
-    const secretWrites = () =>
-      postMessage.mock.calls.filter(
-        ([message]) => (message as { type?: string }).type === "qqSecretsWrite",
-      );
-    expect(secretWrites()).toHaveLength(1);
-
-    // 先输入再清空并失焦 = 显式删除该凭据（空串语义）。
-    act(() => secret.focus());
-    setInput(secret, "tmp");
-    setInput(secret, "");
-    act(() => secret.blur());
-    expect(postMessage).toHaveBeenLastCalledWith({
-      type: "qqSecretsWrite",
-      appSecret: "",
     });
   });
 

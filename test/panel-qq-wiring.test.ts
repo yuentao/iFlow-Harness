@@ -276,21 +276,26 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(writes).toEqual([]);
   });
 
-  it("解绑清空用户白名单并落盘", async () => {
-    const { io, writes } = makeIo({ settings: { allowedUsers: ["10001"] } });
+  it("解绑清空用户白名单、关闭开关并清除本地授权", async () => {
+    const { io, writes } = makeIo({ settings: { allowedUsers: ["10001"], enabled: true } });
     p.qq = {
       service: { listTasks: () => [], handleTaskAction: async () => undefined, stop: async () => undefined },
       store: {},
       ipc: { port: 0, close: async () => undefined },
+      qqbot: { adapter: { close: async () => undefined } },
       config: makeConfig({ allowedUsers: ["10001"] }),
       io,
       restartCount: 0,
     };
     const owner = p.qq as { config: QqConfig };
 
-    await expect(p.unbindQqAccount()).resolves.toEqual({ ok: true, message: "已解除账号绑定" });
-    expect(writes[writes.length - 1]).toEqual({ allowedUsers: [] });
+    await expect(p.unbindQqAccount()).resolves.toEqual({
+      ok: true,
+      message: "已解除绑定并清除本地授权",
+    });
+    expect(writes[writes.length - 1]).toEqual({ allowedUsers: [], enabled: false });
     expect(owner.config.allowedUsers).toEqual([]);
+    expect(p.qq).toBeUndefined();
   });
 
   it("入站消息收敛：坏帧丢弃、合法帧逐字段兜底", () => {

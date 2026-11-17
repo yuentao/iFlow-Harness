@@ -246,9 +246,8 @@ export function SettingsModal({
 /**
  * 「QQ 机器人」页：把纯展示的 QqSettings 接到宿主通道上。
  *
- * 三条通道严格分离：普通设置 → `qqSettingsPatch`，凭据 → `qqSecretsWrite`
- * （只带用户编辑过的字段），连接/配对/解绑动作 → `qqConfigAction`。凭据
- * 草稿只存在于本组件的编辑态，绝不随设置补丁回传。
+ * 两条通道严格分离：普通设置 → `qqSettingsPatch`，连接/配对/解绑/扫码动作 →
+ * `qqConfigAction`。凭据不再手填（扫码成功后由宿主写入 SecretStorage）。
  */
 function QqSection() {
   const qqSettings = useChat((s) => s.qqSettings);
@@ -257,26 +256,11 @@ function QqSection() {
   const qqLoginQr = useChat((s) => s.qqLoginQr);
   const qqManagedStatus = useChat((s) => s.qqManagedStatus);
   const send = useChat((s) => s.send);
-  /** 仅编辑态：组件把凭据回显在密码框里，落盘由宿主负责。 */
-  const [secretDrafts, setSecretDrafts] = useState<{ botToken?: string; appSecret?: string }>({});
 
   return (
     <QqSettings
-      value={{ ...qqSettings, ...secretDrafts }}
-      onChange={(patch) => {
-        const { botToken, appSecret, ...settings } = patch;
-        if (botToken !== undefined || appSecret !== undefined) {
-          setSecretDrafts((prev) => ({
-            ...prev,
-            ...(botToken !== undefined ? { botToken } : {}),
-            ...(appSecret !== undefined ? { appSecret } : {}),
-          }));
-        }
-        if (Object.keys(settings).length > 0) {
-          send({ type: "qqSettingsPatch", patch: settings });
-        }
-      }}
-      onSecretsCommit={(secrets) => send({ type: "qqSecretsWrite", ...secrets })}
+      value={qqSettings}
+      onChange={(patch) => send({ type: "qqSettingsPatch", patch })}
       onTestConnection={() => send({ type: "qqConfigAction", action: "testConnection" })}
       onGenerateBindCode={() => send({ type: "qqConfigAction", action: "generateBindCode" })}
       onUnbind={() => send({ type: "qqConfigAction", action: "unbind" })}

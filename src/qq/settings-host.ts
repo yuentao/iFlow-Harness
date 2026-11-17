@@ -2,9 +2,9 @@
  * QQ 设置的宿主侧读写层（Wave3-B0.5）。
  *
  * 职责边界：
- *  - `readQqSettings` / `applyQqSettingsPatch` / `writeQqSecrets` /
- *    `ensureBridgeSecrets` 全部只依赖注入的 {@link QqSettingsIo}，不 import
- *    vscode 的任何运行时对象，因此可以在纯内存假 IO 上单测；
+ *  - `readQqSettings` / `applyQqSettingsPatch` / `ensureBridgeSecrets` 全部只
+ *    依赖注入的 {@link QqSettingsIo}，不 import vscode 的任何运行时对象，
+ *    因此可以在纯内存假 IO 上单测；
  *  - `createVscodeQqSettingsIo` 是**唯一**接触 vscode 的函数（薄封装：
  *    `getConfiguration("iflow.qq")` 读写 + 扩展传入的 SecretStorage）。
  *
@@ -14,10 +14,11 @@
  * 侧只做「拒绝脏值 + 数字再 clamp 一次」，不做静默修正 —— 非法枚举与类型
  * 不符一律进 `ignored`，绝不把脏值写进用户的 settings.json。
  *
- * 凭据纪律：明文只经 `writeQqSecrets` 单向写入 SecretStorage；快照里只有
- * `hasBotToken` / `hasAppSecret` 两个布尔投影，`signing-secret` 与
- * `bridge-token`（内部 HMAC / bridge Bearer）由 `ensureBridgeSecrets` 自动
- * 生成，既不进 UI 也不回传。本模块不打印任何日志。
+ * 凭据纪律：凭据只在扫码成功后由宿主单向写入 SecretStorage（appId 用
+ * `qqbot-host.ts` 的键、appSecret 用 `QQ_SECRET_KEYS.appSecret`）；快照里只有
+ * `hasAppSecret` 一个布尔投影。`signing-secret` 与 `bridge-token`（内部 HMAC /
+ * bridge Bearer）由 `ensureBridgeSecrets` 自动生成，既不进 UI 也不回传。本模块
+ * 不打印任何日志。
  */
 
 import { randomBytes } from "node:crypto";
@@ -65,7 +66,7 @@ export interface QqSecretStorageLike {
 // 12 个设置键与允许取值（与 package.json 的 iflow.qq.* 声明逐字一致）
 // ---------------------------------------------------------------------------
 
-/** 可写的 9 个设置键（`hasBotToken` / `hasAppSecret` 是派生字段，不在此列）。 */
+/** 可写的 9 个设置键（`hasAppSecret` 是派生字段，不在此列）。 */
 export const QQ_SETTING_KEYS = [
   "enabled",
   "allowedUsers",
@@ -101,20 +102,17 @@ function hasSecretValue(value: string | undefined): boolean {
 }
 
 /**
- * 读取 QQ 设置快照（9 项 + 两个凭据布尔）。
+ * 读取 QQ 设置快照（9 项 + App Secret 布尔）。
  *
- * 只探测 `bot-token` / `app-secret` 是否存在；`signing-secret` 与
+ * 只探测扫码写入的 `app-secret` 是否存在；`signing-secret` 与
  * `bridge-token` 是宿主内部自举的密钥，不对外暴露。返回结构里没有明文，
- * 即便 SecretStorage 里存了值也只投影成布尔。
+ * 即便 SecretStorage 里存了值也只投影成布尔。机器人 Token 已不再手填，
+ * 历史 `iflow.qq.bot-token` 是死键，不再探测。
  */
 export async function readQqSettings(io: QqSettingsIo): Promise<QqSettingsUi> {
   const raw = io.readAll();
-  const [botToken, appSecret] = await Promise.all([
-    io.getSecret(QQ_SECRET_KEYS.botToken),
-    io.getSecret(QQ_SECRET_KEYS.appSecret),
-  ]);
+  const appSecret = await io.getSecret(QQ_SECRET_KEYS.appSecret);
   return pickQqSettingsUi(raw, {
-    hasBotToken: hasSecretValue(botToken),
     hasAppSecret: hasSecretValue(appSecret),
   });
 }
@@ -187,8 +185,8 @@ export interface QqSettingsPatchResult {
  * 应用一个设置补丁。
  *
  * 规则：
- *  - 只允许 9 个白名单键；`hasBotToken` / `hasAppSecret` 是派生字段，任何
- *    其它键（含 `botToken` 这类明文凭据）一律进 `ignored`，不写；
+ *  - 只允许 9 个白名单键；`hasAppSecret` 是派生字段，任何其它键（含
+ *    `appSecret` 这类明文凭据）一律进 `ignored`，不写；
  *  - `undefined` 表示「本次不改」，既不写也不记入 ignored；
  *  - 字符串 / 布尔按原值写；数组必须是全字符串数组才写（浅拷贝原值）；
  *    数字先取整再 clamp 到允许范围；非法枚举整键拒绝；
@@ -222,51 +220,6 @@ export async function applyQqSettingsPatch(
     await io.writeAll(next);
   }
   return { applied, ignored };
-}
-
-// ---------------------------------------------------------------------------
-// 写凭据
-// ---------------------------------------------------------------------------
-
-export interface QqSecretsWriteInput {
-  /** 新机器人 Token；空串表示删除该凭据，`undefined` 表示本次不动。 */
-  botToken?: string;
-  /** 新 App Secret；空串表示删除该凭据，`undefined` 表示本次不动。 */
-  appSecret?: string;
-}
-
-/**
- * 写入 / 删除 QQ 凭据，返回**实际处理过的键名**（不返回值、不打印日志）。
- *
- * 只处理输入里出现（且为字符串）的字段：空串删除，非空写入。键名用
- * `QQ_SECRET_KEYS` 的短名（`botToken` / `appSecret`），与消息协议
- * `qqSecretsWrite` 的字段名一致，便于宿主回执。
- */
-export async function writeQqSecrets(
-  io: QqSettingsIo,
-  input: QqSecretsWriteInput,
-): Promise<string[]> {
-  const changed: string[] = [];
-
-  if (typeof input.botToken === "string") {
-    if (input.botToken.length === 0) {
-      await io.deleteSecret(QQ_SECRET_KEYS.botToken);
-    } else {
-      await io.setSecret(QQ_SECRET_KEYS.botToken, input.botToken);
-    }
-    changed.push("botToken");
-  }
-
-  if (typeof input.appSecret === "string") {
-    if (input.appSecret.length === 0) {
-      await io.deleteSecret(QQ_SECRET_KEYS.appSecret);
-    } else {
-      await io.setSecret(QQ_SECRET_KEYS.appSecret, input.appSecret);
-    }
-    changed.push("appSecret");
-  }
-
-  return changed;
 }
 
 // ---------------------------------------------------------------------------

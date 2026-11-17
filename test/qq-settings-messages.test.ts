@@ -6,7 +6,7 @@ import {
   type WebviewToHost,
 } from "../shared/messages.js";
 
-const SECRETS_OFF = { hasBotToken: false, hasAppSecret: false };
+const SECRETS_OFF = { hasAppSecret: false };
 
 /** 完整默认值（与 src/qq/config.ts 的 DEFAULTS 保持一致）。 */
 const DEFAULTS: QqSettingsUi = {
@@ -19,7 +19,6 @@ const DEFAULTS: QqSettingsUi = {
   rateLimitPerMin: 6,
   resultDetail: "standard",
   autoMerge: false,
-  hasBotToken: false,
   hasAppSecret: false,
 };
 
@@ -105,14 +104,13 @@ describe("pickQqSettingsUi", () => {
     expect(ui.allowedGroups).toEqual([]);
   });
 
-  it("has* 只透传布尔投影，返回值不含任何 secret 明文键", () => {
+  it("hasAppSecret 只透传布尔投影，返回值不含任何 secret 明文键", () => {
     const ui = pickQqSettingsUi(
       // 即便输入里混进明文凭据，也不能进入返回值。
       { botToken: "secret-token", appSecret: "secret-app", enabled: true },
-      { hasBotToken: true, hasAppSecret: false },
+      { hasAppSecret: true },
     );
-    expect(ui.hasBotToken).toBe(true);
-    expect(ui.hasAppSecret).toBe(false);
+    expect(ui.hasAppSecret).toBe(true);
     expect(ui.enabled).toBe(true);
 
     const keys = Object.keys(ui);
@@ -125,7 +123,6 @@ describe("pickQqSettingsUi", () => {
         "autoMerge",
         "enabled",
         "hasAppSecret",
-        "hasBotToken",
         "maxConcurrentTasks",
         "rateLimitPerMin",
         "remotePolicy",
@@ -142,7 +139,7 @@ describe("QQ 设置消息契约", () => {
   it("HostToWebview 含 qqSettings / qqStatus，且保留 qqBindCode", () => {
     const settings: HostToWebview = {
       type: "qqSettings",
-      values: pickQqSettingsUi({}, { hasBotToken: true, hasAppSecret: true }),
+      values: pickQqSettingsUi({}, { hasAppSecret: true }),
     };
     const status: HostToWebview = { type: "qqStatus", connected: false, detail: "连接被拒绝" };
     const bindCode: HostToWebview = { type: "qqBindCode", code: "K7Q2", expiresAt: 1 };
@@ -155,26 +152,26 @@ describe("QQ 设置消息契约", () => {
     expect(hostHasNoConfigAction).toBe(true);
 
     expect(settings.type).toBe("qqSettings");
-    expect(settings.values.hasBotToken).toBe(true);
+    expect(settings.values.hasAppSecret).toBe(true);
     expect(status.type).toBe("qqStatus");
     expect(bindCode.code).toBe("K7Q2");
   });
 
-  it("WebviewToHost 含 qqSettingsPatch / qqSecretsWrite / qqConfigAction，且保留 qqTaskAction", () => {
+  it("WebviewToHost 含 qqSettingsPatch / qqConfigAction，且保留 qqTaskAction", () => {
     const patch: WebviewToHost = {
       type: "qqSettingsPatch",
       patch: { enabled: true, maxConcurrentTasks: 4 },
     };
-    /** 空串表示清空该凭据；只在用户真的输入新值时带字段。 */
-    const write: WebviewToHost = { type: "qqSecretsWrite", botToken: "" };
-    const clearBoth: WebviewToHost = { type: "qqSecretsWrite" };
     const taskAction: WebviewToHost = { type: "qqTaskAction", taskId: "T-1", action: "refresh" };
     const configAction: WebviewToHost = { type: "qqConfigAction", action: "testConnection" };
 
+    // 手填凭据通道已移除：消息联合里不得再出现 qqSecretsWrite。
+    type SecretsWrite = Extract<WebviewToHost, { type: "qqSecretsWrite" }>;
+    const noSecretsWrite: [SecretsWrite] extends [never] ? true : false = true;
+    expect(noSecretsWrite).toBe(true);
+
     expect(patch.type).toBe("qqSettingsPatch");
     expect(patch.patch.enabled).toBe(true);
-    expect(write.botToken).toBe("");
-    expect(clearBoth.appSecret).toBeUndefined();
     expect(taskAction.action).toBe("refresh");
     expect(configAction.action).toBe("testConnection");
   });

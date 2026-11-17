@@ -5,7 +5,6 @@ import {
   createVscodeQqSettingsIo,
   ensureBridgeSecrets,
   readQqSettings,
-  writeQqSecrets,
   type QqSettingsIo,
 } from "../src/qq/settings-host.js";
 import { QQ_SECRET_KEYS } from "../src/qq/config.js";
@@ -22,7 +21,6 @@ const DEFAULTS: QqSettingsUi = {
   rateLimitPerMin: 6,
   resultDetail: "standard",
   autoMerge: false,
-  hasBotToken: false,
   hasAppSecret: false,
 };
 
@@ -80,24 +78,20 @@ describe("readQqSettings", () => {
     await expect(readQqSettings(io)).resolves.toEqual(DEFAULTS);
   });
 
-  it("只读 bot-token / app-secret 两个凭据，并投影成 has* 布尔", async () => {
-    const io = new MemoryIo({}, { [QQ_SECRET_KEYS.botToken]: "tok-123" });
+  it("只读 app-secret 并投影成 hasAppSecret 布尔", async () => {
+    const io = new MemoryIo({}, { [QQ_SECRET_KEYS.appSecret]: "sec-123" });
     const ui = await readQqSettings(io);
 
-    expect(ui.hasBotToken).toBe(true);
-    expect(ui.hasAppSecret).toBe(false);
-    // 只探测 UI 需要感知的两个凭据；内部自举密钥不读。
-    expect(io.secretReads.sort()).toEqual(
-      [QQ_SECRET_KEYS.appSecret, QQ_SECRET_KEYS.botToken].sort(),
-    );
+    expect(ui.hasAppSecret).toBe(true);
+    // 只探测 UI 需要感知的扫码凭据；内部自举密钥不读。
+    expect(io.secretReads).toEqual([QQ_SECRET_KEYS.appSecret]);
     expect(io.secretReads).not.toContain(QQ_SECRET_KEYS.bridgeToken);
     expect(io.secretReads).not.toContain(QQ_SECRET_KEYS.signingSecret);
   });
 
   it("纯空白或缺失的 secret 视为未配置", async () => {
-    const io = new MemoryIo({}, { [QQ_SECRET_KEYS.botToken]: "   " });
+    const io = new MemoryIo({}, { [QQ_SECRET_KEYS.appSecret]: "   " });
     const ui = await readQqSettings(io);
-    expect(ui.hasBotToken).toBe(false);
     expect(ui.hasAppSecret).toBe(false);
   });
 
@@ -129,15 +123,12 @@ describe("readQqSettings", () => {
     const io = new MemoryIo(
       {},
       {
-        [QQ_SECRET_KEYS.botToken]: "plain-bot-token",
         [QQ_SECRET_KEYS.appSecret]: "plain-app-secret",
       },
     );
     const ui = await readQqSettings(io);
     const serialized = JSON.stringify(ui);
-    expect(serialized).not.toContain("plain-bot-token");
     expect(serialized).not.toContain("plain-app-secret");
-    expect(Object.keys(ui)).not.toContain("botToken");
     expect(Object.keys(ui)).not.toContain("appSecret");
   });
 });
@@ -161,15 +152,14 @@ describe("applyQqSettingsPatch", () => {
     expect(io.settings).not.toHaveProperty("adapter");
   });
 
-  it("hasBotToken / hasAppSecret 是派生字段，必须进 ignored", async () => {
+  it("hasAppSecret 是派生字段，必须进 ignored", async () => {
     const io = new MemoryIo();
     const result = await applyQqSettingsPatch(io, {
-      hasBotToken: true,
       hasAppSecret: false,
     });
 
     expect(result.applied).toEqual([]);
-    expect(result.ignored).toEqual(["hasBotToken", "hasAppSecret"]);
+    expect(result.ignored).toEqual(["hasAppSecret"]);
     // 没有可写键时不触发写入。
     expect(io.writes).toEqual([]);
   });
@@ -267,66 +257,10 @@ describe("applyQqSettingsPatch", () => {
 
   it("9 个设置键均已覆盖，且不含派生字段与已移除的遗留键", () => {
     expect(QQ_SETTING_KEYS).toHaveLength(9);
-    expect(QQ_SETTING_KEYS).not.toContain("hasBotToken");
     expect(QQ_SETTING_KEYS).not.toContain("hasAppSecret");
     expect(QQ_SETTING_KEYS).not.toContain("adapter");
     expect(QQ_SETTING_KEYS).not.toContain("endpoint");
     expect(QQ_SETTING_KEYS).not.toContain("bridgePort");
-  });
-});
-
-describe("writeQqSecrets", () => {
-  it("写入两个凭据并返回键名（不返回值）", async () => {
-    const io = new MemoryIo();
-    const changed = await writeQqSecrets(io, {
-      botToken: "bot-value",
-      appSecret: "app-value",
-    });
-
-    expect(changed).toEqual(["botToken", "appSecret"]);
-    expect(io.secrets.get(QQ_SECRET_KEYS.botToken)).toBe("bot-value");
-    expect(io.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("app-value");
-    expect(changed.join(",")).not.toContain("bot-value");
-    expect(changed.join(",")).not.toContain("app-value");
-  });
-
-  it("空串表示删除对应 secret", async () => {
-    const io = new MemoryIo(
-      {},
-      {
-        [QQ_SECRET_KEYS.botToken]: "old-bot",
-        [QQ_SECRET_KEYS.appSecret]: "old-app",
-      },
-    );
-
-    const changed = await writeQqSecrets(io, { botToken: "", appSecret: "" });
-
-    expect(changed).toEqual(["botToken", "appSecret"]);
-    expect(io.secretDeletes.sort()).toEqual(
-      [QQ_SECRET_KEYS.appSecret, QQ_SECRET_KEYS.botToken].sort(),
-    );
-    expect(io.secrets.has(QQ_SECRET_KEYS.botToken)).toBe(false);
-    expect(io.secrets.has(QQ_SECRET_KEYS.appSecret)).toBe(false);
-  });
-
-  it("只处理输入里出现的字段（undefined 不动）", async () => {
-    const io = new MemoryIo({}, { [QQ_SECRET_KEYS.appSecret]: "keep-me" });
-
-    const changed = await writeQqSecrets(io, { botToken: "new-bot" });
-
-    expect(changed).toEqual(["botToken"]);
-    expect(io.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("keep-me");
-    expect(io.secretDeletes).toEqual([]);
-  });
-
-  it("非法类型字段被忽略（运行时脏输入不写）", async () => {
-    const io = new MemoryIo();
-    const changed = await writeQqSecrets(io, {
-      botToken: 42,
-    } as unknown as { botToken?: string });
-
-    expect(changed).toEqual([]);
-    expect(io.secretWrites).toEqual([]);
   });
 });
 

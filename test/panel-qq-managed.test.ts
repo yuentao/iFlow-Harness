@@ -57,13 +57,20 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
   ];
 }
 
-function makeIo(): { io: QqSettingsIo; secrets: Map<string, string> } {
-  const settings: Record<string, unknown> = { enabled: true, allowedUsers: ["10001"] };
+function makeIo(): {
+  io: QqSettingsIo;
+  secrets: Map<string, string>;
+  settings: Record<string, unknown>;
+  writes: Array<Record<string, unknown>>;
+} {
+  const settings: Record<string, unknown> = { enabled: false, allowedUsers: ["10001"] };
   const secrets = new Map<string, string>();
+  const writes: Array<Record<string, unknown>> = [];
   return {
     io: {
       readAll: () => ({ ...settings }),
       writeAll: async (patch) => {
+        writes.push({ ...patch });
         Object.assign(settings, patch);
       },
       getSecret: async (key) => secrets.get(key),
@@ -75,6 +82,8 @@ function makeIo(): { io: QqSettingsIo; secrets: Map<string, string> } {
       },
     },
     secrets,
+    settings,
+    writes,
   };
 }
 
@@ -162,14 +171,19 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     expect(protocolCbs).not.toBeNull();
   });
 
-  it("扫码成功：写官方凭据（appId/appSecret）并启动 adapter", async () => {
+  it("扫码成功：写官方凭据（appId/appSecret）、自动启用并启动 adapter", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onSuccess({ appId: "app-1", appSecret: "sec-1" });
     await tick();
     expect(ioHarness.secrets.get(QQBOT_APP_ID_SECRET_KEY)).toBe("app-1");
     expect(ioHarness.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("sec-1");
+    // 首次绑定（原本未启用）必须自动开启远程任务。
+    expect(ioHarness.writes).toContainEqual({ enabled: true });
+    expect(ioHarness.settings.enabled).toBe(true);
+    expect(p.qq?.config?.enabled).toBe(true);
     expect(adapter.setEventCallback).toHaveBeenCalled();
-    expect(adapter.connect).toHaveBeenCalled();
+    // 先启动再落盘：配置监听不会在 this.qq 未赋值时再并发启动一次。
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
     expect(p.qq?.qqbot?.adapter).toBeTruthy();
     expect(protocolStop).toHaveBeenCalled();
   });
