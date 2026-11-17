@@ -109,10 +109,11 @@ afterEach(() => {
 
 describe("QQ 机器人设置页", () => {
   it("renders the qqSettings snapshot in the settings modal", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     settings(
       {
         enabled: true,
-        allowedUsers: ["10001"],
+        allowedUsers: [openid],
         maxConcurrentTasks: 4,
       },
       { hasAppSecret: true },
@@ -136,9 +137,9 @@ describe("QQ 机器人设置页", () => {
     expect(
       container.querySelector<HTMLInputElement>("input[aria-label='同时运行的任务数']")!.value,
     ).toBe("4");
-    expect(container.querySelector<HTMLInputElement>("input[aria-label='允许的用户 1']")!.value).toBe(
-      "10001",
-    );
+    expect(container.textContent).toContain("D754********8D11");
+    expect(container.textContent).not.toContain(openid);
+    expect(container.querySelector("input[aria-label='允许的用户 1']")).toBeNull();
     // 凭据只由扫码写入：设置页不再有手填输入框。
     expect(container.querySelector("input[aria-label='机器人 Token']")).toBeNull();
     expect(container.querySelector("input[aria-label='App Secret']")).toBeNull();

@@ -249,7 +249,26 @@
         "iflow.qq.allowedUsers": {
           "type": "array",
           "items": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "openid": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "openid"
+                ],
+                "additionalProperties": false
+              }
+            ]
           },
           "default": [],
           "description": "%iflow.configuration.qq.allowedUsers.description%"
@@ -257,7 +276,26 @@
         "iflow.qq.allowedGroups": {
           "type": "array",
           "items": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "openid": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "openid"
+                ],
+                "additionalProperties": false
+              }
+            ]
           },
           "default": [],
           "description": "%iflow.configuration.qq.allowedGroups.description%"

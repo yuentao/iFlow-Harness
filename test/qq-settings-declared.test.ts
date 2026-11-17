@@ -28,7 +28,7 @@ interface SettingSchema {
   maximum?: number;
   enum?: string[];
   enumDescriptions?: string[];
-  items?: { type?: string };
+  items?: { type?: string | string[]; anyOf?: Array<{ type?: string }> };
   description?: string;
   markdownDescription?: string;
 }
@@ -40,14 +40,24 @@ interface Spec {
   minimum?: number;
   maximum?: number;
   enum?: string[];
-  /** array 设置的元素类型。 */
-  itemsType?: string;
+  /** array 设置允许的元素类型（联合格式时多于一项）。 */
+  itemTypes?: string[];
 }
 
 const SPECS: Spec[] = [
   { key: "iflow.qq.enabled", type: "boolean", default: false },
-  { key: "iflow.qq.allowedUsers", type: "array", default: [], itemsType: "string" },
-  { key: "iflow.qq.allowedGroups", type: "array", default: [], itemsType: "string" },
+  {
+    key: "iflow.qq.allowedUsers",
+    type: "array",
+    default: [],
+    itemTypes: ["string", "object"],
+  },
+  {
+    key: "iflow.qq.allowedGroups",
+    type: "array",
+    default: [],
+    itemTypes: ["string", "object"],
+  },
   { key: "iflow.qq.workspace", type: "string", default: "" },
   {
     key: "iflow.qq.remotePolicy",
@@ -87,7 +97,13 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
     if (spec.minimum !== undefined) expect(schema.minimum).toBe(spec.minimum);
     if (spec.maximum !== undefined) expect(schema.maximum).toBe(spec.maximum);
     if (spec.enum) expect(schema.enum).toEqual(spec.enum);
-    if (spec.itemsType) expect(schema.items?.type).toBe(spec.itemsType);
+    if (spec.itemTypes) {
+      const items = schema.items;
+      const declared = Array.isArray(items?.type)
+        ? items!.type
+        : (items?.anyOf ?? []).map((branch) => branch.type);
+      expect(declared).toEqual(spec.itemTypes);
+    }
   });
 
   it.each(SPECS)("$key 的 description 用 %key% 占位", (spec) => {

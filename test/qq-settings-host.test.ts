@@ -111,12 +111,25 @@ describe("readQqSettings", () => {
     const ui = await readQqSettings(io);
 
     expect(ui.enabled).toBe(false);
-    expect(ui.allowedUsers).toEqual(["10001"]);
+    expect(ui.allowedUsers).toEqual([{ openid: "10001" }]);
     expect(ui.remotePolicy).toBe("supervised");
     expect(ui.maxConcurrentTasks).toBe(1);
     expect(ui.rateLimitPerMin).toBe(5);
     expect(ui.resultDetail).toBe("standard");
     expect(ui.autoMerge).toBe(false);
+  });
+
+  it("白名单兼容旧 string[] 与新的 { openid, note } 条目", async () => {
+    const io = new MemoryIo({
+      allowedUsers: ["legacy-openid", { openid: "user-2", note: "同事" }],
+      allowedGroups: [{ openid: "group-9" }],
+    });
+    const ui = await readQqSettings(io);
+    expect(ui.allowedUsers).toEqual([
+      { openid: "legacy-openid" },
+      { openid: "user-2", note: "同事" },
+    ]);
+    expect(ui.allowedGroups).toEqual([{ openid: "group-9" }]);
   });
 
   it("返回值不含凭据明文", async () => {
@@ -253,6 +266,55 @@ describe("applyQqSettingsPatch", () => {
     expect(rejected.applied).toEqual([]);
     expect(rejected.ignored).toEqual(["allowedGroups"]);
     expect(bad.writes).toEqual([]);
+  });
+
+  it("备注条目写成 { openid, note }，没备注的条目仍是裸字符串", async () => {
+    const io = new MemoryIo();
+    const result = await applyQqSettingsPatch(io, {
+      allowedUsers: [
+        { openid: "user-with-note", note: " 同事 " },
+        { openid: "user-plain" },
+        "legacy-id",
+      ],
+    });
+
+    expect(result.applied).toEqual(["allowedUsers"]);
+    // 写入值里绝不含脱敏星号：脱敏只是 UI 展示层的事。
+    expect(JSON.stringify(io.settings.allowedUsers)).not.toContain("*");
+    expect(io.settings.allowedUsers).toEqual([
+      { openid: "user-with-note", note: "同事" },
+      "user-plain",
+      "legacy-id",
+    ]);
+  });
+
+  it("清空备注写回裸字符串（旧的 string[] 形状）", async () => {
+    const io = new MemoryIo({
+      allowedUsers: [{ openid: "user-1", note: "同事" }],
+    });
+    await applyQqSettingsPatch(io, { allowedUsers: [{ openid: "user-1" }] });
+    expect(io.settings.allowedUsers).toEqual(["user-1"]);
+  });
+
+  it("只追加 openid 的补丁（宿主内部路径）保留磁盘上已有备注", async () => {
+    const io = new MemoryIo({
+      allowedUsers: [{ openid: "user-1", note: "同事" }, "user-2"],
+    });
+    await applyQqSettingsPatch(io, {
+      allowedUsers: ["user-1", "user-2", "user-3"],
+    });
+    expect(io.settings.allowedUsers).toEqual([
+      { openid: "user-1", note: "同事" },
+      "user-2",
+      "user-3",
+    ]);
+    // 读回时备注仍在，新追加的条目没有备注。
+    const ui = await readQqSettings(io);
+    expect(ui.allowedUsers).toEqual([
+      { openid: "user-1", note: "同事" },
+      { openid: "user-2" },
+      { openid: "user-3" },
+    ]);
   });
 
   it("9 个设置键均已覆盖，且不含派生字段与已移除的遗留键", () => {

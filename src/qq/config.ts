@@ -23,6 +23,10 @@
  */
 
 import { isAbsolute, relative, resolve } from "node:path";
+import {
+  normalizeQqAllowEntries,
+  normalizeQqAllowEntry,
+} from "../../shared/qq-access.js";
 import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
@@ -250,21 +254,17 @@ function readIdList(
     warnings.push(`iflow.qq.${key} 期望字符串数组，已回退为空列表`);
     return [];
   }
-  const seen = new Set<string>();
-  const ids: string[] = [];
+  // 存储格式是联合：裸 openid（历史）或 { openid, note }（带备注）。
+  // 运行期匹配只认完整 openid，备注不进 QqConfig。
+  const ids = normalizeQqAllowEntries(value).map((entry) => entry.openid);
   let skipped = 0;
   for (const item of value) {
-    if (typeof item !== "string") {
-      skipped += 1;
-      continue;
-    }
-    const id = item.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
+    if (typeof item === "string") continue;
+    if (normalizeQqAllowEntry(item)) continue;
+    skipped += 1;
   }
   if (skipped > 0) {
-    warnings.push(`iflow.qq.${key} 有 ${skipped} 个非字符串项被忽略`);
+    warnings.push(`iflow.qq.${key} 有 ${skipped} 个无效条目被忽略`);
   }
   return ids;
 }

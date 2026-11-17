@@ -92,7 +92,7 @@ describe("pickQqSettingsUi", () => {
     expect(ui.autoMerge).toBe(false);
   });
 
-  it("白名单去空白、去空项、去重（保持首次出现顺序），非字符串项跳过", () => {
+  it("白名单去空白、去空项、去重（保持首次出现顺序），非法项跳过", () => {
     const ui = pickQqSettingsUi(
       {
         allowedUsers: [" 123 ", "123", "", "456", 789, null],
@@ -100,8 +100,27 @@ describe("pickQqSettingsUi", () => {
       },
       SECRETS_OFF,
     );
-    expect(ui.allowedUsers).toEqual(["123", "456"]);
+    expect(ui.allowedUsers).toEqual([{ openid: "123" }, { openid: "456" }]);
     expect(ui.allowedGroups).toEqual([]);
+  });
+
+  it("白名单兼容旧的裸字符串与新的 { openid, note } 条目", () => {
+    const ui = pickQqSettingsUi(
+      {
+        allowedUsers: [
+          "legacy-openid",
+          { openid: " user-2 ", note: " 同事 " },
+          { openid: "user-3", note: "   " },
+          { openid: "", note: "空 openid" },
+        ],
+      },
+      SECRETS_OFF,
+    );
+    expect(ui.allowedUsers).toEqual([
+      { openid: "legacy-openid" },
+      { openid: "user-2", note: "同事" },
+      { openid: "user-3" },
+    ]);
   });
 
   it("hasAppSecret 只透传布尔投影，返回值不含任何 secret 明文键", () => {

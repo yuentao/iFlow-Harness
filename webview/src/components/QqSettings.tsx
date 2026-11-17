@@ -1,11 +1,24 @@
-import type { ReactNode } from "react";
-import { AlertTriangle, PlugZap, Plus, RefreshCw, Square, Trash2, Unlink, Zap } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  Check,
+  PlugZap,
+  Plus,
+  RefreshCw,
+  Square,
+  Trash2,
+  Unlink,
+  X,
+  Zap,
+} from "lucide-react";
 import {
   isQrDataUrl,
   type HostToWebview,
   type QqPendingUserUi,
+  type QqSettingsPatch,
   type QqSettingsUi,
 } from "../../../shared/messages";
+import { maskQqOpenId, type QqAllowEntry } from "../../../shared/qq-access";
 import { t } from "../i18n";
 import {
   ActionRow,
@@ -55,7 +68,7 @@ export type QqSettingsValue = QqSettingsUi;
 
 export interface QqSettingsProps {
   value: QqSettingsValue;
-  onChange: (patch: Partial<QqSettingsValue>) => void;
+  onChange: (patch: QqSettingsPatch) => void;
   onTestConnection: () => void;
   onUnbind: () => void;
   /** 最近一次连接检查的结果（宿主回执）。 */
@@ -104,37 +117,71 @@ function Row({
 }
 
 /**
- * Editable id list (allowed users / allowed groups). Each row carries its own
- * explicit accessible name (entity + 1-based index) — a bare placeholder is
- * not a name, and these rows have no visible per-row label.
+ * Read-only allow-entry list (allowed users / allowed groups).
+ *
+ * openid 只以脱敏形式展示（{@link maskQqOpenId}，前 4 + 8 个 `*` + 后 4），
+ * 页面里没有任何能改 openid 的输入框 —— 要换只能删除后重新添加（添加时必须
+ * 输入完整 openid，脱敏后无法反推）。每行带一个备注字段（草稿 + blur/Enter
+ * 提交）；行内控件的可访问名带实体名与序号，可见文案不足以区分多行。
  */
-function IdList({
+function AccessList({
   label,
-  placeholder,
+  noun,
   addLabel,
   entries,
   onChange,
 }: {
   label: string;
-  placeholder: string;
+  /** 实体名（用户 / 群），用于「输入…的 openid」这类可访问名。 */
+  noun: string;
   addLabel: string;
-  entries: string[];
-  onChange: (next: string[]) => void;
+  entries: QqAllowEntry[];
+  onChange: (next: QqAllowEntry[]) => void;
 }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const cancelAdd = () => {
+    setAdding(false);
+    setDraft("");
+  };
+  const commitAdd = () => {
+    const openid = draft.trim();
+    cancelAdd();
+    if (openid.length === 0) return;
+    // 同一条 openid 已在名单里就不重复追加（读取侧同样按 openid 去重）。
+    if (entries.some((entry) => entry.openid === openid)) return;
+    onChange([...entries, { openid }]);
+  };
+
   return (
     <div className="flex flex-col gap-2 px-4 py-4">
       <FieldLabel>{label}</FieldLabel>
       {entries.length === 0 && <Hint>{t("尚未添加条目")}</Hint>}
+      {entries.length > 0 && (
+        <Hint>{t("openid 已脱敏显示，无法在此修改；如需更换请删除后重新添加。")}</Hint>
+      )}
       {entries.map((entry, index) => (
-        <div key={index} className="flex items-center gap-1.5">
-          <TextInput
-            mono
+        <div key={entry.openid} className="flex flex-wrap items-center gap-1.5">
+          {/* 只读文本，不是输入框：完整 openid 不在这里暴露，也不能被改写。 */}
+          <span className="min-w-0 truncate font-mono text-ui-body text-foreground">
+            {maskQqOpenId(entry.openid)}
+          </span>
+          <CommitTextInput
             className="min-w-0 flex-1"
-            value={entry}
-            placeholder={placeholder}
-            aria-label={t("{0} {1}", label, index + 1)}
-            onChange={(event) =>
-              onChange(entries.map((current, at) => (at === index ? event.target.value : current)))
+            value={entry.note ?? ""}
+            label={t("{0} {1} 的备注", label, index + 1)}
+            placeholder={t("备注")}
+            onCommit={(note) =>
+              onChange(
+                entries.map((current, at) => {
+                  if (at !== index) return current;
+                  const trimmed = note.trim();
+                  return trimmed.length > 0
+                    ? { openid: current.openid, note: trimmed }
+                    : { openid: current.openid };
+                }),
+              )
             }
           />
           <IconButton
@@ -146,11 +193,53 @@ function IdList({
           />
         </div>
       ))}
-      <ActionRow>
-        <Button size="sm" icon={<Plus className={ICON_INLINE} />} onClick={() => onChange([...entries, ""])}>
-          {addLabel}
-        </Button>
-      </ActionRow>
+      {adding ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <TextInput
+            autoFocus
+            mono
+            className="min-w-0 flex-1"
+            value={draft}
+            placeholder={t("完整 openid")}
+            aria-label={t("输入{0}的 openid", noun)}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                cancelAdd();
+                return;
+              }
+              if (event.key !== "Enter") return;
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              event.preventDefault();
+              commitAdd();
+            }}
+          />
+          <IconButton
+            size="sm"
+            tone="primary"
+            icon={<Check className={ICON_INLINE} />}
+            label={t("确认添加")}
+            onClick={commitAdd}
+          />
+          <IconButton
+            size="sm"
+            icon={<X className={ICON_INLINE} />}
+            label={t("取消添加")}
+            onClick={cancelAdd}
+          />
+        </div>
+      ) : (
+        <ActionRow>
+          <Button
+            size="sm"
+            icon={<Plus className={ICON_INLINE} />}
+            onClick={() => setAdding(true)}
+          >
+            {addLabel}
+          </Button>
+        </ActionRow>
+      )}
     </div>
   );
 }
@@ -503,16 +592,16 @@ export function QqSettings({
       </SettingsGroup>
 
       <SettingsGroup title={t("访问控制")} hint={t("留空表示不接受该来源的任务")}>
-        <IdList
+        <AccessList
           label={t("允许的用户")}
-          placeholder={t("QQ 号")}
+          noun={t("用户")}
           addLabel={t("添加用户")}
           entries={value.allowedUsers}
           onChange={(allowedUsers) => onChange({ allowedUsers })}
         />
-        <IdList
+        <AccessList
           label={t("允许的群")}
-          placeholder={t("群号")}
+          noun={t("群")}
           addLabel={t("添加群")}
           entries={value.allowedGroups}
           onChange={(allowedGroups) => onChange({ allowedGroups })}

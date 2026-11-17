@@ -14,6 +14,12 @@
  * 侧只做「拒绝脏值 + 数字再 clamp 一次」，不做静默修正 —— 非法枚举与类型
  * 不符一律进 `ignored`，绝不把脏值写进用户的 settings.json。
  *
+ * 白名单存储是联合格式（裸 openid 字符串 或 `{ openid, note }`）。写入侧把
+ * 两种输入都归一后落盘：对象条目按 `note` 原样写（空串=清空备注），裸字符串
+ * 条目视为「只关心 id」，磁盘上同名 openid 已有的备注会被保留 —— 扫码绑定 /
+ * 放行待审核这类只追加 id 的路径因此不会抹掉用户填的备注。脱敏串（含 `*`）
+ * 绝不进入配置，它只在 webview 渲染时生成。
+ *
  * 凭据纪律：凭据只在扫码成功后由宿主单向写入 SecretStorage（appId 用
  * `qqbot-host.ts` 的键、appSecret 用 `QQ_SECRET_KEYS.appSecret`）；快照里只有
  * `hasAppSecret` 一个布尔投影。`signing-secret` 与 `bridge-token`（内部 HMAC /
@@ -23,7 +29,16 @@
 
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
-import { pickQqSettingsUi, type QqSettingsUi } from "../../shared/messages.js";
+import {
+  pickQqSettingsUi,
+  type QqSettingsPatch,
+  type QqSettingsUi,
+} from "../../shared/messages.js";
+import {
+  normalizeQqAllowEntries,
+  normalizeQqAllowEntry,
+  type QqAllowEntryStored,
+} from "../../shared/qq-access.js";
 import { QQ_SECRET_KEYS } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -141,19 +156,41 @@ function coerceInteger(
 }
 
 /**
- * 白名单数组：必须是「全字符串」的数组，否则整键拒绝（不写半截脏值）。
- * 通过后按原值浅拷贝写入 —— 去空白/去重留给读取侧的 `pickQqSettingsUi`。
+ * 白名单数组：接受裸 openid（旧格式 / 宿主内部只追加 id）与 `{ openid, note }`
+ * 条目，结构非法则整键拒绝（不写半截脏值）。
+ *
+ * 备注合并纪律：**裸字符串条目**表示「只关心 id」，磁盘上同名 openid 已有备注
+ * 时原样保留 —— 否则扫码绑定 / 放行待审核这类只追加 id 的写路径会把用户填的
+ * 备注一次性抹掉。对象条目里 `note` 是权威值（空串 = 清空备注）。
  */
-function coerceIdList(value: unknown): CoercedValue {
+function coerceAllowList(value: unknown, existing: unknown): CoercedValue {
   if (!Array.isArray(value)) return { ok: false };
-  for (const item of value) {
-    if (typeof item !== "string") return { ok: false };
+
+  const preserved = new Map<string, string>();
+  for (const entry of normalizeQqAllowEntries(existing)) {
+    if (entry.note) preserved.set(entry.openid, entry.note);
   }
-  return { ok: true, value: [...(value as string[])] };
+
+  const out: QqAllowEntryStored[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      const note = preserved.get(item.trim()) ?? "";
+      out.push(note.length > 0 ? { openid: item.trim(), note } : item);
+      continue;
+    }
+    const entry = normalizeQqAllowEntry(item);
+    if (!entry) return { ok: false };
+    out.push(entry.note ? { openid: entry.openid, note: entry.note } : entry.openid);
+  }
+  return { ok: true, value: out };
 }
 
 /** 单键校验：类型不符 / 非法枚举 → `{ ok: false }`（调用方记入 ignored）。 */
-function coerceSettingValue(key: QqSettingKey, value: unknown): CoercedValue {
+function coerceSettingValue(
+  key: QqSettingKey,
+  value: unknown,
+  existing: Record<string, unknown>,
+): CoercedValue {
   switch (key) {
     case "enabled":
     case "autoMerge":
@@ -170,7 +207,7 @@ function coerceSettingValue(key: QqSettingKey, value: unknown): CoercedValue {
       return coerceInteger(value, RANGES.rateLimitPerMin);
     case "allowedUsers":
     case "allowedGroups":
-      return coerceIdList(value);
+      return coerceAllowList(value, existing[key]);
   }
 }
 
@@ -194,20 +231,25 @@ export interface QqSettingsPatchResult {
  */
 export async function applyQqSettingsPatch(
   io: QqSettingsIo,
-  patch: Partial<QqSettingsUi>,
+  patch: QqSettingsPatch,
 ): Promise<QqSettingsPatchResult> {
   const applied: string[] = [];
   const ignored: string[] = [];
   const next: Record<string, unknown> = {};
 
   const entries = Object.entries(patch ?? {}) as [string, unknown][];
+  // 白名单写入需要磁盘上的旧值来保留已有备注（只读一次，避免重复 IO）。
+  const touchesAllowlist = entries.some(
+    ([key]) => key === "allowedUsers" || key === "allowedGroups",
+  );
+  const existing: Record<string, unknown> = touchesAllowlist ? io.readAll() : {};
   for (const [key, value] of entries) {
     if (!SETTING_KEY_SET.has(key)) {
       ignored.push(key);
       continue;
     }
     if (value === undefined) continue;
-    const coerced = coerceSettingValue(key as QqSettingKey, value);
+    const coerced = coerceSettingValue(key as QqSettingKey, value, existing);
     if (!coerced.ok) {
       ignored.push(key);
       continue;

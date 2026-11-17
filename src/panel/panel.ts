@@ -53,7 +53,7 @@ import type {
   SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -9661,12 +9661,13 @@ export class ChatPanel implements vscode.Disposable {
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
     try {
       const fresh = await readQqSettings(io);
-      const users = fresh.allowedUsers.includes(id)
+      // 快照里是带备注的条目；匹配与下面同步给运行中 config 的必须是完整 openid。
+      const users = fresh.allowedUsers.some((entry) => entry.openid === id)
         ? fresh.allowedUsers
-        : [...fresh.allowedUsers, id];
+        : [...fresh.allowedUsers, { openid: id }];
       await applyQqSettingsPatch(io, { allowedUsers: users });
       // 与服务共享同一个 config 对象：白名单立刻生效，不必等重启。
-      if (this.qq) this.qq.config.allowedUsers = users;
+      if (this.qq) this.qq.config.allowedUsers = users.map((entry) => entry.openid);
       this.postQqPendingUsers(await pending.approve(id));
       await this.pushQqSettings();
       this.log.info(`QQ 已放行用户 ${id}（当前 ${users.length} 个账号）`);
@@ -9711,7 +9712,7 @@ export class ChatPanel implements vscode.Disposable {
    * 落盘走 `applyQqSettingsPatch`（白名单键 + 拒绝脏值）；是否重启由
    * `syncQqServiceWithSettings` 按连接类字段判定。
    */
-  private async handleQqSettingsPatch(patch: Partial<QqSettingsUi>): Promise<void> {
+  private async handleQqSettingsPatch(patch: QqSettingsPatch): Promise<void> {
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
     const result = await applyQqSettingsPatch(io, patch);
     if (result.ignored.length > 0) {
