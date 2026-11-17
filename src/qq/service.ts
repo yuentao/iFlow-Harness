@@ -168,6 +168,22 @@ export interface QqMainInjectResult {
 }
 
 /**
+ * 一次丢弃的结果。
+ *
+ * 丢弃不是「调用成功就什么都没了」：git 在分支还带着未合并提交时会保下
+ * 分支（只删工作目录），子会话记录也可能早已不在（ok=false）。把这层事实
+ * 回给服务，看板与 QQ 回执才能如实说明「哪些东西真的没了」。
+ */
+export interface QqDiscardResult {
+  /** false = 什么都没删（子会话记录不存在 / 已被清理）。缺省按成功处理。 */
+  ok?: boolean;
+  /** true = 工作目录已删、分支因未合并提交被保留。 */
+  branchKept?: boolean;
+  /** 分支被保留的原因（git 原话，不加工）。 */
+  reason?: string;
+}
+
+/**
  * 宿主能力面。
  *
  * 实现在 `panel.ts`；本任务只定义契约，便于 B2 接线与单测注入假实现。
@@ -181,8 +197,8 @@ export interface QqServiceHost {
   cancelTask(superSessionId: string): Promise<void>;
   /** 把任务分支合并回当前分支。 */
   mergeTask(superSessionId: string): Promise<{ ok: boolean; detail: string }>;
-  /** 丢弃任务分支 / 工作目录。 */
-  discardTask(superSessionId: string): Promise<void>;
+  /** 丢弃任务分支 / 工作目录（结果交给上层如实回报）。 */
+  discardTask(superSessionId: string): Promise<QqDiscardResult>;
   /** 读取任务的最终观测数据；读不到时返回 null。 */
   readTaskOutcome(superSessionId: string): QqServiceTaskOutcome | null;
   /**
@@ -438,6 +454,9 @@ const TASK_STATUSES: readonly QqTaskStatus[] = [
   "validated",
   "queued",
   "dispatched",
+  // 主会话渠道的「已注入待回复」：漏在词表外会让重启后的归档整条丢掉
+  // （coerceQqTask 拒绝未知状态），这是这次补词表时顺手闭合的缺口。
+  "injected",
   "running",
   "waiting_approval",
   "waiting_answer",
@@ -446,6 +465,7 @@ const TASK_STATUSES: readonly QqTaskStatus[] = [
   "canceled",
   "timeout",
   "needs_review",
+  "discarded",
 ];
 
 /** 这些停止原因代表执行没有正常收尾，终态映射为 failed。 */
@@ -572,6 +592,7 @@ export function qqTaskProjectionChanged(a: QqTask, b: QqTask): boolean {
     signature(a.pending) !== signature(b.pending) ||
     signature(a.result) !== signature(b.result) ||
     signature(a.failure) !== signature(b.failure) ||
+    signature(a.discard) !== signature(b.discard) ||
     signature(a.correlation) !== signature(b.correlation)
   );
 }
@@ -705,6 +726,18 @@ function coerceQqTask(raw: unknown): QqTask | null {
     task.failure = {
       code: raw.failure.code,
       message: typeof raw.failure.message === "string" ? raw.failure.message : "",
+    };
+  }
+  // 丢弃留痕：丢了它，重启后看板只剩一个「已丢弃」标题，说不清分支到底
+  // 有没有被保下来 —— 那正是这次要修的信息缺口。
+  if (isRecord(raw.discard) && typeof raw.discard.message === "string") {
+    task.discard = {
+      at:
+        typeof raw.discard.at === "number" && Number.isFinite(raw.discard.at)
+          ? raw.discard.at
+          : raw.updatedAt,
+      message: raw.discard.message,
+      ...(raw.discard.branchKept === true ? { branchKept: true } : {}),
     };
   }
   // 回包幂等锚点与回包失败记录必须一起还原：丢了 resultDeliveredAt，重启后
@@ -2020,13 +2053,34 @@ export class QqService {
     );
   }
 
+  /**
+   * 丢弃任务的工作目录 / 分支。
+   *
+   * 三条硬纪律：
+   *  1. **每一次处置都要落进任务记录**：成功写 `status = "discarded"` +
+   *     `discard` 留痕，被拒/失败写 `failure`。旧实现成功后一个字段都不改
+   *     （终态任务连 `commitStatus` 都被终态粘性挡住），QQ 收到「已丢弃」
+   *     而看板卡片一动不动 —— 这就是用户实测的 BUG。
+   *  2. 丢弃是独立终态，不复用 `canceled`：取消是「停止执行」，丢弃是
+   *     「产物（worktree / 分支）被处置」，看板据此收起合并/丢弃按钮。
+   *  3. 刷新走与其它状态变更同一条通道（`persist` → `onChanged` →
+   *     `refreshQqTaskProjection`），不另开私有推送。
+   */
   private async discardTask(task: QqTask, force: boolean = false): Promise<void> {
     const current = this.tasks.get(task.taskId) ?? task;
+    const label = shortTaskId(current.taskId);
+    // 幂等：已经丢弃过的任务再丢一次只回一句实话，不重写记录 —— 否则
+    // 「子会话已不在」会被记成一条新的「丢弃失败」，把「已丢弃」盖脏。
+    if (current.status === "discarded") {
+      await this.deliverTask(current, `任务 ${label} 已经丢弃过了（工作目录已处置）。`);
+      return;
+    }
     const superSessionId = current.correlation.superSessionId;
     if (!superSessionId) {
-      await this.deliverTask(
+      await this.recordDiscardFailure(
         current,
-        `任务 ${shortTaskId(current.taskId)} 没有可丢弃的工作分支。`,
+        "discard_refused",
+        `任务 ${label} 没有可丢弃的工作分支。`,
       );
       return;
     }
@@ -2035,40 +2089,102 @@ export class QqService {
     // 默认拒绝，要求先 /qq stop；显式 --force 才继续，并在回包里写明代价。
     const running = !isTerminalStatus(current.status);
     if (running && !force) {
-      await this.deliverTask(
+      await this.recordDiscardFailure(
         current,
-        `任务 ${shortTaskId(current.taskId)} 尚未结束（${qqTaskStatusLabel(current.status)}），` +
+        "discard_refused",
+        `任务 ${label} 尚未结束（${qqTaskStatusLabel(current.status)}），` +
           "不能直接丢弃。请先 /qq stop 停止它；如确需强制丢弃，请用 " +
-          `/qq discard ${shortTaskId(current.taskId)} --force（未提交的改动会丢失）。`,
+          `/qq discard ${label} --force（未提交的改动会丢失）。`,
       );
       return;
     }
 
+    let outcome: QqDiscardResult;
     try {
-      await this.host.discardTask(superSessionId);
+      outcome = (await this.host.discardTask(superSessionId)) ?? {};
     } catch (error) {
-      await this.deliverTask(
+      await this.recordDiscardFailure(
         current,
-        `任务 ${shortTaskId(current.taskId)} 丢弃失败：${errorText(error)}`,
+        "discard_failed",
+        `任务 ${label} 丢弃失败：${errorText(error)}`,
       );
       return;
     }
-    const latest = this.tasks.get(current.taskId) ?? current;
-    if (!isTerminalStatus(latest.status)) {
-      const at = this.now();
-      await this.commitStatus(
-        { ...latest, pending: undefined, updatedAt: Math.max(latest.updatedAt, at) },
-        "canceled",
-        { pending: undefined },
+    if (outcome.ok === false) {
+      await this.recordDiscardFailure(
+        current,
+        "discard_failed",
+        `任务 ${label} 丢弃失败：${outcome.reason ?? "子会话不存在或已被清理"}`,
       );
+      return;
     }
-    await this.appendEvent("task_discarded", current.taskId, { forced: running && force });
+
+    const branch = current.correlation.branch ?? current.result?.branch;
+    const kept = outcome.branchKept === true;
+    // 「已丢弃」不等于「全都没了」：git 在分支还带未合并提交时会保下分支
+    // （只删工作目录）。记录与回包都必须说清楚，否则用户以为提交也没了。
+    const detail = kept
+      ? `工作目录已删除；分支${branch ? ` ${branch}` : ""}因未合并提交被保留${
+          outcome.reason ? `（${outcome.reason}）` : ""
+        }，提交仍可用 git 找回。`
+      : running && force
+        ? "已强制丢弃（未提交的改动已随之丢失）。"
+        : "工作分支已丢弃。";
+    const at = this.now();
+    const latest = this.tasks.get(current.taskId) ?? current;
+    const discarded: QqTask = {
+      ...latest,
+      // 终态任务也能被丢弃（见 shared/qq-task.ts 的 TRANSITIONS 说明）：这里是
+      // **用户显式处置**，直接构造新记录，不受 transitionQqTask 的终态粘性约束。
+      status: "discarded",
+      pending: undefined,
+      // 丢弃成功即清掉旧的失败痕迹（例如早先的 cancel_failed），否则看板会
+      // 把「已丢弃」和一条陈旧的「取消失败」并排显示。
+      failure: undefined,
+      discard: { at, message: detail, ...(kept ? { branchKept: true } : {}) },
+      updatedAt: Math.max(latest.updatedAt, at),
+    };
+    await this.persist(discarded);
+    await this.appendEvent("task_discarded", current.taskId, {
+      forced: running && force,
+      branchKept: kept,
+    });
     await this.deliverTask(
-      current,
-      running
-        ? `任务 ${shortTaskId(current.taskId)} 已被强制丢弃（未提交的改动已随之丢失）。`
-        : `任务 ${shortTaskId(current.taskId)} 的工作分支已丢弃。`,
+      discarded,
+      kept
+        ? `任务 ${label} 的${detail}`
+        : running && force
+          ? `任务 ${label} 已被强制丢弃（未提交的改动已随之丢失）。`
+          : `任务 ${label} 的工作分支已丢弃。`,
     );
+  }
+
+  /**
+   * 把一次「丢不掉」如实写进任务记录（看板可见）再回包 QQ。
+   *
+   * 只发 QQ 是这个 BUG 的另一半：在看板上点「丢弃」的人根本看不到那条消息，
+   * 卡片也不动 —— 用户无从判断是没生效还是被拒。失败原因进 `failure`
+   * （code 区分「拒绝」与「执行失败」），投影刷新走 persist → onChanged
+   * 那条公共通道（不另开私有推送）。
+   */
+  private async recordDiscardFailure(
+    task: QqTask,
+    code: "discard_refused" | "discard_failed",
+    message: string,
+  ): Promise<void> {
+    const latest = this.tasks.get(task.taskId) ?? task;
+    const at = this.now();
+    await this.persist({
+      ...latest,
+      failure: { code, message },
+      updatedAt: Math.max(latest.updatedAt, at),
+    });
+    await this.appendEvent(
+      code === "discard_refused" ? "task_discard_refused" : "task_discard_failed",
+      task.taskId,
+      { reason: message },
+    );
+    await this.deliverTask(latest, message);
   }
 
   private async refreshTask(task: QqTask): Promise<void> {
@@ -2418,16 +2534,24 @@ export class QqService {
     // 文案走中性分支（「已取消（…）」），不再显示「执行失败」。
     const errors: string[] = [];
     if (task.failure?.message) {
+      const code = task.failure.code;
       errors.push(
-        task.status === "canceled"
-          ? `已取消（${task.failure.message}）`
-          : task.failure.code === "cancel_failed"
-            ? `取消失败：${task.failure.message}`
-            : `执行失败：${task.failure.message}`,
+        // 丢弃被拒 / 失败是用户动作的回执，不是执行故障：措辞必须区分开，
+        // 否则「任务成功但没丢掉」会被读成「任务执行失败」。
+        code === "discard_refused"
+          ? `丢弃被拒绝：${task.failure.message}`
+          : code === "discard_failed"
+            ? `丢弃失败：${task.failure.message}`
+            : task.status === "canceled"
+              ? `已取消（${task.failure.message}）`
+              : code === "cancel_failed"
+                ? `取消失败：${task.failure.message}`
+                : `执行失败：${task.failure.message}`,
       );
     }
     if (task.deliveryError) errors.push(`回包失败：${task.deliveryError}`);
     if (errors.length > 0) ui.errorMessage = errors.join("；");
+    if (task.discard?.message) ui.discardNote = task.discard.message;
     if (task.pending) {
       ui.pending = { kind: task.pending.kind, summary: task.pending.text };
     }

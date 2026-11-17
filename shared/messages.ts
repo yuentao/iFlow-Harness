@@ -833,7 +833,12 @@ export interface QqTaskUi {
     | "failed"
     | "canceled"
     | "timeout"
-    | "needs_review";
+    | "needs_review"
+    /**
+     * 用户显式丢弃（工作目录/分支已处置）。终态：看板收起所有动作按钮，
+     * 只保留状态与处置说明 —— 分支可能已经不存在，再提供「合并」只会失败。
+     */
+    | "discarded";
   /**
    * 任务创建时的执行策略（宿主回填）。`trusted` = 免确认，`supervised` = 工具
    * 调用需在 QQ 审批，`readonly` = 只读。缺省表示宿主尚未回填（旧记录）——
@@ -860,8 +865,13 @@ export interface QqTaskUi {
   deletions?: number;
   /** 轮次停止原因（CLI 上报，如 end_turn）。 */
   stopReason?: string;
-  /** 失败/异常时的可读错误。 */
+  /** 失败/异常时的可读错误（含「丢弃被拒绝 / 丢弃失败」的原因）。 */
   errorMessage?: string;
+  /**
+   * 丢弃处置的说明（`status === "discarded"` 时才有）：工作目录是否删掉、
+   * 分支是否因未合并提交被保留。看板据此如实展示，不把「分支还在」说成没了。
+   */
+  discardNote?: string;
   /** 等待用户处置时的摘要（审批或提问）；不含完整载荷。 */
   pending?: { kind: "approval" | "answer"; summary: string };
 }

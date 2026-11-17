@@ -150,6 +150,34 @@ describe("QqTaskList", () => {
     expect(onAction).toHaveBeenCalledWith("task-1", "discard");
   });
 
+  it("已丢弃：显示状态与处置说明，且不再给任何动作按钮", () => {
+    render([
+      task({
+        status: "discarded",
+        branch: "iflow/qq/a1",
+        discardNote: "工作目录已删除；分支 iflow/qq/a1 因未合并提交被保留，提交仍可用 git 找回。",
+      }),
+    ]);
+    const [row] = rows();
+    expect(row!.textContent).toContain("已丢弃");
+    expect(row!.textContent).toContain("因未合并提交被保留");
+    // 工作目录/分支可能已经不存在：停止/审批/合并/丢弃/刷新一个都不渲染
+    // （用户要求「禁用所有动作按钮」，这里直接不给按钮，避免读成还能操作）。
+    expect(row!.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("丢弃被拒绝时卡片上能看到原因（不只发 QQ）", () => {
+    render([
+      task({
+        status: "running",
+        branch: "iflow/qq/a1",
+        errorMessage: "丢弃被拒绝：任务尚未结束（执行中），不能直接丢弃。请先 /qq stop 停止它",
+      }),
+    ]);
+    expect(rows()[0]!.textContent).toContain("丢弃被拒绝");
+    expect(rows()[0]!.textContent).toContain("请先 /qq stop");
+  });
+
   it("只在宿主回填 policy 时显示策略 chip：trusted 警告色、supervised 中性", () => {
     render([
       task({ taskId: "t-trust", shortId: "TR", status: "running", policy: "trusted" }),

@@ -155,7 +155,14 @@ describe("transitionQqTask", () => {
   });
 
   it("终态粘性：任何迁移都返回原对象", () => {
-    const terminals: QqTaskStatus[] = ["succeeded", "failed", "canceled", "timeout", "needs_review"];
+    const terminals: QqTaskStatus[] = [
+      "succeeded",
+      "failed",
+      "canceled",
+      "timeout",
+      "needs_review",
+      "discarded",
+    ];
     for (const status of terminals) {
       expect(isTerminalStatus(status)).toBe(true);
       const task = makeTask({ status });
@@ -166,6 +173,17 @@ describe("transitionQqTask", () => {
     }
     expect(isTerminalStatus("running")).toBe(false);
     expect(isTerminalStatus("waiting_answer")).toBe(false);
+  });
+
+  it("丢弃是合法终态：非终态可迁入 discarded，之后粘性", () => {
+    const validated = transitionQqTask(makeTask(), "validated", CREATED_AT + 1).task;
+    const discarded = transitionQqTask(validated, "discarded", CREATED_AT + 2);
+    expect(discarded.noop).toBe(false);
+    expect(discarded.task.status).toBe("discarded");
+    expect(isTerminalStatus("discarded")).toBe(true);
+    expect(qqTaskStatusLabel("discarded")).toBe("已丢弃");
+    // 终态之后任何迁移都不再生效。
+    expect(transitionQqTask(discarded.task, "running", CREATED_AT + 3).noop).toBe(true);
   });
 
   it("updatedAt 不会被回拨（时钟回退不产生负耗时）", () => {

@@ -83,6 +83,7 @@ function makeFixture(): PortsFixture {
     },
     discard: async (superSessionId) => {
       fixture.discards.push(superSessionId);
+      return { ok: true, branchKept: true, reason: "分支上还有未合并提交" };
     },
     readSuper: () => state.snapshot,
     notify: (text) => {
@@ -427,10 +428,12 @@ describe("createQqServiceHost — 透传", () => {
     const host = createQqServiceHost(f.ports);
 
     await host.cancelTask("super-c");
-    await host.discardTask("super-d");
+    const discarded = await host.discardTask("super-d");
 
     expect(f.cancels).toEqual(["super-c"]);
     expect(f.discards).toEqual(["super-d"]);
+    // 丢弃结果必须原样带回（上层据此说明分支是否被保留）。
+    expect(discarded).toEqual({ ok: true, branchKept: true, reason: "分支上还有未合并提交" });
   });
 
   it("merge 失败时 detail 原样返回", async () => {
