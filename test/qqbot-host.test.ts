@@ -11,6 +11,7 @@ import type { InboundMessage, OutboundMessage } from "../src/qq/adapter/types.js
 import type { QqBotQrProtocolLike, QqBotCredentials } from "../src/qq/qqbot/bind.js";
 import {
   QQBOT_APP_ID_SECRET_KEY,
+  buildConfirmedQrMessage,
   createQqBotBindRuntime,
   createQqChannelDispatch,
   deliverViaQqBotAdapter,
@@ -140,6 +141,13 @@ describe("QQBot 宿主编排（M3-C）", () => {
     expect(sanitizeQrLoginMessage(qrReadyMessage(VALID_PNG, 1)).dataUrl).toBe(VALID_PNG);
     const bad = sanitizeQrLoginMessage(qrReadyMessage("javascript:alert(1)", 1));
     expect(bad).toMatchObject({ dataUrl: "", phase: "expired" });
+  });
+
+  it("绑定成功清屏帧：空 dataUrl + phase=confirmed + expiresAt=0", () => {
+    const frame = buildConfirmedQrMessage();
+    expect(frame).toEqual({ type: "qqLoginQr", dataUrl: "", expiresAt: 0, phase: "confirmed" });
+    // 空串过不了护栏 —— webview 即使还没收到 connected 状态也不会渲染旧码。
+    expect(isQrDataUrl(frame.dataUrl)).toBe(false);
   });
 
   it("凭据写 SecretStorage 的两个键；不完整凭据不落盘", async () => {

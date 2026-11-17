@@ -256,8 +256,18 @@ export function QqSettings({
       ? `${MANAGED_PHASE_LABEL[managedPhase]} ${qqManagedStatus.progress}%`
       : MANAGED_PHASE_LABEL[managedPhase]
     : "";
-  /** 只有 waiting_scan / scanned 且 dataUrl 通过 isQrDataUrl 护栏才渲染 <img>。 */
+  /**
+   * 已连接 / 已登录 → 二维码区一律不渲染。
+   *
+   * 宿主成功后会主动推 confirmed 清屏帧，但 webview 可能先收到连接状态、
+   * 后收到（或漏收）清屏帧；若只看 `qqLoginQr`，上一帧 waiting_scan 的旧码
+   * 会连同倒计时挂在已连接界面上（用户实测 BUG：底部「已连接」+ 中间大二维码
+   * 与「剩余 40s」并存）。
+   */
+  const qrConnected = status?.connected === true || managedPhase === "logged_in";
+  /** 只有未连接、waiting_scan / scanned 且 dataUrl 通过 isQrDataUrl 护栏才渲染 <img>。 */
   const qrValid =
+    !qrConnected &&
     qqLoginQr != null &&
     (qqLoginQr.phase === "waiting_scan" || qqLoginQr.phase === "scanned") &&
     isQrDataUrl(qqLoginQr.dataUrl);
@@ -311,7 +321,7 @@ export function QqSettings({
           </div>
         )}
 
-        {qqLoginQr && (
+        {qqLoginQr && !qrConnected && (
           <div className="mt-3 flex flex-col items-center gap-2 rounded-md border border-border bg-editor/40 px-3 py-3">
             <div className="text-ui-label font-semibold text-foreground">{QR_TITLE}</div>
             {qrValid ? (

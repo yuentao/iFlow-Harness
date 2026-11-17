@@ -117,6 +117,16 @@ function managed(
   );
 }
 
+function status(connected: boolean, detail?: string): void {
+  act(() =>
+    useChat.getState().applyHostMessage({
+      type: "qqStatus",
+      connected,
+      ...(detail !== undefined ? { detail } : {}),
+    }),
+  );
+}
+
 beforeEach(() => {
   postMessage.mockClear();
   useChat.setState({
@@ -164,6 +174,34 @@ describe("窗口内扫码", () => {
     qr({ dataUrl: BAD_URL, phase: "waiting_scan" });
     render();
     expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("已连接时残留 waiting_scan 旧帧也不渲染二维码与倒计时", () => {
+    qr(); // 先到旧帧，模拟宿主清屏帧丢失 / 迟到
+    status(true, "QQBot 官方网关已连接");
+    render();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).not.toContain("扫码授权 QQ 机器人");
+    expect(container.textContent).not.toContain("剩余");
+    // 底部状态仍如实显示已连接。
+    expect(container.textContent).toContain("已连接");
+  });
+
+  it("托管 logged_in 时同样隐藏残留二维码", () => {
+    qr();
+    managed("logged_in", "QQBot 绑定成功，官方网关已连接");
+    render();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).not.toContain("剩余");
+    expect(container.textContent).toContain("已连接 QQ 官方机器人");
+  });
+
+  it("confirmed 清屏帧（空 dataUrl）不渲染 img 也不走倒计时", () => {
+    qr({ dataUrl: "", phase: "confirmed", expiresAt: 0 });
+    render();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).not.toContain("剩余");
+    expect(container.textContent).toContain("已确认，正在完成登录");
   });
 
   it("detail 非空时展示（且不回显端点/Token 明文）", () => {

@@ -71,6 +71,19 @@ export function buildClearedQrMessage(now: number): QrLoginMessage {
   return { type: "qqLoginQr", dataUrl: "", expiresAt: now, phase: "expired" };
 }
 
+/**
+ * 扫码绑定成功后的清屏帧（dataUrl 空、expiresAt 0、phase=confirmed）。
+ *
+ * 成功路径必须主动推这一帧：webview 的 `qqLoginQr` 是独立于快照的通道，
+ * 宿主若不覆盖，上一帧 `waiting_scan` 的二维码会连同倒计时一直挂着 ——
+ * 用户实测「底部已显示已连接 QQBot 官方网关，中间仍是大二维码 + 剩余 40s」。
+ * `dataUrl` 空串过不了 `isQrDataUrl`，因此即使 webview 侧还没收到连接状态，
+ * 也不会把旧码送进 `<img>`。
+ */
+export function buildConfirmedQrMessage(): QrLoginMessage {
+  return { type: "qqLoginQr", dataUrl: "", expiresAt: 0, phase: "confirmed" };
+}
+
 // ---------------------------------------------------------------------------
 // 凭据存储
 // ---------------------------------------------------------------------------

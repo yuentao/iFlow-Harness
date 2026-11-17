@@ -199,6 +199,24 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     expect(adapter.connect).toHaveBeenCalledOnce();
     expect(p.qq?.qqbot?.adapter).toBeTruthy();
     expect(protocolStop).toHaveBeenCalled();
+
+    // 成功必须清屏：qqLoginQr 是独立通道，不覆盖就会残留旧二维码 + 倒计时。
+    const confirmed = posted.find(
+      (m) => m.type === "qqLoginQr" && m.phase === "confirmed",
+    );
+    expect(confirmed, "成功后 confirmed 清屏帧").toBeTruthy();
+    expect(confirmed?.dataUrl).toBe("");
+    expect(confirmed?.expiresAt).toBe(0);
+    const confirmedAt = posted.indexOf(confirmed!);
+    const loggedInAt = posted.findIndex(
+      (m) => m.type === "qqManagedStatus" && m.phase === "logged_in",
+    );
+    expect(loggedInAt, "logged_in 回执").toBeGreaterThan(-1);
+    expect(loggedInAt, "先撤二维码再宣布已连接").toBeGreaterThan(confirmedAt);
+    expect(
+      posted.some((m) => m.type === "qqStatus" && m.connected === true),
+      "qqStatus connected=true",
+    ).toBe(true);
   });
 
   it("扫码失败：推脱敏 error，不留扫码会话", async () => {
