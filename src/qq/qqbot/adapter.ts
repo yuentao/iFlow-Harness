@@ -40,7 +40,7 @@ export interface QqBotTransport {
   post(endpoint: string, headers: Record<string, string>, body: Record<string, unknown>): Promise<unknown>;
 }
 
-/** 归一化成功后的入站消息回调（与 onebot-sink 的 onEvent 同语义）。 */
+/** 归一化成功后的入站消息回调。 */
 export type QqBotEventHandler = (inbound: InboundMessage) => void | Promise<void>;
 
 export interface QqBotAdapterDeps {
@@ -101,8 +101,8 @@ function errorText(error: unknown): string {
  *
  * 复用 `src/qq/adapter/types.ts` 的 ChannelAdapter 形态（connect/close/send/
  * health 四个方法签名完全一致）；该接口没有事件回调位，因此额外提供
- * `setEventCallback` 供 bridge 把 InboundMessage 接到 service 层——这是对
- * 契约的扩展而非改动，现有 OneBot HTTP sink 不受影响。
+ * `setEventCallback` 供宿主把 InboundMessage 接到 service 层——这是对契约的
+ * 扩展而非改动。
  */
 export class QqBotAdapter implements ChannelAdapter {
   private readonly appId: string;

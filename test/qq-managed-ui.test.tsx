@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 /**
- * Wave5-D — 一键接入 OneBot + 窗口内扫码的 UI 接线。
+ * QQBot 窗口内扫码的 UI 接线。
  *
  * 用真实 store（只 mock `acquireVsCodeApi`）挂载设置弹窗，因此同时验证：
  *  - 两条宿主回执（qqLoginQr / qqManagedStatus）被 store 收下且不被快照覆盖；
  *  - QqSettings 的按钮把正确消息 post 给宿主；
  *  - 二维码 dataUrl 过 isQrDataUrl 护栏后才渲染 <img>。
  */
-import { act, type ReactElement } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthUiState } from "../shared/messages";
@@ -70,12 +70,6 @@ function render(): void {
       />,
     ),
   );
-}
-
-function clickText(text: string): void {
-  const button = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === text);
-  expect(button, `button 「${text}」`).toBeTruthy();
-  act(() => button!.click());
 }
 
 /** Click one of the three QR actions, scoped to the row that owns them so a
@@ -150,54 +144,6 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
-});
-
-describe("一键接入 OneBot", () => {
-  it("primary 按钮发 qqManagedSetup start", () => {
-    render();
-    clickText("一键接入 OneBot");
-    expect(postMessage).toHaveBeenCalledWith({ type: "qqManagedSetup", action: "start" });
-  });
-
-  it("托管中改为「停止托管」并发 qqManagedSetup stop", () => {
-    managed("waiting_login", "请用 QQ 扫码");
-    render();
-    expect(container.textContent).toContain("等待扫码");
-    expect(container.textContent).toContain("请用 QQ 扫码");
-    clickText("停止托管");
-    expect(postMessage).toHaveBeenCalledWith({ type: "qqManagedSetup", action: "stop" });
-    expect(postMessage).not.toHaveBeenCalledWith({ type: "qqManagedSetup", action: "start" });
-  });
-
-  it("各阶段映射为中文标签，下载阶段带 progress%", () => {
-    const cases = [
-      ["checking", "检查环境", undefined],
-      ["downloading", "下载中", 42],
-      ["configuring", "生成配置", undefined],
-      ["starting", "启动中", undefined],
-      ["waiting_login", "等待扫码", undefined],
-      ["logged_in", "已登录", undefined],
-      ["error", "出错", undefined],
-    ] as const;
-    render();
-    for (const [phase, label, progress] of cases) {
-      managed(phase, `msg-${phase}`, progress);
-      const text = container.textContent ?? "";
-      expect(text, phase).toContain(label);
-      expect(text, phase).toContain(`msg-${phase}`);
-      if (progress !== undefined) expect(text, phase).toContain(`${progress}%`);
-    }
-  });
-
-  it("error 阶段用错误色调", () => {
-    managed("error", "下载失败：网络不可达");
-    render();
-    const chip = [...container.querySelectorAll("span")].find((el) => el.textContent?.trim() === "出错")!;
-    expect(chip, "出错 chip").toBeTruthy();
-    const tone = `${chip.className} ${chip.parentElement?.className ?? ""}`;
-    expect(tone).toContain("destructive");
-    expect(container.textContent).toContain("下载失败：网络不可达");
-  });
 });
 
 describe("窗口内扫码", () => {
@@ -280,18 +226,6 @@ describe("官方 QQBot 路线文案适配（M4）", () => {
       (b) => b.textContent?.trim() === "一键接入 QQ 机器人",
     );
     expect(button, "一键接入 QQ 机器人 button").toBeTruthy();
-  });
-
-  it("onebot 模式保留 go-cqhttp 文案并标注 legacy", () => {
-    setAdapter("onebot");
-    render();
-    const text = container.textContent ?? "";
-    expect(text).toContain("自动下载并配置 go-cqhttp");
-    expect(text).toContain("需自跑 OneBot（legacy）");
-    const button = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent?.trim() === "一键接入 OneBot",
-    );
-    expect(button, "一键接入 OneBot button").toBeTruthy();
   });
 
   it("qqbot 模式阶段文案用官方授权语义", () => {

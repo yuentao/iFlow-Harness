@@ -2,7 +2,7 @@
  * QQBot 官方路线在面板侧的行为锚点（M3-C）。
  *
  * 全程注入：协议不联网、adapter 不建连、QR 用固定 PNG 帧。只钉住编排顺序 ——
- * 不下载 go-cqhttp、不探 5700、扫码成功后启动官方 service、stop 收干净。
+ * 扫码成功后启动官方 service、stop 收干净。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -119,9 +119,6 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     close: ReturnType<typeof vi.fn>;
     send: ReturnType<typeof vi.fn>;
   };
-  let portProbe: ReturnType<typeof vi.fn>;
-  let managerFactory: ReturnType<typeof vi.fn>;
-  let bridgeStarter: ReturnType<typeof vi.fn>;
 
   function createPanel(): void {
     protocolCbs = null;
@@ -132,18 +129,10 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
       close: vi.fn(async () => undefined),
       send: vi.fn(async (_msg: OutboundMessage) => ({ ok: true as const })),
     };
-    portProbe = vi.fn(async () => ({ kind: "free" }));
-    managerFactory = vi.fn(() => {
-      throw new Error("qqbot 模式不应构造 go-cqhttp manager");
-    });
-    bridgeStarter = vi.fn(() => {
-      throw new Error("qqbot 模式不应 spawn bridge");
-    });
     const services: PanelServices = {
       workspaceRoot: here,
       watchers: makeWatchers(),
       qqSettingsIo: ioHarness.io,
-      qqManagedDeps: { portProbe: portProbe as never, managerFactory: managerFactory as never, bridgeStarter: bridgeStarter as never },
       qqbotDeps: {
         bind: {
           protocolFactory: (() => ({
@@ -183,15 +172,8 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("常规启动：无凭据时提示先绑定，绝不启动 bridge / go-cqhttp", async () => {
-    // 收敛到 QQBot 单一路径后，OneBot 编排方法已彻底不存在。
-    const deadMethods = p as unknown as Record<string, unknown>;
-    for (const name of ["buildAndStartQqOwner", "startQqBridge", "startQqManaged", "onQqBridgeExit"]) {
-      expect(deadMethods[name]).toBeUndefined();
-    }
+  it("常规启动：无凭据时提示先绑定，不启动 QQ 通道", async () => {
     await (p as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
-    expect(bridgeStarter).not.toHaveBeenCalled();
-    expect(managerFactory).not.toHaveBeenCalled();
     expect(p.qq).toBeUndefined();
     expect(
       posted.some(
@@ -200,11 +182,8 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     ).toBe(true);
   });
 
-  it("扫码 start：不下载 / 不探端口，推二维码，成功后写凭据并启动官方 service", async () => {
+  it("扫码 start：推二维码，成功后写凭据并启动官方 service", async () => {
     await p.handleQqManagedSetup("start");
-    expect(portProbe).not.toHaveBeenCalled();
-    expect(managerFactory).not.toHaveBeenCalled();
-    expect(bridgeStarter).not.toHaveBeenCalled();
 
     const qr = posted.filter((m) => (m as { type?: string }).type === "qqLoginQr");
     expect(qr.length).toBeGreaterThan(0);

@@ -1,10 +1,8 @@
 /**
- * QQ 托管入口收敛后的面板编排单测。
+ * QQ 托管入口的面板编排单测（QQBot 官方扫码单一路径）。
  *
- * 本文件原先钉住 OneBot 一键托管（5700 探测 / go-cqhttp manager / 二维码
- * 轮询桥）。收敛到 QQBot 单一路径后，这条 OneBot 编排已从面板移除 —— 这里
- * 改为验证托管入口恒走 QQBot 官方扫码：不探端口、不下载 go-cqhttp、不 spawn
- * bridge，扫码成功后写入官方凭据并建 adapter。全程注入，不联网 / 不 spawn。
+ * 验证托管入口恒走 QQBot 官方扫码：推二维码、扫码成功后写入官方凭据并建
+ * adapter，三动作与停止收尾都收干净。全程注入，不联网 / 不 spawn。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -102,9 +100,6 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
   let protocolCbs: Parameters<import("../src/qq/qqbot/bind.js").QqBotQrProtocolLike["start"]>[0] | null;
   let protocolStop: ReturnType<typeof vi.fn>;
   let adapter: { setEventCallback: ReturnType<typeof vi.fn>; connect: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn>; health: ReturnType<typeof vi.fn> };
-  let portProbe: ReturnType<typeof vi.fn>;
-  let managerFactory: ReturnType<typeof vi.fn>;
-  let bridgeStarter: ReturnType<typeof vi.fn>;
 
   function createPanel(): void {
     protocolCbs = null;
@@ -116,18 +111,10 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
       send: vi.fn(async () => ({ ok: true as const })),
       health: vi.fn(async () => ({ connected: true, detail: "qqbot" })),
     };
-    portProbe = vi.fn(async () => ({ kind: "free" }));
-    managerFactory = vi.fn(() => {
-      throw new Error("收敛后不应构造 go-cqhttp manager");
-    });
-    bridgeStarter = vi.fn(() => {
-      throw new Error("收敛后不应 spawn bridge");
-    });
     const services: PanelServices = {
       workspaceRoot: here,
       watchers: makeWatchers(),
       qqSettingsIo: ioHarness.io,
-      qqManagedDeps: { portProbe: portProbe as never, managerFactory: managerFactory as never, bridgeStarter: bridgeStarter as never },
       qqbotDeps: {
         bind: {
           protocolFactory: (() => ({
@@ -169,11 +156,8 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     return posted.filter((m) => (m as { type?: string }).type === type);
   }
 
-  it("start：恒走 QQBot 扫码，不探 5700 / 不构造 manager / 不 spawn bridge", async () => {
+  it("start：恒走 QQBot 扫码，推二维码并建立扫码会话", async () => {
     await p.handleQqManagedSetup("start");
-    expect(portProbe).not.toHaveBeenCalled();
-    expect(managerFactory).not.toHaveBeenCalled();
-    expect(bridgeStarter).not.toHaveBeenCalled();
     expect(messages("qqLoginQr").length).toBeGreaterThan(0);
     expect(protocolCbs).not.toBeNull();
   });
@@ -196,7 +180,6 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
 
     await p.handleQqConfigAction("startQrLogin");
     expect(protocolCbs).not.toBeNull();
-    expect(bridgeStarter).not.toHaveBeenCalled();
     await p.handleQqConfigAction("refreshQr");
     await p.handleQqConfigAction("cancelQrLogin");
     expect(protocolStop).toHaveBeenCalled();

@@ -232,9 +232,6 @@ import {
   QQ_SETTLE_POLL_MS,
   shouldRestartOnPatch,
 } from "../qq/wiring.js";
-import type { ManagedOneBotDeps, ManagedOneBotManager } from "../qq/managed/manager.js";
-import type { QrBridge, QrBridgeDeps } from "../qq/managed/qr-bridge.js";
-import type { ManagedPortProbe } from "./qq-managed-host.js";
 import type { InboundMessage } from "../qq/adapter/types.js";
 import {
   buildClearedQrMessage,
@@ -803,17 +800,6 @@ export interface PanelServices {
   osNotify?: (title: string, message: string) => Promise<boolean>;
   /** Test hook: QQ 设置 / SecretStorage 的注入式 IO（缺省走 vscode 实现）。 */
   qqSettingsIo?: QqSettingsIo;
-  /**
-   * Test hook: 一键托管编排的可注入依赖。缺省走真实实现（node:net 探测、
-   * 真实 ManagedOneBotManager / QrBridge）。测试注入假实现时不占端口、不 spawn。
-   */
-  qqManagedDeps?: {
-    portProbe?: (port: number, accessToken: string) => Promise<ManagedPortProbe>;
-    managerFactory?: (deps: ManagedOneBotDeps) => ManagedOneBotManager;
-    qrBridgeFactory?: (deps: QrBridgeDeps) => QrBridge;
-    /** Test hook: 替代真实 bridge 子进程 spawn（可在此注入 fake bridge_ready）。 */
-    bridgeStarter?: (owner: NonNullable<ChatPanel["qq"]>) => void | Promise<void>;
-  };
   /**
    * Test hook: QQBot 官方路线的可注入依赖（真网络 / 二维码渲染 / adapter）。
    * 缺省走 node:https + node:crypto + 内联 QR PNG + 真 QqBotAdapter。
@@ -8823,16 +8809,15 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  // --- QQ 远程任务通道（Wave3-B2b） -------------------------------------------
+  // --- QQ 远程任务通道 -------------------------------------------------------
   //
-  // 一条通道 = 一份 QqService + 一个宿主侧 IPC（loopback）+ 一个 bridge 子进程。
-  // 面板只做编排：命令解析 / 白名单 / 审批桥 / 结果回传全在 QqService 与 bridge
-  // 里；本节负责把它们接起来、把生命周期管住、把状态投影给 UI。
+  // 一条通道 = 一份 QqService + QQBot 官方 adapter（直连官方网关，无子进程）。
+  // 面板只做编排：命令解析 / 白名单 / 审批桥 / 结果回传全在 QqService 里；本节
+  // 负责把它们接起来、把生命周期管住、把状态投影给 UI。
   //
   // 纪律：
   //  - 所有入口先判 `this.qq` 是否存在 —— 半启动的现场绝不能被消息驱动；
-  //  - bridge 崩溃只重起 bridge（IPC 与服务保持），连续三次失败才放弃；
-  //  - 主动停止走 `qqStopping` 标记，exit 事件不得触发自动重启；
+  //  - 主动停止走 `qqStopping` 标记，防止与在飞的启停重叠；
   //  - 连接类设置改动重建服务，其余字段就地热更新（见 src/qq/wiring.ts）。
 
   /** 设置启用 → 启动通道；任何失败都把半启动现场收干净并如实提示。 */
@@ -8847,7 +8832,7 @@ export class ChatPanel implements vscode.Disposable {
           this.store.sendToast("warning", vscode.l10n.t("QQ 通道启动失败：{0}", detail));
           this.pushQqStatus(false, detail);
         }
-        // 半启动的现场必须收干净：绝不能留下 ipc 监听或 bridge 孤儿进程。
+        // 半启动的现场必须收干净：不留 adapter 连接或扫码绑定残留。
         await this.stopQq().catch(() => undefined);
       })
       .finally(() => {
@@ -9167,7 +9152,7 @@ export class ChatPanel implements vscode.Disposable {
   //
   // 收敛到 QQBot 单一路径后，入站消息由 setEventCallback 直接给出已归一化的
   // InboundMessage，下面两个校验工具不再被 live 路径调用；保留为 public 供
-  // 既有接线测试使用，下一阶段随 OneBot 死代码一起清理。
+  // 既有接线测试使用。
 
   isQqRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -9455,7 +9440,7 @@ export class ChatPanel implements vscode.Disposable {
     const changed = await writeQqSecrets(io, { botToken, appSecret });
     if (changed.length > 0) this.log.info(`QQ 凭据已更新：${changed.join(", ")}`);
     await this.pushQqSettings();
-    // OneBot token 会进 bridge 的环境变量：换了凭据就必须重建 bridge。
+    // 官方 adapter 持有启动时的凭据快照：换了凭据必须重建服务。
     if (changed.length > 0 && this.qq) this.scheduleQqRestart();
   }
 
