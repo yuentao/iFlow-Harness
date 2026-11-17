@@ -11,6 +11,7 @@ import type {
   InjectedContextItem,
   InitializingReason,
   SessionState,
+  ToolBlock,
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
 import {
@@ -18,6 +19,7 @@ import {
   appendApprovalResolution,
   appendInjectedContext,
   applySessionUpdate,
+  attachSuperActionResult,
   attachSynthesizedDiff,
   beginCompressTurn,
   beginHiddenTurn,
@@ -490,6 +492,18 @@ export class SessionStore {
    * Returns whether the block accepted the diff. */
   toolDiffSynthesized(toolCallId: string, diff: ToolDiffUi): boolean {
     const index = attachSynthesizedDiff(this.state, toolCallId, diff);
+    if (index === null) return false;
+    this.noteMutationIndex(index);
+    this.flush();
+    return true;
+  }
+
+  /**
+   * 把 super-agent 管理动作的真实结果回填到工具块，动作卡据此显示 ok/reason，
+   * 而不是把「工具调用完成」谎报成「中断已成功」。
+   */
+  superActionResult(toolCallId: string, result: NonNullable<ToolBlock["superActionResult"]>): boolean {
+    const index = attachSuperActionResult(this.state, toolCallId, result);
     if (index === null) return false;
     this.noteMutationIndex(index);
     this.flush();

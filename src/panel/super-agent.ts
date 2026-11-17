@@ -904,7 +904,14 @@ export class SuperAgentManager {
    */
   async cancel(id: string): Promise<SuperCancelOutcome> {
     const session = this.sessions.get(id);
-    if (!session) return { ok: false, reason: "not-found" };
+    if (!session) {
+      // 历史归档子会话的进程早随扩展退出，中断意图天然达成（幂等）—— 按
+      // already-terminal 回报，不报 not-found。主会话从上一轮冻结的看板
+      // 抄 id 时，抄到这类「已结束」记录不该被误判成「抄错 id」。
+      const archived = this.findArchived(id);
+      if (archived) return { ok: true, reason: "already-terminal", status: archived.status };
+      return { ok: false, reason: "not-found" };
+    }
     if (isTerminalSuperStatus(session.status)) {
       // 幂等重复：目标已经不在跑 —— 意图已达成，如实说成「已终态」，不是失败。
       return { ok: true, reason: "already-terminal", status: session.status };

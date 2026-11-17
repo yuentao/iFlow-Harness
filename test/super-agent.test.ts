@@ -1337,6 +1337,28 @@ describe("super agent · 看板摘要", () => {
     expect(digest).not.toContain("super-119");
   });
 
+  it("活跃会话优先拿预算：尾部活跃者的 id 不被 omitted 折叠（抄错 id 会 cancel not-found）", () => {
+    // 实测故障（58 会话现场）：活跃子会话恰好排在数组尾部，旧实现从尾部
+    // 截断，把它们的 id 折叠进「… (N more omitted)」，主 Agent 于是抄到
+    // 一个已被折叠的历史 id 去 cancel —— 宿主报 not-found，中断没生效。
+    const many = Array.from({ length: 60 }, (_, i) =>
+      i < 55
+        ? session({ id: `old-${i}`, title: `历史 ${i}`, status: "completed", summary: "x".repeat(120) })
+        : session({ id: `active-${i}`, title: `活跃 ${i}`, status: "running", summary: "y".repeat(120) }),
+    );
+    const digest = buildSuperDigest(many);
+    expect(digest.length).toBeLessThanOrEqual(SUPER_DIGEST_MAX_CHARS);
+    const omittedAt = digest.indexOf("more child session(s) omitted for budget");
+    expect(omittedAt).toBeGreaterThan(-1);
+    const beforeOmitted = digest.slice(0, omittedAt);
+    // 全部活跃 id 都落在 omitted 之前的保留部分 —— 主 Agent 能抄到正确 id。
+    for (let i = 55; i < 60; i += 1) {
+      expect(beforeOmitted).toContain(`active-${i}`);
+    }
+    // 活跃者排在历史者之前（首个活跃 id 早于首个历史 id）。
+    expect(beforeOmitted.indexOf("active-55")).toBeLessThan(beforeOmitted.indexOf("old-0"));
+  });
+
   it("单行摘要压成一行并截断过长文本", () => {
     const line = describeSuperSessionLine(
       session({ status: "completed", summary: `第一行\n第二行${"长".repeat(300)}` }),

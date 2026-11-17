@@ -736,6 +736,37 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
     },
     [retryAction, send],
   );
+  // 中断的 host 回包是异步的（杀进程 → dispose → 落终态），从点确认到状态
+  // 翻转之间有空窗；和 retry 同款纪律：点击即把 id 标成「中断中」，状态一变
+  // 就收尾，回包丢失用短超时解锁 —— 避免用户以为没生效又点一次（那正是
+  // 「中断没生效」BUG 的现场之一）。
+  const CANCEL_PENDING_TIMEOUT_MS = 15_000;
+  const cancelStarts = useRef<Map<string, SuperStatus>>(new Map());
+  const dropCancelStart = useCallback((id: string) => {
+    cancelStarts.current.delete(id);
+  }, []);
+  const cancelSettled = useCallback((session: SuperSessionUi | undefined) => {
+    if (!session) return true; // 行已被清理
+    const start = cancelStarts.current.get(session.id);
+    if (!start) return true;
+    // 中断会把状态从活跃翻成 cancelled（终态）；状态一变即视为 host 已受理。
+    return session.status !== start;
+  }, []);
+  const cancelAction = useSuperActionPending(
+    sessions,
+    CANCEL_PENDING_TIMEOUT_MS,
+    cancelSettled,
+    dropCancelStart,
+  );
+  const markCancelPending = useCallback(
+    (items: readonly SuperSessionUi[]) => {
+      for (const session of items) {
+        cancelStarts.current.set(session.id, session.status);
+        cancelAction.begin(session.id);
+      }
+    },
+    [cancelAction],
+  );
   // Interrupts kill a live process, so both the per-row and the board-wide
   // action go through a confirm dialog like merge / cleanup do. The board-wide
   // variant snapshots the active count at open time — recomputing it while the
@@ -1198,6 +1229,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                   cleanupPending={cleanupPending.has(session.id)}
                   mergePending={mergeAction.pending.has(session.id)}
                   retryPending={retryAction.pending.has(session.id)}
+                  cancelPending={cancelAction.pending.has(session.id)}
                   onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                   onMerge={() => setConfirmMerge(session)}
                   onRetry={() => beginRetry(session)}
@@ -1232,6 +1264,7 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
                           cleanupPending={cleanupPending.has(session.id)}
                           mergePending={mergeAction.pending.has(session.id)}
                           retryPending={retryAction.pending.has(session.id)}
+                          cancelPending={cancelAction.pending.has(session.id)}
                           onToggle={() => setOpenRow((v) => (v === session.id ? null : session.id))}
                           onMerge={() => setConfirmMerge(session)}
                           onRetry={() => beginRetry(session)}
@@ -1325,6 +1358,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           )}
           confirmLabel={t("中断")}
           onConfirm={() => {
+            // 乐观反馈：点确认即标记该行「中断中」，不等 host 异步回包。
+            markCancelPending([confirmCancel]);
             send({ type: "superAgent", action: "cancel", sessionId: confirmCancel.id });
             setConfirmCancel(null);
           }}
@@ -1340,6 +1375,8 @@ export function SuperAgentBoard({ panelRef }: { panelRef?: (el: HTMLDivElement |
           )}
           confirmLabel={t("全部中断")}
           onConfirm={() => {
+            // 同样乐观标记全部活跃行，避免批量中断时整屏仍停在「运行中」。
+            markCancelPending(active);
             send({ type: "superAgent", action: "cancelAll" });
             setConfirmCancelAll(null);
           }}
@@ -1415,6 +1452,7 @@ function SuperSessionRow({
   cleanupPending,
   mergePending,
   retryPending,
+  cancelPending,
   onToggle,
   onMerge,
   onRetry,
@@ -1432,6 +1470,8 @@ function SuperSessionRow({
   mergePending: boolean;
   /** True from the retry click until the host accepts it (status/attempt). */
   retryPending: boolean;
+  /** True from the cancel confirm click until the host flips the row terminal. */
+  cancelPending: boolean;
   onToggle: () => void;
   onMerge: () => void;
   onRetry: () => void;
@@ -1444,13 +1484,15 @@ function SuperSessionRow({
   // (a merge target is `completed` — without this it would still read
   // 「已完成」 while the merge child runs). Merge outranks retry only because
   // the two cannot coexist on one row in practice.
-  const busyChip = cleanupPending
-    ? t("清理中")
-    : mergePending
-      ? t("合并中")
-      : retryPending
-        ? t("重试中")
-        : null;
+  const busyChip = cancelPending
+    ? t("中断中")
+    : cleanupPending
+      ? t("清理中")
+      : mergePending
+        ? t("合并中")
+        : retryPending
+          ? t("重试中")
+          : null;
   const chip = busyChip
     ? {
         tone: "primary" as StatusTone,
@@ -1546,11 +1588,18 @@ function SuperSessionRow({
             the detail: the process keeps writing files meanwhile. */}
         {isActive(session) && (
           <IconButton
-            icon={<Square className={ICON_INLINE} />}
-            label={t("中断这个子会话")}
+            icon={
+              cancelPending ? (
+                <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
+              ) : (
+                <Square className={ICON_INLINE} />
+              )
+            }
+            label={cancelPending ? t("中断中") : t("中断这个子会话")}
             size="sm"
             tone="danger"
             hoverSurface="row"
+            disabled={cancelPending}
             onClick={onCancel}
           />
         )}

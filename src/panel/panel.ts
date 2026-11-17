@@ -7848,7 +7848,9 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     this.rememberSuperToolCallActions(actionKey);
-    void this.runSuperActions(parsed.actions);
+    // 带上 toolCallId：runSuperActions 收尾时把每条动作的真实结果回填到这张
+    // 工具帧，动作卡才能显示「中断成功 / not-found」而不是绿色「已完成」。
+    void this.runSuperActions(parsed.actions, update.toolCallId);
   }
 
   /** 记住一条已执行的动作工具调用（有界 Set，超了丢最早一条）。 */
@@ -8013,7 +8015,10 @@ export class ChatPanel implements vscode.Disposable {
    * 看板摘要是每轮开篇冻结的，同一轮里它看不到自己动作的效果 —— 没有回执它
    * 就会重复发同一个动作。
    */
-  private async runSuperActions(actions: readonly SuperAction[]): Promise<void> {
+  private async runSuperActions(
+    actions: readonly SuperAction[],
+    toolCallId?: string,
+  ): Promise<void> {
     const manager = this.getSuperAgent();
     if (!manager) return;
     let applied = 0;
@@ -8047,6 +8052,18 @@ export class ChatPanel implements vscode.Disposable {
                   ? { detail: "no such child session (it may have been cleaned up already)" }
                   : {}),
             };
+            // hidden 回执只进主会话上下文，用户看不到。主 Agent 从每轮冻结的
+            // 看板摘要里抄 id，抄错时 cancel 返回 not-found —— 这正是「中断没
+            // 生效」的真实故障现场。这里额外给用户一条带 id 的明确提示。
+            if (!outcome.ok && outcome.reason === "not-found") {
+              this.store.sendToast(
+                "warning",
+                vscode.l10n.t(
+                  "中断失败：找不到子会话 {0}，可能已被清理或 id 有误",
+                  action.sessionId,
+                ),
+              );
+            }
             break;
           }
           case "answer": {
@@ -8107,6 +8124,9 @@ export class ChatPanel implements vscode.Disposable {
         vscode.l10n.t("{0} 个子会话管理动作未生效（目标不存在或状态不适用）", ignored),
       );
     }
+    // 工具调用触发的动作：把真实结果回填到那张工具帧，动作卡据此显示
+    // 「完成 / 未找到 / 失败」而不是把「工具调用完成」当成动作成功。
+    if (toolCallId) this.store.superActionResult(toolCallId, receipts);
     this.queueSuperActionReceipt(receipts);
   }
 

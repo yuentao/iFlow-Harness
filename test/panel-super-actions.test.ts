@@ -97,6 +97,11 @@ type PanelInternals = {
     answers?: Record<string, string | string[]>;
     keepBranch?: boolean;
   }) => Promise<void>;
+  /** 主会话动作执行入口（内置工具 / 围栏动作块都走它）。 */
+  runSuperActions: (actions: readonly {
+    action: "cancel" | "retry" | "cleanup" | "answer";
+    sessionId: string;
+  }[]) => Promise<void>;
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   notifyOs: (event: string, text: string) => boolean;
@@ -276,5 +281,28 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
   it("看板单个中断（目标不存在）：发出 warning 回执", async () => {
     const { toasts } = await runCancelAction({ ok: false, reason: "not-found" });
     expect(toasts).toEqual([{ level: "warning", message: "该子会话不存在或已被清理" }]);
+  });
+
+  it("主会话 cancel 抄错 id（not-found）：给用户一条带 id 的可见 warning（不再只有 hidden 回执）", async () => {
+    // 实测故障：主 Agent 从冻结的看板摘要里抄 id，抄到一个不存在/已清理的 id，
+    // cancel 报 not-found —— 旧实现只把回执 hidden 投给主会话，用户完全看不到，
+    // 表现为「点了中断没反应」。这里要求额外一条用户可见的明确提示。
+    const cancel = vi.fn(async (_id: string) => ({ ok: false, reason: "not-found" as const }));
+    p.superAgent = { list: () => [], reportPrompt: () => "", cancel };
+    const toasts: { level: string; message: string }[] = [];
+    vi.spyOn(p.store, "sendToast").mockImplementation(((level: string, message: string) => {
+      toasts.push({ level, message });
+      return 1;
+    }) as unknown as PanelInternals["store"]["sendToast"]);
+    p.sendPrompt = vi.fn(async () => true) as unknown as PanelInternals["sendPrompt"];
+
+    await p.runSuperActions([{ action: "cancel", sessionId: "super-wrong-id" }]);
+
+    expect(cancel).toHaveBeenCalledWith("super-wrong-id");
+    const visible = toasts.find(
+      (toast) => toast.level === "warning" && toast.message.includes("super-wrong-id"),
+    );
+    expect(visible).toBeTruthy();
+    expect(visible!.message).toContain("中断失败");
   });
 });

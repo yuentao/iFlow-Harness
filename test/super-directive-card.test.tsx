@@ -968,4 +968,41 @@ describe("SuperActionsToolCallCard（super-agent 工具 actions 载荷）", () =
     expect(card.hasAttribute("data-super-delegation-origin")).toBe(false);
     expect([...card.querySelectorAll("li")].map((li) => li.textContent)).toEqual(fencedRows);
   });
+
+  it("工具帧 completed 但动作 not-found：显示真实失败与原因，不再谎报绿色已完成", () => {
+    // 修复点3 的回归：内核对 super-agent 工具只回 ack，cancel 抄错 id 报
+    // not-found 时工具帧同样是 completed —— 旧卡片据此染成绿色「已完成」。
+    const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-wrong" }] });
+    const block: ToolBlock = {
+      ...toolBlock(input, "completed"),
+      superActionResult: [
+        { action: "cancel", sessionId: "super-wrong", ok: false, reason: "not-found" },
+      ],
+    };
+
+    act(() => root.render(<SuperActionsToolCallCard block={block} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.textContent).toContain("未找到目标");
+    expect(card.textContent).not.toContain("已完成");
+    const failed = card.querySelector<HTMLElement>('[data-testid="super-action-result-failed"]');
+    expect(failed).toBeTruthy();
+    expect(failed!.textContent).toContain("super-wrong");
+    expect(failed!.textContent).toContain("找不到该子会话");
+  });
+
+  it("动作结果全部生效：显示绿色已完成与成功摘要", () => {
+    const input = JSON.stringify({ actions: [{ action: "cancel", sessionId: "super-ok" }] });
+    const block: ToolBlock = {
+      ...toolBlock(input, "completed"),
+      superActionResult: [
+        { action: "cancel", sessionId: "super-ok", ok: true, reason: "applied" },
+      ],
+    };
+
+    act(() => root.render(<SuperActionsToolCallCard block={block} />));
+    const card = container.querySelector<HTMLElement>('[data-testid="super-actions-tool-call-card"]')!;
+    expect(card.textContent).toContain("已完成");
+    expect(card.querySelector('[data-testid="super-action-result-ok"]')).toBeTruthy();
+    expect(card.querySelector('[data-testid="super-action-result-failed"]')).toBeNull();
+  });
 });
