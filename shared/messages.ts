@@ -1922,7 +1922,32 @@ export type HostToWebview =
   | { type: "qqSettings"; values: QqSettingsUi }
   /** QQ 远程任务（Wave3-B）：bridge / 适配器的连接状态；`detail` 是给人看的
    * 补充说明（例如端点地址或失败原因）。 */
-  | { type: "qqStatus"; connected: boolean; detail?: string };
+  | { type: "qqStatus"; connected: boolean; detail?: string }
+  /**
+   * 扫码登录（Wave5-C0）：宿主读 go-cqhttp 的 qrcode.png（或取码 API）→
+   * base64 data URL → webview 用 `<img>` 显示，避免 CSP 禁止的 iframe。
+   * `dataUrl` 必须是 `data:image/png;base64,...`（webview 可用
+   * `isQrDataUrl` 护栏校验）；`expiresAt` 是二维码过期时间（epoch ms）；
+   * `phase` 是扫码生命周期；`detail` 是给人看的补充说明（例如失败原因）。
+   */
+  | {
+      type: "qqLoginQr";
+      dataUrl: string;
+      expiresAt: number;
+      phase: "waiting_scan" | "scanned" | "confirmed" | "expired";
+      detail?: string;
+    }
+  /**
+   * 一键托管（Wave5-C0）：宿主把 go-cqhttp 下载/配置/启动/登录的各阶段
+   * 进度推给设置页。`phase` 是阶段机；`message` 是给人看的说明；
+   * `progress`（0–100）仅下载等可度量阶段携带，缺省表示不确定进度。
+   */
+  | {
+      type: "qqManagedStatus";
+      phase: "idle" | "checking" | "downloading" | "configuring" | "starting" | "waiting_login" | "logged_in" | "error";
+      message: string;
+      progress?: number;
+    };
 
 // ---------------------------------------------------------------------------
 // WebView → Host commands
@@ -2287,19 +2312,57 @@ export type WebviewToHost =
       action: "stop" | "approve" | "deny" | "answer" | "merge" | "discard" | "refresh";
       text?: string;
     }
-  /** QQ 远程任务（Wave3-C 补声明 / Wave2-B 方向修正）：设置页 QQ 卡片的三类
-   * 动作——连测试、生成绑定码、解绑。这是 webview 发给宿主的**请求**（早期
-   * 误声明在 HostToWebview 上，方向写反，panel 只能用运行时形状守卫兜底接收；
+  /** QQ 远程任务（Wave3-C 补声明 / Wave2-B 方向修正）：设置页 QQ 卡片的动作——
+   * 连测试、生成绑定码、解绑（原三类），以及扫码登录（Wave5-C0）的开始取码、
+   * 刷新二维码、取消登录。这是 webview 发给宿主的**请求**（早期误声明在
+   * HostToWebview 上，方向写反，panel 只能用运行时形状守卫兜底接收；
    * 现已从 HostToWebview 移除、只在此处声明）。回执不是同名消息：状态走
-   * `qqStatus`、绑定码走 `qqBindCode`，解绑结果走 toast。 */
-  | { type: "qqConfigAction"; action: "testConnection" | "generateBindCode" | "unbind" }
+   * `qqStatus`、绑定码走 `qqBindCode`、二维码走 `qqLoginQr`，解绑结果走 toast。 */
+  | {
+      type: "qqConfigAction";
+      action: "testConnection" | "generateBindCode" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin";
+    }
   /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
    * `hasBotToken` / `hasAppSecret` 是宿主回传的投影，这里只会被忽略——
    * 凭据走下面的 `qqSecretsWrite`，不进设置补丁。 */
   | { type: "qqSettingsPatch"; patch: Partial<QqSettingsUi> }
   /** QQ 远程任务（Wave3-B）：写入凭据。只在用户真的输入了新值时才带上对应
    * 字段（空串 = 清空该凭据）；两项都缺省时宿主什么也不做。 */
-  | { type: "qqSecretsWrite"; botToken?: string; appSecret?: string };
+  | { type: "qqSecretsWrite"; botToken?: string; appSecret?: string }
+  /**
+   * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 go-cqhttp 托管。
+   * `start` 触发下载→配置→启动→等待扫码登录流程，`stop` 停止并清理。
+   * 进度经 `qqManagedStatus` 回推，登录二维码经 `qqLoginQr` 回推。
+   */
+  | { type: "qqManagedSetup"; action: "start" | "stop" };
+
+// ---------------------------------------------------------------------------
+// QQ 扫码登录安全护栏 (zero-dependency — 宿主生成 data URL、webview 渲染前共用)
+// ---------------------------------------------------------------------------
+
+/** PNG base64 data URL 的严格前缀。`isQrDataUrl` 只认这一种形态，防止把
+ * `data:image/svg+xml` / `javascript:` 等任意 data URL 塞进 `<img src>`。 */
+export const QR_DATA_URL_PREFIX = "data:image/png;base64,";
+
+/**
+ * 扫码登录 data URL 安全护栏：只接受严格 `data:image/png;base64,` 前缀 +
+ * 非空合法 base64 串。base64 合法性判据：长度是 4 的倍数、字符集限于
+ * `[A-Za-z0-9+/]`、仅末尾允许 0–2 个 `=` 填充、且填充前有非空正文。
+ *
+ * 零依赖（宿主与 webview 共用），纯函数，无副作用。宿主生成二维码 data URL
+ * 后、webview 送进 `<img>` 前都应过这道门，避免把任意 data URL（尤其 svg /
+ * javascript:）当成图片渲染。
+ */
+export function isQrDataUrl(value: string): boolean {
+  if (typeof value !== "string") return false;
+  if (!value.startsWith(QR_DATA_URL_PREFIX)) return false;
+  const payload = value.slice(QR_DATA_URL_PREFIX.length);
+  if (!payload || payload.length % 4 !== 0) return false;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) return false;
+  // 去掉末尾填充后必须仍有正文（排除 "====" 等退化串；"==" 长度非 4 已被挡）。
+  if (payload.replace(/=+$/, "").length === 0) return false;
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // User-prompt text helpers (zero-dependency — shared by the host reducer, the
