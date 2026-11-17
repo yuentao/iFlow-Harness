@@ -44,11 +44,25 @@ export const DEFAULT_QQBOT_HTTP_TIMEOUT_MS = 15_000;
  */
 export class QqBotHttpError extends Error {
   readonly status: number;
+  /** 平台业务错误码（响应体 code/errcode/retcode），仅用于诊断。 */
+  readonly code?: number;
+  /** 平台业务错误文案（已截断），仅用于诊断；token 端点不会带上它。 */
+  readonly businessMessage?: string;
 
-  constructor(status: number, path: string) {
-    super(`QQBot: HTTP ${status} from ${path}`);
+  constructor(
+    status: number,
+    path: string,
+    detail?: { code?: number; message?: string },
+  ) {
+    const pieces: string[] = [];
+    if (detail?.code !== undefined) pieces.push(`code ${detail.code}`);
+    if (detail?.message) pieces.push(detail.message);
+    const suffix = pieces.length > 0 ? ` (${pieces.join(": ")})` : "";
+    super(`QQBot: HTTP ${status} from ${path}${suffix}`);
     this.name = "QqBotHttpError";
     this.status = status;
+    if (detail?.code !== undefined) this.code = detail.code;
+    if (detail?.message) this.businessMessage = detail.message;
   }
 }
 
@@ -59,6 +73,8 @@ interface WsLike {
   addEventListener?: (event: string, listener: (event?: unknown) => void) => unknown;
   send: (data: string) => unknown;
   close: () => unknown;
+  /** ws 的强制关闭；连接超时用它兜底（可能不存在，测试假实现可省略）。 */
+  terminate?: () => unknown;
 }
 
 type WsCtor = new (url: string, options?: { headers?: Record<string, string> }) => WsLike;
@@ -67,6 +83,62 @@ function toError(value: unknown, fallback: string): Error {
   if (value instanceof Error) return value;
   const text = typeof value === "string" && value.length > 0 ? value : fallback;
   return new Error(text);
+}
+
+/** 诊断文案截断上限：错误信息只用于区分限流 / 白名单 / 额度，不搬运整段响应体。 */
+const MAX_HTTP_DIAG_CHARS = 200;
+
+/**
+ * 从非 2xx 响应体里提炼诊断信息。
+ *
+ * 平台把「限流 / 白名单 / 额度耗尽 / 参数非法」都塞在响应体的 `code` 与
+ * `message` 里；旧实现只报 HTTP status，上层无法区分这些语义。这里**只取**
+ * 错误码与文案，且截断到 {@link MAX_HTTP_DIAG_CHARS}，绝不回显原始 body
+ * （token 端点连这个函数都不会调用，见 post 的端点判定）。
+ */
+function describeHttpFailureBody(text: string): { code?: number; message?: string } | undefined {
+  if (text.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const detail: { code?: number; message?: string } = {};
+  for (const key of ["code", "errcode", "retcode"] as const) {
+    const value = record[key];
+    const numeric =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim() !== ""
+          ? Number(value)
+          : Number.NaN;
+    if (Number.isFinite(numeric) && numeric !== 0) {
+      detail.code = numeric;
+      break;
+    }
+  }
+  for (const key of ["message", "msg", "errmsg", "error"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      const trimmed = value.trim();
+      detail.message =
+        trimmed.length > MAX_HTTP_DIAG_CHARS ? `${trimmed.slice(0, MAX_HTTP_DIAG_CHARS)}…` : trimmed;
+      break;
+    }
+  }
+  return detail.code === undefined && detail.message === undefined ? undefined : detail;
+}
+
+/**
+ * token 端点判定：其错误响应体可能回显 clientSecret / access_token，绝不能
+ * 把业务码文案拼进错误（连 `message` 也可能是凭据回显）。发消息端点则相反
+ * ——没有诊断信息就无法区分限流 / 白名单 / 额度。
+ */
+function isTokenEndpoint(pathname: string): boolean {
+  return pathname.includes("getAppAccessToken");
 }
 
 function resolveCtor(injected: unknown): WsCtor {
@@ -122,12 +194,27 @@ function normalizeFrame(data: unknown): unknown {
 function wrapSocket(ws: WsLike): QqBotSocket {
   let handler: ((raw: unknown) => void) | undefined;
   const pending: unknown[] = [];
+  let closeHandler: ((error?: unknown) => void) | undefined;
+  let closeFired = false;
+  let closeArg: unknown;
 
   attach(ws, "message", (arg?: unknown) => {
     const raw = normalizeFrame(arg);
     if (handler) handler(raw);
     else pending.push(raw);
   });
+
+  // 底层断开通知：ws 的 "close" 与 "error" 都可能是终态（网络断开时 ws 通常
+  // 先 error 后 close），只上报一次；open 之前的 error 归于 buildSocket 的
+  // reject 路径，不会让已 resolve 的 socket 收到（那时尚无 closeHandler）。
+  const fireClose = (arg?: unknown): void => {
+    if (closeFired) return;
+    closeFired = true;
+    closeArg = arg;
+    closeHandler?.(arg);
+  };
+  attach(ws, "close", (arg?: unknown) => fireClose(arg));
+  attach(ws, "error", (arg?: unknown) => fireClose(arg));
 
   return {
     onMessage(cb: (raw: unknown) => void): void {
@@ -136,6 +223,10 @@ function wrapSocket(ws: WsLike): QqBotSocket {
         const buffered = pending.splice(0, pending.length);
         for (const raw of buffered) cb(raw);
       }
+    },
+    onClose(cb: (error?: unknown) => void): void {
+      closeHandler = cb;
+      if (closeFired) cb(closeArg);
     },
     send(data: unknown): void {
       ws.send(JSON.stringify(data));
@@ -150,6 +241,7 @@ function buildSocket(
   injected: unknown,
   url: string,
   headers: Record<string, string>,
+  timeoutMs: number,
 ): Promise<QqBotSocket> {
   let Ctor: WsCtor;
   try {
@@ -168,19 +260,45 @@ function buildSocket(
   const socket = wrapSocket(ws);
   return new Promise<QqBotSocket>((resolve, reject) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = (): void => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
     const succeed = (): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve(socket);
     };
     const fail = (error: unknown): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(toError(error, "QQBot: WebSocket 打开失败"));
     };
 
     attach(ws, "error", (arg?: unknown) => fail(arg));
     attach(ws, "open", () => succeed());
+
+    // 连接超时：TCP/TLS 挂住或对端不回 101 时必须失败，否则 connect() 永久
+    // pending（宿主侧会一直停在「连接中」）。terminate 兜底关闭底层连接，
+    // 避免超时 reject 之后仍留着一条会自己重连/占句柄的 socket。
+    timer = setTimeout(() => {
+      timer = undefined;
+      fail(new Error(`QQBot: WebSocket 连接超时（${timeoutMs}ms）`));
+      try {
+        if (typeof ws.terminate === "function") ws.terminate();
+        else ws.close();
+      } catch {
+        // 关闭失败不影响已 reject 的结果
+      }
+    }, timeoutMs);
+    timer.unref?.();
+
     // 同步 open（构造器内即触发，或 fake 起始就是 OPEN）用 readyState 兜底。
     if (ws.readyState === 1) succeed();
   });
@@ -201,7 +319,7 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
 
   return {
     connect(url: string, headers: Record<string, string>): Promise<QqBotSocket> {
-      return buildSocket(injected, url, headers);
+      return buildSocket(injected, url, headers, timeoutMs);
     },
 
     async post(
@@ -232,20 +350,46 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
         let timer: ReturnType<typeof setTimeout> | undefined;
         let timedOut = false;
 
+        /** 响应流中途断开：与「请求超时」区分，避免把对端断开误报成超时。 */
+        let responseBroken = false;
+
         const req = send(options, (res) => {
           const chunks: Buffer[] = [];
+          const clearTimer = (): void => {
+            if (timer !== undefined) {
+              clearTimeout(timer);
+              timer = undefined;
+            }
+          };
           res.on("data", (chunk: Buffer | string) => {
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           });
+          // 响应尚未读完就断开（对端 reset / 代理中断）：必须显式失败，否则
+          // 只靠 req 的 "error" 会拿到一个语焉不详的 ECONNRESET，甚至被上层
+          // 误读成「超时」。这里给出可区分的「响应中断」文案。
+          res.on("error", (error: Error) => {
+            responseBroken = true;
+            clearTimer();
+            reject(new Error(`QQBot: 响应中断 from ${url.pathname}: ${error.message}`));
+          });
+          res.on("aborted", () => {
+            responseBroken = true;
+            clearTimer();
+            reject(new Error(`QQBot: 响应中断（连接被对端提前关闭）: ${url.pathname}`));
+          });
           res.on("end", () => {
-            if (timer !== undefined) clearTimeout(timer);
+            clearTimer();
             const status = res.statusCode ?? 0;
-            // 错误文本只带 status/path，不回显响应体（可能含 access_token）。
+            const text = Buffer.concat(chunks).toString("utf8");
             if (status < 200 || status >= 300) {
-              reject(new QqBotHttpError(status, url.pathname));
+              // token 端点绝不回显响应体（可能含 access_token / clientSecret）；
+              // 发消息端点回显业务 code/message，才能区分限流 / 白名单 / 额度。
+              const detail = isTokenEndpoint(url.pathname)
+                ? undefined
+                : describeHttpFailureBody(text);
+              reject(new QqBotHttpError(status, url.pathname, detail));
               return;
             }
-            const text = Buffer.concat(chunks).toString("utf8");
             if (text.trim() === "") {
               resolve(undefined);
               return;
@@ -262,6 +406,9 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
           if (timer !== undefined) clearTimeout(timer);
           if (timedOut) {
             reject(new Error(`QQBot: 请求超时（${timeoutMs}ms）: ${url.pathname}`));
+          } else if (responseBroken) {
+            // res 通道已经给出更准确的「响应中断」，这里不覆盖它。
+            return;
           } else {
             reject(error);
           }

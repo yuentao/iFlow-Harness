@@ -283,16 +283,30 @@ describe("鉴权与 OpenAPI 载荷构造", () => {
 class FakeSocket implements QqBotSocket {
   readonly sent: unknown[] = [];
   readonly closed = { value: false };
+  /** 为 true 时 send 抛错（模拟底层连接已死）。 */
+  failSend = false;
   private callback: ((raw: unknown) => void) | undefined;
+  private closeCallback: ((error?: unknown) => void) | undefined;
 
   onMessage(cb: (raw: unknown) => void): void {
     this.callback = cb;
   }
+  onClose(cb: (error?: unknown) => void): void {
+    this.closeCallback = cb;
+  }
   send(data: unknown): void {
+    if (this.failSend) throw new Error("socket is not open");
     this.sent.push(data);
   }
   close(): void {
+    if (this.closed.value) return;
     this.closed.value = true;
+    this.closeCallback?.();
+  }
+  /** 模拟底层异常断开（触发适配器的 onClose，而不是显式 close）。 */
+  drop(error?: unknown): void {
+    this.closed.value = true;
+    this.closeCallback?.(error);
   }
   emit(raw: unknown): void {
     this.callback?.(raw);
@@ -302,16 +316,31 @@ class FakeSocket implements QqBotSocket {
 class FakeTransport implements QqBotTransport {
   readonly posts: Array<{ endpoint: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
   readonly connects: Array<{ url: string; headers: Record<string, string> }> = [];
-  readonly socket = new FakeSocket();
+  readonly sockets: FakeSocket[] = [];
   tokenResponse: unknown = { access_token: "tok-1", expires_in: 7200 };
   /** 消息发送端点的响应体（默认成功）。 */
   sendResult: unknown = { id: "sent-1" };
   /** 非 undefined 时消息发送端点抛这个错误（模拟 transport 的非 2xx / 超时）。 */
   sendError: unknown;
+  /** token 请求等待这个 promise（并发共享 in-flight 用例）。 */
+  tokenGate: Promise<void> | undefined;
+  /** 前 N 次 token 请求抛错（失败不缓存用例）。 */
+  tokenFailures = 0;
+  /** connect 抛错（重连失败用例）。 */
+  connectError: unknown;
+  private tokenAttempts = 0;
+
+  /** 最近一次建连的 socket。 */
+  get socket(): FakeSocket {
+    return this.sockets[this.sockets.length - 1]!;
+  }
 
   async connect(url: string, headers: Record<string, string>): Promise<QqBotSocket> {
     this.connects.push({ url, headers });
-    return this.socket;
+    if (this.connectError !== undefined) throw this.connectError;
+    const socket = new FakeSocket();
+    this.sockets.push(socket);
+    return socket;
   }
   async post(
     endpoint: string,
@@ -319,7 +348,12 @@ class FakeTransport implements QqBotTransport {
     body: Record<string, unknown>,
   ): Promise<unknown> {
     this.posts.push({ endpoint, headers, body });
-    if (endpoint.includes("getAppAccessToken")) return this.tokenResponse;
+    if (endpoint.includes("getAppAccessToken")) {
+      this.tokenAttempts += 1;
+      if (this.tokenGate) await this.tokenGate;
+      if (this.tokenAttempts <= this.tokenFailures) throw new Error("token endpoint down");
+      return this.tokenResponse;
+    }
     if (this.sendError !== undefined) throw this.sendError;
     return this.sendResult;
   }
@@ -635,6 +669,329 @@ describe("QqBotAdapter — 序号记账", () => {
     await adapter.send({ ...base, text: "old-3", replyToMsgId: "m-old", dedupeKey: "k-old-2" });
     const last = transport.posts.filter((p) => p.endpoint.includes("/users/")).at(-1);
     expect(last?.body).toEqual({ content: "old-3", msg_id: "m-old", msg_seq: 1 });
+
+    await adapter.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 传输层七项修复（2026-11-17）：心跳隔离 / Resume / 空 msgId / token 并发 / 诊断
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("QqBotAdapter — 心跳异常隔离与重连", () => {
+  it("心跳 send 抛错不穿透定时器：记 lastError → 主动断开 → 退避重连 → 心跳重启", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(5));
+    // 模拟底层已死但定时器还在跑：心跳 send 抛错。
+    first.failSend = true;
+
+    await sleep(40);
+
+    expect(first.closed.value).toBe(true);
+    expect(transport.connects.length).toBeGreaterThanOrEqual(2);
+    expect(logs.join("\n")).toContain("心跳发送失败");
+
+    // 新 socket：Hello 之后心跳定时器必须已重启（不是停在死连接上）。
+    const second = transport.socket;
+    second.emit(helloFrame(5));
+    await sleep(25);
+    const heartbeats = second.sent.filter(
+      (frame) => (frame as { op: number }).op === QQBOT_OP.HEARTBEAT,
+    );
+    expect(heartbeats.length).toBeGreaterThan(0);
+
+    await adapter.close();
+  });
+
+  it("心跳 send 抛错期间 health().detail 带出脱敏后的最近错误", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 500,
+      reconnectMaxDelayMs: 500,
+    });
+
+    await adapter.connect();
+    const socket = transport.socket;
+    socket.emit(helloFrame(5));
+    socket.failSend = true;
+
+    await sleep(20);
+    const health = await adapter.health();
+    expect(health.connected).toBe(false);
+    expect(health.detail).toContain("心跳发送失败");
+    // 凭据绝不进 health。
+    expect(health.detail).not.toContain("tok-1");
+    expect(health.detail).not.toContain("secret-1");
+
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — 断线 Resume", () => {
+  it("断线后用 resume_gateway_url 重连并发 op=6（session_id + 最近 seq），READY 后清除缺口提示", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-1", resume_gateway_url: "wss://resume.example/ws" },
+        1,
+      ),
+    );
+    first.emit(dispatchFrame("C2C_MESSAGE_CREATE", { ...c2cPayload, id: "m-1" }, 9));
+
+    // 底层断开（不是用户 close）。
+    first.drop();
+    await sleep(40);
+
+    expect(transport.connects).toHaveLength(2);
+    expect(transport.connects[1]!.url).toBe("wss://resume.example/ws");
+
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    const handshake = second.sent[0] as {
+      op: number;
+      d: { token: string; session_id: string; seq: number };
+    };
+    expect(handshake.op).toBe(QQBOT_OP.RESUME);
+    expect(handshake.d).toMatchObject({
+      token: "QQBot tok-1",
+      session_id: "sess-1",
+      seq: 9,
+    });
+
+    // Resume 成功的 READY：没有丢消息提示。
+    second.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-1", resume_gateway_url: "wss://resume.example/ws" },
+        10,
+      ),
+    );
+    const health = await adapter.health();
+    expect(health.connected).toBe(true);
+    expect(health.detail).not.toContain("丢消息");
+
+    await adapter.close();
+  });
+
+  it("op=9 作废会话：下一轮重连退回 Identify，且 health 保留「可能丢消息」提示", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-dead", resume_gateway_url: "wss://resume.example/ws" },
+        3,
+      ),
+    );
+
+    first.emit({ op: QQBOT_OP.INVALID_SESSION });
+    expect((await adapter.health()).detail).toContain("会话已失效");
+
+    first.drop();
+    await sleep(40);
+
+    // 会话已作废 → 不再连 resume 地址，而是回到默认网关。
+    expect(transport.connects[1]!.url).toBe(DEFAULT_QQBOT_GATEWAY_URL);
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    expect((second.sent[0] as { op: number }).op).toBe(QQBOT_OP.IDENTIFY);
+
+    second.emit(dispatchFrame("READY", { session_id: "sess-new" }, 4));
+    const health = await adapter.health();
+    expect(health.detail).toContain("丢消息");
+
+    await adapter.close();
+  });
+
+  it("resume 地址连续不可达：重试上限后退回默认网关 Identify，不无限卡住", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 10,
+    });
+    const gatewayConnect = transport.connect.bind(transport);
+    let resumeAttempts = 0;
+    transport.connect = async (url: string, headers: Record<string, string>) => {
+      if (url.includes("resume.example")) {
+        resumeAttempts += 1;
+        throw new Error("resume gateway down");
+      }
+      return gatewayConnect(url, headers);
+    };
+
+    await adapter.connect();
+    const first = transport.socket;
+    first.emit(helloFrame(60_000));
+    first.emit(
+      dispatchFrame(
+        "READY",
+        { session_id: "sess-x", resume_gateway_url: "wss://resume.example/ws" },
+        2,
+      ),
+    );
+    first.drop();
+
+    await sleep(200);
+    expect(resumeAttempts).toBeGreaterThanOrEqual(3);
+    // 最终在默认网关新建了一条连接（初始 socket + fallback socket）。
+    expect(transport.sockets).toHaveLength(2);
+
+    const second = transport.socket;
+    second.emit(helloFrame(60_000));
+    expect((second.sent[0] as { op: number }).op).toBe(QQBOT_OP.IDENTIFY);
+    expect((await adapter.health()).detail).toContain("丢消息");
+
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — 空 msgId 丢弃", () => {
+  it("缺 msgId 的入站事件不进回调，丢弃原因可观测（日志 + health）", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const received: InboundMessage[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+    }).setEventCallback((msg) => {
+      received.push(msg);
+    });
+
+    await adapter.connect();
+    transport.socket.emit(helloFrame(60_000));
+
+    // 无 id：normalize 后 msgId 为空串，必须丢弃。
+    transport.socket.emit(
+      dispatchFrame("C2C_MESSAGE_CREATE", { author: { id: "openid-1" }, content: "hi" }, 2),
+    );
+    expect(received).toHaveLength(0);
+    expect(logs.join("\n")).toContain("missing msgId");
+    expect((await adapter.health()).detail).toContain("msgId");
+
+    // 正常消息不受影响。
+    transport.socket.emit(dispatchFrame("C2C_MESSAGE_CREATE", c2cPayload, 3));
+    expect(received).toHaveLength(1);
+
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — token 刷新并发与诊断", () => {
+  it("并发 5 次发送共享同一次 token 刷新（只发 1 次 token 请求）", async () => {
+    const transport = new FakeTransport();
+    let release!: () => void;
+    transport.tokenGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+    const sends = Array.from({ length: 5 }, (_, i) =>
+      adapter.send({ chatType: "private", chatId: "openid-1", text: `t-${i}` }),
+    );
+    await sleep(0);
+    expect(transport.tokenRequestCount()).toBe(1);
+
+    release();
+    const results = await Promise.all(sends);
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(transport.tokenRequestCount()).toBe(1);
+
+    await adapter.close();
+  });
+
+  it("token 刷新失败不缓存：下一次调用会重新请求", async () => {
+    const transport = new FakeTransport();
+    transport.tokenFailures = 1;
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+    const first = await adapter.send({ chatType: "private", chatId: "openid-1", text: "a" });
+    expect(first.ok).toBe(false);
+    expect(transport.tokenRequestCount()).toBe(1);
+
+    const second = await adapter.send({ chatType: "private", chatId: "openid-1", text: "b" });
+    expect(second.ok).toBe(true);
+    expect(transport.tokenRequestCount()).toBe(2);
+
+    await adapter.close();
+  });
+
+  it("token 端点 200 + 业务错误码：异常带 code/message，且不含 secret", async () => {
+    const transport = new FakeTransport();
+    transport.tokenResponse = { code: 10001, message: "invalid appid" };
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+    let message = "";
+    try {
+      await adapter.connect();
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toContain("10001");
+    expect(message).toContain("invalid appid");
+    expect(message).not.toContain("secret-1");
+    expect(transport.connects).toHaveLength(0);
+  });
+
+  it("send 失败写入 lastError（health.detail），成功发送后清除", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+    transport.sendError = Object.assign(new Error("boom tok-1 secret-1"), { status: 429 });
+
+    const failed = await adapter.send({ chatType: "private", chatId: "openid-1", text: "a" });
+    expect(failed.ok).toBe(false);
+
+    const healthAfterFailure = await adapter.health();
+    expect(healthAfterFailure.detail).toContain("发送失败");
+    expect(healthAfterFailure.detail).not.toContain("tok-1");
+    expect(healthAfterFailure.detail).not.toContain("secret-1");
+
+    transport.sendError = undefined;
+    await adapter.send({ chatType: "private", chatId: "openid-1", text: "b" });
+    expect((await adapter.health()).detail).not.toContain("发送失败");
 
     await adapter.close();
   });

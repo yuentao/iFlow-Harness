@@ -236,6 +236,40 @@ export function parseAccessTokenResponse(raw: unknown): QqBotAccessToken | null 
 }
 
 /**
+ * 换 token 的失败诊断：平台在 HTTP 200 里回 `{code, message}` 而不是
+ * `{access_token}` 时，旧实现只报「未返回 access_token」，AppID 非法 /
+ * secret 过期 / 频控这些真实原因全部丢失。这里只读**诊断字段**
+ * （code / errcode / retcode + message / msg / errmsg / error），
+ * 绝不读取 access_token / clientSecret 一类凭据字段。
+ *
+ * 返回 undefined 表示响应体里没有任何可用诊断（调用方仍报通用错误）。
+ */
+export function describeAccessTokenFailure(raw: unknown): string | undefined {
+  if (!isRecord(raw)) return undefined;
+  let code: number | undefined;
+  for (const key of ["code", "errcode", "retcode"] as const) {
+    const value = toFiniteNumber(raw[key]);
+    // 0 是成功码；走到这里通常已经缺 access_token，没必要把它当诊断。
+    if (value !== undefined && value !== 0) {
+      code = value;
+      break;
+    }
+  }
+  let message = "";
+  for (const key of ["message", "msg", "errmsg", "error"] as const) {
+    const value = raw[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      message = value.trim();
+      break;
+    }
+  }
+  if (code === undefined && message === "") return undefined;
+  if (code !== undefined && message !== "") return `code ${code}: ${message}`;
+  if (code !== undefined) return `code ${code}`;
+  return message;
+}
+
+/**
  * 单聊发送：`POST /v2/users/{openid}/messages`。
  *
  * `msg_id` 用于被动回复；`msg_seq` 是**同一 msg_id 的回复序号** —— QQ 用

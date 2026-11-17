@@ -22,6 +22,7 @@ class FakeWebSocket {
   readonly headers: Record<string, string>;
   readonly sent: string[] = [];
   closed = false;
+  terminated = false;
   readyState = 0;
   private readonly listeners = new Map<string, Array<(arg?: unknown) => void>>();
 
@@ -54,6 +55,12 @@ class FakeWebSocket {
     this.closed = true;
     this.readyState = 3;
     this.emit("close");
+  }
+
+  terminate(): void {
+    this.terminated = true;
+    this.closed = true;
+    this.readyState = 3;
   }
 
   static reset(): void {
@@ -184,6 +191,18 @@ describe("createNodeQqBotTransport.connect", () => {
       transport.connect("wss://api.sgroup.qq.com/websocket", {}),
     ).rejects.toThrow(/构造器不可用/);
   });
+
+  it("底层 socket 不 open 时按 timeoutMs reject，并 terminate 掉活 socket", async () => {
+    FakeWebSocket.reset();
+    const transport = createNodeQqBotTransport({ WebSocketImpl: FakeWebSocket, timeoutMs: 40 });
+    const pending = transport.connect("wss://api.sgroup.qq.com/websocket", {});
+    const ws = FakeWebSocket.instances[0];
+    if (!ws) throw new Error("fake WebSocket 未被构造");
+
+    // 不调用 ws.open()：模拟 TCP/TLS 挂住或对端不回 101。
+    await expect(pending).rejects.toThrow(/连接超时/);
+    expect(ws.terminated || ws.closed).toBe(true);
+  });
 });
 
 describe("createNodeQqBotTransport.post", () => {
@@ -251,5 +270,79 @@ describe("createNodeQqBotTransport.post", () => {
   it("非 http(s) 协议直接 reject", async () => {
     const transport = createNodeQqBotTransport();
     await expect(transport.post("ftp://example.com/x", {}, {})).rejects.toThrow(/不支持的协议/);
+  });
+
+  it("发消息端点 4xx：错误带业务 code/message（区分限流/白名单/额度）", async () => {
+    const { baseUrl } = await startPostServer(() => ({
+      status: 403,
+      body: JSON.stringify({ code: 40054, message: "主动消息额度已用尽" }),
+    }));
+    const transport = createNodeQqBotTransport();
+    let error: unknown;
+    try {
+      await transport.post(`${baseUrl}/v2/users/openid-1/messages`, {}, {});
+    } catch (caught) {
+      error = caught;
+    }
+    expect(String(error)).toContain("HTTP 403");
+    expect(String(error)).toContain("40054");
+    expect(String(error)).toContain("主动消息额度已用尽");
+    expect(error).toMatchObject({ status: 403, code: 40054 });
+  });
+
+  it("token 端点 4xx：绝不回显响应体（可能含 access_token / clientSecret）", async () => {
+    const { baseUrl } = await startPostServer(() => ({
+      status: 400,
+      body: JSON.stringify({
+        code: 10001,
+        message: "bad clientSecret=TOP_SECRET_777",
+        access_token: "LEAKED_TOKEN_888",
+      }),
+    }));
+    const transport = createNodeQqBotTransport();
+    let error: unknown;
+    try {
+      await transport.post(`${baseUrl}/app/getAppAccessToken`, {}, {});
+    } catch (caught) {
+      error = caught;
+    }
+    expect(String(error)).toContain("HTTP 400");
+    expect(String(error)).not.toContain("TOP_SECRET_777");
+    expect(String(error)).not.toContain("LEAKED_TOKEN_888");
+    // 连业务 code/message 都不带：token 端点的 message 也可能是凭据回显。
+    expect(String(error)).not.toContain("10001");
+  });
+
+  it("响应中途断开报「响应中断」，不会被误报成请求超时", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"partial":');
+      // 响应尚未发完就掐断连接（代理/对端 reset 的典型形态）。
+      setTimeout(() => res.destroy(), 5);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.once("listening", () => resolve());
+      server.listen(0, "127.0.0.1");
+    });
+    servers.push(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+
+    // 超时远大于断开时间：若把中断误报成超时，说明定时器/错误通道搞反了。
+    const transport = createNodeQqBotTransport({ timeoutMs: 5_000 });
+    let error: unknown;
+    try {
+      await transport.post(
+        `http://127.0.0.1:${(address as AddressInfo).port}/partial`,
+        {},
+        {},
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeDefined();
+    expect(String(error)).not.toMatch(/请求超时/);
+    expect(String(error)).toMatch(/响应中断|aborted|ECONNRESET|socket hang up/i);
   });
 });

@@ -760,17 +760,22 @@ export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): strin
 }
 
 /**
- * 按行 / 代码围栏边界切分纯文本，保证每片长度不超过 `maxChars`。
+ * 按行 / 代码围栏边界切分纯文本，保证每片**码点数**不超过 `maxChars`。
  *
+ * - 单位是 Unicode 码点（`Array.from` 视图），不是 UTF-16 码元：emoji /
+ *   生僻字占两个码元，但硬切时只按整码点推进，**绝不会把代理对劈成孤立的
+ *   半个**（旧实现 `slice(0, take)` 会切出孤立高低代理，QQ 侧收到后是乱码
+ *   或直接拒收）。
  * - 空输入返回 `[]`（没有内容就没有消息）。
  * - 切点落在围栏内部时，当前片尾部补 ` ``` `，下一片头部补 ` ``` ` ——
  *   每片独立可读，不会出现「半个代码块」。
- * - 单行超过预算时按字符硬切（否则「不超长」无法保证）。
+ * - 单行超过预算时按码点硬切（否则「不超长」无法保证）。
  * - `maxChars` 必须为正数，否则抛 `RangeError`（这是编程错误，不是数据问题）。
  *
- * 围栏补齐的开销（最多 8 字符：`\n``` ` 前后各一段）从预算里预留；因此
- * `maxChars` 小于 8 且文本含围栏时，分片可能略微超长 —— 这是刻意的退化，
- * 调用方（QQ 单条消息上限通常 > 1000）不会走到这里。
+ * 与既有上限的兼容：`maxPromptChars`（提示词上限 4000）本来就按码点计
+ * （`Array.from`），分片预算（`chunkChars`，最高 12000）现在同口径；围栏补齐
+ * 开销（最多 `\n``` ` 前后各一段 = 8 个码点）仍从预算里预留，因此预算小于 8
+ * 且文本含围栏时可能略微超长 —— 这是刻意的退化，实际调用方预算远大于此。
  */
 export function chunkQqText(text: string, maxChars: number): string[] {
   if (text.length === 0) return [];
@@ -781,6 +786,7 @@ export function chunkQqText(text: string, maxChars: number): string[] {
   const lines = text.split("\n");
   const chunks: string[] = [];
   let lineIndex = 0;
+  /** 当前行已消费的**码点数**（不是码元数）。 */
   let lineOffset = 0;
   /** 上一片结束时围栏是否仍然打开（打开则下一片以 ``` 开头）。 */
   let fenceOpen: boolean = false;
@@ -794,15 +800,18 @@ export function chunkQqText(text: string, maxChars: number): string[] {
 
     while (lineIndex < lines.length) {
       const full = lines[lineIndex]!;
-      const piece = lineOffset === 0 ? full : full.slice(lineOffset);
+      // 码点视图：切片单位是码点，代理对永远成对出现。
+      const points = Array.from(full);
+      const piecePoints = lineOffset === 0 ? points : points.slice(lineOffset);
+      const piece = piecePoints.join("");
       const fenceLine = lineOffset === 0 && piece.trimStart().startsWith("```");
       const nextOpen: boolean = fenceLine ? !open : open;
       const separator = parts.length === 0 ? 0 : 1;
       const room = limit - joinedLen - separator - (nextOpen ? 4 : 0);
 
-      if (piece.length <= room) {
+      if (piecePoints.length <= room) {
         parts.push(piece);
-        joinedLen += separator + piece.length;
+        joinedLen += separator + piecePoints.length;
         open = nextOpen;
         hasContent = true;
         lineIndex++;
@@ -812,14 +821,14 @@ export function chunkQqText(text: string, maxChars: number): string[] {
       if (hasContent) break; // 当前片装不下这一行，先发出去
 
       // 还没有内容行：硬切当前行（超长单行 / 预算极小的退化情形）。
-      // 至少推进 1 个字符，避免死循环；此时可能略超预算（见函数注释）。
+      // 至少推进 1 个码点，避免死循环；此时可能略超预算（见函数注释）。
       const take = Math.max(1, room);
-      const cut = piece.slice(0, take);
-      parts.push(cut);
-      joinedLen += separator + cut.length;
+      const cutPoints = piecePoints.slice(0, take);
+      parts.push(cutPoints.join(""));
+      joinedLen += separator + cutPoints.length;
       open = nextOpen;
       hasContent = true;
-      if (take >= piece.length) {
+      if (take >= piecePoints.length) {
         lineIndex++;
         lineOffset = 0;
       } else {
