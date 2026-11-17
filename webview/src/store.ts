@@ -2628,6 +2628,17 @@ interface ChatStore {
   qqStatus: { connected: boolean; detail?: string } | null;
   /** 当前配对码与其绝对过期时间（epoch ms）；null = 没有生效中的配对码。 */
   qqBindCode: { code: string; expiresAt: number } | null;
+  /**
+   * 一键托管（Wave5-D）：扫码登录二维码回执。独立于 `state`，
+   * `snapshot` / `blockPatch` 绝不覆盖；`dataUrl` 经 `isQrDataUrl` 护栏后才
+   * 能由 QqSettings 送进 `<img src>`。null = 当前没有二维码。
+   */
+  qqLoginQr: Extract<HostToWebview, { type: "qqLoginQr" }> | null;
+  /**
+   * 一键托管（Wave5-D）：go-cqhttp 下载/配置/启动/登录各阶段的进度回执。
+   * 同样独立于 `state`，不被快照覆盖。null = 尚未开始托管。
+   */
+  qqManagedStatus: Extract<HostToWebview, { type: "qqManagedStatus" }> | null;
   /** Latest editor theme from the host; null until the first `theme` message. */
   editorTheme: "light" | "dark" | null;
   /**
@@ -2702,6 +2713,8 @@ export const useChat = create<ChatStore>((set, get) => ({
   qqSettings: pickQqSettingsUi({}, { hasBotToken: false, hasAppSecret: false }),
   qqStatus: null,
   qqBindCode: null,
+  qqLoginQr: null,
+  qqManagedStatus: null,
   superTranscripts: {},
   editorTheme: null,
   hostSettings: { ...DEFAULT_HOST_SETTINGS },
@@ -2824,6 +2837,16 @@ export const useChat = create<ChatStore>((set, get) => ({
     }
     if (msg.type === "qqBindCode") {
       set({ qqBindCode: { code: msg.code, expiresAt: msg.expiresAt } });
+      return;
+    }
+    if (msg.type === "qqLoginQr") {
+      // 一键托管的二维码回执走独立通道，快照不覆盖。dataUrl 的合法性由
+      // QqSettings 在送进 <img> 前用 isQrDataUrl 自检（防御恶意 host 消息）。
+      set({ qqLoginQr: msg });
+      return;
+    }
+    if (msg.type === "qqManagedStatus") {
+      set({ qqManagedStatus: msg });
       return;
     }
     if (msg.type === "hostSettings") {
