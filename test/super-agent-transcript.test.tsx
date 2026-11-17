@@ -708,7 +708,10 @@ describe("内置 super-agent 工具调用卡片", () => {
     expect(card!.textContent).toContain("super-a1");
     expect(card!.textContent).toContain("保留分支");
     expect(card!.textContent).toContain("2 个回答");
-    expect(card!.textContent).toContain("已完成");
+    // 工具帧 completed 只表示内核回了 ack，不代表动作真的生效。宿主还没
+    // 回填 superActionResult 时显示中性的「已执行」，不再挂绿色「已完成」；
+    // 真实成功/失败由回填后的结果 chip 与摘要呈现。
+    expect(card!.textContent).toContain("已执行");
     expect(card!.textContent).not.toContain("执行参数");
     expect(card!.querySelectorAll("li")).toHaveLength(4);
     // 委派卡没有接管这条工具帧；管理动作也不是「委派产生子会话」，不挂飞入起点。

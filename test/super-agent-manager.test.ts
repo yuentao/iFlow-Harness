@@ -734,6 +734,30 @@ describe("super agent · 编排", () => {
     expect(missing).toEqual({ ok: false, reason: "not-found" });
   }, 30000);
 
+  it("中断已归档的历史子会话：按幂等已终态回报，不误报 not-found", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    harness.manager.restoreSessions("main-1", [
+      {
+        id: "super-archived",
+        title: "上次运行的活",
+        task: "干活",
+        status: "cancelled",
+        restored: true,
+        isolation: { kind: "git_worktree", path: "/tmp/wt-old", branch: "iflow/super/old" },
+        mainSessionId: "main-1",
+        createdAt: 100,
+        updatedAt: 200,
+        reports: [],
+      },
+    ]);
+    // 归档记录进程早已退出：中断意图天然达成，不该报成「找不到」让用户
+    // 以为主会话又抄错了一个 id。
+    const outcome = await harness.manager.cancel("super-archived");
+    expect(outcome.ok).toBe(true);
+    expect(outcome.reason).toBe("already-terminal");
+  }, 30000);
+
   it("并发超出的派发进排队，槽位空出后自动开跑", async () => {
     const repo = makeRepo();
     const limit = 2;

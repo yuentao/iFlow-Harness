@@ -2924,6 +2924,20 @@ const SUPER_BOARD_LABEL_EN = "[child-session board]";
  * 首轮还没有任何子会话，若这里返回空串，主会话就会被误判成子会话而自己
  * 动手干活 —— 委派根本没机会发生，模型还「看起来一切正常」。
  */
+/**
+ * 活跃子会话的精简行：字符预算吃紧时保留 id + 状态 + 短标题，丢掉 summary /
+ * 分支 / 集成细节。`buildSuperDigest` 用它保证活跃 id 即使在上百个子会话的
+ * 看板里也不会被 `… (N omitted)` 折叠 —— 主 Agent 从摘要里抄 id 去执行
+ * cancel / answer，抄错 id 是实测故障（58 会话现场：活跃 id 恰好在尾部，
+ * 被从尾部截断的旧实现折叠，于是 cancel 报 not-found）。
+ */
+function describeSuperSessionCompactLine(session: SuperSessionUi): string {
+  const title = session.title.replace(/\s+/g, " ").trim();
+  const shortTitle = title.length > 24 ? `${title.slice(0, 23)}…` : title;
+  const suffix = `${session.queued && session.status === "preparing" ? " (queued)" : ""}${(session.attempts ?? 1) > 1 ? ` (attempt ${session.attempts})` : ""}`;
+  return `- ${session.id} "${shortTitle}" ${SUPER_STATUS_LABEL[session.status]}${suffix}`;
+}
+
 export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
   if (sessions.length === 0) {
     return (
@@ -2936,7 +2950,6 @@ export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
     `${SUPER_BOARD_MARKER} ${SUPER_BOARD_LABEL_EN} (host-injected live status, not a user message. ${counts.total} child session(s) in total: ` +
     `${counts.running} running, ${counts.awaiting} awaiting you, ${counts.done} completed, ` +
     `${counts.failed} failed, ${counts.cancelled} interrupted)`;
-  const lines = sessions.map((session) => describeSuperSessionLine(session));
   const omittedNote = (count: number): string => `… (${count} more child session(s) omitted for budget — confirm with the user before acting on them)`;
   const render = (kept: readonly string[], omitted: number): string =>
     [
@@ -2944,12 +2957,45 @@ export function buildSuperDigest(sessions: readonly SuperSessionUi[]): string {
       ...kept,
       ...(omitted > 0 ? [omittedNote(omitted)] : []),
     ].join("\n") + SUPER_DIGEST_FOOTER;
+  const fits = (kept: readonly string[], omitted: number): boolean =>
+    render(kept, omitted).length <= SUPER_DIGEST_MAX_CHARS;
 
-  let kept = lines;
-  while (kept.length > 1 && render(kept, lines.length - kept.length).length > SUPER_DIGEST_MAX_CHARS) {
-    kept = kept.slice(0, -1);
+  // 活跃会话（preparing / running / awaiting_input）优先：它们才是主 Agent
+  // 此刻要管理（中断 / 回答）的目标。先尝试全量详情；放不下就整组降级成
+  // 精简行（保住 id），再不够才从尾部丢并如实计入 omitted。非活跃的历史
+  // 会话排在后面，预算不足时先折叠它们。
+  const active = sessions.filter((session) => !isTerminalSuperStatus(session.status));
+  const inactive = sessions.filter((session) => isTerminalSuperStatus(session.status));
+  let activeLines = active.map((session) => describeSuperSessionLine(session));
+  if (!fits(activeLines, inactive.length)) {
+    activeLines = active.map((session) => describeSuperSessionCompactLine(session));
   }
-  return render(kept, lines.length - kept.length);
+  let activeOmitted = 0;
+  while (
+    activeLines.length - activeOmitted > 0 &&
+    !fits(
+      activeLines.slice(0, activeLines.length - activeOmitted),
+      inactive.length + activeOmitted,
+    )
+  ) {
+    activeOmitted += 1;
+  }
+  const kept = activeLines.slice(0, activeLines.length - activeOmitted);
+  const inactiveLines = inactive.map((session) => describeSuperSessionLine(session));
+  let inactiveKept = 0;
+  while (
+    inactiveKept < inactiveLines.length &&
+    fits(
+      [...kept, ...inactiveLines.slice(0, inactiveKept + 1)],
+      activeOmitted + (inactiveLines.length - inactiveKept - 1),
+    )
+  ) {
+    inactiveKept += 1;
+  }
+  return render(
+    [...kept, ...inactiveLines.slice(0, inactiveKept)],
+    activeOmitted + (inactiveLines.length - inactiveKept),
+  );
 }
 
 // ---------------------------------------------------------------------------

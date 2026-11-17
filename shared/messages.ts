@@ -18,7 +18,7 @@ import type {
   McpPromptView,
 } from "../src/acp/protocol.js";
 import type { ApprovalRule } from "./approval-policy.js";
-import type { SuperSessionUi } from "./super-agent.js";
+import type { SuperActionReceipt, SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
 // protocol types they need.
@@ -186,6 +186,17 @@ export interface ToolBlock extends BlockBase {
    * transcripts, and finally to the honest "unparseable" notice.
    */
   superTasks?: SuperDelegatedTaskUi[] | null;
+  /**
+   * 宿主执行 `super-agent` **管理动作**后的真实结果（每条动作一份 ok/reason）。
+   *
+   * 为什么需要它：`block.status === "completed"` 只表示工具帧返回了（内核对
+   * super-agent 工具只回一句 ack），不表示动作真的生效 —— cancel 抄错 id 报
+   * not-found 时工具帧同样是 completed。动作卡必须以本字段为准显示：全 ok
+   * 才是「已完成」，not-found / 失败显示警告色并给出原因摘要。宿主在
+   * `runSuperActions` 收尾时按 toolCallId 回填；null/absent = 还没回填（流式中
+   * 或旧转录），卡片不得因此谎报「已完成」。
+   */
+  superActionResult?: SuperActionReceipt[] | null;
   /**
    * P-1 follow-up: present when `output` exceeded the host STORE cap
    * (`MAX_TOOL_OUTPUT_STORE_CHARS`, 512K, shared/session-state.ts) and was

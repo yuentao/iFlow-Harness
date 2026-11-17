@@ -385,6 +385,9 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
       // therefore the task list) arrive with the in_progress frame only — a
       // later frame without args must not wipe the card's task list.
       superTasks: patch.superTasks ?? block.superTasks,
+      // 动作结果由宿主在 runSuperActions 收尾时按 toolCallId 回填，wire 帧
+      // 永远不带它 —— 后续 completed 帧不能用 undefined 把真实结果擦掉。
+      superActionResult: patch.superActionResult ?? block.superActionResult,
       reverted: patch.diff ? false : block.reverted,
       // P0-2: per-hunk decisions anchor to the diff text they were derived
       // from — a new diff invalidates them exactly like the revert marker.
@@ -1222,6 +1225,38 @@ export function attachSynthesizedDiff(state: SessionState, toolCallId: string, d
         // Nested entries mutate in place; the SubAgent card rides the patch.
         return i;
       }
+    }
+  }
+  return null;
+}
+
+/**
+ * 把宿主执行 `super-agent` 管理动作后的真实结果回填到对应工具块。
+ *
+ * 日志/回执之外的第三处落点：动作卡据此把「工具帧 completed」的绿色已完成
+ * 换成真实结果（全 ok 才完成，not-found/失败给警告色与原因）。按 toolCallId
+ * 查找，兼容嵌在 SubAgent 卡里的工具块；返回顶层变更索引供 P-1 blockPatch。
+ * 重复回填（同一工具帧重放）直接覆盖，结果以最后一次宿主执行为准。
+ */
+export function attachSuperActionResult(
+  state: SessionState,
+  toolCallId: string,
+  result: NonNullable<ToolBlock["superActionResult"]>,
+): number | null {
+  for (let i = state.blocks.length - 1; i >= 0; i--) {
+    const block = state.blocks[i]!;
+    if (block.kind === "tool") {
+      if (block.toolCallId !== toolCallId) continue;
+      block.superActionResult = result;
+      return i;
+    }
+    if (block.kind !== "subagent") continue;
+    const nested = block.entries.find(
+      (e): e is ToolBlock => e.kind === "tool" && e.toolCallId === toolCallId,
+    );
+    if (nested) {
+      nested.superActionResult = result;
+      return i;
     }
   }
   return null;

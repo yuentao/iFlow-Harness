@@ -41,6 +41,7 @@ import {
 import { t } from "../i18n";
 import {
   splitSuperDirectiveSegments,
+  type SuperActionReceipt,
   type SuperDirectiveAction,
   type SuperDirectiveDisplay,
   type SuperDirectiveRawReason,
@@ -589,6 +590,113 @@ function SuperToolStatusChip({ status }: { status: ToolBlock["status"] }) {
   );
 }
 
+/** 动作结果 reason → 人话短摘要（嵌在动作卡里，用户一眼看出为什么没生效）。 */
+const ACTION_RESULT_REASON: Record<SuperActionReceipt["reason"], string> = {
+  applied: "已生效",
+  "already-terminal": "此前已结束，无需中断",
+  "not-found": "找不到该子会话（可能已被清理或 id 有误）",
+  "not-applicable": "当前状态不适用",
+};
+
+/**
+ * 管理动作卡的状态 chip：以宿主回填的真实结果为准。
+ *
+ * 旧实现直接复用「工具帧状态」，工具一旦返回就把动作卡染成绿色「已完成」——
+ * 但内核对 super-agent 工具只回一句 ack，cancel 抄错 id 报 not-found 时工具帧
+ * 同样是 completed，用户看到的是假成功。这里优先读 `result`：全 ok 才完成，
+ * 有任何未生效按 not-found / 其它失败分别给 danger / warning 色；没有结果
+ * （还在流式、旧转录、围栏路径）时给中性的「已执行」，绝不挂绿色完成态。
+ */
+function SuperActionStatusChip({
+  status,
+  result,
+}: {
+  status: ToolBlock["status"];
+  result: SuperActionReceipt[] | null | undefined;
+}) {
+  if (result && result.length > 0) {
+    const failed = result.filter((receipt) => !receipt.ok);
+    if (failed.length === 0) {
+      return (
+        <Chip tone="success" className="chip-in">
+          <Check className={ICON_INLINE} aria-hidden="true" /> {t("已完成")}
+        </Chip>
+      );
+    }
+    const notFound = failed.some((receipt) => receipt.reason === "not-found");
+    return (
+      <Chip tone={notFound ? "danger" : "warning"} className="chip-in">
+        <X className={ICON_INLINE} aria-hidden="true" />
+        {notFound ? t("未找到目标") : t("部分未生效")}
+      </Chip>
+    );
+  }
+  if (status === "completed") {
+    return (
+      <Chip tone="muted" className="chip-in">
+        <CircleDot className={ICON_INLINE} aria-hidden="true" /> {t("已执行")}
+      </Chip>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Chip tone="danger" className="chip-in">
+        <X className={ICON_INLINE} aria-hidden="true" /> {t("失败")}
+      </Chip>
+    );
+  }
+  if (status === "pending") {
+    return (
+      <Chip tone="muted" className="chip-in">
+        <CircleDot className={ICON_INLINE} aria-hidden="true" /> {t("等待执行")}
+      </Chip>
+    );
+  }
+  return (
+    <Chip tone="primary" className="chip-in">
+      <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" /> {t("执行中")}
+    </Chip>
+  );
+}
+
+/** 每条动作的真实结果摘要（成功 / 未生效 + 原因），跟在动作行下方。 */
+function ActionResultNotice({ results }: { results: SuperActionReceipt[] }) {
+  const failed = results.filter((receipt) => !receipt.ok);
+  if (failed.length === 0) {
+    return (
+      <div
+        data-testid="super-action-result-ok"
+        className="flex items-center gap-2 border-t border-primary/20 px-3 py-2 text-ui-caption text-success"
+      >
+        <Check className={ICON_INLINE} aria-hidden="true" />
+        <span>{t("动作已全部生效")}</span>
+      </div>
+    );
+  }
+  const notFound = failed.some((receipt) => receipt.reason === "not-found");
+  const reasons = failed
+    .map((receipt) => `${receipt.sessionId}: ${t(ACTION_RESULT_REASON[receipt.reason])}`)
+    .join("；");
+  return (
+    <div
+      data-testid="super-action-result-failed"
+      className={`flex items-start gap-2 border-t px-3 py-2 text-ui-caption leading-relaxed ${
+        notFound
+          ? "border-destructive/30 bg-destructive/10 text-destructive"
+          : "border-warning/40 bg-warning/10 text-warning"
+      }`}
+    >
+      <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
+      <span className="min-w-0 break-words">
+        {notFound
+          ? t("有 {0} 个动作未生效（目标不存在或 id 有误）", failed.length)
+          : t("有 {0} 个动作未生效", failed.length)}
+        ：{reasons}
+      </span>
+    </div>
+  );
+}
+
 /** 单条任务书：标题 + 序号 + 附件数 + 可展开的正文摘要。 */
 function SuperToolTaskRow({
   task,
@@ -773,7 +881,9 @@ export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
     >
       <DirectiveHeader
         icon={<ListChecks className={ICON_INLINE} />}
-        aside={<SuperToolStatusChip status={block.status} />}
+        aside={
+          <SuperActionStatusChip status={block.status} result={block.superActionResult} />
+        }
       >
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-ui-label font-medium text-foreground/90">
@@ -807,6 +917,9 @@ export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
             </pre>
           )}
         </div>
+      )}
+      {block.superActionResult && block.superActionResult.length > 0 && (
+        <ActionResultNotice results={block.superActionResult} />
       )}
     </DirectiveSurface>
   );
