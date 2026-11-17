@@ -235,6 +235,7 @@ import {
 import type { InboundMessage } from "../qq/adapter/types.js";
 import {
   buildClearedQrMessage,
+  buildConfirmedQrMessage,
   createQqBotBindRuntime,
   createQqChannelDispatch,
   deliverViaQqBotAdapter,
@@ -9031,9 +9032,17 @@ export class ChatPanel implements vscode.Disposable {
       const io = this.qqIo();
       await storeQqBotCredentials(io, creds);
       this.stopQqBotBinding();
+      // 成功即清掉 webview 里的二维码旧帧。`qqLoginQr` 是独立于快照的通道，
+      // 宿主不覆盖的话，上一帧 waiting_scan 会连同倒计时一直挂着（用户实测：
+      // 底部已显示「已连接 QQBot 官方网关」，中间仍是大二维码 +「剩余 40s」）。
+      // 空 dataUrl 过不了 isQrDataUrl，因此 webview 侧也不会把它送进 <img>。
+      this.postToWebview(buildConfirmedQrMessage());
       if (this.qq) await this.stopQq();
       await this.startQqBotChannel(config, io, this.qqGeneration);
       this.postManagedStatus({ phase: "logged_in", message: "QQBot 绑定成功，官方网关已连接" });
+      // 连接状态显式再推一次：startQqBotChannel 成功路径已推过，这里保证即便
+      // 该路径因代际变化提前返回、只要本面板仍持有通道，webview 也拿到已连接。
+      if (this.qq) this.pushQqStatus(true, "QQBot 官方网关已连接");
       await this.pushQqSettings();
     } catch (error) {
       this.stopQqBotBinding();
@@ -9564,7 +9573,13 @@ export class ChatPanel implements vscode.Disposable {
     live.autoMerge = config.autoMerge;
   }
 
-  /** 面板打开 / webview 重连 / 设置变更后的一次性全量推送。 */
+  /**
+   * 面板打开 / webview 重连 / 设置变更后的一次性全量推送。
+   *
+   * 二维码（`qqLoginQr`）是独立的一次性通道，**刻意不在这里补推**：宿主
+   * 从不缓存二维码帧，补推只会把已经清屏的旧码重新塞回 webview。扫码状态
+   * 由 `startQqBotBind` / `onQqBotBound` 主动推送。
+   */
   private pushQqState(): void {
     this.refreshQqTasks();
   }
