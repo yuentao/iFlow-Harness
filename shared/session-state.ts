@@ -38,7 +38,8 @@ import {
   type ToolDiffUi,
   type UsageBreakdownUi,
 } from "./messages.js";
-import { classifySuperToolName, parseSuperDelegationTasks } from "./super-tool-call.js";
+import { classifySuperToolName, resolveSuperToolCallKind } from "./super-tool-call.js";
+import { parseSuperDelegationPayload } from "./super-agent.js";
 
 // --- merging helpers -------------------------------------------------------
 
@@ -244,23 +245,46 @@ export function formatToolInput(args: unknown): string | null {
  * parse runs ONLY for dispatch-class tool names; every other tool frame
  * skips it entirely.
  *
- * @returns the parsed tasks, or undefined when this is not a dispatch call or
- * the payload is unusable (never fabricate).
+ * @returns the parsed tasks and/or a diagnostic; undefined when this is not a
+ * dispatch call, carries no payload yet, or is really an actions payload
+ * (never fabricate tasks, never mislabel an actions call as malformed).
  */
-function superTasksForTool(
+interface SuperTaskParse {
+  /** Parsed tasks; absent when the payload is unusable (never fabricated). */
+  tasks?: SuperDelegatedTaskUi[];
+  /** Human-readable diagnostic for malformed payloads / dropped entries. */
+  error?: string;
+}
+
+function superTaskParseForTool(
   toolName: string | undefined,
   args: unknown,
-): SuperDelegatedTaskUi[] | undefined {
+): SuperTaskParse | undefined {
   if (classifySuperToolName(toolName ?? "") !== "dispatch") return undefined;
-  const tasks = parseSuperDelegationTasks(args);
-  if (!tasks || tasks.length === 0) return undefined;
-  return tasks.map((task) => ({
+  // Wire evidence: args ride only the in_progress frame; a pending frame has
+  // none. Treating "no payload yet" as a format error would stick a bogus
+  // diagnostic on the card forever (the merge rule keeps the first non-null
+  // error). Honest answer: nothing to parse yet.
+  if (args === undefined || args === null) return undefined;
+  // The `super-agent` tool schema also accepts `actions`; a pure actions
+  // payload goes through the actions lane and is NOT a malformed delegation.
+  if (resolveSuperToolCallKind("dispatch", args) === "actions") return undefined;
+  const parsed = parseSuperDelegationPayload(args);
+  if (!parsed.ok) return { error: parsed.reason };
+  const tasks: SuperDelegatedTaskUi[] = parsed.tasks.map((task) => ({
     title: task.title,
     task: task.task,
     // Count only: attachment bodies (file contents / inlined base64 images)
     // must never enter the snapshot (pitfall #27 discipline).
     attachmentCount: (task.attachments ?? []).length,
   }));
+  if (parsed.issues.length === 0) return { tasks };
+  // Mixed payload: keep the valid tasks, but say which entries were dropped —
+  // silently losing half the delegation is exactly the failure to avoid.
+  return {
+    tasks,
+    error: `已忽略 ${parsed.issues.length} 个格式错误的任务条目（${parsed.issues[0]}）`,
+  };
 }
 
 /**
@@ -385,6 +409,9 @@ function upsertToolBlock(blocks: Block[], patch: ToolBlock): number {
       // therefore the task list) arrive with the in_progress frame only — a
       // later frame without args must not wipe the card's task list.
       superTasks: patch.superTasks ?? block.superTasks,
+      // 同上：解析诊断只在带 args 的帧里产生，后续 completed 帧不能用
+      // undefined 把它擦掉（否则用户刚好在卡片上看到原因后又消失）。
+      superTasksError: patch.superTasksError ?? block.superTasksError,
       // 动作结果由宿主在 runSuperActions 收尾时按 toolCallId 回填，wire 帧
       // 永远不带它 —— 后续 completed 帧不能用 undefined 把真实结果擦掉。
       superActionResult: patch.superActionResult ?? block.superActionResult,
@@ -804,10 +831,11 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
       // ignored. During `session/load` replay (M4) user turns arrive through
       // this notification and must be rendered.
       return update.content.type === "text" ? appendTextToLast(blocks, "user", update.content.text) ?? null : null;
-    case "tool_call":
+    case "tool_call": {
       // Todo tools render ONLY as the unified TaskList card (see
       // isTodoToolName) — never as a generic tool card.
       if (isTodoToolName(update.toolName)) return null;
+      const delegation = superTaskParseForTool(update.toolName, update.args);
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -817,12 +845,15 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: "",
         input: formatToolInput(update.args),
-        superTasks: superTasksForTool(update.toolName, update.args),
+        ...(delegation?.tasks ? { superTasks: delegation.tasks } : {}),
+        ...(delegation?.error ? { superTasksError: delegation.error } : {}),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
-    case "tool_call_update":
+    }
+    case "tool_call_update": {
       if (isTodoToolName(update.toolName)) return null;
+      const delegation = superTaskParseForTool(update.toolName, update.args);
       return upsertToolBlock(blocks, {
         kind: "tool",
         toolCallId: update.toolCallId,
@@ -832,10 +863,12 @@ function applyUpdateToBlocks(blocks: Block[], update: SessionUpdate): number | n
         status: update.status ?? "pending",
         output: extractTextOutput(update.content),
         input: formatToolInput(update.args),
-        superTasks: superTasksForTool(update.toolName, update.args),
+        ...(delegation?.tasks ? { superTasks: delegation.tasks } : {}),
+        ...(delegation?.error ? { superTasksError: delegation.error } : {}),
         locations: update.locations ?? [],
         diff: extractDiff(update.content),
       });
+    }
     case "plan": {
       const entries = update.entries.map((e) => ({
         content: e.content,

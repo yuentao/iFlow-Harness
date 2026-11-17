@@ -22,8 +22,7 @@
 import {
   extractSuperActions,
   extractSuperDirectives,
-  parseJsonLoose,
-  parseSuperTaskValue,
+  parseSuperDelegationPayload,
   type SuperAction,
   type SuperTaskSpec,
 } from "./super-agent.js";
@@ -149,12 +148,21 @@ export interface SuperToolCallPayload {
   tasks: SuperTaskSpec[][];
   /** actions：解析出的动作，按输出顺序（dispatch 时为空）。 */
   actions: SuperAction[];
+  /**
+   * 字段级诊断：混合载荷里被丢弃的畸形条目（如 `tasks[1] 必须是对象`）。
+   *
+   * 空数组 = 载荷完全合法；非空时宿主仍派发 `tasks` 里的合法项，并补一条
+   * warning，绝不静默丢掉一半。
+   */
+  issues: string[];
 }
 
 /** 解析失败：`reason` 直接进日志（英文短语），宿主据此留痕。 */
 export interface SuperToolCallFailure {
   ok: false;
   reason: string;
+  /** 字段级诊断（如 `tasks[0].task 必须是字符串`），供宿主 toast 给出具体原因。 */
+  issues: string[];
 }
 
 export type SuperToolCallResult = ({ ok: true } & SuperToolCallPayload) | SuperToolCallFailure;
@@ -181,14 +189,23 @@ export function parseSuperToolCall(
 ): SuperToolCallResult {
   const effectiveKind = resolveSuperToolCallKind(kind, args);
   const text = synthesizeSuperToolCallBlock(effectiveKind, args);
-  if (!text) return { ok: false, reason: "the tool arguments are not a JSON payload" };
+  if (!text) {
+    return { ok: false, reason: "the tool arguments are not a JSON payload", issues: [] };
+  }
   if (effectiveKind === "dispatch") {
     const scan = extractSuperDirectives(text, 0);
     if (scan.blocks.length === 0) {
       const reason = scan.invalidBlocks[0]?.reason ?? "the payload contains no delegation tasks";
-      return { ok: false, reason };
+      return { ok: false, reason, issues: scan.issues };
     }
-    return { ok: true, kind: effectiveKind, text, tasks: scan.blocks, actions: [] };
+    return {
+      ok: true,
+      kind: effectiveKind,
+      text,
+      tasks: scan.blocks,
+      actions: [],
+      issues: scan.issues,
+    };
   }
   const scan = extractSuperActions(text, 0);
   if (scan.actions.length === 0) {
@@ -198,9 +215,10 @@ export function parseSuperToolCall(
         scan.invalidBlocks.length > 0
           ? "the payload is not a valid actions block"
           : "the payload contains no management actions",
+      issues: [],
     };
   }
-  return { ok: true, kind: effectiveKind, text, tasks: [], actions: scan.actions };
+  return { ok: true, kind: effectiveKind, text, tasks: [], actions: scan.actions, issues: [] };
 }
 
 /**
@@ -213,24 +231,18 @@ export function parseSuperToolCall(
  *
  * 两种输入形态都收：
  *  - **对象**（wire 的 `tool_call.args` 就是它）：直接进公共解析入口；
- *  - **JSON 字符串**：先走项目已有的宽松解析 {@link parseJsonLoose}（修原始
- *    换行 / 尾逗号 / 非法转义），修不好就返回 null —— 绝不编造内容。
+ *  - **JSON 字符串**：先走宽松解析（修原始换行 / 尾逗号 / 非法转义），修不好
+ *    就返回 null —— 绝不编造内容。
  *
- * 口径与派发器**完全一致**（复用 {@link parseSuperTaskValue}，不复制校验）：
- * 缺 `title` 回退到 task 首行、附件同时接受 `string[]` 与 `{path,name}` 对象、
- * 占位符任务跳过、空任务判失败。因此「宿主派发出去了」与「卡片说有任务」
- * 不会再出现分叉。
+ * 口径与派发器**完全一致**（复用 {@link parseSuperDelegationPayload}，不复制
+ * 校验）：缺 `title` 回退到 task 首行、附件同时接受 `string[]` 与 `{path,name}`
+ * 对象、占位符任务跳过、空任务判失败；混合载荷里畸形条目被丢弃、合法条目照常
+ * 返回（诊断原因见 `parseSuperDelegationPayload` 的 `issues`）。因此「宿主派发
+ * 出去了」与「卡片说有任务」不会再出现分叉。
  *
  * @returns 解析出的任务列表；载荷不可用时为 null（调用方据此诚实降级）。
  */
 export function parseSuperDelegationTasks(args: unknown): SuperTaskSpec[] | null {
-  let value: unknown = args;
-  if (typeof args === "string") {
-    const loose = parseJsonLoose(args);
-    if (!loose.ok) return null;
-    value = loose.value;
-  }
-  if (!value || typeof value !== "object") return null;
-  const parsed = parseSuperTaskValue(value);
+  const parsed = parseSuperDelegationPayload(args);
   return parsed.ok ? parsed.tasks : null;
 }

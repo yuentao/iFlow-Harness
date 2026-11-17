@@ -3493,4 +3493,72 @@ describe("委派工具调用的任务结构（superTasks）", () => {
     if (block?.kind !== "tool") return;
     expect(block.superTasks).toBeUndefined();
   });
+
+  it("畸形条目 → superTasks 缺省，但 superTasksError 给出字段级原因", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-malformed",
+        toolName: "super-agent",
+        status: "in_progress",
+        // 实测形态：模型把 tasks[].task 写成字符串数组。
+        args: { tasks: [["步骤1", "步骤2"]] },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+    expect(block.superTasksError).toContain("task 必须是字符串");
+  });
+
+  it("混合载荷 → 只有合法项进 superTasks，被忽略条目进 superTasksError", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-mixed",
+        toolName: "super-agent",
+        status: "in_progress",
+        args: { tasks: [{ title: "合法", task: "做这件事" }, { task: 42 }] },
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toHaveLength(1);
+    expect(block.superTasks?.[0]?.title).toBe("合法");
+    expect(block.superTasksError).toContain("tasks[1].task 必须是字符串");
+  });
+
+  it("后续不带 args 的 completed 帧不会擦掉 superTasksError", () => {
+    const state = initialSessionState();
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-sticky-error",
+        toolName: "super-agent",
+        status: "in_progress",
+        args: { tasks: [{ task: 123 }] },
+      }),
+    );
+    applySessionUpdate(
+      state,
+      notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-sticky-error",
+        toolName: "super-agent",
+        status: "completed",
+        content: [
+          { type: "content", content: { type: "text", text: "Delegation request accepted." } },
+        ],
+      }),
+    );
+    const block = state.blocks[0];
+    if (block?.kind !== "tool") return;
+    expect(block.superTasks).toBeUndefined();
+    expect(block.superTasksError).toContain("task 必须是字符串");
+  });
 });

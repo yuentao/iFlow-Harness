@@ -187,6 +187,20 @@ export interface ToolBlock extends BlockBase {
    */
   superTasks?: SuperDelegatedTaskUi[] | null;
   /**
+   * 宿主解析 `super-agent` 委派载荷时遇到的格式问题（可诊断的失败原因）。
+   *
+   * 与 `superTasks` 同源：都来自宿主对**原始 args** 的解析，绝不是对展示串
+   * `input` 回解的结果。两种情形会写入：
+   *  - 载荷整体不可用（如 `tasks` 是字符串数组）→ `superTasks` 缺省，本字段
+   *    是「哪一条字段写错了」的具体说明；
+   *  - 混合载荷（部分条目畸形）→ `superTasks` 只含合法项，本字段说明被忽略
+   *    的条目及原因 —— 不能让畸形条目静默消失。
+   *
+   * null/absent = 载荷没有格式问题（或这不是派发调用）。合并时后续不带 args
+   * 的 completed 帧不得把它擦掉（见 `upsertToolBlock`）。
+   */
+  superTasksError?: string | null;
+  /**
    * 宿主执行 `super-agent` **管理动作**后的真实结果（每条动作一份 ok/reason）。
    *
    * 为什么需要它：`block.status === "completed"` 只表示工具帧返回了（内核对

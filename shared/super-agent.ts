@@ -903,6 +903,13 @@ export interface SuperInvalidBlock {
   body: string;
   /** 失败原因（中文短语，直接进 toast —— 只报「无法解析」等于没报）。 */
   reason: string;
+  /**
+   * 字段级诊断（如 `tasks[0].task 必须是字符串`）。
+   *
+   * `reason` 是给人看的一句话；这里是逐条的具体位置，混在合法块里被丢弃的
+   * 畸形条目也走同一份措辞，用户/模型才能一眼定位是哪个字段写错了。
+   */
+  issues?: string[];
 }
 
 /**
@@ -927,6 +934,13 @@ export interface SuperDirectiveScan {
   blocks: SuperTaskSpec[][];
   /** 解析失败的块（宿主据此提示用户，不静默吞掉）。 */
   invalidBlocks: SuperInvalidBlock[];
+  /**
+   * 字段级诊断汇总（如 `tasks[1] 必须是对象`）。
+   *
+   * 合法块里被丢弃的畸形条目也在这里 —— 宿主仍然派发其余合法任务，但要补一条
+   * warning 说明「哪几条被忽略了」，不能让畸形条目静默消失。
+   */
+  issues: string[];
   /**
    * 扫描结束位置（消费偏移）。调用方把它当作下一轮的起点 —— 已消费的块不会
    * 被二次派发，即使同一段文本在后续 chunk 里再次出现。
@@ -1002,6 +1016,8 @@ export interface SuperProtocolRegion {
   tasks: SuperTaskSpec[] | null;
   /** 载荷非法的原因（宿主据此提示用户）。 */
   reason?: string;
+  /** 该载荷的字段级诊断（合法块里被丢弃的条目也在这里）。 */
+  issues?: string[];
   /** 载荷没收全（流式中间态）—— 区域尚未成形。 */
   pending: boolean;
 }
@@ -1154,6 +1170,7 @@ function scanSuperProtocolRegions(
       body: resolved.body,
       tasks: parsed && parsed.ok ? parsed.tasks : null,
       ...(parsed && !parsed.ok ? { reason: parsed.reason } : {}),
+      ...(parsed && parsed.issues.length > 0 ? { issues: parsed.issues } : {}),
       pending: false,
     });
     fenceSpans.push([open.lineStart, resolved.closeEnd]);
@@ -1175,7 +1192,15 @@ function scanSuperProtocolRegions(
         end: match.end,
         body: match.body,
         tasks: match.tasks,
-        ...(match.tasks ? {} : { reason: "工具调用式载荷里的任务字段非法" }),
+        ...(match.tasks
+          ? {}
+          : {
+              reason:
+                match.issues && match.issues.length > 0
+                  ? `工具调用式载荷里的任务字段非法（${match.issues[0]}）`
+                  : "工具调用式载荷里的任务字段非法",
+            }),
+        ...(match.issues && match.issues.length > 0 ? { issues: match.issues } : {}),
         pending: false,
       });
     }
@@ -1262,6 +1287,7 @@ export function extractSuperDirectives(
   return {
     blocks: core.blocks,
     invalidBlocks: core.invalidBlocks,
+    issues: core.issues,
     end: core.end,
     ...(core.pendingOpen ? { pendingOpen: core.pendingOpen } : {}),
   };
@@ -1288,6 +1314,7 @@ function scanSuperDirectives(
 ): SuperDirectiveScanCore {
   const blocks: SuperTaskSpec[][] = [];
   const invalidBlocks: SuperInvalidBlock[] = [];
+  const issues: string[] = [];
   let end = fromOffset;
   let pendingOpen: SuperPendingFence | undefined;
 
@@ -1312,8 +1339,15 @@ function scanSuperDirectives(
     if (consumedEnd > end) end = consumedEnd;
     // 动作块（super-agent-actions）由 extractSuperActions 处理，这里只跳过。
     if (region.language !== "super-agent") continue;
+    if (region.issues && region.issues.length > 0) issues.push(...region.issues);
     if (region.tasks) blocks.push(region.tasks);
-    else if (region.body) invalidBlocks.push({ body: region.body, reason: region.reason ?? "载荷不是合法 JSON" });
+    else if (region.body) {
+      invalidBlocks.push({
+        body: region.body,
+        reason: region.reason ?? "载荷不是合法 JSON",
+        ...(region.issues && region.issues.length > 0 ? { issues: region.issues } : {}),
+      });
+    }
   }
 
   // 还在等载荷的工具调用式标记：只有落在最后一个完整块**之后**才算「还在等」。
@@ -1336,6 +1370,7 @@ function scanSuperDirectives(
   return {
     blocks,
     invalidBlocks,
+    issues,
     end,
     ...(pendingOpen ? { pendingOpen } : {}),
     deadEnd,
@@ -1413,6 +1448,7 @@ export class SuperDirectiveScanner {
     return {
       blocks: core.blocks,
       invalidBlocks: core.invalidBlocks,
+      issues: core.issues,
       end: this.offset,
       ...(this.pending ? { pendingOpen: this.pending } : {}),
     };
@@ -1452,6 +1488,8 @@ const MAX_INCOMPLETE_TOOL_PAYLOAD = 256 * 1024;
 interface ToolStylePayload {
   /** 解析出的任务；null = 看起来是委派载荷但内容非法（宿主据此提示用户）。 */
   tasks: SuperTaskSpec[] | null;
+  /** 字段级诊断（如 `tasks[0].task 必须是字符串`）。 */
+  issues?: string[];
   /** 载荷原文。 */
   body: string;
   /** 标记偏移（渲染侧据此把包裹标记一起纳入卡片）。 */
@@ -1515,13 +1553,27 @@ function findToolStylePayloads(text: string, from: number): ToolStylePayloadScan
     }
     const tasks = parseToolStylePayload(text.slice(start, close + 1));
     if (tasks.tasks) {
-      out.push({ tasks: tasks.tasks, body: text.slice(start, close + 1), marker, start, end: close + 1 });
+      out.push({
+        tasks: tasks.tasks,
+        body: text.slice(start, close + 1),
+        marker,
+        start,
+        end: close + 1,
+        ...(tasks.issues.length > 0 ? { issues: tasks.issues } : {}),
+      });
       searchFrom = close + 1;
       continue;
     }
     if (tasks.looksLikeDelegation) {
       // 确实是委派载荷但内容非法 —— 交给宿主提示用户，而不是静默丢弃。
-      out.push({ tasks: null, body: text.slice(start, close + 1), marker, start, end: close + 1 });
+      out.push({
+        tasks: null,
+        body: text.slice(start, close + 1),
+        marker,
+        start,
+        end: close + 1,
+        ...(tasks.issues.length > 0 ? { issues: tasks.issues } : {}),
+      });
       searchFrom = close + 1;
       continue;
     }
@@ -1644,27 +1696,28 @@ function matchJsonValue(text: string, start: number): number {
 function parseToolStylePayload(body: string): {
   tasks: SuperTaskSpec[] | null;
   looksLikeDelegation: boolean;
+  issues: string[];
 } {
   const direct = parseDirectiveBody(body);
-  if (direct.ok) return { tasks: direct.tasks, looksLikeDelegation: true };
+  if (direct.ok) return { tasks: direct.tasks, looksLikeDelegation: true, issues: direct.issues };
   const loose = parseJsonLoose(body);
-  if (!loose.ok) return { tasks: null, looksLikeDelegation: false };
+  if (!loose.ok) return { tasks: null, looksLikeDelegation: false, issues: direct.issues };
   const parsed = loose.value;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { tasks: null, looksLikeDelegation: false };
+    return { tasks: null, looksLikeDelegation: false, issues: direct.issues };
   }
   const record = parsed as Record<string, unknown>;
-  if ("tasks" in record) return { tasks: null, looksLikeDelegation: true };
+  if ("tasks" in record) return { tasks: null, looksLikeDelegation: true, issues: direct.issues };
   for (const key of ["arguments", "parameters", "input", "args"]) {
     const inner = record[key];
     if (typeof inner !== "object" || inner === null || Array.isArray(inner)) continue;
     const tasks = parseDirectiveBody(JSON.stringify(inner));
-    if (tasks.ok) return { tasks: tasks.tasks, looksLikeDelegation: true };
+    if (tasks.ok) return { tasks: tasks.tasks, looksLikeDelegation: true, issues: tasks.issues };
     if ("tasks" in (inner as Record<string, unknown>)) {
-      return { tasks: null, looksLikeDelegation: true };
+      return { tasks: null, looksLikeDelegation: true, issues: tasks.issues };
     }
   }
-  return { tasks: null, looksLikeDelegation: false };
+  return { tasks: null, looksLikeDelegation: false, issues: direct.issues };
 }
 
 interface FenceMatch {
@@ -1854,8 +1907,19 @@ function skipWhitespace(text: string, from: number): number {
   return -1;
 }
 
-/** 解析指令块正文的结果：失败要带原因，宿主才能提示得具体。 */
-type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason: string };
+/**
+ * 解析指令块正文的结果。
+ *
+ * 两个分支都带 `issues`：
+ *  - `ok:false`：整块不可用，`issues` 是逐条字段级诊断（如
+ *    `tasks[0].task 必须是字符串`），`reason` 是给 toast 的一句话；
+ *  - `ok:true`：`issues` 通常为空；**混合载荷**（部分条目畸形、部分合法）里
+ *    非法条目被丢弃，`tasks` 保留合法项，`issues` 记下被丢掉的条目 ——
+ *    「静默丢一半」正是这次要消灭的故障。
+ */
+type DirectiveParse =
+  | { ok: true; tasks: SuperTaskSpec[]; issues: string[] }
+  | { ok: false; reason: string; issues: string[] };
 
 /**
  * 委派载荷的公共解析结果（公开入口的返回类型）。
@@ -1864,6 +1928,35 @@ type DirectiveParse = { ok: true; tasks: SuperTaskSpec[] } | { ok: false; reason
  * 同一份结果的类型暴露给外部调用方。
  */
 export type SuperTaskPayloadParse = DirectiveParse;
+
+/** 委派载荷的公共解析结果（`parseSuperDelegationPayload` 的返回类型）。 */
+export type SuperDelegationPayloadParse = DirectiveParse;
+
+/**
+ * 把多条字段级诊断压成一句可读的原因（最多列 3 条，其余只报数量）。
+ *
+ * 直接 join 一整份超长载荷会产出几百字的 toast；前 3 条足够定位问题。
+ */
+function summarizeIssues(issues: readonly string[]): string {
+  const head = issues.slice(0, 3).join("；");
+  return issues.length > 3 ? `${head}；等 ${issues.length} 处` : head;
+}
+
+/** 附件列表的字段级校验：数组元素必须是字符串（或带字符串 path 的对象）。 */
+function validateDirectiveAttachments(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) return "attachments 必须是数组";
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (typeof entry === "string") continue;
+    if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+      const record = entry as { path?: unknown };
+      if (typeof record.path === "string" && record.path.trim()) continue;
+    }
+    return `attachments[${i}] 必须是字符串或带 path 的对象`;
+  }
+  return null;
+}
 
 /**
  * 委派载荷的公共解析入口（已是 JSON 值）。
@@ -1876,10 +1969,30 @@ export function parseSuperTaskValue(value: unknown): SuperTaskPayloadParse {
   return parseDirectiveValue(value);
 }
 
+/**
+ * 委派载荷的公共解析入口（原始值，可以是 JSON 字符串）。
+ *
+ * 工具调用帧的 `args` 可能是对象，也可能是装着 JSON 的字符串；两者都收，
+ * 字符串走项目已有的宽松解析（修原始换行 / 尾逗号）。载荷畸形时返回
+ * `ok:false` + 具体 `issues`，宿主据此给出可诊断的错误，而不是静默丢弃。
+ */
+export function parseSuperDelegationPayload(raw: unknown): SuperDelegationPayloadParse {
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    const loose = parseJsonLoose(raw);
+    if (!loose.ok) return { ok: false, reason: "载荷不是合法 JSON", issues: [] };
+    value = loose.value;
+  }
+  if (!value || typeof value !== "object") {
+    return { ok: false, reason: "载荷必须是对象或数组", issues: [] };
+  }
+  return parseDirectiveValue(value);
+}
+
 /** 解析指令块正文。 */
 function parseDirectiveBody(body: string): DirectiveParse {
   const parsed = parseJsonLoose(body);
-  if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON" };
+  if (!parsed.ok) return { ok: false, reason: "载荷不是合法 JSON", issues: [] };
   return parseDirectiveValue(parsed.value);
 }
 
@@ -1890,13 +2003,37 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     : typeof value === "object" && value !== null && Array.isArray((value as { tasks?: unknown }).tasks)
       ? (value as { tasks: unknown[] }).tasks
       : null;
-  if (!rawTasks) return { ok: false, reason: "缺少 tasks 数组" };
+  if (!rawTasks) return { ok: false, reason: "缺少 tasks 数组", issues: [] };
 
   const tasks: SuperTaskSpec[] = [];
-  for (const entry of rawTasks) {
-    if (typeof entry !== "object" || entry === null) return { ok: false, reason: "任务条目不是对象" };
+  const issues: string[] = [];
+  for (let index = 0; index < rawTasks.length; index++) {
+    const entry = rawTasks[index];
+    const where = `tasks[${index}]`;
+    // 数组条目是「把 task 写成了字符串数组」的典型畸形（`tasks:[["a","b"]]`）：
+    // 报 `task 必须是字符串` 才能指向模型真正写错的那一层。
+    if (Array.isArray(entry)) {
+      issues.push(`${where}.task 必须是字符串`);
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null) {
+      issues.push(`${where} 必须是对象`);
+      continue;
+    }
     const record = entry as { title?: unknown; task?: unknown; attachments?: unknown };
-    const task = typeof record.task === "string" ? record.task.trim() : "";
+    if (typeof record.task !== "string") {
+      issues.push(`${where}.task 必须是字符串`);
+      continue;
+    }
+    if (record.title !== undefined && record.title !== null && typeof record.title !== "string") {
+      issues.push(`${where}.title 必须是字符串`);
+      continue;
+    }
+    const attachmentIssue = validateDirectiveAttachments(record.attachments);
+    // 附件是任务的附属信息：非法元素由 parseDirectiveAttachments 逐个跳过（既有
+    // 兼容行为），这里只补一条诊断，不因为一个坏附件就把整条合法任务丢掉。
+    if (attachmentIssue) issues.push(`${where}.${attachmentIssue}`);
+    const task = record.task.trim();
     // A task that is still a placeholder (the model echoed the documented
     // example back) is skipped — opening a child session for "<任务说明>"
     // would burn a process for nothing.
@@ -1911,9 +2048,19 @@ function parseDirectiveValue(value: unknown): DirectiveParse {
     });
   }
   // 一条都派不出去不是「成功但为空」：模型可能只给了标题、或把协议示例原样
-  // 抄了回来。宿主需要知道这件事（否则用户只看到「什么都没发生」）。
-  if (tasks.length === 0) return { ok: false, reason: "没有可派发的任务（task 为空或全是占位符）" };
-  return { ok: true, tasks };
+  // 抄了回来。宿主需要知道这件事（否则用户只看到「什么都没发生」）。畸形条目
+  // 的原因要进 reason —— 只报「没有任务」会让用户和模型都没法自查。
+  if (tasks.length === 0) {
+    return {
+      ok: false,
+      reason:
+        issues.length > 0
+          ? `载荷格式错误：${summarizeIssues(issues)}`
+          : "没有可派发的任务（task 为空或全是占位符）",
+      issues,
+    };
+  }
+  return { ok: true, tasks, issues };
 }
 
 /**
