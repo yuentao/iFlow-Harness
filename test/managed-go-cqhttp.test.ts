@@ -68,21 +68,43 @@ describe("go-cqhttp.writeConfig", () => {
 });
 
 describe("go-cqhttp 下载 URL 与二进制相对路径", () => {
-  const cases: Array<[NodeJS.Platform, string, string, string, string, string]> = [
-    ["win32", "x64", "windows", "amd64", "zip", "go-cqhttp.exe"],
-    ["linux", "x64", "linux", "amd64", "tar.gz", "go-cqhttp"],
-    ["darwin", "arm64", "darwin", "arm64", "tar.gz", "go-cqhttp"],
+  // 2026-11-17 GitHub API + HEAD 实测：通用包资产名不带版本，仅 deb/rpm 带版本。
+  const cases: Array<[NodeJS.Platform, string, string, string]> = [
+    [
+      "win32",
+      "x64",
+      "https://github.com/Mrs4s/go-cqhttp/releases/download/v1.2.0/go-cqhttp_windows_amd64.zip",
+      "go-cqhttp.exe",
+    ],
+    [
+      "linux",
+      "x64",
+      "https://github.com/Mrs4s/go-cqhttp/releases/download/v1.2.0/go-cqhttp_linux_amd64.tar.gz",
+      "go-cqhttp",
+    ],
+    [
+      "darwin",
+      "arm64",
+      "https://github.com/Mrs4s/go-cqhttp/releases/download/v1.2.0/go-cqhttp_darwin_arm64.tar.gz",
+      "go-cqhttp",
+    ],
   ];
 
-  for (const [platform, arch, os, goArch, ext, binary] of cases) {
+  for (const [platform, arch, expectedUrl, binary] of cases) {
     it(`${platform}/${arch} 的 URL 与路径`, () => {
       const cfg = config({ platform, arch });
-      const url = goCqhttpProvider.downloadUrl(cfg);
-      expect(url).toMatch(/^https:\/\/github\.com\/Mrs4s\/go-cqhttp\/releases\/download\//);
-      expect(url).toContain(`go-cqhttp_${GO_CQHTTP_VERSION}_${os}_${goArch}.${ext}`);
+      expect(goCqhttpProvider.downloadUrl(cfg)).toBe(expectedUrl);
       expect(goCqhttpProvider.binaryRelativePath(cfg)).toBe(binary);
     });
   }
+
+  it("资产名不含版本号（防回归：通用包资产名不带版本，仅 deb/rpm 带版本）", () => {
+    for (const [platform, arch] of cases) {
+      const url = goCqhttpProvider.downloadUrl(config({ platform, arch }));
+      expect(url).not.toContain(`_${GO_CQHTTP_VERSION}_`);
+      expect(url).not.toContain(`go-cqhttp_${GO_CQHTTP_VERSION}_`);
+    }
+  });
 
   it("不支持的平台抛错，不返回假装可用的 URL", () => {
     const cfg = config({ platform: "freebsd", arch: "x64" });

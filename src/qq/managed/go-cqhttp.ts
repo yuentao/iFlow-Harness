@@ -26,13 +26,18 @@ export const GO_CQHTTP_VERSION = "1.2.0";
 /**
  * 下载地址模板。占位符 `{version}` / `{os}` / `{arch}` / `{ext}`。
  *
- * 「以实际 release 为准，需后续核对」：本波未联网实测 GitHub release 资产名，
- * 这里按上游惯例拼（`go-cqhttp_<version>_<os>_<arch>.<ext>`，Go 的 amd64 对应
- * Node 的 x64）；接入真实下载前必须用 `npm run harness` 或 curl.exe 核一次，
- * 资产名/标签前缀随发行版变化就改这里。
+ * 2026-11-17 经 GitHub API `releases/latest` + HEAD 实测（最新 tag = `v1.2.0`）：
+ * 通用二进制压缩包资产名**不带版本号**，仅 `.deb` / `.rpm` 包才带版本，与本模板
+ * 无关（旧模板在资产名里多插了 `{version}_`，linux/darwin 实测均 404）。挂在 tag
+ * `v1.2.0` 下的三平台资产名：
+ *   - go-cqhttp_windows_amd64.zip
+ *   - go-cqhttp_linux_amd64.tar.gz
+ *   - go-cqhttp_darwin_arm64.tar.gz
+ * 故资产名为 `go-cqhttp_<os>_<arch>.<ext>`（Go 的 amd64 对应 Node 的 x64）；
+ * 升级版本只改 GO_CQHTTP_VERSION，资产名随发行版变化再改这里。
  */
 const DOWNLOAD_URL_TEMPLATE =
-  "https://github.com/Mrs4s/go-cqhttp/releases/download/v{version}/go-cqhttp_{version}_{os}_{arch}.{ext}";
+  "https://github.com/Mrs4s/go-cqhttp/releases/download/v{version}/go-cqhttp_{os}_{arch}.{ext}";
 
 /** Node 平台/架构 → go-cqhttp release 资产字段。仅列真正支持的组合。 */
 interface AssetTarget {
