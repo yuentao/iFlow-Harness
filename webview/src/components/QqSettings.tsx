@@ -190,6 +190,33 @@ const ADAPTER_DESCRIPTION: Record<QqAdapter, string> = {
   qqbot: t("QQ 官方机器人接口，通过配置的端点与机器人凭据访问。"),
 };
 
+/**
+ * 一键接入（M4 官方 QQBot 路线）按当前 adapter 显示的文案。
+ * qqbot 走官方扫码 SDK（窗口内二维码），不再下载 go-cqhttp；onebot 保留旧的自动托管但标注 legacy。
+ */
+const MANAGED_INTRO: Record<QqAdapter, string> = {
+  qqbot: t("使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。"),
+  onebot: t("自动下载并配置 go-cqhttp，扫码登录即可从 QQ 远程控制本工作区。"),
+};
+
+/** 明确的通道定位：官方合规（推荐） vs 需自跑 OneBot（legacy）。 */
+const ADAPTER_CHANNEL: Record<QqAdapter, string> = {
+  qqbot: t("官方合规通道（推荐）"),
+  onebot: t("需自跑 OneBot（legacy）"),
+};
+
+/** 一键接入按钮文案（qqbot 是官方机器人，onebot 是 legacy 的 OneBot）。 */
+const MANAGED_START_LABEL: Record<QqAdapter, string> = {
+  qqbot: t("一键接入 QQ 机器人"),
+  onebot: t("一键接入 OneBot"),
+};
+
+/** 二维码区标题：qqbot 是「扫码授权」，onebot 保留「扫码登录」。 */
+const QR_TITLE: Record<QqAdapter, string> = {
+  qqbot: t("扫码授权 QQ 机器人"),
+  onebot: t("扫码登录"),
+};
+
 /** 一键托管阶段机的中文标签（与共享契约的 phase 枚举一一对应）。 */
 const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
   idle: t("空闲"),
@@ -200,6 +227,12 @@ const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
   waiting_login: t("等待扫码"),
   logged_in: t("已登录"),
   error: t("出错"),
+};
+
+/** qqbot 专属阶段文案（官方授权语义）；onebot（legacy）沿用上表。 */
+const QQBOT_PHASE_LABEL: Partial<Record<QqManagedStatus["phase"], string>> = {
+  waiting_login: t("请用手机 QQ 扫描二维码完成授权"),
+  logged_in: t("已连接 QQ 官方机器人"),
 };
 
 export function QqSettings({
@@ -224,6 +257,8 @@ export function QqSettings({
     setSecretDirty((prev) => ({ ...prev, [field]: false }));
     onSecretsCommit?.({ [field]: next.trim() });
   }
+  /** 当前适配器：qqbot 走官方扫码授权，onebot 为 legacy 自跑 OneBot。 */
+  const adapter = value.adapter;
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -244,10 +279,14 @@ export function QqSettings({
     managedPhase === "waiting_login" ||
     managedPhase === "logged_in";
   const managedError = managedPhase === "error";
+  /** qqbot 用官方授权语义的阶段文案，onebot（legacy）保留原标签。 */
+  function phaseLabelFor(phase: QqManagedStatus["phase"]): string {
+    return (adapter === "qqbot" && QQBOT_PHASE_LABEL[phase]) || MANAGED_PHASE_LABEL[phase];
+  }
   const phaseLabel = managedPhase
     ? managedPhase === "downloading" && qqManagedStatus?.progress !== undefined
-      ? `${MANAGED_PHASE_LABEL[managedPhase]} ${qqManagedStatus.progress}%`
-      : MANAGED_PHASE_LABEL[managedPhase]
+      ? `${phaseLabelFor(managedPhase)} ${qqManagedStatus.progress}%`
+      : phaseLabelFor(managedPhase)
     : "";
   /** 只有 waiting_scan / scanned 且 dataUrl 通过 isQrDataUrl 护栏才渲染 <img>。 */
   const qrValid =
@@ -262,9 +301,11 @@ export function QqSettings({
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-ui-label font-semibold text-foreground">{t("一键接入")}</div>
-            <Hint className="mt-0.5">
-              {t("自动下载并配置 go-cqhttp，扫码登录即可从 QQ 远程控制本工作区。")}
-            </Hint>
+            <Hint className="mt-0.5">{MANAGED_INTRO[adapter]}</Hint>
+            <Hint className="mt-0.5">{ADAPTER_CHANNEL[adapter]}</Hint>
+            {adapter === "qqbot" && (
+              <Hint className="mt-0.5">{t("首次使用需在 q.qq.com 创建机器人（个人账号即可）。")}</Hint>
+            )}
           </div>
           {managing ? (
             <Button
@@ -282,7 +323,7 @@ export function QqSettings({
               icon={<Zap className={ICON_INLINE} />}
               onClick={() => onManagedSetup?.("start")}
             >
-              {t("一键接入 OneBot")}
+              {MANAGED_START_LABEL[adapter]}
             </Button>
           )}
         </div>
@@ -306,7 +347,7 @@ export function QqSettings({
 
         {qqLoginQr && (
           <div className="mt-3 flex flex-col items-center gap-2 rounded-md border border-border bg-editor/40 px-3 py-3">
-            <div className="text-ui-label font-semibold text-foreground">{t("扫码登录")}</div>
+            <div className="text-ui-label font-semibold text-foreground">{QR_TITLE[adapter]}</div>
             {qrValid ? (
               <>
                 <img

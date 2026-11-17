@@ -1181,6 +1181,17 @@ const en: Record<string, string> = {
     "OneBot v11 bridge — e.g. a local NapCat or LLOneBot HTTP/WebSocket endpoint.",
   "QQ 官方机器人接口，通过配置的端点与机器人凭据访问。":
     "QQ official bot API, reached through the configured endpoint and bot credentials.",
+  // 一键接入：官方 QQBot 路线文案适配（M4）
+  "使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。":
+    "Uses the official QQ bot — scan to authorize, then control this workspace from QQ (create a bot at q.qq.com first).",
+  "官方合规通道（推荐）": "Official compliant channel (recommended)",
+  "需自跑 OneBot（legacy）": "Requires you to run OneBot yourself (legacy)",
+  "一键接入 QQ 机器人": "One-click QQ bot setup",
+  "请用手机 QQ 扫描二维码完成授权": "Scan the QR code with mobile QQ to authorize",
+  "已连接 QQ 官方机器人": "Connected to the official QQ bot",
+  "扫码授权 QQ 机器人": "Scan to authorize the QQ bot",
+  "首次使用需在 q.qq.com 创建机器人（个人账号即可）。":
+    "On first use, create a bot at q.qq.com (a personal account is enough).",
   // 一键接入 OneBot + 窗口内扫码（Wave5-D）
   "一键接入": "One-click setup",
   "一键接入 OneBot": "One-click OneBot setup",

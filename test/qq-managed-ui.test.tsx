@@ -123,6 +123,18 @@ function managed(
   );
 }
 
+/** Switch the store's QQ settings to a given adapter before rendering. */
+function setAdapter(adapter: "onebot" | "qqbot"): void {
+  act(() =>
+    useChat.setState({
+      qqSettings: pickQqSettingsUi(
+        { adapter },
+        { hasBotToken: false, hasAppSecret: false },
+      ),
+    }),
+  );
+}
+
 beforeEach(() => {
   postMessage.mockClear();
   useChat.setState({
@@ -252,5 +264,56 @@ describe("非快照通道", () => {
     );
     expect(useChat.getState().qqManagedStatus?.phase).toBe("checking");
     expect(useChat.getState().qqLoginQr?.dataUrl).toBe(QR_URL);
+  });
+});
+
+describe("官方 QQBot 路线文案适配（M4）", () => {
+  it("qqbot 模式显示官方机器人文案、通道定位与创建机器人引导", () => {
+    setAdapter("qqbot");
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区");
+    expect(text).toContain("官方合规通道（推荐）");
+    expect(text).toContain("首次使用需在 q.qq.com 创建机器人（个人账号即可）。");
+    expect(text).not.toContain("自动下载并配置 go-cqhttp");
+    const button = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "一键接入 QQ 机器人",
+    );
+    expect(button, "一键接入 QQ 机器人 button").toBeTruthy();
+  });
+
+  it("onebot 模式保留 go-cqhttp 文案并标注 legacy", () => {
+    setAdapter("onebot");
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("自动下载并配置 go-cqhttp");
+    expect(text).toContain("需自跑 OneBot（legacy）");
+    const button = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "一键接入 OneBot",
+    );
+    expect(button, "一键接入 OneBot button").toBeTruthy();
+  });
+
+  it("qqbot 模式阶段文案用官方授权语义", () => {
+    setAdapter("qqbot");
+    managed("waiting_login", "等待授权");
+    render();
+    expect(container.textContent).toContain("请用手机 QQ 扫描二维码完成授权");
+    managed("logged_in", "授权完成");
+    expect(container.textContent).toContain("已连接 QQ 官方机器人");
+  });
+
+  it("qqbot 模式二维码标题为扫码授权，三个动作按钮保留", () => {
+    setAdapter("qqbot");
+    qr();
+    render();
+    expect(container.textContent).toContain("扫码授权 QQ 机器人");
+    expect(container.querySelector("img")?.getAttribute("alt")).toBe("QQ 登录二维码");
+    clickQrAction("刷新二维码");
+    expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "refreshQr" });
+    clickQrAction("我已扫码");
+    expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "startQrLogin" });
+    clickQrAction("取消");
+    expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "cancelQrLogin" });
   });
 });
