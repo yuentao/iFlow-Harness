@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { QqTaskStore } from "../src/qq/store.js";
+import { DEFAULT_TERMINAL_STATUSES, QqTaskStore } from "../src/qq/store.js";
+import { TERMINAL_STATUSES } from "../shared/qq-task.js";
 
 const created: string[] = [];
 
@@ -288,5 +289,35 @@ describe("QqTaskStore — 清理与原子写", () => {
     const rootNames = readdirSync(store.rootDir);
     const taskNames = readdirSync(tasksDir(store));
     expect([...rootNames, ...taskNames].filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  it("索引写入失败时以文件为准重建，不让「文件在、索引无」长期存在", async () => {
+    const store = makeStore();
+    // 把 index.json 变成一个目录：任何写索引的尝试（rename 到该路径）都会失败。
+    const blocker = path.join(tasksDir(store), "index.json");
+    mkdirSync(blocker, { recursive: true });
+
+    await expect(
+      store.saveTask({ taskId: "resilient", status: "running", updatedAt: 5 }),
+    ).rejects.toBeTruthy();
+    // 任务文件已经原子落地：失败的是索引这一步，不是保存本身。
+    expect(await store.loadTask("resilient")).not.toBeNull();
+
+    // 障碍移除后，读路径以文件为准把索引补齐（stale 标记驱动重建）。
+    rmSync(blocker, { recursive: true, force: true });
+    const listed = await store.listTasks();
+    expect(listed.map((entry) => entry.taskId)).toContain("resilient");
+  });
+
+  it("默认终态词表与 shared/qq-task 的 isTerminalStatus 同源", async () => {
+    const store = makeStore();
+    for (const status of TERMINAL_STATUSES) {
+      expect(store.isTerminalStatus(status)).toBe(true);
+      expect(DEFAULT_TERMINAL_STATUSES).toContain(status);
+    }
+    // 非终态绝不能出现在词表里（否则清理会误删在跑的任务）。
+    for (const status of ["running", "queued", "waiting_approval", "injected"]) {
+      expect(store.isTerminalStatus(status)).toBe(false);
+    }
   });
 });

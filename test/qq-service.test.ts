@@ -4,6 +4,8 @@ import type { QqConfig } from "../src/qq/config.js";
 import type { QqPendingUserInput } from "../src/qq/pending-users.js";
 import {
   QqService,
+  QQ_APPROVAL_TIMEOUT_MS,
+  QQ_DEFAULT_RETENTION_DAYS,
   QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS,
   QQ_RESULT_CHANGED_WHILE_DELIVERING,
   QQ_RESULT_RESTORE_RETRY_MS,
@@ -21,7 +23,12 @@ import type {
   QqTaskStore,
 } from "../src/qq/store.js";
 import type { SuperPermissionDecision } from "../src/panel/super-agent.js";
-import { shortTaskId, type QqTask, type QqTaskStatus } from "../shared/qq-task.js";
+import {
+  isTerminalStatus,
+  shortTaskId,
+  type QqTask,
+  type QqTaskStatus,
+} from "../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
 // 假 store（内存）
@@ -30,6 +37,8 @@ import { shortTaskId, type QqTask, type QqTaskStatus } from "../shared/qq-task.j
 class MemoryStore {
   readonly records = new Map<string, QqTask>();
   readonly events: QqTaskEvent[] = [];
+  /** pruneTasks 收到的保留天数（测试据此断言「prune 真的被调用」）。 */
+  readonly pruneCalls: number[] = [];
 
   async saveTask(task: QqTaskRecord): Promise<void> {
     this.records.set(task.taskId, JSON.parse(JSON.stringify(task)) as QqTask);
@@ -38,6 +47,19 @@ class MemoryStore {
   async loadTask(taskId: string): Promise<QqTask | null> {
     const record = this.records.get(taskId);
     return record ? (JSON.parse(JSON.stringify(record)) as QqTask) : null;
+  }
+
+  /** 与 QqTaskStore 同规则：只删「终态 + 超过保留期」的记录。 */
+  async pruneTasks(olderThanDays: number): Promise<{ deleted: string[]; skipped: string[] }> {
+    this.pruneCalls.push(olderThanDays);
+    const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+    const deleted: string[] = [];
+    for (const [taskId, task] of [...this.records]) {
+      if (!isTerminalStatus(task.status) || task.updatedAt >= cutoff) continue;
+      this.records.delete(taskId);
+      deleted.push(taskId);
+    }
+    return { deleted, skipped: [] };
   }
 
   async listTasks(): Promise<QqTaskIndexEntry[]> {
@@ -168,6 +190,8 @@ function makeService(options: {
   config?: Partial<QqConfig>;
   store?: MemoryStore;
   now?: () => number;
+  monotonicNow?: () => number;
+  taskRetentionDays?: number;
   onChanged?: () => void;
   deliveryRetryDelayMs?: number;
 } = {}): ServiceFixture {
@@ -180,6 +204,10 @@ function makeService(options: {
     host: fixture.host,
     now: options.now,
     log: () => undefined,
+    ...(options.monotonicNow ? { monotonicNow: options.monotonicNow } : {}),
+    ...(options.taskRetentionDays !== undefined
+      ? { taskRetentionDays: options.taskRetentionDays }
+      : {}),
     ...(options.onChanged ? { onChanged: options.onChanged } : {}),
     ...(options.deliveryRetryDelayMs !== undefined
       ? { deliveryRetryDelayMs: options.deliveryRetryDelayMs }
@@ -202,6 +230,14 @@ function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
   };
 }
 
+/**
+ * 归档夹具的时间基准：取「一分钟前」。
+ *
+ * `start()` 会按保留期清理超期终态任务，若夹具仍用 1000 这类纪元附近的时间，
+ * 会被当成几十年前的归档删掉 —— 那不是这些用例要验证的行为。
+ */
+const SEED_BASE = Date.now() - 60_000;
+
 function seedTask(
   taskId: string,
   status: QqTaskStatus,
@@ -215,8 +251,8 @@ function seedTask(
     payload: { prompt: `任务 ${taskId}`, attachments: [], contexts: [] },
     policy: { remotePolicy: "supervised", resultDetail: "standard" },
     status,
-    createdAt: 1_000,
-    updatedAt: 1_000,
+    createdAt: SEED_BASE,
+    updatedAt: SEED_BASE,
     correlation: {},
     ...overrides,
   };
@@ -1146,7 +1182,7 @@ describe("QqService — 回包可靠性缺口回归", () => {
     const gate = new Promise<void>((resolve) => {
       releaseDispatch = resolve;
     });
-    const f = makeService({ now: () => clock });
+    const f = makeService({ now: () => clock, monotonicNow: () => clock });
     f.host.dispatchTask = async (input) => {
       f.dispatches.push(input);
       input.task.correlation.superSessionId = "super-throttle";
@@ -1240,16 +1276,16 @@ describe("QqService — 回包可靠性缺口回归", () => {
     store.records.set(
       "T-seed-un00001",
       seedTask("T-seed-un00001", "succeeded", {
-        createdAt: 1_000,
-        updatedAt: 2_000,
+        createdAt: SEED_BASE,
+        updatedAt: SEED_BASE,
         result: { stopReason: "end_turn", summary: "重启补发的摘要", changes: [], artifacts: [] },
       }),
     );
     store.records.set(
       "T-seed-de00002",
       seedTask("T-seed-de00002", "succeeded", {
-        createdAt: 1_000,
-        updatedAt: 2_000,
+        createdAt: SEED_BASE,
+        updatedAt: SEED_BASE,
         result: { stopReason: "end_turn", summary: "已经送达过的摘要", changes: [], artifacts: [] },
         resultDeliveredAt: 2_000,
       }),
@@ -1270,8 +1306,8 @@ describe("QqService — 回包可靠性缺口回归", () => {
     store.records.set(
       "T-seed-un00003",
       seedTask("T-seed-un00003", "succeeded", {
-        createdAt: 1_000,
-        updatedAt: 2_000,
+        createdAt: SEED_BASE,
+        updatedAt: SEED_BASE,
         result: { stopReason: "end_turn", summary: "上次没送达的摘要", changes: [], artifacts: [] },
         deliveryError: QQ_RESULT_UNDELIVERED,
         resultDeliveryAttemptAt: 2_000,
@@ -1315,10 +1351,10 @@ describe("QqService — 命令处理", () => {
       store.records.set(
         id,
         seedTask(id, "succeeded", {
-          createdAt: i,
-          updatedAt: i,
+          createdAt: SEED_BASE + i,
+          updatedAt: SEED_BASE + i,
           // 已送达：start() 的重启补发不该在这里插一条结果摘要（本用例只测列表）。
-          resultDeliveredAt: i,
+          resultDeliveredAt: SEED_BASE + i,
           payload: { prompt: `任务${i}`, attachments: [], contexts: [] },
         }),
       );
@@ -1553,7 +1589,8 @@ describe("QqService — 看板投影", () => {
     store.records.set(
       "T-seed-old001",
       seedTask("T-seed-old001", "succeeded", {
-        updatedAt: 10,
+        createdAt: SEED_BASE,
+        updatedAt: SEED_BASE + 10,
         result: {
           stopReason: "end_turn",
           summary: "旧任务",
@@ -1568,7 +1605,8 @@ describe("QqService — 看板投影", () => {
     store.records.set(
       "T-seed-new001",
       seedTask("T-seed-new001", "needs_review", {
-        updatedAt: 20,
+        createdAt: SEED_BASE,
+        updatedAt: SEED_BASE + 20,
         correlation: { branch: "iflow/qq/new" },
         pending: { kind: "approval", text: "审批 run", at: 20 },
       }),
@@ -1596,3 +1634,357 @@ describe("QqService — 看板投影", () => {
     expect(f.service.getTask("nope")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 生命周期与存储层修复（discard 守卫 / 取消失败 / 终态粘性 / prune / 脱敏 /
+// 续发与重启补发 / policy 投影 / worktreePath / 单调时钟）
+// ---------------------------------------------------------------------------
+
+const LONG_OPENID = "D754D2240C503C2ABE2B236DC1E78D11";
+
+/** 启动一个真正处于 running 的任务（dispatchTask 挂起），返回服务夹具。 */
+async function startRunningTask(
+  options: Parameters<typeof makeService>[0],
+  superSessionId: string,
+): Promise<ServiceFixture> {
+  const f = makeService(options);
+  f.host.dispatchTask = async (input) => {
+    f.dispatches.push(input);
+    // 与真实宿主一致：派发时把子会话 id 回填到共享任务对象上。
+    input.task.correlation.superSessionId = superSessionId;
+    return new Promise<never>(() => undefined);
+  };
+  await f.service.handleInboundMessage(inbound({ msgId: `run-${superSessionId}` }));
+  await waitFor(() => lastTask(f).status === "running");
+  return f;
+}
+
+describe("QqService — discard 守卫", () => {
+  it("非终态任务拒绝丢弃，提示先 /qq stop", async () => {
+    const f = await startRunningTask({}, "super-guard");
+    const taskId = lastTask(f).taskId;
+
+    await f.service.handleInboundMessage(
+      inbound({ text: `/qq discard ${shortTaskId(taskId)}` }),
+    );
+
+    expect(f.discards).toEqual([]);
+    expect(f.delivered.at(-1)?.text).toContain("请先 /qq stop");
+    expect(lastTask(f).status).toBe("running");
+  });
+
+  it("--force 才强制丢弃，并在回包里写明未提交改动会丢失", async () => {
+    const f = await startRunningTask({}, "super-force");
+    const taskId = lastTask(f).taskId;
+
+    await f.service.handleInboundMessage(
+      inbound({ text: `/qq discard ${shortTaskId(taskId)} --force` }),
+    );
+
+    expect(f.discards).toEqual(["super-force"]);
+    const reply = f.delivered.at(-1)?.text ?? "";
+    expect(reply).toContain("强制丢弃");
+    expect(reply).toContain("未提交的改动已随之丢失");
+    expect(lastTask(f).status).toBe("canceled");
+    expect(
+      f.store.events.some((event) => event.type === "task_discarded"),
+    ).toBe(true);
+  });
+
+  it("终态任务不需要 --force 即可丢弃（保留原有行为）", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-done09",
+      seedTask("T-seed-done09", "needs_review", {
+        correlation: { superSessionId: "super-done", branch: "iflow/qq/done" },
+      }),
+    );
+    const f = makeService({ store, now: () => 100 });
+    await f.service.start();
+
+    await f.service.handleInboundMessage(inbound({ text: "/qq discard done09" }));
+
+    expect(f.discards).toEqual(["super-done"]);
+    expect(f.delivered.at(-1)?.text).toContain("工作分支已丢弃");
+  });
+});
+
+describe("QqService — 取消失败不写 canceled", () => {
+  it("host.cancelTask 抛错时保持原状态并如实回执", async () => {
+    const f = await startRunningTask({}, "super-cancel-fail");
+    const taskId = lastTask(f).taskId;
+    f.host.cancelTask = async () => {
+      throw new Error("宿主取消失败");
+    };
+
+    await f.service.handleTaskAction(taskId, "stop");
+
+    const task = lastTask(f);
+    expect(task.status).toBe("running");
+    expect(task.failure?.code).toBe("cancel_failed");
+    expect(task.failure?.message).toContain("宿主取消失败");
+    expect(f.delivered.at(-1)?.text).toContain("取消失败");
+    expect(f.store.events.some((event) => event.type === "task_cancel_failed")).toBe(true);
+    expect(f.store.events.some((event) => event.type === "task_canceled")).toBe(false);
+    // 看板用中性措辞，不把它渲染成「执行失败」。
+    expect(f.service.listTasks()[0]?.errorMessage).toContain("取消失败");
+    expect(f.service.listTasks()[0]?.errorMessage).not.toContain("执行失败");
+  });
+
+  it("取消成功时仍按原语义落 canceled", async () => {
+    const f = await startRunningTask({}, "super-cancel-ok");
+    const taskId = lastTask(f).taskId;
+
+    await f.service.handleTaskAction(taskId, "stop");
+
+    expect(f.cancels).toEqual(["super-cancel-ok"]);
+    expect(lastTask(f).status).toBe("canceled");
+    expect(f.store.events.some((event) => event.type === "task_canceled")).toBe(true);
+  });
+});
+
+describe("QqService — commitStatus 终态粘性", () => {
+  type CommitStatus = (
+    task: QqTask,
+    next: QqTaskStatus,
+    patch?: Partial<QqTask>,
+  ) => Promise<QqTask>;
+
+  it("终态任务的迟到提交（含带 status 的 patch）一律不改写", async () => {
+    const store = new MemoryStore();
+    store.records.set("T-seed-term01", seedTask("T-seed-term01", "succeeded"));
+    const f = makeService({ store, now: () => 100 });
+    await f.service.start();
+    const internals = f.service as unknown as { commitStatus: CommitStatus };
+    const before = f.service.getTask("T-seed-term01")!;
+
+    const returned = await internals.commitStatus(before, "queued", {
+      status: "queued" as QqTaskStatus,
+      pending: { kind: "approval", text: "迟到", at: 100 },
+    });
+
+    expect(returned.status).toBe("succeeded");
+    expect(returned.pending).toBeUndefined();
+    const stored = lastTask(f);
+    expect(stored.status).toBe("succeeded");
+    expect(stored.pending).toBeUndefined();
+    expect(stored.updatedAt).toBe(before.updatedAt);
+  });
+
+  it("空 patch 直接返回，不因为 noop 提交再写一次", async () => {
+    const f = await startRunningTask({}, "super-noop");
+    const internals = f.service as unknown as { commitStatus: CommitStatus };
+    const before = lastTask(f);
+
+    const returned = await internals.commitStatus(before, before.status);
+
+    expect(returned).toBe(before);
+    expect(returned.updatedAt).toBe(before.updatedAt);
+  });
+});
+
+describe("QqService — 归档清理（prune 接线）", () => {
+  it("start() 用默认保留天数清理超期终态任务", async () => {
+    const old = Date.now() - (QQ_DEFAULT_RETENTION_DAYS + 5) * 24 * 60 * 60 * 1000;
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-prune1",
+      seedTask("T-seed-prune1", "succeeded", { createdAt: old, updatedAt: old }),
+    );
+    store.records.set(
+      "T-seed-prune2",
+      seedTask("T-seed-prune2", "running", { createdAt: old, updatedAt: old }),
+    );
+    const f = makeService({ store });
+    await f.service.start();
+
+    expect(store.pruneCalls).toEqual([QQ_DEFAULT_RETENTION_DAYS]);
+    expect(f.service.getTask("T-seed-prune1")).toBeNull();
+    // 非终态任务即使超期也不清（start 先 prune 再加载，随后被标成中断失败）。
+    expect(f.service.getTask("T-seed-prune2")?.status).toBe("failed");
+    expect(store.events.some((event) => event.type === "tasks_pruned")).toBe(true);
+  });
+
+  it("taskRetentionDays<=0 时完全关闭清理", async () => {
+    const old = Date.now() - (QQ_DEFAULT_RETENTION_DAYS + 5) * 24 * 60 * 60 * 1000;
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-prune3",
+      seedTask("T-seed-prune3", "succeeded", { createdAt: old, updatedAt: old }),
+    );
+    const f = makeService({ store, taskRetentionDays: 0 });
+    await f.service.start();
+
+    expect(store.pruneCalls).toEqual([]);
+    expect(f.service.getTask("T-seed-prune3")).not.toBeNull();
+  });
+});
+
+describe("QqService — 开放平台 id 脱敏", () => {
+  it("通知 / 事件 / 看板投影都不含完整 openid 或群号", async () => {
+    const f = makeService({ config: { allowedUsers: [LONG_OPENID] } });
+    await f.service.handleInboundMessage(
+      inbound({ msgId: "mask-1", senderId: LONG_OPENID, chatId: LONG_OPENID }),
+    );
+    await waitFor(() => f.service.listTasks().length === 1);
+
+    const ui = f.service.listTasks()[0]!;
+    expect(ui.senderId).toBe("D754********8D11");
+    expect(ui.chatId).toBe("D754********8D11");
+
+    const created = f.store.events.find((event) => event.type === "task_created");
+    expect(created).toBeDefined();
+    expect(JSON.stringify(created)).not.toContain(LONG_OPENID);
+
+    expect(f.notes.join("\n")).not.toContain(LONG_OPENID);
+  });
+
+  it("限流通知与待审核通知里的 openid 也脱敏", async () => {
+    const f = makeService({
+      config: { allowedUsers: [LONG_OPENID], rateLimitPerMin: 1 },
+    });
+    await f.service.handleInboundMessage(
+      inbound({ msgId: "mask-a", senderId: LONG_OPENID, chatId: LONG_OPENID }),
+    );
+    await f.service.handleInboundMessage(
+      inbound({ msgId: "mask-b", senderId: LONG_OPENID, chatId: LONG_OPENID }),
+    );
+    expect(f.notes.join("\n")).toContain("触发限流");
+
+    const other = "OTHEROPENID1234567890ABCDEF99";
+    await f.service.handleInboundMessage(
+      inbound({ msgId: "mask-c", senderId: other, chatId: other }),
+    );
+    expect(f.notes.join("\n")).toContain("待审核");
+
+    const allNotes = f.notes.join("\n");
+    expect(allNotes).not.toContain(LONG_OPENID);
+    expect(allNotes).not.toContain(other);
+    // 待审核队列本身仍保留完整 openid（授权依据，不是 UI/日志面）。
+    expect(f.pendingUsers[0]?.openid).toBe(other);
+  });
+});
+
+describe("QqService — 续发分片与重启补发绕开 (msg_id, seq) 去重", () => {
+  const longSummary = Array.from(
+    { length: 150 },
+    (_, i) => `第 ${i} 项：${"摘要正文填充内容。".repeat(9)}`,
+  ).join("\n");
+
+  it("多片结果的续发分片走主动消息（不带 msg_id），首片仍是被动回复", async () => {
+    const f = makeService({ config: { resultDetail: "full" }, deliveryRetryDelayMs: 0 });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-chunks" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: longSummary,
+      status: "completed",
+      stopReason: "end_turn",
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "chunk-1" }));
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+
+    const resultMessages = f.delivered.filter(
+      (item) => !item.text.startsWith("已受理任务"),
+    );
+    expect(resultMessages.length).toBeGreaterThan(1);
+    expect(resultMessages[0]?.replyToMsgId).toBe("chunk-1");
+    for (const message of resultMessages.slice(1)) {
+      expect(message.replyToMsgId).toBeUndefined();
+    }
+  });
+
+  it("重启补发终态结果整份走主动消息", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-retry1",
+      seedTask("T-seed-retry1", "succeeded", {
+        updatedAt: Date.now(),
+        result: {
+          stopReason: "end_turn",
+          summary: "补偿结果正文",
+          changes: [],
+          artifacts: [],
+        },
+      }),
+    );
+    const f = makeService({ store, deliveryRetryDelayMs: 0 });
+    await f.service.start();
+
+    const results = f.delivered.filter((item) => item.text.includes("补偿结果正文"));
+    expect(results).toHaveLength(1);
+    expect(results[0]?.replyToMsgId).toBeUndefined();
+    expect(lastTask(f).resultDeliveredAt).toBeTypeOf("number");
+  });
+});
+
+describe("QqService — policy 投影与 worktree 落盘", () => {
+  it("toUi 回填任务的 remotePolicy，看板 chip 可用", async () => {
+    const f = makeService({ config: { remotePolicy: "trusted" } });
+    await f.service.handleInboundMessage(inbound({ msgId: "policy-1" }));
+    await waitFor(() => f.service.listTasks().length === 1);
+
+    expect(f.service.listTasks()[0]?.policy).toBe("trusted");
+  });
+
+  it("派发结果里的 branch / worktreePath 落进任务记录", async () => {
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return {
+        superSessionId: "super-wt",
+        branch: "iflow/qq/wt",
+        worktreePath: "/ws/.iflow/super/worktrees/wt",
+      };
+    };
+    await f.service.handleInboundMessage(inbound({ msgId: "wt-1" }));
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+
+    const task = lastTask(f);
+    expect(task.correlation.branch).toBe("iflow/qq/wt");
+    expect(task.correlation.worktreePath).toBe("/ws/.iflow/super/worktrees/wt");
+  });
+
+  it("旧归档没有 worktreePath 也能正常恢复", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-oldwt",
+      seedTask("T-seed-oldwt", "succeeded", {
+        correlation: { superSessionId: "s-old", branch: "iflow/qq/old" },
+      }),
+    );
+    const f = makeService({ store });
+    await f.service.start();
+
+    const task = f.service.getTask("T-seed-oldwt");
+    expect(task?.correlation.branch).toBe("iflow/qq/old");
+    expect(task?.correlation.worktreePath).toBeUndefined();
+  });
+});
+
+describe("QqService — 单调时钟", () => {
+  it("系统时间回拨不会重置限流窗口", async () => {
+    let wall = 1_000_000;
+    let mono = 0;
+    const f = makeService({
+      config: { rateLimitPerMin: 2 },
+      now: () => wall,
+      monotonicNow: () => mono,
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "mono-1" }));
+    // 每次消息之间把墙上时钟往回拨 5 分钟；单调时钟仍单调前进。
+    wall -= 300_000;
+    mono += 1;
+    await f.service.handleInboundMessage(inbound({ msgId: "mono-2" }));
+    wall -= 300_000;
+    mono += 1;
+    await f.service.handleInboundMessage(inbound({ msgId: "mono-3" }));
+
+    expect(f.service.listTasks()).toHaveLength(2);
+    expect(f.delivered.some((item) => item.text.includes("请求过于频繁"))).toBe(true);
+  });
+});
+

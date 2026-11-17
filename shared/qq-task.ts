@@ -118,6 +118,13 @@ export interface QqTaskCorrelation {
   userBlockId?: string;
   /** 执行所在分支（worktree 隔离时）。 */
   branch?: string;
+  /**
+   * 执行所在 worktree 的绝对路径（隔离执行时）。
+   *
+   * 与 branch 一起落进任务记录：manager 的记录缺失（重启 / 清理过）时，
+   * 仍能凭磁盘上的分支与工作目录做合并 / 丢弃兜底。
+   */
+  worktreePath?: string;
   /** 集成后的提交 sha（已知才写）。 */
   commit?: string;
 }
@@ -311,7 +318,13 @@ export function shortTaskId(taskId: string): string {
 // 状态机
 // ---------------------------------------------------------------------------
 
-const TERMINAL_STATUSES: readonly QqTaskStatus[] = [
+/**
+ * 权威终态集合（唯一真值）。
+ *
+ * `src/qq/store.ts` 的清理逻辑从这里派生自己的状态集（另加历史别名），
+ * `isTerminalStatus` 也读它 —— 词表只有这一份，避免两处漂移。
+ */
+export const TERMINAL_STATUSES: readonly QqTaskStatus[] = [
   "succeeded",
   "failed",
   "canceled",
