@@ -60,6 +60,13 @@ export interface QqHostSuperSnapshot {
   summary?: string;
   /** worktree 隔离时的分支名。 */
   branch?: string;
+  /**
+   * worktree 的绝对路径（仅 git worktree 隔离、且目录仍然存在时才有）。
+   *
+   * 服务派发尾声用它补 `correlation.worktreePath`：spawn 那一刻 worktree
+   * 还没创建，只能等收尾后从快照里取；取不到就保持缺省，绝不拼造路径。
+   */
+  worktreePath?: string;
   /** 子会话状态（如 `running` / `merged` / `interrupted`），原样透传。 */
   status?: string;
   /** 是否已合并回当前分支（已知才填）。 */
@@ -78,12 +85,17 @@ export interface QqHostPorts {
   /**
    * 启动一个 Super Agent 子会话。
    *
-   * 同步返回子会话 id（与可选分支）；失败直接抛错。宿主必须在返回前就把
-   * 子会话登记好，因为这之后服务可能立刻收到 `/qq stop`。
+   * 同步返回子会话 id（与可选的隔离信息）；失败直接抛错。宿主必须在返回前
+   * 就把子会话登记好，因为这之后服务可能立刻收到 `/qq stop`。
+   *
+   * `worktreePath` 只在 spawn 那一刻**已经**知道隔离目录时才有值：真实的
+   * worktree 是排队泵异步创建的，通常此刻拿不到 —— 适配器会在收尾后从
+   * `readSuper` 快照再取一次，两处都没有就保持 undefined。
    */
   spawnTask(spec: QqHostSpawnSpec, opts: QqHostSpawnOptions): {
     superSessionId: string;
     branch?: string;
+    worktreePath?: string;
   };
   /** 等待子会话收尾；`timeoutMs` 是建议上限（端口应自行兜底）。 */
   waitForSettle(superSessionId: string, timeoutMs?: number): Promise<void>;
@@ -243,12 +255,28 @@ export function createQqServiceHost(
       // 同步回填：这一步必须早于任何 await，否则 `/qq stop` 可能读不到 id。
       input.task.correlation.superSessionId = spawned.superSessionId;
       if (spawned.branch) input.task.correlation.branch = spawned.branch;
+      if (spawned.worktreePath) input.task.correlation.worktreePath = spawned.worktreePath;
 
       await waitForSettle(spawned.superSessionId);
 
-      return spawned.branch
-        ? { superSessionId: spawned.superSessionId, branch: spawned.branch }
-        : { superSessionId: spawned.superSessionId };
+      // worktree 是排队泵异步创建的：spawn 那一刻通常还没有路径。收尾后从
+      // 只读快照补取一次（子会话可能已清理 —— 快照不给就保持 undefined，
+      // 绝不拼造一个磁盘上不存在的路径）。
+      let worktreePath = spawned.worktreePath;
+      if (!worktreePath) {
+        const snapshot = ports.readSuper(spawned.superSessionId);
+        const fromSnapshot = snapshot?.worktreePath;
+        if (typeof fromSnapshot === "string" && fromSnapshot.length > 0) {
+          worktreePath = fromSnapshot;
+          input.task.correlation.worktreePath = fromSnapshot;
+        }
+      }
+
+      return {
+        superSessionId: spawned.superSessionId,
+        ...(spawned.branch ? { branch: spawned.branch } : {}),
+        ...(worktreePath ? { worktreePath } : {}),
+      };
     },
 
     async cancelTask(superSessionId: string): Promise<void> {

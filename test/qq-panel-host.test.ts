@@ -212,6 +212,70 @@ describe("createQqServiceHost — dispatchTask", () => {
     expect(task.correlation).toEqual({ superSessionId: "super-2", branch: "iflow/qq/legacy" });
   });
 
+  it("透传 worktreePath：spawn 时已知就回传并写回 correlation", async () => {
+    const task = makeTask();
+    const f = makeFixture();
+    const host = createQqServiceHost({
+      ...f.ports,
+      spawnTask: (spec, opts) => {
+        f.spawns.push({ spec, opts });
+        return {
+          superSessionId: "super-wt",
+          branch: "iflow/qq/wt",
+          worktreePath: "/ws/.iflow/super/worktrees/wt",
+        };
+      },
+    });
+
+    const result = await host.dispatchTask(makeDispatchInput(task));
+
+    expect(result).toEqual({
+      superSessionId: "super-wt",
+      branch: "iflow/qq/wt",
+      worktreePath: "/ws/.iflow/super/worktrees/wt",
+    });
+    expect(task.correlation.worktreePath).toBe("/ws/.iflow/super/worktrees/wt");
+  });
+
+  it("spawn 时拿不到 worktree 路径时，收尾后从快照补取", async () => {
+    const task = makeTask();
+    const f = makeFixture();
+    const host = createQqServiceHost({
+      ...f.ports,
+      spawnTask: (spec, opts) => {
+        f.spawns.push({ spec, opts });
+        return { superSessionId: "super-late" };
+      },
+      readSuper: () => ({
+        summary: "完成",
+        worktreePath: "/ws/.iflow/super/worktrees/late",
+      }),
+    });
+
+    const result = await host.dispatchTask(makeDispatchInput(task));
+
+    expect(result.worktreePath).toBe("/ws/.iflow/super/worktrees/late");
+    expect(task.correlation.worktreePath).toBe("/ws/.iflow/super/worktrees/late");
+  });
+
+  it("两处都拿不到 worktree 路径时保持 undefined，不伪造", async () => {
+    const task = makeTask();
+    const f = makeFixture();
+    const host = createQqServiceHost({
+      ...f.ports,
+      spawnTask: (spec, opts) => {
+        f.spawns.push({ spec, opts });
+        return { superSessionId: "super-no-wt" };
+      },
+      readSuper: () => null,
+    });
+
+    const result = await host.dispatchTask(makeDispatchInput(task));
+
+    expect(result).toEqual({ superSessionId: "super-no-wt" });
+    expect("worktreePath" in task.correlation).toBe(false);
+  });
+
   it("spawnTask 抛错时原样上抛，不继续等待、不伪造成功", async () => {
     const task = makeTask();
     const waits: string[] = [];

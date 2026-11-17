@@ -1204,11 +1204,25 @@ describe("QqService — 回包可靠性缺口回归", () => {
     // msg_seq，平台按 (msg_id, msg_seq) 去重，不会把终态结果的配额烧光。
     expect(progress).toHaveLength(1);
     expect(progress[0]?.dedupeKey).toBe(`progress:${taskId}:running|running`);
+    // 节流命中不能再是「点了没反应」：本地必须给一次性回执（且不刷屏）。
+    const receipts = f.notes.filter((note) => note.includes("已刷新"));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toContain(shortTaskId(taskId));
 
-    // 超出最小间隔后才允许再发一条（节流是时间窗，不是永久抑制）。
+    // dedupeKey 的 TTL 是 10 分钟：过期后 adapter 会重新分配 seq，同一 key
+    // 会被平台当成新消息 —— 同指纹必须由服务侧挡住，无论过了多久都不重发。
+    clock += 10 * 60_000 + 1;
+    await f.service.handleTaskAction(taskId, "refresh");
+    expect(f.delivered.filter((item) => item.text.includes("尚未结束"))).toHaveLength(1);
+
+    // 指纹变化（执行体状态变了）才允许再发一条进度。
+    f.host.readTaskOutcome = () => ({ summary: "", status: "waiting_approval" });
     clock += QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS + 1;
     await f.service.handleTaskAction(taskId, "refresh");
-    expect(f.delivered.filter((item) => item.text.includes("尚未结束"))).toHaveLength(2);
+    const updated = f.delivered.filter((item) => item.text.includes("尚未结束"));
+    expect(updated).toHaveLength(2);
+    expect(updated[1]!.text).toContain("waiting_approval");
+    expect(updated[1]!.dedupeKey).toBe(`progress:${taskId}:running|waiting_approval`);
 
     // 终态结果仍能送达。
     f.host.readTaskOutcome = () => ({

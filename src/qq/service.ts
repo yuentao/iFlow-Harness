@@ -290,8 +290,19 @@ export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主
  * QQ 同一个 `msg_id` 的被动回复条数有上限（常见口径 5 条，见
  * {@link deliverTaskText}），「已受理 + 审批请求 + 审批结果 + 终态结果」已经
  * 占掉 4 条；用户连点几次 `/qq refresh` 就会把配额烧光，终态结果只能靠主动
- * 消息额度（同样受限）。因此同一任务的进度快照在本地按此间隔节流：间隔内的
- * 重复刷新复用上一次投递，不再新开被动回复序号。
+ * 消息额度（同样受限）。因此同一任务的进度快照在本地按此间隔节流。
+ *
+ * **真实行为（三段式，别再按旧注释理解）**：
+ *  1. **节流命中**（同一指纹在窗口内重复刷新）：不再投递，但会给**本地
+ *     一次性回执**（toast），用户不会遇到「点了没反应」；
+ *  2. **指纹未变**（无论距上次多久）：永不重发 —— adapter 的 dedupeKey TTL
+ *     只有 10 分钟，过期后同一 key 会重新分配 seq、被平台当成新消息投递，
+ *     所以「同状态同文本」不能只靠 dedupeKey 去重，必须由这里按指纹挡住；
+ *  3. **指纹变化**（任务状态或执行体状态变了）：窗口外立即投递；窗口内
+ *     等下一次刷新（配额保护）。
+ *
+ * 也就是说，静默 → 平台去重 → TTL 过期后重复送达这条旧路径已被指纹挡住，
+ * 而节流本身也从「静默丢弃」变成「本地有回执、QQ 侧不重复」。
  */
 export const QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS = 60_000;
 /**
@@ -368,7 +379,11 @@ interface QqDetailProfile {
  *
  * 配置层（`iflow.qq.resultDetail`）用 compact / standard / detailed，
  * shared 层用 summary / standard / full；两套词表都在这里收敛，避免调用点
- * 各写一份 switch。字符预算按任务约定：800 / 3000 / 12000。
+ * 各写一份 switch。这里的 `chunkChars` 只是档位**期望**预算（800 / 3000 /
+ * 12000），实际单片长度还要过 `chunkQqText` 的保守常量
+ * `QQ_CHUNK_MAX_CHARS`（3000 码点）与 `QQ_CHUNK_MAX_BYTES`（12000 UTF-8
+ * 字节）—— detailed 的 12000 因此当前会被收紧到 3000 码点。真机实测出
+ * 平台上限后再放宽 shared 常量，这里不必再改。
  */
 const DETAIL_PROFILES: Readonly<Record<string, QqDetailProfile>> = {
   compact: { detail: "summary", chunkChars: 800 },
@@ -755,13 +770,28 @@ export class QqService {
    */
   private readonly deliveringResults = new Map<string, Promise<QqTask>>();
   /**
-   * 运行中进度回包的节流记账（taskId → 上次进度投递时刻）。
+   * 运行中进度回包的节流记账（taskId → 上次进度投递时刻，单调时钟）。
    *
-   * 同状态在 {@link QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS} 内的重复刷新直接
-   * 复用上一次投递（同一个稳定 dedupeKey → adapter 复用同一个 msg_seq），
-   * 不让每次点击都新开一条被动回复。
+   * 同状态在 {@link QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS} 内的重复刷新不再
+   * 投递（保护被动回复配额），并给一次本地回执。
    */
   private readonly progressRefreshes = new Map<string, number>();
+  /**
+   * 每任务「最后一次**已发送**的进度指纹」（taskId → 指纹）。
+   *
+   * 为什么需要它：adapter 的 dedupeKey 只保留 10 分钟，过期后同一个 key 会被
+   * 重新分配 seq、平台当成一条新消息送出去 —— 只靠节流窗口与 dedupeKey
+   * 挡不住「10 分钟后同一条进度又发一遍」。这里按指纹做永久去重：指纹未变
+   * 就永不重发（无论距上次多久），只有状态/执行体状态变化才允许再投递。
+   */
+  private readonly progressFingerprints = new Map<string, string>();
+  /**
+   * 每任务上一次「节流回执」的单调时刻（taskId → 时刻）。
+   *
+   * 连点刷新时节流会命中多次，但本地只提示一次（每个窗口最多一条），
+   * 免得按钮把同一句 toast 刷满屏。
+   */
+  private readonly progressNoticeAt = new Map<string, number>();
   /** 逻辑投递去重键的递增序号（配合 taskId 生成全局唯一的 dedupeKey）。 */
   private deliverySeqCounter = 0;
 
@@ -2046,25 +2076,42 @@ export class QqService {
       // QQ 同一 msg_id 的被动回复条数有上限（常见口径 5 条）：已受理 + 审批
       // 请求 + 审批结果 + 终态结果已经占 4 条，进度消息再每次新开一条，用户
       // 点几次刷新就把终态结果的配额烧光（这是「收不到结果」的另一条回法）。
-      // 因此：①最小间隔内的重复刷新直接复用上一次投递；②投递用稳定
-      // dedupeKey，adapter 复用同一个 msg_seq，平台按 (msg_id, msg_seq) 去重。
+      // 因此：①同一指纹在最小间隔内不投递（只给一次本地回执）；②同指纹
+      // 永不重发（adapter 的 dedupeKey TTL 过期后同 key 会变成新消息，见
+      // progressFingerprints 字段注释）；③只有指纹变化才投递，投递仍带
+      // 稳定 dedupeKey，让 adapter 复用同一个 msg_seq（重试不刷重复消息）。
+      // 指纹覆盖「任务状态 + 执行体状态」：二者一起决定进度正文，所以正文
+      // 不变 ⇔ 指纹不变。
       const fingerprint = `${current.status}|${typeof outcome.status === "string" ? outcome.status : ""}`;
       // 节流窗口同样是相对时间：走单调时钟，避免系统时间回拨导致「刚发过」
       // 被读成「很久没发」而连发，或反之永久压住。
       const at = this.monotonic();
       const previous = this.progressRefreshes.get(current.taskId);
-      if (previous !== undefined && at - previous < QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS) {
+      const lastSent = this.progressFingerprints.get(current.taskId);
+      const withinInterval =
+        previous !== undefined && at - previous < QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS;
+
+      // 两条路径都不投递，但都给本地一次性回执（旧实现直接 return，用户点
+      // 刷新完全看不到反馈，只能以为按钮坏了）：
+      //  ① 指纹未变：永不重发 —— adapter 的 dedupeKey TTL 只有 10 分钟，
+      //     过期后同一个 key 会被重新分配 seq、平台当成新消息再送一遍；
+      //  ② 指纹变了但在最小间隔内：本次压住，等下个窗口（被动回复配额保护）。
+      if (lastSent === fingerprint || withinInterval) {
+        this.notifyProgressThrottled(current.taskId, at, lastSent === fingerprint);
         this.log(
-          `QQ 任务 ${current.taskId}：${QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS}ms 内的重复刷新复用上一次进度投递`,
+          `QQ 任务 ${current.taskId}：进度未投递（${
+            lastSent === fingerprint ? "指纹未变" : "最小间隔内"
+          }，指纹 ${fingerprint}）`,
         );
         return;
       }
-      const dedupeKey = `progress:${current.taskId}:${fingerprint}`;
+
       this.progressRefreshes.set(current.taskId, at);
+      this.progressFingerprints.set(current.taskId, fingerprint);
       await this.deliverTaskNotice(
         current,
         `任务 ${shortTaskId(current.taskId)} 尚未结束${statusNote}，结束后结果会自动送达；如需查询可回复 /qq status ${current.taskId}。`,
-        dedupeKey,
+        `progress:${current.taskId}:${fingerprint}`,
       );
       return;
     }
@@ -2085,6 +2132,32 @@ export class QqService {
       : { ...current, result, updatedAt: Math.max(current.updatedAt, this.now()) };
     await this.persist(patched);
     await this.deliverResult(patched);
+  }
+
+  /**
+   * 进度投递被节流时的**本地**回执（只进面板 toast / 日志，不发 QQ）。
+   *
+   * 每个最小间隔窗口最多一条：连点 5 次刷新最终是 1 条 QQ 消息 + 1 条本地
+   * 提示，而不是 5 条重复 toast。两种原因分开措辞，用户能判断「是没变化」
+   * 还是「发得太频繁」。
+   */
+  private notifyProgressThrottled(taskId: string, at: number, unchanged: boolean): void {
+    const previousNotice = this.progressNoticeAt.get(taskId);
+    if (
+      previousNotice !== undefined &&
+      at - previousNotice < QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.progressNoticeAt.set(taskId, at);
+    const id = shortTaskId(taskId);
+    this.notify(
+      unchanged
+        ? `QQ 任务 ${id} 已刷新：状态没有变化，进度消息不重复发送。`
+        : `QQ 任务 ${id} 已刷新：进度消息最快每 ${Math.round(
+            QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS / 1000,
+          )} 秒一条。`,
+    );
   }
 
   // -------------------------------------------------------------------------
