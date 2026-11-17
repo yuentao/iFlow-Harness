@@ -297,16 +297,6 @@ const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
   error: t("出错"),
 };
 
-/**
- * openid / 群号脱敏：只露末 6 位。
- *
- * 官方接口给的是 openid（不是 QQ 号），整串既不便于阅读也没必要铺在设置页
- * 上；末 6 位足够用户在同一条记录里辨认，同时避免整屏标识符。
- */
-function maskIdentifier(value: string): string {
-  return `…${value.slice(-6)}`;
-}
-
 /** 列表里的时间按本地时区渲染成 `YYYY-MM-DD HH:mm`（不需要秒）。 */
 function formatAt(at: number): string {
   if (!Number.isFinite(at) || at <= 0) return "—";
@@ -532,13 +522,16 @@ export function QqSettings({
             <div key={user.openid} className="flex flex-col gap-2 px-4 py-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-ui-body font-medium text-foreground">
-                  {maskIdentifier(user.openid)}
+                  {maskQqOpenId(user.openid)}
                 </span>
                 <span className="text-ui-caption text-muted-foreground">{t("来源")}</span>
                 <Chip tone="muted">
                   {user.chatType === "private"
                     ? t("私聊")
-                    : t("群 {0}", user.groupId ? maskIdentifier(user.groupId) : "—")}
+                    : // 群号与 openid 共用同一套脱敏（固定 8 个星号、≤8 位整体覆盖）。
+                      // 取舍：QQ 群号常在 8 位上下，因此多数群会显示成纯星号 ——
+                      // 牺牲可辨识性，换「不泄露原长/原值」这条硬底线。
+                      t("群 {0}", user.groupId ? maskQqOpenId(user.groupId) : "—")}
                 </Chip>
                 <span className="text-ui-caption text-muted-foreground">
                   {t("出现次数")} {user.count}

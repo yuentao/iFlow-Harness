@@ -325,7 +325,7 @@ describe("待审核用户（授权模型）", () => {
     render();
     const text = container.textContent ?? "";
     expect(text).toContain("待审核用户");
-    expect(text).toContain("…abcdef");
+    expect(text).toContain("open********cdef");
     expect(text).not.toContain("openid-abcdef");
     expect(text).toContain("帮我看看构建为什么失败");
 

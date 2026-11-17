@@ -251,13 +251,13 @@ describe("applyQqSettingsPatch", () => {
     expect(io.settings).toEqual({ workspace: " J:/work/qq " });
   });
 
-  it("白名单数组按原值浅拷贝写入；含非字符串项则整键拒绝", async () => {
+  it("白名单写入按 openid 归一（trim + 去重保首次顺序）；空 id / 非字符串项整键拒绝", async () => {
     const ok = new MemoryIo();
     const accepted = await applyQqSettingsPatch(ok, {
       allowedUsers: [" 10001 ", "10001", "10002"],
     });
     expect(accepted.applied).toEqual(["allowedUsers"]);
-    expect(ok.settings.allowedUsers).toEqual([" 10001 ", "10001", "10002"]);
+    expect(ok.settings.allowedUsers).toEqual(["10001", "10002"]);
 
     const bad = new MemoryIo();
     const rejected = await applyQqSettingsPatch(bad, {
@@ -266,6 +266,15 @@ describe("applyQqSettingsPatch", () => {
     expect(rejected.applied).toEqual([]);
     expect(rejected.ignored).toEqual(["allowedGroups"]);
     expect(bad.writes).toEqual([]);
+
+    // 空 / 纯空白的 openid 与对象缺 openid 同待遇：整键拒绝，不写半截脏值。
+    const blank = new MemoryIo();
+    const rejectedBlank = await applyQqSettingsPatch(blank, {
+      allowedUsers: ["ok-id", "   "],
+    });
+    expect(rejectedBlank.applied).toEqual([]);
+    expect(rejectedBlank.ignored).toEqual(["allowedUsers"]);
+    expect(blank.writes).toEqual([]);
   });
 
   it("备注条目写成 { openid, note }，没备注的条目仍是裸字符串", async () => {
@@ -294,6 +303,53 @@ describe("applyQqSettingsPatch", () => {
     });
     await applyQqSettingsPatch(io, { allowedUsers: [{ openid: "user-1" }] });
     expect(io.settings.allowedUsers).toEqual(["user-1"]);
+  });
+
+  it("备注语义守卫：裸字符串保留盘上备注，对象缺 note / 空 note 都清空", async () => {
+    // 裸字符串 = 「只关心 id」：盘上备注必须保留。
+    const bare = new MemoryIo({
+      allowedUsers: [{ openid: "user-1", note: "同事" }],
+    });
+    await applyQqSettingsPatch(bare, { allowedUsers: ["user-1"] });
+    expect(bare.settings.allowedUsers).toEqual([{ openid: "user-1", note: "同事" }]);
+
+    // 对象条目 = note 是权威值：缺省即清空。
+    const omitted = new MemoryIo({
+      allowedUsers: [{ openid: "user-1", note: "同事" }],
+    });
+    await applyQqSettingsPatch(omitted, { allowedUsers: [{ openid: "user-1" }] });
+    expect(omitted.settings.allowedUsers).toEqual(["user-1"]);
+
+    // 对象条目 = note 是权威值：空串同样清空。
+    const blankNote = new MemoryIo({
+      allowedUsers: [{ openid: "user-1", note: "同事" }],
+    });
+    await applyQqSettingsPatch(blankNote, {
+      allowedUsers: [{ openid: "user-1", note: "  " }],
+    });
+    expect(blankNote.settings.allowedUsers).toEqual(["user-1"]);
+  });
+
+  it("对象条目的显式 note 覆盖盘上旧备注；其它条目不受影响", async () => {
+    const io = new MemoryIo({
+      allowedUsers: [
+        { openid: "user-1", note: "同事" },
+        { openid: "user-2", note: "运维" },
+        "user-3",
+      ],
+    });
+    await applyQqSettingsPatch(io, {
+      allowedUsers: [
+        { openid: "user-1", note: "运维同事" },
+        { openid: "user-2", note: "运维" },
+        "user-3",
+      ],
+    });
+    expect(io.settings.allowedUsers).toEqual([
+      { openid: "user-1", note: "运维同事" },
+      { openid: "user-2", note: "运维" },
+      "user-3",
+    ]);
   });
 
   it("只追加 openid 的补丁（宿主内部路径）保留磁盘上已有备注", async () => {

@@ -245,6 +245,25 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     expect(ioHarness.settings.allowedUsers).toEqual(["10001", "open-self"]);
   });
 
+  it("扫码绑定以磁盘最新白名单为基准：另一个窗口新增的条目与备注不被内存快照覆盖", async () => {
+    // 本窗口内存里只有扫码者本人；扫码流程开始后，另一个窗口在磁盘上写入
+    // 用户 A（带备注）。旧实现会用内存快照整体覆盖，把 A 抹掉。
+    ioHarness.settings.allowedUsers = ["mem-b"];
+    await p.handleQqManagedSetup("start");
+    ioHarness.settings.allowedUsers = [{ openid: "user-a", note: "同事" }];
+
+    protocolCbs!.onSuccess({ appId: "app-3", appSecret: "sec-3", userOpenid: "mem-b" });
+    await tick();
+
+    expect(ioHarness.settings.allowedUsers).toEqual([
+      { openid: "user-a", note: "同事" },
+      "mem-b",
+    ]);
+    expect(
+      (p.qq?.config as { allowedUsers?: string[] } | undefined)?.allowedUsers,
+    ).toEqual(["user-a", "mem-b"]);
+  });
+
   it("白名单为空也能启动（allowlist_empty 只是提示，不拦启动）", async () => {
     ioHarness.settings.enabled = true;
     ioHarness.settings.allowedUsers = [];

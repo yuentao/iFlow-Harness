@@ -2,7 +2,12 @@
 import { act, useState, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { QqPendingUserUi } from "../shared/messages";
+import type { QqPendingUserUi, QqSettingsPatch } from "../shared/messages";
+import {
+  applyQqSettingsPatch,
+  readQqSettings,
+  type QqSettingsIo,
+} from "../src/qq/settings-host.js";
 import { QqSettings, type QqSettingsValue } from "../webview/src/components/QqSettings";
 
 /** jsdom ships neither ResizeObserver nor scrollIntoView; the Dropdown clamp
@@ -44,6 +49,34 @@ let onChange: ReturnType<typeof vi.fn>;
 let onTestConnection: ReturnType<typeof vi.fn>;
 let onUnbind: ReturnType<typeof vi.fn>;
 let onUserAction: ReturnType<typeof vi.fn>;
+
+/**
+ * 端到端往返用的最小 IO：设置值存在内存里，secret 一律空。
+ * 与 `applyQqSettingsPatch` / `readQqSettings` 搭配即为「磁盘」。
+ */
+class MemoryIo implements QqSettingsIo {
+  readonly settings: Record<string, unknown>;
+
+  constructor(settings: Record<string, unknown> = {}) {
+    this.settings = { ...settings };
+  }
+
+  readAll(): Record<string, unknown> {
+    return { ...this.settings };
+  }
+
+  async writeAll(patch: Record<string, unknown>): Promise<void> {
+    Object.assign(this.settings, patch);
+  }
+
+  async getSecret(_key: string): Promise<string | undefined> {
+    return undefined;
+  }
+
+  async setSecret(_key: string, _value: string): Promise<void> {}
+
+  async deleteSecret(_key: string): Promise<void> {}
+}
 
 /** Stateful harness: the component is controlled, so a test must feed the
  * patch back for the next render (like the host will). */
@@ -355,20 +388,57 @@ describe("QqSettings", () => {
     );
     const text = container.textContent ?? "";
     expect(text).toContain("待审核用户");
-    // 末 6 位可见，完整 openid / 完整群号不出现。
-    expect(text).toContain("…123456");
+    // 与白名单区同一套脱敏：前 4 + 固定 8 个 * + 后 4（≤8 位整体覆盖）。
+    // 完整 openid / 完整群号都不出现。
+    expect(text).toContain("abcd********3456");
     expect(text).not.toContain("abcdef123456");
-    expect(text).toContain("…654321");
+    expect(text).toContain("grou********4321");
     expect(text).not.toContain("group-user-654321");
-    expect(text).toContain("…789012");
+    expect(text).toContain("1234********9012");
     expect(text).not.toContain("123456789012");
     expect(text).toContain("私聊");
-    expect(text).toContain("群 …789012");
+    expect(text).toContain("群 1234********9012");
     expect(text).toContain("出现次数");
     expect(text).toContain("3");
     expect(text).toContain("帮我改一下 README 的安装说明");
     expect(text).toContain("首次");
     expect(text).toContain("最近");
+  });
+
+  it("待审核区短 id 不得原样显示：≤8 位整体覆盖，星号个数恒为 8", () => {
+    render(
+      <Harness
+        pending={[
+          {
+            openid: "abc123",
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 1,
+            preview: "短 id",
+            chatType: "private",
+          },
+          {
+            openid: "abcdefgh12345678",
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 1,
+            preview: "长 id",
+            chatType: "group",
+            groupId: "12345678",
+          },
+        ]}
+      />,
+    );
+    const text = container.textContent ?? "";
+    // 短值（6 位）与 8 位群号都整体覆盖，绝不出现原文。
+    expect(text).not.toContain("abc123");
+    expect(text).not.toContain("12345678");
+    expect(text).toContain("abcd********5678");
+    expect(text).toContain("群 ********");
+    // 三条脱敏串的星号段长度一致（固定 8），不能由星号数推出原始长度。
+    const starRuns = text.match(/\*+/g) ?? [];
+    expect(starRuns).toHaveLength(3);
+    expect(starRuns.every((run) => run.length === 8)).toBe(true);
   });
 
   it("待审核列表为空时不渲染该区", () => {
@@ -397,5 +467,66 @@ describe("QqSettings", () => {
     expect(onUserAction).toHaveBeenCalledWith(openid, "approve");
     clickText("拒绝");
     expect(onUserAction).toHaveBeenCalledWith(openid, "reject");
+  });
+
+  it("端到端往返：读 → UI 全量回传（只改一条备注）→ 写 → 再读，无备注条目仍是裸字符串", async () => {
+    const io = new MemoryIo({
+      allowedUsers: ["legacy-plain", { openid: "user-with-note", note: "同事" }],
+    });
+    // 1) 读：磁盘值经宿主归一成 UI 快照。
+    const initial = await readQqSettings(io);
+    expect(initial.allowedUsers).toEqual([
+      { openid: "legacy-plain" },
+      { openid: "user-with-note", note: "同事" },
+    ]);
+
+    // 2) UI：只改第二条的备注；onChange 交回全量数组（对象形态，与宿主语义一致）。
+    function IoHarness() {
+      const [value, setValue] = useState<QqSettingsValue>({ ...initial });
+      return (
+        <QqSettings
+          value={value}
+          onChange={(patch) => {
+            onChange(patch);
+            setValue((current) => ({ ...current, ...patch }) as QqSettingsValue);
+          }}
+          onTestConnection={onTestConnection}
+          onUnbind={onUnbind}
+          onUserAction={onUserAction}
+        />
+      );
+    }
+    render(<IoHarness />);
+    const note = container.querySelector<HTMLInputElement>(
+      "input[aria-label='允许的用户 2 的备注']",
+    )!;
+    expect(note.value).toBe("同事");
+    act(() => note.focus());
+    setInput(note, "运维同事");
+    act(() => note.blur());
+
+    const calls = onChange.mock.calls;
+    const patch = calls[calls.length - 1]![0] as QqSettingsPatch;
+    expect(patch.allowedUsers).toEqual([
+      { openid: "legacy-plain" },
+      { openid: "user-with-note", note: "运维同事" },
+    ]);
+
+    // 3) 写：真实写入层落盘。
+    await act(async () => {
+      await applyQqSettingsPatch(io, patch);
+    });
+    // 无备注条目保持裸字符串 —— 不被 UI 的对象形态无意义升格成 `{ openid }`。
+    expect(io.settings.allowedUsers).toEqual([
+      "legacy-plain",
+      { openid: "user-with-note", note: "运维同事" },
+    ]);
+
+    // 4) 再读：备注落盘且条目形状照旧。
+    const after = await readQqSettings(io);
+    expect(after.allowedUsers).toEqual([
+      { openid: "legacy-plain" },
+      { openid: "user-with-note", note: "运维同事" },
+    ]);
   });
 });
