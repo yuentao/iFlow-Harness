@@ -133,7 +133,7 @@ beforeEach(() => {
     state: null,
     qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
     qqStatus: null,
-    qqBindCode: null,
+    qqPendingUsers: [],
     qqLoginQr: null,
     qqManagedStatus: null,
   });
@@ -290,5 +290,79 @@ describe("纯 QQBot 界面文案", () => {
     expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "startQrLogin" });
     clickQrAction("取消");
     expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "cancelQrLogin" });
+  });
+});
+
+describe("待审核用户（授权模型）", () => {
+  function pending(): void {
+    act(() =>
+      useChat.getState().applyHostMessage({
+        type: "qqPendingUsers",
+        users: [
+          {
+            openid: "openid-abcdef",
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 2,
+            preview: "帮我看看构建为什么失败",
+            chatType: "private",
+          },
+        ],
+      }),
+    );
+  }
+
+  function clickText(text: string): void {
+    const button = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === text,
+    );
+    expect(button, `button 「${text}」`).toBeTruthy();
+    act(() => button!.click());
+  }
+
+  it("列表脱敏渲染，批准 / 拒绝 post qqUserAction", () => {
+    pending();
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("待审核用户");
+    expect(text).toContain("…abcdef");
+    expect(text).not.toContain("openid-abcdef");
+    expect(text).toContain("帮我看看构建为什么失败");
+
+    clickText("批准");
+    expect(postMessage).toHaveBeenCalledWith({
+      type: "qqUserAction",
+      openid: "openid-abcdef",
+      action: "approve",
+    });
+    clickText("拒绝");
+    expect(postMessage).toHaveBeenCalledWith({
+      type: "qqUserAction",
+      openid: "openid-abcdef",
+      action: "reject",
+    });
+  });
+
+  it("空列表不渲染待审核区，未授权时隐藏测试连接 / 解除绑定", () => {
+    render();
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("待审核用户");
+    expect(text).toContain("一键接入 QQ 机器人");
+    expect(text).not.toContain("测试连接");
+    expect(text).not.toContain("解除绑定");
+    // 白名单区始终可见。
+    expect(text).toContain("允许的用户");
+  });
+
+  it("snapshot 不覆盖待审核列表", () => {
+    pending();
+    act(() =>
+      useChat.getState().applyHostMessage({
+        type: "snapshot",
+        state: initialSessionState(),
+      }),
+    );
+    expect(useChat.getState().qqPendingUsers).toHaveLength(1);
+    expect(useChat.getState().qqPendingUsers[0]?.openid).toBe("openid-abcdef");
   });
 });

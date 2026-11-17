@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
-import { AlertTriangle, Link2, PlugZap, Plus, RefreshCw, Square, Trash2, Unlink, Zap } from "lucide-react";
-import { isQrDataUrl, type HostToWebview, type QqSettingsUi } from "../../../shared/messages";
+import { AlertTriangle, PlugZap, Plus, RefreshCw, Square, Trash2, Unlink, Zap } from "lucide-react";
+import {
+  isQrDataUrl,
+  type HostToWebview,
+  type QqPendingUserUi,
+  type QqSettingsUi,
+} from "../../../shared/messages";
 import { t } from "../i18n";
 import {
   ActionRow,
@@ -52,12 +57,16 @@ export interface QqSettingsProps {
   value: QqSettingsValue;
   onChange: (patch: Partial<QqSettingsValue>) => void;
   onTestConnection: () => void;
-  onGenerateBindCode: () => void;
   onUnbind: () => void;
   /** 最近一次连接检查的结果（宿主回执）。 */
   status?: { connected?: boolean; detail?: string };
-  /** 当前有效的配对码与其绝对过期时间（epoch ms）。 */
-  bindCode?: { code: string; expiresAt: number };
+  /**
+   * 白名单外的人发来消息时留下的待审核记录（宿主每次全量重发）。
+   * 空数组 = 不渲染「待审核用户」区。
+   */
+  pendingUsers?: QqPendingUserUi[];
+  /** 对一条待审核记录的处置：放行写进白名单，拒绝记入拒绝集合。 */
+  onUserAction?: (openid: string, action: "approve" | "reject") => void;
   /** 配置或运行环境的问题；非空时以警告色调呈现。 */
   warnings?: string[];
   /** 一键接入：请求宿主开始 / 停止 QQBot 接入流程。 */
@@ -199,14 +208,37 @@ const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
   error: t("出错"),
 };
 
+/**
+ * openid / 群号脱敏：只露末 6 位。
+ *
+ * 官方接口给的是 openid（不是 QQ 号），整串既不便于阅读也没必要铺在设置页
+ * 上；末 6 位足够用户在同一条记录里辨认，同时避免整屏标识符。
+ */
+function maskIdentifier(value: string): string {
+  return `…${value.slice(-6)}`;
+}
+
+/** 列表里的时间按本地时区渲染成 `YYYY-MM-DD HH:mm`（不需要秒）。 */
+function formatAt(at: number): string {
+  if (!Number.isFinite(at) || at <= 0) return "—";
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 消息预览截断（宿主已按 80 码点收敛，这里再兜一次底、避免撑破单行）。 */
+function truncatePreview(preview: string): string {
+  return preview.length > 80 ? `${preview.slice(0, 79)}…` : preview;
+}
+
 export function QqSettings({
   value,
   onChange,
   onTestConnection,
-  onGenerateBindCode,
   onUnbind,
   status,
-  bindCode,
+  pendingUsers = [],
+  onUserAction,
   warnings = [],
   onManagedSetup,
   onQrAction,
@@ -385,37 +417,80 @@ export function QqSettings({
         <Hint className="px-1">{t("已通过扫码授权；如需更换请重新扫码。")}</Hint>
       )}
 
-      {bindCode && (
-        <div className="rounded-lg border border-border bg-surface/40 px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <FieldLabel>{t("配对码")}</FieldLabel>
-            <span className="font-mono text-ui-body font-semibold tracking-[0.2em] text-foreground">{bindCode.code}</span>
-            <span className="text-ui-caption text-muted-foreground">{t("剩余")}</span>
-            <CountdownSeconds deadline={bindCode.expiresAt} />
-          </div>
-          <Hint className="mt-1">{t("在 QQ 里发送 /qq bind {0} 完成绑定；倒计时结束后配对码失效，需要重新生成。", bindCode.code)}</Hint>
-        </div>
-      )}
-
-      <ActionRow className="px-1">
-        <Button icon={<PlugZap className={ICON_INLINE} />} onClick={onTestConnection}>
-          {t("测试连接")}
-        </Button>
-        <Button icon={<Link2 className={ICON_INLINE} />} onClick={onGenerateBindCode}>
-          {t("生成配对码")}
-        </Button>
-        {authorized && (
+      {authorized && (
+        <ActionRow className="px-1">
           <Button
             icon={<RefreshCw className={ICON_INLINE} />}
             onClick={() => onQrAction?.("startQrLogin")}
           >
             {t("重新扫码授权")}
           </Button>
-        )}
-        <Button variant="danger" icon={<Unlink className={ICON_INLINE} />} onClick={onUnbind}>
-          {t("解除绑定")}
-        </Button>
-      </ActionRow>
+          <Button icon={<PlugZap className={ICON_INLINE} />} onClick={onTestConnection}>
+            {t("测试连接")}
+          </Button>
+          <Button variant="danger" icon={<Unlink className={ICON_INLINE} />} onClick={onUnbind}>
+            {t("解除绑定")}
+          </Button>
+        </ActionRow>
+      )}
+
+      {pendingUsers.length > 0 && (
+        <SettingsGroup
+          title={t("待审核用户")}
+          hint={t("白名单外的人发来消息时只会出现在这里，不会被执行；放行后即可派发任务，拒绝后不会再出现。")}
+        >
+          {pendingUsers.map((user) => (
+            <div key={user.openid} className="flex flex-col gap-2 px-4 py-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-ui-body font-medium text-foreground">
+                  {maskIdentifier(user.openid)}
+                </span>
+                <span className="text-ui-caption text-muted-foreground">{t("来源")}</span>
+                <Chip tone="muted">
+                  {user.chatType === "private"
+                    ? t("私聊")
+                    : t("群 {0}", user.groupId ? maskIdentifier(user.groupId) : "—")}
+                </Chip>
+                <span className="text-ui-caption text-muted-foreground">
+                  {t("出现次数")} {user.count}
+                </span>
+              </div>
+              <div
+                className="truncate text-ui-caption text-muted-foreground"
+                title={user.preview}
+              >
+                {truncatePreview(user.preview)}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-3 text-ui-caption text-muted-foreground">
+                  <span>
+                    {t("首次")} {formatAt(user.firstSeenAt)}
+                  </span>
+                  <span>
+                    {t("最近")} {formatAt(user.lastSeenAt)}
+                  </span>
+                </div>
+                <ActionRow>
+                  <Button
+                    size="sm"
+                    variant="outline-primary"
+                    onClick={() => onUserAction?.(user.openid, "approve")}
+                  >
+                    {t("批准")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline-danger"
+                    onClick={() => onUserAction?.(user.openid, "reject")}
+                  >
+                    {t("拒绝")}
+                  </Button>
+                </ActionRow>
+              </div>
+            </div>
+          ))}
+        </SettingsGroup>
+      )}
 
       <SettingsGroup title={t("连接")}>
         <Row label={t("启用 QQ 远程任务")} description={t("从 QQ 私聊或群聊接收任务，在独立分支上执行。")}>

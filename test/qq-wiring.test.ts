@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QqConfig } from "../src/qq/config.js";
-import {
-  generateBindCode,
-  isBindCodeValid,
-  isTerminalSuperStatus,
-  QQ_BIND_CODE_LENGTH,
-  QQ_BIND_CODE_TTL_MS,
-  shouldRestartOnPatch,
-} from "../src/qq/wiring.js";
+import { isTerminalSuperStatus, shouldRestartOnPatch } from "../src/qq/wiring.js";
 
 /** 一份完整配置（只用于 shouldRestartOnPatch 的比较基准）。 */
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
@@ -24,67 +17,6 @@ function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
     ...overrides,
   };
 }
-
-describe("generateBindCode", () => {
-  it("生成 6 位大写字母数字，并在 5 分钟后过期", () => {
-    const now = 1_700_000_000_000;
-    // 0.0 → A；0.5 → S（18/36）；0.9999 → 9
-    const samples = [0, 0.5, 0.9999, 0.25, 0.75, 0.1];
-    let cursor = 0;
-    const rng = () => samples[cursor++ % samples.length]!;
-    const bind = generateBindCode(rng, now);
-    expect(bind.code).toHaveLength(QQ_BIND_CODE_LENGTH);
-    expect(bind.code).toMatch(/^[A-Z0-9]{6}$/);
-    expect(bind.expiresAt).toBe(now + QQ_BIND_CODE_TTL_MS);
-    expect(bind.code[0]).toBe("A");
-    expect(bind.code[1]).toBe("S");
-    expect(bind.code[2]).toBe("9");
-  });
-
-  it("脏随机源（NaN / 负数 / 超过 1）不会产出空码或越界", () => {
-    const values = [Number.NaN, -5, 5, Number.POSITIVE_INFINITY];
-    let cursor = 0;
-    const code = generateBindCode(() => values[cursor++ % values.length]!, 0).code;
-    expect(code).toHaveLength(QQ_BIND_CODE_LENGTH);
-    expect(code).toMatch(/^[A-Z0-9]{6}$/);
-  });
-
-  it("默认参数在真实随机源下依然合法", () => {
-    const code = generateBindCode().code;
-    expect(code).toMatch(/^[A-Z0-9]{6}$/);
-  });
-});
-
-describe("isBindCodeValid", () => {
-  const now = 1_000_000;
-  const bind = { code: "AB12CD", expiresAt: now + 1_000 };
-
-  it("码匹配且未过期 → true", () => {
-    expect(isBindCodeValid(bind, "AB12CD", now)).toBe(true);
-  });
-
-  it("小写 / 前后空白输入也接受（用户手打）", () => {
-    expect(isBindCodeValid(bind, " ab12cd ", now)).toBe(true);
-  });
-
-  it("过期（含恰好到期）→ false", () => {
-    expect(isBindCodeValid(bind, "AB12CD", now + 999)).toBe(true);
-    expect(isBindCodeValid(bind, "AB12CD", now + 1_000)).toBe(false);
-    expect(isBindCodeValid(bind, "AB12CD", now + 5_000)).toBe(false);
-  });
-
-  it("码不匹配 / 空码 / 没有记录 → false", () => {
-    expect(isBindCodeValid(bind, "AB12CE", now)).toBe(false);
-    expect(isBindCodeValid(bind, "", now)).toBe(false);
-    expect(isBindCodeValid(bind, "   ", now)).toBe(false);
-    expect(isBindCodeValid(undefined, "AB12CD", now)).toBe(false);
-    expect(isBindCodeValid({ code: "", expiresAt: now + 1_000 }, "", now)).toBe(false);
-  });
-
-  it("过期时间不是有限数 → false（脏归档不能成为永久有效的码）", () => {
-    expect(isBindCodeValid({ code: "AB12CD", expiresAt: Number.NaN }, "AB12CD", now)).toBe(false);
-  });
-});
 
 describe("isTerminalSuperStatus", () => {
   it("只认三个终态", () => {
