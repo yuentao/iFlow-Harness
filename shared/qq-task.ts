@@ -813,7 +813,58 @@ export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): strin
 }
 
 /**
- * 按行 / 代码围栏边界切分纯文本，保证每片**码点数**不超过 `maxChars`。
+ * 单条 QQ 消息的保守码点上限。
+ *
+ * 平台口径未实测：社区说法是 C2C 单条约 3000–5000 字符，这里取 3000 这个
+ * 保守值 —— 宁可多发一片，也不要让一整片被平台按 `retryable: false` 拒收而
+ * 永久丢失。将来在真机上实测出更大上限后，调用方可通过 `chunkQqText` 的
+ * `limits.maxChars` 覆写，不必改这个默认值。
+ */
+export const QQ_CHUNK_MAX_CHARS = 3000;
+
+/**
+ * 单条 QQ 消息的保守 UTF-8 字节上限（12000 字节）。
+ *
+ * 码点预算对中文 / emoji 的字节开销没有约束力（3000 个汉字 = 9000 字节，
+ * 3000 个 emoji = 12000 字节）：平台若按字节计长，纯码点预算仍可能超限。
+ * 因此分片同时看字节预算，取两者先到者；同样可通过 `limits.maxBytes` 覆写。
+ */
+export const QQ_CHUNK_MAX_BYTES = 12_000;
+
+/** 分片上限的覆写入口（缺省即上面两个保守常量）。 */
+export interface QqChunkLimits {
+  /** 单片码点上限；缺省 {@link QQ_CHUNK_MAX_CHARS}。 */
+  maxChars?: number;
+  /** 单片 UTF-8 字节上限；缺省 {@link QQ_CHUNK_MAX_BYTES}。 */
+  maxBytes?: number;
+}
+
+/** 单个字符串的 UTF-8 字节数（不依赖 Node Buffer，任何运行时都可用）。 */
+function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0;
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
+
+/** 从码点切片里取最多 `maxPoints` 个、且 UTF-8 不超过 `maxBytes` 的前缀。 */
+function takeFitting(points: readonly string[], maxPoints: number, maxBytes: number): number {
+  let bytes = 0;
+  let take = 0;
+  while (take < maxPoints && take < points.length) {
+    const charBytes = utf8ByteLength(points[take]!);
+    if (bytes + charBytes > maxBytes) break;
+    bytes += charBytes;
+    take += 1;
+  }
+  return take;
+}
+
+/**
+ * 按行 / 代码围栏边界切分纯文本，保证每片**码点数**与 **UTF-8 字节数**都
+ * 不超过预算（两者先到者）。
  *
  * - 单位是 Unicode 码点（`Array.from` 视图），不是 UTF-16 码元：emoji /
  *   生僻字占两个码元，但硬切时只按整码点推进，**绝不会把代理对劈成孤立的
@@ -825,17 +876,38 @@ export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): strin
  * - 单行超过预算时按码点硬切（否则「不超长」无法保证）。
  * - `maxChars` 必须为正数，否则抛 `RangeError`（这是编程错误，不是数据问题）。
  *
- * 与既有上限的兼容：`maxPromptChars`（提示词上限 4000）本来就按码点计
- * （`Array.from`），分片预算（`chunkChars`，最高 12000）现在同口径；围栏补齐
- * 开销（最多 `\n``` ` 前后各一段 = 8 个码点）仍从预算里预留，因此预算小于 8
- * 且文本含围栏时可能略微超长 —— 这是刻意的退化，实际调用方预算远大于此。
+ * 预算取值：`maxChars` 是调用方的**期望**预算（档位意图），实际生效值还要
+ * 过 {@link QQ_CHUNK_MAX_CHARS}（码点）与 {@link QQ_CHUNK_MAX_BYTES}（字节）
+ * 两道保守上限 —— 任一档位写得再大，也不会产出超过平台保守上限的片。两个
+ * 上限都可以经 `limits` 覆写（真机实测后放宽），非法覆写值退回保守常量，
+ * 不会因为一个坏参数就取消全部保护。
+ *
+ * 围栏补齐开销（最多 `\n``` ` 前后各一段 = 8 个码点 / 8 字节）从两个预算里
+ * 都预留；预算小于 8 且文本含围栏时可能略微超长 —— 这是刻意的退化，实际
+ * 调用方预算远大于此。
  */
-export function chunkQqText(text: string, maxChars: number): string[] {
+export function chunkQqText(
+  text: string,
+  maxChars: number = QQ_CHUNK_MAX_CHARS,
+  limits: QqChunkLimits = {},
+): string[] {
   if (text.length === 0) return [];
   if (!Number.isFinite(maxChars) || maxChars < 1) {
     throw new RangeError("chunkQqText: maxChars 必须是正数");
   }
-  const limit = Math.floor(maxChars);
+  const charCap =
+    typeof limits.maxChars === "number" &&
+    Number.isFinite(limits.maxChars) &&
+    limits.maxChars >= 1
+      ? Math.floor(limits.maxChars)
+      : QQ_CHUNK_MAX_CHARS;
+  const byteLimit =
+    typeof limits.maxBytes === "number" &&
+    Number.isFinite(limits.maxBytes) &&
+    limits.maxBytes >= 1
+      ? Math.floor(limits.maxBytes)
+      : QQ_CHUNK_MAX_BYTES;
+  const limit = Math.min(Math.floor(maxChars), charCap);
   const lines = text.split("\n");
   const chunks: string[] = [];
   let lineIndex = 0;
@@ -848,6 +920,8 @@ export function chunkQqText(text: string, maxChars: number): string[] {
     const reopened: boolean = fenceOpen;
     const parts: string[] = reopened ? ["```"] : [];
     let joinedLen = reopened ? 3 : 0;
+    /** 当前片已累计的 UTF-8 字节数（含换行与重开的围栏行）。 */
+    let joinedBytes = reopened ? 3 : 0;
     let open: boolean = reopened;
     let hasContent = false;
 
@@ -857,14 +931,17 @@ export function chunkQqText(text: string, maxChars: number): string[] {
       const points = Array.from(full);
       const piecePoints = lineOffset === 0 ? points : points.slice(lineOffset);
       const piece = piecePoints.join("");
+      const pieceBytes = utf8ByteLength(piece);
       const fenceLine = lineOffset === 0 && piece.trimStart().startsWith("```");
       const nextOpen: boolean = fenceLine ? !open : open;
       const separator = parts.length === 0 ? 0 : 1;
       const room = limit - joinedLen - separator - (nextOpen ? 4 : 0);
+      const byteRoom = byteLimit - joinedBytes - separator - (nextOpen ? 4 : 0);
 
-      if (piecePoints.length <= room) {
+      if (piecePoints.length <= room && pieceBytes <= byteRoom) {
         parts.push(piece);
         joinedLen += separator + piecePoints.length;
+        joinedBytes += separator + pieceBytes;
         open = nextOpen;
         hasContent = true;
         lineIndex++;
@@ -875,10 +952,20 @@ export function chunkQqText(text: string, maxChars: number): string[] {
 
       // 还没有内容行：硬切当前行（超长单行 / 预算极小的退化情形）。
       // 至少推进 1 个码点，避免死循环；此时可能略超预算（见函数注释）。
-      const take = Math.max(1, room);
+      const pointRoom = Math.max(1, room);
+      const take = Math.max(
+        1,
+        takeFitting(
+          piecePoints,
+          Math.min(pointRoom, piecePoints.length),
+          Math.max(1, byteRoom),
+        ),
+      );
       const cutPoints = piecePoints.slice(0, take);
-      parts.push(cutPoints.join(""));
+      const cutText = cutPoints.join("");
+      parts.push(cutText);
       joinedLen += separator + cutPoints.length;
+      joinedBytes += separator + utf8ByteLength(cutText);
       open = nextOpen;
       hasContent = true;
       if (take >= piecePoints.length) {

@@ -7,6 +7,8 @@ import {
   formatQqTaskSummary,
   isTerminalStatus,
   makeIdempotencyKey,
+  QQ_CHUNK_MAX_BYTES,
+  QQ_CHUNK_MAX_CHARS,
   qqTaskStatusLabel,
   shortTaskId,
   transitionQqTask,
@@ -19,6 +21,16 @@ import {
 import type { Block, TurnChangeUi } from "../shared/messages.js";
 
 const CREATED_AT = 1_800_000_000_000;
+
+/** 独立的 UTF-8 字节计数（不复用被测实现，避免自证）。 */
+function utf8Bytes(text: string): number {
+  let bytes = 0;
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0;
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
 
 function makeInput(over: Partial<CreateQqTaskInput> = {}): CreateQqTaskInput {
   return {
@@ -520,5 +532,70 @@ describe("chunkQqText", () => {
   it("非法 maxChars 抛 RangeError", () => {
     expect(() => chunkQqText("x", 0)).toThrow(RangeError);
     expect(() => chunkQqText("x", Number.NaN)).toThrow(RangeError);
+  });
+
+  it("默认预算把档位期望收紧到保守常量：每片 ≤ 3000 码点且 ≤ 12000 字节", () => {
+    // 中英混排 + emoji + 超长文本：调用方按 detailed 档传 12000，实际必须被
+    // shared 层的保守上限收紧（平台单条口径未实测，取保守值）。
+    const text = Array.from(
+      { length: 400 },
+      (_, i) => `第 ${i} 行：mixed English 文本 🎉 ${"填充内容".repeat(i % 5)}`,
+    ).join("\n");
+    const chunks = chunkQqText(text, 12_000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Array.from(chunk).length).toBeLessThanOrEqual(QQ_CHUNK_MAX_CHARS);
+      expect(utf8Bytes(chunk)).toBeLessThanOrEqual(QQ_CHUNK_MAX_BYTES);
+      // 无孤立代理：代理对永远成对出现。
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(chunk)).toBe(false);
+      expect(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(chunk)).toBe(false);
+    }
+    expect(chunks.join("\n")).toBe(text);
+  });
+
+  it("字节预算先到时按字节切分（放宽码点上限后 12000 字节先命中）", () => {
+    const text = "😀".repeat(6000); // 6000 码点 / 24000 字节
+    const chunks = chunkQqText(text, 12_000, { maxChars: 5000 });
+    expect(chunks).toHaveLength(2);
+    for (const chunk of chunks) {
+      expect(utf8Bytes(chunk)).toBeLessThanOrEqual(QQ_CHUNK_MAX_BYTES);
+      expect(Array.from(chunk).length).toBeLessThanOrEqual(5000);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(chunk)).toBe(false);
+    }
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("字节预算下代码围栏仍成对、内容保真", () => {
+    const text = [
+      "```ts",
+      ...Array.from({ length: 200 }, (_, i) => `const 变量${i} = "中文🎉";`),
+      "```",
+    ].join("\n");
+    const chunks = chunkQqText(text, 12_000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      const fences = chunk.split("\n").filter((line) => line.trimStart().startsWith("```"));
+      expect(fences.length % 2).toBe(0);
+      expect(Array.from(chunk).length).toBeLessThanOrEqual(QQ_CHUNK_MAX_CHARS);
+      expect(utf8Bytes(chunk)).toBeLessThanOrEqual(QQ_CHUNK_MAX_BYTES);
+    }
+    const codeLines = chunks
+      .flatMap((chunk) => chunk.split("\n"))
+      .filter((line) => line.startsWith("const 变量"));
+    expect(codeLines).toHaveLength(200);
+  });
+
+  it("上限可经参数覆写（真机实测后放宽 / 收紧）", () => {
+    const text = "a".repeat(100);
+    expect(chunkQqText(text, 1000)).toHaveLength(1);
+    expect(chunkQqText(text, 1000, { maxChars: 40 })).toHaveLength(3);
+    expect(chunkQqText("😀".repeat(10), 1000, { maxBytes: 8 })).toHaveLength(5);
+  });
+
+  it("非法覆写值退回保守常量，不取消保护", () => {
+    const text = "a".repeat(QQ_CHUNK_MAX_CHARS + 10);
+    const chunks = chunkQqText(text, 12_000, { maxChars: Number.NaN, maxBytes: -1 });
+    expect(chunks).toHaveLength(2);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(QQ_CHUNK_MAX_CHARS);
   });
 });

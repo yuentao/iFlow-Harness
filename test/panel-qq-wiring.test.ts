@@ -17,6 +17,9 @@ import type { PanelServices } from "../src/panel/panel.js";
 import type { QqSettingsIo } from "../src/qq/settings-host.js";
 import type { QqConfig } from "../src/qq/config.js";
 import type { QqTaskUi, SessionState, WebviewToHost } from "../shared/messages.js";
+import { maskQqOpenId } from "../shared/qq-access.js";
+import type { QqHostPorts } from "../src/qq/panel-host.js";
+import { QQ_PENDING_MAX_USERS } from "../src/qq/pending-users.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -385,6 +388,114 @@ describe("QQ 通道 · 面板侧接线", () => {
       at: Date.now(),
     });
     expect(await pending.list()).toHaveLength(0);
+  });
+
+  it("待审核队列满员丢弃时给出脱敏的本地提示", async () => {
+    const now = Date.now();
+    // 面板启动时已经读过一次空归档（store 有内存缓存），直接改盘不会被读回；
+    // 这里走真实记录路径把队列填到上限。
+    for (let i = 0; i < QQ_PENDING_MAX_USERS; i += 1) {
+      await p.handleQqPendingUser({
+        openid: `seed-${i}`,
+        chatType: "private",
+        preview: "seed",
+        at: now + i,
+      });
+    }
+
+    const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
+    const openid = "newcomer-openid-1234567890";
+    await p.handleQqPendingUser({
+      openid,
+      chatType: "private",
+      preview: "帮我跑一下测试",
+      at: now + QQ_PENDING_MAX_USERS + 1,
+    });
+
+    expect(toast).toHaveBeenCalledTimes(1);
+    const [level, message] = toast.mock.calls[0]!;
+    expect(level).toBe("warning");
+    expect(message).toContain("待审核队列已满");
+    // 脱敏纪律：提示里不得出现完整 openid。
+    expect(message).toContain(maskQqOpenId(openid));
+    expect(message).not.toContain(openid);
+    // 队列仍被限制在上限内，新记录没有被悄悄写进去。
+    expect(await p.qqPendingStore().list()).toHaveLength(QQ_PENDING_MAX_USERS);
+    toast.mockRestore();
+  });
+
+  it("QQ 端口回传 worktree 路径：仅 git worktree 隔离，目录隔离不给", () => {
+    Object.assign(p, {
+      getSuperAgent: () => ({
+        spawn: () => ({
+          id: "super-wt",
+          isolation: {
+            kind: "git_worktree",
+            path: "/ws/.iflow/super/worktrees/wt-1",
+            branch: "iflow/super/wt-1",
+          },
+        }),
+      }),
+    });
+    const portsOf = (): QqHostPorts =>
+      (p as unknown as { createQqHostPorts: () => QqHostPorts }).createQqHostPorts();
+    const opts = {
+      approval: "auto" as const,
+      disallowedTools: [],
+      onPermission: async (): Promise<"deny"> => "deny",
+    };
+
+    expect(portsOf().spawnTask({ title: "QQ wt", task: "do" }, opts)).toEqual({
+      superSessionId: "super-wt",
+      branch: "iflow/super/wt-1",
+      worktreePath: "/ws/.iflow/super/worktrees/wt-1",
+    });
+
+    Object.assign(p, {
+      getSuperAgent: () => ({
+        spawn: () => ({
+          id: "super-dir",
+          isolation: { kind: "directory", path: "/ws/.iflow/super/worktrees/dir" },
+        }),
+      }),
+    });
+    expect(portsOf().spawnTask({ title: "QQ dir", task: "do" }, opts)).toEqual({
+      superSessionId: "super-dir",
+    });
+  });
+
+  it("QQ 端口 readSuper 只在 worktree 目录仍存在时给出路径", () => {
+    const snapshotOf = (isolation: Record<string, unknown>) => {
+      Object.assign(p, {
+        getSuperAgent: () => ({
+          get: () => ({
+            id: "s1",
+            status: "completed",
+            reports: [],
+            isolation,
+            integration: undefined,
+          }),
+        }),
+      });
+      const ports = (p as unknown as {
+        createQqHostPorts: () => QqHostPorts;
+      }).createQqHostPorts();
+      return ports.readSuper("s1");
+    };
+
+    expect(
+      snapshotOf({ kind: "git_worktree", path: "/wt/a", branch: "iflow/super/a" })?.worktreePath,
+    ).toBe("/wt/a");
+    // 目录已回收（released / recycled）时不能再给一个磁盘上不存在的路径。
+    expect(
+      snapshotOf({ kind: "git_worktree", path: "/wt/a", branch: "b", released: true })
+        ?.worktreePath,
+    ).toBeUndefined();
+    expect(
+      snapshotOf({ kind: "git_worktree", path: "/wt/a", branch: "b", recycled: true })
+        ?.worktreePath,
+    ).toBeUndefined();
+    expect(snapshotOf({ kind: "directory", path: "/dir" })?.worktreePath).toBeUndefined();
   });
 
   it("解绑清空用户白名单、关闭开关并清除本地授权", async () => {

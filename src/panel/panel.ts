@@ -237,9 +237,11 @@ import {
 } from "../qq/wiring.js";
 import {
   QqPendingUserStore,
+  QQ_PENDING_MAX_USERS,
   type QqPendingUser,
   type QqPendingUserInput,
 } from "../qq/pending-users.js";
+import { maskQqOpenId } from "../../shared/qq-access.js";
 import type { InboundMessage } from "../qq/adapter/types.js";
 import {
   buildClearedQrMessage,
@@ -9724,11 +9726,16 @@ export class ChatPanel implements vscode.Disposable {
           },
         );
         // spawn 是同步登记：worktree 与分支在 prepare 里才落地，此刻可能还
-        // 没有 branch —— 缺省即可，最终结果由 readSuper 里的分支补齐。
-        const branch = session.isolation.branch;
-        return branch
-          ? { superSessionId: session.id, branch }
-          : { superSessionId: session.id };
+        // 没有 branch / path —— 缺省即可，最终结果由 readSuper 里的快照补齐。
+        const isolation = session.isolation;
+        const branch = isolation.branch;
+        const worktreePath =
+          isolation.kind === "git_worktree" && isolation.path ? isolation.path : undefined;
+        return {
+          superSessionId: session.id,
+          ...(branch ? { branch } : {}),
+          ...(worktreePath ? { worktreePath } : {}),
+        };
       },
 
       /**
@@ -9829,6 +9836,17 @@ export class ChatPanel implements vscode.Disposable {
         if (summary.length > 0) snapshot.summary = summary;
         const branch = session.isolation.branch;
         if (branch) snapshot.branch = branch;
+        // worktree 路径同样只在「真的还有目录」时给：released / recycled 表示
+        // 目录已经被清理，回传一个磁盘上不存在的路径只会误导合并/丢弃兜底。
+        const isolation = session.isolation;
+        if (
+          isolation.kind === "git_worktree" &&
+          isolation.path &&
+          isolation.released !== true &&
+          isolation.recycled !== true
+        ) {
+          snapshot.worktreePath = isolation.path;
+        }
         if (session.integration) snapshot.merged = session.integration.state === "merged";
         return snapshot;
       },
@@ -10041,11 +10059,28 @@ export class ChatPanel implements vscode.Disposable {
     return this.qqPendingUsers;
   }
 
-  /** 服务上报一条白名单外消息：累加记录并推全量列表。 */
+  /**
+   * 服务上报一条白名单外消息：累加记录并推全量列表。
+   *
+   * `record()` 的返回值必须被消费：队列满（{@link QQ_PENDING_MAX_USERS}）时
+   * 新用户会被丢弃，旧实现只看列表，用户永远不知道有人在等着审核。丢弃提示
+   * 里只出现脱敏 openid（`maskQqOpenId`），完整值只留在存储里作为放行依据。
+   */
   private async handleQqPendingUser(info: QqPendingUserInput): Promise<void> {
     if (this.disposed) return;
-    const users = await this.qqPendingStore().addOrUpdate(info);
-    this.postQqPendingUsers(users);
+    const outcome = await this.qqPendingStore().record(info);
+    this.postQqPendingUsers(outcome.users);
+    if (outcome.dropped) {
+      const masked = maskQqOpenId(outcome.openid) || "（未知用户）";
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "待审核队列已满（上限 {0} 条），已丢弃来自 {1} 的新请求；请先处理现有记录",
+          QQ_PENDING_MAX_USERS,
+          masked,
+        ),
+      );
+    }
   }
 
   /** 推待审核列表（每次全量，webview 直接替换）。 */
