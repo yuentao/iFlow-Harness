@@ -83,6 +83,21 @@ describe("parseQqCommand / 基础意图", () => {
     }
   });
 
+  it("discard 接受 --force / -f 强制确认，其余尾段仍报参数过多", () => {
+    expect(parseOk("/qq discard T-1 --force")).toEqual({
+      kind: "discard",
+      taskId: "T-1",
+      force: true,
+    });
+    expect(parseOk("/qq discard T-1 -f")).toEqual({
+      kind: "discard",
+      taskId: "T-1",
+      force: true,
+    });
+    expect(parseErr("/qq discard T-1 --yes").code).toBe("too_many_args");
+    expect(buildQqHelpText()).toContain("--force");
+  });
+
   it("approve 无验证码", () => {
     expect(parseOk("/qq approve T-1")).toEqual({ kind: "approve", taskId: "T-1" });
   });

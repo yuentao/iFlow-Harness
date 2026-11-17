@@ -23,6 +23,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { TERMINAL_STATUSES } from "../../shared/qq-task.js";
 
 /** 任务记录的最小形状（其余字段原样序列化，不做改写）。 */
 export interface QqTaskRecord {
@@ -84,15 +85,15 @@ export interface QqPruneResult {
 /**
  * 默认的终态状态集。
  *
- * `shared/qq-task.ts` 由另一个子会话定义，本模块刻意不 import 它 —— 两处
- * 若要用同一套词表，由调用方通过构造参数 `terminalStatuses` 传入，避免
- * 在这里猜死对方的状态机。
+ * 权威词表在 `shared/qq-task.ts` 的 {@link TERMINAL_STATUSES}（与
+ * `isTerminalStatus` 同源）；这里额外补上历史 / 上游执行体可能写进归档的
+ * 别名（`completed` / `done` / `error` / `aborted` / `interrupted` 等），
+ * 让清理逻辑对旧数据同样保守 —— 只有确认是终态才会删。
  */
 export const DEFAULT_TERMINAL_STATUSES: readonly string[] = [
+  ...TERMINAL_STATUSES,
   "completed",
-  "failed",
   "cancelled",
-  "canceled",
   "done",
   "error",
   "aborted",
@@ -193,6 +194,14 @@ export class QqTaskStore {
   private readonly writeChains = new Map<string, Promise<unknown>>();
   /** 索引的读-改-写链（整段串行，避免丢更新）。 */
   private indexChain: Promise<unknown> = Promise.resolve();
+  /**
+   * 索引是否已知落后于任务文件。
+   *
+   * 写入是「先文件、后索引」两步：文件落地而索引写失败的窗口里，索引里
+   * 没有这一条。此时以**文件为准**把索引重建一次，读路径（listTasks /
+   * pruneTasks）在重建成功前都先补这一步，避免条目长期不可见。
+   */
+  private indexStale = false;
 
   constructor(rootDir: string, options: { terminalStatuses?: readonly string[] } = {}) {
     this.rootDir = rootDir;
@@ -229,22 +238,34 @@ export class QqTaskStore {
     const target = this.taskPath(taskId);
     await this.enqueueWrite(target, () => writeJsonAtomic(target, payload));
 
-    await this.enqueueIndex(async () => {
-      const { entries } = await this.readIndex();
-      const previous = entries.find((entry) => entry.taskId === taskId);
-      const now = Date.now();
-      const next = entries.filter((entry) => entry.taskId !== taskId);
-      next.push({
-        taskId,
-        status: strOr(record.status, previous?.status ?? "unknown"),
-        createdAt: numOr(record.createdAt, previous?.createdAt ?? now),
-        // 一次保存就是一次更新：调用方没显式给 updatedAt 时推进到当前时间。
-        updatedAt: numOr(record.updatedAt, now),
-        chatId: strOr(record.chatId, previous?.chatId ?? ""),
-        senderId: strOr(record.senderId, previous?.senderId ?? ""),
+    try {
+      await this.enqueueIndex(async () => {
+        const { entries } = await this.readIndex();
+        const previous = entries.find((entry) => entry.taskId === taskId);
+        const now = Date.now();
+        const next = entries.filter((entry) => entry.taskId !== taskId);
+        next.push({
+          taskId,
+          status: strOr(record.status, previous?.status ?? "unknown"),
+          createdAt: numOr(record.createdAt, previous?.createdAt ?? now),
+          // 一次保存就是一次更新：调用方没显式给 updatedAt 时推进到当前时间。
+          updatedAt: numOr(record.updatedAt, now),
+          chatId: strOr(record.chatId, previous?.chatId ?? ""),
+          senderId: strOr(record.senderId, previous?.senderId ?? ""),
+        });
+        await this.writeIndex(next);
       });
-      await this.writeIndex(next);
-    });
+    } catch (error) {
+      // 任务文件已经原子落地，只是索引没写进去 —— 以文件为准重建一次，
+      // 让索引与磁盘事实一致（重建会把刚写的这条任务扫进来）。重建本身
+      // 也失败时标记 stale 并如实抛错：读路径稍后仍会重试修复。
+      try {
+        await this.rebuildIndex();
+      } catch {
+        this.indexStale = true;
+        throw error;
+      }
+    }
   }
 
   /** 读取一个任务；文件不存在或内容损坏一律返回 null（绝不抛错）。 */
@@ -271,6 +292,9 @@ export class QqTaskStore {
    * 正常路径不会碰全量文件。
    */
   async listTasks(options: QqTaskListOptions = {}): Promise<QqTaskIndexEntry[]> {
+    // 上次保存「文件成功、索引失败」时索引已知落后：先以文件为准补一次，
+    // 否则刚存的任务在列表里根本看不见。
+    if (this.indexStale) await this.repairIndex();
     let { entries, damaged } = await this.readIndex();
     if (damaged) {
       try {
@@ -374,6 +398,10 @@ export class QqTaskStore {
         : 0;
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
 
+    // 索引落后于文件（上次 save 的索引步失败）时先修好：按索引挑候选的清理
+    // 绝不能漏掉磁盘上已经存在的任务。重建在索引锁之外单独入队。
+    if (this.indexStale) await this.repairIndex();
+
     return this.enqueueIndex(async () => {
       const { entries, damaged } = await this.readIndex();
       const result: QqPruneResult = { deleted: [], skipped: [] };
@@ -470,8 +498,21 @@ export class QqTaskStore {
 
       const entries = [...byId.values()];
       await this.writeIndex(entries);
+      this.indexStale = false;
       return { indexed: entries.length, skipped };
     });
+  }
+
+  /**
+   * 尽力把索引修回与文件一致；失败不抛（读路径不该因为索引修不好就整体崩）。
+   * 失败时保留 stale 标记，下次读再试。
+   */
+  private async repairIndex(): Promise<void> {
+    try {
+      await this.rebuildIndex();
+    } catch {
+      // 保留 indexStale；调用方继续在旧索引上工作（保守，不误删）。
+    }
   }
 
   private taskPath(taskId: string): string {

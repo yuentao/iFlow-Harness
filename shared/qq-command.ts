@@ -35,8 +35,8 @@ export type QqCommandIntent =
   | { kind: "answer"; taskId: string; text: string }
   /** `/qq merge <任务编号>`：把任务分支合并回当前分支。 */
   | { kind: "merge"; taskId: string }
-  /** `/qq discard <任务编号>`：丢弃任务分支。 */
-  | { kind: "discard"; taskId: string }
+  /** `/qq discard <任务编号> [--force]`：丢弃任务分支（非终态必须显式 --force）。 */
+  | { kind: "discard"; taskId: string; force?: boolean }
   /** `/qq unbind`：解除绑定。 */
   | { kind: "unbind" }
   /** `/qq help`（以及裸 `/qq`）：显示帮助。 */
@@ -248,8 +248,11 @@ export function parseQqCommand(raw: string): QqCommandParseResult {
       const first = /^(\S+)/u.exec(rest)!;
       const taskId = first[1]!;
       const tail = rest.slice(first[0].length).trim();
-      // approve 的尾段是可选验证码、answer 的尾段是回答正文；其余子命令不容忍多余参数。
-      if (tail && sub !== "approve" && sub !== "answer") return tooMany(sub);
+      // approve 的尾段是可选验证码、answer 的尾段是回答正文、discard 的尾段
+      // 是可选强制确认参数；其余子命令不容忍多余参数。
+      if (tail && sub !== "approve" && sub !== "answer" && sub !== "discard") {
+        return tooMany(sub);
+      }
       switch (sub) {
         case "approve": {
           if (!tail) return ok({ kind: "approve", taskId });
@@ -261,6 +264,15 @@ export function parseQqCommand(raw: string): QqCommandParseResult {
           if (!tail) return missing(sub, "回答内容");
           return ok({ kind: "answer", taskId, text: tail });
         }
+        case "discard": {
+          if (!tail) return ok({ kind: "discard", taskId });
+          // 唯一允许的尾段是强制确认标记；多写别的词按参数过多报错，
+          // 不静默忽略（否则用户以为 --force 生效了）。
+          const parts = tail.split(/\s+/u);
+          const allForce = parts.every((part) => part === "--force" || part === "-f");
+          if (!allForce) return tooMany(sub);
+          return ok({ kind: "discard", taskId, force: true });
+        }
         case "result":
           return ok({ kind: "result", taskId });
         case "diff":
@@ -271,8 +283,6 @@ export function parseQqCommand(raw: string): QqCommandParseResult {
           return ok({ kind: "deny", taskId });
         case "merge":
           return ok({ kind: "merge", taskId });
-        case "discard":
-          return ok({ kind: "discard", taskId });
       }
     }
   }
@@ -300,7 +310,10 @@ const HELP_ENTRIES: readonly QqHelpEntry[] = [
   // 回「当前没有等待回答的问题」。帮助文本必须如实标注，不能让人以为已接通。
   { usage: "answer <任务编号> <回答>", description: "暂不支持：提问通道尚未接通" },
   { usage: "merge <任务编号>", description: "把任务分支合并回当前分支" },
-  { usage: "discard <任务编号>", description: "丢弃任务分支" },
+  {
+    usage: "discard <任务编号> [--force]",
+    description: "丢弃任务分支（非终态任务必须先 /qq stop，或加 --force 强制丢弃）",
+  },
   { usage: "unbind", description: "解除当前会话的绑定" },
   { usage: "help", description: "显示本帮助" },
 ];

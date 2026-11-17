@@ -50,7 +50,7 @@ import {
   type QqTaskStatus,
   type QqTaskUsage,
 } from "../../shared/qq-task.js";
-import { maskQqOpenId } from "../../shared/qq-access.js";
+import { QQ_APPROVAL_TIMEOUT_MINUTES, maskQqOpenId } from "../../shared/qq-access.js";
 import {
   buildQqHelpText,
   normalizeCommandText,
@@ -82,10 +82,15 @@ export interface QqServiceDispatchInput {
   onPermission: (request: SuperPermissionRequest) => Promise<SuperPermissionDecision>;
 }
 
-/** 宿主派发结果：子会话 id，以及（worktree 隔离时的）分支名。 */
+/** 宿主派发结果：子会话 id，以及（worktree 隔离时的）分支名与工作目录。 */
 export interface QqServiceDispatchResult {
   superSessionId: string;
   branch?: string;
+  /**
+   * worktree 的绝对路径（隔离执行时）。落进任务记录，供 manager 记录缺失时
+   * 凭磁盘事实做合并 / 丢弃兜底。
+   */
+  worktreePath?: string;
 }
 
 /** 宿主对任务执行情况的只读快照（不知道的字段就别填）。 */
@@ -231,6 +236,19 @@ export interface QqServiceOptions {
   onChanged?: () => void;
   /** 结果回包重试的基础间隔（毫秒，缺省 {@link QQ_DELIVERY_RETRY_DELAY_MS}）。 */
   deliveryRetryDelayMs?: number;
+  /**
+   * 终态任务的保留天数（`start()` 时按它清理归档）。
+   *
+   * 缺省 {@link QQ_DEFAULT_RETENTION_DAYS}；`<= 0` 表示关闭清理（一条都不删）。
+   * 只删「终态 + 超期」的任务，非终态永远不动。
+   */
+  taskRetentionDays?: number;
+  /**
+   * 单调时钟（毫秒）。限流滑动窗口与进度节流只关心时间差，必须免疫系统
+   * 时间回拨（NTP / 手动改表能把「60 秒窗口」变成永久窗口或瞬间重置）。
+   * 缺省 `performance.now()`，环境没有时退回 `Date.now()`。
+   */
+  monotonicNow?: () => number;
 }
 
 /** 任务操作（IPC 与命令处理共用）。 */
@@ -247,8 +265,11 @@ export type QqTaskAction =
 // 常量与映射
 // ---------------------------------------------------------------------------
 
-/** 审批码有效期：4 分钟（与 Super Agent 的审批卡超时同口径）。 */
-export const QQ_APPROVAL_TIMEOUT_MS = 4 * 60_000;
+/**
+ * 审批码有效期：与 UI 文案同源（`shared/qq-access.ts` 的
+ * {@link QQ_APPROVAL_TIMEOUT_MINUTES}），不在两处各写一份分钟数。
+ */
+export const QQ_APPROVAL_TIMEOUT_MS = QQ_APPROVAL_TIMEOUT_MINUTES * 60_000;
 /** 验证码最多尝试次数：第一次错误后仍保留 2 次机会。 */
 export const QQ_APPROVAL_MAX_ATTEMPTS = 3;
 /** `status` 无编号时回显的最近任务条数。 */
@@ -284,6 +305,13 @@ export const QQ_RESULT_RESTORE_RETRY_MS = 10 * 60_000;
 /** 投递窗口内结果被刷新改写时的可观测提示（不写锚点，下次刷新会重投）。 */
 export const QQ_RESULT_CHANGED_WHILE_DELIVERING =
   "投递期间结果已被更新，本次不记为已送达（下次刷新会重投）";
+/**
+ * 终态任务的默认保留天数（`start()` 时清理超期的终态归档）。
+ *
+ * 归档只增不减会让 `tasks/` 无限膨胀；30 天足够覆盖「回来看看上周干了什么」，
+ * 又不会把近期任务清掉。非终态任务从不清理。
+ */
+export const QQ_DEFAULT_RETENTION_DAYS = 30;
 
 /**
  * 主会话渠道等待「主会话空闲」的上限。
@@ -593,6 +621,9 @@ function coerceQqTask(raw: unknown): QqTask | null {
         ? { userBlockId: correlation.userBlockId }
         : {}),
       ...(typeof correlation.branch === "string" ? { branch: correlation.branch } : {}),
+      ...(typeof correlation.worktreePath === "string"
+        ? { worktreePath: correlation.worktreePath }
+        : {}),
       ...(typeof correlation.commit === "string" ? { commit: correlation.commit } : {}),
     },
   };
@@ -679,6 +710,10 @@ export class QqService {
   private readonly store: QqTaskStore;
   private readonly host: QqServiceHost;
   private readonly now: () => number;
+  /** 单调时钟：只用于时间差（限流窗口 / 进度节流），不写进任何持久化字段。 */
+  private readonly monotonic: () => number;
+  /** 终态任务保留天数（<=0 关闭启动清理）。 */
+  private readonly taskRetentionDays: number;
   private readonly log: (line: string) => void;
   private readonly onChanged: () => void;
   private readonly deliveryRetryDelayMs: number;
@@ -735,6 +770,15 @@ export class QqService {
     this.store = options.store;
     this.host = options.host;
     this.now = options.now ?? (() => Date.now());
+    this.monotonic =
+      options.monotonicNow ??
+      (typeof performance !== "undefined" && typeof performance.now === "function"
+        ? () => performance.now()
+        : () => Date.now());
+    this.taskRetentionDays =
+      typeof options.taskRetentionDays === "number" && Number.isFinite(options.taskRetentionDays)
+        ? options.taskRetentionDays
+        : QQ_DEFAULT_RETENTION_DAYS;
     this.log = options.log ?? (() => undefined);
     this.onChanged = options.onChanged ?? (() => undefined);
     this.deliveryRetryDelayMs =
@@ -763,6 +807,10 @@ export class QqService {
     // 上一次 stop() 可能已经 abort 过：新的一轮生命周期必须拿到新信号，
     // 否则主会话注入会在启动瞬间被自己判成「已取消」。
     this.abortController = new AbortController();
+
+    // 启动时先清理超期的终态归档：只在加载前做，内存里就不会再出现刚被删掉
+    // 的任务。清理失败只记日志，不挡启动。
+    await this.pruneArchivedTasks();
 
     let entries: Awaited<ReturnType<QqTaskStore["listTasks"]>> = [];
     try {
@@ -840,15 +888,50 @@ export class QqService {
       if (
         typeof lastAttempt === "number" &&
         Number.isFinite(lastAttempt) &&
-        this.now() - lastAttempt < QQ_RESULT_RESTORE_RETRY_MS
+        // 单调化：系统时间回拨时 `now - lastAttempt` 会变成负数，直接比较会
+        // 把「刚失败过」误判成「很久没试」；夹到 0 即保持节流语义。
+        Math.max(0, this.now() - lastAttempt) < QQ_RESULT_RESTORE_RETRY_MS
       ) {
         continue;
       }
       try {
-        await this.deliverResult(task);
+        // 重启补发走主动消息：adapter 的 replySeq 是纯内存的，进程换了以后
+        // 从 1 重开，与重启前已用的 (msg_id, seq) 撞车会被平台静默去重
+        // —— 结果缺尾却写成「已送达」。主动消息不带 msg_id，天然绕开该去重键。
+        await this.deliverResult(task, { forceActive: true });
       } catch (error) {
         this.log(`QQ 任务 ${task.taskId} 重启补发终态结果失败：${errorText(error)}`);
       }
+    }
+  }
+
+  /**
+   * 按 `taskRetentionDays` 清理超期的终态归档（`<=0` 关闭）。
+   *
+   * 只清「终态 + 超期」：store 在删除前会再读一次任务文件核对状态与更新时间，
+   * 索引陈旧也不会误删在跑的任务（见 `QqTaskStore.pruneTasks`）。清理失败只
+   * 记日志，绝不挡启动。
+   */
+  private async pruneArchivedTasks(): Promise<void> {
+    const days = this.taskRetentionDays;
+    if (!(days > 0)) return;
+    try {
+      const result = await this.store.pruneTasks(days);
+      if (result.deleted.length > 0) {
+        this.log(
+          `QQ 归档清理：删除 ${result.deleted.length} 个超过 ${days} 天的终态任务` +
+            (result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : ""),
+        );
+        await this.appendEvent("tasks_pruned", undefined, {
+          days,
+          deleted: result.deleted.length,
+          skipped: result.skipped.length,
+        });
+      } else if (result.skipped.length > 0) {
+        this.log(`QQ 归档清理：跳过 ${result.skipped.length} 个无法读取的任务文件`);
+      }
+    } catch (error) {
+      this.log(`QQ 归档清理失败：${errorText(error)}`);
     }
   }
 
@@ -892,7 +975,9 @@ export class QqService {
     if (!accepted.ok) {
       if (accepted.pending) {
         this.host.onPendingUser(accepted.pending);
-        this.notify(`QQ 消息来自白名单外的用户 ${accepted.pending.openid}，已记入待审核`);
+        this.notify(
+          `QQ 消息来自白名单外的用户 ${maskQqOpenId(accepted.pending.openid)}，已记入待审核`,
+        );
         this.log(`QQ 入站消息待审核：${accepted.reason}`);
       } else {
         this.notify(`QQ 消息被忽略：${accepted.reason}`);
@@ -944,14 +1029,14 @@ export class QqService {
       return { ok: false, reason: "缺少发送者标识" };
     }
     if (!this.config.allowedUsers.includes(openid)) {
-      return this.pendingDecision(msg, openid, `发送者 ${openid} 不在白名单`);
+      return this.pendingDecision(msg, openid, `发送者 ${maskQqOpenId(openid)} 不在白名单`);
     }
     if (msg.chatType === "group") {
       if (!this.config.allowedGroups.includes(msg.chatId)) {
-        return { ok: false, reason: `群 ${msg.chatId} 不在允许列表` };
+        return { ok: false, reason: `群 ${maskQqOpenId(msg.chatId)} 不在允许列表` };
       }
       if (msg.mentionsBot !== true) {
-        return { ok: false, reason: `群 ${msg.chatId} 的消息没有 @ 机器人` };
+        return { ok: false, reason: `群 ${maskQqOpenId(msg.chatId)} 的消息没有 @ 机器人` };
       }
     }
     return { ok: true };
@@ -972,7 +1057,7 @@ export class QqService {
     const at = this.now();
     if (msg.chatType === "group") {
       if (!this.config.allowedGroups.includes(msg.chatId)) {
-        return { ok: false, reason: `${reason}（群 ${msg.chatId} 不在允许列表）` };
+        return { ok: false, reason: `${reason}（群 ${maskQqOpenId(msg.chatId)} 不在允许列表）` };
       }
       return {
         ok: false,
@@ -1026,7 +1111,9 @@ export class QqService {
 
     if (!this.consumeRateLimit(msg.senderId)) {
       const limit = Math.max(1, this.config.rateLimitPerMin);
-      this.notify(`QQ 用户 ${msg.senderId} 触发限流（每分钟 ${limit} 条）`);
+      this.notify(
+        `QQ 用户 ${maskQqOpenId(msg.senderId)} 触发限流（每分钟 ${limit} 条）`,
+      );
       await this.deliver(msg, `请求过于频繁，每分钟最多 ${limit} 条任务，请稍后再试。`);
       return;
     }
@@ -1059,8 +1146,6 @@ export class QqService {
     task = await this.commitStatus(task, "queued");
     await this.appendEvent("task_created", task.taskId, {
       chatType: msg.chatType,
-      chatId: msg.chatId,
-      senderId: msg.senderId,
     });
 
     if (this.taskChannel(task) === "main") {
@@ -1122,7 +1207,9 @@ export class QqService {
   /** 滑动窗口限流：返回 true 表示配额已消耗（可以继续）。 */
   private consumeRateLimit(senderId: string): boolean {
     const limit = Math.max(1, this.config.rateLimitPerMin);
-    const at = this.now();
+    // 单调时钟：窗口是「过去 60 秒」的相对量，用墙上时钟会在回拨时把整个
+    // 窗口瞬间清空（等于放开限流）。这里的时间戳只在内存里比较，不落盘。
+    const at = this.monotonic();
     const windowStart = at - 60_000;
     const recent = (this.rateWindows.get(senderId) ?? []).filter((ts) => ts > windowStart);
     if (recent.length >= limit) {
@@ -1228,6 +1315,7 @@ export class QqService {
           ...current.correlation,
           superSessionId: dispatched.superSessionId,
           ...(dispatched.branch ? { branch: dispatched.branch } : {}),
+          ...(dispatched.worktreePath ? { worktreePath: dispatched.worktreePath } : {}),
         },
       };
       await this.persist(correlated);
@@ -1579,7 +1667,7 @@ export class QqService {
       [
         `任务 ${shortTaskId(taskId)} 请求审批${detail}`,
         `回复 /qq approve ${shortTaskId(taskId)} ${code} 批准，`,
-        `/qq deny ${shortTaskId(taskId)} 拒绝（4 分钟内有效）。`,
+        `/qq deny ${shortTaskId(taskId)} 拒绝（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟内有效）。`,
       ].join("\n"),
       `approval:${taskId}:${code}`,
     );
@@ -1610,7 +1698,7 @@ export class QqService {
     const updated = await this.commitStatus(cleared, "running", { pending: undefined });
     await this.deliverTaskNotice(
       updated,
-      `任务 ${shortTaskId(taskId)} 审批超时（4 分钟），已按拒绝处理。`,
+      `任务 ${shortTaskId(taskId)} 审批超时（${QQ_APPROVAL_TIMEOUT_MINUTES} 分钟），已按拒绝处理。`,
       `approval-result:${taskId}:${code}:timeout`,
     );
   }
@@ -1627,6 +1715,7 @@ export class QqService {
     taskId: string,
     action: QqTaskAction,
     text?: string,
+    options?: { force?: boolean },
   ): Promise<void> {
     const resolved = this.resolveTaskRef(taskId);
     if (resolved.kind === "ambiguous") {
@@ -1660,7 +1749,7 @@ export class QqService {
         await this.mergeTask(task);
         return;
       case "discard":
-        await this.discardTask(task);
+        await this.discardTask(task, options?.force === true);
         return;
       case "refresh":
         await this.refreshTask(task);
@@ -1772,11 +1861,14 @@ export class QqService {
     if (queuedAt >= 0) this.queue.splice(queuedAt, 1);
 
     const superSessionId = current.correlation.superSessionId;
+    const failures: string[] = [];
     if (superSessionId) {
       try {
         await this.host.cancelTask(superSessionId);
       } catch (error) {
-        this.log(`QQ 任务 ${current.taskId} 取消失败：${errorText(error)}`);
+        const detail = errorText(error);
+        failures.push(`子会话取消失败：${detail}`);
+        this.log(`QQ 任务 ${current.taskId} 取消失败：${detail}`);
       }
     }
 
@@ -1786,8 +1878,34 @@ export class QqService {
       try {
         await this.host.cancelMainInjection?.(current.taskId);
       } catch (error) {
-        this.log(`QQ 任务 ${current.taskId} 主会话注入取消失败：${errorText(error)}`);
+        const detail = errorText(error);
+        failures.push(`主会话注入取消失败：${detail}`);
+        this.log(`QQ 任务 ${current.taskId} 主会话注入取消失败：${detail}`);
       }
+    }
+
+    if (failures.length > 0) {
+      // 取消失败不能写成 canceled：执行体可能还在跑（甚至会完成并自动合并），
+      // 谎称「已取消」会让用户失去唯一的干预窗口。保持原状态，把失败原因写
+      // 在任务上（看板可见）并如实回包。
+      const message = `${failures.join("；")}（任务可能仍在运行，请重试 /qq stop）`;
+      const at = this.now();
+      const failed: QqTask = {
+        ...current,
+        failure: { code: "cancel_failed", message },
+        pending: undefined,
+        updatedAt: Math.max(current.updatedAt, at),
+      };
+      await this.persist(failed);
+      await this.appendEvent("task_cancel_failed", failed.taskId, {
+        reason: failures.join("; "),
+      });
+      await this.deliverTask(
+        failed,
+        `任务 ${shortTaskId(failed.taskId)} 取消失败（${failures.join("；")}）。` +
+          "任务可能仍在运行，请重试 /qq stop。",
+      );
+      return;
     }
 
     const at = this.now();
@@ -1835,7 +1953,7 @@ export class QqService {
     );
   }
 
-  private async discardTask(task: QqTask): Promise<void> {
+  private async discardTask(task: QqTask, force: boolean = false): Promise<void> {
     const current = this.tasks.get(task.taskId) ?? task;
     const superSessionId = current.correlation.superSessionId;
     if (!superSessionId) {
@@ -1845,6 +1963,20 @@ export class QqService {
       );
       return;
     }
+
+    // 非终态任务可能仍在执行：删 worktree 会连未提交改动一起抹掉，且无法恢复。
+    // 默认拒绝，要求先 /qq stop；显式 --force 才继续，并在回包里写明代价。
+    const running = !isTerminalStatus(current.status);
+    if (running && !force) {
+      await this.deliverTask(
+        current,
+        `任务 ${shortTaskId(current.taskId)} 尚未结束（${qqTaskStatusLabel(current.status)}），` +
+          "不能直接丢弃。请先 /qq stop 停止它；如确需强制丢弃，请用 " +
+          `/qq discard ${shortTaskId(current.taskId)} --force（未提交的改动会丢失）。`,
+      );
+      return;
+    }
+
     try {
       await this.host.discardTask(superSessionId);
     } catch (error) {
@@ -1863,7 +1995,13 @@ export class QqService {
         { pending: undefined },
       );
     }
-    await this.deliverTask(current, `任务 ${shortTaskId(current.taskId)} 的工作分支已丢弃。`);
+    await this.appendEvent("task_discarded", current.taskId, { forced: running && force });
+    await this.deliverTask(
+      current,
+      running
+        ? `任务 ${shortTaskId(current.taskId)} 已被强制丢弃（未提交的改动已随之丢失）。`
+        : `任务 ${shortTaskId(current.taskId)} 的工作分支已丢弃。`,
+    );
   }
 
   private async refreshTask(task: QqTask): Promise<void> {
@@ -1911,7 +2049,9 @@ export class QqService {
       // 因此：①最小间隔内的重复刷新直接复用上一次投递；②投递用稳定
       // dedupeKey，adapter 复用同一个 msg_seq，平台按 (msg_id, msg_seq) 去重。
       const fingerprint = `${current.status}|${typeof outcome.status === "string" ? outcome.status : ""}`;
-      const at = this.now();
+      // 节流窗口同样是相对时间：走单调时钟，避免系统时间回拨导致「刚发过」
+      // 被读成「很久没发」而连发，或反之永久压住。
+      const at = this.monotonic();
       const previous = this.progressRefreshes.get(current.taskId);
       if (previous !== undefined && at - previous < QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS) {
         this.log(
@@ -2020,7 +2160,12 @@ export class QqService {
             : intent.kind === "answer"
               ? intent.text
               : undefined;
-        await this.handleTaskAction(resolved.task.taskId, intent.kind, text);
+        await this.handleTaskAction(
+          resolved.task.taskId,
+          intent.kind,
+          text,
+          intent.kind === "discard" && intent.force === true ? { force: true } : undefined,
+        );
         return;
       }
     }
@@ -2094,9 +2239,12 @@ export class QqService {
       taskId: task.taskId,
       shortId: shortTaskId(task.taskId),
       chatType: task.source.chatType,
-      chatId: task.source.chatId,
-      senderId: task.source.senderId,
+      // 看板投影是 UI 面：openid / 群号一律脱敏（完整值只留在任务记录与授权
+      // 存储里）。webview 也做过一次 mask，两次结果一致（幂等）。
+      chatId: maskQqOpenId(task.source.chatId),
+      senderId: maskQqOpenId(task.source.senderId),
       status: task.status,
+      policy: task.policy.remotePolicy,
       channel: this.taskChannel(task),
       promptPreview: previewPrompt(task.payload.prompt),
       createdAt: task.createdAt,
@@ -2119,7 +2267,9 @@ export class QqService {
       errors.push(
         task.status === "canceled"
           ? `已取消（${task.failure.message}）`
-          : `执行失败：${task.failure.message}`,
+          : task.failure.code === "cancel_failed"
+            ? `取消失败：${task.failure.message}`
+            : `执行失败：${task.failure.message}`,
       );
     }
     if (task.deliveryError) errors.push(`回包失败：${task.deliveryError}`);
@@ -2166,17 +2316,49 @@ export class QqService {
     patch?: Partial<QqTask>,
   ): Promise<QqTask> {
     const latest = this.tasks.get(task.taskId) ?? task;
+
+    // 终态粘性优先：任务一旦收尾，任何后续提交（迟到的执行体事件、重复的
+    // 刷新、带 status 的补丁）都不得改写它 —— 否则一个 noop 分支里的 patch
+    // 就能把 terminated 的任务改回 pending / running。这里直接拒绝并留痕。
+    if (isTerminalStatus(latest.status)) {
+      this.log(
+        `QQ 任务 ${task.taskId}：终态 ${latest.status} 粘性，忽略 ${next} 提交` +
+          (patch && Object.keys(patch).length > 0 ? "（含补丁）" : ""),
+      );
+      return latest;
+    }
+
+    // 空补丁（undefined 或无任何键）没有可写内容：直接返回，绝不为了「提交」
+    // 再落一次盘。
+    if (!patch || Object.keys(patch).length === 0) {
+      const at = this.now();
+      const outcome = transitionQqTask(latest, next, at);
+      if (outcome.noop) {
+        if (outcome.error) this.log(`QQ 任务 ${task.taskId}：${outcome.error.message}`);
+        return latest;
+      }
+      const updated = outcome.task;
+      await this.persist(updated);
+      this.notify(
+        `QQ 任务 ${shortTaskId(updated.taskId)} → ${qqTaskStatusLabel(updated.status)}`,
+      );
+      return updated;
+    }
+
     const at = this.now();
     const outcome = transitionQqTask(latest, next, at);
+    // 补丁不允许携带 status：状态只能经由 next 迁移，避免「迁移是 noop、
+    // 补丁却把状态改了」这条隐式通道。
+    const safePatch: Partial<QqTask> = { ...patch };
+    delete safePatch.status;
     let updated: QqTask;
     if (outcome.noop) {
       if (outcome.error) {
         this.log(`QQ 任务 ${task.taskId}：${outcome.error.message}`);
       }
-      if (!patch) return latest;
-      updated = { ...latest, ...patch, updatedAt: Math.max(latest.updatedAt, at) };
+      updated = { ...latest, ...safePatch, updatedAt: Math.max(latest.updatedAt, at) };
     } else {
-      updated = patch ? { ...outcome.task, ...patch } : outcome.task;
+      updated = { ...outcome.task, ...safePatch };
     }
     if (updated.updatedAt < at) updated = { ...updated, updatedAt: at };
     await this.persist(updated);
@@ -2316,8 +2498,12 @@ export class QqService {
     task: QqTask,
     text: string,
     dedupeKey?: string,
+    options?: { passive?: boolean },
   ): Promise<QqDeliveryOutcome> {
-    if (task.source.msgId) {
+    // passive === false：跳过被动回复，直接走主动消息（不带 msg_id）。用于
+    // 「续发分片」与「重启后补发」—— 这两条路径上的 (msg_id, msg_seq) 可能
+    // 与进程重启前用过的键撞车，被平台静默去重；主动消息没有这个键。
+    if (options?.passive !== false && task.source.msgId) {
       const passive = await this.deliverOutcome(
         { chatType: task.source.chatType, chatId: task.source.chatId },
         text,
@@ -2336,7 +2522,7 @@ export class QqService {
       }
       return active;
     }
-    // 没有 msg_id 就没有被动回复通道，直接主动消息（dedupeKey 无处安放）。
+    // 没有 msg_id（或显式要求主动消息）就直接主动投递（dedupeKey 无处安放）。
     return this.deliverOutcome(
       { chatType: task.source.chatType, chatId: task.source.chatId },
       text,
@@ -2354,10 +2540,17 @@ export class QqService {
    *  2. 适配器明确判定 `retryable === false`（4xx / 参数不合法这类确定性
    *     拒绝）时直接短路，不再烧重试窗口 —— 重试只会得到同一份拒绝。
    */
-  private async deliverTaskTextWithRetry(task: QqTask, text: string): Promise<boolean> {
-    const dedupeKey = `task:${task.taskId}:${++this.deliverySeqCounter}`;
+  private async deliverTaskTextWithRetry(
+    task: QqTask,
+    text: string,
+    dedupeKey?: string,
+    options?: { passive?: boolean },
+  ): Promise<boolean> {
+    // 调用方没给 key 时，为这一条逻辑消息分配一个新的递增 key（同一逻辑消息
+    // 的全部重试共用它，adapter 据此复用同一个 msg_seq）。
+    const key = dedupeKey ?? `task:${task.taskId}:${++this.deliverySeqCounter}`;
     for (let attempt = 1; attempt <= QQ_DELIVERY_ATTEMPTS; attempt += 1) {
-      const outcome = await this.deliverTaskText(task, text, dedupeKey);
+      const outcome = await this.deliverTaskText(task, text, key, options);
       if (outcome.ok) return true;
       if (outcome.retryable === false) return false;
       if (attempt < QQ_DELIVERY_ATTEMPTS && this.deliveryRetryDelayMs > 0) {
@@ -2383,7 +2576,10 @@ export class QqService {
    * `deliveringResults` 在飞标记兜底：投递进行中的再次触发直接复用同一次
    * 投递（返回内存里的当前任务），绝不重复发送。
    */
-  private async deliverResult(task: QqTask): Promise<QqTask> {
+  private async deliverResult(
+    task: QqTask,
+    options?: { forceActive?: boolean },
+  ): Promise<QqTask> {
     if (task.resultDeliveredAt !== undefined) return task;
     // 纵深防御：只有终态任务才允许走回包。非终态任务没有可信的摘要与停止
     // 原因，把「中间结果」写进锚点会让真正的终态结果永远送不出去（旧实现的
@@ -2394,7 +2590,7 @@ export class QqService {
     // 真正收尾后的任务。旧实现直接返回内存快照，调用方以为刷新生效，实际
     // 什么也没发生。
     if (inflight) return await inflight;
-    const run = this.deliverResultLocked(task).finally(() => {
+    const run = this.deliverResultLocked(task, options).finally(() => {
       this.deliveringResults.delete(task.taskId);
     });
     this.deliveringResults.set(task.taskId, run);
@@ -2402,7 +2598,10 @@ export class QqService {
   }
 
   /** 分片内容的稳定指纹（djb2，非加密用途）：识别「同一份结果的分片序列」。 */
-  private async deliverResultLocked(task: QqTask): Promise<QqTask> {
+  private async deliverResultLocked(
+    task: QqTask,
+    options?: { forceActive?: boolean },
+  ): Promise<QqTask> {
     const profile = qqDetailProfile(this.config.resultDetail);
     // 投递开始时给 result 拍指纹：收尾时只有内容没被改写，才允许把这次投递
     // 记成「新结果已送达」。否则投递窗口（可达数十秒）里刷新换上的新内容会
@@ -2428,7 +2627,14 @@ export class QqService {
     let ok = chunks.length > 0;
     let deliveredCount = skip;
     for (let i = skip; i < chunks.length; i += 1) {
-      if (await this.deliverTaskTextWithRetry(task, chunks[i]!)) {
+      // 第一片（且非重启补发）走被动回复；续发分片一律主动消息。
+      //
+      // 为什么：adapter 的 `replySeq` 是纯内存的，进程重启后从 1 重开，续发
+      // 时算出的 seq 与重启前已用过的 (msg_id, seq) 撞车会被平台**静默去重**
+      // —— 结果缺尾却仍写成「已送达」。主动消息不带 msg_id，没有这个去重键，
+      // 续发片段因此不可能被吞。重启补发整份都走主动消息（同样原因）。
+      const passive = i === 0 && options?.forceActive !== true;
+      if (await this.deliverTaskTextWithRetry(task, chunks[i]!, undefined, { passive })) {
         deliveredCount = i + 1;
       } else {
         ok = false;
@@ -2496,7 +2702,9 @@ export class QqService {
       options.neverRan === true
         ? `任务 ${label} 因扩展宿主重启**未执行**（排队消息不会保留），请重新发送。`
         : `任务 ${label} 因扩展宿主重启而中断（未完成）。`;
-    if (await this.deliverTaskTextWithRetry(task, text)) return;
+    // 主动消息：这条通知只在「进程换了一茬」之后发，被动回复的 seq 会从 1
+    // 重开，与重启前的已受理回执撞键会被平台静默去重。
+    if (await this.deliverTaskTextWithRetry(task, text, undefined, { passive: false })) return;
     const current = this.tasks.get(task.taskId) ?? task;
     await this.persist({ ...current, deliveryError: QQ_RESULT_UNDELIVERED });
     await this.appendEvent("task_result_undelivered", task.taskId, {
