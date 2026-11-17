@@ -28,9 +28,10 @@ import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
 /**
  * QQ 适配器种类（取值与 package.json 的 `iflow.qq.adapter` 枚举逐字一致）。
  *
- * 当前只实现了 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 是 QQ 官方
- * 机器人接口的预留位，**尚无适配器实现**——`checkQqStartupGate` 会拒绝用它
- * 启动。新增适配器时在这里追加并同步设置项枚举。
+ * `onebot` 走 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 走 QQ 官方
+ * 机器人网关（M3-B 起有真实 WS transport `src/qq/qqbot/ws-transport.ts` +
+ * M2 的 `src/qq/qqbot/adapter.ts`），两者都已实现、都可通过启动门控。
+ * 新增适配器时在这里追加并同步设置项枚举。
  */
 const ADAPTERS = ["onebot", "qqbot"] as const;
 /** 远程执行策略：readonly 只读，supervised 逐次确认，trusted 免确认。 */
@@ -413,12 +414,11 @@ function isSamePath(left: string, right: string): boolean {
 /**
  * 当前是否真的有可用的适配器实现。
  *
- * 只实现了 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 是 QQ 官方机器人
- * 接口的预留枚举值，**没有适配器实现**。选它会 spawn 的仍是 OneBot bridge，
- * 与其让用户以为切换成功，不如在启动前直接拒绝。
+ * M3-B 起 `onebot`（OneBot v11）与 `qqbot`（QQ 官方机器人，M2 的 adapter +
+ * 真实 WS transport）都已实现，两者均受支持；保留此函数供门控与 UI 复用。
  */
 export function isAdapterSupported(config: QqConfig): boolean {
-  return config.adapter === "onebot";
+  return config.adapter === "onebot" || config.adapter === "qqbot";
 }
 
 /**
@@ -445,24 +445,17 @@ export function isWorkspaceCompatible(
  * 启动前必须满足的硬门控（只报问题，不做修正）。
  *
  * 与 `validateQqConfig` 分开：那些是「配置写错了」（缺 endpoint、白名单为空），
- * 这些是「这个版本根本不支持」——即使其余配置完美也必须拒绝启动，否则
- * 面板会如实启动一个与设置不符的通道。
+ * 这些是「环境不满足」——即使其余配置完美也必须拒绝启动。M3-B 起 onebot 与
+ * qqbot 都已实现，不再因适配器种类拒绝；当前唯一硬门控是 workspace 必须落在
+ * 当前工作区根（qqbot 也一样，远程任务由主仓根上的 worktree 执行）。
  *
- * 调用方负责先判断 `config.enabled`；本函数只看能力与路径兼容性。
+ * 调用方负责先判断 `config.enabled`；本函数只看路径兼容性。
  */
 export function checkQqStartupGate(
   config: QqConfig,
   activeRoot?: string | null,
 ): QqConfigIssue[] {
   const issues: QqConfigIssue[] = [];
-
-  if (!isAdapterSupported(config)) {
-    issues.push({
-      severity: "error",
-      code: "adapter_unsupported",
-      message: "QQ 官方适配器尚未实现，请选择 OneBot",
-    });
-  }
 
   if (!isWorkspaceCompatible(config, activeRoot)) {
     issues.push({

@@ -545,7 +545,8 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "@types/ws": "^8.18.0"
   },
   "dependencies": {
     "dompurify": "^3.4.14",
@@ -557,6 +558,7 @@
     "node-notifier": "^10.0.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "ws": "^8.18.0",
     "zustand": "^5.0.15"
   }
 }
