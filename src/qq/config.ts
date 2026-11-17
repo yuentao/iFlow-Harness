@@ -52,7 +52,12 @@ export type { QqRemotePolicy, QqResultDetail };
 /** 归一化后的 QQ 通道配置（`iflow.qq.*` 9 项）。 */
 export interface QqConfig {
   enabled: boolean;
-  /** 允许通过 QQ 派发任务的用户 QQ 号。 */
+  /**
+   * 允许通过 QQ 派发任务的用户标识（QQ 官方 openid，不是 QQ 号）。
+   *
+   * 只有两个来源：扫码绑定成功时的扫码者本人（宿主自动写入）、以及面板里
+   * 对「待审核用户」的人工放行。没有任何聊天命令能把自己加进来。
+   */
   allowedUsers: string[];
   /** 允许通过 QQ 派发任务的群号。 */
   allowedGroups: string[];
@@ -301,13 +306,13 @@ export function validateQqConfig(
     config.allowedGroups.length === 0
   ) {
     // 只提示不拦启动：QqService.acceptInbound 本身要求白名单命中，空名单
-    // 等于「谁都不能派发任务」，不构成安全风险；而扫码绑定后自动启用时
-    // 白名单往往还是空的，把这里当 error 会让通道永远起不来。
+    // 意味着「谁都不能派发任务」——不是「裸奔」，而是只有待审核记录。扫码
+    // 成功后宿主会自动把扫码者写进白名单，因此这里也不该拦启动。
     issues.push({
       severity: "warning",
       code: "allowlist_empty",
       message:
-        "已启用 QQ 通道，但用户白名单与群白名单都为空：目前没有任何账号能派发任务，请先添加允许的用户或群。",
+        "已启用 QQ 通道，但用户白名单与群白名单都为空：任何人都无法派发任务，只会收到待审核记录；扫码绑定会自动加入扫码者，其余人可在面板里审核放行。",
     });
   }
 

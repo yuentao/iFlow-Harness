@@ -136,13 +136,25 @@ describe("pickQqSettingsUi", () => {
 });
 
 describe("QQ 设置消息契约", () => {
-  it("HostToWebview 含 qqSettings / qqStatus，且保留 qqBindCode", () => {
+  it("HostToWebview 含 qqSettings / qqStatus / qqPendingUsers", () => {
     const settings: HostToWebview = {
       type: "qqSettings",
       values: pickQqSettingsUi({}, { hasAppSecret: true }),
     };
     const status: HostToWebview = { type: "qqStatus", connected: false, detail: "连接被拒绝" };
-    const bindCode: HostToWebview = { type: "qqBindCode", code: "K7Q2", expiresAt: 1 };
+    const pending: HostToWebview = {
+      type: "qqPendingUsers",
+      users: [
+        {
+          openid: "open-1",
+          firstSeenAt: 1,
+          lastSeenAt: 2,
+          count: 1,
+          preview: "帮我跑个测试",
+          chatType: "private",
+        },
+      ],
+    };
 
     // 方向断言：qqConfigAction 是 webview → 宿主的请求，宿主 → webview 的联合
     // 里必须解析为 never。若哪天又被写回 HostToWebview，这里的类型条件会变成
@@ -154,7 +166,12 @@ describe("QQ 设置消息契约", () => {
     expect(settings.type).toBe("qqSettings");
     expect(settings.values.hasAppSecret).toBe(true);
     expect(status.type).toBe("qqStatus");
-    expect(bindCode.code).toBe("K7Q2");
+    expect(pending.users[0]?.openid).toBe("open-1");
+
+    // 配对码消息已随授权模型移除：宿主联合里不得再出现 qqBindCode。
+    type BindCodeMessage = Extract<HostToWebview, { type: "qqBindCode" }>;
+    const noBindCode: [BindCodeMessage] extends [never] ? true : false = true;
+    expect(noBindCode).toBe(true);
   });
 
   it("WebviewToHost 含 qqSettingsPatch / qqConfigAction，且保留 qqTaskAction", () => {

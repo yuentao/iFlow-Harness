@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { InboundMessage } from "../src/qq/adapter/types.js";
 import type { QqConfig } from "../src/qq/config.js";
+import type { QqPendingUserInput } from "../src/qq/pending-users.js";
 import {
   QqService,
   qqSpawnPolicyFor,
@@ -70,8 +71,7 @@ interface HostFixture {
   cancels: string[];
   merges: string[];
   discards: string[];
-  bindCodes: string[];
-  bindSenders: string[];
+  pendingUsers: QqPendingUserInput[];
   unbindCount: { value: number };
 }
 
@@ -82,8 +82,7 @@ function makeHost(): HostFixture {
   const cancels: string[] = [];
   const merges: string[] = [];
   const discards: string[] = [];
-  const bindCodes: string[] = [];
-  const bindSenders: string[] = [];
+  const pendingUsers: QqPendingUserInput[] = [];
   const unbindCount = { value: 0 };
 
   const host: QqServiceHost = {
@@ -107,10 +106,8 @@ function makeHost(): HostFixture {
       delivered.push({ ...msg });
       return true;
     },
-    bindAccount: async (code, senderId) => {
-      bindCodes.push(code);
-      bindSenders.push(senderId);
-      return { ok: true, message: `已绑定 ${code}` };
+    onPendingUser: (info) => {
+      pendingUsers.push({ ...info });
     },
     unbindAccount: async () => {
       unbindCount.value += 1;
@@ -129,8 +126,7 @@ function makeHost(): HostFixture {
     cancels,
     merges,
     discards,
-    bindCodes,
-    bindSenders,
+    pendingUsers,
     unbindCount,
   };
 }
@@ -734,12 +730,11 @@ describe("QqService — 命令处理", () => {
     expect(f.delivered.at(-1)?.text).toContain("未找到任务");
   });
 
-  it("bind / unbind 转发给 host，成功回执只报账号数", async () => {
+  it("unbind 转发给 host；/qq bind 已不是命令（回未知子命令）", async () => {
     const f = makeService();
     await f.service.handleInboundMessage(inbound({ text: "/qq bind abcd12" }));
-    expect(f.bindCodes).toEqual(["abcd12"]);
-    expect(f.bindSenders).toEqual(["u1"]);
-    expect(f.delivered.at(-1)?.text).toBe("已绑定，当前共 1 个账号。");
+    expect(f.delivered.at(-1)?.text).toContain("未知子命令");
+    expect(f.pendingUsers).toHaveLength(0);
 
     await f.service.handleInboundMessage(inbound({ text: "/qq unbind" }));
     expect(f.unbindCount.value).toBe(1);
@@ -794,27 +789,29 @@ describe("QqService — 命令处理", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 绑定流程（必须绕过发送者白名单）
+// 授权模型：白名单外的人只进待审核队列
 // ---------------------------------------------------------------------------
 
-describe("QqService — 绑定流程", () => {
-  it("未在白名单的用户可以完成绑定，宿主收到正确的发送者标识", async () => {
-    const f = makeService(); // allowedUsers: ["u1"]
+describe("QqService — 待审核用户（授权模型）", () => {
+  it("私聊未授权消息：不派发、不回执，交给 onPendingUser", async () => {
+    const f = makeService({ now: () => 100 }); // allowedUsers: ["u1"]
     await f.service.handleInboundMessage(
-      inbound({
-        chatType: "private",
-        chatId: "u2",
-        senderId: "u2",
-        text: "/qq bind abcd12",
-      }),
+      inbound({ chatId: "u2", senderId: "u2", text: "帮我看看这个报错" }),
     );
-    expect(f.bindCodes).toEqual(["abcd12"]);
-    expect(f.bindSenders).toEqual(["u2"]);
-    expect(f.delivered.at(-1)?.text).toBe("已绑定，当前共 2 个账号。");
+    expect(f.delivered).toHaveLength(0);
+    expect(f.dispatches).toHaveLength(0);
     expect(f.service.listTasks()).toHaveLength(0);
+    expect(f.pendingUsers).toHaveLength(1);
+    expect(f.pendingUsers[0]).toEqual({
+      openid: "u2",
+      chatType: "private",
+      preview: "帮我看看这个报错",
+      at: 100,
+    });
+    expect(f.notes.some((line) => line.includes("白名单"))).toBe(true);
   });
 
-  it("未绑定用户发 /qq task 仍被静默拒绝", async () => {
+  it("未授权用户发 /qq task 也只进待审核（不执行、不回执）", async () => {
     const f = makeService();
     await f.service.handleInboundMessage(
       inbound({ chatId: "u2", senderId: "u2", text: "/qq task 帮我改个东西" }),
@@ -822,10 +819,11 @@ describe("QqService — 绑定流程", () => {
     expect(f.delivered).toHaveLength(0);
     expect(f.dispatches).toHaveLength(0);
     expect(f.service.listTasks()).toHaveLength(0);
-    expect(f.notes.some((line) => line.includes("白名单"))).toBe(true);
+    expect(f.pendingUsers).toHaveLength(1);
+    expect(f.pendingUsers[0]?.preview).toContain("/qq task");
   });
 
-  it("群聊未在 allowedGroups、或未 @ 机器人时 /qq bind 也不放行", async () => {
+  it("群聊未在 allowedGroups 时不记录（避免任意群刷记录）", async () => {
     const f = makeService();
     await f.service.handleInboundMessage(
       inbound({
@@ -833,77 +831,42 @@ describe("QqService — 绑定流程", () => {
         chatId: "g2",
         senderId: "u2",
         mentionsBot: true,
-        text: "/qq bind abcd12",
+        text: "拉机器人进群试试",
       }),
     );
-    await f.service.handleInboundMessage(
-      inbound({
-        chatType: "group",
-        chatId: "g1",
-        senderId: "u2",
-        mentionsBot: false,
-        text: "/qq bind abcd12",
-      }),
-    );
-    expect(f.bindCodes).toHaveLength(0);
+    expect(f.pendingUsers).toHaveLength(0);
     expect(f.delivered).toHaveLength(0);
+    expect(f.notes.some((line) => line.includes("忽略"))).toBe(true);
+  });
 
-    // 允许列表内的群 + @ 机器人：名单外的人也能绑定
+  it("allowedGroups 内的群：未授权成员的消息入队并带 groupId", async () => {
+    const f = makeService();
     await f.service.handleInboundMessage(
       inbound({
         chatType: "group",
         chatId: "g1",
         senderId: "u2",
         mentionsBot: true,
-        text: "/qq bind abcd12",
+        text: "群里的请求",
       }),
     );
-    expect(f.bindCodes).toEqual(["abcd12"]);
-    expect(f.delivered.at(-1)?.text).toBe("已绑定，当前共 2 个账号。");
-  });
-
-  it("绑定失败统一回「绑定码无效或已过期」，不泄露码与白名单细节", async () => {
-    const f = makeService();
-    f.host.bindAccount = async () => ({
-      ok: false,
-      message: "配对码 abcd12 不存在（当前白名单：u1）",
+    expect(f.pendingUsers).toHaveLength(1);
+    expect(f.pendingUsers[0]).toMatchObject({
+      openid: "u2",
+      chatType: "group",
+      groupId: "g1",
+      preview: "群里的请求",
     });
-    await f.service.handleInboundMessage(
-      inbound({ senderId: "u2", chatId: "u2", text: "/qq bind abcd12" }),
-    );
-    const text = f.delivered.at(-1)?.text ?? "";
-    expect(text).toBe("绑定码无效或已过期。");
-    expect(text).not.toContain("abcd12");
-    expect(text).not.toContain("u1");
-
-    // 宿主抛错同样不把内部信息带给 QQ 用户
-    f.host.bindAccount = async () => {
-      throw new Error("store: EACCES C:\\secret\\bind.json");
-    };
-    await f.service.handleInboundMessage(
-      inbound({ msgId: "b2", senderId: "u2", chatId: "u2", text: "/qq bind abcd12" }),
-    );
-    expect(f.delivered.at(-1)?.text).toBe("绑定码无效或已过期。");
+    expect(f.delivered).toHaveLength(0);
+    expect(f.dispatches).toHaveLength(0);
   });
 
-  it("同一发送者重复绑定幂等成功，回执不回显白名单", async () => {
+  it("白名单命中的消息正常执行，且不产生待审核记录", async () => {
     const f = makeService();
-    const bound = new Set(["u1"]);
-    f.host.bindAccount = async (_code, senderId) => {
-      bound.add(senderId);
-      return { ok: true, message: `已绑定 ${senderId}，白名单：${[...bound].join("、")}` };
-    };
-    await f.service.handleInboundMessage(
-      inbound({ msgId: "b1", senderId: "u2", chatId: "u2", text: "/qq bind abcd12" }),
-    );
-    await f.service.handleInboundMessage(
-      inbound({ msgId: "b2", senderId: "u2", chatId: "u2", text: "/qq bind abcd12" }),
-    );
-    const receipts = f.delivered.filter((item) => item.text.startsWith("已绑定"));
-    expect(receipts).toHaveLength(2);
-    expect(receipts[0]?.text).toBe("已绑定，当前共 2 个账号。");
-    expect(receipts[1]?.text).toBe("已绑定，当前共 2 个账号。");
-    expect(receipts.some((item) => item.text.includes("u1"))).toBe(false);
+    await f.service.handleInboundMessage(inbound({ msgId: "ok-1" }));
+    expect(f.pendingUsers).toHaveLength(0);
+    expect(f.delivered[0]?.text).toContain("已受理任务");
+    await waitFor(() => f.dispatches.length === 1);
   });
 });
 

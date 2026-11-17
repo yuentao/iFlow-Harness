@@ -38,7 +38,6 @@ const ALL_SUBCOMMANDS = [
   "answer",
   "merge",
   "discard",
-  "bind",
   "unbind",
   "help",
 ] as const;
@@ -104,8 +103,10 @@ describe("parseQqCommand / 基础意图", () => {
     });
   });
 
-  it("bind 返回配对码", () => {
-    expect(parseOk("/qq bind A1b2")).toEqual({ kind: "bind", code: "A1b2" });
+  it("bind 已不是子命令（配对码机制随授权模型移除）", () => {
+    expect(parseErr("/qq bind A1b2").code).toBe("unknown_subcommand");
+    // 注意 `unbind` 含 `bind` 子串：按「行首命令词」判断，别用 includes。
+    expect(buildQqHelpText()).not.toMatch(/^\s+bind\s/mu);
   });
 
   it("unbind 无参数", () => {
@@ -187,10 +188,6 @@ describe("parseQqCommand / missing_arg", () => {
   it("answer 缺少回答正文", () => {
     expect(parseErr("/qq answer T-1").code).toBe("missing_arg");
   });
-
-  it("bind 缺少配对码", () => {
-    expect(parseErr("/qq bind").code).toBe("missing_arg");
-  });
 });
 
 describe("parseQqCommand / too_many_args", () => {
@@ -204,7 +201,6 @@ describe("parseQqCommand / too_many_args", () => {
       "/qq merge T-1 T-2",
       "/qq discard T-1 T-2",
       "/qq approve T-1 CODE EXTRA",
-      "/qq bind A1b2 A1b3",
       "/qq unbind x",
       "/qq help x",
     ];
@@ -222,18 +218,12 @@ describe("parseQqCommand / too_many_args", () => {
   });
 });
 
-describe("parseQqCommand / bad_code_format", () => {
-  it("配对码必须是 4-10 位字母数字", () => {
-    // 注意：带空格的输入会被分成多个参数，命中 too_many_args（见上一组用例），
-    // 这里只放单个 token 的非法形态。
-    for (const code of ["abc", "abcdefghijk", "ab-cd", "你好你好", "A1_b2"]) {
-      expect(parseErr(`/qq bind ${code}`).code).toBe("bad_code_format");
+describe("parseQqCommand / 配对码已移除", () => {
+  it("任何 /qq bind 形态都只回未知子命令（没有格式校验分支）", () => {
+    for (const code of ["A1b2", "abc", "abcdefghijk", "A1_b2"]) {
+      expect(parseErr(`/qq bind ${code}`).code).toBe("unknown_subcommand");
     }
-  });
-
-  it("4 位与 10 位边界值合法", () => {
-    expect(parseOk("/qq bind A1b2")).toEqual({ kind: "bind", code: "A1b2" });
-    expect(parseOk("/qq bind abcdefghij")).toEqual({ kind: "bind", code: "abcdefghij" });
+    expect(parseErr("/qq bind").code).toBe("unknown_subcommand");
   });
 });
 
@@ -317,7 +307,6 @@ describe("formatAck", () => {
       { kind: "answer", taskId: "T-1", text: "x" },
       { kind: "merge", taskId: "T-1" },
       { kind: "discard", taskId: "T-1" },
-      { kind: "bind", code: "A1b2" },
       { kind: "unbind" },
       { kind: "help" },
     ];

@@ -115,7 +115,7 @@ export type AssertManagedSetupOnWebview = Expect<
 export type AssertQrActionsOnWebview = Expect<
   Equal<
     Member<WebviewToHost, "qqConfigAction">["action"],
-    "testConnection" | "generateBindCode" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin"
+    "testConnection" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin"
   >
 >;
 

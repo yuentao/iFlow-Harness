@@ -18,6 +18,7 @@
  */
 
 import { shortTaskId } from "../../shared/qq-task.js";
+import type { QqPendingUserInput } from "./pending-users.js";
 import type {
   SuperApprovalMode,
   SuperPermissionDecision,
@@ -95,8 +96,8 @@ export interface QqHostPorts {
   notify(text: string): void;
   /** 回复一条 QQ 消息；返回是否成功送达。 */
   deliver(msg: QqServiceDeliverInput): Promise<boolean>;
-  /** 完成账号绑定；`senderId` 是发起绑定的 QQ 号。 */
-  bindAccount(code: string, senderId: string): Promise<{ ok: boolean; message: string }>;
+  /** 白名单外的人发来消息：只记录，不执行、不回执（面板据此审核）。 */
+  onPendingUser(info: QqPendingUserInput): void;
   /** 解除账号绑定。 */
   unbindAccount(): Promise<{ ok: boolean; message: string }>;
 }
@@ -248,11 +249,8 @@ export function createQqServiceHost(
       return ports.deliver(msg);
     },
 
-    async bindAccount(
-      code: string,
-      senderId: string,
-    ): Promise<{ ok: boolean; message: string }> {
-      return ports.bindAccount(code, senderId);
+    onPendingUser(info: QqPendingUserInput): void {
+      ports.onPendingUser(info);
     },
 
     async unbindAccount(): Promise<{ ok: boolean; message: string }> {
