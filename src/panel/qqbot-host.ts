@@ -35,9 +35,7 @@ import { createNodeQqBotTransport } from "../qq/qqbot/ws-transport.js";
 import type { QqServiceDeliverInput } from "../qq/service.js";
 
 // ---------------------------------------------------------------------------
-// webview 消息形状与阶段映射（自 qq-managed-host 迁入；QQBot 单一路径不再
-// 依赖 OneBot 托管模块。原模块保留这些定义的副本供其自身测试，下一阶段随
-// OneBot 死代码一起删除。）
+// webview 消息形状与阶段映射（QQBot 单一路径下由本模块自持）
 // ---------------------------------------------------------------------------
 
 /** HostToWebview 的托管进度消息形状（从协议取，避免两侧漂移）。 */

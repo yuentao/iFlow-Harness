@@ -28,9 +28,9 @@ import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
 /**
  * QQ 适配器种类（取值与 package.json 的 `iflow.qq.adapter` 枚举逐字一致）。
  *
- * `onebot` 走 OneBot v11（`src/qq/adapter/onebot.ts`）；`qqbot` 走 QQ 官方
- * 机器人网关（M3-B 起有真实 WS transport `src/qq/qqbot/ws-transport.ts` +
- * M2 的 `src/qq/qqbot/adapter.ts`），两者都已实现、都可通过启动门控。
+ * `onebot` 为保留的旧枚举值（OneBot 后端已移除，阶段4统一清理枚举与 nls）；
+ * `qqbot` 走 QQ 官方机器人网关（真实 WS transport `src/qq/qqbot/ws-transport.ts`
+ * + `src/qq/qqbot/adapter.ts`），是唯一可走的通道。
  * 新增适配器时在这里追加并同步设置项枚举。
  */
 const ADAPTERS = ["onebot", "qqbot"] as const;
