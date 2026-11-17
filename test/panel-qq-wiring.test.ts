@@ -119,6 +119,7 @@ type PanelInternals = {
   handleQqConfigAction: (action: "testConnection" | "unbind") => Promise<void>;
   handleQqTaskAction: (taskId: string, action: string, text?: string) => Promise<void>;
   refreshQqTasks: () => void;
+  refreshQqTaskProjection: () => void;
   handleQqPendingUser: (info: {
     openid: string;
     chatType: "private" | "group";
@@ -202,6 +203,29 @@ describe("QQ 通道 · 面板侧接线", () => {
 
     await p.handleQqTaskAction("task-1", "stop");
     expect(handleTaskAction).toHaveBeenCalledWith("task-1", "stop", undefined);
+  });
+
+  it("服务状态变化只刷新任务投影：终态与真实耗时写回看板", () => {
+    // 卡片上的「耗时」= updatedAt - createdAt、「停止」按钮只在中途状态出现，
+    // 因此终态与收尾时间必须真的进 SessionState.qqTasks。
+    const done: QqTaskUi = {
+      ...TASK,
+      status: "succeeded",
+      createdAt: 1_000,
+      updatedAt: 61_000,
+    };
+    p.qq = {
+      service: { listTasks: () => [done], handleTaskAction: vi.fn(async () => undefined), stop: async () => undefined },
+      store: {},
+      config: makeConfig(),
+      io: makeIo().io,
+    };
+
+    p.refreshQqTaskProjection();
+
+    const [task] = p.store.getState().qqTasks;
+    expect(task?.status).toBe("succeeded");
+    expect((task?.updatedAt ?? 0) - (task?.createdAt ?? 0)).toBe(60_000);
   });
 
   it("qqConfigAction 走 webview → host 通道并被识别（不再是 HostToWebview 的误声明）", async () => {

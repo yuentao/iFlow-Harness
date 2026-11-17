@@ -143,6 +143,31 @@ export interface QqHostTaskOutcome extends QqServiceTaskOutcome {
   merged?: boolean;
 }
 
+/**
+ * 子会话终态 → 任务停止原因。
+ *
+ * 只映射**观察到的事实**：完成 = `end_turn`、失败 = `error`、被中断 =
+ * `canceled`。其余状态（准备中 / 运行中 / 等待应答）没有可靠的停止原因，
+ * 返回 `undefined`（不编造）。
+ *
+ * 为什么必须有这层：服务侧按 `stopReason` 决定任务终态。没有映射时，被中断
+ * 的子会话会被当成「正常结束」记成成功 —— QQ 会收到一份假成功结果。
+ */
+export function stopReasonForSuperStatus(
+  status: string | null | undefined,
+): string | undefined {
+  switch (status) {
+    case "completed":
+      return "end_turn";
+    case "failed":
+      return "error";
+    case "cancelled":
+      return "canceled";
+    default:
+      return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 适配器
 // ---------------------------------------------------------------------------
@@ -150,11 +175,14 @@ export interface QqHostTaskOutcome extends QqServiceTaskOutcome {
 /**
  * 用端口构造 {@link QqServiceHost}。
  *
- * 每个方法都是薄映射，唯一带逻辑的两处是：
+ * 每个方法都是薄映射，唯一带逻辑的三处是：
  *  1. `dispatchTask`：派发后立刻把 `superSessionId` / `branch` 写回
  *     `input.task.correlation` —— `/qq stop` 与 `/qq merge` 都靠这个字段定位
  *     子会话，晚一步写就等于丢掉了正在跑的任务。
  *  2. `readTaskOutcome`：缺摘要时给占位文案，其余字段有才透传。
+ *  3. `readTaskOutcome` 里的终态映射：完成/失败/被中断分别给出 `end_turn` /
+ *     `error` / `canceled`，让服务能把任务收在正确的终态上（否则被中断的任务
+ *     会被记成「成功」）。
  */
 export function createQqServiceHost(
   ports: QqHostPorts,
@@ -230,7 +258,9 @@ export function createQqServiceHost(
           : QQ_MISSING_SUMMARY_TEXT;
 
       const outcome: QqHostTaskOutcome = { summary };
-      // stopReason 没有可靠来源：不编造，直接省略。
+      // 终态子会话给出可核对的停止原因；非终态（或陌生值）不编造，直接省略。
+      const stopReason = stopReasonForSuperStatus(snapshot.status);
+      if (stopReason) outcome.stopReason = stopReason;
       if (typeof snapshot.branch === "string" && snapshot.branch.length > 0) {
         outcome.branch = snapshot.branch;
       }

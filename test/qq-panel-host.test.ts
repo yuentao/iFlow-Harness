@@ -317,6 +317,29 @@ describe("createQqServiceHost — readTaskOutcome", () => {
 
     expect(outcomeOf(host, "super-1")!.merged).toBe(true);
   });
+
+  it("子会话终态映射成可核对的 stopReason（完成/失败/被中断）", () => {
+    const samples: Array<[string, string]> = [
+      ["completed", "end_turn"],
+      ["failed", "error"],
+      ["cancelled", "canceled"],
+    ];
+    for (const [status, expected] of samples) {
+      const f = makeFixture();
+      f.state.snapshot = { summary: "结果", status };
+      const host = createQqServiceHost(f.ports);
+      expect(outcomeOf(host, "super-1")!.stopReason).toBe(expected);
+    }
+  });
+
+  it("非终态 / 陌生状态不编造 stopReason", () => {
+    for (const status of ["running", "preparing", "awaiting_input", "merged", "???"]) {
+      const f = makeFixture();
+      f.state.snapshot = { summary: "结果", status };
+      const host = createQqServiceHost(f.ports);
+      expect(outcomeOf(host, "super-1")!.stopReason).toBeUndefined();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
