@@ -995,6 +995,35 @@ export class ChatPanel implements vscode.Disposable {
   /** {@link superToolCallActionsDone} 的容量上限。 */
   private static readonly SUPER_TOOL_CALL_ACTIONS_CAP = 100;
   /**
+   * 同一个主会话、同一轮里最多发几次「super-agent 参数纠错提示」。
+   *
+   * 工具层现在会抛错让模型自己修，宿主这条 hidden prompt 是兜底：两者叠加
+   * 若不加限次，模型坚持写同样的错误参数时宿主会无限喂纠错回合。2 次足够
+   * 覆盖「模型没读懂错误 / 换一种写法又错」两种情况，之后只留 toast ——
+   * 把决定权交回用户，而不是让面板自转。
+   */
+  private static readonly SUPER_TOOL_CALL_CORRECTION_CAP = 2;
+  /**
+   * 当前轮次已发出的纠错提示数（key = 主会话 id）。
+   *
+   * 「一轮」以用户下一次主动发消息为界（`sendPrompt` 的 !internal && !hidden
+   * 分支清掉本条记录）；宿主自己投的 hidden 回合不重置 —— 否则纠错提示自己
+   * 触发的新一轮会重新获得配额，限次形同虚设。换会话 / 恢复会话 / 热重认证
+   * 时由 {@link resetSuperDirectiveScans} 清空。
+   */
+  private readonly superToolCallCorrections = new Map<string, number>();
+  /**
+   * 等待主会话空闲的纠错提示（hidden prompt）。
+   *
+   * 工具调用必然发生在主会话生成中，所以入队时几乎总是忙的；投递复用子会话
+   * 汇报那条「排队等空闲」的车道（`drainSuperToolCallCorrections`，与汇报/
+   * 动作回执互斥执行）。每条带归属主会话：排队期间用户切了会话，A 的纠错
+   * 提示不能投进 B 的对话。
+   */
+  private pendingSuperToolCallCorrections: Array<{ mainSessionId: string | null; text: string }> = [];
+  /** 纠错提示投递正在跑（drain 的重入锁）。 */
+  private superToolCallCorrectionRunning = false;
+  /**
    * Rolling buffer of the same MAIN-session text, scanned for management
    * actions (`super-agent-actions` fenced blocks). Kept separate from the
    * delegation buffer: the two protocols have independent fences and
@@ -3878,6 +3907,7 @@ export class ChatPanel implements vscode.Disposable {
         this.syncSuperWaitingState();
         void this.drainSuperReports();
         void this.drainDelegatedUserTurns();
+        void this.drainSuperToolCallCorrections();
       }
       return;
     }
@@ -7668,6 +7698,7 @@ export class ChatPanel implements vscode.Disposable {
     this.superDispatchedDirectives.clear();
     this.superToolCallWarned.clear();
     this.superToolCallActionsDone.clear();
+    this.superToolCallCorrections.clear();
   }
 
   /**
@@ -7729,6 +7760,9 @@ export class ChatPanel implements vscode.Disposable {
           issues[0] ?? "",
         ),
       );
+      // 被丢掉的条目不会自己回来：把原因送回主会话，让模型重发完整条目。
+      // 与「整体不可解析」共用同一限次账本（同一轮最多 2 次）。
+      this.queueSuperToolCallCorrection(issues[0] ?? "");
     }
     let dispatched = 0;
     let droppedAttachments = 0;
@@ -7795,7 +7829,7 @@ export class ChatPanel implements vscode.Disposable {
     if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
     const parsed = parseSuperToolCall(kind, update.args);
     if (!parsed.ok) {
-      this.warnUnsupportedSuperToolCall(update, name, parsed.reason);
+      this.warnUnsupportedSuperToolCall(update, name, parsed.reason, parsed.issues);
       return;
     }
     // 载荷纠偏：新版 `super-agent` 工具同时收 tasks / actions，模型做管理动作
@@ -7875,7 +7909,12 @@ export class ChatPanel implements vscode.Disposable {
    * 数量本身不设界，不能让它无限增长；换会话时由
    * {@link resetSuperDirectiveScans} 清空。
    */
-  private warnUnsupportedSuperToolCall(update: ToolCallBase, name: string, reason: string): void {
+  private warnUnsupportedSuperToolCall(
+    update: ToolCallBase,
+    name: string,
+    reason: string,
+    issues: readonly string[] = [],
+  ): void {
     const key = update.toolCallId || `${name}#${update.status ?? ""}`;
     if (this.superToolCallWarned.has(key)) return;
     if (this.superToolCallWarned.size >= ChatPanel.SUPER_TOOL_CALL_WARN_CAP) {
@@ -7890,6 +7929,94 @@ export class ChatPanel implements vscode.Disposable {
       "warning",
       vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发子会话", reason),
     );
+    // 宿主能看见「这次没派出去」，模型却只收到一个 failed 工具帧 —— 补一条
+    // hidden prompt 把原因和正确格式送回主会话上下文，让它在同一轮里自行修正。
+    this.queueSuperToolCallCorrection(issues[0] ?? reason);
+  }
+
+  /**
+   * 入队一条「super-agent 参数不合法」的纠错提示（hidden prompt）。
+   *
+   * 限次是硬约束：同一主会话同一轮最多 {@link SUPER_TOOL_CALL_CORRECTION_CAP}
+   * 次，超出只留 toast 与日志 —— 工具层已经会让这次调用 failed，模型若坚持
+   * 写同样的错误参数，宿主不能无限给自己喂回合。
+   *
+   * 提示词只带**原因**与**正确格式示例**，绝不回贴畸形原文：原文可能就是
+   * 一大段错位 JSON，贴回上下文既浪费 token，又可能诱导模型照抄。
+   */
+  private queueSuperToolCallCorrection(detail: string): void {
+    const owner = this.currentMainSessionId();
+    const key = owner ?? "";
+    const used = this.superToolCallCorrections.get(key) ?? 0;
+    if (used >= ChatPanel.SUPER_TOOL_CALL_CORRECTION_CAP) {
+      this.log.info(
+        `super agent: parameter-correction prompt suppressed (${used}/${ChatPanel.SUPER_TOOL_CALL_CORRECTION_CAP} used this round)`,
+      );
+      return;
+    }
+    this.superToolCallCorrections.set(key, used + 1);
+    const text = [
+      "[super-agent tool call rejected]",
+      `Reason: ${detail}`,
+      "Required format:",
+      '{"tasks":[{"title":"short title","task":"self-contained brief"}]}',
+      "请修正后重新调用 super-agent（不要重复提交同样的参数）。",
+    ].join("\n");
+    this.pendingSuperToolCallCorrections.push({ mainSessionId: owner, text });
+    this.log.info("super agent: queued a parameter-correction prompt for the main session");
+    // 工具调用必然发生在主会话生成中，几乎一定等不到空闲 —— 点着心跳，
+    // 回合结束后由 drain 补投；心跳也会在没有其它待办时自行停表。
+    this.ensureSuperHeartbeat();
+    void this.drainSuperToolCallCorrections();
+  }
+
+  /**
+   * 把排队的纠错提示逐条投给主会话。
+   *
+   * 与子会话汇报 / 动作回执 / 合并请求共用同一条「主会话空闲」车道：同一时刻
+   * 只能有一个回合跑在同一个 ACP 会话上。条件不满足就把提示留在队列里，
+   * 由心跳重试 —— 丢了它模型就永远不知道自己错在哪。
+   */
+  private async drainSuperToolCallCorrections(): Promise<void> {
+    if (this.disposed || this.superToolCallCorrectionRunning) return;
+    if (this.autoTurnsHeld()) return;
+    this.superToolCallCorrectionRunning = true;
+    try {
+      while (this.pendingSuperToolCallCorrections.length > 0) {
+        if (this.disposed) return;
+        if (this.autoTurnsHeld()) break;
+        if (!this.mainSessionFree()) break;
+        // 合并子会话在主仓工作区跑 git：主会话此时再跑回合会互相踩。
+        if (
+          this.superMergeRunning ||
+          this.pendingSuperMerges.length > 0 ||
+          this.superMergeChildRunning()
+        ) {
+          break;
+        }
+        // 只投当前主会话的提示：别的会话等用户切过去再投（串台）。
+        const owner = this.currentMainSessionId();
+        const index = this.pendingSuperToolCallCorrections.findIndex(
+          (item) => item.mainSessionId === owner,
+        );
+        if (index === -1) break;
+        const item = this.pendingSuperToolCallCorrections[index]!;
+        this.log.info("super agent: delivering the parameter-correction prompt as a hidden main-session turn");
+        const started = await this.sendPrompt(item.text, undefined, undefined, undefined, {
+          delegateOnBusy: false,
+          hidden: true,
+        });
+        if (!started) break; // 主会话被占：留在队列里等心跳重投。
+        const pos = this.pendingSuperToolCallCorrections.indexOf(item);
+        if (pos !== -1) this.pendingSuperToolCallCorrections.splice(pos, 1);
+        // 这一轮端点 / 内核报错：别在心跳里连续喂下一条，留给用户处理。
+        if (this.store.getState().status === "error") break;
+      }
+    } catch (error) {
+      this.log.warn(`super agent correction delivery failed: ${errorMessage(error)}`);
+    } finally {
+      this.superToolCallCorrectionRunning = false;
+    }
   }
 
   /**
@@ -8497,6 +8624,7 @@ export class ChatPanel implements vscode.Disposable {
     void this.drainSuperReports();
     void this.drainSuperActionReceipts();
     void this.drainDelegatedUserTurns();
+    void this.drainSuperToolCallCorrections();
     void this.drainSuperMerges();
     if (!this.hasSuperWork()) this.stopSuperHeartbeat();
   }
@@ -8511,6 +8639,9 @@ export class ChatPanel implements vscode.Disposable {
     // 待补投的「被改道用户消息」同样是欠着主会话的一轮：心跳停了它就永远
     // 投不出去，那条消息又会像修复前一样在主会话里丢失。
     if (this.pendingDelegatedUserTurns.length > 0) return true;
+    // 排队的参数纠错提示也是一轮欠账：模型不知道自己的调用为何失败，就会
+    // 在下一轮继续重复同一份错误载荷。
+    if (this.pendingSuperToolCallCorrections.length > 0) return true;
     if (this.pendingSuperMerges.length > 0) return true;
     // 汇报已交上来但来源子会话还没终态：它的汇报还欠着主会话，心跳必须
     // 继续跑，否则既没有汇报也没有忙碌态刷新。
@@ -11567,6 +11698,10 @@ export class ChatPanel implements vscode.Disposable {
     if (!internal && !hidden) {
       this.autoTurnsStoppedFor = null;
       this.clearDeferredAutoTurnsToast();
+      // 用户真正开了一轮新对话：super-agent 参数纠错的每轮配额重新给满。
+      // 绝不能放在 hidden 分支：纠错提示自己会触发一次 hidden 回合，重置
+      // 配额就等于让限次失效（模型每错一次都能再拿 2 次提醒）。
+      this.superToolCallCorrections.delete(this.currentMainSessionId() ?? "");
     }
     // ── 主会话车道 ────────────────────────────────────────────────
     // 「用户回合」与「hidden 汇报回合」都跑在同一个 ACP 会话上：两个回合
@@ -11908,6 +12043,9 @@ export class ChatPanel implements vscode.Disposable {
       // 回合（hidden，不伪造用户气泡）。与汇报/合并共用同一条车道，谁先申领
       // superReportRunning 谁跑；没抢到的留给心跳重投。
       void this.drainDelegatedUserTurns();
+      // 本轮里 super-agent 参数不合法时排下的纠错提示，等主会话空闲后作为
+      // 一次 hidden 回合投出（模型据此修正后重新调用）。
+      void this.drainSuperToolCallCorrections();
       this.refreshSuperWaitHeartbeat();
       if (this.hasSuperWork()) this.ensureSuperHeartbeat();
     } catch (error) {
