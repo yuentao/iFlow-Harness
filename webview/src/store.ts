@@ -233,6 +233,30 @@ function createMockHost(): HostApi {
   // the host's approvalPolicy message.
   let mockApprovalRules: ApprovalRule[] | undefined;
   let mockApprovalDraft: ApprovalRule | null | undefined;
+  // Mock QQ settings (browser preview): the QQ tab renders straight from
+  // `qqSettings`, so seed the access-control tables with real entries —
+  // two users with notes plus one without (exercises the masked fallback)
+  // and one group with a note. Deleting a row in the preview pushes a
+  // `qqSettingsPatch` back, which empties that list and shows its empty state.
+  let mockQqSettings: QqSettingsUi = pickQqSettingsUi(
+    {
+      enabled: true,
+      route: "main",
+      workspace: "C:\\mock\\workspace",
+      allowedUsers: [
+        { openid: "D754A1B2C3D4E5F6A7B88D11", note: "我的手机（私聊）" },
+        { openid: "A1B2C3D4E5F6A7B8C9D0E1F2", note: "同事小林" },
+        { openid: "9F8E7D6C5B4A3928F0E1D2C3" },
+      ],
+      allowedGroups: [{ openid: "123456789", note: "项目讨论群" }],
+      remotePolicy: "supervised",
+      maxConcurrentTasks: 2,
+      rateLimitPerMin: 6,
+      resultDetail: "standard",
+      autoMerge: false,
+    },
+    { hasAppSecret: true },
+  );
 
   // Mock memory files (F3): enough to exercise the tab in a browser — one
   // global primary with structured facts, one project file, one legacy file.
@@ -1207,6 +1231,11 @@ function createMockHost(): HostApi {
       if (m.type === "ready") {
         broadcast({ type: "theme", kind: mockTheme });
         broadcast({ type: "hostSettings", ...mockHostSettings });
+        // QQ channels are independent of the transcript snapshot (the real
+        // host pushes them separately), so the mock must seed them too —
+        // otherwise the settings hub's QQ tab renders empty tables.
+        broadcast({ type: "qqSettings", values: mockQqSettings });
+        broadcast({ type: "qqStatus", connected: false });
         broadcast({
           type: "snapshot",
           state: {
@@ -1219,6 +1248,14 @@ function createMockHost(): HostApi {
             auth: authState,
           },
         });
+        return;
+      }
+      if (m.type === "qqSettingsPatch") {
+        mockQqSettings = pickQqSettingsUi(
+          { ...mockQqSettings, ...m.patch } as Record<string, unknown>,
+          { hasAppSecret: mockQqSettings.hasAppSecret },
+        );
+        broadcast({ type: "qqSettings", values: mockQqSettings });
         return;
       }
       if (m.type === "requestTurnChanges") {
