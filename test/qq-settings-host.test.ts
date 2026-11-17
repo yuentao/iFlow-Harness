@@ -373,6 +373,59 @@ describe("applyQqSettingsPatch", () => {
     ]);
   });
 
+  it("群备注写入 / 清空与用户备注互不影响，读回保持", async () => {
+    const io = new MemoryIo({
+      allowedUsers: [{ openid: "user-1", note: "同事" }],
+      allowedGroups: [{ openid: "group-1", note: "测试群" }, "group-2"],
+    });
+
+    // 改群备注 + 新增带备注的群：只写 allowedGroups，用户列表原封不动。
+    await applyQqSettingsPatch(io, {
+      allowedGroups: [
+        { openid: "group-1", note: " 运营群 " },
+        { openid: "group-3", note: "新群" },
+        "group-2",
+      ],
+    });
+    expect(io.settings.allowedGroups).toEqual([
+      { openid: "group-1", note: "运营群" },
+      { openid: "group-3", note: "新群" },
+      "group-2",
+    ]);
+    expect(io.settings.allowedUsers).toEqual([{ openid: "user-1", note: "同事" }]);
+
+    // 清空某条群备注：退回裸字符串；其它群与用户列表不受影响。
+    await applyQqSettingsPatch(io, {
+      allowedGroups: [{ openid: "group-1" }, { openid: "group-3", note: "新群" }, "group-2"],
+    });
+    expect(io.settings.allowedGroups).toEqual([
+      "group-1",
+      { openid: "group-3", note: "新群" },
+      "group-2",
+    ]);
+    expect(io.settings.allowedUsers).toEqual([{ openid: "user-1", note: "同事" }]);
+
+    // 重开设置页（读回）：群备注在，无备注条目是裸字符串形状。
+    const ui = await readQqSettings(io);
+    expect(ui.allowedGroups).toEqual([
+      { openid: "group-1" },
+      { openid: "group-3", note: "新群" },
+      { openid: "group-2" },
+    ]);
+    expect(ui.allowedUsers).toEqual([{ openid: "user-1", note: "同事" }]);
+  });
+
+  it("只追加裸 id 的群补丁保留磁盘上的群备注（与用户列表同口径）", async () => {
+    const io = new MemoryIo({
+      allowedGroups: [{ openid: "group-1", note: "测试群" }],
+    });
+    await applyQqSettingsPatch(io, { allowedGroups: ["group-1", "group-2"] });
+    expect(io.settings.allowedGroups).toEqual([
+      { openid: "group-1", note: "测试群" },
+      "group-2",
+    ]);
+  });
+
   it("9 个设置键均已覆盖，且不含派生字段与已移除的遗留键", () => {
     expect(QQ_SETTING_KEYS).toHaveLength(9);
     expect(QQ_SETTING_KEYS).not.toContain("hasAppSecret");

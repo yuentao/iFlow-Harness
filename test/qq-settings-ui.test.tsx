@@ -333,6 +333,77 @@ describe("QqSettings", () => {
     expect(container.textContent).not.toContain(openid);
   });
 
+  it("群条目同样带备注：可修改、可清空，且不牵连用户列表", () => {
+    const group = "12345678";
+    const user = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(
+      <Harness
+        initial={{
+          allowedUsers: [{ openid: user, note: "同事" }],
+          allowedGroups: [{ openid: group, note: "测试群" }],
+        }}
+      />,
+    );
+
+    const groupNote = container.querySelector<HTMLInputElement>(
+      "input[aria-label='允许的群 1 的备注']",
+    )!;
+    expect(groupNote.value).toBe("测试群");
+
+    // 8 位群号脱敏后恒为纯星号，多条群在 id 上完全无法区分：备注必须排在
+    // 脱敏 id 之前（备注是唯一可辨识信息）。
+    const row = groupNote.parentElement!;
+    const masked = [...row.querySelectorAll("span")].find((span) =>
+      (span.textContent ?? "").includes("********"),
+    )!;
+    expect(masked.textContent).toBe("********");
+    expect(
+      groupNote.compareDocumentPosition(masked) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    act(() => groupNote.focus());
+    setInput(groupNote, " 运营群 ");
+    act(() => groupNote.blur());
+    expect(onChange).toHaveBeenLastCalledWith({
+      allowedGroups: [{ openid: group, note: "运营群" }],
+    });
+
+    const cleared = container.querySelector<HTMLInputElement>(
+      "input[aria-label='允许的群 1 的备注']",
+    )!;
+    act(() => cleared.focus());
+    setInput(cleared, "");
+    act(() => cleared.blur());
+    // 清空备注：写回不带 note 的条目。
+    expect(onChange).toHaveBeenLastCalledWith({ allowedGroups: [{ openid: group }] });
+
+    // 每次补丁都只带群列表：用户列表（含备注）不被牵连。
+    for (const call of onChange.mock.calls) {
+      expect(call[0]).not.toHaveProperty("allowedUsers");
+    }
+  });
+
+  it("新增群条目后可继续填写备注", () => {
+    const openid = "12345678";
+    render(<Harness />);
+
+    clickText("添加群");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    setInput(input, openid);
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(onChange).toHaveBeenLastCalledWith({ allowedGroups: [{ openid }] });
+
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='允许的群 1 的备注']")!;
+    act(() => note.focus());
+    setInput(note, "测试群");
+    act(() => note.blur());
+    expect(onChange).toHaveBeenLastCalledWith({
+      allowedGroups: [{ openid, note: "测试群" }],
+    });
+  });
+
   it("paints warnings in the warning tone, never primary", () => {
     render(<Harness />);
     const alert = container.querySelector<HTMLElement>("[role='alert']")!;
@@ -527,6 +598,72 @@ describe("QqSettings", () => {
     expect(after.allowedUsers).toEqual([
       { openid: "legacy-plain" },
       { openid: "user-with-note", note: "运维同事" },
+    ]);
+  });
+
+  it("端到端往返（群）：改群备注不影响用户备注，无备注群仍是裸字符串", async () => {
+    const io = new MemoryIo({
+      allowedUsers: [{ openid: "user-with-note", note: "同事" }, "user-plain"],
+      allowedGroups: ["987654321012", { openid: "group-with-note", note: "测试群" }],
+    });
+    const initial = await readQqSettings(io);
+    expect(initial.allowedGroups).toEqual([
+      { openid: "987654321012" },
+      { openid: "group-with-note", note: "测试群" },
+    ]);
+
+    function IoHarness() {
+      const [value, setValue] = useState<QqSettingsValue>({ ...initial });
+      return (
+        <QqSettings
+          value={value}
+          onChange={(patch) => {
+            onChange(patch);
+            setValue((current) => ({ ...current, ...patch }) as QqSettingsValue);
+          }}
+          onTestConnection={onTestConnection}
+          onUnbind={onUnbind}
+          onUserAction={onUserAction}
+        />
+      );
+    }
+    render(<IoHarness />);
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='允许的群 2 的备注']")!;
+    expect(note.value).toBe("测试群");
+    act(() => note.focus());
+    setInput(note, "运营群");
+    act(() => note.blur());
+
+    const calls = onChange.mock.calls;
+    const patch = calls[calls.length - 1]![0] as QqSettingsPatch;
+    expect(patch.allowedGroups).toEqual([
+      { openid: "987654321012" },
+      { openid: "group-with-note", note: "运营群" },
+    ]);
+    // 群备注补丁不携带用户列表，两者互不影响。
+    expect(patch.allowedUsers).toBeUndefined();
+
+    await act(async () => {
+      await applyQqSettingsPatch(io, patch);
+    });
+    // 无备注的群保持裸字符串；用户列表（含备注）原封不动。
+    expect(io.settings.allowedGroups).toEqual([
+      "987654321012",
+      { openid: "group-with-note", note: "运营群" },
+    ]);
+    expect(io.settings.allowedUsers).toEqual([
+      { openid: "user-with-note", note: "同事" },
+      "user-plain",
+    ]);
+
+    const after = await readQqSettings(io);
+    expect(after.allowedGroups).toEqual([
+      { openid: "987654321012" },
+      { openid: "group-with-note", note: "运营群" },
+    ]);
+    expect(after.allowedUsers).toEqual([
+      { openid: "user-with-note", note: "同事" },
+      { openid: "user-plain" },
     ]);
   });
 });
