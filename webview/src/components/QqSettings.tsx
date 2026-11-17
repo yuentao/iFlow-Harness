@@ -14,7 +14,6 @@ import {
   Hint,
   ICON_INLINE,
   IconButton,
-  Segmented,
   Select,
   SettingsDisclosure,
   SettingsGroup,
@@ -29,13 +28,11 @@ import {
  * 唯一真值，`onChange(patch)` 只把用户改动交回调用方，落盘与校验都由宿主
  * 负责。这样设置页可以接在任何数据源上（当前宿主还没有 QQ 配置的读写通道，
  * Wave3-B 接线时只需要把这份组件接到真实的 settings 快照）。
+ *
+ * 阶段5：通道恒走 QQ 官方机器人（QQBot），已移除旧的适配器分流与
+ * endpoint / bridgePort 遗留字段。
  */
 
-/**
- * 适配器字面量。阶段4 已从共享契约 `QqSettingsUi` 移除 `adapter` 字段（通道恒走
- * QQBot），但本组件里 OneBot 相关的文案分支留到阶段5 清理，因此这里保留该类型。
- */
-export type QqAdapter = "onebot" | "qqbot";
 export type QqRemotePolicy = QqSettingsUi["remotePolicy"];
 export type QqResultDetail = QqSettingsUi["resultDetail"];
 /** 一键托管（Wave5-D）的两条宿主回执与二维码动作枚举，直接取自共享契约。 */
@@ -54,13 +51,6 @@ export type QrAction = "startQrLogin" | "refreshQr" | "cancelQrLogin";
 export type QqSettingsValue = QqSettingsUi & {
   botToken?: string;
   appSecret?: string;
-  /**
-   * 阶段4 已从共享契约移除、仅为本组件当前文案分支保留的可选遗留字段。
-   * 宿主不再下发它们，值为空时按 QQBot 处理；阶段5 清理 OneBot 文案后删除。
-   */
-  adapter?: QqAdapter;
-  endpoint?: string;
-  bridgePort?: number;
 };
 
 export interface QqSettingsProps {
@@ -80,9 +70,9 @@ export interface QqSettingsProps {
   bindCode?: { code: string; expiresAt: number };
   /** 配置或运行环境的问题；非空时以警告色调呈现。 */
   warnings?: string[];
-  /** 一键托管：请求宿主开始 / 停止 go-cqhttp 托管。 */
+  /** 一键接入：请求宿主开始 / 停止 QQBot 接入流程。 */
   onManagedSetup?: (action: "start" | "stop") => void;
-  /** 扫码登录动作：我已扫码 / 刷新二维码 / 取消登录。 */
+  /** 扫码授权动作：我已扫码 / 刷新二维码 / 取消登录。 */
   onQrAction?: (action: QrAction) => void;
   /** 当前二维码回执；null = 无二维码。 */
   qqLoginQr?: QqLoginQr | null;
@@ -190,59 +180,33 @@ const DETAIL_OPTIONS: Array<{ value: QqResultDetail; label: string; description:
   { value: "full", label: t("完整回复"), description: t("完整最终回复，受 QQ 单条消息长度限制。") },
 ];
 
-const ADAPTER_OPTIONS: Array<{ value: QqAdapter; label: string }> = [
-  { value: "onebot", label: t("OneBot v11") },
-  { value: "qqbot", label: t("QQ 官方机器人") },
-];
+/** 一键接入（官方 QQBot 路线）的说明文案。 */
+const MANAGED_INTRO = t(
+  "使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。",
+);
 
-const ADAPTER_DESCRIPTION: Record<QqAdapter, string> = {
-  onebot: t("OneBot v11 桥，例如本机的 NapCat 或 LLOneBot 的 HTTP/WebSocket 端点。"),
-  qqbot: t("QQ 官方机器人接口，通过配置的端点与机器人凭据访问。"),
-};
+/** 通道定位：官方合规。 */
+const CHANNEL_LABEL = t("官方合规通道（推荐）");
+
+/** 一键接入按钮文案。 */
+const MANAGED_START_LABEL = t("一键接入 QQ 机器人");
+
+/** 二维码区标题。 */
+const QR_TITLE = t("扫码授权 QQ 机器人");
 
 /**
- * 一键接入（M4 官方 QQBot 路线）按当前 adapter 显示的文案。
- * qqbot 走官方扫码 SDK（窗口内二维码），不再下载 go-cqhttp；onebot 保留旧的自动托管但标注 legacy。
+ * 一键托管阶段机的中文标签（与共享契约的 phase 枚举一一对应，QQBot 官方
+ * 授权语义）。`downloading` 沿用通用的「准备中」，不再暗含旧桥接工具的语义。
  */
-const MANAGED_INTRO: Record<QqAdapter, string> = {
-  qqbot: t("使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。"),
-  onebot: t("自动下载并配置 go-cqhttp，扫码登录即可从 QQ 远程控制本工作区。"),
-};
-
-/** 明确的通道定位：官方合规（推荐） vs 需自跑 OneBot（legacy）。 */
-const ADAPTER_CHANNEL: Record<QqAdapter, string> = {
-  qqbot: t("官方合规通道（推荐）"),
-  onebot: t("需自跑 OneBot（legacy）"),
-};
-
-/** 一键接入按钮文案（qqbot 是官方机器人，onebot 是 legacy 的 OneBot）。 */
-const MANAGED_START_LABEL: Record<QqAdapter, string> = {
-  qqbot: t("一键接入 QQ 机器人"),
-  onebot: t("一键接入 OneBot"),
-};
-
-/** 二维码区标题：qqbot 是「扫码授权」，onebot 保留「扫码登录」。 */
-const QR_TITLE: Record<QqAdapter, string> = {
-  qqbot: t("扫码授权 QQ 机器人"),
-  onebot: t("扫码登录"),
-};
-
-/** 一键托管阶段机的中文标签（与共享契约的 phase 枚举一一对应）。 */
 const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
   idle: t("空闲"),
   checking: t("检查环境"),
-  downloading: t("下载中"),
+  downloading: t("准备中"),
   configuring: t("生成配置"),
   starting: t("启动中"),
-  waiting_login: t("等待扫码"),
-  logged_in: t("已登录"),
-  error: t("出错"),
-};
-
-/** qqbot 专属阶段文案（官方授权语义）；onebot（legacy）沿用上表。 */
-const QQBOT_PHASE_LABEL: Partial<Record<QqManagedStatus["phase"], string>> = {
   waiting_login: t("请用手机 QQ 扫描二维码完成授权"),
   logged_in: t("已连接 QQ 官方机器人"),
+  error: t("出错"),
 };
 
 export function QqSettings({
@@ -267,8 +231,6 @@ export function QqSettings({
     setSecretDirty((prev) => ({ ...prev, [field]: false }));
     onSecretsCommit?.({ [field]: next.trim() });
   }
-  /** 当前适配器：宿主已恒走 QQBot，遗留值缺失时按 qqbot 处理。 */
-  const adapter: QqAdapter = value.adapter ?? "qqbot";
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -289,14 +251,10 @@ export function QqSettings({
     managedPhase === "waiting_login" ||
     managedPhase === "logged_in";
   const managedError = managedPhase === "error";
-  /** qqbot 用官方授权语义的阶段文案，onebot（legacy）保留原标签。 */
-  function phaseLabelFor(phase: QqManagedStatus["phase"]): string {
-    return (adapter === "qqbot" && QQBOT_PHASE_LABEL[phase]) || MANAGED_PHASE_LABEL[phase];
-  }
   const phaseLabel = managedPhase
     ? managedPhase === "downloading" && qqManagedStatus?.progress !== undefined
-      ? `${phaseLabelFor(managedPhase)} ${qqManagedStatus.progress}%`
-      : phaseLabelFor(managedPhase)
+      ? `${MANAGED_PHASE_LABEL[managedPhase]} ${qqManagedStatus.progress}%`
+      : MANAGED_PHASE_LABEL[managedPhase]
     : "";
   /** 只有 waiting_scan / scanned 且 dataUrl 通过 isQrDataUrl 护栏才渲染 <img>。 */
   const qrValid =
@@ -306,16 +264,14 @@ export function QqSettings({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* 一键接入（Wave5-D）：宿主自下载→配置→启动 go-cqhttp，面板只发请求与展示回执。 */}
+      {/* 一键接入：宿主完成 QQBot 接入（准备→配置→启动→扫码授权），面板只发请求与展示回执。 */}
       <div className="rounded-lg border border-border bg-surface/40 px-3 py-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-ui-label font-semibold text-foreground">{t("一键接入")}</div>
-            <Hint className="mt-0.5">{MANAGED_INTRO[adapter]}</Hint>
-            <Hint className="mt-0.5">{ADAPTER_CHANNEL[adapter]}</Hint>
-            {adapter === "qqbot" && (
-              <Hint className="mt-0.5">{t("首次使用需在 q.qq.com 创建机器人（个人账号即可）。")}</Hint>
-            )}
+            <Hint className="mt-0.5">{MANAGED_INTRO}</Hint>
+            <Hint className="mt-0.5">{CHANNEL_LABEL}</Hint>
+            <Hint className="mt-0.5">{t("首次使用需在 q.qq.com 创建机器人（个人账号即可）。")}</Hint>
           </div>
           {managing ? (
             <Button
@@ -333,7 +289,7 @@ export function QqSettings({
               icon={<Zap className={ICON_INLINE} />}
               onClick={() => onManagedSetup?.("start")}
             >
-              {MANAGED_START_LABEL[adapter]}
+              {MANAGED_START_LABEL}
             </Button>
           )}
         </div>
@@ -357,7 +313,7 @@ export function QqSettings({
 
         {qqLoginQr && (
           <div className="mt-3 flex flex-col items-center gap-2 rounded-md border border-border bg-editor/40 px-3 py-3">
-            <div className="text-ui-label font-semibold text-foreground">{QR_TITLE[adapter]}</div>
+            <div className="text-ui-label font-semibold text-foreground">{QR_TITLE}</div>
             {qrValid ? (
               <>
                 <img
@@ -451,7 +407,7 @@ export function QqSettings({
         </Button>
       </ActionRow>
 
-      <SettingsGroup title={t("连接与适配器")}>
+      <SettingsGroup title={t("连接")}>
         <Row label={t("启用 QQ 远程任务")} description={t("从 QQ 私聊或群聊接收任务，在独立分支上执行。")}>
           <Switch
             checked={value.enabled}
@@ -459,77 +415,54 @@ export function QqSettings({
             onChange={(enabled) => onChange({ enabled })}
           />
         </Row>
-        <Row label={t("协议适配器")} description={ADAPTER_DESCRIPTION[adapter]} wide>
-          <Segmented<QqAdapter>
-            ariaLabel={t("协议适配器")}
-            options={ADAPTER_OPTIONS}
-            value={adapter}
-            onChange={(adapter) => onChange({ adapter })}
-          />
+        <Row
+          label={t("机器人 Token")}
+          description={
+            value.hasBotToken
+              ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
+              : t("输入后失焦即提交给宿主，面板不保存明文。")
+          }
+          wide
+        >
+          <Field label={t("机器人 Token")}>
+            <TextInput
+              type="password"
+              revealable
+              mono
+              aria-label={t("机器人 Token")}
+              value={value.botToken ?? ""}
+              onChange={(event) => {
+                setSecretDirty((prev) => ({ ...prev, botToken: true }));
+                onChange({ botToken: event.target.value });
+              }}
+              onBlur={(event) => commitSecret("botToken", event.currentTarget.value)}
+            />
+          </Field>
         </Row>
-        <Row label={t("适配器端点")} wide>
-          <CommitTextInput
-            mono
-            value={value.endpoint ?? ""}
-            label={t("适配器端点")}
-            placeholder={
-              adapter === "onebot" ? "http://127.0.0.1:3000" : "https://api.sgroup.qq.com"
-            }
-            onCommit={(endpoint) => onChange({ endpoint })}
-          />
+        <Row
+          label={t("App Secret")}
+          description={
+            value.hasAppSecret
+              ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
+              : t("输入后失焦即提交给宿主，面板不保存明文。")
+          }
+          wide
+        >
+          <Field label={t("App Secret")}>
+            <TextInput
+              type="password"
+              revealable
+              mono
+              aria-label={t("App Secret")}
+              value={value.appSecret ?? ""}
+              onChange={(event) => {
+                setSecretDirty((prev) => ({ ...prev, appSecret: true }));
+                onChange({ appSecret: event.target.value });
+              }}
+              onBlur={(event) => commitSecret("appSecret", event.currentTarget.value)}
+            />
+          </Field>
         </Row>
-        {adapter === "qqbot" && (
-          <>
-            <Row
-              label={t("机器人 Token")}
-              description={
-                value.hasBotToken
-                  ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
-                  : t("输入后失焦即提交给宿主，面板不保存明文。")
-              }
-              wide
-            >
-              <Field label={t("机器人 Token")}>
-                <TextInput
-                  type="password"
-                  revealable
-                  mono
-                  aria-label={t("机器人 Token")}
-                  value={value.botToken ?? ""}
-                  onChange={(event) => {
-                    setSecretDirty((prev) => ({ ...prev, botToken: true }));
-                    onChange({ botToken: event.target.value });
-                  }}
-                  onBlur={(event) => commitSecret("botToken", event.currentTarget.value)}
-                />
-              </Field>
-            </Row>
-            <Row
-              label={t("App Secret")}
-              description={
-                value.hasAppSecret
-                  ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
-                  : t("输入后失焦即提交给宿主，面板不保存明文。")
-              }
-              wide
-            >
-              <Field label={t("App Secret")}>
-                <TextInput
-                  type="password"
-                  revealable
-                  mono
-                  aria-label={t("App Secret")}
-                  value={value.appSecret ?? ""}
-                  onChange={(event) => {
-                    setSecretDirty((prev) => ({ ...prev, appSecret: true }));
-                    onChange({ appSecret: event.target.value });
-                  }}
-                  onBlur={(event) => commitSecret("appSecret", event.currentTarget.value)}
-                />
-              </Field>
-            </Row>
-          </>
-        )}
       </SettingsGroup>
 
       <SettingsGroup title={t("访问控制")} hint={t("留空表示不接受该来源的任务")}>
@@ -590,15 +523,6 @@ export function QqSettings({
       </SettingsGroup>
 
       <SettingsDisclosure title={t("高级")}>
-        <Row label={t("桥接端口")} description={t("0 表示使用适配器默认端口；范围 0–65535。")}>
-          <CommitNumberInput
-            label={t("桥接端口")}
-            value={value.bridgePort ?? 0}
-            min={0}
-            max={65535}
-            onCommit={(bridgePort) => onChange({ bridgePort })}
-          />
-        </Row>
         <Row label={t("工作区目录")} description={t("远程任务运行的工作区；留空表示当前工作区根目录。")} wide>
           <Field label={t("工作区目录")}>
             <CommitTextInput

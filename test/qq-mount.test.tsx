@@ -120,14 +120,11 @@ describe("QQ 机器人设置页", () => {
     settings(
       {
         enabled: true,
-        adapter: "qqbot",
-        endpoint: "https://api.sgroup.qq.com",
         allowedUsers: ["10001"],
         maxConcurrentTasks: 4,
       },
       { hasBotToken: true, hasAppSecret: false },
     );
-    // 阶段4 起 adapter/endpoint 已不是设置项，pickQqSettingsUi 会忽略它们。
     render(
       <SettingsModal
         tab="qq"
@@ -187,7 +184,7 @@ describe("QQ 机器人设置页", () => {
   });
 
   it("submits edited credentials through qqSecretsWrite on blur", () => {
-    settings({ adapter: "qqbot" });
+    settings({});
     render(
       <SettingsModal
         tab="qq"
@@ -233,7 +230,7 @@ describe("QQ 机器人设置页", () => {
       useChat.getState().applyHostMessage({
         type: "qqStatus",
         connected: true,
-        detail: "本机 OneBot 桥",
+        detail: "QQ 官方机器人已连接",
       });
       useChat.getState().applyHostMessage({
         type: "qqBindCode",
@@ -253,7 +250,7 @@ describe("QQ 机器人设置页", () => {
     );
 
     expect(container.textContent).toContain("已连接");
-    expect(container.textContent).toContain("本机 OneBot 桥");
+    expect(container.textContent).toContain("QQ 官方机器人已连接");
     expect(container.textContent).toContain("K7Q2");
     expect(container.textContent).toContain("剩余");
     expect(container.textContent).toContain("/qq bind K7Q2");
