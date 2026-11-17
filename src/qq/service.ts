@@ -54,6 +54,12 @@ import {
   type QqCommandIntent,
 } from "../../shared/qq-command.js";
 import type { Block, QqTaskUi, TurnChangeUi } from "../../shared/messages.js";
+
+/**
+ * 固定适配器前缀。阶段4 收敛为仅 QQBot 后，`iflow.qq.adapter` 设置项已移除，
+ * 幂等键与任务来源统一用此常量，不再从配置读取。
+ */
+const QQ_ADAPTER = "qqbot";
 import type {
   SuperApprovalMode,
   SuperPermissionDecision,
@@ -664,7 +670,7 @@ export class QqService {
   // -------------------------------------------------------------------------
 
   private async createTaskFromMessage(msg: InboundMessage, prompt: string): Promise<void> {
-    const key = makeIdempotencyKey(this.config.adapter, msg.msgId);
+    const key = makeIdempotencyKey(QQ_ADAPTER, msg.msgId);
     const existingId = this.idempotency.get(key);
     if (existingId) {
       const existing = this.tasks.get(existingId);
@@ -709,7 +715,7 @@ export class QqService {
 
     const created = createQqTask(
       {
-        adapter: this.config.adapter,
+        adapter: QQ_ADAPTER,
         source: {
           chatType: msg.chatType,
           chatId: msg.chatId,

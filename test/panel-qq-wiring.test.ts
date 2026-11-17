@@ -65,9 +65,6 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
-    adapter: "onebot",
-    endpoint: "http://127.0.0.1:3000/",
-    bridgePort: 0,
     allowedUsers: ["10001"],
     allowedGroups: [],
     workspace: "",
@@ -331,11 +328,9 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(p.isQqTaskAction(undefined)).toBe(false);
   });
 
-  it("adapter=qqbot 走官方路线：未绑定时提示扫码，不再以「尚未实现」拒绝", async () => {
+  it("QQ 通道只走 QQBot 官方路线：未绑定时提示扫码，不再以「尚未实现」拒绝", async () => {
     setConfigOverrides({
       enabled: true,
-      adapter: "qqbot",
-      endpoint: "http://127.0.0.1:3000/",
       allowedUsers: ["10001"],
     });
     const other = new ChatPanel(makeContext(storageDir), {
@@ -356,8 +351,6 @@ describe("QQ 通道 · 面板侧接线", () => {
   it("workspace 指向其他目录时拒绝启动：toast 说明只支持当前工作区", async () => {
     setConfigOverrides({
       enabled: true,
-      adapter: "onebot",
-      endpoint: "http://127.0.0.1:3000/",
       allowedUsers: ["10001"],
       workspace: path.resolve(here, "..", "qq-elsewhere"),
     });

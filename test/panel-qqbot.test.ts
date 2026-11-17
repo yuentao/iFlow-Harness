@@ -64,7 +64,7 @@ function makeIo(): {
   secrets: Map<string, string>;
   writes: Array<Record<string, unknown>>;
 } {
-  const settings: Record<string, unknown> = { enabled: true, adapter: "qqbot", allowedUsers: ["10001"] };
+  const settings: Record<string, unknown> = { enabled: true, allowedUsers: ["10001"] };
   const secrets = new Map<string, string>();
   const writes: Array<Record<string, unknown>> = [];
   return {
@@ -89,7 +89,7 @@ function makeIo(): {
 
 type PanelInternals = {
   qq?: {
-    config?: { adapter: string };
+    config?: Record<string, unknown>;
     qqbot?: { adapter: { close: () => Promise<void> } };
     [k: string]: unknown;
   };
@@ -154,7 +154,6 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qqbot-"));
     setConfigOverrides({
       enabled: true,
-      adapter: "qqbot",
       allowedUsers: ["10001"],
     });
     ioHarness = makeIo();
@@ -199,7 +198,6 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     expect(adapter.setEventCallback).toHaveBeenCalledOnce();
     expect(adapter.connect).toHaveBeenCalledOnce();
     expect(p.qq?.qqbot?.adapter).toBeTruthy();
-    expect(p.qq?.config?.adapter).toBe("qqbot");
     expect(protocolStop).toHaveBeenCalled();
   });
 

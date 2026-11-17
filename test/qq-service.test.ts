@@ -142,9 +142,6 @@ function makeHost(): HostFixture {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
-    adapter: "onebot",
-    endpoint: "http://127.0.0.1:3000",
-    bridgePort: 0,
     allowedUsers: ["u1"],
     allowedGroups: ["g1"],
     workspace: "/ws",
@@ -202,7 +199,7 @@ function seedTask(
 ): QqTask {
   return {
     taskId,
-    idempotencyKey: `onebot:${taskId}`,
+    idempotencyKey: `qqbot:${taskId}`,
     source: { chatType: "private", chatId: "u1", senderId: "u1", msgId: taskId },
     target: { workspace: "/ws" },
     payload: { prompt: `任务 ${taskId}`, attachments: [], contexts: [] },

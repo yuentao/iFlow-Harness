@@ -13,9 +13,6 @@ import {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
-    adapter: "onebot",
-    endpoint: "http://127.0.0.1:3000/",
-    bridgePort: 0,
     allowedUsers: ["10001"],
     allowedGroups: [],
     workspace: "",
@@ -108,18 +105,21 @@ describe("isTerminalSuperStatus", () => {
 });
 
 describe("shouldRestartOnPatch", () => {
-  it("连接类字段变化 → true", () => {
+  it("唯一连接类字段 enabled 变化 → true", () => {
     const prev = makeConfig();
     expect(shouldRestartOnPatch(prev, { enabled: false })).toBe(true);
-    expect(shouldRestartOnPatch(prev, { adapter: "qqbot" })).toBe(true);
-    expect(shouldRestartOnPatch(prev, { endpoint: "http://127.0.0.1:5700/" })).toBe(true);
-    expect(shouldRestartOnPatch(prev, { bridgePort: 3100 })).toBe(true);
   });
 
-  it("连接类字段同值 → false（不做无谓的 bridge 重启）", () => {
+  it("enabled 同值 → false（不做无谓的重启）", () => {
     const prev = makeConfig();
-    expect(shouldRestartOnPatch(prev, { enabled: true, adapter: "onebot" })).toBe(false);
-    expect(shouldRestartOnPatch(prev, { endpoint: prev.endpoint, bridgePort: 0 })).toBe(false);
+    expect(shouldRestartOnPatch(prev, { enabled: true })).toBe(false);
+  });
+
+  it("已移除的 adapter / endpoint / bridgePort 键不再触发重启", () => {
+    const prev = makeConfig();
+    expect(shouldRestartOnPatch(prev, { adapter: "qqbot" })).toBe(false);
+    expect(shouldRestartOnPatch(prev, { endpoint: "http://127.0.0.1:5700/" })).toBe(false);
+    expect(shouldRestartOnPatch(prev, { bridgePort: 3100 })).toBe(false);
   });
 
   it("热更新字段 → false", () => {
@@ -137,7 +137,6 @@ describe("shouldRestartOnPatch", () => {
   it("undefined 表示本次不改", () => {
     const prev = makeConfig();
     expect(shouldRestartOnPatch(prev, { enabled: undefined })).toBe(false);
-    expect(shouldRestartOnPatch(prev, { enabled: undefined, endpoint: prev.endpoint })).toBe(false);
   });
 
   it("没有快照时有连接类改动 → true；空补丁 → false", () => {

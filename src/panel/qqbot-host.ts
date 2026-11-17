@@ -159,12 +159,13 @@ export interface QqChannelDispatchDeps {
 /**
  * 构造 QQBot 官方 adapter 通道（QQBot 单一路径）。
  *
- * 保留 `config` 入参仅为兼容既有调用点签名，不再按 config.adapter 分流。
+ * 保留 `config` 入参仅为兼容既有调用点签名，不再按 config.adapter 分流；
+ * 阶段4 起配置层已无 adapter 字段，故入参放宽为 unknown。
  * 构造出 adapter 后立刻用 `setEventCallback` 接上入站出口 —— 这是 M2 唯一
  * 的事件接缝，不能改用轮询或旁路调用。
  */
 export function createQqChannelDispatch(
-  _config: { adapter: string },
+  _config: unknown,
   deps: QqChannelDispatchDeps,
 ): QqChannelDispatch {
   const transport = deps.transport ?? createNodeQqBotTransport();

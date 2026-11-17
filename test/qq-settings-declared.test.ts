@@ -4,10 +4,13 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 
 /**
- * QQ 远程任务的 12 项设置声明。这些断言把设置项钉在磁盘上：键名、类型、
+ * QQ 远程任务的 9 项设置声明。这些断言把设置项钉在磁盘上：键名、类型、
  * 默认值、取值范围，以及每个 nls 键在英文与中文两份 bundle 里都存在且非空
  * —— 漂移会让设置项静默失色。描述文案同时受「如实」约束：不得再声称
  * 「只声明、未接线」，且未实现的能力必须写明会被拒绝。
+ *
+ * 阶段4 移除了 OneBot 专属的 adapter / endpoint / bridgePort 三项设置，
+ * 通道恒走 QQBot，声明里不再有它们。
  */
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -43,9 +46,6 @@ interface Spec {
 
 const SPECS: Spec[] = [
   { key: "iflow.qq.enabled", type: "boolean", default: false },
-  { key: "iflow.qq.adapter", type: "string", default: "onebot", enum: ["onebot", "qqbot"] },
-  { key: "iflow.qq.endpoint", type: "string", default: "" },
-  { key: "iflow.qq.bridgePort", type: "number", default: 0, minimum: 0, maximum: 65535 },
   { key: "iflow.qq.allowedUsers", type: "array", default: [], itemsType: "string" },
   { key: "iflow.qq.allowedGroups", type: "array", default: [], itemsType: "string" },
   { key: "iflow.qq.workspace", type: "string", default: "" },
@@ -75,7 +75,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
   const props = pkg.contributes.configuration.properties;
   const qqKeys = Object.keys(props).filter((k) => k.startsWith("iflow.qq."));
 
-  it("恰好声明 12 项 iflow.qq.* 设置", () => {
+  it("恰好声明 9 项 iflow.qq.* 设置", () => {
     expect(qqKeys.sort()).toEqual(SPECS.map((s) => s.key).sort());
   });
 
@@ -98,7 +98,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
   });
 
   it("枚举设置逐项解释（enumDescriptions 与 enum 等长且都是 nls 键）", () => {
-    for (const key of ["iflow.qq.adapter", "iflow.qq.remotePolicy", "iflow.qq.resultDetail"]) {
+    for (const key of ["iflow.qq.remotePolicy", "iflow.qq.resultDetail"]) {
       const schema = props[key]!;
       expect(schema.enumDescriptions, `${key} 缺少 enumDescriptions`).toHaveLength(schema.enum!.length);
       for (const raw of schema.enumDescriptions!) nlsKey(raw);
@@ -112,8 +112,8 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
       keys.add(nlsKey(schema.description ?? schema.markdownDescription ?? ""));
       for (const raw of schema.enumDescriptions ?? []) keys.add(nlsKey(raw));
     }
-    // 12 个 description + 8 个枚举项解释。
-    expect(keys.size).toBe(20);
+    // 9 个 description + 6 个枚举项解释（remotePolicy 3 + resultDetail 3）。
+    expect(keys.size).toBe(15);
     for (const key of keys) {
       expect(typeof en[key], `英文 nls 缺少 ${key}`).toBe("string");
       expect(en[key]!.trim().length, `英文 nls 的 ${key} 为空`).toBeGreaterThan(0);
@@ -134,7 +134,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
     expect(enText).toContain("denial");
   });
 
-  it("描述如实：不再声称「仅声明 / 尚未接线」，qqbot 写成已实现的推荐通道", () => {
+  it("描述如实：不再声称「仅声明 / 尚未接线」", () => {
     const staleZh = ["仅声明", "尚未接线"];
     const staleEn = ["only declares", "not wired", "nothing is wired"];
     for (const key of Object.keys(zh).filter((k) => k.startsWith("iflow.configuration.qq."))) {
@@ -148,30 +148,6 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
         expect(lowered, `英文 nls 的 ${key} 仍含陈旧表述「${phrase}」`).not.toContain(phrase);
       }
     }
-
-    // M3-B：qqbot 官方适配器已实现，描述必须写「推荐」而不是「尚未实现 / 拒绝启动」。
-    const zhAdapter = zh["iflow.configuration.qq.adapter.description"] ?? "";
-    expect(zhAdapter).toContain("qqbot");
-    expect(zhAdapter).toContain("推荐");
-    expect(zhAdapter).not.toContain("尚未实现");
-    expect(zhAdapter).not.toContain("拒绝启动");
-    const enAdapter = en["iflow.configuration.qq.adapter.description"] ?? "";
-    expect(enAdapter).toContain("qqbot");
-    expect(enAdapter.toLowerCase()).toContain("recommended");
-    expect(enAdapter.toLowerCase()).not.toContain("not implemented");
-    expect(enAdapter.toLowerCase()).not.toContain("refuse");
-
-    // enumDescriptions 也同步：qqbot = 推荐 / 官方合规 / WebSocket 免公网；onebot = legacy/需自跑。
-    const zhQqbot = zh["iflow.configuration.qq.adapter.qqbot"] ?? "";
-    expect(zhQqbot).toContain("推荐");
-    expect(zhQqbot).toContain("免公网");
-    const enQqbot = en["iflow.configuration.qq.adapter.qqbot"] ?? "";
-    expect(enQqbot.toLowerCase()).toContain("recommended");
-    expect(enQqbot.toLowerCase()).toContain("no public ip");
-    const zhOnebot = zh["iflow.configuration.qq.adapter.onebot"] ?? "";
-    expect(zhOnebot).toContain("旧版");
-    const enOnebot = en["iflow.configuration.qq.adapter.onebot"] ?? "";
-    expect(enOnebot.toLowerCase()).toContain("legacy");
 
     // workspace 只支持当前工作区根：描述必须说清楚「指向其他根会拒绝启动」。
     const zhWorkspace = zh["iflow.configuration.qq.workspace.description"] ?? "";

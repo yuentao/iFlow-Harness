@@ -1,11 +1,8 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  QQ_RESERVED_BRIDGE_PORTS,
   QQ_SECRET_KEYS,
-  buildBridgeEnv,
   checkQqStartupGate,
-  isAdapterSupported,
   isWorkspaceCompatible,
   normalizeQqConfig,
   validateQqConfig,
@@ -16,9 +13,6 @@ import {
 /** 与 config.ts 的权威默认值一致（测试独立写一份，防止实现悄悄改默认值不被发现）。 */
 const DEFAULTS: QqConfig = {
   enabled: false,
-  adapter: "onebot",
-  endpoint: "",
-  bridgePort: 0,
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -38,11 +32,10 @@ function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   };
 }
 
-/** 一条「已启用且配置完整」的基线（endpoint + 用户白名单齐全）。 */
+/** 一条「已启用且白名单齐全」的基线。 */
 function makeEnabled(overrides: Partial<QqConfig> = {}): QqConfig {
   return makeConfig({
     enabled: true,
-    endpoint: "http://127.0.0.1:3000/",
     allowedUsers: ["10001"],
     ...overrides,
   });
@@ -59,14 +52,22 @@ describe("normalizeQqConfig", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("已移除的 adapter / endpoint / bridgePort 键被忽略，不进配置也不产 warning", () => {
+    const { config, warnings } = normalizeQqConfig({
+      adapter: "onebot",
+      endpoint: "http://127.0.0.1:3000/",
+      bridgePort: 3000,
+    });
+    expect(config).toEqual(DEFAULTS);
+    expect(warnings).toEqual([]);
+  });
+
   it("字符串 trim，白名单数组去空白 / 去空项 / 去重并保持首次出现顺序", () => {
     const { config, warnings } = normalizeQqConfig({
-      endpoint: "  http://127.0.0.1:3000/  ",
       workspace: "  J:/work/qq  ",
       allowedUsers: [" 10001 ", "10001", "", "   ", "10002"],
       allowedGroups: [" 20002 ", "20002"],
     });
-    expect(config.endpoint).toBe("http://127.0.0.1:3000/");
     expect(config.workspace).toBe("J:/work/qq");
     expect(config.allowedUsers).toEqual(["10001", "10002"]);
     expect(config.allowedGroups).toEqual(["20002"]);
@@ -92,65 +93,42 @@ describe("normalizeQqConfig", () => {
     const clamped = normalizeQqConfig({
       maxConcurrentTasks: 99,
       rateLimitPerMin: 0.2,
-      bridgePort: -5,
     });
     expect(clamped.config.maxConcurrentTasks).toBe(10);
     // 0.2 先四舍五入为 0，再被下限夹到 1。
     expect(clamped.config.rateLimitPerMin).toBe(1);
-    expect(clamped.config.bridgePort).toBe(0);
-    expect(clamped.warnings).toHaveLength(3);
+    expect(clamped.warnings).toHaveLength(2);
 
-    const high = normalizeQqConfig({ bridgePort: 65535.7 });
-    expect(high.config.bridgePort).toBe(65535);
+    const high = normalizeQqConfig({ rateLimitPerMin: 60.7 });
+    expect(high.config.rateLimitPerMin).toBe(60);
     expect(high.warnings).toHaveLength(1);
   });
 
   it("数字项类型不符 / 非有限数回退默认值并告警", () => {
     const { config, warnings } = normalizeQqConfig({
       maxConcurrentTasks: "3",
-      rateLimitPerMin: null,
-      bridgePort: Number.NaN,
+      rateLimitPerMin: Number.NaN,
     });
     expect(config.maxConcurrentTasks).toBe(2);
     expect(config.rateLimitPerMin).toBe(6);
-    expect(config.bridgePort).toBe(0);
-    expect(warnings).toHaveLength(3);
-  });
-
-  it("adapter=qqbot 归一化后保留", () => {
-    const { config, warnings } = normalizeQqConfig({ adapter: "qqbot" });
-    expect(config.adapter).toBe("qqbot");
-    expect(warnings).toEqual([]);
-  });
-
-  it("adapter=official（废弃枚举值）回退 onebot 并告警", () => {
-    const { config, warnings } = normalizeQqConfig({ adapter: "official" });
-    expect(config.adapter).toBe("onebot");
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("iflow.qq.adapter");
-    expect(warnings[0]).toContain("onebot / qqbot");
+    expect(warnings).toHaveLength(2);
   });
 
   it("非法枚举值回退默认值并告警，合法值允许首尾空白", () => {
     const invalid = normalizeQqConfig({
-      adapter: "napcat",
       remotePolicy: "yolo",
       resultDetail: "verbose",
     });
-    expect(invalid.config.adapter).toBe("onebot");
     expect(invalid.config.remotePolicy).toBe("supervised");
     expect(invalid.config.resultDetail).toBe("standard");
-    expect(invalid.warnings).toHaveLength(3);
-    expect(invalid.warnings.join("\n")).toContain("iflow.qq.adapter");
+    expect(invalid.warnings).toHaveLength(2);
     expect(invalid.warnings.join("\n")).toContain("iflow.qq.remotePolicy");
     expect(invalid.warnings.join("\n")).toContain("iflow.qq.resultDetail");
 
     const trimmed = normalizeQqConfig({
-      adapter: "  onebot ",
       remotePolicy: " trusted ",
       resultDetail: " full ",
     });
-    expect(trimmed.config.adapter).toBe("onebot");
     expect(trimmed.config.remotePolicy).toBe("trusted");
     expect(trimmed.config.resultDetail).toBe("full");
     expect(trimmed.warnings).toEqual([]);
@@ -174,15 +152,13 @@ describe("normalizeQqConfig", () => {
   it("字符串 / 布尔 / 数组类型不符都回退默认值并告警", () => {
     const { config, warnings } = normalizeQqConfig({
       enabled: "true",
-      endpoint: 3000,
       autoMerge: 1,
       allowedGroups: "20002",
     });
     expect(config.enabled).toBe(false);
-    expect(config.endpoint).toBe("");
     expect(config.autoMerge).toBe(false);
     expect(config.allowedGroups).toEqual([]);
-    expect(warnings).toHaveLength(4);
+    expect(warnings).toHaveLength(3);
   });
 
   it("未知字段被忽略", () => {
@@ -197,13 +173,13 @@ describe("validateQqConfig", () => {
     expect(validateQqConfig(makeConfig())).toEqual([]);
   });
 
-  it("启用但缺 endpoint 与白名单时报两个 error", () => {
+  it("启用但白名单为空时报 allowlist_empty", () => {
     const issues = validateQqConfig(makeConfig({ enabled: true }));
-    expect(codes(issues)).toEqual(["endpoint_required", "allowlist_empty"]);
+    expect(codes(issues)).toEqual(["allowlist_empty"]);
     expect(issues.every((issue) => issue.severity === "error")).toBe(true);
   });
 
-  it("启用且 endpoint 与白名单齐全时无 issue", () => {
+  it("启用且白名单齐全时无 issue", () => {
     expect(validateQqConfig(makeEnabled())).toEqual([]);
   });
 
@@ -238,16 +214,6 @@ describe("validateQqConfig", () => {
     expect(validateQqConfig(makeConfig({ workspace: outside }))).toEqual([]);
   });
 
-  it("bridgePort 命中 OneBot 后端默认端口时报 warning，其他端口不报", () => {
-    for (const port of QQ_RESERVED_BRIDGE_PORTS) {
-      const issues = validateQqConfig(makeConfig({ bridgePort: port }));
-      expect(codes(issues)).toEqual(["bridge_port_conflict"]);
-      expect(issues[0]?.severity).toBe("warning");
-    }
-    expect(validateQqConfig(makeConfig({ bridgePort: 0 }))).toEqual([]);
-    expect(validateQqConfig(makeConfig({ bridgePort: 12345 }))).toEqual([]);
-  });
-
   it("remotePolicy=trusted 报免确认 warning", () => {
     const issues = validateQqConfig(makeConfig({ remotePolicy: "trusted" }));
     expect(codes(issues)).toEqual(["trusted_policy"]);
@@ -257,42 +223,24 @@ describe("validateQqConfig", () => {
   it("多个问题同时返回", () => {
     const issues = validateQqConfig(
       makeEnabled({
-        endpoint: "",
         allowedUsers: [],
         remotePolicy: "trusted",
-        bridgePort: 5700,
       }),
     );
-    expect(codes(issues)).toEqual([
-      "endpoint_required",
-      "allowlist_empty",
-      "bridge_port_conflict",
-      "trusted_policy",
-    ]);
+    expect(codes(issues)).toEqual(["allowlist_empty", "trusted_policy"]);
   });
 });
 
 describe("启动门控（checkQqStartupGate）", () => {
   const root = path.resolve(".");
 
-  it("adapter=onebot 与 qqbot 都受支持", () => {
-    expect(isAdapterSupported(makeConfig({ adapter: "onebot" }))).toBe(true);
-    expect(isAdapterSupported(makeConfig({ adapter: "qqbot" }))).toBe(true);
-  });
-
-  it("adapter=qqbot 且 workspace 合法时门控通过（不再报 adapter_unsupported）", () => {
-    expect(checkQqStartupGate(makeEnabled({ adapter: "qqbot" }), root)).toEqual([]);
-    expect(checkQqStartupGate(makeEnabled({ adapter: "qqbot", workspace: root }), root)).toEqual(
-      [],
-    );
-  });
-
-  it("adapter=onebot 且 workspace 留空时门控通过", () => {
+  it("workspace 留空时门控通过", () => {
     expect(checkQqStartupGate(makeEnabled(), root)).toEqual([]);
     expect(isWorkspaceCompatible(makeConfig({ workspace: "   " }), root)).toBe(true);
   });
 
-  it("workspace 等于当前工作区根时兼容（忽略大小写与尾部分隔符）", () => {
+  it("workspace 等于当前工作区根时门控通过（忽略大小写与尾部分隔符）", () => {
+    expect(checkQqStartupGate(makeEnabled({ workspace: root }), root)).toEqual([]);
     const variant = process.platform === "win32" ? root.toUpperCase() : root;
     expect(isWorkspaceCompatible(makeConfig({ workspace: root }), root)).toBe(true);
     expect(isWorkspaceCompatible(makeConfig({ workspace: variant }), root)).toBe(true);
@@ -319,80 +267,13 @@ describe("启动门控（checkQqStartupGate）", () => {
     expect(isWorkspaceCompatible(makeConfig({ workspace: "" }), undefined)).toBe(true);
   });
 
-  it("qqbot + workspace 不匹配时只报 workspace_not_active_root（workspace 门控仍保留）", () => {
+  it("workspace 不匹配时只报 workspace_not_active_root", () => {
     const issues = checkQqStartupGate(
-      makeEnabled({ adapter: "qqbot", workspace: path.resolve(root, "..", "qq-elsewhere") }),
+      makeEnabled({ workspace: path.resolve(root, "..", "qq-elsewhere") }),
       root,
     );
     expect(codes(issues)).toEqual(["workspace_not_active_root"]);
-    expect(codes(issues)).not.toContain("adapter_unsupported");
     expect(issues.every((issue) => issue.severity === "error")).toBe(true);
-  });
-});
-
-describe("buildBridgeEnv", () => {
-  it("只产出 bridge 约定的 7 个键，且值全部是字符串", () => {
-    const env = buildBridgeEnv(makeConfig({ endpoint: "http://127.0.0.1:3000/" }), {
-      hostPort: 43123,
-      bridgeToken: "bridge-token",
-      hmacSecret: "hmac-secret",
-      onebotToken: "onebot-token",
-      incomingPort: 43124,
-      incomingToken: "incoming-token",
-    });
-
-    expect(env).toEqual({
-      IFLOW_QQ_HOST_PORT: "43123",
-      IFLOW_QQ_BRIDGE_TOKEN: "bridge-token",
-      IFLOW_QQ_HMAC_SECRET: "hmac-secret",
-      IFLOW_QQ_ONEBOT_URL: "http://127.0.0.1:3000/",
-      IFLOW_QQ_ONEBOT_TOKEN: "onebot-token",
-      IFLOW_QQ_INCOMING_PORT: "43124",
-      IFLOW_QQ_INCOMING_TOKEN: "incoming-token",
-    });
-    expect(Object.keys(env).sort()).toEqual(
-      [
-        "IFLOW_QQ_HOST_PORT",
-        "IFLOW_QQ_BRIDGE_TOKEN",
-        "IFLOW_QQ_HMAC_SECRET",
-        "IFLOW_QQ_ONEBOT_URL",
-        "IFLOW_QQ_ONEBOT_TOKEN",
-        "IFLOW_QQ_INCOMING_PORT",
-        "IFLOW_QQ_INCOMING_TOKEN",
-      ].sort(),
-    );
-    expect(Object.values(env).every((value) => typeof value === "string")).toBe(true);
-  });
-
-  it("显式 onebotUrl 覆盖 config.endpoint", () => {
-    const env = buildBridgeEnv(makeConfig({ endpoint: "http://127.0.0.1:3000/" }), {
-      hostPort: 1,
-      bridgeToken: "b",
-      hmacSecret: "h",
-      onebotToken: "o",
-      onebotUrl: "http://10.0.0.2:5700/",
-      incomingPort: 2,
-      incomingToken: "i",
-    });
-    expect(env.IFLOW_QQ_ONEBOT_URL).toBe("http://10.0.0.2:5700/");
-  });
-
-  it("不把配置里的其他字段（含策略 / 白名单）塞进环境变量", () => {
-    const env = buildBridgeEnv(
-      makeEnabled({ adapter: "qqbot", autoMerge: true, resultDetail: "full" }),
-      {
-        hostPort: 1,
-        bridgeToken: "b",
-        hmacSecret: "h",
-        onebotToken: "o",
-        incomingPort: 2,
-        incomingToken: "i",
-      },
-    );
-    expect(env).not.toHaveProperty("IFLOW_QQ_AUTO_MERGE");
-    expect(env).not.toHaveProperty("IFLOW_QQ_RESULT_DETAIL");
-    expect(env).not.toHaveProperty("IFLOW_QQ_ALLOWED_USERS");
-    expect(Object.keys(env)).toHaveLength(7);
   });
 });
 

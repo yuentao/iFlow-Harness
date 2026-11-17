@@ -11,9 +11,6 @@ const SECRETS_OFF = { hasBotToken: false, hasAppSecret: false };
 /** 完整默认值（与 src/qq/config.ts 的 DEFAULTS 保持一致）。 */
 const DEFAULTS: QqSettingsUi = {
   enabled: false,
-  adapter: "onebot",
-  endpoint: "",
-  bridgePort: 0,
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -42,38 +39,34 @@ describe("pickQqSettingsUi", () => {
 
   it("非法枚举回退默认值", () => {
     const ui = pickQqSettingsUi(
-      { adapter: "napcat", remotePolicy: "yolo", resultDetail: "compact" },
+      { remotePolicy: "yolo", resultDetail: "compact" },
       SECRETS_OFF,
     );
-    expect(ui.adapter).toBe("onebot");
     expect(ui.remotePolicy).toBe("supervised");
     expect(ui.resultDetail).toBe("standard");
   });
 
   it("合法枚举原样保留（含 readonly / summary / full）", () => {
     const ui = pickQqSettingsUi(
-      { adapter: " qqbot ", remotePolicy: "readonly", resultDetail: "full" },
+      { remotePolicy: " readonly ", resultDetail: " full " },
       SECRETS_OFF,
     );
-    expect(ui.adapter).toBe("qqbot");
     expect(ui.remotePolicy).toBe("readonly");
     expect(ui.resultDetail).toBe("full");
   });
 
   it("数字先取整再裁剪到允许范围（与 src/qq/config.ts 的 RANGES 同口径）", () => {
     const ui = pickQqSettingsUi(
-      { bridgePort: 70000.4, maxConcurrentTasks: 0, rateLimitPerMin: 4.6 },
+      { maxConcurrentTasks: 0, rateLimitPerMin: 4.6 },
       SECRETS_OFF,
     );
-    expect(ui.bridgePort).toBe(65535);
     expect(ui.maxConcurrentTasks).toBe(1);
     expect(ui.rateLimitPerMin).toBe(5);
 
     const low = pickQqSettingsUi(
-      { bridgePort: -3, maxConcurrentTasks: 99, rateLimitPerMin: 0 },
+      { maxConcurrentTasks: 99, rateLimitPerMin: 0 },
       SECRETS_OFF,
     );
-    expect(low.bridgePort).toBe(0);
     expect(low.maxConcurrentTasks).toBe(10);
     expect(low.rateLimitPerMin).toBe(1);
   });
@@ -81,24 +74,21 @@ describe("pickQqSettingsUi", () => {
   it("数字类型不符 / 非有限值回退默认值", () => {
     const ui = pickQqSettingsUi(
       {
-        bridgePort: "3000",
         maxConcurrentTasks: Number.NaN,
         rateLimitPerMin: Number.POSITIVE_INFINITY,
       },
       SECRETS_OFF,
     );
-    expect(ui.bridgePort).toBe(0);
     expect(ui.maxConcurrentTasks).toBe(2);
     expect(ui.rateLimitPerMin).toBe(6);
   });
 
   it("字符串 trim，布尔类型不符回退默认值", () => {
     const ui = pickQqSettingsUi(
-      { enabled: "true", endpoint: "  http://127.0.0.1:3000  ", workspace: "  ", autoMerge: 1 },
+      { enabled: "true", workspace: "  ", autoMerge: 1 },
       SECRETS_OFF,
     );
     expect(ui.enabled).toBe(false);
-    expect(ui.endpoint).toBe("http://127.0.0.1:3000");
     expect(ui.workspace).toBe("");
     expect(ui.autoMerge).toBe(false);
   });
@@ -130,13 +120,10 @@ describe("pickQqSettingsUi", () => {
     expect(keys).not.toContain("appSecret");
     expect(keys.sort()).toEqual(
       [
-        "adapter",
         "allowedGroups",
         "allowedUsers",
         "autoMerge",
-        "bridgePort",
         "enabled",
-        "endpoint",
         "hasAppSecret",
         "hasBotToken",
         "maxConcurrentTasks",
@@ -176,7 +163,7 @@ describe("QQ 设置消息契约", () => {
   it("WebviewToHost 含 qqSettingsPatch / qqSecretsWrite / qqConfigAction，且保留 qqTaskAction", () => {
     const patch: WebviewToHost = {
       type: "qqSettingsPatch",
-      patch: { enabled: true, adapter: "qqbot", maxConcurrentTasks: 4 },
+      patch: { enabled: true, maxConcurrentTasks: 4 },
     };
     /** 空串表示清空该凭据；只在用户真的输入新值时带字段。 */
     const write: WebviewToHost = { type: "qqSecretsWrite", botToken: "" };
@@ -185,7 +172,7 @@ describe("QQ 设置消息契约", () => {
     const configAction: WebviewToHost = { type: "qqConfigAction", action: "testConnection" };
 
     expect(patch.type).toBe("qqSettingsPatch");
-    expect(patch.patch.adapter).toBe("qqbot");
+    expect(patch.patch.enabled).toBe(true);
     expect(write.botToken).toBe("");
     expect(clearBoth.appSecret).toBeUndefined();
     expect(taskAction.action).toBe("refresh");

@@ -1576,7 +1576,7 @@ export interface HostSettingsUi {
 }
 
 /**
- * QQ 远程任务设置快照（`iflow.qq.*` 的 12 项 + 两个凭据「已配置」标志）。
+ * QQ 远程任务设置快照（`iflow.qq.*` 的 9 项 + 两个凭据「已配置」标志）。
  *
  * **绝不携带明文凭据**：`hasBotToken` / `hasAppSecret` 只是「SecretStorage /
  * 设置里有没有值」的布尔投影；明文只经 WebviewToHost 的 `qqSecretsWrite`
@@ -1587,9 +1587,6 @@ export interface HostSettingsUi {
  */
 export interface QqSettingsUi {
   enabled: boolean;
-  adapter: "onebot" | "qqbot";
-  endpoint: string;
-  bridgePort: number;
   allowedUsers: string[];
   allowedGroups: string[];
   workspace: string;
@@ -1612,9 +1609,6 @@ export interface QqSettingsUi {
  */
 const QQ_SETTINGS_DEFAULTS = {
   enabled: false,
-  adapter: "onebot",
-  endpoint: "",
-  bridgePort: 0,
   workspace: "",
   remotePolicy: "supervised",
   maxConcurrentTasks: 2,
@@ -1625,13 +1619,11 @@ const QQ_SETTINGS_DEFAULTS = {
 
 /** 数字项允许范围（闭区间，先取整再裁剪）——与 src/qq/config.ts 的 RANGES 一致。 */
 const QQ_SETTINGS_RANGES = {
-  bridgePort: { min: 0, max: 65535 },
   maxConcurrentTasks: { min: 1, max: 10 },
   rateLimitPerMin: { min: 1, max: 60 },
 } as const;
 
 /** 枚举取值（与 package.json 的 iflow.qq.* enum 一致）。 */
-const QQ_ADAPTERS = ["onebot", "qqbot"] as const;
 const QQ_REMOTE_POLICIES = ["readonly", "supervised", "trusted"] as const;
 const QQ_RESULT_DETAILS = ["summary", "standard", "full"] as const;
 
@@ -1695,13 +1687,6 @@ export function pickQqSettingsUi(
     raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   return {
     enabled: qqReadBoolean(source.enabled, QQ_SETTINGS_DEFAULTS.enabled),
-    adapter: qqReadEnum(source.adapter, QQ_ADAPTERS, QQ_SETTINGS_DEFAULTS.adapter),
-    endpoint: qqReadString(source.endpoint, QQ_SETTINGS_DEFAULTS.endpoint),
-    bridgePort: qqReadInteger(
-      source.bridgePort,
-      QQ_SETTINGS_RANGES.bridgePort,
-      QQ_SETTINGS_DEFAULTS.bridgePort,
-    ),
     allowedUsers: qqReadIdList(source.allowedUsers),
     allowedGroups: qqReadIdList(source.allowedGroups),
     workspace: qqReadString(source.workspace, QQ_SETTINGS_DEFAULTS.workspace),

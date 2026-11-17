@@ -8861,9 +8861,7 @@ export class ChatPanel implements vscode.Disposable {
     }
 
     const roots = this.qqWorkspaceRoots();
-    const allIssues = validateQqConfig(config, roots);
-    // QQBot 走官方网关，不需要也不该要求 OneBot endpoint。
-    const issues = allIssues.filter((issue) => issue.code !== "endpoint_required");
+    const issues = validateQqConfig(config, roots);
     for (const issue of issues) {
       const line = `QQ 配置${issue.severity === "error" ? "错误" : "提示"}（${issue.code}）：${issue.message}`;
       if (issue.severity === "error") this.log.warn(line);
@@ -9549,9 +9547,6 @@ export class ChatPanel implements vscode.Disposable {
     if (
       shouldRestartOnPatch(this.qq.config, {
         enabled: config.enabled,
-        adapter: config.adapter,
-        endpoint: config.endpoint,
-        bridgePort: config.bridgePort,
       })
     ) {
       this.scheduleQqRestart();
