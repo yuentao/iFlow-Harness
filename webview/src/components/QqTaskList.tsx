@@ -51,6 +51,8 @@ function statusLabel(status: QqTaskUi["status"]): string {
       return t("已超时");
     case "needs_review":
       return t("待复核");
+    case "discarded":
+      return t("已丢弃");
   }
 }
 
@@ -115,6 +117,9 @@ function TaskRow({
     Boolean(task.branch) &&
     (task.status === "succeeded" || task.status === "needs_review");
   const canDiscard = Boolean(task.branch) && (canReview || task.status === "failed" || task.status === "canceled" || task.status === "timeout");
+  // 已丢弃 = 处置完毕：产物（worktree/分支）可能已经不存在，任何动作按钮
+  // （停止/审批/合并/丢弃/刷新）都只会产出误导或失败，整行收起。
+  const discarded = task.status === "discarded";
   const hasChangeStats =
     Boolean(task.branch) ||
     typeof task.changes === "number" ||
@@ -168,10 +173,17 @@ function TaskRow({
       {task.errorMessage && (
         <p
           className={`mt-1 break-words text-ui-caption leading-relaxed ${
-            task.status === "canceled" ? "text-warning" : "text-destructive"
+            task.status === "canceled" || discarded ? "text-warning" : "text-destructive"
           }`}
         >
           {task.errorMessage}
+        </p>
+      )}
+
+      {/* 丢弃处置说明：工作目录是否删掉、分支是否因未合并提交被保留。 */}
+      {task.discardNote && (
+        <p className="mt-1 break-words text-ui-caption leading-relaxed text-muted-foreground">
+          {task.discardNote}
         </p>
       )}
 
@@ -193,50 +205,52 @@ function TaskRow({
         </div>
       )}
 
-      <ActionRow className="mt-2">
-        {canStop && (
-          <Button size="sm" variant="danger" icon={<X className={ICON_INLINE} />} onClick={() => onAction(task.taskId, "stop")}>
-            {t("停止")}
-          </Button>
-        )}
-        {pendingKind === "approval" && (
-          <>
-            <Button
-              size="sm"
-              variant="primary"
-              icon={<ShieldCheck className={ICON_INLINE} />}
-              onClick={() => onAction(task.taskId, "approve")}
-            >
-              {t("批准")}
+      {!discarded && (
+        <ActionRow className="mt-2">
+          {canStop && (
+            <Button size="sm" variant="danger" icon={<X className={ICON_INLINE} />} onClick={() => onAction(task.taskId, "stop")}>
+              {t("停止")}
             </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              icon={<X className={ICON_INLINE} />}
-              onClick={() => onAction(task.taskId, "deny")}
-            >
-              {t("拒绝")}
+          )}
+          {pendingKind === "approval" && (
+            <>
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<ShieldCheck className={ICON_INLINE} />}
+                onClick={() => onAction(task.taskId, "approve")}
+              >
+                {t("批准")}
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                icon={<X className={ICON_INLINE} />}
+                onClick={() => onAction(task.taskId, "deny")}
+              >
+                {t("拒绝")}
+              </Button>
+            </>
+          )}
+          {canReview && (
+            <Button size="sm" variant="primary" icon={<GitBranch className={ICON_INLINE} />} onClick={() => onAction(task.taskId, "merge")}>
+              {t("合并")}
             </Button>
-          </>
-        )}
-        {canReview && (
-          <Button size="sm" variant="primary" icon={<GitBranch className={ICON_INLINE} />} onClick={() => onAction(task.taskId, "merge")}>
-            {t("合并")}
-          </Button>
-        )}
-        {canDiscard && (
-          <Button size="sm" variant="danger" onClick={() => onAction(task.taskId, "discard")}>
-            {t("丢弃")}
-          </Button>
-        )}
-        <IconButton
-          className="ml-auto"
-          size="sm"
-          icon={<RefreshCw className={ICON_INLINE} />}
-          label={t("刷新任务 {0}", task.shortId)}
-          onClick={() => onAction(task.taskId, "refresh")}
-        />
-      </ActionRow>
+          )}
+          {canDiscard && (
+            <Button size="sm" variant="danger" onClick={() => onAction(task.taskId, "discard")}>
+              {t("丢弃")}
+            </Button>
+          )}
+          <IconButton
+            className="ml-auto"
+            size="sm"
+            icon={<RefreshCw className={ICON_INLINE} />}
+            label={t("刷新任务 {0}", task.shortId)}
+            onClick={() => onAction(task.taskId, "refresh")}
+          />
+        </ActionRow>
+      )}
     </article>
   );
 }

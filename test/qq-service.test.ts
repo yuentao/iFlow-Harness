@@ -129,6 +129,7 @@ function makeHost(): HostFixture {
     },
     discardTask: async (id) => {
       discards.push(id);
+      return {};
     },
     readTaskOutcome: () => ({ summary: "完成", stopReason: "end_turn" }),
     deliver: async (msg) => {
@@ -1705,7 +1706,11 @@ describe("QqService — discard 守卫", () => {
     const reply = f.delivered.at(-1)?.text ?? "";
     expect(reply).toContain("强制丢弃");
     expect(reply).toContain("未提交的改动已随之丢失");
-    expect(lastTask(f).status).toBe("canceled");
+    // 丢弃是独立终态（不是 canceled）：取消 ≠ 产物被处置，看板要能区分。
+    const task = lastTask(f);
+    expect(task.status).toBe("discarded");
+    expect(task.failure).toBeUndefined();
+    expect(task.discard?.message).toContain("未提交的改动已随之丢失");
     expect(
       f.store.events.some((event) => event.type === "task_discarded"),
     ).toBe(true);
@@ -1726,6 +1731,125 @@ describe("QqService — discard 守卫", () => {
 
     expect(f.discards).toEqual(["super-done"]);
     expect(f.delivered.at(-1)?.text).toContain("工作分支已丢弃");
+    // BUG 回归（用户实测：QQ 收到「已丢弃」、看板一动不动）：终态 sticky 会
+    // 挡住 commitStatus，旧实现成功后一个字段都不改，投影自然毫无变化。
+    const ui = f.service.listTasks()[0];
+    expect(ui?.status).toBe("discarded");
+    expect(ui?.discardNote).toContain("工作分支已丢弃");
+  });
+
+  it("丢弃成功：走公共投影通道刷新一次，看板立即反映", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-dsc001",
+      seedTask("T-seed-dsc001", "succeeded", {
+        correlation: { superSessionId: "super-dsc", branch: "iflow/qq/dsc" },
+      }),
+    );
+    let changed = 0;
+    const f = makeService({
+      store,
+      now: () => 100,
+      onChanged: () => {
+        changed += 1;
+      },
+    });
+    await f.service.start();
+    // start() 的重启补发也会刷新投影，这里只数「丢弃」这一次。
+    changed = 0;
+
+    await f.service.handleTaskAction("T-seed-dsc001", "discard");
+
+    const task = lastTask(f);
+    expect(task.status).toBe("discarded");
+    expect(task.discard?.message).toContain("工作分支已丢弃");
+    // 失败痕迹（若有）必须被清掉：丢弃成功不该顶着一条陈旧的「执行失败」。
+    expect(task.failure).toBeUndefined();
+    // 走的是 persist → onChanged 这条公共通道，且恰好一次（不另发私有推送）。
+    expect(changed).toBe(1);
+    // 归档里也要能读回（重启后看板仍显示已丢弃）。
+    expect(store.records.get("T-seed-dsc001")?.status).toBe("discarded");
+  });
+
+  it("丢弃被拒：原因写进任务记录（看板可见），不只发 QQ", async () => {
+    let changed = 0;
+    const f = await startRunningTask(
+      {
+        onChanged: () => {
+          changed += 1;
+        },
+      },
+      "super-refuse",
+    );
+    const taskId = lastTask(f).taskId;
+    changed = 0;
+
+    await f.service.handleTaskAction(taskId, "discard");
+
+    expect(f.discards).toEqual([]);
+    const task = lastTask(f);
+    expect(task.status).toBe("running");
+    expect(task.failure?.code).toBe("discard_refused");
+    expect(task.failure?.message).toContain("请先 /qq stop");
+    const ui = f.service.listTasks()[0];
+    expect(ui?.errorMessage).toContain("丢弃被拒绝");
+    // 丢弃是用户动作，不能渲染成「执行失败」。
+    expect(ui?.errorMessage).not.toContain("执行失败");
+    expect(f.store.events.some((event) => event.type === "task_discard_refused")).toBe(true);
+    expect(changed).toBeGreaterThan(0);
+  });
+
+  it("宿主丢弃失败：原因写进任务记录，状态不变（不谎称已丢弃）", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-dscfail",
+      seedTask("T-seed-dscfail", "failed", {
+        correlation: { superSessionId: "super-dscfail", branch: "iflow/qq/fail" },
+      }),
+    );
+    const f = makeService({ store, now: () => 100 });
+    await f.service.start();
+    f.host.discardTask = async () => {
+      throw new Error("worktree 被占用");
+    };
+
+    await f.service.handleTaskAction("T-seed-dscfail", "discard");
+
+    const task = lastTask(f);
+    expect(task.status).toBe("failed");
+    expect(task.failure?.code).toBe("discard_failed");
+    const ui = f.service.listTasks()[0];
+    expect(ui?.errorMessage).toContain("丢弃失败");
+    expect(ui?.errorMessage).toContain("worktree 被占用");
+    expect(f.store.events.some((event) => event.type === "task_discard_failed")).toBe(true);
+  });
+
+  it("分支因未合并提交被保留时如实说明（不谎称提交也没了）", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-keep01",
+      seedTask("T-seed-keep01", "needs_review", {
+        correlation: { superSessionId: "super-keep", branch: "iflow/qq/keep" },
+      }),
+    );
+    const f = makeService({ store, now: () => SEED_BASE + 10 });
+    await f.service.start();
+    f.host.discardTask = async () => ({
+      ok: true,
+      branchKept: true,
+      reason: "分支上还有未合并提交",
+    });
+
+    await f.service.handleTaskAction("T-seed-keep01", "discard");
+
+    const task = lastTask(f);
+    expect(task.status).toBe("discarded");
+    expect(task.discard?.branchKept).toBe(true);
+    expect(task.discard?.message).toContain("iflow/qq/keep");
+    expect(task.discard?.message).toContain("未合并提交");
+    const reply = f.delivered.at(-1)?.text ?? "";
+    expect(reply).toContain("iflow/qq/keep");
+    expect(reply).toContain("保留");
   });
 });
 

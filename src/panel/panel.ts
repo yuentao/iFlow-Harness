@@ -1260,6 +1260,14 @@ export class ChatPanel implements vscode.Disposable {
    */
   private superArchiveFingerprint = "";
   /**
+   * 后台残留 worktree 清扫的在飞标记。
+   *
+   * 清扫**不在**会话恢复 / 新建会话的关键路径上（见
+   * `sweepStaleWorktreesInBackground`）；这个闸门只保证同一时刻最多一份在跑，
+   * 切会话 / 反复恢复不会叠出多条 `git status` 子进程链。
+   */
+  private sweepInFlight = false;
+  /**
    * 已经把汇报交给宿主的子会话 id。
    *
    * 子会话进入终态（completed / failed / cancelled）之后，宿主还要等它把汇报
@@ -7251,7 +7259,17 @@ export class ChatPanel implements vscode.Disposable {
       void this.persistActiveTranscript(true); // seed the extension-owned copy
       // 该主会话当年派发的子会话（重启后进程已亡，但分支与工作目录还在）：
       // 把它们取回看板，用户才知道有哪些分支等着合并或清理。
-      await this.restoreSuperSessions(loadedId);
+      //
+      // 单独兜错：看板是**附加信息**，它坏了不能把「会话已恢复」判成失败 ——
+      // 那会连带丢掉刚重建好的转录并让用户以为恢复失败。失败可见（toast +
+      // 日志）但不阻断（新建会话、继续对话都照常）。
+      await this.restoreSuperSessions(loadedId).catch((error: unknown) => {
+        this.log.warn(`super agent: 恢复子会话记录失败（不影响会话恢复）：${errorMessage(error)}`);
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t("子会话记录恢复失败（不影响会话）：{0}", errorMessage(error)),
+        );
+      });
       void vscode.window.showInformationMessage(vscode.l10n.t("已恢复会话"));
       return true;
     } catch (error) {
@@ -7506,17 +7524,65 @@ export class ChatPanel implements vscode.Disposable {
     // 在这里被收掉 —— 否则它们会一直堆在 `.iflow/super/worktrees/` 下。
     // 超过 `iflow.superAgent.maxWorktrees` 的干净残留（含未合并的）按目录
     // mtime 从旧到新回收目录、保留分支。
+    //
+    // **绝不 await**：这一步要逐个残留目录跑 `git status` + merge-base 探测，
+    // 而本方法处于 connect() 的启动序列里（restoreSession 被 await），新建
+    // 会话又要先等在飞的恢复 settle —— 串起来就是用户实测的「点新建会话
+    // 毫无反应，只在控制台反复打 new session: joining the in-flight run」。
+    this.sweepStaleWorktreesInBackground();
+  }
+
+  /**
+   * 后台清扫磁盘上的残留 worktree（**绝不阻塞会话恢复 / 新建会话**）。
+   *
+   * 因果链（2026-11-18 用户实测）：`connect()` → `restoreSession()` →
+   * `restoreSuperSessions()` → `await sweepStaleWorktrees()`。每个残留目录都要
+   * 跑 `git status --porcelain` 与 `merge-base --is-ancestor`，工程一大（或磁盘
+   * 被索引器/杀软占着）就是几十秒；期间用户点「新建会话」→ `startNewSession`
+   * 发现恢复在飞 → 停在恢复的 settle 上 → 后续点击全部 join 同一次 run。
+   *
+   * 纪律：
+   *  - fire-and-forget，但**必须有 catch**：清扫失败只记警告 + 一条提示，
+   *    绝不变 unhandled rejection，也绝不影响新建会话；
+   *  - 同一时刻只跑一次（`sweepInFlight`）：恢复被反复触发时不叠多份 git 子进程；
+   *  - 清扫本身幂等（见 `SuperAgentManager.sweepStaleWorktrees`），晚一点跑与
+   *    早一点跑结果相同，代价只是磁盘残留多留一会儿。
+   */
+  private sweepStaleWorktreesInBackground(): void {
+    if (this.disposed || this.sweepInFlight) return;
+    const manager = this.getSuperAgent();
+    if (!manager) return;
     const maxKeep = clampMaxSuperWorktrees(
       vscode.workspace
         .getConfiguration("iflow")
         .get<number>("superAgent.maxWorktrees", DEFAULT_MAX_SUPER_WORKTREES),
     );
-    const swept = await this.getSuperAgent()?.sweepStaleWorktrees?.({ maxKeep });
-    if (swept && (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0)) {
-      this.log.info(
-        `super agent: 残留清扫 — 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
-      );
-    }
+    this.sweepInFlight = true;
+    void Promise.resolve()
+      // 用一个已 resolve 的 promise 起链：manager 的同步抛错也落进 catch，
+      // 不会在调用点炸出去打断恢复。
+      .then(() => manager.sweepStaleWorktrees({ maxKeep }))
+      .then((swept) => {
+        if (this.disposed) return;
+        if (swept.removed > 0 || swept.kept > 0 || swept.orphans.length > 0) {
+          this.log.info(
+            `super agent: 残留清扫（后台）— 删除 ${swept.removed} 个，保留 ${swept.kept} 个，疑似残留 ${swept.orphans.length} 个（需人工确认）`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        // 背景清扫失败不是会话故障：可观测（日志 + 提示），但绝不冒泡。
+        this.log.warn(`super agent: 后台残留清扫失败（不影响会话）：${errorMessage(error)}`);
+        if (!this.disposed) {
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("后台清理残留工作目录失败（不影响会话）：{0}", errorMessage(error)),
+          );
+        }
+      })
+      .finally(() => {
+        this.sweepInFlight = false;
+      });
   }
 
   /**
@@ -9830,7 +9896,14 @@ export class ChatPanel implements vscode.Disposable {
       discard: async (superSessionId) => {
         const manager = this.getSuperAgent();
         if (!manager) throw new Error("Super Agent 不可用（未打开工作区）");
-        await manager.cleanup(superSessionId, { keepBranch: false });
+        // 如实回传 cleanup 的观测：分支还带未合并提交时 git 会保下分支
+        // （只删工作目录），QQ 回执与看板都要把这件事说清楚。
+        const result = await manager.cleanup(superSessionId, { keepBranch: false });
+        return {
+          ok: result.ok,
+          ...(result.branchKept === true ? { branchKept: true } : {}),
+          ...(result.reason ? { reason: result.reason } : {}),
+        };
       },
 
       readSuper: (superSessionId) => {

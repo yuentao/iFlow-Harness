@@ -127,7 +127,7 @@ function makeService(options: {
     },
     cancelTask: async () => undefined,
     mergeTask: async () => ({ ok: true, detail: "已合并" }),
-    discardTask: async () => undefined,
+    discardTask: async () => ({}),
     readTaskOutcome: () => ({ summary: "子会话完成", stopReason: "end_turn" }),
     deliver: async (msg) => {
       delivered.push({ ...msg });

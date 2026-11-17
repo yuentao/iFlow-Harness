@@ -72,7 +72,16 @@ export type QqTaskStatus =
   /** 超时（终态）。 */
   | "timeout"
   /** 结果不可直接采信、需要人工复核（终态）。 */
-  | "needs_review";
+  | "needs_review"
+  /**
+   * 用户显式丢弃（终态）：工作目录 / 分支已被删除（分支上仍有未合并提交时
+   * git 会保下分支，见 `QqTask.discard`）。
+   *
+   * 刻意与 `canceled` 分开：取消是「停止执行」，丢弃是「把这条任务的产物
+   * （worktree / 分支）删掉」—— 已结束的任务也能丢弃，而且看板必须能把
+   * 「分支没了」和「只是停了」区分开（否则会继续提供合并按钮）。
+   */
+  | "discarded";
 
 /** 消息来源标识：哪条会话、谁发的、哪条消息。 */
 export interface QqTaskSource {
@@ -174,6 +183,23 @@ export interface QqTaskError {
   message: string;
 }
 
+/**
+ * 丢弃处置的留痕（`QqTaskStatus = "discarded"` 时才有）。
+ *
+ * 为什么单独一个字段而不是复用 `failure`：丢弃是**用户的主动动作**，不是
+ * 执行故障 —— 塞进 `failure` 会让看板把「我主动删了它」读成「任务挂了」。
+ * 同时 git 在分支还有未合并提交时会保下分支（只删工作目录），这层事实也
+ * 必须留在记录里，否则「已丢弃」会谎称提交也没了。
+ */
+export interface QqTaskDiscard {
+  /** 处置时刻（毫秒时间戳）。 */
+  at: number;
+  /** 可读说明（工作目录/分支的去向）。 */
+  message: string;
+  /** true = 分支因未合并提交被保留（工作目录已删）。 */
+  branchKept?: boolean;
+}
+
 /** 一条远程任务。纯数据，可落盘、可序列化。 */
 export interface QqTask {
   taskId: string;
@@ -196,6 +222,13 @@ export interface QqTask {
   result?: QqTaskResult;
   pending?: QqTaskPending;
   failure?: QqTaskError;
+  /**
+   * 丢弃处置的留痕（`status === "discarded"` 时才有）。
+   *
+   * 与 `failure` 分开：丢弃是用户的主动动作，不是执行故障；看板按它渲染
+   * 「已丢弃（…）」这一行说明，不再显示「执行失败」。
+   */
+  discard?: QqTaskDiscard;
   /**
    * 终态结果成功回送到 QQ 的时刻（毫秒）。
    *
@@ -330,6 +363,7 @@ export const TERMINAL_STATUSES: readonly QqTaskStatus[] = [
   "canceled",
   "timeout",
   "needs_review",
+  "discarded",
 ];
 
 /** 终态判定：终态之后的一切迁移都按 no-op 处理（重连重放 / 心跳补发的兜底）。 */
@@ -345,11 +379,11 @@ export function isTerminalStatus(status: QqTaskStatus): boolean {
  * ——这些是外部中断路径，不能要求先回到某个中间态。
  */
 const TRANSITIONS: Record<QqTaskStatus, readonly QqTaskStatus[]> = {
-  received: ["validated", "failed", "canceled", "timeout"],
-  validated: ["queued", "failed", "canceled", "timeout"],
+  received: ["validated", "failed", "canceled", "timeout", "discarded"],
+  validated: ["queued", "failed", "canceled", "timeout", "discarded"],
   // `injected` 只属于主会话渠道：队列项在主会话空闲、消息真正投出后才离开
   // queued —— 排队等待主会话不是「已注入」，看板必须能区分。
-  queued: ["dispatched", "injected", "failed", "canceled", "timeout"],
+  queued: ["dispatched", "injected", "failed", "canceled", "timeout", "discarded"],
   dispatched: [
     "running",
     "waiting_approval",
@@ -359,6 +393,7 @@ const TRANSITIONS: Record<QqTaskStatus, readonly QqTaskStatus[]> = {
     "canceled",
     "timeout",
     "needs_review",
+    "discarded",
   ],
   injected: [
     "running",
@@ -369,6 +404,7 @@ const TRANSITIONS: Record<QqTaskStatus, readonly QqTaskStatus[]> = {
     "canceled",
     "timeout",
     "needs_review",
+    "discarded",
   ],
   running: [
     "waiting_approval",
@@ -378,15 +414,21 @@ const TRANSITIONS: Record<QqTaskStatus, readonly QqTaskStatus[]> = {
     "canceled",
     "timeout",
     "needs_review",
+    "discarded",
   ],
-  waiting_approval: ["running", "failed", "canceled", "timeout", "needs_review"],
-  waiting_answer: ["running", "failed", "canceled", "timeout", "needs_review"],
+  waiting_approval: ["running", "failed", "canceled", "timeout", "needs_review", "discarded"],
+  waiting_answer: ["running", "failed", "canceled", "timeout", "needs_review", "discarded"],
   // 终态：粘性，没有出边。
+  //
+  // `discarded` 是「用户显式处置」而不是执行体事件：已终态的任务照样能被丢弃，
+  // 但那条路径在 QqService 里直接构造新记录（不走本表）—— 终态粘性挡的是
+  // 迟到的执行体迁移，不该把用户的手动动作也挡掉。
   succeeded: [],
   failed: [],
   canceled: [],
   timeout: [],
   needs_review: [],
+  discarded: [],
 };
 
 /** 一次状态迁移的结果。 */
@@ -677,6 +719,7 @@ const STATUS_LABELS: Record<QqTaskStatus, string> = {
   canceled: "已取消",
   timeout: "已超时",
   needs_review: "需复核",
+  discarded: "已丢弃",
 };
 
 /** 状态的中文短标签（看板与摘要共用，避免两处措辞漂移）。 */
@@ -781,6 +824,10 @@ export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): strin
     } else {
       lines.push(`失败  ${task.failure.code}：${toPlainText(task.failure.message)}`);
     }
+  }
+  // 丢弃同样是用户的主动动作：中性措辞 + 分支去向（未合并时 git 会保分支）。
+  if (task.discard) {
+    lines.push(`处置  ${toPlainText(task.discard.message)}`);
   }
 
   const summary = result ? toPlainText(result.summary) : "";

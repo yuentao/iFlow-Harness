@@ -26,6 +26,7 @@ import type {
 } from "../panel/super-agent.js";
 import type {
   QqDeliveryOutcome,
+  QqDiscardResult,
   QqMainInjectInput,
   QqMainInjectResult,
   QqServiceDeliverInput,
@@ -103,8 +104,13 @@ export interface QqHostPorts {
   cancel(superSessionId: string): Promise<void>;
   /** 把子会话分支合并回当前分支；失败原因放在 `detail` 里原样返回。 */
   merge(superSessionId: string): Promise<{ ok: boolean; detail: string }>;
-  /** 丢弃子会话分支 / 工作目录。 */
-  discard(superSessionId: string): Promise<void>;
+  /**
+   * 丢弃子会话分支 / 工作目录。
+   *
+   * 必须如实回传结果：git 在分支还有未合并提交时会保下分支（只删工作目录），
+   * 子会话记录也可能早已不在 —— 上层据此决定回执措辞。
+   */
+  discard(superSessionId: string): Promise<QqDiscardResult>;
   /** 读取子会话快照；读不到返回 null。 */
   readSuper(superSessionId: string): QqHostSuperSnapshot | null;
   /**
@@ -289,8 +295,9 @@ export function createQqServiceHost(
       return ports.merge(superSessionId);
     },
 
-    async discardTask(superSessionId: string): Promise<void> {
-      await ports.discard(superSessionId);
+    async discardTask(superSessionId: string): Promise<QqDiscardResult> {
+      // 原样透传端口的观测（ok / branchKept / reason）：适配器不解释、不加工。
+      return (await ports.discard(superSessionId)) ?? {};
     },
 
     readTaskOutcome(superSessionId: string): QqHostTaskOutcome | null {
