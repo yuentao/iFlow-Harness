@@ -78,7 +78,6 @@ type PanelInternals = {
       status: string;
       usage?: SessionUsageUi | null;
       pendingApproval: unknown;
-      pendingPlanExit: unknown;
       pendingQuestions: unknown;
     };
     sessionStarted: (meta: { sessionId: string }) => void;

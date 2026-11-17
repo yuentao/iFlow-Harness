@@ -20,11 +20,11 @@ import {
   initialSessionState,
   hasAgentAttachmentBlock,
   normalizeUserPromptText,
+  withoutPlanModes,
   type Block,
   type InjectedContextItem,
   type ModelInfoUi,
   type PendingApprovalUi,
-  type PendingPlanExitUi,
   type PendingProfileSwitchUi,
   type PendingQuestionsUi,
   type PlanEntryUi,
@@ -778,19 +778,8 @@ function upsertPlanEntries(
   return blocks.length - 1;
 }
 
-/** Seed the turn's TaskList from an approved Plan-mode plan (3.5 ①: the
- * card otherwise only appears once the agent itself calls the todo tool,
- * so after approval the round had no task-level progress view). Reuses the
- * todo-tool merge rule — one live card per turn, and a later `todo_write`
- * replaces the seeded items (the agent's own bookkeeping wins). Returns
- * null for an empty list (nothing to seed). */
-export function addPlanChecklist(blocks: Block[], entries: PlanEntryUi[]): number | null {
-  if (entries.length === 0) return null;
-  return upsertPlanEntries(blocks, entries, () => ({ kind: "plan", id: nextBlockId(), entries }));
-}
-
 /** Tick/untick one checklist entry by stable block id (P4) — the user-side
- * progress control (the plan card is checkable even when the agent never
+ * progress control (the TaskList card is checkable even when the agent never
  * drives the todo tool). Only flips `pending`/`completed`; an `in_progress`
  * item completing is the agent's claim and stays untouched. Returns the
  * mutated index, or null when the block/entry is not addressable (stale
@@ -1019,7 +1008,11 @@ export function applySessionUpdate(
       state.commands = update.availableCommands;
       return null;
     case "current_mode_update":
-      if (state.modes) state.modes = { ...state.modes, currentModeId: update.currentModeId };
+      // Plan mode 已移除：CLI 若仍报 plan，归一到可用的非 plan 模式（见
+      // withoutPlanModes）。其余未知 id 原样保留（agent 可能新增模式）。
+      if (state.modes) {
+        state.modes = withoutPlanModes({ ...state.modes, currentModeId: update.currentModeId });
+      }
       return null;
     default:
       return null;
@@ -1899,8 +1892,9 @@ export function closeOpenSubAgents(blocks: Block[], now = Date.now()): number | 
  * model's functionCall chunk streams (bundle, CLI 0.5.19 fork: stream path
  * `D && R.id && sendUpdate({sessionUpdate:"tool_call",…,status:"pending"})`),
  * but several settle paths answer the call WITHOUT any terminal
- * `tool_call_update`: PLAN-mode rejection of non-readonly tools
- * (`return u(new Error("Cannot execute … in PLAN mode"))` before the
+ * `tool_call_update`: rejection of non-readonly tools in the CLI's internal
+ * plan mode (legacy sessions / external settings — the panel no longer exposes
+ * it; `return u(new Error("Cannot execute … in PLAN mode"))` before the
  * in_progress/completed sendUpdate pair), `exit_plan_mode` itself
  * (handleExitPlanMode returns a functionResponse, never a sendUpdate),
  * tool-not-found, smart-approval failure, and user-cancelled approvals
@@ -2126,7 +2120,9 @@ export function setMeta(
   },
 ): void {
   if (meta.sessionId !== undefined) state.sessionId = meta.sessionId;
-  if (meta.modes !== undefined) state.modes = meta.modes;
+  // Plan mode 已移除（2026-11-18）：CLI 仍会上报 plan，但面板不再提供它。
+  // 每次写入 modes 都归一一次，旧会话 / 外部 settings 的 plan 值不会回流。
+  if (meta.modes !== undefined) state.modes = withoutPlanModes(meta.modes);
   if (meta.models !== undefined) state.models = meta.models;
   if (meta.currentModelId !== undefined) state.currentModelId = meta.currentModelId;
   if (meta.thinkLevel !== undefined) state.thinkLevel = meta.thinkLevel;
@@ -2194,7 +2190,6 @@ export function sortSessionSummaries(sessions: readonly SessionSummaryUi[]): Ses
 function clearTranscriptFields(state: SessionState): void {
   state.blocks = [];
   state.pendingApproval = null;
-  state.pendingPlanExit = null;
   state.pendingQuestions = null;
   state.errorMessage = null;
   state.stopReason = null;
@@ -2628,45 +2623,7 @@ export function clearPendingApproval(state: SessionState, id: string): boolean {
   return true;
 }
 
-// --- plan exit (_iflow/plan/exit) --------------------------------------------
-
-/** Show the Plan-mode exit confirmation card. The WebView answers via
- * `respondPlanExit`. */
-export function setPendingPlanExit(state: SessionState, pending: PendingPlanExitUi): void {
-  state.pendingPlanExit = pending;
-}
-
-/** Clear the card once answered (or timed out / cancelled host-side). */
-export function clearPendingPlanExit(state: SessionState, id: string): boolean {
-  if (state.pendingPlanExit?.id !== id) return false;
-  state.pendingPlanExit = null;
-  return true;
-}
-
-/**
- * Settle the pending `exit_plan_mode` tool call when the Plan card answers.
- * The CLI never sends a terminal update for this call (bundle, CLI 0.5.19
- * fork: handleExitPlanMode returns a functionResponse only), so the block
- * would linger at 等待执行 and the turn-end closeOpenToolBlocks sweep would
- * mislabel an APPROVED plan's call as failed. Approval → completed (the CLI
- * answered success:true); rejection/replan/timeout → failed (success:false).
- * Latest pending call wins — a replan loop makes the model call
- * exit_plan_mode again, and the answer always corresponds to the most recent
- * one. Returns the mutated index, or null when no pending call is recorded.
- */
-export function resolveExitPlanModeBlock(blocks: Block[], approved: boolean, now = Date.now()): number | null {
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const block = blocks[i]!;
-    if (block.kind !== "tool") continue;
-    if (block.toolName !== "exit_plan_mode") continue;
-    if (block.status !== "pending" && block.status !== "in_progress") continue;
-    block.status = approved ? "completed" : "failed";
-    if (block.startedAt !== undefined) block.completedAt ??= now;
-    return i;
-  }
-  return null;
-}
-
+// --- approval resolution notes -----------------------------------------------
 /**
  * Append a resolution note below the approval so the transcript records what
  * the user chose (the card itself is transient).

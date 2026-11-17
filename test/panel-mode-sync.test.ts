@@ -73,9 +73,16 @@ type PanelInternals = {
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   maybeGenerateAiTitle: (id: string) => Promise<void>;
-  requestPlanExitFromUser: (req: { sessionId: string; plan: string }) => Promise<{ approved: boolean }>;
+  handleRemovedPlanExit: (req: { sessionId: string; plan: string }) => { approved: boolean; reason?: string };
+  log: { lines: { level: string; message: string }[] };
   store: {
-    getState: () => { sessionId: string | null; modes: { currentModeId: string } | null };
+    getState: () => {
+      sessionId: string | null;
+      modes: { currentModeId: string } | null;
+      pendingApproval: unknown;
+      pendingQuestions: unknown;
+      [key: string]: unknown;
+    };
     sessionStarted: (meta: unknown) => void;
   };
 };
@@ -85,20 +92,19 @@ async function flush(): Promise<void> {
 }
 
 const MODES = {
-  currentModeId: "plan",
+  currentModeId: "smart",
   availableModes: [
     { id: "default", name: "Default" },
-    { id: "plan", name: "Plan", kind: "plan" },
+    { id: "smart", name: "Smart", kind: "smart" },
   ],
 };
 
 /**
  * Mode drift guard: the CLI never notifies mode changes, so the panel must
- * re-assert its authoritative mode before a turn and right after a user Stop
- * cancels a pending Plan-exit card (session 439fd54b: the composer kept
- * showing 计划 while the CLI had left Plan mode and the agent could write).
+ * re-assert its authoritative mode before a turn (and never push one when the
+ * turn's request has not gone out yet).
  */
-describe("ChatPanel plan-mode sync", () => {
+describe("ChatPanel mode sync", () => {
   let panel: ChatPanel;
   let p: PanelInternals;
   let storageDir: string;
@@ -141,29 +147,25 @@ describe("ChatPanel plan-mode sync", () => {
 
   it("re-asserts the panel mode before the prompt goes out", async () => {
     await p.handleWebviewMessage({ type: "sendPrompt", text: "write something" });
-    expect(order).toEqual(["setMode:plan", "prompt"]);
+    expect(order).toEqual(["setMode:smart", "prompt"]);
   });
 
-  it("re-asserts the mode after Stop cancels a pending Plan-exit card", async () => {
-    // A Plan-exit card only exists while the turn is genuinely running, i.e.
-    // the CLI owns a `session/prompt` request — that is what makes the cancel
-    // reach it (see sendTurnCancel).
-    p.promptRequestSessionId = "s-mode";
-    const pending = p.requestPlanExitFromUser({ sessionId: "s-mode", plan: "do the thing" });
-    await flush();
-    expect(order).toEqual([]);
-
-    await p.handleWebviewMessage({ type: "cancel" });
-    await flush();
-
-    await expect(pending).resolves.toMatchObject({ approved: false });
-    // The CLI is told to stay in Plan mode AFTER the interrupt — the drift
-    // that let the agent write files behind a 计划 composer.
-    expect(client.setMode).toHaveBeenLastCalledWith("s-mode", "plan");
-    expect(order).toEqual(["cancel", "setMode:plan"]);
+  it("auto-approves a stale _iflow/plan/exit instead of showing a card (Plan mode removed)", () => {
+    // Defensive: the CLI bundle still ships permission_mode=plan and the
+    // exit_plan_mode tool, so an old archived session or an external
+    // ~/.iflow/settings.json approvalMode=plan can still produce this request.
+    // It must never block the agent behind a card that no longer exists.
+    const response = p.handleRemovedPlanExit({ sessionId: "s-mode", plan: "1. do the thing" });
+    expect(response).toEqual({ approved: true, reason: "计划模式已移除，自动继续" });
+    const state = p.store.getState();
+    expect(state.pendingApproval).toBeNull();
+    expect(state.pendingQuestions).toBeNull();
+    // No plan-exit slot survives on the state shape.
+    expect((state as unknown as { pendingPlanExit?: unknown }).pendingPlanExit).toBeUndefined();
+    expect(p.log.lines.some((line) => line.level === "warn" && line.message.includes("plan mode removed"))).toBe(true);
   });
 
-  it("does not push the mode on a Stop with no Plan card pending", async () => {
+  it("does not push the mode on a Stop", async () => {
     p.promptRequestSessionId = "s-mode";
     await p.handleWebviewMessage({ type: "cancel" });
     await flush();

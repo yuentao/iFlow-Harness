@@ -236,15 +236,12 @@ describe("super agent · 审批策略（编排接线）", () => {
     expect(JSON.stringify(request ?? {})).not.toContain("allowed_tools");
   });
 
-  it("deny：不推 yolo，权限请求与 Plan 退出直接拒绝，提问仍走看板", async () => {
+  it("deny：不推 yolo，权限请求直接拒绝，提问仍走看板", async () => {
     const { harness, client, session } = await spawnRunning({ approval: "deny" });
     expect(client.modes).toEqual([]);
 
     const permission = await client.callbacks.onRequestPermission?.(permissionRequest());
     expect(permission).toEqual({ outcome: { outcome: "selected", optionId: "deny-1" } });
-
-    const plan = await client.callbacks.onExitPlanMode?.({ sessionId: "sub-1", plan: "计划正文" });
-    expect(plan).toEqual({ approved: false });
 
     // 提问不是权限：仍然落到子会话自己的 pending 槽位。
     const pending = client.callbacks.onUserQuestions?.({
@@ -282,11 +279,6 @@ describe("super agent · 审批策略（编排接线）", () => {
     expect(permission).toEqual({ outcome: { outcome: "selected", optionId: "allow-1" } });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ sessionId: "sub-1", toolName: "write_file", summary: "写入 a.txt" });
-
-    const plan = await client.callbacks.onExitPlanMode?.({ sessionId: "sub-1", plan: "计划正文" });
-    expect(plan).toEqual({ approved: true });
-    expect(seen).toHaveLength(2);
-    expect(seen[1]).toMatchObject({ toolName: "plan_exit", plan: "计划正文" });
   });
 
   it("supervised：回调拒绝 / 抛错 / 未提供时得到拒绝", async () => {
@@ -296,9 +288,6 @@ describe("super agent · 审批策略（编排接线）", () => {
     });
     expect(await denying.client.callbacks.onRequestPermission?.(permissionRequest())).toEqual({
       outcome: { outcome: "selected", optionId: "deny-1" },
-    });
-    expect(await denying.client.callbacks.onExitPlanMode?.({ sessionId: "sub-1", plan: "p" })).toEqual({
-      approved: false,
     });
 
     const throwing = await spawnRunning({

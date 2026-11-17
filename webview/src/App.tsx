@@ -31,7 +31,6 @@ import { OnboardingWizard } from "./components/OnboardingWizard";
 import { MemoryQuickAdd } from "./components/MemoryQuickAdd";
 import { MemoryReviewDialog } from "./components/MemoryReviewDialog";
 import type { AgentStatus, ErrorAdviceUi, InitializingReason, MemoryCandidateUi, SessionSummaryUi } from "../../shared/messages";
-import { isPlanMode } from "../../shared/messages";
 import { adjacentSessionId } from "../../shared/session-nav";
 import { hasActiveSuperSession } from "../../shared/super-agent";
 
@@ -55,7 +54,7 @@ function initializingLabel(reason: InitializingReason | null | undefined): strin
   }
 }
 
-function statusChip(status: AgentStatus, compressing = false, plan = false) {
+function statusChip(status: AgentStatus, compressing = false) {
   switch (status) {
     case "connecting":
       return (
@@ -67,11 +66,10 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
     // the agent state, and a permanent "ready" pill with an infinite ping was
     // pure decoration stealing attention from the transcript.
     // 顶栏只保留有独立信息量的状态：连接中 / 错误，以及 streaming 下本轮特有
-    // 的「正在压缩」「正在规划」。默认的「生成中」不再占顶栏（转录底部已有
-    // 浮动 pill 显示正在生成 / 正在压缩 / 正在规划 / 正在创建新会话…，重复的
-    // 信号只会在窄屏挤掉会话标题）；宿主等待子会话汇报（superWaiting）同样
-    // 不渲染 chip —— 忙碌信号由子会话看板的计数承担，superWaiting 本身仍只
-    // 用于禁用顶栏「新会话」按钮。
+    // 的「正在压缩」。默认的「生成中」不再占顶栏（转录底部已有浮动 pill 显示
+    // 正在生成 / 正在压缩 / 正在创建新会话…，重复的信号只会在窄屏挤掉会话
+    // 标题）；宿主等待子会话汇报（superWaiting）同样不渲染 chip —— 忙碌信号
+    // 由子会话看板的计数承担，superWaiting 本身仍只用于禁用顶栏「新会话」按钮。
     case "idle":
       return null;
     case "streaming":
@@ -79,13 +77,6 @@ function statusChip(status: AgentStatus, compressing = false, plan = false) {
         return (
           <Chip tone="primary">
             <Loader2 className="size-2.5 animate-spin" /> {t("正在压缩")}
-          </Chip>
-        );
-      }
-      if (plan) {
-        return (
-          <Chip tone="primary">
-            <Loader2 className="size-2.5 animate-spin" /> {t("正在规划")}
           </Chip>
         );
       }
@@ -286,9 +277,7 @@ export function App() {
   // store 更新时都求值（流式期间 12.5 次/秒），等于每秒把整张子会话表扫一遍。
   const superSessions = useChat((s) => s.state?.superSessions);
   const superActive = useMemo(() => hasActiveSuperSession(superSessions), [superSessions]);
-  const modes = useChat((s) => s.state?.modes ?? null);
   const pendingApproval = useChat((s) => s.state?.pendingApproval ?? null);
-  const pendingPlanExit = useChat((s) => s.state?.pendingPlanExit ?? null);
   const pendingQuestions = useChat((s) => s.state?.pendingQuestions ?? null);
   const pendingProfileSwitch = useChat((s) => s.state?.pendingProfileSwitch ?? null);
   // True once the transcript has scrolled under the header — drives the
@@ -382,7 +371,7 @@ export function App() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  // Pending-action cards (approval / plan-exit / question) own their overlay
+  // Pending-action cards (approval / question) own their overlay
   // in PendingCards: it mirrors its visible height into --pending-card-h on
   // this wrapper (MessageList reads it as the transcript's bottom padding and
   // the "生成中" pill rides on it) and switches between the single-card layout
@@ -446,23 +435,18 @@ export function App() {
   const liveMessage = useMemo(() => {
     if (status === null) return "";
     if (pendingApproval) return t("有操作等你批准");
-    if (pendingPlanExit) return t("计划已就绪，等你批准");
     if (pendingQuestions) return t("iFlow 有问题等你回答");
     if (pendingProfileSwitch) return t("等你选择切换 API 配置后如何处理当前会话");
     if (status === "connecting") return t("正在连接 iFlow…");
     if (status === "streaming")
-      return compressing
-        ? t("正在压缩上下文…")
-        : isPlanMode(modes)
-          ? t("正在规划…")
-          : t("正在生成回复…");
+      return compressing ? t("正在压缩上下文…") : t("正在生成回复…");
     if (status === "idle") {
       if (errorMessage) return errorMessage;
       if (stopReason === "cancelled") return t("已停止生成");
       return t("已就绪");
     }
     return "";
-  }, [status, errorMessage, stopReason, pendingApproval, pendingPlanExit, pendingQuestions, pendingProfileSwitch, compressing, modes]);
+  }, [status, errorMessage, stopReason, pendingApproval, pendingQuestions, pendingProfileSwitch, compressing]);
 
   // P0-3: connecting elapsed timer. A wedged handshake used to strand the
   // splash with no feedback and no escape hatch; the live seconds plus a
@@ -893,7 +877,7 @@ export function App() {
               <Loader2 className="size-2.5 animate-spin" /> <span className="@max-[320px]:hidden">{initializingLabel(initializingReason)}</span>
             </Chip>
           ) : (
-            statusChip(status ?? "connecting", compressing, isPlanMode(modes))
+            statusChip(status ?? "connecting", compressing)
           )}
                     {/* Super Agent board: collapsed it is one inline control here in
                         the header; expanded it opens a popup panel under the header.
@@ -1023,7 +1007,7 @@ export function App() {
 
       {pendingProfileSwitch && <ProfileSwitchCard pending={pendingProfileSwitch} />}
 
-      {/* Pending-action cards (approval / plan-exit / question) float OVER the
+      {/* Pending-action cards (approval / question) float OVER the
           transcript instead of taking a row in the flex column — a shrink-0
           sibling here would squeeze the message list every time a card mounts.
           The wrapper is the relative anchor (same box MessageList fills); the
@@ -1053,14 +1037,13 @@ export function App() {
               </div>
             </div>
           )}
-          {/* Pending-action cards (approval / plan-exit / question). The
+          {/* Pending-action cards (approval / question). The
               component owns the overlay shell, the stacked-vs-list switch and
               the --pending-card-h measurement; it starts below the Super Agent
               board's expanded popup panel via the same --super-bar-h offset.
               A single card renders exactly as before. */}
           <PendingCards
             pendingApproval={pendingApproval}
-            pendingPlanExit={pendingPlanExit}
             pendingQuestions={pendingQuestions}
           />
         </div>

@@ -581,7 +581,6 @@ describe("活跃子会话禁用会话/模型/凭据切换", () => {
       currentModelId: "model-a",
       thinkLevel: "auto",
       pendingApproval: null,
-      pendingPlanExit: null,
       pendingQuestions: null,
       pendingProfileSwitch: null,
       auth: {

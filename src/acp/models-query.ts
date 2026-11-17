@@ -183,7 +183,8 @@ export interface CliSettingsShape {
   apiProfiles?: Record<string, ProfileShape>;
   /** CLI UI language ("zh-CN" | "en-US"); CLI reads it at startup only. */
   language?: string;
-  /** CLI default approval mode ("default" | "smart" | "yolo" | "plan");
+  /** CLI default approval mode ("default" | "smart" | "yolo", plus a legacy
+   * "plan" that the panel no longer offers but an old settings file may hold);
    * startup-only (probed, CLI 0.5.19 bundle: Config reads settings once). */
   approvalMode?: string;
   /** MCP servers as a name → config dict; startup-only. */

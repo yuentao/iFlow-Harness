@@ -137,13 +137,15 @@ export const SUPER_PENDING_TIMEOUT_MS = 5 * 60_000;
  * 子会话审批模式。
  *
  * - `auto`（缺省）：**完全维持既有行为** —— 内核推 `yolo`，宿主对任何
- *   `session/request_permission` / `_iflow/plan/exit` 直接放行（shell 仍过依赖
- *   护栏）。本地现有调用零回归。
- * - `supervised`：**不推 `yolo`**；权限请求与 Plan 退出先交给策略里的
+ *   `session/request_permission` 直接放行（shell 仍过依赖护栏）。本地现有
+ *   调用零回归。
+ * - `supervised`：**不推 `yolo`**；权限请求先交给策略里的
  *   `onPermissionRequest` 回调裁决，未提供回调、回调抛错或超时一律按拒绝处理
  *   （安全默认）。提问不是权限，仍落到看板作答。
- * - `deny`：**不推 `yolo`**；所有权限请求直接拒绝（取消输出），Plan 退出直接
- *   拒绝；提问仍走看板。
+ * - `deny`：**不推 `yolo`**；所有权限请求直接拒绝（取消输出）；提问仍走看板。
+ *
+ * 计划模式已移除（2026-11-18）：`_iflow/plan/exit` 不再走审批策略，宿主一律
+ * 记警告后自动放行（见 `autoApproveRemovedPlanExit`）。
  */
 export type SuperApprovalMode = "auto" | "supervised" | "deny";
 
@@ -152,8 +154,7 @@ const SUPER_APPROVAL_MODES: readonly SuperApprovalMode[] = ["auto", "supervised"
 /**
  * 交给审批回调的请求摘要。
  *
- * `request` 是**原始 wire 请求**（含 `options`），回调可以据此做更细的判断；
- * `_iflow/plan/exit` 没有权限选项，改在 `plan` 字段里带上计划正文。
+ * `request` 是**原始 wire 请求**（含 `options`），回调可以据此做更细的判断。
  */
 export interface SuperPermissionRequest {
   sessionId: string;
@@ -161,12 +162,10 @@ export interface SuperPermissionRequest {
   toolName?: string;
   /** 工具 kind（`execute` / `edit` / ...，wire 上的 `toolCall.kind`）。 */
   kind?: string;
-  /** 人类可读摘要：工具标题，或 Plan 正文的单行摘要。 */
+  /** 人类可读摘要：工具标题。 */
   summary: string;
-  /** 原始权限请求；Plan 退出请求不存在。 */
+  /** 原始权限请求。 */
   request?: RequestPermissionRequest;
-  /** Plan 退出请求的计划正文（`_iflow/plan/exit` 时存在）。 */
-  plan?: string;
 }
 
 /**
@@ -329,17 +328,6 @@ export function toSuperPermissionRequest(request: RequestPermissionRequest): Sup
   if (tool.toolCallId) out.toolCallId = tool.toolCallId;
   if (tool.toolName) out.toolName = tool.toolName;
   if (typeof tool.kind === "string") out.kind = tool.kind;
-  return out;
-}
-
-/** Plan 退出请求 → 交给策略回调的摘要（没有权限选项，改带计划正文）。 */
-export function toSuperPlanExitRequest(request: ExitPlanModeRequest): SuperPermissionRequest {
-  const out: SuperPermissionRequest = {
-    sessionId: request.sessionId,
-    toolName: "plan_exit",
-    summary: truncateForPrompt(request.plan.replace(/\s+/g, " "), 200),
-    plan: request.plan,
-  };
   return out;
 }
 
@@ -1876,8 +1864,9 @@ export class SuperAgentManager {
       onRequestPermission: async (request) => this.decidePermission(id, request),
       onUserQuestions: async (request) =>
         (await this.awaitQuestion(id, request.questions)) as UserQuestionsResponse,
-      // `auto`：免确认模式不该卡在计划审批上（自动批准）；其余策略走裁决。
-      onExitPlanMode: async (request) => this.decidePlanExit(id, request),
+      // Plan 模式已移除（2026-11-18）：CLI 仍可能发来 `_iflow/plan/exit`，
+      // 记警告后直接放行，绝不阻塞子会话（见 autoApproveRemovedPlanExit）。
+      onExitPlanMode: async (request) => this.autoApproveRemovedPlanExit(id, request),
       onExit: (code) => {
         const session = this.sessions.get(id);
         if (!session || isTerminalSuperStatus(session.status)) return;
@@ -1976,29 +1965,20 @@ export class SuperAgentManager {
   }
 
   /**
-   * Plan 退出裁决。
+   * 计划模式已移除（2026-11-18）。
    *
-   * `auto` 自动批准（免确认模式不该卡在计划审批上）；`deny` 直接拒绝；
-   * `supervised` 交给同一个策略回调（未提供/抛错/超时按拒绝）。
+   * 子会话理论上不会再进入 plan 模式（宿主在 `session/new` 后推 yolo），但 CLI
+   * 内部仍保留该模式与 `exit_plan_mode` 工具。旧会话归档、外部
+   * `~/.iflow/settings.json` 的 `approvalMode: "plan"` 仍可能让它发来
+   * `_iflow/plan/exit`。不弹卡、不阻塞、不按审批策略拒绝：记一条警告后直接
+   * 放行，让子会话继续跑。
    */
-  private async decidePlanExit(
-    id: string,
-    request: ExitPlanModeRequest,
-  ): Promise<ExitPlanModeResponse> {
-    const policy = this.policyFor(id);
-    if (policy.approval === "auto") return { approved: true } as ExitPlanModeResponse;
-    if (policy.approval === "deny") {
-      this.deps.log.info(`[${id}] 审批策略 deny：拒绝 Plan 退出`);
-      return { approved: false } as ExitPlanModeResponse;
-    }
-    const decision = await awaitSuperPermissionDecision(
-      policy.onPermissionRequest,
-      toSuperPlanExitRequest(request),
+  private autoApproveRemovedPlanExit(id: string, request: ExitPlanModeRequest): ExitPlanModeResponse {
+    const planChars = (request.plan ?? "").length;
+    this.deps.log.warn(
+      `[${id}] plan mode removed: auto-approving stale _iflow/plan/exit (${planChars} chars of plan text)`,
     );
-    this.deps.log.info(`[${id}] 审批策略 supervised：Plan 退出 → ${decision}`);
-    return {
-      approved: decision === "allow_once" || decision === "allow_always",
-    } as ExitPlanModeResponse;
+    return { approved: true } as ExitPlanModeResponse;
   }
 
   /** Lazily create the transcript buffer for a child session. */

@@ -62,7 +62,6 @@ const EXPECTED_ALLOWED = [
   "todo_write",
   "todo_read",
   "ask_user_question",
-  "exit_plan_mode",
 ] as const;
 
 /** 读/写/执行三类工具必须全部被剔除；规划与派发通道必须保留。 */
@@ -360,15 +359,15 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
     expect(blocked).not.toContain("ls");
   });
 
-  it("白名单精确等于「派发 + 规划 + 提问 + Plan 退出」，多一项都要显式讨论", () => {
+  it("白名单精确等于「派发 + 待办 + 提问」，多一项都要显式讨论", () => {
     expect([...MAIN_SESSION_ALLOWED_TOOLS].sort()).toEqual([...EXPECTED_ALLOWED].sort());
     // 派发通道必须在白名单里，否则主会话一个任务都派不出去。
     expect(MAIN_SESSION_ALLOWED_TOOLS).toContain("super-agent");
     for (const name of ["todo_write", "todo_read", "ask_user_question"]) {
       expect(MAIN_SESSION_ALLOWED_TOOLS).toContain(name);
     }
-    // Plan 模式的唯一出口：少了它主会话交不出计划。
-    expect(MAIN_SESSION_ALLOWED_TOOLS).toContain("exit_plan_mode");
+    // 计划模式已移除：exit_plan_mode 不再保留在主会话（也不再出现在白名单里）。
+    expect(MAIN_SESSION_ALLOWED_TOOLS).not.toContain("exit_plan_mode");
   });
 
   it("两份清单都不含 MCP 工具名，settings 形状也不随用户 MCP 配置变化", () => {

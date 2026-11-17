@@ -54,7 +54,6 @@ function makeState(activeSessionId: string, prompts: string[]): SessionState {
     models: [],
     currentModelId: null,
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     auth: {
       authenticated: true,

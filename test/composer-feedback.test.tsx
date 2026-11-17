@@ -227,7 +227,7 @@ describe("切换控件的进行态", () => {
     currentModeId: "default",
     availableModes: [
       { id: "default", name: "Default" },
-      { id: "plan", name: "Plan" },
+      { id: "yolo", name: "YOLO" },
     ],
   };
 
@@ -259,7 +259,7 @@ describe("切换控件的进行态", () => {
     render({ modes });
     expect(container.querySelector('button[title="权限模式"]')).toBeTruthy();
 
-    mocked.pending = { kind: "mode", target: "plan" };
+    mocked.pending = { kind: "mode", target: "yolo" };
     act(() => root.render(<Composer />));
     const busy = container.querySelector<HTMLButtonElement>('button[title="切换中…"]');
     expect(busy).toBeTruthy();

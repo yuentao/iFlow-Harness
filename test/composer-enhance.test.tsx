@@ -52,7 +52,6 @@ function makeState(activeSessionId: string): SessionState {
     models: [],
     currentModelId: null,
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     auth: {
       authenticated: true,

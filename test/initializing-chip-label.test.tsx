@@ -46,7 +46,6 @@ function state(overrides: Partial<SessionState> = {}): SessionState {
     currentModelId: null,
     thinkLevel: "auto",
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
     auth: {

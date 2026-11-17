@@ -142,8 +142,6 @@ const en: Record<string, string> = {
   "所有操作直接执行，不再询问": "Every action runs directly — nothing is asked",
   "标准": "Standard",
   "每次执行操作前都要你确认": "You confirm before each action runs",
-  "规划": "Plan",
-  "只读：只分析、出计划，不改动文件": "Read-only: analyze and plan without changing files",
   "模型": "Model",
   "搜索模型…": "Search models…",
   "新会话": "New session",
@@ -154,7 +152,6 @@ const en: Record<string, string> = {
   "连接中": "Connecting",
   "正在生成": "Generating",
   "生成中": "Generating",
-  "正在规划": "Planning",
   "正在压缩": "Compressing",
   "出错了": "Something went wrong",
   "会话历史": "Session history",
@@ -328,14 +325,6 @@ const en: Record<string, string> = {
     "\"Allow once\" runs it just this time; \"Always allow\" remembers this action for the session and stops asking.",
   "Y 允许一次 · N 拒绝 · Esc 取消": "Y allow once · N reject · Esc cancel",
   "Y 允许一次 · N/Esc 拒绝": "Y allow once · N/Esc reject",
-  "计划说明": "Plan help",
-  "Plan 模式只做分析和规划，不改动文件。批准后 iFlow 会开始执行，并可以修改工作区里的文件。":
-    "Plan mode only analyzes and plans — it does not change files. Once you approve, iFlow starts working and can modify files in the workspace.",
-  "批准的计划会存到 .iflow/specs/，方便以后回看。":
-    "Approved plans are saved under .iflow/specs/ so you can review them later.",
-  "编辑的内容只在你点「重新规划」时交给 iFlow；点「批准计划」执行的仍是原计划。":
-    "Your edits are handed to iFlow only when you choose Re-plan; Approve still runs the original plan.",
-  "Y 批准 · N 拒绝 · R 重新规划": "Y approve · N reject · R re-plan",
   "提问说明": "Question help",
   "iFlow 正在等你回答，回答前它会先暂停。":
     "iFlow is waiting for your answer and pauses until you reply.",
@@ -357,10 +346,8 @@ const en: Record<string, string> = {
   "不回答并继续": "Continue without answering",
   "回车只确认当前输入框；要提交整张卡片，请点「提交回答」或按 Ctrl/Cmd + 回车。":
     "Enter confirms just that field; to submit the whole card, use the Submit answer button or Ctrl/Cmd+Enter.",
-  "保存并重新规划": "Save and re-plan",
   "快捷键": "Keyboard shortcuts",
   "审批允许 / 拒绝": "Approve / reject",
-  "计划批准 / 拒绝 / 重新规划": "Plan approve / reject / re-plan",
   "上一个 / 下一个会话": "Previous / next session",
   "聚焦输入框": "Focus the composer",
   "切换 Focus 视图": "Toggle Focus view",
@@ -592,22 +579,11 @@ const en: Record<string, string> = {
   "已选 {0} 项": "{0} selected",
   "正在连接 iFlow…": "Connecting to iFlow…",
   "正在生成回复…": "Generating response…",
-  "正在规划…": "Planning…",
   "正在压缩上下文…": "Compressing context…",
   "已停止生成": "Generation stopped",
   "已就绪": "Ready",
-  // Plan-mode exit confirmation card
-  "iFlow 准备开始执行计划": "iFlow is ready to start the plan",
-  "批准后 iFlow 会离开 Plan 模式，按下面的计划开始动手：": "Once approved, iFlow leaves Plan mode and starts working through this plan:",
-  "批准计划": "Approve plan",
-  "拒绝计划": "Reject plan",
-  "重新规划": "Re-plan",
-  "编辑计划": "Edit plan",
-  "预览计划": "Preview plan",
   "编辑": "Edit",
   "预览": "Preview",
-  "计划审批操作": "Plan approval actions",
-  "计划已就绪，等你批准": "The plan is ready for your approval",
   // render-error fallback (ErrorBoundary)
   "重试": "Retry",
   "界面渲染异常": "Interface rendering error",
@@ -675,8 +651,8 @@ const en: Record<string, string> = {
   "个": "sessions",
   "跟随编辑器主题，或固定为浅色/深色。": "Follow the editor theme, or pin light/dark.",
   "调整面板整体字号。": "Adjust the panel font size.",
-  "审批/提问/计划阻塞时，或整轮完成时发送。":
-    "Sent when an approval, question or plan blocks, or when a turn completes.",
+  "审批/提问阻塞时，或整轮完成时发送。":
+    "Sent when an approval or question blocks, or when a turn completes.",
   "高级外观": "Advanced appearance",
   "可选": "Optional",
   "新会话使用的权限模式。": "The permission mode new sessions start with.",
@@ -868,7 +844,7 @@ const en: Record<string, string> = {
   "收起任务说明": "Collapse the task description",
   "展开全文（还有 {0} 字）": "Show full text ({0} more characters)",
   "未指定子会话": "No child session specified",
-  // 多张待处理卡的堆叠计数器（审批 / Plan 退出 / 提问）
+  // 多张待处理卡的堆叠计数器（审批 / 提问）
   "还有 {0} 张卡片待处理": "{0} more card(s) need you",
   "还有 {0} 张卡片待处理：{1}": "{0} more card(s) need you: {1}",
   "收起待处理卡": "Collapse pending cards",
@@ -1296,8 +1272,6 @@ export function modeDisplay(mode: { id: string; name: string }): { label: string
       return { label: t("免确认"), desc: t("所有操作直接执行，不再询问") };
     case "default":
       return { label: t("标准"), desc: t("每次执行操作前都要你确认") };
-    case "plan":
-      return { label: t("规划"), desc: t("只读：只分析、出计划，不改动文件") };
     default:
       return { label: mode.name || mode.id, desc: "" };
   }

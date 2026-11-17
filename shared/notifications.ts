@@ -1,9 +1,9 @@
 /**
  * M1 P0-5 — OS-level notification gating (pure, unit-testable).
  *
- * Policy (user restated 2026-10-16): OS reminders exist for exactly four
- * triggers — question card displayed, approval card displayed, plan-exit
- * card displayed, turn completed. A failed turn keeps its in-panel banner +
+ * Policy (user restated 2026-10-16): OS reminders exist for exactly three
+ * triggers — question card displayed, approval card displayed, turn
+ * completed. A failed turn keeps its in-panel banner +
  * error chime but earns no toast (the old `turnFailed` event kind is gone,
  * matching the setting description that never promised failure toasts).
  *
@@ -40,7 +40,7 @@
  *              window unfocused (roadmap trigger 3 is "整轮完成且窗口失焦": a
  *              finished turn must not ping a user who is merely reading code
  *              in another editor tab of a focused window). The blocking card
- *              events (approval / question / plan) ignore focus — the agent
+ *              events (approval / question) ignore focus — the agent
  *              is stuck waiting for that card, so even a focused window with
  *              a hidden panel earns the interrupt.
  *   throttle — the same event kind at most once per window (a burst of
@@ -61,7 +61,6 @@
 export type OsNotifyEvent =
   | "approval"
   | "question"
-  | "plan"
   | "turnDone"
   /** ONE child session reached a terminal state (completed / failed /
    * cancelled) — a per-child light cue, never an aggregate 「all done」 line. */
@@ -86,7 +85,7 @@ export const OS_NOTIFY_CONTENT_COOLDOWN_MS = 60_000;
  * NOT here either — policy 2026-10-16 keeps OS reminders to the four
  * card/completion triggers (the queue pause and the in-panel banner + error
  * chime still announce failures, just not via toast). */
-const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question", "plan"]);
+const APPROVAL_TIER: ReadonlySet<OsNotifyEvent> = new Set<OsNotifyEvent>(["approval", "question"]);
 
 /** Setting tier allows this event kind? The `setting` values are the
  * `iflow.osNotifications` manifest enum: `off` / `approvals` / `all`. */

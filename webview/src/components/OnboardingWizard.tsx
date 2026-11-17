@@ -34,10 +34,9 @@ const MODE_FALLBACK: Array<{ id: string; name: string }> = [
   { id: "smart", name: "" },
   { id: "default", name: "" },
   { id: "yolo", name: "" },
-  { id: "plan", name: "" },
 ];
 
-const DEFAULT_MODES: readonly UiDefaultMode[] = ["default", "smart", "yolo", "plan"];
+const DEFAULT_MODES: readonly UiDefaultMode[] = ["default", "smart", "yolo"];
 
 function isDefaultMode(value: string): value is UiDefaultMode {
   return (DEFAULT_MODES as readonly string[]).includes(value);

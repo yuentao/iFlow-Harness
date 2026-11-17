@@ -50,7 +50,6 @@ function idleState(superWaiting: boolean): SessionState {
     currentModelId: null,
     thinkLevel: "auto",
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
     auth: {
@@ -172,18 +171,6 @@ describe("streaming 状态的顶栏 chip", () => {
   it("压缩中仍显示「正在压缩」", () => {
     renderState({ status: "streaming", compressing: true });
     expect(container.textContent).toContain("正在压缩");
-    expect(container.textContent).not.toContain("生成中");
-  });
-
-  it("Plan 模式仍显示「正在规划」", () => {
-    renderState({
-      status: "streaming",
-      modes: {
-        currentModeId: "plan",
-        availableModes: [{ id: "plan", name: "Plan", kind: "plan" }],
-      },
-    });
-    expect(container.textContent).toContain("正在规划");
     expect(container.textContent).not.toContain("生成中");
   });
 });

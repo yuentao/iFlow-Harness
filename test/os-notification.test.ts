@@ -419,10 +419,10 @@ describe("ChatPanel OS notifications (P0-5 wiring)", () => {
   });
 
   it("a failed turn earns no toast — the banner and the error chime carry it", async () => {
-    // Policy 2026-10-16 (user restated): OS reminders exist only for the four
-    // triggers — question/approval/plan card displayed, turn completed. A
-    // failed turn keeps its in-panel banner (markError) + the error chime,
-    // but never announces itself through the system toast.
+    // Policy 2026-10-16 (user restated): OS reminders exist only for the
+    // blocking-card triggers — question/approval card displayed — plus turn
+    // completion. A failed turn keeps its in-panel banner (markError) + the
+    // error chime, but never announces itself through the system toast.
     p.store.userPrompt("触发失败");
     p.store.promptCompleted("end_turn"); // idle gate for regenerate
     p.promptWithRetry = async () => {

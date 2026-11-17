@@ -2655,7 +2655,7 @@ function ToastPill({ toast, suppressCompressAction }: { toast: ToastItem; suppre
 }
 
 /** Transient host notices, rendered as a centered stack above the streaming
- * indicator. Bottom-anchored pending cards (approval / plan / question) and the
+ * indicator. Bottom-anchored pending cards (approval / question) and the
  * floating bottom band are cleared via `--pending-card-h` / `--stream-pill-h`;
  * the stack bottom is computed from those measured heights, never a fixed
  * offset. */

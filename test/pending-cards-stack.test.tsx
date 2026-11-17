@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PendingCards } from "../webview/src/components/PendingCards";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi } from "../shared/messages";
+import type { PendingApprovalUi, PendingQuestionsUi } from "../shared/messages";
 
 const send = vi.hoisted(() => vi.fn());
 const useChat = vi.hoisted(() =>
@@ -37,13 +37,6 @@ const APPROVAL: PendingApprovalUi = {
   timeoutMs: 60_000,
 };
 
-const PLAN: PendingPlanExitUi = {
-  id: "plan-1",
-  plan: "# Plan\n\n- step one",
-  deadline: Date.now() + 60_000,
-  timeoutMs: 60_000,
-};
-
 const QUESTIONS: PendingQuestionsUi = {
   id: "q-1",
   questions: [
@@ -60,11 +53,10 @@ const QUESTIONS: PendingQuestionsUi = {
 
 type Props = {
   pendingApproval: PendingApprovalUi | null;
-  pendingPlanExit: PendingPlanExitUi | null;
   pendingQuestions: PendingQuestionsUi | null;
 };
 
-const NONE: Props = { pendingApproval: null, pendingPlanExit: null, pendingQuestions: null };
+const NONE: Props = { pendingApproval: null, pendingQuestions: null };
 
 let root: Root;
 let wrapper: HTMLDivElement;
@@ -90,7 +82,7 @@ function render(props: Partial<Props>) {
   act(() => root.render(<PendingCards {...NONE} {...props} />));
 }
 
-function slot(kind: "approval" | "planExit" | "questions"): HTMLElement {
+function slot(kind: "approval" | "questions"): HTMLElement {
   const node = document.querySelector<HTMLElement>(`[data-pending-slot="${kind}"]`);
   expect(node, `slot ${kind}`).not.toBeNull();
   return node!;
@@ -107,11 +99,10 @@ function counter(): HTMLButtonElement {
   return node!;
 }
 
-/** Cards arrive one at a time (approval → plan-exit → question). */
-function arriveAllThree() {
+/** Cards arrive one at a time (approval → question). */
+function arriveBoth() {
   render({ pendingApproval: APPROVAL });
-  render({ pendingApproval: APPROVAL, pendingPlanExit: PLAN });
-  render({ pendingApproval: APPROVAL, pendingPlanExit: PLAN, pendingQuestions: QUESTIONS });
+  render({ pendingApproval: APPROVAL, pendingQuestions: QUESTIONS });
 }
 
 describe("PendingCards", () => {
@@ -130,18 +121,18 @@ describe("PendingCards", () => {
     expect(only.className).toContain("contents");
   });
 
-  it("3 卡：只有最新一张完整可见，另两张只露 8px 边且退出 Tab 链", () => {
-    arriveAllThree();
+  it("2 卡：只有最新一张完整可见，另一张只露 8px 边且退出 Tab 链", () => {
+    arriveBoth();
 
-    // All three cards stay mounted (local state must survive the slide-under).
-    expect(document.querySelectorAll('[role="alertdialog"]')).toHaveLength(3);
+    // Both cards stay mounted (local state must survive the slide-under).
+    expect(document.querySelectorAll('[role="alertdialog"]')).toHaveLength(2);
 
     const top = slot("questions");
     expect(top.getAttribute("aria-hidden")).toBeNull();
     expect(top.hasAttribute("inert")).toBe(false);
     expect(top.style.height).toBe("");
 
-    for (const kind of ["approval", "planExit"] as const) {
+    for (const kind of ["approval"] as const) {
       const covered = slot(kind);
       expect(covered.getAttribute("aria-hidden")).toBe("true");
       expect(covered.hasAttribute("inert")).toBe(true);
@@ -151,45 +142,43 @@ describe("PendingCards", () => {
       expect(covered.querySelector('[role="alertdialog"]')).not.toBeNull();
     }
 
-    // Visual stacking is order-based, oldest edge furthest from the top card.
+    // Visual stacking is order-based, oldest edge further from the top card.
     const edgeOrder = Number(slot("approval").style.order);
-    const newerEdgeOrder = Number(slot("planExit").style.order);
     const topOrder = Number(top.style.order);
-    expect(edgeOrder).toBeLessThan(newerEdgeOrder);
-    expect(newerEdgeOrder).toBeLessThan(topOrder);
+    expect(edgeOrder).toBeLessThan(topOrder);
   });
 
   it("计数器：文案、N 与 aria-expanded 正确，可访问名带被压住卡的类型", () => {
-    arriveAllThree();
+    arriveBoth();
 
     const pill = counter();
-    expect(pill.textContent).toContain("还有 2 张卡片待处理");
+    expect(pill.textContent).toContain("还有 1 张卡片待处理");
     expect(pill.getAttribute("aria-expanded")).toBe("false");
-    // Hidden cards are plan-exit (arrived second) and approval (arrived first).
+    // The hidden card is the approval (arrived first).
     expect(pill.getAttribute("aria-label")).toBe(
-      "还有 2 张卡片待处理：iFlow 准备开始执行计划、iFlow 想执行一项操作",
+      "还有 1 张卡片待处理：iFlow 想执行一项操作",
     );
     expect(pill.getAttribute("aria-controls")).toBe(document.querySelector("[data-pending-slot]")!.parentElement!.id);
     // Keyboard-focusable by default (real <button>).
     expect(pill.tagName).toBe("BUTTON");
   });
 
-  it("点计数器展开三卡，再点收起回堆叠", () => {
-    arriveAllThree();
+  it("点计数器展开两卡，再点收起回堆叠", () => {
+    arriveBoth();
 
     act(() => counter().click());
 
     const expandedPill = counter();
     expect(expandedPill.getAttribute("aria-expanded")).toBe("true");
     expect(expandedPill.textContent).toContain("收起待处理卡");
-    for (const kind of ["approval", "planExit", "questions"] as const) {
+    for (const kind of ["approval", "questions"] as const) {
       const open = slot(kind);
       expect(open.getAttribute("aria-hidden")).toBeNull();
       expect(open.hasAttribute("inert")).toBe(false);
       expect(open.style.height).toBe("");
       expect(open.className).toContain("contents");
     }
-    expect(document.querySelectorAll('[role="alertdialog"]')).toHaveLength(3);
+    expect(document.querySelectorAll('[role="alertdialog"]')).toHaveLength(2);
 
     act(() => counter().click());
     expect(counter().getAttribute("aria-expanded")).toBe("false");
@@ -204,15 +193,8 @@ describe("PendingCards", () => {
     // Question arrived last → it is the fully visible card.
     expect(slot("questions").getAttribute("aria-hidden")).toBeNull();
     expect(slot("approval").getAttribute("aria-hidden")).toBe("true");
-
-    // A plan-exit card arriving afterwards takes the top spot, pushing the
-    // question card under it.
-    render({ pendingApproval: APPROVAL, pendingPlanExit: PLAN, pendingQuestions: QUESTIONS });
-    expect(slot("planExit").getAttribute("aria-hidden")).toBeNull();
-    expect(slot("planExit").style.height).toBe("");
-    expect(slot("questions").getAttribute("aria-hidden")).toBe("true");
-    expect(slot("questions").style.height).toBe("8px");
-    expect(counter().textContent).toContain("还有 2 张卡片待处理");
+    expect(slot("approval").style.height).toBe("8px");
+    expect(counter().textContent).toContain("还有 1 张卡片待处理");
   });
 
   it("同一 kind 换实例（新 id）：新卡成为堆顶，旧实例的戳不残留", () => {
@@ -246,8 +228,8 @@ describe("PendingCards", () => {
     expect(slot("questions").getAttribute("aria-hidden")).toBe("true");
   });
 
-  it("三卡清空回到初始态：无残留卡片/计数器，清掉 --pending-card-h", () => {
-    arriveAllThree();
+  it("两卡清空回到初始态：无残留卡片/计数器，清掉 --pending-card-h", () => {
+    arriveBoth();
     act(() => counter().click()); // expanded → reset must also collapse
     expect(counter().getAttribute("aria-expanded")).toBe("true");
     expect(wrapper.style.getPropertyValue("--pending-card-h")).not.toBe("");

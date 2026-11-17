@@ -774,7 +774,6 @@ function AppearanceSection() {
         <div className="space-y-2 px-4 py-4">
           <ShortcutRow keys="Esc" label={t("停止生成（在审批卡上为拒绝）")} />
           <ShortcutRow keys="Y / N" label={t("审批允许 / 拒绝")} />
-          <ShortcutRow keys="Y / N / R" label={t("计划批准 / 拒绝 / 重新规划")} />
           <ShortcutRow keys="Alt+← / Alt+→" label={t("上一个 / 下一个会话")} />
           <ShortcutRow keys="Alt+N" label={t("新建会话")} />
           <ShortcutRow keys="/" label={t("聚焦输入框")} />
@@ -802,13 +801,11 @@ function PermissionDefaults() {
     { value: "default", label: t("标准") },
     { value: "smart", label: t("智能") },
     { value: "yolo", label: t("免确认") },
-    { value: "plan", label: t("规划") },
   ];
   const defaultModeOptions: Array<{ value: UiDefaultMode; label: string }> = [
     { value: "smart", label: t("智能") },
     { value: "default", label: t("标准") },
     { value: "yolo", label: t("免确认") },
-    { value: "plan", label: t("规划") },
   ];
   return (
     <div className="space-y-4">
