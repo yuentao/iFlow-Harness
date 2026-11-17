@@ -328,7 +328,7 @@ describe("QQ 通道 · 面板侧接线", () => {
       openid: "open-offline",
       chatType: "private",
       preview: "离线记录",
-      at: 1,
+      at: Date.now(),
     });
     expect((await p.qqPendingStore().list()).map((user) => user.openid)).toEqual([
       "open-offline",
@@ -349,7 +349,7 @@ describe("QQ 通道 · 面板侧接线", () => {
       openid: "open-9",
       chatType: "private",
       preview: "帮我跑个测试",
-      at: 1,
+      at: Date.now(),
     });
     expect((await p.qqPendingStore().list()).map((user) => user.openid)).toEqual(["open-9"]);
 
@@ -369,7 +369,7 @@ describe("QQ 通道 · 面板侧接线", () => {
       openid: "spam",
       chatType: "private",
       preview: "拉我进群",
-      at: 1,
+      at: Date.now(),
     });
     await p.handleQqUserAction("spam", "reject");
 
@@ -382,7 +382,7 @@ describe("QQ 通道 · 面板侧接线", () => {
       openid: "spam",
       chatType: "private",
       preview: "again",
-      at: 2,
+      at: Date.now(),
     });
     expect(await pending.list()).toHaveLength(0);
   });
