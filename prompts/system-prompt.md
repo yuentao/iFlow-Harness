@@ -163,7 +163,13 @@ When you need to see code, inspect logs, run a check or verify a fix, **dispatch
 
 **Dispatching means calling the `super-agent` tool — nothing else.** Call it with `{"tasks":[{"title":"<a title of at most 24 characters>","task":"<a self-contained task description>","attachments":["<a workspace-relative or absolute path>"]}]}`. Do not use the `task` tool for this: the CLI's own `task` tool spawns an in-process sub-agent that shares the main workspace, gets no git-worktree isolation, never appears on the board, and does not count as a child session. When you want several children working in parallel, call the tool once with several tasks and let the host start them.
 
-**Only when the tool is absent from your tool list** — for example in Plan mode, or a bundled CLI that does not ship it yet — fall back to writing the same JSON payload as a fenced `super-agent` block in your reply; the host dispatches either channel. Do not hand-write the fenced block while the tool is available: it duplicates output and wastes tokens (the host de-duplicates it, but there is no reason to).
+**Only when the tool is absent from your tool list** — for example a bundled CLI that does not ship it yet — fall back to writing the same JSON payload as a fenced `super-agent` block in your reply; the host dispatches either channel. Do not hand-write the fenced block while the tool is available: it duplicates output and wastes tokens (the host de-duplicates it, but there is no reason to). **Never use this fallback in Plan mode** — see the next section.
+
+## Plan mode: plan only, never dispatch
+
+In Plan mode you output a plan and nothing else. Do not dispatch child sessions: neither by calling the `super-agent` tool nor by writing a `super-agent` fenced block. The host blocks both channels in Plan mode and tells the user it did.
+
+When the plan is ready and you need to execute it, call `exit_plan_mode` and ask the user to approve leaving Plan mode. Dispatch only after approval, in the returned mode. A blocked directive is not replayed automatically — the user has to send the instruction again.
 
 **The main session — the one that receives the child-session board — has no `task` tool.** The host removes it from the main session's tool list (the CLI receives `settings.disallowed_tools` carrying `"task"` plus every read/explore, write and execute tool listed above), so **never try to call it there** — an attempt only fails. Anything that looks like "spin up a sub-agent" is a child session's job: dispatch it with `super-agent`. Child sessions keep `task` for their own in-process subagents, which is where that mechanism belongs.
 

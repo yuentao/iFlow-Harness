@@ -1177,6 +1177,17 @@ export class ChatPanel implements vscode.Disposable {
   /** {@link superToolCallWarned} 的容量上限（工具帧数量不设界，Set 必须有界）。 */
   private static readonly SUPER_TOOL_CALL_WARN_CAP = 100;
   /**
+   * 计划模式下被拦下的派发 / 管理载荷指纹（`kind#fingerprint`）。
+   *
+   * Plan 模式只做计划：宿主不派发子会话、也不执行子会话管理动作。拦截必须
+   * **可见**（用户要看到「被拦下了、以及为什么」），但同一条载荷会随流式分帧
+   * 多次扫到（工具帧还有 pending / in_progress 两帧），按指纹去重才不会刷屏。
+   * 有界集合，换会话 / 恢复会话 / 热重认证时清空。
+   */
+  private readonly planModeBlockWarned = new Set<string>();
+  /** {@link planModeBlockWarned} 的容量上限。 */
+  private static readonly PLAN_MODE_BLOCK_WARN_CAP = 50;
+  /**
    * 已执行过管理动作的结构化工具调用（`toolCallId` + 载荷指纹）。
    *
    * 派发侧有 `superDispatchedDirectives` 载荷账本兜底，动作侧没有 —— 同一条
@@ -7972,6 +7983,46 @@ export class ChatPanel implements vscode.Disposable {
     this.superToolCallWarned.clear();
     this.superToolCallActionsDone.clear();
     this.superToolCallCorrections.clear();
+    this.planModeBlockWarned.clear();
+  }
+
+  /**
+   * Plan 模式是**只做计划**的模式：宿主不派发子会话、也不执行子会话管理
+   * 动作。这里返回 true 表示「已拦下，调用方必须直接返回」。
+   *
+   * 机械强制，不能只靠提示词：派发有两条通道 —— 内置 `super-agent` 工具调用
+   * 与正文里的 `super-agent` 围栏块。CLI 在 Plan 模式下会把 `super-agent` 从
+   * functionDeclarations 里滤掉（bundle 实证：`startChat` 里
+   * `currentChatApprovalMode===dn.PLAN` 时只暴露 12 个只读 / 计划工具），但
+   * 工具 registry 里它仍然注册着，模型幻觉或围栏文本仍可能到达宿主 —— 所以
+   * 宿主在消费侧再拦一道。
+   *
+   * 拦截必须**可见**（不得静默丢弃）：用户要看到「被拦下了、以及为什么」，
+   * 并且知道「退出计划模式后不会自动补派」。同一条载荷会随流式分帧多次扫到、
+   * 工具帧还有 pending / in_progress 两帧，因此按指纹去重。
+   */
+  private blockSuperOperationInPlanMode(kind: "dispatch" | "actions", key: string): boolean {
+    if (!isPlanMode(this.store.getState().modes)) return false;
+    const fingerprint = ChatPanel.superDirectiveFingerprint(`${kind}#${key}`);
+    if (!this.planModeBlockWarned.has(fingerprint)) {
+      if (this.planModeBlockWarned.size >= ChatPanel.PLAN_MODE_BLOCK_WARN_CAP) {
+        const oldest = this.planModeBlockWarned.values().next().value;
+        if (oldest !== undefined) this.planModeBlockWarned.delete(oldest);
+      }
+      this.planModeBlockWarned.add(fingerprint);
+      this.log.info(`super agent: blocked ${kind} in plan mode (payload ${fingerprint})`);
+      this.store.sendToast(
+        "warning",
+        kind === "dispatch"
+          ? vscode.l10n.t(
+              "计划模式只做计划，不派发子会话；请先退出计划模式（exit_plan_mode）后再执行（本次不会自动补派）",
+            )
+          : vscode.l10n.t(
+              "计划模式只做计划，不执行子会话管理操作；请先退出计划模式（exit_plan_mode）后再执行",
+            ),
+      );
+    }
+    return true;
   }
 
   /**
@@ -8002,6 +8053,11 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     if (scan.blocks.length === 0) return;
+    // Plan 模式只做计划：围栏块照样被扫描器消费掉（偏移已推进，退出计划模式
+    // 后**不会自动补派**），但绝不派发。提示交给共用门控，按载荷指纹去重。
+    if (this.blockSuperOperationInPlanMode("dispatch", superDirectiveDedupeKey(scan.blocks.flat()))) {
+      return;
+    }
     this.dispatchSuperTasks(scan.blocks, scan.issues);
   }
 
@@ -8017,6 +8073,12 @@ export class ChatPanel implements vscode.Disposable {
     blocks: readonly SuperTaskSpec[][],
     issues: readonly string[] = [],
   ): void {
+    // 第二条派发通道（结构化 `super-agent` 工具调用）同样受 Plan 模式门控。
+    // 正文围栏在 scanSuperDirectives 里已先拦一次；这里再拦是结构性的兜底，
+    // 也保证工具调用通道无需知道门控细节。
+    if (this.blockSuperOperationInPlanMode("dispatch", superDirectiveDedupeKey(blocks.flat()))) {
+      return;
+    }
     const manager = this.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
@@ -8100,6 +8162,9 @@ export class ChatPanel implements vscode.Disposable {
     // 不能下结论 —— 下一帧就会带载荷；在这里弹「未派发子会话」是误报
     // （用户先看到「没派」，紧接着又看到真的派了）。
     if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
+    // Plan 模式只做计划：CLI 会把它从 functionDeclarations 里滤掉，但 registry
+    // 里仍注册着，模型幻觉的调用照样能到这里 —— 宿主侧再拦一道并提示用户。
+    if (this.blockSuperOperationInPlanMode(kind, update.toolCallId || name)) return;
     const parsed = parseSuperToolCall(kind, update.args);
     if (!parsed.ok) {
       this.warnUnsupportedSuperToolCall(update, name, parsed.reason, parsed.issues);
@@ -8311,7 +8376,15 @@ export class ChatPanel implements vscode.Disposable {
     if (scan.invalidBlocks.length > 0) {
       this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
     }
-    if (scan.actions.length > 0) void this.runSuperActions(scan.actions);
+    if (scan.actions.length > 0) {
+      // Plan 模式只做计划：管理动作（merge / cleanup / cancel …）同样不执行。
+      // 记账与 pending 状态更新仍走下面的常规路径 —— 只是不调用 runSuperActions。
+      const blocked = this.blockSuperOperationInPlanMode(
+        "actions",
+        JSON.stringify(scan.actions),
+      );
+      if (!blocked) void this.runSuperActions(scan.actions);
+    }
     // 围栏开了没收：记住它。流式期间这是正常中间态（载荷下一帧才到），不在
     // 每帧报警；但**回合都结束了还停在这里**，说明这个动作块永远不会被执行
     // —— 回合收尾时复核并留痕（见 `auditSuperActionsAtSettle`）。
