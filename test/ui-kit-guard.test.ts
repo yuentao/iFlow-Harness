@@ -150,6 +150,8 @@ describe("ui kit guard", () => {
       "box",
       "dashed",
       "none",
+      // Table border model (`border-collapse`), not a color.
+      "collapse",
       // Text alignment.
       "center",
       "left",
