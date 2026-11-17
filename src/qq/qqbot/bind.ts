@@ -40,6 +40,18 @@ export interface QrSessionCallbacks {
   onFailure(message: string): void;
 }
 
+/**
+ * M3-A 自实现扫码协议的最小契约（结构兼容 protocol-client.ts 的 QqBotQrProtocol）。
+ * 只在这里声明结构，不 import 具体类，保持 bind 层零新增耦合。
+ */
+export interface QqBotQrProtocolLike {
+  start(cbs: {
+    onQr(dataUrl: string, expiresAt: number): void;
+    onSuccess(creds: QqBotCredentials): void;
+    onFailure(message: string): void;
+  }): Promise<() => void>;
+}
+
 /** 全部 IO 注入点：SDK 启动、二维码渲染、时钟、日志。 */
 export interface QqBotBindDeps {
   startQrConnect: (
@@ -55,6 +67,11 @@ export interface QqBotBindDeps {
   ttlMs?: number;
   log?: (line: string) => void;
   source?: string;
+  /**
+   * M3-A：若注入自实现协议则**优先**走它（真 https + 凭据解密），
+   * `startQrConnect` 保留给 M1 兼容 / 未接线的宿主，二者互斥。
+   */
+  protocol?: QqBotQrProtocolLike;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +149,8 @@ function sanitizeFailure(message: string): string {
 export class QqBotBindSession {
   private readonly controller = new AbortController();
   private stopHandle: (() => void) | void = undefined;
+  /** M3-A 自实现协议返回的 stop（与 stopHandle 互斥）。 */
+  private protocolStop: (() => void) | undefined = undefined;
   private started = false;
   private stopped = false;
   private lastPhase: QrProgressPhase | null = null;
@@ -149,6 +168,41 @@ export class QqBotBindSession {
     this.started = true;
     this.cbs = cbs;
     this.log("start");
+
+    // M3-A：注入了自实现协议则优先走它（真 https + AES-GCM 解密 + 过期刷新）。
+    // 首张二维码已在 protocol.start() 内渲染并过 isQrDataUrl 校验，这里直接转发。
+    if (this.deps.protocol) {
+      const stop = await this.deps.protocol.start({
+        onQr: (dataUrl, expiresAt) => {
+          if (this.stopped || !this.cbs) return;
+          this.emitProgress("waiting_scan");
+          this.log("qrReady");
+          this.cbs.onQr(dataUrl, expiresAt);
+        },
+        onSuccess: (creds) => {
+          if (this.stopped || !this.cbs) return;
+          this.log("success");
+          this.cbs.onSuccess(creds);
+        },
+        onFailure: (message) => {
+          if (this.stopped || !this.cbs) return;
+          this.log("failure");
+          this.cbs.onFailure(sanitizeFailure(message));
+        },
+      });
+      this.protocolStop = stop;
+      // stop() 可能在首次 createBindTask 仍在飞行时被调（此时 protocolStop 还没拿到），
+      // 补一次 stop，避免协议在后台继续轮询。
+      if (this.stopped) {
+        try {
+          stop();
+        } catch {
+          this.log("stopError");
+        }
+        this.protocolStop = undefined;
+      }
+      return;
+    }
 
     // 额外的 onScanned / onConfirmed 只是「SDK 若有就映射」的透明通道：
     // 我们绝不在没有 SDK 事件时自己伪造 scanned/confirmed 阶段。
@@ -182,6 +236,15 @@ export class QqBotBindSession {
     if (typeof stopFn === "function") {
       try {
         stopFn();
+      } catch {
+        this.log("stopError");
+      }
+    }
+    const protocolStop = this.protocolStop;
+    this.protocolStop = undefined;
+    if (protocolStop) {
+      try {
+        protocolStop();
       } catch {
         this.log("stopError");
       }
