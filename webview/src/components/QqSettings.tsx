@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { AlertTriangle, Link2, PlugZap, Plus, Trash2, Unlink } from "lucide-react";
-import type { QqSettingsUi } from "../../../shared/messages";
+import { AlertTriangle, Link2, PlugZap, Plus, RefreshCw, Square, Trash2, Unlink, Zap } from "lucide-react";
+import { isQrDataUrl, type HostToWebview, type QqSettingsUi } from "../../../shared/messages";
 import { t } from "../i18n";
 import {
   ActionRow,
@@ -35,6 +35,10 @@ import {
 export type QqAdapter = QqSettingsUi["adapter"];
 export type QqRemotePolicy = QqSettingsUi["remotePolicy"];
 export type QqResultDetail = QqSettingsUi["resultDetail"];
+/** 一键托管（Wave5-D）的两条宿主回执与二维码动作枚举，直接取自共享契约。 */
+export type QqLoginQr = Extract<HostToWebview, { type: "qqLoginQr" }>;
+export type QqManagedStatus = Extract<HostToWebview, { type: "qqManagedStatus" }>;
+export type QrAction = "startQrLogin" | "refreshQr" | "cancelQrLogin";
 
 /**
  * 组件的受控值：共享设置快照 {@link QqSettingsUi} 加上**仅用于编辑**的凭据
@@ -66,6 +70,14 @@ export interface QqSettingsProps {
   bindCode?: { code: string; expiresAt: number };
   /** 配置或运行环境的问题；非空时以警告色调呈现。 */
   warnings?: string[];
+  /** 一键托管：请求宿主开始 / 停止 go-cqhttp 托管。 */
+  onManagedSetup?: (action: "start" | "stop") => void;
+  /** 扫码登录动作：我已扫码 / 刷新二维码 / 取消登录。 */
+  onQrAction?: (action: QrAction) => void;
+  /** 当前二维码回执；null = 无二维码。 */
+  qqLoginQr?: QqLoginQr | null;
+  /** 当前托管阶段进度；null = 未开始托管。 */
+  qqManagedStatus?: QqManagedStatus | null;
 }
 
 /** Label + description on the left, one control on the right — the same row
@@ -178,6 +190,18 @@ const ADAPTER_DESCRIPTION: Record<QqAdapter, string> = {
   qqbot: t("QQ 官方机器人接口，通过配置的端点与机器人凭据访问。"),
 };
 
+/** 一键托管阶段机的中文标签（与共享契约的 phase 枚举一一对应）。 */
+const MANAGED_PHASE_LABEL: Record<QqManagedStatus["phase"], string> = {
+  idle: t("空闲"),
+  checking: t("检查环境"),
+  downloading: t("下载中"),
+  configuring: t("生成配置"),
+  starting: t("启动中"),
+  waiting_login: t("等待扫码"),
+  logged_in: t("已登录"),
+  error: t("出错"),
+};
+
 export function QqSettings({
   value,
   onChange,
@@ -188,6 +212,10 @@ export function QqSettings({
   status,
   bindCode,
   warnings = [],
+  onManagedSetup,
+  onQrAction,
+  qqLoginQr,
+  qqManagedStatus,
 }: QqSettingsProps) {
   /** 凭据字段是否被用户改过；没改过的空字段失焦不得提交（会误清空）。 */
   const [secretDirty, setSecretDirty] = useState<{ botToken?: boolean; appSecret?: boolean }>({});
@@ -206,9 +234,125 @@ export function QqSettings({
       : status?.connected === false
         ? t("未连接")
         : t("连接状态未知");
+  /** 一键托管（Wave5-D）派生状态：托管进行中才给「停止托管」，出错给错误色调。 */
+  const managedPhase = qqManagedStatus?.phase ?? null;
+  const managing =
+    managedPhase === "checking" ||
+    managedPhase === "downloading" ||
+    managedPhase === "configuring" ||
+    managedPhase === "starting" ||
+    managedPhase === "waiting_login" ||
+    managedPhase === "logged_in";
+  const managedError = managedPhase === "error";
+  const phaseLabel = managedPhase
+    ? managedPhase === "downloading" && qqManagedStatus?.progress !== undefined
+      ? `${MANAGED_PHASE_LABEL[managedPhase]} ${qqManagedStatus.progress}%`
+      : MANAGED_PHASE_LABEL[managedPhase]
+    : "";
+  /** 只有 waiting_scan / scanned 且 dataUrl 通过 isQrDataUrl 护栏才渲染 <img>。 */
+  const qrValid =
+    qqLoginQr != null &&
+    (qqLoginQr.phase === "waiting_scan" || qqLoginQr.phase === "scanned") &&
+    isQrDataUrl(qqLoginQr.dataUrl);
 
   return (
     <div className="flex flex-col gap-3">
+      {/* 一键接入（Wave5-D）：宿主自下载→配置→启动 go-cqhttp，面板只发请求与展示回执。 */}
+      <div className="rounded-lg border border-border bg-surface/40 px-3 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-ui-label font-semibold text-foreground">{t("一键接入")}</div>
+            <Hint className="mt-0.5">
+              {t("自动下载并配置 go-cqhttp，扫码登录即可从 QQ 远程控制本工作区。")}
+            </Hint>
+          </div>
+          {managing ? (
+            <Button
+              size="sm"
+              variant="danger"
+              icon={<Square className={ICON_INLINE} />}
+              onClick={() => onManagedSetup?.("stop")}
+            >
+              {t("停止托管")}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<Zap className={ICON_INLINE} />}
+              onClick={() => onManagedSetup?.("start")}
+            >
+              {t("一键接入 OneBot")}
+            </Button>
+          )}
+        </div>
+
+        {qqManagedStatus && managedPhase !== "idle" && (
+          <div
+            className={`mt-3 flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-2 ${
+              managedError ? "border-destructive/50 bg-destructive/10" : "border-border bg-editor/40"
+            }`}
+          >
+            <Chip tone={managedError ? "danger" : "primary"}>{phaseLabel}</Chip>
+            <span
+              className={`min-w-0 break-words text-ui-caption ${
+                managedError ? "text-destructive" : "text-muted-foreground"
+              }`}
+            >
+              {qqManagedStatus.message}
+            </span>
+          </div>
+        )}
+
+        {qqLoginQr && (
+          <div className="mt-3 flex flex-col items-center gap-2 rounded-md border border-border bg-editor/40 px-3 py-3">
+            <div className="text-ui-label font-semibold text-foreground">{t("扫码登录")}</div>
+            {qrValid ? (
+              <>
+                <img
+                  src={qqLoginQr.dataUrl}
+                  alt={t("QQ 登录二维码")}
+                  className="object-contain"
+                  style={{ width: 220, height: 220, imageRendering: "pixelated" }}
+                />
+                <div className="flex items-center gap-1 text-ui-caption text-muted-foreground">
+                  <span>{t("剩余")}</span>
+                  <CountdownSeconds deadline={qqLoginQr.expiresAt} />
+                </div>
+              </>
+            ) : qqLoginQr.phase === "expired" ? (
+              <div className="text-ui-caption text-warning" role="status">
+                {t("二维码已过期，请刷新")}
+              </div>
+            ) : qqLoginQr.phase === "confirmed" ? (
+              <div className="text-ui-caption text-success" role="status">
+                {t("已确认，正在完成登录")}
+              </div>
+            ) : null}
+            {qqLoginQr.detail && (
+              <div className="max-w-full break-words text-ui-caption text-muted-foreground">
+                {qqLoginQr.detail}
+              </div>
+            )}
+            <ActionRow className="justify-center">
+              <Button
+                size="sm"
+                icon={<RefreshCw className={ICON_INLINE} />}
+                onClick={() => onQrAction?.("refreshQr")}
+              >
+                {t("刷新二维码")}
+              </Button>
+              <Button size="sm" variant="primary-soft" onClick={() => onQrAction?.("startQrLogin")}>
+                {t("我已扫码")}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => onQrAction?.("cancelQrLogin")}>
+                {t("取消")}
+              </Button>
+            </ActionRow>
+          </div>
+        )}
+      </div>
+
       {warnings.length > 0 && (
         <div role="alert" className="rounded-lg border border-warning/50 bg-warning/10 px-3 py-2">
           <div className="flex items-center gap-1.5 text-ui-label font-semibold text-warning">

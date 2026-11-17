@@ -1181,6 +1181,26 @@ const en: Record<string, string> = {
     "OneBot v11 bridge — e.g. a local NapCat or LLOneBot HTTP/WebSocket endpoint.",
   "QQ 官方机器人接口，通过配置的端点与机器人凭据访问。":
     "QQ official bot API, reached through the configured endpoint and bot credentials.",
+  // 一键接入 OneBot + 窗口内扫码（Wave5-D）
+  "一键接入": "One-click setup",
+  "一键接入 OneBot": "One-click OneBot setup",
+  "自动下载并配置 go-cqhttp，扫码登录即可从 QQ 远程控制本工作区。":
+    "Automatically downloads and configures go-cqhttp; scan the QR code to control this workspace from QQ.",
+  "停止托管": "Stop managed setup",
+  "空闲": "Idle",
+  "检查环境": "Checking environment",
+  "下载中": "Downloading",
+  "生成配置": "Generating configuration",
+  "启动中": "Starting",
+  "等待扫码": "Waiting for QR scan",
+  "已登录": "Logged in",
+  "出错": "Error",
+  "扫码登录": "QR login",
+  "QQ 登录二维码": "QQ login QR code",
+  "二维码已过期，请刷新": "QR code expired — please refresh",
+  "已确认，正在完成登录": "Confirmed — finishing login",
+  "刷新二维码": "Refresh QR code",
+  "我已扫码": "I've scanned",
   // QQ 远程任务（看板）
   "已收到": "Received",
   "已校验": "Validated",

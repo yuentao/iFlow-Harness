@@ -254,6 +254,8 @@ function QqSection() {
   const qqSettings = useChat((s) => s.qqSettings);
   const qqStatus = useChat((s) => s.qqStatus);
   const qqBindCode = useChat((s) => s.qqBindCode);
+  const qqLoginQr = useChat((s) => s.qqLoginQr);
+  const qqManagedStatus = useChat((s) => s.qqManagedStatus);
   const send = useChat((s) => s.send);
   /** 仅编辑态：组件把凭据回显在密码框里，落盘由宿主负责。 */
   const [secretDrafts, setSecretDrafts] = useState<{ botToken?: string; appSecret?: string }>({});
@@ -280,6 +282,10 @@ function QqSection() {
       onUnbind={() => send({ type: "qqConfigAction", action: "unbind" })}
       status={qqStatus ?? undefined}
       bindCode={qqBindCode ?? undefined}
+      onManagedSetup={(action) => send({ type: "qqManagedSetup", action })}
+      onQrAction={(action) => send({ type: "qqConfigAction", action })}
+      qqLoginQr={qqLoginQr}
+      qqManagedStatus={qqManagedStatus}
     />
   );
 }
