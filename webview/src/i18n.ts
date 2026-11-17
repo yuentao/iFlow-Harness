@@ -137,13 +137,17 @@ const en: Record<string, string> = {
   "当前会话": "Current session",
   "权限模式": "Permission mode",
   "智能": "Smart",
-  "iFlow 会自行判断风险，必要时才征求你的确认": "iFlow judges the risk itself and only asks when it matters",
+  "主会话只规划与派发；执行在子会话，风险判断已无作用":
+    "Plans and delegates only; execution happens in child sessions, so smart risk checks no longer apply",
   "免确认": "Auto-approve",
-  "所有操作直接执行，不再询问": "Every action runs directly — nothing is asked",
+  "主会话只规划与派发；执行在子会话，默认免确认":
+    "Plans and delegates only; execution happens in child sessions, which are auto-approved by default",
   "标准": "Standard",
-  "每次执行操作前都要你确认": "You confirm before each action runs",
+  "主会话只规划与派发；执行在子会话，无需逐次确认":
+    "Plans and delegates only; execution happens in child sessions, so nothing needs your confirmation",
   "规划": "Plan",
-  "只读：只分析、出计划，不改动文件": "Read-only: analyze and plan without changing files",
+  "只做计划，不派发子会话；需要执行时先请求退出规划模式":
+    "Plans only and dispatches no child sessions; request to leave Plan mode before execution",
   "模型": "Model",
   "搜索模型…": "Search models…",
   "新会话": "New session",
@@ -1284,20 +1288,53 @@ export function t(message: string, ...args: Array<string | number>): string {
 
 /**
  * W6: localized display for the CLI's permission modes (ids come from the
- * agent, names may be English) — label + one-line description per the design
- * spec. Lives next to the dictionary so a new mode id is added in ONE place.
- * Unknown ids fall back to the agent-provided name.
+ * agent, names may be English) — label + a short description (kept to at most
+ * two lines in the composer menu). Lives next to the dictionary so a new mode
+ * id is added in ONE place. Unknown ids fall back to the agent-provided name.
+ *
+ * The descriptions were rewritten on 2026-11-18 because the main session no
+ * longer executes anything: `mainSessionSettings()` (src/panel/panel.ts) gives
+ * it only `super-agent` / `todo_write` / `todo_read` / `ask_user_question` /
+ * `exit_plan_mode`, and its CLI process starts with `disableMcpServers`, so no
+ * tool (built-in or MCP) that consults the approval mode is ever registered.
+ * The remaining five tools all return `false` from `shouldConfirmExecute`
+ * (probed in vendor/iflow-fork/bundle/iflow.js by locating each tool class:
+ * `todo_write`, `todo_read`, `exit_plan_mode`, `ask_user_question`, plus
+ * `super-agent-loader.cjs`), so smart/default/yolo no longer change any
+ * observable behaviour — the host only ever sees super-agent permission
+ * requests, which it auto-allows itself. Execution happens in child sessions,
+ * which the mode menu does not control (the panel's dispatch policy defaults
+ * to `auto`: children are pushed to `yolo` and the host auto-allows; QQ remote
+ * tasks may instead use the supervised/deny policy). Plan mode is the only one
+ * with a live effect: the CLI filters the offered tools to a read-only
+ * whitelist that does NOT include `super-agent`
+ * (bundle `updateChatTools`, the 13-name list), and `exit_plan_mode` is the
+ * way out. Do not restore the old copy
+ * ("所有操作直接执行" / "每次执行操作前都要你确认") — it promised behaviour this
+ * session cannot produce.
  */
 export function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
   switch (mode.id) {
     case "smart":
-      return { label: t("智能"), desc: t("iFlow 会自行判断风险，必要时才征求你的确认") };
+      return {
+        label: t("智能"),
+        desc: t("主会话只规划与派发；执行在子会话，风险判断已无作用"),
+      };
     case "yolo":
-      return { label: t("免确认"), desc: t("所有操作直接执行，不再询问") };
+      return {
+        label: t("免确认"),
+        desc: t("主会话只规划与派发；执行在子会话，默认免确认"),
+      };
     case "default":
-      return { label: t("标准"), desc: t("每次执行操作前都要你确认") };
+      return {
+        label: t("标准"),
+        desc: t("主会话只规划与派发；执行在子会话，无需逐次确认"),
+      };
     case "plan":
-      return { label: t("规划"), desc: t("只读：只分析、出计划，不改动文件") };
+      return {
+        label: t("规划"),
+        desc: t("只做计划，不派发子会话；需要执行时先请求退出规划模式"),
+      };
     default:
       return { label: mode.name || mode.id, desc: "" };
   }
