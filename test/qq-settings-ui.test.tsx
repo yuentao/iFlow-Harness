@@ -163,7 +163,8 @@ describe("QqSettings", () => {
     const trigger = container.querySelector<HTMLButtonElement>("button[aria-label='远程任务策略']")!;
     expect(trigger.textContent).toContain("受监督");
     act(() => trigger.click());
-    const items = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
+    // Portaled menu: it lives under document.body, not inside the settings card.
+    const items = [...document.body.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
     const trusted = items.find((item) => item.textContent?.includes("受信任"))!;
     act(() => trusted.click());
     expect(onChange).toHaveBeenCalledWith({ remotePolicy: "trusted" });
@@ -215,6 +216,43 @@ describe("QqSettings", () => {
     )!;
     act(() => remove.click());
     expect(onChange).toHaveBeenCalledWith({ allowedUsers: [] });
+  });
+
+  it("portals the execution-policy menu out of the clipping settings card", () => {
+    render(<Harness />);
+    const trigger = container.querySelector<HTMLButtonElement>("button[aria-label='远程任务策略']")!;
+    const wrapper = trigger.closest<HTMLElement>(".relative")!;
+    const anchorRect = {
+      x: 260,
+      y: 120,
+      left: 260,
+      top: 120,
+      right: 360,
+      bottom: 148,
+      width: 100,
+      height: 28,
+      toJSON: () => ({}),
+    } as DOMRect;
+    wrapper.getBoundingClientRect = () => anchorRect;
+
+    act(() => trigger.click());
+
+    const menu = document.body.querySelector<HTMLElement>("[role='menu']")!;
+    expect(menu).toBeTruthy();
+    // Not a descendant of the settings group (which is overflow-hidden):
+    // fixed + body portal is what stops the「受信任」row from being cut off.
+    expect(menu.parentElement).toBe(document.body);
+    expect(container.contains(menu)).toBe(false);
+    expect(menu.style.position).toBe("fixed");
+    // Content width: long descriptions get a readable sentence width instead
+    // of one character per line; still never narrower than the trigger.
+    expect(menu.style.width).toBe("max-content");
+    expect(menu.style.minWidth).toBe("100px");
+    expect(Number.parseInt(menu.style.maxWidth, 10)).toBeLessThanOrEqual(448);
+    expect(Number.parseInt(menu.style.maxHeight, 10)).toBeGreaterThan(0);
+    expect(menu.className).toContain("overflow-y-auto");
+    // The long 受信任 description is rendered in full inside that readable menu.
+    expect(menu.textContent).toContain("仅建议对自己完全掌控的账号与群使用");
   });
 
   it("添加用户：必须先输入完整 openid，提交后立即按脱敏展示", () => {

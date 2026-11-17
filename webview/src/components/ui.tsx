@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type CSSProperties,
   type InputHTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type MutableRefObject,
@@ -796,9 +797,57 @@ export function ConfirmDialog({
   );
 }
 
+/** Trigger-to-menu gap and the minimum breathing room kept from the viewport
+ * edges by the portal clamp (same 8px margin the old absolute clamp used). */
+const MENU_VIEWPORT_MARGIN = 8;
+const MENU_TRIGGER_GAP = 4;
+/** Readable width cap for content-sized menus (28rem): long option
+ * descriptions wrap at this width instead of stretching the menu to their
+ * full single-line extent, and narrow viewports clamp below it. */
+const MENU_CONTENT_MAX_WIDTH = 448;
+/** Cap share of the viewport a content-sized menu may occupy before it
+ * scrolls internally (max-h-[60vh] equivalent, computed against the space
+ * actually available above/below the trigger). */
+const MENU_MAX_HEIGHT_RATIO = 0.6;
+
+type MenuBox = {
+  left: number;
+  top: number;
+  minWidth?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+  width?: "max-content";
+};
+
+function sameMenuBox(a: MenuBox, b: MenuBox): boolean {
+  return (
+    a.left === b.left &&
+    a.top === b.top &&
+    a.minWidth === b.minWidth &&
+    a.maxWidth === b.maxWidth &&
+    a.maxHeight === b.maxHeight &&
+    a.width === b.width
+  );
+}
+
 /**
  * Minimal popover menu: trigger + content render props, closes on outside
  * click / Escape. Opens upward for composer dropdowns, downward in the header.
+ *
+ * The menu is PORTALED to `document.body` and positioned with `fixed`
+ * coordinates measured from the trigger. It used to be an `absolute` child of
+ * the trigger wrapper: settings cards are `overflow-hidden` (SettingsGroup /
+ * SettingsDisclosure) and the settings body scrolls (`overflow-y-auto`), so
+ * any menu taller than the remaining card space was clipped and unreachable
+ * (QQ「执行策略」的「受信任」项被卡片底边切掉). Fixed positioning from body is
+ * also immune to ancestor `backdrop-filter` containing blocks.
+ *
+ * `menuWidth` chooses the width policy:
+ * - "none" (default): width stays with `menuClass` (header/composer menus
+ *   carry explicit widths).
+ * - "content": `max-content` growth capped at 28rem / viewport, never narrower
+ *   than the trigger. Select value pickers use this so long option
+ *   descriptions read as sentences instead of a vertical character column.
  */
 export function Dropdown({
   trigger,
@@ -809,6 +858,7 @@ export function Dropdown({
    * the wrapper is the flex item, so without min-w-0 it ignores the trigger's
    * shrink chain and long content stretches the whole parent row. */
   wrapperClass = "",
+  menuWidth = "none",
   /** Open-state change notification (true = opening). Lets callers refresh
    * data at open time (auth profile list, live model list). */
   onOpenChange,
@@ -824,40 +874,53 @@ export function Dropdown({
   align?: "left" | "right";
   menuClass?: string;
   wrapperClass?: string;
+  menuWidth?: "none" | "content";
   onOpenChange?: (open: boolean) => void;
   disabled?: boolean;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [menuBox, setMenuBox] = useState<MenuBox | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const focusTrigger = () => {
+    ref.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  };
 
   /** Close + notify. Every close path (trigger toggle, selection via the
    * `close` render arg, outside click, Escape) must fire onOpenChange(false) —
    * callers reset per-open state there (e.g. the model search query); only
-   * notifying on the trigger-toggle path left stale query/filter on reopen. */
-  const closeAndNotify = () => {
+   * notifying on the trigger-toggle path left stale query/filter on reopen.
+   * `restoreFocus` is used by the keyboard/selection paths: the portaled menu
+   * is unmounted on close, so focus would otherwise drop to <body>. */
+  const closeAndNotify = (restoreFocus = false) => {
     setOpen(false);
+    setMenuBox(null);
     onOpenChange?.(false);
+    if (restoreFocus) focusTrigger();
   };
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) closeAndNotify();
+      const target = e.target as Node;
+      // The menu lives in a body portal, so it is no longer inside `ref`.
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
+      closeAndNotify();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        // ESC 只关下拉：拦下事件，防止冒泡到 window 的「ESC 停止生成」。
-        e.stopPropagation();
-        closeAndNotify();
-      }
+      if (e.key !== "Escape") return;
+      // ESC 只关下拉：捕获阶段拦下事件，防止冒泡到 window 的「ESC 停止生成」
+      // 以及 ModalShell 的 document 监听把整个弹窗一起关掉。
+      e.stopPropagation();
+      closeAndNotify(true);
     };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
     // closeAndNotify closes over onOpenChange, which callers may pass inline;
     // the listeners are only active while open, so re-registering on toggles
@@ -898,40 +961,94 @@ export function Dropdown({
     focusMenuItem(items, checked && items.includes(checked) ? items.indexOf(checked) : 0);
   }, [open]);
 
-  // Keep the menu inside the viewport. Right-aligned menus near a narrow panel
-  // edge (thinking level at 300px) used to start left of x=0. Shift the
-  // absolutely positioned menu with margin-left — not transform — so the
-  // dropdown-in animation keeps working.
+  // Fixed-position placement for the body portal. The first pass renders the
+  // menu hidden (visibility) so it can be measured; the layout effect then
+  // publishes real coordinates before paint. `fixed` + body portal keeps the
+  // menu outside every clipping/backdrop-filter containing block; the clamp
+  // still keeps right-aligned menus inside a narrow panel (old absolute clamp
+  // shifted thinking-level menus left of x=0).
   useLayoutEffect(() => {
-    if (!open) return;
-    const menu = menuRef.current;
+    if (!open) {
+      setMenuBox(null);
+      return;
+    }
     const anchor = ref.current;
-    if (!menu || !anchor) return;
-    const clamp = () => {
-      const width = menu.offsetWidth;
+    if (!anchor) return;
+    const contentSized = menuWidth === "content";
+    const place = () => {
+      const menu = menuRef.current;
       const rect = anchor.getBoundingClientRect();
-      const margin = 8;
-      const viewport = document.documentElement.clientWidth;
-      const preferred = align === "right" ? rect.right - width : rect.left;
-      const target = Math.max(margin, Math.min(preferred, viewport - margin - width));
-      // Position relative to the wrapper's padding box and drop the class's
-      // `right-0` anchor; margin-left is ignored on a right-anchored absolute box.
-      menu.style.left = `${target - rect.left}px`;
-      menu.style.right = "auto";
+      const viewportW = document.documentElement.clientWidth || window.innerWidth;
+      const viewportH = document.documentElement.clientHeight || window.innerHeight;
+      if (rect.bottom < 0 || rect.top > viewportH) {
+        // The trigger scrolled out of the viewport — no anchor, no menu.
+        closeAndNotify();
+        return;
+      }
+      const maxWidth = contentSized
+        ? Math.min(MENU_CONTENT_MAX_WIDTH, Math.max(160, viewportW - MENU_VIEWPORT_MARGIN * 2))
+        : undefined;
+      const measuredWidth =
+        menu && menu.offsetWidth > 0
+          ? menu.offsetWidth
+          : Math.min(rect.width || maxWidth || 0, maxWidth ?? Number.POSITIVE_INFINITY);
+      const measuredHeight = menu?.offsetHeight ?? 0;
+      const spaceBelow = viewportH - rect.bottom - MENU_TRIGGER_GAP - MENU_VIEWPORT_MARGIN;
+      const spaceAbove = rect.top - MENU_TRIGGER_GAP - MENU_VIEWPORT_MARGIN;
+      const needed = measuredHeight > 0 ? measuredHeight : 120;
+      const preferUp = direction === "up";
+      // Keep the requested side unless it cannot fit the menu AND the other
+      // side has more room (short menus never flip on a near-full viewport).
+      const flip = preferUp
+        ? spaceAbove < Math.min(needed, 160) && spaceBelow > spaceAbove
+        : spaceBelow < Math.min(needed, 160) && spaceAbove > spaceBelow;
+      const placeUp = preferUp !== flip;
+      const space = placeUp ? spaceAbove : spaceBelow;
+      let left = align === "right" ? rect.right - measuredWidth : rect.left;
+      left = Math.max(
+        MENU_VIEWPORT_MARGIN,
+        Math.min(left, viewportW - MENU_VIEWPORT_MARGIN - measuredWidth),
+      );
+      const top = placeUp
+        ? Math.max(MENU_VIEWPORT_MARGIN, rect.top - MENU_TRIGGER_GAP - measuredHeight)
+        : rect.bottom + MENU_TRIGGER_GAP;
+      const next: MenuBox = {
+        left: Math.round(left),
+        top: Math.round(top),
+        ...(menuWidth === "none" ? {} : { minWidth: Math.round(rect.width) }),
+        ...(maxWidth !== undefined ? { maxWidth: Math.round(maxWidth) } : {}),
+        ...(contentSized
+          ? {
+              maxHeight: Math.max(96, Math.round(Math.min(viewportH * MENU_MAX_HEIGHT_RATIO, space))),
+              width: "max-content" as const,
+            }
+          : {}),
+      };
+      setMenuBox((prev) => (prev && sameMenuBox(prev, next) ? prev : next));
     };
-    clamp();
-    window.addEventListener("resize", clamp);
-    const observer = new ResizeObserver(clamp);
-    observer.observe(menu);
+    place();
+    window.addEventListener("resize", place);
+    // Capture so every scrollable ancestor (settings body) re-places the menu,
+    // not only window scroll.
+    document.addEventListener("scroll", place, true);
+    const observer = new ResizeObserver(place);
+    if (menuRef.current) observer.observe(menuRef.current);
     return () => {
-      window.removeEventListener("resize", clamp);
+      window.removeEventListener("resize", place);
+      document.removeEventListener("scroll", place, true);
       observer.disconnect();
-      menu.style.left = "";
-      menu.style.right = "";
     };
-  }, [open, align]);
+  }, [open, align, direction, menuWidth]);
 
   function onMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>): void {
+    if (e.key === "Tab") {
+      // Portaled menu: close and hand focus back to the trigger instead of
+      // letting it escape to <body> (ModalShell's Tab trap would otherwise
+      // pull it to the dialog's first control).
+      e.preventDefault();
+      closeAndNotify(true);
+      return;
+    }
     const ae = document.activeElement as HTMLElement | null;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
     const items = getMenuItems();
@@ -966,6 +1083,31 @@ export function Dropdown({
     // document-level Escape closer) take over.
   }
 
+  const contentSized = menuWidth === "content";
+  const menuStyle: CSSProperties = menuBox
+    ? {
+        position: "fixed",
+        left: menuBox.left,
+        top: menuBox.top,
+        minWidth: menuBox.minWidth,
+        maxWidth: menuBox.maxWidth,
+        maxHeight: menuBox.maxHeight,
+        width: menuBox.width,
+      }
+    : {
+        // Hidden measuring pass: `visibility` (not display) keeps layout so the
+        // layout effect can read offsetWidth/offsetHeight and place before paint.
+        position: "fixed",
+        left: 0,
+        top: 0,
+        visibility: "hidden",
+        width: contentSized ? "max-content" : undefined,
+        maxWidth: contentSized
+          ? `min(${MENU_CONTENT_MAX_WIDTH}px, calc(100vw - ${MENU_VIEWPORT_MARGIN * 2}px))`
+          : undefined,
+        maxHeight: contentSized ? "60vh" : undefined,
+      };
+
   return (
     <div className={`relative${wrapperClass ? ` ${wrapperClass}` : ""}`} ref={ref}>
       {/* P1-10: this is a plain click proxy, NOT a button — the trigger
@@ -985,24 +1127,27 @@ export function Dropdown({
           // Discrete toggle (not inside the setState updater): React StrictMode
           // may invoke updaters twice, which would double-fire onOpenChange.
           const next = !open;
+          if (next) setMenuBox(null);
           setOpen(next);
           onOpenChange?.(next);
         }}
       >
         {trigger(open)}
       </div>
-      {open && (
-        <div
-          ref={menuRef}
-          role="menu"
-          onKeyDown={onMenuKeyDown}
-          className={`absolute z-30 overflow-hidden rounded-xl border border-border acrylic-pop shadow-float dropdown-in ${
-            direction === "up" ? "bottom-full mb-1" : "top-full mt-1"
-          } ${align === "right" ? "right-0" : "left-0"} ${menuClass}`}
-        >
-          {children(closeAndNotify)}
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            data-dropdown-menu=""
+            onKeyDown={onMenuKeyDown}
+            style={menuStyle}
+            className={`z-50 overflow-y-auto overflow-x-hidden rounded-xl border border-border acrylic-pop shadow-float dropdown-in${menuClass ? ` ${menuClass}` : ""}`}
+          >
+            {children(closeAndNotify)}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -1723,7 +1868,9 @@ export type SelectOption = { value: string; label: string; description?: string;
  * uses) instead of a native `<select>`: the OS popup ignores the panel's overlay
  * language (radius, acrylic surface, selection check, secondary captions).
  * Trigger keeps the text-field chrome (`BTN_INPUT`) at the two control heights;
- * the menu is at least as wide as the field and viewport-clamped by Dropdown.
+ * the menu uses Dropdown's "content" width policy: never narrower than the
+ * field, growing with the longest option text up to 28rem / the viewport so a
+ * long `description` reads as a sentence instead of a one-character column.
  */
 export function Select({
   options,
@@ -1757,7 +1904,8 @@ export function Select({
       direction={direction}
       disabled={disabled}
       wrapperClass={wrapperClass}
-      menuClass={`min-w-full max-w-[calc(100vw_-_24px)]${menuClass ? ` ${menuClass}` : ""}`}
+      menuWidth="content"
+      menuClass={menuClass}
       trigger={(open) => (
         <button
           type="button"

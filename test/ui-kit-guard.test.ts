@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { act, createElement } from "react";
+import { act, createElement, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import { Select, TextArea, TextInput } from "../webview/src/components/ui";
@@ -394,10 +394,51 @@ describe("select overlay", () => {
     // No native popup anywhere.
     expect(container.querySelector("select")).toBeNull();
 
+    // jsdom has no layout: pin the trigger wrapper to a realistic field width
+    // so the width policy (min = trigger, max = 28rem / viewport) is asserted
+    // against real numbers instead of the 0×0 default rect.
+    const wrapper = trigger!.parentElement!.parentElement as HTMLElement;
+    const anchorRect = {
+      x: 120,
+      y: 100,
+      left: 120,
+      top: 100,
+      right: 340,
+      bottom: 128,
+      width: 220,
+      height: 28,
+      toJSON: () => ({}),
+    } as DOMRect;
+    wrapper.getBoundingClientRect = () => anchorRect;
+
     act(() => trigger!.click());
 
-    const menu = container.querySelector<HTMLDivElement>("[role='menu']");
+    // The menu is portaled to <body>: fixed positioning escapes the settings
+    // card's overflow-hidden / the settings body's scroll container.
+    const menu = document.body.querySelector<HTMLDivElement>("[role='menu']");
     expect(menu).toBeTruthy();
+    expect(menu!.parentElement).toBe(document.body);
+    expect(container.contains(menu!)).toBe(false);
+    expect(menu!.style.position).toBe("fixed");
+    // Width policy: content-sized (long descriptions wrap at a readable
+    // width rather than being squeezed into the 220px trigger column), never
+    // narrower than the trigger.
+    expect(menu!.style.width).toBe("max-content");
+    expect(menu!.style.minWidth).toBe("220px");
+    const maxWidth = Number.parseInt(menu!.style.maxWidth, 10);
+    expect(maxWidth).toBeGreaterThanOrEqual(300);
+    expect(maxWidth).toBeLessThanOrEqual(448);
+    // Height cap with internal scrolling keeps a long menu inside the viewport.
+    expect(Number.parseInt(menu!.style.maxHeight, 10)).toBeGreaterThan(0);
+    expect(menu!.className).toContain("overflow-y-auto");
+    // Material + entrance animation preserved (guard asserts shadow-float).
+    expect(menu!.className).toContain("acrylic-pop");
+    expect(menu!.className).toContain("shadow-float");
+    expect(menu!.className).toContain("dropdown-in");
+    // Placed just below the trigger (fixed coordinates, not wrapper-relative).
+    expect(menu!.style.left).toBe("120px");
+    expect(menu!.style.top).toBe("132px");
+
     expect(trigger!.getAttribute("aria-expanded")).toBe("true");
     const items = [...menu!.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
     expect(items.map((item) => item.textContent?.trim())).toEqual(["自动允许", "自动拒绝", "弹卡确认"]);
@@ -412,8 +453,44 @@ describe("select overlay", () => {
 
     act(() => items[1].click());
     expect(onChange).toHaveBeenCalledWith("deny");
-    expect(container.querySelector("[role='menu']")).toBeNull();
+    expect(document.body.querySelector("[role='menu']")).toBeNull();
     expect(trigger!.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("updates the trigger label on selection and returns focus on Escape", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    function Controlled(): ReactNode {
+      const [value, setValue] = useState("ask");
+      return createElement(Select, { ariaLabel: "动作", options: OPTIONS, value, onChange: setValue });
+    }
+
+    act(() => {
+      root.render(createElement(Controlled));
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>("button[aria-haspopup='menu']")!;
+    act(() => trigger.click());
+    expect(document.activeElement).not.toBe(trigger);
+
+    // Escape closes only the menu (document capture listener) and hands focus
+    // back to the trigger instead of dropping it to <body>.
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(document.body.querySelector("[role='menu']")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    act(() => trigger.click());
+    const items = [...document.body.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
+    act(() => items[1]!.click());
+    expect(trigger.textContent).toContain("自动拒绝");
+    expect(document.body.querySelector("[role='menu']")).toBeNull();
 
     act(() => root.unmount());
     container.remove();
