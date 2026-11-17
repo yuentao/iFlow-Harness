@@ -163,10 +163,9 @@ function AccessList({
       )}
       {entries.map((entry, index) => (
         <div key={entry.openid} className="flex flex-wrap items-center gap-1.5">
-          {/* 只读文本，不是输入框：完整 openid 不在这里暴露，也不能被改写。 */}
-          <span className="min-w-0 truncate font-mono text-ui-body text-foreground">
-            {maskQqOpenId(entry.openid)}
-          </span>
+          {/* 备注在前：8 位左右的群号脱敏后是纯星号（`********`），多个群
+              在脱敏 id 上完全无法区分，备注才是唯一可辨识信息；脱敏 id
+              退居其后作参照。用户列表同构，保持两栏一致。 */}
           <CommitTextInput
             className="min-w-0 flex-1"
             value={entry.note ?? ""}
@@ -184,6 +183,10 @@ function AccessList({
               )
             }
           />
+          {/* 只读文本，不是输入框：完整 openid 不在这里暴露，也不能被改写。 */}
+          <span className="shrink-0 whitespace-nowrap font-mono text-ui-body text-muted-foreground">
+            {maskQqOpenId(entry.openid)}
+          </span>
           <IconButton
             size="sm"
             tone="danger"

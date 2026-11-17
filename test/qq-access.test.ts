@@ -87,4 +87,15 @@ describe("serializeQqAllowEntries", () => {
     expect(stored).toEqual([{ openid: "user-1", note: "同事" }, "user-2", "user-3"]);
     expect(JSON.stringify(stored)).not.toContain("*");
   });
+
+  it("8 位群号脱敏后只剩余星号：备注是唯一可辨识信息，存储仍沿用联合格式", () => {
+    // 群号常见 8 位左右，脱敏后恒为 8 个 `*`，同列表内多个群无法靠 id 区分。
+    expect(maskQqOpenId("12345678")).toBe("********");
+    expect(
+      serializeQqAllowEntries([
+        { openid: "12345678" },
+        { openid: "87654321", note: "测试群" },
+      ]),
+    ).toEqual(["12345678", { openid: "87654321", note: "测试群" }]);
+  });
 });

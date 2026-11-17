@@ -104,7 +104,7 @@ describe("pickQqSettingsUi", () => {
     expect(ui.allowedGroups).toEqual([]);
   });
 
-  it("白名单兼容旧的裸字符串与新的 { openid, note } 条目", () => {
+  it("白名单兼容旧的裸字符串与新的 { openid, note } 条目（用户与群同口径）", () => {
     const ui = pickQqSettingsUi(
       {
         allowedUsers: [
@@ -113,6 +113,11 @@ describe("pickQqSettingsUi", () => {
           { openid: "user-3", note: "   " },
           { openid: "", note: "空 openid" },
         ],
+        allowedGroups: [
+          "12345678",
+          { openid: " group-2 ", note: " 测试群 " },
+          { openid: "group-3", note: "" },
+        ],
       },
       SECRETS_OFF,
     );
@@ -120,6 +125,11 @@ describe("pickQqSettingsUi", () => {
       { openid: "legacy-openid" },
       { openid: "user-2", note: "同事" },
       { openid: "user-3" },
+    ]);
+    expect(ui.allowedGroups).toEqual([
+      { openid: "12345678" },
+      { openid: "group-2", note: "测试群" },
+      { openid: "group-3" },
     ]);
   });
 
