@@ -9078,6 +9078,9 @@ export class ChatPanel implements vscode.Disposable {
       store: taskStore,
       host: createQqServiceHost(this.createQqHostPorts()),
       log: (line) => this.log.info(line),
+      // 服务里每一次任务状态变化（派发 / 运行 / 终态 / 回包）都要回写到看板
+      // 投影：否则卡片永远停在「已校验 · 耗时 0 秒 · 停止」。
+      onChanged: () => this.refreshQqTaskProjection(),
     });
     const deps = this.services.qqbotDeps ?? {};
     const dispatch = createQqChannelDispatch(config, {
@@ -9866,6 +9869,19 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 只刷新任务看板投影（服务状态一变就调用）。
+   *
+   * 任务从「已校验」走到终态期间会 persist 好几次，每次都连带读设置 / 推连接
+   * 状态是纯浪费（还要碰 SecretStorage）；这里只做 `setQqTasks` + 快照。
+   */
+  private refreshQqTaskProjection(): void {
+    if (this.disposed) return;
+    const service = this.qq?.service;
+    setQqTasks(this.store.getState(), service ? service.listTasks() : []);
+    this.store.pushSnapshot();
+  }
+
+  /**
    * 任务看板投影：服务里的任务列表 → `SessionState.qqTasks`。
    *
    * 与 `superSessions` 一样是**非 blocks 元数据**，因此复用 store 既有的
@@ -9873,9 +9889,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private refreshQqTasks(): void {
     if (this.disposed) return;
-    const service = this.qq?.service;
-    setQqTasks(this.store.getState(), service ? service.listTasks() : []);
-    this.store.pushSnapshot();
+    this.refreshQqTaskProjection();
     // 「一次刷新 = 三样都推」：看板条目变化往往伴随状态/设置变化（桥接上、
     // 任务新建），分开推只会让设置卡与看板短暂不同步。读设置是内存 + 一次
     // SecretStorage 探测，QQ 消息频率下这点开销可以忽略。

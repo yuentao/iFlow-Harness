@@ -235,10 +235,25 @@ export function parseAccessTokenResponse(raw: unknown): QqBotAccessToken | null 
   return { accessToken, expiresIn };
 }
 
-/** 单聊发送：`POST /v2/users/{openid}/messages`。msg_id 存在时用于回复。 */
-export function buildSendPrivateMsg(openid: string, text: string, msgId?: string): QqBotRequestSpec {
+/**
+ * 单聊发送：`POST /v2/users/{openid}/messages`。
+ *
+ * `msg_id` 用于被动回复；`msg_seq` 是**同一 msg_id 的回复序号** —— QQ 用
+ * `(msg_id, msg_seq)` 去重，不填时每条回复都被当成序号 1，于是同一条用户
+ * 消息的第 2 条及以后的回复会被平台当作重复消息丢弃（实测：只有「已受理」
+ * 送达，结果回包一条都收不到）。因此调用方必须为同一 msg_id 递增 seq。
+ */
+export function buildSendPrivateMsg(
+  openid: string,
+  text: string,
+  msgId?: string,
+  msgSeq?: number,
+): QqBotRequestSpec {
   const body: Record<string, unknown> = { content: text };
   if (msgId) body["msg_id"] = msgId;
+  if (typeof msgSeq === "number" && Number.isFinite(msgSeq) && msgSeq > 0) {
+    body["msg_seq"] = Math.floor(msgSeq);
+  }
   return {
     endpoint: `${QQBOT_OPENAPI_BASE}/v2/users/${encodeURIComponent(openid)}/messages`,
     method: "POST",
@@ -246,10 +261,18 @@ export function buildSendPrivateMsg(openid: string, text: string, msgId?: string
   };
 }
 
-/** 群聊发送：`POST /v2/groups/{group_openid}/messages`。 */
-export function buildSendGroupMsg(groupId: string, text: string, msgId?: string): QqBotRequestSpec {
+/** 群聊发送：`POST /v2/groups/{group_openid}/messages`。msg_seq 语义同单聊。 */
+export function buildSendGroupMsg(
+  groupId: string,
+  text: string,
+  msgId?: string,
+  msgSeq?: number,
+): QqBotRequestSpec {
   const body: Record<string, unknown> = { content: text };
   if (msgId) body["msg_id"] = msgId;
+  if (typeof msgSeq === "number" && Number.isFinite(msgSeq) && msgSeq > 0) {
+    body["msg_seq"] = Math.floor(msgSeq);
+  }
   return {
     endpoint: `${QQBOT_OPENAPI_BASE}/v2/groups/${encodeURIComponent(groupId)}/messages`,
     method: "POST",

@@ -160,6 +160,8 @@ function makeService(options: {
   config?: Partial<QqConfig>;
   store?: MemoryStore;
   now?: () => number;
+  onChanged?: () => void;
+  deliveryRetryDelayMs?: number;
 } = {}): ServiceFixture {
   const config = makeConfig(options.config);
   const fixture = makeHost();
@@ -170,6 +172,10 @@ function makeService(options: {
     host: fixture.host,
     now: options.now,
     log: () => undefined,
+    ...(options.onChanged ? { onChanged: options.onChanged } : {}),
+    ...(options.deliveryRetryDelayMs !== undefined
+      ? { deliveryRetryDelayMs: options.deliveryRetryDelayMs }
+      : {}),
   });
   return { ...fixture, service, store, config };
 }
@@ -648,6 +654,143 @@ describe("QqService — 终态与结果回传", () => {
     expect(joined).toContain("改动明细");
     expect(joined).toContain("src/x.ts");
     expect(joined).toContain("TAILTOKEN");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 终态写回 / 真实耗时 / 结果回包（2026-11-17 用户实测回归）
+// ---------------------------------------------------------------------------
+
+describe("QqService — 终态写回与结果回包", () => {
+  it("回合结束后写终态、记录真实耗时，并把结果回包一次", async () => {
+    let clock = 1_000;
+    const f = makeService({ now: () => clock });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      clock = 61_000; // 子会话跑了 60 秒
+      return { superSessionId: "super-1", branch: "iflow/qq/test" };
+    };
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e1" }));
+    await waitFor(() => lastTask(f).status === "needs_review");
+
+    const task = lastTask(f);
+    // 终态 + 真实耗时：updatedAt 是收尾时刻，不是创建时刻（否则卡片永远 0 秒）。
+    expect(task.updatedAt).toBeGreaterThan(task.createdAt);
+    expect(task.updatedAt - task.createdAt).toBe(60_000);
+    expect(task.resultDeliveredAt).toBe(61_000);
+    expect(task.deliveryError).toBeUndefined();
+
+    // 结果只回一次，且是真的结果摘要（不是「已受理」ack）。
+    const results = summaryChunks(f);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toContain("QQ 任务");
+    expect(results[0]).toContain("needs_review");
+  });
+
+  it("任务每次状态变化都通知宿主刷新投影（onChanged）", async () => {
+    const changes: string[] = [];
+    const f = makeService({
+      onChanged: () => {
+        changes.push(lastTask(f).status);
+      },
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e2" }));
+    await waitFor(() => lastTask(f).status === "needs_review");
+
+    // 至少覆盖 建任务 → 派发 → 运行 → 终态 这几档，否则看板只会停在中途。
+    expect(changes).toContain("validated");
+    expect(changes).toContain("queued");
+    expect(changes).toContain("dispatched");
+    expect(changes).toContain("running");
+    expect(changes).toContain("needs_review");
+  });
+
+  it("被动回复送达失败时退回主动消息，送达后仍记为已回包", async () => {
+    const f = makeService({ deliveryRetryDelayMs: 0 });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-active" };
+    };
+    const attempts: Array<{ text: string; replyToMsgId?: string }> = [];
+    f.host.deliver = async (msg) => {
+      attempts.push({ text: msg.text, ...(msg.replyToMsgId ? { replyToMsgId: msg.replyToMsgId } : {}) });
+      // 被动回复（带 msg_id）一律失败，模拟回复窗口已过期；主动消息可达。
+      return msg.replyToMsgId === undefined;
+    };
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e3" }));
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+
+    const resultAttempts = attempts.filter((item) => item.text.includes("QQ 任务"));
+    expect(resultAttempts.length).toBeGreaterThanOrEqual(2);
+    expect(resultAttempts[0]?.replyToMsgId).toBe("e3");
+    expect(resultAttempts.some((item) => item.replyToMsgId === undefined)).toBe(true);
+    expect(lastTask(f).deliveryError).toBeUndefined();
+  });
+
+  it("结果彻底送不出去时记录 deliveryError 并本地提示，不静默丢弃", async () => {
+    const f = makeService({
+      config: { resultDetail: "compact" },
+      deliveryRetryDelayMs: 0,
+    });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-down" };
+    };
+    f.host.deliver = async () => false;
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e4" }));
+    await waitFor(() => Boolean(lastTask(f).deliveryError));
+
+    const task = lastTask(f);
+    expect(task.deliveryError).toContain("未能送达");
+    // 回包失败不改写任务本身的终态：执行确实结束了，如实区分两件事。
+    expect(task.status).toBe("succeeded");
+    expect(task.resultDeliveredAt).toBeUndefined();
+    expect(f.notes.some((line) => line.includes("未能送达"))).toBe(true);
+    // 看板也要看得见（QqTaskUi.errorMessage）。
+    expect(f.service.listTasks()[0]?.errorMessage).toContain("未能送达");
+  });
+
+  it("执行体没返回摘要时仍回一条如实的兜底说明", async () => {
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-empty" };
+    };
+    f.host.readTaskOutcome = () => ({ summary: "", stopReason: "end_turn" });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e5" }));
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+
+    const text = summaryChunks(f).join("\n");
+    expect(text).toContain("QQ 任务");
+    expect(text).toContain("未返回摘要内容");
+  });
+
+  it("手动刷新不会把已送达的结果重复回包（幂等）", async () => {
+    const f = makeService();
+    await f.service.handleInboundMessage(inbound({ msgId: "e6" }));
+    await waitFor(() => summaryChunks(f).length > 0 && lastTask(f).resultDeliveredAt !== undefined);
+
+    const before = summaryChunks(f).length;
+    await f.service.handleTaskAction(lastTask(f).taskId, "refresh");
+    await f.service.handleTaskAction(lastTask(f).taskId, "refresh");
+
+    expect(summaryChunks(f)).toHaveLength(before);
+  });
+
+  it("宿主重启的中断也回一条通知，不让用户只看到「已受理」", async () => {
+    const store = new MemoryStore();
+    store.records.set("T-seed-run002", seedTask("T-seed-run002", "running"));
+    const f = makeService({ store, now: () => 2_000, deliveryRetryDelayMs: 0 });
+
+    await f.service.start();
+
+    expect(f.delivered.some((item) => item.text.includes("扩展宿主重启而中断"))).toBe(true);
+    expect(f.service.getTask("T-seed-run002")?.status).toBe("failed");
   });
 });
 

@@ -121,6 +121,14 @@ export class QqBotAdapter implements ChannelAdapter {
   private lastError: string | undefined;
   private connected = false;
   private eventHandler: QqBotEventHandler | undefined;
+  /**
+   * 每个 `msg_id` 已经用掉的被动回复序号。
+   *
+   * QQ 按 `(msg_id, msg_seq)` 去重：同一个 msg_id 若不带 seq（缺省都当 1），
+   * 第二条及以后的回复会被平台当成重复消息丢弃 —— 表现就是「只有已受理送达，
+   * 结果回包一条也收不到」。这里为每条入站消息维护递增序号。
+   */
+  private readonly replySeq = new Map<string, number>();
 
   constructor(deps: QqBotAdapterDeps) {
     this.appId = deps.appId;
@@ -252,6 +260,17 @@ export class QqBotAdapter implements ChannelAdapter {
     }
   }
 
+  /** 取下一条被动回复序号（每个 msg_id 独立递增）；映射有上限，防止无限增长。 */
+  private nextReplySeq(msgId: string): number {
+    const next = (this.replySeq.get(msgId) ?? 0) + 1;
+    this.replySeq.set(msgId, next);
+    if (this.replySeq.size > 500) {
+      const oldest = this.replySeq.keys().next().value;
+      if (oldest !== undefined) this.replySeq.delete(oldest);
+    }
+    return next;
+  }
+
   /** 发送一条文本消息；token 复用缓存。filePath 属富媒体上传，M2 明确不支持。 */
   async send(msg: OutboundMessage): Promise<SendResult> {
     if (msg.filePath) {
@@ -263,10 +282,12 @@ export class QqBotAdapter implements ChannelAdapter {
     }
     try {
       const token = await this.ensureToken();
+      // 有 msg_id 才算被动回复，才需要 msg_seq；主动消息两者都不带。
+      const msgSeq = msg.replyToMsgId ? this.nextReplySeq(msg.replyToMsgId) : undefined;
       const request =
         msg.chatType === "group"
-          ? buildSendGroupMsg(msg.chatId, msg.text, msg.replyToMsgId)
-          : buildSendPrivateMsg(msg.chatId, msg.text, msg.replyToMsgId);
+          ? buildSendGroupMsg(msg.chatId, msg.text, msg.replyToMsgId, msgSeq)
+          : buildSendPrivateMsg(msg.chatId, msg.text, msg.replyToMsgId, msgSeq);
       const raw = await this.transport.post(
         request.endpoint,
         { ...buildAuthHeaders(token), "content-type": "application/json" },

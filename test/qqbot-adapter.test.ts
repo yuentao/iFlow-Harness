@@ -245,7 +245,7 @@ describe("鉴权与 OpenAPI 载荷构造", () => {
     expect(parseAccessTokenResponse("bad")).toBeNull();
   });
 
-  it("buildSendPrivateMsg / buildSendGroupMsg：正确 endpoint、body、msg_id 可选", () => {
+  it("buildSendPrivateMsg / buildSendGroupMsg：正确 endpoint、body、msg_id 与 msg_seq 可选", () => {
     const priv = buildSendPrivateMsg("openid-x", "你好");
     expect(priv).toEqual({
       endpoint: "https://api.sgroup.qq.com/v2/users/openid-x/messages",
@@ -254,11 +254,25 @@ describe("鉴权与 OpenAPI 载荷构造", () => {
     });
     const privReply = buildSendPrivateMsg("openid-x", "收到", "msg-9");
     expect(privReply.body).toEqual({ content: "收到", msg_id: "msg-9" });
+    // msg_seq 必须随 msg_id 一起出现在 body 里，否则同一条消息的第二条回复
+    // 会被平台按重复消息丢弃。
+    const privSeq = buildSendPrivateMsg("openid-x", "结果", "msg-9", 2);
+    expect(privSeq.body).toEqual({ content: "结果", msg_id: "msg-9", msg_seq: 2 });
+    // 非法 seq（0 / NaN / 非有限）不写进 body，交给平台默认。
+    expect(buildSendPrivateMsg("openid-x", "x", "msg-9", 0).body).toEqual({
+      content: "x",
+      msg_id: "msg-9",
+    });
 
     const group = buildSendGroupMsg("group-y", "群消息", "msg-10");
     expect(group.endpoint).toBe("https://api.sgroup.qq.com/v2/groups/group-y/messages");
     expect(group.method).toBe("POST");
     expect(group.body).toEqual({ content: "群消息", msg_id: "msg-10" });
+    expect(buildSendGroupMsg("group-y", "群结果", "msg-10", 3).body).toEqual({
+      content: "群结果",
+      msg_id: "msg-10",
+      msg_seq: 3,
+    });
   });
 });
 
@@ -403,7 +417,19 @@ describe("QqBotAdapter", () => {
     const privPost = transport.posts.find((p) => p.endpoint.includes("/users/"));
     expect(privPost?.endpoint).toBe("https://api.sgroup.qq.com/v2/users/openid-1/messages");
     expect(privPost?.headers).toMatchObject({ Authorization: "QQBot tok-1", "content-type": "application/json" });
-    expect(privPost?.body).toEqual({ content: "hi", msg_id: "m-0" });
+    // 被动回复必须带 msg_seq：QQ 用 (msg_id, msg_seq) 去重，缺省都当 1 会让
+    // 同一条用户消息的第 2 条回复被平台当成重复消息丢掉。
+    expect(privPost?.body).toEqual({ content: "hi", msg_id: "m-0", msg_seq: 1 });
+
+    // 同一个 msg_id 的下一条回复序号递增（结果回包就靠这个才送得出去）。
+    await adapter.send({ chatType: "private", chatId: "openid-1", text: "结果", replyToMsgId: "m-0" });
+    const secondReply = transport.posts.filter((p) => p.endpoint.includes("/users/")).at(-1);
+    expect(secondReply?.body).toEqual({ content: "结果", msg_id: "m-0", msg_seq: 2 });
+
+    // 换了 msg_id 就从头计数；主动消息（无 replyToMsgId）不带这两个字段。
+    await adapter.send({ chatType: "private", chatId: "openid-1", text: "另一条", replyToMsgId: "m-1" });
+    const otherReply = transport.posts.filter((p) => p.endpoint.includes("/users/")).at(-1);
+    expect(otherReply?.body).toEqual({ content: "另一条", msg_id: "m-1", msg_seq: 1 });
 
     const group = await adapter.send({ chatType: "group", chatId: "group-1", text: "hello" });
     expect(group.ok).toBe(true);
