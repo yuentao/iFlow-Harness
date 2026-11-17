@@ -65,21 +65,19 @@ export type QqCommandParseResult =
 // 归一化
 // ---------------------------------------------------------------------------
 
-/** CQ 码形式的 at 提及（`[CQ:at,qq=123456]`），可能带额外字段。 */
-const CQ_AT_PREFIX = /^\[CQ:at,[^\]]*\]/i;
 /** 纯文本形式的 at 提及（`@机器人` 或 `@123456`）。 */
 const AT_PREFIX = /^@[^\s]+/u;
 
 /**
- * 剥掉行首**一个**提及标记，并去掉其后的空白。
+ * 剥掉行首**一个** `@token` 提及标记，并去掉其后的空白。
  *
- * 只剥一个是有意为之：`@bot [CQ:at,qq=1] /qq ...` 这种双标记残留说明上游没有
+ * 官方 QQBot 适配器已经在 `cleanQqBotContent` 里剥掉 mention 标签与 `@token`，
+ * 这里是对直接调用 `handleInboundMessage` 的其它来源（手写测试、将来的适配器）
+ * 的防御。只剥一个是有意为之：`@bot @user /qq ...` 这种双标记残留说明上游没有
  * 清理干净，与其猜「到底剥到哪」，不如让它按非命令处理，由适配器暴露问题。
  * `@qq` 这类后面不跟空白的形态不算提及（避免把邮箱 / 用户名误伤）。
  */
 function stripLeadingMention(text: string): string {
-  const cq = CQ_AT_PREFIX.exec(text);
-  if (cq) return text.slice(cq[0].length).replace(/^[^\S\r\n]+/u, "");
   const at = AT_PREFIX.exec(text);
   if (at) {
     const rest = text.slice(at[0].length);
@@ -97,8 +95,7 @@ function stripMentionAndTrim(text: string): string {
 }
 
 /**
- * 命令行归一化：去首尾空白、去行首一个 @ 提及标记（`@机器人` / CQ 码形态）、
- * 合并行内连续空白。
+ * 命令行归一化：去首尾空白、去行首一个 `@token` 提及标记、合并行内连续空白。
  *
  * 换行一律保留（CRLF 统一成 LF）：`/qq task` 的提示词可能带多段结构，折叠成
  * 一行会改变语义。行内空白（空格 / 制表符 / 全角空格）合并成单个半角空格。

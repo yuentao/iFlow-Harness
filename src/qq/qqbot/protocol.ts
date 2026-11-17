@@ -79,18 +79,34 @@ function parseTimestamp(value: unknown): number | undefined {
 
 /**
  * 去掉消息正文里平台插入的 @ 标记（`<@...>` / `<at ...>` / 行首或空白后的
- * `@xxx`）与换行，收敛为单行纯文本。只判断「有没有 @」用 hasMentionMarkup，
- * 真正的 mentionsBot 由事件类型决定，不从正文猜。
+ * `@xxx`），同时**保留段落与行结构**：单个换行照旧是换行，连续空白行压成最多
+ * 一个空行，行内连续空白收敛为一个空格，首尾空白 trim。多行 `/qq task` 提示词
+ * 的段落结构必须活到 shared/qq-command 的解析层，折成一行会改变语义。
+ * 只判断「有没有 @」用 hasMentionMarkup，真正的 mentionsBot 由事件类型决定，
+ * 不从正文猜。
  */
 export function cleanQqBotContent(content: unknown): string {
   let text = toStringOrUndefined(content) ?? "";
   // 平台 XML 式 mention 标签，如 `<@123456>`、`<@!123456>`、`<at id="x">`。
   text = text.replace(/<@[^>]*>/g, " ").replace(/<at\b[^>]*>/gi, " ");
   // 纯文本 @提及：仅在行首或空白之后，避免误伤 user@example.com。
-  text = text.replace(/(^|\s)@[\p{L}\p{N}_.-]+/gu, "$1");
-  // 真实换行与字面量 \n（很多网关把换行转义后塞进 content）。
-  text = text.replace(/\\r\\n|\\n|\\r|\r\n|\n|\r/g, " ");
-  return text.replace(/\s+/g, " ").trim();
+  // `m` 让 `^` 命中每一行行首，行首 `@token` 同样被剥掉。
+  text = text.replace(/(^|\s)@[\p{L}\p{N}_.-]+/gmu, "$1");
+  // 真实换行与字面量 \n（很多网关把换行转义后塞进 content）：统一成 LF，
+  // 然后逐行收敛行内空白，最后把连续空白行压成一个空行。
+  const lines = text
+    .replace(/\\r\\n|\\n|\\r/g, "\n")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[^\S\n]+/gu, " ").trim());
+  const out: string[] = [];
+  for (const line of lines) {
+    // 行首与行尾的空行丢弃，中间连续空行只留一个。
+    if (line === "" && (out.length === 0 || out[out.length - 1] === "")) continue;
+    out.push(line);
+  }
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out.join("\n");
 }
 
 /** 正文里是否带显式 mention 标记（用于 GROUP_MESSAGE_CREATE 的保守判定）。 */
