@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import {
   AlertTriangle,
   Check,
+  Pencil,
   PlugZap,
   Plus,
   RefreshCw,
@@ -31,6 +32,7 @@ import {
   Chip,
   CommitNumberInput,
   CommitTextInput,
+  ConfirmDialog,
   CountdownSeconds,
   Field,
   FieldLabel,
@@ -123,39 +125,91 @@ function Row({
 }
 
 /**
- * Read-only allow-entry list (allowed users / allowed groups).
+ * Allow-entry table (allowed users / allowed groups).
  *
- * openid 只以脱敏形式展示（{@link maskQqOpenId}，前 4 + 8 个 `*` + 后 4），
- * 页面里没有任何能改 openid 的输入框 —— 要换只能删除后重新添加（添加时必须
- * 输入完整 openid，脱敏后无法反推）。每行带一个备注字段（草稿 + blur/Enter
- * 提交）；行内控件的可访问名带实体名与序号，可见文案不足以区分多行。
+ * 表格语义：列 = 备注（主信息）/ openid 或群号（脱敏、次要色）/ 操作。
+ * 默认行内**没有任何输入框**——备注与脱敏 id 都是纯文本，谁只读、谁可编辑
+ * 一眼可分。openid 永远不可编辑（完整值不进 UI，{@link maskQqOpenId} 只给
+ * 前 4 + 8 个 `*` + 后 4；要换只能删除后重新添加）。
+ *
+ * 编辑与添加共用同一种「行内编辑态」：点铅笔 / 「+ 添加」后该行变成输入态，
+ * 右侧换成保存 / 取消；Enter（IME 组合中不提交）保存、Esc 取消。选行内而非
+ * 弹窗，是因为编辑对象只有一条备注、上下文（同表格里的其它条目与脱敏 id）
+ * 恰恰是判断依据，弹窗会把这份上下文挡掉；添加也天然落在表格末尾，两种
+ * 操作共用一套心智模型。
+ *
+ * 删除走 {@link ConfirmDialog}：条目一旦删除就找不回完整 openid（脱敏显示
+ * 无法反推），误点的代价是重新找对方要 id，值得一次确认。
  */
 function AccessList({
   label,
+  columnLabel,
   noun,
   addLabel,
   entries,
   onChange,
 }: {
   label: string;
+  /** 第二列表头：用户列表是 openid，群列表是群号。 */
+  columnLabel: string;
   /** 实体名（用户 / 群），用于「输入…的 openid」这类可访问名。 */
   noun: string;
   addLabel: string;
   entries: QqAllowEntry[];
   onChange: (next: QqAllowEntry[]) => void;
 }) {
+  /** 正在行内编辑的行下标；null = 全展示态。 */
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState("");
-  /** 添加失败的就地说明：空值 / 格式非法 / 重复都留在这里，绝不静默丢弃。 */
+  const [noteDraft, setNoteDraft] = useState("");
+  const [idDraft, setIdDraft] = useState("");
+  /** 添加/编辑失败的就地说明：空值 / 格式非法 / 重复都留在这里，绝不静默丢弃。 */
   const [error, setError] = useState("");
+  /** 待确认删除的行下标；非 null 时渲染 ConfirmDialog。 */
+  const [pendingDelete, setPendingDelete] = useState<number | null>(null);
 
-  const cancelAdd = () => {
+  /** 可辨识的实体名：有备注用备注（多条群号脱敏后都是星号，备注才是唯一
+   * 可区分信息），否则退回脱敏 id。 */
+  const entityName = (entry: QqAllowEntry): string => {
+    const note = entry.note?.trim();
+    return note && note.length > 0 ? note : maskQqOpenId(entry.openid);
+  };
+
+  const cancelEditing = () => {
     setAdding(false);
-    setDraft("");
+    setEditingIndex(null);
+    setNoteDraft("");
+    setIdDraft("");
     setError("");
   };
+  const beginAdd = () => {
+    setError("");
+    setEditingIndex(null);
+    setNoteDraft("");
+    setIdDraft("");
+    setAdding(true);
+  };
+  const beginEdit = (index: number, entry: QqAllowEntry) => {
+    setError("");
+    setAdding(false);
+    setIdDraft("");
+    setNoteDraft(entry.note ?? "");
+    setEditingIndex(index);
+  };
+  const commitEdit = () => {
+    if (editingIndex === null) return;
+    const trimmed = noteDraft.trim();
+    onChange(
+      entries.map((current, at) => {
+        if (at !== editingIndex) return current;
+        // 清空备注 = 写回不带 note 的条目（存储层仍是旧形状）。
+        return trimmed.length > 0 ? { openid: current.openid, note: trimmed } : { openid: current.openid };
+      }),
+    );
+    cancelEditing();
+  };
   const commitAdd = () => {
-    const openid = draft.trim();
+    const openid = idDraft.trim();
     if (openid.length === 0) {
       setError(t("请填写完整的{0}标识。", noun));
       return;
@@ -174,111 +228,218 @@ function AccessList({
       setError(t("该标识已在名单中，无需重复添加。"));
       return;
     }
-    cancelAdd();
-    onChange([...entries, { openid }]);
+    const note = noteDraft.trim();
+    onChange([...entries, note.length > 0 ? { openid, note } : { openid }]);
+    cancelEditing();
   };
+  /** Enter 提交 / Esc 取消；IME 组合中的 Enter 是确认候选词，不能当提交。 */
+  const editorKeyDown =
+    (commit: () => void) =>
+    (event: ReactKeyboardEvent<HTMLInputElement>): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelEditing();
+        return;
+      }
+      if (event.key !== "Enter") return;
+      if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      commit();
+    };
+
+  const pendingEntry = pendingDelete === null ? null : entries[pendingDelete];
 
   return (
     <div className="flex flex-col gap-2 px-4 py-4">
       <FieldLabel>{label}</FieldLabel>
-      {entries.length === 0 && <Hint>{t("尚未添加条目")}</Hint>}
+      {entries.length === 0 && !adding && <Hint>{t("尚未添加条目")}</Hint>}
       {entries.length > 0 && (
         <Hint>{t("openid 已脱敏显示，无法在此修改；如需更换请删除后重新添加。")}</Hint>
       )}
-      {entries.map((entry, index) => (
-        <div key={entry.openid} className="flex flex-wrap items-center gap-1.5">
-          {/* 备注在前：8 位左右的群号脱敏后是纯星号（`********`），多个群
-              在脱敏 id 上完全无法区分，备注才是唯一可辨识信息；脱敏 id
-              退居其后作参照。用户列表同构，保持两栏一致。 */}
-          <CommitTextInput
-            className="min-w-0 flex-1"
-            value={entry.note ?? ""}
-            label={t("{0} {1} 的备注", label, index + 1)}
-            placeholder={t("备注")}
-            onCommit={(note) =>
-              onChange(
-                entries.map((current, at) => {
-                  if (at !== index) return current;
-                  const trimmed = note.trim();
-                  return trimmed.length > 0
-                    ? { openid: current.openid, note: trimmed }
-                    : { openid: current.openid };
-                }),
-              )
-            }
-          />
-          {/* 只读文本，不是输入框：完整 openid 不在这里暴露，也不能被改写。 */}
-          <span className="shrink-0 whitespace-nowrap font-mono text-ui-body text-muted-foreground">
-            {maskQqOpenId(entry.openid)}
-          </span>
-          <IconButton
-            size="sm"
-            tone="danger"
-            icon={<Trash2 className={ICON_INLINE} />}
-            label={t("删除 {0} {1}", label, index + 1)}
-            onClick={() => onChange(entries.filter((_, at) => at !== index))}
-          />
-        </div>
-      ))}
-      {adding ? (
-        <>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <TextInput
-              autoFocus
-              mono
-              className="min-w-0 flex-1"
-              value={draft}
-              placeholder={t("完整 openid")}
-              aria-label={t("输入{0}的 openid", noun)}
-              onChange={(event) => {
-                setDraft(event.target.value);
-                if (error) setError("");
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  cancelAdd();
-                  return;
-                }
-                if (event.key !== "Enter") return;
-                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-                event.preventDefault();
-                commitAdd();
-              }}
-            />
-            <IconButton
-              size="sm"
-              tone="primary"
-              icon={<Check className={ICON_INLINE} />}
-              label={t("确认添加")}
-              onClick={commitAdd}
-            />
-            <IconButton
-              size="sm"
-              icon={<X className={ICON_INLINE} />}
-              label={t("取消添加")}
-              onClick={cancelAdd}
-            />
-          </div>
-          {error && (
-            <p role="alert" className="text-ui-caption leading-relaxed text-destructive">
-              {error}
-            </p>
-          )}
-        </>
-      ) : (
+      {(entries.length > 0 || adding) && (
+        <table aria-label={label} className="w-full table-fixed border-collapse text-ui-label">
+          <thead>
+            <tr className="border-b border-border/60">
+              <th
+                scope="col"
+                className="py-1.5 pr-2 text-left text-ui-caption font-medium text-muted-foreground"
+              >
+                {t("备注")}
+              </th>
+              <th
+                scope="col"
+                className="w-1/3 px-2 py-1.5 text-left text-ui-caption font-medium text-muted-foreground"
+              >
+                {columnLabel}
+              </th>
+              {/* 操作列固定宽度：窄屏也只压缩备注/标识两列的可见宽度，
+                  绝不让两个图标按钮被推出视口（320px 宽仍可用）。 */}
+              <th
+                scope="col"
+                className="w-16 py-1.5 pl-2 text-right text-ui-caption font-medium text-muted-foreground"
+              >
+                {t("操作")}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map((entry, index) => {
+              const editingThis = editingIndex === index;
+              const name = entityName(entry);
+              const masked = maskQqOpenId(entry.openid);
+              const displayNote = entry.note?.trim() ?? "";
+              return (
+                <tr key={entry.openid} className="border-b border-border/40 last:border-b-0">
+                  {/* 备注列：展示态是纯文本（空备注用低调占位，不抢眼），
+                      只有进入编辑态才变成输入框。 */}
+                  <td className="min-w-0 py-1 pr-2 align-middle">
+                    {editingThis ? (
+                      <TextInput
+                        autoFocus
+                        className="w-full"
+                        value={noteDraft}
+                        placeholder={t("备注")}
+                        aria-label={t("备注 {0}", name)}
+                        onChange={(event) => setNoteDraft(event.target.value)}
+                        onKeyDown={editorKeyDown(commitEdit)}
+                      />
+                    ) : (
+                      <span
+                        className={`block truncate${displayNote ? " text-foreground" : " text-muted-foreground/70"}`}
+                        title={displayNote || t("未命名")}
+                      >
+                        {displayNote || t("未命名")}
+                      </span>
+                    )}
+                  </td>
+                  {/* 第二列恒为只读脱敏文本，任何状态下都不出现完整 id。 */}
+                  <td className="min-w-0 px-2 py-1 align-middle">
+                    <span
+                      className="block truncate font-mono text-ui-caption text-muted-foreground"
+                      title={masked}
+                    >
+                      {masked}
+                    </span>
+                  </td>
+                  <td className="w-16 py-1 pl-2 align-middle">
+                    <div className="flex items-center justify-end gap-0.5">
+                      {editingThis ? (
+                        <>
+                          <IconButton
+                            size="sm"
+                            tone="primary"
+                            icon={<Check className={ICON_INLINE} />}
+                            label={t("保存")}
+                            onClick={commitEdit}
+                          />
+                          <IconButton
+                            size="sm"
+                            icon={<X className={ICON_INLINE} />}
+                            label={t("取消")}
+                            onClick={cancelEditing}
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <IconButton
+                            size="sm"
+                            icon={<Pencil className={ICON_INLINE} />}
+                            label={t("编辑 {0}", name)}
+                            onClick={() => beginEdit(index, entry)}
+                          />
+                          <IconButton
+                            size="sm"
+                            tone="danger"
+                            icon={<Trash2 className={ICON_INLINE} />}
+                            label={t("删除 {0}", name)}
+                            onClick={() => setPendingDelete(index)}
+                          />
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {adding && (
+              <tr className="border-b border-border/40 last:border-b-0">
+                <td className="min-w-0 py-1 pr-2 align-middle">
+                  <TextInput
+                    className="w-full"
+                    value={noteDraft}
+                    placeholder={t("备注（可选）")}
+                    aria-label={t("新{0}的备注", noun)}
+                    onChange={(event) => setNoteDraft(event.target.value)}
+                    onKeyDown={editorKeyDown(commitAdd)}
+                  />
+                </td>
+                <td className="min-w-0 px-2 py-1 align-middle">
+                  <TextInput
+                    autoFocus
+                    mono
+                    className="w-full"
+                    value={idDraft}
+                    placeholder={t("完整 openid")}
+                    aria-label={t("输入{0}的 openid", noun)}
+                    onChange={(event) => {
+                      setIdDraft(event.target.value);
+                      if (error) setError("");
+                    }}
+                    onKeyDown={editorKeyDown(commitAdd)}
+                  />
+                </td>
+                <td className="w-16 py-1 pl-2 align-middle">
+                  <div className="flex items-center justify-end gap-0.5">
+                    <IconButton
+                      size="sm"
+                      tone="primary"
+                      icon={<Check className={ICON_INLINE} />}
+                      label={t("确认添加")}
+                      onClick={commitAdd}
+                    />
+                    <IconButton
+                      size="sm"
+                      icon={<X className={ICON_INLINE} />}
+                      label={t("取消添加")}
+                      onClick={cancelEditing}
+                    />
+                  </div>
+                </td>
+              </tr>
+            )}
+            {error && (
+              <tr>
+                <td colSpan={3} className="pt-1.5">
+                  <p role="alert" className="text-ui-caption leading-relaxed text-destructive">
+                    {error}
+                  </p>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      )}
+      {!adding && (
         <ActionRow>
-          <Button
-            size="sm"
-            icon={<Plus className={ICON_INLINE} />}
-            onClick={() => {
-              setError("");
-              setAdding(true);
-            }}
-          >
+          <Button size="sm" icon={<Plus className={ICON_INLINE} />} onClick={beginAdd}>
             {addLabel}
           </Button>
         </ActionRow>
+      )}
+      {pendingEntry && (
+        <ConfirmDialog
+          title={t("删除条目")}
+          message={t(
+            "删除「{0}」后将无法恢复：完整标识已脱敏，无法从界面还原，需要时只能重新添加。",
+            entityName(pendingEntry),
+          )}
+          confirmLabel={t("删除")}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => {
+            onChange(entries.filter((_, at) => at !== pendingDelete));
+            setPendingDelete(null);
+          }}
+        />
       )}
     </div>
   );
@@ -651,6 +812,7 @@ export function QqSettings({
       <SettingsGroup title={t("访问控制")} hint={t("留空表示不接受该来源的任务")}>
         <AccessList
           label={t("允许的用户")}
+          columnLabel={t("openid")}
           noun={t("用户")}
           addLabel={t("添加用户")}
           entries={value.allowedUsers}
@@ -658,6 +820,7 @@ export function QqSettings({
         />
         <AccessList
           label={t("允许的群")}
+          columnLabel={t("群号")}
           noun={t("群")}
           addLabel={t("添加群")}
           entries={value.allowedGroups}

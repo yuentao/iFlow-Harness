@@ -1154,6 +1154,15 @@ const en: Record<string, string> = {
   "该标识已在名单中，无需重复添加。": "That identifier is already in the list.",
   "openid 已脱敏显示，无法在此修改；如需更换请删除后重新添加。":
     "OpenIDs are shown masked and cannot be edited here; delete and re-add an entry to change it.",
+  "openid": "openid",
+  "操作": "Actions",
+  "未命名": "Unnamed",
+  "编辑 {0}": "Edit {0}",
+  "备注（可选）": "Note (optional)",
+  "新{0}的备注": "Note for the new {0}",
+  "删除条目": "Delete entry",
+  "删除「{0}」后将无法恢复：完整标识已脱敏，无法从界面还原，需要时只能重新添加。":
+    "Deleting “{0}” cannot be undone: the full identifier is masked and cannot be recovered from this screen — you would have to add it again.",
   "执行策略": "Execution policy",
   "消息去向": "Message destination",
   "主会话": "Main session",

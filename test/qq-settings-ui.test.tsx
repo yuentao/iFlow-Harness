@@ -137,6 +137,39 @@ function alertText(): string {
     .join("\n");
 }
 
+/** 访问控制的两张表都带 aria-label；测试按名称取，避免误取别的表格。 */
+function accessTable(label: string): HTMLTableElement {
+  const table = container.querySelector<HTMLTableElement>(`table[aria-label='${label}']`);
+  expect(table, `table 「${label}」`).toBeTruthy();
+  return table!;
+}
+
+/** 行内图标按钮：可访问名带实体名（备注优先，空备注退回脱敏 id）。 */
+function rowButton(scope: ParentNode, label: string): HTMLButtonElement {
+  const button = scope.querySelector<HTMLButtonElement>(`button[aria-label='${label}']`);
+  expect(button, `button 「${label}」`).toBeTruthy();
+  return button!;
+}
+
+function clickEdit(table: string, name: string): void {
+  act(() => rowButton(accessTable(table), `编辑 ${name}`).click());
+}
+
+function clickDelete(table: string, name: string): void {
+  act(() => rowButton(accessTable(table), `删除 ${name}`).click());
+}
+
+/** ConfirmDialog 走 portal 挂在 document.body，不在组件容器里。 */
+function confirmDialog(): HTMLElement | null {
+  return document.body.querySelector<HTMLElement>("[role='alertdialog']");
+}
+
+function pressKey(el: HTMLElement, key: string, init: KeyboardEventInit = {}): void {
+  act(() => {
+    el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+  });
+}
+
 beforeEach(() => {
   onChange = vi.fn();
   onTestConnection = vi.fn();
@@ -231,51 +264,151 @@ describe("QqSettings", () => {
     expect(onChange).toHaveBeenCalledWith({ route: "main" });
   });
 
-  it("已存在条目只读展示脱敏 openid，并带可提交的备注字段", () => {
+  it("默认态：真正的表格 + 表头，行内没有任何输入框，openid 只显示脱敏文本", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
 
-    const text = container.textContent ?? "";
+    const table = accessTable("允许的用户");
+    // 真正的表格语义：三个 columnheader，操作列在最后。
+    const headers = [...table.querySelectorAll("th")];
+    expect(headers.map((th) => th.textContent)).toEqual(["备注", "openid", "操作"]);
+    expect(headers.every((th) => th.getAttribute("scope") === "col")).toBe(true);
+
+    // 展示态没有任何输入框：备注与脱敏 id 都是纯文本。
+    expect(table.querySelectorAll("input")).toHaveLength(0);
+    const text = table.textContent ?? "";
+    expect(text).toContain("同事");
     expect(text).toContain("D754********8D11");
     expect(text).not.toContain(openid);
-    // 不是输入框：页面上没有能直接改 openid 的字段。
-    expect(container.querySelector("input[aria-label='允许的用户 1']")).toBeNull();
+    // 完整 openid 连 title 属性里都不出现（只有脱敏串可作 title）。
+    expect(table.innerHTML).not.toContain(openid);
 
-    const note = container.querySelector<HTMLInputElement>(
-      "input[aria-label='允许的用户 1 的备注']",
-    )!;
-    expect(note.value).toBe("同事");
-
-    act(() => note.focus());
-    setInput(note, "运维同事");
-    act(() => note.blur());
-    expect(onChange).toHaveBeenCalledWith({
-      allowedUsers: [{ openid, note: "运维同事" }],
-    });
+    // 操作列两个图标按钮，可访问名带实体名。
+    expect(rowButton(table, "编辑 同事")).toBeTruthy();
+    expect(rowButton(table, "删除 同事")).toBeTruthy();
   });
 
-  it("备注可以清空（写回不带 note 的条目）", () => {
+  it("备注为空时显示「未命名」占位，编辑按钮退回脱敏 id 作可访问名", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid }] }} />);
+
+    const table = accessTable("允许的用户");
+    expect(table.textContent).toContain("未命名");
+    expect(rowButton(table, "编辑 D754********8D11")).toBeTruthy();
+    expect(rowButton(table, "删除 D754********8D11")).toBeTruthy();
+  });
+
+  it("编辑：点铅笔进入行内编辑态，保存后落盘并回到展示态", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+    clickEdit("允许的用户", "同事");
 
-    const note = container.querySelector<HTMLInputElement>(
-      "input[aria-label='允许的用户 1 的备注']",
-    )!;
-    act(() => note.focus());
-    setInput(note, "");
-    act(() => note.blur());
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    expect(input.value).toBe("同事");
+    // 编辑态也只有备注一个输入框：openid 仍不可编辑。
+    expect(accessTable("允许的用户").querySelectorAll("input")).toHaveLength(1);
+
+    setInput(input, "  运维同事 ");
+    pressKey(input, "Enter");
+
+    expect(onChange).toHaveBeenLastCalledWith({ allowedUsers: [{ openid, note: "运维同事" }] });
+    const table = accessTable("允许的用户");
+    expect(table.querySelectorAll("input")).toHaveLength(0);
+    expect(table.textContent).toContain("运维同事");
+  });
+
+  it("编辑：Esc 取消不落盘；IME 组合中的 Enter 不算提交", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+    clickEdit("允许的用户", "同事");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+
+    setInput(input, "不该保存");
+    // IME 组合中的 Enter 是「确认候选词」，不能提交。
+    pressKey(input, "Enter", { isComposing: true });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(container.querySelector("input[aria-label='备注 同事']")).toBeTruthy();
+
+    pressKey(input, "Escape");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(container.querySelector("input[aria-label='备注 同事']")).toBeNull();
+    expect(accessTable("允许的用户").textContent).toContain("同事");
+
+    // 行内「取消」按钮等价于 Esc：丢弃草稿、不落盘。
+    clickEdit("允许的用户", "同事");
+    const again = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    setInput(again, "取消掉");
+    act(() => rowButton(accessTable("允许的用户"), "取消").click());
+    expect(onChange).not.toHaveBeenCalled();
+    expect(accessTable("允许的用户").querySelectorAll("input")).toHaveLength(0);
+  });
+
+  it("编辑时清空备注：写回不带 note 的条目", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+    clickEdit("允许的用户", "同事");
+
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    setInput(input, "   ");
+    pressKey(input, "Enter");
     expect(onChange).toHaveBeenCalledWith({ allowedUsers: [{ openid }] });
   });
 
-  it("删除按钮仍可用", () => {
+  it("删除需要确认：确认前不落盘，确认后行消失并回到空态", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
 
-    const remove = container.querySelector<HTMLButtonElement>(
-      "button[aria-label='删除 允许的用户 1']",
+    clickDelete("允许的用户", "同事");
+    expect(onChange).not.toHaveBeenCalled();
+    const dialog = confirmDialog();
+    expect(dialog).toBeTruthy();
+    // 确认文案说明完整 id 无法从脱敏显示还原（误删不可恢复）。
+    expect(dialog!.textContent).toContain("无法恢复");
+    expect(dialog!.textContent).toContain("同事");
+
+    const confirm = [...dialog!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "删除",
     )!;
-    act(() => remove.click());
+    act(() => confirm.click());
     expect(onChange).toHaveBeenCalledWith({ allowedUsers: [] });
+
+    // Harness 回灌空列表：表格消失，只剩空态文案。
+    expect(container.querySelector("table[aria-label='允许的用户']")).toBeNull();
+    expect(container.textContent).toContain("尚未添加条目");
+  });
+
+  it("空态：只显示「尚未添加条目」，不渲染空表头", () => {
+    render(<Harness />);
+    expect(container.querySelector("table[aria-label='允许的用户']")).toBeNull();
+    expect(container.querySelector("table[aria-label='允许的群']")).toBeNull();
+    expect(container.textContent).toContain("尚未添加条目");
+    expect(container.textContent).not.toContain("操作");
+  });
+
+  it("窄屏：操作列固定宽度，备注与脱敏 id 截断，图标按钮不被挤出视口", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "很长的备注".repeat(8) }] }} />);
+
+    const table = accessTable("允许的用户");
+    // table-fixed：列宽由表头决定，内容再长也不会把表格撑得横向溢出。
+    expect(table.className).toContain("table-fixed");
+    expect(table.className).toContain("w-full");
+    const opHeader = [...table.querySelectorAll("th")][2]!;
+    expect(opHeader.className).toContain("w-16");
+    expect(opHeader.className).toContain("text-right");
+
+    // 两个图标按钮自带 shrink-0（kit IconButton 基类），不会被压缩或推出。
+    const buttons = [...table.querySelectorAll("button")];
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) expect(button.className).toContain("shrink-0");
+
+    // 备注与脱敏 id 都用 truncate + title 兜全文（320px 宽也不会撑破）。
+    const note = table.querySelector<HTMLElement>("tbody tr td span")!;
+    expect(note.className).toContain("truncate");
+    expect(note.getAttribute("title")).toBe("很长的备注".repeat(8));
+    const masked = table.querySelector<HTMLElement>("tbody tr td:nth-child(2) span")!;
+    expect(masked.className).toContain("truncate");
+    expect(masked.getAttribute("title")).toBe("D754********8D11");
   });
 
   it("portals the execution-policy menu out of the clipping settings card", () => {
@@ -409,7 +542,7 @@ describe("QqSettings", () => {
     expect(alertText()).toContain("已在名单中");
   });
 
-  it("群条目同样带备注：可修改、可清空，且不牵连用户列表", () => {
+  it("群条目同构：列头是「群号」，备注可编辑，且不牵连用户列表", () => {
     const group = "12345678";
     const user = "D754D2240C503C2ABE2B236DC1E78D11";
     render(
@@ -421,37 +554,26 @@ describe("QqSettings", () => {
       />,
     );
 
-    const groupNote = container.querySelector<HTMLInputElement>(
-      "input[aria-label='允许的群 1 的备注']",
-    )!;
-    expect(groupNote.value).toBe("测试群");
+    const table = accessTable("允许的群");
+    // 与用户表完全同构，只是第二列表头是「群号」。
+    expect([...table.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
+      "备注",
+      "群号",
+      "操作",
+    ]);
+    // 备注列在脱敏 id 之前：8 位群号脱敏后恒为纯星号，备注才是唯一可辨识信息。
+    const cells = [...table.querySelectorAll<HTMLElement>("tbody tr td")];
+    expect(cells[0]?.textContent).toContain("测试群");
+    expect(cells[1]?.textContent).toBe("********");
 
-    // 8 位群号脱敏后恒为纯星号，多条群在 id 上完全无法区分：备注必须排在
-    // 脱敏 id 之前（备注是唯一可辨识信息）。
-    const row = groupNote.parentElement!;
-    const masked = [...row.querySelectorAll("span")].find((span) =>
-      (span.textContent ?? "").includes("********"),
-    )!;
-    expect(masked.textContent).toBe("********");
-    expect(
-      groupNote.compareDocumentPosition(masked) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-
-    act(() => groupNote.focus());
-    setInput(groupNote, " 运营群 ");
-    act(() => groupNote.blur());
+    clickEdit("允许的群", "测试群");
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='备注 测试群']")!;
+    expect(note.value).toBe("测试群");
+    setInput(note, " 运营群 ");
+    pressKey(note, "Enter");
     expect(onChange).toHaveBeenLastCalledWith({
       allowedGroups: [{ openid: group, note: "运营群" }],
     });
-
-    const cleared = container.querySelector<HTMLInputElement>(
-      "input[aria-label='允许的群 1 的备注']",
-    )!;
-    act(() => cleared.focus());
-    setInput(cleared, "");
-    act(() => cleared.blur());
-    // 清空备注：写回不带 note 的条目。
-    expect(onChange).toHaveBeenLastCalledWith({ allowedGroups: [{ openid: group }] });
 
     // 每次补丁都只带群列表：用户列表（含备注）不被牵连。
     for (const call of onChange.mock.calls) {
@@ -459,25 +581,26 @@ describe("QqSettings", () => {
     }
   });
 
-  it("新增群条目后可继续填写备注", () => {
+  it("添加群：可在同一编辑行填写备注，一起落盘", () => {
     const openid = "12345678";
     render(<Harness />);
 
     clickText("添加群");
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
-    setInput(input, openid);
-    act(() => {
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    });
-    expect(onChange).toHaveBeenLastCalledWith({ allowedGroups: [{ openid }] });
-
-    const note = container.querySelector<HTMLInputElement>("input[aria-label='允许的群 1 的备注']")!;
-    act(() => note.focus());
+    // 添加行插在表格末尾：表头先出现（空态文案让位给表格）。
+    expect(accessTable("允许的群").querySelectorAll("thead th")).toHaveLength(3);
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='新群的备注']")!;
+    const id = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
     setInput(note, "测试群");
-    act(() => note.blur());
-    expect(onChange).toHaveBeenLastCalledWith({
-      allowedGroups: [{ openid, note: "测试群" }],
-    });
+    setInput(id, openid);
+    pressKey(id, "Enter");
+
+    expect(onChange).toHaveBeenLastCalledWith({ allowedGroups: [{ openid, note: "测试群" }] });
+
+    // 回灌后回到展示态：没有任何输入框，备注与脱敏群号各就各位。
+    const table = accessTable("允许的群");
+    expect(table.querySelectorAll("input")).toHaveLength(0);
+    expect(table.textContent).toContain("测试群");
+    expect(table.textContent).toContain("********");
   });
 
   it("paints warnings in the warning tone, never primary", () => {
@@ -644,13 +767,12 @@ describe("QqSettings", () => {
       );
     }
     render(<IoHarness />);
-    const note = container.querySelector<HTMLInputElement>(
-      "input[aria-label='允许的用户 2 的备注']",
-    )!;
+    // 展示态没有输入框：点第二条（备注「同事」）的铅笔进入行内编辑。
+    clickEdit("允许的用户", "同事");
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
     expect(note.value).toBe("同事");
-    act(() => note.focus());
     setInput(note, "运维同事");
-    act(() => note.blur());
+    pressKey(note, "Enter");
 
     const calls = onChange.mock.calls;
     const patch = calls[calls.length - 1]![0] as QqSettingsPatch;
@@ -704,11 +826,11 @@ describe("QqSettings", () => {
       );
     }
     render(<IoHarness />);
-    const note = container.querySelector<HTMLInputElement>("input[aria-label='允许的群 2 的备注']")!;
+    clickEdit("允许的群", "测试群");
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='备注 测试群']")!;
     expect(note.value).toBe("测试群");
-    act(() => note.focus());
     setInput(note, "运营群");
-    act(() => note.blur());
+    pressKey(note, "Enter");
 
     const calls = onChange.mock.calls;
     const patch = calls[calls.length - 1]![0] as QqSettingsPatch;
