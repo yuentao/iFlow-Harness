@@ -447,4 +447,83 @@ describe("Super Agent · 结构化工具调用兜底", () => {
       p.autoApproveSuperAgentTool(permissionRequest({ toolName: "super-agent-guard" })),
     ).toBeNull();
   });
+
+  // --- 参数纠错闭环：工具层报错 + 宿主 hidden prompt 引导重派 -----------------
+
+  /** 取出发给主会话的 super-agent 参数纠错提示（hidden prompt）。 */
+  function correctionPrompts(): Array<{ text: string; options: Record<string, unknown> | undefined }> {
+    const mock = p.sendPrompt as unknown as { mock: { calls: unknown[][] } };
+    return mock.mock.calls
+      .filter((call) => {
+        const options = call[4] as Record<string, unknown> | undefined;
+        return (
+          options?.hidden === true &&
+          typeof call[0] === "string" &&
+          call[0].includes("[super-agent tool call rejected]")
+        );
+      })
+      .map((call) => ({
+        text: String(call[0]),
+        options: call[4] as Record<string, unknown> | undefined,
+      }));
+  }
+
+  it("畸形调用：入队一条 hidden 纠错提示（含原因与正确格式，不回贴畸形原文）", async () => {
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        status: "in_progress",
+        args: { tasks: [{ title: "坏任务", task: 5 }] },
+      }),
+    });
+
+    await waitFor(() => correctionPrompts().length > 0);
+    const prompts = correctionPrompts();
+    expect(prompts).toHaveLength(1);
+    const text = prompts[0]!.text;
+    // 正确格式示例（模型可直接照抄）。
+    expect(text).toContain('{"tasks":[{"title":"short title","task":"self-contained brief"}]}');
+    // 明确的修正指令 + 具体到字段的原因。
+    expect(text).toContain("请修正后重新调用 super-agent");
+    expect(text).toMatch(/task/);
+    // 畸形原文绝不回贴（否则既费 token 又可能诱导模型照抄）。
+    expect(text).not.toContain('"task":5');
+    expect(text).not.toContain("坏任务");
+    // 纠错回合禁止被派发成子会话（delegateOnBusy: false）。
+    expect(prompts[0]!.options).toMatchObject({ hidden: true, delegateOnBusy: false });
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("同一轮最多 2 条纠错提示：第 3 次畸形调用只留 toast，不再入队", async () => {
+    for (let i = 0; i < 3; i += 1) {
+      p.onSessionUpdate({
+        sessionId: "tool-session",
+        update: frame({
+          toolCallId: `tc-bad-${i}`,
+          status: "in_progress",
+          args: { tasks: [{ task: 42 }] },
+        }),
+      });
+    }
+
+    await waitFor(() => correctionPrompts().length >= 2);
+    await flush();
+    expect(correctionPrompts()).toHaveLength(2);
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("正常派发不产生纠错提示", async () => {
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        status: "in_progress",
+        args: { tasks: [{ title: "正常任务", task: "把这件事做完" }] },
+      }),
+    });
+
+    await flush();
+    await flush();
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(correctionPrompts()).toHaveLength(0);
+  });
 });
