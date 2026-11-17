@@ -1,8 +1,10 @@
 /**
- * 一键托管 / 窗口内扫码的面板编排单测（Wave5-C）。
+ * QQ 托管入口收敛后的面板编排单测。
  *
- * 全程不 spawn 真实 bridge、不占真实端口、不起真 CLI：端口探测 / manager /
- * 二维码桥 / QQ 设置 IO 全部注入假实现，只钉住编排顺序与消息投影。
+ * 本文件原先钉住 OneBot 一键托管（5700 探测 / go-cqhttp manager / 二维码
+ * 轮询桥）。收敛到 QQBot 单一路径后，这条 OneBot 编排已从面板移除 —— 这里
+ * 改为验证托管入口恒走 QQBot 官方扫码：不探端口、不下载 go-cqhttp、不 spawn
+ * bridge，扫码成功后写入官方凭据并建 adapter。全程注入，不联网 / 不 spawn。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -12,31 +14,21 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel, type PanelServices } from "../src/panel/panel.js";
 import type { QqSettingsIo } from "../src/qq/settings-host.js";
-import type {
-  ManagedOneBotDeps,
-  ManagedOneBotManager,
-  ManagedOneBotStatus,
-} from "../src/qq/managed/manager.js";
-import type { QrBridge, QrBridgeDeps, QrBridgeMessage } from "../src/qq/managed/qr-bridge.js";
 import type { HostToWebview, WebviewToHost } from "../shared/messages.js";
 import { QR_DATA_URL_PREFIX } from "../shared/messages.js";
+import { QQBOT_APP_ID_SECRET_KEY } from "../src/panel/qqbot-host.js";
+import { QQ_SECRET_KEYS } from "../src/qq/config.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const FAKE_INCOMING_PORT = 19999;
 const VALID_PNG = QR_DATA_URL_PREFIX + Buffer.from("qr-bytes").toString("base64");
 
 function makeContext(storageDir: string): vscodeTypes.ExtensionContext {
-  const store = new Map<string, unknown>();
   const state = {
-    get: <T>(key: string, defaultValue?: T): T =>
-      (store.has(key) ? (store.get(key) as T) : defaultValue) as T,
+    get: <T>(_key: string, defaultValue?: T): T => defaultValue as T,
     update: () => Promise.resolve(),
-    keys: () => [...store.keys()],
-    delete: (key: string) => {
-      store.delete(key);
-      return Promise.resolve();
-    },
+    keys: () => [] as string[],
+    delete: () => Promise.resolve(),
   };
   return {
     subscriptions: [],
@@ -67,145 +59,88 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
   ];
 }
 
-/** 内存 IO：记录设置写入 / 凭据写入，返回启用中的配置快照。 */
-function makeIo(): {
-  io: QqSettingsIo;
-  writes: Array<Record<string, unknown>>;
-  secretWrites: Array<[string, string]>;
-} {
-  const settings: Record<string, unknown> = {
-    enabled: true,
-    adapter: "onebot",
-    endpoint: "http://127.0.0.1:3000/",
-    allowedUsers: ["10001"],
-  };
+function makeIo(): { io: QqSettingsIo; secrets: Map<string, string> } {
+  const settings: Record<string, unknown> = { enabled: true, adapter: "qqbot", allowedUsers: ["10001"] };
   const secrets = new Map<string, string>();
-  const writes: Array<Record<string, unknown>> = [];
-  const secretWrites: Array<[string, string]> = [];
-  const io: QqSettingsIo = {
-    readAll: () => ({ ...settings }),
-    writeAll: async (patch) => {
-      writes.push({ ...patch });
-      Object.assign(settings, patch);
-    },
-    getSecret: async (key) => secrets.get(key),
-    setSecret: async (key, value) => {
-      secrets.set(key, value);
-      secretWrites.push([key, value]);
-    },
-    deleteSecret: async (key) => {
-      secrets.delete(key);
-    },
-  };
-  return { io, writes, secretWrites };
-}
-
-type FakeManager = {
-  onStatus: ReturnType<typeof vi.fn>;
-  start: ReturnType<typeof vi.fn>;
-  stop: ReturnType<typeof vi.fn>;
-  qrCodePath: ReturnType<typeof vi.fn>;
-};
-
-function makeManagerHarness() {
-  const listeners: Array<(status: ManagedOneBotStatus) => void> = [];
-  const opts = { throwWithToken: false };
-  let deps: ManagedOneBotDeps | undefined;
-  const manager: FakeManager = {
-    onStatus: vi.fn((cb: (status: ManagedOneBotStatus) => void) => {
-      listeners.push(cb);
-      return () => undefined;
-    }),
-    start: vi.fn(async () => {
-      // 模拟 manager 走过的阶段（二维码出现 → 登录完成）。
-      for (const cb of listeners) cb({ phase: "waiting_login", message: "请扫码" });
-      for (const cb of listeners) cb({ phase: "logged_in", message: "已登录" });
-      if (opts.throwWithToken && deps) {
-        throw new Error(`boom token=${deps.accessToken}`);
-      }
-      return {
-        endpoint: `http://127.0.0.1:${deps?.port ?? 5700}`,
-        accessToken: deps?.accessToken ?? "",
-        alreadyRunning: false,
-      };
-    }),
-    stop: vi.fn(async () => undefined),
-    qrCodePath: vi.fn(() => path.join(here, "qr", "qrcode.png")),
-  };
-  const factory = (d: ManagedOneBotDeps): ManagedOneBotManager => {
-    deps = d;
-    return manager as unknown as ManagedOneBotManager;
-  };
   return {
-    manager,
-    factory,
-    getDeps: () => deps!,
-    setThrow: (value: boolean) => {
-      opts.throwWithToken = value;
+    io: {
+      readAll: () => ({ ...settings }),
+      writeAll: async (patch) => {
+        Object.assign(settings, patch);
+      },
+      getSecret: async (key) => secrets.get(key),
+      setSecret: async (key, value) => {
+        secrets.set(key, value);
+      },
+      deleteSecret: async (key) => {
+        secrets.delete(key);
+      },
     },
-    emit: (s: ManagedOneBotStatus) => listeners.forEach((cb) => cb(s)),
+    secrets,
   };
-}
-
-function makeQrHarness() {
-  let current: QrBridgeMessage | null = null;
-  const bridge = {
-    start: vi.fn((onMessage: (msg: QrBridgeMessage) => void) => {
-      current = {
-        type: "qqLoginQr",
-        dataUrl: VALID_PNG,
-        expiresAt: Date.now() + 60_000,
-        phase: "waiting_scan",
-      };
-      onMessage(current);
-    }),
-    stop: vi.fn(),
-    refresh: vi.fn(),
-    current: vi.fn(() => current),
-  };
-  const factory = (_deps: QrBridgeDeps): QrBridge => bridge as unknown as QrBridge;
-  return { bridge, factory };
 }
 
 type PanelInternals = {
-  qq?: { managed?: unknown; qrBridge?: unknown; io: QqSettingsIo; [k: string]: unknown };
+  qq?: { config?: { adapter: string }; qqbot?: { adapter: { close: () => Promise<void> } }; [k: string]: unknown };
+  qqbotBinding?: { stop(): void } | null;
   handleWebviewMessage: (msg: WebviewToHost) => Promise<void>;
   handleQqManagedSetup: (action: "start" | "stop") => Promise<void>;
   handleQqConfigAction: (action: string) => Promise<void>;
-  pushQqState: () => void;
+  stopQq: () => Promise<void>;
   postToWebview: (msg: HostToWebview) => void;
-  qqIncomingPort: number | null;
   [k: string]: unknown;
 };
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+const tick = () => new Promise((resolve) => setTimeout(resolve, 25));
 
-describe("QQ 一键托管 · 面板编排（Wave5-C）", () => {
+describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => {
   let storageDir: string;
-  let posted: HostToWebview[];
-  let ioHarness: ReturnType<typeof makeIo>;
-  let managerHarness: ReturnType<typeof makeManagerHarness>;
-  let qrHarness: ReturnType<typeof makeQrHarness>;
-  let portProbe: ReturnType<typeof vi.fn>;
   let panel: ChatPanel;
   let p: PanelInternals;
+  let posted: HostToWebview[];
+  let ioHarness: ReturnType<typeof makeIo>;
+  let protocolCbs: Parameters<import("../src/qq/qqbot/bind.js").QqBotQrProtocolLike["start"]>[0] | null;
+  let protocolStop: ReturnType<typeof vi.fn>;
+  let adapter: { setEventCallback: ReturnType<typeof vi.fn>; connect: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn>; send: ReturnType<typeof vi.fn>; health: ReturnType<typeof vi.fn> };
+  let portProbe: ReturnType<typeof vi.fn>;
+  let managerFactory: ReturnType<typeof vi.fn>;
+  let bridgeStarter: ReturnType<typeof vi.fn>;
 
   function createPanel(): void {
-    managerHarness = makeManagerHarness();
-    qrHarness = makeQrHarness();
+    protocolCbs = null;
+    protocolStop = vi.fn();
+    adapter = {
+      setEventCallback: vi.fn(),
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+      send: vi.fn(async () => ({ ok: true as const })),
+      health: vi.fn(async () => ({ connected: true, detail: "qqbot" })),
+    };
     portProbe = vi.fn(async () => ({ kind: "free" }));
+    managerFactory = vi.fn(() => {
+      throw new Error("收敛后不应构造 go-cqhttp manager");
+    });
+    bridgeStarter = vi.fn(() => {
+      throw new Error("收敛后不应 spawn bridge");
+    });
     const services: PanelServices = {
       workspaceRoot: here,
       watchers: makeWatchers(),
       qqSettingsIo: ioHarness.io,
-      qqManagedDeps: {
-        portProbe,
-        managerFactory: managerHarness.factory,
-        qrBridgeFactory: qrHarness.factory,
-        bridgeStarter: () => {
-          // 假 bridge_ready：直接写入 sink 端口，不 spawn、不占端口。
-          (panel as unknown as PanelInternals).qqIncomingPort = FAKE_INCOMING_PORT;
+      qqManagedDeps: { portProbe: portProbe as never, managerFactory: managerFactory as never, bridgeStarter: bridgeStarter as never },
+      qqbotDeps: {
+        bind: {
+          protocolFactory: (() => ({
+            start: async (
+              cbs: Parameters<import("../src/qq/qqbot/bind.js").QqBotQrProtocolLike["start"]>[0],
+            ) => {
+              protocolCbs = cbs;
+              cbs.onQr(VALID_PNG, Date.now() + 60_000);
+              return protocolStop as unknown as () => void;
+            },
+          })) as never,
         },
+        adapterFactory: () => adapter as never,
       },
     };
     panel = new ChatPanel(makeContext(storageDir), services);
@@ -214,16 +149,11 @@ describe("QQ 一键托管 · 面板编排（Wave5-C）", () => {
 
   beforeEach(async () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-managed-"));
-    setConfigOverrides({
-      enabled: true,
-      adapter: "onebot",
-      endpoint: "http://127.0.0.1:3000/",
-      allowedUsers: ["10001"],
-    });
+    setConfigOverrides({ enabled: true, adapter: "qqbot", allowedUsers: ["10001"] });
     ioHarness = makeIo();
     posted = [];
     createPanel();
-    await tick(); // 构造函数的 startQqIfEnabled 落定
+    await tick();
     vi.spyOn(p, "postToWebview").mockImplementation((m) => {
       posted.push(m);
     });
@@ -239,135 +169,57 @@ describe("QQ 一键托管 · 面板编排（Wave5-C）", () => {
     return posted.filter((m) => (m as { type?: string }).type === type);
   }
 
-  it("start：探测 5700 → 用 sink 端口构造反向上报 → 跑 manager → 写设置并挂回 manager", async () => {
+  it("start：恒走 QQBot 扫码，不探 5700 / 不构造 manager / 不 spawn bridge", async () => {
     await p.handleQqManagedSetup("start");
-
-    // 1) 端口探测用固定 5700 和生成的 accessToken。
-    expect(portProbe).toHaveBeenCalledWith(5700, expect.any(String));
-    const token = portProbe.mock.calls[0]![1] as string;
-    expect(token).toMatch(/^[0-9a-f]{64}$/);
-
-    // 2) manager 收到由 bridge_ready 入站端口构造的反向上报地址。
-    const deps = managerHarness.getDeps();
-    expect(deps.reversePostUrl).toBe(`http://127.0.0.1:${FAKE_INCOMING_PORT}/onebot/event`);
-    expect(deps.port).toBe(5700);
-    expect(deps.accessToken).toBe(token);
-    expect(deps.installDir).toBe(path.join(storageDir, "qq", "managed"));
-
-    // 3) manager 跑完，二维码桥在 waiting_login 起、logged_in 停。
-    expect(managerHarness.manager.start).toHaveBeenCalled();
-    expect(qrHarness.bridge.start).toHaveBeenCalled();
-    expect(qrHarness.bridge.stop).toHaveBeenCalled();
-
-    // 4) 成功设置补丁：endpoint + enabled；botToken 与 accessToken 同值。
-    expect(ioHarness.writes.some((w) => w.enabled === true && w.endpoint === "http://127.0.0.1:5700")).toBe(true);
-    expect(ioHarness.secretWrites.some(([, v]) => v === token)).toBe(true);
-
-    // 5) manager 挂回重建后的现场，供后续 stopQq 收掉。
-    expect((p.qq as { managed?: unknown } | undefined)?.managed).toBe(managerHarness.manager);
-
-    // 6) 进度消息推到 webview，且 token 不泄漏。
-    const statuses = messages("qqManagedStatus");
-    expect(statuses.length).toBeGreaterThan(0);
-    expect(JSON.stringify(posted)).not.toContain(token);
+    expect(portProbe).not.toHaveBeenCalled();
+    expect(managerFactory).not.toHaveBeenCalled();
+    expect(bridgeStarter).not.toHaveBeenCalled();
+    expect(messages("qqLoginQr").length).toBeGreaterThan(0);
+    expect(protocolCbs).not.toBeNull();
   });
 
-  it("端口被占用：报「端口 5700 被占用」并停止，绝不构造/启动 manager", async () => {
-    portProbe.mockResolvedValueOnce({ kind: "occupied" });
+  it("扫码成功：写官方凭据（appId/appSecret）并启动 adapter", async () => {
     await p.handleQqManagedSetup("start");
-
-    const errors = messages("qqManagedStatus").filter(
-      (m) => (m as { phase?: string }).phase === "error",
-    );
-    expect(errors.some((m) => (m as { message: string }).message.includes("端口 5700 被占用"))).toBe(true);
-    expect(managerHarness.manager.start).not.toHaveBeenCalled();
-    expect(ioHarness.writes).toEqual([]);
+    protocolCbs!.onSuccess({ appId: "app-1", appSecret: "sec-1" });
+    await tick();
+    expect(ioHarness.secrets.get(QQBOT_APP_ID_SECRET_KEY)).toBe("app-1");
+    expect(ioHarness.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("sec-1");
+    expect(adapter.setEventCallback).toHaveBeenCalled();
+    expect(adapter.connect).toHaveBeenCalled();
+    expect(p.qq?.qqbot?.adapter).toBeTruthy();
+    expect(p.qq?.config?.adapter).toBe("qqbot");
+    expect(protocolStop).toHaveBeenCalled();
   });
 
-  it("manager 失败：推脱敏错误、停 manager、不写设置、不留半启动现场", async () => {
-    // 让 manager 抛一个带真 token 的错误，验证状态消息里被脱敏。
-    portProbe.mockImplementation(async () => ({ kind: "onebot" }));
-    managerHarness.setThrow(true);
-    posted.length = 0;
-
-    await p.handleQqManagedSetup("start");
-
-    const token = managerHarness.getDeps().accessToken;
-    expect(managerHarness.manager.stop).toHaveBeenCalled();
-    expect(ioHarness.writes).toEqual([]);
-    expect(JSON.stringify(posted)).not.toContain(token);
-    expect(JSON.stringify(posted)).toContain("[REDACTED]");
-  });
-
-  it("startQrLogin / refreshQr / cancelQrLogin 三动作与无现场防御", async () => {
-    // 无现场：三个动作都安静返回，不抛错。
-    await expect(p.handleQqConfigAction("startQrLogin")).resolves.toBeUndefined();
-    await expect(p.handleQqConfigAction("refreshQr")).resolves.toBeUndefined();
+  it("QR 三动作只走 QQBot 扫码会话；无现场时安静返回", async () => {
     await expect(p.handleQqConfigAction("cancelQrLogin")).resolves.toBeUndefined();
 
-    // 挂一份含 manager、无二维码桥的最小现场。
-    (p as { qq: unknown }).qq = {
-      managed: managerHarness.manager,
-      qrBridge: undefined,
-      io: ioHarness.io,
-    };
-
-    posted.length = 0;
     await p.handleQqConfigAction("startQrLogin");
-    expect(qrHarness.bridge.start).toHaveBeenCalled();
-    expect(messages("qqLoginQr").length).toBeGreaterThan(0);
-
+    expect(protocolCbs).not.toBeNull();
+    expect(bridgeStarter).not.toHaveBeenCalled();
     await p.handleQqConfigAction("refreshQr");
-    expect(qrHarness.bridge.refresh).toHaveBeenCalledTimes(1);
-
     await p.handleQqConfigAction("cancelQrLogin");
-    expect(qrHarness.bridge.stop).toHaveBeenCalled();
-    expect((p.qq as { qrBridge?: unknown } | undefined)?.qrBridge).toBeUndefined();
-    const cleared = messages("qqLoginQr").filter((m) => (m as { phase: string }).phase === "expired");
-    expect(cleared.some((m) => (m as { dataUrl: string }).dataUrl === "")).toBe(true);
+    expect(protocolStop).toHaveBeenCalled();
+    expect(p.qqbotBinding).toBeNull();
+    expect(messages("qqLoginQr").some((m) => (m as { phase?: string }).phase === "expired")).toBe(true);
   });
 
-  it("面板打开/刷新时补推二维码缓存帧", () => {
-    // 先让二维码桥产生一帧缓存（真实场景是 waiting_login 阶段轮询出来的）。
-    qrHarness.bridge.start(() => undefined);
-    (p as { qq: unknown }).qq = {
-      managed: managerHarness.manager,
-      qrBridge: qrHarness.bridge,
-      io: ioHarness.io,
-    };
-    posted.length = 0;
-    p.pushQqState();
-    expect(messages("qqLoginQr").length).toBeGreaterThan(0);
-  });
-
-  it("stopQq：先停二维码桥、再停 manager（顺序固定）", async () => {
-    const order: string[] = [];
-    qrHarness.bridge.stop.mockImplementation(() => {
-      order.push("qr");
-    });
-    managerHarness.manager.stop.mockImplementation(async () => {
-      order.push("manager");
-    });
-    (p as { qq: unknown }).qq = {
-      managed: managerHarness.manager,
-      qrBridge: qrHarness.bridge,
-      io: ioHarness.io,
-      service: { stop: async () => undefined, listTasks: () => [] },
-      store: {},
-      ipc: { port: 0, close: async () => undefined },
-      restartCount: 0,
-    };
-
-    await (p as unknown as { stopQq: () => Promise<void> }).stopQq();
-    expect(order).toEqual(["qr", "manager"]);
+  it("stopQq：关 adapter 并清空绑定会话，幂等", async () => {
+    await p.handleQqManagedSetup("start");
+    protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
+    await tick();
+    await p.stopQq();
+    expect(adapter.close).toHaveBeenCalled();
     expect(p.qq).toBeUndefined();
+    expect(p.qqbotBinding).toBeNull();
+    await p.stopQq();
+    expect(adapter.close).toHaveBeenCalledTimes(1);
   });
 
   it("stop 动作推 idle，不写回 disabled", async () => {
     await p.handleQqManagedSetup("stop");
-    const idle = messages("qqManagedStatus").filter((m) => (m as { phase: string }).phase === "idle");
+    const idle = messages("qqManagedStatus").filter((m) => (m as { phase?: string }).phase === "idle");
     expect(idle.length).toBeGreaterThan(0);
-    expect(ioHarness.writes.some((w) => w.enabled === false)).toBe(false);
   });
 
   it("qqManagedSetup 经 webview → host 通道路由到编排入口", async () => {

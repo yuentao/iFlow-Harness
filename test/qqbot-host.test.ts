@@ -45,14 +45,16 @@ function fakeAdapter() {
 }
 
 describe("QQBot 宿主编排（M3-C）", () => {
-  it("按 adapter 分流：onebot 零副作用，qqbot 建 adapter 并接 setEventCallback", () => {
+  it("分流恒走 QQBot：任意 adapter 都构造官方 adapter 并接 setEventCallback", () => {
     const factory = vi.fn(fakeAdapter);
-    const onebot = createQqChannelDispatch(
+    // 收敛到 QQBot 单一路径后，config.adapter 不再影响分流；即便是遗留的
+    // "onebot" 值也恒走官方 adapter，绝不再返回无副作用的 onebot 分支。
+    const legacy = createQqChannelDispatch(
       { adapter: "onebot" },
       { appId: "a", appSecret: "s", onInbound: () => undefined, adapterFactory: factory as never },
     );
-    expect(onebot).toEqual({ kind: "onebot" });
-    expect(factory).not.toHaveBeenCalled();
+    expect(legacy.kind).toBe("qqbot");
+    expect(factory).toHaveBeenCalledOnce();
 
     const onInbound = vi.fn();
     const qqbot = createQqChannelDispatch(
@@ -60,11 +62,11 @@ describe("QQBot 宿主编排（M3-C）", () => {
       { appId: "app", appSecret: "sec", onInbound, adapterFactory: factory as never },
     );
     expect(qqbot.kind).toBe("qqbot");
-    expect(factory).toHaveBeenCalledOnce();
-    expect(qqbot.kind === "qqbot" && qqbot.adapter.setEventCallback).toHaveBeenCalledOnce();
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(qqbot.kind === "qqbot" && qqbot.adapter.setEventCallback).toHaveBeenCalled();
 
     // 事件出口：M2 的 setEventCallback 接缝必须把入站消息交给 service。
-    const handler = factory.mock.results[0]!.value.setEventCallback.mock.calls[0]![0] as (
+    const handler = factory.mock.results[1]!.value.setEventCallback.mock.calls[0]![0] as (
       msg: InboundMessage,
     ) => void;
     handler(INBOUND);

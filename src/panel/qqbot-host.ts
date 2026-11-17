@@ -2,9 +2,9 @@
  * QQBot 官方路线的宿主侧编排辅助（M3-C，纯逻辑 / 可注入 / 可单测）。
  *
  * 职责边界：
- *  - 把「按 config.adapter 分流」做成纯工厂：onebot 交给现有 bridge 路径，
- *    qqbot 构造官方 QqBotAdapter 并用 `setEventCallback` 把入站消息接进
- *    QqService.handleInboundMessage（M2 的事件出口就是这道接缝）。
+ *  - 把「构造 QQBot 官方通道」做成纯工厂：构造官方 QqBotAdapter 并用
+ *    `setEventCallback` 把入站消息接进 QqService.handleInboundMessage
+ *    （M2 的事件出口就是这道接缝）。已收敛到 QQBot 单一路径，无 onebot 分流。
  *  - 把「扫码绑定」的零件（协议 / 会话 / 回调 → webview 消息 / 凭据落盘）
  *    做成纯函数，panel 只负责调用与生命周期。
  *  - 本模块不 import vscode、不碰 panel 私有状态、不 spawn 进程。
@@ -19,7 +19,7 @@
  */
 
 import { deflateSync } from "node:zlib";
-import { isQrDataUrl } from "../../shared/messages.js";
+import { isQrDataUrl, type HostToWebview } from "../../shared/messages.js";
 import type { InboundMessage, OutboundMessage, SendResult } from "../qq/adapter/types.js";
 import { QQ_SECRET_KEYS } from "../qq/config.js";
 import { QqBotAdapter, type QqBotEventHandler } from "../qq/qqbot/adapter.js";
@@ -33,7 +33,45 @@ import { QqBotQrProtocol, createNodeCrypto, createNodeHttp, redactSecrets } from
 import type { QqBotCrypto, QqBotHttp } from "../qq/qqbot/protocol-client.js";
 import { createNodeQqBotTransport } from "../qq/qqbot/ws-transport.js";
 import type { QqServiceDeliverInput } from "../qq/service.js";
-import type { ManagedStatusMessage, QrLoginMessage } from "./qq-managed-host.js";
+
+// ---------------------------------------------------------------------------
+// webview 消息形状与阶段映射（自 qq-managed-host 迁入；QQBot 单一路径不再
+// 依赖 OneBot 托管模块。原模块保留这些定义的副本供其自身测试，下一阶段随
+// OneBot 死代码一起删除。）
+// ---------------------------------------------------------------------------
+
+/** HostToWebview 的托管进度消息形状（从协议取，避免两侧漂移）。 */
+export type ManagedStatusMessage = Extract<HostToWebview, { type: "qqManagedStatus" }>;
+/** HostToWebview 的扫码消息形状。 */
+export type QrLoginMessage = Extract<HostToWebview, { type: "qqLoginQr" }>;
+
+/** 去掉文本里所有 token 出现（manager 已脱敏，这里再兜一层）。 */
+function redactManagedToken(text: string, token: string | undefined): string {
+  if (!token) return text;
+  return text.split(token).join("[REDACTED]");
+}
+
+/**
+ * manager 阶段快照 → qqManagedStatus 消息。
+ * phase 直接透传；message 过 token 脱敏；progress 仅在数值时携带。
+ */
+export function toManagedStatusMessage(
+  status: { phase: ManagedStatusMessage["phase"]; message: string; progress?: number },
+  token?: string,
+): ManagedStatusMessage {
+  const out: ManagedStatusMessage = {
+    type: "qqManagedStatus",
+    phase: status.phase,
+    message: redactManagedToken(status.message, token),
+  };
+  if (typeof status.progress === "number") out.progress = status.progress;
+  return out;
+}
+
+/** 取消扫码 / 登录结束后的清屏帧（dataUrl 空、phase=expired）。 */
+export function buildClearedQrMessage(now: number): QrLoginMessage {
+  return { type: "qqLoginQr", dataUrl: "", expiresAt: now, phase: "expired" };
+}
 
 // ---------------------------------------------------------------------------
 // 凭据存储
@@ -89,10 +127,13 @@ export async function readQqBotCredentials(
 // adapter 分流 / 出站
 // ---------------------------------------------------------------------------
 
-/** 分流结果：onebot 走现有 bridge；qqbot 持一条官方 adapter 连接。 */
-export type QqChannelDispatch =
-  | { kind: "onebot" }
-  | { kind: "qqbot"; adapter: QqBotAdapter };
+/**
+ * 分流结果：单一路径恒走 QQBot 官方 adapter。
+ *
+ * 保留 `kind` 判别字段是为了兼容既有调用点（panel 侧曾按 kind 分支），
+ * 收敛到 QQBot 单一路径后它恒为 `"qqbot"`。
+ */
+export type QqChannelDispatch = { kind: "qqbot"; adapter: QqBotAdapter };
 
 /** QqBotAdapter 鸭子类型（便于测试注入假实现）。 */
 export type QqBotAdapterLike = QqBotAdapter;
@@ -118,17 +159,16 @@ export interface QqChannelDispatchDeps {
 }
 
 /**
- * 按 config.adapter 分流。
+ * 构造 QQBot 官方 adapter 通道（QQBot 单一路径）。
  *
- * onebot 分支**零副作用**（panel 继续走 IPC + bridge 原路径）；qqbot 分支
- * 构造官方 adapter 并立刻用 `setEventCallback` 接上入站出口 —— 这是 M2 唯一
+ * 保留 `config` 入参仅为兼容既有调用点签名，不再按 config.adapter 分流。
+ * 构造出 adapter 后立刻用 `setEventCallback` 接上入站出口 —— 这是 M2 唯一
  * 的事件接缝，不能改用轮询或旁路调用。
  */
 export function createQqChannelDispatch(
-  config: { adapter: string },
+  _config: { adapter: string },
   deps: QqChannelDispatchDeps,
 ): QqChannelDispatch {
-  if (config.adapter !== "qqbot") return { kind: "onebot" };
   const transport = deps.transport ?? createNodeQqBotTransport();
   const args: QqBotAdapterFactoryDeps = {
     appId: deps.appId,

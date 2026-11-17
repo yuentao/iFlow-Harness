@@ -7,8 +7,8 @@ import * as vscode from "vscode";
 import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
-import { execFile as execFileCb, spawn, type ChildProcess } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { execFile as execFileCb } from "node:child_process";
+import { createHash } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -205,8 +205,6 @@ import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.j
 import { WireRingBuffer } from "./wire-log.js";
 import { QqService, type QqTaskAction } from "../qq/service.js";
 import { QqTaskStore } from "../qq/store.js";
-import { createQqIpcServer, type QqIpcHandlers } from "../qq/ipc.js";
-import { createBridgeDeliveryClient, type BridgeDeliveryClient } from "../qq/bridge-client.js";
 import {
   createQqServiceHost,
   QQ_DEFAULT_SETTLE_TIMEOUT_MS,
@@ -217,16 +215,13 @@ import {
 import {
   applyQqSettingsPatch,
   createVscodeQqSettingsIo,
-  ensureBridgeSecrets,
   readQqSettings,
   writeQqSecrets,
   type QqSettingsIo,
 } from "../qq/settings-host.js";
 import {
-  buildBridgeEnv,
   checkQqStartupGate,
   normalizeQqConfig,
-  QQ_SECRET_KEYS,
   validateQqConfig,
   type QqConfig,
 } from "../qq/config.js";
@@ -237,23 +232,12 @@ import {
   QQ_SETTLE_POLL_MS,
   shouldRestartOnPatch,
 } from "../qq/wiring.js";
-import { ManagedOneBotManager, type ManagedOneBotDeps, type ManagedOneBotStatus } from "../qq/managed/manager.js";
-import { QrBridge, type QrBridgeDeps, type QrBridgeMessage } from "../qq/managed/qr-bridge.js";
-import {
-  QQ_MANAGED_ONEBOT_PORT,
-  buildClearedQrMessage,
-  buildManagedEndpoint,
-  buildManagedSettingsUpdate,
-  buildReversePostUrl,
-  managedInstallDir,
-  probeManagedPort,
-  qrBridgeActiveForPhase,
-  sanitizeQrMessage,
-  toManagedStatusMessage,
-  type ManagedPortProbe,
-} from "./qq-managed-host.js";
+import type { ManagedOneBotDeps, ManagedOneBotManager } from "../qq/managed/manager.js";
+import type { QrBridge, QrBridgeDeps } from "../qq/managed/qr-bridge.js";
+import type { ManagedPortProbe } from "./qq-managed-host.js";
 import type { InboundMessage } from "../qq/adapter/types.js";
 import {
+  buildClearedQrMessage,
   createQqBotBindRuntime,
   createQqChannelDispatch,
   deliverViaQqBotAdapter,
@@ -263,6 +247,7 @@ import {
   readQqBotCredentials,
   sanitizeQrLoginMessage,
   storeQqBotCredentials,
+  toManagedStatusMessage,
   type QqBotAdapterLike,
   type QqBotBindRuntimeDeps,
   type QqChannelDispatchDeps,
@@ -847,16 +832,9 @@ export interface PanelServices {
  * it at their checkpoints so a destroyed store is never touched again.
  */
 /**
- * QQ bridge 的自动重启上限与退避阶梯（宿主 §B2b 第 4 条）。
- *
- * bridge 是独立进程：它崩了不代表配置错了，重试有价值；但连续三次都起不来
- * 基本就是配置/端口问题，继续重起只会刷屏，所以到此为止并如实 toast。
- * 一旦 `bridge_ready` 成功，`restartCount` 归零 —— 阶梯按「失败连跑」计，而不是
- * 按进程一生计。
+ * QQ 通道单项收尾上限：关面板不能被一个卡住的 adapter/socket 拖死。
+ * （OneBot bridge 的重启上限与退避阶梯已随收敛移除。）
  */
-const QQ_BRIDGE_MAX_RESTARTS = 3;
-const QQ_BRIDGE_RESTART_DELAYS_MS = [2_000, 5_000, 10_000] as const;
-/** stopQq 的单项上限：关面板不能被一个卡住的 socket 拖死。 */
 const QQ_BRIDGE_STOP_TIMEOUT_MS = 2_000;
 /** 设置改动 → 重启 QQ 服务的防抖窗口（settings.json 一次编辑会触发多帧）。 */
 const QQ_SETTINGS_RESTART_DEBOUNCE_MS = 500;
@@ -912,55 +890,36 @@ export class ChatPanel implements vscode.Disposable {
    */
   private superAgent: SuperAgentManager | null = null;
   /**
-   * QQ 远程任务通道（Wave3-B2b）的运行期现场。
+   * QQ 远程任务通道的运行期现场（QQBot 单一路径）。
    *
-   * 一段式记录：服务、任务落盘、宿主侧 IPC、bridge 子进程、投递客户端、
-   * 启动时的配置快照、设置 IO 与一个一次性配对码。它是**唯一**的「通道是否
-   * 在跑」判据 —— 所有入口（IPC 事件、webview 消息、设置监听）都以
+   * 现场 = QqService + 任务落盘 + 启动时的配置快照 + 设置 IO + 官方 adapter
+   * （+ 一次性配对码）。它是**唯一**的「通道是否在跑」判据 —— 所有入口都以
    * `this.qq` 是否存在为闸门，没有任何入口能在半初始化状态下继续。
    *
    * `config` 与 QqService 内部持有的是**同一个对象**：非连接类字段（白名单 /
-   * 策略 / 并发 / 限流 / 详略 / 自动合并）由面板就地热更新，改完即时生效；
-   * 连接类字段（enabled / adapter / endpoint / bridgePort）必须重建服务，
-   * 判定见 `src/qq/wiring.ts` 的 `shouldRestartOnPatch`。
+   * 策略 / 并发 / 限流 / 详略 / 自动合并）由面板就地热更新，改完即时生效。
+   * OneBot 的 IPC / bridge / go-cqhttp manager / 二维码轮询桥字段已随收敛移除。
    */
   private qq?: {
     service: QqService;
     store: QqTaskStore;
-    ipc: { port: number; close(): Promise<void> };
-    bridge?: ChildProcess;
-    delivery?: BridgeDeliveryClient;
     config: QqConfig;
     io: QqSettingsIo;
     bindCode?: { code: string; expiresAt: number };
-    restartCount: number;
-    /** 一键托管（Wave5-C）：托管实例管理器与二维码轮询桥，随这份现场一起生灭。 */
-    managed?: ManagedOneBotManager;
-    qrBridge?: QrBridge;
-    /** 托管安装期临时覆盖 bridge 的 OneBot token（不落盘，成功后才写 SecretStorage）。 */
-    onebotTokenOverride?: string;
     /** QQBot 官方路线：不 spawn bridge，直接持有 adapter + 扫码会话。 */
-    qqbot?: {
+    qqbot: {
       adapter: QqBotAdapterLike;
       /** 扫码会话在绑定成功后即停并清空，只在绑定进行中短驻留。 */
       bindSession?: { stop(): void };
     };
   };
-  /** 主动停止中：bridge 的 exit 事件不得触发自动重启。 */
+  /** 主动停止中：防止与在飞的启停重叠。 */
   private qqStopping = false;
   /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
   private qqConnected = false;
   private qqLastDetail: string | null = null;
-  /** bridge 的投递端口（`bridge_ready` 上报；健康检查与诊断详情用）。 */
-  private qqDeliveryPort: number | null = null;
-  /** bridge 的入站端口（`bridge_ready` 上报；OneBot 反向上报地址用它构造）。 */
-  private qqIncomingPort: number | null = null;
-  /** 等待 bridge_ready 入站端口的 waiter（托管 start 期间）。 */
-  private qqBridgeReadyWaiters: Array<(port: number) => void> = [];
   /** 设置变更 → 重启服务的防抖定时器。 */
   private qqRestartTimer: ReturnType<typeof setTimeout> | null = null;
-  /** bridge 崩溃后的重起定时器（与上面的「整服务重启」是两回事）。 */
-  private qqBridgeRestartTimer: ReturnType<typeof setTimeout> | null = null;
   /** 进行中的启动（并发调用 startQqIfEnabled 时共享同一份工作）。 */
   private qqStarting: Promise<void> | null = null;
   /**
@@ -8918,11 +8877,8 @@ export class ChatPanel implements vscode.Disposable {
 
     const roots = this.qqWorkspaceRoots();
     const allIssues = validateQqConfig(config, roots);
-    // endpoint 是 OneBot HTTP 地址；qqbot 走官方网关，不需要也不该要求它。
-    const issues =
-      config.adapter === "qqbot"
-        ? allIssues.filter((issue) => issue.code !== "endpoint_required")
-        : allIssues;
+    // QQBot 走官方网关，不需要也不该要求 OneBot endpoint。
+    const issues = allIssues.filter((issue) => issue.code !== "endpoint_required");
     for (const issue of issues) {
       const line = `QQ 配置${issue.severity === "error" ? "错误" : "提示"}（${issue.code}）：${issue.message}`;
       if (issue.severity === "error") this.log.warn(line);
@@ -8937,8 +8893,6 @@ export class ChatPanel implements vscode.Disposable {
     }
 
     // 硬门控：workspace 必须落在当前工作区根（远程任务由主仓 worktree 执行）。
-    // onebot / qqbot 都有真实适配器，不再因 adapter 种类拒绝；qqbot 走官方
-    // adapter（见 startQqBotChannel），不会启动 OneBot bridge。
     const gateIssues = checkQqStartupGate(config, this.superRepoRoot());
     if (gateIssues.length > 0) {
       const first = gateIssues[0]!;
@@ -8948,100 +8902,7 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
 
-    if (config.adapter === "qqbot") {
-      await this.startQqBotChannel(config, io, generation);
-      return;
-    }
-    const owner = await this.buildAndStartQqOwner(config, io, generation);
-    if (!owner) return;
-    this.pushQqStatus(false, "QQ bridge 正在启动");
-    this.refreshQqTasks();
-    this.log.info(`QQ 通道已启动（adapter=${config.adapter}）`);
-  }
-
-  /**
-   * 建一份 QQ 运行现场（IPC → 服务 → bridge），并挂到 `this.qq`。
-   *
-   * 常规启动（doStartQq）与一键托管（ensureQqBridgeForManaged）共用这段，
-   * 避免把 IPC 监听 + spawn bridge 的零件写两遍。返回 null 表示被停用 /
-   * 重启 / 面板销毁打断（现场已自拆），抛错表示真实启动失败（已自拆）。
-   */
-  private async buildAndStartQqOwner(
-    config: QqConfig,
-    io: QqSettingsIo,
-    generation: number,
-    overrides?: Pick<NonNullable<ChatPanel["qq"]>, "onebotTokenOverride">,
-  ): Promise<NonNullable<ChatPanel["qq"]> | null> {
-    const secrets = await ensureBridgeSecrets(io);
-    const root = path.join(
-      this.context.storageUri?.fsPath ?? this.context.globalStorageUri.fsPath,
-      "qq",
-    );
-    const taskStore = new QqTaskStore(root);
-    const service = new QqService({
-      config,
-      store: taskStore,
-      host: createQqServiceHost(this.createQqHostPorts()),
-      log: (line) => this.log.info(line),
-    });
-    const startedAt = Date.now();
-    const handlers: QqIpcHandlers = {
-      onEvents: async (body) => this.handleQqIpcEvent(body),
-      // bridge 的投递回执通道：当前桥只回 204，没有可消费的数据。
-      onDeliver: async () => ({ ok: true }),
-      onTaskAction: async (taskId, body) => this.handleQqIpcTaskAction(taskId, body),
-      onHealth: async () => ({
-        ok: true,
-        uptimeMs: Date.now() - startedAt,
-        deliveryPort: this.qqDeliveryPort,
-      }),
-    };
-    const ipc = await createQqIpcServer({
-      port: 0,
-      token: secrets.bridgeToken,
-      hmacSecret: secrets.hmacSecret,
-      handlers,
-    });
-    if (generation !== this.qqGeneration || this.disposed || this.qq) {
-      // 绑定 IPC 期间被停用 / 重启（或另一个启动已经装好现场）：这份监听
-      // 不能留，否则会占着一个没人认领的端口。
-      await this.raceQqTeardown(ipc.close());
-      await this.raceQqTeardown(service.stop());
-      return null;
-    }
-    // 先把现场挂上再 spawn bridge：bridge_ready 可能在 await 之间到达，
-    // 早一步赋值才接得住那一帧投递端口。
-    const owner: NonNullable<ChatPanel["qq"]> = {
-      service,
-      store: taskStore,
-      ipc,
-      config,
-      io,
-      restartCount: 0,
-      ...(overrides ?? {}),
-    };
-    this.qq = owner;
-    this.log.info(`QQ IPC 已监听 127.0.0.1:${ipc.port}`);
-    try {
-      await this.startQqBridge(owner);
-      // spawn / 服务启动都是 await：期间用户可能已经关掉通道或改了设置。
-      if (generation !== this.qqGeneration || this.disposed) {
-        if (this.qq === owner) this.qq = undefined;
-        await this.disposeQqOwner(owner);
-        return null;
-      }
-      await service.start();
-    } catch (error) {
-      if (this.qq === owner) this.qq = undefined;
-      await this.disposeQqOwner(owner);
-      throw error;
-    }
-    if (generation !== this.qqGeneration || this.disposed) {
-      if (this.qq === owner) this.qq = undefined;
-      await this.disposeQqOwner(owner);
-      return null;
-    }
-    return owner;
+    await this.startQqBotChannel(config, io, generation);
   }
 
   // --- QQBot 官方路线（M3-C）-----------------------------------------------
@@ -9095,16 +8956,11 @@ export class ChatPanel implements vscode.Disposable {
       ...(deps.adapterFactory ? { adapterFactory: deps.adapterFactory } : {}),
       ...(deps.gatewayUrl ? { gatewayUrl: deps.gatewayUrl } : {}),
     });
-    if (dispatch.kind !== "qqbot") return; // 防御：分流入口已判 adapter
-
-    // qqbot 没有 bridge / IPC：用无操作 ipc 占位，满足运行现场的公共形状。
     const owner: NonNullable<ChatPanel["qq"]> = {
       service,
       store: taskStore,
-      ipc: { port: 0, close: async () => undefined },
       config,
       io,
-      restartCount: 0,
       qqbot: { adapter: dispatch.adapter },
     };
     this.qq = owner;
@@ -9209,381 +9065,26 @@ export class ChatPanel implements vscode.Disposable {
     return this.services.qqSettingsIo ?? createVscodeQqSettingsIo(this.context.secrets);
   }
 
-  /** 托管流程的可注入依赖（缺省走真实实现）。 */
-  private qqManagedFactories(): NonNullable<PanelServices["qqManagedDeps"]> {
-    return this.services.qqManagedDeps ?? {};
-  }
-
-  /**
-   * 确保 IPC + bridge 已启动，供托管拿到 OneBot 反向上报的 sink 端口。
-   *
-   * 与常规启动共用 buildAndStartQqOwner，不重复 spawn 逻辑；配置未启用时
-   * 也能只起 IPC/bridge（临时覆盖 endpoint/token 到内存，不落盘）。
-   */
-  private async ensureQqBridgeForManaged(accessToken: string): Promise<NonNullable<ChatPanel["qq"]>> {
-    if (this.qq) return this.qq;
-    const io = this.qqIo();
-    const snapshot = await readQqSettings(io);
-    const { config } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
-    config.endpoint = buildManagedEndpoint(QQ_MANAGED_ONEBOT_PORT);
-    const owner = await this.buildAndStartQqOwner(config, io, this.qqGeneration, {
-      onebotTokenOverride: accessToken,
-    });
-    if (!owner) throw new Error("QQ 通道启动被打断");
-    return owner;
-  }
-
-  /** 等待 bridge_ready 的入站端口（托管 start 期间最多等 15s）。 */
-  private waitForQqIncomingPort(timeoutMs = 15_000): Promise<number> {
-    const current = this.qqIncomingPort;
-    if (current !== null && current > 0) return Promise.resolve(current);
-    return new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.qqBridgeReadyWaiters = this.qqBridgeReadyWaiters.filter((w) => w !== waiter);
-        reject(new Error("等待 QQ bridge 就绪超时"));
-      }, timeoutMs);
-      const waiter = (port: number): void => {
-        clearTimeout(timer);
-        resolve(port);
-      };
-      this.qqBridgeReadyWaiters.push(waiter);
-    });
-  }
-
-  /** 启动二维码轮询（仅 waiting_login 阶段）。返回当前桥，重复调用幂等。 */
-  private startQrBridgeForManaged(
-    owner: NonNullable<ChatPanel["qq"]>,
-    qrPath: string,
-  ): QrBridge | undefined {
-    if (this.qq !== owner || this.disposed) return undefined;
-    if (owner.qrBridge) return owner.qrBridge;
-    const factory = this.qqManagedFactories().qrBridgeFactory;
-    const bridge = factory ? factory({ qrPath }) : new QrBridge({ qrPath });
-    owner.qrBridge = bridge;
-    bridge.start((msg) => this.postQrMessage(msg));
-    const current = bridge.current();
-    if (current) this.postQrMessage(current);
-    return bridge;
-  }
-
-  /** 停掉二维码轮询（幂等）。 */
-  private stopQrBridgeForManaged(owner: NonNullable<ChatPanel["qq"]>): void {
-    owner.qrBridge?.stop();
-    owner.qrBridge = undefined;
-  }
-
-  /** QrBridge 消息过护栏后推 webview。 */
-  private postQrMessage(msg: QrBridgeMessage): void {
-    if (this.disposed) return;
-    this.postToWebview(sanitizeQrMessage(msg));
-  }
-
-  /** manager 阶段 → qqManagedStatus（message 过 token 脱敏）。 */
-  private postManagedStatus(status: ManagedOneBotStatus, token?: string): void {
+  /** 扫码阶段 → qqManagedStatus（message 过 token 脱敏）。 */
+  private postManagedStatus(status: Parameters<typeof toManagedStatusMessage>[0], token?: string): void {
     if (this.disposed) return;
     this.postToWebview(toManagedStatusMessage(status, token));
   }
 
-  /** qqManagedSetup 消息入口：qqbot 走官方扫码绑定，不下载 / 启动 go-cqhttp。 */
+  /** qqManagedSetup 消息入口：QQBot 单一路径，start 走官方扫码、stop 停扫码会话。 */
   private async handleQqManagedSetup(action: "start" | "stop"): Promise<void> {
     if (action === "stop") {
       this.stopQqBotBinding();
-      await this.stopQqManaged();
+      if (!this.disposed) {
+        this.postToWebview({ type: "qqManagedStatus", phase: "idle", message: "QQBot 扫码已停止" });
+      }
       return;
     }
     const config = await this.currentQqConfig();
-    if (config.adapter === "qqbot") {
-      await this.startQqBotBind(config);
-      return;
-    }
-    await this.startQqManaged();
+    await this.startQqBotBind(config);
   }
 
-  /** 停止托管：先二维码桥、再 manager，清状态后推 idle（不写回 disabled）。 */
-  private async stopQqManaged(): Promise<void> {
-    const owner = this.qq;
-    if (owner) {
-      this.stopQrBridgeForManaged(owner);
-      const managed = owner.managed;
-      owner.managed = undefined;
-      if (managed) await managed.stop().catch(() => undefined);
-    }
-    if (!this.disposed) {
-      this.postToWebview({ type: "qqManagedStatus", phase: "idle", message: "一键托管已停止" });
-    }
-  }
-
-  /** 一键托管的完整 start 编排。 */
-  private async startQqManaged(): Promise<void> {
-    if (this.disposed) return;
-
-    // 1) 生成一次性 accessToken（绝不进状态消息 / 日志）。
-    const accessToken = randomBytes(32).toString("hex");
-    const factories = this.qqManagedFactories();
-
-    // 2) 已有一条通道时先拆掉，保证安装期的 bridge 用我们注入的 token。
-    //    然后确保 IPC + bridge 起来（即便 enabled=false 也起，只为拿 sink 端口）。
-    if (this.qq) await this.stopQq();
-    this.qqIncomingPort = null;
-    let owner: NonNullable<ChatPanel["qq"]>;
-    try {
-      owner = await this.ensureQqBridgeForManaged(accessToken);
-    } catch (error) {
-      this.postToWebview({
-        type: "qqManagedStatus",
-        phase: "error",
-        message: `QQ bridge 启动失败：${errorMessage(error)}`,
-      });
-      return;
-    }
-    if (this.disposed || this.qq !== owner) return;
-
-    try {
-      // 3) 等 bridge_ready 的 incomingPort → 反向上报地址。
-      const incomingPort = await this.waitForQqIncomingPort();
-      if (this.disposed || this.qq !== owner) return;
-      const reversePostUrl = buildReversePostUrl(incomingPort);
-
-      // 4) 端口占用探测：5700 可连但 get_login_info 不通 → 拒绝，绝不拿别人的实例。
-      const probe = factories.portProbe
-        ? await factories.portProbe(QQ_MANAGED_ONEBOT_PORT, accessToken)
-        : await probeManagedPort(QQ_MANAGED_ONEBOT_PORT, accessToken);
-      if (probe.kind === "occupied") {
-        this.postToWebview({
-          type: "qqManagedStatus",
-          phase: "error",
-          message: `端口 ${QQ_MANAGED_ONEBOT_PORT} 被占用，无法启动一键托管`,
-        });
-        await this.stopQq(); // 拆掉临时 IPC/bridge，绝不留半启动现场
-        return;
-      }
-
-      // 5) 构造 manager，订阅阶段：waiting_login 起二维码桥，logged_in/error 停。
-      const deps: ManagedOneBotDeps = {
-        installDir: managedInstallDir(this.context.globalStorageUri.fsPath),
-        platform: process.platform,
-        arch: process.arch,
-        accessToken,
-        reversePostUrl,
-        port: QQ_MANAGED_ONEBOT_PORT,
-      };
-      const mgr = factories.managerFactory
-        ? factories.managerFactory(deps)
-        : new ManagedOneBotManager(deps);
-      owner.managed = mgr;
-      mgr.onStatus((status) => {
-        if (this.disposed || this.qq !== owner) return;
-        this.postManagedStatus(status, accessToken);
-        if (qrBridgeActiveForPhase(status.phase)) {
-          this.startQrBridgeForManaged(owner, mgr.qrCodePath());
-        } else if (status.phase === "logged_in" || status.phase === "error") {
-          this.stopQrBridgeForManaged(owner);
-        }
-      });
-
-      // 6) 跑完整链路（下载 → 配置 → 启动 → 扫码登录）。
-      const result = await mgr.start();
-      if (this.disposed || this.qq !== owner) return;
-
-      // 7) 成功：写设置 + botToken（与 accessToken 同值），再让 QQ 服务进入正常态。
-      const update = buildManagedSettingsUpdate(QQ_MANAGED_ONEBOT_PORT, result.accessToken);
-      await applyQqSettingsPatch(owner.io, update.patch);
-      await writeQqSecrets(owner.io, update.secrets);
-      this.stopQrBridgeForManaged(owner);
-      const runningManager = owner.managed;
-      owner.managed = undefined;
-
-      // 只拆安装期的 IPC/bridge/服务（不动 manager），再用已写入的设置
-      // 重建常规通道，让它连上刚登录的 OneBot。
-      const stale = owner;
-      this.qq = undefined;
-      await this.disposeQqOwner(stale);
-      await this.startQqIfEnabled();
-      // 设置写入会触发 onDidChangeConfiguration → scheduleQqRestart；这里已经
-      // 手动重建过通道，清掉那次防抖重启，避免它随后 stopQq 杀掉刚登录的实例。
-      if (this.qqRestartTimer) {
-        clearTimeout(this.qqRestartTimer);
-        this.qqRestartTimer = null;
-      }
-      const fresh = this.qq as unknown as NonNullable<ChatPanel["qq"]> | undefined;
-      if (fresh && runningManager) {
-        // 把 manager 挂回新现场，供后续 stopQq / dispose 收掉 OneBot 进程。
-        fresh.managed = runningManager;
-      } else if (runningManager) {
-        // 常规通道没起来（如白名单为空）：不留孤儿 OneBot 进程。
-        await runningManager.stop().catch(() => undefined);
-      }
-      await this.pushQqSettings();
-    } catch (error) {
-      // 失败：状态文案经脱敏，绝不半启动。
-      this.stopQrBridgeForManaged(owner);
-      const managed = owner.managed;
-      owner.managed = undefined;
-      if (managed) await managed.stop().catch(() => undefined);
-      this.postManagedStatus(
-        { phase: "error", message: `一键托管失败：${errorMessage(error)}` },
-        accessToken,
-      );
-    }
-  }
-
-  /**
-   * spawn bridge 子进程（或崩溃后重新 spawn）。
-   *
-   * `process.execPath` 只作最后兜底：VSCode 桌面端的扩展宿主里它指向编辑器
-   * 可执行文件，直接喂 JS 会另开窗口 —— 所以优先沿用 CLI 那套 node 解析
-   * （`iflow.nodePath` → 自动探测）。
-   *
-   * stdin 必须是 pipe 且保持打开：bridge 把 stdin 关闭当作「上层进程结束」
-   * 的信号会主动退出（见 src/qq/bridge/main.ts），用 ignore 会立刻 EOF。
-   */
-  private async startQqBridge(owner: NonNullable<ChatPanel["qq"]>): Promise<void> {
-    if (this.qq !== owner || this.disposed || this.qqStopping) return;
-    const injectedStarter = this.services.qqManagedDeps?.bridgeStarter;
-    if (injectedStarter) {
-      await injectedStarter(owner);
-      return;
-    }
-    const { bridgeToken, hmacSecret } = await ensureBridgeSecrets(owner.io);
-    const botToken =
-      owner.onebotTokenOverride ?? (await owner.io.getSecret(QQ_SECRET_KEYS.botToken))?.trim() ?? "";
-    // OneBot 的 access token 同时用作反向上报的 Bearer：没有配置时退回
-    // bridge token（稳定、已存在），用户需在 OneBot 侧填同一个值。
-    const onebotToken = botToken.length > 0 ? botToken : "";
-    const incomingToken = onebotToken.length > 0 ? onebotToken : bridgeToken;
-
-    const nodePathConfigured = vscode.workspace.getConfiguration("iflow").get<string>("nodePath");
-    const locatedNode = nodePathConfigured ? null : await locateNodeExecutable();
-    // 两次 await 之间通道可能已被停用 / 面板已销毁：绝不能再 spawn。
-    if (this.qq !== owner || this.disposed || this.qqStopping) return;
-    const node = nodePathConfigured || locatedNode || process.execPath;
-    const entry = path.join(this.context.extensionPath, "dist", "qq-bridge.cjs");
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...buildBridgeEnv(owner.config, {
-        hostPort: owner.ipc.port,
-        bridgeToken,
-        hmacSecret,
-        onebotToken,
-        incomingPort: owner.config.bridgePort,
-        incomingToken,
-      }),
-    };
-
-    let child: ChildProcess;
-    try {
-      child = spawn(node, [entry], { env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
-    } catch (error) {
-      throw new Error(`无法启动 QQ bridge：${errorMessage(error)}`);
-    }
-    owner.bridge = child;
-    if (this.qq !== owner) {
-      try {
-        child.kill();
-      } catch {
-        // 已经开始但现场已被替换：尽力收掉即可。
-      }
-      return;
-    }
-    this.log.info(`QQ bridge 已 spawn（pid=${child.pid ?? "?"}）`);
-
-    // stderr 逐行进输出通道：bridge 的日志约定就是「一律走 stderr」。
-    let stderrBuffer = "";
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => {
-      stderrBuffer += chunk;
-      const lines = stderrBuffer.split(/\r?\n/u);
-      stderrBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const text = line.trim();
-        if (text.length > 0) this.log.info(`[qq-bridge] ${text.slice(0, 500)}`);
-      }
-    });
-
-    let handled = false;
-    const onGone = (detail: string): void => {
-      if (handled) return;
-      handled = true;
-      void this.onQqBridgeExit(owner, detail);
-    };
-    child.on("exit", (code, signal) => {
-      onGone(`QQ bridge 已退出（${code !== null ? `code ${code}` : `signal ${signal ?? "unknown"}`}）`);
-    });
-    child.on("close", (code, signal) => {
-      onGone(`QQ bridge 已关闭（${code !== null ? `code ${code}` : `signal ${signal ?? "unknown"}`}）`);
-    });
-    child.on("error", (error) => {
-      this.log.warn(`QQ bridge 进程错误：${errorMessage(error)}`);
-      onGone(`QQ bridge 启动失败：${errorMessage(error)}`);
-    });
-  }
-
-  /**
-   * bridge 退出后的处置：主动停止不管，否则按 2s/5s/10s 重起，三次为止。
-   *
-   * 投递客户端绑在**旧 bridge 的端口**上，进程没了就必然失败 —— 先关掉，
-   * 等新 bridge 的 `bridge_ready` 再建。
-   */
-  private async onQqBridgeExit(
-    owner: NonNullable<ChatPanel["qq"]>,
-    detail: string,
-  ): Promise<void> {
-    if (this.qq !== owner) return;
-    if (this.qqStopping || this.disposed) return;
-    owner.delivery?.close();
-    owner.delivery = undefined;
-    this.qqDeliveryPort = null;
-    this.log.warn(detail);
-    this.pushQqStatus(false, detail);
-
-    if (owner.restartCount >= QQ_BRIDGE_MAX_RESTARTS) {
-      this.store.sendToast("warning", vscode.l10n.t("QQ bridge 多次启动失败"));
-      this.pushQqStatus(false, "QQ bridge 多次启动失败");
-      return;
-    }
-    const delay =
-      QQ_BRIDGE_RESTART_DELAYS_MS[
-        Math.min(owner.restartCount, QQ_BRIDGE_RESTART_DELAYS_MS.length - 1)
-      ] ?? 10_000;
-    owner.restartCount += 1;
-    this.log.info(`QQ bridge ${delay}ms 后重启（第 ${owner.restartCount} 次）`);
-    if (this.qqBridgeRestartTimer) clearTimeout(this.qqBridgeRestartTimer);
-    this.qqBridgeRestartTimer = setTimeout(() => {
-      this.qqBridgeRestartTimer = null;
-      if (this.disposed || this.qqStopping || this.qq !== owner) return;
-      void this.startQqBridge(owner).catch((error: unknown) => {
-        const why = errorMessage(error);
-        this.log.warn(`QQ bridge 重启失败：${why}`);
-        this.pushQqStatus(false, why);
-      });
-    }, delay);
-    this.qqBridgeRestartTimer.unref?.();
-  }
-
-  /** 绑定 bridge 的投递端口（bridge_ready 到达时调用）。 */
-  private async attachQqDelivery(
-    owner: NonNullable<ChatPanel["qq"]>,
-    deliveryPort: number,
-  ): Promise<void> {
-    if (this.qq !== owner) return;
-    owner.delivery?.close();
-    const { bridgeToken, hmacSecret } = await ensureBridgeSecrets(owner.io);
-    owner.delivery = createBridgeDeliveryClient({
-      port: deliveryPort,
-      token: bridgeToken,
-      hmacSecret,
-    });
-    this.qqDeliveryPort = deliveryPort;
-    // 一次成功的握手把退避阶梯清零：阶梯按「连续失败」计，不是按进程一生计。
-    owner.restartCount = 0;
-    this.pushQqStatus(
-      true,
-      vscode.l10n.t("QQ bridge 已连接（投递端口 {0}）", deliveryPort),
-    );
-    this.log.info(`QQ bridge 已就绪：deliveryPort=${deliveryPort}`);
-  }
-
-  /** 停掉整条通道（bridge → IPC → 服务），每一项都有 2s 上限。 */
+  /** 停掉整条通道（QQBot adapter → 服务），每一项都有 2s 上限。 */
   private async stopQq(): Promise<void> {
     // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
     // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
@@ -9596,22 +9097,9 @@ export class ChatPanel implements vscode.Disposable {
         clearTimeout(this.qqRestartTimer);
         this.qqRestartTimer = null;
       }
-      if (this.qqBridgeRestartTimer) {
-        clearTimeout(this.qqBridgeRestartTimer);
-        this.qqBridgeRestartTimer = null;
-      }
       const owner = this.qq;
       this.qq = undefined;
-      this.qqDeliveryPort = null;
-      this.qqIncomingPort = null;
-      this.qqBridgeReadyWaiters = [];
       if (!owner) return;
-      // Wave5-C：先停二维码轮询桥，再停托管 manager，顺序不可颠倒
-      // （manager.stop 会杀掉 OneBot 子进程，二维码桥应先停止轮询）。
-      this.stopQrBridgeForManaged(owner);
-      const managed = owner.managed;
-      owner.managed = undefined;
-      if (managed) await managed.stop().catch(() => undefined);
       await this.disposeQqOwner(owner);
       this.pushQqStatus(false, "QQ 通道已停止");
     } finally {
@@ -9620,40 +9108,16 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 只拆**这一份** owner（bridge → delivery → IPC → 服务）。
+   * 只拆**这一份** owner（QQBot adapter → 服务）。
    *
    * 与 stopQq 分开是为了「启动途中被停用」那条路径：那时 `this.qq` 可能已经
    * 属于另一份现场（或已被 stopQq 清空），我们不能用 stopQq 去动它，只能把
    * 自己造出来的这份拆干净。
    */
   private async disposeQqOwner(owner: NonNullable<ChatPanel["qq"]>): Promise<void> {
-    // qqbot 没有 bridge：关 adapter（socket + 心跳），并清空凭据缓存所在对象。
-    const qqbot = owner.qqbot;
-    owner.qqbot = undefined;
-    if (qqbot) {
-      this.stopQqBotBinding();
-      await this.raceQqTeardown(qqbot.adapter.close());
-    }
-    const bridge = owner.bridge;
-    owner.bridge = undefined;
-    if (bridge) {
-      // 先关 stdin（bridge 的优雅退出信号），再 kill；两条都是尽力而为。
-      try {
-        bridge.stdin?.end();
-      } catch {
-        // stdin 可能已经关了
-      }
-      if (!bridge.killed) {
-        try {
-          bridge.kill();
-        } catch {
-          // 进程可能已经退出
-        }
-      }
-    }
-    owner.delivery?.close();
-    owner.delivery = undefined;
-    await this.raceQqTeardown(owner.ipc.close());
+    // 关 adapter（socket + 心跳）；扫码会话由 stopQqBotBinding 负责停。
+    this.stopQqBotBinding();
+    await this.raceQqTeardown(owner.qqbot.adapter.close());
     await this.raceQqTeardown(owner.service.stop());
   }
 
@@ -9699,74 +9163,17 @@ export class ChatPanel implements vscode.Disposable {
     this.qqRestartTimer.unref?.();
   }
 
-  // --- QQ IPC 事件 -----------------------------------------------------------
+  // --- QQ 入口校验工具 -------------------------------------------------------
+  //
+  // 收敛到 QQBot 单一路径后，入站消息由 setEventCallback 直接给出已归一化的
+  // InboundMessage，下面两个校验工具不再被 live 路径调用；保留为 public 供
+  // 既有接线测试使用，下一阶段随 OneBot 死代码一起清理。
 
-  /** bridge → 宿主的事件路由（`POST /v1/events`）。 */
-  private async handleQqIpcEvent(body: unknown): Promise<unknown> {
-    const owner = this.qq;
-    if (!owner) return { ok: false, reason: "not_running" };
-    if (!this.isQqRecord(body)) return { ok: false, reason: "bad_request" };
-    const type = body["type"];
-
-    if (type === "bridge_ready") {
-      const port = body["deliveryPort"];
-      if (typeof port !== "number" || !Number.isInteger(port) || port <= 0) {
-        this.log.warn("QQ bridge_ready 缺少有效 deliveryPort");
-        return { ok: false, reason: "bad_request" };
-      }
-      // 入站端口（OneBot 反向上报 sink）供一键托管构造 reversePostUrl。
-      const incoming = body["incomingPort"];
-      if (typeof incoming === "number" && Number.isInteger(incoming) && incoming > 0) {
-        this.qqIncomingPort = incoming;
-        const waiters = this.qqBridgeReadyWaiters;
-        this.qqBridgeReadyWaiters = [];
-        for (const waiter of waiters) waiter(incoming);
-      }
-      await this.attachQqDelivery(owner, port);
-      return { ok: true };
-    }
-
-    if (type === "inbound_message") {
-      const message = this.coerceQqInboundMessage(body["message"]);
-      if (!message) {
-        this.log.warn("QQ inbound_message 载荷不合法，已丢弃");
-        return { ok: false, reason: "bad_request" };
-      }
-      await owner.service.handleInboundMessage(message);
-      this.refreshQqTasks();
-      return { ok: true };
-    }
-
-    if (type === "task_action") {
-      const taskId = body["taskId"];
-      const action = body["action"];
-      if (typeof taskId !== "string" || !this.isQqTaskAction(action)) {
-        return { ok: false, reason: "bad_request" };
-      }
-      const text = typeof body["text"] === "string" ? body["text"] : undefined;
-      await this.handleQqTaskAction(taskId, action, text);
-      return { ok: true };
-    }
-
-    return { ok: false, reason: "unknown_event" };
-  }
-
-  /** `POST /v1/tasks/:id/action` —— 与 webview 任务操作共用一条路径。 */
-  private async handleQqIpcTaskAction(taskId: string, body: unknown): Promise<unknown> {
-    if (!this.qq) return { ok: false, reason: "not_running" };
-    const action = this.isQqRecord(body) ? body["action"] : undefined;
-    if (!this.isQqTaskAction(action)) return { ok: false, reason: "bad_request" };
-    const text =
-      this.isQqRecord(body) && typeof body["text"] === "string" ? body["text"] : undefined;
-    await this.handleQqTaskAction(taskId, action, text);
-    return { ok: true };
-  }
-
-  private isQqRecord(value: unknown): value is Record<string, unknown> {
+  isQqRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
-  private isQqTaskAction(value: unknown): value is QqTaskAction {
+  isQqTaskAction(value: unknown): value is QqTaskAction {
     return (
       value === "approve" ||
       value === "deny" ||
@@ -9785,7 +9192,7 @@ export class ChatPanel implements vscode.Disposable {
    * 在 `.map` 上直接抛错。这里逐字段兜底，`mentionsBot` 只在明确为 true 时算
    * true（无法证明被 @ 就不算，群聊会因此静默丢弃，这是安全的一侧）。
    */
-  private coerceQqInboundMessage(value: unknown): InboundMessage | null {
+  coerceQqInboundMessage(value: unknown): InboundMessage | null {
     if (!this.isQqRecord(value)) return null;
     const chatType = value["chatType"];
     if (chatType !== "private" && chatType !== "group") return null;
@@ -9965,15 +9372,9 @@ export class ChatPanel implements vscode.Disposable {
       },
 
       deliver: async (msg) => {
-        const owner = this.qq;
-        if (!owner) return false; // 入口防御：通道未起
-        if (owner.config.adapter === "qqbot" && owner.qqbot) {
-          return deliverViaQqBotAdapter(owner.qqbot.adapter, msg);
-        }
-        const delivery = owner.delivery;
-        if (!delivery) return false; // bridge 没握手：如实回报未送达
-        const result = await delivery.deliver(msg);
-        return result.ok;
+        const adapter = this.qq?.qqbot?.adapter;
+        if (!adapter) return false; // 入口防御：通道未起 / 未绑定
+        return deliverViaQqBotAdapter(adapter, msg);
       },
 
       bindAccount: (code, senderId) => this.bindQqAccount(code, senderId),
@@ -10065,17 +9466,17 @@ export class ChatPanel implements vscode.Disposable {
   ): Promise<void> {
     switch (action) {
       case "testConnection": {
-        const delivery = this.qq?.delivery;
-        if (!delivery) {
-          this.pushQqStatus(false, "QQ bridge 未运行");
+        const adapter = this.qq?.qqbot?.adapter;
+        if (!adapter) {
+          this.pushQqStatus(false, "QQBot 未连接");
           return;
         }
-        const health = await delivery.health();
+        const health = await adapter.health();
         this.pushQqStatus(
-          health.ok,
-          health.ok
-            ? vscode.l10n.t("QQ bridge 已连接")
-            : vscode.l10n.t("QQ bridge 未响应（status {0}）", String(health.status)),
+          health.connected,
+          health.connected
+            ? vscode.l10n.t("QQBot 官方网关已连接")
+            : vscode.l10n.t("QQBot 未连接（{0}）", String(health.detail ?? "")),
         );
         return;
       }
@@ -10096,42 +9497,19 @@ export class ChatPanel implements vscode.Disposable {
         return;
       }
       case "startQrLogin": {
-        const owner = this.qq;
-        if (owner?.config?.adapter === "qqbot" || this.qqbotBinding) {
-          await this.startQqBotBind(owner?.config ?? (await this.currentQqConfig()));
-          return;
-        }
-        if (!owner) {
-          // qqbot 未起服务时仍可扫码（扫码本身就是入口）。
-          const config = await this.currentQqConfig();
-          if (config.adapter === "qqbot") await this.startQqBotBind(config);
-          return;
-        }
-        const manager = owner.managed;
-        if (!manager) return; // 只有托管流程才持有二维码路径。
-        if (!owner.qrBridge) {
-          const bridge = this.startQrBridgeForManaged(owner, manager.qrCodePath());
-          const current = bridge?.current();
-          if (current) this.postQrMessage(current);
-        } else {
-          owner.qrBridge.refresh();
-        }
+        const config = this.qq?.config ?? (await this.currentQqConfig());
+        await this.startQqBotBind(config);
         return;
       }
       case "refreshQr": {
-        const bridge = this.qq?.qrBridge;
-        if (!bridge) return;
-        bridge.refresh();
+        // QQBot 扫码会话不可原地刷新：重新发起一次扫码绑定。
+        const config = this.qq?.config ?? (await this.currentQqConfig());
+        await this.startQqBotBind(config);
         return;
       }
       case "cancelQrLogin": {
-        const owner = this.qq;
-        if (!owner && !this.qqbotBinding) return;
-        if (owner?.qqbot || this.qqbotBinding) {
-          this.stopQqBotBinding();
-        } else {
-          this.stopQrBridgeForManaged(owner!);
-        }
+        if (!this.qqbotBinding && !this.qq?.qqbot?.bindSession) return;
+        this.stopQqBotBinding();
         this.postToWebview(buildClearedQrMessage(Date.now()));
         return;
       }
@@ -10209,9 +9587,6 @@ export class ChatPanel implements vscode.Disposable {
   /** 面板打开 / webview 重连 / 设置变更后的一次性全量推送。 */
   private pushQqState(): void {
     this.refreshQqTasks();
-    // 窗口内扫码：面板重开 / 重连时补一帧二维码，避免卡片空白。
-    const qr = this.qq?.qrBridge?.current();
-    if (qr) this.postQrMessage(qr);
   }
 
   /** QQ 设置快照（无明文凭据，只有 hasBotToken / hasAppSecret 布尔）。 */
