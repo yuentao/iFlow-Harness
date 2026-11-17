@@ -275,17 +275,16 @@ describe("validateQqConfig", () => {
 describe("启动门控（checkQqStartupGate）", () => {
   const root = path.resolve(".");
 
-  it("adapter=onebot 受支持，qqbot 不受支持", () => {
+  it("adapter=onebot 与 qqbot 都受支持", () => {
     expect(isAdapterSupported(makeConfig({ adapter: "onebot" }))).toBe(true);
-    expect(isAdapterSupported(makeConfig({ adapter: "qqbot" }))).toBe(false);
+    expect(isAdapterSupported(makeConfig({ adapter: "qqbot" }))).toBe(true);
   });
 
-  it("adapter=qqbot 时门控报 adapter_unsupported 且文案写明未实现", () => {
-    const issues = checkQqStartupGate(makeEnabled({ adapter: "qqbot" }), root);
-    expect(codes(issues)).toEqual(["adapter_unsupported"]);
-    expect(issues[0]?.severity).toBe("error");
-    expect(issues[0]?.message).toContain("尚未实现");
-    expect(issues[0]?.message).toContain("OneBot");
+  it("adapter=qqbot 且 workspace 合法时门控通过（不再报 adapter_unsupported）", () => {
+    expect(checkQqStartupGate(makeEnabled({ adapter: "qqbot" }), root)).toEqual([]);
+    expect(checkQqStartupGate(makeEnabled({ adapter: "qqbot", workspace: root }), root)).toEqual(
+      [],
+    );
   });
 
   it("adapter=onebot 且 workspace 留空时门控通过", () => {
@@ -320,12 +319,13 @@ describe("启动门控（checkQqStartupGate）", () => {
     expect(isWorkspaceCompatible(makeConfig({ workspace: "" }), undefined)).toBe(true);
   });
 
-  it("qqbot + workspace 不匹配时两个 issue 一起返回", () => {
+  it("qqbot + workspace 不匹配时只报 workspace_not_active_root（workspace 门控仍保留）", () => {
     const issues = checkQqStartupGate(
       makeEnabled({ adapter: "qqbot", workspace: path.resolve(root, "..", "qq-elsewhere") }),
       root,
     );
-    expect(codes(issues)).toEqual(["adapter_unsupported", "workspace_not_active_root"]);
+    expect(codes(issues)).toEqual(["workspace_not_active_root"]);
+    expect(codes(issues)).not.toContain("adapter_unsupported");
     expect(issues.every((issue) => issue.severity === "error")).toBe(true);
   });
 });

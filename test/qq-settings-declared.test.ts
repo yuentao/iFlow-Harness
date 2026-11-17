@@ -134,7 +134,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
     expect(enText).toContain("denial");
   });
 
-  it("描述如实：不再声称「仅声明 / 尚未接线」，并写明未实现的能力会被拒绝", () => {
+  it("描述如实：不再声称「仅声明 / 尚未接线」，qqbot 写成已实现的推荐通道", () => {
     const staleZh = ["仅声明", "尚未接线"];
     const staleEn = ["only declares", "not wired", "nothing is wired"];
     for (const key of Object.keys(zh).filter((k) => k.startsWith("iflow.configuration.qq."))) {
@@ -149,15 +149,29 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
       }
     }
 
-    // qqbot 未实现：适配器描述必须说清楚「选它会拒绝启动」。
+    // M3-B：qqbot 官方适配器已实现，描述必须写「推荐」而不是「尚未实现 / 拒绝启动」。
     const zhAdapter = zh["iflow.configuration.qq.adapter.description"] ?? "";
     expect(zhAdapter).toContain("qqbot");
-    expect(zhAdapter).toContain("尚未实现");
-    expect(zhAdapter).toContain("拒绝启动");
+    expect(zhAdapter).toContain("推荐");
+    expect(zhAdapter).not.toContain("尚未实现");
+    expect(zhAdapter).not.toContain("拒绝启动");
     const enAdapter = en["iflow.configuration.qq.adapter.description"] ?? "";
     expect(enAdapter).toContain("qqbot");
-    expect(enAdapter).toContain("not implemented");
-    expect(enAdapter).toContain("refuse");
+    expect(enAdapter.toLowerCase()).toContain("recommended");
+    expect(enAdapter.toLowerCase()).not.toContain("not implemented");
+    expect(enAdapter.toLowerCase()).not.toContain("refuse");
+
+    // enumDescriptions 也同步：qqbot = 推荐 / 官方合规 / WebSocket 免公网；onebot = legacy/需自跑。
+    const zhQqbot = zh["iflow.configuration.qq.adapter.qqbot"] ?? "";
+    expect(zhQqbot).toContain("推荐");
+    expect(zhQqbot).toContain("免公网");
+    const enQqbot = en["iflow.configuration.qq.adapter.qqbot"] ?? "";
+    expect(enQqbot.toLowerCase()).toContain("recommended");
+    expect(enQqbot.toLowerCase()).toContain("no public ip");
+    const zhOnebot = zh["iflow.configuration.qq.adapter.onebot"] ?? "";
+    expect(zhOnebot).toContain("旧版");
+    const enOnebot = en["iflow.configuration.qq.adapter.onebot"] ?? "";
+    expect(enOnebot.toLowerCase()).toContain("legacy");
 
     // workspace 只支持当前工作区根：描述必须说清楚「指向其他根会拒绝启动」。
     const zhWorkspace = zh["iflow.configuration.qq.workspace.description"] ?? "";
