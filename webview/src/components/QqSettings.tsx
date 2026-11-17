@@ -31,8 +31,11 @@ import {
  * Wave3-B 接线时只需要把这份组件接到真实的 settings 快照）。
  */
 
-/** 共享契约里的枚举（不重复声明字面量，改契约时这里自动跟随）。 */
-export type QqAdapter = QqSettingsUi["adapter"];
+/**
+ * 适配器字面量。阶段4 已从共享契约 `QqSettingsUi` 移除 `adapter` 字段（通道恒走
+ * QQBot），但本组件里 OneBot 相关的文案分支留到阶段5 清理，因此这里保留该类型。
+ */
+export type QqAdapter = "onebot" | "qqbot";
 export type QqRemotePolicy = QqSettingsUi["remotePolicy"];
 export type QqResultDetail = QqSettingsUi["resultDetail"];
 /** 一键托管（Wave5-D）的两条宿主回执与二维码动作枚举，直接取自共享契约。 */
@@ -51,6 +54,13 @@ export type QrAction = "startQrLogin" | "refreshQr" | "cancelQrLogin";
 export type QqSettingsValue = QqSettingsUi & {
   botToken?: string;
   appSecret?: string;
+  /**
+   * 阶段4 已从共享契约移除、仅为本组件当前文案分支保留的可选遗留字段。
+   * 宿主不再下发它们，值为空时按 QQBot 处理；阶段5 清理 OneBot 文案后删除。
+   */
+  adapter?: QqAdapter;
+  endpoint?: string;
+  bridgePort?: number;
 };
 
 export interface QqSettingsProps {
@@ -257,8 +267,8 @@ export function QqSettings({
     setSecretDirty((prev) => ({ ...prev, [field]: false }));
     onSecretsCommit?.({ [field]: next.trim() });
   }
-  /** 当前适配器：qqbot 走官方扫码授权，onebot 为 legacy 自跑 OneBot。 */
-  const adapter = value.adapter;
+  /** 当前适配器：宿主已恒走 QQBot，遗留值缺失时按 qqbot 处理。 */
+  const adapter: QqAdapter = value.adapter ?? "qqbot";
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -449,26 +459,26 @@ export function QqSettings({
             onChange={(enabled) => onChange({ enabled })}
           />
         </Row>
-        <Row label={t("协议适配器")} description={ADAPTER_DESCRIPTION[value.adapter]} wide>
+        <Row label={t("协议适配器")} description={ADAPTER_DESCRIPTION[adapter]} wide>
           <Segmented<QqAdapter>
             ariaLabel={t("协议适配器")}
             options={ADAPTER_OPTIONS}
-            value={value.adapter}
+            value={adapter}
             onChange={(adapter) => onChange({ adapter })}
           />
         </Row>
         <Row label={t("适配器端点")} wide>
           <CommitTextInput
             mono
-            value={value.endpoint}
+            value={value.endpoint ?? ""}
             label={t("适配器端点")}
             placeholder={
-              value.adapter === "onebot" ? "http://127.0.0.1:3000" : "https://api.sgroup.qq.com"
+              adapter === "onebot" ? "http://127.0.0.1:3000" : "https://api.sgroup.qq.com"
             }
             onCommit={(endpoint) => onChange({ endpoint })}
           />
         </Row>
-        {value.adapter === "qqbot" && (
+        {adapter === "qqbot" && (
           <>
             <Row
               label={t("机器人 Token")}
@@ -583,7 +593,7 @@ export function QqSettings({
         <Row label={t("桥接端口")} description={t("0 表示使用适配器默认端口；范围 0–65535。")}>
           <CommitNumberInput
             label={t("桥接端口")}
-            value={value.bridgePort}
+            value={value.bridgePort ?? 0}
             min={0}
             max={65535}
             onCommit={(bridgePort) => onChange({ bridgePort })}

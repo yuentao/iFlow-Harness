@@ -32,12 +32,12 @@ import { QQ_SECRET_KEYS } from "./config.js";
 /**
  * 宿主侧 IO 抽象：设置区（`iflow.qq.*`）与 SecretStorage。
  *
- * `readAll()` 返回 12 个设置键的**原始值**（键缺失即 `undefined`），由
+ * `readAll()` 返回 9 个设置键的**原始值**（键缺失即 `undefined`），由
  * `pickQqSettingsUi` 归一；`writeAll(patch)` 逐键落盘，`patch` 里的值已经过
  * 校验/裁剪，是可序列化的最终值。
  */
 export interface QqSettingsIo {
-  /** 读出 12 个 `iflow.qq.*` 键的原始值（缺失为 `undefined`）。 */
+  /** 读出 9 个 `iflow.qq.*` 键的原始值（缺失为 `undefined`）。 */
   readAll(): Record<string, unknown>;
   /** 逐键写入（值已是可序列化的最终值）。 */
   writeAll(patch: Record<string, unknown>): Promise<void>;
@@ -65,12 +65,9 @@ export interface QqSecretStorageLike {
 // 12 个设置键与允许取值（与 package.json 的 iflow.qq.* 声明逐字一致）
 // ---------------------------------------------------------------------------
 
-/** 可写的 12 个设置键（`hasBotToken` / `hasAppSecret` 是派生字段，不在此列）。 */
+/** 可写的 9 个设置键（`hasBotToken` / `hasAppSecret` 是派生字段，不在此列）。 */
 export const QQ_SETTING_KEYS = [
   "enabled",
-  "adapter",
-  "endpoint",
-  "bridgePort",
   "allowedUsers",
   "allowedGroups",
   "workspace",
@@ -85,13 +82,11 @@ export type QqSettingKey = (typeof QQ_SETTING_KEYS)[number];
 
 const SETTING_KEY_SET: ReadonlySet<string> = new Set(QQ_SETTING_KEYS);
 
-const ADAPTERS = ["onebot", "qqbot"] as const;
 const REMOTE_POLICIES = ["readonly", "supervised", "trusted"] as const;
 const RESULT_DETAILS = ["summary", "standard", "full"] as const;
 
 /** 数字项的允许范围（闭区间，先取整再裁剪）——与 src/qq/config.ts 的 RANGES 一致。 */
 const RANGES = {
-  bridgePort: { min: 0, max: 65535 },
   maxConcurrentTasks: { min: 1, max: 10 },
   rateLimitPerMin: { min: 1, max: 60 },
 } as const;
@@ -106,7 +101,7 @@ function hasSecretValue(value: string | undefined): boolean {
 }
 
 /**
- * 读取 QQ 设置快照（12 项 + 两个凭据布尔）。
+ * 读取 QQ 设置快照（9 项 + 两个凭据布尔）。
  *
  * 只探测 `bot-token` / `app-secret` 是否存在；`signing-secret` 与
  * `bridge-token` 是宿主内部自举的密钥，不对外暴露。返回结构里没有明文，
@@ -165,17 +160,12 @@ function coerceSettingValue(key: QqSettingKey, value: unknown): CoercedValue {
     case "enabled":
     case "autoMerge":
       return typeof value === "boolean" ? { ok: true, value } : { ok: false };
-    case "endpoint":
     case "workspace":
       return typeof value === "string" ? { ok: true, value } : { ok: false };
-    case "adapter":
-      return coerceEnum(value, ADAPTERS);
     case "remotePolicy":
       return coerceEnum(value, REMOTE_POLICIES);
     case "resultDetail":
       return coerceEnum(value, RESULT_DETAILS);
-    case "bridgePort":
-      return coerceInteger(value, RANGES.bridgePort);
     case "maxConcurrentTasks":
       return coerceInteger(value, RANGES.maxConcurrentTasks);
     case "rateLimitPerMin":
@@ -197,7 +187,7 @@ export interface QqSettingsPatchResult {
  * 应用一个设置补丁。
  *
  * 规则：
- *  - 只允许 12 个白名单键；`hasBotToken` / `hasAppSecret` 是派生字段，任何
+ *  - 只允许 9 个白名单键；`hasBotToken` / `hasAppSecret` 是派生字段，任何
  *    其它键（含 `botToken` 这类明文凭据）一律进 `ignored`，不写；
  *  - `undefined` 表示「本次不改」，既不写也不记入 ignored；
  *  - 字符串 / 布尔按原值写；数组必须是全字符串数组才写（浅拷贝原值）；

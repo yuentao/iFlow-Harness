@@ -127,6 +127,7 @@ describe("QQ 机器人设置页", () => {
       },
       { hasBotToken: true, hasAppSecret: false },
     );
+    // 阶段4 起 adapter/endpoint 已不是设置项，pickQqSettingsUi 会忽略它们。
     render(
       <SettingsModal
         tab="qq"
@@ -143,9 +144,9 @@ describe("QQ 机器人设置页", () => {
       "button[role='switch'][aria-label='启用 QQ 远程任务']",
     )!;
     expect(toggle.getAttribute("aria-checked")).toBe("true");
-    expect(container.querySelector<HTMLInputElement>("input[aria-label='适配器端点']")!.value).toBe(
-      "https://api.sgroup.qq.com",
-    );
+    expect(
+      container.querySelector<HTMLInputElement>("input[aria-label='同时运行的任务数']")!.value,
+    ).toBe("4");
     expect(container.querySelector<HTMLInputElement>("input[aria-label='允许的用户 1']")!.value).toBe(
       "10001",
     );

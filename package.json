@@ -246,31 +246,6 @@
           "default": false,
           "description": "%iflow.configuration.qq.enabled.description%"
         },
-        "iflow.qq.adapter": {
-          "type": "string",
-          "enum": [
-            "onebot",
-            "qqbot"
-          ],
-          "enumDescriptions": [
-            "%iflow.configuration.qq.adapter.onebot%",
-            "%iflow.configuration.qq.adapter.qqbot%"
-          ],
-          "default": "onebot",
-          "description": "%iflow.configuration.qq.adapter.description%"
-        },
-        "iflow.qq.endpoint": {
-          "type": "string",
-          "default": "",
-          "description": "%iflow.configuration.qq.endpoint.description%"
-        },
-        "iflow.qq.bridgePort": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 65535,
-          "description": "%iflow.configuration.qq.bridgePort.description%"
-        },
         "iflow.qq.allowedUsers": {
           "type": "array",
           "items": {

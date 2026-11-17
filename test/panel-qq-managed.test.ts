@@ -58,7 +58,7 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 }
 
 function makeIo(): { io: QqSettingsIo; secrets: Map<string, string> } {
-  const settings: Record<string, unknown> = { enabled: true, adapter: "qqbot", allowedUsers: ["10001"] };
+  const settings: Record<string, unknown> = { enabled: true, allowedUsers: ["10001"] };
   const secrets = new Map<string, string>();
   return {
     io: {
@@ -79,7 +79,7 @@ function makeIo(): { io: QqSettingsIo; secrets: Map<string, string> } {
 }
 
 type PanelInternals = {
-  qq?: { config?: { adapter: string }; qqbot?: { adapter: { close: () => Promise<void> } }; [k: string]: unknown };
+  qq?: { config?: Record<string, unknown>; qqbot?: { adapter: { close: () => Promise<void> } }; [k: string]: unknown };
   qqbotBinding?: { stop(): void } | null;
   handleWebviewMessage: (msg: WebviewToHost) => Promise<void>;
   handleQqManagedSetup: (action: "start" | "stop") => Promise<void>;
@@ -136,7 +136,7 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
 
   beforeEach(async () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-managed-"));
-    setConfigOverrides({ enabled: true, adapter: "qqbot", allowedUsers: ["10001"] });
+    setConfigOverrides({ enabled: true, allowedUsers: ["10001"] });
     ioHarness = makeIo();
     posted = [];
     createPanel();
@@ -171,7 +171,6 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     expect(adapter.setEventCallback).toHaveBeenCalled();
     expect(adapter.connect).toHaveBeenCalled();
     expect(p.qq?.qqbot?.adapter).toBeTruthy();
-    expect(p.qq?.config?.adapter).toBe("qqbot");
     expect(protocolStop).toHaveBeenCalled();
   });
 

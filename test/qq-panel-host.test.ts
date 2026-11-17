@@ -113,7 +113,7 @@ function outcomeOf(
 function makeTask(taskId = "T-abcdef123456"): QqTask {
   return {
     taskId,
-    idempotencyKey: `onebot:${taskId}`,
+    idempotencyKey: `qqbot:${taskId}`,
     source: { chatType: "private", chatId: "u1", senderId: "u1", msgId: "m1" },
     target: { workspace: "/ws-a" },
     payload: { prompt: "把 README 的错误链接修一下", attachments: [], contexts: [] },

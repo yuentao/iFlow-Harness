@@ -14,9 +14,6 @@ import type { QqSettingsUi } from "../shared/messages.js";
 /** 完整默认值（与 shared/messages.ts 的 pickQqSettingsUi 默认一致）。 */
 const DEFAULTS: QqSettingsUi = {
   enabled: false,
-  adapter: "onebot",
-  endpoint: "",
-  bridgePort: 0,
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -120,9 +117,6 @@ describe("readQqSettings", () => {
     const ui = await readQqSettings(io);
 
     expect(ui.enabled).toBe(false);
-    expect(ui.adapter).toBe("onebot");
-    expect(ui.endpoint).toBe("http://127.0.0.1:3000");
-    expect(ui.bridgePort).toBe(65535);
     expect(ui.allowedUsers).toEqual(["10001"]);
     expect(ui.remotePolicy).toBe("supervised");
     expect(ui.maxConcurrentTasks).toBe(1);
@@ -153,14 +147,18 @@ describe("applyQqSettingsPatch", () => {
     const io = new MemoryIo();
     const result = await applyQqSettingsPatch(io, {
       enabled: true,
-      adapter: "qqbot",
-      ...({ botToken: "should-not-write" } as unknown as Partial<QqSettingsUi>),
+      allowedUsers: ["10001"],
+      ...({
+        botToken: "should-not-write",
+        adapter: "qqbot",
+      } as unknown as Partial<QqSettingsUi>),
     });
 
-    expect(result.applied).toEqual(["enabled", "adapter"]);
-    expect(result.ignored).toEqual(["botToken"]);
-    expect(io.writes).toEqual([{ enabled: true, adapter: "qqbot" }]);
+    expect(result.applied).toEqual(["enabled", "allowedUsers"]);
+    expect(result.ignored).toEqual(["botToken", "adapter"]);
+    expect(io.writes).toEqual([{ enabled: true, allowedUsers: ["10001"] }]);
     expect(io.settings).not.toHaveProperty("botToken");
+    expect(io.settings).not.toHaveProperty("adapter");
   });
 
   it("hasBotToken / hasAppSecret 是派生字段，必须进 ignored", async () => {
@@ -178,7 +176,7 @@ describe("applyQqSettingsPatch", () => {
 
   it("undefined 表示本次不改：既不写也不进 ignored", async () => {
     const io = new MemoryIo();
-    const result = await applyQqSettingsPatch(io, { enabled: undefined, endpoint: undefined });
+    const result = await applyQqSettingsPatch(io, { enabled: undefined, workspace: undefined });
 
     expect(result.applied).toEqual([]);
     expect(result.ignored).toEqual([]);
@@ -188,55 +186,50 @@ describe("applyQqSettingsPatch", () => {
   it("数字先取整再 clamp 到允许范围", async () => {
     const io = new MemoryIo();
     const result = await applyQqSettingsPatch(io, {
-      bridgePort: 70000.4,
       maxConcurrentTasks: 0,
       rateLimitPerMin: 4.6,
     });
 
-    expect(result.applied).toEqual(["bridgePort", "maxConcurrentTasks", "rateLimitPerMin"]);
+    expect(result.applied).toEqual(["maxConcurrentTasks", "rateLimitPerMin"]);
     expect(result.ignored).toEqual([]);
     expect(io.writes).toEqual([
-      { bridgePort: 65535, maxConcurrentTasks: 1, rateLimitPerMin: 5 },
+      { maxConcurrentTasks: 1, rateLimitPerMin: 5 },
     ]);
 
     const low = new MemoryIo();
-    await applyQqSettingsPatch(low, { bridgePort: -3, rateLimitPerMin: 99 });
-    expect(low.settings).toEqual({ bridgePort: 0, rateLimitPerMin: 60 });
+    await applyQqSettingsPatch(low, { maxConcurrentTasks: 99, rateLimitPerMin: 99 });
+    expect(low.settings).toEqual({ maxConcurrentTasks: 10, rateLimitPerMin: 60 });
   });
 
   it("数字类型不符 / 非有限值整键拒绝（不写脏值）", async () => {
     const io = new MemoryIo();
     const result = await applyQqSettingsPatch(io, {
-      bridgePort: "3000",
       maxConcurrentTasks: Number.NaN,
       rateLimitPerMin: Number.POSITIVE_INFINITY,
     } as unknown as Partial<QqSettingsUi>);
 
     expect(result.applied).toEqual([]);
-    expect(result.ignored).toEqual(["bridgePort", "maxConcurrentTasks", "rateLimitPerMin"]);
+    expect(result.ignored).toEqual(["maxConcurrentTasks", "rateLimitPerMin"]);
     expect(io.writes).toEqual([]);
   });
 
   it("非法枚举进 ignored；合法枚举 trim 后写入", async () => {
     const bad = new MemoryIo();
     const rejected = await applyQqSettingsPatch(bad, {
-      adapter: "napcat",
       remotePolicy: "yolo",
       resultDetail: "compact",
     } as unknown as Partial<QqSettingsUi>);
     expect(rejected.applied).toEqual([]);
-    expect(rejected.ignored).toEqual(["adapter", "remotePolicy", "resultDetail"]);
+    expect(rejected.ignored).toEqual(["remotePolicy", "resultDetail"]);
     expect(bad.writes).toEqual([]);
 
     const good = new MemoryIo();
     const accepted = await applyQqSettingsPatch(good, {
-      adapter: " qqbot ",
       remotePolicy: "readonly",
-      resultDetail: "full",
+      resultDetail: " full ",
     } as unknown as Partial<QqSettingsUi>);
-    expect(accepted.applied).toEqual(["adapter", "remotePolicy", "resultDetail"]);
+    expect(accepted.applied).toEqual(["remotePolicy", "resultDetail"]);
     expect(good.settings).toEqual({
-      adapter: "qqbot",
       remotePolicy: "readonly",
       resultDetail: "full",
     });
@@ -247,12 +240,12 @@ describe("applyQqSettingsPatch", () => {
     const result = await applyQqSettingsPatch(io, {
       enabled: "true",
       autoMerge: 1,
-      endpoint: " http://127.0.0.1:3000 ",
+      workspace: " J:/work/qq ",
     } as unknown as Partial<QqSettingsUi>);
 
-    expect(result.applied).toEqual(["endpoint"]);
+    expect(result.applied).toEqual(["workspace"]);
     expect(result.ignored).toEqual(["enabled", "autoMerge"]);
-    expect(io.settings).toEqual({ endpoint: " http://127.0.0.1:3000 " });
+    expect(io.settings).toEqual({ workspace: " J:/work/qq " });
   });
 
   it("白名单数组按原值浅拷贝写入；含非字符串项则整键拒绝", async () => {
@@ -272,10 +265,13 @@ describe("applyQqSettingsPatch", () => {
     expect(bad.writes).toEqual([]);
   });
 
-  it("12 个设置键均已覆盖，且不含派生字段", () => {
-    expect(QQ_SETTING_KEYS).toHaveLength(12);
+  it("9 个设置键均已覆盖，且不含派生字段与已移除的 OneBot 键", () => {
+    expect(QQ_SETTING_KEYS).toHaveLength(9);
     expect(QQ_SETTING_KEYS).not.toContain("hasBotToken");
     expect(QQ_SETTING_KEYS).not.toContain("hasAppSecret");
+    expect(QQ_SETTING_KEYS).not.toContain("adapter");
+    expect(QQ_SETTING_KEYS).not.toContain("endpoint");
+    expect(QQ_SETTING_KEYS).not.toContain("bridgePort");
   });
 });
 

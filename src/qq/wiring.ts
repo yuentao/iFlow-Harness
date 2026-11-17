@@ -14,9 +14,9 @@
  * 关于「必须重启」的取舍（与 panel 里的热更新路径配套）：
  * `QqService` 在构造时拿走一份 `config` 快照，但白名单 / 策略 / 并发 / 限流 /
  * 详略 / 自动合并这些字段都是在**使用时**从同一个对象里读的，因此面板可以
- * 直接改字段让它们即时生效；而 `enabled`（起停）、`adapter`（幂等键与适配器
- * 语义）、`endpoint` 与 `bridgePort`（都进 bridge 的环境变量）只能靠重建
- * 服务 + bridge 才能生效 —— 这就是 {@link QQ_CONNECTION_FIELDS}。
+ * 直接改字段让它们即时生效；而 `enabled`（起停）只能靠重建 QQ 服务才能生效
+ * —— 这就是 {@link QQ_CONNECTION_FIELDS}。阶段4 移除了 OneBot 专属的
+ * `adapter` / `endpoint` / `bridgePort`，连接类字段现在只剩 `enabled`。
  */
 
 import { randomBytes } from "node:crypto";
@@ -44,7 +44,7 @@ export const QQ_SETTLE_POLL_MS = 1_500;
 const BIND_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /**
- * 只有这 4 个字段的改动需要重建 QQ 服务（见文件头注释）。
+ * 只有 `enabled` 的改动需要重建 QQ 服务（见文件头注释）。
  *
  * 其余字段（allowedUsers / allowedGroups / workspace / remotePolicy /
  * maxConcurrentTasks / rateLimitPerMin / resultDetail / autoMerge）由面板
@@ -52,9 +52,6 @@ const BIND_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
  */
 export const QQ_CONNECTION_FIELDS = [
   "enabled",
-  "adapter",
-  "endpoint",
-  "bridgePort",
 ] as const;
 
 export type QqConnectionField = (typeof QQ_CONNECTION_FIELDS)[number];
@@ -143,7 +140,7 @@ function sameFieldValue(previous: unknown, next: unknown): boolean {
  * - `undefined` 表示「本次不改」，不参与判定（与 `applyQqSettingsPatch` 同语义）。
  * - `previous` 缺失（服务没在跑，或调用方还没有快照）时，只要补丁碰到连接类
  *   字段就返回 true —— 交给调用方决定「该起还是该停」。
- * - 值没变（例如回写同一份 endpoint）不算改动，避免无谓地重启 bridge。
+ * - 值没变（例如回写同一份 enabled）不算改动，避免无谓地重启 QQ 服务。
  */
 export function shouldRestartOnPatch(
   previous: QqConfig | null | undefined,
