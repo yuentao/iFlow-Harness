@@ -168,8 +168,13 @@ export class SessionStore {
     this.flush();
   }
 
-  userPrompt(text: string, images?: string[], files?: { name: string; path: string }[]): number {
-    const index = beginUserPrompt(this.state, text, images, files);
+  userPrompt(
+    text: string,
+    images?: string[],
+    files?: { name: string; path: string }[],
+    origin?: "qq",
+  ): number {
+    const index = beginUserPrompt(this.state, text, images, files, origin);
     this.noteMutationIndex(index);
     this.flush();
     return index;

@@ -32,6 +32,7 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
 
 const VALUE: QqSettingsValue = {
   enabled: false,
+  route: "main",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -202,6 +203,20 @@ describe("QqSettings", () => {
     act(() => trusted.click());
     expect(onChange).toHaveBeenCalledWith({ remotePolicy: "trusted" });
     expect(container.textContent).toContain("工具调用无需 QQ 审核直接执行");
+  });
+
+  it("消息去向默认主会话，可切换到独立子会话并回传补丁", () => {
+    render(<Harness />);
+    const trigger = container.querySelector<HTMLButtonElement>("button[aria-label='消息去向']")!;
+    expect(trigger.textContent).toContain("主会话");
+    // 说明文案要讲清楚「与本地输入同一条对话线、忙时排队」。
+    expect(container.textContent).toContain("可远程接续工作");
+
+    act(() => trigger.click());
+    const items = [...document.body.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
+    const child = items.find((item) => item.textContent?.includes("独立子会话"))!;
+    act(() => child.click());
+    expect(onChange).toHaveBeenCalledWith({ route: "child" });
   });
 
   it("已存在条目只读展示脱敏 openid，并带可提交的备注字段", () => {

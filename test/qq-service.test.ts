@@ -140,6 +140,7 @@ function makeHost(): HostFixture {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
+    route: "child",
     allowedUsers: ["u1"],
     allowedGroups: ["g1"],
     workspace: "/ws",

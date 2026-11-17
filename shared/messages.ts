@@ -126,6 +126,14 @@ export interface UserBlock extends BlockBase {
   text: string;
   /** Attached images as data URLs (M5 image input), absent for text-only prompts. */
   images?: string[];
+  /**
+   * 这条用户消息的来源渠道（宿主写入，webview 只渲染徽标）。
+   *
+   * `qq` = 由 QQ 机器人转来的外部消息（`iflow.qq.route = "main"`）：它在本机
+   * 用户眼里必须与亲手输入的消息可区分 —— 徽标 + 来源包裹是安全边界的一部分，
+   * 不能靠正文内容自行判断。
+   */
+  origin?: "qq";
 }
 
 /** Webview DOM cap for one tool-output pane (3.5 ②). The host store keeps
@@ -817,6 +825,7 @@ export interface QqTaskUi {
     | "validated"
     | "queued"
     | "dispatched"
+    | "injected"
     | "running"
     | "waiting_approval"
     | "waiting_answer"
@@ -825,6 +834,12 @@ export interface QqTaskUi {
     | "canceled"
     | "timeout"
     | "needs_review";
+  /**
+   * 执行渠道：`main` = 注入主会话（看板标注「渠道：主会话」，状态里能看到
+   * 「已注入待回复」）；`child` = Super Agent 子会话（旧行为，也是旧归档的
+   * 解释）。
+   */
+  channel: "main" | "child";
   /** 任务提示词的截断预览（完整正文不进快照）。 */
   promptPreview: string;
   /** 收到任务的时间（epoch ms）。 */
@@ -1595,7 +1610,7 @@ export interface HostSettingsUi {
 }
 
 /**
- * QQ 远程任务设置快照（`iflow.qq.*` 的 9 项 + App Secret「已配置」标志）。
+ * QQ 远程任务设置快照（`iflow.qq.*` 的 10 项 + App Secret「已配置」标志）。
  *
  * **绝不携带明文凭据**：`hasAppSecret` 只是「SecretStorage 里有没有扫码写入的
  * App Secret」的布尔投影；凭据只在扫码成功后由宿主单向写入，永不回传、永不进
@@ -1606,6 +1621,12 @@ export interface HostSettingsUi {
  */
 export interface QqSettingsUi {
   enabled: boolean;
+  /**
+   * 入站消息的去向：`main` = 排队注入主会话（默认，与本地输入同一条对话线，
+   * 可远程接续工作）；`child` = 直接派 Super Agent 子会话（旧行为，便于回滚
+   * 与诊断）。
+   */
+  route: "main" | "child";
   /**
    * 访问控制条目：完整 openid + 可选备注。存储里兼容旧的裸字符串数组
    * （`pickQqSettingsUi` 归一），脱敏只在 webview 渲染时做。
@@ -1662,6 +1683,7 @@ export interface QqPendingUserUi {
  */
 const QQ_SETTINGS_DEFAULTS = {
   enabled: false,
+  route: "main",
   workspace: "",
   remotePolicy: "supervised",
   maxConcurrentTasks: 2,
@@ -1677,6 +1699,7 @@ const QQ_SETTINGS_RANGES = {
 } as const;
 
 /** 枚举取值（与 package.json 的 iflow.qq.* enum 一致）。 */
+const QQ_ROUTES = ["main", "child"] as const;
 const QQ_REMOTE_POLICIES = ["readonly", "supervised", "trusted"] as const;
 const QQ_RESULT_DETAILS = ["summary", "standard", "full"] as const;
 
@@ -1726,6 +1749,7 @@ export function pickQqSettingsUi(
     raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   return {
     enabled: qqReadBoolean(source.enabled, QQ_SETTINGS_DEFAULTS.enabled),
+    route: qqReadEnum(source.route, QQ_ROUTES, QQ_SETTINGS_DEFAULTS.route),
     allowedUsers: normalizeQqAllowEntries(source.allowedUsers),
     allowedGroups: normalizeQqAllowEntries(source.allowedGroups),
     workspace: qqReadString(source.workspace, QQ_SETTINGS_DEFAULTS.workspace),

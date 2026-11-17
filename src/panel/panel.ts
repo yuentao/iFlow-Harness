@@ -203,7 +203,12 @@ import {
 } from "../../shared/model-metadata.js";
 import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.js";
 import { WireRingBuffer } from "./wire-log.js";
-import { QqService, type QqTaskAction } from "../qq/service.js";
+import {
+  QqService,
+  type QqMainInjectInput,
+  type QqMainInjectResult,
+  type QqTaskAction,
+} from "../qq/service.js";
 import { QqTaskStore } from "../qq/store.js";
 import {
   createQqServiceHost,
@@ -829,6 +834,13 @@ export interface PanelServices {
 const QQ_BRIDGE_STOP_TIMEOUT_MS = 2_000;
 /** 设置改动 → 重启 QQ 服务的防抖窗口（settings.json 一次编辑会触发多帧）。 */
 const QQ_SETTINGS_RESTART_DEBOUNCE_MS = 500;
+/**
+ * 主会话渠道等待「主会话空闲」的轮询间隔。
+ *
+ * 比子会话收尾轮询（1.5s）短得多：这里等的是本地回合结束，用户按下回车后
+ * 往往几秒内就空闲，注入延迟必须可感知地小。
+ */
+const QQ_MAIN_IDLE_POLL_MS = 300;
 
 export class DisposedError extends Error {
   constructor(message = "panel disposed") {
@@ -903,6 +915,15 @@ export class ChatPanel implements vscode.Disposable {
       bindSession?: { stop(): void };
     };
   };
+  /**
+   * 主会话渠道（`iflow.qq.route = "main"`）的注入控制面。
+   *
+   * `qqInjectAborts` 按 taskId 保存「放弃等待空闲」的取消信号（`/qq stop`
+   * 与通道停止都要能立刻放手）；`qqInjectedTaskId` 是当前真正跑在主会话上的
+   * 那一轮属于哪个任务 —— 停止时要打断的是**这一轮**，不能误伤本地回合。
+   */
+  private readonly qqInjectAborts = new Map<string, AbortController>();
+  private qqInjectedTaskId: string | null = null;
   /** 主动停止中：防止与在飞的启停重叠。 */
   private qqStopping = false;
   /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
@@ -1695,6 +1716,11 @@ export class ChatPanel implements vscode.Disposable {
     // re-running teardown against an already-destroyed panel.
     if (this.disposed) return;
     this.disposed = true;
+    // QQ 主会话渠道：等空闲的注入立刻放手。否则它会在宿主销毁后继续排空，
+    // 往已销毁的 store 写一轮 prompt（服务侧看到 canceled 会自行收尾）。
+    for (const controller of this.qqInjectAborts.values()) controller.abort();
+    this.qqInjectAborts.clear();
+    this.qqInjectedTaskId = null;
     // Final flush: a turn interrupted by window close / extension reload has
     // no later persist point (completion never runs) — write the tail now so
     // the session survives a restart intact. No-op when blocks are empty.
@@ -9603,6 +9629,9 @@ export class ChatPanel implements vscode.Disposable {
         return snapshot;
       },
 
+      injectIntoMain: (input) => this.injectQqMainTurn(input),
+      cancelMainInjection: (taskId) => this.cancelQqMainInjection(taskId),
+
       notify: (text) => {
         if (this.disposed) return;
         this.store.sendToast("info", text);
@@ -9621,6 +9650,169 @@ export class ChatPanel implements vscode.Disposable {
       },
       unbindAccount: () => this.unbindQqAccount(),
     };
+  }
+
+  // --- QQ 主会话渠道（iflow.qq.route = "main"）-------------------------------
+
+  /**
+   * 把一条 QQ 消息注入主会话，等那一轮结束，返回该轮 assistant 正文。
+   *
+   * 三条硬纪律：
+   *  1. **等空闲再投**：`mainSessionFree()` 是 sendPrompt 自己那道门的镜像
+   *     （status / initializing / replaying / historySync / mainLane），所以
+   *     不会与本地回合或宿主回合并发跑在同一 ACP 会话上；
+   *  2. **转录可区分**：正常 user 气泡（`hidden:false`）+ `origin:"qq"` 徽标；
+   *     模型看到的是带来源包裹的正文（服务生成），本机用户看到的是原文；
+   *  3. **轮次锚定**：`onTurnStarted` 在 user 气泡落地后触发，记下当时的
+   *     text 块数量；轮次结束后只取**基线之后**的 assistant 文本 —— 上一轮
+   *     与后续无关轮次的输出永远不会被当成这一轮的结果。
+   *
+   * 忙（撞上本地回合刚抢到车道）时不会失败：短暂等待后重试，直到超时上限。
+   * 排队等空闲期间被 `/qq stop` 打断就返回 canceled，由服务侧收尾。
+   */
+  private async injectQqMainTurn(input: QqMainInjectInput): Promise<QqMainInjectResult> {
+    const taskId = input.task.taskId;
+    const controller = new AbortController();
+    const onServiceAbort = (): void => controller.abort();
+    if (input.signal.aborted) controller.abort();
+    else input.signal.addEventListener("abort", onServiceAbort, { once: true });
+    this.qqInjectAborts.set(taskId, controller);
+
+    const deadline = Date.now() + Math.max(0, input.timeoutMs);
+    try {
+      // 阶段一：等主会话空闲（被取消 / 超时都如实返回，绝不硬塞）。
+      const free = await this.waitForQqMainFree(controller.signal, deadline);
+      if (free !== "free") {
+        return free === "canceled"
+          ? { injected: false, canceled: true }
+          : {
+              injected: false,
+              reason: "主会话长时间未空闲，消息未注入（可在主会话空闲后重发）。",
+            };
+      }
+
+      // 阶段二：发一轮。撞上忙窗口（本地回合先抢到车道）不算失败，等一拍
+      // 再来；一旦这一轮真的开始（started），后续只收本轮文本、不再重试。
+      while (true) {
+        if (this.disposed || controller.signal.aborted) {
+          return { injected: false, canceled: true };
+        }
+        if (Date.now() > deadline) {
+          return {
+            injected: false,
+            reason: "主会话长时间未空闲，消息未注入（可在主会话空闲后重发）。",
+          };
+        }
+
+        // 轮次锚点：这一轮开始前已有多少个 text 块。只取基线之后的部分。
+        const textCountBefore = this.store
+          .getState()
+          .blocks.filter((block) => block.kind === "text").length;
+
+        let started = false;
+        await this.sendPrompt(input.text, undefined, undefined, undefined, {
+          // 宿主驱动回合：不改会话标题、不拍 checkpoint（QQ 正文不写进
+          // 会话标签/工作区快照）；但**不 hidden** —— 转录里要有用户气泡。
+          internal: true,
+          delegateOnBusy: false,
+          quietBusy: true,
+          origin: "qq",
+          displayText: input.displayText,
+          onTurnStarted: async () => {
+            started = true;
+            this.qqInjectedTaskId = taskId;
+            await input.onInjected();
+          },
+        });
+
+        if (!started) {
+          // 车道被别的回合抢走（本地回合优先）：等下一拍重试。
+          await this.waitForMainFreeTick(controller.signal, deadline);
+        } else {
+          // 这一轮真的跑过：无论成败，结果都属于它。
+          const state = this.store.getState();
+          const text = state.blocks
+            .filter((block) => block.kind === "text" && !block.system)
+            .slice(textCountBefore)
+            .map((block) => (block.kind === "text" ? block.text : ""))
+            .join("\n")
+            .trim();
+          const failed = state.status === "error";
+          return {
+            injected: true,
+            text,
+            ...(state.stopReason ? { stopReason: state.stopReason } : {}),
+            ...(failed
+              ? { failed: true, reason: state.errorMessage ?? "主会话本轮执行失败。" }
+              : {}),
+          };
+        }
+      }
+    } finally {
+      this.qqInjectAborts.delete(taskId);
+      if (this.qqInjectedTaskId === taskId) this.qqInjectedTaskId = null;
+      input.signal.removeEventListener("abort", onServiceAbort);
+    }
+  }
+
+  /**
+   * 等主会话进入可注入状态。
+   *
+   * 判定口径与 `sendPrompt` 自己的门一致（`mainSessionFree`：会话就绪、非
+   * streaming / initializing / replaying / historySync、且主会话车道空闲）。
+   * 被取消或超过 deadline 就返回对应状态，由调用方如实收尾。
+   */
+  private async waitForQqMainFree(
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<"free" | "canceled" | "timeout"> {
+    while (true) {
+      if (this.disposed || signal.aborted) return "canceled";
+      if (this.mainSessionFree()) return "free";
+      if (Date.now() > deadline) return "timeout";
+      await this.waitForMainFreeTick(signal, deadline);
+    }
+  }
+
+  /** 等一拍再看主会话是否空闲；取消/销毁/超时立刻返回。 */
+  private async waitForMainFreeTick(signal: AbortSignal, deadline: number): Promise<void> {
+    const remain = deadline - Date.now();
+    if (remain <= 0) return;
+    const ms = Math.min(QQ_MAIN_IDLE_POLL_MS, remain);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(finish, ms);
+      const onAbort = (): void => finish();
+      function finish(): void {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }
+      if (signal.aborted) {
+        finish();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      timer.unref?.();
+    });
+  }
+
+  /**
+   * 停止某个主会话渠道任务：放弃等待空闲，必要时打断正在跑的那一轮。
+   *
+   * 只有当前注入的就是这个任务时才 `session/cancel` —— 绝不能因为 QQ 的任务
+   * 被停，把用户本地正在跑的回合一起打掉。
+   */
+  private cancelQqMainInjection(taskId: string): boolean {
+    const controller = this.qqInjectAborts.get(taskId);
+    const isActiveTurn = this.qqInjectedTaskId === taskId;
+    if (!controller && !isActiveTurn) return false;
+    controller?.abort();
+    if (isActiveTurn) {
+      this.cancelSeen = true;
+      const sessionId = this.store.getState().sessionId;
+      if (sessionId) this.sendTurnCancel(sessionId, this.client);
+    }
+    return true;
   }
 
   /** 子会话快照：优先 store 的投影（webview 看到的那份），再退回管理器。 */
@@ -9856,6 +10048,7 @@ export class ChatPanel implements vscode.Disposable {
     }
     // 热更新：QqService 持有的就是这个对象，改字段即改行为。
     const live = this.qq.config;
+    live.route = config.route;
     live.allowedUsers = [...config.allowedUsers];
     live.allowedGroups = [...config.allowedGroups];
     live.workspace = config.workspace;
@@ -11729,12 +11922,33 @@ export class ChatPanel implements vscode.Disposable {
      * 正忙 / 正在恢复历史 / 已销毁）或被派发成了子会话。汇报队列靠它决定
      * 「这条汇报是投出去了」还是「还欠着」—— 汇报丢了主会话就永远读不到
      * 自己孩子的结果。
+     *
+     * QQ 主会话注入（`iflow.qq.route = "main"`）用到四个额外选项：
+     *  - `origin: "qq"`：user 块带来源标记，转录里渲染 QQ 徽标（外部渠道
+     *    消息必须与本机输入可区分）；
+     *  - `displayText`：转录气泡正文（QQ 原文），而 `text` 是模型可见的
+     *    带来源包裹版本 —— 本机用户看到的就是对方发来的内容；
+     *  - `quietBusy`：撞上忙窗口时安静返回 false（调用方排队重试），不要弹
+     *    「等本轮结束后再让智能体合并」那种误导性提示；
+     *  - `onTurnStarted`：这一轮真的开始后回调（服务据此把 QQ 任务从
+     *    「排队中」切到「已注入待回复」）。
      */
-    options?: { internal?: boolean; delegateOnBusy?: boolean; hidden?: boolean; reportTurn?: boolean },
+    options?: {
+      internal?: boolean;
+      delegateOnBusy?: boolean;
+      hidden?: boolean;
+      reportTurn?: boolean;
+      origin?: "qq";
+      displayText?: string;
+      quietBusy?: boolean;
+      onTurnStarted?: () => void | Promise<void>;
+    },
   ): Promise<boolean> {
     const internal = options?.internal === true;
     const hidden = options?.hidden === true;
     const reportTurn = options?.reportTurn === true;
+    /** QQ 主会话注入回合：对话派生的回合末任务（下一步 / 记忆）必须跳过。 */
+    const qqTurn = options?.origin === "qq";
     const trimmed = text.trim();
     const hasContexts = (contexts?.length ?? 0) > 0;
     if (!trimmed && !hasContexts) return false;
@@ -11796,10 +12010,14 @@ export class ChatPanel implements vscode.Disposable {
       // an isolated child session would be wrong (the child's worktree has
       // its own branch). Refuse and say why instead of doing something else.
       if (options?.delegateOnBusy === false) {
-        this.store.sendToast(
-          "warning",
-          vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
-        );
+        // `quietBusy`：调用方（QQ 主会话注入）自己会排队重试，弹一条
+        // 「让智能体合并」的提示纯属误导。
+        if (options?.quietBusy !== true) {
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
+          );
+        }
         return false;
       }
       const contextBlock = hasContexts
@@ -11973,10 +12191,14 @@ export class ChatPanel implements vscode.Disposable {
       // transcript — no user bubble, no session rename. The agent's answer
       // still streams in as an assistant message.
       if (!hidden) {
+        // QQ 注入：气泡显示对方原文，模型拿到的是带来源包裹的版本（服务
+        // 生成），来源标记另走 `origin` —— 三者不得混为一谈。
+        const bubbleText = options?.displayText ?? fullText;
         this.store.userPrompt(
-          fullText,
+          bubbleText,
           (images ?? []).map((img) => `data:${img.mimeType};base64,${img.data}`),
           files,
+          options?.origin,
         );
         if (!internal) void this.labelSessionWithPrompt(fullText);
         void this.persistActiveTranscript(); // user turn lands even on a crash
@@ -11991,6 +12213,15 @@ export class ChatPanel implements vscode.Disposable {
       // 可以还回去 —— 否则回合收尾的家务（队列里的下一条消息、汇报投递）
       // 会被自己的车道挡住。
       releaseLane();
+      // QQ 注入的「已注入」锚点：user 气泡已落地、这一轮确定要跑。回调失败
+      // 只记日志 —— 它只是投影状态，不能把一整轮真实工作打红。
+      if (options?.onTurnStarted) {
+        try {
+          await options.onTurnStarted();
+        } catch (error) {
+          this.log.warn(`turn-started callback failed: ${errorMessage(error)}`);
+        }
+      }
       // M3 P0-1: snapshot the workspace BEFORE the agent runs so this turn's
       // file changes are revertible. Awaited — a parallel capture would race
       // the agent's writes and bake them into the "before" snapshot. Best
@@ -12076,7 +12307,9 @@ export class ChatPanel implements vscode.Disposable {
       if (promptSessionId && result.stopReason !== "cancelled") {
         void this.runTurnFollowup(promptSessionId, {
           allowTitle: true,
-          conversationTasks: !isCompressTurn && !autoCompressed,
+          // QQ 消息是外部渠道内容：绝不从中提炼「下一步」或写入自动记忆
+          // （记忆会进后续系统提示）。标题只是本地会话标签，不涉安全边界。
+          conversationTasks: !qqTurn && !isCompressTurn && !autoCompressed,
         });
       }
       // M2 P0-3: the turn settled — the idle slot is free, feed it the next

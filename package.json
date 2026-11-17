@@ -246,6 +246,19 @@
           "default": false,
           "description": "%iflow.configuration.qq.enabled.description%"
         },
+        "iflow.qq.route": {
+          "type": "string",
+          "enum": [
+            "main",
+            "child"
+          ],
+          "enumDescriptions": [
+            "%iflow.configuration.qq.route.main%",
+            "%iflow.configuration.qq.route.child%"
+          ],
+          "default": "main",
+          "description": "%iflow.configuration.qq.route.description%"
+        },
         "iflow.qq.allowedUsers": {
           "type": "array",
           "items": {

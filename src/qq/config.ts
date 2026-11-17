@@ -27,7 +27,11 @@ import {
   normalizeQqAllowEntries,
   normalizeQqAllowEntry,
 } from "../../shared/qq-access.js";
-import type { QqRemotePolicy, QqResultDetail } from "../../shared/qq-task.js";
+import type {
+  QqRemotePolicy,
+  QqResultDetail,
+  QqTaskChannel,
+} from "../../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
 // 枚举取值
@@ -46,16 +50,32 @@ const RESULT_DETAILS = [
   "full",
 ] as const satisfies readonly QqResultDetail[];
 
+/**
+ * 入站消息的去向。
+ *
+ * - `main`（默认）：排队注入**主会话** —— 与本地输入同一条对话线，QQ 侧能
+ *   接续工作；主会话按 system prompt 的分工再派子会话干活；
+ * - `child`：直接派 Super Agent 子会话（旧行为，保留用于回滚与诊断）。
+ */
+const ROUTES = ["main", "child"] as const satisfies readonly QqTaskChannel[];
+
 /** 权威类型在 `shared/qq-task.ts`，此处只做转出，避免两份枚举漂移。 */
-export type { QqRemotePolicy, QqResultDetail };
+export type { QqRemotePolicy, QqResultDetail, QqTaskChannel };
 
 // ---------------------------------------------------------------------------
 // 配置形状与默认值
 // ---------------------------------------------------------------------------
 
-/** 归一化后的 QQ 通道配置（`iflow.qq.*` 9 项）。 */
+/** 归一化后的 QQ 通道配置（`iflow.qq.*` 10 项）。 */
 export interface QqConfig {
   enabled: boolean;
+  /**
+   * 入站消息的去向：`main`（默认）注入主会话、`child` 直接派子会话。
+   *
+   * 每次使用时从本对象读（与白名单等同为热更新字段），改设置即时生效；
+   * 已经建好的任务把渠道写在自己的记录上，不随设置回头变化。
+   */
+  route: QqTaskChannel;
   /**
    * 允许通过 QQ 派发任务的用户标识（QQ 官方 openid，不是 QQ 号）。
    *
@@ -85,6 +105,7 @@ export interface QqConfig {
  */
 const DEFAULTS: QqConfig = {
   enabled: false,
+  route: "main",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -128,6 +149,7 @@ export function normalizeQqConfig(raw: Record<string, unknown>): QqNormalizeResu
 
   const config: QqConfig = {
     enabled: readBoolean(source, "enabled", DEFAULTS.enabled, warnings),
+    route: readEnum(source, "route", ROUTES, DEFAULTS.route, warnings),
     allowedUsers: readIdList(source, "allowedUsers", warnings),
     allowedGroups: readIdList(source, "allowedGroups", warnings),
     workspace: readString(source, "workspace", DEFAULTS.workspace, warnings),

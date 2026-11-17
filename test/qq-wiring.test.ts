@@ -6,6 +6,7 @@ import { isTerminalSuperStatus, shouldRestartOnPatch } from "../src/qq/wiring.js
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
+    route: "child",
     allowedUsers: ["10001"],
     allowedGroups: [],
     workspace: "",

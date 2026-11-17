@@ -49,12 +49,12 @@ import { QQ_SECRET_KEYS } from "./config.js";
 /**
  * 宿主侧 IO 抽象：设置区（`iflow.qq.*`）与 SecretStorage。
  *
- * `readAll()` 返回 9 个设置键的**原始值**（键缺失即 `undefined`），由
+ * `readAll()` 返回 10 个设置键的**原始值**（键缺失即 `undefined`），由
  * `pickQqSettingsUi` 归一；`writeAll(patch)` 逐键落盘，`patch` 里的值已经过
  * 校验/裁剪，是可序列化的最终值。
  */
 export interface QqSettingsIo {
-  /** 读出 9 个 `iflow.qq.*` 键的原始值（缺失为 `undefined`）。 */
+  /** 读出 10 个 `iflow.qq.*` 键的原始值（缺失为 `undefined`）。 */
   readAll(): Record<string, unknown>;
   /** 逐键写入（值已是可序列化的最终值）。 */
   writeAll(patch: Record<string, unknown>): Promise<void>;
@@ -82,9 +82,10 @@ export interface QqSecretStorageLike {
 // 12 个设置键与允许取值（与 package.json 的 iflow.qq.* 声明逐字一致）
 // ---------------------------------------------------------------------------
 
-/** 可写的 9 个设置键（`hasAppSecret` 是派生字段，不在此列）。 */
+/** 可写的 10 个设置键（`hasAppSecret` 是派生字段，不在此列）。 */
 export const QQ_SETTING_KEYS = [
   "enabled",
+  "route",
   "allowedUsers",
   "allowedGroups",
   "workspace",
@@ -99,6 +100,7 @@ export type QqSettingKey = (typeof QQ_SETTING_KEYS)[number];
 
 const SETTING_KEY_SET: ReadonlySet<string> = new Set(QQ_SETTING_KEYS);
 
+const ROUTES = ["main", "child"] as const;
 const REMOTE_POLICIES = ["readonly", "supervised", "trusted"] as const;
 const RESULT_DETAILS = ["summary", "standard", "full"] as const;
 
@@ -118,7 +120,7 @@ function hasSecretValue(value: string | undefined): boolean {
 }
 
 /**
- * 读取 QQ 设置快照（9 项 + App Secret 布尔）。
+ * 读取 QQ 设置快照（10 项 + App Secret 布尔）。
  *
  * 只探测扫码写入的 `app-secret` 是否存在；`signing-secret` 与
  * `bridge-token` 是宿主内部自举的密钥，不对外暴露。返回结构里没有明文，
@@ -207,6 +209,8 @@ function coerceSettingValue(
       return typeof value === "boolean" ? { ok: true, value } : { ok: false };
     case "workspace":
       return typeof value === "string" ? { ok: true, value } : { ok: false };
+    case "route":
+      return coerceEnum(value, ROUTES);
     case "remotePolicy":
       return coerceEnum(value, REMOTE_POLICIES);
     case "resultDetail":
@@ -232,7 +236,7 @@ export interface QqSettingsPatchResult {
  * 应用一个设置补丁。
  *
  * 规则：
- *  - 只允许 9 个白名单键；`hasAppSecret` 是派生字段，任何其它键（含
+ *  - 只允许 10 个白名单键；`hasAppSecret` 是派生字段，任何其它键（含
  *    `appSecret` 这类明文凭据）一律进 `ignored`，不写；
  *  - `undefined` 表示「本次不改」，既不写也不记入 ignored；
  *  - 字符串 / 布尔按原值写；数组必须是全字符串数组才写（浅拷贝原值）；

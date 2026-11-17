@@ -19,6 +19,7 @@ function task(overrides: Partial<QqTaskUi> = {}): QqTaskUi {
     chatId: "1234567890",
     senderId: "42",
     status: "running",
+    channel: "child",
     promptPreview: "把 README 的安装段改成内网镜像",
     createdAt: 0,
     updatedAt: 90_000,
@@ -150,6 +151,21 @@ describe("QqTaskList", () => {
     expect(onAction).toHaveBeenCalledWith("task-1", "merge");
     clickText("丢弃");
     expect(onAction).toHaveBeenCalledWith("task-1", "discard");
+  });
+
+  it("marks the main-session channel and its injected stage", () => {
+    render([task({ channel: "main", status: "injected", promptPreview: "把安装段改掉" })]);
+    const [row] = rows();
+    expect(row!.textContent).toContain("渠道：主会话");
+    expect(row!.textContent).toContain("已注入待回复");
+    // 注入中仍可停止（排队/等回复都属于「中途」）。
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "停止")).toBe(true);
+  });
+
+  it("does not offer merge for a main-session task (it has no branch of its own)", () => {
+    render([task({ channel: "main", status: "succeeded" })]);
+    expect(container.textContent).toContain("渠道：主会话");
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "合并")).toBe(false);
   });
 
   it("renders only the first fifty rows and says so", () => {

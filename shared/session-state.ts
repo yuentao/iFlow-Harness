@@ -1398,6 +1398,11 @@ export function beginUserPrompt(
   text: string,
   images?: string[],
   files?: { name: string; path: string }[],
+  /**
+   * 消息来源渠道：`"qq"` 表示这条用户消息由 QQ 机器人转来（宿主注入），
+   * 不是本机用户的直接输入。转录里必须可区分（webview 渲染 QQ 徽标）。
+   */
+  origin?: "qq",
 ): number {
   // Mirror the agent-facing attachment list in the transcript so the user
   // message block shows exactly what the agent was told about the files.
@@ -1406,10 +1411,11 @@ export function beginUserPrompt(
       ? "\n" + files.map((f) => `（文件：${f.name} → ${f.path}）`).join("\n")
       : "";
   const full = text + fileNote;
+  const originField = origin ? { origin } : {};
   state.blocks.push(
     images && images.length > 0
-      ? { kind: "user", text: full, images, id: nextBlockId() }
-      : { kind: "user", text: full, id: nextBlockId() },
+      ? { kind: "user", text: full, images, id: nextBlockId(), ...originField }
+      : { kind: "user", text: full, id: nextBlockId(), ...originField },
   );
   state.status = "streaming";
   state.stopReason = null;

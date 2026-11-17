@@ -11,6 +11,7 @@ const SECRETS_OFF = { hasAppSecret: false };
 /** 完整默认值（与 src/qq/config.ts 的 DEFAULTS 保持一致）。 */
 const DEFAULTS: QqSettingsUi = {
   enabled: false,
+  route: "main",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -146,6 +147,7 @@ describe("pickQqSettingsUi", () => {
         "rateLimitPerMin",
         "remotePolicy",
         "resultDetail",
+        "route",
         "workspace",
       ].sort(),
     );

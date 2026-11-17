@@ -53,8 +53,13 @@ interface Spec {
 }
 
 const SPECS: Spec[] = [
-  { key: "iflow.qq.enabled", type: "boolean", default: false },
-  {
+{ key: "iflow.qq.enabled", type: "boolean", default: false },
+{
+  key: "iflow.qq.route",
+  type: "string",
+  default: "main",
+  enum: ["main", "child"],
+},  {
     key: "iflow.qq.allowedUsers",
     type: "array",
     default: [],
@@ -93,7 +98,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
   const props = pkg.contributes.configuration.properties;
   const qqKeys = Object.keys(props).filter((k) => k.startsWith("iflow.qq."));
 
-  it("恰好声明 9 项 iflow.qq.* 设置", () => {
+  it("恰好声明 10 项 iflow.qq.* 设置", () => {
     expect(qqKeys.sort()).toEqual(SPECS.map((s) => s.key).sort());
   });
 
@@ -136,7 +141,7 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
   });
 
   it("枚举设置逐项解释（enumDescriptions 与 enum 等长且都是 nls 键）", () => {
-    for (const key of ["iflow.qq.remotePolicy", "iflow.qq.resultDetail"]) {
+    for (const key of ["iflow.qq.route", "iflow.qq.remotePolicy", "iflow.qq.resultDetail"]) {
       const schema = props[key]!;
       expect(schema.enumDescriptions, `${key} 缺少 enumDescriptions`).toHaveLength(schema.enum!.length);
       for (const raw of schema.enumDescriptions!) nlsKey(raw);
@@ -150,8 +155,8 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
       keys.add(nlsKey(schema.description ?? schema.markdownDescription ?? ""));
       for (const raw of schema.enumDescriptions ?? []) keys.add(nlsKey(raw));
     }
-    // 9 个 description + 6 个枚举项解释（remotePolicy 3 + resultDetail 3）。
-    expect(keys.size).toBe(15);
+    // 10 个 description + 8 个枚举项解释（route 2 + remotePolicy 3 + resultDetail 3）。
+    expect(keys.size).toBe(18);
     for (const key of keys) {
       expect(typeof en[key], `英文 nls 缺少 ${key}`).toBe("string");
       expect(en[key]!.trim().length, `英文 nls 的 ${key} 为空`).toBeGreaterThan(0);

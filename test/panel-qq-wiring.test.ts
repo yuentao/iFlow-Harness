@@ -65,6 +65,7 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
+    route: "child",
     allowedUsers: ["10001"],
     allowedGroups: [],
     workspace: "",
@@ -85,6 +86,7 @@ const TASK: QqTaskUi = {
   chatId: "10001",
   senderId: "10001",
   status: "running",
+  channel: "child",
   promptPreview: "跑个测试",
   createdAt: 1,
   updatedAt: 2,

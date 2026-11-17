@@ -33,6 +33,8 @@ function statusLabel(status: QqTaskUi["status"]): string {
       return t("排队中");
     case "dispatched":
       return t("已派发");
+    case "injected":
+      return t("已注入待回复");
     case "running":
       return t("执行中");
     case "waiting_approval":
@@ -66,6 +68,7 @@ function statusTone(status: QqTaskUi["status"]): "muted" | "success" | "warning"
       return "warning";
     case "running":
     case "dispatched":
+    case "injected":
       return "info";
     default:
       return "muted";
@@ -105,8 +108,13 @@ function TaskRow({
     task.status === "validated" ||
     task.status === "queued" ||
     task.status === "dispatched" ||
+    task.status === "injected" ||
     task.status === "running";
-  const canReview = task.status === "succeeded" || task.status === "needs_review";
+  // 合并是子会话渠道的动作：主会话渠道没有自己的分支，按钮不该出现
+  // （点了只会回一句「没有可合并的分支」，读起来像失败）。
+  const canReview =
+    Boolean(task.branch) &&
+    (task.status === "succeeded" || task.status === "needs_review");
   const canDiscard = Boolean(task.branch) && (canReview || task.status === "failed" || task.status === "canceled" || task.status === "timeout");
   const hasChangeStats =
     Boolean(task.branch) ||
@@ -122,6 +130,9 @@ function TaskRow({
         <span className="min-w-0 truncate text-ui-caption text-muted-foreground">
           {source} · {maskQqChatId(task.chatId)}
         </span>
+        <Chip tone={task.channel === "main" ? "info" : "muted"}>
+          {task.channel === "main" ? t("渠道：主会话") : t("渠道：子会话")}
+        </Chip>
         <span className="ml-auto shrink-0 text-ui-caption text-muted-foreground">
           {t("耗时 {0}", formatQqDuration(task.updatedAt - task.createdAt))}
         </span>

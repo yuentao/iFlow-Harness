@@ -44,11 +44,13 @@ import {
   type QqRemotePolicy,
   type QqResultDetail,
   type QqTask,
+  type QqTaskChannel,
   type QqTaskError,
   type QqTaskResult,
   type QqTaskStatus,
   type QqTaskUsage,
 } from "../../shared/qq-task.js";
+import { maskQqOpenId } from "../../shared/qq-access.js";
 import {
   buildQqHelpText,
   normalizeCommandText,
@@ -119,6 +121,48 @@ export interface QqServiceDeliverInput {
 }
 
 /**
+ * 主会话注入：一次把消息投进主会话并等那一轮结束的完整输入。
+ *
+ * 排队/等待空闲由宿主实现（同一 ACP 会话上并发两个回合会把转录与上下文
+ * 搅乱），服务只关心「是否真的投出去了」与「那一轮的 assistant 文本」。
+ */
+export interface QqMainInjectInput {
+  /** 完整任务记录（宿主可读 source / payload，不得改写它）。 */
+  task: QqTask;
+  /** 模型可见正文（已含来源包裹）。 */
+  text: string;
+  /** 转录气泡正文（不含来源包裹；来源由 `origin` 标记）。 */
+  displayText: string;
+  /** 转录块来源标记，webview 据此渲染 QQ 徽标。 */
+  origin: "qq";
+  /**
+   * 消息**真的投进主会话**时回调（这一轮已经开始）。服务据此把任务从
+   * queued 切到 injected —— 排队等空闲不算注入。
+   */
+  onInjected: () => void | Promise<void>;
+  /** 取消信号（`/qq stop`、服务停止）。宿主必须尽快放弃等待。 */
+  signal: AbortSignal;
+  /** 等待主会话空闲的上限（毫秒）；超时如实失败，不静默丢失。 */
+  timeoutMs: number;
+}
+
+/** 一次主会话注入的结果（缺项保持 undefined，绝不编造）。 */
+export interface QqMainInjectResult {
+  /** 消息是否真的投进主会话并跑完了那一轮。 */
+  injected: boolean;
+  /** 那一轮 assistant 的正文（不含思考过程）；没有正文就是空串。 */
+  text?: string;
+  /** 那一轮的停止原因（end_turn / cancelled / error…）。 */
+  stopReason?: string;
+  /** 该轮以错误收尾（宿主状态为 error）。 */
+  failed?: boolean;
+  /** 未注入 / 失败的可读原因（如实报告给 QQ）。 */
+  reason?: string;
+  /** 被取消（`/qq stop` 或通道停止）：调用方不当作失败投递。 */
+  canceled?: boolean;
+}
+
+/**
  * 宿主能力面。
  *
  * 实现在 `panel.ts`；本任务只定义契约，便于 B2 接线与单测注入假实现。
@@ -136,6 +180,19 @@ export interface QqServiceHost {
   discardTask(superSessionId: string): Promise<void>;
   /** 读取任务的最终观测数据；读不到时返回 null。 */
   readTaskOutcome(superSessionId: string): QqServiceTaskOutcome | null;
+  /**
+   * 主会话渠道：把消息排队注入主会话，等这一轮结束后返回该轮 assistant 文本。
+   *
+   * 可选：只有 `iflow.qq.route = "main"` 的部署需要实现它；缺失时主会话渠道
+   * 的任务会如实失败（`main_route_unavailable`），绝不退化成子会话。
+   */
+  injectIntoMainSession?(input: QqMainInjectInput): Promise<QqMainInjectResult>;
+  /**
+   * 停止某个主会话渠道路径上的任务：取消「等待空闲」与正在跑的那一轮。
+   *
+   * 返回是否真的命中（false = 该任务不在注入流程里，调用方按队列项处理）。
+   */
+  cancelMainInjection?(taskId: string): Promise<boolean> | boolean;
   /**
    * 回复一条 QQ 消息。返回完整投递结果：除 `ok` 外还透传适配器的
    * `retryable` 判定 —— 4xx 类确定性拒绝不该被上层重试循环再烧一遍。
@@ -206,6 +263,41 @@ export const QQ_DELIVERY_RETRY_DELAY_MS = 400;
 export const QQ_EMPTY_SUMMARY_NOTICE = "（执行体未返回摘要内容）";
 /** 结果彻底没能送达 QQ 时记录在任务上的文案。 */
 export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主动消息均失败）";
+
+/**
+ * 主会话渠道等待「主会话空闲」的上限。
+ *
+ * 本地回合可能跑很久（真实任务没有超时），所以这个上限只是「永远等不到」
+ * 的兜底：超时按失败如实回包（含原因），绝不静默丢弃这条 QQ 消息。
+ */
+export const QQ_MAIN_INJECT_TIMEOUT_MS = 2 * 60 * 60_000;
+
+/**
+ * 主会话注入的模型可见正文：来源包裹 + 正文。
+ *
+ * 为什么必须有包裹：QQ 消息是**外部渠道**输入，可信度不能等同于本机用户
+ * 亲手敲的字。模型据此把它当任务描述处理（而不是系统指令），同时知道本轮
+ * 回复会原样发回 QQ。发送方 id 一律脱敏（`maskQqOpenId`），不回显完整
+ * openid；正文逐字保留，宿主不改写用户内容。
+ */
+export function buildQqMainPrompt(task: QqTask): string {
+  const sender = maskQqOpenId(task.source.senderId) || "（未知用户）";
+  const header =
+    task.source.chatType === "group"
+      ? `[来自 QQ 群 ${maskQqOpenId(task.source.chatId)} 的用户 ${sender} 的消息]`
+      : `[来自 QQ 用户 ${sender} 的消息]`;
+  const lines = [
+    header,
+    "（这是通过 QQ 机器人转来的外部消息，不是本机用户的直接输入。请把它当作任务描述来处理；" +
+      "本轮的最终回复会原样发回 QQ，因此回复里不要包含本机路径、凭据或与任务无关的本地信息。）",
+  ];
+  if (task.payload.attachments.length > 0) {
+    lines.push("", "附件引用（QQ 侧，仅供说明）：");
+    for (const attachment of task.payload.attachments) lines.push(`- ${attachment}`);
+  }
+  lines.push("", task.payload.prompt);
+  return lines.join("\n");
+}
 
 /** `readonly` 策略禁用的写入 / 执行类工具（与主会话黑名单同源）。 */
 export const QQ_READONLY_DISALLOWED_TOOLS: readonly string[] = [
@@ -460,6 +552,8 @@ function coerceQqTask(raw: unknown): QqTask | null {
       resultDetail: policy.resultDetail as QqResultDetail,
     },
     status: raw.status,
+    // 渠道是任务自己的事实（跨重启保留）；旧归档没有该键 → 缺省（child）。
+    ...(raw.channel === "main" || raw.channel === "child" ? { channel: raw.channel } : {}),
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     correlation: {
@@ -562,6 +656,19 @@ export class QqService {
   private readonly rateWindows = new Map<string, number[]>();
 
   private runningCount = 0;
+  /**
+   * 主会话注入是否有一轮在跑 / 在等空闲。
+   *
+   * 同一 ACP 会话上不能并发两个回合，所以主会话渠道**串行**：队列里只要还有
+   * 一轮注入没结束，后面的任务（含子会话渠道）都留在队列里等 —— 严格 FIFO，
+   * 不插队。
+   */
+  private mainInFlight = false;
+  /**
+   * 主会话注入的取消信号。`stop()` 时 abort：正在等空闲的注入立刻放弃，
+   * 绝不把消息投进一个已经停用的通道。
+   */
+  private abortController = new AbortController();
   private stopped = false;
   private started = false;
   /** 验证码随机源（测试可以替换成确定值）。 */
@@ -608,6 +715,9 @@ export class QqService {
     if (this.started) return;
     this.started = true;
     this.stopped = false;
+    // 上一次 stop() 可能已经 abort 过：新的一轮生命周期必须拿到新信号，
+    // 否则主会话注入会在启动瞬间被自己判成「已取消」。
+    this.abortController = new AbortController();
 
     let entries: Awaited<ReturnType<QqTaskStore["listTasks"]>> = [];
     try {
@@ -636,27 +746,38 @@ export class QqService {
     for (const task of [...this.tasks.values()]) {
       if (isTerminalStatus(task.status)) continue;
       const at = this.now();
+      // 重启时任务停在哪一步决定 QQ 该收到什么：还在排队（从未投出）的要
+      // 明确说「没执行，请重发」；已经注入/执行中的只能如实说「中断」。
+      const wasQueued = task.status === "received" || task.status === "validated" || task.status === "queued";
       const outcome = transitionQqTask(task, "failed", at);
       const base = outcome.noop ? task : outcome.task;
       const interrupted: QqTask = {
         ...base,
         updatedAt: Math.max(base.updatedAt, at),
-        failure: { code: "host_restarted", message: "扩展宿主已重启，任务中断。" },
+        failure: {
+          code: "host_restarted",
+          message: wasQueued
+            ? "扩展宿主已重启，任务未执行（请重发）。"
+            : "扩展宿主已重启，任务中断。",
+        },
         pending: undefined,
       };
       try {
         await this.persist(interrupted);
         await this.appendEvent("task_interrupted", interrupted.taskId, {
           reason: "host_restarted",
+          wasQueued,
         });
       } catch (error) {
         this.log(`QQ 任务 ${interrupted.taskId} 中断回写失败：${errorText(error)}`);
       }
       this.notify(`QQ 任务 ${shortTaskId(interrupted.taskId)} 因宿主重启标记为失败`);
       // 进程换了，QQ 那侧不能只剩一条「已受理」：中断本身也要有一条回包。
-      await this.deliverInterruption(interrupted).catch((error: unknown) => {
-        this.log(`QQ 任务 ${interrupted.taskId} 中断通知发送失败：${errorText(error)}`);
-      });
+      await this.deliverInterruption(interrupted, { neverRan: wasQueued }).catch(
+        (error: unknown) => {
+          this.log(`QQ 任务 ${interrupted.taskId} 中断通知发送失败：${errorText(error)}`);
+        },
+      );
     }
   }
 
@@ -670,6 +791,9 @@ export class QqService {
     this.stopped = true;
     this.started = false;
     this.queue.length = 0;
+    // 正在等空闲 / 正在注入的任务：立刻放弃（宿主侧看到 signal 就 unwait）。
+    // 队列是内存态，未投出的条目由宿主重启路径如实告知（见 start()）。
+    this.abortController.abort();
     for (const entry of this.pendingApprovals.values()) {
       clearTimeout(entry.timer);
       entry.resolve("deny");
@@ -855,6 +979,7 @@ export class QqService {
           remotePolicy: this.config.remotePolicy as QqRemotePolicy,
           resultDetail: qqDetailProfile(this.config.resultDetail).detail,
         },
+        channel: this.channelForNewTask(),
       },
       { now: this.now },
     );
@@ -867,8 +992,52 @@ export class QqService {
       senderId: msg.senderId,
     });
 
+    if (this.taskChannel(task) === "main") {
+      // 主会话渠道：先入队（位次才能算准），**立刻**回一条排队确认 ——
+      // 用户不必等主会话空闲就能知道消息被接住了、排在第几位。
+      // 去重键与被动回复的 msg_id 沿用现有回包通道（重试不会刷出第二条）。
+      this.queue.push(task.taskId);
+      const position = this.mainQueuePosition(task.taskId);
+      await this.deliver(
+        msg,
+        `任务 ${shortTaskId(task.taskId)} 已排队（第 ${position} 位），主会话空闲后开始执行。`,
+        msg.msgId,
+        `qq-queued:${task.taskId}`,
+      );
+      this.pump();
+      return;
+    }
+
     await this.deliver(msg, `已受理任务 ${shortTaskId(task.taskId)}，排队中。`, msg.msgId);
     this.enqueue(task.taskId);
+  }
+
+  /** 新任务该走的渠道（`iflow.qq.route`；未知值按旧行为 child）。 */
+  private channelForNewTask(): QqTaskChannel {
+    return this.config.route === "main" ? "main" : "child";
+  }
+
+  /** 任务自己的渠道（旧归档没有该字段 → child，与历史行为一致）。 */
+  private taskChannel(task: QqTask): QqTaskChannel {
+    return task.channel === "main" ? "main" : "child";
+  }
+
+  /**
+   * 主会话渠道的排队位次（1 = 下一条；已有一轮在注入时它占第 1 位）。
+   *
+   * 只数**主会话渠道**的非终态项：子会话任务不占主会话这一条线，把它们算进
+   * 位次会让用户以为要等很久。
+   */
+  private mainQueuePosition(taskId: string): number {
+    let position = this.mainInFlight ? 2 : 1;
+    for (const id of this.queue) {
+      if (id === taskId) break;
+      const task = this.tasks.get(id);
+      if (task && this.taskChannel(task) === "main" && !isTerminalStatus(task.status)) {
+        position += 1;
+      }
+    }
+    return position;
   }
 
   private resolveWorkspace(): string {
@@ -899,27 +1068,50 @@ export class QqService {
     this.pump();
   }
 
-  /** 并发上限内启动排队任务（FIFO）。 */
+  /**
+   * 按 FIFO 启动排队任务。
+   *
+   * 两条纪律：
+   *  - **主会话渠道串行**：同一 ACP 会话上并发两个回合会乱序，所以只要有一轮
+   *    注入在跑/在等空闲，队列整体停住（严格 FIFO，后面的子会话任务也不超车）；
+   *  - 子会话渠道沿用并发上限（`maxConcurrentTasks`），与旧行为一致。
+   */
   private pump(): void {
     if (this.stopped) return;
     const limit = Math.max(1, this.config.maxConcurrentTasks);
-    while (this.runningCount < limit && this.queue.length > 0) {
-      const taskId = this.queue.shift();
-      if (!taskId) continue;
+    while (this.queue.length > 0) {
+      const taskId = this.queue[0]!;
       const task = this.tasks.get(taskId);
-      if (!task || isTerminalStatus(task.status)) continue;
+      if (!task || isTerminalStatus(task.status)) {
+        this.queue.shift();
+        continue;
+      }
 
-      this.runningCount += 1;
+      const main = this.taskChannel(task) === "main";
+      if (main) {
+        if (this.mainInFlight) return;
+      } else if (this.runningCount >= limit) {
+        return;
+      }
+
+      this.queue.shift();
+      if (main) this.mainInFlight = true;
+      else this.runningCount += 1;
+
       const job = this.runTask(taskId)
         .catch((error: unknown) => {
           this.log(`QQ 任务 ${taskId} 调度异常：${errorText(error)}`);
         })
         .finally(() => {
-          this.runningCount = Math.max(0, this.runningCount - 1);
+          if (main) this.mainInFlight = false;
+          else this.runningCount = Math.max(0, this.runningCount - 1);
           this.jobs.delete(job);
           this.pump();
         });
       this.jobs.add(job);
+
+      // 队首的主会话任务已占用唯一那条注入线：后面的任务必须等它结束。
+      if (main) return;
     }
   }
 
@@ -928,9 +1120,15 @@ export class QqService {
   // -------------------------------------------------------------------------
 
   private async runTask(taskId: string): Promise<void> {
-    let task = this.tasks.get(taskId);
-    if (!task || isTerminalStatus(task.status)) return;
+    const initial = this.tasks.get(taskId);
+    if (!initial || isTerminalStatus(initial.status)) return;
 
+    if (this.taskChannel(initial) === "main") {
+      await this.runMainTask(initial);
+      return;
+    }
+
+    let task = initial;
     try {
       task = await this.commitStatus(task, "dispatched");
       if (isTerminalStatus(task.status)) return;
@@ -964,6 +1162,134 @@ export class QqService {
       await this.persist(correlated);
       if (isTerminalStatus(correlated.status)) return;
       await this.finalize(correlated, dispatched);
+    } catch (error) {
+      if (this.stopped) return;
+      const current = this.tasks.get(taskId);
+      if (!current || isTerminalStatus(current.status)) return;
+      await this.failTask(current, "host_error", errorText(error));
+    }
+  }
+
+  /**
+   * 主会话渠道：把消息排队注入主会话，等那一轮的 assistant 回复，回传 QQ。
+   *
+   * 轮次锚定（最容易错的地方）：
+   *  - 注入由 `host.injectIntoMainSession` **一次只发一轮**，返回的就是那一轮
+   *    的正文 —— 宿主在轮次开始时记下文本块基线，轮次结束后只取基线之后的
+   *    assistant 文本（不含思考），因此不会把上一轮或后续无关轮次的输出当
+   *    本轮结果；
+   *  - `onInjected` 只在消息**真的投出**时触发（排队等空闲不算），看板据此
+   *    从「排队中」切到「已注入待回复」；
+   *  - 任务一旦被 `/qq stop` / 看板停止收尾（终态），这里不再写结果、不再
+   *    回包 —— 结果只回传一次，且只属于它自己那一轮。
+   */
+  private async runMainTask(task: QqTask): Promise<void> {
+    const taskId = task.taskId;
+    try {
+      const inject = this.host.injectIntoMainSession;
+      if (!inject) {
+        await this.failTask(
+          task,
+          "main_route_unavailable",
+          "当前宿主未实现主会话注入（iflow.qq.route=main），请改用 child 渠道或更新扩展。",
+        );
+        return;
+      }
+
+      const result = await inject({
+        task,
+        text: buildQqMainPrompt(task),
+        displayText: task.payload.prompt,
+        origin: "qq",
+        signal: this.abortController.signal,
+        timeoutMs: QQ_MAIN_INJECT_TIMEOUT_MS,
+        onInjected: async () => {
+          const current = this.tasks.get(taskId);
+          if (!current || isTerminalStatus(current.status)) return;
+          await this.commitStatus(current, "injected");
+        },
+      });
+
+      if (this.stopped) return;
+      const latest = this.tasks.get(taskId) ?? task;
+      // 已被停止（/qq stop / 看板）收尾并回包：这一轮的任何输出都不再回传。
+      if (isTerminalStatus(latest.status)) return;
+      if (result.canceled) {
+        // 正常情况下 `/qq stop` 已经把任务收在 canceled 并回过一条状态（上面
+        // 的终态检查会直接返回）。这里兜住「取消来自宿主、但没有对应的用户
+        // 停止」的情形：任务不能永远停在排队中。
+        this.log(`QQ 任务 ${taskId} 主会话注入被取消`);
+        const cleared = await this.commitStatus(
+          { ...latest, pending: undefined },
+          "canceled",
+          { pending: undefined },
+        );
+        await this.appendEvent("task_canceled", cleared.taskId, { channel: "main" });
+        await this.deliverTask(cleared, `已取消任务 ${shortTaskId(cleared.taskId)}。`);
+        return;
+      }
+      if (!result.injected) {
+        await this.failTask(
+          latest,
+          "main_inject_failed",
+          result.reason && result.reason.trim().length > 0
+            ? result.reason
+            : "消息未能注入主会话。",
+        );
+        return;
+      }
+
+      const rawStop = (result.stopReason ?? "").trim();
+      const stopReason = rawStop.length > 0 ? rawStop : result.failed ? "error" : "end_turn";
+      const summary = (result.text ?? "").trim();
+      const qqResult = this.buildResult({ summary, stopReason }, stopReason, latest, undefined);
+
+      let status: QqTaskStatus;
+      let failure: QqTaskError | undefined;
+      // ACP 的停止原因是英式拼写 `cancelled`；本仓库其它路径用 `canceled`。
+      // 两种都按「用户取消」收尾 —— 取消不是执行故障，不该在 QQ 侧报失败。
+      const stopKey = normalizedStopReason(stopReason);
+      if (stopKey === "canceled" || stopKey === "cancelled") {
+        status = "canceled";
+        failure = { code: "agent_canceled", message: `执行结束：${stopReason}` };
+      } else if (result.failed === true || isFailureStopReason(stopReason)) {
+        status = "failed";
+        failure = {
+          code: "main_turn_failed",
+          message: result.reason && result.reason.trim().length > 0
+            ? result.reason
+            : `执行结束：${stopReason}`,
+        };
+      } else {
+        status = "succeeded";
+      }
+
+      // 防御：面板已在轮次开始时回调过 onInjected，但那次落盘可能没走到。
+      // 仍停在 queued 就直接收终态会让迁移表拒绝（queued→succeeded 非法），
+      // 结果永远是「排队中」。先补一次 injected。
+      const base = latest.status === "queued"
+        ? await this.commitStatus(latest, "injected")
+        : latest;
+
+      const at = this.now();
+      const patched: QqTask = {
+        ...base,
+        result: qqResult,
+        failure,
+        pending: undefined,
+        updatedAt: Math.max(base.updatedAt, at),
+      };
+      const updated = await this.commitStatus(patched, status, {
+        result: qqResult,
+        failure,
+        pending: undefined,
+      });
+      await this.appendEvent(
+        status === "succeeded" ? "task_succeeded" : "task_finished",
+        updated.taskId,
+        { status, stopReason, channel: "main" },
+      );
+      await this.deliverResult(updated);
     } catch (error) {
       if (this.stopped) return;
       const current = this.tasks.get(taskId);
@@ -1356,6 +1682,9 @@ export class QqService {
     }
 
     const queuedAt = this.queue.indexOf(current.taskId);
+    // 主会话渠道的任务可能已被取出、正「等空闲」，状态仍是 queued —— 对用户
+    // 来说那同样是排队项，取消文案要说「已取消排队」而不是「已请求停止」。
+    const wasQueued = queuedAt >= 0 || current.status === "queued";
     if (queuedAt >= 0) this.queue.splice(queuedAt, 1);
 
     const superSessionId = current.correlation.superSessionId;
@@ -1367,6 +1696,16 @@ export class QqService {
       }
     }
 
+    // 主会话渠道：任务可能正「等空闲」或正跑在唯一那条注入线上。宿主要
+    // 立刻放弃等待 / 打断那一轮；否则用户以为停了，QQ 却还会收到结果。
+    if (this.taskChannel(current) === "main") {
+      try {
+        await this.host.cancelMainInjection?.(current.taskId);
+      } catch (error) {
+        this.log(`QQ 任务 ${current.taskId} 主会话注入取消失败：${errorText(error)}`);
+      }
+    }
+
     const at = this.now();
     const patched: QqTask = {
       ...current,
@@ -1375,7 +1714,12 @@ export class QqService {
     };
     const updated = await this.commitStatus(patched, "canceled", { pending: undefined });
     await this.appendEvent("task_canceled", updated.taskId);
-    await this.deliverTask(updated, `已请求停止任务 ${shortTaskId(updated.taskId)}。`);
+    await this.deliverTask(
+      updated,
+      wasQueued
+        ? `已取消排队中的任务 ${shortTaskId(updated.taskId)}。`
+        : `已请求停止任务 ${shortTaskId(updated.taskId)}。`,
+    );
   }
 
   private async mergeTask(task: QqTask): Promise<void> {
@@ -1440,6 +1784,13 @@ export class QqService {
 
   private async refreshTask(task: QqTask): Promise<void> {
     const current = this.tasks.get(task.taskId) ?? task;
+    if (this.taskChannel(current) === "main") {
+      // 主会话渠道没有子会话可读：按任务自己的真实状态回一条摘要。排队中 /
+      // 已注入待回复时明确说还要等，绝不把「没结果」说成「已完成」。
+      const profile = qqDetailProfile(this.config.resultDetail);
+      await this.deliverTask(current, formatQqTaskSummary(current, profile.detail));
+      return;
+    }
     const superSessionId = current.correlation.superSessionId;
     if (!superSessionId) {
       await this.deliverTask(
@@ -1645,6 +1996,7 @@ export class QqService {
       chatId: task.source.chatId,
       senderId: task.source.senderId,
       status: task.status,
+      channel: this.taskChannel(task),
       promptPreview: previewPrompt(task.payload.prompt),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
@@ -1986,8 +2338,15 @@ export class QqService {
    * 宿主重启造成的中断也要有回包：QQ 那侧不能只剩一条「已受理」。
    * 失败同样记录 `deliveryError` 并本地提示。
    */
-  private async deliverInterruption(task: QqTask): Promise<void> {
-    const text = `任务 ${shortTaskId(task.taskId)} 因扩展宿主重启而中断（未完成）。`;
+  private async deliverInterruption(
+    task: QqTask,
+    options: { neverRan?: boolean } = {},
+  ): Promise<void> {
+    const label = shortTaskId(task.taskId);
+    const text =
+      options.neverRan === true
+        ? `任务 ${label} 因扩展宿主重启**未执行**（排队消息不会保留），请重新发送。`
+        : `任务 ${label} 因扩展宿主重启而中断（未完成）。`;
     if (await this.deliverTaskTextWithRetry(task, text)) return;
     const current = this.tasks.get(task.taskId) ?? task;
     await this.persist({ ...current, deliveryError: QQ_RESULT_UNDELIVERED });
