@@ -23,10 +23,27 @@ import type { SuperIntegration } from "./super-agent.js";
 export type QqChatType = "private" | "group";
 
 /**
+ * 任务的执行渠道（`iflow.qq.route`）。
+ *
+ * - `main`：消息注入**主会话**（排队等待主会话空闲），主会话再按 system prompt
+ *   的分工派子会话干活 —— 与用户在本机输入是同一条对话线，QQ 侧因此能接续
+ *   本地工作；
+ * - `child`：旧行为，直接派一个 Super Agent 子会话（独立 CLI 进程 + worktree）。
+ *
+ * 写在任务记录上而不是只在配置里：归档跨重启保留，路由随设置改变时旧任务
+ * 仍按它创建时的渠道收尾，看板也不会把两者混为一谈。
+ */
+export type QqTaskChannel = "main" | "child";
+
+/**
  * 任务生命周期状态。
  *
- * 线性主干：received → validated → queued → dispatched → running → 终态；
- * 运行期可以进出 `waiting_approval` / `waiting_answer` 两个等待态。
+ * 两条主干：
+ *  - 子会话渠道（`child`）：received → validated → queued → dispatched →
+ *    running → 终态；运行期可以进出 `waiting_approval` / `waiting_answer`。
+ *  - 主会话渠道（`main`）：received → validated → queued → injected → 终态
+ *    （`injected` = 消息已经真的投进主会话，正在等那一轮的 assistant 回复）。
+ *
  * 终态集合见 `TERMINAL_STATUSES`（`isTerminalStatus`）。
  */
 export type QqTaskStatus =
@@ -34,10 +51,12 @@ export type QqTaskStatus =
   | "received"
   /** 校验通过、已解析成任务。 */
   | "validated"
-  /** 等待并发槽位（排队中）。 */
+  /** 等待并发槽位 / 等待主会话空闲（排队中）。 */
   | "queued"
   /** 已交给执行体（子会话 / CLI 进程），尚未观察到运行。 */
   | "dispatched"
+  /** 已注入主会话，等待这一轮的 assistant 回复（主会话渠道）。 */
+  | "injected"
   /** 执行中。 */
   | "running"
   /** 等待审批（远程策略要求人工确认）。 */
@@ -158,6 +177,11 @@ export interface QqTask {
   payload: QqTaskPayload;
   policy: QqTaskPolicy;
   status: QqTaskStatus;
+  /**
+   * 执行渠道。缺省表示旧归档（创建于本设置引入之前，按子会话渠道收尾）。
+   * 新任务由服务按 `iflow.qq.route` 写入，之后不再随设置变化。
+   */
+  channel?: QqTaskChannel;
   /** 毫秒时间戳。 */
   createdAt: number;
   updatedAt: number;
@@ -210,6 +234,8 @@ export interface CreateQqTaskInput {
   target: QqTaskTarget;
   payload: QqTaskPayload;
   policy: QqTaskPolicy;
+  /** 执行渠道；缺省不写该键（旧归档形状，按 child 解释）。 */
+  channel?: QqTaskChannel;
 }
 
 /** 可注入的时钟与随机源（测试用；生产缺省 Date.now / Math.random）。 */
@@ -269,6 +295,7 @@ export function createQqTask(input: CreateQqTaskInput, opts: CreateQqTaskOptions
     },
     policy: { ...input.policy },
     status: "received",
+    ...(input.channel ? { channel: input.channel } : {}),
     createdAt,
     updatedAt: createdAt,
     correlation: {},
@@ -307,8 +334,20 @@ export function isTerminalStatus(status: QqTaskStatus): boolean {
 const TRANSITIONS: Record<QqTaskStatus, readonly QqTaskStatus[]> = {
   received: ["validated", "failed", "canceled", "timeout"],
   validated: ["queued", "failed", "canceled", "timeout"],
-  queued: ["dispatched", "failed", "canceled", "timeout"],
+  // `injected` 只属于主会话渠道：队列项在主会话空闲、消息真正投出后才离开
+  // queued —— 排队等待主会话不是「已注入」，看板必须能区分。
+  queued: ["dispatched", "injected", "failed", "canceled", "timeout"],
   dispatched: [
+    "running",
+    "waiting_approval",
+    "waiting_answer",
+    "succeeded",
+    "failed",
+    "canceled",
+    "timeout",
+    "needs_review",
+  ],
+  injected: [
     "running",
     "waiting_approval",
     "waiting_answer",
@@ -616,6 +655,7 @@ const STATUS_LABELS: Record<QqTaskStatus, string> = {
   validated: "已校验",
   queued: "排队中",
   dispatched: "已派发",
+  injected: "已注入待回复",
   running: "执行中",
   waiting_approval: "等待审批",
   waiting_answer: "等待回答",

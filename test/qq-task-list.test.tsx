@@ -20,6 +20,7 @@ function task(overrides: Partial<QqTaskUi> = {}): QqTaskUi {
     chatId: "1234567890",
     senderId: "42",
     status: "running",
+    channel: "child",
     promptPreview: "把 README 的安装段改成内网镜像",
     createdAt: 0,
     updatedAt: 90_000,
@@ -158,18 +159,33 @@ describe("QqTaskList", () => {
     const [trusted, supervised, plain] = rows();
 
     const trustedChips = [...trusted!.querySelectorAll<HTMLElement>(".chip-fade")];
-    expect(trustedChips).toHaveLength(2);
+    expect(trustedChips).toHaveLength(3);
     expect(trustedChips[1]!.textContent).toBe("免确认");
     expect(trustedChips[1]!.className).toContain("bg-warning");
 
     const supervisedChips = [...supervised!.querySelectorAll<HTMLElement>(".chip-fade")];
-    expect(supervisedChips).toHaveLength(2);
+    expect(supervisedChips).toHaveLength(3);
     expect(supervisedChips[1]!.textContent).toBe("需审批");
     expect(supervisedChips[1]!.className).toContain("bg-surface");
     expect(supervisedChips[1]!.className).not.toContain("bg-warning");
 
-    // 没有 policy 的行只有状态 chip：看板不猜策略。
-    expect(plain!.querySelectorAll(".chip-fade")).toHaveLength(1);
+    // 没有 policy 的行只有状态 chip + 渠道 chip：看板不猜策略。
+    expect(plain!.querySelectorAll(".chip-fade")).toHaveLength(2);
+  });
+
+  it("marks the main-session channel and its injected stage", () => {
+    render([task({ channel: "main", status: "injected", promptPreview: "把安装段改掉" })]);
+    const [row] = rows();
+    expect(row!.textContent).toContain("渠道：主会话");
+    expect(row!.textContent).toContain("已注入待回复");
+    // 注入中仍可停止（排队/等回复都属于「中途」）。
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "停止")).toBe(true);
+  });
+
+  it("does not offer merge for a main-session task (it has no branch of its own)", () => {
+    render([task({ channel: "main", status: "succeeded" })]);
+    expect(container.textContent).toContain("渠道：主会话");
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent?.trim() === "合并")).toBe(false);
   });
 
   it("renders only the first fifty rows and says so", () => {

@@ -1139,6 +1139,12 @@ function UserMessage({
           </div>
         ) : (
           <>
+        {block.origin === "qq" && (
+          <div className="mb-1.5 flex items-center gap-1.5" title={t("这条消息来自 QQ 机器人转发的远程用户，不是本机输入")}>
+            <Chip tone="info">{t("QQ")}</Chip>
+            <span className="text-ui-micro text-muted-foreground">{t("来自 QQ 渠道")}</span>
+          </div>
+        )}
         <Markdown text={block.text} />
         {block.images && block.images.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">

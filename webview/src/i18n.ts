@@ -1155,6 +1155,13 @@ const en: Record<string, string> = {
   "openid 已脱敏显示，无法在此修改；如需更换请删除后重新添加。":
     "OpenIDs are shown masked and cannot be edited here; delete and re-add an entry to change it.",
   "执行策略": "Execution policy",
+  "消息去向": "Message destination",
+  "主会话": "Main session",
+  "独立子会话": "Isolated child session",
+  "消息排队注入当前主会话（与本地输入同一条对话线，可远程接续工作；忙时排队等待）。":
+    "Queue the message into the current main session (same conversation as local input, so work can continue remotely; queued while busy).",
+  "每条消息直接派一个独立子会话（旧行为，便于回滚与排查）。":
+    "Dispatch each message as an isolated child session (legacy behaviour, kept for rollback and diagnosis).",
   "远程任务策略": "Remote task policy",
   "只读": "Read-only",
   "只读：可以查看工作区，写文件与执行命令会被拒绝。":
@@ -1216,6 +1223,12 @@ const en: Record<string, string> = {
   "已收到": "Received",
   "已校验": "Validated",
   "已派发": "Dispatched",
+  "已注入待回复": "Injected — awaiting reply",
+  "渠道：主会话": "Channel: main session",
+  "渠道：子会话": "Channel: child session",
+  "来自 QQ 渠道": "from QQ",
+  "这条消息来自 QQ 机器人转发的远程用户，不是本机输入":
+    "This message came from a remote user via the QQ bot — it is not local input",
   "等待审批": "Waiting for approval",
   "等待回答": "Waiting for an answer",
   "已取消": "Canceled",

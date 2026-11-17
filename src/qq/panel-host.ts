@@ -26,6 +26,8 @@ import type {
 } from "../panel/super-agent.js";
 import type {
   QqDeliveryOutcome,
+  QqMainInjectInput,
+  QqMainInjectResult,
   QqServiceDeliverInput,
   QqServiceDispatchInput,
   QqServiceDispatchResult,
@@ -93,6 +95,15 @@ export interface QqHostPorts {
   discard(superSessionId: string): Promise<void>;
   /** 读取子会话快照；读不到返回 null。 */
   readSuper(superSessionId: string): QqHostSuperSnapshot | null;
+  /**
+   * 主会话渠道（`iflow.qq.route = "main"`）：排队等主会话空闲，把消息投成
+   * 一轮真实 prompt，等该轮结束后返回 assistant 文本。
+   *
+   * 可选：只有主会话渠道需要；缺失时该渠道任务会如实失败（不退化成子会话）。
+   */
+  injectIntoMain?(input: QqMainInjectInput): Promise<QqMainInjectResult>;
+  /** 停止某个主会话渠道任务：取消等待空闲并打断正在跑的那一轮。 */
+  cancelMainInjection?(taskId: string): Promise<boolean> | boolean;
   /** 本地通知（面板 toast / 日志），不发往 QQ。 */
   notify(text: string): void;
   /**
@@ -278,6 +289,20 @@ export function createQqServiceHost(
       }
       return outcome;
     },
+
+    // 主会话渠道：端口缺失时不暴露该方法 —— 服务据此如实失败（不静默退化）。
+    ...(ports.injectIntoMain
+      ? {
+          injectIntoMainSession: (input: QqMainInjectInput): Promise<QqMainInjectResult> =>
+            ports.injectIntoMain!(input),
+        }
+      : {}),
+    ...(ports.cancelMainInjection
+      ? {
+          cancelMainInjection: (taskId: string): Promise<boolean> | boolean =>
+            ports.cancelMainInjection!(taskId),
+        }
+      : {}),
 
     async deliver(msg: QqServiceDeliverInput): Promise<QqDeliveryOutcome> {
       return ports.deliver(msg);

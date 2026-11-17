@@ -16,6 +16,7 @@ function task(taskId: string, overrides: Partial<QqTaskUi> = {}): QqTaskUi {
     chatId: "chat-1",
     senderId: "user-1",
     status: "received",
+    channel: "child",
     promptPreview: "把日志里的错误整理一下",
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
