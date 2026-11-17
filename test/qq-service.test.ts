@@ -4,6 +4,10 @@ import type { QqConfig } from "../src/qq/config.js";
 import type { QqPendingUserInput } from "../src/qq/pending-users.js";
 import {
   QqService,
+  QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS,
+  QQ_RESULT_CHANGED_WHILE_DELIVERING,
+  QQ_RESULT_RESTORE_RETRY_MS,
+  QQ_RESULT_UNDELIVERED,
   fingerprintChunks,
   qqSpawnPolicyFor,
   qqTaskProjectionChanged,
@@ -63,6 +67,7 @@ interface DeliveredText {
   chatId: string;
   text: string;
   replyToMsgId?: string;
+  dedupeKey?: string;
 }
 
 interface HostFixture {
@@ -1054,7 +1059,9 @@ describe("QqService — 回包可靠性缺口回归", () => {
     f.host.readTaskOutcome = () => ({
       summary: "",
       status: "cancelled",
-      stopReason: "canceled",
+      // 英式拼写也要归一成 canceled：旧实现只匹配 "canceled"，"cancelled"
+      // 会落进 isFailureStopReason → failed。
+      stopReason: "cancelled",
     });
 
     await f.service.handleInboundMessage(inbound({ msgId: "e-cancel-1" }));
@@ -1063,7 +1070,16 @@ describe("QqService — 回包可靠性缺口回归", () => {
     const task = lastTask(f);
     expect(task.status).toBe("canceled");
     expect(task.failure?.code).toBe("agent_canceled");
-    expect(f.service.listTasks()[0]?.status).toBe("canceled");
+    const ui = f.service.listTasks()[0]!;
+    expect(ui.status).toBe("canceled");
+    // 取消是用户主动动作：看板不借用「执行失败」前缀。
+    expect(ui.errorMessage).toContain("已取消");
+    expect(ui.errorMessage).not.toContain("执行失败");
+    // 摘要同样中性：不再出现「失败 agent_canceled」与「执行结束」。
+    const sent = f.delivered.map((item) => item.text).join("\n");
+    expect(sent).toContain("取消");
+    expect(sent).not.toContain("执行失败");
+    expect(sent).not.toContain("执行结束");
   });
 
   it("多片结果中途失败后从下一片续发，不重发已送达片", async () => {
@@ -1122,6 +1138,155 @@ describe("QqService — 回包可靠性缺口回归", () => {
     expect(lastTask(f).resultDeliveredChunks).toBeUndefined();
     expect(lastTask(f).deliveryError).toBeUndefined();
   });
+
+  it("连续 5 次运行中刷新只消耗 1 条被动回复，终态结果仍能送达", async () => {
+    let clock = 10_000;
+    let releaseDispatch!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const f = makeService({ now: () => clock });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      input.task.correlation.superSessionId = "super-throttle";
+      await gate; // 挂起派发：任务停在 running
+      return { superSessionId: "super-throttle" };
+    };
+    f.host.readTaskOutcome = () => ({ summary: "", status: "running" });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-throttle-1" }));
+    await waitFor(() => lastTask(f).status === "running");
+    const taskId = lastTask(f).taskId;
+
+    for (let i = 0; i < 5; i += 1) {
+      clock += 1; // 5 次点击都落在最小间隔内
+      await f.service.handleTaskAction(taskId, "refresh");
+    }
+    const progress = f.delivered.filter((item) => item.text.includes("尚未结束"));
+    // 只有 1 条进度消息，且复用稳定 dedupeKey —— adapter 据此复用同一个
+    // msg_seq，平台按 (msg_id, msg_seq) 去重，不会把终态结果的配额烧光。
+    expect(progress).toHaveLength(1);
+    expect(progress[0]?.dedupeKey).toBe(`progress:${taskId}:running|running`);
+
+    // 超出最小间隔后才允许再发一条（节流是时间窗，不是永久抑制）。
+    clock += QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS + 1;
+    await f.service.handleTaskAction(taskId, "refresh");
+    expect(f.delivered.filter((item) => item.text.includes("尚未结束"))).toHaveLength(2);
+
+    // 终态结果仍能送达。
+    f.host.readTaskOutcome = () => ({
+      summary: "终态结果到达",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+    releaseDispatch();
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+    expect(f.delivered.some((item) => item.text.includes("终态结果到达"))).toBe(true);
+  });
+
+  it("投递窗口内 result 被改写时不写送达锚点，下次刷新重投新内容", async () => {
+    let releaseDelivery!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    let gated = false;
+    const f = makeService();
+    f.host.deliver = async (msg) => {
+      f.delivered.push({ ...msg });
+      if (!gated && msg.text.includes("第一版结果")) {
+        gated = true;
+        await gate; // 模拟平台慢响应
+      }
+      return { ok: true };
+    };
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-rewrite" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "第一版结果",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+
+    const main = f.service.handleInboundMessage(inbound({ msgId: "e-rewrite-1" }));
+    await waitFor(() => gated);
+    const taskId = lastTask(f).taskId;
+
+    // 投递还在飞时结果被刷新改写：旧内容的成功回包不能把新内容标成已送达。
+    f.host.readTaskOutcome = () => ({
+      summary: "第二版结果（更新）",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+    const refresh = f.service.handleTaskAction(taskId, "refresh");
+    releaseDelivery();
+    await Promise.all([main, refresh]);
+
+    const stale = lastTask(f);
+    expect(stale.result?.summary).toBe("第二版结果（更新）");
+    expect(stale.resultDeliveredAt).toBeUndefined();
+    expect(stale.deliveryError).toContain(QQ_RESULT_CHANGED_WHILE_DELIVERING);
+
+    // 下一次刷新重投新内容并补上锚点。
+    await f.service.handleTaskAction(taskId, "refresh");
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+    expect(f.delivered.some((item) => item.text.includes("第二版结果"))).toBe(true);
+  });
+
+  it("重启后补发终态但未送达的结果；已送达的不重发", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-un00001",
+      seedTask("T-seed-un00001", "succeeded", {
+        createdAt: 1_000,
+        updatedAt: 2_000,
+        result: { stopReason: "end_turn", summary: "重启补发的摘要", changes: [], artifacts: [] },
+      }),
+    );
+    store.records.set(
+      "T-seed-de00002",
+      seedTask("T-seed-de00002", "succeeded", {
+        createdAt: 1_000,
+        updatedAt: 2_000,
+        result: { stopReason: "end_turn", summary: "已经送达过的摘要", changes: [], artifacts: [] },
+        resultDeliveredAt: 2_000,
+      }),
+    );
+    const f = makeService({ store, now: () => 100_000, deliveryRetryDelayMs: 0 });
+
+    await f.service.start();
+
+    const texts = f.delivered.map((item) => item.text).join("\n");
+    expect(texts).toContain("重启补发的摘要");
+    expect(texts).not.toContain("已经送达过的摘要");
+    expect(f.service.getTask("T-seed-un00001")?.resultDeliveredAt).toBeDefined();
+    expect(f.service.getTask("T-seed-de00002")?.resultDeliveredAt).toBe(2_000);
+  });
+
+  it("重启补发受最小间隔节流：刚失败过的任务不会每次开窗都重试", async () => {
+    const store = new MemoryStore();
+    store.records.set(
+      "T-seed-un00003",
+      seedTask("T-seed-un00003", "succeeded", {
+        createdAt: 1_000,
+        updatedAt: 2_000,
+        result: { stopReason: "end_turn", summary: "上次没送达的摘要", changes: [], artifacts: [] },
+        deliveryError: QQ_RESULT_UNDELIVERED,
+        resultDeliveryAttemptAt: 2_000,
+      }),
+    );
+    const f = makeService({
+      store,
+      now: () => 2_000 + Math.floor(QQ_RESULT_RESTORE_RETRY_MS / 2),
+      deliveryRetryDelayMs: 0,
+    });
+
+    await f.service.start();
+
+    expect(f.delivered).toHaveLength(0);
+    expect(f.service.getTask("T-seed-un00003")?.resultDeliveredAt).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +1313,13 @@ describe("QqService — 命令处理", () => {
       const id = `T-seed-00000${i}`;
       store.records.set(
         id,
-        seedTask(id, "succeeded", { createdAt: i, updatedAt: i, payload: { prompt: `任务${i}`, attachments: [], contexts: [] } }),
+        seedTask(id, "succeeded", {
+          createdAt: i,
+          updatedAt: i,
+          // 已送达：start() 的重启补发不该在这里插一条结果摘要（本用例只测列表）。
+          resultDeliveredAt: i,
+          payload: { prompt: `任务${i}`, attachments: [], contexts: [] },
+        }),
       );
     }
     const f = makeService({ store, now: () => 100 });

@@ -97,6 +97,56 @@ function errorText(error: unknown): string {
 }
 
 /**
+ * 从 transport 抛出的错误里取 HTTP status。
+ *
+ * `node:http(s)` 的 transport 在非 2xx 时抛带 `status` 字段的错误（见
+ * `ws-transport.ts` 的 `QqBotHttpError`）；超时 / 网络错误没有 status ——
+ * 返回 undefined 表示「无法判定，按可重试处理」。
+ */
+function errorStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  return toFiniteNumber((error as { status?: unknown }).status);
+}
+
+/**
+ * 4xx（429 除外）是确定性拒绝：鉴权失败、参数非法、消息已被平台拒绝……重试
+ * 只会拿到同一份拒绝，继续烧重试窗口（并可能重复发主动消息）毫无意义。
+ * 429（限流）、5xx、超时与网络错误仍然可重试。
+ */
+function isPermanentHttpStatus(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 429;
+}
+
+/** 业务错误码的字段名：QQBot OpenAPI 的错误响应以这些键承载（HTTP 可能仍是 200）。 */
+const BUSINESS_ERROR_CODE_KEYS = ["code", "errcode", "retcode"] as const;
+
+/**
+ * 从 2xx 响应体里提取非零业务错误码。
+ *
+ * 成功响应是 `{id, timestamp}`（发送）或 `{access_token, expires_in}`（换 token），
+ * 不含错误码；平台把部分拒绝放在 HTTP 200 的 `code` / `errcode` / `retcode`
+ * 里。**HTTP 200 + 非零业务码必须算失败**，否则会把没发出去的消息记成已送达
+ * （幂等锚点被虚增，结果再也不重发）。
+ */
+function businessError(raw: unknown): { code: number; message: string } | undefined {
+  if (!isRecord(raw)) return undefined;
+  for (const key of BUSINESS_ERROR_CODE_KEYS) {
+    const code = toFiniteNumber(raw[key]);
+    if (code === undefined || code === 0) continue;
+    let message = "";
+    for (const messageKey of ["message", "msg", "errmsg", "error"] as const) {
+      const value = raw[messageKey];
+      if (typeof value === "string" && value.trim()) {
+        message = value.trim();
+        break;
+      }
+    }
+    return { code, message: message || `业务错误码 ${code}` };
+  }
+  return undefined;
+}
+
+/**
  * 官方 QQBot ChannelAdapter 实现。
  *
  * 复用 `src/qq/adapter/types.ts` 的 ChannelAdapter 形态（connect/close/send/
@@ -128,27 +178,47 @@ export class QqBotAdapter implements ChannelAdapter {
    * 第二条及以后的回复会被平台当成重复消息丢弃 —— 表现就是「只有已受理送达，
    * 结果回包一条也收不到」。这里为每条入站消息维护递增序号。
    */
-  private readonly replySeq = new Map<string, number>();
+  private readonly replySeq = new Map<string, { seq: number; at: number }>();
   /**
-   * 逻辑消息去重键 → 已分配的 msg_seq 与分配时刻。
+   * 逻辑消息去重键 → 已分配的 msg_seq、归属 msg_id 与分配时刻。
    *
    * 同一 `dedupeKey`（同一逻辑消息的首次发送 + 它的全部重试）复用同一个
    * seq：平台按 `(msg_id, msg_seq)` 去重，重试不会刷出重复消息。条目带
    * TTL —— 被动回复窗口本身有限，过期条目再分配新 seq 也无碍（旧窗口
    * 早已关闭，不可能再撞上旧消息）。
+   *
+   * 与 `replySeq` 共同记账：任一侧逐出对应 msg_id 时必须同步作废，否则
+   * dedupe 条目会指向一个已被重置的序号（下次同 msg_id 从 1 重开，可能撞
+   * 历史 `(msg_id, 1)` 被平台当重复丢弃）。
    */
-  private readonly dedupeSeq = new Map<string, { seq: number; at: number }>();
+  private readonly dedupeSeq = new Map<string, { seq: number; at: number; msgId: string }>();
 
   /** 去重条目的保留时长；超过即视为新消息重新分配 seq。 */
   private static readonly DEDUPE_TTL_MS = 10 * 60_000;
+  /**
+   * 单个 `msg_id` 的序号记账保留时长。
+   *
+   * 被动回复绑定在用户那条消息的短窗口上；超出该窗口后序号不再有平台语义，
+   * 重开不会撞上一条「仍然有效」的历史消息。TTL 只用于回收内存，不改变
+   * 窗口内的单调递增。
+   */
+  private static readonly REPLY_SEQ_TTL_MS = 30 * 60_000;
 
   /** 限容映射的条目上限（超限逐出最旧，防无限增长）。 */
-  private static readonly SEQ_MAP_LIMIT = 500;
+  private static readonly SEQ_MAP_LIMIT = 5_000;
 
   private evictOldest<K, V>(map: Map<K, V>, limit: number): void {
     if (map.size <= limit) return;
     const oldest = map.keys().next().value;
     if (oldest !== undefined) map.delete(oldest);
+  }
+
+  /** 逐出某 `msg_id` 的序号记账，并同步作废指向它的 dedupe 条目。 */
+  private forgetMsgSeq(msgId: string): void {
+    this.replySeq.delete(msgId);
+    for (const [key, entry] of this.dedupeSeq) {
+      if (entry.msgId === msgId) this.dedupeSeq.delete(key);
+    }
   }
 
   constructor(deps: QqBotAdapterDeps) {
@@ -291,17 +361,31 @@ export class QqBotAdapter implements ChannelAdapter {
    * 处理。
    */
   private nextReplySeq(msgId: string, dedupeKey?: string): number {
+    const now = this.nowFn();
     if (dedupeKey) {
       const cached = this.dedupeSeq.get(dedupeKey);
-      if (cached && this.nowFn() - cached.at < QqBotAdapter.DEDUPE_TTL_MS) {
+      if (cached && cached.msgId === msgId && now - cached.at < QqBotAdapter.DEDUPE_TTL_MS) {
         return cached.seq;
       }
+      // 过期或换了 msg_id（理论上同一逻辑消息不会换）都按新消息处理。
+      if (cached) this.dedupeSeq.delete(dedupeKey);
     }
-    const next = (this.replySeq.get(msgId) ?? 0) + 1;
-    this.replySeq.set(msgId, next);
-    this.evictOldest(this.replySeq, QqBotAdapter.SEQ_MAP_LIMIT);
+
+    const existing = this.replySeq.get(msgId);
+    if (existing && now - existing.at >= QqBotAdapter.REPLY_SEQ_TTL_MS) {
+      // 旧窗口早已关闭：连同 dedupe 条目一起作废再重开，避免复用旧 seq。
+      this.forgetMsgSeq(msgId);
+    }
+    const next = (this.replySeq.get(msgId)?.seq ?? 0) + 1;
+    this.replySeq.set(msgId, { seq: next, at: now });
+    if (this.replySeq.size > QqBotAdapter.SEQ_MAP_LIMIT) {
+      // 超限逐出最旧：必须同步作废它的 dedupe 条目 —— 只删 replySeq 会让
+      // dedupeSeq 指向一个被重置的序号（下次同 msg_id 从 1 重开）。
+      const oldest = this.replySeq.keys().next().value;
+      if (oldest !== undefined) this.forgetMsgSeq(oldest);
+    }
     if (dedupeKey) {
-      this.dedupeSeq.set(dedupeKey, { seq: next, at: this.nowFn() });
+      this.dedupeSeq.set(dedupeKey, { seq: next, at: now, msgId });
       this.evictOldest(this.dedupeSeq, QqBotAdapter.SEQ_MAP_LIMIT);
     }
     return next;
@@ -333,6 +417,16 @@ export class QqBotAdapter implements ChannelAdapter {
         { ...buildAuthHeaders(token), "content-type": "application/json" },
         request.body,
       );
+      // HTTP 200 不等于发送成功：平台可能用 `code`/`errcode` 承载拒绝。
+      const failure = businessError(raw);
+      if (failure) {
+        return {
+          ok: false,
+          error: `QQBot: 业务错误 ${failure.code}（${failure.message}）`,
+          // 语义拒绝：同样的请求重试只会得到同一份拒绝。
+          retryable: false,
+        };
+      }
       let messageId: string | undefined;
       if (isRecord(raw)) {
         const id = raw["id"] ?? raw["msg_id"];
@@ -340,8 +434,12 @@ export class QqBotAdapter implements ChannelAdapter {
       }
       return { ok: true, messageId };
     } catch (error) {
+      // transport 的非 2xx 错误带 status：4xx（429 除外）是确定性拒绝，不再
+      // 让上层重试（配额耗尽后每片再烧 3 轮注定失败的请求）。
+      const status = errorStatus(error);
+      const retryable = status === undefined ? true : !isPermanentHttpStatus(status);
       // 网络/服务端异常交给上层重试；错误文本不含凭据。
-      return { ok: false, error: errorText(error), retryable: true };
+      return { ok: false, error: errorText(error), retryable };
     }
   }
 

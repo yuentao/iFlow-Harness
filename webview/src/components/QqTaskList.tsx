@@ -146,7 +146,13 @@ function TaskRow({
       )}
 
       {task.errorMessage && (
-        <p className="mt-1 break-words text-ui-caption leading-relaxed text-destructive">{task.errorMessage}</p>
+        <p
+          className={`mt-1 break-words text-ui-caption leading-relaxed ${
+            task.status === "canceled" ? "text-warning" : "text-destructive"
+          }`}
+        >
+          {task.errorMessage}
+        </p>
       )}
 
       {task.pending && (

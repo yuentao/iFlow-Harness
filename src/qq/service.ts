@@ -206,6 +206,27 @@ export const QQ_DELIVERY_RETRY_DELAY_MS = 400;
 export const QQ_EMPTY_SUMMARY_NOTICE = "（执行体未返回摘要内容）";
 /** 结果彻底没能送达 QQ 时记录在任务上的文案。 */
 export const QQ_RESULT_UNDELIVERED = "结果未能送达 QQ（被动回复与主动消息均失败）";
+/**
+ * 运行中刷新的进度消息最小投递间隔（毫秒）。
+ *
+ * QQ 同一个 `msg_id` 的被动回复条数有上限（常见口径 5 条，见
+ * {@link deliverTaskText}），「已受理 + 审批请求 + 审批结果 + 终态结果」已经
+ * 占掉 4 条；用户连点几次 `/qq refresh` 就会把配额烧光，终态结果只能靠主动
+ * 消息额度（同样受限）。因此同一任务的进度快照在本地按此间隔节流：间隔内的
+ * 重复刷新复用上一次投递，不再新开被动回复序号。
+ */
+export const QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS = 60_000;
+/**
+ * 重启后补发「终态但未送达」结果的最小重试间隔（毫秒）。
+ *
+ * 已送达的任务由 `resultDeliveredAt` 挡住（永不重发）；投递失败的任务需要
+ * 在下次开窗时补一次，但连续开关面板不能每次都把失败重试一遍 —— 用持久化
+ * 的 `resultDeliveryAttemptAt`（见 `shared/qq-task.ts`）设最小间隔。
+ */
+export const QQ_RESULT_RESTORE_RETRY_MS = 10 * 60_000;
+/** 投递窗口内结果被刷新改写时的可观测提示（不写锚点，下次刷新会重投）。 */
+export const QQ_RESULT_CHANGED_WHILE_DELIVERING =
+  "投递期间结果已被更新，本次不记为已送达（下次刷新会重投）";
 
 /** `readonly` 策略禁用的写入 / 执行类工具（与主会话黑名单同源）。 */
 export const QQ_READONLY_DISALLOWED_TOOLS: readonly string[] = [
@@ -300,9 +321,17 @@ function isQqTaskStatus(value: unknown): value is QqTaskStatus {
   return typeof value === "string" && (TASK_STATUSES as readonly string[]).includes(value);
 }
 
-/** 停止原因的归一化形式（trim + 小写），供终态映射与失败判定共用。 */
+/**
+ * 停止原因的归一化形式（trim + 小写 + 取消拼写归一），供终态映射与失败判定
+ * 共用。
+ *
+ * 执行体可能上报 `canceled`（美式）或 `cancelled`（英式）：两者是同一次取消，
+ * 必须在归一化层收敛，否则 `cancelled` 会落进 {@link FAILURE_STOP_REASONS}
+ * 被记成 `failed`，同一个动作在两种拼写下得到不同终态。
+ */
 function normalizedStopReason(reason: string): string {
-  return reason.trim().toLowerCase();
+  const normalized = reason.trim().toLowerCase();
+  return normalized === "cancelled" ? "canceled" : normalized;
 }
 
 function isFailureStopReason(reason: string): boolean {
@@ -524,6 +553,13 @@ function coerceQqTask(raw: unknown): QqTask | null {
   if (typeof raw.deliveryError === "string" && raw.deliveryError.length > 0) {
     task.deliveryError = raw.deliveryError;
   }
+  // 回包尝试时刻：重启补发用它做最小间隔节流，丢了就退化成「每次开窗重试」。
+  if (
+    typeof raw.resultDeliveryAttemptAt === "number" &&
+    Number.isFinite(raw.resultDeliveryAttemptAt)
+  ) {
+    task.resultDeliveryAttemptAt = raw.resultDeliveryAttemptAt;
+  }
   // 部分送达续发锚点也要还原：丢了它，重启后已经送达的几片会被重发一遍。
   if (
     isRecord(raw.resultDeliveredChunks) &&
@@ -567,14 +603,23 @@ export class QqService {
   /** 验证码随机源（测试可以替换成确定值）。 */
   private random: () => number = Math.random;
   /**
-   * 正在投递终态结果的任务集合。
+   * 正在投递终态结果的任务：taskId → 该次投递的 promise。
    *
    * 幂等锚点（resultDeliveredAt）要等全部分片发完才落盘 —— 只靠锚点挡不住
    * 投递窗口内的并发触发（单次发送 10s 超时 + 重试退避，窗口可达数十秒），
-   * 期间再刷新 / 重复事件会读到「未投递」而二次发送。这里的标记让并发触发
-   * 直接复用同一次投递。
+   * 期间再刷新 / 重复事件会读到「未投递」而二次发送。这里存的是 promise
+   * 而不是纯标记：并发触发 await 同一次投递，拿到的是真实收尾后的任务
+   * （旧实现直接返回内存快照，并发刷新等于静默无效）。
    */
-  private readonly deliveringResults = new Set<string>();
+  private readonly deliveringResults = new Map<string, Promise<QqTask>>();
+  /**
+   * 运行中进度回包的节流记账（taskId → 上次进度投递时刻）。
+   *
+   * 同状态在 {@link QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS} 内的重复刷新直接
+   * 复用上一次投递（同一个稳定 dedupeKey → adapter 复用同一个 msg_seq），
+   * 不让每次点击都新开一条被动回复。
+   */
+  private readonly progressRefreshes = new Map<string, number>();
   /** 逻辑投递去重键的递增序号（配合 taskId 生成全局唯一的 dedupeKey）。 */
   private deliverySeqCounter = 0;
 
@@ -633,30 +678,56 @@ export class QqService {
       this.idempotency.set(task.idempotencyKey, task.taskId);
     }
 
+    const interrupted = new Set<string>();
     for (const task of [...this.tasks.values()]) {
       if (isTerminalStatus(task.status)) continue;
       const at = this.now();
       const outcome = transitionQqTask(task, "failed", at);
       const base = outcome.noop ? task : outcome.task;
-      const interrupted: QqTask = {
+      const interruptedTask: QqTask = {
         ...base,
         updatedAt: Math.max(base.updatedAt, at),
         failure: { code: "host_restarted", message: "扩展宿主已重启，任务中断。" },
         pending: undefined,
       };
       try {
-        await this.persist(interrupted);
-        await this.appendEvent("task_interrupted", interrupted.taskId, {
+        await this.persist(interruptedTask);
+        await this.appendEvent("task_interrupted", interruptedTask.taskId, {
           reason: "host_restarted",
         });
       } catch (error) {
-        this.log(`QQ 任务 ${interrupted.taskId} 中断回写失败：${errorText(error)}`);
+        this.log(`QQ 任务 ${interruptedTask.taskId} 中断回写失败：${errorText(error)}`);
       }
-      this.notify(`QQ 任务 ${shortTaskId(interrupted.taskId)} 因宿主重启标记为失败`);
+      interrupted.add(interruptedTask.taskId);
+      this.notify(`QQ 任务 ${shortTaskId(interruptedTask.taskId)} 因宿主重启标记为失败`);
       // 进程换了，QQ 那侧不能只剩一条「已受理」：中断本身也要有一条回包。
-      await this.deliverInterruption(interrupted).catch((error: unknown) => {
-        this.log(`QQ 任务 ${interrupted.taskId} 中断通知发送失败：${errorText(error)}`);
+      await this.deliverInterruption(interruptedTask).catch((error: unknown) => {
+        this.log(`QQ 任务 ${interruptedTask.taskId} 中断通知发送失败：${errorText(error)}`);
       });
+    }
+
+    // 重启补发：终态但结果没送达的任务（进程在投递中途退出、配额耗尽、
+    // 主动消息额度用完…）在下次开窗时补一次。幂等由 resultDeliveredAt 保证
+    // （已送达的永不重发），失败重试由持久化的 resultDeliveryAttemptAt 设
+    // 最小间隔 —— 否则「每次开窗都重试一遍」会变成另一种刷屏。
+    for (const task of [...this.tasks.values()]) {
+      if (this.stopped) return;
+      if (!isTerminalStatus(task.status)) continue;
+      if (interrupted.has(task.taskId)) continue;
+      if (task.resultDeliveredAt !== undefined) continue;
+      const lastAttempt = task.resultDeliveryAttemptAt;
+      if (
+        typeof lastAttempt === "number" &&
+        Number.isFinite(lastAttempt) &&
+        this.now() - lastAttempt < QQ_RESULT_RESTORE_RETRY_MS
+      ) {
+        continue;
+      }
+      try {
+        await this.deliverResult(task);
+      } catch (error) {
+        this.log(`QQ 任务 ${task.taskId} 重启补发终态结果失败：${errorText(error)}`);
+      }
     }
   }
 
@@ -997,7 +1068,9 @@ export class QqService {
     // 失败类停止原因（error / failed / interrupted…）仍按失败处理。
     if (normalizedStopReason(stopReason) === "canceled") {
       status = "canceled";
-      failure = { code: "agent_canceled", message: `执行结束：${stopReason}` };
+      // 取消是用户主动动作：`failure.code` 保留给状态机判别，消息本身是中性的
+      // 「停止原因」，看板/摘要各自渲染成「已取消（…）」，不再显示「执行失败」。
+      failure = { code: "agent_canceled", message: `停止原因：${stopReason}` };
     } else if (isFailureStopReason(stopReason)) {
       status = "failed";
       failure = { code: "agent_failed", message: `执行结束：${stopReason}` };
@@ -1175,13 +1248,14 @@ export class QqService {
     });
 
     const detail = request.summary ? `：${request.summary}` : "";
-    await this.deliverTask(
+    await this.deliverTaskNotice(
       waiting,
       [
         `任务 ${shortTaskId(taskId)} 请求审批${detail}`,
         `回复 /qq approve ${shortTaskId(taskId)} ${code} 批准，`,
         `/qq deny ${shortTaskId(taskId)} 拒绝（4 分钟内有效）。`,
       ].join("\n"),
+      `approval:${taskId}:${code}`,
     );
     return decision;
   }
@@ -1208,9 +1282,10 @@ export class QqService {
       updatedAt: Math.max(task.updatedAt, at),
     };
     const updated = await this.commitStatus(cleared, "running", { pending: undefined });
-    await this.deliverTask(
+    await this.deliverTaskNotice(
       updated,
       `任务 ${shortTaskId(taskId)} 审批超时（4 分钟），已按拒绝处理。`,
+      `approval-result:${taskId}:${code}:timeout`,
     );
   }
 
@@ -1285,7 +1360,11 @@ export class QqService {
       this.releaseApproval(entry);
       entry.resolve("allow_once");
       const updated = await this.clearPendingAndResume(task.taskId, task);
-      await this.deliverTask(updated, `任务 ${shortTaskId(task.taskId)} 已批准。`);
+      await this.deliverTaskNotice(
+        updated,
+        `任务 ${shortTaskId(task.taskId)} 已批准。`,
+        `approval-result:${task.taskId}:${entry.code}:approved`,
+      );
       return;
     }
 
@@ -1301,9 +1380,10 @@ export class QqService {
     this.releaseApproval(entry);
     entry.resolve("deny");
     const updated = await this.clearPendingAndResume(task.taskId, task);
-    await this.deliverTask(
+    await this.deliverTaskNotice(
       updated,
       `验证码错误次数过多，任务 ${shortTaskId(task.taskId)} 已按拒绝处理。`,
+      `approval-result:${task.taskId}:${entry.code}:denied`,
     );
   }
 
@@ -1317,7 +1397,11 @@ export class QqService {
     this.releaseApproval(entry);
     entry.resolve("deny");
     const updated = await this.clearPendingAndResume(task.taskId, task);
-    await this.deliverTask(updated, `任务 ${shortTaskId(task.taskId)} 已拒绝。`);
+    await this.deliverTaskNotice(
+      updated,
+      `任务 ${shortTaskId(task.taskId)} 已拒绝。`,
+      `approval-result:${task.taskId}:${entry.code}:denied`,
+    );
   }
 
   private async answerTask(task: QqTask): Promise<void> {
@@ -1470,9 +1554,26 @@ export class QqService {
         typeof outcome.status === "string" && outcome.status.length > 0
           ? `（执行体状态：${outcome.status}）`
           : "";
-      await this.deliverTask(
+      // QQ 同一 msg_id 的被动回复条数有上限（常见口径 5 条）：已受理 + 审批
+      // 请求 + 审批结果 + 终态结果已经占 4 条，进度消息再每次新开一条，用户
+      // 点几次刷新就把终态结果的配额烧光（这是「收不到结果」的另一条回法）。
+      // 因此：①最小间隔内的重复刷新直接复用上一次投递；②投递用稳定
+      // dedupeKey，adapter 复用同一个 msg_seq，平台按 (msg_id, msg_seq) 去重。
+      const fingerprint = `${current.status}|${typeof outcome.status === "string" ? outcome.status : ""}`;
+      const at = this.now();
+      const previous = this.progressRefreshes.get(current.taskId);
+      if (previous !== undefined && at - previous < QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS) {
+        this.log(
+          `QQ 任务 ${current.taskId}：${QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS}ms 内的重复刷新复用上一次进度投递`,
+        );
+        return;
+      }
+      const dedupeKey = `progress:${current.taskId}:${fingerprint}`;
+      this.progressRefreshes.set(current.taskId, at);
+      await this.deliverTaskNotice(
         current,
         `任务 ${shortTaskId(current.taskId)} 尚未结束${statusNote}，结束后结果会自动送达；如需查询可回复 /qq status ${current.taskId}。`,
+        dedupeKey,
       );
       return;
     }
@@ -1659,8 +1760,16 @@ export class QqService {
     if (task.result?.stopReason) ui.stopReason = task.result.stopReason;
     // 两个错误维度并存可见：执行失败与回包失败是独立事件（任务可以同时执行
     // 失败且回包失败），用互斥覆盖会把回包失败从看板上抹掉，只剩 toast。
+    // 取消是用户主动动作，不是执行故障：`failure` 字段保留给状态机，展示
+    // 文案走中性分支（「已取消（…）」），不再显示「执行失败」。
     const errors: string[] = [];
-    if (task.failure?.message) errors.push(`执行失败：${task.failure.message}`);
+    if (task.failure?.message) {
+      errors.push(
+        task.status === "canceled"
+          ? `已取消（${task.failure.message}）`
+          : `执行失败：${task.failure.message}`,
+      );
+    }
     if (task.deliveryError) errors.push(`回包失败：${task.deliveryError}`);
     if (errors.length > 0) ui.errorMessage = errors.join("；");
     if (task.pending) {
@@ -1817,6 +1926,26 @@ export class QqService {
   }
 
   /**
+   * 审批 / 进度类通知的投递：失败时本地提示并**重试一次**。
+   *
+   * 为什么单独一条：`deliverTask` 只尝试一次，而审批请求、审批结果、进度快照
+   * 这类消息发不出去时用户全程无感（审批还会在 4 分钟后被自动拒绝）。重试
+   * 沿用同一个 `dedupeKey`（adapter 复用同一 `msg_seq`），平台按
+   * `(msg_id, msg_seq)` 去重，重试不会刷出重复消息。
+   */
+  private async deliverTaskNotice(
+    task: QqTask,
+    text: string,
+    dedupeKey?: string,
+  ): Promise<boolean> {
+    if (await this.deliverTask(task, text, dedupeKey)) return true;
+    this.notify(`QQ 任务 ${shortTaskId(task.taskId)} 的通知未能送达，正在重试一次`);
+    if (await this.deliverTask(task, text, dedupeKey)) return true;
+    this.notify(`QQ 任务 ${shortTaskId(task.taskId)} 的通知仍未送达 QQ`);
+    return false;
+  }
+
+  /**
    * 任务侧文本的投递：先走 QQ 的「被动回复」（带 `msg_id`），失败再退回
    * 「主动消息」（不带 `msg_id`）。
    *
@@ -1908,20 +2037,25 @@ export class QqService {
     // 原因，把「中间结果」写进锚点会让真正的终态结果永远送不出去（旧实现的
     // 运行中刷新就是这么抑制最终回包的）。
     if (!isTerminalStatus(task.status)) return task;
-    if (this.deliveringResults.has(task.taskId)) {
-      return this.tasks.get(task.taskId) ?? task;
-    }
-    this.deliveringResults.add(task.taskId);
-    try {
-      return await this.deliverResultLocked(task);
-    } finally {
+    const inflight = this.deliveringResults.get(task.taskId);
+    // 并发触发（提交收尾 / 刷新 / 重启补发交叠）await 同一次投递：拿到的是
+    // 真正收尾后的任务。旧实现直接返回内存快照，调用方以为刷新生效，实际
+    // 什么也没发生。
+    if (inflight) return await inflight;
+    const run = this.deliverResultLocked(task).finally(() => {
       this.deliveringResults.delete(task.taskId);
-    }
+    });
+    this.deliveringResults.set(task.taskId, run);
+    return await run;
   }
 
   /** 分片内容的稳定指纹（djb2，非加密用途）：识别「同一份结果的分片序列」。 */
   private async deliverResultLocked(task: QqTask): Promise<QqTask> {
     const profile = qqDetailProfile(this.config.resultDetail);
+    // 投递开始时给 result 拍指纹：收尾时只有内容没被改写，才允许把这次投递
+    // 记成「新结果已送达」。否则投递窗口（可达数十秒）里刷新换上的新内容会
+    // 被旧内容的成功回包顺带标成已送达，永远不再发出去。
+    const resultSignature = signature(task.result);
     // 空摘要也要有一条如实的说明，不能只回一行「状态 成功」看着像丢了内容。
     const base = formatQqTaskSummary(task, profile.detail);
     const text =
@@ -1952,15 +2086,30 @@ export class QqService {
 
     const current = this.tasks.get(task.taskId) ?? task;
     const at = this.now();
+    if (signature(current.result) !== resultSignature) {
+      const stale: QqTask = {
+        ...current,
+        resultDeliveryAttemptAt: at,
+        deliveryError: QQ_RESULT_CHANGED_WHILE_DELIVERING,
+      };
+      await this.persist(stale);
+      await this.appendEvent("task_result_undelivered", stale.taskId, {
+        error: stale.deliveryError,
+      });
+      this.notify(`QQ 任务 ${shortTaskId(task.taskId)} ${QQ_RESULT_CHANGED_WHILE_DELIVERING}`);
+      return stale;
+    }
     const patched: QqTask = ok
       ? {
           ...current,
           resultDeliveredAt: Math.max(current.updatedAt, at),
           resultDeliveredChunks: undefined,
+          resultDeliveryAttemptAt: at,
           deliveryError: undefined,
         }
       : {
           ...current,
+          resultDeliveryAttemptAt: at,
           deliveryError:
             deliveredCount > 0
               ? `${QQ_RESULT_UNDELIVERED}（已送达 ${deliveredCount}/${chunks.length} 片，下次投递将从第 ${deliveredCount + 1} 片续发）`

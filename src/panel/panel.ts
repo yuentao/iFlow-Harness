@@ -9321,7 +9321,7 @@ export class ChatPanel implements vscode.Disposable {
   private async stopQq(): Promise<void> {
     // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
     // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
-    this.qqGeneration += 1;
+    const generation = ++this.qqGeneration;
     this.stopQqBotBinding();
     if (this.qqStopping) return;
     this.qqStopping = true;
@@ -9334,6 +9334,16 @@ export class ChatPanel implements vscode.Disposable {
       this.qq = undefined;
       if (!owner) return;
       await this.disposeQqOwner(owner);
+      // 拆旧 owner 是异步的（socket 关闭 + 服务停止），期间可能有一条新通道
+      // 已经装回 this.qq，或又有一次 stop 把 generation 推进。那一刻再清空
+      // 看板/推「已停止」，就会把**新通道**的看板抹掉。
+      if (
+        this.disposed ||
+        generation !== this.qqGeneration ||
+        this.qq !== undefined
+      ) {
+        return;
+      }
       // 显式停用：清空看板投影并推一次（不留幽灵条目）。被动刷新
       // （refreshQqTaskProjection 的 onChanged 竞态）不经过这里、也不会清空。
       setQqTasks(this.store.getState(), []);
