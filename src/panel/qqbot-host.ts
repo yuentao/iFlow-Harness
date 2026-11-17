@@ -32,7 +32,7 @@ import {
 import { QqBotQrProtocol, createNodeCrypto, createNodeHttp, redactSecrets } from "../qq/qqbot/protocol-client.js";
 import type { QqBotCrypto, QqBotHttp } from "../qq/qqbot/protocol-client.js";
 import { createNodeQqBotTransport } from "../qq/qqbot/ws-transport.js";
-import type { QqServiceDeliverInput } from "../qq/service.js";
+import type { QqServiceDeliverInput, QqDeliveryOutcome } from "../qq/service.js";
 
 // ---------------------------------------------------------------------------
 // webview 消息形状与阶段映射（QQBot 单一路径下由本模块自持）
@@ -201,15 +201,18 @@ export function createQqChannelDispatch(
 export async function deliverViaQqBotAdapter(
   adapter: Pick<QqBotAdapter, "send">,
   msg: QqServiceDeliverInput,
-): Promise<boolean> {
+): Promise<QqDeliveryOutcome> {
   const out: OutboundMessage = {
     chatType: msg.chatType,
     chatId: msg.chatId,
     text: msg.text,
     ...(msg.replyToMsgId ? { replyToMsgId: msg.replyToMsgId } : {}),
+    ...(msg.dedupeKey ? { dedupeKey: msg.dedupeKey } : {}),
   };
   const result: SendResult = await adapter.send(out);
-  return result.ok;
+  if (result.ok) return { ok: true };
+  // retryable 原样透传：4xx 类确定性拒绝不该被服务的重试循环再烧一遍窗口。
+  return { ok: false, retryable: result.retryable };
 }
 
 // ---------------------------------------------------------------------------

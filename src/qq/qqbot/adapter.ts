@@ -129,6 +129,27 @@ export class QqBotAdapter implements ChannelAdapter {
    * 结果回包一条也收不到」。这里为每条入站消息维护递增序号。
    */
   private readonly replySeq = new Map<string, number>();
+  /**
+   * 逻辑消息去重键 → 已分配的 msg_seq 与分配时刻。
+   *
+   * 同一 `dedupeKey`（同一逻辑消息的首次发送 + 它的全部重试）复用同一个
+   * seq：平台按 `(msg_id, msg_seq)` 去重，重试不会刷出重复消息。条目带
+   * TTL —— 被动回复窗口本身有限，过期条目再分配新 seq 也无碍（旧窗口
+   * 早已关闭，不可能再撞上旧消息）。
+   */
+  private readonly dedupeSeq = new Map<string, { seq: number; at: number }>();
+
+  /** 去重条目的保留时长；超过即视为新消息重新分配 seq。 */
+  private static readonly DEDUPE_TTL_MS = 10 * 60_000;
+
+  /** 限容映射的条目上限（超限逐出最旧，防无限增长）。 */
+  private static readonly SEQ_MAP_LIMIT = 500;
+
+  private evictOldest<K, V>(map: Map<K, V>, limit: number): void {
+    if (map.size <= limit) return;
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
 
   constructor(deps: QqBotAdapterDeps) {
     this.appId = deps.appId;
@@ -260,13 +281,28 @@ export class QqBotAdapter implements ChannelAdapter {
     }
   }
 
-  /** 取下一条被动回复序号（每个 msg_id 独立递增）；映射有上限，防止无限增长。 */
-  private nextReplySeq(msgId: string): number {
+  /**
+   * 取下一条被动回复序号（每个 msg_id 独立递增）；映射有上限，防止无限增长。
+   *
+   * 带 `dedupeKey` 时：同一逻辑消息的重试复用首次分配的 seq（不推进
+   * replySeq）—— 平台按 `(msg_id, msg_seq)` 去重，重试是幂等的；若首次
+   * 发送真的失败（平台没有记录这对键值），复用的 seq 等价于新消息，不会被
+   * 平台误拒。条目过期（超 {@link QqBotAdapter.DEDUPE_TTL_MS}）后按新消息
+   * 处理。
+   */
+  private nextReplySeq(msgId: string, dedupeKey?: string): number {
+    if (dedupeKey) {
+      const cached = this.dedupeSeq.get(dedupeKey);
+      if (cached && this.nowFn() - cached.at < QqBotAdapter.DEDUPE_TTL_MS) {
+        return cached.seq;
+      }
+    }
     const next = (this.replySeq.get(msgId) ?? 0) + 1;
     this.replySeq.set(msgId, next);
-    if (this.replySeq.size > 500) {
-      const oldest = this.replySeq.keys().next().value;
-      if (oldest !== undefined) this.replySeq.delete(oldest);
+    this.evictOldest(this.replySeq, QqBotAdapter.SEQ_MAP_LIMIT);
+    if (dedupeKey) {
+      this.dedupeSeq.set(dedupeKey, { seq: next, at: this.nowFn() });
+      this.evictOldest(this.dedupeSeq, QqBotAdapter.SEQ_MAP_LIMIT);
     }
     return next;
   }
@@ -283,7 +319,11 @@ export class QqBotAdapter implements ChannelAdapter {
     try {
       const token = await this.ensureToken();
       // 有 msg_id 才算被动回复，才需要 msg_seq；主动消息两者都不带。
-      const msgSeq = msg.replyToMsgId ? this.nextReplySeq(msg.replyToMsgId) : undefined;
+      // dedupeKey 让同一逻辑消息的重试复用同一个 msg_seq（平台按
+      // (msg_id, msg_seq) 去重，重试不会刷出重复消息）。
+      const msgSeq = msg.replyToMsgId
+        ? this.nextReplySeq(msg.replyToMsgId, msg.dedupeKey)
+        : undefined;
       const request =
         msg.chatType === "group"
           ? buildSendGroupMsg(msg.chatId, msg.text, msg.replyToMsgId, msgSeq)

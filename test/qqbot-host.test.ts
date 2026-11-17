@@ -74,7 +74,7 @@ describe("QQBot 宿主编排（M3-C）", () => {
     expect(onInbound).toHaveBeenCalledWith(INBOUND);
   });
 
-  it("出站投递：QqService 契约翻译成 OutboundMessage，失败如实回报", async () => {
+  it("出站投递：QqService 契约翻译成 OutboundMessage，失败如实回报 retryable", async () => {
     const adapter = fakeAdapter();
     await expect(
       deliverViaQqBotAdapter(adapter, {
@@ -83,7 +83,7 @@ describe("QQBot 宿主编排（M3-C）", () => {
         text: "hi",
         replyToMsgId: "m0",
       }),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ ok: true });
     expect(adapter.send).toHaveBeenCalledWith({
       chatType: "group",
       chatId: "g1",
@@ -93,7 +93,12 @@ describe("QQBot 宿主编排（M3-C）", () => {
     adapter.send.mockResolvedValueOnce({ ok: false, error: "x", retryable: true } as never);
     await expect(
       deliverViaQqBotAdapter(adapter, { chatType: "private", chatId: "u", text: "t" }),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ ok: false, retryable: true });
+    // 确定性拒绝（retryable:false）也要原样透传，服务据此短路不重试。
+    adapter.send.mockResolvedValueOnce({ ok: false, error: "403", retryable: false } as never);
+    await expect(
+      deliverViaQqBotAdapter(adapter, { chatType: "private", chatId: "u", text: "t" }),
+    ).resolves.toEqual({ ok: false, retryable: false });
   });
 
   it("扫码回调映射：onQr / onProgress / onFailure 走注入协议，失败文案脱敏", async () => {

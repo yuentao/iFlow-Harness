@@ -25,6 +25,7 @@ import type {
   SuperPermissionRequest,
 } from "../panel/super-agent.js";
 import type {
+  QqDeliveryOutcome,
   QqServiceDeliverInput,
   QqServiceDispatchInput,
   QqServiceDispatchResult,
@@ -94,8 +95,11 @@ export interface QqHostPorts {
   readSuper(superSessionId: string): QqHostSuperSnapshot | null;
   /** 本地通知（面板 toast / 日志），不发往 QQ。 */
   notify(text: string): void;
-  /** 回复一条 QQ 消息；返回是否成功送达。 */
-  deliver(msg: QqServiceDeliverInput): Promise<boolean>;
+  /**
+   * 回复一条 QQ 消息；返回完整投递结果（含适配器的 `retryable` 判定，让
+   * 服务侧对 4xx 类确定性拒绝短路，不重复烧重试窗口）。
+   */
+  deliver(msg: QqServiceDeliverInput): Promise<QqDeliveryOutcome>;
   /** 白名单外的人发来消息：只记录，不执行、不回执（面板据此审核）。 */
   onPendingUser(info: QqPendingUserInput): void;
   /** 解除账号绑定。 */
@@ -275,7 +279,7 @@ export function createQqServiceHost(
       return outcome;
     },
 
-    async deliver(msg: QqServiceDeliverInput): Promise<boolean> {
+    async deliver(msg: QqServiceDeliverInput): Promise<QqDeliveryOutcome> {
       return ports.deliver(msg);
     },
 

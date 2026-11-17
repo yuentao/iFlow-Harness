@@ -29,6 +29,7 @@ interface PortsFixture {
     snapshot: QqHostSuperSnapshot | null;
     mergeResult: { ok: boolean; detail: string };
     deliverResult: boolean;
+    deliverRetryable: boolean;
     unbindResult: { ok: boolean; message: string };
   };
   spawns: Array<{ spec: QqHostSpawnSpec; opts: QqHostSpawnOptions }>;
@@ -47,6 +48,7 @@ function makeFixture(): PortsFixture {
     snapshot: { summary: "已完成", branch: "iflow/qq/t" },
     mergeResult: { ok: true, detail: "已合并" },
     deliverResult: true,
+    deliverRetryable: true,
     unbindResult: { ok: true, message: "已解绑" },
   };
   const fixture: PortsFixture = {
@@ -88,7 +90,9 @@ function makeFixture(): PortsFixture {
     },
     deliver: async (msg) => {
       fixture.delivered.push({ ...msg });
-      return state.deliverResult;
+      return state.deliverResult
+        ? { ok: true }
+        : { ok: false, retryable: state.deliverRetryable };
     },
     onPendingUser: (info) => {
       fixture.pendings.push({ ...info });
@@ -377,9 +381,10 @@ describe("createQqServiceHost — 透传", () => {
     expect(f.merges).toEqual(["super-m"]);
   });
 
-  it("deliver 透传消息与送达结果", async () => {
+  it("deliver 透传消息与投递结果（含 retryable）", async () => {
     const f = makeFixture();
     f.state.deliverResult = false;
+    f.state.deliverRetryable = false;
     const host = createQqServiceHost(f.ports);
     const msg: QqServiceDeliverInput = {
       chatType: "group",
@@ -388,7 +393,7 @@ describe("createQqServiceHost — 透传", () => {
       replyToMsgId: "m9",
     };
 
-    await expect(host.deliver(msg)).resolves.toBe(false);
+    await expect(host.deliver(msg)).resolves.toEqual({ ok: false, retryable: false });
     expect(f.delivered).toEqual([msg]);
   });
 
