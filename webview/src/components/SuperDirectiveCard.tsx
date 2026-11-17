@@ -26,12 +26,13 @@
  *
  * 宿主派发不经过本文件：`src/panel/panel.ts` 仍按原逻辑扫描同一段文本。
  */
-import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   ChevronDown,
   ChevronUp,
   CircleDot,
+  Copy,
   FileWarning,
   ListChecks,
   Loader2,
@@ -40,6 +41,8 @@ import {
 } from "lucide-react";
 import { t } from "../i18n";
 import {
+  parseJsonLoose,
+  parseSuperDelegationPayload,
   splitSuperDirectiveSegments,
   type SuperActionReceipt,
   type SuperDirectiveAction,
@@ -49,10 +52,10 @@ import {
   type SuperDirectiveTask,
 } from "../../../shared/super-agent";
 import type { ToolBlock } from "../../../shared/messages";
-import { parseSuperDelegationTasks, parseSuperToolCall } from "../../../shared/super-tool-call";
+import { parseSuperToolCall } from "../../../shared/super-tool-call";
 import { DELEGATION_ORIGIN_ATTR } from "./SuperDelegationFly";
-import { Button, Chip, ICON_INLINE } from "./ui";
-import { Markdown } from "./Markdown";
+import { Button, Chip, ICON_INLINE, IconButton } from "./ui";
+import { Markdown, copyText } from "./Markdown";
 import {
   parseSuperTaskText,
   previewSuperTaskBlocks,
@@ -508,12 +511,41 @@ interface SuperToolTaskView {
 }
 
 type SuperToolCallParse =
-  | { ok: true; tasks: SuperToolTaskView[] }
-  | { ok: false; reason: "pending" | "invalid" };
+  | { ok: true; tasks: SuperToolTaskView[]; error: string | null }
+  | { ok: false; reason: "pending" }
+  | { ok: false; reason: "invalid"; detail: string };
 
 /** 折叠态任务书预览预算：与围栏任务卡同源，按块截断而不是切半句。 */
 const SUPER_TOOL_PREVIEW_CHARS = 200;
 const SUPER_TOOL_PREVIEW_BLOCKS = 2;
+
+/**
+ * 去掉解析器给整份载荷的结论前缀。
+ *
+ * `parseDirectiveValue` 在「一条都派不出去」时把字段级诊断包成
+ * `载荷格式错误：tasks[0].task 必须是字符串`；卡面横幅自己已经写了
+ * 「委派指令格式错误」，再叠一层同义前缀就是纯噪音。
+ */
+function stripPayloadPrefix(reason: string): string {
+  return reason.replace(/^载荷格式错误[：:]\s*/, "").trim() || reason;
+}
+
+/**
+ * 派发载荷解析失败的具体原因（字段级）。
+ *
+ * 第一真源是宿主写回的 `block.superTasksError`——reducer 用同一份解析器
+ * （`parseSuperDelegationPayload`）产出它，含 `tasks[0].task 必须是字符串`
+ * 这类能指向模型真正写错那一层的诊断。历史转录没有该字段时才回解 `input`
+ * （同一份实现，口径不漂移）；连解析器都给不出原因就退回通用文案。
+ */
+function superToolCallFailureDetail(block: ToolBlock): string {
+  const host = block.superTasksError?.trim();
+  if (host) return stripPayloadPrefix(host);
+  const parsed = parseSuperDelegationPayload(block.input);
+  if (parsed.ok) return t("内容格式不对，读不出来");
+  const head = parsed.issues.slice(0, 3).join("；");
+  return head || stripPayloadPrefix(parsed.reason);
+}
 
 /**
  * 从 ToolBlock 解析任务书。
@@ -529,10 +561,15 @@ const SUPER_TOOL_PREVIEW_BLOCKS = 2;
  *    一次成功的委派谎报成「工具参数未能完整解析」。
  *
  * 没有 `superTasks` 时（历史转录 / 恢复会话）才回退去解析 `input`，且回解
- * 复用与派发器**同一份**实现（`parseSuperDelegationTasks`）—— 两边口径不会
+ * 复用与派发器**同一份**实现（`parseSuperDelegationPayload`）—— 两边口径不会
  * 漂移。两者都失败才走诚实降级：绝不把坏载荷拆成看起来已派发的任务。
+ *
+ * `block.superTasksError` 是宿主解析失败的**结论**（字段级原因）：它存在即
+ * 说明宿主已经判过这份载荷，卡片直接用它，不再靠回解有损的 `input` 猜原因。
+ * 混合载荷（部分条目合法）时宿主同时给 tasks 与 error，卡片两者都呈现。
  */
 function parseSuperToolCallPayload(block: ToolBlock): SuperToolCallParse {
+  const hostError = block.superTasksError?.trim() || null;
   const host = block.superTasks;
   if (host && host.length > 0) {
     return {
@@ -542,26 +579,52 @@ function parseSuperToolCallPayload(block: ToolBlock): SuperToolCallParse {
         task: task.task,
         attachments: task.attachmentCount,
       })),
+      error: hostError,
     };
   }
-  const fallback = parseSuperDelegationTasks(block.input);
-  if (fallback && fallback.length > 0) {
+  const fallback = parseSuperDelegationPayload(block.input);
+  if (fallback.ok && fallback.tasks.length > 0) {
     return {
       ok: true,
-      tasks: fallback.map((task) => ({
+      tasks: fallback.tasks.map((task) => ({
         title: task.title,
         task: task.task,
         attachments: (task.attachments ?? []).length,
       })),
+      error: hostError,
     };
   }
-  // 参数还没到达 → pending 占位；到了却读不出来 → 诚实降级。
+  // 宿主已经判过格式错 → 具体原因就在手（args 缺席不是 pending，是真的坏载荷）。
+  if (hostError) return { ok: false, reason: "invalid", detail: stripPayloadPrefix(hostError) };
+  // 参数还没到达 → pending 占位；到了却读不出来 → 带原因诚实降级。
   if (!block.input || !block.input.trim()) return { ok: false, reason: "pending" };
-  return { ok: false, reason: "invalid" };
+  return { ok: false, reason: "invalid", detail: superToolCallFailureDetail(block) };
 }
 
-/** 状态 chip 留在独立卡内，沿用 ToolCard 的四态文案但穿委派家族表面。 */
-function SuperToolStatusChip({ status }: { status: ToolBlock["status"] }) {
+/**
+ * 状态 chip 留在独立卡内，沿用 ToolCard 的四态文案但穿委派家族表面。
+ *
+ * `dispatchError` 存在（宿主判过格式错）时**不再挂绿色「已完成」**：工具帧
+ * completed 只说明内核回了 ack，载荷坏了就是没派出去。混合载荷（坏条目被
+ * 丢弃、合法条目照常派发）说「部分未派发」，一条都没派出去说「未派发」。
+ */
+function SuperToolStatusChip({
+  status,
+  dispatchError,
+  taskCount = 0,
+}: {
+  status: ToolBlock["status"];
+  dispatchError?: string | null;
+  taskCount?: number;
+}) {
+  if (dispatchError) {
+    return (
+      <Chip tone="warning" className="chip-in">
+        <X className={ICON_INLINE} aria-hidden="true" />{" "}
+        {taskCount > 0 ? t("部分未派发") : t("未派发")}
+      </Chip>
+    );
+  }
   if (status === "completed") {
     return (
       <Chip tone="success" className="chip-in">
@@ -757,20 +820,103 @@ function SuperToolTaskRow({
 }
 
 /**
+ * 「复制原始参数」图标按钮。
+ *
+ * 载荷畸形时卡面只给原因、**不展示原始 JSON**（一堵裸 JSON 对用户没有信息量，
+ * 还会把卡片撑成噪音）；但排障时那份参数确实有用，所以留一个复制入口：它读
+ * `block.input` 只写剪贴板，正文不进 DOM。复制被拒时保持原标签，不假装成功。
+ */
+function CopyRawArgsButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  return (
+    <IconButton
+      size="sm"
+      className="text-warning"
+      label={copied ? t("已复制") : t("复制原始参数")}
+      icon={
+        copied ? (
+          <Check className={ICON_INLINE} aria-hidden="true" />
+        ) : (
+          <Copy className={ICON_INLINE} aria-hidden="true" />
+        )
+      }
+      onClick={() => {
+        Promise.resolve()
+          .then(() => copyText(text))
+          .then(
+            () => {
+              if (timer.current) clearTimeout(timer.current);
+              setCopied(true);
+              timer.current = setTimeout(() => {
+                timer.current = null;
+                setCopied(false);
+              }, 2000);
+            },
+            () => {
+              /* 剪贴板被拒：保持原标签，绝不谎报已复制 */
+            },
+          );
+      }}
+    />
+  );
+}
+
+/**
+ * 载荷解析失败的 warning 横幅：一句具体原因（字段级）+ 可选的复制参数入口。
+ *
+ * 两个委派卡共用 —— 旧实现各自摊开一 `<pre>` 原始 JSON，用户看到的是格式
+ * 错误却读不懂的那串载荷本身。
+ */
+function DirectiveFailureBanner({
+  testId,
+  text,
+  rawInput,
+}: {
+  testId: string;
+  text: string;
+  rawInput?: string;
+}) {
+  return (
+    <div
+      data-testid={testId}
+      className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
+    >
+      <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
+      <span className="min-w-0 flex-1 break-words">{text}</span>
+      {rawInput ? <CopyRawArgsButton text={rawInput} /> : null}
+    </div>
+  );
+}
+
+/**
  * tool_call 帧里的内置 super-agent 调用 → 与围栏委派卡同材质的独立卡。
  *
  * 卡片只回答「派了什么」：标题 + 任务列表 + 状态 chip。底部**不再**有
  * 「(查看原始参数)」折叠项与工具回执/结果区块（issue #166）——原始 JSON
  * 参数与 `Delegation request accepted.` 这类回执对用户零信息量，反而把
- * 卡片底部撑成一堵噪音。解析失败时原始参数仍按原样摊开（那一态它就是
- * 唯一有价值的正文，见下方 invalid 分支）。
+ * 卡片底部撑成一堵噪音。载荷解析失败时也**不摊开原始 JSON**：宿主写回的
+ * `superTasksError` 已经是字段级原因，卡面直接说清「哪里错了、没派发」，
+ * 参数只留一个复制入口。
  */
 export function SuperToolCallCard({ block }: { block: ToolBlock }) {
   const parsed = useMemo(
     () => parseSuperToolCallPayload(block),
-    [block.superTasks, block.input],
+    [block.superTasks, block.superTasksError, block.input],
   );
   const tasks = parsed.ok ? parsed.tasks : [];
+  // 成功分支里也可能带 error（混合载荷：坏条目被丢弃、合法条目照常派发）。
+  const dispatchError = parsed.ok
+    ? parsed.error
+    : parsed.reason === "invalid"
+      ? parsed.detail
+      : null;
   return (
     <DirectiveSurface
       className="my-2"
@@ -780,7 +926,13 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
     >
       <DirectiveHeader
         icon={<Users className={ICON_INLINE} />}
-        aside={<SuperToolStatusChip status={block.status} />}
+        aside={
+          <SuperToolStatusChip
+            status={block.status}
+            dispatchError={dispatchError}
+            taskCount={tasks.length}
+          />
+        }
       >
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-ui-title font-semibold leading-snug text-foreground">
@@ -790,35 +942,36 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
         </div>
       </DirectiveHeader>
       {parsed.ok ? (
-        <ul data-testid="super-tool-call-tasks" className="divide-y divide-primary/20">
-          {tasks.map((task, index) => (
-            <SuperToolTaskRow key={index} task={task} index={index} total={tasks.length} />
-          ))}
-        </ul>
+        <>
+          <ul data-testid="super-tool-call-tasks" className="divide-y divide-primary/20">
+            {tasks.map((task, index) => (
+              <SuperToolTaskRow key={index} task={task} index={index} total={tasks.length} />
+            ))}
+          </ul>
+          {dispatchError && (
+            <div className="border-t border-warning/40 px-3 py-2">
+              <DirectiveFailureBanner
+                testId="super-tool-call-partial"
+                text={t("委派指令格式错误：{0}", dispatchError)}
+                rawInput={block.input || undefined}
+              />
+            </div>
+          )}
+        </>
       ) : parsed.reason === "pending" ? (
         <div className="flex items-center gap-2 px-3 py-2 text-ui-caption text-muted-foreground">
           <Loader2 className={`${ICON_INLINE} animate-spin`} aria-hidden="true" />
           <span>{t("正在编写任务书…")}</span>
         </div>
       ) : (
-        // 载荷解析不出来时**不假装有任务书**：如实说明这里只保留了原始参数，
-        // 且参数本身直接摊开（折叠起来等于让用户点两次才看到唯一的内容）。
-        <div className="space-y-2 px-3 py-2">
-          <div
-            data-testid="super-tool-call-invalid"
-            className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
-          >
-            <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
-            <span>{t("这段任务信息没能完整读取，暂时看不到任务列表，下面是它的原始内容")}</span>
-          </div>
-          {block.input && (
-            <pre
-              data-testid="super-tool-call-raw"
-              className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
-            >
-              {block.input}
-            </pre>
-          )}
+        // 载荷解析不出来时**不假装有任务书**，也不把原始 JSON 摊给用户：
+        // 只说清具体哪里不对 + 明确「未派发」，参数留给复制按钮。
+        <div className="px-3 py-2">
+          <DirectiveFailureBanner
+            testId="super-tool-call-invalid"
+            text={t("委派指令格式错误：{0}", parsed.detail)}
+            rawInput={block.input || undefined}
+          />
         </div>
       )}
     </DirectiveSurface>
@@ -845,7 +998,24 @@ export function SuperToolCallCard({ block }: { block: ToolBlock }) {
  */
 type SuperActionsToolParse =
   | { ok: true; actions: SuperDirectiveAction[] }
-  | { ok: false; reason: "pending" | "invalid" };
+  | { ok: false; reason: "pending" }
+  | { ok: false; reason: "invalid"; detail: string };
+
+/**
+ * 动作载荷解析失败的具体原因。
+ *
+ * `parseSuperToolCall("actions")` 的 `reason` 是英文内部短语（直接上卡面就是
+ * 乱码），字段级诊断在 `issues` 里。没有 issues 时按「能不能读成合法 JSON」
+ * 补一句中文：能读但没动作 = 「里面没有操作列表」，读不出来 = 「内容格式不对」。
+ */
+function superActionsFailureDetail(block: ToolBlock): string {
+  const parsed = parseSuperToolCall("actions", block.input);
+  if (!parsed.ok && parsed.issues.length > 0) return parsed.issues.slice(0, 3).join("；");
+  if (typeof block.input !== "string" || !block.input.trim()) {
+    return t("内容格式不对，读不出来");
+  }
+  return parseJsonLoose(block.input).ok ? t("里面没有操作列表") : t("内容格式不对，读不出来");
+}
 
 function parseSuperActionsToolCall(block: ToolBlock): SuperActionsToolParse {
   const parsed = parseSuperToolCall("actions", block.input);
@@ -868,7 +1038,7 @@ function parseSuperActionsToolCall(block: ToolBlock): SuperActionsToolParse {
     };
   }
   if (!block.input || !block.input.trim()) return { ok: false, reason: "pending" };
-  return { ok: false, reason: "invalid" };
+  return { ok: false, reason: "invalid", detail: superActionsFailureDetail(block) };
 }
 
 export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
@@ -900,22 +1070,13 @@ export function SuperActionsToolCallCard({ block }: { block: ToolBlock }) {
           <span>{t("正在编写子会话操作…")}</span>
         </div>
       ) : (
-        <div className="space-y-2 px-3 py-2">
-          <div
-            data-testid="super-actions-tool-call-invalid"
-            className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-caption leading-relaxed text-warning"
-          >
-            <FileWarning className={`${ICON_INLINE} mt-0.5 shrink-0`} aria-hidden="true" />
-            <span>{t("这段操作信息没能完整读取，暂时看不到操作列表，下面是它的原始内容")}</span>
-          </div>
-          {block.input && (
-            <pre
-              data-testid="super-actions-tool-call-raw"
-              className="max-h-64 max-w-full overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-editor px-3 py-2 font-mono text-ui-caption leading-relaxed text-muted-foreground"
-            >
-              {block.input}
-            </pre>
-          )}
+        // 与委派卡同一纪律：坏载荷只说清原因，不把原始 JSON 摊到卡面上。
+        <div className="px-3 py-2">
+          <DirectiveFailureBanner
+            testId="super-actions-tool-call-invalid"
+            text={t("委派指令格式错误：{0}", parsed.detail)}
+            rawInput={block.input || undefined}
+          />
         </div>
       )}
       {block.superActionResult && block.superActionResult.length > 0 && (

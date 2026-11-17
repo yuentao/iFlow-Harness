@@ -845,10 +845,10 @@ const en: Record<string, string> = {
   "第 {0}/{1} 个任务": "Task {0}/{1}",
   "这段内容没能完整读取，下面的任务书仅供参考，可能还没有真正派出去":
     "This content could not be read in full; the task briefs below are for reference only and may not have been dispatched yet.",
-  "这段任务信息没能完整读取，暂时看不到任务列表，下面是它的原始内容":
-    "This task information could not be read in full, so the task list is unavailable. Its raw content is shown below.",
-  "这段操作信息没能完整读取，暂时看不到操作列表，下面是它的原始内容":
-    "This action information could not be read in full, so the action list is unavailable. Its raw content is shown below.",
+  "委派指令格式错误：{0}": "Malformed delegation directive: {0}",
+  "未派发": "Not dispatched",
+  "部分未派发": "Partly dispatched",
+  "复制原始参数": "Copy raw arguments",
   "子会话操作": "Child session actions",
   "{0} 个动作": "{0} action(s)",
   "回答": "Answer",
