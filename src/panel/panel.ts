@@ -53,7 +53,7 @@ import type {
   SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QqTaskUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
 import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
@@ -835,6 +835,84 @@ const QQ_BRIDGE_STOP_TIMEOUT_MS = 2_000;
 /** 设置改动 → 重启 QQ 服务的防抖窗口（settings.json 一次编辑会触发多帧）。 */
 const QQ_SETTINGS_RESTART_DEBOUNCE_MS = 500;
 /**
+ * 设置事件合并窗口：一次补丁会逐键写多条配置，`onDidChangeConfiguration`
+ * 因此连发多轮。50ms 内的事件合并成一轮完整同步，避免一次编辑触发 N 次。
+ */
+const QQ_SETTINGS_SYNC_DEBOUNCE_MS = 50;
+/** 单次「失活 → 自动重启」的硬上限：绝不允许无限重启（重扫是人工兜底）。 */
+const QQ_HEALTH_RESTART_LIMIT = 1;
+/**
+ * 任务看板投影上限。
+ *
+ * 任务记录本身由 `QqTaskStore` 落盘管理，这里限的是**投影到 webview 的行数**
+ * ——长跑通道会把几百条终态任务一起塞进每一帧快照。活跃（非终态）任务全
+ * 保留（用户要能看到正在跑的任务并停止它），剩余名额给最近的终态任务。
+ */
+export const QQ_TASK_PROJECTION_LIMIT = 100;
+/** `QqTaskUi.status` 中的终态集合（与 `src/qq/service.ts` 的状态机一致）。 */
+const QQ_TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "succeeded",
+  "failed",
+  "canceled",
+  "timeout",
+  "needs_review",
+]);
+/**
+ * 健康 detail 里出现这些片段即视为「失活 / 出错」，不能继续显示「正常」。
+ *
+ * 只匹配明确表示链路不可用的措辞：`op=9 invalid session` 由 adapter 记录成
+ * 「会话已失效（op=9 invalid session）」，断线与重连失败同理；**不**匹配
+ * 「断线区间可能丢消息」这类「当前已连上、只是提示历史缺口」的 notice。
+ */
+const QQ_HEALTH_FAILURE_MARKERS = [
+  "invalid session",
+  "会话已失效",
+  "连接断开",
+  "已断开",
+  "重连失败",
+  "心跳发送失败",
+  "发送失败",
+  "disconnected",
+] as const;
+
+/** adapter 健康快照是否代表「可正常收发」。 */
+export function isQqHealthHealthy(health: {
+  connected: boolean;
+  detail?: string | null;
+}): boolean {
+  if (!health.connected) return false;
+  const detail = (health.detail ?? "").toLowerCase();
+  if (detail.length === 0) return true;
+  return !QQ_HEALTH_FAILURE_MARKERS.some((marker) => detail.includes(marker.toLowerCase()));
+}
+
+/**
+ * 裁剪 QQ 任务投影：活跃任务永不丢弃，剩余名额按原顺序（service 已按
+ * updatedAt 降序）补足终态任务；返回保持原行序（看板不回跳）。
+ */
+export function capQqTaskProjection(
+  tasks: readonly QqTaskUi[],
+  limit: number = QQ_TASK_PROJECTION_LIMIT,
+): QqTaskUi[] {
+  if (tasks.length <= limit) return [...tasks];
+  const keep = new Set<string>();
+  for (const task of tasks) {
+    if (keep.size >= limit) break;
+    if (!QQ_TERMINAL_TASK_STATUSES.has(task.status)) keep.add(task.taskId);
+  }
+  for (const task of tasks) {
+    if (keep.size >= limit) break;
+    keep.add(task.taskId);
+  }
+  return tasks.filter((task) => keep.has(task.taskId));
+}
+
+/** `requestSuperMerge` 的真实结果（供 QQ 端口如实回传 detail）。 */
+export type SuperMergeDispatchResult =
+  | { dispatched: true; mergeSessionId: string }
+  | { dispatched: false; queued: boolean; reason: string };
+
+/**
  * 主会话渠道等待「主会话空闲」的轮询间隔。
  *
  * 比子会话收尾轮询（1.5s）短得多：这里等的是本地回合结束，用户按下回车后
@@ -933,6 +1011,18 @@ export class ChatPanel implements vscode.Disposable {
   private qqRestartTimer: ReturnType<typeof setTimeout> | null = null;
   /** 进行中的启动（并发调用 startQqIfEnabled 时共享同一份工作）。 */
   private qqStarting: Promise<void> | null = null;
+  /**
+   * 进行中的「建通道」占位。
+   *
+   * `startQqBotChannel` 既有 `doStartQq`（配置事件路径）也有扫码成功
+   * （绑定路径）两个调用方；两条路径若各建一套 owner，会互相覆盖/反杀。
+   * 这里在**任何 await 之前同步占位**，后来者直接复用同一份启动。
+   */
+  private qqChannelStarting: Promise<void> | null = null;
+  /** 健康检查驱动的自动重启次数（上限 {@link QQ_HEALTH_RESTART_LIMIT}）。 */
+  private qqHealthRestarts = 0;
+  /** 设置事件合并定时器（一次补丁逐键写配置会连发多轮事件）。 */
+  private qqSettingsSyncTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * QQBot 官方扫码会话：绑定进行中短驻留，成功/失败/stop 后立即清空。
    * 独立于 `this.qq`（扫码时尚无服务现场），避免把半绑定现场塞进主通道。
@@ -1562,9 +1652,8 @@ export class ChatPanel implements vscode.Disposable {
     this.context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (!e.affectsConfiguration("iflow.qq")) return;
-        void this.onQqSettingsChanged().catch((error: unknown) => {
-          this.log.warn(`QQ 设置变更处理失败：${errorMessage(error)}`);
-        });
+        // 合并同一批写入产生的多轮事件（见 QQ_SETTINGS_SYNC_DEBOUNCE_MS）。
+        this.scheduleQqSettingsChanged();
       }),
     );
     // 异步启动，不阻塞激活：设置未启用时只读一次配置就返回。
@@ -1790,6 +1879,14 @@ export class ChatPanel implements vscode.Disposable {
     if (this.diagDebounce) {
       clearTimeout(this.diagDebounce);
       this.diagDebounce = null;
+    }
+    if (this.qqSettingsSyncTimer) {
+      clearTimeout(this.qqSettingsSyncTimer);
+      this.qqSettingsSyncTimer = null;
+    }
+    if (this.qqRestartTimer) {
+      clearTimeout(this.qqRestartTimer);
+      this.qqRestartTimer = null;
     }
     this.diagBaselineErrors = null;
     // QQ 通道：bridge 进程、宿主 IPC 监听与任务服务必须一起收掉 —— 否则窗口
@@ -9074,13 +9171,35 @@ export class ChatPanel implements vscode.Disposable {
   // --- QQBot 官方路线（M3-C）-----------------------------------------------
 
   /**
+   * QQBot 通道启动的**并发闸门**。
+   *
+   * 两个调用方（配置事件路径的 `doStartQq`、扫码成功路径的 `onQqBotBound`）
+   * 都可能同时到达；同步占位保证只有一份启动在跑，后来者复用它。发现通道
+   * 已经在跑时直接返回（配置事件路径在 enable 落盘后重入）。
+   */
+  private startQqBotChannel(
+    config: QqConfig,
+    io: QqSettingsIo,
+    generation: number,
+  ): Promise<void> {
+    if (this.qqChannelStarting) return this.qqChannelStarting;
+    if (this.qq) return Promise.resolve();
+    let task!: Promise<void>;
+    task = this.doStartQqBotChannel(config, io, generation).finally(() => {
+      if (this.qqChannelStarting === task) this.qqChannelStarting = null;
+    });
+    this.qqChannelStarting = task;
+    return task;
+  }
+
+  /**
    * QQBot 官方通道的常规启动：不建 IPC、不 spawn bridge、不下载外部组件。
    *
    * 用 SecretStorage 里扫码写入的 appId/appSecret 建官方 adapter，入站事件
    * 经 `setEventCallback` 直接进 QqService，出站由 adapter.send 完成。没有
    * 凭据时如实提示先绑定，绝不退化成其它通道。
    */
-  private async startQqBotChannel(
+  private async doStartQqBotChannel(
     config: QqConfig,
     io: QqSettingsIo,
     generation: number,
@@ -9285,6 +9404,8 @@ export class ChatPanel implements vscode.Disposable {
       // 内存里先置启用：QqService 读的就是这个对象（私聊自由文本任务要求
       // enabled），落盘刻意放在启动之后。
       config.enabled = true;
+      // 新凭据建立的新通道拥有完整的失败预算。
+      this.qqHealthRestarts = 0;
       this.stopQqBotBinding();
       // 成功即清掉 webview 里的二维码旧帧。`qqLoginQr` 是独立于快照的通道，
       // 宿主不覆盖的话，上一帧 waiting_scan 会连同倒计时一直挂着（用户实测：
@@ -9419,6 +9540,81 @@ export class ChatPanel implements vscode.Disposable {
     if (inFlight) await inFlight.catch(() => undefined);
     await this.stopQq();
     await this.startQqIfEnabled();
+  }
+
+  /**
+   * 面板重新可见时的一次静默健康检查。
+   *
+   * `op=9 invalid session` 之后 adapter 只是丢掉了会话，socket 可能仍显示
+   * connected 且永远不会再收到事件 —— 只看 `connected` 会一直「正常」。
+   * 这里按 health.detail 判定失活，并触发一次有限重启。
+   */
+  private async checkQqChannelHealth(): Promise<void> {
+    if (this.disposed) return;
+    const adapter = this.qq?.qqbot?.adapter;
+    if (!adapter) return;
+    let health: { connected: boolean; detail?: string };
+    try {
+      health = await adapter.health();
+    } catch (error) {
+      this.log.warn(`QQ 通道健康检查失败：${errorMessage(error)}`);
+      return;
+    }
+    if (this.disposed || this.qq?.qqbot?.adapter !== adapter) return;
+    if (isQqHealthHealthy(health)) {
+      this.qqHealthRestarts = 0;
+      return;
+    }
+    const detail =
+      typeof health.detail === "string" && health.detail.trim().length > 0
+        ? health.detail.trim()
+        : "unknown";
+    this.pushQqStatus(false, detail);
+    await this.recoverQqChannel(detail);
+  }
+
+  /**
+   * 失活后的恢复：**有限次**自动重启（{@link QQ_HEALTH_RESTART_LIMIT}），
+   * 用尽后如实要求重新扫码，绝不无限重启。
+   *
+   * 返回是否恢复出一条活着的通道。
+   */
+  private async recoverQqChannel(detail: string): Promise<boolean> {
+    if (this.disposed) return false;
+    // 正在绑定 / 启动 / 停止：这些路径自己会收尾，别抢。
+    if (this.qqbotBinding || this.qqChannelStarting || this.qqStopping) return false;
+    if (this.qqHealthRestarts >= QQ_HEALTH_RESTART_LIMIT) {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("QQ 通道已失活且自动重启次数已用尽，请重新扫码绑定"),
+      );
+      this.pushQqStatus(false, "QQ 通道已失活，请重新扫码绑定");
+      return false;
+    }
+    this.qqHealthRestarts += 1;
+    this.log.warn(
+      `QQ 通道健康检查失活（${detail}），尝试自动重启（${this.qqHealthRestarts}/${QQ_HEALTH_RESTART_LIMIT}）`,
+    );
+    try {
+      await this.restartQq();
+    } catch (error) {
+      this.log.warn(`QQ 通道自动重启失败：${errorMessage(error)}`);
+    }
+    const alive = !this.disposed && this.qq !== undefined;
+    if (alive) {
+      this.store.sendToast(
+        "info",
+        vscode.l10n.t("QQ 通道已失活，已自动重启一次；若仍无法收发消息，请重新扫码绑定"),
+      );
+      this.pushQqStatus(true, "QQ 通道已重启");
+    } else {
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("QQ 通道已失活且无法自动恢复，请重新扫码绑定"),
+      );
+      this.pushQqStatus(false, "QQ 通道已失活，请重新扫码绑定");
+    }
+    return alive;
   }
 
   /** 500ms 防抖的整服务重启（settings.json 一次编辑会触发多帧事件）。 */
@@ -9585,7 +9781,8 @@ export class ChatPanel implements vscode.Disposable {
        *
        * 合并由**专用合并子会话**在主仓工作区里执行（冲突需要有人读代码），
        * 因此这是一个异步动作：派发成功也只回报「已派出」，合并结果稍后写进
-       * 看板的 integration。**绝不**在这里谎报 ok=true。
+       * 看板的 integration。**绝不**在这里谎报 ok=true；`requestSuperMerge`
+       * 没派出子会话时必须把真实原因回给 QQ（排队 / 主会话忙 / 已有合并在跑）。
        */
       merge: async (superSessionId) => {
         const manager = this.getSuperAgent();
@@ -9601,20 +9798,17 @@ export class ChatPanel implements vscode.Disposable {
         if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
           return { ok: false, detail: "该子会话没有可合并的分支（仅目录隔离）" };
         }
-        const state = this.store.getState();
-        if (
-          state.status === "streaming" ||
-          state.initializing ||
-          state.replaying ||
-          this.historySyncBusy
-        ) {
-          return { ok: false, detail: "主会话正在生成，请稍后再合并" };
+        const outcome = await this.requestSuperMerge(superSessionId);
+        if (outcome.dispatched) {
+          return {
+            ok: false,
+            detail: "已派出合并子会话（异步执行），合并结果稍后在看板确认",
+          };
         }
-        await this.requestSuperMerge(superSessionId);
-        return {
-          ok: false,
-          detail: "已派出合并子会话（异步执行），合并结果稍后在看板确认",
-        };
+        if (outcome.queued) {
+          return { ok: false, detail: `合并请求已排队，空闲后自动派发：${outcome.reason}` };
+        }
+        return { ok: false, detail: outcome.reason };
       },
 
       discard: async (superSessionId) => {
@@ -9954,7 +10148,11 @@ export class ChatPanel implements vscode.Disposable {
     if (result.ignored.length > 0) {
       this.log.warn(`QQ 设置补丁忽略了：${result.ignored.join(", ")}`);
     }
-    await this.onQqSettingsChanged();
+    // 落盘会触发 `onDidChangeConfiguration` → `scheduleQqSettingsChanged`，
+    // 由它统一做一轮快照 + 重启/热更新。这里**不再**直接调
+    // `onQqSettingsChanged`，否则一次补丁会同步两轮（直接调用 + 事件回显）。
+    // 立即回推归一化快照只是让设置页马上看到裁剪后的值。
+    await this.pushQqSettings();
   }
 
   /** 设置页 QQ 卡片的动作。扫码登录三动作在 Wave5-C 落地：二维码桥随托管
@@ -9970,12 +10168,19 @@ export class ChatPanel implements vscode.Disposable {
           return;
         }
         const health = await adapter.health();
-        this.pushQqStatus(
-          health.connected,
-          health.connected
-            ? vscode.l10n.t("QQBot 官方网关已连接")
-            : vscode.l10n.t("QQBot 未连接（{0}）", String(health.detail ?? "")),
-        );
+        if (isQqHealthHealthy(health)) {
+          // 健康即清零：下一次失活仍有一次自动重启的机会。
+          this.qqHealthRestarts = 0;
+          this.pushQqStatus(true, vscode.l10n.t("QQBot 官方网关已连接"));
+          return;
+        }
+        const detail =
+          typeof health.detail === "string" && health.detail.trim().length > 0
+            ? health.detail.trim()
+            : vscode.l10n.t("QQBot 未连接");
+        // 先如实显示失活状态（绝不显示「正常」），再尝试恢复。
+        this.pushQqStatus(false, detail);
+        await this.recoverQqChannel(detail);
         return;
       }
       case "unbind": {
@@ -10019,6 +10224,25 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
+   * 设置事件合并入口（`onDidChangeConfiguration` 的唯一调用点）。
+   *
+   * 一次补丁会逐键 `writeAll`，事件会连发多轮；每轮都做读设置 + 推送 +
+   * 重启判定纯属浪费。窗口内的多轮合并成一次完整同步。
+   */
+  private scheduleQqSettingsChanged(): void {
+    if (this.disposed) return;
+    if (this.qqSettingsSyncTimer) clearTimeout(this.qqSettingsSyncTimer);
+    this.qqSettingsSyncTimer = setTimeout(() => {
+      this.qqSettingsSyncTimer = null;
+      if (this.disposed) return;
+      void this.onQqSettingsChanged().catch((error: unknown) => {
+        this.log.warn(`QQ 设置变更处理失败：${errorMessage(error)}`);
+      });
+    }, QQ_SETTINGS_SYNC_DEBOUNCE_MS);
+    this.qqSettingsSyncTimer.unref?.();
+  }
+
+  /**
    * 配置变更后的统一处理：推快照 → 按需重启或热更新。
    *
    * 非连接类字段（白名单 / 策略 / 并发 / 限流 / 详略 / 自动合并）直接写进
@@ -10034,13 +10258,19 @@ export class ChatPanel implements vscode.Disposable {
 
   private async syncQqServiceWithSettings(): Promise<void> {
     if (this.disposed) return;
+    // 扫码绑定进行中 / 通道正在启动：绑定路径与启动路径自己会收尾，此刻任何
+    // 按磁盘配置做的停/起都会把刚建好的 owner 反杀（首绑 enable 尚未落盘，
+    // 配置事件读到 false 就会 stopQq）。等它们结束后由事件/心跳补一次同步。
+    if (this.qqbotBinding || this.qqChannelStarting || this.qqStopping) return;
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
     const snapshot = await readQqSettings(io);
     const { config, warnings } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
     for (const warning of warnings) this.log.warn(`QQ 设置：${warning}`);
 
     if (!config.enabled) {
-      if (this.qq) await this.stopQq();
+      // 只停仍在跑的通道：内存里的 enabled 已经是 false（刚停过 / 从未起过）
+      // 时再调 stopQq 会白白推进代次并打断正在收尾的启动。
+      if (this.qq && this.qq.config.enabled !== false) await this.stopQq();
       this.pushQqStatus(false, "QQ 通道已停用");
       return;
     }
@@ -10079,6 +10309,9 @@ export class ChatPanel implements vscode.Disposable {
   private pushQqState(): void {
     this.refreshQqTasks();
     void this.pushQqPendingUsers();
+    // 面板打开/重新可见时检查一次通道健康：op=9 之后 socket 可能仍「看着
+    // 活着」但永远不会再来事件，只在用户点「测试连接」时才检查就太晚了。
+    void this.checkQqChannelHealth();
   }
 
   /** QQ 设置快照（无明文凭据，只有 hasAppSecret 布尔）。 */
@@ -10118,8 +10351,22 @@ export class ChatPanel implements vscode.Disposable {
     // 通道为空（dispose / 重建竞态）时保持现状：清空看板会闪出一帧空列表，
     // 而显式停用路径（stopQq）不经过这里，不需要「空推送」。
     if (!service) return;
-    setQqTasks(this.store.getState(), service.listTasks());
-    this.store.pushSnapshot();
+    setQqTasks(this.store.getState(), capQqTaskProjection(service.listTasks()));
+    this.scheduleQqSnapshotFlush();
+  }
+
+  /**
+   * 节流推送（而非立即 `pushSnapshot`）。
+   *
+   * 一个任务从 received 走到终态会 persist 多次，`onChanged` 每次都立即
+   * push 会把整份快照风暴式推给 webview。`SessionStore` 的 `scheduleFlush`
+   * 正是同一套节流器；它目前是私有方法（`store.ts` 不在本次改动边界内），
+   * 这里用窄类型桥接，方法缺失时退回立即推送。
+   */
+  private scheduleQqSnapshotFlush(): void {
+    const store = this.store as unknown as { scheduleFlush?: () => void };
+    if (typeof store.scheduleFlush === "function") store.scheduleFlush();
+    else this.store.pushSnapshot();
   }
 
   /**
@@ -10205,25 +10452,39 @@ export class ChatPanel implements vscode.Disposable {
   private async requestSuperMerge(
     id: string,
     options?: { auto?: boolean; reason?: string },
-  ): Promise<void> {
+  ): Promise<SuperMergeDispatchResult> {
     const manager = this.getSuperAgent();
-    if (!manager) return;
+    if (!manager) {
+      return {
+        dispatched: false,
+        queued: false,
+        reason: "Super Agent 不可用（未打开工作区）",
+      };
+    }
     const session = manager.get(id);
     if (!session) {
       this.store.sendToast("warning", vscode.l10n.t("该子会话不存在或已被清理"));
-      return;
+      return { dispatched: false, queued: false, reason: "该子会话不存在或已被清理" };
     }
     if (session.isolation.kind !== "git_worktree" || !session.isolation.branch) {
       this.store.sendToast("warning", vscode.l10n.t("该子会话没有可合并的分支（仅目录隔离）"));
-      return;
+      return {
+        dispatched: false,
+        queued: false,
+        reason: "该子会话没有可合并的分支（仅目录隔离）",
+      };
     }
     if (session.integration?.state === "merged") {
       this.store.sendToast("info", vscode.l10n.t("该子会话的改动已经合并"));
-      return;
+      return { dispatched: false, queued: false, reason: "该子会话的改动已经合并" };
     }
     if (!isTerminalSuperStatus(session.status)) {
       this.store.sendToast("warning", vscode.l10n.t("子会话还没结束，完成后再让智能体合并"));
-      return;
+      return {
+        dispatched: false,
+        queued: false,
+        reason: "子会话还没结束，完成后再让智能体合并",
+      };
     }
     const state = this.store.getState();
     if (
@@ -10236,21 +10497,30 @@ export class ChatPanel implements vscode.Disposable {
         // 主会话正忙着：留在队列里等它空闲。自动路径不能就此丢掉 —— 丢掉就
         // 等于把这件事又推回给用户手动点按钮，那正是这次要改掉的行为。
         this.scheduleSuperMerge(id, options.reason ?? "");
-        return;
+        return {
+          dispatched: false,
+          queued: true,
+          reason: "主会话正忙，合并请求已排队，空闲后自动派发",
+        };
       }
+      const reason = "主会话正在生成，未派出合并子会话，请等本轮结束后重试";
       this.store.sendToast(
         "warning",
-        vscode.l10n.t("主会话正在生成，等本轮结束后再让智能体合并"),
+        vscode.l10n.t("主会话正在生成，未派出合并子会话，请等本轮结束后重试"),
       );
-      return;
+      return { dispatched: false, queued: false, reason };
     }
     if (!state.sessionId) {
       if (options?.auto) {
         this.scheduleSuperMerge(id, options.reason ?? "");
-        return;
+        return {
+          dispatched: false,
+          queued: true,
+          reason: "会话未就绪，合并请求已排队，就绪后自动派发",
+        };
       }
       this.store.sendToast("warning", vscode.l10n.t("会话未就绪，无法让智能体合并"));
-      return;
+      return { dispatched: false, queued: false, reason: "会话未就绪，无法让智能体合并" };
     }
     // 派一个跑在主仓工作区的合并子会话：任务书就是合并任务书本身。
     const branch = session.isolation.branch;
@@ -10267,13 +10537,21 @@ export class ChatPanel implements vscode.Disposable {
         // 已有合并子会话在跑（主仓工作区没有版本隔离）：自动路径不能就此丢掉
         // —— 重新排队，等前一个合并子会话跑完再派。
         this.scheduleSuperMerge(id, options.reason ?? "");
-        return;
+        return {
+          dispatched: false,
+          queued: true,
+          reason: "已有合并子会话在跑，合并请求已排队，等它结束后派发",
+        };
       }
       this.store.sendToast(
         "warning",
         vscode.l10n.t("已有合并子会话在跑，等它结束后再合并：{0}", branch),
       );
-      return;
+      return {
+        dispatched: false,
+        queued: false,
+        reason: `已有合并子会话在跑，未派出新的合并子会话（分支 ${branch}），请稍后重试`,
+      };
     }
     this.store.sendToast(
       "info",
@@ -10281,6 +10559,7 @@ export class ChatPanel implements vscode.Disposable {
         ? vscode.l10n.t("子会话「{0}」的改动没能自动合并，已派出合并子会话", session.title)
         : vscode.l10n.t("已派出合并子会话，合并子会话「{0}」的分支", session.title),
     );
+    return { dispatched: true, mergeSessionId: child.id };
   }
 
   /**

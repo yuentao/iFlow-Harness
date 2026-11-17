@@ -13,7 +13,7 @@ import type { QqSettingsUi } from "../shared/messages.js";
 /** 完整默认值（与 shared/messages.ts 的 pickQqSettingsUi 默认一致）。 */
 const DEFAULTS: QqSettingsUi = {
   enabled: false,
-  route: "main",
+  route: "child",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",

@@ -1127,8 +1127,8 @@ const en: Record<string, string> = {
   "最近": "Last seen",
   "群 {0}": "Group {0}",
   "启用 QQ 远程任务": "Enable QQ remote tasks",
-  "从 QQ 私聊或群聊接收任务，在独立分支上执行。":
-    "Receive tasks from QQ private chats or groups and run them on isolated branches.",
+  "从 QQ 私聊或群聊接收任务，在独立分支上执行。关闭面板不会停止 QQ 通道（通道随扩展宿主存活，重开面板可继续查看）。":
+    "Receive tasks from QQ private chats or groups and run them on isolated branches. Closing the panel does NOT stop the QQ channel — it lives with the extension host, so reopen the panel anytime to keep watching it.",
   "机器人 Token": "Bot token",
   "App Secret": "App secret",
   "凭据只从宿主传入，面板不保存。": "Credentials come from the host only; the panel stores nothing.",
@@ -1160,8 +1160,8 @@ const en: Record<string, string> = {
   "独立子会话": "Isolated child session",
   "消息排队注入当前主会话（与本地输入同一条对话线，可远程接续工作；忙时排队等待）。":
     "Queue the message into the current main session (same conversation as local input, so work can continue remotely; queued while busy).",
-  "每条消息直接派一个独立子会话（旧行为，便于回滚与排查）。":
-    "Dispatch each message as an isolated child session (legacy behaviour, kept for rollback and diagnosis).",
+  "每条消息直接派一个独立子会话（默认，隔离执行、互不影响）。":
+    "Dispatch each message as an isolated child session (the default; isolated execution, no cross-talk).",
   "远程任务策略": "Remote task policy",
   "只读": "Read-only",
   "只读：可以查看工作区，写文件与执行命令会被拒绝。":

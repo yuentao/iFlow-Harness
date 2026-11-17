@@ -317,4 +317,56 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     expect(protocolStop).toHaveBeenCalled();
     expect(p.qqbotBinding).toBeNull();
   });
+
+  it("并发启动只建一套 owner（配置事件路径与绑定路径共用同一份启动）", async () => {
+    ioHarness.settings.enabled = true;
+    ioHarness.secrets.set(QQBOT_APP_ID_SECRET_KEY, "app-1");
+    ioHarness.secrets.set(QQ_SECRET_KEYS.appSecret, "sec-1");
+    const internals = p as unknown as {
+      currentQqConfig: () => Promise<unknown>;
+      qqGeneration: number;
+    };
+    const config = await internals.currentQqConfig();
+    const generation = internals.qqGeneration;
+
+    // 两个路径同时到达：同步占位保证只有一份启动在跑。
+    await Promise.all([
+      p.startQqBotChannel(config, ioHarness.io, generation),
+      p.startQqBotChannel(config, ioHarness.io, generation),
+    ]);
+
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
+    expect(p.qq).toBeTruthy();
+  });
+
+  it("首绑启动途中配置事件读到 enabled=false 也不会反杀正在建的通道", async () => {
+    let releaseConnect!: () => void;
+    adapter.connect.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseConnect = resolve;
+        }),
+    );
+
+    await p.handleQqManagedSetup("start");
+    protocolCbs!.onSuccess({ appId: "app-1", appSecret: "sec-1" });
+
+    // 等 adapter.connect 真正进入在飞状态。
+    const deadline = Date.now() + 1_000;
+    while (adapter.connect.mock.calls.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
+
+    // 首绑尚未把 enabled 落盘：此刻配置事件路径会读到 false，旧实现会
+    // 在 stopQq 里把半成品通道拆掉。
+    ioHarness.settings.enabled = false;
+    await (p as unknown as { syncQqServiceWithSettings: () => Promise<void> }).syncQqServiceWithSettings();
+
+    expect(p.qq).toBeTruthy();
+    releaseConnect();
+    await tick();
+    expect(p.qq).toBeTruthy();
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
+  });
 });

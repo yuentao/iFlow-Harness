@@ -53,9 +53,9 @@ const RESULT_DETAILS = [
 /**
  * 入站消息的去向。
  *
- * - `main`（默认）：排队注入**主会话** —— 与本地输入同一条对话线，QQ 侧能
- *   接续工作；主会话按 system prompt 的分工再派子会话干活；
- * - `child`：直接派 Super Agent 子会话（旧行为，保留用于回滚与诊断）。
+ * - `child`（默认）：每条消息直接派 Super Agent 子会话（隔离执行，行为可预测）；
+ * - `main`：排队注入**主会话** —— 与本地输入同一条对话线，QQ 侧能接续工作；
+ *   主会话按 system prompt 的分工再派子会话干活。保留为可选项。
  */
 const ROUTES = ["main", "child"] as const satisfies readonly QqTaskChannel[];
 
@@ -70,7 +70,7 @@ export type { QqRemotePolicy, QqResultDetail, QqTaskChannel };
 export interface QqConfig {
   enabled: boolean;
   /**
-   * 入站消息的去向：`main`（默认）注入主会话、`child` 直接派子会话。
+   * 入站消息的去向：`child`（默认）直接派子会话、`main` 注入主会话。
    *
    * 每次使用时从本对象读（与白名单等同为热更新字段），改设置即时生效；
    * 已经建好的任务把渠道写在自己的记录上，不随设置回头变化。
@@ -105,7 +105,7 @@ export interface QqConfig {
  */
 const DEFAULTS: QqConfig = {
   enabled: false,
-  route: "main",
+  route: "child",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",

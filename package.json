@@ -256,7 +256,7 @@
             "%iflow.configuration.qq.route.main%",
             "%iflow.configuration.qq.route.child%"
           ],
-          "default": "main",
+          "default": "child",
           "description": "%iflow.configuration.qq.route.description%"
         },
         "iflow.qq.allowedUsers": {

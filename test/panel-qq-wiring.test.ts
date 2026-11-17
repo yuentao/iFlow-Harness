@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
-import { ChatPanel } from "../src/panel/panel.js";
+import { ChatPanel, capQqTaskProjection, isQqHealthHealthy } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
 import type { QqSettingsIo } from "../src/qq/settings-host.js";
 import type { QqConfig } from "../src/qq/config.js";
@@ -122,6 +122,10 @@ type PanelInternals = {
   handleQqTaskAction: (taskId: string, action: string, text?: string) => Promise<void>;
   refreshQqTasks: () => void;
   refreshQqTaskProjection: () => void;
+  handleQqSettingsPatch: (patch: Record<string, unknown>) => Promise<void>;
+  pushQqSettings: () => Promise<void>;
+  onQqSettingsChanged: () => Promise<void>;
+  scheduleQqSettingsChanged: () => void;
   stopQq: () => Promise<void>;
   handleQqPendingUser: (info: {
     openid: string;
@@ -136,7 +140,11 @@ type PanelInternals = {
     isRejected: (openid: string) => Promise<boolean>;
   };
   unbindQqAccount: () => Promise<{ ok: boolean; message: string }>;
-  store: { getState: () => SessionState; sendToast: (...args: unknown[]) => number };
+  store: {
+    getState: () => SessionState;
+    sendToast: (...args: unknown[]) => number;
+    pushSnapshot: () => void;
+  };
 };
 
 describe("QQ 通道 · 面板侧接线", () => {
@@ -474,5 +482,118 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("当前工作区"));
     toast.mockRestore();
     await other.dispose();
+  });
+
+  it("任务投影按上限裁剪：活跃任务全保留，终态只留最近的", () => {
+    const tasks: QqTaskUi[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      tasks.push({
+        ...TASK,
+        taskId: `run-${i}`,
+        shortId: `R${i}`,
+        status: "running",
+        updatedAt: 10_000 - i,
+      });
+    }
+    for (let i = 0; i < 120; i += 1) {
+      tasks.push({
+        ...TASK,
+        taskId: `done-${i}`,
+        shortId: `D${i}`,
+        status: "succeeded",
+        updatedAt: 9_000 - i,
+      });
+    }
+
+    const trimmed = capQqTaskProjection(tasks);
+    expect(trimmed).toHaveLength(100);
+    // 活跃任务绝不被裁剪（用户要能看到并停止）。
+    for (const id of ["run-0", "run-1", "run-2"]) {
+      expect(trimmed.some((task) => task.taskId === id), id).toBe(true);
+    }
+    // 终态按最近优先保留：最新的 97 条留下，最旧的 20 条被丢。
+    expect(trimmed.some((task) => task.taskId === "done-96")).toBe(true);
+    expect(trimmed.some((task) => task.taskId === "done-97")).toBe(false);
+    expect(trimmed.some((task) => task.taskId === "done-119")).toBe(false);
+  });
+
+  it("任务投影走节流推送：刷新立即更新状态，但不立即 push；稍后合并成一次", async () => {
+    // 排空构造期可能残留的推送定时器。
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    p.qq = {
+      service: {
+        listTasks: () => [TASK],
+        handleTaskAction: vi.fn(async () => undefined),
+        stop: async () => undefined,
+      },
+      config: makeConfig(),
+      io: makeIo().io,
+    };
+    const push = vi.spyOn(p.store, "pushSnapshot");
+
+    p.refreshQqTaskProjection();
+    // 状态已经同步写入（webview 下一次收到快照即可看到），但不立即推送。
+    expect(p.store.getState().qqTasks).toEqual([TASK]);
+    expect(push).not.toHaveBeenCalled();
+
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    expect(push).toHaveBeenCalledTimes(1);
+    push.mockRestore();
+  });
+
+  it("设置补丁不再直接触发完整同步：一次写入只回推快照，同步交给配置事件", async () => {
+    const { io, writes } = makeIo({ settings: { enabled: false, allowedUsers: [] } });
+    p.qq = {
+      service: {
+        listTasks: () => [],
+        handleTaskAction: vi.fn(async () => undefined),
+        stop: async () => undefined,
+      },
+      config: makeConfig({ enabled: false }),
+      io,
+    };
+    const sync = vi.spyOn(p, "onQqSettingsChanged").mockResolvedValue(undefined);
+    const push = vi.spyOn(p, "pushQqSettings").mockResolvedValue(undefined);
+
+    await p.handleQqSettingsPatch({ enabled: true });
+
+    expect(writes).toEqual([{ enabled: true }]);
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(sync).not.toHaveBeenCalled();
+
+    sync.mockRestore();
+    push.mockRestore();
+  });
+
+  it("配置事件合并：同一批多轮事件只做一次完整同步", async () => {
+    const sync = vi.spyOn(p, "onQqSettingsChanged").mockResolvedValue(undefined);
+    p.scheduleQqSettingsChanged();
+    p.scheduleQqSettingsChanged();
+    p.scheduleQqSettingsChanged();
+
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    expect(sync).toHaveBeenCalledTimes(1);
+    sync.mockRestore();
+  });
+
+  it("健康判定：connected=true 但 detail 报 op=9 失活时不算正常", () => {
+    expect(isQqHealthHealthy({ connected: true, detail: "qqbot websocket" })).toBe(true);
+    expect(
+      isQqHealthHealthy({
+        connected: true,
+        detail: "qqbot websocket; 会话已失效（op=9 invalid session）",
+      }),
+    ).toBe(false);
+    expect(isQqHealthHealthy({ connected: true, detail: "qqbot websocket; 发送失败：timeout" })).toBe(
+      false,
+    );
+    expect(isQqHealthHealthy({ connected: false, detail: "disconnected" })).toBe(false);
+    // 只是提示历史缺口、当前仍连着：不能当成失活去重启。
+    expect(
+      isQqHealthHealthy({
+        connected: true,
+        detail: "qqbot websocket; 断线区间可能丢消息（resume 多次失败，已改为新建会话）",
+      }),
+    ).toBe(true);
   });
 });
