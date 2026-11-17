@@ -305,4 +305,38 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
     expect(visible).toBeTruthy();
     expect(visible!.message).toContain("中断失败");
   });
+
+  it("Plan 模式下管理动作围栏不执行，且提示可见（只做计划）", async () => {
+    const cancel = vi.fn(async (_id: string) => ({ ok: true, reason: "cancelled" as const }));
+    p.superAgent = { list: () => [], reportPrompt: () => "", cancel };
+    const toasts: { level: string; message: string }[] = [];
+    vi.spyOn(p.store, "sendToast").mockImplementation(((level: string, message: string) => {
+      toasts.push({ level, message });
+      return 1;
+    }) as unknown as PanelInternals["store"]["sendToast"]);
+    p.store.replaceState({
+      ...p.store.getState(),
+      modes: {
+        currentModeId: "plan",
+        availableModes: [
+          { id: "default", name: "Default", kind: "default" },
+          { id: "plan", name: "Plan", kind: "plan" },
+        ],
+      },
+    } as SessionState);
+
+    p.scanSuperActions({
+      type: "text",
+      text: [
+        "```super-agent-actions",
+        '{"actions":[{"action":"cancel","sessionId":"super-1"}]}',
+        "```",
+      ].join("\n"),
+    });
+    await flush();
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(toasts.some((t) => t.level === "warning" && t.message.includes("计划模式"))).toBe(true);
+    expect(toasts.some((t) => t.message.includes("管理操作"))).toBe(true);
+  });
 });
