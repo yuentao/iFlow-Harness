@@ -99,7 +99,7 @@ type PanelInternals = {
   handleQqConfigAction: (action: string) => Promise<void>;
   stopQq: () => Promise<void>;
   postToWebview: (msg: HostToWebview) => void;
-  buildAndStartQqOwner: (...args: unknown[]) => Promise<unknown>;
+  startQqBotChannel: (...args: unknown[]) => Promise<void>;
   [k: string]: unknown;
 };
 
@@ -184,9 +184,12 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
   });
 
   it("常规启动：无凭据时提示先绑定，绝不启动 bridge / go-cqhttp", async () => {
-    const ownerSpy = vi.spyOn(p, "buildAndStartQqOwner");
+    // 收敛到 QQBot 单一路径后，OneBot 编排方法已彻底不存在。
+    const deadMethods = p as unknown as Record<string, unknown>;
+    for (const name of ["buildAndStartQqOwner", "startQqBridge", "startQqManaged", "onQqBridgeExit"]) {
+      expect(deadMethods[name]).toBeUndefined();
+    }
     await (p as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
-    expect(ownerSpy).not.toHaveBeenCalled();
     expect(bridgeStarter).not.toHaveBeenCalled();
     expect(managerFactory).not.toHaveBeenCalled();
     expect(p.qq).toBeUndefined();
@@ -195,7 +198,6 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
         (m) => (m as { message?: string }).message?.includes("尚未扫码绑定"),
       ),
     ).toBe(true);
-    ownerSpy.mockRestore();
   });
 
   it("扫码 start：不下载 / 不探端口，推二维码，成功后写凭据并启动官方 service", async () => {
