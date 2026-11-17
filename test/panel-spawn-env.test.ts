@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import type * as vscodeTypes from "vscode";
 import { ChatPanel } from "../src/panel/panel.js";
 import type { PanelServices } from "../src/panel/panel.js";
+import { MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL } from "../src/acp/cli-locator.js";
 import { setConfigOverrides } from "./vscode-stub.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -102,6 +103,7 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
   afterEach(async () => {
     await panel.dispose();
     delete process.env.ACP_MOCK_ENV_DUMP;
+    delete process.env.ACP_MOCK_ARGV_DUMP;
     delete process.env.IFLOW_SUPER_TOOL;
     delete process.env.IFLOW_HOME;
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -143,6 +145,55 @@ describe("CLI spawn env · IFLOW_SUPER_TOOL 只给主会话", () => {
       expect(env.IFLOW_SUPER_TOOL).toBeUndefined();
       // 子会话仍是 harness 子进程，只是没有派发工具。
       expect(env.IFLOW_HARNESS).toBe("1");
+    } finally {
+      await child.dispose();
+    }
+  }, 30000);
+
+  /**
+   * MCP 作用域按**进程**生效：主会话的 CLI 进程一个 MCP 服务器都不该有
+   * （MCP 工具绕过 `settings.allowed_tools` 白名单，只能这样整体移除），
+   * 子会话必须保留（实现工作要用 MCP 的浏览器/数据库工具）。
+   *
+   * 断言的是宿主真的交给子进程的 argv（mock agent 自己 dump 的），不是某个
+   * 内部对象。哨兵名与真实服务器名永不相交，所以「新装一个 MCP 服务器」不
+   * 需要改任何代码。
+   */
+  function readDumpedArgv(file: string): string[] {
+    return JSON.parse(fs.readFileSync(file, "utf8")) as string[];
+  }
+
+  it("主会话的 spawn argv 带 MCP 作用域参数（哨兵不可命中任何服务器）", async () => {
+    const dump = path.join(storageDir, "main-argv.json");
+    process.env.ACP_MOCK_ARGV_DUMP = dump;
+
+    await (panel as unknown as SpawnEnvInternals).ensureClient();
+
+    const argv = readDumpedArgv(dump);
+    const i = argv.indexOf(MCP_SERVER_ALLOWLIST_FLAG);
+    expect(i).toBeGreaterThan(-1);
+    expect(argv[i + 1]).toBe(MCP_SERVER_ALLOWLIST_SENTINEL);
+    // 既有参数没被破坏。
+    expect(argv).toContain("--experimental-acp");
+    expect(argv).toContain("--stream");
+  }, 30000);
+
+  it("子会话的 spawn argv 不带 MCP 作用域参数（子会话保留全部 MCP 工具）", async () => {
+    const dump = path.join(storageDir, "child-argv.json");
+    process.env.ACP_MOCK_ARGV_DUMP = dump;
+
+    const child = await (panel as unknown as SpawnEnvInternals).createSuperClient({
+      cwd: here,
+      allowedRoots: [here],
+      includeDirectories: [],
+      label: "spawn-argv-child",
+      callbacks: {},
+    });
+    try {
+      const argv = readDumpedArgv(dump);
+      expect(argv).not.toContain(MCP_SERVER_ALLOWLIST_FLAG);
+      expect(JSON.stringify(argv)).not.toContain(MCP_SERVER_ALLOWLIST_SENTINEL);
+      expect(argv).toContain("--experimental-acp");
     } finally {
       await child.dispose();
     }
