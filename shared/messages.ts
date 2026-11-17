@@ -17,7 +17,6 @@ import type {
   McpToolView,
   McpPromptView,
 } from "../src/acp/protocol.js";
-import type { ApprovalRule } from "./approval-policy.js";
 import {
   normalizeQqAllowEntries,
   type QqAllowEntry,
@@ -32,9 +31,7 @@ export type { SlashCommand, UserQuestion, SkillInfo };
 // the per-server view and the detail sub-page consume tools/prompts directly.
 // The report envelope itself is consumed host-side from src/acp/protocol.js.
 export type { McpServerStatusView, McpToolView, McpPromptView };
-// M4 P1-1: the approval-policy card edits these directly (the rule shape is
-// shared pure data, not session state — it never rides a snapshot).
-export type { ApprovalRule, ApprovalAction } from "./approval-policy.js";
+
 
 // ---------------------------------------------------------------------------
 // Transcript blocks (rendered in order)
@@ -1538,9 +1535,6 @@ export type UiFontSize = "compact" | "standard" | "large";
 /** Panel spacing density preset, mirrored from `iflow.uiDensity`. */
 export type UiDensity = "compact" | "standard" | "comfortable";
 
-/** Default session approval mode, mirrored from `iflow.defaultMode`. */
-export type UiDefaultMode = "default" | "smart" | "yolo";
-
 /** Panel color theme, mirrored from `iflow.theme`. "auto" follows the editor. */
 export type UiThemeMode = "auto" | "light" | "dark";
 
@@ -1549,9 +1543,6 @@ export type UiOsNotifications = "off" | "approvals" | "all";
 
 /** CLI interface language written to ~/.iflow/settings.json; empty leaves it untouched. */
 export type UiCliLanguage = "" | "zh-CN" | "en-US";
-
-/** CLI default approval mode; empty leaves the CLI's own value untouched. */
-export type UiCliApprovalMode = "" | UiDefaultMode;
 
 /** One thinking-capability rule mirrored from `iflow.thinkingModelRules`. */
 export interface ThinkingModelRuleUi {
@@ -1597,9 +1588,6 @@ export interface HostSettingsUi {
   osNotifications: UiOsNotifications;
   /** CLI UI language written to ~/.iflow/settings.json (restart required). */
   language: UiCliLanguage;
-  defaultMode: UiDefaultMode;
-  /** CLI startup approval mode written to settings.json (restart required). */
-  approvalMode: UiCliApprovalMode;
   theme: UiThemeMode;
   auroraIntensity: number;
   uiFontSize: UiFontSize;
@@ -1932,23 +1920,6 @@ export type HostToWebview =
       stage: "scanning" | "summarizing" | "writing" | "done" | "error";
       message?: string;
     }
-  /** M4 P1-1: the approval pre-review rule table. `rules` are the user's
-   * global rules (editable, persisted in globalState); `projectRules` come
-   * from the workspace's `.iflow/approval.json` and are READ-ONLY here (the
-   * file is user-owned — the host matches them first but never writes them).
-   * `draft` non-null means a 「始终允许」 click derived a rule that is now
-   * waiting to be named: the webview opens the policy card in naming mode and
-   * either saves it into `rules` or dismisses it. */
-  | {
-      type: "approvalPolicy";
-      rules: ApprovalRule[];
-      projectRules: ApprovalRule[];
-      draft?: ApprovalRule | null;
-      /** Present only when this push answers a save request: "ok" = persisted,
-       * "failed" = the write was rolled back (the rules here are the ones still
-       * on disk). The card waits for this before flashing 已保存. */
-      saveResult?: "ok" | "failed";
-    }
   /** Reply to `deleteProfile`: the row clears its pending chip on receipt.
    * `ok:false` means the profile is still present (the host also toasts). */
   | { type: "profileDeleteResult"; name: string; ok: boolean }
@@ -2134,7 +2105,6 @@ export type WebviewToHost =
       keepBranch?: boolean;
     }
   | { type: "newSession" }
-  | { type: "setMode"; modeId: string }
   | { type: "setModel"; modelId: string }
   | { type: "setThink"; level: ThinkLevel }
   /** Open a file location in the editor; `toolCallId` (when the chip belongs
@@ -2239,7 +2209,7 @@ export type WebviewToHost =
    * captured at session start goes stale (new gateway models appear). */
   | { type: "refreshModels" }
   /** Settings-page hot restart: tear the CLI child down and spawn a fresh
-   * one so startup-only changes (language / approvalMode / mcpServers written
+   * one so startup-only changes (language / mcpServers written
    * to settings.json) take effect without reloading VSCode. */
   | { type: "restartCli" }
   /** Open the VSCode Settings UI filtered to the iFlow extension section. */
@@ -2332,18 +2302,6 @@ export type WebviewToHost =
   | { type: "openKnowledgeFile"; path: string }
   /** Open a discovered memory file in the editor. */
   | { type: "openMemoryFile"; path: string }
-  /** M4 P1-1: approval-policy card opened — re-read the global table and the
-   * workspace `.iflow/approval.json` (external tools may have rewritten it).
-   * Reply: `approvalPolicy`. */
-  | { type: "listApprovalPolicy" }
-  /** Save the whole global rule table (replace semantics — the card edits a
-   * fresh copy read via `listApprovalPolicy`). Also clears a pending `draft`
-   * when the card saved it into `rules`. Reply: `approvalPolicy`. */
-  | { type: "saveApprovalPolicy"; rules: ApprovalRule[] }
-  /** Abandon the 「始终允许」-derived draft without adding it. The wire
-   * response already went out (the CLI's own proceed_always still applies for
-   * this session) — only the persistent host-side rule is dropped. */
-  | { type: "dismissApprovalRuleDraft" }
   /** M1 P0-7: export the ACTIVE session's transcript. `format` picks the
    * serializer; the host shows a native save dialog and writes the file
    * (Markdown renders every block type, JSON copies the transcript file). */

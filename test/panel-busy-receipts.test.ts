@@ -78,14 +78,12 @@ type PanelInternals = {
   client: unknown;
   historySyncBusy: boolean;
   context: vscode.ExtensionContext;
-  approvalRules: unknown[];
   deleteUserMessage: (id: string, reason?: "deleteMessage" | "rollback") => Promise<void>;
   refreshLiveModels: () => Promise<void>;
   queryLiveModelsDetailed: () => Promise<
     | { ok: true; models: Array<{ id: string; name: string }> }
     | { ok: false; reason: "no-endpoint" | "unreachable"; message?: string }
   >;
-  saveApprovalPolicy: (rules: unknown[]) => Promise<void>;
   writeUserSetting: (key: string, value: unknown) => Promise<void>;
   wireWebview: (webview: unknown) => void;
   handleWebviewMessage: (msg: unknown) => Promise<void>;
@@ -159,16 +157,6 @@ describe("ChatPanel async busy states and failure receipts", () => {
     p.queryLiveModelsDetailed = async () => ({ ok: true, models: [] });
     await p.refreshLiveModels();
     expect(toast).toHaveBeenCalledWith("warning", "端点未返回任何模型，仍显示上次结果");
-  });
-
-  it("审批规则写盘失败时 toast 且保留原规则", async () => {
-    const toast = vi.spyOn(p.store, "sendToast");
-    p.context.globalState.update = () => Promise.reject(new Error("disk full"));
-    await p.saveApprovalPolicy([
-      { id: "rule-a", label: "允许读取 src", enabled: true, action: "allow", path: "src/**" },
-    ]);
-    expect(toast).toHaveBeenCalledWith("warning", "审批规则保存失败，已保留原规则");
-    expect(p.approvalRules).toEqual([]);
   });
 
   function harness(loadSession: () => Promise<void> | void): void {

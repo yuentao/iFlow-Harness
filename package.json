@@ -121,16 +121,6 @@
     "configuration": {
       "title": "%iflow.configuration.title%",
       "properties": {
-        "iflow.defaultMode": {
-          "type": "string",
-          "enum": [
-            "smart",
-            "yolo",
-            "default"
-          ],
-          "default": "smart",
-          "description": "%iflow.configuration.defaultMode.description%"
-        },
         "iflow.nodePath": {
           "type": "string",
           "default": "",
@@ -198,17 +188,6 @@
           ],
           "default": "",
           "markdownDescription": "%iflow.configuration.language.description%"
-        },
-        "iflow.approvalMode": {
-          "type": "string",
-          "enum": [
-            "",
-            "default",
-            "smart",
-            "yolo"
-          ],
-          "default": "",
-          "markdownDescription": "%iflow.configuration.approvalMode.description%"
         },
         "iflow.superAgent.integration": {
           "type": "string",

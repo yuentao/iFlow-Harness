@@ -350,19 +350,13 @@ export function App() {
     if (settingsTab) send({ type: "refreshAuth" });
   }, [settingsTab, send]);
 
-  // M4 P1-1 handoff: an approval card's 「始终允许」 makes the host derive a
-  // rule draft and push `approvalPolicy` — jump the settings modal to the
-  // policy tab so the user can name & save it (the section's own listener
-  // loads the draft into the editor; here we only route visibility).
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data as {
         type?: string;
-        draft?: unknown;
         sessionId?: string | null;
         candidates?: MemoryCandidateUi[];
       };
-      if (msg?.type === "approvalPolicy" && msg.draft) setSettingsTab("policy");
       if (msg?.type === "memoryCandidates" && Array.isArray(msg.candidates) && msg.candidates.length > 0) {
         setMemoryReview({ sessionId: msg.sessionId ?? null, candidates: msg.candidates });
       }

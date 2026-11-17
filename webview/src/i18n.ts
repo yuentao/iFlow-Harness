@@ -135,16 +135,8 @@ const en: Record<string, string> = {
   // loading / topbar
   "历史会话（选择后恢复该会话上下文）": "Recent sessions (pick one to restore its context)",
   "当前会话": "Current session",
-  "权限模式": "Permission mode",
-  "智能": "Smart",
-  "主会话只规划与派发；执行在子会话，风险判断已无作用":
-    "Plans and delegates only; execution happens in child sessions, so smart risk checks no longer apply",
   "免确认": "Auto-approve",
-  "主会话只规划与派发；执行在子会话，默认免确认":
-    "Plans and delegates only; execution happens in child sessions, which are auto-approved by default",
   "标准": "Standard",
-  "主会话只规划与派发；执行在子会话，无需逐次确认":
-    "Plans and delegates only; execution happens in child sessions, so nothing needs your confirmation",
   "模型": "Model",
   "搜索模型…": "Search models…",
   "新会话": "New session",
@@ -322,7 +314,6 @@ const en: Record<string, string> = {
   "当前模型：{0}": "Current model: {0}",
   "提示音": "Sound",
   "回复完成或失败时播放提示音。": "Play a cue when a reply finishes or fails.",
-  "默认权限模式": "Default approval mode",
   "审批说明": "Approval help",
   "「允许一次」只执行这一次；「始终允许」会让本次会话记住这个操作，之后不再询问。":
     "\"Allow once\" runs it just this time; \"Always allow\" remembers this action for the session and stops asking.",
@@ -356,7 +347,6 @@ const en: Record<string, string> = {
   "切换 Focus 视图": "Toggle Focus view",
   "配置完成": "You're all set",
   "连接": "Connection",
-  "默认模式": "Default mode",
   "继续配置": "Continue configuring",
   "还没配置 API 密钥，现在还不能开始对话。": "No API key configured yet — you cannot start chatting.",
   "去配置": "Set it up",
@@ -373,17 +363,7 @@ const en: Record<string, string> = {
   "如 glm-5.3-flash-free": "e.g. glm-5.3-flash-free",
   "重启内核": "Restart Core",
   "等待选择…": "Waiting for your choice…",
-  "审批规则": "Approval rule",
-  "自动允许": "Auto-allow",
   "自动拒绝": "Auto-deny",
-  "弹卡确认": "Ask (card)",
-  "启用": "Enabled",
-  "点击启用": "Click to enable",
-  "点击停用": "Click to disable",
-  "规则名称": "Rule name",
-  "动作": "Action",
-  "MCP 服务器名": "MCP server name",
-  "工具名（精确匹配）": "Tool name (exact match)",
   // MCP management card
   "MCP 服务器": "MCP servers",
   "添加 MCP 服务器": "Add MCP server",
@@ -504,7 +484,6 @@ const en: Record<string, string> = {
   "删除会话": "Delete session",
   "删除消息": "Delete message",
   "删除配置": "Delete profile",
-  "删除审批规则": "Delete approval rule",
   "确定删除会话「{0}」吗？此操作不可撤销。": "Delete session \"{0}\"? This cannot be undone.",
   "确定删除该消息及其后所有内容吗？此操作不可撤销。":
     "Delete this message and everything after it? This cannot be undone.",
@@ -639,7 +618,6 @@ const en: Record<string, string> = {
   // settings taxonomy + grouped settings (2026-10-18)
   "账户与模型": "Account & models",
   "外观与交互": "Appearance & interaction",
-  "权限与审批": "Permissions & approvals",
   "MCP 与工具": "MCP & tools",
   "记忆与知识": "Memory & knowledge",
   "运行与数据": "Runtime & data",
@@ -658,8 +636,6 @@ const en: Record<string, string> = {
     "Sent when an approval or question blocks, or when a turn completes.",
   "高级外观": "Advanced appearance",
   "可选": "Optional",
-  "新会话使用的权限模式。": "The permission mode new sessions start with.",
-  "内核兼容": "Core compatibility",
   "面板启动时恢复上次使用的会话。": "Restore the last used session when the panel starts.",
   "VSCode 启动时自动打开聊天面板。": "Open the chat panel automatically when VSCode starts.",
   "下次启动生效。": "Takes effect on the next start.",
@@ -690,8 +666,6 @@ const en: Record<string, string> = {
   "提示与通知": "Sound & notifications",
   "系统通知": "OS notifications",
   "从不": "Never",
-  "面板默认权限模式": "Default panel approval mode",
-  "内核默认审批模式": "Core default approval mode",
   "启动与会话": "Startup & sessions",
   "后台预热内核": "Warm up the Core",
   "恢复上次会话": "Restore last session",
@@ -863,13 +837,13 @@ const en: Record<string, string> = {
   "添加文件超时了，请重试": "Adding the file timed out. Try again.",
   "、": ", ",
 
-  // 2026-11-16 文案优化：设置 / 引导 / 认证 / 审批规则（键变更后的新词条）
+  // 2026-11-16 文案优化：设置 / 引导 / 认证（键变更后的新词条）
   "设置保存在哪里": "Where settings are saved",
-  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言、审批模式保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。":
-    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP, language and approval mode live in the local iFlow config (keys are plaintext — mind who can read this machine) and apply after a Core restart.",
+  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。":
+    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine) and apply after a Core restart.",
   "打开 VSCode 设置": "Open VSCode settings",
-  "重启内核，当前会话会自动恢复。语言、审批模式与 MCP 的改动在重启后生效。":
-    "Restart the Core — the current session comes back automatically. Language, approval mode and MCP changes apply after the restart.",
+  "重启内核，当前会话会自动恢复。语言与 MCP 的改动在重启后生效。":
+    "Restart the Core — the current session comes back automatically. Language and MCP changes apply after the restart.",
   "内容需要是列表（最外层用 [ ]）": "The content must be a list (wrap it in [ ])",
   "JSON 格式有误，请检查括号与引号": "Invalid JSON — check the brackets and quotes",
   "用 JSON 列表写明哪些模型支持思考：每项包含 pattern（模型匹配）与 supportsThinking（是否支持）。保存后写入本机 iFlow 配置，重启内核生效。":
@@ -918,11 +892,6 @@ const en: Record<string, string> = {
   "停止生成（在审批卡上为拒绝）": "Stop generating (rejects on an approval card)",
   "背景光晕的浓淡：0 为关闭，100 最亮。":
     "How strong the background glow is: 0 turns it off, 100 is brightest.",
-  "只影响新会话；当前会话可在输入框下方的模式菜单里切换。":
-    "New sessions only; switch the current one from the mode menu below the composer.",
-  "内核启动时使用的审批模式。": "The approval mode the Core starts with.",
-  "与上面的面板默认模式互不影响；保存后重启内核生效。":
-    "Independent of the panel default above; applies after a Core restart.",
   "窗口打开时提前启动内核，首次打开面板不用等。":
     "Start the Core ahead of time when a window opens, so the first panel open is instant.",
   "每个窗口约 100MB 内存；下次窗口启动生效。":
@@ -986,8 +955,6 @@ const en: Record<string, string> = {
   "可以点下面的按钮再试一次。": "Use the button below to try again.",
   "返回填写配置": "Back to the profile form",
   "没有匹配的模型": "No matching models",
-  "新会话默认用这个权限模式；点选后当前会话也会立即切换。之后可以在「设置 → 权限与审批」里细化规则。":
-    "New sessions start in this mode; picking one also switches the current session. Fine-grained rules live in Settings → Permissions & approvals.",
   "可以开始对话了，其余设置在 ⚙ 里随时能改。":
     "You can start chatting now; the rest stays editable in ⚙.",
   "这几项可以稍后再配。": "These can be set up later.",
@@ -997,26 +964,8 @@ const en: Record<string, string> = {
     "How should the current conversation be handled after switching to profile \"{0}\"?",
   "这段对话保留，用新配置接着聊": "Keep this conversation and continue with the new profile",
   "从一段空白对话重新开始": "Start over with a blank conversation",
-  "每次询问": "Ask every time",
-  "审批请求会从上往下匹配规则（项目规则优先），第一条命中的规则决定结果：自动允许、自动拒绝或每次询问。破坏性命令（如 rm、git push）永远不会被自动允许，即使命中规则也会先问你。":
-    "Approval requests match rules top to bottom (project rules first); the first match decides: auto-allow, auto-deny, or ask. Destructive commands such as rm or git push are never auto-allowed — you are always asked first.",
-  "还没有审批规则": "No approval rules yet",
-  "项目内的规则（只读）": "Rules from the project (read-only)",
-  "已命中 {0} 次": "Matched {0}×",
-  "添加规则": "Add rule",
-  "如 允许读取 src 目录": "e.g. Allow reading the src folder",
-  "路径范围（相对工作区，支持通配）":
-    "Path scope (relative to the workspace; globs allowed)",
-  "命令开头（逗号分隔，仅对执行类生效）":
-    "Command prefix (comma-separated; execute only)",
-  "加入列表": "Add to list",
-  "更新列表": "Update list",
-  "所有条件都留空会匹配全部请求，请谨慎使用。这里的修改只作用于列表，点「保存」后才真正生效。":
-    "Leaving every condition empty matches ALL requests — use with care. Edits only change the list; click Save to apply.",
-  "删除规则「{0}」？点「保存」后才会真正生效。":
-    "Delete rule \"{0}\"? It takes effect once you save.",
   // 文案收尾补充：资产 / 记忆 / MCP / 看板等新增词条（2026-11-16）
-  "拒绝或取消都不会执行任何操作。想提前定好规则，可到「设置 → 权限与审批」。": "Reject or cancel runs nothing. To set rules in advance, go to Settings → Permissions & approvals.",
+  "拒绝或取消都不会执行任何操作。": "Reject or cancel runs nothing.",
   "审批操作": "Approval actions",
   "{0}（{1}）": "{0} ({1})",
   "取消审批": "Cancel approval",
@@ -1261,51 +1210,4 @@ export function t(message: string, ...args: Array<string | number>): string {
   return out;
 }
 
-/**
- * W6: localized display for the CLI's permission modes (ids come from the
- * agent, names may be English) — label + a short description (kept to at most
- * two lines in the composer menu). Lives next to the dictionary so a new mode
- * id is added in ONE place. Unknown ids fall back to the agent-provided name.
- *
- * The descriptions were rewritten on 2026-11-18 because the main session no
- * longer executes anything: `mainSessionSettings()` (src/panel/panel.ts) gives
- * it only `super-agent` / `todo_write` / `todo_read` / `ask_user_question`,
- * and its CLI process starts with `disableMcpServers`, so no tool (built-in or
- * MCP) that consults the approval mode is ever registered. The remaining four
- * tools all return `false` from `shouldConfirmExecute` (probed in
- * vendor/iflow-fork/bundle/iflow.js by locating each tool class:
- * `todo_write`, `todo_read`, `ask_user_question`, plus
- * `super-agent-loader.cjs`), so smart/default/yolo no longer change any
- * observable behaviour — the host only ever sees super-agent permission
- * requests, which it auto-allows itself. Execution happens in child sessions,
- * which the mode menu does not control (the panel's dispatch policy defaults
- * to `auto`: children are pushed to `yolo` and the host auto-allows; QQ remote
- * tasks may instead use the supervised/deny policy). Plan mode was removed
- * from the panel entirely (2026-11-18): the CLI still reports it in
- * `_meta.modes`, but `withoutPlanModes` (shared/messages.ts) filters it out,
- * and a stale `_iflow/plan/exit` is auto-approved by
- * `handleRemovedPlanExit`. Do not restore the old copy
- * ("所有操作直接执行" / "每次执行操作前都要你确认") — it promised behaviour this
- * session cannot produce.
- */
-export function modeDisplay(mode: { id: string; name: string }): { label: string; desc: string } {
-  switch (mode.id) {
-    case "smart":
-      return {
-        label: t("智能"),
-        desc: t("主会话只规划与派发；执行在子会话，风险判断已无作用"),
-      };
-    case "yolo":
-      return {
-        label: t("免确认"),
-        desc: t("主会话只规划与派发；执行在子会话，默认免确认"),
-      };
-    case "default":
-      return {
-        label: t("标准"),
-        desc: t("主会话只规划与派发；执行在子会话，无需逐次确认"),
-      };
-    default:
-      return { label: mode.name || mode.id, desc: "" };
-  }
-}
+

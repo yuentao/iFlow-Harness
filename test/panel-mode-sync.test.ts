@@ -92,10 +92,11 @@ async function flush(): Promise<void> {
 }
 
 const MODES = {
-  currentModeId: "smart",
+  currentModeId: "yolo",
   availableModes: [
     { id: "default", name: "Default" },
     { id: "smart", name: "Smart", kind: "smart" },
+    { id: "yolo", name: "YOLO" },
   ],
 };
 
@@ -145,9 +146,28 @@ describe("ChatPanel mode sync", () => {
     fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  it("re-asserts the panel mode before the prompt goes out", async () => {
+  it("re-asserts the fixed smart mode before the prompt goes out (ignores a drifted store value)", async () => {
     await p.handleWebviewMessage({ type: "sendPrompt", text: "write something" });
     expect(order).toEqual(["setMode:smart", "prompt"]);
+  });
+
+  it("pushes the same fixed mode on every prompt (same-value push is a CLI-side no-op)", async () => {
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "one" });
+    await p.handleWebviewMessage({ type: "sendPrompt", text: "two" });
+    expect(order).toEqual(["setMode:smart", "prompt", "setMode:smart", "prompt"]);
+  });
+
+  it("pushes smart after a session starts and syncs the store echo", async () => {
+    const fresh = {
+      setMode: vi.fn(async () => ({ success: true, currentModeId: "smart" })),
+    };
+    await (
+      p as unknown as {
+        applyMainSessionMode: (client: unknown, sessionId: string) => Promise<void>;
+      }
+    ).applyMainSessionMode(fresh, "s-mode");
+    expect(fresh.setMode).toHaveBeenCalledWith("s-mode", "smart");
+    expect(p.store.getState().modes?.currentModeId).toBe("smart");
   });
 
   it("auto-approves a stale _iflow/plan/exit instead of showing a card (Plan mode removed)", () => {
