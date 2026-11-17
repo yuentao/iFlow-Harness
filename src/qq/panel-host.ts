@@ -124,7 +124,9 @@ export interface QqHostPorts {
    */
   deliver(msg: QqServiceDeliverInput): Promise<QqDeliveryOutcome>;
   /** 白名单外的人发来消息：只记录，不执行、不回执（面板据此审核）。 */
-  onPendingUser(info: QqPendingUserInput): void;
+  onPendingUser(
+    info: QqPendingUserInput,
+  ): { dropped: boolean } | Promise<{ dropped: boolean }> | void;
   /** 解除账号绑定。 */
   unbindAccount(): Promise<{ ok: boolean; message: string }>;
 }
@@ -336,8 +338,10 @@ export function createQqServiceHost(
       return ports.deliver(msg);
     },
 
-    onPendingUser(info: QqPendingUserInput): void {
-      ports.onPendingUser(info);
+    onPendingUser(
+      info: QqPendingUserInput,
+    ): { dropped: boolean } | Promise<{ dropped: boolean }> | void {
+      return ports.onPendingUser(info);
     },
 
     async unbindAccount(): Promise<{ ok: boolean; message: string }> {

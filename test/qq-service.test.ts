@@ -1128,7 +1128,8 @@ describe("QqService — 回包可靠性缺口回归", () => {
       f.dispatches.push(input);
       return { superSessionId: "super-partial" };
     };
-    // full 档单条消息预算 12000 字符：造超长摘要强制 chunkQqText 分片。
+    // full 档档位期望预算 12000 字符（实际被 QQ_CHUNK_MAX_CHARS 收紧到
+    // 3000 码点）：造超长摘要强制 chunkQqText 分片。
     const longSummary = Array.from(
       { length: 150 },
       (_, i) => `第 ${i} 项：${"摘要正文填充内容。".repeat(9)}`,
@@ -1155,6 +1156,10 @@ describe("QqService — 回包可靠性缺口回归", () => {
 
     const failed = lastTask(f);
     expect(failed.deliveryError).toContain("已送达 1/");
+    // 尾片失败诚实化：剩余片明确归因「主动消息不可用」，并给出 /qq result
+    // 的补救路径 —— 不静默、不虚报整体成功。
+    expect(failed.deliveryError).toContain("主动消息不可用");
+    expect(failed.deliveryError).toContain("/qq result");
     expect(failed.resultDeliveredChunks?.count).toBe(1);
     expect(failed.resultDeliveredAt).toBeUndefined();
 
@@ -1202,8 +1207,9 @@ describe("QqService — 回包可靠性缺口回归", () => {
     const progress = f.delivered.filter((item) => item.text.includes("尚未结束"));
     // 只有 1 条进度消息，且复用稳定 dedupeKey —— adapter 据此复用同一个
     // msg_seq，平台按 (msg_id, msg_seq) 去重，不会把终态结果的配额烧光。
+    // key 由「progress:<taskId>:<最终文本指纹>」构成（指纹见 fingerprintText）。
     expect(progress).toHaveLength(1);
-    expect(progress[0]?.dedupeKey).toBe(`progress:${taskId}:running|running`);
+    expect(progress[0]?.dedupeKey?.startsWith(`progress:${taskId}:`)).toBe(true);
     // 节流命中不能再是「点了没反应」：本地必须给一次性回执（且不刷屏）。
     const receipts = f.notes.filter((note) => note.includes("已刷新"));
     expect(receipts).toHaveLength(1);
@@ -1222,7 +1228,7 @@ describe("QqService — 回包可靠性缺口回归", () => {
     const updated = f.delivered.filter((item) => item.text.includes("尚未结束"));
     expect(updated).toHaveLength(2);
     expect(updated[1]!.text).toContain("waiting_approval");
-    expect(updated[1]!.dedupeKey).toBe(`progress:${taskId}:running|waiting_approval`);
+    expect(updated[1]!.dedupeKey).not.toBe(progress[0]?.dedupeKey);
 
     // 终态结果仍能送达。
     f.host.readTaskOutcome = () => ({
@@ -1999,6 +2005,170 @@ describe("QqService — 单调时钟", () => {
 
     expect(f.service.listTasks()).toHaveLength(2);
     expect(f.delivered.some((item) => item.text.includes("请求过于频繁"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 刷新去重与待审核诚实化回归（2026-11-17 复核）
+// ---------------------------------------------------------------------------
+
+describe("QqService — 指纹成功后才记账", () => {
+  it("进度投递失败不记指纹：下次刷新会重试；成功后同指纹不再重发", async () => {
+    let clock = 20_000;
+    const f = makeService({ now: () => clock, monotonicNow: () => clock });
+    let releaseDispatch!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      input.task.correlation.superSessionId = "super-fp";
+      await gate; // 挂起派发：任务停在 running，finalize 尚未跑
+      return { superSessionId: "super-fp" };
+    };
+    f.host.readTaskOutcome = () => ({ summary: "", status: "running" });
+    let failProgress = true;
+    f.host.deliver = async (msg) => {
+      f.delivered.push({ ...msg });
+      if (msg.text.includes("尚未结束")) {
+        return failProgress ? { ok: false, retryable: false } : { ok: true };
+      }
+      return { ok: true };
+    };
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-fp-1" }));
+    await waitFor(() => lastTask(f).status === "running");
+    const taskId = lastTask(f).taskId;
+
+    // 第一轮刷新：投递失败（确定性拒绝），失败必须可观测。
+    await f.service.handleTaskAction(taskId, "refresh");
+    const beforeRetry = f.delivered.filter((m) => m.text.includes("尚未结束"));
+    expect(beforeRetry.length).toBeGreaterThan(0);
+    expect(f.notes.some((n) => n.includes("仍未送达"))).toBe(true);
+
+    // 投递失败后指纹**没有**被记账（旧实现先记账再投递，失败后同一条进度
+    // 被指纹永久挡住、用户永远收不到）：修复后下次刷新立即重试并成功。
+    failProgress = false;
+    clock += 1;
+    await f.service.handleTaskAction(taskId, "refresh");
+    const afterRetry = f.delivered.filter((m) => m.text.includes("尚未结束"));
+    expect(afterRetry.length).toBeGreaterThan(beforeRetry.length);
+
+    // 成功后指纹才记账：同指纹无论过多久都不再重发。
+    clock += QQ_PROGRESS_REFRESH_MIN_INTERVAL_MS + 1;
+    await f.service.handleTaskAction(taskId, "refresh");
+    expect(f.delivered.filter((m) => m.text.includes("尚未结束"))).toHaveLength(
+      afterRetry.length,
+    );
+    releaseDispatch();
+  });
+});
+
+describe("QqService — /qq refresh 三条分支节流去重", () => {
+  /** 连点 5 次，断言该分支只发出 ≤1 条 QQ 消息 + 本地有一次性回执。 */
+  async function assertFiveClicksSingleMessage(
+    f: ReturnType<typeof makeService>,
+    taskId: string,
+    marker: string,
+  ): Promise<void> {
+    for (let i = 0; i < 5; i += 1) {
+      await f.service.handleTaskAction(taskId, "refresh");
+    }
+    const sent = f.delivered.filter((item) => item.text.includes(marker));
+    expect(sent.length).toBeLessThanOrEqual(1);
+    expect(sent.length).toBeGreaterThan(0); // 第一次点击必须有回包
+    // 节流命中给本地一次性回执，不是「点了没反应」。
+    const receipts = f.notes.filter((note) => note.includes("已刷新"));
+    expect(receipts.length).toBeGreaterThanOrEqual(1);
+  }
+
+  it("main 渠道分支：连点 5 次只发 1 条摘要", async () => {
+    let clock = 30_000;
+    const f = makeService({
+      config: { route: "main" },
+      now: () => clock,
+      monotonicNow: () => clock,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.host.injectIntoMainSession = async () => {
+      await gate; // 挂起注入：任务停在排队态
+      throw new Error("unreachable");
+    };
+    await f.service.handleInboundMessage(inbound({ msgId: "e-rf-main" }));
+    await waitFor(() => f.service.listTasks().length === 1);
+    await assertFiveClicksSingleMessage(f, f.service.listTasks()[0]!.taskId, "QQ 任务");
+    release();
+  });
+
+  it("未派发分支：连点 5 次只发 1 条提示", async () => {
+    let clock = 40_000;
+    const f = makeService({ now: () => clock, monotonicNow: () => clock });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // 派发挂起且尚未回填 superSessionId：refresh 走「尚未派发」分支。
+    f.host.dispatchTask = async () => {
+      await gate;
+      throw new Error("unreachable");
+    };
+    await f.service.handleInboundMessage(inbound({ msgId: "e-rf-undis" }));
+    await waitFor(() => f.service.listTasks().length === 1);
+    await assertFiveClicksSingleMessage(f, f.service.listTasks()[0]!.taskId, "尚未派发");
+    release();
+  });
+
+  it("读不到结果分支：连点 5 次只发 1 条提示", async () => {
+    let clock = 50_000;
+    const f = makeService({ now: () => clock, monotonicNow: () => clock });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      input.task.correlation.superSessionId = "super-unread";
+      await gate;
+      throw new Error("unreachable");
+    };
+    f.host.readTaskOutcome = () => null;
+    await f.service.handleInboundMessage(inbound({ msgId: "e-rf-unread" }));
+    await waitFor(() => lastTask(f).status === "running");
+    await assertFiveClicksSingleMessage(f, lastTask(f).taskId, "暂时读取不到结果");
+    release();
+  });
+});
+
+describe("QqService — 待审核入队结果诚实化", () => {
+  it("入队成功时提示「已记入待审核」", async () => {
+    const f = makeService();
+    f.host.onPendingUser = (info) => {
+      f.pendingUsers.push({ ...info });
+      return { dropped: false };
+    };
+    await f.service.handleInboundMessage(
+      inbound({ chatId: "u2", senderId: "u2", text: "帮我看看这个报错" }),
+    );
+    expect(f.pendingUsers).toHaveLength(1);
+    expect(f.notes.some((n) => n.includes("已记入待审核"))).toBe(true);
+    expect(f.notes.some((n) => n.includes("未能记入"))).toBe(false);
+  });
+
+  it("队列满被丢弃时不虚称「已记入」，如实提示未入队", async () => {
+    const f = makeService();
+    f.host.onPendingUser = (info) => {
+      f.pendingUsers.push({ ...info });
+      return { dropped: true };
+    };
+    await f.service.handleInboundMessage(
+      inbound({ chatId: "u2", senderId: "u2", text: "帮我看看这个报错" }),
+    );
+    expect(f.pendingUsers).toHaveLength(1);
+    expect(f.notes.some((n) => n.includes("已记入待审核"))).toBe(false);
+    expect(f.notes.some((n) => n.includes("未能记入待审核"))).toBe(true);
   });
 });
 

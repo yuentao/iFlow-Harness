@@ -424,6 +424,31 @@ describe("QQ 通道 · 面板侧接线", () => {
     toast.mockRestore();
   });
 
+  it("丢弃提示按 openid 冷却：同一用户连续 10 次只 1 条 toast", async () => {
+    const now = Date.now();
+    for (let i = 0; i < QQ_PENDING_MAX_USERS; i += 1) {
+      await p.handleQqPendingUser({
+        openid: `cool-seed-${i}`,
+        chatType: "private",
+        preview: "seed",
+        at: now + i,
+      });
+    }
+
+    const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
+    const openid = "cooldown-openid-1234567890";
+    for (let i = 0; i < 10; i += 1) {
+      await p.handleQqPendingUser({
+        openid,
+        chatType: "private",
+        preview: `spam ${i}`,
+        at: now + QQ_PENDING_MAX_USERS + 1 + i,
+      });
+    }
+    expect(toast).toHaveBeenCalledTimes(1);
+    toast.mockRestore();
+  });
+
   it("QQ 端口回传 worktree 路径：仅 git worktree 隔离，目录隔离不给", () => {
     Object.assign(p, {
       getSuperAgent: () => ({

@@ -237,6 +237,7 @@ import {
 } from "../qq/wiring.js";
 import {
   QqPendingUserStore,
+  QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS,
   QQ_PENDING_MAX_USERS,
   type QqPendingUser,
   type QqPendingUserInput,
@@ -1038,6 +1039,14 @@ export class ChatPanel implements vscode.Disposable {
    * 面板懒建、与通道生命周期无关。
    */
   private qqPendingUsers: QqPendingUserStore | null = null;
+  /**
+   * 队列满丢弃提示的冷却记账（openid → 上次 warning toast 时刻）。
+   *
+   * 满队时外部每条消息都会触发一次丢弃事件，同一 openid 连续刷消息会把
+   * 面板刷满屏；按 {@link QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS} 冷却，
+   * 每 10 分钟最多一条。不同 openid 的首次丢弃仍各自提示。
+   */
+  private readonly qqPendingDropToastAt = new Map<string, number>();
   /**
    * 启动代次：`stopQq` 每次递增。异步启动在关键节点复核它 —— 启动途中被
    * 停用 / 重启时，慢半拍的那个启动必须把自己造出来的现场拆掉，而不是把
@@ -9865,11 +9874,12 @@ export class ChatPanel implements vscode.Disposable {
         return deliverViaQqBotAdapter(adapter, msg);
       },
 
-      onPendingUser: (info) => {
-        void this.handleQqPendingUser(info).catch((error: unknown) => {
+      onPendingUser: (info) =>
+        this.handleQqPendingUser(info).catch((error: unknown) => {
           this.log.warn(`QQ 待审核记录写入失败：${errorMessage(error)}`);
-        });
-      },
+          // 写失败 = 未记入：如实回报 dropped，服务侧不得虚称「已记入」。
+          return { dropped: true };
+        }),
       unbindAccount: () => this.unbindQqAccount(),
     };
   }
@@ -10062,25 +10072,43 @@ export class ChatPanel implements vscode.Disposable {
   /**
    * 服务上报一条白名单外消息：累加记录并推全量列表。
    *
-   * `record()` 的返回值必须被消费：队列满（{@link QQ_PENDING_MAX_USERS}）时
-   * 新用户会被丢弃，旧实现只看列表，用户永远不知道有人在等着审核。丢弃提示
-   * 里只出现脱敏 openid（`maskQqOpenId`），完整值只留在存储里作为放行依据。
+   * 返回 `{dropped}`：队列满（{@link QQ_PENDING_MAX_USERS}）或写入失败时为
+   * true，服务侧据此不虚称「已记入待审核」。丢弃提示里只出现脱敏 openid
+   * （`maskQqOpenId`），完整值只留在存储里作为放行依据。
+   *
+   * 丢弃 warning 按 openid 冷却（{@link QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS}）：
+   * 满队时外部每条消息都触发一次丢弃事件，没有冷却会把操作者的面板刷满屏；
+   * 不同用户的首次丢弃仍各自提示，不吞真实信号。
    */
-  private async handleQqPendingUser(info: QqPendingUserInput): Promise<void> {
-    if (this.disposed) return;
-    const outcome = await this.qqPendingStore().record(info);
+  private async handleQqPendingUser(info: QqPendingUserInput): Promise<{ dropped: boolean }> {
+    if (this.disposed) return { dropped: false };
+    let outcome: { users: QqPendingUser[]; dropped: boolean; openid: string };
+    try {
+      outcome = await this.qqPendingStore().record(info);
+    } catch (error) {
+      this.log.warn(`QQ 待审核记录写入失败：${errorMessage(error)}`);
+      // 写失败 = 未记入：如实回报 dropped，服务侧不得虚称「已记入」。
+      return { dropped: true };
+    }
     this.postQqPendingUsers(outcome.users);
     if (outcome.dropped) {
-      const masked = maskQqOpenId(outcome.openid) || "（未知用户）";
-      this.store.sendToast(
-        "warning",
-        vscode.l10n.t(
-          "待审核队列已满（上限 {0} 条），已丢弃来自 {1} 的新请求；请先处理现有记录",
-          QQ_PENDING_MAX_USERS,
-          masked,
-        ),
-      );
+      const key = typeof info.openid === "string" ? info.openid.trim() : "";
+      const at = Date.now();
+      const last = this.qqPendingDropToastAt.get(key);
+      if (last === undefined || at - last >= QQ_PENDING_DROPPED_TOAST_COOLDOWN_MS) {
+        this.qqPendingDropToastAt.set(key, at);
+        const masked = maskQqOpenId(outcome.openid) || "（未知用户）";
+        this.store.sendToast(
+          "warning",
+          vscode.l10n.t(
+            "待审核队列已满（上限 {0} 条），已丢弃来自 {1} 的新请求；请先处理现有记录",
+            QQ_PENDING_MAX_USERS,
+            masked,
+          ),
+        );
+      }
     }
+    return { dropped: outcome.dropped };
   }
 
   /** 推待审核列表（每次全量，webview 直接替换）。 */
