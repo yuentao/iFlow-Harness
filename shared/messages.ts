@@ -1920,7 +1920,7 @@ export type HostToWebview =
    * 补充说明（例如端点地址或失败原因）。 */
   | { type: "qqStatus"; connected: boolean; detail?: string }
   /**
-   * 扫码登录（Wave5-C0）：宿主读 go-cqhttp 的 qrcode.png（或取码 API）→
+   * 扫码登录（Wave5-C0）：宿主从 QQ 官方扫码接口取二维码 →
    * base64 data URL → webview 用 `<img>` 显示，避免 CSP 禁止的 iframe。
    * `dataUrl` 必须是 `data:image/png;base64,...`（webview 可用
    * `isQrDataUrl` 护栏校验）；`expiresAt` 是二维码过期时间（epoch ms）；
@@ -1934,8 +1934,8 @@ export type HostToWebview =
       detail?: string;
     }
   /**
-   * 一键托管（Wave5-C0）：宿主把 go-cqhttp 下载/配置/启动/登录的各阶段
-   * 进度推给设置页。`phase` 是阶段机；`message` 是给人看的说明；
+   * 一键托管（Wave5-C0）：宿主把 QQBot 接入（准备环境 / 配置 / 启动 / 等待授权）
+   * 的各阶段进度推给设置页。`phase` 是阶段机；`message` 是给人看的说明；
    * `progress`（0–100）仅下载等可度量阶段携带，缺省表示不确定进度。
    */
   | {
@@ -2326,8 +2326,8 @@ export type WebviewToHost =
    * 字段（空串 = 清空该凭据）；两项都缺省时宿主什么也不做。 */
   | { type: "qqSecretsWrite"; botToken?: string; appSecret?: string }
   /**
-   * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 go-cqhttp 托管。
-   * `start` 触发下载→配置→启动→等待扫码登录流程，`stop` 停止并清理。
+   * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 QQBot 托管。
+   * `start` 触发准备→配置→启动→等待扫码授权流程，`stop` 停止并清理。
    * 进度经 `qqManagedStatus` 回推，登录二维码经 `qqLoginQr` 回推。
    */
   | { type: "qqManagedSetup"; action: "start" | "stop" };

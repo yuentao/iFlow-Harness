@@ -15,7 +15,7 @@
  * `QqService` 在构造时拿走一份 `config` 快照，但白名单 / 策略 / 并发 / 限流 /
  * 详略 / 自动合并这些字段都是在**使用时**从同一个对象里读的，因此面板可以
  * 直接改字段让它们即时生效；而 `enabled`（起停）只能靠重建 QQ 服务才能生效
- * —— 这就是 {@link QQ_CONNECTION_FIELDS}。阶段4 移除了 OneBot 专属的
+ * —— 这就是 {@link QQ_CONNECTION_FIELDS}。阶段4 移除了历史遗留的
  * `adapter` / `endpoint` / `bridgePort`，连接类字段现在只剩 `enabled`。
  */
 

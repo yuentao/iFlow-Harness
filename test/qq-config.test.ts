@@ -54,7 +54,7 @@ describe("normalizeQqConfig", () => {
 
   it("已移除的 adapter / endpoint / bridgePort 键被忽略，不进配置也不产 warning", () => {
     const { config, warnings } = normalizeQqConfig({
-      adapter: "onebot",
+      adapter: "legacy",
       endpoint: "http://127.0.0.1:3000/",
       bridgePort: 3000,
     });

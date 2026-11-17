@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
  * —— 漂移会让设置项静默失色。描述文案同时受「如实」约束：不得再声称
  * 「只声明、未接线」，且未实现的能力必须写明会被拒绝。
  *
- * 阶段4 移除了 OneBot 专属的 adapter / endpoint / bridgePort 三项设置，
+ * 阶段4 移除了历史遗留的 adapter / endpoint / bridgePort 三项设置，
  * 通道恒走 QQBot，声明里不再有它们。
  */
 

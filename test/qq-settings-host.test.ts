@@ -104,7 +104,7 @@ describe("readQqSettings", () => {
   it("原始脏值按 pickQqSettingsUi 归一（字符串 trim / 数字裁剪 / 枚举回退）", async () => {
     const io = new MemoryIo({
       enabled: "true",
-      adapter: "napcat",
+      adapter: "legacy",
       endpoint: "  http://127.0.0.1:3000  ",
       bridgePort: 70000.4,
       allowedUsers: [" 10001 ", "10001", ""],
@@ -265,7 +265,7 @@ describe("applyQqSettingsPatch", () => {
     expect(bad.writes).toEqual([]);
   });
 
-  it("9 个设置键均已覆盖，且不含派生字段与已移除的 OneBot 键", () => {
+  it("9 个设置键均已覆盖，且不含派生字段与已移除的遗留键", () => {
     expect(QQ_SETTING_KEYS).toHaveLength(9);
     expect(QQ_SETTING_KEYS).not.toContain("hasBotToken");
     expect(QQ_SETTING_KEYS).not.toContain("hasAppSecret");

@@ -4,7 +4,7 @@
  * 职责边界：
  *  - 把「构造 QQBot 官方通道」做成纯工厂：构造官方 QqBotAdapter 并用
  *    `setEventCallback` 把入站消息接进 QqService.handleInboundMessage
- *    （M2 的事件出口就是这道接缝）。已收敛到 QQBot 单一路径，无 onebot 分流。
+ *    （M2 的事件出口就是这道接缝）。已收敛到 QQBot 单一路径，无其它通道分流。
  *  - 把「扫码绑定」的零件（协议 / 会话 / 回调 → webview 消息 / 凭据落盘）
  *    做成纯函数，panel 只负责调用与生命周期。
  *  - 本模块不 import vscode、不碰 panel 私有状态、不 spawn 进程。
@@ -12,7 +12,7 @@
  * 安全纪律：
  *  - appId / appSecret 只写 SecretStorage：appSecret 用已有的
  *    `QQ_SECRET_KEYS.appSecret`，appId 用本模块的 `QQBOT_APP_ID_SECRET_KEY`
- *    （不复用 endpoint —— 那是 OneBot HTTP 地址字段，塞应用 id 会让配置语义
+ *    （不复用 endpoint —— 那是 HTTP 地址字段，塞应用 id 会让配置语义
  *    混乱且被 validateQqConfig 当成 URL 校验）。
  *  - 失败文案过 `redactSecrets` 再推 webview；本模块没有任何 console/log 调用。
  *  - 二维码 data URL 复用 shared 的 `isQrDataUrl` 护栏（严格 PNG + base64）。
@@ -78,7 +78,7 @@ export function buildClearedQrMessage(now: number): QrLoginMessage {
 /**
  * appId 在 SecretStorage 里的键名。
  *
- * `QQ_SECRET_KEYS` 没有 appId 键，而 endpoint 是 OneBot HTTP 基地址（会被
+ * `QQ_SECRET_KEYS` 没有 appId 键，而 endpoint 是 HTTP 基地址（会被
  * validateQqConfig 当 URL 校验），两者都不适合塞应用 id —— 因此在本模块
  * 单独声明一个点分段键，与现有键风格一致。
  */
