@@ -252,7 +252,7 @@ export function SettingsModal({
 function QqSection() {
   const qqSettings = useChat((s) => s.qqSettings);
   const qqStatus = useChat((s) => s.qqStatus);
-  const qqBindCode = useChat((s) => s.qqBindCode);
+  const qqPendingUsers = useChat((s) => s.qqPendingUsers);
   const qqLoginQr = useChat((s) => s.qqLoginQr);
   const qqManagedStatus = useChat((s) => s.qqManagedStatus);
   const send = useChat((s) => s.send);
@@ -262,10 +262,10 @@ function QqSection() {
       value={qqSettings}
       onChange={(patch) => send({ type: "qqSettingsPatch", patch })}
       onTestConnection={() => send({ type: "qqConfigAction", action: "testConnection" })}
-      onGenerateBindCode={() => send({ type: "qqConfigAction", action: "generateBindCode" })}
       onUnbind={() => send({ type: "qqConfigAction", action: "unbind" })}
       status={qqStatus ?? undefined}
-      bindCode={qqBindCode ?? undefined}
+      pendingUsers={qqPendingUsers}
+      onUserAction={(openid, action) => send({ type: "qqUserAction", openid, action })}
       onManagedSetup={(action) => send({ type: "qqManagedSetup", action })}
       onQrAction={(action) => send({ type: "qqConfigAction", action })}
       qqLoginQr={qqLoginQr}

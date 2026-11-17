@@ -1114,13 +1114,18 @@ const en: Record<string, string> = {
   "重新扫码授权": "Re-authorize by QR",
   "需要注意": "Needs attention",
   "连接状态未知": "Connection status unknown",
-  "配对码": "Pairing code",
   "剩余": "Expires in",
-  "在 QQ 里发送 /qq bind {0} 完成绑定；倒计时结束后配对码失效，需要重新生成。":
-    "Send /qq bind {0} in QQ to bind; the code expires when the countdown ends and must be regenerated.",
   "测试连接": "Test connection",
-  "生成配对码": "Generate pairing code",
   "解除绑定": "Unbind",
+  "待审核用户": "Pending users",
+  "暂无待审核用户": "No pending users",
+  "白名单外的人发来消息时只会出现在这里，不会被执行；放行后即可派发任务，拒绝后不会再出现。":
+    "Messages from people outside the allowlist only show up here and are never executed; approve to let them dispatch tasks, reject to hide them for good.",
+  "来源": "Source",
+  "出现次数": "Seen",
+  "首次": "First seen",
+  "最近": "Last seen",
+  "群 {0}": "Group {0}",
   "启用 QQ 远程任务": "Enable QQ remote tasks",
   "从 QQ 私聊或群聊接收任务，在独立分支上执行。":
     "Receive tasks from QQ private chats or groups and run them on isolated branches.",

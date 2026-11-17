@@ -3,12 +3,12 @@
  * Wave3-C2 — QQ 远程任务的 webview 挂载。
  *
  * 覆盖两处挂载点与它们对宿主通道的接线：
- *  - 设置弹窗的「QQ 机器人」页签：吃 `qqSettings` 快照、显示连接状态与配对码、
- *    普通改动走 `qqSettingsPatch`（凭据只由扫码写入，页面上没有输入框）；
+ *  - 设置弹窗的「QQ 机器人」页签：吃 `qqSettings` 快照、显示连接状态与待审核
+ *    用户列表、普通改动走 `qqSettingsPatch`（凭据只由扫码写入，页面上没有输入框）；
  *  - 看板附近的「远程任务」区：只在有任务时出现，动作走 `qqTaskAction`。
  *
  * 用真实 store（只 mock `acquireVsCodeApi`），因此同时验证了 store 对
- * `qqSettings` / `qqStatus` / `qqBindCode` 三条消息的处理不会被快照覆盖。
+ * `qqSettings` / `qqStatus` / `qqPendingUsers` 三条消息的处理不会被快照覆盖。
  */
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -98,7 +98,7 @@ beforeEach(() => {
     state: null,
     qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
     qqStatus: null,
-    qqBindCode: null,
+    qqPendingUsers: [],
   });
 });
 
@@ -176,7 +176,7 @@ describe("QQ 机器人设置页", () => {
     });
   });
 
-  it("renders connection status and the pairing code with its expiry", () => {
+  it("renders connection status and the pending-user list", () => {
     act(() => {
       useChat.getState().applyHostMessage({
         type: "qqStatus",
@@ -184,9 +184,18 @@ describe("QQ 机器人设置页", () => {
         detail: "QQ 官方机器人已连接",
       });
       useChat.getState().applyHostMessage({
-        type: "qqBindCode",
-        code: "K7Q2",
-        expiresAt: Date.now() + 60_000,
+        type: "qqPendingUsers",
+        users: [
+          {
+            openid: "openid-123456",
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 1,
+            preview: "帮我跑一下测试",
+            chatType: "group",
+            groupId: "987654321098",
+          },
+        ],
       });
     });
     render(
@@ -202,9 +211,11 @@ describe("QQ 机器人设置页", () => {
 
     expect(container.textContent).toContain("已连接");
     expect(container.textContent).toContain("QQ 官方机器人已连接");
-    expect(container.textContent).toContain("K7Q2");
-    expect(container.textContent).toContain("剩余");
-    expect(container.textContent).toContain("/qq bind K7Q2");
+    expect(container.textContent).toContain("待审核用户");
+    expect(container.textContent).toContain("…123456");
+    expect(container.textContent).not.toContain("openid-123456");
+    expect(container.textContent).toContain("群 …321098");
+    expect(container.textContent).toContain("帮我跑一下测试");
   });
 });
 

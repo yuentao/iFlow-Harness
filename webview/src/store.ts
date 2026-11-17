@@ -2626,8 +2626,11 @@ interface ChatStore {
   qqSettings: QqSettingsUi;
   /** 最近一次连接检查 / 适配器状态回执；null = 尚未收到。 */
   qqStatus: { connected: boolean; detail?: string } | null;
-  /** 当前配对码与其绝对过期时间（epoch ms）；null = 没有生效中的配对码。 */
-  qqBindCode: { code: string; expiresAt: number } | null;
+  /**
+   * QQ 授权模型：白名单外的人发来消息时留下的待审核记录（宿主每次全量重发，
+   * 这里直接替换）。顺序由宿主按 `lastSeenAt` 倒序保证。
+   */
+  qqPendingUsers: Extract<HostToWebview, { type: "qqPendingUsers" }>["users"];
   /**
    * 一键接入：QQ 官方机器人扫码授权二维码回执。独立于 `state`，
    * `snapshot` / `blockPatch` 绝不覆盖；`dataUrl` 经 `isQrDataUrl` 护栏后才
@@ -2712,7 +2715,7 @@ export const useChat = create<ChatStore>((set, get) => ({
   state: null,
   qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
   qqStatus: null,
-  qqBindCode: null,
+  qqPendingUsers: [],
   qqLoginQr: null,
   qqManagedStatus: null,
   superTranscripts: {},
@@ -2835,8 +2838,9 @@ export const useChat = create<ChatStore>((set, get) => ({
       set({ qqStatus: { connected: msg.connected, detail: msg.detail } });
       return;
     }
-    if (msg.type === "qqBindCode") {
-      set({ qqBindCode: { code: msg.code, expiresAt: msg.expiresAt } });
+    if (msg.type === "qqPendingUsers") {
+      // 授权模型：宿主每次全量重发（新增 / 放行 / 拒绝都会推），直接替换。
+      set({ qqPendingUsers: msg.users });
       return;
     }
     if (msg.type === "qqLoginQr") {

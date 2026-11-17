@@ -5,8 +5,6 @@
  * SecretStorage），所以凡是「有判断」的部分都搬到此处，保持零 vscode 依赖、
  * 零副作用：
  *
- *  - {@link generateBindCode}：6 位大写字母数字配对码 + 5 分钟有效期；
- *  - {@link isBindCodeValid}：过期 / 不存在 / 大小写差异的判定（唯一一处）；
  *  - {@link isTerminalSuperStatus}：等待子会话收尾时的终态口径（字符串入参，
  *    端口拿到的可能是一个陌生值，不能被 `SuperStatus` 的类型断言骗过去）；
  *  - {@link shouldRestartOnPatch}：**哪些设置改动必须重建 QQ 服务**。
@@ -19,17 +17,12 @@
  * `adapter` / `endpoint` / `bridgePort`，连接类字段现在只剩 `enabled`。
  */
 
-import { randomBytes } from "node:crypto";
 import type { QqConfig } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // 常量
 // ---------------------------------------------------------------------------
 
-/** 配对码长度（与设置页展示的输入框一致）。 */
-export const QQ_BIND_CODE_LENGTH = 6;
-/** 配对码有效期：5 分钟。 */
-export const QQ_BIND_CODE_TTL_MS = 5 * 60_000;
 /**
  * 轮询子会话终态的间隔。
  *
@@ -39,9 +32,6 @@ export const QQ_BIND_CODE_TTL_MS = 5 * 60_000;
  * 1.5s 对「等一个可能跑几十分钟的子会话」绰绰有余，又不会让看板延迟可感。
  */
 export const QQ_SETTLE_POLL_MS = 1_500;
-
-/** 配对码字符集：大写字母 + 数字（不含小写，避免朗读/输入歧义）。 */
-const BIND_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /**
  * 只有 `enabled` 的改动需要重建 QQ 服务（见文件头注释）。
@@ -55,68 +45,6 @@ export const QQ_CONNECTION_FIELDS = [
 ] as const;
 
 export type QqConnectionField = (typeof QQ_CONNECTION_FIELDS)[number];
-
-// ---------------------------------------------------------------------------
-// 配对码
-// ---------------------------------------------------------------------------
-
-export interface QqBindCode {
-  /** 6 位大写字母数字。 */
-  code: string;
-  /** 过期时间（epoch ms）。 */
-  expiresAt: number;
-}
-
-/** 默认随机源：密码学安全。 */
-function secureRandom(): number {
-  return randomBytes(4).readUInt32BE(0) / 0x1_0000_0000;
-}
-
-/**
- * 生成配对码。
- *
- * `rng` 只为可测性注入（测试传常量即可得到确定码）；`now` 同理。
- * 越界 / 非有限值的随机数一律按 0 处理 —— 脏随机源不能产出一个空码。
- * 字符逐位抽取，不存在「把整个随机数取模」带来的偏置放大。
- */
-export function generateBindCode(
-  rng: () => number = secureRandom,
-  now: number = Date.now(),
-): QqBindCode {
-  let code = "";
-  for (let index = 0; index < QQ_BIND_CODE_LENGTH; index += 1) {
-    const sample = rng();
-    const bounded = Number.isFinite(sample)
-      ? Math.min(1 - Number.EPSILON, Math.max(0, sample))
-      : 0;
-    const at = Math.floor(bounded * BIND_ALPHABET.length);
-    code += BIND_ALPHABET[at] ?? BIND_ALPHABET[0];
-  }
-  return { code, expiresAt: now + QQ_BIND_CODE_TTL_MS };
-}
-
-/**
- * 配对码是否可用。
- *
- * 判定顺序刻意是「记录存在 → 未过期 → 码匹配」：过期与不存在对用户是同一句
- * 文案（见 `QqService` 的 `QQ_BIND_FAILURE_TEXT`），但本地日志需要分清是哪一种，
- * 所以这里只返回布尔，原因由调用点自己补。
- *
- * 用户从 QQ 里手打码时大小写经常不对：比较前统一转大写（码本身只含大写）。
- */
-export function isBindCodeValid(
-  record: QqBindCode | null | undefined,
-  code: string | null | undefined,
-  now: number = Date.now(),
-): boolean {
-  if (!record || typeof record.code !== "string" || record.code.length === 0) return false;
-  if (typeof code !== "string") return false;
-  const candidate = code.trim().toUpperCase();
-  if (candidate.length === 0) return false;
-  if (typeof record.expiresAt !== "number" || !Number.isFinite(record.expiresAt)) return false;
-  if (record.expiresAt <= now) return false;
-  return candidate === record.code.toUpperCase();
-}
 
 // ---------------------------------------------------------------------------
 // 服务重启判定

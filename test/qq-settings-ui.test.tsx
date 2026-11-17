@@ -2,6 +2,7 @@
 import { act, useState, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { QqPendingUserUi } from "../shared/messages";
 import { QqSettings, type QqSettingsValue } from "../webview/src/components/QqSettings";
 
 /** jsdom ships neither ResizeObserver nor scrollIntoView; the Dropdown clamp
@@ -41,12 +42,18 @@ let root: Root;
 let container: HTMLDivElement;
 let onChange: ReturnType<typeof vi.fn>;
 let onTestConnection: ReturnType<typeof vi.fn>;
-let onGenerateBindCode: ReturnType<typeof vi.fn>;
 let onUnbind: ReturnType<typeof vi.fn>;
+let onUserAction: ReturnType<typeof vi.fn>;
 
 /** Stateful harness: the component is controlled, so a test must feed the
  * patch back for the next render (like the host will). */
-function Harness({ initial }: { initial?: Partial<QqSettingsValue> }) {
+function Harness({
+  initial,
+  pending,
+}: {
+  initial?: Partial<QqSettingsValue>;
+  pending?: QqPendingUserUi[];
+}) {
   const [value, setValue] = useState<QqSettingsValue>({ ...VALUE, ...initial });
   return (
     <QqSettings
@@ -56,10 +63,10 @@ function Harness({ initial }: { initial?: Partial<QqSettingsValue> }) {
         setValue((current) => ({ ...current, ...patch }));
       }}
       onTestConnection={onTestConnection}
-      onGenerateBindCode={onGenerateBindCode}
       onUnbind={onUnbind}
+      pendingUsers={pending}
+      onUserAction={onUserAction}
       status={{ connected: initial?.enabled ? true : false, detail: "QQ 官方机器人已连接" }}
-      bindCode={initial?.enabled ? { code: "K7Q2", expiresAt: Date.now() + 60_000 } : undefined}
       warnings={initial?.enabled ? [] : ["机器人凭据还没有配置"]}
     />
   );
@@ -88,8 +95,8 @@ function setInput(el: HTMLInputElement, value: string): void {
 beforeEach(() => {
   onChange = vi.fn();
   onTestConnection = vi.fn();
-  onGenerateBindCode = vi.fn();
   onUnbind = vi.fn();
+  onUserAction = vi.fn();
 });
 
 afterEach(() => {
@@ -186,16 +193,94 @@ describe("QqSettings", () => {
     expect(alert.textContent).toContain("机器人凭据还没有配置");
   });
 
-  it("shows the bind code and wires the connection actions", () => {
-    render(<Harness initial={{ enabled: true }} />);
-    expect(container.textContent).toContain("K7Q2");
-    expect(container.textContent).toContain("剩余");
+  it("未授权时只保留「一键接入」，隐藏测试连接 / 解除绑定", () => {
+    render(<Harness />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("一键接入 QQ 机器人");
+    for (const hidden of ["测试连接", "解除绑定", "重新扫码授权"]) {
+      expect(text, hidden).not.toContain(hidden);
+    }
+    // 白名单区与开关不受授权态影响。
+    expect(text).toContain("允许的用户");
+    expect(text).toContain("允许的群");
+  });
 
+  it("已授权时显示重新扫码授权 / 测试连接 / 解除绑定并接线", () => {
+    render(<Harness initial={{ enabled: true }} />);
     clickText("测试连接");
-    clickText("生成配对码");
     clickText("解除绑定");
+    clickText("重新扫码授权");
     expect(onTestConnection).toHaveBeenCalledTimes(1);
-    expect(onGenerateBindCode).toHaveBeenCalledTimes(1);
     expect(onUnbind).toHaveBeenCalledTimes(1);
+  });
+
+  it("待审核用户列表：脱敏 openid、来源、次数、预览与时间", () => {
+    render(
+      <Harness
+        pending={[
+          {
+            openid: "abcdef123456",
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 3,
+            preview: "帮我改一下 README 的安装说明",
+            chatType: "private",
+          },
+          {
+            openid: "group-user-654321",
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 1,
+            preview: "群里的陌生人",
+            chatType: "group",
+            groupId: "123456789012",
+          },
+        ]}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("待审核用户");
+    // 末 6 位可见，完整 openid / 完整群号不出现。
+    expect(text).toContain("…123456");
+    expect(text).not.toContain("abcdef123456");
+    expect(text).toContain("…654321");
+    expect(text).not.toContain("group-user-654321");
+    expect(text).toContain("…789012");
+    expect(text).not.toContain("123456789012");
+    expect(text).toContain("私聊");
+    expect(text).toContain("群 …789012");
+    expect(text).toContain("出现次数");
+    expect(text).toContain("3");
+    expect(text).toContain("帮我改一下 README 的安装说明");
+    expect(text).toContain("首次");
+    expect(text).toContain("最近");
+  });
+
+  it("待审核列表为空时不渲染该区", () => {
+    render(<Harness pending={[]} />);
+    expect(container.textContent).not.toContain("待审核用户");
+    expect(container.textContent).not.toContain("暂无待审核用户");
+  });
+
+  it("批准 / 拒绝把 openid 与动作交回调用方", () => {
+    const openid = "openid-123456";
+    render(
+      <Harness
+        pending={[
+          {
+            openid,
+            firstSeenAt: 1_700_000_000_000,
+            lastSeenAt: 1_700_000_600_000,
+            count: 1,
+            preview: "你好",
+            chatType: "private",
+          },
+        ]}
+      />,
+    );
+    clickText("批准");
+    expect(onUserAction).toHaveBeenCalledWith(openid, "approve");
+    clickText("拒绝");
+    expect(onUserAction).toHaveBeenCalledWith(openid, "reject");
   });
 });
