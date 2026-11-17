@@ -154,18 +154,6 @@ import {
   toAgentPromptText,
 } from "../../shared/session-state.js";
 import { computeHunks, replayHunks } from "../../shared/hunks.js";
-import {
-  APPROVAL_RULES_MAX,
-  decideApproval,
-  deriveAllowRule,
-  hardDenyReason,
-  isSuperAgentToolRequest,
-  normalizeApprovalRule,
-  parseApprovalPolicy,
-  serializeApprovalPolicy,
-  type ApprovalRequestInfo,
-  type ApprovalRule,
-} from "../../shared/approval-policy.js";
 import { SessionStore } from "./store.js";
 import { getTerminalRecorder, openInTerminal } from "./terminal.js";
 import { MemoryService } from "../memory/service.js";
@@ -588,7 +576,18 @@ export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // executing
   "run_shell_command",
 ] as const;
-/** Fresh settings object for one main-session `session/new` / `session/load`.
+/** The main session's mode is fixed (2026-11-18). Every tool it holds
+ * (`super-agent` / `todo_write` / `todo_read` / `ask_user_question`) has
+ * `shouldConfirmExecute() === false` and its CLI process runs without MCP
+ * servers, so no permission request can ever reach the approval card — the
+ * user-selectable mode had no observable effect and was removed. `smart` is
+ * the product default (vendor bundle: `(function(A){A.DEFAULT="default",
+ * A.SMART="smart",A.YOLO="yolo",A.PLAN="plan"})(dn||(dn={}))` and
+ * `getAvailableModes()` lists `{id:"smart"}` first). Child sessions push
+ * `yolo` themselves and QQ tasks use their own supervised policy. */
+export const MAIN_SESSION_MODE = "smart";
+
+/** Fresh settings object for one main-session `session/new` / `session/load`,
  * A factory (not a shared object) so no caller can mutate another's copy.
  *
  * `allowed_tools` is the structural gate (only these names are registered at
@@ -771,13 +770,6 @@ const ONBOARDING_DISMISSED_KEY = "iflow.onboardingDismissed";
 /** globalState key: cross-window cache of the resolved node runtime
  * (the CLI entry is no longer probed — the vendored fork is the only one). */
 const LOCATOR_PATHS_KEY = "iflow.locator.paths";
-/** M4 P1-1 globalState key: the serialized global approval pre-review rule
- * table (`{version, rules}` — see shared/approval-policy.ts). */
-const APPROVAL_POLICY_KEY = "iflow.approvalPolicy";
-/** M4 P1-1: workspace-relative project override, matched BEFORE the global
- * table so a repo can tighten (or loosen, within the hard-veto floor) the
- * user's rules. Read-only from the panel's side — never written back. */
-const APPROVAL_POLICY_PROJECT_FILE = ".iflow/approval.json";
 /** `iflow.uiFontSize` presets — kept in sync with shared/messages.ts. */
 const UI_FONT_SIZES = ["compact", "standard", "large"] as const;
 /** `iflow.uiDensity` presets — kept in sync with shared/messages.ts. */
@@ -794,17 +786,6 @@ function asUiDensity(value: unknown): (typeof UI_DENSITIES)[number] {
   return UI_DENSITIES.includes(value as (typeof UI_DENSITIES)[number])
     ? (value as (typeof UI_DENSITIES)[number])
     : "standard";
-}
-
-/** `iflow.defaultMode` values — kept in sync with shared/messages.ts.
- * Plan mode 已移除（2026-11-18）：旧配置里的 `plan` 不再合法，读取时回退。 */
-const DEFAULT_MODES = ["default", "smart", "yolo"] as const;
-
-/** settings.json / VSCode config is user-editable — fall back to `smart`. */
-function asDefaultMode(value: unknown): (typeof DEFAULT_MODES)[number] {
-  return DEFAULT_MODES.includes(value as (typeof DEFAULT_MODES)[number])
-    ? (value as (typeof DEFAULT_MODES)[number])
-    : "smart";
 }
 
 /** `iflow.theme` values — kept in sync with shared/messages.ts. */
@@ -828,14 +809,6 @@ const CLI_LANGUAGES = ["", "zh-CN", "en-US"] as const;
 function asCliLanguage(value: unknown): (typeof CLI_LANGUAGES)[number] {
   return CLI_LANGUAGES.includes(value as (typeof CLI_LANGUAGES)[number])
     ? (value as (typeof CLI_LANGUAGES)[number])
-    : "";
-}
-
-/** `iflow.approvalMode` values; empty = do not override the CLI's own value. */
-const CLI_APPROVAL_MODES = ["", ...DEFAULT_MODES] as const;
-function asCliApprovalMode(value: unknown): (typeof CLI_APPROVAL_MODES)[number] {
-  return CLI_APPROVAL_MODES.includes(value as (typeof CLI_APPROVAL_MODES)[number])
-    ? (value as (typeof CLI_APPROVAL_MODES)[number])
     : "";
 }
 
@@ -1400,25 +1373,11 @@ export class ChatPanel implements vscode.Disposable {
     {
       options: PermissionOption[];
       toolName: string;
-      /** M4 P1-1: the original request — needed to derive an allow rule when
-       * the user upgrades an approval to 「始终允许」. */
-      req: RequestPermissionRequest;
       resolve: (response: RequestPermissionResponse) => void;
       timer: NodeJS.Timeout;
     }
   >();
   private approvalSeq = 0;
-  /** M4 P1-1: cached global pre-review rule table (null = not loaded yet).
-   * Invalidated on save and on panel dispose only — globalState is ours. */
-  private approvalRules: ApprovalRule[] | null = null;
-  /** M4 P1-1: cached workspace `.iflow/approval.json` rules (read-only).
-   * Invalidated by the workspace file watcher, on session start and on card
-   * open — an external tool (or the user's editor) owns that file. */
-  private approvalProjectRules: ApprovalRule[] | null = null;
-  /** M4 P1-1: a 「始终允许」 click derived this rule; it is NOT persisted until
-   * the user names it in the policy card (or it is dismissed). */
-  private approvalDraft: ApprovalRule | null = null;
-  private approvalRuleSeq = 0;
   /** Awaiting user answers for `_iflow/user/questions`, keyed by card id. */
   private readonly pendingQuestions = new Map<
     string,
@@ -1677,10 +1636,7 @@ export class ChatPanel implements vscode.Disposable {
             // Every mirrored setting lives in the same settings panel; a
             // direct VSCode-side edit must repaint it too.
             if (e.affectsConfiguration("iflow")) this.postHostSettings();
-        if (
-          e.affectsConfiguration("iflow.language")
-          || e.affectsConfiguration("iflow.approvalMode")
-        ) {
+        if (e.affectsConfiguration("iflow.language")) {
           this.syncCliSettingsToDisk();
         }
         // Setting-owned thinking rules: re-merge into ~/.iflow/thinking-models.json
@@ -1708,9 +1664,6 @@ export class ChatPanel implements vscode.Disposable {
     const fileWatcher = this.services.watchers?.[0] ?? vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(watchRoot, "**/*"));
     const invalidateFileCache = () => {
       this.fileSearchCache = null;
-      // M4 P1-1: the project override lives inside the workspace, so the same
-      // watcher covers it — drop the cache and the next pre-review re-reads.
-      this.approvalProjectRules = null;
     };
     fileWatcher.onDidCreate(invalidateFileCache);
     fileWatcher.onDidDelete(invalidateFileCache);
@@ -2391,9 +2344,6 @@ export class ChatPanel implements vscode.Disposable {
       case "newSession":
         await this.startNewSession();
         break;
-      case "setMode":
-        await this.setMode(msg.modeId);
-        break;
       case "setModel":
         await this.setModel(msg.modelId);
         break;
@@ -2593,12 +2543,6 @@ export class ChatPanel implements vscode.Disposable {
         if (msg.language !== undefined && CLI_LANGUAGES.includes(msg.language)) {
           writes.push(["language", msg.language]);
         }
-        if (msg.defaultMode !== undefined && DEFAULT_MODES.includes(msg.defaultMode)) {
-          writes.push(["defaultMode", msg.defaultMode]);
-        }
-        if (msg.approvalMode !== undefined && CLI_APPROVAL_MODES.includes(msg.approvalMode)) {
-          writes.push(["approvalMode", msg.approvalMode]);
-        }
         if (msg.theme !== undefined && UI_THEMES.includes(msg.theme)) writes.push(["theme", msg.theme]);
         if (msg.auroraIntensity !== undefined && Number.isFinite(msg.auroraIntensity)) {
           writes.push(["auroraIntensity", Math.min(100, Math.max(0, Math.round(msg.auroraIntensity)))]);
@@ -2736,16 +2680,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "openKnowledgeFile":
         void this.memory.openKnowledgeFile(msg.path);
-        break;
-      case "listApprovalPolicy":
-        void this.sendApprovalPolicy();
-        break;
-      case "saveApprovalPolicy":
-        await this.saveApprovalPolicy(msg.rules);
-        break;
-      case "dismissApprovalRuleDraft":
-        this.approvalDraft = null;
-        void this.sendApprovalPolicy();
         break;
       case "regenerate":
         await this.regenerate();
@@ -2911,8 +2845,6 @@ export class ChatPanel implements vscode.Disposable {
       soundFeedback: config.get<boolean>("soundFeedback", true),
       osNotifications: asOsNotifications(config.get<string>("osNotifications", "approvals")),
       language: asCliLanguage(config.get<string>("language", "")),
-      defaultMode: asDefaultMode(config.get<string>("defaultMode", "smart")),
-      approvalMode: asCliApprovalMode(config.get<string>("approvalMode", "")),
       theme: asUiTheme(config.get<string>("theme", "auto")),
       auroraIntensity: Math.min(100, Math.max(0, config.get<number>("auroraIntensity", 35))),
       uiFontSize: asUiFontSize(config.get<string>("uiFontSize", "standard")),
@@ -4233,102 +4165,6 @@ export class ChatPanel implements vscode.Disposable {
   }
 
 
-  // --- M4 P1-1: approval pre-review rule table --------------------------------
-
-  /** Auto-decision transcript notes already emitted this turn, keyed by
-   * `ruleId|toolName`. An "allow all reads" rule would otherwise add a system
-   * line per read_file call; cleared at every prompt attempt (see
-   * promptWithRetry's `turnHadAgentOutput` reset). */
-  private readonly autoApprovalNoted = new Set<string>();
-
-  /** Workspace file the project override is read from (null = no workspace). */
-  private approvalProjectUri(): vscode.Uri | null {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!root) return null;
-    return vscode.Uri.joinPath(root, ...APPROVAL_POLICY_PROJECT_FILE.split("/"));
-  }
-
-  /**
-   * Load (and cache) both rule tables. Async on purpose: the approval path
-   * must never do sync I/O in the extension host (trap #18 discipline), and
-   * the project file is owned by the user / external tools.
-   */
-  private async loadApprovalRules(): Promise<{ global: ApprovalRule[]; project: ApprovalRule[] }> {
-    if (!this.approvalRules) {
-      const raw = this.context.globalState.get<string>(APPROVAL_POLICY_KEY);
-      this.approvalRules = raw ? parseApprovalPolicy(raw) ?? [] : [];
-    }
-    if (!this.approvalProjectRules) this.approvalProjectRules = await this.readProjectApprovalRules();
-    return { global: this.approvalRules, project: this.approvalProjectRules };
-  }
-
-  private async readProjectApprovalRules(): Promise<ApprovalRule[]> {
-    const uri = this.approvalProjectUri();
-    if (!uri) return [];
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      const rules = parseApprovalPolicy(Buffer.from(bytes).toString("utf8"));
-      if (!rules) {
-        this.log.warn(`approval policy: ignoring malformed ${APPROVAL_POLICY_PROJECT_FILE}`);
-        return [];
-      }
-      return rules;
-    } catch {
-      return []; // absent is the normal case — global rules only
-    }
-  }
-
-  /** Precedence order for matching: project rules override global ones. */
-  private approvalRuleChain(global: readonly ApprovalRule[], project: readonly ApprovalRule[]): ApprovalRule[] {
-    return [...project, ...global];
-  }
-
-  /**
-   * Persist the global rule table. Returns false when the write rejected —
-   * the in-memory table is rolled back so the panel never acts on rules that
-   * would be gone after a window reload (the caller answers with a toast /
-   * a saveResult:"failed" push instead of claiming 已保存).
-   */
-  private async persistApprovalRules(rules: ApprovalRule[]): Promise<boolean> {
-    const previous = this.approvalRules;
-    this.approvalRules = rules;
-    try {
-      await this.context.globalState.update(APPROVAL_POLICY_KEY, serializeApprovalPolicy(rules));
-      return true;
-    } catch (error) {
-      this.approvalRules = previous;
-      this.log.warn(`approval policy write failed: ${errorMessage(error)}`);
-      return false;
-    }
-  }
-
-  /** Bump a matched GLOBAL rule's hit counter (project rules are read-only —
-   * the panel never writes a file the user owns). */
-  private noteApprovalRuleHit(ruleId: string | undefined, project: readonly ApprovalRule[]): void {
-    if (!ruleId || !this.approvalRules) return;
-    if (project.some((r) => r.id === ruleId)) return;
-    let changed = false;
-    const next = this.approvalRules.map((r) => {
-      if (r.id !== ruleId) return r;
-      changed = true;
-      return { ...r, hits: (r.hits ?? 0) + 1 };
-    });
-    if (changed) void this.persistApprovalRules(next);
-  }
-
-  /** The wire facts a decision is made from (see ApprovalRequestInfo: CLI
-   * 0.5.19 permission requests carry kind/title/locations, not toolName/args). */
-  private approvalRequestInfo(req: RequestPermissionRequest): ApprovalRequestInfo {
-    const toolCall = req.toolCall;
-    return {
-      toolName: toolCall.toolName ?? "",
-      toolKind: toolCall.kind ?? "other",
-      title: toolCall.title ?? "",
-      paths: (toolCall.locations ?? []).map((l) => l.path),
-      cwd: this.sessionCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
-    };
-  }
-
   /**
    * Super Agent 内置工具（`super-agent` / `super-agent-actions`）的权限请求
    * 直接放行，不弹审批卡。
@@ -4339,13 +4175,15 @@ export class ChatPanel implements vscode.Disposable {
    * 子会话就要用户点一次，把「随时开启」变成「每次确认」，安全边界却没有任何
    * 增量（工具不执行任何东西）。
    *
-   * 只对这一个工具生效：其它工具仍走规则表 / 审批卡，用户的 approvalMode
-   * 语义不变。响应里的 `optionId` **必须是 agent 真正给出的** —— CLI 用
-   * `nativeEnum` 解析，伪造会抛错并卡死回合；没有 allow 选项时按现有取消
-   * 路径回 `cancelled`，绝不伪造批准。
+   * 只对这一个工具生效：其它工具仍走审批卡。响应里的 `optionId` **必须是
+   * agent 真正给出的** —— CLI 用 `nativeEnum` 解析，伪造会抛错并卡死回合；
+   * 没有 allow 选项时按现有取消路径回 `cancelled`，绝不伪造批准。
    */
   private autoApproveSuperAgentTool(req: RequestPermissionRequest): RequestPermissionResponse | null {
-    if (!isSuperAgentToolRequest(this.approvalRequestInfo(req))) return null;
+    // 归一规则见 shared/super-tool-call.ts（含命名空间前缀）；CLI 0.5.19 的
+    // 权限请求经常省略 toolName，因此退回 title。
+    const name = (req.toolCall.toolName ?? "").trim() || (req.toolCall.title ?? "").trim();
+    if (!name || classifySuperToolName(name) === null) return null;
     const label = req.toolCall.toolName || req.toolCall.title || "super-agent";
     const option =
       req.options.find((o) => o.kind === "allow_always") ??
@@ -4358,116 +4196,7 @@ export class ChatPanel implements vscode.Disposable {
     return { outcome: { outcome: "selected", optionId: option.optionId } };
   }
 
-  /**
-   * Run the rule table over an incoming permission request BEFORE surfacing a
-   * card. Returns the wire response to send, or null when the user must still
-   * decide (no rule matched, or a hard veto downgraded an allow to ask).
-   *
-   * Discipline: the response's `optionId` is ALWAYS one the agent offered —
-   * the CLI parses it with `nativeEnum(...)` (probed, CLI 0.5.19 bundle), so a
-   * fabricated id throws and strands the turn. When the wanted shape is
-   * missing, allow falls back to the card and deny falls back to `cancelled`
-   * (the same response the 5-minute timeout produces).
-   */
-  private async preReviewApproval(req: RequestPermissionRequest): Promise<RequestPermissionResponse | null> {
-    const { global, project } = await this.loadApprovalRules();
-    const chain = this.approvalRuleChain(global, project);
-    if (chain.length === 0) return null;
-    const info = this.approvalRequestInfo(req);
-    const decision = decideApproval(chain, info);
-    if (decision.action === "ask") return null;
-
-    const pick = (kinds: readonly string[]): PermissionOption | undefined => {
-      for (const kind of kinds) {
-        const found = req.options.find((o) => o.kind === kind);
-        if (found) return found;
-      }
-      return undefined;
-    };
-
-    let response: RequestPermissionResponse;
-    if (decision.action === "allow") {
-      const option = pick(["allow_once", "allow_always"]);
-      if (!option) {
-        this.log.warn(
-          `approval policy: rule "${decision.ruleLabel ?? decision.ruleId}" matched but the request offers no allow option — showing the card`,
-        );
-        return null;
-      }
-      response = { outcome: { outcome: "selected", optionId: option.optionId } };
-    } else {
-      const option = pick(["reject_once", "reject_always"]);
-      response = option
-        ? { outcome: { outcome: "selected", optionId: option.optionId } }
-        : { outcome: { outcome: "cancelled" } };
-    }
-
-    this.noteApprovalRuleHit(decision.ruleId, project);
-    // One transcript trace per rule per tool per turn (see autoApprovalNoted).
-    const noteKey = `${decision.ruleId ?? ""}|${info.toolName}`;
-    if (!this.autoApprovalNoted.has(noteKey)) {
-      this.autoApprovalNoted.add(noteKey);
-      const ruleName = decision.ruleLabel ?? decision.ruleId ?? "";
-      this.store.approvalResolutionNote(
-        info.toolName || info.title || "tool",
-        decision.action === "allow"
-          ? vscode.l10n.t("按策略自动允许（{0}）", ruleName)
-          : vscode.l10n.t("按策略自动拒绝（{0}）", ruleName),
-      );
-    }
-    return response;
-  }
-
-  /**
-   * 「始终允许」 upgrade (roadmap P1-1): derive the narrowest rule for THIS
-   * request and hand it to the policy card for naming. Nothing is persisted
-   * until the user saves — a rule that silently auto-approves future turns
-   * must be a deliberate, visible act. Returns false when no rule can be
-   * derived (hard-vetoed command, or the request carries nothing to match on).
-   */
-  private offerAlwaysAllowRule(req: RequestPermissionRequest): boolean {
-    const info = this.approvalRequestInfo(req);
-    if (hardDenyReason(info)) return false;
-    const draft = deriveAllowRule(info, `rule-${Date.now().toString(36)}-${++this.approvalRuleSeq}`);
-    if (!draft) return false;
-    this.approvalDraft = draft;
-    return true;
-  }
-
-  /** Push the current tables (+ any pending draft) to the policy card.
-   * `saveResult` is only set when this push answers a save request: the card
-   * waits for it before flashing 已保存 (a fire-and-forget send used to flash
-   * success before the host had written anything). */
-  private async sendApprovalPolicy(saveResult?: "ok" | "failed"): Promise<void> {
-    const { global, project } = await this.loadApprovalRules();
-    this.postToWebview({
-      type: "approvalPolicy",
-      rules: global,
-      projectRules: project,
-      draft: this.approvalDraft,
-      ...(saveResult ? { saveResult } : {}),
-    });
-  }
-
-  /** Save the global table (replace semantics — see shared/messages.ts). */
-  private async saveApprovalPolicy(rules: readonly ApprovalRule[]): Promise<void> {
-    const clean: ApprovalRule[] = [];
-    for (const raw of rules.slice(0, APPROVAL_RULES_MAX)) {
-      const rule = normalizeApprovalRule(raw, `rule-${clean.length + 1}`);
-      if (rule && !clean.some((r) => r.id === rule.id)) clean.push(rule);
-    }
-    // Saving from the card resolves the draft either way (the user either
-    // kept it in `rules` or threw it away).
-    this.approvalDraft = null;
-    const ok = await this.persistApprovalRules(clean);
-    if (!ok) {
-      this.store.sendToast("warning", vscode.l10n.t("审批规则保存失败，已保留原规则"));
-    }
-    // Push the (possibly rolled-back) table either way: the card uses this
-    // reply to stop its saving state, and on failure it must show what is
-    // actually persisted rather than the user's unsaved draft.
-    await this.sendApprovalPolicy(ok ? "ok" : "failed");
-  }
+  
 
 
   // --- Tool approval flow (session/request_permission) --------------------------
@@ -4524,7 +4253,6 @@ export class ChatPanel implements vscode.Disposable {
       this.pendingApprovals.set(id, {
         options: req.options,
         toolName: approval.toolName,
-        req,
         resolve,
         timer,
       });
@@ -4585,13 +4313,6 @@ export class ChatPanel implements vscode.Disposable {
       isReject ? vscode.l10n.t("已拒绝") : vscode.l10n.t("已允许（{0}）", option?.name ?? optionId),
     );
     pending.resolve({ outcome: { outcome: "selected", optionId } });
-    // M4 P1-1: 「始终允许」 upgrades to a named rule. The approval itself is
-    // already resolved — rule creation is a deliberate second step in the
-    // policy card (pre-filled draft, user names & saves).
-    if (option?.kind === "allow_always") {
-      if (this.offerAlwaysAllowRule(pending.req)) void this.sendApprovalPolicy();
-      else this.log.info("allow-always offered but no rule could be derived — kept as one-time approval");
-    }
   }
 
   /** Shared complete user-stop chain: unblock cards, suppress retries/watchdog. */
@@ -5570,8 +5291,8 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * Mirror the CLI-bound extension settings (language / approvalMode) into
-   * `~/.iflow/settings.json`. The CLI reads both only at startup (probed,
+   * Mirror the CLI-bound extension setting (language) into
+   * `~/.iflow/settings.json`. The CLI reads it only at startup (probed,
    * CLI 0.5.19 bundle: Config loads settings once, the `/language` command
    * itself prints "restartRequired"), so an empty value means "don't touch
    * the CLI's own entry" and a successful write offers an immediate hot
@@ -5596,8 +5317,6 @@ export class ChatPanel implements vscode.Disposable {
     const patch: Partial<CliSettingsShape> = {};
     const language = cfg.get<string>("language", "");
     if (language) patch.language = language;
-    const approvalMode = cfg.get<string>("approvalMode", "");
-    if (approvalMode) patch.approvalMode = approvalMode;
     if (Object.keys(patch).length === 0) return;
     if (!updateCliSettings(patch)) {
       void vscode.window.showWarningMessage(
@@ -5729,7 +5448,7 @@ export class ChatPanel implements vscode.Disposable {
   /** MCP card saved: replace the whole dict of ONE scope in that scope's
    * settings.json (see the replace-semantics note on the WebviewToHost
    * message), then offer the same hot-restart affordance as the
-   * language/approvalMode sync path — the CLI only reads mcpServers at
+   * language sync path — the CLI only reads mcpServers at
    * startup. The project file is created when absent (the CLI's own
    * `mcp add --scope project` does the same); the global file is not, so a
    * broken global config surfaces instead of being silently rebuilt. */
@@ -10840,19 +10559,6 @@ export class ChatPanel implements vscode.Disposable {
             // autoApproveSuperAgentTool）。其它工具不受影响。
             const superTool = this.autoApproveSuperAgentTool(req);
             if (superTool) return superTool;
-            // M4 P1-1: the rule table answers matching requests without a card.
-            // A failing pre-review must NEVER strand the agent — degrade to the
-            // card (the pre-P1-1 behaviour) instead of rejecting or throwing.
-            const auto = await this.preReviewApproval(req).catch((error: unknown) => {
-              this.log.warn(`approval pre-review failed: ${errorMessage(error)}`);
-              return null;
-            });
-            if (auto) return auto;
-            // Re-check after the await: the client may have been torn down
-            // while the policy files were read (A3 discipline).
-            if (this.client !== client || this.disposed) {
-              return { outcome: { outcome: "cancelled" } as const };
-            }
             return this.requestPermissionFromUser(req);
           },
           onUserQuestions: (req: UserQuestionsRequest) => {
@@ -11135,54 +10841,43 @@ export class ChatPanel implements vscode.Disposable {
   // response must be written back into the store or the dropdown snaps back.
 
   /**
-   * Push the panel's authoritative mode to the CLI before a turn starts.
+   * Push the fixed main-session mode after `session/new` / `session/load`.
    *
-   * The CLI keeps the mode only in `Config.approvalMode` and never notifies us
-   * (no `current_mode_update`), so the panel's copy is an optimistic echo that
-   * nothing used to re-sync. Without this push a drift between the dropdown and
-   * the CLI's real mode would silently change what the agent is allowed to do
-   * (e.g. edits rejected with "Cannot execute write_file in PLAN mode" while
-   * the composer showed an approving mode).
-   *
-   * Pushing the stored mode right before each prompt makes the CLI follow what
-   * the user sees; pushing the mode it already holds is a no-op CLI-side. A
-   * failure here must never block the prompt — the turn still runs as before.
+   * Same-value pushes are CLI-side no-ops, so calling this on every session
+   * start is idempotent. The store's optimistic echo is updated only when it
+   * actually changed. Never throws: a failure only logs — the turn still
+   * runs under whatever mode the CLI booted with.
    */
-  private async assertModeForPrompt(client: AcpClient, sessionId: string): Promise<void> {
-    const modeId = this.store.getState().modes?.currentModeId;
-    if (!modeId) return;
+  private async applyMainSessionMode(client: AcpClient, sessionId: string): Promise<void> {
     try {
-      await client.setMode(sessionId, modeId);
+      const resp = (await client.setMode(sessionId, MAIN_SESSION_MODE)) as
+        | { success?: boolean; currentModeId?: string }
+        | undefined;
+      const modes = this.store.getState().modes;
+      if (!modes) return;
+      const currentModeId = resp?.currentModeId ?? MAIN_SESSION_MODE;
+      if (modes.currentModeId !== currentModeId) {
+        this.store.sessionMeta({ modes: { ...modes, currentModeId } });
+      }
     } catch (error) {
-      this.log.warn(`mode re-assert failed (${modeId}): ${errorMessage(error)}`);
+      this.log.warn(`main session mode push failed (${MAIN_SESSION_MODE}): ${errorMessage(error)}`);
     }
   }
 
-  private async setMode(modeId: string): Promise<void> {
-    if (this.historySyncBusy) return;
-    const sessionId = this.store.getState().sessionId;
-    // C2: an empty sessionId would make the CLI bind the mode to a bogus
-    // session — refuse until a session actually exists.
-    if (!sessionId) {
-      vscode.window.showWarningMessage(vscode.l10n.t("会话未就绪"));
-      return;
-    }
+  /**
+   * Re-assert the fixed mode before a turn starts.
+   *
+   * The CLI keeps the mode only in its config and never notifies us (no
+   * `current_mode_update`), so an external drift (stale archived session,
+   * external `~/.iflow/settings.json`) must be pulled back before the turn
+   * goes out. Pushing the mode it already holds is a no-op CLI-side; a
+   * failure here must never block the prompt.
+   */
+  private async assertModeForPrompt(client: AcpClient, sessionId: string): Promise<void> {
     try {
-      const resp = (await this.client?.setMode(sessionId, modeId)) as
-        | { success?: boolean; currentModeId?: string }
-        | undefined;
-      if (resp?.success && resp.currentModeId) {
-        const modes = this.store.getState().modes;
-        if (modes) this.store.sessionMeta({ modes: { ...modes, currentModeId: resp.currentModeId } });
-        return;
-      }
-      vscode.window.showWarningMessage(
-        vscode.l10n.t("切换模式失败：{0}", JSON.stringify(resp ?? vscode.l10n.t("无响应"))),
-      );
+      await client.setMode(sessionId, MAIN_SESSION_MODE);
     } catch (error) {
-      vscode.window.showWarningMessage(
-        vscode.l10n.t("切换模式失败：{0}", errorMessage(error)),
-      );
+      this.log.warn(`mode re-assert failed (${MAIN_SESSION_MODE}): ${errorMessage(error)}`);
     }
   }
 
@@ -12159,29 +11854,10 @@ export class ChatPanel implements vscode.Disposable {
       const pushId = await this.validateModelForPush(modelsPromise, currentModelId, cliModelId);
       if (pushId) await this.setModel(pushId);
     }
-    // iflow.defaultMode: the CLI boots with its own mode (session/new
-    // reports it in modes.currentModeId), so the configured default must be
-    // pushed explicitly on every fresh session — the setting was previously
-    // declared but never read (trap #14 class). A legacy `plan` value is no
-    // longer in DEFAULT_MODES, so it is ignored here (compat, no error).
-    // Additionally Plan mode was removed from the product: if the CLI still
-    // boots in it (external ~/.iflow/settings.json `approvalMode: "plan"`),
-    // setMeta already normalized the store's mode — push that normalized mode
-    // so the CLI does not stay in a mode the user can no longer see or leave.
-    const configuredMode = vscode.workspace.getConfiguration("iflow").get<string>("defaultMode");
-    const normalizedModes = this.store.getState().modes;
-    const configuredOffered =
-      configuredMode && normalizedModes?.availableModes.some((m) => m.id === configuredMode)
-        ? configuredMode
-        : null;
-    const modeDriftedFromPlan =
-      session.modes && normalizedModes && normalizedModes.currentModeId !== session.modes.currentModeId
-        ? normalizedModes.currentModeId
-        : null;
-    const targetMode = configuredOffered ?? modeDriftedFromPlan;
-    if (targetMode && targetMode !== session.modes?.currentModeId) {
-      await this.setMode(targetMode).catch(() => undefined);
-    }
+    // 主会话模式固定为 smart：CLI 会按自己的启动模式（外部 settings.json
+    // 的 approvalMode 或内置默认）开新会话，必须显式推回 smart。set_mode
+    // 同值推送在 CLI 侧是 no-op，因此每次新建会话都推送是幂等的。
+    await this.applyMainSessionMode(client, session.sessionId);
     await this.applyThinkLevel(client, session.sessionId, this.store.getState().thinkLevel);
     this.log.info(`session started: ${session.sessionId}`);
     await this.recordSession(session.sessionId, null);
@@ -13448,7 +13124,7 @@ export class ChatPanel implements vscode.Disposable {
             throw new Error("session changed during history synchronization");
           }
           const after = this.store.getState();
-          if (after.modes?.currentModeId) await client.setMode(sessionId, after.modes.currentModeId);
+          await client.setMode(sessionId, MAIN_SESSION_MODE);
           if (after.currentModelId) await client.setModel(sessionId, after.currentModelId);
         }
       } catch (error) {
@@ -13662,9 +13338,6 @@ export class ChatPanel implements vscode.Disposable {
         // Fresh output flag per attempt: the gate below judges THIS attempt
         // only (a compress turn's own output must not mask an empty resend).
         this.turnHadAgentOutput = false;
-        // M4 P1-1: auto-approval transcript notes dedupe per turn — a new
-        // attempt (or turn) may legitimately re-note the same rule hit.
-        this.autoApprovalNoted.clear();
         try {
           // A `/compress` turn may be given a wall-clock ceiling
           // (`iflow.compressTimeoutSeconds`); 0 keeps the historical

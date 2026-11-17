@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { Brain, Database, ExternalLink, Globe, KeyRound, Loader2, MessageSquare, MoreHorizontal, Palette, Pencil, Plus, RefreshCw, Server, Settings2, Sparkles, Trash2 } from "lucide-react";
 import type {
   AuthUiState,
   ThinkingModelRuleUi,
-  UiCliApprovalMode,
   UiCliLanguage,
-  UiDefaultMode,
   UiOsNotifications,
   UiThemeMode,
 } from "../../../shared/messages";
@@ -39,7 +37,6 @@ import {
   rovingTabKeyDown,
 } from "./ui";
 import { McpSection } from "./McpCard";
-import { ApprovalPolicySection } from "./ApprovalPolicyCard";
 import { MemorySection } from "./MemoryCard";
 import { AssetSection } from "./AssetCard";
 import { QqSettings } from "./QqSettings";
@@ -50,13 +47,13 @@ import { QqSettings } from "./QqSettings";
  * MCP tools, memory and runtime/data. Every control writes the same VSCode
  * user settings.json the CLI/config reads, so Settings Sync carries it.
  * Replaces the old three-modal sprawl (AuthCard embedding 「扩展设置」 buttons
- * that swapped into McpCard / ApprovalPolicyCard with no way back).
+ * that swapped into other cards with no way back).
  *
  * Layout: fixed header (section title + back arrow while editing) → body =
  * nav rail (left on wide viewports, top tab strip when narrow, via the
  * @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
-export type SettingsTab = "api" | "chat" | "appearance" | "policy" | "mcp" | "memory" | "assets" | "qq" | "runtime";
+export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "qq" | "runtime";
 
 /** Editor-state header override a section reports to the shell (back arrow +
  * contextual title while a sub-editor is open). */
@@ -109,7 +106,6 @@ export function SettingsModal({
       tabs: [
         { id: "chat", icon: MessageSquare, label: t("对话") },
         { id: "appearance", icon: Palette, label: t("外观与交互") },
-        { id: "policy", icon: ShieldCheck, label: t("权限与审批") },
       ],
     },
     {
@@ -146,7 +142,7 @@ export function SettingsModal({
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <HelpTip label={t("设置保存在哪里")} align="left">
-            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言、审批模式保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。")}
+            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。")}
           </HelpTip>
           <Button
             variant="ghost"
@@ -159,7 +155,7 @@ export function SettingsModal({
             className="ml-auto"
             disabled={busy}
             icon={<RefreshCw className={ICON_INLINE} />}
-            title={t("重启内核，当前会话会自动恢复。语言、审批模式与 MCP 的改动在重启后生效。")}
+            title={t("重启内核，当前会话会自动恢复。语言与 MCP 的改动在重启后生效。")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();
@@ -229,9 +225,6 @@ export function SettingsModal({
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "chat" && <ChatSection />}
           {tab === "appearance" && <AppearanceSection />}
-          {tab === "policy" && (
-            <ApprovalPolicySection busy={busy} onHeader={setSectionHeader} defaults={<PermissionDefaults />} />
-          )}
           {tab === "mcp" && <McpTab busy={busy} onHeader={setSectionHeader} />}
           {tab === "memory" && <MemorySection busy={busy} onHeader={setSectionHeader} />}
           {tab === "assets" && <AssetSection busy={busy} onHeader={setSectionHeader} />}
@@ -786,47 +779,6 @@ function AppearanceSection() {
           description={t("背景光晕的浓淡：0 为关闭，100 最亮。")}
           value={settings.auroraIntensity}
           onCommit={(auroraIntensity) => update({ auroraIntensity })}
-        />
-      </SettingsDisclosure>
-    </div>
-  );
-}
-
-/** Mode defaults shown above the approval-rule table. */
-function PermissionDefaults() {
-  const settings = useChat((s) => s.hostSettings);
-  const update = useChat((s) => s.updateHostSetting);
-  const approvalOptions: Array<{ value: UiCliApprovalMode; label: string }> = [
-    { value: "", label: t("跟随内核") },
-    { value: "default", label: t("标准") },
-    { value: "smart", label: t("智能") },
-    { value: "yolo", label: t("免确认") },
-  ];
-  const defaultModeOptions: Array<{ value: UiDefaultMode; label: string }> = [
-    { value: "smart", label: t("智能") },
-    { value: "default", label: t("标准") },
-    { value: "yolo", label: t("免确认") },
-  ];
-  return (
-    <div className="space-y-4">
-      <SettingsGroup title={t("默认模式")}>
-        <ChoiceRow
-          label={t("面板默认权限模式")}
-          description={t("新会话使用的权限模式。")}
-          detail={t("只影响新会话；当前会话可在输入框下方的模式菜单里切换。")}
-          value={settings.defaultMode}
-          options={defaultModeOptions}
-          onChange={(defaultMode) => update({ defaultMode })}
-        />
-      </SettingsGroup>
-      <SettingsDisclosure title={t("内核兼容")} hint={t("重启内核生效")}>
-        <ChoiceRow
-          label={t("内核默认审批模式")}
-          description={t("内核启动时使用的审批模式。")}
-          detail={t("与上面的面板默认模式互不影响；保存后重启内核生效。")}
-          value={settings.approvalMode}
-          options={approvalOptions}
-          onChange={(approvalMode) => update({ approvalMode })}
         />
       </SettingsDisclosure>
     </div>

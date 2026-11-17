@@ -2,7 +2,6 @@ import { create } from "zustand";
 import {
   applyBlockPatch,
   evictBlockPayloads,
-  type ApprovalRule,
   type Block,
   type HostSettingsUi,
   type HostToWebview,
@@ -91,8 +90,6 @@ const DEFAULT_HOST_SETTINGS: HostSettingsUi = {
   soundFeedback: true,
   osNotifications: "approvals",
   language: "",
-  defaultMode: "smart",
-  approvalMode: "",
   theme: "auto",
   auroraIntensity: 35,
   uiFontSize: "standard",
@@ -229,10 +226,6 @@ function createMockHost(): HostApi {
   const mockHostSettings: HostSettingsUi = { ...DEFAULT_HOST_SETTINGS };
   /** 「联网补充模型数据」 mock: one in-flight timer (cancel clears it). */
   let mockMetadataTimer: number | null = null;
-  // Mock approval-policy table + 「始终允许」 draft (M4 P1-1), same shape as
-  // the host's approvalPolicy message.
-  let mockApprovalRules: ApprovalRule[] | undefined;
-  let mockApprovalDraft: ApprovalRule | null | undefined;
   // Mock QQ settings (browser preview): the QQ tab renders straight from
   // `qqSettings`, so seed the access-control tables with real entries —
   // two users with notes plus one without (exercises the masked fallback)
@@ -1513,26 +1506,6 @@ function createMockHost(): HostApi {
         });
         return;
       }
-      if (m.type === "setMode") {
-        // Mirrors real CLI behavior: respond with the new current mode.
-        demoMeta.modes = {
-          ...demoMeta.modes,
-          currentModeId: m.modeId,
-        };
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "idle",
-            errorMessage: null,
-            stopReason: "end_turn",
-            ...demoMeta,
-            pendingApproval: activeApproval,
-            auth: authState,
-          },
-        });
-        return;
-      }
       if (m.type === "setModel") {
         demoMeta.currentModelId = m.modelId;
         broadcast({
@@ -2169,35 +2142,6 @@ function createMockHost(): HostApi {
             ),
           400,
         );
-        return;
-      }
-      if (m.type === "listApprovalPolicy" || m.type === "saveApprovalPolicy" || m.type === "dismissApprovalRuleDraft") {
-        if (m.type === "saveApprovalPolicy") mockApprovalRules = m.rules;
-        if (m.type === "dismissApprovalRuleDraft") mockApprovalDraft = null;
-        if (!mockApprovalRules) {
-          mockApprovalRules = [
-            { id: "rule-read-src", label: "允许读取 src 下文件", enabled: true, action: "allow", kinds: ["read"], path: "src/**", hits: 12 },
-            { id: "deny-env", label: "拒绝读取 .env", enabled: true, action: "deny", path: "**/.env*" },
-            { id: "ask-push", label: "git push 弹卡", enabled: false, action: "ask", commands: ["git"] },
-          ];
-          mockApprovalDraft = {
-            id: `rule-draft-${Date.now().toString(36)}`,
-            label: "允许执行 git status",
-            enabled: true,
-            action: "allow",
-            kinds: ["execute"],
-            commands: ["git"],
-          };
-        }
-        const payload = {
-          type: "approvalPolicy",
-          rules: mockApprovalRules,
-          projectRules: [{ id: "proj-lock", label: "项目：拒绝改 lock 文件", enabled: true, action: "deny", path: "**/package-lock.json" }],
-          draft: mockApprovalDraft,
-          // Mirror the real host: a save is acknowledged with its outcome.
-          ...(m.type === "saveApprovalPolicy" ? { saveResult: "ok" as const } : {}),
-        };
-        window.setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: payload })), 80);
         return;
       }
       if (m.type === "stopSubagent") {
@@ -2932,7 +2876,6 @@ export const useChat = create<ChatStore>((set, get) => ({
       msg.type === "memoryFileContent" ||
       msg.type === "memoryCandidates" ||
       msg.type === "knowledgeJob" ||
-      msg.type === "approvalPolicy" ||
       msg.type === "profileDeleteResult" ||
       msg.type === "enhancedPrompt" ||
       msg.type === "queueEdited" ||

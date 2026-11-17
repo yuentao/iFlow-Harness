@@ -25,8 +25,6 @@ const hostSettings = vi.hoisted(() => ({
   soundFeedback: true,
   osNotifications: "approvals",
   language: "",
-  defaultMode: "smart",
-  approvalMode: "",
   theme: "auto",
   auroraIntensity: 35,
   uiFontSize: "standard",
@@ -86,7 +84,6 @@ vi.mock("../webview/src/store", () => ({
 }));
 vi.mock("../webview/src/i18n", () => ({
   t: (s: string, ...args: string[]) => s.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)] ?? ""),
-  modeDisplay: () => ({ label: "mode", desc: "" }),
 }));
 // 新增用例只断言顶栏 / 设置页 / Composer 三处切换；转录与子会话看板不参与。
 vi.mock("../webview/src/components/MessageList", () => ({ MessageList: () => null }));
@@ -147,13 +144,13 @@ it("exposes the redesigned top-level categories", () => {
   expect(container.textContent).toContain("账户与模型");
   expect(container.textContent).toContain("对话");
   expect(container.textContent).toContain("外观与交互");
-  expect(container.textContent).toContain("权限与审批");
+  expect(container.textContent).not.toContain("权限与审批");
   expect(container.textContent).toContain("MCP 与工具");
   expect(container.textContent).toContain("记忆与知识");
   expect(container.textContent).toContain("运行与数据");
 });
 
-it("groups the nine tabs under four named sections", () => {
+it("groups the eight tabs under four named sections", () => {
   for (const group of ["账户", "工作方式", "扩展", "系统"]) {
     expect(container.textContent).toContain(group);
   }
@@ -161,7 +158,7 @@ it("groups the nine tabs under four named sections", () => {
   const tablist = container.querySelector('[role="tablist"]');
   expect(tablist).toBeTruthy();
   const tabs = container.querySelectorAll('[role="tab"]');
-  expect(tabs).toHaveLength(9);
+  expect(tabs).toHaveLength(8);
   expect([...tabs].filter((el) => el.getAttribute("tabindex") === "0")).toHaveLength(1);
 });
 
