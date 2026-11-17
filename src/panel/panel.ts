@@ -7698,7 +7698,7 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     if (scan.blocks.length === 0) return;
-    this.dispatchSuperTasks(scan.blocks);
+    this.dispatchSuperTasks(scan.blocks, scan.issues);
   }
 
   /**
@@ -7709,11 +7709,26 @@ export class ChatPanel implements vscode.Disposable {
    * toast 文案都不允许两条通道各写一份 —— 同一份载荷从两条路径同时到达时，
    * `superDirectiveDedupeKey` 必须能看见同一个账本，否则会双开子会话。
    */
-  private dispatchSuperTasks(blocks: readonly SuperTaskSpec[][]): void {
+  private dispatchSuperTasks(
+    blocks: readonly SuperTaskSpec[][],
+    issues: readonly string[] = [],
+  ): void {
     const manager = this.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
       return;
+    }
+    if (issues.length > 0) {
+      // 混合载荷：合法任务照常派发，但被丢掉的畸形条目必须可见 —— 静默丢一半
+      // 正是「用户只看到一堵 JSON 墙」的来源。只报首条原因，避免 toast 过长。
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t(
+          "已忽略 {0} 个格式错误的任务条目（{1}）",
+          issues.length,
+          issues[0] ?? "",
+        ),
+      );
     }
     let dispatched = 0;
     let droppedAttachments = 0;
@@ -7790,7 +7805,7 @@ export class ChatPanel implements vscode.Disposable {
       `super agent: accepted structured ${parsed.kind} tool call (${update.toolCallId || "no-id"})`,
     );
     if (parsed.kind === "dispatch") {
-      this.dispatchSuperTasks(parsed.tasks);
+      this.dispatchSuperTasks(parsed.tasks, parsed.issues);
       return;
     }
     // 同一工具帧会在 pending / in_progress 两帧各带一次载荷；动作没有载荷
@@ -7873,10 +7888,7 @@ export class ChatPanel implements vscode.Disposable {
     );
     this.store.sendToast(
       "warning",
-      vscode.l10n.t(
-        "模型调用了不存在的 super-agent 工具（{0}，工具列表里没有它），未派发子会话",
-        name,
-      ),
+      vscode.l10n.t("super-agent 调用载荷不合法（{0}），未派发子会话", reason),
     );
   }
 

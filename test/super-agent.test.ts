@@ -99,6 +99,31 @@ describe("super agent · 委派指令解析", () => {
     expect(scan.invalidBlocks).toHaveLength(1);
   });
 
+  it("task 写成字符串数组 → 非法块的原因指向 task 字段", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[["步骤1","步骤2"]]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks).toHaveLength(0);
+    expect(scan.invalidBlocks).toHaveLength(1);
+    expect(scan.invalidBlocks[0]?.reason).toContain("task 必须是字符串");
+    expect(scan.invalidBlocks[0]?.issues).toEqual(["tasks[0].task 必须是字符串"]);
+    expect(scan.issues).toEqual(["tasks[0].task 必须是字符串"]);
+  });
+
+  it("混合块（一条合法 + 一条畸形）→ 派发合法项并带上 issues", () => {
+    const scan = extractSuperDirectives([
+      "```super-agent",
+      '{"tasks":[{"title":"真的","task":"真的任务"},{"task":123}]}',
+      "```",
+    ].join("\n"));
+    expect(scan.blocks).toHaveLength(1);
+    expect(scan.blocks[0]).toEqual([{ title: "真的", task: "真的任务" }]);
+    expect(scan.invalidBlocks).toHaveLength(0);
+    expect(scan.issues).toEqual(["tasks[1].task 必须是字符串"]);
+  });
+
   it("占位符任务被忽略（模型把示例原样抄回来）", () => {
     const text = ['```super-agent', '{"tasks":[{"title":"<标题>","task":"<自包含的任务说明>"}]}', "```"].join("\n");
     const scan = extractSuperDirectives(text);

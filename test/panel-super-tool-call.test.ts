@@ -293,6 +293,7 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
     expect(warnings).toHaveLength(1);
     expect(String(warnings[0]?.[1])).toContain("super-agent");
+    expect(String(warnings[0]?.[1])).toContain("载荷不合法");
     expect(String(warnings[0]?.[1])).toContain("未派发子会话");
     expect(p.log.lines.some((line) => line.level === "warn")).toBe(true);
 
@@ -303,6 +304,25 @@ describe("Super Agent · 结构化工具调用兜底", () => {
     });
     expect(toast.mock.calls.filter((call) => call[0] === "warning")).toHaveLength(1);
     expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("畸形 tasks（字符串数组）：warning 含具体原因，零 spawn", () => {
+    const toast = vi.spyOn(p.store, "sendToast");
+    p.onSessionUpdate({
+      sessionId: "tool-session",
+      update: frame({
+        status: "in_progress",
+        // 实测形态：模型把 tasks[].task 写成字符串数组。
+        args: { tasks: [["a", "b"]] },
+      }),
+    });
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    const warnings = toast.mock.calls.filter((call) => call[0] === "warning");
+    expect(warnings).toHaveLength(1);
+    expect(String(warnings[0]?.[1])).toContain("载荷不合法");
+    expect(String(warnings[0]?.[1])).toContain("task 必须是字符串");
+    expect(String(warnings[0]?.[1])).toContain("未派发子会话");
   });
 
   it("pending 帧不带 args 时不误报「未派发」，随后 in_progress 照常派发一次", () => {

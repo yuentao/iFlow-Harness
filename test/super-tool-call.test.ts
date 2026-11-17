@@ -16,7 +16,7 @@ import {
   resolveSuperToolCallKind,
   synthesizeSuperToolCallBlock,
 } from "../shared/super-tool-call.js";
-import { extractSuperActions, extractSuperDirectives } from "../shared/super-agent.js";
+import { extractSuperActions, extractSuperDirectives, parseSuperDelegationPayload } from "../shared/super-agent.js";
 
 describe("classifySuperToolName", () => {
   it("把派发工具名的大小写与分隔符归一", () => {
@@ -308,5 +308,66 @@ describe("parseSuperDelegationTasks", () => {
     expect(viaDispatcher.ok).toBe(true);
     if (!viaDispatcher.ok) return;
     expect(direct).toEqual(viaDispatcher.tasks.flat());
+  });
+});
+
+/**
+ * 畸形委派载荷必须给出可诊断的错误，而不是静默丢成「零派发 + 一堵 JSON 墙」。
+ *
+ * 实测形态（2026-11-17）：主 Agent 把 `tasks[].task` 写成字符串数组
+ * （`{"tasks":[["a","b"]]}`），旧解析只回一句「没有可派发的任务」，用户与模型
+ * 都无法定位是哪个字段写错了。
+ */
+describe("parseSuperDelegationPayload · 畸形载荷诊断", () => {
+  it("tasks[].task 传成字符串数组 → ok:false，原因指向 task 字段", () => {
+    const parsed = parseSuperDelegationPayload({ tasks: [["a", "b"]] });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("task 必须是字符串");
+    expect(parsed.issues).toEqual(["tasks[0].task 必须是字符串"]);
+  });
+
+  it("task 不是字符串 → ok:false，索引级原因", () => {
+    const parsed = parseSuperDelegationPayload({ tasks: [{ task: 123 }] });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("task 必须是字符串");
+    expect(parsed.issues).toEqual(["tasks[0].task 必须是字符串"]);
+  });
+
+  it("非对象条目 → 指出是第几条不是对象", () => {
+    const parsed = parseSuperDelegationPayload({ tasks: ["坏条目"] });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.issues).toEqual(["tasks[0] 必须是对象"]);
+  });
+
+  it("混合载荷：合法任务保留，畸形条目进 issues（ok:true）", () => {
+    const parsed = parseSuperDelegationPayload({
+      tasks: [{ task: "合法任务" }, { task: 42 }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks).toHaveLength(1);
+    expect(parsed.tasks[0]?.task).toBe("合法任务");
+    expect(parsed.issues).toEqual(["tasks[1].task 必须是字符串"]);
+  });
+
+  it("parseSuperToolCall 的失败分支带 issues", () => {
+    const parsed = parseSuperToolCall("dispatch", { tasks: [["a", "b"]] });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.reason).toContain("task 必须是字符串");
+    expect(parsed.issues).toContain("tasks[0].task 必须是字符串");
+  });
+
+  it("parseSuperToolCall 的成功分支带 issues（混合载荷）", () => {
+    const parsed = parseSuperToolCall("dispatch", {
+      tasks: [{ task: "真的" }, { task: 7 }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.tasks.flat()).toHaveLength(1);
+    expect(parsed.issues).toEqual(["tasks[1].task 必须是字符串"]);
   });
 });
