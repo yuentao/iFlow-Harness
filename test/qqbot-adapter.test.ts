@@ -996,3 +996,179 @@ describe("QqBotAdapter — token 刷新并发与诊断", () => {
     await adapter.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 心跳阈值可注入 / 反复判死不退避重置 / 握手超时（2026-11-17 第二轮修复）
+// ---------------------------------------------------------------------------
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor 超时");
+    await sleep(2);
+  }
+}
+
+describe("QqBotAdapter — 心跳判死阈值可注入", () => {
+  it("缺省阈值仍是 2（日志写明 × 2，行为不变）", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      reconnectBaseDelayMs: 500,
+      reconnectMaxDelayMs: 500,
+    });
+
+    await adapter.connect();
+    const socket = transport.socket;
+    socket.emit(helloFrame(5));
+    // 一直不发 ACK：默认两个周期后判死。
+    await waitFor(() => socket.closed.value, 1000);
+    expect(logs.join("\n")).toContain("× 2");
+    await adapter.close();
+  });
+
+  it("注入 1：一个周期收不到 ACK 即判死", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      heartbeatMaxMissedAcks: 1,
+      reconnectBaseDelayMs: 500,
+      reconnectMaxDelayMs: 500,
+    });
+
+    await adapter.connect();
+    const socket = transport.socket;
+    socket.emit(helloFrame(5));
+    await waitFor(() => socket.closed.value, 1000);
+    expect(logs.join("\n")).toContain("× 1");
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — 反复判死不退避重置", () => {
+  it("连续判死 3 次退避单调增长，READY 后清零，health 可观测", async () => {
+    const transport = new FakeTransport();
+    const logs: string[] = [];
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      log: (line) => logs.push(line),
+      reconnectBaseDelayMs: 5,
+      reconnectMaxDelayMs: 100,
+      // 关掉握手超时，避免它混进「判死次数」的观察。
+      handshakeTimeoutMs: 0,
+    });
+
+    await adapter.connect();
+    for (let round = 0; round < 3; round += 1) {
+      const before = transport.connects.length;
+      transport.socket.drop(new Error("link dead"));
+      await waitFor(() => transport.connects.length > before);
+    }
+
+    const delays = logs
+      .filter((line) => line.includes("reconnect in"))
+      .map((line) => Number(/reconnect in (\d+)ms/.exec(line)?.[1] ?? "NaN"));
+    expect(delays.slice(0, 3)).toEqual([5, 10, 20]);
+
+    const health = await adapter.health();
+    expect(health.detail).toContain("最近断线原因");
+    expect(health.detail).toContain("连续失败 3 次");
+    // 凭据绝不进 health。
+    expect(health.detail).not.toContain("tok-1");
+
+    // READY 是唯一重置点：连续失败清零，下一次判死从 base 重新开始。
+    transport.socket.emit(helloFrame(60_000));
+    transport.socket.emit(dispatchFrame("READY", { session_id: "s-1" }, 1));
+    expect((await adapter.health()).detail).not.toContain("连续失败");
+
+    const before = transport.connects.length;
+    transport.socket.drop(new Error("dead again"));
+    await waitFor(() => transport.connects.length > before);
+    expect(logs.filter((line) => line.includes("reconnect in")).at(-1)).toContain(
+      "reconnect in 5ms",
+    );
+
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — 握手超时（已连接但不干活）", () => {
+  it("101 后迟迟没有 READY：超时断开、记 lastError 并重连", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 100,
+      reconnectMaxDelayMs: 100,
+      handshakeTimeoutMs: 25,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    await waitFor(() => first.closed.value, 1000);
+    const detail = (await adapter.health()).detail;
+    expect(detail).toContain("握手超时");
+    expect(detail).toContain("最近断线原因");
+
+    // 断开后走重连退避。
+    await waitFor(() => transport.connects.length >= 2);
+    await adapter.close();
+  });
+
+  it("收到 READY 后定时器清除：连接不会被误杀", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 10,
+      reconnectMaxDelayMs: 10,
+      handshakeTimeoutMs: 25,
+    });
+
+    await adapter.connect();
+    const socket = transport.socket;
+    socket.emit(helloFrame(60_000));
+    socket.emit(dispatchFrame("READY", { session_id: "sess-ok" }, 1));
+
+    // 超过握手超时窗口后连接仍然健在，也没有触发重连。
+    await sleep(60);
+    expect(socket.closed.value).toBe(false);
+    expect(transport.connects).toHaveLength(1);
+    expect((await adapter.health()).connected).toBe(true);
+
+    await adapter.close();
+  });
+
+  it("只收到 HELLO、始终没有 READY（Resume 被静默忽略）时仍按超时处理", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({
+      appId: "app-1",
+      appSecret: "secret-1",
+      transport,
+      reconnectBaseDelayMs: 100,
+      reconnectMaxDelayMs: 100,
+      handshakeTimeoutMs: 25,
+    });
+
+    await adapter.connect();
+    const first = transport.socket;
+    // HELLO 到了、Identify/Resume 也发了，但平台永不回 READY。
+    first.emit(helloFrame(60_000));
+    await waitFor(() => first.closed.value, 1000);
+    await waitFor(() => transport.connects.length >= 2);
+
+    await adapter.close();
+  });
+});

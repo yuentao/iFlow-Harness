@@ -17,6 +17,11 @@
  * 连接生命周期（2026-11-17 补齐断线恢复）：
  *  - 心跳发送异常与 ACK 断供都在定时器内部消化（记 lastError → 主动断开 →
  *    指数退避重连），异常绝不穿透定时器回调；
+ *  - 101 建连成功后启动一次性握手超时（缺省 20s）：迟迟拿不到 READY 就断开
+ *    重连，避免「已连接但不干活」（平台静默忽略 Resume 时就是这种形态）；
+ *    定时器只在 READY 清除，HELLO 不算握手完成；
+ *  - 退避按**连续失败次数**指数增长，只有 READY 成功才清零 —— 反复判死不
+ *    会每次退回 1s 形成重连风暴；最近判死原因与连续失败次数进 health；
  *  - 重连优先 Resume（op=6，携带 session_id + 最近 seq，目标为 READY 给的
  *    resume_gateway_url），失败或没有会话时退回 Identify；
  *  - 退回 Identify 意味着断线区间无法补发：`missedWindowNotice` 会一直挂在
@@ -71,6 +76,17 @@ export interface QqBotAdapterDeps {
   reconnectBaseDelayMs?: number;
   /** 重连退避上限（毫秒，测试注入）；缺省 30000。 */
   reconnectMaxDelayMs?: number;
+  /**
+   * 连续多少个心跳周期收不到 ACK 就判定连接已死；缺省 2。
+   * 测试与弱网场景可注入更大值以减少误判，注入 1 表示一个周期未 ACK 即判死。
+   */
+  heartbeatMaxMissedAcks?: number;
+  /**
+   * WS 建连成功（101）后等待 HELLO/READY 的一次性握手超时（毫秒）；
+   * 缺省 20000，`<= 0` 关闭。平台对 Resume 静默忽略时连接会「看着活着但
+   * 永远没有 READY」，这条超时是唯一能把它拉回来的机制。
+   */
+  handshakeTimeoutMs?: number;
 }
 
 /** 过期前 5 分钟刷新：避免请求打到临界点被拒。 */
@@ -79,8 +95,20 @@ export const TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000;
 /** 默认心跳间隔兜底（Hello 没给 heartbeat_interval 时用 30s）。 */
 const DEFAULT_HEARTBEAT_MS = 30_000;
 
-/** 心跳连续多少个周期没收到 ACK 就判定连接已死（两个周期 ≈ 平台容忍窗口）。 */
-const HEARTBEAT_MAX_MISSED_ACKS = 2;
+/**
+ * 心跳连续多少个周期没收到 ACK 就判定连接已死（缺省 2 个周期 ≈ 平台容忍
+ * 窗口）。可通过构造选项 `heartbeatMaxMissedAcks` 覆盖，行为默认不变。
+ */
+export const DEFAULT_HEARTBEAT_MAX_MISSED_ACKS = 2;
+
+/**
+ * WS 建连（101）后等待 HELLO/READY 的一次性超时缺省值（20s）。
+ *
+ * 只覆盖「已连接但不干活」：TCP/TLS 与 101 由 transport 自己的连接超时管，
+ * 这里管的是握手帧迟迟不来（典型：平台静默忽略 Resume，连接保持但没有
+ * READY，心跳也永远不启动）。可用 `handshakeTimeoutMs` 覆盖或关闭。
+ */
+export const DEFAULT_QQBOT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
 /** 重连退避：1s 起、指数增长、封顶 30s（测试可注入更小值）。 */
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1_000;
@@ -214,14 +242,27 @@ export class QqBotAdapter implements ChannelAdapter {
   private socketEpoch = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private heartbeatIntervalMs = DEFAULT_HEARTBEAT_MS;
-  /** 已发出但尚未收到 ACK 的心跳数（连续两个周期无 ACK 判定连接已死）。 */
+  /** 建连成功后等待 HELLO/READY 的一次性超时定时器（READY 时清除）。 */
+  private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 已发出但尚未收到 ACK 的心跳数（连续多个周期无 ACK 判定连接已死）。 */
   private awaitingHeartbeatAcks = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempts = 0;
+  /**
+   * 连续失败次数（建连失败 / 心跳判死 / 握手超时都算）。
+   *
+   * 退避延迟按它指数增长，**只有 READY 成功才清零** —— 否则「反复判死 →
+   * 重连 → 又判死」的震荡里每次都会退回 1s 重连风暴。
+   */
+  private consecutiveFailures = 0;
+  /** 最近一次判死原因（脱敏后进 health().detail，便于排查震荡）。 */
+  private lastDeathReason: string | undefined;
   /** 用户显式 close 后不再自动重连。 */
   private closing = false;
   private readonly reconnectBaseDelayMs: number;
   private readonly reconnectMaxDelayMs: number;
+  private readonly heartbeatMaxMissedAcks: number;
+  private readonly handshakeTimeoutMs: number;
 
   private lastSequence: number | null = null;
   private lastEventAt: number | undefined;
@@ -309,6 +350,16 @@ export class QqBotAdapter implements ChannelAdapter {
       typeof deps.reconnectMaxDelayMs === "number" && deps.reconnectMaxDelayMs > 0
         ? deps.reconnectMaxDelayMs
         : DEFAULT_RECONNECT_MAX_DELAY_MS;
+    this.heartbeatMaxMissedAcks =
+      typeof deps.heartbeatMaxMissedAcks === "number" &&
+      Number.isFinite(deps.heartbeatMaxMissedAcks) &&
+      deps.heartbeatMaxMissedAcks >= 1
+        ? Math.floor(deps.heartbeatMaxMissedAcks)
+        : DEFAULT_HEARTBEAT_MAX_MISSED_ACKS;
+    this.handshakeTimeoutMs =
+      typeof deps.handshakeTimeoutMs === "number" && Number.isFinite(deps.handshakeTimeoutMs)
+        ? deps.handshakeTimeoutMs
+        : DEFAULT_QQBOT_HANDSHAKE_TIMEOUT_MS;
   }
 
   /** 注册入站消息回调（可用链式调用；重复注册以最后一次为准）。 */
@@ -414,6 +465,7 @@ export class QqBotAdapter implements ChannelAdapter {
     // 单连接生命周期：新建前先让旧 socket 失效（抬 epoch）并关闭，避免它的
     // close 事件反过来再触发一次重连。
     this.stopHeartbeat();
+    this.clearHandshakeTimeout();
     this.socketEpoch += 1;
     const previous = this.socket;
     this.socket = undefined;
@@ -446,11 +498,8 @@ export class QqBotAdapter implements ChannelAdapter {
     this.socket = socket;
     this.connected = true;
     this.awaitingHeartbeatAcks = 0;
-    // 连接成功即清空连接类错误（send 类错误由成功发送清除，见 send）。
-    if (this.lastErrorSource !== "send") {
-      this.lastError = undefined;
-      this.lastErrorSource = undefined;
-    }
+    // 101 不等于可用：连接类错误必须留到 READY 才清（captureReady），否则
+    // 「握手超时 → 重连 → 立刻把错误抹掉」会让 health 完全看不到问题。
     socket.onMessage((raw) => {
       if (epoch === this.socketEpoch) this.handleRaw(raw);
     });
@@ -461,6 +510,9 @@ export class QqBotAdapter implements ChannelAdapter {
         "connection",
       );
     });
+    // 握手超时：101 之后若一直拿不到 READY（典型：Resume 被平台静默忽略），
+    // 连接会「看着活着但不干活」。这里在拿到 READY 前兜一层超时。
+    this.startHandshakeTimeout(epoch);
     this.log("QQBot: websocket connected");
   }
 
@@ -474,6 +526,8 @@ export class QqBotAdapter implements ChannelAdapter {
       case QQBOT_OP.HELLO: {
         const hello = isRecord(raw["d"]) ? raw["d"] : {};
         const interval = toFiniteNumber(hello["heartbeat_interval"]);
+        // 注意：HELLO **不**清握手超时。平台静默忽略 Resume 时连接只会收到
+        // HELLO、永远没有 READY —— 若在这里清定时器，那次握手就永远悬着。
         this.startHeartbeat(
           interval !== undefined && interval > 0 ? interval : DEFAULT_HEARTBEAT_MS,
         );
@@ -487,7 +541,11 @@ export class QqBotAdapter implements ChannelAdapter {
         const eventType = typeof raw["t"] === "string" ? raw["t"] : "";
         // READY 携带可恢复会话信息（session_id / resume_gateway_url），必须在
         // normalize 丢弃系统事件之前抓住它。
-        if (eventType === "READY") this.captureReady(raw);
+        if (eventType === "READY") {
+          // 握手真正完成：清一次性超时，已 ready 的连接绝不误杀。
+          this.clearHandshakeTimeout();
+          this.captureReady(raw);
+        }
         const inbound = normalizeQqBotEvent(raw);
         if (!inbound) break;
         // 空 msgId 的消息无法做被动回复、也无法参与去重锚点：绝不能进任务
@@ -602,6 +660,10 @@ export class QqBotAdapter implements ChannelAdapter {
     }
     this.disconnectedSinceReady = false;
     this.reconnectAttempts = 0;
+    // 真正连上了：这是唯一的重置点 —— 连续失败次数与判死原因都清空，
+    // 退避下次从头算；连接类 lastError 也在这里清（101 不算连上）。
+    this.consecutiveFailures = 0;
+    this.lastDeathReason = undefined;
     if (this.lastErrorSource !== "send") {
       this.lastError = undefined;
       this.lastErrorSource = undefined;
@@ -627,9 +689,9 @@ export class QqBotAdapter implements ChannelAdapter {
   /** 一个心跳周期：ACK 断供或发送抛错都走「断开 + 退避重连」，绝不穿透定时器。 */
   private heartbeatTick(): void {
     if (!this.socket || this.closing) return;
-    if (this.awaitingHeartbeatAcks >= HEARTBEAT_MAX_MISSED_ACKS) {
+    if (this.awaitingHeartbeatAcks >= this.heartbeatMaxMissedAcks) {
       this.handleDisconnect(
-        `心跳 ACK 超时（${this.heartbeatIntervalMs}ms × ${HEARTBEAT_MAX_MISSED_ACKS}）`,
+        `心跳 ACK 超时（${this.heartbeatIntervalMs}ms × ${this.heartbeatMaxMissedAcks}）`,
         "connection",
       );
       return;
@@ -651,6 +713,36 @@ export class QqBotAdapter implements ChannelAdapter {
     this.awaitingHeartbeatAcks = 0;
   }
 
+  /**
+   * 启动一次性握手超时（仅在还没有 READY 时有效）。
+   *
+   * 守卫用 `epoch === this.socketEpoch`：socket 已换代的旧定时器直接作废。
+   * 超时即按连接已死处理（关 socket + 记 lastError + 退避重连），避免连接
+   * 「已连上但永远不干活」地挂着。
+   */
+  private startHandshakeTimeout(epoch: number): void {
+    this.clearHandshakeTimeout();
+    if (!(this.handshakeTimeoutMs > 0)) return;
+    const timer = setTimeout(() => {
+      if (this.handshakeTimer !== timer) return;
+      this.handshakeTimer = undefined;
+      if (this.closing || epoch !== this.socketEpoch || !this.socket) return;
+      this.handleDisconnect(
+        `握手超时（${this.handshakeTimeoutMs}ms 内未收到 READY）`,
+        "connection",
+      );
+    }, this.handshakeTimeoutMs);
+    timer.unref?.();
+    this.handshakeTimer = timer;
+  }
+
+  private clearHandshakeTimeout(): void {
+    if (this.handshakeTimer !== undefined) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = undefined;
+    }
+  }
+
   private clearReconnectTimer(): void {
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
@@ -665,6 +757,7 @@ export class QqBotAdapter implements ChannelAdapter {
   private handleDisconnect(reason: string, source: "send" | "connection"): void {
     if (this.closing) return;
     const hadSocket = this.socket !== undefined;
+    this.clearHandshakeTimeout();
     this.stopHeartbeat();
     this.socketEpoch += 1;
     const socket = this.socket;
@@ -677,6 +770,10 @@ export class QqBotAdapter implements ChannelAdapter {
         // 关闭失败不影响重连
       }
     }
+    // 震荡记账：连续失败次数只由 READY 清零（见 captureReady），退避据此
+    // 递增，绝不因为「又建上了一条 101」就退回 1s 重连。
+    this.consecutiveFailures += 1;
+    this.lastDeathReason = reason;
     this.noteError(source, reason);
     this.log(`QQBot: disconnected: ${this.redact(reason)}`);
     // 本次断线若最终退回 Identify（没有会话 / resume 被拒），断线区间就是真实
@@ -689,8 +786,11 @@ export class QqBotAdapter implements ChannelAdapter {
   private scheduleReconnect(): void {
     if (this.closing || this.reconnectTimer !== undefined) return;
     this.reconnectAttempts += 1;
+    // 延迟按**连续失败次数**算（READY 才清零）：反复判死时退避单调增长，
+    // 不会因为「这次 TCP 又连上了」而重置到 1s，避免重连风暴。
+    const failures = Math.max(1, this.consecutiveFailures);
     const delay = Math.min(
-      this.reconnectBaseDelayMs * 2 ** (this.reconnectAttempts - 1),
+      this.reconnectBaseDelayMs * 2 ** (failures - 1),
       this.reconnectMaxDelayMs,
     );
     this.log(`QQBot: reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
@@ -706,7 +806,10 @@ export class QqBotAdapter implements ChannelAdapter {
         this.missedWindowNotice = "断线区间可能丢消息（resume 多次失败，已改为新建会话）";
       }
       void this.openSocket().catch((error: unknown) => {
-        this.noteError("connection", `重连失败：${errorText(error)}`);
+        const reason = `重连失败：${errorText(error)}`;
+        this.consecutiveFailures += 1;
+        this.lastDeathReason = reason;
+        this.noteError("connection", reason);
         this.scheduleReconnect();
       });
     }, delay);
@@ -819,6 +922,7 @@ export class QqBotAdapter implements ChannelAdapter {
   async close(): Promise<void> {
     this.closing = true;
     this.clearReconnectTimer();
+    this.clearHandshakeTimeout();
     this.stopHeartbeat();
     this.socketEpoch += 1;
     const socket = this.socket;
@@ -829,6 +933,8 @@ export class QqBotAdapter implements ChannelAdapter {
     this.disconnectedSinceReady = false;
     this.missedWindowNotice = undefined;
     this.reconnectAttempts = 0;
+    this.consecutiveFailures = 0;
+    this.lastDeathReason = undefined;
     if (socket) {
       try {
         socket.close();
@@ -849,6 +955,14 @@ export class QqBotAdapter implements ChannelAdapter {
   async health(): Promise<ChannelHealth> {
     const parts: string[] = [this.connected ? "qqbot websocket" : "disconnected"];
     if (this.lastError) parts.push(this.redact(this.lastError));
+    // 判死原因单独带标签（可能与 lastError 同一句，成对出现也无害）。
+    const deathReason = this.lastDeathReason ? this.redact(this.lastDeathReason) : undefined;
+    if (deathReason) {
+      parts.push(`最近断线原因：${deathReason}`);
+    }
+    if (this.consecutiveFailures > 0) {
+      parts.push(`连续失败 ${this.consecutiveFailures} 次`);
+    }
     if (this.missedWindowNotice) parts.push(this.missedWindowNotice);
     if (this.droppedInbound > 0) {
       parts.push(`已丢弃 ${this.droppedInbound} 条缺 msgId 的入站事件`);
