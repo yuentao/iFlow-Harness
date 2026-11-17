@@ -264,28 +264,48 @@ describe("QqSettings", () => {
     expect(onChange).toHaveBeenCalledWith({ route: "main" });
   });
 
-  it("默认态：真正的表格 + 表头，行内没有任何输入框，openid 只显示脱敏文本", () => {
+  it("默认态：两列表格（条目 / 操作），行内无输入框，条目列含备注与完整脱敏值", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
 
     const table = accessTable("允许的用户");
-    // 真正的表格语义：三个 columnheader，操作列在最后。
+    // 两列：条目 + 操作（操作列在最后）。
     const headers = [...table.querySelectorAll("th")];
-    expect(headers.map((th) => th.textContent)).toEqual(["备注", "openid", "操作"]);
+    expect(headers).toHaveLength(2);
+    expect(headers.map((th) => th.textContent)).toEqual(["条目", "操作"]);
     expect(headers.every((th) => th.getAttribute("scope") === "col")).toBe(true);
 
     // 展示态没有任何输入框：备注与脱敏 id 都是纯文本。
     expect(table.querySelectorAll("input")).toHaveLength(0);
     const text = table.textContent ?? "";
     expect(text).toContain("同事");
+    // 脱敏值必须完整可见：星号段与末尾 4 位都在。
+    expect(text).toContain("********");
+    expect(text).toContain("8D11");
     expect(text).toContain("D754********8D11");
     expect(text).not.toContain(openid);
     // 完整 openid 连 title 属性里都不出现（只有脱敏串可作 title）。
     expect(table.innerHTML).not.toContain(openid);
 
+    // 唯一一行、两个单元格：条目列 + 操作列。
+    const cells = [...table.querySelectorAll<HTMLElement>("tbody tr td")];
+    expect(cells).toHaveLength(2);
+
     // 操作列两个图标按钮，可访问名带实体名。
     expect(rowButton(table, "编辑 同事")).toBeTruthy();
     expect(rowButton(table, "删除 同事")).toBeTruthy();
+  });
+
+  it("脱敏 id 元素不带 truncate：宽度不足时换行，绝不截掉末尾 4 位", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+
+    const masked = accessTable("允许的用户").querySelector<HTMLElement>("tbody tr td span[title='D754********8D11']")!;
+    expect(masked).toBeTruthy();
+    expect(masked.textContent).toBe("D754********8D11");
+    // 关键回归：不能被 truncate 切成 `D754**...`。
+    expect(masked.className).not.toContain("truncate");
+    expect(masked.className).toContain("break-all");
   });
 
   it("备注为空时显示「未命名」占位，编辑按钮退回脱敏 id 作可访问名", () => {
@@ -315,6 +335,44 @@ describe("QqSettings", () => {
     const table = accessTable("允许的用户");
     expect(table.querySelectorAll("input")).toHaveLength(0);
     expect(table.textContent).toContain("运维同事");
+  });
+
+  it("编辑态：输入框占满条目列（不是固定 68px），脱敏 id 仍在第二行完整可见", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "我的手机（私聊）" }] }} />);
+    clickEdit("允许的用户", "我的手机（私聊）");
+
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 我的手机（私聊）']")!;
+    expect(input.value).toBe("我的手机（私聊）");
+    // 关键回归：上一版输入框只有 68px（内容宽度 auto），「我的手机（私聊）」
+    // 显示成「（私聊）」。现在必须撑满条目列。
+    expect(input.className).toContain("w-full");
+    expect(input.className).not.toMatch(/\bw-\[\d/);
+    expect(input.className).not.toMatch(/\bw-(?:8|10|12|14|16|20|24|28|32|40|48|56|64)\b/);
+
+    // 编辑态里脱敏 id 仍作为第二行只读显示，且完整（不截尾）。
+    const masked = container.querySelector<HTMLElement>(
+      "table[aria-label='允许的用户'] tbody tr td span[title='D754********8D11']",
+    )!;
+    expect(masked).toBeTruthy();
+    expect(masked.className).not.toContain("truncate");
+    expect(masked.textContent).toBe("D754********8D11");
+  });
+
+  it("分组标题与提示上下排版：标题独占一行，提示在下一行且不被截断", () => {
+    render(<Harness />);
+    const heading = [...container.querySelectorAll("h3")].find(
+      (node) => node.textContent === "访问控制",
+    )!;
+    expect(heading).toBeTruthy();
+    const header = heading.parentElement!;
+    // 上下排版：标题与提示是 column 的直接子元素。
+    expect(header.className).toContain("flex-col");
+    const hint = [...header.children].find((node) => node.textContent === "留空表示不接受该来源的任务")!;
+    expect(hint).toBeTruthy();
+    expect(hint.tagName).toBe("SPAN");
+    // 提示不再用 truncate 与标题抢同一行。
+    expect(hint.className).not.toContain("truncate");
   });
 
   it("编辑：Esc 取消不落盘；IME 组合中的 Enter 不算提交", () => {
@@ -385,7 +443,7 @@ describe("QqSettings", () => {
     expect(container.textContent).not.toContain("操作");
   });
 
-  it("窄屏：操作列固定宽度，备注与脱敏 id 截断，图标按钮不被挤出视口", () => {
+  it("窄屏：两列表格不横向溢出，操作列固定宽度，脱敏值换行而非截尾", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "很长的备注".repeat(8) }] }} />);
 
@@ -393,7 +451,7 @@ describe("QqSettings", () => {
     // table-fixed：列宽由表头决定，内容再长也不会把表格撑得横向溢出。
     expect(table.className).toContain("table-fixed");
     expect(table.className).toContain("w-full");
-    const opHeader = [...table.querySelectorAll("th")][2]!;
+    const opHeader = [...table.querySelectorAll("th")][1]!;
     expect(opHeader.className).toContain("w-16");
     expect(opHeader.className).toContain("text-right");
 
@@ -402,12 +460,16 @@ describe("QqSettings", () => {
     expect(buttons).toHaveLength(2);
     for (const button of buttons) expect(button.className).toContain("shrink-0");
 
-    // 备注与脱敏 id 都用 truncate + title 兜全文（320px 宽也不会撑破）。
+    // 备注最多两行（line-clamp-2），不是单行 truncate。
     const note = table.querySelector<HTMLElement>("tbody tr td span")!;
-    expect(note.className).toContain("truncate");
+    expect(note.className).toContain("line-clamp-2");
+    expect(note.className).not.toContain("truncate");
     expect(note.getAttribute("title")).toBe("很长的备注".repeat(8));
-    const masked = table.querySelector<HTMLElement>("tbody tr td:nth-child(2) span")!;
-    expect(masked.className).toContain("truncate");
+
+    // 脱敏 id 靠 break-all 换行保持完整，禁止 truncate 切掉尾巴。
+    const masked = table.querySelector<HTMLElement>("tbody tr td span[title='D754********8D11']")!;
+    expect(masked.className).not.toContain("truncate");
+    expect(masked.className).toContain("break-all");
     expect(masked.getAttribute("title")).toBe("D754********8D11");
   });
 
@@ -454,9 +516,13 @@ describe("QqSettings", () => {
     expect(container.textContent).toContain("尚未添加条目");
 
     clickText("添加用户");
+    // 添加行在表格末尾：表头是两列（条目 / 操作）。
+    expect(accessTable("允许的用户").querySelectorAll("thead th")).toHaveLength(2);
     // 添加输入框的可见标签是占位符，可访问名必须另外给（不能拿 placeholder 充当）。
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户的 openid']")!;
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户标识']")!;
     expect(input.placeholder).toBe("完整 openid");
+    // 标识输入占满条目列（不是固定像素宽）。
+    expect(input.className).toContain("w-full");
     setInput(input, openid);
 
     const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
@@ -474,15 +540,16 @@ describe("QqSettings", () => {
     render(<Harness />);
 
     clickText("添加群");
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群标识']")!;
+    expect(input.placeholder).toBe("完整群号");
     const cancel = container.querySelector<HTMLButtonElement>("button[aria-label='取消添加']")!;
     setInput(input, openid);
     act(() => cancel.click());
     expect(onChange).not.toHaveBeenCalled();
-    expect(container.querySelector("input[aria-label='输入群的 openid']")).toBeNull();
+    expect(container.querySelector("input[aria-label='输入群标识']")).toBeNull();
 
     clickText("添加群");
-    const again = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    const again = container.querySelector<HTMLInputElement>("input[aria-label='输入群标识']")!;
     setInput(again, openid);
     act(() => {
       again.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
@@ -496,7 +563,7 @@ describe("QqSettings", () => {
   it("添加用户：脱敏串被就地拒绝，带空格的完整 openid 仍可保存", () => {
     render(<Harness />);
     clickText("添加用户");
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户的 openid']")!;
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户标识']")!;
     const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
 
     // 从界面复制来的脱敏串（含 *）是最常见的误粘贴：必须报错且不写入。
@@ -518,7 +585,7 @@ describe("QqSettings", () => {
   it("添加群：过短 / 超长 / 含空格的标识一律拒绝并提示", () => {
     render(<Harness />);
     clickText("添加群");
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群标识']")!;
     const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
 
     for (const bad of ["abc", "a".repeat(65), "1234 5678"]) {
@@ -533,7 +600,7 @@ describe("QqSettings", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid }] }} />);
     clickText("添加用户");
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户的 openid']")!;
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户标识']")!;
     const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
 
     setInput(input, openid);
@@ -542,7 +609,7 @@ describe("QqSettings", () => {
     expect(alertText()).toContain("已在名单中");
   });
 
-  it("群条目同构：列头是「群号」，备注可编辑，且不牵连用户列表", () => {
+  it("群条目同构：两列（条目 / 操作），备注可编辑，且不牵连用户列表", () => {
     const group = "12345678";
     const user = "D754D2240C503C2ABE2B236DC1E78D11";
     render(
@@ -555,16 +622,21 @@ describe("QqSettings", () => {
     );
 
     const table = accessTable("允许的群");
-    // 与用户表完全同构，只是第二列表头是「群号」。
+    // 与用户表完全同构：两列（条目 / 操作）。
     expect([...table.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
-      "备注",
-      "群号",
+      "条目",
       "操作",
     ]);
-    // 备注列在脱敏 id 之前：8 位群号脱敏后恒为纯星号，备注才是唯一可辨识信息。
+    // 条目列上下两行：备注在前（8 位群号脱敏后恒为纯星号，备注才是唯一
+    // 可辨识信息），脱敏群号紧随其后且完整可见。
     const cells = [...table.querySelectorAll<HTMLElement>("tbody tr td")];
+    expect(cells).toHaveLength(2);
     expect(cells[0]?.textContent).toContain("测试群");
-    expect(cells[1]?.textContent).toBe("********");
+    expect(cells[0]?.textContent).toContain("********");
+    // 群号脱敏元素同样不带 truncate。
+    const masked = cells[0]?.querySelector<HTMLElement>("span[title='********']")!;
+    expect(masked).toBeTruthy();
+    expect(masked.className).not.toContain("truncate");
 
     clickEdit("允许的群", "测试群");
     const note = container.querySelector<HTMLInputElement>("input[aria-label='备注 测试群']")!;
@@ -586,10 +658,10 @@ describe("QqSettings", () => {
     render(<Harness />);
 
     clickText("添加群");
-    // 添加行插在表格末尾：表头先出现（空态文案让位给表格）。
-    expect(accessTable("允许的群").querySelectorAll("thead th")).toHaveLength(3);
+    // 添加行插在表格末尾：表头先出现（空态文案让位给表格），两列。
+    expect(accessTable("允许的群").querySelectorAll("thead th")).toHaveLength(2);
     const note = container.querySelector<HTMLInputElement>("input[aria-label='新群的备注']")!;
-    const id = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    const id = container.querySelector<HTMLInputElement>("input[aria-label='输入群标识']")!;
     setInput(note, "测试群");
     setInput(id, openid);
     pressKey(id, "Enter");

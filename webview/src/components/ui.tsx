@@ -1167,9 +1167,12 @@ export function SettingsGroup({
 }) {
   return (
     <section className="overflow-hidden rounded-lg border border-border bg-surface/60 shadow-card">
-      <div className="flex items-baseline gap-2 border-b border-border/60 bg-surface/40 px-4 py-3">
+      {/* 标题与提示上下排版：标题独占一行，提示另起一行左对齐。旧的
+          `ml-auto + truncate` 把两者挤在同一行，窄屏时标题被压成两行、
+          提示还被截断（2026-11 用户实测）。 */}
+      <div className="flex flex-col gap-1 border-b border-border/60 bg-surface/40 px-4 py-3">
         <h3 className="text-ui-caption font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
-        {hint && <span className="ml-auto min-w-0 truncate text-ui-caption text-muted-foreground/75">{hint}</span>}
+        {hint && <span className="text-ui-caption text-muted-foreground/75">{hint}</span>}
       </div>
       <div className="divide-y divide-border/50">{children}</div>
     </section>

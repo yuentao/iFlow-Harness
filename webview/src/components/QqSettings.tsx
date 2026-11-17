@@ -125,34 +125,45 @@ function Row({
 }
 
 /**
- * Allow-entry table (allowed users / allowed groups).
+ * Allow-entry table (allowed users / allowed groups) — **two columns only**.
  *
- * 表格语义：列 = 备注（主信息）/ openid 或群号（脱敏、次要色）/ 操作。
+ * 列 =「条目」+「操作」：
+ *  - 条目列上行是备注（主信息，最多两行），下行是脱敏 id（次要色、小一号）；
+ *  - 操作列固定宽度，只放编辑 / 删除两个图标按钮，右对齐且不换行。
+ *
+ * 为什么不再拆「备注 / openid / 操作」三列：500px 视口下三列各只分到 ~70px，
+ * 脱敏串 `D754********8D11` 需要 ~110px，被 `truncate` 切成 `D754**...`，
+ * 后 4 位（唯一可辨识的尾巴）完全看不到。两列 + 上下两行后，条目列拿到
+ * 操作列之外的全部宽度，脱敏串用 `break-all` 换行而**绝不截尾**。
+ *
  * 默认行内**没有任何输入框**——备注与脱敏 id 都是纯文本，谁只读、谁可编辑
  * 一眼可分。openid 永远不可编辑（完整值不进 UI，{@link maskQqOpenId} 只给
  * 前 4 + 8 个 `*` + 后 4；要换只能删除后重新添加）。
  *
  * 编辑与添加共用同一种「行内编辑态」：点铅笔 / 「+ 添加」后该行变成输入态，
- * 右侧换成保存 / 取消；Enter（IME 组合中不提交）保存、Esc 取消。选行内而非
- * 弹窗，是因为编辑对象只有一条备注、上下文（同表格里的其它条目与脱敏 id）
- * 恰恰是判断依据，弹窗会把这份上下文挡掉；添加也天然落在表格末尾，两种
- * 操作共用一套心智模型。
+ * 输入框占满条目列，右侧换成保存 / 取消；Enter（IME 组合中不提交）保存、
+ * Esc 取消。选行内而非弹窗，是因为编辑对象只有一条备注、上下文（同表格里
+ * 的其它条目与脱敏 id）恰恰是判断依据，弹窗会把这份上下文挡掉；添加也
+ * 天然落在表格末尾，两种操作共用一套心智模型。
  *
  * 删除走 {@link ConfirmDialog}：条目一旦删除就找不回完整 openid（脱敏显示
  * 无法反推），误点的代价是重新找对方要 id，值得一次确认。
  */
 function AccessList({
   label,
-  columnLabel,
+  idLabel,
+  idPlaceholder,
   noun,
   addLabel,
   entries,
   onChange,
 }: {
   label: string;
-  /** 第二列表头：用户列表是 openid，群列表是群号。 */
-  columnLabel: string;
-  /** 实体名（用户 / 群），用于「输入…的 openid」这类可访问名。 */
+  /** 脱敏标识的叫法（openid / 群号），用于说明文案。 */
+  idLabel: string;
+  /** 添加行标识输入框的占位（完整 openid / 完整群号）。 */
+  idPlaceholder: string;
+  /** 实体名（用户 / 群），用于「输入…标识」这类可访问名。 */
   noun: string;
   addLabel: string;
   entries: QqAllowEntry[];
@@ -254,9 +265,12 @@ function AccessList({
       <FieldLabel>{label}</FieldLabel>
       {entries.length === 0 && !adding && <Hint>{t("尚未添加条目")}</Hint>}
       {entries.length > 0 && (
-        <Hint>{t("openid 已脱敏显示，无法在此修改；如需更换请删除后重新添加。")}</Hint>
+        <Hint>{t("{0} 已脱敏显示，无法在此修改；如需更换请删除后重新添加。", idLabel)}</Hint>
       )}
       {(entries.length > 0 || adding) && (
+        // 两列：条目（备注 + 脱敏 id 上下两行）/ 操作（固定宽度图标）。
+        // `table-fixed` 让列宽只由表头决定：内容再长也只压条目列，绝不把
+        // 操作列推出视口（360 / 500px 均无横向溢出）。
         <table aria-label={label} className="w-full table-fixed border-collapse text-ui-label">
           <thead>
             <tr className="border-b border-border/60">
@@ -264,16 +278,10 @@ function AccessList({
                 scope="col"
                 className="py-1.5 pr-2 text-left text-ui-caption font-medium text-muted-foreground"
               >
-                {t("备注")}
+                {t("条目")}
               </th>
-              <th
-                scope="col"
-                className="w-1/3 px-2 py-1.5 text-left text-ui-caption font-medium text-muted-foreground"
-              >
-                {columnLabel}
-              </th>
-              {/* 操作列固定宽度：窄屏也只压缩备注/标识两列的可见宽度，
-                  绝不让两个图标按钮被推出视口（320px 宽仍可用）。 */}
+              {/* 操作列固定 64px（两个 24px 图标 + 2px 间距 + 8px 左侧留白），
+                  不参与伸缩。 */}
               <th
                 scope="col"
                 className="w-16 py-1.5 pl-2 text-right text-ui-caption font-medium text-muted-foreground"
@@ -290,38 +298,40 @@ function AccessList({
               const displayNote = entry.note?.trim() ?? "";
               return (
                 <tr key={entry.openid} className="border-b border-border/40 last:border-b-0">
-                  {/* 备注列：展示态是纯文本（空备注用低调占位，不抢眼），
-                      只有进入编辑态才变成输入框。 */}
-                  <td className="min-w-0 py-1 pr-2 align-middle">
-                    {editingThis ? (
-                      <TextInput
-                        autoFocus
-                        className="w-full"
-                        value={noteDraft}
-                        placeholder={t("备注")}
-                        aria-label={t("备注 {0}", name)}
-                        onChange={(event) => setNoteDraft(event.target.value)}
-                        onKeyDown={editorKeyDown(commitEdit)}
-                      />
-                    ) : (
+                  {/* 条目列：上行备注（空备注用低调占位，最多两行），
+                      下行脱敏 id。脱敏串**绝不 truncate**（截掉后 4 位就等于
+                      不可辨识）：宽度不够时靠 `break-all` 换行，始终完整可见。 */}
+                  <td className="min-w-0 py-1.5 pr-2 align-top">
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      {editingThis ? (
+                        <TextInput
+                          autoFocus
+                          className="w-full min-w-0"
+                          value={noteDraft}
+                          placeholder={t("备注")}
+                          aria-label={t("备注 {0}", name)}
+                          onChange={(event) => setNoteDraft(event.target.value)}
+                          onKeyDown={editorKeyDown(commitEdit)}
+                        />
+                      ) : (
+                        <span
+                          className={`line-clamp-2 min-w-0 break-words${displayNote ? " text-foreground" : " text-muted-foreground/70"}`}
+                          title={displayNote || t("未命名")}
+                        >
+                          {displayNote || t("未命名")}
+                        </span>
+                      )}
+                      {/* 脱敏值只读，任何状态下都不出现完整 id。 */}
                       <span
-                        className={`block truncate${displayNote ? " text-foreground" : " text-muted-foreground/70"}`}
-                        title={displayNote || t("未命名")}
+                        className="block min-w-0 whitespace-normal break-all font-mono text-ui-caption text-muted-foreground"
+                        title={masked}
                       >
-                        {displayNote || t("未命名")}
+                        {masked}
                       </span>
-                    )}
+                    </div>
                   </td>
-                  {/* 第二列恒为只读脱敏文本，任何状态下都不出现完整 id。 */}
-                  <td className="min-w-0 px-2 py-1 align-middle">
-                    <span
-                      className="block truncate font-mono text-ui-caption text-muted-foreground"
-                      title={masked}
-                    >
-                      {masked}
-                    </span>
-                  </td>
-                  <td className="w-16 py-1 pl-2 align-middle">
+                  {/* 操作列：固定宽度，两个图标横向不换行、右对齐。 */}
+                  <td className="w-16 py-1.5 pl-2 align-middle">
                     <div className="flex items-center justify-end gap-0.5">
                       {editingThis ? (
                         <>
@@ -363,32 +373,33 @@ function AccessList({
             })}
             {adding && (
               <tr className="border-b border-border/40 last:border-b-0">
-                <td className="min-w-0 py-1 pr-2 align-middle">
-                  <TextInput
-                    className="w-full"
-                    value={noteDraft}
-                    placeholder={t("备注（可选）")}
-                    aria-label={t("新{0}的备注", noun)}
-                    onChange={(event) => setNoteDraft(event.target.value)}
-                    onKeyDown={editorKeyDown(commitAdd)}
-                  />
+                {/* 添加行与行内编辑同构：标识输入占满条目列，可选备注在其下。 */}
+                <td className="min-w-0 py-1.5 pr-2 align-top">
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <TextInput
+                      autoFocus
+                      mono
+                      className="w-full min-w-0"
+                      value={idDraft}
+                      placeholder={idPlaceholder}
+                      aria-label={t("输入{0}标识", noun)}
+                      onChange={(event) => {
+                        setIdDraft(event.target.value);
+                        if (error) setError("");
+                      }}
+                      onKeyDown={editorKeyDown(commitAdd)}
+                    />
+                    <TextInput
+                      className="w-full min-w-0"
+                      value={noteDraft}
+                      placeholder={t("备注（可选）")}
+                      aria-label={t("新{0}的备注", noun)}
+                      onChange={(event) => setNoteDraft(event.target.value)}
+                      onKeyDown={editorKeyDown(commitAdd)}
+                    />
+                  </div>
                 </td>
-                <td className="min-w-0 px-2 py-1 align-middle">
-                  <TextInput
-                    autoFocus
-                    mono
-                    className="w-full"
-                    value={idDraft}
-                    placeholder={t("完整 openid")}
-                    aria-label={t("输入{0}的 openid", noun)}
-                    onChange={(event) => {
-                      setIdDraft(event.target.value);
-                      if (error) setError("");
-                    }}
-                    onKeyDown={editorKeyDown(commitAdd)}
-                  />
-                </td>
-                <td className="w-16 py-1 pl-2 align-middle">
+                <td className="w-16 py-1.5 pl-2 align-middle">
                   <div className="flex items-center justify-end gap-0.5">
                     <IconButton
                       size="sm"
@@ -409,7 +420,7 @@ function AccessList({
             )}
             {error && (
               <tr>
-                <td colSpan={3} className="pt-1.5">
+                <td colSpan={2} className="pt-1.5">
                   <p role="alert" className="text-ui-caption leading-relaxed text-destructive">
                     {error}
                   </p>
@@ -812,7 +823,8 @@ export function QqSettings({
       <SettingsGroup title={t("访问控制")} hint={t("留空表示不接受该来源的任务")}>
         <AccessList
           label={t("允许的用户")}
-          columnLabel={t("openid")}
+          idLabel={t("openid")}
+          idPlaceholder={t("完整 openid")}
           noun={t("用户")}
           addLabel={t("添加用户")}
           entries={value.allowedUsers}
@@ -820,7 +832,8 @@ export function QqSettings({
         />
         <AccessList
           label={t("允许的群")}
-          columnLabel={t("群号")}
+          idLabel={t("群号")}
+          idPlaceholder={t("完整群号")}
           noun={t("群")}
           addLabel={t("添加群")}
           entries={value.allowedGroups}
