@@ -95,6 +95,7 @@ type PanelInternals = {
   handleQqConfigAction: (action: string) => Promise<void>;
   stopQq: () => Promise<void>;
   postToWebview: (msg: HostToWebview) => void;
+  store: { sendToast: (...args: unknown[]) => number };
   [k: string]: unknown;
 };
 
@@ -225,5 +226,54 @@ describe("QQ 托管入口收敛 · 面板编排（QQBot 单一路径）", () => 
     await p.handleWebviewMessage({ type: "qqManagedSetup", action: "stop" });
     expect(spy).toHaveBeenLastCalledWith("stop");
     spy.mockRestore();
+  });
+
+  it("op=9 失活：测试连接不再显示正常，并自动重启一次", async () => {
+    await p.handleQqManagedSetup("start");
+    protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
+    await tick();
+    expect(p.qq).toBeTruthy();
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
+
+    const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
+    adapter.health.mockResolvedValueOnce({
+      connected: true,
+      detail: "qqbot websocket; 会话已失效（op=9 invalid session）",
+    });
+
+    await p.handleQqConfigAction("testConnection");
+
+    const statuses = messages("qqStatus");
+    expect(statuses.some((m) => (m as { connected?: boolean }).connected === false)).toBe(true);
+    // 自动重启一次：stop 旧 owner 后重新 connect。
+    expect(adapter.connect).toHaveBeenCalledTimes(2);
+    expect(toast).toHaveBeenCalledWith("info", expect.stringContaining("已自动重启一次"));
+    expect(p.qq).toBeTruthy();
+    toast.mockRestore();
+  });
+
+  it("连续失活最多自动重启一次：第二次只提示重新扫码", async () => {
+    await p.handleQqManagedSetup("start");
+    protocolCbs!.onSuccess({ appId: "app", appSecret: "sec" });
+    await tick();
+    expect(adapter.connect).toHaveBeenCalledTimes(1);
+
+    const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
+    adapter.health.mockResolvedValue({
+      connected: true,
+      detail: "qqbot websocket; 会话已失效（op=9 invalid session）",
+    });
+
+    await p.handleQqConfigAction("testConnection");
+    expect(adapter.connect).toHaveBeenCalledTimes(2);
+
+    // 第二次仍然失活：预算已用尽，绝不再重启，只能让用户重扫。
+    await p.handleQqConfigAction("testConnection");
+    expect(adapter.connect).toHaveBeenCalledTimes(2);
+    expect(toast).toHaveBeenCalledWith(
+      "warning",
+      expect.stringContaining("重新扫码"),
+    );
+    toast.mockRestore();
   });
 });

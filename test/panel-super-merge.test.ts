@@ -214,4 +214,45 @@ describe("ChatPanel 子会话合并请求（派合并子会话，不再走主会
     expect(merges).toHaveLength(1);
     expect(merges[0]?.source.id).toBe("super-1");
   });
+
+  it("requestSuperMerge 返回真实结果：派出成功 / 已有合并子会话未派发", async () => {
+    const request = (p as unknown as {
+      requestSuperMerge: (id: string) => Promise<{ dispatched: boolean; reason?: string }>;
+    }).requestSuperMerge.bind(p);
+
+    const ok = await request("super-1");
+    expect(ok.dispatched).toBe(true);
+    expect(merges).toHaveLength(1);
+
+    // 主仓工作区只允许一个合并子会话：再派一次 spawnMerge 返回 null。
+    Object.assign(p, {
+      getSuperAgent: () => ({
+        get: () => CHILD,
+        spawnMerge: async () => null,
+      }),
+    });
+    const blocked = await request("super-1");
+    expect(blocked.dispatched).toBe(false);
+    expect(blocked.reason).toContain("已有合并子会话");
+    expect(merges).toHaveLength(1);
+  });
+
+  it("QQ 端口 merge 回传真实 detail：未派发时不谎报「已派出合并子会话」", async () => {
+    Object.assign(p, {
+      getSuperAgent: () => ({
+        get: () => CHILD,
+        spawnMerge: async () => null,
+      }),
+    });
+    const ports = (p as unknown as {
+      createQqHostPorts: () => {
+        merge: (id: string) => Promise<{ ok: boolean; detail: string }>;
+      };
+    }).createQqHostPorts();
+
+    const result = await ports.merge("super-1");
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("未派出");
+    expect(result.detail).not.toContain("已派出合并子会话");
+  });
 });

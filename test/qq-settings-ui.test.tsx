@@ -32,7 +32,7 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
 
 const VALUE: QqSettingsValue = {
   enabled: false,
-  route: "main",
+  route: "child",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -173,6 +173,8 @@ describe("QqSettings", () => {
     // 凭据只由扫码写入：页面没有手填输入框。
     expect(text).not.toContain("机器人 Token");
     expect(text).not.toContain("App Secret");
+    // 关面板 ≠ 停通道：说明里必须讲清楚（用户容易误以为关掉面板就断开）。
+    expect(text).toContain("关闭面板不会停止 QQ 通道");
   });
 
   it("reports the enabled switch and offers no credential inputs", () => {
@@ -215,18 +217,18 @@ describe("QqSettings", () => {
     expect(container.textContent).toContain("工具调用无需 QQ 审核直接执行");
   });
 
-  it("消息去向默认主会话，可切换到独立子会话并回传补丁", () => {
+  it("消息去向默认为独立子会话，可切换到主会话并回传补丁", () => {
     render(<Harness />);
     const trigger = container.querySelector<HTMLButtonElement>("button[aria-label='消息去向']")!;
-    expect(trigger.textContent).toContain("主会话");
-    // 说明文案要讲清楚「与本地输入同一条对话线、忙时排队」。
-    expect(container.textContent).toContain("可远程接续工作");
+    expect(trigger.textContent).toContain("独立子会话");
+    // 默认项要说明「隔离执行」。
+    expect(container.textContent).toContain("隔离执行");
 
     act(() => trigger.click());
     const items = [...document.body.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
-    const child = items.find((item) => item.textContent?.includes("独立子会话"))!;
-    act(() => child.click());
-    expect(onChange).toHaveBeenCalledWith({ route: "child" });
+    const main = items.find((item) => item.textContent?.includes("主会话"))!;
+    act(() => main.click());
+    expect(onChange).toHaveBeenCalledWith({ route: "main" });
   });
 
   it("已存在条目只读展示脱敏 openid，并带可提交的备注字段", () => {

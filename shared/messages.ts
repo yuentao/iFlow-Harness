@@ -1689,7 +1689,7 @@ export interface QqPendingUserUi {
  */
 const QQ_SETTINGS_DEFAULTS = {
   enabled: false,
-  route: "main",
+  route: "child",
   workspace: "",
   remotePolicy: "supervised",
   maxConcurrentTasks: 2,

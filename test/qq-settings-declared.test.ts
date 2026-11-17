@@ -58,7 +58,7 @@ const SPECS: Spec[] = [
 {
   key: "iflow.qq.route",
   type: "string",
-  default: "main",
+  default: "child",
   enum: ["main", "child"],
 },  {
     key: "iflow.qq.allowedUsers",

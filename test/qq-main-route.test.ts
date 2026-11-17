@@ -210,15 +210,15 @@ function onlyTask(f: Fixture): QqTask {
 // ---------------------------------------------------------------------------
 
 describe("iflow.qq.route 默认值", () => {
-  it("缺省即 main（用户拍板），child 仍可显式选择", () => {
-    expect(normalizeQqConfig({}).config.route).toBe("main");
-    expect(normalizeQqConfig({ route: "child" }).config.route).toBe("child");
+  it("缺省即 child（用户拍板），main 仍可显式选择", () => {
+    expect(normalizeQqConfig({}).config.route).toBe("child");
+    expect(normalizeQqConfig({ route: "main" }).config.route).toBe("main");
     expect(normalizeQqConfig({ route: " main " }).config.route).toBe("main");
   });
 
-  it("非法值回退 main 并如实告警", () => {
+  it("非法值回退 child 并如实告警", () => {
     const { config, warnings } = normalizeQqConfig({ route: "yolo" });
-    expect(config.route).toBe("main");
+    expect(config.route).toBe("child");
     expect(warnings.some((line) => line.includes("iflow.qq.route"))).toBe(true);
   });
 });

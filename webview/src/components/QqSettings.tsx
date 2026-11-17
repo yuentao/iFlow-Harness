@@ -286,14 +286,14 @@ function AccessList({
 
 const ROUTE_OPTIONS: Array<{ value: QqRoute; label: string; description: string }> = [
   {
+    value: "child",
+    label: t("独立子会话"),
+    description: t("每条消息直接派一个独立子会话（默认，隔离执行、互不影响）。"),
+  },
+  {
     value: "main",
     label: t("主会话"),
     description: t("消息排队注入当前主会话（与本地输入同一条对话线，可远程接续工作；忙时排队等待）。"),
-  },
-  {
-    value: "child",
-    label: t("独立子会话"),
-    description: t("每条消息直接派一个独立子会话（旧行为，便于回滚与排查）。"),
   },
 ];
 
@@ -634,7 +634,12 @@ export function QqSettings({
       )}
 
       <SettingsGroup title={t("连接")}>
-        <Row label={t("启用 QQ 远程任务")} description={t("从 QQ 私聊或群聊接收任务，在独立分支上执行。")}>
+        <Row
+          label={t("启用 QQ 远程任务")}
+          description={t(
+            "从 QQ 私聊或群聊接收任务，在独立分支上执行。关闭面板不会停止 QQ 通道（通道随扩展宿主存活，重开面板可继续查看）。",
+          )}
+        >
           <Switch
             checked={value.enabled}
             label={t("启用 QQ 远程任务")}
