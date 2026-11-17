@@ -1600,6 +1600,26 @@ export interface QqSettingsUi {
 }
 
 /**
+ * QQ 授权模型（2026-11-17）：待审核用户的一条记录。
+ *
+ * 语义：白名单（`allowedUsers`）只由「扫码者本人」与「面板里人工放行」写入；
+ * 名单外的人发来消息时**不执行任务、不回执**，只把这条记录推到面板由用户
+ * 决定放行或拒绝。`openid` 是 QQ 官方接口给的 openid（私聊 author.id /
+ * 群聊 member_openid），**不是 QQ 号**——官方 API 不提供 QQ 号。
+ *
+ * 脱敏只在 UI 侧做：存储与消息都保留原值，否则面板无法据此写回白名单。
+ */
+export interface QqPendingUserUi {
+  openid: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  count: number;
+  preview: string;
+  chatType: "private" | "group";
+  groupId?: string;
+}
+
+/**
  * 默认值与裁剪范围 —— **与 src/qq/config.ts 保持同步**（那边是宿主侧权威
  * 归一化：`normalizeQqConfig`）。shared 层不能 import src/，所以这里只复刻
  * 默认值、整数四舍五入 + 闭区间裁剪、字符串 trim、白名单去空白/去重，
@@ -1908,8 +1928,11 @@ export type HostToWebview =
    * error / idle (cancelled). On `done` the appended rows are already written
    * to the settings, so the following `hostSettings` refresh carries them. */
   | ({ type: "modelMetadataState" } & ModelMetadataStateUi)
-  /** QQ 远程任务（Wave2-B）：绑定码与过期时间（epoch ms），供设置页展示。 */
-  | { type: "qqBindCode"; code: string; expiresAt: number }
+  /**
+   * QQ 授权模型：待审核用户列表（每次变更全量重发，顺序按 lastSeenAt 倒序）。
+   * 白名单外的人发来消息只会落到这里，不会执行任务、不会收到回执。
+   */
+  | { type: "qqPendingUsers"; users: QqPendingUserUi[] }
   /** QQ 远程任务（Wave3-B）：设置页的配置快照。明文凭据绝不在这条消息里，
    * 只用 `hasAppSecret` 表达扫码写入的 App Secret 是否已配置。 */
   | { type: "qqSettings"; values: QqSettingsUi }
@@ -2306,15 +2329,21 @@ export type WebviewToHost =
       text?: string;
     }
   /** QQ 远程任务（Wave3-C 补声明 / Wave2-B 方向修正）：设置页 QQ 卡片的动作——
-   * 连测试、生成绑定码、解绑（原三类），以及扫码登录（Wave5-C0）的开始取码、
-   * 刷新二维码、取消登录。这是 webview 发给宿主的**请求**（早期误声明在
-   * HostToWebview 上，方向写反，panel 只能用运行时形状守卫兜底接收；
-   * 现已从 HostToWebview 移除、只在此处声明）。回执不是同名消息：状态走
-   * `qqStatus`、绑定码走 `qqBindCode`、二维码走 `qqLoginQr`，解绑结果走 toast。 */
+   * 连测试、解绑，以及扫码登录（Wave5-C0）的开始取码、刷新二维码、取消登录。
+   * 这是 webview 发给宿主的**请求**（早期误声明在 HostToWebview 上，方向写反，
+   * panel 只能用运行时形状守卫兜底接收；现已从 HostToWebview 移除、只在此处
+   * 声明）。回执不是同名消息：状态走 `qqStatus`、二维码走 `qqLoginQr`，解绑
+   * 结果走 toast。配对码机制（`generateBindCode`）已随授权模型改造移除。 */
   | {
       type: "qqConfigAction";
-      action: "testConnection" | "generateBindCode" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin";
+      action: "testConnection" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin";
     }
+  /**
+   * QQ 授权模型：面板对某个待审核用户的处置。`approve` 会把他写进
+   * `iflow.qq.allowedUsers`（去重追加）并移出待审核；`reject` 只移出并记入
+   * 拒绝集合（同一 openid 不会再冒出来）。openid 是官方接口标识，非 QQ 号。
+   */
+  | { type: "qqUserAction"; openid: string; action: "approve" | "reject" }
   /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
    * `hasAppSecret` 是宿主回传的投影，这里只会被忽略——凭据只在扫码成功后
    * 由宿主写入 SecretStorage，不走设置补丁。 */

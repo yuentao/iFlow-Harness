@@ -227,6 +227,40 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
     ).toBe(true);
   });
 
+  it("扫码成功：扫码者 openid 去重写入白名单，重复扫码不重复占位", async () => {
+    await p.handleQqManagedSetup("start");
+    protocolCbs!.onSuccess({ appId: "app-2", appSecret: "sec-2", userOpenid: "open-self" });
+    await tick();
+
+    expect(ioHarness.writes).toContainEqual({ allowedUsers: ["10001", "open-self"] });
+    expect(
+      (p.qq?.config as { allowedUsers?: string[] } | undefined)?.allowedUsers,
+    ).toEqual(["10001", "open-self"]);
+    expect(p.qq).toBeTruthy();
+
+    // 再扫一次（同一 openid）不应重复占位。
+    await p.handleQqManagedSetup("start");
+    protocolCbs!.onSuccess({ appId: "app-2", appSecret: "sec-2", userOpenid: "open-self" });
+    await tick();
+    expect(ioHarness.settings.allowedUsers).toEqual(["10001", "open-self"]);
+  });
+
+  it("白名单为空也能启动（allowlist_empty 只是提示，不拦启动）", async () => {
+    ioHarness.settings.enabled = true;
+    ioHarness.settings.allowedUsers = [];
+    ioHarness.secrets.set(QQBOT_APP_ID_SECRET_KEY, "app-x");
+    ioHarness.secrets.set(QQ_SECRET_KEYS.appSecret, "sec-x");
+
+    await (p as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
+
+    expect(p.qq).toBeTruthy();
+    expect(adapter.connect).toHaveBeenCalledOnce();
+    expect(
+      posted.some((m) => m.type === "qqStatus" && m.connected === true),
+      "白名单空不得拒启动",
+    ).toBe(true);
+  });
+
   it("扫码失败：推脱敏 error，不留扫码会话", async () => {
     await p.handleQqManagedSetup("start");
     protocolCbs!.onFailure("app_secret=LEAK 失败");

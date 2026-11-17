@@ -15,6 +15,7 @@ import type {
   QqServiceDispatchInput,
   QqServiceHost,
 } from "../src/qq/service.js";
+import type { QqPendingUserInput } from "../src/qq/pending-users.js";
 import type { SuperPermissionDecision } from "../src/panel/super-agent.js";
 import { shortTaskId, type QqTask } from "../shared/qq-task.js";
 
@@ -28,7 +29,6 @@ interface PortsFixture {
     snapshot: QqHostSuperSnapshot | null;
     mergeResult: { ok: boolean; detail: string };
     deliverResult: boolean;
-    bindResult: { ok: boolean; message: string };
     unbindResult: { ok: boolean; message: string };
   };
   spawns: Array<{ spec: QqHostSpawnSpec; opts: QqHostSpawnOptions }>;
@@ -38,7 +38,7 @@ interface PortsFixture {
   discards: string[];
   notes: string[];
   delivered: QqServiceDeliverInput[];
-  binds: Array<{ code: string; senderId: string }>;
+  pendings: QqPendingUserInput[];
   unbinds: { count: number };
 }
 
@@ -47,7 +47,6 @@ function makeFixture(): PortsFixture {
     snapshot: { summary: "已完成", branch: "iflow/qq/t" },
     mergeResult: { ok: true, detail: "已合并" },
     deliverResult: true,
-    bindResult: { ok: true, message: "绑定完成" },
     unbindResult: { ok: true, message: "已解绑" },
   };
   const fixture: PortsFixture = {
@@ -60,7 +59,7 @@ function makeFixture(): PortsFixture {
     discards: [],
     notes: [],
     delivered: [],
-    binds: [],
+    pendings: [],
     unbinds: { count: 0 },
   };
 
@@ -91,9 +90,8 @@ function makeFixture(): PortsFixture {
       fixture.delivered.push({ ...msg });
       return state.deliverResult;
     },
-    bindAccount: async (code, senderId) => {
-      fixture.binds.push({ code, senderId });
-      return state.bindResult;
+    onPendingUser: (info) => {
+      fixture.pendings.push({ ...info });
     },
     unbindAccount: async () => {
       fixture.unbinds.count += 1;
@@ -381,21 +379,25 @@ describe("createQqServiceHost — 透传", () => {
     expect(f.delivered).toEqual([]);
   });
 
-  it("bindAccount / unbindAccount 透传参数与结果", async () => {
+  it("onPendingUser 原样透传；unbindAccount 透传结果", async () => {
     const f = makeFixture();
-    f.state.bindResult = { ok: false, message: "配对码不存在" };
     f.state.unbindResult = { ok: true, message: "已解绑 1 个账号" };
     const host = createQqServiceHost(f.ports);
+    const info: QqPendingUserInput = {
+      openid: "u2",
+      chatType: "group",
+      groupId: "g1",
+      preview: "帮我改个东西",
+      at: 123,
+    };
 
-    await expect(host.bindAccount("abcd12", "u2")).resolves.toEqual({
-      ok: false,
-      message: "配对码不存在",
-    });
+    host.onPendingUser(info);
+    expect(f.pendings).toEqual([info]);
+
     await expect(host.unbindAccount()).resolves.toEqual({
       ok: true,
       message: "已解绑 1 个账号",
     });
-    expect(f.binds).toEqual([{ code: "abcd12", senderId: "u2" }]);
     expect(f.unbinds.count).toBe(1);
   });
 });

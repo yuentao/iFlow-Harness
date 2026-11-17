@@ -37,8 +37,6 @@ export type QqCommandIntent =
   | { kind: "merge"; taskId: string }
   /** `/qq discard <任务编号>`：丢弃任务分支。 */
   | { kind: "discard"; taskId: string }
-  /** `/qq bind <配对码>`：绑定当前会话。 */
-  | { kind: "bind"; code: string }
   /** `/qq unbind`：解除绑定。 */
   | { kind: "unbind" }
   /** `/qq help`（以及裸 `/qq`）：显示帮助。 */
@@ -50,12 +48,10 @@ export type QqCommandErrorCode =
   | "not_a_command"
   /** `/qq` 之后是未知子命令。 */
   | "unknown_subcommand"
-  /** 缺少必需参数（任务描述 / 任务编号 / 配对码 / 回答内容）。 */
+  /** 缺少必需参数（任务描述 / 任务编号 / 回答内容）。 */
   | "missing_arg"
   /** 参数多余（非 `task` 子命令不接受额外参数；`answer` 的额外参数是回答正文）。 */
-  | "too_many_args"
-  /** 配对码不是 4-10 位字母数字。 */
-  | "bad_code_format";
+  | "too_many_args";
 
 export type QqCommandParseResult =
   | { ok: true; intent: QqCommandIntent }
@@ -121,7 +117,6 @@ type QqSubcommand =
   | "answer"
   | "merge"
   | "discard"
-  | "bind"
   | "unbind"
   | "help";
 
@@ -149,14 +144,10 @@ const SUBCOMMAND_ALIASES: Readonly<Record<string, QqSubcommand>> = {
   answer: "answer",
   merge: "merge",
   discard: "discard",
-  bind: "bind",
   unbind: "unbind",
   help: "help",
   帮助: "help",
 };
-
-/** 配对码形态：4-10 位字母或数字。 */
-const BIND_CODE_PATTERN = /^[A-Za-z0-9]{4,10}$/u;
 
 // ---------------------------------------------------------------------------
 // 解析
@@ -204,8 +195,7 @@ function extractTaskPrompt(preserved: string): string | undefined {
  *    空提示词 → `missing_arg`；
  *  - `status` 允许无任务编号；其余按任务编号的子命令缺参 → `missing_arg`；
  *  - 除 `task` / `answer` 外，多余参数一律 `too_many_args`（不静默忽略，
- *    避免打错命令时收到一个「看起来成功」的确认）；
- *  - `bind` 的配对码必须是 4-10 位字母数字，否则 `bad_code_format`。
+ *    避免打错命令时收到一个「看起来成功」的确认）。
  */
 export function parseQqCommand(raw: string): QqCommandParseResult {
   if (typeof raw !== "string" || raw.length === 0) {
@@ -240,16 +230,6 @@ export function parseQqCommand(raw: string): QqCommandParseResult {
       const tokens = rest.split(/\s+/u);
       if (tokens.length > 1) return tooMany(sub);
       return ok({ kind: "status", taskId: tokens[0]! });
-    }
-    case "bind": {
-      if (!rest) return missing(sub, "配对码");
-      const tokens = rest.split(/\s+/u);
-      if (tokens.length > 1) return tooMany(sub);
-      const code = tokens[0]!;
-      if (!BIND_CODE_PATTERN.test(code)) {
-        return fail("bad_code_format", `配对码「${code}」格式不对，必须是 4-10 位字母或数字`);
-      }
-      return ok({ kind: "bind", code });
     }
     case "unbind":
     case "help": {
@@ -319,7 +299,6 @@ const HELP_ENTRIES: readonly QqHelpEntry[] = [
   { usage: "answer <任务编号> <回答>", description: "回答 agent 的提问" },
   { usage: "merge <任务编号>", description: "把任务分支合并回当前分支" },
   { usage: "discard <任务编号>", description: "丢弃任务分支" },
-  { usage: "bind <配对码>", description: "绑定当前会话，配对码为 4-10 位字母数字" },
   { usage: "unbind", description: "解除当前会话的绑定" },
   { usage: "help", description: "显示本帮助" },
 ];
@@ -375,8 +354,6 @@ export function formatAck(intent: QqCommandIntent): string {
       return "正在合并任务分支。";
     case "discard":
       return "正在丢弃任务分支。";
-    case "bind":
-      return "正在绑定当前会话。";
     case "unbind":
       return "正在解除绑定。";
     case "help":

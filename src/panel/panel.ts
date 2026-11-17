@@ -226,12 +226,15 @@ import {
   type QqConfig,
 } from "../qq/config.js";
 import {
-  generateBindCode,
-  isBindCodeValid,
   isTerminalSuperStatus as isQqTerminalSuperStatus,
   QQ_SETTLE_POLL_MS,
   shouldRestartOnPatch,
 } from "../qq/wiring.js";
+import {
+  QqPendingUserStore,
+  type QqPendingUser,
+  type QqPendingUserInput,
+} from "../qq/pending-users.js";
 import type { InboundMessage } from "../qq/adapter/types.js";
 import {
   buildClearedQrMessage,
@@ -880,9 +883,9 @@ export class ChatPanel implements vscode.Disposable {
   /**
    * QQ 远程任务通道的运行期现场（QQBot 单一路径）。
    *
-   * 现场 = QqService + 任务落盘 + 启动时的配置快照 + 设置 IO + 官方 adapter
-   * （+ 一次性配对码）。它是**唯一**的「通道是否在跑」判据 —— 所有入口都以
-   * `this.qq` 是否存在为闸门，没有任何入口能在半初始化状态下继续。
+   * 现场 = QqService + 任务落盘 + 启动时的配置快照 + 设置 IO + 官方 adapter。
+   * 它是**唯一**的「通道是否在跑」判据 —— 所有入口都以 `this.qq` 是否存在
+   * 为闸门，没有任何入口能在半初始化状态下继续。
    *
    * `config` 与 QqService 内部持有的是**同一个对象**：非连接类字段（白名单 /
    * 策略 / 并发 / 限流 / 详略 / 自动合并）由面板就地热更新，改完即时生效。
@@ -893,7 +896,6 @@ export class ChatPanel implements vscode.Disposable {
     store: QqTaskStore;
     config: QqConfig;
     io: QqSettingsIo;
-    bindCode?: { code: string; expiresAt: number };
     /** QQBot 官方路线：不 spawn bridge，直接持有 adapter + 扫码会话。 */
     qqbot: {
       adapter: QqBotAdapterLike;
@@ -915,6 +917,14 @@ export class ChatPanel implements vscode.Disposable {
    * 独立于 `this.qq`（扫码时尚无服务现场），避免把半绑定现场塞进主通道。
    */
   private qqbotBinding: { stop(): void } | null = null;
+  /**
+   * QQ 待审核用户（授权模型 2026-11-17）：白名单外的人发来消息时落一条记录，
+   * 面板审核后决定放行（写进 `allowedUsers`）或拒绝。
+   *
+   * 独立于 `this.qq`：通道没启动 / 没绑定时也要能展示历史记录，因此存储由
+   * 面板懒建、与通道生命周期无关。
+   */
+  private qqPendingUsers: QqPendingUserStore | null = null;
   /**
    * 启动代次：`stopQq` 每次递增。异步启动在关键节点复核它 —— 启动途中被
    * 停用 / 重启时，慢半拍的那个启动必须把自己造出来的现场拆掉，而不是把
@@ -2078,17 +2088,17 @@ export class ChatPanel implements vscode.Disposable {
 
   private async handleWebviewMessage(msg: WebviewToHost): Promise<void> {
     this.log.trace(`webview → host: ${msg.type}`);
-    // `qqConfigAction`（连测试 / 生成配对码 / 解绑）是 webview→host 命令；
+    // `qqConfigAction`（连测试 / 解绑 / 扫码三动作）是 webview→host 命令；
     // 它历史上只声明在 HostToWebview 上（方向写反），Wave3-C2 已在
     // WebviewToHost 补上声明，「修正消息方向」这次又把 HostToWebview 上的
     // 误声明移除，下面 switch 里的 `case "qqConfigAction"` 是类型检查过的
     // 正规通道。这段运行时形状守卫保留，兼容尚未重建、仍按旧声明发送的
-    // 旧 webview（先于 switch 命中，行为与原先一致）。
+    // 旧 webview（先于 switch 命中，行为与原先一致）。配对码动作已随授权
+    // 模型改造移除，旧 webview 发来会被静默丢弃。
     const qqAction = (msg as { type?: unknown; action?: unknown });
     if (
       qqAction.type === "qqConfigAction" &&
       (qqAction.action === "testConnection" ||
-        qqAction.action === "generateBindCode" ||
         qqAction.action === "unbind" ||
         qqAction.action === "startQrLogin" ||
         qqAction.action === "refreshQr" ||
@@ -2557,6 +2567,9 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "qqConfigAction":
         await this.handleQqConfigAction(msg.action);
+        break;
+      case "qqUserAction":
+        await this.handleQqUserAction(msg.openid, msg.action);
         break;
       case "qqManagedSetup":
         await this.handleQqManagedSetup(msg.action);
@@ -8822,6 +8835,8 @@ export class ChatPanel implements vscode.Disposable {
   /** 设置启用 → 启动通道；任何失败都把半启动现场收干净并如实提示。 */
   private startQqIfEnabled(): Promise<void> {
     if (this.disposed) return Promise.resolve();
+    // 待审核记录与通道是否启用无关：启动时先推一次，面板打开即可看到历史。
+    void this.pushQqPendingUsers();
     if (this.qqStarting) return this.qqStarting;
     const task = this.doStartQq()
       .catch(async (error: unknown) => {
@@ -9025,8 +9040,9 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 扫码成功：凭据写 SecretStorage → 内存置 enabled → 停扫码 → 重建官方通道
-   * → 首次绑定把 enabled 落盘 → 推已连接回执。
+   * 扫码成功：凭据写 SecretStorage → **扫码者 openid 去重写入白名单** →
+   * 内存置 enabled → 停扫码 → 重建官方通道 → 首次绑定把 enabled 落盘 →
+   * 推已连接回执。
    *
    * **顺序是刻意的**：`writeAll` 走 Workspace 作用域，会触发
    * `onDidChangeConfiguration` 的 QQ 监听；若先落盘再启动，监听会在
@@ -9040,6 +9056,30 @@ export class ChatPanel implements vscode.Disposable {
       const io = this.qqIo();
       const wasEnabled = config.enabled === true;
       await storeQqBotCredentials(io, creds);
+      // 扫码者自动入白名单（授权模型 2026-11-17）：官方接口只给 openid，
+      // 扫码结果里的 `userOpenid` 就是扫码者本人。不写进去，扫码完仍然谁也
+      // 派不了任务。写入刻意在启动通道之前——QqService 持有的就是这份
+      // config 对象，通道一起来就能命中。落盘失败不静默：内存里照常放行
+      // （本次可用），但如实说明重启后会丢。
+      const openid = typeof creds.userOpenid === "string" ? creds.userOpenid.trim() : "";
+      if (openid.length > 0) {
+        const users = config.allowedUsers.includes(openid)
+          ? config.allowedUsers
+          : [...config.allowedUsers, openid];
+        config.allowedUsers = users;
+        try {
+          await applyQqSettingsPatch(io, { allowedUsers: users });
+        } catch (error) {
+          this.log.warn(`QQ 白名单写入失败：${errorMessage(error)}`);
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("扫码者未能写入白名单（重启后会丢失）：{0}", errorMessage(error)),
+          );
+        }
+      } else {
+        // 没有 openid 就无法自动授权：如实记日志，绝不假装已授权。
+        this.log.warn("扫码结果没有 userOpenid，未自动加入白名单");
+      }
       // 内存里先置启用：QqService 读的就是这个对象（私聊自由文本任务要求
       // enabled），落盘刻意放在启动之后。
       config.enabled = true;
@@ -9394,7 +9434,11 @@ export class ChatPanel implements vscode.Disposable {
         return deliverViaQqBotAdapter(adapter, msg);
       },
 
-      bindAccount: (code, senderId) => this.bindQqAccount(code, senderId),
+      onPendingUser: (info) => {
+        void this.handleQqPendingUser(info).catch((error: unknown) => {
+          this.log.warn(`QQ 待审核记录写入失败：${errorMessage(error)}`);
+        });
+      },
       unbindAccount: () => this.unbindQqAccount(),
     };
   }
@@ -9407,37 +9451,86 @@ export class ChatPanel implements vscode.Disposable {
     return this.getSuperAgent()?.get(id) ?? null;
   }
 
-  // --- QQ 账号绑定 -----------------------------------------------------------
+  // --- QQ 待审核用户 / 账号授权 ---------------------------------------------
+
+  /** 待审核用户存储（懒建；与通道生命周期无关，通道没起也能看历史记录）。 */
+  private qqPendingStore(): QqPendingUserStore {
+    if (!this.qqPendingUsers) {
+      const root = path.join(
+        this.context.storageUri?.fsPath ?? this.context.globalStorageUri.fsPath,
+        "qq",
+      );
+      this.qqPendingUsers = new QqPendingUserStore(root);
+    }
+    return this.qqPendingUsers;
+  }
+
+  /** 服务上报一条白名单外消息：累加记录并推全量列表。 */
+  private async handleQqPendingUser(info: QqPendingUserInput): Promise<void> {
+    if (this.disposed) return;
+    const users = await this.qqPendingStore().addOrUpdate(info);
+    this.postQqPendingUsers(users);
+  }
+
+  /** 推待审核列表（每次全量，webview 直接替换）。 */
+  private postQqPendingUsers(users: QqPendingUser[]): void {
+    if (this.disposed) return;
+    this.postToWebview({ type: "qqPendingUsers", users });
+  }
+
+  /** 读存储后推一次（面板重开 / 通道启动时）。 */
+  private async pushQqPendingUsers(): Promise<void> {
+    if (this.disposed) return;
+    try {
+      this.postQqPendingUsers(await this.qqPendingStore().list());
+    } catch (error) {
+      this.log.warn(`QQ 待审核列表读取失败：${errorMessage(error)}`);
+    }
+  }
 
   /**
-   * 完成一次配对：校验码 → 把发送者写进白名单 → 落盘并热更新。
+   * 面板对一条待审核记录的处置。
    *
-   * 返回的 `message` 只作本地日志（服务侧统一改写回执文案，绝不回显名单）。
-   * 同一发送者重复绑定按幂等成功处理（去重，不重复占位）。
+   * approve → 移出队列 + 去重追加进 `allowedUsers`（落盘 + 热更新运行中的
+   * config）+ 推设置快照；reject → 移出队列并记入拒绝集合（同一 openid 不会
+   * 再冒出来）。写盘失败时**不删记录**并如实提示 —— 否则用户点了「放行」
+   * 记录就消失，而白名单里其实没有他。
    */
-  private async bindQqAccount(
-    code: string,
-    senderId: string,
-  ): Promise<{ ok: boolean; message: string }> {
-    const owner = this.qq;
-    if (!owner) return { ok: false, message: "QQ 通道未启动" };
-    if (!isBindCodeValid(owner.bindCode, code, Date.now())) {
-      const expired = owner.bindCode !== undefined && owner.bindCode.expiresAt <= Date.now();
-      return { ok: false, message: expired ? "绑定码已过期" : "绑定码无效" };
+  private async handleQqUserAction(
+    openid: string,
+    action: "approve" | "reject",
+  ): Promise<void> {
+    if (this.disposed) return;
+    const id = typeof openid === "string" ? openid.trim() : "";
+    if (id.length === 0) {
+      this.store.sendToast("warning", vscode.l10n.t("待审核记录缺少用户标识"));
+      return;
     }
-    const id = senderId.trim();
-    if (id.length === 0) return { ok: false, message: "缺少发送者标识" };
+    const pending = this.qqPendingStore();
+    if (action === "reject") {
+      this.postQqPendingUsers(await pending.reject(id));
+      return;
+    }
 
-    const fresh = await readQqSettings(owner.io);
-    const users = fresh.allowedUsers.includes(id)
-      ? fresh.allowedUsers
-      : [...fresh.allowedUsers, id];
-    await applyQqSettingsPatch(owner.io, { allowedUsers: users });
-    // 与服务共享同一个 config 对象：白名单立刻生效，不必等重启。
-    owner.config.allowedUsers = users;
-    await this.pushQqSettings();
-    this.log.info(`QQ 账号已绑定：${id}（当前 ${users.length} 个账号）`);
-    return { ok: true, message: `已绑定 ${id}` };
+    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
+    try {
+      const fresh = await readQqSettings(io);
+      const users = fresh.allowedUsers.includes(id)
+        ? fresh.allowedUsers
+        : [...fresh.allowedUsers, id];
+      await applyQqSettingsPatch(io, { allowedUsers: users });
+      // 与服务共享同一个 config 对象：白名单立刻生效，不必等重启。
+      if (this.qq) this.qq.config.allowedUsers = users;
+      this.postQqPendingUsers(await pending.approve(id));
+      await this.pushQqSettings();
+      this.log.info(`QQ 已放行用户 ${id}（当前 ${users.length} 个账号）`);
+    } catch (error) {
+      this.log.warn(`QQ 白名单写入失败：${errorMessage(error)}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("无法写入 QQ 白名单：{0}", errorMessage(error)),
+      );
+    }
   }
 
   /**
@@ -9484,7 +9577,7 @@ export class ChatPanel implements vscode.Disposable {
   /** 设置页 QQ 卡片的动作。扫码登录三动作在 Wave5-C 落地：二维码桥随托管
    * 现场（this.qq）生灭，未启动时安静返回。 */
   private async handleQqConfigAction(
-    action: "testConnection" | "generateBindCode" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin",
+    action: "testConnection" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin",
   ): Promise<void> {
     switch (action) {
       case "testConnection": {
@@ -9500,17 +9593,6 @@ export class ChatPanel implements vscode.Disposable {
             ? vscode.l10n.t("QQBot 官方网关已连接")
             : vscode.l10n.t("QQBot 未连接（{0}）", String(health.detail ?? "")),
         );
-        return;
-      }
-      case "generateBindCode": {
-        if (!this.qq) {
-          this.store.sendToast("warning", vscode.l10n.t("QQ 通道未启动，无法生成绑定码"));
-          return;
-        }
-        const bind = generateBindCode();
-        this.qq.bindCode = bind;
-        this.postToWebview({ type: "qqBindCode", code: bind.code, expiresAt: bind.expiresAt });
-        this.store.sendToast("info", vscode.l10n.t("绑定码已生成，5 分钟内有效"));
         return;
       }
       case "unbind": {
@@ -9612,6 +9694,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private pushQqState(): void {
     this.refreshQqTasks();
+    void this.pushQqPendingUsers();
   }
 
   /** QQ 设置快照（无明文凭据，只有 hasAppSecret 布尔）。 */

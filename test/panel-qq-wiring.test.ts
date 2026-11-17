@@ -116,10 +116,21 @@ type PanelInternals = {
   coerceQqInboundMessage: (value: unknown) => unknown;
   isQqTaskAction: (value: unknown) => boolean;
   handleWebviewMessage: (msg: WebviewToHost) => Promise<void>;
-  handleQqConfigAction: (action: "testConnection" | "generateBindCode" | "unbind") => Promise<void>;
+  handleQqConfigAction: (action: "testConnection" | "unbind") => Promise<void>;
   handleQqTaskAction: (taskId: string, action: string, text?: string) => Promise<void>;
   refreshQqTasks: () => void;
-  bindQqAccount: (code: string, senderId: string) => Promise<{ ok: boolean; message: string }>;
+  handleQqPendingUser: (info: {
+    openid: string;
+    chatType: "private" | "group";
+    groupId?: string;
+    preview: string;
+    at: number;
+  }) => Promise<void>;
+  handleQqUserAction: (openid: string, action: "approve" | "reject") => Promise<void>;
+  qqPendingStore: () => {
+    list: () => Promise<Array<{ openid: string }>>;
+    isRejected: (openid: string) => Promise<boolean>;
+  };
   unbindQqAccount: () => Promise<{ ok: boolean; message: string }>;
   store: { getState: () => SessionState; sendToast: (...args: unknown[]) => number };
 };
@@ -202,78 +213,79 @@ describe("QQ 通道 · 面板侧接线", () => {
     await p.handleWebviewMessage(msg);
     expect(handler).toHaveBeenCalledWith("testConnection");
 
-    await p.handleWebviewMessage({ type: "qqConfigAction", action: "generateBindCode" });
-    expect(handler).toHaveBeenLastCalledWith("generateBindCode");
+    await p.handleWebviewMessage({ type: "qqConfigAction", action: "cancelQrLogin" });
+    expect(handler).toHaveBeenLastCalledWith("cancelQrLogin");
 
     handler.mockRestore();
   });
 
-  it("通道未启动时提问/操作入口安静返回（不崩、不改状态）", async () => {
+  it("通道未启动时任务操作提示未启动；待审核入口仍可记录", async () => {
     const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
     await p.handleQqTaskAction("task-1", "stop");
-    expect(toast).toHaveBeenCalled();
-    await p.handleQqConfigAction("generateBindCode");
-    expect(toast).toHaveBeenCalledTimes(2);
-    await expect(p.bindQqAccount("ABC123", "10001")).resolves.toEqual({
-      ok: false,
-      message: "QQ 通道未启动",
+    expect(toast).toHaveBeenCalledTimes(1);
+
+    // 待审核记录与通道生命周期无关：没启动也能落盘并列出。
+    await p.handleQqPendingUser({
+      openid: "open-offline",
+      chatType: "private",
+      preview: "离线记录",
+      at: 1,
     });
+    expect((await p.qqPendingStore().list()).map((user) => user.openid)).toEqual([
+      "open-offline",
+    ]);
   });
 
-  it("配对成功：校验码 → 去重追加白名单 → 落盘", async () => {
+  it("放行待审核用户：去重追加白名单并移出队列", async () => {
     const { io, writes } = makeIo({ settings: { allowedUsers: ["10001"] } });
     p.qq = {
       service: { listTasks: () => [], handleTaskAction: async () => undefined, stop: async () => undefined },
       store: {},
-      ipc: { port: 0, close: async () => undefined },
       config: makeConfig({ allowedUsers: ["10001"] }),
       io,
-      restartCount: 0,
-      bindCode: { code: "ABC123", expiresAt: Date.now() + 60_000 },
     };
     const owner = p.qq as { config: QqConfig; io: QqSettingsIo };
 
-    await expect(p.bindQqAccount(" abc123 ", "10002")).resolves.toEqual({
-      ok: true,
-      message: "已绑定 10002",
+    await p.handleQqPendingUser({
+      openid: "open-9",
+      chatType: "private",
+      preview: "帮我跑个测试",
+      at: 1,
     });
-    expect(writes[writes.length - 1]).toEqual({ allowedUsers: ["10001", "10002"] });
-    // 与服务共享同一份 config：白名单立刻生效（不必等重启）。
-    expect(owner.config.allowedUsers).toEqual(["10001", "10002"]);
+    expect((await p.qqPendingStore().list()).map((user) => user.openid)).toEqual(["open-9"]);
 
-    // 幂等：重复绑定不重复占位。
-    await p.bindQqAccount("ABC123", "10002");
-    expect(writes[writes.length - 1]).toEqual({ allowedUsers: ["10001", "10002"] });
+    await p.handleQqUserAction("open-9", "approve");
+    expect(writes[writes.length - 1]).toEqual({ allowedUsers: ["10001", "open-9"] });
+    // 与服务共享同一份 config：白名单立刻生效（不必等重启）。
+    expect(owner.config.allowedUsers).toEqual(["10001", "open-9"]);
+    expect(await p.qqPendingStore().list()).toHaveLength(0);
+
+    // 幂等：重复放行不重复占位。
+    await p.handleQqUserAction("open-9", "approve");
+    expect(writes[writes.length - 1]).toEqual({ allowedUsers: ["10001", "open-9"] });
   });
 
-  it("配对失败：码不匹配 / 已过期 / 不存在都不改白名单", async () => {
-    const { io, writes } = makeIo({ settings: { allowedUsers: ["10001"] } });
-    p.qq = {
-      service: { listTasks: () => [], handleTaskAction: async () => undefined, stop: async () => undefined },
-      store: {},
-      ipc: { port: 0, close: async () => undefined },
-      config: makeConfig(),
-      io,
-      restartCount: 0,
-      bindCode: { code: "ABC123", expiresAt: Date.now() + 60_000 },
-    };
+  it("拒绝待审核用户：移出队列并记入拒绝集合，不再出现", async () => {
+    await p.handleQqPendingUser({
+      openid: "spam",
+      chatType: "private",
+      preview: "拉我进群",
+      at: 1,
+    });
+    await p.handleQqUserAction("spam", "reject");
 
-    await expect(p.bindQqAccount("WRONG1", "10002")).resolves.toEqual({
-      ok: false,
-      message: "绑定码无效",
+    const pending = p.qqPendingStore();
+    expect(await pending.list()).toHaveLength(0);
+    expect(await pending.isRejected("spam")).toBe(true);
+
+    // 同一个人再来消息也不会重新进队列。
+    await p.handleQqPendingUser({
+      openid: "spam",
+      chatType: "private",
+      preview: "again",
+      at: 2,
     });
-    const expired = p.qq as { bindCode?: { code: string; expiresAt: number } };
-    expired.bindCode = { code: "ABC123", expiresAt: Date.now() - 1 };
-    await expect(p.bindQqAccount("ABC123", "10002")).resolves.toEqual({
-      ok: false,
-      message: "绑定码已过期",
-    });
-    delete expired.bindCode;
-    await expect(p.bindQqAccount("ABC123", "10002")).resolves.toEqual({
-      ok: false,
-      message: "绑定码无效",
-    });
-    expect(writes).toEqual([]);
+    expect(await pending.list()).toHaveLength(0);
   });
 
   it("解绑清空用户白名单、关闭开关并清除本地授权", async () => {
