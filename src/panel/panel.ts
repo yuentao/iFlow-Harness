@@ -9514,9 +9514,12 @@ export class ChatPanel implements vscode.Disposable {
     if (changed.length > 0 && this.qq) this.scheduleQqRestart();
   }
 
-  /** 设置页 QQ 卡片的三类动作。 */
+  /** 设置页 QQ 卡片的动作。扫码登录三动作（startQrLogin / refreshQr /
+   * cancelQrLogin）在 Wave5-C0 只定了消息契约，执行逻辑由后续波次补；
+   * 此处仅把参数类型与 WebviewToHost.qqConfigAction.action 对齐以免调用点
+   * 类型不匹配（未实现的动作落到 switch 末尾自然 no-op）。 */
   private async handleQqConfigAction(
-    action: "testConnection" | "generateBindCode" | "unbind",
+    action: "testConnection" | "generateBindCode" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin",
   ): Promise<void> {
     switch (action) {
       case "testConnection": {
