@@ -456,6 +456,39 @@ describe("chunkQqText", () => {
     expect(chunks.join("")).toBe(text);
   });
 
+  it("按码点切分：emoji / 生僻字 / 中英混排不产生孤立代理，拼接回原文", () => {
+    // 代理对（emoji / 扩展区汉字）与 BMP 字符混排：按 UTF-16 码元硬切会
+    // 在高低代理之间下刀，产出孤立代理；这里按码点切分，必须完全保真。
+    const text =
+      "😀😃😄🙂🤔" +
+      "生僻字𠀋𪚥" +
+      "Mixed中英文English 123 ".repeat(20) +
+      "🎉".repeat(30);
+    for (const limit of [7, 16, 40, 200]) {
+      const chunks = chunkQqText(text, limit);
+      expect(chunks.length).toBeGreaterThan(0);
+      for (const chunk of chunks) {
+        // 预算按码点计。
+        expect(Array.from(chunk).length).toBeLessThanOrEqual(limit);
+        // 孤立高代理 / 孤立低代理都不允许。
+        expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(chunk)).toBe(false);
+        expect(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(chunk)).toBe(false);
+      }
+      expect(chunks.join("")).toBe(text);
+    }
+  });
+
+  it("含 astral 字符的多行文本：换行结构保留、每片按码点不超预算", () => {
+    const text = Array.from({ length: 10 }, (_, i) => `😀第${i}行𠀋`).join("\n");
+    const chunks = chunkQqText(text, 20);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Array.from(chunk).length).toBeLessThanOrEqual(20);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(chunk)).toBe(false);
+    }
+    expect(chunks.join("\n")).toBe(text);
+  });
+
   it("代码围栏不被切断：每片围栏成对", () => {
     const body = Array.from({ length: 30 }, (_, i) => `const value${i} = ${i};`);
     const text = ["前言", "```ts", ...body, "```", "后记"].join("\n");
