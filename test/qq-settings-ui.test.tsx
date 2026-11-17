@@ -34,6 +34,7 @@ const VALUE: QqSettingsValue = {
   rateLimitPerMin: 6,
   resultDetail: "standard",
   autoMerge: false,
+  hasAppSecret: false,
 };
 
 let root: Root;
@@ -97,13 +98,11 @@ afterEach(() => {
 });
 
 describe("QqSettings", () => {
-  it("renders the eleven QQBot remote-task settings with credentials always visible", () => {
+  it("renders the nine QQBot remote-task settings", () => {
     render(<Harness />);
     const text = container.textContent ?? "";
     for (const label of [
       "启用 QQ 远程任务",
-      "机器人 Token",
-      "App Secret",
       "允许的用户",
       "允许的群",
       "远程任务策略",
@@ -119,17 +118,19 @@ describe("QqSettings", () => {
     expect(text).not.toContain("协议适配器");
     expect(text).not.toContain("适配器端点");
     expect(text).not.toContain("桥接端口");
+    // 凭据只由扫码写入：页面没有手填输入框。
+    expect(text).not.toContain("机器人 Token");
+    expect(text).not.toContain("App Secret");
   });
 
-  it("reports the enabled switch and always shows QQBot credentials", () => {
+  it("reports the enabled switch and offers no credential inputs", () => {
     render(<Harness />);
     const toggle = container.querySelector<HTMLButtonElement>("button[role='switch'][aria-label='启用 QQ 远程任务']")!;
     act(() => toggle.click());
     expect(onChange).toHaveBeenCalledWith({ enabled: true });
 
-    // 纯 QQBot：凭据字段恒在场，无需先切适配器。
-    expect(container.querySelector("input[aria-label='机器人 Token']")).toBeTruthy();
-    expect(container.querySelector("input[aria-label='App Secret']")).toBeTruthy();
+    expect(container.querySelector("input[aria-label='机器人 Token']")).toBeNull();
+    expect(container.querySelector("input[aria-label='App Secret']")).toBeNull();
   });
 
   it("commits numeric fields on blur and clamps them", () => {
@@ -196,16 +197,5 @@ describe("QqSettings", () => {
     expect(onTestConnection).toHaveBeenCalledTimes(1);
     expect(onGenerateBindCode).toHaveBeenCalledTimes(1);
     expect(onUnbind).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps credentials in a revealable field fed only by props", () => {
-    render(<Harness initial={{ botToken: "secret-token" }} />);
-    const input = container.querySelector<HTMLInputElement>("input[aria-label='机器人 Token']")!;
-    expect(input.type).toBe("password");
-    expect(input.value).toBe("secret-token");
-
-    const reveal = container.querySelector<HTMLButtonElement>("button[aria-label='显示密码']")!;
-    act(() => reveal.click());
-    expect(input.type).toBe("text");
   });
 });

@@ -62,9 +62,10 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 function makeIo(): {
   io: QqSettingsIo;
   secrets: Map<string, string>;
+  settings: Record<string, unknown>;
   writes: Array<Record<string, unknown>>;
 } {
-  const settings: Record<string, unknown> = { enabled: true, allowedUsers: ["10001"] };
+  const settings: Record<string, unknown> = { enabled: false, allowedUsers: ["10001"] };
   const secrets = new Map<string, string>();
   const writes: Array<Record<string, unknown>> = [];
   return {
@@ -83,6 +84,7 @@ function makeIo(): {
       },
     },
     secrets,
+    settings,
     writes,
   };
 }
@@ -172,6 +174,8 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
   });
 
   it("常规启动：无凭据时提示先绑定，不启动 QQ 通道", async () => {
+    // 夹具默认未启用（避免构造期就起通道）；这条用例要走「已启用但无凭据」。
+    ioHarness.settings.enabled = true;
     await (p as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
     expect(p.qq).toBeUndefined();
     expect(
@@ -195,6 +199,10 @@ describe("QQBot 官方路线 · 面板接线（M3-C）", () => {
 
     expect(ioHarness.secrets.get(QQBOT_APP_ID_SECRET_KEY)).toBe("app-1");
     expect(ioHarness.secrets.get(QQ_SECRET_KEYS.appSecret)).toBe("sec-1");
+    // 首次绑定自动开启远程任务；先启动再落盘，不会重复启动。
+    expect(ioHarness.writes).toContainEqual({ enabled: true });
+    expect(ioHarness.settings.enabled).toBe(true);
+    expect(p.qq?.config?.enabled).toBe(true);
     expect(adapter.setEventCallback).toHaveBeenCalledOnce();
     expect(adapter.connect).toHaveBeenCalledOnce();
     expect(p.qq?.qqbot?.adapter).toBeTruthy();

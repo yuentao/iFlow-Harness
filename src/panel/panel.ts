@@ -216,12 +216,12 @@ import {
   applyQqSettingsPatch,
   createVscodeQqSettingsIo,
   readQqSettings,
-  writeQqSecrets,
   type QqSettingsIo,
 } from "../qq/settings-host.js";
 import {
   checkQqStartupGate,
   normalizeQqConfig,
+  QQ_SECRET_KEYS,
   validateQqConfig,
   type QqConfig,
 } from "../qq/config.js";
@@ -239,6 +239,7 @@ import {
   createQqBotBindRuntime,
   createQqChannelDispatch,
   deliverViaQqBotAdapter,
+  QQBOT_APP_ID_SECRET_KEY,
   qrFailureMessage,
   qrProgressMessage,
   qrReadyMessage,
@@ -2550,9 +2551,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "qqSettingsPatch":
         await this.handleQqSettingsPatch(msg.patch);
-        break;
-      case "qqSecretsWrite":
-        await this.handleQqSecretsWrite(msg.botToken, msg.appSecret);
         break;
       case "qqTaskAction":
         await this.handleQqTaskAction(msg.taskId, msg.action, msg.text);
@@ -9026,11 +9024,25 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  /** 扫码成功：凭据写 SecretStorage → 停扫码 → 重建官方通道。 */
+  /**
+   * 扫码成功：凭据写 SecretStorage → 内存置 enabled → 停扫码 → 重建官方通道
+   * → 首次绑定把 enabled 落盘 → 推已连接回执。
+   *
+   * **顺序是刻意的**：`writeAll` 走 Workspace 作用域，会触发
+   * `onDidChangeConfiguration` 的 QQ 监听；若先落盘再启动，监听会在
+   * `this.qq` 还没赋值时并发发起一次启动，而首次绑定时白名单通常还是空的，
+   * 那一次启动会被 `allowlist_empty` 拦下（现在降为 warning，但并发启动
+   * 本身仍会制造两套现场）。先启动则监听看到的是同一份运行中的配置，
+   * `shouldRestartOnPatch` 判定无需重启。
+   */
   private async onQqBotBound(creds: Parameters<typeof storeQqBotCredentials>[1], config: QqConfig): Promise<void> {
     try {
       const io = this.qqIo();
+      const wasEnabled = config.enabled === true;
       await storeQqBotCredentials(io, creds);
+      // 内存里先置启用：QqService 读的就是这个对象（私聊自由文本任务要求
+      // enabled），落盘刻意放在启动之后。
+      config.enabled = true;
       this.stopQqBotBinding();
       // 成功即清掉 webview 里的二维码旧帧。`qqLoginQr` 是独立于快照的通道，
       // 宿主不覆盖的话，上一帧 waiting_scan 会连同倒计时一直挂着（用户实测：
@@ -9039,6 +9051,19 @@ export class ChatPanel implements vscode.Disposable {
       this.postToWebview(buildConfirmedQrMessage());
       if (this.qq) await this.stopQq();
       await this.startQqBotChannel(config, io, this.qqGeneration);
+      if (!wasEnabled) {
+        // 首次绑定自动开启远程任务。写失败不能谎报成功：通道已经连上，
+        // 只是开关没落盘，明确让用户手动打开。
+        try {
+          await applyQqSettingsPatch(io, { enabled: true });
+        } catch (error) {
+          this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+          this.store.sendToast(
+            "warning",
+            vscode.l10n.t("已连接，但无法自动开启远程任务，请手动打开开关"),
+          );
+        }
+      }
       this.postManagedStatus({ phase: "logged_in", message: "QQBot 绑定成功，官方网关已连接" });
       // 连接状态显式再推一次：startQqBotChannel 成功路径已推过，这里保证即便
       // 该路径因代际变化提前返回、只要本面板仍持有通道，webview 也拿到已连接。
@@ -9415,13 +9440,28 @@ export class ChatPanel implements vscode.Disposable {
     return { ok: true, message: `已绑定 ${id}` };
   }
 
-  /** 解除绑定：清空用户白名单（群白名单不动）。 */
+  /**
+   * 解除绑定并清除本地授权：删除扫码写入的 appId / appSecret、清空用户白名单
+   * （群白名单不动）、把 enabled 落盘为 false，然后停掉通道。
+   *
+   * 手填凭据移除后这是唯一「忘掉机器人」的入口，所以必须连 SecretStorage
+   * 里的凭据一起删 —— 只清白名单会让用户以为已经解绑，实际机器人凭据仍在。
+   */
   private async unbindQqAccount(): Promise<{ ok: boolean; message: string }> {
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
-    await applyQqSettingsPatch(io, { allowedUsers: [] });
+    await io.deleteSecret(QQBOT_APP_ID_SECRET_KEY);
+    await io.deleteSecret(QQ_SECRET_KEYS.appSecret);
+    try {
+      await applyQqSettingsPatch(io, { allowedUsers: [], enabled: false });
+    } catch (error) {
+      // writeAll 走 Workspace 作用域：没打开工作区时会抛错。凭据已经删除，
+      // 这里只记日志 —— 不谎报设置已落盘。
+      this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+    }
     if (this.qq) this.qq.config.allowedUsers = [];
+    await this.stopQq();
     await this.pushQqSettings();
-    return { ok: true, message: "已解除账号绑定" };
+    return { ok: true, message: "已解除绑定并清除本地授权" };
   }
 
   // --- QQ 设置 / 凭据 / 状态消息 --------------------------------------------
@@ -9439,16 +9479,6 @@ export class ChatPanel implements vscode.Disposable {
       this.log.warn(`QQ 设置补丁忽略了：${result.ignored.join(", ")}`);
     }
     await this.onQqSettingsChanged();
-  }
-
-  /** 凭据写入（单向：明文只进 SecretStorage，快照里只有布尔投影）。 */
-  private async handleQqSecretsWrite(botToken?: string, appSecret?: string): Promise<void> {
-    const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
-    const changed = await writeQqSecrets(io, { botToken, appSecret });
-    if (changed.length > 0) this.log.info(`QQ 凭据已更新：${changed.join(", ")}`);
-    await this.pushQqSettings();
-    // 官方 adapter 持有启动时的凭据快照：换了凭据必须重建服务。
-    if (changed.length > 0 && this.qq) this.scheduleQqRestart();
   }
 
   /** 设置页 QQ 卡片的动作。扫码登录三动作在 Wave5-C 落地：二维码桥随托管
@@ -9584,7 +9614,7 @@ export class ChatPanel implements vscode.Disposable {
     this.refreshQqTasks();
   }
 
-  /** QQ 设置快照（无明文凭据，只有 hasBotToken / hasAppSecret 布尔）。 */
+  /** QQ 设置快照（无明文凭据，只有 hasAppSecret 布尔）。 */
   private async pushQqSettings(): Promise<void> {
     if (this.disposed) return;
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);

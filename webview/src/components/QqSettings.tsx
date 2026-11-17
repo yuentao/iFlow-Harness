@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { AlertTriangle, Link2, PlugZap, Plus, RefreshCw, Square, Trash2, Unlink, Zap } from "lucide-react";
 import { isQrDataUrl, type HostToWebview, type QqSettingsUi } from "../../../shared/messages";
 import { t } from "../i18n";
@@ -41,17 +41,12 @@ export type QqManagedStatus = Extract<HostToWebview, { type: "qqManagedStatus" }
 export type QrAction = "startQrLogin" | "refreshQr" | "cancelQrLogin";
 
 /**
- * 组件的受控值：共享设置快照 {@link QqSettingsUi} 加上**仅用于编辑**的凭据
- * 草稿。
+ * 组件的受控值：共享设置快照 {@link QqSettingsUi}。
  *
- * 快照本身绝不含明文凭据（只有 `hasBotToken` / `hasAppSecret` 布尔）；
- * `botToken` / `appSecret` 是宿主递进来的临时输入值，组件只在 password 字段
- * 里回显它们，落盘与遮罩都由宿主负责。
+ * 快照本身绝不含明文凭据（只有 `hasAppSecret` 布尔）；凭据由扫码成功后
+ * 宿主直接写入 SecretStorage，面板既不需要也不允许手填。
  */
-export type QqSettingsValue = QqSettingsUi & {
-  botToken?: string;
-  appSecret?: string;
-};
+export type QqSettingsValue = QqSettingsUi;
 
 export interface QqSettingsProps {
   value: QqSettingsValue;
@@ -59,11 +54,6 @@ export interface QqSettingsProps {
   onTestConnection: () => void;
   onGenerateBindCode: () => void;
   onUnbind: () => void;
-  /**
-   * 凭据提交（密码框失焦）：只带用户真正编辑过的字段；空串表示清空该凭据。
-   * 凭据与普通设置走两条通道，绝不混进 {@link onChange} 的设置补丁。
-   */
-  onSecretsCommit?: (secrets: { botToken?: string; appSecret?: string }) => void;
   /** 最近一次连接检查的结果（宿主回执）。 */
   status?: { connected?: boolean; detail?: string };
   /** 当前有效的配对码与其绝对过期时间（epoch ms）。 */
@@ -72,7 +62,7 @@ export interface QqSettingsProps {
   warnings?: string[];
   /** 一键接入：请求宿主开始 / 停止 QQBot 接入流程。 */
   onManagedSetup?: (action: "start" | "stop") => void;
-  /** 扫码授权动作：我已扫码 / 刷新二维码 / 取消登录。 */
+  /** 扫码授权动作：我已扫码 / 刷新二维码 / 取消登录 / 重新扫码授权。 */
   onQrAction?: (action: QrAction) => void;
   /** 当前二维码回执；null = 无二维码。 */
   qqLoginQr?: QqLoginQr | null;
@@ -215,7 +205,6 @@ export function QqSettings({
   onTestConnection,
   onGenerateBindCode,
   onUnbind,
-  onSecretsCommit,
   status,
   bindCode,
   warnings = [],
@@ -224,13 +213,6 @@ export function QqSettings({
   qqLoginQr,
   qqManagedStatus,
 }: QqSettingsProps) {
-  /** 凭据字段是否被用户改过；没改过的空字段失焦不得提交（会误清空）。 */
-  const [secretDirty, setSecretDirty] = useState<{ botToken?: boolean; appSecret?: boolean }>({});
-  function commitSecret(field: "botToken" | "appSecret", next: string): void {
-    if (!secretDirty[field]) return;
-    setSecretDirty((prev) => ({ ...prev, [field]: false }));
-    onSecretsCommit?.({ [field]: next.trim() });
-  }
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -271,6 +253,13 @@ export function QqSettings({
     qqLoginQr != null &&
     (qqLoginQr.phase === "waiting_scan" || qqLoginQr.phase === "scanned") &&
     isQrDataUrl(qqLoginQr.dataUrl);
+  /**
+   * 已授权：扫码写入过 App Secret，或当前已连接 / 托管已登录。
+   * 此时提供「重新扫码授权」入口 —— 手填 Token / App Secret 已移除，
+   * 更换凭据的唯一通道就是重新扫码。
+   */
+  const authorized =
+    value.hasAppSecret === true || status?.connected === true || managedPhase === "logged_in";
 
   return (
     <div className="flex flex-col gap-3">
@@ -392,6 +381,9 @@ export function QqSettings({
         </Chip>
         {status?.detail && <span className="min-w-0 truncate text-ui-caption text-muted-foreground">{status.detail}</span>}
       </div>
+      {authorized && (
+        <Hint className="px-1">{t("已通过扫码授权；如需更换请重新扫码。")}</Hint>
+      )}
 
       {bindCode && (
         <div className="rounded-lg border border-border bg-surface/40 px-3 py-2">
@@ -412,6 +404,14 @@ export function QqSettings({
         <Button icon={<Link2 className={ICON_INLINE} />} onClick={onGenerateBindCode}>
           {t("生成配对码")}
         </Button>
+        {authorized && (
+          <Button
+            icon={<RefreshCw className={ICON_INLINE} />}
+            onClick={() => onQrAction?.("startQrLogin")}
+          >
+            {t("重新扫码授权")}
+          </Button>
+        )}
         <Button variant="danger" icon={<Unlink className={ICON_INLINE} />} onClick={onUnbind}>
           {t("解除绑定")}
         </Button>
@@ -424,54 +424,6 @@ export function QqSettings({
             label={t("启用 QQ 远程任务")}
             onChange={(enabled) => onChange({ enabled })}
           />
-        </Row>
-        <Row
-          label={t("机器人 Token")}
-          description={
-            value.hasBotToken
-              ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
-              : t("输入后失焦即提交给宿主，面板不保存明文。")
-          }
-          wide
-        >
-          <Field label={t("机器人 Token")}>
-            <TextInput
-              type="password"
-              revealable
-              mono
-              aria-label={t("机器人 Token")}
-              value={value.botToken ?? ""}
-              onChange={(event) => {
-                setSecretDirty((prev) => ({ ...prev, botToken: true }));
-                onChange({ botToken: event.target.value });
-              }}
-              onBlur={(event) => commitSecret("botToken", event.currentTarget.value)}
-            />
-          </Field>
-        </Row>
-        <Row
-          label={t("App Secret")}
-          description={
-            value.hasAppSecret
-              ? t("已保存；输入新值并在失焦后提交，清空并失焦可删除。")
-              : t("输入后失焦即提交给宿主，面板不保存明文。")
-          }
-          wide
-        >
-          <Field label={t("App Secret")}>
-            <TextInput
-              type="password"
-              revealable
-              mono
-              aria-label={t("App Secret")}
-              value={value.appSecret ?? ""}
-              onChange={(event) => {
-                setSecretDirty((prev) => ({ ...prev, appSecret: true }));
-                onChange({ appSecret: event.target.value });
-              }}
-              onBlur={(event) => commitSecret("appSecret", event.currentTarget.value)}
-            />
-          </Field>
         </Row>
       </SettingsGroup>
 

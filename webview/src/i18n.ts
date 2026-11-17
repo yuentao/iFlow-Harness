@@ -1109,10 +1109,9 @@ const en: Record<string, string> = {
   "请填写模型名称": "Enter a model name",
   // QQ 远程任务（设置页）
   "QQ 机器人": "QQ bot",
-  "已保存；输入新值并在失焦后提交，清空并失焦可删除。":
-    "Saved; enter a new value and commit on blur, or clear the field and blur to delete it.",
-  "输入后失焦即提交给宿主，面板不保存明文。":
-    "Submitted to the host when the field loses focus; the panel stores no plaintext.",
+  "已通过扫码授权；如需更换请重新扫码。":
+    "Authorized by QR code; scan again if you need to replace it.",
+  "重新扫码授权": "Re-authorize by QR",
   "需要注意": "Needs attention",
   "连接状态未知": "Connection status unknown",
   "配对码": "Pairing code",

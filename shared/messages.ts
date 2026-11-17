@@ -1576,11 +1576,11 @@ export interface HostSettingsUi {
 }
 
 /**
- * QQ 远程任务设置快照（`iflow.qq.*` 的 9 项 + 两个凭据「已配置」标志）。
+ * QQ 远程任务设置快照（`iflow.qq.*` 的 9 项 + App Secret「已配置」标志）。
  *
- * **绝不携带明文凭据**：`hasBotToken` / `hasAppSecret` 只是「SecretStorage /
- * 设置里有没有值」的布尔投影；明文只经 WebviewToHost 的 `qqSecretsWrite`
- * 单向写入，永不回传、永不进快照。
+ * **绝不携带明文凭据**：`hasAppSecret` 只是「SecretStorage 里有没有扫码写入的
+ * App Secret」的布尔投影；凭据只在扫码成功后由宿主单向写入，永不回传、永不进
+ * 快照。机器人 Token 已不再手填（历史 `iflow.qq.bot-token` 是死键）。
  *
  * 枚举取值与 `package.json` 的 `iflow.qq.*` 声明逐字一致，也是
  * `shared/qq-task.ts` 的 `QqRemotePolicy` / `QqResultDetail`。
@@ -1595,9 +1595,7 @@ export interface QqSettingsUi {
   rateLimitPerMin: number;
   resultDetail: "summary" | "standard" | "full";
   autoMerge: boolean;
-  /** 机器人 Token 是否已配置（qqbot 适配器）。只有布尔，没有明文。 */
-  hasBotToken: boolean;
-  /** App Secret 是否已配置。只有布尔，没有明文。 */
+  /** App Secret 是否已由扫码写入。只有布尔，没有明文。 */
   hasAppSecret: boolean;
 }
 
@@ -1676,12 +1674,12 @@ function qqReadIdList(value: unknown): string[] {
  * 保持同步**；枚举非法回退默认值，数字取整后裁剪，字符串 trim，白名单去
  * 空白/去重。
  *
- * 凭据只以 `hasBotToken` / `hasAppSecret` 布尔透传（来自 `secrets`），
- * 输入里即便混进 `botToken` / `appSecret` 也**不会**进入返回值。
+ * 凭据只以 `hasAppSecret` 布尔透传（来自 `secrets`），输入里即便混进
+ * `botToken` / `appSecret` 明文也**不会**进入返回值。
  */
 export function pickQqSettingsUi(
   raw: Record<string, unknown>,
-  secrets: { hasBotToken: boolean; hasAppSecret: boolean },
+  secrets: { hasAppSecret: boolean },
 ): QqSettingsUi {
   const source: Record<string, unknown> =
     raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -1711,7 +1709,6 @@ export function pickQqSettingsUi(
       QQ_SETTINGS_DEFAULTS.resultDetail,
     ),
     autoMerge: qqReadBoolean(source.autoMerge, QQ_SETTINGS_DEFAULTS.autoMerge),
-    hasBotToken: secrets.hasBotToken === true,
     hasAppSecret: secrets.hasAppSecret === true,
   };
 }
@@ -1914,7 +1911,7 @@ export type HostToWebview =
   /** QQ 远程任务（Wave2-B）：绑定码与过期时间（epoch ms），供设置页展示。 */
   | { type: "qqBindCode"; code: string; expiresAt: number }
   /** QQ 远程任务（Wave3-B）：设置页的配置快照。明文凭据绝不在这条消息里，
-   * 只用 `hasBotToken` / `hasAppSecret` 表达「已配置」。 */
+   * 只用 `hasAppSecret` 表达扫码写入的 App Secret 是否已配置。 */
   | { type: "qqSettings"; values: QqSettingsUi }
   /** QQ 远程任务（Wave3-B）：bridge / 适配器的连接状态；`detail` 是给人看的
    * 补充说明（例如端点地址或失败原因）。 */
@@ -2319,12 +2316,9 @@ export type WebviewToHost =
       action: "testConnection" | "generateBindCode" | "unbind" | "startQrLogin" | "refreshQr" | "cancelQrLogin";
     }
   /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
-   * `hasBotToken` / `hasAppSecret` 是宿主回传的投影，这里只会被忽略——
-   * 凭据走下面的 `qqSecretsWrite`，不进设置补丁。 */
+   * `hasAppSecret` 是宿主回传的投影，这里只会被忽略——凭据只在扫码成功后
+   * 由宿主写入 SecretStorage，不走设置补丁。 */
   | { type: "qqSettingsPatch"; patch: Partial<QqSettingsUi> }
-  /** QQ 远程任务（Wave3-B）：写入凭据。只在用户真的输入了新值时才带上对应
-   * 字段（空串 = 清空该凭据）；两项都缺省时宿主什么也不做。 */
-  | { type: "qqSecretsWrite"; botToken?: string; appSecret?: string }
   /**
    * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 QQBot 托管。
    * `start` 触发准备→配置→启动→等待扫码授权流程，`stop` 停止并清理。

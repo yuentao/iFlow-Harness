@@ -131,7 +131,7 @@ beforeEach(() => {
   postMessage.mockClear();
   useChat.setState({
     state: null,
-    qqSettings: pickQqSettingsUi({}, { hasBotToken: false, hasAppSecret: false }),
+    qqSettings: pickQqSettingsUi({}, { hasAppSecret: false }),
     qqStatus: null,
     qqBindCode: null,
     qqLoginQr: null,
@@ -221,6 +221,22 @@ describe("窗口内扫码", () => {
     expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "startQrLogin" });
     clickQrAction("取消");
     expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "cancelQrLogin" });
+  });
+
+  it("已授权时提供「重新扫码授权」入口（手填凭据已移除）", () => {
+    act(() =>
+      useChat.setState({
+        qqSettings: pickQqSettingsUi({}, { hasAppSecret: true }),
+      }),
+    );
+    render();
+    expect(container.textContent).toContain("已通过扫码授权；如需更换请重新扫码。");
+    const button = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "重新扫码授权",
+    );
+    expect(button, "重新扫码授权 button").toBeTruthy();
+    act(() => button!.click());
+    expect(postMessage).toHaveBeenCalledWith({ type: "qqConfigAction", action: "startQrLogin" });
   });
 });
 
