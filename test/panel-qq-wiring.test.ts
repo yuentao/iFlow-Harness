@@ -120,6 +120,7 @@ type PanelInternals = {
   handleQqTaskAction: (taskId: string, action: string, text?: string) => Promise<void>;
   refreshQqTasks: () => void;
   refreshQqTaskProjection: () => void;
+  stopQq: () => Promise<void>;
   handleQqPendingUser: (info: {
     openid: string;
     chatType: "private" | "group";
@@ -183,9 +184,34 @@ describe("QQ 通道 · 面板侧接线", () => {
     p.refreshQqTasks();
     expect(p.store.getState().qqTasks).toEqual([TASK]);
 
-    // 通道没了以后刷新应当清空投影，而不是留下上一轮的幽灵条目。
+    // 通道为空时被动刷新**保留**现有条目：dispose / 重建竞态下清空看板会
+    // 闪一帧空列表（旧实现的行为）；显式停用的清空走 stopQq 的空推送。
     p.qq = undefined;
     p.refreshQqTasks();
+    expect(p.store.getState().qqTasks).toEqual([TASK]);
+  });
+
+  it("显式停用后清空投影，不留幽灵条目", async () => {
+    const stop = vi.fn(async () => undefined);
+    p.qq = {
+      service: {
+        listTasks: () => [TASK],
+        handleTaskAction: vi.fn(async () => undefined),
+        stop,
+      },
+      qqbot: { adapter: { close: async () => undefined } },
+      store: {},
+      ipc: { port: 0, close: async () => undefined },
+      config: makeConfig(),
+      io: makeIo().io,
+      restartCount: 0,
+    };
+
+    p.refreshQqTasks();
+    expect(p.store.getState().qqTasks).toEqual([TASK]);
+
+    await p.stopQq();
+    expect(stop).toHaveBeenCalled();
     expect(p.store.getState().qqTasks).toEqual([]);
   });
 

@@ -9304,6 +9304,10 @@ export class ChatPanel implements vscode.Disposable {
       this.qq = undefined;
       if (!owner) return;
       await this.disposeQqOwner(owner);
+      // 显式停用：清空看板投影并推一次（不留幽灵条目）。被动刷新
+      // （refreshQqTaskProjection 的 onChanged 竞态）不经过这里、也不会清空。
+      setQqTasks(this.store.getState(), []);
+      this.store.pushSnapshot();
       this.pushQqStatus(false, "QQ 通道已停止");
     } finally {
       this.qqStopping = false;
@@ -9576,7 +9580,7 @@ export class ChatPanel implements vscode.Disposable {
 
       deliver: async (msg) => {
         const adapter = this.qq?.qqbot?.adapter;
-        if (!adapter) return false; // 入口防御：通道未起 / 未绑定
+        if (!adapter) return { ok: false }; // 入口防御：通道未起 / 未绑定
         return deliverViaQqBotAdapter(adapter, msg);
       },
 
@@ -9878,7 +9882,10 @@ export class ChatPanel implements vscode.Disposable {
   private refreshQqTaskProjection(): void {
     if (this.disposed) return;
     const service = this.qq?.service;
-    setQqTasks(this.store.getState(), service ? service.listTasks() : []);
+    // 通道为空（dispose / 重建竞态）时保持现状：清空看板会闪出一帧空列表，
+    // 而显式停用路径（stopQq）不经过这里，不需要「空推送」。
+    if (!service) return;
+    setQqTasks(this.store.getState(), service.listTasks());
     this.store.pushSnapshot();
   }
 

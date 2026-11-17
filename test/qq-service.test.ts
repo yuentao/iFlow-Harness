@@ -4,7 +4,9 @@ import type { QqConfig } from "../src/qq/config.js";
 import type { QqPendingUserInput } from "../src/qq/pending-users.js";
 import {
   QqService,
+  fingerprintChunks,
   qqSpawnPolicyFor,
+  qqTaskProjectionChanged,
   type QqServiceDispatchInput,
   type QqServiceHost,
 } from "../src/qq/service.js";
@@ -104,7 +106,7 @@ function makeHost(): HostFixture {
     readTaskOutcome: () => ({ summary: "完成", stopReason: "end_turn" }),
     deliver: async (msg) => {
       delivered.push({ ...msg });
-      return true;
+      return { ok: true };
     },
     onPendingUser: (info) => {
       pendingUsers.push({ ...info });
@@ -717,7 +719,7 @@ describe("QqService — 终态写回与结果回包", () => {
     f.host.deliver = async (msg) => {
       attempts.push({ text: msg.text, ...(msg.replyToMsgId ? { replyToMsgId: msg.replyToMsgId } : {}) });
       // 被动回复（带 msg_id）一律失败，模拟回复窗口已过期；主动消息可达。
-      return msg.replyToMsgId === undefined;
+      return msg.replyToMsgId === undefined ? { ok: true } : { ok: false, retryable: true };
     };
 
     await f.service.handleInboundMessage(inbound({ msgId: "e3" }));
@@ -739,7 +741,7 @@ describe("QqService — 终态写回与结果回包", () => {
       f.dispatches.push(input);
       return { superSessionId: "super-down" };
     };
-    f.host.deliver = async () => false;
+    f.host.deliver = async () => ({ ok: false, retryable: true });
 
     await f.service.handleInboundMessage(inbound({ msgId: "e4" }));
     await waitFor(() => Boolean(lastTask(f).deliveryError));
@@ -791,6 +793,334 @@ describe("QqService — 终态写回与结果回包", () => {
 
     expect(f.delivered.some((item) => item.text.includes("扩展宿主重启而中断"))).toBe(true);
     expect(f.service.getTask("T-seed-run002")?.status).toBe("failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 回包可靠性缺口回归（2026-11-17）
+// ---------------------------------------------------------------------------
+
+describe("QqService — 回包可靠性缺口回归", () => {
+  it("运行中刷新只回进度、不写中间 result，终态结果仍能送达且只送一次", async () => {
+    let releaseDispatch!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      // 模拟 panel-host：spawnTask 后同步回填 correlation，再等待收尾。
+      // （service 层要等 dispatchTask resolve 才写 correlated，回填必须发生在
+      // 挂起之前，否则运行中刷新读不到 superSessionId。）
+      input.task.correlation.superSessionId = "super-refresh-run";
+      await gate; // 挂起派发：任务停在 running，finalize 尚未跑
+      return { superSessionId: "super-refresh-run" };
+    };
+    // 运行中：没有 stopReason、没有摘要 —— 旧实现会拿占位文案 + 缺省 end_turn
+    // 把「中间结果」写进幂等锚点，永久抑制真正的终态回包。
+    f.host.readTaskOutcome = () => ({ summary: "", status: "running" });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-rr-1" }));
+    await waitFor(() => lastTask(f).status === "running");
+
+    // 运行中刷新：只回一句进度，不写 result / 锚点。
+    await f.service.handleTaskAction(lastTask(f).taskId, "refresh");
+    const duringRun = lastTask(f);
+    expect(duringRun.result).toBeUndefined();
+    expect(duringRun.resultDeliveredAt).toBeUndefined();
+    expect(duringRun.resultDeliveredChunks).toBeUndefined();
+    const progress = f.delivered.filter((item) => item.text.includes("尚未结束"));
+    expect(progress).toHaveLength(1);
+    expect(progress[0]!.text).toContain("running");
+    // 中间 result 不污染看板：没有伪造的 stopReason。
+    expect(f.service.listTasks()[0]?.stopReason).toBeUndefined();
+
+    // 子会话真正收尾：finalize 应送达终态结果（刷新不抑制它）。
+    f.host.readTaskOutcome = () => ({
+      summary: "真的改好了，附上验证结果。",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+    releaseDispatch();
+    await waitFor(() => lastTask(f).status === "succeeded");
+
+    const done = lastTask(f);
+    expect(done.result?.summary).toBe("真的改好了，附上验证结果。");
+    expect(done.resultDeliveredAt).toBeDefined();
+    const finalResults = f.delivered.filter((item) => item.text.includes("真的改好了"));
+    expect(finalResults).toHaveLength(1);
+  });
+
+  it("投递进行中并发刷新不重复发送（在飞标记复用同一次投递）", async () => {
+    let releaseDelivery!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const f = makeService();
+    const delivered: string[] = [];
+    let resultGating = false;
+    f.host.deliver = async (msg) => {
+      delivered.push(msg.text);
+      // 只对结果摘要的投递挂起，模拟平台慢响应（锚点要等全部片发完才落盘）。
+      if (msg.text.includes("QQ 任务") && !resultGating) {
+        resultGating = true;
+        await gate;
+      }
+      return { ok: true };
+    };
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-race" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "并发刷新不该造成二次投递",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+
+    const main = f.service.handleInboundMessage(inbound({ msgId: "e-race-1" }));
+    await waitFor(() => delivered.some((text) => text.includes("QQ 任务")));
+
+    // 投递进行中并发触发刷新：读到的 resultDeliveredAt 还是 undefined。
+    const refresh = f.service.handleTaskAction(lastTask(f).taskId, "refresh");
+    releaseDelivery();
+    await Promise.all([main, refresh]);
+
+    const results = delivered.filter((text) => text.includes("QQ 任务"));
+    expect(results).toHaveLength(1);
+    expect(lastTask(f).resultDeliveredAt).toBeDefined();
+  });
+
+  it("同一逻辑消息的重试复用同一 dedupeKey；不同逻辑投递使用不同 key", async () => {
+    const f = makeService({ deliveryRetryDelayMs: 0 });
+    const passiveKeys: Array<string | undefined> = [];
+    // 被动回复与主动消息全部失败（可重试）→ 每个逻辑投递会烧满 3 次 attempt。
+    f.host.deliver = async (msg) => {
+      if (msg.replyToMsgId !== undefined && msg.dedupeKey !== undefined) {
+        passiveKeys.push(msg.dedupeKey);
+      }
+      return { ok: false, retryable: true };
+    };
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: `super-${f.dispatches.length}` };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "重试去重键验证",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-key-1" }));
+    await waitFor(() => Boolean(lastTask(f).deliveryError));
+    const firstResultKeys = passiveKeys.splice(0);
+
+    // 同一逻辑消息的 3 次 attempt 必须全部复用同一个 key（adapter 据此复用
+    // 同一个 msg_seq，平台按 (msg_id, msg_seq) 去重）。
+    expect(firstResultKeys.length).toBeGreaterThan(0);
+    const uniqueInFirst = new Set(firstResultKeys);
+    expect(uniqueInFirst.size).toBe(1);
+
+    // 第二条任务的结果投递是新的逻辑消息：key 必须与第一条不同。
+    await f.service.handleInboundMessage(inbound({ msgId: "e-key-2" }));
+    await waitFor(() => passiveKeys.length > 0);
+    expect(new Set(passiveKeys).size).toBe(1);
+    expect(passiveKeys[0]).not.toBe(firstResultKeys[0]);
+  });
+
+  it("retryable:false 的确定性拒绝不重试，直接走兜底/记录", async () => {
+    const f = makeService({ deliveryRetryDelayMs: 0 });
+    const attempts: string[] = [];
+    f.host.deliver = async (msg) => {
+      attempts.push(msg.text);
+      return { ok: false, retryable: false }; // 4xx 类确定性拒绝
+    };
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-reject" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "确定性拒绝验证",
+      status: "completed",
+      stopReason: "end_turn",
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-rej-1" }));
+    await waitFor(() => Boolean(lastTask(f).deliveryError));
+
+    // 每次 attempt 只做「被动力 → 主动力兜底」各一次，且断言拒绝后不再重试：
+    // 3 次重试窗口一次都没被烧（结果投递恰 1 次被动 + 1 次主动兜底）。
+    const resultAttempts = attempts.filter((text) => text.includes("QQ 任务"));
+    expect(resultAttempts).toHaveLength(2);
+    expect(lastTask(f).status).toBe("succeeded");
+    expect(lastTask(f).resultDeliveredAt).toBeUndefined();
+  });
+
+  it("执行失败与回包失败同时可见（errorMessage 拼接，不互斥覆盖）", async () => {
+    const f = makeService({ deliveryRetryDelayMs: 0 });
+    f.host.deliver = async () => ({ ok: false, retryable: true });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-both" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "",
+      status: "failed",
+      stopReason: "error",
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-both-1" }));
+    await waitFor(() => lastTask(f).status === "failed");
+    await waitFor(() => Boolean(lastTask(f).deliveryError));
+
+    const ui = f.service.listTasks()[0]!;
+    expect(ui.errorMessage).toContain("执行失败");
+    expect(ui.errorMessage).toContain("执行结束：error");
+    expect(ui.errorMessage).toContain("回包失败");
+    expect(f.service.getTask(lastTask(f).taskId)?.failure?.message).toContain("执行结束：error");
+  });
+
+  describe("persist 去重（关键字段集合比较）", () => {
+    it("字段等价的重复记录不推快照；仅 pending 变化会推一次", () => {
+      const base = seedTask("T-proj-1", "running", {
+        pending: { kind: "approval", text: "等待审批", at: 1 },
+        result: {
+          stopReason: "end_turn",
+          summary: "汇总",
+          changes: [],
+          artifacts: [],
+        },
+        correlation: { superSessionId: "super-p" },
+      });
+      // 同一记录重复 persist（spread 重建、字段等价）：不推快照。
+      expect(qqTaskProjectionChanged(base, { ...base })).toBe(false);
+      expect(qqTaskProjectionChanged(base, { ...base, pending: { ...base.pending } })).toBe(false);
+      // 仅 pending 变化（updatedAt / status 都不变）：必须推一次。
+      expect(qqTaskProjectionChanged(base, { ...base, pending: undefined })).toBe(true);
+    });
+
+    it("result / failure / correlation / 回包锚点任一变化都会推快照", () => {
+      const base = seedTask("T-proj-2", "running");
+      const result2 = {
+        stopReason: "end_turn",
+        summary: "新结果",
+        changes: [],
+        artifacts: [],
+      };
+      expect(qqTaskProjectionChanged(base, { ...base, result: result2 })).toBe(true);
+      expect(
+        qqTaskProjectionChanged(base, { ...base, failure: { code: "x", message: "y" } }),
+      ).toBe(true);
+      expect(
+        qqTaskProjectionChanged(base, { ...base, correlation: { superSessionId: "s" } }),
+      ).toBe(true);
+      expect(qqTaskProjectionChanged(base, { ...base, resultDeliveredAt: 9 })).toBe(true);
+      expect(qqTaskProjectionChanged(base, { ...base, deliveryError: "boom" })).toBe(true);
+      expect(
+        qqTaskProjectionChanged(base, {
+          ...base,
+          resultDeliveredChunks: { count: 1, fingerprint: "f" },
+        }),
+      ).toBe(true);
+      expect(qqTaskProjectionChanged(base, { ...base, status: "succeeded" })).toBe(true);
+      expect(qqTaskProjectionChanged(base, { ...base, updatedAt: 9_999 })).toBe(true);
+    });
+
+    it("fingerprintChunks：任一片文本变化都改变指纹，片数也参与", () => {
+      const chunks = ["第一片", "第二片"];
+      const fingerprint = fingerprintChunks(chunks);
+      expect(fingerprintChunks([...chunks])).toBe(fingerprint);
+      expect(fingerprintChunks(["第一片改", "第二片"])).not.toBe(fingerprint);
+      expect(fingerprintChunks(["第一片"])).not.toBe(fingerprint);
+    });
+
+    it("重试不会因内容不变重复推快照（同一份结果的重复 persist 是 noop）", () => {
+      const base = seedTask("T-proj-3", "succeeded", {
+        result: { stopReason: "end_turn", summary: "s", changes: [], artifacts: [] },
+        resultDeliveredAt: 100,
+      });
+      const rebuilt: QqTask = JSON.parse(JSON.stringify(base)) as QqTask;
+      // 落盘再读回（store 深拷贝）后内容等价：重复 persist 不该再推快照。
+      expect(qqTaskProjectionChanged(base, rebuilt)).toBe(false);
+    });
+  });
+
+  it("执行体确认取消的子会话收成 canceled 终态（与 /qq stop 对齐，不再记 failed）", async () => {
+    const f = makeService();
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-cancel" };
+    };
+    f.host.readTaskOutcome = () => ({
+      summary: "",
+      status: "cancelled",
+      stopReason: "canceled",
+    });
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-cancel-1" }));
+    await waitFor(() => lastTask(f).status === "canceled");
+
+    const task = lastTask(f);
+    expect(task.status).toBe("canceled");
+    expect(task.failure?.code).toBe("agent_canceled");
+    expect(f.service.listTasks()[0]?.status).toBe("canceled");
+  });
+
+  it("多片结果中途失败后从下一片续发，不重发已送达片", async () => {
+    const f = makeService({
+      config: { resultDetail: "full" },
+      deliveryRetryDelayMs: 0,
+    });
+    f.host.dispatchTask = async (input) => {
+      f.dispatches.push(input);
+      return { superSessionId: "super-partial" };
+    };
+    // full 档单条消息预算 12000 字符：造超长摘要强制 chunkQqText 分片。
+    const longSummary = Array.from(
+      { length: 150 },
+      (_, i) => `第 ${i} 项：${"摘要正文填充内容。".repeat(9)}`,
+    ).join("\n");
+    f.host.readTaskOutcome = () => ({
+      summary: longSummary,
+      status: "completed",
+      stopReason: "end_turn",
+    });
+
+    const deliveredTexts: string[] = [];
+    let firstRound = true;
+    f.host.deliver = async (msg) => {
+      deliveredTexts.push(msg.text);
+      if (msg.text.startsWith("已受理任务")) return { ok: true }; // ack 不参与分片
+      if (!firstRound) return { ok: true };
+      // 第一轮：第一片（以「QQ 任务」开头）成功送达，续片一律失败。
+      if (msg.text.startsWith("QQ 任务")) return { ok: true };
+      return { ok: false, retryable: true };
+    };
+
+    await f.service.handleInboundMessage(inbound({ msgId: "e-part-1" }));
+    await waitFor(() => Boolean(lastTask(f).deliveryError));
+
+    const failed = lastTask(f);
+    expect(failed.deliveryError).toContain("已送达 1/");
+    expect(failed.resultDeliveredChunks?.count).toBe(1);
+    expect(failed.resultDeliveredAt).toBeUndefined();
+
+    // 第二轮（手动刷新）：指纹一致 → 跳过已送达的第一片，从第二片续发。
+    const firstRoundCount = deliveredTexts.length;
+    firstRound = false;
+    f.host.deliver = async (msg) => {
+      deliveredTexts.push(msg.text);
+      return { ok: true };
+    };
+    await f.service.handleTaskAction(failed.taskId, "refresh");
+    await waitFor(() => lastTask(f).resultDeliveredAt !== undefined);
+
+    const secondRound = deliveredTexts.slice(firstRoundCount);
+    // 第一片没有重发，且续发的片全部成功送达。
+    expect(secondRound.some((text) => text.startsWith("QQ 任务"))).toBe(false);
+    expect(secondRound.length).toBeGreaterThan(0);
+    expect(lastTask(f).resultDeliveredChunks).toBeUndefined();
+    expect(lastTask(f).deliveryError).toBeUndefined();
   });
 });
 

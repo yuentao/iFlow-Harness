@@ -484,4 +484,37 @@ describe("QqBotAdapter", () => {
     await expect(adapter.connect()).rejects.toThrow("未返回 access_token");
     expect(transport.connects).toHaveLength(0);
   });
+
+  it("dedupeKey：同一逻辑消息的重试复用同一 msg_seq（平台按 msg_id+msg_seq 去重）", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+    const base = { chatType: "private" as const, chatId: "openid-1", replyToMsgId: "m-0" };
+    await adapter.send({ ...base, text: "attempt-1", dedupeKey: "task:T-1:1" });
+    await adapter.send({ ...base, text: "attempt-2", dedupeKey: "task:T-1:1" });
+    const bodies = transport.posts
+      .filter((p) => p.endpoint.includes("/users/"))
+      .map((p) => p.body);
+    // 同一 dedupeKey 的两次发送共享 msg_seq：网络超时但实际已送达的重试不会
+    // 被平台当成新消息刷出来；若首试真的失败，复用的 seq 等价于新消息。
+    expect(bodies[0]).toEqual({ content: "attempt-1", msg_id: "m-0", msg_seq: 1 });
+    expect(bodies[1]).toEqual({ content: "attempt-2", msg_id: "m-0", msg_seq: 1 });
+
+    // 新逻辑消息（新 dedupeKey）正常递增，不与重试共享。
+    await adapter.send({ ...base, text: "next", dedupeKey: "task:T-1:2" });
+    expect(transport.posts.filter((p) => p.endpoint.includes("/users/")).at(-1)?.body).toEqual({
+      content: "next",
+      msg_id: "m-0",
+      msg_seq: 2,
+    });
+
+    // 不带 dedupeKey 维持旧行为：每次发送都递增。
+    await adapter.send({ ...base, text: "a" });
+    await adapter.send({ ...base, text: "b" });
+    const tail = transport.posts.filter((p) => p.endpoint.includes("/users/")).slice(-2);
+    expect(tail[0]?.body).toEqual({ content: "a", msg_id: "m-0", msg_seq: 3 });
+    expect(tail[1]?.body).toEqual({ content: "b", msg_id: "m-0", msg_seq: 4 });
+
+    await adapter.close();
+  });
 });

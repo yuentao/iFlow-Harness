@@ -51,8 +51,18 @@ export interface OutboundMessage {
   chatType: ChatType;
   chatId: string;
   text: string;
-  /** Quote-reply target; the adapter expresses it in the platform's reply segment. */
+  /**
+   * Quote-reply target; the adapter expresses it in the platform's reply segment.
+   */
   replyToMsgId?: string;
+  /**
+   * Logical-message dedup key (optional). Retries of the same logical message
+   * carry the same key, so the adapter reuses one `msg_seq` for all attempts —
+   * QQ de-duplicates on `(msg_id, msg_seq)`, and a retry after a network
+   * timeout that actually delivered must not surface as a brand-new message.
+   * Without a key, every send bumps `msg_seq` (legacy behaviour).
+   */
+  dedupeKey?: string;
   /**
    * Local file to upload instead of (or in addition to) text. Upload support is
    * a later milestone — the port is declared now so callers can be written
