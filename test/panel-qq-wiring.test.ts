@@ -331,7 +331,7 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(p.isQqTaskAction(undefined)).toBe(false);
   });
 
-  it("adapter=qqbot 时拒绝启动：toast 说明未实现，且不留通道现场", async () => {
+  it("adapter=qqbot 走官方路线：未绑定时提示扫码，不再以「尚未实现」拒绝", async () => {
     setConfigOverrides({
       enabled: true,
       adapter: "qqbot",
@@ -347,7 +347,8 @@ describe("QQ 通道 · 面板侧接线", () => {
     await (other as unknown as { startQqIfEnabled: () => Promise<void> }).startQqIfEnabled();
 
     expect(op.qq).toBeUndefined();
-    expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("尚未实现"));
+    expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("尚未扫码绑定"));
+    expect(toast).not.toHaveBeenCalledWith("warning", expect.stringContaining("尚未实现"));
     toast.mockRestore();
     await other.dispose();
   });

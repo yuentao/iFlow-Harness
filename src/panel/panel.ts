@@ -253,6 +253,20 @@ import {
   type ManagedPortProbe,
 } from "./qq-managed-host.js";
 import type { InboundMessage } from "../qq/adapter/types.js";
+import {
+  createQqBotBindRuntime,
+  createQqChannelDispatch,
+  deliverViaQqBotAdapter,
+  qrFailureMessage,
+  qrProgressMessage,
+  qrReadyMessage,
+  readQqBotCredentials,
+  sanitizeQrLoginMessage,
+  storeQqBotCredentials,
+  type QqBotAdapterLike,
+  type QqBotBindRuntimeDeps,
+  type QqChannelDispatchDeps,
+} from "./qqbot-host.js";
 
 const WEBVIEW_DIST = "webview/dist/index.html";
 /** M2 P0-4: async execFile (never sync — trap #18: external process probes
@@ -815,6 +829,16 @@ export interface PanelServices {
     /** Test hook: 替代真实 bridge 子进程 spawn（可在此注入 fake bridge_ready）。 */
     bridgeStarter?: (owner: NonNullable<ChatPanel["qq"]>) => void | Promise<void>;
   };
+  /**
+   * Test hook: QQBot 官方路线的可注入依赖（真网络 / 二维码渲染 / adapter）。
+   * 缺省走 node:https + node:crypto + 内联 QR PNG + 真 QqBotAdapter。
+   */
+  qqbotDeps?: {
+    bind?: QqBotBindRuntimeDeps;
+    transport?: QqChannelDispatchDeps["transport"];
+    adapterFactory?: QqChannelDispatchDeps["adapterFactory"];
+    gatewayUrl?: string;
+  };
 }
 
 /**
@@ -915,6 +939,12 @@ export class ChatPanel implements vscode.Disposable {
     qrBridge?: QrBridge;
     /** 托管安装期临时覆盖 bridge 的 OneBot token（不落盘，成功后才写 SecretStorage）。 */
     onebotTokenOverride?: string;
+    /** QQBot 官方路线：不 spawn bridge，直接持有 adapter + 扫码会话。 */
+    qqbot?: {
+      adapter: QqBotAdapterLike;
+      /** 扫码会话在绑定成功后即停并清空，只在绑定进行中短驻留。 */
+      bindSession?: { stop(): void };
+    };
   };
   /** 主动停止中：bridge 的 exit 事件不得触发自动重启。 */
   private qqStopping = false;
@@ -933,6 +963,11 @@ export class ChatPanel implements vscode.Disposable {
   private qqBridgeRestartTimer: ReturnType<typeof setTimeout> | null = null;
   /** 进行中的启动（并发调用 startQqIfEnabled 时共享同一份工作）。 */
   private qqStarting: Promise<void> | null = null;
+  /**
+   * QQBot 官方扫码会话：绑定进行中短驻留，成功/失败/stop 后立即清空。
+   * 独立于 `this.qq`（扫码时尚无服务现场），避免把半绑定现场塞进主通道。
+   */
+  private qqbotBinding: { stop(): void } | null = null;
   /**
    * 启动代次：`stopQq` 每次递增。异步启动在关键节点复核它 —— 启动途中被
    * 停用 / 重启时，慢半拍的那个启动必须把自己造出来的现场拆掉，而不是把
@@ -8862,7 +8897,12 @@ export class ChatPanel implements vscode.Disposable {
     }
 
     const roots = this.qqWorkspaceRoots();
-    const issues = validateQqConfig(config, roots);
+    const allIssues = validateQqConfig(config, roots);
+    // endpoint 是 OneBot HTTP 地址；qqbot 走官方网关，不需要也不该要求它。
+    const issues =
+      config.adapter === "qqbot"
+        ? allIssues.filter((issue) => issue.code !== "endpoint_required")
+        : allIssues;
     for (const issue of issues) {
       const line = `QQ 配置${issue.severity === "error" ? "错误" : "提示"}（${issue.code}）：${issue.message}`;
       if (issue.severity === "error") this.log.warn(line);
@@ -8876,9 +8916,9 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
 
-    // 硬门控：这两项不是「配置写错了」，而是本版本**根本不支持**。其余配置
-    // 再完美也必须拒绝启动 —— 否则会起一个与设置不符的通道（qqbot 实际跑的
-    // 是 OneBot bridge，workspace 实际仍在主工作区执行）。
+    // 硬门控：workspace 必须落在当前工作区根（远程任务由主仓 worktree 执行）。
+    // onebot / qqbot 都有真实适配器，不再因 adapter 种类拒绝；qqbot 走官方
+    // adapter（见 startQqBotChannel），不会启动 OneBot bridge。
     const gateIssues = checkQqStartupGate(config, this.superRepoRoot());
     if (gateIssues.length > 0) {
       const first = gateIssues[0]!;
@@ -8888,6 +8928,10 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
 
+    if (config.adapter === "qqbot") {
+      await this.startQqBotChannel(config, io, generation);
+      return;
+    }
     const owner = await this.buildAndStartQqOwner(config, io, generation);
     if (!owner) return;
     this.pushQqStatus(false, "QQ bridge 正在启动");
@@ -8980,6 +9024,164 @@ export class ChatPanel implements vscode.Disposable {
     return owner;
   }
 
+  // --- QQBot 官方路线（M3-C）-----------------------------------------------
+
+  /**
+   * adapter=qqbot 的常规启动：不建 IPC、不 spawn bridge、不下载 go-cqhttp。
+   *
+   * 用 SecretStorage 里扫码写入的 appId/appSecret 建官方 adapter，入站事件
+   * 经 `setEventCallback` 直接进 QqService，出站由 adapter.send 完成。没有
+   * 凭据时如实提示先绑定，绝不退化成 OneBot 通道。
+   */
+  private async startQqBotChannel(
+    config: QqConfig,
+    io: QqSettingsIo,
+    generation: number,
+  ): Promise<void> {
+    const creds = await readQqBotCredentials(io);
+    if (!creds) {
+      const detail = "QQBot 尚未扫码绑定，请先在设置页完成扫码绑定";
+      this.store.sendToast("warning", vscode.l10n.t(detail));
+      this.pushQqStatus(false, detail);
+      this.postToWebview(qrFailureMessage(detail));
+      return;
+    }
+
+    const root = path.join(
+      this.context.storageUri?.fsPath ?? this.context.globalStorageUri.fsPath,
+      "qq",
+    );
+    const taskStore = new QqTaskStore(root);
+    const service = new QqService({
+      config,
+      store: taskStore,
+      host: createQqServiceHost(this.createQqHostPorts()),
+      log: (line) => this.log.info(line),
+    });
+    const deps = this.services.qqbotDeps ?? {};
+    const dispatch = createQqChannelDispatch(config, {
+      appId: creds.appId,
+      appSecret: creds.appSecret,
+      onInbound: (msg) => {
+        const live = this.qq?.service;
+        if (!live) return;
+        void live.handleInboundMessage(msg).catch((error: unknown) => {
+          this.log.warn(`QQBot 入站处理失败：${errorMessage(error)}`);
+        });
+        this.refreshQqTasks();
+      },
+      log: (line) => this.log.info(line),
+      ...(deps.transport ? { transport: deps.transport } : {}),
+      ...(deps.adapterFactory ? { adapterFactory: deps.adapterFactory } : {}),
+      ...(deps.gatewayUrl ? { gatewayUrl: deps.gatewayUrl } : {}),
+    });
+    if (dispatch.kind !== "qqbot") return; // 防御：分流入口已判 adapter
+
+    // qqbot 没有 bridge / IPC：用无操作 ipc 占位，满足运行现场的公共形状。
+    const owner: NonNullable<ChatPanel["qq"]> = {
+      service,
+      store: taskStore,
+      ipc: { port: 0, close: async () => undefined },
+      config,
+      io,
+      restartCount: 0,
+      qqbot: { adapter: dispatch.adapter },
+    };
+    this.qq = owner;
+    try {
+      await dispatch.adapter.connect();
+      if (generation !== this.qqGeneration || this.disposed) {
+        if (this.qq === owner) this.qq = undefined;
+        await this.disposeQqOwner(owner);
+        return;
+      }
+      await service.start();
+    } catch (error) {
+      if (this.qq === owner) this.qq = undefined;
+      await this.disposeQqOwner(owner);
+      throw error;
+    }
+    if (generation !== this.qqGeneration || this.disposed) {
+      if (this.qq === owner) this.qq = undefined;
+      await this.disposeQqOwner(owner);
+      return;
+    }
+    this.pushQqStatus(true, "QQBot 官方网关已连接");
+    this.refreshQqTasks();
+    this.log.info("QQBot 官方通道已启动（无 bridge / 无 go-cqhttp）");
+  }
+
+  /** 当前 QQ 配置（测试 IO 优先，读失败回默认）。 */
+  private async currentQqConfig(): Promise<QqConfig> {
+    const snapshot = await readQqSettings(this.qqIo());
+    const { config } = normalizeQqConfig({ ...snapshot } as Record<string, unknown>);
+    return config;
+  }
+
+  /** 停掉在飞的扫码会话（幂等；成功/失败/stop 都调用）。 */
+  private stopQqBotBinding(): void {
+    const binding = this.qqbotBinding;
+    this.qqbotBinding = null;
+    if (this.qq?.qqbot?.bindSession) {
+      this.qq.qqbot.bindSession.stop();
+      this.qq.qqbot.bindSession = undefined;
+    }
+    binding?.stop();
+  }
+
+  /**
+   * 官方扫码绑定：协议 → 会话 → webview 消息 / 凭据落盘 → 启动官方通道。
+   * 这条路径完全不碰 go-cqhttp 下载、5700 端口探测与 manager。
+   */
+  private async startQqBotBind(config: QqConfig): Promise<void> {
+    if (this.disposed) return;
+    this.stopQqBotBinding();
+    const runtime = createQqBotBindRuntime(this.services.qqbotDeps?.bind ?? {});
+    this.qqbotBinding = runtime.session;
+    this.postManagedStatus({ phase: "checking", message: "正在获取 QQBot 登录二维码" });
+    try {
+      await runtime.session.start({
+        onQr: (dataUrl, expiresAt) => {
+          if (this.disposed) return;
+          this.postToWebview(sanitizeQrLoginMessage(qrReadyMessage(dataUrl, expiresAt)));
+          this.postManagedStatus({ phase: "waiting_login", message: "请用 QQ 扫码绑定机器人" });
+        },
+        onProgress: (phase) => {
+          if (this.disposed) return;
+          this.postToWebview(qrProgressMessage(phase));
+        },
+        onSuccess: (creds) => {
+          if (this.disposed) return;
+          void this.onQqBotBound(creds, config);
+        },
+        onFailure: (message) => {
+          if (this.disposed) return;
+          this.stopQqBotBinding();
+          this.postToWebview(qrFailureMessage(message));
+        },
+      });
+    } catch (error) {
+      this.stopQqBotBinding();
+      this.postToWebview(qrFailureMessage(errorMessage(error)));
+    }
+  }
+
+  /** 扫码成功：凭据写 SecretStorage → 停扫码 → 重建官方通道。 */
+  private async onQqBotBound(creds: Parameters<typeof storeQqBotCredentials>[1], config: QqConfig): Promise<void> {
+    try {
+      const io = this.qqIo();
+      await storeQqBotCredentials(io, creds);
+      this.stopQqBotBinding();
+      if (this.qq) await this.stopQq();
+      await this.startQqBotChannel(config, io, this.qqGeneration);
+      this.postManagedStatus({ phase: "logged_in", message: "QQBot 绑定成功，官方网关已连接" });
+      await this.pushQqSettings();
+    } catch (error) {
+      this.stopQqBotBinding();
+      this.postToWebview(qrFailureMessage(errorMessage(error)));
+    }
+  }
+
   // --- 一键托管 / 窗口内扫码（Wave5-C）------------------------------------
 
   /** QQ 设置 IO：测试注入优先，否则用真实 vscode 实现。 */
@@ -9062,10 +9264,19 @@ export class ChatPanel implements vscode.Disposable {
     this.postToWebview(toManagedStatusMessage(status, token));
   }
 
-  /** qqManagedSetup 消息入口。 */
+  /** qqManagedSetup 消息入口：qqbot 走官方扫码绑定，不下载 / 启动 go-cqhttp。 */
   private async handleQqManagedSetup(action: "start" | "stop"): Promise<void> {
-    if (action === "start") await this.startQqManaged();
-    else await this.stopQqManaged();
+    if (action === "stop") {
+      this.stopQqBotBinding();
+      await this.stopQqManaged();
+      return;
+    }
+    const config = await this.currentQqConfig();
+    if (config.adapter === "qqbot") {
+      await this.startQqBotBind(config);
+      return;
+    }
+    await this.startQqManaged();
   }
 
   /** 停止托管：先二维码桥、再 manager，清状态后推 idle（不写回 disabled）。 */
@@ -9357,6 +9568,7 @@ export class ChatPanel implements vscode.Disposable {
     // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
     // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
     this.qqGeneration += 1;
+    this.stopQqBotBinding();
     if (this.qqStopping) return;
     this.qqStopping = true;
     try {
@@ -9395,6 +9607,13 @@ export class ChatPanel implements vscode.Disposable {
    * 自己造出来的这份拆干净。
    */
   private async disposeQqOwner(owner: NonNullable<ChatPanel["qq"]>): Promise<void> {
+    // qqbot 没有 bridge：关 adapter（socket + 心跳），并清空凭据缓存所在对象。
+    const qqbot = owner.qqbot;
+    owner.qqbot = undefined;
+    if (qqbot) {
+      this.stopQqBotBinding();
+      await this.raceQqTeardown(qqbot.adapter.close());
+    }
     const bridge = owner.bridge;
     owner.bridge = undefined;
     if (bridge) {
@@ -9726,7 +9945,12 @@ export class ChatPanel implements vscode.Disposable {
       },
 
       deliver: async (msg) => {
-        const delivery = this.qq?.delivery;
+        const owner = this.qq;
+        if (!owner) return false; // 入口防御：通道未起
+        if (owner.config.adapter === "qqbot" && owner.qqbot) {
+          return deliverViaQqBotAdapter(owner.qqbot.adapter, msg);
+        }
+        const delivery = owner.delivery;
         if (!delivery) return false; // bridge 没握手：如实回报未送达
         const result = await delivery.deliver(msg);
         return result.ok;
@@ -9853,7 +10077,16 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "startQrLogin": {
         const owner = this.qq;
-        if (!owner) return; // 入口防御：无现场时安静返回。
+        if (owner?.config?.adapter === "qqbot" || this.qqbotBinding) {
+          await this.startQqBotBind(owner?.config ?? (await this.currentQqConfig()));
+          return;
+        }
+        if (!owner) {
+          // qqbot 未起服务时仍可扫码（扫码本身就是入口）。
+          const config = await this.currentQqConfig();
+          if (config.adapter === "qqbot") await this.startQqBotBind(config);
+          return;
+        }
         const manager = owner.managed;
         if (!manager) return; // 只有托管流程才持有二维码路径。
         if (!owner.qrBridge) {
@@ -9873,8 +10106,12 @@ export class ChatPanel implements vscode.Disposable {
       }
       case "cancelQrLogin": {
         const owner = this.qq;
-        if (!owner) return;
-        this.stopQrBridgeForManaged(owner);
+        if (!owner && !this.qqbotBinding) return;
+        if (owner?.qqbot || this.qqbotBinding) {
+          this.stopQqBotBinding();
+        } else {
+          this.stopQrBridgeForManaged(owner!);
+        }
         this.postToWebview(buildClearedQrMessage(Date.now()));
         return;
       }
