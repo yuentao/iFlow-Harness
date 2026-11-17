@@ -17,8 +17,9 @@
  * 白名单存储是联合格式（裸 openid 字符串 或 `{ openid, note }`）。写入侧把
  * 两种输入都归一后落盘：对象条目按 `note` 原样写（空串=清空备注），裸字符串
  * 条目视为「只关心 id」，磁盘上同名 openid 已有的备注会被保留 —— 扫码绑定 /
- * 放行待审核这类只追加 id 的路径因此不会抹掉用户填的备注。脱敏串（含 `*`）
- * 绝不进入配置，它只在 webview 渲染时生成。
+ * 放行待审核这类只追加 id 的路径因此不会抹掉用户填的备注。openid 一律 `trim`
+ * 并按完整值去重（保留首次出现顺序），与读侧 `normalizeQqAllowEntries` 同口径。
+ * 脱敏串（含 `*`）绝不进入配置，它只在 webview 渲染时生成。
  *
  * 凭据纪律：凭据只在扫码成功后由宿主单向写入 SecretStorage（appId 用
  * `qqbot-host.ts` 的键、appSecret 用 `QQ_SECRET_KEYS.appSecret`）；快照里只有
@@ -159,9 +160,17 @@ function coerceInteger(
  * 白名单数组：接受裸 openid（旧格式 / 宿主内部只追加 id）与 `{ openid, note }`
  * 条目，结构非法则整键拒绝（不写半截脏值）。
  *
- * 备注合并纪律：**裸字符串条目**表示「只关心 id」，磁盘上同名 openid 已有备注
- * 时原样保留 —— 否则扫码绑定 / 放行待审核这类只追加 id 的写路径会把用户填的
- * 备注一次性抹掉。对象条目里 `note` 是权威值（空串 = 清空备注）。
+ * **备注语义（两种条目形态刻意不同，不要混用）**：
+ *  - **对象条目**的 `note` 是**权威值** —— 有值即覆盖磁盘备注，缺省或空串即
+ *    **清空**磁盘备注（对象形态由 UI 全量回传时产生，用户清空输入框就是要删备注）；
+ *  - **裸字符串条目**表示「只关心 id」，磁盘上同名 openid 已有的备注**原样保留**
+ *    —— 否则扫码绑定 / 放行待审核这类只追加 id 的写路径会把用户填的备注抹掉；
+ *  - 因此，**只想改 id、不想动备注的调用方必须传裸字符串**（或先 `readAll()`
+ *    拿到备注再回传对象形态）；传一个不带 `note` 的对象 = 显式清空备注。
+ *
+ * 其余归一（与读侧 `normalizeQqAllowEntries` 同口径）：openid `trim`，空 id /
+ * 非字符串非对象的项一律整键拒绝；写侧也按 openid **去重并保留首次出现顺序**
+ * —— 读侧虽然会收敛，但磁盘上留重复 id 会让外部工具与旧版本读到脏数据。
  */
 function coerceAllowList(value: unknown, existing: unknown): CoercedValue {
   if (!Array.isArray(value)) return { ok: false };
@@ -171,16 +180,17 @@ function coerceAllowList(value: unknown, existing: unknown): CoercedValue {
     if (entry.note) preserved.set(entry.openid, entry.note);
   }
 
+  const seen = new Set<string>();
   const out: QqAllowEntryStored[] = [];
   for (const item of value) {
-    if (typeof item === "string") {
-      const note = preserved.get(item.trim()) ?? "";
-      out.push(note.length > 0 ? { openid: item.trim(), note } : item);
-      continue;
-    }
     const entry = normalizeQqAllowEntry(item);
     if (!entry) return { ok: false };
-    out.push(entry.note ? { openid: entry.openid, note: entry.note } : entry.openid);
+    if (seen.has(entry.openid)) continue;
+    seen.add(entry.openid);
+    // 裸字符串：只在盘上有备注时保留；对象：用它自己的 note（空 = 清空）。
+    const note =
+      typeof item === "string" ? (preserved.get(entry.openid) ?? "") : (entry.note ?? "");
+    out.push(note.length > 0 ? { openid: entry.openid, note } : entry.openid);
   }
   return { ok: true, value: out };
 }

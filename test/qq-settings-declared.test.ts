@@ -28,7 +28,15 @@ interface SettingSchema {
   maximum?: number;
   enum?: string[];
   enumDescriptions?: string[];
-  items?: { type?: string | string[]; anyOf?: Array<{ type?: string }> };
+  items?: {
+    type?: string | string[];
+    anyOf?: Array<{
+      type?: string;
+      properties?: Record<string, { type?: string }>;
+      required?: string[];
+      additionalProperties?: boolean;
+    }>;
+  };
   description?: string;
   markdownDescription?: string;
 }
@@ -111,6 +119,20 @@ describe("QQ 远程任务设置声明 (Wave2-B)", () => {
     const raw = schema.description ?? schema.markdownDescription ?? "";
     const expected = `${spec.key.replace(/^iflow\./, "iflow.configuration.")}.description`;
     expect(nlsKey(raw)).toBe(expected);
+  });
+
+  it("白名单联合格式的 object 分支钉住 openid / note / required / additionalProperties", () => {
+    for (const key of ["iflow.qq.allowedUsers", "iflow.qq.allowedGroups"]) {
+      const anyOf = props[key]!.items?.anyOf ?? [];
+      const objectBranch = anyOf.find((branch) => branch.type === "object");
+      expect(objectBranch, `${key} 缺少 object 分支`).toBeTruthy();
+      // 只允许这两个字段，多一个少一个都算契约漂移。
+      expect(Object.keys(objectBranch!.properties ?? {}).sort()).toEqual(["note", "openid"]);
+      expect(objectBranch!.properties!.openid!.type).toBe("string");
+      expect(objectBranch!.properties!.note!.type).toBe("string");
+      expect(objectBranch!.required).toEqual(["openid"]);
+      expect(objectBranch!.additionalProperties).toBe(false);
+    }
   });
 
   it("枚举设置逐项解释（enumDescriptions 与 enum 等长且都是 nls 键）", () => {

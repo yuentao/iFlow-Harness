@@ -9186,7 +9186,8 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 扫码成功：凭据写 SecretStorage → **扫码者 openid 去重写入白名单** →
+   * 扫码成功：凭据写 SecretStorage → **扫码者 openid 去重写入白名单**（以磁盘
+   * 最新值为基准合并，另一个窗口新增的条目与备注不会被内存快照覆盖）→
    * 内存置 enabled → 停扫码 → 重建官方通道 → 首次绑定把 enabled 落盘 →
    * 推已连接回执。
    *
@@ -9209,9 +9210,38 @@ export class ChatPanel implements vscode.Disposable {
       // （本次可用），但如实说明重启后会丢。
       const openid = typeof creds.userOpenid === "string" ? creds.userOpenid.trim() : "";
       if (openid.length > 0) {
-        const users = config.allowedUsers.includes(openid)
-          ? config.allowedUsers
-          : [...config.allowedUsers, openid];
+        // 与「放行待审核」（handleQqUserAction）同构：以**磁盘最新值**为基准
+        // 合并，绝不用内存快照整体覆盖 —— `allowedUsers` 是整体替换语义，
+        // 另一个 VSCode 窗口在磁盘上加过的用户（含备注）必须原样保住。
+        // 本窗口内存里的条目一并并进去（它们可能来自尚未落盘的放行），但交给
+        // `applyQqSettingsPatch` 的只有裸 openid：coerceAllowList 会保留磁盘上
+        // 同名条目的 note，内存里从未有过备注意图，不能替用户清空它。
+        let users: string[];
+        try {
+          const fresh = await readQqSettings(io);
+          const seen = new Set<string>();
+          const merged: string[] = [];
+          for (const entry of fresh.allowedUsers) {
+            if (seen.has(entry.openid)) continue;
+            seen.add(entry.openid);
+            merged.push(entry.openid);
+          }
+          for (const entry of config.allowedUsers) {
+            const id = entry.trim();
+            if (id.length === 0 || seen.has(id)) continue;
+            seen.add(id);
+            merged.push(id);
+          }
+          if (!seen.has(openid)) merged.push(openid);
+          users = merged;
+        } catch (error) {
+          // 读盘失败时**不能**改回「凭内存覆盖磁盘」的旧行为（那正是丢数据的
+          // 路径），只在内存态上追加扫码者并如实记录。
+          this.log.warn(`QQ 白名单读取失败，仅更新内存白名单：${errorMessage(error)}`);
+          users = config.allowedUsers.includes(openid)
+            ? config.allowedUsers
+            : [...config.allowedUsers, openid];
+        }
         config.allowedUsers = users;
         try {
           await applyQqSettingsPatch(io, { allowedUsers: users });
