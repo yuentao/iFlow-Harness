@@ -238,7 +238,7 @@ describe("parseQqCommand / bad_code_format", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 归一化（@ 提及 / CQ 码 / 空白）
+// 归一化（@ 提及 / 空白）
 // ---------------------------------------------------------------------------
 
 describe("normalizeCommandText", () => {
@@ -246,13 +246,9 @@ describe("normalizeCommandText", () => {
     expect(normalizeCommandText("  @机器人   /qq    log  ")).toBe("/qq log");
   });
 
-  it("剥掉行首 CQ 码提及", () => {
-    expect(normalizeCommandText("[CQ:at,qq=123456] /qq log")).toBe("/qq log");
-  });
-
   it("只剥开头一个提及标记，双标记残留按非命令处理", () => {
-    expect(normalizeCommandText("@bot [CQ:at,qq=1] /qq status")).toBe("[CQ:at,qq=1] /qq status");
-    expect(parseErr("@bot [CQ:at,qq=1] /qq status").code).toBe("not_a_command");
+    expect(normalizeCommandText("@bot @user /qq status")).toBe("@user /qq status");
+    expect(parseErr("@bot @user /qq status").code).toBe("not_a_command");
   });
 
   it("保留换行，只合并行内空白", () => {
@@ -270,8 +266,8 @@ describe("parseQqCommand / 提及剥离后的解析", () => {
     expect(parseOk("@机器人 /qq status T-7")).toEqual({ kind: "status", taskId: "T-7" });
   });
 
-  it("CQ 码前缀不妨碍解析，任务提示词保留原文空行", () => {
-    expect(parseOk("[CQ:at,qq=123456] /qq task 修复  登录\n\n补测试")).toEqual({
+  it("任务提示词保留原文空行与行内连续空格", () => {
+    expect(parseOk("/qq task 修复  登录\n\n补测试")).toEqual({
       kind: "task",
       prompt: "修复  登录\n\n补测试",
     });

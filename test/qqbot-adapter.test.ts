@@ -18,6 +18,7 @@ import {
   normalizeQqBotEvent,
   parseAccessTokenResponse,
 } from "../src/qq/qqbot/protocol.js";
+import { parseQqCommand } from "../shared/qq-command.js";
 
 // ---------------------------------------------------------------------------
 // 纯协议层
@@ -107,13 +108,45 @@ describe("normalizeQqBotEvent", () => {
     expect(normalizeQqBotEvent({ op: QQBOT_OP.HEARTBEAT_ACK, s: 3 })).toBeNull();
   });
 
-  it("content 清洗：去 <@>/<at> 与 @提及、去换行、收敛空白", () => {
-    expect(cleanQqBotContent("<@bot> 你好\n世界\\n再见")).toBe("你好 世界 再见");
+  it("content 清洗：去 <@>/<at> 与 @提及、保留换行结构、收敛行内空白", () => {
+    // 字面量 \n 也是换行（很多网关把换行转义后塞进 content），不能折成空格。
+    expect(cleanQqBotContent("<@bot> 你好\n世界\\n再见")).toBe("你好\n世界\n再见");
     expect(cleanQqBotContent("@机器人 请帮我看看")).toBe("请帮我看看");
     expect(cleanQqBotContent("<at id=\"123\"> 开始任务")).toBe("开始任务");
     // 邮箱里的 @ 不该被吃掉。
     expect(cleanQqBotContent("发到 user@example.com 谢谢")).toBe("发到 user@example.com 谢谢");
     expect(cleanQqBotContent(undefined)).toBe("");
+  });
+
+  it("content 清洗：保留单换行，连续空白行压成最多一个空行，首尾空白 trim", () => {
+    expect(cleanQqBotContent("第一行\n第二行")).toBe("第一行\n第二行");
+    expect(cleanQqBotContent("第一行\n\n\n\n第二行")).toBe("第一行\n\n第二行");
+    expect(cleanQqBotContent("\n\n  第一行  \n\n")).toBe("第一行");
+    expect(cleanQqBotContent("  第一行   \n  第二行  ")).toBe("第一行\n第二行");
+  });
+
+  it("content 清洗：剥 @ 后行结构不变", () => {
+    expect(cleanQqBotContent("<@123> /qq task 第一行\n<@!456> 第二行")).toBe(
+      "/qq task 第一行\n第二行",
+    );
+  });
+
+  it("含换行的群消息：normalizeQqBotEvent 保留换行，parseQqCommand 取到多行 task prompt", () => {
+    const inbound = normalizeQqBotEvent({
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "msg-multi",
+        group_openid: "group-multi",
+        author: { member_openid: "member-multi" },
+        content: "<@bot> /qq task 第一行\n\n第二行",
+      },
+    });
+    expect(inbound?.mentionsBot).toBe(true);
+    expect(inbound?.text).toBe("/qq task 第一行\n\n第二行");
+    expect(parseQqCommand(inbound?.text ?? "")).toEqual({
+      ok: true,
+      intent: { kind: "task", prompt: "第一行\n\n第二行" },
+    });
   });
 
   it("附件映射：content_type 决定 kind，url/filename/size/file_uuid 逐字段映射", () => {
