@@ -427,7 +427,7 @@ describe("API 配置行更多菜单", () => {
     container.querySelector<HTMLButtonElement>(`button[aria-label="配置 ${name} 的操作"]`);
   const rowOf = (name: string) => moreButton(name)?.closest<HTMLElement>(".card-lift");
   const overflowMenu = () =>
-    [...container.querySelectorAll<HTMLElement>('[role="menu"]')].find((menu) =>
+    [...document.body.querySelectorAll<HTMLElement>('[role="menu"]')].find((menu) =>
       menu.textContent?.includes("编辑") && menu.textContent?.includes("删除"),
     );
 
@@ -730,7 +730,7 @@ describe("API 配置保存按钮的 busy 门控", () => {
     const more = container.querySelector<HTMLButtonElement>(`button[aria-label="配置 ${name} 的操作"]`);
     expect(more).toBeTruthy();
     act(() => more!.click());
-    const editItem = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    const editItem = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
       (el) => el.textContent?.trim() === "编辑",
     );
     expect(editItem).toBeTruthy();
