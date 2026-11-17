@@ -53,8 +53,8 @@ import type {
   SessionSettings,
   ToolCallBase,
 } from "../acp/protocol.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QqTaskUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
-import { extractCorePrompt, isPlanMode, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, AssetKind, Block, CheckpointUi, ContextKind, ContextRefUi, InjectedContextItem, McpScope, McpStatusUi, QqSettingsPatch, QqTaskUi, QueuedPromptUi, SessionState, SessionSummaryUi, ToolBlock, ToolDiffUi, WebviewToHost } from "../../shared/messages.js";
+import { extractCorePrompt, normalizeUserPromptText, splitReportedContextSections, AGENT_ATTACHMENT_HEADER } from "../../shared/messages.js";
 import { buildAssetGenPrompt, normalizeGeneratedAsset } from "../../shared/asset-gen.js";
 import { loadPrompt, renderPrompt } from "../../prompts/index.js";
 import { canReviewTurn, collectTurnChanges, collectTurnToolBlocks, isLatestTurn, turnChangeKey } from "../../shared/turn-changes.js";
@@ -186,7 +186,6 @@ import {
 } from "../../shared/notifications.js";
 import { sendOsNotification } from "../acp/os-notify.js";
 import { transcriptToMarkdown, transcriptToJson } from "../../shared/export.js";
-import { planSpecContent, planSpecFileName, planChecklistEntries } from "../../shared/plan-spec.js";
 import {
   buildFollowupPrompt,
   parseFollowupResponse,
@@ -279,7 +278,7 @@ const URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 /** User answer window for a tool-approval card. */
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 /** Re-check window for the deferred card toasts (policy 2026-10-16): the OS
- * reminder for an approval / plan / question card is scheduled this long and
+ * reminder for an approval / question card is scheduled this long and
  * fires only if the card still owns its webview pending slot when the check
  * runs — parallel permission requests replace each other's card (CLI runs a
  * turn's function calls through Promise.allSettled), and a card that has been
@@ -497,8 +496,8 @@ const SUPER_HEARTBEAT_MS = 1_500;
  *
  * Provenance of the names below (scanned 2026-11-16 / 2026-11-17 across
  * vendor/iflow-fork/bundle/iflow.js). Each one is a `static Name` in the
- * bundle — a `"<name>"` literal, or for `exit_plan_mode` / `save_memory` the
- * schema object's name (`static Name = l2a.name` / `jzn.name`) — but "declared"
+ * bundle — a `"<name>"` literal, or for `save_memory` the
+ * schema object's name (`static Name = jzn.name`) — but "declared"
  * is not "registered": this comment must not claim a tool is withheld when the
  * registrar never creates it:
  *  - registered by `createToolRegistry()`'s `t(...)` calls: read_file (L1246),
@@ -530,8 +529,7 @@ const SUPER_HEARTBEAT_MS = 1_500;
  * list: `super-agent` (the dispatch channel — registered by the loader,
  * `super-agent-loader.cjs`, `static Name = "super-agent"`, and it goes through
  * the same registrar), `todo_write` / `todo_read` (the orchestrator's own
- * planning), `ask_user_question` (requirements) and `exit_plan_mode` (Plan
- * mode's only way to hand a plan to the user).
+ * planning) and `ask_user_question` (requirements).
  *
  * The list below is the SECOND layer. It is redundant with the whitelist in
  * this bundle version — both are consumed by the same registrar, and a name that
@@ -561,10 +559,6 @@ export const MAIN_SESSION_ALLOWED_TOOLS = [
   "todo_read",
   // requirements clarification — the answers become the task briefs
   "ask_user_question",
-  // Plan mode's exit path (`static Name = l2a.name` = "exit_plan_mode" in the
-  // bundle; the host renders its Plan approval card). Without it Plan mode
-  // could never hand a plan over.
-  "exit_plan_mode",
 ] as const;
 export const MAIN_SESSION_DISALLOWED_TOOLS = [
   // in-process sub-agents — the main session delegates to Super Agent children
@@ -802,8 +796,9 @@ function asUiDensity(value: unknown): (typeof UI_DENSITIES)[number] {
     : "standard";
 }
 
-/** `iflow.defaultMode` values — kept in sync with shared/messages.ts. */
-const DEFAULT_MODES = ["default", "smart", "yolo", "plan"] as const;
+/** `iflow.defaultMode` values — kept in sync with shared/messages.ts.
+ * Plan mode 已移除（2026-11-18）：旧配置里的 `plan` 不再合法，读取时回退。 */
+const DEFAULT_MODES = ["default", "smart", "yolo"] as const;
 
 /** settings.json / VSCode config is user-editable — fall back to `smart`. */
 function asDefaultMode(value: unknown): (typeof DEFAULT_MODES)[number] {
@@ -1177,17 +1172,6 @@ export class ChatPanel implements vscode.Disposable {
   /** {@link superToolCallWarned} 的容量上限（工具帧数量不设界，Set 必须有界）。 */
   private static readonly SUPER_TOOL_CALL_WARN_CAP = 100;
   /**
-   * 计划模式下被拦下的派发 / 管理载荷指纹（`kind#fingerprint`）。
-   *
-   * Plan 模式只做计划：宿主不派发子会话、也不执行子会话管理动作。拦截必须
-   * **可见**（用户要看到「被拦下了、以及为什么」），但同一条载荷会随流式分帧
-   * 多次扫到（工具帧还有 pending / in_progress 两帧），按指纹去重才不会刷屏。
-   * 有界集合，换会话 / 恢复会话 / 热重认证时清空。
-   */
-  private readonly planModeBlockWarned = new Set<string>();
-  /** {@link planModeBlockWarned} 的容量上限。 */
-  private static readonly PLAN_MODE_BLOCK_WARN_CAP = 50;
-  /**
    * 已执行过管理动作的结构化工具调用（`toolCallId` + 载荷指纹）。
    *
    * 派发侧有 `superDispatchedDirectives` 载荷账本兜底，动作侧没有 —— 同一条
@@ -1435,24 +1419,6 @@ export class ChatPanel implements vscode.Disposable {
    * the user names it in the policy card (or it is dismissed). */
   private approvalDraft: ApprovalRule | null = null;
   private approvalRuleSeq = 0;
-  /** Awaiting user confirmation for `_iflow/plan/exit`, keyed by plan-exit id. */
-  private readonly pendingPlanExits = new Map<
-    string,
-    {
-      resolve: (response: ExitPlanModeResponse) => void;
-      timer: NodeJS.Timeout;
-      /** Full plan text — persisted to `.iflow/specs/` on approval. */
-      plan: string;
-    }
-  >();
-  private planExitSeq = 0;
-  /**
-   * Mode to return to after a Plan exit is approved. The CLI does NOT switch
-   * modes itself when `_iflow/plan/exit` is approved (verified 2026-09: agent
-   * stays in plan mode), so the client must issue `session/set_mode` after
-   * approval. Captured in setMode() right before switching INTO a plan mode.
-   */
-  private planReturnModeId: string | null = null;
   /** Awaiting user answers for `_iflow/user/questions`, keyed by card id. */
   private readonly pendingQuestions = new Map<
     string,
@@ -1463,7 +1429,7 @@ export class ChatPanel implements vscode.Disposable {
   >();
   /**
    * Awaiting the user's choice in the profile-switch dialog, keyed by dialog id.
-   * No timer: the dialog blocks no agent (unlike approval/plan/question cards),
+   * No timer: the dialog blocks no agent (unlike approval/question cards),
    * so it waits for the user indefinitely — every cancel path (panel dispose,
    * session teardown) resolves it explicitly instead.
    */
@@ -1523,7 +1489,7 @@ export class ChatPanel implements vscode.Disposable {
    */
   private turnHadAgentOutput = false;
   /**
-   * Armed after a timeout auto-reject (approval / plan-exit / question) while
+   * Armed after a timeout auto-reject (approval / question) while
    * a turn is in flight. If the CLI's follow-up model request wedges (zero
    * `session/update` for POST_REJECTION_IDLE_MS — see the constant), the
    * watchdog cancels the dead turn instead of stranding the panel on
@@ -1777,9 +1743,7 @@ export class ChatPanel implements vscode.Disposable {
       case "streaming": {
         const label = state.compressing
           ? vscode.l10n.t("正在压缩")
-          : isPlanMode(state.modes)
-            ? vscode.l10n.t("正在规划")
-            : vscode.l10n.t("生成中");
+          : vscode.l10n.t("生成中");
         text = `$(sync~spin) iFlow: ${label}${model}`;
         break;
       }
@@ -1940,7 +1904,6 @@ export class ChatPanel implements vscode.Disposable {
       }
     }
     this.cancelAllApprovals(vscode.l10n.t("扩展已停用"));
-    this.cancelAllPlanExits(vscode.l10n.t("扩展已停用，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Super Agent: kill the child sessions' CLI processes too — each one is
     // its own process tree, and leaving them behind would leak node
@@ -2480,9 +2443,6 @@ export class ChatPanel implements vscode.Disposable {
         break;
       case "respondApproval":
         this.handleApprovalResponse(msg.id, msg.optionId);
-        break;
-      case "respondPlanExit":
-        await this.handlePlanExitResponse(msg.id, msg.approved, msg.reason, msg.replan === true);
         break;
       case "answerQuestions":
         this.handleQuestionAnswers(msg.id, msg.answers);
@@ -3093,7 +3053,7 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * Deferred card toast (policy 2026-10-16: OS reminders exist only while the
-   * question/approval/plan card is displayed). `cardStillDisplayed` answers
+   * question/approval card is displayed). `cardStillDisplayed` answers
    * "still pending AND still owning its webview slot" at FIRE time — the
    * synchronous call site cannot see a same-tick slot replacement from a
    * parallel permission request, but the deferred check does. A toast for an
@@ -4202,7 +4162,7 @@ export class ChatPanel implements vscode.Disposable {
    *   compress a healthy session — the hy3 32K-fallback misreport was the
    *   exact false-positive this guard prevents);
    * - only a truly idle session (streaming/connecting/init/replay windows
-   *   and pending approval/question/plan cards stay untouched);
+   *   and pending approval/question cards stay untouched);
    * - `autoCompressInFlight` keeps one compress turn at a time; a failed
    *   compression is logged + warned, never escalated to the error banner
    *   (the user's next real prompt still has the reactive overflow path).
@@ -4221,7 +4181,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (state.sessionId !== sessionId) return false;
     if (state.initializing || state.replaying || state.status !== "idle") return false;
-    if (state.pendingApproval || state.pendingPlanExit || state.pendingQuestions) return false;
+    if (state.pendingApproval || state.pendingQuestions) return false;
     const usage = state.usage;
     const window = usage?.contextWindow ?? null;
     if (!usage || usage.estimated || window === null || window <= 0) return false;
@@ -4638,7 +4598,6 @@ export class ChatPanel implements vscode.Disposable {
   private cancelCurrentTurn(): void {
     const client = this.client;
     this.cancelAllApprovals(vscode.l10n.t("用户取消"));
-    const skippedPlanExits = this.cancelAllPlanExits(vscode.l10n.t("用户取消，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("用户取消"));
     this.cancelSeen = true;
     this.clearPostRejectionWatchdog();
@@ -4655,15 +4614,6 @@ export class ChatPanel implements vscode.Disposable {
       this.announceDeferredAutoTurns();
     }
     this.sendTurnCancel(sessionId, client);
-    // Stopping a Plan-exit card must leave the session in the mode the panel
-    // shows. `session/set_mode` has no echo notification, so nothing would
-    // notice the CLI drifting out of Plan mode here — the user-reported
-    // symptom was the composer still saying 计划 while the agent had already
-    // gained write access (session 439fd54b). Re-assert the stored mode; a
-    // push of the mode the CLI already holds is a no-op on its side.
-    if (skippedPlanExits > 0 && client) {
-      void this.assertModeForPrompt(client, sessionId);
-    }
   }
 
   /**
@@ -4770,176 +4720,22 @@ export class ChatPanel implements vscode.Disposable {
     }
   }
 
-  // --- Plan-mode exit flow (_iflow/plan/exit) ---------------------------------
+  // --- Plan mode (removed) — minimal defensive fallback ------------------------
 
   /**
-   * Surface a Plan-mode exit request as a confirmation card in the webview and
-   * resolve once the user answers (or the timeout auto-rejects). Reuses the
-   * approval-card visual form so the panel stays consistent.
+   * 计划模式已移除（2026-11-18）。
+   *
+   * CLI 内部仍然保留 `permission_mode: plan` 与 `exit_plan_mode` 工具（vendor
+   * bundle 刻意不改）。旧会话归档、外部 `~/.iflow/settings.json` 的
+   * `approvalMode: "plan"`、或 CLI 自身的启动默认都可能让
+   * `_iflow/plan/exit` 再次到达宿主。**不能挂死**：这里不弹卡、不入待办、不写
+   * specs，记一条警告后直接放行（wire 契约仍是 `{approved, reason?}`），让
+   * agent 继续跑，而不是阻塞到 5 分钟审批超时。
    */
-  private requestPlanExitFromUser(req: ExitPlanModeRequest): Promise<ExitPlanModeResponse> {
-    const id = `plan-${++this.planExitSeq}`;
-    const now = Date.now();
-    const pending: PendingPlanExitUi = {
-      id,
-      plan: req.plan ?? "",
-      deadline: now + APPROVAL_TIMEOUT_MS,
-      timeoutMs: APPROVAL_TIMEOUT_MS,
-    };
-    return new Promise<ExitPlanModeResponse>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingPlanExits.delete(id);
-        // Resolve FIRST — see the approval-timeout comment above.
-        resolve({ approved: false, reason: vscode.l10n.t("超时未确认，已拒绝") });
-        this.store.clearPlanExit(id);
-        this.store.resolveExitPlanModeBlock(false);
-        this.store.planExitResolutionNote(vscode.l10n.t("计划审批超时，已自动拒绝"));
-        this.armPostRejectionWatchdog();
-      }, APPROVAL_TIMEOUT_MS);
-      this.pendingPlanExits.set(id, { resolve, timer, plan: pending.plan });
-      this.store.showPlanExit(pending);
-      // M1 P0-5 + policy 2026-10-16: Plan approval is the user's fourth OS
-      // trigger (card displayed) — same slot-mirror re-check as approvals so a
-      // replaced card never announces itself.
-      this.toastWhileDisplayed(
-        () => this.pendingPlanExits.has(id) &&
-          this.store.getState().pendingPlanExit?.id === pending.id,
-        "plan",
-        () => vscode.l10n.t("iFlow 等待计划审批（{0} 秒后自动拒绝）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
-      );
-    });
-  }
-
-  /** Resolve a pending Plan-mode exit from the webview's answer. */
-  private async handlePlanExitResponse(
-    id: string,
-    approved: boolean,
-    reason?: string,
-    replan = false,
-  ): Promise<void> {
-    const pending = this.pendingPlanExits.get(id);
-    if (!pending) return;
-    this.pendingPlanExits.delete(id);
-    clearTimeout(pending.timer);
-    this.store.clearPlanExit(id);
-    // The CLI never sends a terminal update for the exit_plan_mode call itself
-    // (bundle: handleExitPlanMode returns a functionResponse only) — settle it
-    // here so the card doesn't linger at 等待执行 until the turn-end sweep
-    // mislabels an approved plan's call as failed. Replan answered
-    // success:false too, so it settles as failed like a rejection.
-    this.store.resolveExitPlanModeBlock(approved);
-    // The agent is blocked on this response: compute it first and resolve in
-    // `finally`, so a note/mode/write failure can never leave the CLI waiting
-    // for the 5-minute timeout.
-    const response: ExitPlanModeResponse = {
-      approved,
-      reason: approved ? undefined : reason ?? vscode.l10n.t("用户拒绝了该计划"),
-    };
-    try {
-      // Replan with edited plan text: the reason IS the revised plan the user
-      // wrote in the card's edit mode — surface a truncated excerpt in the
-      // resolution note so the transcript records what changed (the full text
-      // goes to the agent via the resolve below; the note is display-only).
-      let note: string;
-      if (replan) {
-        note = reason
-          ? vscode.l10n.t("重新规划：{0}", reason.length > 80 ? `${reason.slice(0, 80)}…` : reason)
-          : vscode.l10n.t("重新规划");
-      } else if (approved) {
-        // Approved plans are project artifacts: `.iflow/specs/<timestamp>-<slug>.md`.
-        // The write must not block approval — a failure is logged and the note
-        // simply omits the path.
-        let savedPath: string | null = null;
-        try {
-          savedPath = await this.persistPlanSpec(pending.plan);
-        } catch (error) {
-          this.log.warn(`failed to persist plan spec: ${errorMessage(error)}`);
-        }
-        note = savedPath
-          ? vscode.l10n.t("已批准计划，已保存到 {0}", savedPath)
-          : vscode.l10n.t("已批准计划");
-        // 3.5 ①: give the approved round a task-level progress view from the
-        // start — the TaskList otherwise only appears once the agent itself
-        // calls the todo tool. Parser returns null for plans without a
-        // usable item list (a one-item card is noise); a later todo_write
-        // still replaces the seeded items (the agent's bookkeeping wins).
-        const checklist = planChecklistEntries(pending.plan);
-        if (checklist) this.store.seedPlanChecklist(checklist);
-      } else {
-        note = reason ?? vscode.l10n.t("已拒绝计划");
-      }
-      this.store.planExitResolutionNote(note);
-      // Wire behavior (verified 2026-09): the CLI does not leave plan mode on
-      // its own after `_iflow/plan/exit` resolves — switch back explicitly on
-      // BOTH approval and rejection (rejection must not strand the session in
-      // plan mode either; the agent continues in the returned mode). Replan is
-      // the exception: it rejects the plan but keeps the session in plan mode
-      // so the agent can revise it.
-      if (!replan) {
-        const modes = this.store.getState().modes;
-        const fallback = modes?.availableModes.find((m) => m.kind != null && m.kind !== "plan")?.id;
-        const target = this.planReturnModeId ?? fallback ?? "smart";
-        this.planReturnModeId = null;
-        void this.setMode(target).catch(() => undefined);
-      }
-    } catch (error) {
-      this.log.warn(`failed to finish plan exit: ${errorMessage(error)}`);
-    } finally {
-      pending.resolve(response);
-    }
-  }
-
-  /**
-   * Persist an approved plan under the active workspace's `.iflow/specs/`.
-   * Returns the workspace-relative display path, or null when there is no
-   * workspace folder / the write fails (approval still proceeds).
-   */
-  private async persistPlanSpec(plan: string): Promise<string | null> {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (folders.length === 0) return null;
-    const folder = folders.find((candidate) => candidate.uri.fsPath === this.sessionCwd) ?? folders[0]!;
-    const createdAt = new Date();
-    const dir = vscode.Uri.joinPath(folder.uri, ".iflow", "specs");
-    try {
-      const fileName = planSpecFileName(plan, createdAt);
-      await vscode.workspace.fs.createDirectory(dir);
-      let target = vscode.Uri.joinPath(dir, fileName);
-      // Timestamps are second-granular; keep two approvals in the same second
-      // from clobbering each other.
-      for (let n = 2; ; n += 1) {
-        try {
-          await vscode.workspace.fs.stat(target);
-        } catch {
-          break;
-        }
-        target = vscode.Uri.joinPath(dir, fileName.replace(/\.md$/, `-${n}.md`));
-      }
-      await vscode.workspace.fs.writeFile(
-        target,
-        Buffer.from(
-          planSpecContent(plan, { sessionId: this.store.getState().sessionId, createdAt }),
-          "utf8",
-        ),
-      );
-      return path.posix.join(".iflow", "specs", path.basename(target.fsPath));
-    } catch (error) {
-      this.log.warn(`failed to persist plan spec: ${errorMessage(error)}`);
-      return null;
-    }
-  }
-
-  /** Cancel every pending Plan exit (client died / replaced) without hanging the agent. */
-  private cancelAllPlanExits(reason: string): number {
-    const cancelled = this.pendingPlanExits.size;
-    for (const [id, pending] of this.pendingPlanExits) {
-      clearTimeout(pending.timer);
-      this.store.clearPlanExit(id);
-      this.store.resolveExitPlanModeBlock(false);
-      this.store.planExitResolutionNote(reason);
-      pending.resolve({ approved: false, reason });
-    }
-    this.pendingPlanExits.clear();
-    return cancelled;
+  private handleRemovedPlanExit(req: ExitPlanModeRequest): ExitPlanModeResponse {
+    const planChars = (req.plan ?? "").length;
+    this.log.warn(`plan mode removed: auto-approving stale _iflow/plan/exit (${planChars} chars of plan text)`);
+    return { approved: true, reason: vscode.l10n.t("计划模式已移除，自动继续") };
   }
 
   // --- User questions flow (_iflow/user/questions, ask_user_question tool) ----
@@ -5855,7 +5651,6 @@ export class ChatPanel implements vscode.Disposable {
       this.restartRestoreId = outgoingId;
     }
     this.cancelAllApprovals(vscode.l10n.t("内核已重启"));
-    this.cancelAllPlanExits(vscode.l10n.t("内核已重启，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Tail rescue BEFORE the state swap (same rationale as the profile
     // switch): the in-memory blocks are discarded by replaceState below.
@@ -6385,7 +6180,6 @@ export class ChatPanel implements vscode.Disposable {
     // hot re-auth / restart path against a destroyed store.
     if (this.disposed) return;
     this.cancelAllApprovals(vscode.l10n.t("重新认证"));
-    this.cancelAllPlanExits(vscode.l10n.t("重新认证，计划审批已跳过"));
     this.cancelAllPendingQuestions(vscode.l10n.t("重新认证，提问已跳过"));
     // 热重认证的 keepSession 路径原地重载同一个会话（不经过新会话 / 恢复），
     // 扫描缓冲与去重账本属于旧凭据下的那段对话，这里显式清空。
@@ -7076,7 +6870,6 @@ export class ChatPanel implements vscode.Disposable {
     const activeId = lockState.activeSessionId ?? lockState.sessionId;
     if (sessionId === activeId) {
       this.cancelAllApprovals(vscode.l10n.t("会话已删除"));
-      this.cancelAllPlanExits(vscode.l10n.t("会话已删除，计划审批已跳过"));
       this.cancelAllPendingQuestions(vscode.l10n.t("会话已删除，提问已跳过"));
     }
     try {
@@ -7983,46 +7776,6 @@ export class ChatPanel implements vscode.Disposable {
     this.superToolCallWarned.clear();
     this.superToolCallActionsDone.clear();
     this.superToolCallCorrections.clear();
-    this.planModeBlockWarned.clear();
-  }
-
-  /**
-   * Plan 模式是**只做计划**的模式：宿主不派发子会话、也不执行子会话管理
-   * 动作。这里返回 true 表示「已拦下，调用方必须直接返回」。
-   *
-   * 机械强制，不能只靠提示词：派发有两条通道 —— 内置 `super-agent` 工具调用
-   * 与正文里的 `super-agent` 围栏块。CLI 在 Plan 模式下会把 `super-agent` 从
-   * functionDeclarations 里滤掉（bundle 实证：`startChat` 里
-   * `currentChatApprovalMode===dn.PLAN` 时只暴露 12 个只读 / 计划工具），但
-   * 工具 registry 里它仍然注册着，模型幻觉或围栏文本仍可能到达宿主 —— 所以
-   * 宿主在消费侧再拦一道。
-   *
-   * 拦截必须**可见**（不得静默丢弃）：用户要看到「被拦下了、以及为什么」，
-   * 并且知道「退出计划模式后不会自动补派」。同一条载荷会随流式分帧多次扫到、
-   * 工具帧还有 pending / in_progress 两帧，因此按指纹去重。
-   */
-  private blockSuperOperationInPlanMode(kind: "dispatch" | "actions", key: string): boolean {
-    if (!isPlanMode(this.store.getState().modes)) return false;
-    const fingerprint = ChatPanel.superDirectiveFingerprint(`${kind}#${key}`);
-    if (!this.planModeBlockWarned.has(fingerprint)) {
-      if (this.planModeBlockWarned.size >= ChatPanel.PLAN_MODE_BLOCK_WARN_CAP) {
-        const oldest = this.planModeBlockWarned.values().next().value;
-        if (oldest !== undefined) this.planModeBlockWarned.delete(oldest);
-      }
-      this.planModeBlockWarned.add(fingerprint);
-      this.log.info(`super agent: blocked ${kind} in plan mode (payload ${fingerprint})`);
-      this.store.sendToast(
-        "warning",
-        kind === "dispatch"
-          ? vscode.l10n.t(
-              "计划模式只做计划，不派发子会话；请先退出计划模式（exit_plan_mode）后再执行（本次不会自动补派）",
-            )
-          : vscode.l10n.t(
-              "计划模式只做计划，不执行子会话管理操作；请先退出计划模式（exit_plan_mode）后再执行",
-            ),
-      );
-    }
-    return true;
   }
 
   /**
@@ -8053,11 +7806,6 @@ export class ChatPanel implements vscode.Disposable {
       );
     }
     if (scan.blocks.length === 0) return;
-    // Plan 模式只做计划：围栏块照样被扫描器消费掉（偏移已推进，退出计划模式
-    // 后**不会自动补派**），但绝不派发。提示交给共用门控，按载荷指纹去重。
-    if (this.blockSuperOperationInPlanMode("dispatch", superDirectiveDedupeKey(scan.blocks.flat()))) {
-      return;
-    }
     this.dispatchSuperTasks(scan.blocks, scan.issues);
   }
 
@@ -8073,12 +7821,6 @@ export class ChatPanel implements vscode.Disposable {
     blocks: readonly SuperTaskSpec[][],
     issues: readonly string[] = [],
   ): void {
-    // 第二条派发通道（结构化 `super-agent` 工具调用）同样受 Plan 模式门控。
-    // 正文围栏在 scanSuperDirectives 里已先拦一次；这里再拦是结构性的兜底，
-    // 也保证工具调用通道无需知道门控细节。
-    if (this.blockSuperOperationInPlanMode("dispatch", superDirectiveDedupeKey(blocks.flat()))) {
-      return;
-    }
     const manager = this.getSuperAgent();
     if (!manager) {
       this.store.sendToast("warning", vscode.l10n.t("没有打开的工作区，无法派发子会话"));
@@ -8162,9 +7904,6 @@ export class ChatPanel implements vscode.Disposable {
     // 不能下结论 —— 下一帧就会带载荷；在这里弹「未派发子会话」是误报
     // （用户先看到「没派」，紧接着又看到真的派了）。
     if (update.status === "pending" && (update.args === undefined || update.args === null)) return;
-    // Plan 模式只做计划：CLI 会把它从 functionDeclarations 里滤掉，但 registry
-    // 里仍注册着，模型幻觉的调用照样能到这里 —— 宿主侧再拦一道并提示用户。
-    if (this.blockSuperOperationInPlanMode(kind, update.toolCallId || name)) return;
     const parsed = parseSuperToolCall(kind, update.args);
     if (!parsed.ok) {
       this.warnUnsupportedSuperToolCall(update, name, parsed.reason, parsed.issues);
@@ -8377,13 +8116,7 @@ export class ChatPanel implements vscode.Disposable {
       this.store.sendToast("warning", vscode.l10n.t("子会话管理指令无法解析，已忽略"));
     }
     if (scan.actions.length > 0) {
-      // Plan 模式只做计划：管理动作（merge / cleanup / cancel …）同样不执行。
-      // 记账与 pending 状态更新仍走下面的常规路径 —— 只是不调用 runSuperActions。
-      const blocked = this.blockSuperOperationInPlanMode(
-        "actions",
-        JSON.stringify(scan.actions),
-      );
-      if (!blocked) void this.runSuperActions(scan.actions);
+      void this.runSuperActions(scan.actions);
     }
     // 围栏开了没收：记住它。流式期间这是正常中间态（载荷下一帧才到），不在
     // 每帧报警；但**回合都结束了还停在这里**，说明这个动作块永远不会被执行
@@ -11091,7 +10824,6 @@ export class ChatPanel implements vscode.Disposable {
             void this.persistActiveTranscript();
             this.client = null;
             this.cancelAllApprovals(vscode.l10n.t("内核进程已退出"));
-            this.cancelAllPlanExits(vscode.l10n.t("内核进程已退出，计划审批已跳过"));
             this.cancelAllPendingQuestions(vscode.l10n.t("内核进程已退出，提问已跳过"));
             this.store.markError(vscode.l10n.t("内核进程已退出，重新打开面板可重试"));
             // Async failure — the user is likely in the editor; cue it.
@@ -11128,13 +10860,12 @@ export class ChatPanel implements vscode.Disposable {
             return this.userQuestionsFromAgent(req);
           },
           onExitPlanMode: async (req: ExitPlanModeRequest) => {
-            // Route Plan-mode exit through the unified webview confirmation card
-            // (mirrors session/request_permission) instead of a native
-            // QuickPick: the card lives inside the panel where the user is
-            // looking, so it can't be dismissed by a stray click the way a
-            // native popup could (which silently rejected and stranded Plan mode).
+            // 计划模式已移除（2026-11-18）。CLI 仍可能从旧会话归档或外部
+            // `~/.iflow/settings.json` 的 approvalMode=plan 进入 plan 模式并发来
+            // `_iflow/plan/exit`；这里不弹卡、不阻塞，直接放行（见
+            // handleRemovedPlanExit）。
             if (this.client !== client) return { approved: false, reason: "client busy" };
-            return this.requestPlanExitFromUser(req);
+            return this.handleRemovedPlanExit(req);
           },
         },
       );
@@ -11408,14 +11139,10 @@ export class ChatPanel implements vscode.Disposable {
    *
    * The CLI keeps the mode only in `Config.approvalMode` and never notifies us
    * (no `current_mode_update`), so the panel's copy is an optimistic echo that
-   * nothing used to re-sync. Two drift faces were observed in real sessions:
-   * - stopping a pending Plan-exit card left the composer showing 计划 while
-   *   the CLI had left Plan mode, so the agent silently gained write access
-   *   (session 439fd54b: the next "继续" turn's `replace`/`write_file` all
-   *   completed even though `write_file` had just been rejected with
-   *   "Cannot execute write_file in PLAN mode");
-   * - after approving a plan the CLI could stay in Plan mode while the panel
-   *   showed the return mode (same transcript family: every edit rejected).
+   * nothing used to re-sync. Without this push a drift between the dropdown and
+   * the CLI's real mode would silently change what the agent is allowed to do
+   * (e.g. edits rejected with "Cannot execute write_file in PLAN mode" while
+   * the composer showed an approving mode).
    *
    * Pushing the stored mode right before each prompt makes the CLI follow what
    * the user sees; pushing the mode it already holds is a no-op CLI-side. A
@@ -11441,17 +11168,6 @@ export class ChatPanel implements vscode.Disposable {
       return;
     }
     try {
-      // Capture the mode we're leaving so plan approval can switch back to it.
-      const modesBefore = this.store.getState().modes;
-      if (modesBefore) {
-        if (modesBefore.currentModeId === modeId) {
-          // no-op switch; keep existing memo
-        } else if (modesBefore.availableModes.find((m) => m.id === modeId)?.kind === "plan") {
-          this.planReturnModeId = modesBefore.currentModeId;
-        } else {
-          this.planReturnModeId = null;
-        }
-      }
       const resp = (await this.client?.setMode(sessionId, modeId)) as
         | { success?: boolean; currentModeId?: string }
         | undefined;
@@ -12331,7 +12047,6 @@ export class ChatPanel implements vscode.Disposable {
     // Settle pending approval/question cards BEFORE the clear: their
     // resolution notes belong to the old transcript and are cleared with it.
     this.cancelAllApprovals(vscode.l10n.t("会话已重置"));
-    this.cancelAllPlanExits(vscode.l10n.t("会话已重置，计划审批已跳过"));
     this.cancelAllPendingQuestions("");
     // Defensive: a restore that STARTED after the abort request above (the
     // switcher can fire one while the panel is idle) must not interleave its
@@ -12447,17 +12162,25 @@ export class ChatPanel implements vscode.Disposable {
     // iflow.defaultMode: the CLI boots with its own mode (session/new
     // reports it in modes.currentModeId), so the configured default must be
     // pushed explicitly on every fresh session — the setting was previously
-    // declared but never read (trap #14 class). Skip silently when the CLI
-    // does not offer the configured id (e.g. an older agent without "plan");
-    // a setMode that is actually attempted surfaces its own failure warning.
+    // declared but never read (trap #14 class). A legacy `plan` value is no
+    // longer in DEFAULT_MODES, so it is ignored here (compat, no error).
+    // Additionally Plan mode was removed from the product: if the CLI still
+    // boots in it (external ~/.iflow/settings.json `approvalMode: "plan"`),
+    // setMeta already normalized the store's mode — push that normalized mode
+    // so the CLI does not stay in a mode the user can no longer see or leave.
     const configuredMode = vscode.workspace.getConfiguration("iflow").get<string>("defaultMode");
-    if (
-      configuredMode &&
-      session.modes &&
-      configuredMode !== session.modes.currentModeId &&
-      session.modes.availableModes.some((m) => m.id === configuredMode)
-    ) {
-      await this.setMode(configuredMode).catch(() => undefined);
+    const normalizedModes = this.store.getState().modes;
+    const configuredOffered =
+      configuredMode && normalizedModes?.availableModes.some((m) => m.id === configuredMode)
+        ? configuredMode
+        : null;
+    const modeDriftedFromPlan =
+      session.modes && normalizedModes && normalizedModes.currentModeId !== session.modes.currentModeId
+        ? normalizedModes.currentModeId
+        : null;
+    const targetMode = configuredOffered ?? modeDriftedFromPlan;
+    if (targetMode && targetMode !== session.modes?.currentModeId) {
+      await this.setMode(targetMode).catch(() => undefined);
     }
     await this.applyThinkLevel(client, session.sessionId, this.store.getState().thinkLevel);
     this.log.info(`session started: ${session.sessionId}`);
@@ -12742,10 +12465,10 @@ export class ChatPanel implements vscode.Disposable {
       if (this.disposed) throw new DisposedError();
       promptSessionId = this.store.getState().sessionId;
       if (!promptSessionId) throw new Error(vscode.l10n.t("会话未就绪"));
-      // The CLI's mode is invisible to us (no `current_mode_update`), so a
-      // drift introduced by a Plan-exit interrupt would otherwise surface as
-      // the agent silently writing while the composer still says 计划 — make
-      // the CLI follow the mode the user sees before every turn.
+      // The CLI's mode is invisible to us (no `current_mode_update`), so any
+      // drift would otherwise surface as the agent silently acting under a
+      // different mode than the composer shows — make the CLI follow the mode
+      // the user sees before every turn.
       await this.assertModeForPrompt(client, promptSessionId);
       // First turn of this session: show what the request auto-injects
       // (system prompt / memory / context files) BEFORE the user bubble.
@@ -12941,9 +12664,9 @@ export class ChatPanel implements vscode.Disposable {
       this.log.error(`prompt failed: ${this.formatErrorForLog(error)}`);
       this.store.markError(errorMessage(error));
       // Policy 2026-10-16 (user restated): OS reminders exist for exactly the
-      // four triggers — question/approval/plan card displayed, turn completed.
-      // A failed turn keeps its in-panel banner (markError above) + the error
-      // chime (postSound below) but earns no system toast.
+      // blocking-card triggers — question/approval card displayed — plus turn
+      // completion. A failed turn keeps its in-panel banner (markError above) +
+      // the error chime (postSound below) but earns no system toast.
       // M2 P0-3: a real failure pauses auto-dispatch — every queued message
       // would hit the same broken endpoint/CLI. The composer's queue strip
       // shows 继续/清空; dispatch resumes on `queueAction: resume`.
@@ -13252,7 +12975,6 @@ export class ChatPanel implements vscode.Disposable {
           // (settle the blocking cards first, then cancel the session); the
           // completion handler dispatches the marked entry first.
           this.cancelAllApprovals(vscode.l10n.t("用户打断并立即发送"));
-          this.cancelAllPlanExits(vscode.l10n.t("用户打断并立即发送，计划审批已跳过"));
           this.cancelAllPendingQuestions(vscode.l10n.t("用户打断并立即发送"));
           this.cancelSeen = true;
           this.clearPostRejectionWatchdog();
@@ -13675,7 +13397,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (
       state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+      state.pendingApproval || state.pendingQuestions
     ) {
       this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再删除消息"));
       return;
@@ -13816,7 +13538,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (
       state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+      state.pendingApproval || state.pendingQuestions
     ) {
       this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再编辑消息"));
       return;
@@ -14446,7 +14168,7 @@ export class ChatPanel implements vscode.Disposable {
     const state = this.store.getState();
     if (
       state.initializing || state.replaying || state.status === "streaming" || state.status === "connecting" ||
-      state.pendingApproval || state.pendingQuestions || state.pendingPlanExit
+      state.pendingApproval || state.pendingQuestions
     ) {
       this.store.appendNotice(vscode.l10n.t("正在生成、连接或等待确认，请先完成当前操作后再回滚"));
       return;

@@ -21,7 +21,7 @@ export function ProfileSwitchCard({ pending }: { pending: PendingProfileSwitchUi
   const send = useChat((s) => s.send);
   // Optimistic lock: the first click answers the dialog; every button is
   // disabled until the host's next snapshot removes the card (same pattern
-  // as the approval / plan-exit cards — prevents double-fire on rapid clicks).
+  // as the approval card — prevents double-fire on rapid clicks).
   const [answered, setAnswered] = useState(false);
 
   const answer = (keepSession: boolean | null) => {

@@ -7,12 +7,14 @@ import { modeDisplay, setLocale } from "../webview/src/i18n";
  * The mode descriptions used to promise behaviour the main session cannot
  * perform any more ("所有操作直接执行" / "每次执行操作前都要你确认"): since the
  * Super Agent split, the main session only holds `super-agent` / `todo_write` /
- * `todo_read` / `ask_user_question` / `exit_plan_mode`, every one of them has
+ * `todo_read` / `ask_user_question`, every one of them has
  * `shouldConfirmExecute() === false`, and its CLI process runs without MCP
  * servers (see `mainSessionSettings()` in src/panel/panel.ts and the comment
  * above `modeDisplay`). Execution lives in child sessions, which are
- * auto-approved by default. These assertions keep the copy honest and keep it
- * in i18n (no hardcoded strings in the menu component).
+ * auto-approved by default. Plan mode was removed from the panel entirely
+ * (`withoutPlanModes` filters the CLI's `plan` entry out), so only the three
+ * approval modes are localized here. These assertions keep the copy honest and
+ * keep it in i18n (no hardcoded strings in the menu component).
  */
 
 const MODES = [
@@ -30,11 +32,6 @@ const MODES = [
     id: "default",
     zhLabel: "标准",
     zhDesc: "主会话只规划与派发；执行在子会话，无需逐次确认",
-  },
-  {
-    id: "plan",
-    zhLabel: "规划",
-    zhDesc: "只做计划，不派发子会话；需要执行时先请求退出规划模式",
   },
 ] as const;
 
@@ -83,18 +80,16 @@ describe("permission-mode copy", () => {
 
   it("the three approval modes say the main session only plans/delegates and execution is in child sessions", () => {
     setLocale("zh-cn");
-    for (const mode of MODES.filter((m) => m.id !== "plan")) {
+    for (const mode of MODES) {
       const desc = modeDisplay({ id: mode.id, name: "" }).desc;
       expect(desc).toContain("主会话只规划与派发");
       expect(desc).toContain("执行在子会话");
     }
   });
 
-  it("Plan mode says it dispatches no child sessions and requires leaving Plan mode", () => {
+  it("Plan mode is no longer special-cased (the panel filters it out before it reaches the menu)", () => {
     setLocale("zh-cn");
-    const plan = modeDisplay({ id: "plan", name: "Plan" });
-    expect(plan.desc).toContain("不派发");
-    expect(plan.desc).toContain("退出规划模式");
+    expect(modeDisplay({ id: "plan", name: "Plan" })).toEqual({ label: "Plan", desc: "" });
   });
 
   it("unknown mode ids fall back to the agent-provided name", () => {

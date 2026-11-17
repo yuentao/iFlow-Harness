@@ -575,7 +575,6 @@ describe("Super Agent 看板并入顶栏（App 级结构）", () => {
         currentModelId: null,
         thinkLevel: "auto",
         pendingApproval: null,
-        pendingPlanExit: null,
         pendingQuestions: null,
         pendingProfileSwitch: null,
         auth: {

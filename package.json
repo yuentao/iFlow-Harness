@@ -126,8 +126,7 @@
           "enum": [
             "smart",
             "yolo",
-            "default",
-            "plan"
+            "default"
           ],
           "default": "smart",
           "description": "%iflow.configuration.defaultMode.description%"
@@ -206,8 +205,7 @@
             "",
             "default",
             "smart",
-            "yolo",
-            "plan"
+            "yolo"
           ],
           "default": "",
           "markdownDescription": "%iflow.configuration.approvalMode.description%"

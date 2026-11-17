@@ -15,7 +15,6 @@ import type {
 } from "../../shared/messages.js";
 import { initialSessionState } from "../../shared/messages.js";
 import {
-  addPlanChecklist,
   appendApprovalResolution,
   appendInjectedContext,
   applySessionUpdate,
@@ -28,7 +27,6 @@ import {
   closeOpenSubAgents,
   completePrompt,
   clearPendingApproval,
-  clearPendingPlanExit,
   clearPendingProfileSwitch,
   deleteUserMessageById,
   endCompressTurn,
@@ -36,19 +34,17 @@ import {
   markToolReverted,
   markToolHunkDecisions,
   refreshSessionUsage,
-  resolveExitPlanModeBlock,
   setMeta,
   setNextStepLoading,
   setNextStepSuggestions,
   setPendingApproval,
-  setPendingPlanExit,
   setPendingProfileSwitch,
   setPendingQuestions,
   setPlanEntryStatus,
   setSessions,
 } from "../../shared/session-state.js";
 import { classifyErrorAdvice } from "../../shared/error-advice.js";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingProfileSwitchUi, PendingQuestionsUi, PlanEntryUi, MemoryScope, ToolDiffUi } from "../../shared/messages.js";
+import type { PendingApprovalUi, PendingProfileSwitchUi, PendingQuestionsUi, MemoryScope, ToolDiffUi } from "../../shared/messages.js";
 import type { UsageContext } from "../../shared/session-state.js";
 
 export class SessionStore {
@@ -143,16 +139,7 @@ export class SessionStore {
     this.flush();
   }
 
-  /** 3.5 ①: seed the turn's TaskList from an approved plan (panel calls this
-   * on plan approval). Returns the card index, null when nothing seeded. */
-  seedPlanChecklist(entries: PlanEntryUi[]): number | null {
-    const index = addPlanChecklist(this.state.blocks, entries);
-    this.noteMutationIndex(index);
-    this.flush();
-    return index;
-  }
-
-  /** 3.5 ①: user tick/untick of one checklist item; stale ids drop silently. */
+  /** User tick/untick of one checklist item; stale ids drop silently. */
   togglePlanItem(blockId: string, index: number): void {
     this.noteMutationIndex(setPlanEntryStatus(this.state.blocks, blockId, index));
     this.flush();
@@ -410,36 +397,6 @@ export class SessionStore {
     const cleared = clearPendingApproval(this.state, id);
     if (cleared) this.flush();
     return cleared;
-  }
-
-  /** Surface a Plan-mode exit confirmation to the WebView (immediate flush). */
-  showPlanExit(pending: PendingPlanExitUi): void {
-    setPendingPlanExit(this.state, pending);
-    this.flush();
-  }
-
-  /** Answer whether the named plan-exit card was still pending. */
-  clearPlanExit(id: string): boolean {
-    const cleared = clearPendingPlanExit(this.state, id);
-    if (cleared) this.flush();
-    return cleared;
-  }
-
-  /** Visual marker recording the user's Plan-exit decision (the card is transient). */
-  planExitResolutionNote(resolution: string): void {
-    this.noteMutationIndex(appendApprovalResolution(this.state, "plan", resolution));
-    this.flush();
-  }
-
-  /**
-   * Settle the pending `exit_plan_mode` tool call when the Plan card answers —
-   * the CLI never sends a terminal update for that call, so without this the
-   * block lingers at 等待执行 until the turn-end sweep mislabels an approved
-   * plan's call as failed.
-   */
-  resolveExitPlanModeBlock(approved: boolean): void {
-    this.noteMutationIndex(resolveExitPlanModeBlock(this.state.blocks, approved));
-    this.flush();
   }
 
   /** Surface an ask_user_question card to the WebView (immediate flush). */

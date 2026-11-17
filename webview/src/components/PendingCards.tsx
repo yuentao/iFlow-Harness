@@ -1,14 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Layers } from "lucide-react";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi } from "../../../shared/messages";
+import type { PendingApprovalUi, PendingQuestionsUi } from "../../../shared/messages";
 import { t } from "../i18n";
 import { Button, ICON_INLINE } from "./ui";
 import { ApprovalCard } from "./ApprovalCard";
-import { PlanExitCard } from "./PlanExitCard";
 import { QuestionCard } from "./QuestionCard";
 
 /**
- * Pending-action overlay (approval / plan-exit / ask_user_question).
+ * Pending-action overlay (approval / ask_user_question).
  *
  * Single card: exactly the previous rendering — bottom-anchored, `pb-3`, the
  * card caps itself with `max-h-full` and scrolls its own body.
@@ -19,8 +18,8 @@ import { QuestionCard } from "./QuestionCard";
  * single expand entry point. Expanding restores the flat list (vertical,
  * `gap-2`, bottom-anchored, overlay scrolls and sticks to the bottom).
  *
- * Why the wrapper elements: each card owns local state (draft plan text,
- * question answers, optimistic answered lock), so a card must never be
+ * Why the wrapper elements: each card owns local state (question answers,
+ * optimistic answered lock), so a card must never be
  * unmounted when it slides under a newer one. Every kind therefore keeps ONE
  * stable wrapper element and only its classes change:
  *  - list mode  → `display: contents`, so the card is a flex item of the
@@ -43,7 +42,7 @@ import { QuestionCard } from "./QuestionCard";
  * approval must be the one fully visible.
  */
 
-type PendingKind = "approval" | "planExit" | "questions";
+type PendingKind = "approval" | "questions";
 
 interface PendingEntry {
   kind: PendingKind;
@@ -64,11 +63,9 @@ const MAX_VISIBLE_EDGES = 3;
 
 export function PendingCards({
   pendingApproval,
-  pendingPlanExit,
   pendingQuestions,
 }: {
   pendingApproval: PendingApprovalUi | null;
-  pendingPlanExit: PendingPlanExitUi | null;
   pendingQuestions: PendingQuestionsUi | null;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -78,8 +75,8 @@ export function PendingCards({
   const stampsRef = useRef<Map<string, number>>(new Map());
   const stampSeqRef = useRef(0);
 
-  // Stable DOM order (approval → planExit → questions) so React never moves a
-  // card; the visual stack is ordered with CSS `order` instead.
+  // Stable DOM order (approval → questions) so React never moves a card; the
+  // visual stack is ordered with CSS `order` instead.
   const present = useMemo<PendingEntry[]>(() => {
     const list: PendingEntry[] = [];
     if (pendingApproval) {
@@ -88,14 +85,6 @@ export function PendingCards({
         key: `approval:${pendingApproval.id}`,
         summary: t("iFlow 想执行一项操作"),
         node: <ApprovalCard approval={pendingApproval} />,
-      });
-    }
-    if (pendingPlanExit) {
-      list.push({
-        kind: "planExit",
-        key: `planExit:${pendingPlanExit.id}`,
-        summary: t("iFlow 准备开始执行计划"),
-        node: <PlanExitCard pending={pendingPlanExit} />,
       });
     }
     if (pendingQuestions) {
@@ -107,7 +96,7 @@ export function PendingCards({
       });
     }
     return list;
-  }, [pendingApproval, pendingPlanExit, pendingQuestions]);
+  }, [pendingApproval, pendingQuestions]);
 
   // Stamp on first appearance, drop every key that is no longer present, then
   // rank by stamp. Keying on `${kind}:${id}` is what makes a same-kind
@@ -155,7 +144,7 @@ export function PendingCards({
   // mechanism as before: a ResizeObserver mirrors the visible band into a CSS
   // custom property on the transcript wrapper (the overlay's parent). Stacked
   // → counter + edges + top card; expanded → whole list; single → the card.
-  const layoutKey = `${pendingApproval?.id ?? ""}|${pendingPlanExit?.id ?? ""}|${pendingQuestions?.id ?? ""}|${count}|${stacked ? "stacked" : "list"}`;
+  const layoutKey = `${pendingApproval?.id ?? ""}|${pendingQuestions?.id ?? ""}|${count}|${stacked ? "stacked" : "list"}`;
   useEffect(() => {
     const overlay = overlayRef.current;
     if (!overlay) {

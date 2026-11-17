@@ -50,7 +50,6 @@ function connectingState(connectEpoch = 0): SessionState {
     currentModelId: null,
     thinkLevel: "auto",
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
     auth: {

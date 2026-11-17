@@ -712,30 +712,6 @@ function createMockHost(): HostApi {
     deadline: Date.now() + 5 * 60_000,
     timeoutMs: 5 * 60_000,
   };
-  // Demo plan-exit card: surfaced when the user switches to Plan mode in the
-  // mock host (mirrors the real flow — plan mode → agent exits plan → card).
-  // Markdown-heavy so the render/edit toggle in PlanExitCard is exercisable
-  // in browser debug mode.
-  const demoPlanExit: SessionState["pendingPlanExit"] = {
-    id: "plan-demo-1",
-    plan: [
-      "## Token 计费追踪优化",
-      "",
-      "先改 **shared/session-state.ts**：",
-      "",
-      "1. `appendTokenUsage` 流式追加改为增量累加 token（替代失效缓存），使流式缓存索失效前刷新 BPE 量",
-      "2. `upsertToolBlock` 仅内容变化才重算 token（纯态翻稳定缓存），消除工具更新的 BPE 热点",
-      "3. `refreshSessionUsage(state)` 引用稳定（数值不变换对象引用）",
-      "",
-      "再改 **src/panel/store.ts**：",
-      "",
-      "- `streaming` 期间在 `pushSnapshot` 按 500ms 节流刷新 usage chip",
-      "",
-      "> 风险：`gpt-tokenizer` 计数是 O(size)，长会话注意节流。",
-    ].join("\n"),
-    deadline: Date.now() + 5 * 60_000,
-    timeoutMs: 5 * 60_000,
-  };
   const demoQuestions: SessionState["pendingQuestions"] = {
     id: "question-demo-1",
     // 30s answer window for the demo.
@@ -1075,7 +1051,7 @@ function createMockHost(): HostApi {
     qqTasks: [] as SessionState["qqTasks"],
     modes: { currentModeId: "smart", availableModes: [
       { id: "smart", name: "Smart" }, { id: "yolo", name: "YOLO" },
-      { id: "default", name: "Default" }, { id: "plan", name: "Plan" },
+      { id: "default", name: "Default" },
     ] },
     commands: [
       { name: "init", description: "分析项目并创建或更新定制的 IFLOW.md 文件" },
@@ -1134,7 +1110,6 @@ function createMockHost(): HostApi {
     // Demo: surface the question card so the option-description UI is visible
     // in browser debug mode.
     pendingQuestions: demoQuestions as SessionState["pendingQuestions"],
-    pendingPlanExit: null,
     pendingProfileSwitch: null as SessionState["pendingProfileSwitch"],
     replaying: false,
     initializing: false,
@@ -1494,29 +1469,6 @@ function createMockHost(): HostApi {
         }, 600);
         return;
       }
-      if (m.type === "respondPlanExit") {
-        // Replan with edited text (reason): record the revision in the mock
-        // transcript so the edited plan has a visible destination in demo.
-        const replanNote = m.replan && m.reason ? `（修改：${m.reason.slice(0, 60)}${m.reason.length > 60 ? "…" : ""}）` : "";
-        demoBlocks.push({
-          kind: "text",
-          text: `*plan exit — ${m.approved ? "已批准（mock）" : m.replan ? `已重新规划（mock）${replanNote}` : "已拒绝（mock）"}*`,
-        });
-        broadcast({
-          type: "snapshot",
-          state: {
-            blocks: [...demoBlocks],
-            status: "streaming",
-            errorMessage: null,
-            stopReason: null,
-            ...demoMeta,
-            pendingApproval: null,
-            pendingPlanExit: null,
-            auth: authState,
-          },
-        });
-        return;
-      }
       if (m.type === "revertTool") {
         for (const block of demoBlocks) {
           if (block.kind === "tool" && block.toolCallId === m.toolCallId) {
@@ -1567,13 +1519,6 @@ function createMockHost(): HostApi {
           ...demoMeta.modes,
           currentModeId: m.modeId,
         };
-        // Mock plan-exit demo: switching INTO Plan mode surfaces the demo
-        // card (mirrors the real flow — plan mode → agent requests exit →
-        // card). Switching out clears it.
-        const showPlanCard = m.modeId === "plan";
-        if (showPlanCard) {
-          demoPlanExit.deadline = Date.now() + demoPlanExit.timeoutMs;
-        }
         broadcast({
           type: "snapshot",
           state: {
@@ -1583,7 +1528,6 @@ function createMockHost(): HostApi {
             stopReason: "end_turn",
             ...demoMeta,
             pendingApproval: activeApproval,
-            pendingPlanExit: showPlanCard ? demoPlanExit : null,
             auth: authState,
           },
         });

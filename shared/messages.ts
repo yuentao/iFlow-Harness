@@ -109,7 +109,7 @@ export interface TextBlock extends BlockBase {
   text: string;
   /**
    * Host-classified status text, not an assistant reply: CLI compression
-   * chatter ("正在压缩…", "压缩聊天历史失败：…") and approval/plan
+   * chatter ("正在压缩…", "压缩聊天历史失败：…") and approval
    * resolution notes. The webview renders these as muted system lines
    * without copy/regenerate actions.
    */
@@ -567,22 +567,6 @@ export interface PendingApprovalUi {
 }
 
 /**
- * A Plan-mode exit request awaiting user confirmation (iFlow extension
- * `_iflow/plan/exit`). Rendered with the same approval-card visual form as
- * `pendingApproval` so the panel stays visually consistent; the user approves
- * or rejects, and the host replies `{ approved, reason }`.
- */
-export interface PendingPlanExitUi {
-  id: string;
-  /** The plan the agent wants to execute once Plan mode is exited. May be long. */
-  plan: string;
-  /** Host-side auto-answer deadline (epoch ms); drives the countdown UI. */
-  deadline: number;
-  /** Total answer window in ms (APPROVAL_TIMEOUT_MS). */
-  timeoutMs: number;
-}
-
-/**
  * The `ask_user_question` tool's questions awaiting user answers (iFlow
  * extension). Rendered like an approval card; the user answers per question
  * (single choice / multi-select / free text), the host replies on the
@@ -896,8 +880,6 @@ export interface SessionState {
   thinkLevel: ThinkLevel;
   /** Non-null while the host awaits the user's answer for a tool approval. */
   pendingApproval: PendingApprovalUi | null;
-  /** Non-null while the host awaits the user's confirmation to exit Plan mode. */
-  pendingPlanExit: PendingPlanExitUi | null;
   /** Non-null while the host awaits the user's answers for ask_user_question. */
   pendingQuestions: PendingQuestionsUi | null;
   /** Non-null while the profile-switch choice dialog is open (see PendingProfileSwitchUi). */
@@ -1116,7 +1098,6 @@ export function initialSessionState(): SessionState {
     currentModelId: null,
     thinkLevel: "auto",
     pendingApproval: null,
-    pendingPlanExit: null,
     pendingQuestions: null,
     pendingProfileSwitch: null,
     auth: { authenticated: false, needsSetup: false, saved: null, profiles: [], onboardingDismissed: false },
@@ -1153,17 +1134,30 @@ export function emptySessionUsage(): SessionUsageUi {
 }
 
 /**
- * Whether the session currently sits in Plan mode. Matched by the mode's
- * `kind` (the CLI's semantic tag, probed CLI 0.5.19 `session/new` `_meta`);
- * falls back to the literal id "plan" for agents that omit `kind`. Shared by
- * host (status bar) and webview (streaming indicator wording) so both agree
- * on when to say 规划 instead of 生成.
+ * Plan mode 已移除（2026-11-18）。
+ *
+ * CLI 的 `_meta.modes` 仍然会上报 `plan`（vendor bundle 刻意不改），但面板不再
+ * 提供该模式。host 每次把 modes 写进 store 都过这里：从 `availableModes` 里
+ * 剔掉 plan 项，并把落在 plan 上的 `currentModeId` 归一到可用的非 plan 模式
+ * （优先 smart / default，否则列表第一项）。旧会话归档、外部
+ * `~/.iflow/settings.json` 的 `approvalMode: "plan"` 因此都不会让已移除的模式
+ * 重新出现在模式菜单里。
+ *
+ * 没有可用的非 plan 模式时原样返回（不伪造模式，交由调用方处理）。
  */
-export function isPlanMode(modes: SessionModeState | null | undefined): boolean {
-  if (!modes) return false;
-  const current = modes.availableModes.find((m) => m.id === modes.currentModeId);
-  if (!current) return false;
-  return current.kind === "plan" || (current.kind === undefined && current.id === "plan");
+export function withoutPlanModes(modes: SessionModeState | null | undefined): SessionModeState | null {
+  if (!modes) return null;
+  const isPlanMode = (mode: SessionModeState["availableModes"][number]): boolean =>
+    mode.kind === "plan" || (mode.kind === undefined && mode.id === "plan");
+  const availableModes = modes.availableModes.filter((mode) => !isPlanMode(mode));
+  if (availableModes.length === 0) return modes;
+  if (availableModes.some((mode) => mode.id === modes.currentModeId)) {
+    return { ...modes, availableModes };
+  }
+  const preferred =
+    availableModes.find((mode) => mode.id === "smart") ??
+    availableModes.find((mode) => mode.id === "default");
+  return { ...modes, availableModes, currentModeId: (preferred ?? availableModes[0]!).id };
 }
 
 /** One fuzzy-search file hit for the @-mention popup (M5). */
@@ -1545,7 +1539,7 @@ export type UiFontSize = "compact" | "standard" | "large";
 export type UiDensity = "compact" | "standard" | "comfortable";
 
 /** Default session approval mode, mirrored from `iflow.defaultMode`. */
-export type UiDefaultMode = "default" | "smart" | "yolo" | "plan";
+export type UiDefaultMode = "default" | "smart" | "yolo";
 
 /** Panel color theme, mirrored from `iflow.theme`. "auto" follows the editor. */
 export type UiThemeMode = "auto" | "light" | "dark";
@@ -2150,8 +2144,6 @@ export type WebviewToHost =
   | { type: "openExternal"; uri: string }
   /** Answer a pending approval; `optionId: null` cancels the request. */
   | { type: "respondApproval"; id: string; optionId: string | null }
-  /** Confirm or reject a pending Plan-mode exit; `approved: false` rejects. */
-  | { type: "respondPlanExit"; id: string; approved: boolean; reason?: string; replan?: boolean }
   /** Answer the pending ask_user_question card; `answers` is keyed by
    * question `header`. An empty answers object = dismissed (the agent
    * proceeds with "no answer"). */
@@ -2369,10 +2361,10 @@ export type WebviewToHost =
    * message's `action`). The host dispatches on `actionId` (e.g. "compress"
    * drives the /compress bridge) and dismisses the pill. */
   | { type: "toastAction"; actionId: string; toastId?: number }
-  /** 3.5 ①: the user ticked/unticked one item of a plan checklist card
-   * (`PlanBlock` seeded at plan approval). `blockId` is the stable block id
-   * (P4), `index` the entry position; the host flips pending↔completed via
-   * `setPlanEntryStatus` and drops stale clicks silently. */
+  /** The user ticked/unticked one item of a TaskList card (`PlanBlock`).
+   * `blockId` is the stable block id (P4), `index` the entry position; the
+   * host flips pending↔completed via `setPlanEntryStatus` and drops stale
+   * clicks silently. */
   | { type: "togglePlanItem"; blockId: string; index: number }
   /** 3.5 ②: "查看完整输出" on a truncated tool card — the host writes the
    * block's FULL stored output (up to the 512K store cap) to a temp file

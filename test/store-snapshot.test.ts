@@ -10,7 +10,7 @@ import { SessionStore } from "../src/panel/store.js";
 import {
   applyBlockPatch,
   initialSessionState,
-  isPlanMode,
+  withoutPlanModes,
   type Block,
   type HostToWebview,
   type SessionState,
@@ -581,25 +581,46 @@ describe("SessionStore.beginCompressTurn / endCompressTurn (silent /compress tur
   });
 });
 
-describe("isPlanMode", () => {
-  const modes = (currentModeId: string, availableModes: Array<{ id: string; kind?: string }>) => ({
+describe("withoutPlanModes (Plan mode removed)", () => {
+  const modes = (currentModeId: string, availableModes: Array<{ id: string; name?: string; kind?: string }>) => ({
     currentModeId,
     availableModes,
   });
 
-  it("matches by kind regardless of id", () => {
-    expect(isPlanMode(modes("m-plan", [{ id: "m-plan", kind: "plan" }, { id: "m-smart", kind: "smart" }]))).toBe(true);
-    expect(isPlanMode(modes("m-smart", [{ id: "m-plan", kind: "plan" }, { id: "m-smart", kind: "smart" }]))).toBe(false);
+  it("strips plan entries by kind or by id", () => {
+    const byKind = withoutPlanModes(
+      modes("m-smart", [{ id: "m-plan", name: "Plan", kind: "plan" }, { id: "m-smart", name: "Smart", kind: "smart" }]),
+    );
+    expect(byKind?.availableModes.map((m) => m.id)).toEqual(["m-smart"]);
+    const byId = withoutPlanModes(modes("default", [{ id: "plan", name: "Plan" }, { id: "default", name: "Default" }]));
+    expect(byId?.availableModes.map((m) => m.id)).toEqual(["default"]);
   });
 
-  it("falls back to the literal id when kind is absent", () => {
-    expect(isPlanMode(modes("plan", [{ id: "plan" }, { id: "default" }]))).toBe(true);
-    expect(isPlanMode(modes("default", [{ id: "plan" }, { id: "default" }]))).toBe(false);
+  it("keeps a current mode that is still offered", () => {
+    const next = withoutPlanModes(
+      modes("m-smart", [{ id: "m-plan", kind: "plan" }, { id: "m-smart", kind: "smart" }]),
+    );
+    expect(next?.currentModeId).toBe("m-smart");
   });
 
-  it("null/unknown mode is not plan", () => {
-    expect(isPlanMode(null)).toBe(false);
-    expect(isPlanMode(modes("missing", [{ id: "plan", kind: "plan" }]))).toBe(false);
+  it("coerces a plan current mode to smart (then default, then the first entry)", () => {
+    expect(
+      withoutPlanModes(
+        modes("plan", [{ id: "plan", kind: "plan" }, { id: "default", kind: "default" }, { id: "smart", kind: "smart" }]),
+      )?.currentModeId,
+    ).toBe("smart");
+    expect(
+      withoutPlanModes(modes("plan", [{ id: "plan", kind: "plan" }, { id: "default", kind: "default" }]))?.currentModeId,
+    ).toBe("default");
+    expect(
+      withoutPlanModes(modes("plan", [{ id: "plan", kind: "plan" }, { id: "custom", kind: "custom" }]))?.currentModeId,
+    ).toBe("custom");
+  });
+
+  it("null modes stay null; a list with no non-plan mode is returned unchanged", () => {
+    expect(withoutPlanModes(null)).toBeNull();
+    const onlyPlan = modes("plan", [{ id: "plan", kind: "plan" }]);
+    expect(withoutPlanModes(onlyPlan)).toBe(onlyPlan);
   });
 });
 

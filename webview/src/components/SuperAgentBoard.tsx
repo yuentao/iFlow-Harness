@@ -1942,9 +1942,9 @@ function SuperSessionLive({
  * The child session's pending question.
  *
  * Approvals never reach this component: child sessions always run in
- * no-confirmation mode, and the host answers their `request_permission` /
- * plan-exit requests itself. `ask_user_question` is the only thing that truly
- * needs a human.
+ * no-confirmation mode, and the host answers their `request_permission`
+ * requests itself (a stale plan-exit is auto-approved too). `ask_user_question`
+ * is the only thing that truly needs a human.
  *
  * The questions themselves are rendered by `QuestionBody` — the SAME
  * component the main session's question card uses. The board used to carry

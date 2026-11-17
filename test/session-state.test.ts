@@ -31,7 +31,6 @@ import {
   clearPendingApproval,
   closeOpenSubAgents,
   closeOpenToolBlocks,
-  resolveExitPlanModeBlock,
   markSubAgentStopped,
   deleteUserMessageById,
   findCliHistoryCut,
@@ -46,11 +45,10 @@ import {
   setNextStepLoading,
   toAgentPromptText,
   appendInjectedContext,
-  addPlanChecklist,
   setPlanEntryStatus,
   MAX_TOOL_OUTPUT_STORE_CHARS,
 } from "../shared/session-state";
-import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, splitReportedContextSections, type Block, type SessionState, type ToolBlock } from "../shared/messages";
+import { evictBlockPayloads, payloadChars, EVICT_BUDGET_CHARS, initialSessionState, collectUserPromptTexts, normalizeUserPromptText, extractCorePrompt, splitSystemPromptSections, splitReportedContextSections, type Block, type PlanEntryUi, type SessionState, type ToolBlock } from "../shared/messages";
 import type { SessionNotification } from "../src/acp/protocol";
 // Mock the tokenizer so we can exercise the heuristic fallback. `vi.hoisted`
 // captures `vi` before the `vi.mock` factory is hoisted above the import, so the
@@ -504,13 +502,13 @@ describe("system status text classification", () => {
     expect(sys.system).toBe(true);
   });
 
-  it("flags approval/plan resolution notes as system text", () => {
+  it("flags approval resolution notes as system text", () => {
     const state: SessionState = initialSessionState();
-    appendApprovalResolution(state, "plan", "已批准计划");
+    appendApprovalResolution(state, "write_file", "已批准");
     const b = state.blocks[0]!;
     if (b.kind !== "text") throw new Error("expected text");
     expect(b.system).toBe(true);
-    expect(b.text).toBe("*plan — 已批准计划*");
+    expect(b.text).toBe("*write_file — 已批准*");
   });
 
   it("classifies restored compression status lines as system text", () => {
@@ -530,7 +528,7 @@ describe("system status text classification", () => {
   it("backfills the system flag on legacy persisted blocks", () => {
     const blocks = [
       { kind: "text", text: "正在压缩..." },
-      { kind: "text", text: "*plan — 已批准计划*" },
+      { kind: "text", text: "*write_file — 已批准*" },
       { kind: "text", text: "普通回复 — 不是注记" },
       { kind: "text", text: "好的", system: false },
     ] as Block[];
@@ -654,8 +652,8 @@ describe("closeOpenToolBlocks (tool cards parked at 等待执行 by a killed tur
   it("completePrompt force-closes pending/in_progress tool blocks as failed", () => {
     const state: SessionState = initialSessionState();
     // Wire shape of the residual state: the CLI stamps tool_call(pending) when
-    // the functionCall streams, then PLAN-rejects / settles exit_plan_mode
-    // without ever sending a terminal tool_call_update.
+    // the functionCall streams, then settles the turn without ever sending a
+    // terminal tool_call_update.
     applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "w-1", toolName: "write_file", title: "替换内容", kind: "edit", status: "pending" }));
     applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "x-1", toolName: "exit_plan_mode", title: "退出计划", kind: "other", status: "pending" }));
     applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "r-1", toolName: "read_file", title: "读", kind: "read", status: "completed" }));
@@ -689,32 +687,6 @@ describe("closeOpenToolBlocks (tool cards parked at 等待执行 by a killed tur
     const nested = sub.entries.find((b) => b.kind === "tool");
     if (nested?.kind !== "tool") throw new Error("expected nested tool");
     expect(nested.status).toBe("failed");
-  });
-});
-
-describe("resolveExitPlanModeBlock (Plan-card settle of the exit_plan_mode call)", () => {
-  function seedPlanCalls(state: SessionState): void {
-    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "ep-1", toolName: "exit_plan_mode", title: "退出计划", kind: "other", status: "pending" }));
-    applySessionUpdate(state, notify({ sessionUpdate: "tool_call", toolCallId: "ep-2", toolName: "exit_plan_mode", title: "退出计划", kind: "other", status: "pending" }));
-  }
-
-  it("approves the LATEST pending exit_plan_mode call as completed", () => {
-    const state: SessionState = initialSessionState();
-    seedPlanCalls(state);
-    const mutated = resolveExitPlanModeBlock(state.blocks, true);
-    expect(mutated).toBe(1);
-    expect(state.blocks.map((b) => (b.kind === "tool" ? b.status : "-"))).toEqual(["pending", "completed"]);
-  });
-
-  it("rejects as failed and returns null when no pending call is recorded", () => {
-    const state: SessionState = initialSessionState();
-    seedPlanCalls(state);
-    expect(resolveExitPlanModeBlock(state.blocks, false)).toBe(1);
-    expect(state.blocks[1]!.kind === "tool" && state.blocks[1]!.status).toBe("failed");
-    // One call per answer: a second answer settles the remaining earlier
-    // pending call; only then do further answers find nothing.
-    expect(resolveExitPlanModeBlock(state.blocks, false)).toBe(0);
-    expect(resolveExitPlanModeBlock(state.blocks, false)).toBeNull();
   });
 });
 
@@ -1193,50 +1165,16 @@ describe("todo tool unification (single TaskList card)", () => {
   });
 });
 
-describe("plan checklist seeding & ticking (3.5 ①)", () => {
-  it("seeds a plan card and a later todo_write replaces the seeded items", () => {
-    const state = initialSessionState();
+describe("task list ticking (user-side progress)", () => {
+  /** Build a TaskList card for the current turn from a CLI plan update. */
+  function seedTaskList(state: SessionState, entries: PlanEntryUi[]): void {
     beginUserPrompt(state, "go");
-    const index = addPlanChecklist(state.blocks, [
-      { content: "步骤一", status: "pending" },
-      { content: "步骤二", status: "pending" },
-    ]);
-    expect(index).toBe(1);
-    expect(state.blocks[1]).toMatchObject({ kind: "plan", entries: [{ content: "步骤一" }, { content: "步骤二" }] });
-    // The agent's own bookkeeping wins: the adapter maps a todo_write to a
-    // `plan` update, which merges into the SAME card (one live card per turn)
-    // with its own items.
-    applySessionUpdate(state, notify({
-      sessionUpdate: "plan",
-      entries: [{ content: "步骤一", status: "completed" }],
-    }));
-    expect(state.blocks.filter((b) => b.kind === "plan")).toHaveLength(1);
-    const plan = state.blocks[1]!;
-    if (plan.kind !== "plan") throw new Error("expected plan");
-    expect(plan.entries).toEqual([{ content: "步骤一", status: "completed" }]);
-  });
-
-  it("seeding is idempotent per turn (re-approval merges into the same card)", () => {
-    const state = initialSessionState();
-    beginUserPrompt(state, "go");
-    addPlanChecklist(state.blocks, [{ content: "A", status: "pending" }, { content: "B", status: "pending" }]);
-    addPlanChecklist(state.blocks, [{ content: "C", status: "pending" }]);
-    expect(state.blocks.filter((b) => b.kind === "plan")).toHaveLength(1);
-    const plan = state.blocks[1]!;
-    if (plan.kind !== "plan") throw new Error("expected plan");
-    expect(plan.entries.map((e) => e.content)).toEqual(["C"]);
-  });
-
-  it("empty entry list seeds nothing", () => {
-    const state = initialSessionState();
-    expect(addPlanChecklist(state.blocks, [])).toBeNull();
-    expect(state.blocks).toHaveLength(0);
-  });
+    applySessionUpdate(state, notify({ sessionUpdate: "plan", entries }));
+  }
 
   it("toggling flips pending↔completed and leaves in_progress untouched", () => {
     const state = initialSessionState();
-    beginUserPrompt(state, "go");
-    addPlanChecklist(state.blocks, [
+    seedTaskList(state, [
       { content: "A", status: "pending" },
       { content: "B", status: "in_progress" },
     ]);
@@ -1261,8 +1199,7 @@ describe("plan checklist seeding & ticking (3.5 ①)", () => {
 
   it("stale block ids and out-of-range indices drop silently", () => {
     const state = initialSessionState();
-    beginUserPrompt(state, "go");
-    addPlanChecklist(state.blocks, [{ content: "A", status: "pending" }]);
+    seedTaskList(state, [{ content: "A", status: "pending" }]);
     expect(setPlanEntryStatus(state.blocks, "missing-id", 0)).toBeNull();
     const plan = state.blocks[1]!;
     if (plan.kind !== "plan" || !plan.id) throw new Error("expected plan with id");

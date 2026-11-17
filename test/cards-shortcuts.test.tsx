@@ -3,9 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApprovalCard } from "../webview/src/components/ApprovalCard";
-import { PlanExitCard } from "../webview/src/components/PlanExitCard";
 import { QuestionCard } from "../webview/src/components/QuestionCard";
-import type { PendingApprovalUi, PendingPlanExitUi, PendingQuestionsUi } from "../shared/messages";
+import type { PendingApprovalUi, PendingQuestionsUi } from "../shared/messages";
 
 const send = vi.hoisted(() => vi.fn());
 const useChat = vi.hoisted(() =>
@@ -35,13 +34,6 @@ const APPROVAL: PendingApprovalUi = {
     { optionId: "reject-1", name: "拒绝", kind: "reject_once" },
     { optionId: "allow-1", name: "允许", kind: "allow_once" },
   ],
-  deadline: Date.now() + 60_000,
-  timeoutMs: 60_000,
-};
-
-const PLAN: PendingPlanExitUi = {
-  id: "plan-1",
-  plan: "# Plan\n\n- step one",
   deadline: Date.now() + 60_000,
   timeoutMs: 60_000,
 };
@@ -166,51 +158,6 @@ it("keeps the Esc = cancel wording only when no reject option exists", () => {
   expect(container.textContent).toContain("Esc 取消");
 });
 
-it("approves a plan with Y", () => {
-  act(() => root.render(<PlanExitCard pending={PLAN} />));
-  key("y");
-  expect(send).toHaveBeenCalledWith(
-    expect.objectContaining({
-      type: "respondPlanExit",
-      id: "plan-1",
-      approved: true,
-      replan: false,
-    }),
-  );
-});
-
-it("replans with R", () => {
-  act(() => root.render(<PlanExitCard pending={PLAN} />));
-  key("r");
-  expect(send).toHaveBeenCalledWith(
-    expect.objectContaining({
-      type: "respondPlanExit",
-      id: "plan-1",
-      approved: false,
-      replan: true,
-    }),
-  );
-});
-
-it("shows the plan shortcut hint once, and the edit-state primary button names the action", () => {
-  act(() => root.render(<PlanExitCard pending={PLAN} />));
-  expect(container.textContent).toContain("Y 批准 · N 拒绝 · R 重新规划");
-  const edit = [...container.querySelectorAll("button")].find((b) => b.textContent === "编辑");
-  expect(edit).toBeTruthy();
-  act(() => edit!.click());
-  // The edit-scope caveat now lives in ONE place (the tooltip); the edit-mode
-  // action button states the consequence outright instead.
-  expect(container.textContent).toContain("保存并重新规划");
-  expect(container.textContent).not.toContain("「批准计划」执行原计划");
-});
-
-it("autofocuses the plan card's reject, so Enter cannot start execution", () => {
-  act(() => root.render(<PlanExitCard pending={PLAN} />));
-  const pinned = container.querySelectorAll("[data-autofocus]");
-  expect(pinned.length).toBe(1);
-  expect(pinned[0]!.textContent).toBe("拒绝计划");
-});
-
 it("autofocuses the approval card's reject option, never an allow button", () => {
   act(() => root.render(<ApprovalCard approval={APPROVAL} />));
   const pinned = container.querySelectorAll("[data-autofocus]");
@@ -312,7 +259,7 @@ it("commits the whole question card only from the explicit submit button", () =>
  * Overlay height contract (narrow-window regression): the pending cards are
  * bottom-aligned in a shell that starts below the header. Each card must cap
  * at that shell (max-h-full) and scroll its BODY internally, so a long
- * approval title / diff / plan can never grow the card upward over the header
+ * approval title / diff can never grow the card upward over the header
  * (which made the header controls unclickable). The decision row must stay
  * outside the scroll body: it is the one thing that must never scroll away.
  */
@@ -324,7 +271,7 @@ function expectCappedCard(root: Element, actionRowLabel: string) {
     (el) => el.classList.contains("min-h-0") && el.classList.contains("overflow-y-auto"),
   );
   // Exactly one scroll body — a second one would mean a nested scroll region
-  // (the old title/diff/plan caps) competing with the card-level scroll.
+  // (the old title/diff caps) competing with the card-level scroll.
   expect(bodies).toHaveLength(1);
   const body = bodies[0]!;
 
@@ -347,16 +294,6 @@ it("caps the approval card and keeps its action row outside the scroll body", ()
   expect(actions.querySelectorAll("button")).toHaveLength(2);
 });
 
-it("caps the plan card and keeps its action row outside the scroll body", () => {
-  act(() => root.render(<PlanExitCard pending={PLAN} />));
-  const { actions } = expectCappedCard(container.firstElementChild!, "计划审批操作");
-  expect([...actions.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
-    "批准计划",
-    "拒绝计划",
-    "重新规划",
-  ]);
-});
-
 it("caps the question card and keeps its action row outside the scroll body", () => {
   act(() => root.render(<QuestionCard pending={QUESTIONS} />));
   const { actions } = expectCappedCard(container.firstElementChild!, "回答操作");
@@ -375,17 +312,6 @@ it("keeps the approval actions rendered when the title is long enough to overflo
     "允许一次",
     "拒绝",
   ]);
-});
-
-it("keeps the plan editor usable inside the scroll body", () => {
-  act(() => root.render(<PlanExitCard pending={PLAN} />));
-  const edit = [...container.querySelectorAll("button")].find((b) => b.textContent === "编辑");
-  act(() => edit!.click());
-  const { body } = expectCappedCard(container.firstElementChild!, "计划审批操作");
-  const textarea = body.querySelector("textarea");
-  expect(textarea).toBeTruthy();
-  // min-h-40 stops the editor collapsing to 0 inside the scroll body.
-  expect(textarea!.classList.contains("min-h-40")).toBe(true);
 });
 
 /**

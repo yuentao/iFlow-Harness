@@ -1,8 +1,9 @@
 /**
  * M4 P1-1 — host-side approval pre-review rule table (pure, unit-testable).
  *
- * The CLI only offers four coarse modes (default / smart / yolo / plan). This
- * module adds Cline-style fine-grained auto-approval WITHOUT touching the CLI:
+ * The CLI's coarse modes are default / smart / yolo (its internal plan mode is
+ * no longer exposed by the panel). This module adds Cline-style fine-grained
+ * auto-approval WITHOUT touching the CLI:
  * the host runs `decideApproval` before surfacing a `session/request_permission`
  * card, so a matching rule answers the wire request directly.
  *

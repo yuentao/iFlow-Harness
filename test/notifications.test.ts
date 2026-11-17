@@ -9,7 +9,7 @@ import {
   osNotifyAllowed,
 } from "../shared/notifications.js";
 
-const ALL_EVENTS = ["approval", "question", "plan", "turnDone", "childDone", "superReport"] as const;
+const ALL_EVENTS = ["approval", "question", "turnDone", "childDone", "superReport"] as const;
 
 describe("osNotifyAllowed", () => {
   it("off blocks every event kind", () => {
@@ -21,10 +21,9 @@ describe("osNotifyAllowed", () => {
   it("approvals covers only the agent-blocking card events", () => {
     expect(osNotifyAllowed("approval", "approvals")).toBe(true);
     expect(osNotifyAllowed("question", "approvals")).toBe(true);
-    expect(osNotifyAllowed("plan", "approvals")).toBe(true);
     // Policy 2026-10-16: failed turns earn no toast at all (the `turnFailed`
-    // kind is gone from the type system) — the tier is exactly the trio of
-    // blocking cards, completion stays in the `all` tier only.
+    // kind is gone from the type system) — the tier is exactly the blocking
+    // cards, completion stays in the `all` tier only.
     expect(osNotifyAllowed("turnDone", "approvals")).toBe(false);
     // 2026-11-16: the two split completion signals are `all`-tier only too.
     expect(osNotifyAllowed("childDone", "approvals")).toBe(false);
@@ -146,7 +145,7 @@ describe("gateOsNotification", () => {
   });
 
   it("blocking events ignore window focus — the agent is stuck", () => {
-    for (const event of ["approval", "question", "plan"] as const) {
+    for (const event of ["approval", "question"] as const) {
       const out = gateOsNotification({
         event,
         setting: "approvals",

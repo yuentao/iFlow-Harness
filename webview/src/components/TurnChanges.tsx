@@ -65,7 +65,6 @@ function TurnChangesInner({ sessionId, userBlockId }: {
       st.status ?? "",
       st.pendingApproval?.id ?? "",
       st.pendingQuestions?.id ?? "",
-      st.pendingPlanExit?.id ?? "",
       st.pendingProfileSwitch?.id ?? "",
     ].join("|");
   });

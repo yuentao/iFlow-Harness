@@ -83,14 +83,14 @@ it("sends preset changes to the host and applies them optimistically", () => {
 });
 
 it("sends sound and default-mode changes to the host", () => {
-  useChat.getState().updateHostSetting({ soundFeedback: false, defaultMode: "plan" });
+  useChat.getState().updateHostSetting({ soundFeedback: false, defaultMode: "yolo" });
 
   expect(useChat.getState().hostSettings.soundFeedback).toBe(false);
-  expect(useChat.getState().hostSettings.defaultMode).toBe("plan");
+  expect(useChat.getState().hostSettings.defaultMode).toBe("yolo");
   const sent = postMessage.mock.calls
     .map((call) => call[0] as { type?: string; soundFeedback?: boolean; defaultMode?: string })
     .find((msg) => msg.type === "setHostSettings");
-  expect(sent).toMatchObject({ type: "setHostSettings", soundFeedback: false, defaultMode: "plan" });
+  expect(sent).toMatchObject({ type: "setHostSettings", soundFeedback: false, defaultMode: "yolo" });
 });
 
 it("mirrors theme and advanced settings from the host", () => {
