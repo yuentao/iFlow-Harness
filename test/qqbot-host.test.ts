@@ -48,9 +48,9 @@ describe("QQBot 宿主编排（M3-C）", () => {
   it("分流恒走 QQBot：任意 adapter 都构造官方 adapter 并接 setEventCallback", () => {
     const factory = vi.fn(fakeAdapter);
     // 收敛到 QQBot 单一路径后，config.adapter 不再影响分流；即便是遗留的
-    // "onebot" 值也恒走官方 adapter，绝不再返回无副作用的 onebot 分支。
+    // "legacy" 值也恒走官方 adapter，绝不再返回无副作用的分支。
     const legacy = createQqChannelDispatch(
-      { adapter: "onebot" },
+      { adapter: "legacy" },
       { appId: "a", appSecret: "s", onInbound: () => undefined, adapterFactory: factory as never },
     );
     expect(legacy.kind).toBe("qqbot");

@@ -135,7 +135,7 @@ describe("扫码登录与一键托管消息方向", () => {
     const hostStatus: HostToWebview = {
       type: "qqManagedStatus",
       phase: "downloading",
-      message: "正在下载 go-cqhttp",
+      message: "正在准备接入环境",
       progress: 42,
     };
     const webSetup: WebviewToHost = { type: "qqManagedSetup", action: "start" };

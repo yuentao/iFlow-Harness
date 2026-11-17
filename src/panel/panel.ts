@@ -819,7 +819,7 @@ export interface PanelServices {
  */
 /**
  * QQ 通道单项收尾上限：关面板不能被一个卡住的 adapter/socket 拖死。
- * （OneBot bridge 的重启上限与退避阶梯已随收敛移除。）
+ * （通道重启上限与退避阶梯已随收敛移除。）
  */
 const QQ_BRIDGE_STOP_TIMEOUT_MS = 2_000;
 /** 设置改动 → 重启 QQ 服务的防抖窗口（settings.json 一次编辑会触发多帧）。 */
@@ -884,7 +884,7 @@ export class ChatPanel implements vscode.Disposable {
    *
    * `config` 与 QqService 内部持有的是**同一个对象**：非连接类字段（白名单 /
    * 策略 / 并发 / 限流 / 详略 / 自动合并）由面板就地热更新，改完即时生效。
-   * OneBot 的 IPC / bridge / go-cqhttp manager / 二维码轮询桥字段已随收敛移除。
+   * 历史遗留的 IPC / bridge / 托管 manager / 二维码轮询桥字段已随收敛移除。
    */
   private qq?: {
     service: QqService;
@@ -8891,11 +8891,11 @@ export class ChatPanel implements vscode.Disposable {
   // --- QQBot 官方路线（M3-C）-----------------------------------------------
 
   /**
-   * adapter=qqbot 的常规启动：不建 IPC、不 spawn bridge、不下载 go-cqhttp。
+   * QQBot 官方通道的常规启动：不建 IPC、不 spawn bridge、不下载外部组件。
    *
    * 用 SecretStorage 里扫码写入的 appId/appSecret 建官方 adapter，入站事件
    * 经 `setEventCallback` 直接进 QqService，出站由 adapter.send 完成。没有
-   * 凭据时如实提示先绑定，绝不退化成 OneBot 通道。
+   * 凭据时如实提示先绑定，绝不退化成其它通道。
    */
   private async startQqBotChannel(
     config: QqConfig,
@@ -8967,7 +8967,7 @@ export class ChatPanel implements vscode.Disposable {
     }
     this.pushQqStatus(true, "QQBot 官方网关已连接");
     this.refreshQqTasks();
-    this.log.info("QQBot 官方通道已启动（无 bridge / 无 go-cqhttp）");
+    this.log.info("QQBot 官方通道已启动（无 bridge / 无外部托管进程）");
   }
 
   /** 当前 QQ 配置（测试 IO 优先，读失败回默认）。 */
@@ -8990,7 +8990,7 @@ export class ChatPanel implements vscode.Disposable {
 
   /**
    * 官方扫码绑定：协议 → 会话 → webview 消息 / 凭据落盘 → 启动官方通道。
-   * 这条路径完全不碰 go-cqhttp 下载、5700 端口探测与 manager。
+   * 这条路径完全不碰外部托管进程的下载、端口探测与 manager。
    */
   private async startQqBotBind(config: QqConfig): Promise<void> {
     if (this.disposed) return;
