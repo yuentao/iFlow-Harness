@@ -26,9 +26,6 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
 
 const VALUE: QqSettingsValue = {
   enabled: false,
-  adapter: "onebot",
-  endpoint: "",
-  bridgePort: 0,
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -60,9 +57,9 @@ function Harness({ initial }: { initial?: Partial<QqSettingsValue> }) {
       onTestConnection={onTestConnection}
       onGenerateBindCode={onGenerateBindCode}
       onUnbind={onUnbind}
-      status={{ connected: initial?.enabled ? true : false, detail: "本机 OneBot 桥" }}
+      status={{ connected: initial?.enabled ? true : false, detail: "QQ 官方机器人已连接" }}
       bindCode={initial?.enabled ? { code: "K7Q2", expiresAt: Date.now() + 60_000 } : undefined}
-      warnings={initial?.enabled ? [] : ["端点还没有配置"]}
+      warnings={initial?.enabled ? [] : ["机器人凭据还没有配置"]}
     />
   );
 }
@@ -100,13 +97,13 @@ afterEach(() => {
 });
 
 describe("QqSettings", () => {
-  it("renders the twelve remote-task settings", () => {
+  it("renders the eleven QQBot remote-task settings with credentials always visible", () => {
     render(<Harness />);
     const text = container.textContent ?? "";
     for (const label of [
       "启用 QQ 远程任务",
-      "协议适配器",
-      "适配器端点",
+      "机器人 Token",
+      "App Secret",
       "允许的用户",
       "允许的群",
       "远程任务策略",
@@ -114,23 +111,23 @@ describe("QqSettings", () => {
       "同时运行的任务数",
       "每分钟任务上限",
       "完成后自动合并",
-      "桥接端口",
       "工作区目录",
     ]) {
       expect(text, label).toContain(label);
     }
+    // 展平后不再有适配器分流与端点/桥接端口字段。
+    expect(text).not.toContain("协议适配器");
+    expect(text).not.toContain("适配器端点");
+    expect(text).not.toContain("桥接端口");
   });
 
-  it("reports the enabled switch and adapter choice", () => {
+  it("reports the enabled switch and always shows QQBot credentials", () => {
     render(<Harness />);
     const toggle = container.querySelector<HTMLButtonElement>("button[role='switch'][aria-label='启用 QQ 远程任务']")!;
     act(() => toggle.click());
     expect(onChange).toHaveBeenCalledWith({ enabled: true });
 
-    // qqbot is only reachable through the adapter segmented control.
-    expect(container.querySelector("input[aria-label='机器人 Token']")).toBeNull();
-    clickText("QQ 官方机器人");
-    expect(onChange).toHaveBeenCalledWith({ adapter: "qqbot" });
+    // 纯 QQBot：凭据字段恒在场，无需先切适配器。
     expect(container.querySelector("input[aria-label='机器人 Token']")).toBeTruthy();
     expect(container.querySelector("input[aria-label='App Secret']")).toBeTruthy();
   });
@@ -185,7 +182,7 @@ describe("QqSettings", () => {
     const alert = container.querySelector<HTMLElement>("[role='alert']")!;
     expect(alert.className).toContain("bg-warning");
     expect(alert.className).not.toContain("bg-primary");
-    expect(alert.textContent).toContain("端点还没有配置");
+    expect(alert.textContent).toContain("机器人凭据还没有配置");
   });
 
   it("shows the bind code and wires the connection actions", () => {
@@ -202,7 +199,7 @@ describe("QqSettings", () => {
   });
 
   it("keeps credentials in a revealable field fed only by props", () => {
-    render(<Harness initial={{ adapter: "qqbot", botToken: "secret-token" }} />);
+    render(<Harness initial={{ botToken: "secret-token" }} />);
     const input = container.querySelector<HTMLInputElement>("input[aria-label='机器人 Token']")!;
     expect(input.type).toBe("password");
     expect(input.value).toBe("secret-token");

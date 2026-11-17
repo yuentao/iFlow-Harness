@@ -1122,12 +1122,9 @@ const en: Record<string, string> = {
   "测试连接": "Test connection",
   "生成配对码": "Generate pairing code",
   "解除绑定": "Unbind",
-  "连接与适配器": "Connection & adapter",
   "启用 QQ 远程任务": "Enable QQ remote tasks",
   "从 QQ 私聊或群聊接收任务，在独立分支上执行。":
     "Receive tasks from QQ private chats or groups and run them on isolated branches.",
-  "协议适配器": "Protocol adapter",
-  "适配器端点": "Adapter endpoint",
   "机器人 Token": "Bot token",
   "App Secret": "App secret",
   "凭据只从宿主传入，面板不保存。": "Credentials come from the host only; the panel stores nothing.",
@@ -1166,8 +1163,6 @@ const en: Record<string, string> = {
   "完成后自动合并": "Auto-merge when done",
   "任务成功后把分支自动合并回当前分支。":
     "Merge the branch back into the current branch after a successful run.",
-  "桥接端口": "Bridge port",
-  "0 表示使用适配器默认端口；范围 0–65535。": "0 uses the adapter's default port; range 0–65535.",
   "工作区目录": "Workspace directory",
   "远程任务运行的工作区；留空表示当前工作区根目录。":
     "Workspace the remote tasks run in; empty means the current workspace root.",
@@ -1175,38 +1170,25 @@ const en: Record<string, string> = {
   "尚未添加条目": "No entries yet",
   "{0} {1}": "{0} {1}",
   "删除 {0} {1}": "Delete {0} {1}",
-  "OneBot v11": "OneBot v11",
   "QQ 官方机器人": "QQ official bot",
-  "OneBot v11 桥，例如本机的 NapCat 或 LLOneBot 的 HTTP/WebSocket 端点。":
-    "OneBot v11 bridge — e.g. a local NapCat or LLOneBot HTTP/WebSocket endpoint.",
-  "QQ 官方机器人接口，通过配置的端点与机器人凭据访问。":
-    "QQ official bot API, reached through the configured endpoint and bot credentials.",
-  // 一键接入：官方 QQBot 路线文案适配（M4）
+  // 一键接入：QQ 官方机器人（QQBot）
   "使用 QQ 官方机器人，扫码授权后即可从 QQ 远程控制本工作区（需先在 q.qq.com 创建机器人）。":
     "Uses the official QQ bot — scan to authorize, then control this workspace from QQ (create a bot at q.qq.com first).",
   "官方合规通道（推荐）": "Official compliant channel (recommended)",
-  "需自跑 OneBot（legacy）": "Requires you to run OneBot yourself (legacy)",
   "一键接入 QQ 机器人": "One-click QQ bot setup",
   "请用手机 QQ 扫描二维码完成授权": "Scan the QR code with mobile QQ to authorize",
   "已连接 QQ 官方机器人": "Connected to the official QQ bot",
   "扫码授权 QQ 机器人": "Scan to authorize the QQ bot",
   "首次使用需在 q.qq.com 创建机器人（个人账号即可）。":
     "On first use, create a bot at q.qq.com (a personal account is enough).",
-  // 一键接入 OneBot + 窗口内扫码（Wave5-D）
+  // 一键接入 + 窗口内扫码授权
   "一键接入": "One-click setup",
-  "一键接入 OneBot": "One-click OneBot setup",
-  "自动下载并配置 go-cqhttp，扫码登录即可从 QQ 远程控制本工作区。":
-    "Automatically downloads and configures go-cqhttp; scan the QR code to control this workspace from QQ.",
   "停止托管": "Stop managed setup",
   "空闲": "Idle",
   "检查环境": "Checking environment",
-  "下载中": "Downloading",
   "生成配置": "Generating configuration",
   "启动中": "Starting",
-  "等待扫码": "Waiting for QR scan",
-  "已登录": "Logged in",
   "出错": "Error",
-  "扫码登录": "QR login",
   "QQ 登录二维码": "QQ login QR code",
   "二维码已过期，请刷新": "QR code expired — please refresh",
   "已确认，正在完成登录": "Confirmed — finishing login",
