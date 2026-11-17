@@ -304,6 +304,10 @@ class FakeTransport implements QqBotTransport {
   readonly connects: Array<{ url: string; headers: Record<string, string> }> = [];
   readonly socket = new FakeSocket();
   tokenResponse: unknown = { access_token: "tok-1", expires_in: 7200 };
+  /** 消息发送端点的响应体（默认成功）。 */
+  sendResult: unknown = { id: "sent-1" };
+  /** 非 undefined 时消息发送端点抛这个错误（模拟 transport 的非 2xx / 超时）。 */
+  sendError: unknown;
 
   async connect(url: string, headers: Record<string, string>): Promise<QqBotSocket> {
     this.connects.push({ url, headers });
@@ -316,7 +320,8 @@ class FakeTransport implements QqBotTransport {
   ): Promise<unknown> {
     this.posts.push({ endpoint, headers, body });
     if (endpoint.includes("getAppAccessToken")) return this.tokenResponse;
-    return { id: "sent-1" };
+    if (this.sendError !== undefined) throw this.sendError;
+    return this.sendResult;
   }
 
   tokenRequestCount(): number {
@@ -514,6 +519,122 @@ describe("QqBotAdapter", () => {
     const tail = transport.posts.filter((p) => p.endpoint.includes("/users/")).slice(-2);
     expect(tail[0]?.body).toEqual({ content: "a", msg_id: "m-0", msg_seq: 3 });
     expect(tail[1]?.body).toEqual({ content: "b", msg_id: "m-0", msg_seq: 4 });
+
+    await adapter.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 失败分类与序号记账（复核阻塞项 2026-11-17）
+// ---------------------------------------------------------------------------
+
+describe("QqBotAdapter — 失败分类", () => {
+  function httpError(status: number): Error {
+    // ws-transport 的 QqBotHttpError 形态：message + status 字段。
+    return Object.assign(new Error(`QQBot: HTTP ${status} from /v2/users/x/messages`), {
+      status,
+    });
+  }
+
+  it("HTTP 4xx（429 除外）是确定性拒绝：retryable:false", async () => {
+    for (const status of [400, 401, 403, 404]) {
+      const transport = new FakeTransport();
+      transport.sendError = httpError(status);
+      const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+      const result = await adapter.send({ chatType: "private", chatId: "openid-1", text: "hi" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.retryable).toBe(false);
+        expect(result.error).toContain(`HTTP ${status}`);
+      }
+
+      await adapter.close();
+    }
+  });
+
+  it("429 / 5xx / 超时 / 网络错误仍可重试：retryable:true", async () => {
+    for (const status of [429, 500, 502, 503]) {
+      const transport = new FakeTransport();
+      transport.sendError = httpError(status);
+      const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+      const result = await adapter.send({ chatType: "private", chatId: "openid-1", text: "hi" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.retryable).toBe(true);
+
+      await adapter.close();
+    }
+
+    // 超时 / 网络错误没有 status：无法判定确定性，按可重试处理（保守一侧）。
+    for (const error of [
+      new Error("QQBot: 请求超时（15000ms）: /v2/users/x/messages"),
+      Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
+    ]) {
+      const transport = new FakeTransport();
+      transport.sendError = error;
+      const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+      const result = await adapter.send({ chatType: "private", chatId: "openid-1", text: "hi" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.retryable).toBe(true);
+
+      await adapter.close();
+    }
+  });
+
+  it("HTTP 200 + 非零业务码算失败（不把没发出去的消息记成已送达）", async () => {
+    const bodies = [
+      { code: 40054, message: "主动消息额度已用尽" },
+      { errcode: 11244, msg: "消息发送频率过快" },
+      { retcode: 1 },
+    ];
+    for (const body of bodies) {
+      const transport = new FakeTransport();
+      transport.sendResult = body;
+      const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+
+      const result = await adapter.send({ chatType: "private", chatId: "openid-1", text: "hi" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.retryable).toBe(false);
+        expect(result.error).toContain("业务错误");
+      }
+
+      await adapter.close();
+    }
+
+    // code: 0 表示成功（平台也可能在成功响应里回 0）。
+    const transport = new FakeTransport();
+    transport.sendResult = { code: 0, id: "sent-ok" };
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+    await expect(
+      adapter.send({ chatType: "private", chatId: "openid-1", text: "hi" }),
+    ).resolves.toEqual({ ok: true, messageId: "sent-ok" });
+    await adapter.close();
+  });
+});
+
+describe("QqBotAdapter — 序号记账", () => {
+  it("replySeq 逐出时同步作废 dedupe 条目（不会复用旧窗口的 seq）", async () => {
+    const transport = new FakeTransport();
+    const adapter = new QqBotAdapter({ appId: "app-1", appSecret: "secret-1", transport });
+    const base = { chatType: "private" as const, chatId: "openid-1" };
+
+    // 给 m-old 建立 seq 1、2，并缓存第二个逻辑消息的 seq。
+    await adapter.send({ ...base, text: "old-1", replyToMsgId: "m-old", dedupeKey: "k-old-1" });
+    await adapter.send({ ...base, text: "old-2", replyToMsgId: "m-old", dedupeKey: "k-old-2" });
+
+    // 塞满序号表触发逐出（私有上限 5000，m-old 是最旧条目）。
+    for (let i = 0; i < 5001; i += 1) {
+      await adapter.send({ ...base, text: `churn-${i}`, replyToMsgId: `m-churn-${i}` });
+    }
+
+    // m-old 已被逐出：它的 dedupe 缓存必须一起作废。若缓存还在，这里会复用
+    // 旧 seq=2；正确行为是按新窗口从 1 重开。
+    await adapter.send({ ...base, text: "old-3", replyToMsgId: "m-old", dedupeKey: "k-old-2" });
+    const last = transport.posts.filter((p) => p.endpoint.includes("/users/")).at(-1);
+    expect(last?.body).toEqual({ content: "old-3", msg_id: "m-old", msg_seq: 1 });
 
     await adapter.close();
   });

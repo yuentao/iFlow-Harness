@@ -215,6 +215,45 @@ describe("QQ 通道 · 面板侧接线", () => {
     expect(p.store.getState().qqTasks).toEqual([]);
   });
 
+  it("stopQq 收尾期间新通道已装回时不清空看板（generation 守卫）", async () => {
+    let releaseClose!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const makeOwner = (tasks: QqTaskUi[], close: () => Promise<void>) => ({
+      service: {
+        listTasks: () => tasks,
+        handleTaskAction: vi.fn(async () => undefined),
+        stop: async () => undefined,
+      },
+      qqbot: { adapter: { close } },
+      store: {},
+      ipc: { port: 0, close: async () => undefined },
+      config: makeConfig(),
+      io: makeIo().io,
+      restartCount: 0,
+    });
+
+    p.qq = makeOwner([TASK], () => gate);
+    p.refreshQqTasks();
+    expect(p.store.getState().qqTasks).toEqual([TASK]);
+
+    // 旧通道的 socket 关闭被挂住：stopQq 停在收尾中。
+    const stopping = p.stopQq();
+    await Promise.resolve();
+
+    // 期间新通道装回并刷新看板。
+    const fresh: QqTaskUi = { ...TASK, taskId: "task-2", shortId: "task-2" };
+    p.qq = makeOwner([fresh], async () => undefined);
+    p.refreshQqTaskProjection();
+    expect(p.store.getState().qqTasks).toEqual([fresh]);
+    releaseClose();
+    await stopping;
+
+    // 旧 stop 不得把新通道的看板清空。
+    expect(p.store.getState().qqTasks).toEqual([fresh]);
+  });
+
   it("任务操作转发给服务并刷新投影", async () => {
     const handleTaskAction = vi.fn(async () => undefined);
     const io = makeIo().io;

@@ -214,7 +214,7 @@ describe("createNodeQqBotTransport.post", () => {
     await expect(transport.post(`${baseUrl}/empty`, {}, {})).resolves.toBeUndefined();
   });
 
-  it("非 2xx reject，且错误文本不回显响应体（避免凭据泄漏）", async () => {
+  it("非 2xx reject，错误携带 status 且不回显响应体（避免凭据泄漏）", async () => {
     const { baseUrl } = await startPostServer(() => ({
       status: 500,
       body: "secret-body-should-not-leak",
@@ -224,6 +224,12 @@ describe("createNodeQqBotTransport.post", () => {
     await expect(transport.post(`${baseUrl}/fail`, {}, {})).rejects.not.toThrow(
       /secret-body-should-not-leak/,
     );
+
+    // adapter 的分类依赖 status 字段：4xx 是确定性拒绝，不能一律当可重试。
+    const { baseUrl: fourBase } = await startPostServer(() => ({ status: 401, body: "{}" }));
+    await expect(transport.post(`${fourBase}/unauthorized`, {}, {})).rejects.toMatchObject({
+      status: 401,
+    });
   });
 
   it("2xx 但不是合法 JSON 时 reject", async () => {

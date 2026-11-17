@@ -35,6 +35,23 @@ export interface NodeQqBotTransportDeps {
 
 export const DEFAULT_QQBOT_HTTP_TIMEOUT_MS = 15_000;
 
+/**
+ * OpenAPI 非 2xx 错误：携带 HTTP status 供适配器分类重试。
+ *
+ * 旧实现只抛一个没有 status 的普通 Error，适配器只能一律按「可重试」处理；
+ * 4xx（参数非法 / 消息被拒 / 鉴权失败）因此会被上层重试 3 轮，每轮都注定
+ * 失败。错误文本仍只带 method / path / status，绝不回显响应体。
+ */
+export class QqBotHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, path: string) {
+    super(`QQBot: HTTP ${status} from ${path}`);
+    this.name = "QqBotHttpError";
+    this.status = status;
+  }
+}
+
 /** 只列本模块实际用到的 ws 能力；注入的假实现也按此形状鸭子类型识别。 */
 interface WsLike {
   readyState?: number;
@@ -225,7 +242,7 @@ export function createNodeQqBotTransport(deps: NodeQqBotTransportDeps = {}): QqB
             const status = res.statusCode ?? 0;
             // 错误文本只带 status/path，不回显响应体（可能含 access_token）。
             if (status < 200 || status >= 300) {
-              reject(new Error(`QQBot: HTTP ${status} from ${url.pathname}`));
+              reject(new QqBotHttpError(status, url.pathname));
               return;
             }
             const text = Buffer.concat(chunks).toString("utf8");

@@ -417,6 +417,18 @@ describe("formatQqTaskSummary", () => {
     expect(text).toContain("失败  rate_limited：请求过于频繁");
     expect(text).toContain("失败 (failed)");
   });
+
+  it("取消态用中性文案，不再把取消渲染成「失败」", () => {
+    const canceled = makeTask({
+      status: "canceled",
+      failure: { code: "agent_canceled", message: "停止原因：cancelled" },
+    });
+    const text = formatQqTaskSummary(canceled, "summary");
+    expect(text).toContain("已取消 (canceled)");
+    expect(text).toContain("取消  停止原因：cancelled");
+    // 自相矛盾的「状态 已取消」紧跟「失败 agent_canceled」是旧行为。
+    expect(text).not.toContain("失败  agent_canceled");
+  });
 });
 
 // ---------------------------------------------------------------------------

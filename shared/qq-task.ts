@@ -188,6 +188,15 @@ export interface QqTask {
    * 摘要缺一块（指纹只由「已确认送达」的片数与内容构成，绝不虚构送达状态）。
    */
   resultDeliveredChunks?: { count: number; fingerprint: string };
+  /**
+   * 最近一次终态回包**尝试**的时刻（毫秒，成功与失败都写）。
+   *
+   * 只用于重启后的补发节流：进程换了以后 `start()` 会对「终态但未送达」的
+   * 任务补一次回包（{@link resultDeliveredAt} 保证已送达的不重发），但连续
+   * 开窗不能让每次开窗都重试一遍，因此用这个持久化时刻设最小间隔。它是内部
+   * 节流锚点，不进看板投影。
+   */
+  resultDeliveryAttemptAt?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +721,13 @@ export function formatQqTaskSummary(task: QqTask, detail: QqResultDetail): strin
     lines.push(`等待  ${kind}：${toPlainText(task.pending.text)}`);
   }
   if (task.failure) {
-    lines.push(`失败  ${task.failure.code}：${toPlainText(task.failure.message)}`);
+    // 取消是用户的主动动作，不是执行故障：与「状态 已取消」挨着的
+    // 「失败 agent_canceled」自相矛盾，取消态改中性标签。
+    if (task.status === "canceled") {
+      lines.push(`取消  ${toPlainText(task.failure.message)}`);
+    } else {
+      lines.push(`失败  ${task.failure.code}：${toPlainText(task.failure.message)}`);
+    }
   }
 
   const summary = result ? toPlainText(result.summary) : "";
