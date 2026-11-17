@@ -18,6 +18,11 @@ import type {
   McpPromptView,
 } from "../src/acp/protocol.js";
 import type { ApprovalRule } from "./approval-policy.js";
+import {
+  normalizeQqAllowEntries,
+  type QqAllowEntry,
+  type QqAllowEntryInput,
+} from "./qq-access.js";
 import type { SuperActionReceipt, SuperSessionUi } from "./super-agent.js";
 
 // Webview components import wire types from this module — re-export the
@@ -1601,8 +1606,12 @@ export interface HostSettingsUi {
  */
 export interface QqSettingsUi {
   enabled: boolean;
-  allowedUsers: string[];
-  allowedGroups: string[];
+  /**
+   * 访问控制条目：完整 openid + 可选备注。存储里兼容旧的裸字符串数组
+   * （`pickQqSettingsUi` 归一），脱敏只在 webview 渲染时做。
+   */
+  allowedUsers: QqAllowEntry[];
+  allowedGroups: QqAllowEntry[];
   workspace: string;
   remotePolicy: "readonly" | "supervised" | "trusted";
   maxConcurrentTasks: number;
@@ -1612,6 +1621,18 @@ export interface QqSettingsUi {
   /** App Secret 是否已由扫码写入。只有布尔，没有明文。 */
   hasAppSecret: boolean;
 }
+
+/**
+ * QQ 设置补丁。
+ *
+ * 白名单字段放宽到 {@link QqAllowEntryInput}：webview 交回带备注的完整条目，
+ * 宿主内部的「只追加一个 openid」写路径（扫码绑定 / 放行待审核）仍然可以传
+ * 裸字符串。两种形态都在 `applyQqSettingsPatch` 里归一后落盘。
+ */
+export type QqSettingsPatch = Partial<Omit<QqSettingsUi, "allowedUsers" | "allowedGroups">> & {
+  allowedUsers?: readonly QqAllowEntryInput[];
+  allowedGroups?: readonly QqAllowEntryInput[];
+};
 
 /**
  * QQ 授权模型（2026-11-17）：待审核用户的一条记录。
@@ -1686,20 +1707,6 @@ function qqReadInteger(
   return Math.min(range.max, Math.max(range.min, Math.round(value)));
 }
 
-function qqReadIdList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const ids: string[] = [];
-  for (const item of value) {
-    if (typeof item !== "string") continue;
-    const id = item.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
-  }
-  return ids;
-}
-
 /**
  * 把任意设置快照归一成 {@link QqSettingsUi}。
  *
@@ -1719,8 +1726,8 @@ export function pickQqSettingsUi(
     raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   return {
     enabled: qqReadBoolean(source.enabled, QQ_SETTINGS_DEFAULTS.enabled),
-    allowedUsers: qqReadIdList(source.allowedUsers),
-    allowedGroups: qqReadIdList(source.allowedGroups),
+    allowedUsers: normalizeQqAllowEntries(source.allowedUsers),
+    allowedGroups: normalizeQqAllowEntries(source.allowedGroups),
     workspace: qqReadString(source.workspace, QQ_SETTINGS_DEFAULTS.workspace),
     remotePolicy: qqReadEnum(
       source.remotePolicy,
@@ -2361,7 +2368,7 @@ export type WebviewToHost =
   /** QQ 远程任务（Wave3-B）：设置页把用户改动交回宿主（局部补丁语义）。
    * `hasAppSecret` 是宿主回传的投影，这里只会被忽略——凭据只在扫码成功后
    * 由宿主写入 SecretStorage，不走设置补丁。 */
-  | { type: "qqSettingsPatch"; patch: Partial<QqSettingsUi> }
+  | { type: "qqSettingsPatch"; patch: QqSettingsPatch }
   /**
    * 一键托管（Wave5-C0）：设置页请求宿主开始接入 / 停止 QQBot 托管。
    * `start` 触发准备→配置→启动→等待扫码授权流程，`stop` 停止并清理。

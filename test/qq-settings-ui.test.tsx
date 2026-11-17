@@ -60,7 +60,8 @@ function Harness({
       value={value}
       onChange={(patch) => {
         onChange(patch);
-        setValue((current) => ({ ...current, ...patch }));
+        // 这里的用例只回灌组件自己产出的条目形式（不带裸字符串），断言收窄。
+        setValue((current) => ({ ...current, ...patch }) as QqSettingsValue);
       }}
       onTestConnection={onTestConnection}
       onUnbind={onUnbind}
@@ -169,20 +170,96 @@ describe("QqSettings", () => {
     expect(container.textContent).toContain("工具调用无需 QQ 审核直接执行");
   });
 
-  it("adds, edits and removes allowed users with per-row accessible names", () => {
+  it("已存在条目只读展示脱敏 openid，并带可提交的备注字段", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("D754********8D11");
+    expect(text).not.toContain(openid);
+    // 不是输入框：页面上没有能直接改 openid 的字段。
+    expect(container.querySelector("input[aria-label='允许的用户 1']")).toBeNull();
+
+    const note = container.querySelector<HTMLInputElement>(
+      "input[aria-label='允许的用户 1 的备注']",
+    )!;
+    expect(note.value).toBe("同事");
+
+    act(() => note.focus());
+    setInput(note, "运维同事");
+    act(() => note.blur());
+    expect(onChange).toHaveBeenCalledWith({
+      allowedUsers: [{ openid, note: "运维同事" }],
+    });
+  });
+
+  it("备注可以清空（写回不带 note 的条目）", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+
+    const note = container.querySelector<HTMLInputElement>(
+      "input[aria-label='允许的用户 1 的备注']",
+    )!;
+    act(() => note.focus());
+    setInput(note, "");
+    act(() => note.blur());
+    expect(onChange).toHaveBeenCalledWith({ allowedUsers: [{ openid }] });
+  });
+
+  it("删除按钮仍可用", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
+
+    const remove = container.querySelector<HTMLButtonElement>(
+      "button[aria-label='删除 允许的用户 1']",
+    )!;
+    act(() => remove.click());
+    expect(onChange).toHaveBeenCalledWith({ allowedUsers: [] });
+  });
+
+  it("添加用户：必须先输入完整 openid，提交后立即按脱敏展示", () => {
+    const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness />);
     expect(container.textContent).toContain("尚未添加条目");
 
     clickText("添加用户");
-    expect(onChange).toHaveBeenCalledWith({ allowedUsers: [""] });
+    // 添加输入框的可见标签是占位符，可访问名必须另外给（不能拿 placeholder 充当）。
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入用户的 openid']")!;
+    expect(input.placeholder).toBe("完整 openid");
+    setInput(input, openid);
 
-    const field = container.querySelector<HTMLInputElement>("input[aria-label='允许的用户 1']")!;
-    setInput(field, "1234567890");
-    expect(onChange).toHaveBeenCalledWith({ allowedUsers: ["1234567890"] });
+    const confirm = container.querySelector<HTMLButtonElement>("button[aria-label='确认添加']")!;
+    act(() => confirm.click());
 
-    const remove = container.querySelector<HTMLButtonElement>("button[aria-label='删除 允许的用户 1']")!;
-    act(() => remove.click());
-    expect(onChange).toHaveBeenCalledWith({ allowedUsers: [] });
+    expect(onChange).toHaveBeenCalledWith({ allowedUsers: [{ openid }] });
+    // Harness 会把补丁回灌：条目立即以脱敏形式出现，完整 openid 不再泄露。
+    const text = container.textContent ?? "";
+    expect(text).toContain("D754********8D11");
+    expect(text).not.toContain(openid);
+  });
+
+  it("添加群按同一规则脱敏，取消添加不会写入", () => {
+    const openid = "ABCDEF0123456789ABCDEF0123456789";
+    render(<Harness />);
+
+    clickText("添加群");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    const cancel = container.querySelector<HTMLButtonElement>("button[aria-label='取消添加']")!;
+    setInput(input, openid);
+    act(() => cancel.click());
+    expect(onChange).not.toHaveBeenCalled();
+    expect(container.querySelector("input[aria-label='输入群的 openid']")).toBeNull();
+
+    clickText("添加群");
+    const again = container.querySelector<HTMLInputElement>("input[aria-label='输入群的 openid']")!;
+    setInput(again, openid);
+    act(() => {
+      again.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith({ allowedGroups: [{ openid }] });
+    // 回灌后立即脱敏：群 openid 与用户 openid 用同一规则。
+    expect(container.textContent).toContain("ABCD********6789");
+    expect(container.textContent).not.toContain(openid);
   });
 
   it("paints warnings in the warning tone, never primary", () => {

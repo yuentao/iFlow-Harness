@@ -74,14 +74,27 @@ describe("normalizeQqConfig", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("白名单里的非字符串项被跳过并汇总告警", () => {
+  it("白名单里的无效条目被跳过并汇总告警", () => {
     const { config, warnings } = normalizeQqConfig({
       allowedUsers: ["10001", 10002, null, true, { qq: 3 }],
     });
     expect(config.allowedUsers).toEqual(["10001"]);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("iflow.qq.allowedUsers");
-    expect(warnings[0]).toContain("4 个非字符串项");
+    expect(warnings[0]).toContain("4 个无效条目");
+  });
+
+  it("带备注的 { openid, note } 条目只取完整 openid（运行期匹配不认备注/脱敏）", () => {
+    const { config, warnings } = normalizeQqConfig({
+      allowedUsers: [
+        { openid: "D754D2240C503C2ABE2B236DC1E78D11", note: "同事" },
+        { openid: " user-2 " },
+      ],
+      allowedGroups: [{ openid: "group-1", note: "测试群" }],
+    });
+    expect(config.allowedUsers).toEqual(["D754D2240C503C2ABE2B236DC1E78D11", "user-2"]);
+    expect(config.allowedGroups).toEqual(["group-1"]);
+    expect(warnings).toEqual([]);
   });
 
   it("数字项先四舍五入取整，越界再裁剪到允许范围", () => {
