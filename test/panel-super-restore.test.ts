@@ -81,6 +81,20 @@ type PanelInternals = {
   currentMainSessionId: () => string | null;
   publishSuperSessions: () => void;
   getSuperAgent: () => unknown;
+  superAgent: unknown;
+  superHeartbeatTimer: NodeJS.Timeout | null;
+  ensureSuperHeartbeat: () => void;
+  pendingSuperReportPrompts: Array<{ mainSessionId: string | null; text: string }>;
+  pendingSuperActionReceipts: Array<{ mainSessionId: string | null; text: string }>;
+  pendingDelegatedUserTurns: Array<{
+    mainSessionId: string | null;
+    text: string;
+    images: { data: string; mimeType: string }[];
+    files: { name: string; path: string }[];
+    droppedByChild: number;
+  }>;
+  pendingSuperToolCallCorrections: Array<{ mainSessionId: string | null; text: string }>;
+  pendingSuperMerges: Array<{ id: string; reason: string }>;
 };
 
 function record(overrides: Partial<PersistedSuperSession> = {}): PersistedSuperSession {
@@ -262,5 +276,46 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     // 再落一次同样的内容：文件不该被重写（mtime 不变）。
     await p.persistSuperSessions({ force: true });
     expect(fs.statSync(file).mtimeMs).toBe(first);
+  });
+
+  it("删除会话：终止其子会话、清掉它的待投递队列、归档删除且空转心跳停表", async () => {
+    // 管理器替身：记录删除归属，看板投影为空（子会话已被清掉）。
+    const forgotten: string[] = [];
+    const manager = {
+      forgetMainSession: vi.fn(async (id: string) => {
+        forgotten.push(id);
+        return { ids: ["super-x"], worktrees: [] };
+      }),
+      list: () => [],
+      archivableMainSessionIds: () => [],
+      archivableSessions: () => [],
+    };
+    p.superAgent = manager;
+    await writeSuperSessionArchive(storageDir, "main-1", [record()]);
+    // 欠着这个会话的待投递内容（汇报 / 回执 / 改道消息 / 参数纠错 / 合并）。
+    p.pendingSuperReportPrompts = [{ mainSessionId: "main-1", text: "旧汇报" }];
+    p.pendingSuperActionReceipts = [{ mainSessionId: "main-1", text: "旧回执" }];
+    p.pendingDelegatedUserTurns = [
+      { mainSessionId: "main-1", text: "旧消息", images: [], files: [], droppedByChild: 0 },
+    ];
+    p.pendingSuperToolCallCorrections = [{ mainSessionId: "main-1", text: "旧纠错" }];
+    p.pendingSuperMerges = [{ id: "super-x", reason: "旧的合并请求" }];
+    p.ensureSuperHeartbeat();
+    expect(p.superHeartbeatTimer).not.toBeNull();
+
+    await p.deleteSession("main-1");
+
+    expect(forgotten).toEqual(["main-1"]);
+    // 队列清干净：留着它们既投不出去，又会让心跳永远停不下来。
+    expect(p.pendingSuperReportPrompts).toEqual([]);
+    expect(p.pendingSuperActionReceipts).toEqual([]);
+    expect(p.pendingDelegatedUserTurns).toEqual([]);
+    expect(p.pendingSuperToolCallCorrections).toEqual([]);
+    expect(p.pendingSuperMerges).toEqual([]);
+    // 归档文件与看板投影都跟着会话消失。
+    expect(fs.existsSync(path.join(storageDir, "super-sessions", "main-1.json"))).toBe(false);
+    expect(board()).toEqual([]);
+    // 没有待办 → 心跳停表（旧实现让它常驻）。
+    expect(p.superHeartbeatTimer).toBeNull();
   });
 });

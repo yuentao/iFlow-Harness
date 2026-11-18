@@ -3072,6 +3072,31 @@ const SUPER_BOARD_LABEL_EN = "[child-session board]";
  * 动手干活 —— 委派根本没机会发生，模型还「看起来一切正常」。
  */
 /**
+ * 看板投影里任务说明的预览上限（字符）。
+ *
+ * 任务书是模型写的，可能几千字符；`superSessions` 是**非 blocks 元数据**，
+ * 随每次 snapshot / blockPatch 整份重发。webview 从不渲染这段正文（它只
+ * 渲染标题 / 状态 / 分支 / 摘要），每轮把全文重新发一遍纯属带宽与内存浪费。
+ * 投影里只留一句可追溯的摘要 + 子会话 `id`（追溯键）；**完整任务书仍留在
+ * 管理器的记录里** —— 重试、PR 正文与归档都读那边，信息不丢。
+ */
+export const SUPER_BOARD_TASK_PREVIEW_MAX_CHARS = 200;
+
+/**
+ * 看板投影：任务书压成单行预览，其余字段原样。
+ *
+ * 只在需要裁剪时才换对象（短任务书原引用返回），调用点可以安全地把它当作
+ * 每次投影的 mapper。末尾的 `…` 如实标记「这里还有被截掉的内容」，不装作
+ * 全文都在。
+ */
+export function toSuperBoardSession(session: SuperSessionUi): SuperSessionUi {
+  const task = session.task ?? "";
+  if (task.length <= SUPER_BOARD_TASK_PREVIEW_MAX_CHARS) return session;
+  const preview = `${task.slice(0, SUPER_BOARD_TASK_PREVIEW_MAX_CHARS - 1).trimEnd()}…`;
+  return { ...session, task: preview };
+}
+
+/**
  * 活跃子会话的精简行：字符预算吃紧时保留 id + 状态 + 短标题，丢掉 summary /
  * 分支 / 集成细节。`buildSuperDigest` 用它保证活跃 id 即使在上百个子会话的
  * 看板里也不会被 `… (N omitted)` 折叠 —— 主 Agent 从摘要里抄 id 去执行

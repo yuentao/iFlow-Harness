@@ -210,6 +210,21 @@ export async function deleteSuperSessionArchive(baseDir: string, sessionId: stri
   lastWritten.delete(target);
 }
 
+/**
+ * 等这个归档**已经排队的写**全部落定（会话删除前的收尾）。
+ *
+ * `writeSuperSessionArchive` 的写链是串行的：删除会话时如果直接 `rm`，
+ * 一个早已排队的写会在 rm 之后才 rename —— 文件被「复活」，而那个会话已经
+ * 不存在了。先等链尾（吞掉错误，与写入侧一致），再删才确定。
+ */
+export async function awaitSuperSessionArchiveWrite(
+  baseDir: string,
+  sessionId: string,
+): Promise<void> {
+  const pending = pendingWrites.get(archivePath(baseDir, sessionId));
+  if (pending) await pending.catch(() => undefined);
+}
+
 /** 归档目录里的文件名列表（清理孤儿归档用）。 */
 export async function listSuperSessionArchiveFiles(baseDir: string): Promise<string[]> {
   try {

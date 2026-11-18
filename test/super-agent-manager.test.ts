@@ -370,8 +370,10 @@ describe("super agent · 编排", () => {
     const request = harness.clients[0]?.newSessionRequests[0];
     expect(request).toBeDefined();
     // 主会话经 `settings.allowed_tools`（白名单）与 `settings.disallowed_tools`
-    // 机械剔除全部读取/写入/执行工具，并在进程级移除 MCP 服务器；子会话刻意
-    // 不传 settings —— 实现与探查都只允许在子会话里跑，MCP 工具也要保留。
+    // 机械剔除全部读取/写入/执行工具；子会话刻意不传 settings —— 实现与探查
+    // 都只允许在子会话里跑，内置工具（含 task）必须齐全。MCP 服务器另算：
+    // 子会话进程默认在启动参数层面整体移除（见 panel-spawn-env 的 argv 断言），
+    // 那是进程级开关，不是 session/new 的 settings。
     expect(request?.settings).toBeUndefined();
     expect(JSON.stringify(request ?? {})).not.toContain("disallowed_tools");
     expect(JSON.stringify(request ?? {})).not.toContain("allowed_tools");
@@ -2117,4 +2119,141 @@ describe("super agent · 准备阶段抛错也要回收并发槽位", () => {
 
     await harness.manager.dispose();
   }, 60000);
+});
+
+/** 一条最小可用的历史（归档）子会话记录。 */
+function archivedChild(id: string, mainSessionId: string): SuperSessionUi {
+  return {
+    id,
+    title: `历史 ${id}`,
+    task: "旧任务",
+    status: "cancelled",
+    restored: true,
+    mainSessionId,
+    isolation: { kind: "git_worktree", path: `/tmp/${id}`, branch: `iflow/super/${id}` },
+    createdAt: 100,
+    updatedAt: 200,
+    reports: [],
+  };
+}
+
+describe("super agent · 删除主会话时清理它的子会话（H）", () => {
+  it("forgetMainSession 终止活子会话、清掉记录与归档归属，worktree 保留", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang", "manual", "main-1", 2, { keepWorktree: true });
+    const spawned = harness.manager.spawn({ title: "跑着的", task: "长任务" });
+    await until(() => harness.sessions[0]?.status === "running");
+    harness.manager.restoreSessions("main-1", [archivedChild("super-old", "main-1")]);
+    expect(harness.manager.list("main-1")).toHaveLength(2);
+    const branch = harness.manager.get(spawned.id)?.isolation.branch;
+
+    const result = await harness.manager.forgetMainSession("main-1");
+
+    // 进程被回收，记录从看板与归档归属里消失。
+    expect(result.ids).toEqual([spawned.id]);
+    await until(() => harness.clients[0]?.disposed === true);
+    expect(harness.manager.list("main-1")).toEqual([]);
+    expect(harness.manager.list()).toEqual([]);
+    expect(harness.manager.archivableSessions("main-1")).toEqual([]);
+    // 归属集合也必须清掉：留着它，下一次落盘会把空归档重新写回磁盘。
+    expect(harness.manager.archivableMainSessionIds()).not.toContain("main-1");
+    // worktree 与分支保留（删目录不可逆），返回给宿主记日志。
+    expect(result.worktrees).toHaveLength(1);
+    expect(result.worktrees[0]?.id).toBe(spawned.id);
+    expect(result.worktrees[0]?.branch).toBe(branch);
+
+    await harness.manager.dispose();
+  }, 30000);
+
+  it("只清目标会话：别的会话名下的子会话不受影响", async () => {
+    const repo = makeRepo();
+    let owner = "main-1";
+    const harness = makeManager(repo, "hang", "manual", () => owner);
+    harness.manager.spawn({ title: "A 的孩子", task: "干活" });
+    await until(() => harness.sessions.length === 1);
+    owner = "main-2";
+    harness.manager.spawn({ title: "B 的孩子", task: "干活" });
+    await until(() => harness.manager.list().length === 2);
+
+    const result = await harness.manager.forgetMainSession("main-1");
+
+    expect(result.ids).toHaveLength(1);
+    const remaining = harness.manager.list();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.mainSessionId).toBe("main-2");
+
+    await harness.manager.dispose();
+  }, 30000);
+});
+
+describe("super agent · 宿主侧子会话转录的资源上限（I）", () => {
+  it("超过保留窗口的旧工具输出被释放，最新块仍完整", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const session = harness.manager.spawn({ title: "长任务", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    await until(() => (harness.clients[0]?.prompts.length ?? 0) === 1);
+    const cb = harness.clients[0]!.callbacks;
+
+    // 210 个工具块 × 20K 输出 —— 合计超过 webview 的字符预算（4M），旧块
+    // 必须被释放；宿主侧此前完全没有上限。
+    const chunk = "x".repeat(20_000);
+    const count = 210;
+    for (let i = 0; i < count; i += 1) {
+      cb.onSessionUpdate?.({
+        sessionId: "sub",
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: `t${i}`,
+          toolName: "read_file",
+          title: `读取 ${i}`,
+          kind: "read",
+          status: "completed",
+          content: [{ type: "content", content: { type: "text", text: chunk } }],
+        },
+      } as never);
+    }
+
+    await until(() =>
+      harness.manager
+        .transcriptBlocks(session.id)
+        .some((block) => block.kind === "tool" && block.evicted === true),
+    );
+    const blocks = harness.manager.transcriptBlocks(session.id);
+    expect(blocks).toHaveLength(count);
+    // 旧块被打上 released 标记、载荷已释放……
+    const oldest = blocks[0];
+    expect(oldest?.kind).toBe("tool");
+    if (oldest?.kind === "tool") {
+      expect(oldest.evicted).toBe(true);
+      expect(oldest.output).toBe("");
+    }
+    // ……最新块仍然完整可读（保留窗口内不裁剪）。
+    const newest = blocks[count - 1];
+    expect(newest?.kind).toBe("tool");
+    if (newest?.kind === "tool") {
+      expect(newest.evicted).toBeUndefined();
+      expect(newest.output.length).toBe(chunk.length);
+    }
+
+    await harness.manager.dispose();
+  }, 30000);
+});
+
+describe("super agent · 看板投影不重发完整任务书（G）", () => {
+  it("list() 只带预览，记录与归档仍保留完整任务书", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "complete");
+    const task = "按需求改写模块 ".repeat(100);
+    const session = harness.manager.spawn({ title: "长任务", task });
+    await until(() => harness.sessions[0]?.status === "completed");
+
+    // 看板投影（随每次 snapshot / blockPatch 整份重发）只带预览。
+    const projected = harness.manager.list("main-1")[0];
+    expect(projected?.task.length).toBeLessThanOrEqual(200);
+    expect(projected?.task.endsWith("…")).toBe(true);
+    // 追溯：记录本身（重试 / PR 正文读它）与归档都保留全文。
+    expect(harness.manager.get(session.id)?.task).toBe(task);
+    expect(harness.manager.archivableSessions("main-1")[0]?.task).toBe(task);
+  }, 30000);
 });
