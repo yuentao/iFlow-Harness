@@ -135,12 +135,14 @@ type FakeClient = {
   setMode: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
+  mcpStatus?: ReturnType<typeof vi.fn>;
 };
 
 type PanelInternals = {
   client: FakeClient | null;
   sessionCwd: string | null;
   ensureClient: () => Promise<unknown>;
+  insertInjectedContextCard: (since: number) => Promise<void>;
   startNewSession: (options?: { bypassSuperWait?: boolean }) => Promise<void>;
   restoreSession: (sessionId: string) => Promise<boolean>;
   reloadSessionUnderCreds: (
@@ -383,6 +385,39 @@ describe("主会话 session settings · 剔除 task 与读写执行工具", () =
     const settings = mainSessionSettings();
     expect(settings.mcpServers).toBeUndefined();
     expect(JSON.stringify(settings)).not.toContain("new_page");
+  });
+
+  it("自动注入卡不再查询 mcp-status，也不带入任何 MCP 条目", async () => {
+    // 主会话的 CLI 进程在 spawn 时就移除了全部 MCP 服务器（buildAcpCommand 的
+    // disableMcpServers），因此这个「模型实际看到什么」的卡片里根本不该有 MCP
+    // 条目——把用户配置里因进程级禁用而未连接的服务器报成「N 个未连接」是误导
+    // （2026-11-18 用户实测截图）。
+    fs.writeFileSync(
+      path.join(storageDir, "context-report.json"),
+      JSON.stringify({ version: 2, systemPrompt: "You are a helpful assistant." }),
+      "utf8",
+    );
+    const servers = Object.fromEntries(
+      ["apipost-mcp", "firecrawl", "exa", "figma", "playwright-mcp"].map((name) => [
+        name,
+        { status: "disconnected", tools: [], toolCount: 0, promptCount: 0, prompts: [] },
+      ]),
+    );
+    const mcpStatus = vi.fn(async () => ({ available: true, servers }));
+    client.mcpStatus = mcpStatus;
+    p.persistActiveTranscript = async () => {};
+    p.store.sessionStarted({ sessionId: "injected-mcp" });
+
+    await p.insertInjectedContextCard(0);
+
+    expect(mcpStatus).not.toHaveBeenCalled();
+    const injected = p.store.getState().blocks.find((b) => b.kind === "injected") as
+      | Extract<SessionState["blocks"][number], { kind: "injected" }>
+      | undefined;
+    expect(injected).toBeDefined();
+    expect(injected!.items.length).toBeGreaterThan(0);
+    expect(injected!.items.some((i) => i.kind === "mcp")).toBe(false);
+    expect(injected!.notice).not.toContain("MCP 服务器未连接");
   });
 
   it("新建会话流程中投影为 starting，结束后回到 null", async () => {
