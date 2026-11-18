@@ -137,6 +137,15 @@ export interface QqHostPorts {
     superSessionId: string,
     answers: Record<string, string | string[]>,
   ): boolean;
+  /**
+   * 把 **main 渠道**任务的提问答案送回主会话挂起的 `_iflow/user/questions`
+   * 卡（面板 `pendingQuestions`）。按 taskId 寻址，与子会话端口区分开。
+   * 返回是否真的命中一张挂起的提问卡；缺失即由服务如实回执「未送达」。
+   */
+  answerMainQuestion?(
+    taskId: string,
+    answers: Record<string, string | string[]>,
+  ): boolean;
   /** 本地通知（面板 toast / 日志），不发往 QQ。 */
   notify(text: string): void;
   /**
@@ -373,6 +382,15 @@ export function createQqServiceHost(
             superSessionId: string,
             answers: Record<string, string | string[]>,
           ): boolean => ports.answerRemoteQuestion!(superSessionId, answers),
+        }
+      : {}),
+
+    ...(ports.answerMainQuestion
+      ? {
+          answerMainQuestion: (
+            taskId: string,
+            answers: Record<string, string | string[]>,
+          ): boolean => ports.answerMainQuestion!(taskId, answers),
         }
       : {}),
 

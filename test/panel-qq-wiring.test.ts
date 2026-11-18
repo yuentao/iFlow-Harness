@@ -117,6 +117,14 @@ function makeIo(initial: { settings?: Record<string, unknown> } = {}): {
 
 type PanelInternals = {
   qq?: unknown;
+  qqGeneration: number;
+  qqInjectAborts: Map<string, AbortController>;
+  qqInjectedTaskId: string | null;
+  doStartQqBotChannel: (
+    config: QqConfig,
+    io: QqSettingsIo,
+    generation: number,
+  ) => Promise<void>;
   qqWorkspaceRoots: () => string[];
   coerceQqInboundMessage: (value: unknown) => unknown;
   isQqTaskAction: (value: unknown) => boolean;
@@ -731,5 +739,141 @@ describe("QQ 通道 · 面板侧接线", () => {
         detail: "qqbot websocket; 断线区间可能丢消息（resume 多次失败，已改为新建会话）",
       }),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F3：启动竞态（connect → start 窗口）
+// ---------------------------------------------------------------------------
+
+describe("QQ 通道启动竞态（F3）", () => {
+  it("connect→start 窗口到达的入站消息被丢弃，不被 start() 误标失败", async () => {
+    const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-race-storage-"));
+    const sent: string[] = [];
+    let onEvent: ((msg: unknown) => void) | undefined;
+    const fakeAdapter = {
+      setEventCallback: (cb: (msg: unknown) => void) => {
+        onEvent = cb;
+      },
+      connect: async () => {
+        // connect 期间投递一条合法入站消息：此时 this.qq 尚未发布。
+        onEvent?.({
+          chatType: "private",
+          chatId: "u-race",
+          senderId: "u-race",
+          msgId: "m-race-1",
+          text: "帮我跑个测试",
+          mentionsBot: false,
+          attachments: [],
+          timestamp: 0,
+        });
+      },
+      close: async () => undefined,
+      health: async () => ({ connected: true, detail: "fake" }),
+      send: async (out: { text: string }) => {
+        sent.push(out.text);
+        return { ok: true };
+      },
+    };
+    const io: QqSettingsIo = {
+      readAll: () => ({ enabled: true, route: "child", allowedUsers: ["u-race"] }),
+      writeAll: async () => undefined,
+      getSecret: async (key: string) =>
+        key.includes("appId") || key.toLowerCase().includes("appid")
+          ? "fake-app-id"
+          : "fake-app-secret",
+      setSecret: async () => undefined,
+      deleteSecret: async () => undefined,
+    };
+    const config = makeConfig({ enabled: true, allowedUsers: ["u-race"] });
+    const panel = new ChatPanel(makeContext(storageDir), {
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+      qqbotDeps: {
+        adapterFactory: () => fakeAdapter as never,
+      },
+    });
+    const p = panel as unknown as PanelInternals;
+    try {
+      await p.doStartQqBotChannel(config, io, p.qqGeneration);
+      const owner = p.qq as { service: { listTasks: () => unknown[] } } | undefined;
+      expect(owner).toBeDefined();
+      // 窗口消息没有建任务；因此 start() 的「非终态标 failed(host_restarted)」
+      // 也不会给它回「请重发」，更不会派出孤儿子会话。
+      expect(owner!.service.listTasks()).toHaveLength(0);
+      expect(sent.join("\n")).not.toContain("请重发");
+      expect(sent.join("\n")).not.toContain("已受理任务");
+    } finally {
+      await panel.dispose();
+      fs.rmSync(storageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F6：停止通道打断在飞的主会话注入
+// ---------------------------------------------------------------------------
+
+describe("QQ 停止通道 · 主会话注入（F6）", () => {
+  it("stopQq 打断当前注入回合、abort 等待表，且不误伤本地回合", async () => {
+    const panel = new ChatPanel(makeContext(fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-stop-storage-"))), {
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    });
+    const p = panel as unknown as PanelInternals;
+    const turnCancel = vi.fn();
+    Object.assign(p, { sendTurnCancel: turnCancel });
+    const controller = new AbortController();
+    p.qqInjectAborts.set("T-main-1", controller);
+    p.qqInjectedTaskId = "T-main-1";
+    p.store.getState().sessionId = "main-session";
+
+    try {
+      await p.stopQq();
+      expect(controller.signal.aborted).toBe(true);
+      expect(p.qqInjectAborts.size).toBe(0);
+      expect(p.qqInjectedTaskId).toBeNull();
+      expect(turnCancel).toHaveBeenCalledTimes(1);
+      expect(turnCancel.mock.calls[0]![0]).toBe("main-session");
+    } finally {
+      await panel.dispose();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F9：无工作区写 QQ 设置
+// ---------------------------------------------------------------------------
+
+describe("QQ 设置写入失败（F9）", () => {
+  it("writeAll 抛错时捕获并 toast，不冒泡出 handleWebviewMessage", async () => {
+    const panel = new ChatPanel(makeContext(fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-settings-storage-"))), {
+      workspaceRoot: here,
+      watchers: makeWatchers(),
+    });
+    const p = panel as unknown as PanelInternals;
+    const io: QqSettingsIo = {
+      readAll: () => ({ enabled: true }),
+      writeAll: async () => {
+        throw new Error("no workspace folder");
+      },
+      getSecret: async () => undefined,
+      setSecret: async () => undefined,
+      deleteSecret: async () => undefined,
+    };
+    p.qq = {
+      service: { listTasks: () => [], handleTaskAction: async () => undefined, stop: async () => undefined },
+      store: {},
+      config: makeConfig(),
+      io,
+    };
+    const toast = vi.spyOn(p.store, "sendToast").mockImplementation(() => 0);
+    try {
+      await expect(p.handleQqSettingsPatch({ enabled: true })).resolves.toBeUndefined();
+      expect(toast).toHaveBeenCalledWith("warning", expect.stringContaining("工作区"));
+    } finally {
+      toast.mockRestore();
+      await panel.dispose();
+    }
   });
 });

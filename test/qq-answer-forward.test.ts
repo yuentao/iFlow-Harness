@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { InboundMessage } from "../src/qq/adapter/types.js";
 import type { QqConfig } from "../src/qq/config.js";
 import {
@@ -69,6 +69,7 @@ interface Fixture {
   store: MemoryStore;
   delivered: QqServiceDeliverInput[];
   answered: AnswerCall[];
+  mainAnswered: Array<{ taskId: string; answers: Record<string, string | string[]> }>;
   releaseDispatch: () => void;
   setSuperSessionId: (id: string) => void;
 }
@@ -93,11 +94,14 @@ function makeFixture(
     questionTimeoutMs?: number;
     withAnswerPort?: boolean;
     throwingAnswerPort?: boolean;
+    withMainAnswerPort?: boolean;
+    throwingMainAnswerPort?: boolean;
   } = {},
 ): Fixture {
   const store = new MemoryStore();
   const delivered: QqServiceDeliverInput[] = [];
   const answered: AnswerCall[] = [];
+  const mainAnswered: Array<{ taskId: string; answers: Record<string, string | string[]> }> = [];
   let releaseDispatch!: () => void;
   const dispatchGate = new Promise<void>((resolve) => {
     releaseDispatch = resolve;
@@ -131,6 +135,15 @@ function makeFixture(
             return true;
           },
         }),
+    ...(options.withMainAnswerPort === false
+      ? {}
+      : {
+          answerMainQuestion: (taskId: string, answers: Record<string, string | string[]>) => {
+            if (options.throwingMainAnswerPort) throw new Error("主会话回灌端口故障");
+            mainAnswered.push({ taskId, answers });
+            return true;
+          },
+        }),
     notify: () => undefined,
   };
 
@@ -149,6 +162,7 @@ function makeFixture(
     store,
     delivered,
     answered,
+    mainAnswered,
     releaseDispatch,
     setSuperSessionId: (id: string) => {
       superSessionId = id;
@@ -191,6 +205,13 @@ async function runningRemoteTask(fixture: Fixture): Promise<QqTask> {
   });
   const id = fixture.service.listTasks().find((task) => task.status === "running")!.taskId;
   return fixture.service.getTask(id)!;
+}
+
+/** 把一条正在运行的任务切到 main 渠道（服务按 task.channel 区分寻址方式）。 */
+async function runningMainTask(fixture: Fixture): Promise<QqTask> {
+  const task = await runningRemoteTask(fixture);
+  task.channel = "main";
+  return task;
 }
 
 function question(overrides: Partial<Parameters<typeof formatQqQuestionNotice>[1][number]> = {}) {
@@ -446,5 +467,172 @@ describe("createQqServiceHost — 回答回灌端口", () => {
     };
     const host = createQqServiceHost(ports);
     expect(host.answerRemoteQuestion).toBeUndefined();
+  });
+
+  it("把 QqHostPorts.answerMainQuestion 映射到 QqServiceHost", () => {
+    const calls: Array<{ taskId: string; answers: Record<string, string | string[]> }> = [];
+    const ports: QqHostPorts = {
+      workspaceRoots: () => ["/ws"],
+      spawnTask: () => ({ superSessionId: "s1" }),
+      waitForSettle: async () => undefined,
+      cancel: async () => undefined,
+      merge: async () => ({ ok: true, detail: "ok" }),
+      discard: async () => ({}),
+      readSuper: () => null,
+      notify: () => undefined,
+      deliver: async () => ({ ok: true }),
+      onPendingUser: () => undefined,
+      unbindAccount: async () => ({ ok: true, message: "ok" }),
+      answerMainQuestion: (taskId, answers) => {
+        calls.push({ taskId, answers });
+        return true;
+      },
+    };
+    const host = createQqServiceHost(ports);
+    expect(host.answerMainQuestion?.("t1", { 颜色: "蓝色" })).toBe(true);
+    expect(calls).toEqual([{ taskId: "t1", answers: { 颜色: "蓝色" } }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// main 渠道提问转发（新功能）
+// ---------------------------------------------------------------------------
+
+describe("主会话渠道提问提醒转发（main）", () => {
+  it("main 任务的提问转发到 QQ，任务切到 waiting_answer 并带 /qq answer 提示", async () => {
+    const f = makeFixture();
+    const task = await runningMainTask(f);
+    f.delivered.length = 0;
+
+    await f.service.forwardMainTaskQuestion({
+      taskId: task.taskId,
+      questions: [question()],
+    });
+
+    const updated = f.service.getTask(task.taskId)!;
+    expect(updated.status).toBe("waiting_answer");
+    expect(updated.pending?.kind).toBe("answer");
+    const notice = f.delivered[f.delivered.length - 1]!;
+    expect(notice.text).toContain(`/qq answer ${shortTaskId(task.taskId)}`);
+    // 尚未回答：不能用子会话端口回灌。
+    expect(f.answered).toHaveLength(0);
+  });
+
+  it("child 渠道 / 不存在的任务不会被 forwardMainTaskQuestion 误转发", async () => {
+    const f = makeFixture();
+    const child = await runningRemoteTask(f);
+    f.delivered.length = 0;
+
+    await f.service.forwardMainTaskQuestion({ taskId: child.taskId, questions: [question()] });
+    await f.service.forwardMainTaskQuestion({ taskId: "not-exist", questions: [question()] });
+
+    expect(f.delivered.length).toBe(0);
+    expect(f.service.getTask(child.taskId)!.status).toBe("running");
+  });
+
+  it("/qq answer 经 answerMainQuestion 回灌主会话，任务恢复 running 并回执", async () => {
+    const f = makeFixture();
+    const task = await runningMainTask(f);
+    await f.service.forwardMainTaskQuestion({ taskId: task.taskId, questions: [question()] });
+    f.delivered.length = 0;
+
+    await f.service.handleInboundMessage(
+      inbound(`/qq answer ${shortTaskId(task.taskId)} 我选蓝色`, "m-main-answer"),
+    );
+
+    expect(f.mainAnswered).toHaveLength(1);
+    expect(f.mainAnswered[0]!.taskId).toBe(task.taskId);
+    expect(f.mainAnswered[0]!.answers).toEqual({ 颜色: "我选蓝色" });
+    expect(f.answered).toHaveLength(0);
+    expect(f.service.getTask(task.taskId)!.status).toBe("running");
+    expect(f.delivered.some((msg) => msg.text.includes("回答已提交给 agent"))).toBe(true);
+  });
+
+  it("主会话回灌端口缺失或抛错时如实回执「未能送达」", async () => {
+    for (const options of [{ withMainAnswerPort: false }, { throwingMainAnswerPort: true }]) {
+      const f = makeFixture(options);
+      const task = await runningMainTask(f);
+      await f.service.forwardMainTaskQuestion({ taskId: task.taskId, questions: [question()] });
+      f.delivered.length = 0;
+
+      await f.service.handleTaskAction(task.taskId, "answer", "蓝色");
+
+      expect(f.service.getTask(task.taskId)!.status).toBe("running");
+      expect(f.delivered.some((msg) => msg.text.includes("回答未能送达 agent"))).toBe(true);
+      f.service.stop();
+    }
+  });
+
+  it("超时按未回答回灌空答案到主会话", async () => {
+    const f = makeFixture({ questionTimeoutMs: 20 });
+    const task = await runningMainTask(f);
+    await f.service.forwardMainTaskQuestion({ taskId: task.taskId, questions: [question()] });
+    f.delivered.length = 0;
+
+    await waitFor(() => f.mainAnswered.length === 1, 2_000);
+
+    expect(f.mainAnswered[0]!.answers).toEqual({});
+    expect(f.answered).toHaveLength(0);
+    await waitFor(() => f.service.getTask(task.taskId)!.status === "running");
+  });
+
+  it("stop() 把 main 未答提问按未回答回灌，避免主会话 agent 永远挂着", async () => {
+    const f = makeFixture();
+    const task = await runningMainTask(f);
+    await f.service.forwardMainTaskQuestion({
+      taskId: task.taskId,
+      questions: [question()],
+    });
+
+    await f.service.stop();
+
+    expect(f.mainAnswered).toHaveLength(1);
+    expect(f.mainAnswered[0]!.answers).toEqual({});
+  });
+
+  it("本机先作答时 clearQuestionWait 撤销槽位且不回灌", async () => {
+    const f = makeFixture();
+    const task = await runningMainTask(f);
+    await f.service.forwardMainTaskQuestion({ taskId: task.taskId, questions: [question()] });
+    f.mainAnswered.length = 0;
+    f.delivered.length = 0;
+
+    f.service.clearQuestionWait(task.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(f.mainAnswered).toHaveLength(0);
+    expect(f.service.getTask(task.taskId)!.pending).toBeUndefined();
+    f.delivered.length = 0;
+    await f.service.handleTaskAction(task.taskId, "answer", "蓝色");
+    expect(f.mainAnswered).toHaveLength(0);
+    expect(f.delivered[f.delivered.length - 1]!.text).toContain("当前没有等待回答的问题");
+  });
+
+  it("F1：readonly 远程策略的 main 任务直接失败，绝不调用主会话注入端口", async () => {
+    const f = makeFixture();
+    const config = f.service.config as QqConfig & { remotePolicy: string };
+    config.route = "main";
+    config.remotePolicy = "readonly";
+    const inject = vi.fn(async () => ({ injected: true, text: "不该出现" }));
+    (f.service.host as QqServiceHost & { injectIntoMainSession?: typeof inject }).injectIntoMainSession =
+      inject;
+    await f.service.start();
+    f.delivered.length = 0;
+
+    await f.service.handleInboundMessage(inbound("/qq task 只读任务", "m-readonly"));
+    await waitFor(() =>
+      f.service.listTasks().some((entry) => {
+        const task = f.service.getTask(entry.taskId);
+        return task?.failure?.code === "main_route_policy_denied";
+      }),
+    );
+
+    const denied = f.service
+      .listTasks()
+      .map((entry) => f.service.getTask(entry.taskId)!)
+      .find((task) => task.failure?.code === "main_route_policy_denied")!;
+    expect(denied.channel).toBe("main");
+    expect(inject).toHaveBeenCalledTimes(0);
+    f.service.stop();
   });
 });
