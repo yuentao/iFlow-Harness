@@ -430,6 +430,47 @@ describe("Super Agent 看板排序与折叠", () => {
     expect(document.body.textContent).toContain("已合并的任务");
   });
 
+  const nothingToMerge = (id: string, title: string, createdAt: number): SuperSessionUi =>
+    session({
+      id,
+      title,
+      status: "completed",
+      createdAt,
+      integration: { mode: "merge", state: "not_needed", at: createdAt + 10 },
+    });
+
+  it("没有产生任何提交的子会话折叠行说「无需合并」，绝不谎报成已合并", () => {
+    renderMany([
+      session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 2000 }),
+      nothingToMerge("super-empty", "没有改动的任务", 1000),
+    ]);
+    clickLabel("子会话看板");
+
+    const text = document.body.textContent ?? "";
+    // 元提交（not_needed）不是合并：标题与 chip 都必须如实。
+    expect(text).toContain("已完成、无需合并的 1 个子会话");
+    expect(text).toContain("无需合并");
+    expect(text).not.toContain("已完成并合并");
+    expect(text).not.toContain("已自动合并");
+  });
+
+  it("折叠分组混合时只给总数，两种结果分 chip 显示（只有 merged 才算已合并）", () => {
+    renderMany([
+      session({ id: "super-live", title: "进行中的任务", status: "running", createdAt: 3000 }),
+      merged("super-merged", "已合并的任务", 1000),
+      nothingToMerge("super-empty", "没有改动的任务", 2000),
+    ]);
+    clickLabel("子会话看板");
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("已完成的 2 个子会话");
+    expect(text).not.toContain("已完成并合并的 2 个子会话");
+    // 两个 chip 同时在场：一条真合并、一条无需合并。
+    const chips = [...document.body.querySelectorAll(".chip-fade")].map((el) => el.textContent);
+    expect(chips).toContain("已自动合并");
+    expect(chips).toContain("无需合并");
+  });
+
   it("一次只展开一行详情", () => {
     renderMany([
       session({ id: "super-a", title: "任务甲", status: "running", createdAt: 1000 }),

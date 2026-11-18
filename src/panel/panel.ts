@@ -7490,11 +7490,16 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * 换会话 / 恢复会话 / 热重认证时重置委派扫描状态。
+   * 换会话 / 恢复会话 / 热重认证时重置委派与动作扫描状态。
    *
    * 滚动缓冲里是上一个会话的助手文本（可能还有没收口的围栏），去重账本里是
    * 上一个会话派发过的载荷 —— 两者都跟新会话无关：不清掉会让新会话的扫描
    * 基线落在别人的文本上，还会把本该重新派发的指令误判成重复。
+   *
+   * 动作通道同理：`superActionScanText/Offset` 是上一个会话的助手文本与消费
+   * 偏移；`superActionReceiptLast` 是**上一个会话**最后一条回执文本。
+   * 后者不清会让另一个主会话里**一模一样**的动作回执被当成重复丢弃 ——
+   * 那个会话根本没收到过这条回执，主会话因此以为动作没生效、反复重发。
    */
   private resetSuperDirectiveScans(): void {
     this.superScan.reset();
@@ -7502,6 +7507,12 @@ export class ChatPanel implements vscode.Disposable {
     this.superToolCallWarned.clear();
     this.superToolCallActionsDone.clear();
     this.superToolCallCorrections.clear();
+    this.superActionScanText = "";
+    this.superActionScanOffset = 0;
+    this.superActionPending = false;
+    this.superActionPendingBody = "";
+    this.superActionZeroWarned = false;
+    this.superActionReceiptLast = "";
   }
 
   /**

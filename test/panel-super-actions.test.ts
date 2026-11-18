@@ -102,6 +102,8 @@ type PanelInternals = {
     action: "cancel" | "retry" | "cleanup" | "answer";
     sessionId: string;
   }[]) => Promise<void>;
+  /** 换会话 / 恢复会话 / 热重认证时的扫描与去重账本重置。 */
+  resetSuperDirectiveScans: () => void;
   persistActiveTranscript: () => Promise<void>;
   touchActiveSession: () => Promise<void>;
   notifyOs: (event: string, text: string) => boolean;
@@ -281,6 +283,40 @@ describe("Super Agent · 管理动作的宿主侧行为", () => {
   it("看板单个中断（目标不存在）：发出 warning 回执", async () => {
     const { toasts } = await runCancelAction({ ok: false, reason: "not-found" });
     expect(toasts).toEqual([{ level: "warning", message: "该子会话不存在或已被清理" }]);
+  });
+
+  it("换会话重置扫描后，同一份回执不再被当成重复丢弃", async () => {
+    const cancel = vi.fn(async (_id: string) => ({
+      ok: true,
+      reason: "already-terminal" as const,
+      status: "completed",
+    }));
+    p.superAgent = { list: () => [], reportPrompt: () => "", cancel };
+    const sendPrompt = vi.fn(async () => true);
+    p.sendPrompt = sendPrompt as unknown as PanelInternals["sendPrompt"];
+    const receiptCalls = () =>
+      sendPrompt.mock.calls.filter(
+        (call) => typeof call[0] === "string" && call[0].includes("[子会话动作回执]"),
+      ).length;
+
+    const block = [
+      "```super-agent-actions",
+      '{"actions":[{"action":"cancel","sessionId":"super-1"}]}',
+      "```",
+    ].join("\n");
+
+    p.scanSuperActions({ type: "text", text: block });
+    await waitFor(() => receiptCalls() === 1);
+    expect(receiptCalls()).toBe(1);
+
+    // 用户切到另一个主会话：扫描缓冲与回执去重账本必须一起换人。
+    p.resetSuperDirectiveScans();
+
+    p.scanSuperActions({ type: "text", text: block });
+    await waitFor(() => receiptCalls() === 2);
+    // 旧实现里 superActionReceiptLast 没清：第二条一模一样的回执被静默丢掉，
+    // 新会话的主 Agent 永远收不到「已生效」，于是反复重发同一个动作。
+    expect(receiptCalls()).toBe(2);
   });
 
   it("主会话 cancel 抄错 id（not-found）：给用户一条带 id 的可见 warning（不再只有 hidden 回执）", async () => {
