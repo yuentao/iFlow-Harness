@@ -50,8 +50,10 @@ import { QqSettings } from "./QqSettings";
  * that swapped into other cards with no way back).
  *
  * Layout: fixed header (section title + back arrow while editing) → body =
- * nav rail (left on wide viewports, top tab strip when narrow, via the
- * @container on .auth-modal-wide) + scrolling content → fixed footer.
+ * nav rail (left sidebar on wide viewports; below a 560px container a
+ * single-row horizontally scrolling tab strip, so the content keeps the full
+ * width — the old stacked wrap stole ~312px of height at 360px viewports),
+ * via the @container on .auth-modal-wide) + scrolling content → fixed footer.
  */
 export type SettingsTab = "api" | "chat" | "appearance" | "mcp" | "memory" | "assets" | "qq" | "runtime";
 
@@ -94,6 +96,11 @@ export function SettingsModal({
     // Each tab is an independent page — carrying the previous scroll offset
     // into it drops the user mid-list with the title out of view.
     if (contentRef.current) contentRef.current.scrollTop = 0;
+    // The selected tab must stay visible in the nav (narrow: horizontal
+    // scroll strip; the wide rail has its own overflow too) — a keyboard
+    // switch from the last visible tab would otherwise leave the selection
+    // offscreen. Optional call: jsdom does not implement scrollIntoView.
+    tabRefs.current[tab]?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [tab]);
 
   // 4.7: eight peer tabs read as a flat wall. Group them into four named
@@ -166,7 +173,10 @@ export function SettingsModal({
         </div>
       }
     >
-      <div className="auth-modal-body flex min-h-0 flex-1 flex-col @min-[460px]:flex-row">
+      {/* Narrow container: the nav is a single-row horizontally scrolling tab
+       * strip (old stacked wrap ate ~312px of height at 360px viewports);
+       * wide container: the classic 172px left sidebar. */}
+      <div className="auth-modal-body flex min-h-0 flex-1 flex-col @min-[560px]:flex-row">
         <nav
           role="tablist"
           aria-label={t("设置分区")}
@@ -180,18 +190,20 @@ export function SettingsModal({
             }
             rovingTabKeyDown(ALL_TABS, tab, onTabChange, (id) => tabRefs.current[id]?.focus())(event);
           }}
-          className="flex min-h-0 flex-col gap-2 overflow-y-auto border-b border-border/60 p-2 @min-[460px]:w-[172px] @min-[460px]:shrink-0 @min-[460px]:gap-2.5 @min-[460px]:border-b-0 @min-[460px]:border-r"
+          className="flex min-h-0 flex-row items-center gap-1 overflow-x-auto border-b border-border/60 p-2 @min-[560px]:w-[172px] @min-[560px]:shrink-0 @min-[560px]:flex-col @min-[560px]:items-stretch @min-[560px]:gap-2.5 @min-[560px]:overflow-x-hidden @min-[560px]:overflow-y-auto @min-[560px]:border-b-0 @min-[560px]:border-r"
         >
           {TAB_GROUPS.map((group) => (
             <div
               key={group.label}
               role="group"
               aria-label={group.label}
-              className="flex flex-wrap items-center gap-1 @min-[460px]:flex-col @min-[460px]:items-stretch @min-[460px]:gap-0.5"
+              className="flex shrink-0 flex-nowrap items-center gap-1 @min-[560px]:flex-col @min-[560px]:items-stretch @min-[560px]:gap-0.5"
             >
+              {/* Group caption: narrow strip has no room for it (the row must
+               * stay one line tall) — semantics stay on the role="group" wrapper. */}
               <div
                 aria-hidden="true"
-                className="shrink-0 whitespace-nowrap rounded-md bg-accent/40 px-1.5 py-0.5 text-ui-micro font-semibold tracking-[0.08em] text-muted-foreground/70 @min-[460px]:rounded-none @min-[460px]:bg-transparent @min-[460px]:px-2.5 @min-[460px]:py-1.5"
+                className="hidden shrink-0 whitespace-nowrap rounded-md bg-accent/40 px-1.5 py-0.5 text-ui-micro font-semibold tracking-[0.08em] text-muted-foreground/70 @min-[560px]:block @min-[560px]:rounded-none @min-[560px]:bg-transparent @min-[560px]:px-2.5 @min-[560px]:py-1.5"
               >
                 {group.label}
               </div>
@@ -207,7 +219,7 @@ export function SettingsModal({
                     tabRefs.current[id] = el;
                   }}
                   data-autofocus={tab === id ? "true" : undefined}
-                  className="grow basis-[calc(50%_-_2px)] @min-[460px]:grow-0 @min-[460px]:basis-auto"
+                  className="shrink-0"
                 >
                   {label}
                 </TabButton>
@@ -220,7 +232,7 @@ export function SettingsModal({
           id="settings-panel"
           role="tabpanel"
           aria-label={tabTitle}
-          className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[460px]:px-5"
+          className="min-w-0 flex-1 overflow-y-auto px-4 py-4 @min-[560px]:px-5"
         >
           {tab === "api" && <ApiConfigSection auth={auth} busy={busy} onHeader={setSectionHeader} />}
           {tab === "chat" && <ChatSection />}
