@@ -74,6 +74,27 @@ type PanelInternals = {
   }>;
   cancelQqMainInjection: (taskId: string) => boolean;
   sendPrompt: (...args: unknown[]) => Promise<boolean>;
+  qqInjectedTaskId: string | null;
+  qqMainQuestionIds: Set<string>;
+  qq?: {
+    service?: {
+      forwardMainTaskQuestion?: (input: {
+        taskId: string;
+        questions: readonly Record<string, unknown>[];
+      }) => Promise<void>;
+      clearQuestionWait?: (taskId: string) => void;
+    };
+  };
+  userQuestionsFromAgent: (req: {
+    questions: Array<{
+      header: string;
+      question: string;
+      options?: Array<{ label: string; description?: string }>;
+      multiSelect?: boolean;
+    }>;
+  }) => Promise<{ answers: Record<string, string | string[]> }>;
+  answerQqMainQuestion: (taskId: string, answers: Record<string, string | string[]>) => boolean;
+  handleQuestionAnswers: (id: string, answers: Record<string, string | string[]>) => void;
   store: {
     getState: () => {
       status: string;
@@ -308,3 +329,285 @@ describe("beginUserPrompt 来源标记", () => {
 
 // 类型层面：QqTaskUi.channel 必填，看板据此标注渠道。
 void (null as unknown as QqTaskUi);
+
+// ---------------------------------------------------------------------------
+// F1：main 路由的 remotePolicy 闸门
+// ---------------------------------------------------------------------------
+
+describe("QQ 主会话注入 · remotePolicy 闸门（F1）", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+
+  beforeEach(async () => {
+    process.env.IFLOW_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-gate-home-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-gate-storage-"));
+    setConfigOverrides({});
+    panel = new ChatPanel(makeContext(dir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    const state = p.store.getState();
+    state.sessionId = "main-session";
+    state.status = "idle";
+    state.initializing = false;
+    state.replaying = false;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+  });
+
+  it("readonly 远程策略：main 渠道拒绝注入，不触碰主会话", async () => {
+    const calls: InjectCall[] = [];
+    p.sendPrompt = fakeSendPrompt(p, calls);
+    const readonlyTask: QqTask = {
+      ...TASK,
+      policy: { remotePolicy: "readonly", resultDetail: "standard" },
+    };
+
+    const result = await p.injectQqMainTurn({
+      task: readonlyTask,
+      text: "请改一下代码",
+      displayText: "请改一下代码",
+      origin: "qq",
+      onInjected: () => undefined,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    });
+
+    expect(result.injected).toBe(false);
+    expect(result.canceled).toBeUndefined();
+    expect(result.reason).toContain("只读");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("trusted / supervised 仍可正常注入（闸门不误伤常规策略）", async () => {
+    const calls: InjectCall[] = [];
+    p.sendPrompt = fakeSendPrompt(p, calls);
+    for (const remotePolicy of ["trusted", "supervised"] as const) {
+      const result = await p.injectQqMainTurn({
+        task: { ...TASK, policy: { remotePolicy, resultDetail: "standard" } },
+        text: "继续",
+        displayText: "继续",
+        origin: "qq",
+        onInjected: () => undefined,
+        signal: new AbortController().signal,
+        timeoutMs: 2_000,
+      });
+      expect(result.injected).toBe(true);
+    }
+    expect(calls).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F5：轮次锚定（sessionId + 稳定块 id）
+// ---------------------------------------------------------------------------
+
+describe("QQ 主会话注入 · 结果锚定（F5）", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+
+  beforeEach(async () => {
+    process.env.IFLOW_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-anchor-home-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-anchor-storage-"));
+    setConfigOverrides({});
+    panel = new ChatPanel(makeContext(dir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    const state = p.store.getState();
+    state.sessionId = "main-session";
+    state.status = "idle";
+    state.initializing = false;
+    state.replaying = false;
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+  });
+
+  it("回合中会话被替换：判失败且绝不返回新会话的无关文本", async () => {
+    p.sendPrompt = async (...args: unknown[]) => {
+      const options = (args[4] ?? {}) as { onTurnStarted?: () => Promise<void> | void };
+      await options.onTurnStarted?.();
+      const state = p.store.getState();
+      state.sessionId = "another-session";
+      state.blocks.push({ kind: "text", text: "无关会话的回答" });
+      state.status = "idle";
+      return true;
+    };
+
+    const result = await p.injectQqMainTurn({
+      task: TASK,
+      text: "原始任务",
+      displayText: "原始任务",
+      origin: "qq",
+      onInjected: () => undefined,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    });
+
+    expect(result.injected).toBe(true);
+    expect(result.failed).toBe(true);
+    expect(result.reason).toContain("会话");
+    expect(result.text).toBe("");
+  });
+
+  it("基线统计与取结果同口径：system text 块不算基线也不算结果", async () => {
+    p.store.getState().blocks.push({ kind: "text", text: "系统提示文本", system: true });
+    p.sendPrompt = async (...args: unknown[]) => {
+      const options = (args[4] ?? {}) as { onTurnStarted?: () => Promise<void> | void };
+      await options.onTurnStarted?.();
+      p.store.getState().blocks.push({ kind: "text", text: "本轮真正的回答" });
+      p.store.getState().status = "idle";
+      p.store.getState().stopReason = "end_turn";
+      return true;
+    };
+
+    const result = await p.injectQqMainTurn({
+      task: TASK,
+      text: "问题",
+      displayText: "问题",
+      origin: "qq",
+      onInjected: () => undefined,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    });
+
+    expect(result.text).toBe("本轮真正的回答");
+  });
+
+  it("稳定块 id 锚定：基线锚块消失时判失败而非按数量误取", async () => {
+    p.store.getState().blocks.push({ kind: "text", text: "带 id 的旧回答", id: "blk-old" });
+    p.sendPrompt = async (...args: unknown[]) => {
+      const options = (args[4] ?? {}) as { onTurnStarted?: () => Promise<void> | void };
+      await options.onTurnStarted?.();
+      const blocks = p.store.getState().blocks;
+      // 模拟转录被清空/重排：锚块不在了，但数量还在。
+      blocks.splice(0, blocks.length);
+      blocks.push({ kind: "text", text: "不属于本轮的文本" });
+      p.store.getState().status = "idle";
+      return true;
+    };
+
+    const result = await p.injectQqMainTurn({
+      task: TASK,
+      text: "问题",
+      displayText: "问题",
+      origin: "qq",
+      onInjected: () => undefined,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    });
+
+    expect(result.injected).toBe(true);
+    expect(result.failed).toBe(true);
+    expect(result.text).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 新功能：main 渠道 agent 提问 → QQ → 回答回灌 → agent 继续
+// ---------------------------------------------------------------------------
+
+describe("QQ 主渠道提问转发与回灌", () => {
+  let panel: ChatPanel;
+  let p: PanelInternals;
+
+  beforeEach(async () => {
+    process.env.IFLOW_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-question-home-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iflow-qq-question-storage-"));
+    setConfigOverrides({});
+    panel = new ChatPanel(makeContext(dir), { workspaceRoot: here, watchers: makeWatchers() });
+    p = panel as unknown as PanelInternals;
+    p.store.getState().sessionId = "main-session";
+    p.store.getState().status = "idle";
+  });
+
+  afterEach(async () => {
+    await panel.dispose();
+    delete process.env.IFLOW_HOME;
+  });
+
+  it("注入回合里的提问转发到 QQ（含选项/多选），回答后 agent 的提问 Promise 被 resolve", async () => {
+    const forwardMain = vi.fn(async () => undefined);
+    p.qq = { service: { forwardMainTaskQuestion: forwardMain } };
+    p.qqInjectedTaskId = TASK.taskId;
+
+    const pending = p.userQuestionsFromAgent({
+      questions: [
+        {
+          header: "颜色",
+          question: "选哪个颜色？",
+          options: [{ label: "红色", description: "热情" }],
+          multiSelect: true,
+        },
+      ],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(forwardMain).toHaveBeenCalledTimes(1);
+    expect(forwardMain.mock.calls[0]![0]).toMatchObject({
+      taskId: TASK.taskId,
+    });
+    expect(forwardMain.mock.calls[0]![0]!.questions[0]).toMatchObject({
+      header: "颜色",
+      question: "选哪个颜色？",
+      multiSelect: true,
+    });
+    expect(p.qqMainQuestionIds.size).toBe(1);
+
+    expect(p.answerQqMainQuestion(TASK.taskId, { 颜色: ["红色"] })).toBe(true);
+    await expect(pending).resolves.toEqual({ answers: { 颜色: ["红色"] } });
+    expect(p.qqMainQuestionIds.size).toBe(0);
+    expect(p.store.getState().pendingQuestions).toBeNull();
+  });
+
+  it("本地回合的提问不转发，也不被 QQ 回答误答", async () => {
+    const forwardMain = vi.fn(async () => undefined);
+    p.qq = { service: { forwardMainTaskQuestion: forwardMain } };
+
+    const local = p.userQuestionsFromAgent({ questions: [{ header: "确认", question: "继续吗？" }] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(forwardMain).not.toHaveBeenCalled();
+
+    // 即便随后出现一个 QQ 注入回合，本地卡也不在 qqMainQuestionIds 里。
+    p.qqInjectedTaskId = TASK.taskId;
+    expect(p.answerQqMainQuestion(TASK.taskId, { 确认: "是" })).toBe(false);
+    expect(p.store.getState().pendingQuestions?.id).toBeDefined();
+    // 收尾：本地作答让 promise settle，避免悬挂定时器。
+    p.handleQuestionAnswers(p.store.getState().pendingQuestions!.id, { 确认: "是" });
+    await expect(local).resolves.toEqual({ answers: { 确认: "是" } });
+  });
+
+  it("超时/停止的空答案按「未回答」回灌，agent 不被挂住", async () => {
+    p.qq = { service: { forwardMainTaskQuestion: vi.fn(async () => undefined) } };
+    p.qqInjectedTaskId = TASK.taskId;
+
+    const pending = p.userQuestionsFromAgent({ questions: [{ header: "颜色", question: "选哪个？" }] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(p.answerQqMainQuestion(TASK.taskId, {})).toBe(true);
+    await expect(pending).resolves.toEqual({ answers: {} });
+  });
+
+  it("本机先作答时撤销 QQ 侧等待槽位，避免二次回灌", async () => {
+    const clearWait = vi.fn();
+    p.qq = {
+      service: {
+        forwardMainTaskQuestion: vi.fn(async () => undefined),
+        clearQuestionWait: clearWait,
+      },
+    };
+    p.qqInjectedTaskId = TASK.taskId;
+
+    const pending = p.userQuestionsFromAgent({ questions: [{ header: "颜色", question: "选哪个？" }] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const cardId = p.store.getState().pendingQuestions!.id;
+
+    p.handleQuestionAnswers(cardId, { 颜色: "蓝色" });
+    await expect(pending).resolves.toEqual({ answers: { 颜色: "蓝色" } });
+    expect(clearWait).toHaveBeenCalledWith(TASK.taskId);
+    // QQ 再来回答时已无可命中的卡。
+    expect(p.answerQqMainQuestion(TASK.taskId, { 颜色: "红色" })).toBe(false);
+  });
+});

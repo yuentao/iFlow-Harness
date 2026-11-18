@@ -308,6 +308,19 @@ export interface QqServiceHost {
     superSessionId: string,
     answers: Record<string, string | string[]>,
   ): boolean;
+  /**
+   * 把 **主会话渠道**任务的提问答案送回主会话挂起的 `_iflow/user/questions`。
+   *
+   * 与 {@link answerRemoteQuestion} 的区别只在寻址方式：子会话按
+   * `superSessionId` 找 `SuperAgentManager.respond`，主会话按 `taskId` 找面板
+   * `pendingQuestions` 槽位里属于这一轮的那张卡。返回值同样是「是否真的命中
+   * 一个挂起提问」；端口缺失或抛错时服务如实回执「回答未能送达」，绝不假装
+   * 提交成功。超时 / 停止按未回答回灌空答案也走这条端口。
+   */
+  answerMainQuestion?(
+    taskId: string,
+    answers: Record<string, string | string[]>,
+  ): boolean;
   /** 本地通知（面板 toast / 日志），不发给 QQ。 */
   notify(text: string): void;
 }
@@ -633,6 +646,11 @@ interface PendingUnbindConfirm {
 interface PendingAnswer {
   taskId: string;
   superSessionId: string;
+  /**
+   * 该提问所属的任务渠道。child（缺省）走 `answerRemoteQuestion` 回灌子会话；
+   * main 走 `answerMainQuestion` 回灌主会话的提问卡。
+   */
+  channel: "child" | "main";
   /** 规范化后的问题（保证 header 非空），用于按 header 拼回包。 */
   questions: QqRemoteQuestion[];
   timer: NodeJS.Timeout;
@@ -943,6 +961,16 @@ export class QqService {
   private abortController = new AbortController();
   private stopped = false;
   private started = false;
+  /**
+   * 服务是否已完整启动（F3）：`start()` 加载归档并把非终态任务标记完之后才置真。
+   * 宿主在 adapter.connect() → service.start() 窗口里据此丢弃入站消息，避免
+   * 刚建的任务被「非终态标 failed(host_restarted)」误杀。
+   */
+  private ready = false;
+  /** start() 完成后才接单：窗口期的入站消息由宿主据此丢弃。 */
+  isReady(): boolean {
+    return this.ready;
+  }
   /** 等待二次确认的 `/qq unbind`（发起者 openid → 确认槽位）。 */
   private readonly pendingUnbindConfirms = new Map<string, PendingUnbindConfirm>();
   /** 扫码绑定者 openid（解绑/审批特权身份）。 */
@@ -1048,6 +1076,7 @@ export class QqService {
     if (this.started) return;
     this.started = true;
     this.stopped = false;
+    this.ready = false;
     // 上一次 stop() 可能已经 abort 过：新的一轮生命周期必须拿到新信号，
     // 否则主会话注入会在启动瞬间被自己判成「已取消」。
     this.abortController = new AbortController();
@@ -1147,6 +1176,8 @@ export class QqService {
         this.log(`QQ 任务 ${task.taskId} 重启补发终态结果失败：${errorText(error)}`);
       }
     }
+    // F3：到这里归档加载 / 中断标记 / 补发都完成，才允许宿主接单。
+    this.ready = true;
   }
 
   /**
@@ -1189,6 +1220,7 @@ export class QqService {
   async stop(): Promise<void> {
     this.stopped = true;
     this.started = false;
+    this.ready = false;
     this.queue.length = 0;
     // 正在等空闲 / 正在注入的任务：立刻放弃（宿主侧看到 signal 就 unwait）。
     // 队列是内存态，未投出的条目由宿主重启路径如实告知（见 start()）。
@@ -1201,7 +1233,7 @@ export class QqService {
     // 提问提醒也不能让 agent 永远挂着：按「未回答」把空答案送回去。
     for (const entry of this.pendingAnswers.values()) {
       clearTimeout(entry.timer);
-      this.feedAnswerBack(entry.superSessionId, {});
+      this.feedAnswerBack(entry, {});
     }
     this.pendingAnswers.clear();
     // 解绑二次确认同样不能跨生命周期残留（定时器 + 已被撤销的特权身份）。
@@ -1669,6 +1701,18 @@ export class QqService {
   private async runMainTask(task: QqTask): Promise<void> {
     const taskId = task.taskId;
     try {
+      // F1 安全闸门：main 渠道跑在用户自己的主会话里，无法像 child 那样按
+      // remotePolicy 剔除写工具。与 child 走同一个 qqSpawnPolicyFor 判定 ——
+      // readonly（approval=deny）时主会话渠道一律拒绝，绝不注入，杜绝越权面。
+      const policy = qqSpawnPolicyFor(task.policy.remotePolicy);
+      if (policy.approval === "deny") {
+        await this.failTask(
+          task,
+          "main_route_policy_denied",
+          "当前远程策略为只读，主会话渠道无法保证只读约束，任务未执行。请改用 child 渠道或调整远程策略。",
+        );
+        return;
+      }
       const inject = this.host.injectIntoMainSession;
       if (!inject) {
         await this.failTask(
@@ -2092,11 +2136,56 @@ export class QqService {
    * 端口送回 agent；逾期按未回答继续，与子会话自身的超时纪律一致。
    */
   async forwardTaskQuestion(input: QqRemoteQuestionInput): Promise<void> {
-    if (this.stopped || !this.config.enabled) return;
+    if (typeof input.superSessionId !== "string" || input.superSessionId.length === 0) return;
     const superSessionId = input.superSessionId;
-    if (typeof superSessionId !== "string" || superSessionId.length === 0) return;
+    await this.forwardQuestionToTask(
+      () =>
+        [...this.tasks.values()].find(
+          (candidate) =>
+            candidate.correlation.superSessionId === superSessionId &&
+            candidate.channel !== "main" &&
+            !isTerminalStatus(candidate.status),
+        ),
+      input.questions,
+      "child",
+    );
+  }
 
-    const questions = (input.questions ?? [])
+  /**
+   * 主会话渠道任务产生 agent 提问时，把提醒转发给发起任务的 QQ 用户。
+   *
+   * 与 child 渠道共用同一套 `waiting_answer` 状态机 / `pendingAnswers` 槽位 /
+   * `/qq answer` 应答与超时纪律，只是寻址方式不同：main 任务没有子会话 id，
+   * 按 `taskId` 精确定位。回答经 `answerMainQuestion` 端口回灌主会话提问卡；
+   * 非 main 渠道 / 已终态 / 没有该任务时安静返回（本地回合不会被转发）。
+   */
+  async forwardMainTaskQuestion(input: {
+    taskId: string;
+    questions: readonly QqRemoteQuestion[];
+  }): Promise<void> {
+    const taskId = typeof input.taskId === "string" ? input.taskId.trim() : "";
+    if (taskId.length === 0) return;
+    await this.forwardQuestionToTask(
+      () => {
+        const candidate = this.tasks.get(taskId);
+        return candidate && candidate.channel === "main" && !isTerminalStatus(candidate.status)
+          ? candidate
+          : undefined;
+      },
+      input.questions,
+      "main",
+    );
+  }
+
+  /** 转发提问的共用实现：规范化 → 定位任务 → 切 waiting_answer → 挂槽 → 投递。 */
+  private async forwardQuestionToTask(
+    findTask: () => QqTask | undefined,
+    rawQuestions: readonly QqRemoteQuestion[],
+    channel: "child" | "main",
+  ): Promise<void> {
+    if (this.stopped || !this.config.enabled) return;
+
+    const questions = (rawQuestions ?? [])
       .filter(
         (question): question is QqRemoteQuestion =>
           Boolean(question) && typeof question.header === "string" && question.header.length > 0,
@@ -2109,12 +2198,7 @@ export class QqService {
       }));
     if (questions.length === 0) return;
 
-    const task = [...this.tasks.values()].find(
-      (candidate) =>
-        candidate.correlation.superSessionId === superSessionId &&
-        candidate.channel !== "main" &&
-        !isTerminalStatus(candidate.status),
-    );
+    const task = findTask();
     if (!task) return;
     if (this.pendingAnswers.has(task.taskId)) return; // 同一问题只转发一次
     if (
@@ -2143,7 +2227,13 @@ export class QqService {
       void this.expireQuestion(taskId);
     }, this.questionTimeoutMs);
     timer.unref?.();
-    this.pendingAnswers.set(taskId, { taskId, superSessionId, questions, timer });
+    this.pendingAnswers.set(taskId, {
+      taskId,
+      superSessionId: task.correlation.superSessionId ?? "",
+      channel,
+      questions,
+      timer,
+    });
 
     await this.deliverTaskNotice(
       waiting,
@@ -2157,14 +2247,32 @@ export class QqService {
    * 任务状态收尾 —— 否则槽位已摘、状态却停在 waiting_answer，agent 只能干等超时。
    */
   private feedAnswerBack(
-    superSessionId: string,
+    entry: Pick<PendingAnswer, "superSessionId" | "channel" | "taskId">,
     answers: Record<string, string | string[]>,
   ): boolean {
     try {
-      return this.host.answerRemoteQuestion?.(superSessionId, answers) ?? false;
+      return entry.channel === "main"
+        ? this.host.answerMainQuestion?.(entry.taskId, answers) ?? false
+        : this.host.answerRemoteQuestion?.(entry.superSessionId, answers) ?? false;
     } catch (error) {
       this.log(`QQ 提问回答回灌失败：${errorText(error)}`);
       return false;
+    }
+  }
+
+  /**
+   * 本机提问卡先被回答时，撤销 QQ 侧那条等待槽位（不回灌——本机路径已 resolve
+   * 了 agent 的提问，再回灌就是双重应答）。任务状态恢复到 running，QQ 用户若
+   * 再来 `/qq answer` 会如实收到「当前没有等待回答的问题」。
+   */
+  clearQuestionWait(taskId: string): void {
+    const entry = this.pendingAnswers.get(taskId);
+    if (!entry) return;
+    this.pendingAnswers.delete(taskId);
+    clearTimeout(entry.timer);
+    const current = this.tasks.get(taskId);
+    if (current && !isTerminalStatus(current.status)) {
+      void this.clearPendingAndResume(taskId, current);
     }
   }
 
@@ -2174,8 +2282,8 @@ export class QqService {
     if (!entry) return;
     this.pendingAnswers.delete(taskId);
     clearTimeout(entry.timer);
-    // 子会话可能已先一步超时（respond 返回 false），重复送空答案是幂等的。
-    this.feedAnswerBack(entry.superSessionId, {});
+    // 子会话 / 主会话可能已先一步超时（respond 返回 false），重复送空答案是幂等的。
+    this.feedAnswerBack(entry, {});
 
     const task = this.tasks.get(taskId);
     if (!task || isTerminalStatus(task.status)) return;
@@ -2337,13 +2445,13 @@ export class QqService {
     for (const question of pending.questions) {
       answers[question.header] = question.multiSelect ? [answer] : answer;
     }
-    const delivered = this.feedAnswerBack(pending.superSessionId, answers);
+    const delivered = this.feedAnswerBack(pending, answers);
     const updated = await this.clearPendingAndResume(task.taskId, task);
     await this.deliverTaskNotice(
       updated,
       delivered
         ? `任务 ${shortTaskId(task.taskId)} 的回答已提交给 agent。`
-        : `任务 ${shortTaskId(task.taskId)} 的提问已结束，但回答未能送达 agent（子会话可能已超时）。`,
+        : `任务 ${shortTaskId(task.taskId)} 的提问已结束，但回答未能送达 agent（提问可能已超时）。`,
       `answer-result:${task.taskId}:${++this.deliverySeqCounter}`,
     );
   }

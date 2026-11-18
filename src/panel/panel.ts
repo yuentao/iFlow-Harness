@@ -199,6 +199,7 @@ import { fetchPageText, searchWeb, type WebSearchHit } from "../acp/web-search.j
 import { WireRingBuffer } from "./wire-log.js";
 import {
   QqService,
+  qqSpawnPolicyFor,
   type QqMainInjectInput,
   type QqMainInjectResult,
   type QqTaskAction,
@@ -1083,6 +1084,14 @@ export class ChatPanel implements vscode.Disposable {
    */
   private readonly qqInjectAborts = new Map<string, AbortController>();
   private qqInjectedTaskId: string | null = null;
+  /**
+   * 属于当前 QQ 主渠道注入回合的本地提问卡 id（`pendingQuestions` 的键）。
+   *
+   * 主会话 agent 的 `_iflow/user/questions` 与本地回合共用同一个单数提问卡槽位，
+   * 这里单独记账：QQ 用户的 `/qq answer` 只回灌这些 id，绝不误答本地提问；本地
+   * 用户先作答时也从这里摘除，避免同一问题被 QQ 再答一次（双重应答）。
+   */
+  private readonly qqMainQuestionIds = new Set<string>();
   /** 主动停止中：防止与在飞的启停重叠。 */
   private qqStopping = false;
   /** 最近一次推给 webview 的连接状态（用于「面板重新打开时」的立即回显）。 */
@@ -4567,11 +4576,17 @@ export class ChatPanel implements vscode.Disposable {
   private userQuestionsFromAgent(req: UserQuestionsRequest): Promise<UserQuestionsResponse> {
     const id = `q-${++this.approvalSeq}`;
     const now = Date.now();
+    // QQ 主渠道注入回合里 agent 的提问：本地卡照常显示，但额外转发给发起者。
+    // 捕获快照而非实时读 qqInjectedTaskId —— 回合结束后它会清空，回灌必须按
+    // 提问诞生时所属的那一个任务寻址。
+    const qqMainTaskId = this.qqInjectedTaskId;
+    const isQqMainQuestion = qqMainTaskId !== null;
 
     return new Promise<UserQuestionsResponse>((resolve) => {
       const timer = setTimeout(() => {
         // Safety: an unanswered card must not block the agent forever.
         this.pendingQuestions.delete(id);
+        this.qqMainQuestionIds.delete(id);
         // Resolve FIRST — see the approval-timeout comment above.
         resolve({ answers: {} });
         this.store.clearQuestions(id);
@@ -4580,6 +4595,7 @@ export class ChatPanel implements vscode.Disposable {
       }, APPROVAL_TIMEOUT_MS);
 
       this.pendingQuestions.set(id, { resolve, timer });
+      if (isQqMainQuestion) this.qqMainQuestionIds.add(id);
       this.store.showQuestions({
         id,
         questions: req.questions,
@@ -4594,6 +4610,8 @@ export class ChatPanel implements vscode.Disposable {
         "question",
         () => vscode.l10n.t("iFlow 有问题需要你回答（{0} 秒后自动继续）", Math.round(APPROVAL_TIMEOUT_MS / 1000)),
       );
+      // 转发是异步的，不阻塞提问挂起；接线异常只记日志，本地卡始终可用。
+      if (qqMainTaskId) this.forwardQqMainTaskQuestion(qqMainTaskId, req.questions);
     });
   }
 
@@ -4601,9 +4619,18 @@ export class ChatPanel implements vscode.Disposable {
   private handleQuestionAnswers(id: string, answers: Record<string, string | string[]>): void {
     const pending = this.pendingQuestions.get(id);
     if (!pending) return;
+    const wasQqMainQuestion = this.qqMainQuestionIds.delete(id);
     this.pendingQuestions.delete(id);
     clearTimeout(pending.timer);
     this.store.clearQuestions(id);
+    // 本机先作答 → 撤销 QQ 侧那条等待槽位，避免 `/qq answer` 二次回灌同一个问题。
+    if (wasQqMainQuestion && this.qqInjectedTaskId) {
+      try {
+        this.qq?.service.clearQuestionWait(this.qqInjectedTaskId);
+      } catch (error) {
+        this.log.warn(`QQ 提问等待槽位清理失败：${errorMessage(error)}`);
+      }
+    }
     const answered = Object.keys(answers).length;
     this.store.appendNotice(
       answered > 0
@@ -4621,6 +4648,7 @@ export class ChatPanel implements vscode.Disposable {
       pending.resolve({ answers: {} });
     }
     this.pendingQuestions.clear();
+    this.qqMainQuestionIds.clear();
   }
 
   /**
@@ -4657,6 +4685,74 @@ export class ChatPanel implements vscode.Disposable {
     } catch (error) {
       this.log.warn(`QQ 提问提醒转发失败：${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * QQ 主渠道注入回合里 agent 的提问 → 转发给发起者。
+   *
+   * 与 child 渠道复用服务的 `waiting_answer` / `pendingAnswers` / `/qq answer`
+   * 状态机，只按 taskId 定位（main 任务没有子会话 id）。服务找不到对应 main
+   * 任务（本地回合被误标）时会安静忽略，不会给无关的 QQ 用户发消息。
+   */
+  private forwardQqMainTaskQuestion(taskId: string, questions: readonly UserQuestion[]): void {
+    const service = this.qq?.service;
+    if (!service) return;
+    try {
+      void service
+        .forwardMainTaskQuestion({
+          taskId,
+          questions: questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            ...(question.options
+              ? {
+                  options: question.options.map((option) => ({
+                    label: option.label,
+                    description: option.description,
+                  })),
+                }
+              : {}),
+            multiSelect: question.multiSelect === true,
+          })),
+        })
+        .catch((error: unknown) => {
+          this.log.warn(`QQ 主会话提问提醒转发失败：${errorMessage(error)}`);
+        });
+    } catch (error) {
+      this.log.warn(`QQ 主会话提问提醒转发失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * QQ 用户的 `/qq answer` 回灌：命中本回合的提问卡并 resolve，agent 继续。
+   * 只认 `qqMainQuestionIds` 里的卡 —— 本地回合的提问绝不会被 QQ 回答误答。
+   * 端口被服务超时 / 停止调用时 answers 是 `{}`（按未回答继续），语义一致。
+   * 返回是否真的命中，供服务如实回执（绝不假装提交成功）。
+   */
+  private answerQqMainQuestion(taskId: string, answers: Record<string, string | string[]>): boolean {
+    if (this.qqInjectedTaskId !== taskId) return false;
+    let answered = false;
+    for (const id of [...this.qqMainQuestionIds]) {
+      const pending = this.pendingQuestions.get(id);
+      if (!pending) {
+        this.qqMainQuestionIds.delete(id);
+        continue;
+      }
+      this.pendingQuestions.delete(id);
+      this.qqMainQuestionIds.delete(id);
+      clearTimeout(pending.timer);
+      this.store.clearQuestions(id);
+      pending.resolve({ answers });
+      answered = true;
+    }
+    if (answered) {
+      this.store.appendNotice(
+        Object.keys(answers).length > 0
+          ? vscode.l10n.t("已通过 QQ 回答 {0} 个问题", Object.keys(answers).length)
+          : vscode.l10n.t("QQ 提问已按未回答继续"),
+      );
+    }
+    return answered;
   }
 
   // --- Profile-switch choice dialog (extension-side, custom webview modal) ----
@@ -9288,7 +9384,10 @@ export class ChatPanel implements vscode.Disposable {
       appSecret: creds.appSecret,
       onInbound: (msg) => {
         const live = this.qq?.service;
-        if (!live) return;
+        // F3：服务 start() 尚未完成时（connect→start 窗口）不接消息 —— 否则
+        // 建出的任务会被紧随其后的「非终态标 failed(host_restarted)」误杀，
+        // 甚至派出孤儿子会话。窗口很短，丢弃优于错处理，QQ 侧会重发。
+        if (!live?.isReady()) return;
         void live.handleInboundMessage(msg).catch((error: unknown) => {
           this.log.warn(`QQBot 入站处理失败：${errorMessage(error)}`);
         });
@@ -9307,6 +9406,10 @@ export class ChatPanel implements vscode.Disposable {
       qqbot: { adapter: dispatch.adapter },
     };
     this.qq = owner;
+    // F3：现场在 connect 前发布（既有「配置事件不反杀半成品通道」的语义依赖
+    // 这一点），但窗口期的入站消息由 QqService 的 ready 标志挡住 —— start()
+    // 成功前 handleInboundMessage 一律丢弃，不会被「非终态标 failed」误杀、也
+    // 不会派出孤儿子会话。
     try {
       await dispatch.adapter.connect();
       if (generation !== this.qqGeneration || this.disposed) {
@@ -9524,6 +9627,10 @@ export class ChatPanel implements vscode.Disposable {
     // 任何停止意图都必须让在飞的启动失效 —— 哪怕这次因为已有停止在进行而
     // 直接返回：那个慢启动不能在 stop 之后把一份陈旧通道装回 this.qq。
     const generation = ++this.qqGeneration;
+    // F6：停通道 = 立刻放手主会话注入。只 abort 服务信号不够 —— 已经开始的
+    // ACP 回合不会被它打断，会继续流式跑完且 QQ 早已停止、收不到结果。这里
+    // 对「当前真正跑在主会话上的那一轮」发 session/cancel，并撤掉所有等待者。
+    this.cancelAllQqMainInjections();
     this.stopQqBotBinding();
     if (this.qqStopping) return;
     this.qqStopping = true;
@@ -9924,6 +10031,12 @@ export class ChatPanel implements vscode.Disposable {
         return manager ? manager.respond(superSessionId, { answers }) : false;
       },
 
+      /**
+       * main 渠道任务的回答回灌：按 taskId 命中本注入回合的提问卡。超时 / 停止
+       * 时服务送来空答案（按未回答继续），语义与本地提问卡一致。
+       */
+      answerMainQuestion: (taskId, answers) => this.answerQqMainQuestion(taskId, answers),
+
       notify: (text) => {
         if (this.disposed) return;
         this.store.sendToast("info", text);
@@ -9950,21 +10063,31 @@ export class ChatPanel implements vscode.Disposable {
   /**
    * 把一条 QQ 消息注入主会话，等那一轮结束，返回该轮 assistant 正文。
    *
-   * 三条硬纪律：
-   *  1. **等空闲再投**：`mainSessionFree()` 是 sendPrompt 自己那道门的镜像
+   * 四条硬纪律：
+   *  1. **remotePolicy 闸门**：与 child 渠道走同一个 `qqSpawnPolicyFor` 判定，
+   *     readonly 策略下主会话渠道（无法保证只读）一律拒绝注入；
+   *  2. **等空闲再投**：`mainSessionFree()` 是 sendPrompt 自己那道门的镜像
    *     （status / initializing / replaying / historySync / mainLane），所以
    *     不会与本地回合或宿主回合并发跑在同一 ACP 会话上；
-   *  2. **转录可区分**：正常 user 气泡（`hidden:false`）+ `origin:"qq"` 徽标；
+   *  3. **转录可区分**：正常 user 气泡（`hidden:false`）+ `origin:"qq"` 徽标；
    *     模型看到的是带来源包裹的正文（服务生成），本机用户看到的是原文；
-   *  3. **轮次锚定**：`onTurnStarted` 在 user 气泡落地后触发，记下当时的
-   *     text 块数量；轮次结束后只取**基线之后**的 assistant 文本 —— 上一轮
-   *     与后续无关轮次的输出永远不会被当成这一轮的结果。
+   *  4. **轮次锚定**：记下回合开始时的 sessionId 与末尾可见 text 块的稳定 id，
+   *     结束时 sessionId 必须一致、锚块必须仍在，只取锚块之后的 assistant 文本
+   *     —— 上一轮、后续轮次与「会话被替换后的无关文本」都不会被回给 QQ。
    *
    * 忙（撞上本地回合刚抢到车道）时不会失败：短暂等待后重试，直到超时上限。
    * 排队等空闲期间被 `/qq stop` 打断就返回 canceled，由服务侧收尾。
    */
   private async injectQqMainTurn(input: QqMainInjectInput): Promise<QqMainInjectResult> {
     const taskId = input.task.taskId;
+    // F1：main 渠道跑在用户自己的主会话里，不能像 child 那样剔除写工具。
+    // 与 child 走同源策略判定：readonly（deny）一律拒绝，绝不注入。
+    if (qqSpawnPolicyFor(input.task.policy.remotePolicy).approval === "deny") {
+      return {
+        injected: false,
+        reason: "当前远程策略为只读，主会话渠道无法保证只读约束，任务未注入。请改用 child 渠道或调整远程策略。",
+      };
+    }
     const controller = new AbortController();
     const onServiceAbort = (): void => controller.abort();
     if (input.signal.aborted) controller.abort();
@@ -9997,10 +10120,16 @@ export class ChatPanel implements vscode.Disposable {
           };
         }
 
-        // 轮次锚点：这一轮开始前已有多少个 text 块。只取基线之后的部分。
-        const textCountBefore = this.store
-          .getState()
-          .blocks.filter((block) => block.kind === "text").length;
+        // 轮次锚点：sessionId + 「基线末尾那一个可见 text 块的稳定 id」。
+        // 基线口径与取结果口径一致（都排除 system 块），避免数量错位；块 id
+        // 让「会话被替换后同样数量的文本」也能被识别成串包而非本轮结果。
+        const before = this.store.getState();
+        const sessionIdBefore = before.sessionId;
+        const visibleTextBefore = before.blocks.filter(
+          (block) => block.kind === "text" && !block.system,
+        );
+        const textCountBefore = visibleTextBefore.length;
+        const anchorId = visibleTextBefore[visibleTextBefore.length - 1]?.id;
 
         let started = false;
         await this.sendPrompt(input.text, undefined, undefined, undefined, {
@@ -10024,9 +10153,38 @@ export class ChatPanel implements vscode.Disposable {
         } else {
           // 这一轮真的跑过：无论成败，结果都属于它。
           const state = this.store.getState();
-          const text = state.blocks
-            .filter((block) => block.kind === "text" && !block.system)
-            .slice(textCountBefore)
+          // F5：会话在回合中被替换（切会话 / 新会话 / 恢复）时基线来自旧会话，
+          // 结果读自新会话 —— 绝不把无关文本当成本轮结果回给 QQ。
+          if (state.sessionId !== sessionIdBefore) {
+            return {
+              injected: true,
+              text: "",
+              failed: true,
+              reason: "会话在本轮执行期间被切换，未能取回本轮结果。",
+            };
+          }
+          const visibleText = state.blocks.filter(
+            (block) => block.kind === "text" && !block.system,
+          );
+          let resultStart = 0;
+          if (anchorId !== undefined) {
+            const anchorIndex = visibleText.findIndex((block) => block.id === anchorId);
+            if (anchorIndex < 0) {
+              // 基线锚块消失（转录被清空/重排）：同样不能安全地按数量切片。
+              return {
+                injected: true,
+                text: "",
+                failed: true,
+                reason: "本轮转录基线已失效，未能取回本轮结果。",
+              };
+            }
+            resultStart = anchorIndex + 1;
+          } else {
+            // 没有锚块（历史数据无稳定 id）：退回数量口径，但 sessionId 已校验。
+            resultStart = textCountBefore;
+          }
+          const text = visibleText
+            .slice(resultStart)
             .map((block) => (block.kind === "text" ? block.text : ""))
             .join("\n")
             .trim();
@@ -10087,6 +10245,23 @@ export class ChatPanel implements vscode.Disposable {
       signal.addEventListener("abort", onAbort, { once: true });
       timer.unref?.();
     });
+  }
+
+  /**
+   * 停止整条 QQ 通道时的一次性放手（F6）：撤掉所有「等空闲」的注入，并打断
+   * 当前真正跑在主会话上的那一轮。与单任务 {@link cancelQqMainInjection} 同源
+   * 的 session/cancel 语义 —— 只有 qqInjectedTaskId 命中才打，绝不误伤本地回合。
+   */
+  private cancelAllQqMainInjections(): void {
+    const activeTaskId = this.qqInjectedTaskId;
+    for (const controller of this.qqInjectAborts.values()) controller.abort();
+    this.qqInjectAborts.clear();
+    if (activeTaskId !== null) {
+      this.qqInjectedTaskId = null;
+      this.cancelSeen = true;
+      const sessionId = this.store.getState().sessionId;
+      if (sessionId) this.sendTurnCancel(sessionId, this.client);
+    }
   }
 
   /**
@@ -10268,7 +10443,20 @@ export class ChatPanel implements vscode.Disposable {
    */
   private async handleQqSettingsPatch(patch: QqSettingsPatch): Promise<void> {
     const io = this.qq?.io ?? createVscodeQqSettingsIo(this.context.secrets);
-    const result = await applyQqSettingsPatch(io, patch);
+    let result: Awaited<ReturnType<typeof applyQqSettingsPatch>>;
+    try {
+      result = await applyQqSettingsPatch(io, patch);
+    } catch (error) {
+      // writeAll 走 Workspace 作用域：没打开工作区时会抛错。与
+      // unbindQqAccount 一致如实提示，绝不让它冒泡出 handleWebviewMessage
+      // 变成一次静默失败（用户以为设置生效了，实际一个字都没落盘）。
+      this.log.warn(`QQ 设置写入失败：${errorMessage(error)}`);
+      this.store.sendToast(
+        "warning",
+        vscode.l10n.t("无法写入 QQ 设置：{0}（请在已打开的工作区中设置）", errorMessage(error)),
+      );
+      return;
+    }
     if (result.ignored.length > 0) {
       this.log.warn(`QQ 设置补丁忽略了：${result.ignored.join(", ")}`);
     }
