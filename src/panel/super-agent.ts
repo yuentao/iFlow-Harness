@@ -45,6 +45,7 @@ import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AcpClient, AcpClientCallbacks } from "../acp/client.js";
+import type { McpServer } from "../acp/protocol.js";
 import type {
   ContentBlock,
   ExitPlanModeRequest,
@@ -454,6 +455,19 @@ export interface SuperAgentDeps {
   /** 主仓根目录（worktree / 隔离目录的来源）；非 git 仓库时降级为目录隔离。 */
   repoRoot: string;
   createClient: SuperClientFactory;
+  /**
+   * MCP servers for a child's `session/new` (host broker endpoints).
+   *
+   * The broker owns ONE process per configured MCP server; each child gets a
+   * loopback HTTP endpoint for it, so N concurrent children still mean a single
+   * server process. The host also scopes the child's CLI process to exactly
+   * these names (`--allowed-mcp-server-names`), which is what stops the child
+   * from spawning the user's configured stdio servers itself.
+   *
+   * Optional so fixtures/tests that do not care about MCP keep working; an
+   * absent dependency means "no MCP in child sessions" (the previous default).
+   */
+  childMcpServers?: () => McpServer[];
   /** 子会话列表变化（宿主写进 store.superSessions）。 */
   onSessionsChanged: (sessions: SuperSessionUi[]) => void;
   /**
@@ -1690,7 +1704,11 @@ export class SuperAgentManager {
 
       const { sessionId } = await client.newSession({
         cwd: isolation.path,
-        mcpServers: [],
+        // Broker endpoints for the configured MCP servers (one shared process
+        // per server across ALL children). Empty when the host has no broker
+        // (no configured servers, or broker startup failed — the CLI process
+        // is then scoped to the sentinel by the host and spawns nothing).
+        mcpServers: this.deps.childMcpServers?.() ?? [],
         // 工具黑名单与主会话的 `settings.disallowed_tools` 同一机制；**为空时
         // 不带 settings** —— 缺省策略下 `session/new` 的请求形状必须与既有
         // 行为逐字节一致（既有测试断言子会话不传 settings）。

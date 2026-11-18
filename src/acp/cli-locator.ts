@@ -129,9 +129,20 @@ export interface BuildAcpCommandOptions {
    * Used by the main panel session only: it must never execute anything — its
    * MCP tools (`new_page` / `take_screenshot` / …) bypass the built-in tool
    * whitelist, because they are registered by `discoverAllTools()` after
-   * `createToolRegistry()`. Child sessions keep their MCP servers.
+   * `createToolRegistry()`. Child sessions get the host broker's names below.
    */
   disableMcpServers?: boolean;
+  /**
+   * Keep ONLY these MCP server names for this CLI process. The filter runs on
+   * the merged map (settings + the session request's `mcpServers`), so passing
+   * the broker's names lets a child reach the broker endpoints and prevents it
+   * from ever spawning the user's configured stdio servers itself.
+   *
+   * An EMPTY array means "no MCP at all" and is emitted as the never-matching
+   * sentinel (yargs' `[]` behaviour is an implementation detail we do not rely
+   * on). `undefined` = no flag at all (the CLI keeps every configured server).
+   */
+  mcpServerNames?: string[];
 }
 
 export function buildAcpCommand(
@@ -164,6 +175,17 @@ export function buildAcpCommand(
   // exist drops every configured server from this process's config.
   if (options.disableMcpServers) {
     args.push(MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL);
+  } else if (options.mcpServerNames) {
+    // Child sessions: only the host broker's names survive the filter, so the
+    // child never spawns the user's configured stdio servers itself. An empty
+    // list must still mean "nothing" — hence the sentinel instead of no flag.
+    if (options.mcpServerNames.length === 0) {
+      args.push(MCP_SERVER_ALLOWLIST_FLAG, MCP_SERVER_ALLOWLIST_SENTINEL);
+    } else {
+      for (const name of options.mcpServerNames) {
+        args.push(MCP_SERVER_ALLOWLIST_FLAG, name);
+      }
+    }
   }
   return { command: process.execPath, args };
 }

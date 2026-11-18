@@ -111,6 +111,7 @@ export interface McpServerEnvVar {
 }
 
 export interface McpServerStdio {
+  name?: string;
   type?: "stdio";
   command: string;
   args?: string[];
@@ -118,7 +119,21 @@ export interface McpServerStdio {
   cwd?: string;
 }
 
-export type McpServer = McpServerStdio | { type: "http" | "sse"; url: string; headers?: McpServerEnvVar[] };
+/**
+ * Remote MCP server (probed against the vendored CLI bundle's ACP zod schema:
+ * `type: enum(["stdio","sse","http","streamable-http"])`, `url` / `httpUrl`,
+ * and `headers` as `Record<string,string>` — NOT the `{name,value}[]` shape
+ * `env` uses). A `url` without `type` is treated as legacy SSE by the CLI.
+ */
+export interface McpServerRemote {
+  name?: string;
+  type: "http" | "sse" | "streamable-http";
+  url?: string;
+  httpUrl?: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServer = McpServerStdio | McpServerRemote;
 
 export interface NewSessionRequest {
   cwd: string;
