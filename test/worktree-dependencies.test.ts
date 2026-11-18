@@ -100,8 +100,9 @@ describe("worktree · 依赖预置（硬链接）", () => {
     expect(created.dependencies?.ok).toBe(true);
     expect(created.dependencies?.files).toBe(3);
     expect(created.dependencies?.dirs).toBeGreaterThanOrEqual(3);
-    // 链接被按链接复制，没有跟随（否则 linked-pkg/package.json 会是硬链接）。
-    expect(created.dependencies?.symlinks).toBe(1);
+    // 指向 node_modules 之外的目录链接改建真实空目录（防写穿透），
+    // 不计入 symlinks；包内链接仍按链接复刻。
+    expect(created.dependencies?.symlinks).toBe(0);
 
     const source = path.join(repo, "node_modules");
     const target = path.join(created.path, "node_modules");
@@ -113,11 +114,10 @@ describe("worktree · 依赖预置（硬链接）", () => {
       expect(Number(dstStat.nlink)).toBeGreaterThanOrEqual(2);
       expect(lstatSync(path.join(target, rel)).isSymbolicLink()).toBe(false);
     }
-    // 链接项保持为链接。
-    expect(lstatSync(path.join(target, "linked-pkg")).isSymbolicLink()).toBe(true);
-    expect(readFileSync(path.join(target, "linked-pkg", "package.json"), "utf8")).toContain(
-      "linked-pkg",
-    );
+    // 外部目录链接不再复刻 junction：它是 worktree 内的真实空目录，
+    // 子代理写到这里的任何内容都不会穿透回主仓。
+    expect(lstatSync(path.join(target, "linked-pkg")).isSymbolicLink()).toBe(false);
+    expect(statSync(path.join(target, "linked-pkg")).isDirectory()).toBe(true);
   }, 30000);
 
   it("幂等：目标已存在时整棵预置跳过，不报错也不改动", async () => {
@@ -223,7 +223,7 @@ describe("worktree · 依赖预置（硬链接）", () => {
     expect(existsSync(sourceFile)).toBe(true);
     expect(statSync(sourceFile, { bigint: true }).ino).toBe(beforeIno);
     expect(readFileSync(sourceFile, "utf8")).toContain("module.exports");
-    // 复刻的 junction 指向主仓的 packages 目录：删除时也不能顺着它删过去。
+    // 指向主仓 packages 的目录链接已改建为 worktree 内空目录：主仓文件更不该被碰到。
     const junctionTarget = path.join(repo, "packages", "linked-pkg", "package.json");
     expect(existsSync(junctionTarget)).toBe(true);
     expect(readFileSync(junctionTarget, "utf8")).toContain("linked-pkg");

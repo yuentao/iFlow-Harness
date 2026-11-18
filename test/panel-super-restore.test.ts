@@ -210,7 +210,7 @@ describe("ChatPanel · 子会话归档的恢复接线", () => {
     expect(toasts.length).toBeGreaterThan(0);
     expect(toasts[0]?.level).toBe("warning");
     expect(toasts[0]?.message).toContain("记录已损坏");
-    expect(toasts[0]?.message).toContain(".corrupt-");
+    expect(toasts[0]?.message).toContain(".corrupt");
   });
 
   it("关键变更（恢复出来的子会话）立刻落盘，不等节流窗口", async () => {

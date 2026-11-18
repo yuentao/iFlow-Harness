@@ -159,17 +159,37 @@ export async function ensureSuperIsolationIgnored(repoRoot: string): Promise<voi
   } catch {
     return;
   }
+  const key = `${excludePath}\n${pattern}`;
+  const previous = pendingSuperIgnore.get(key) ?? Promise.resolve();
+  const next = previous.then(() => appendSuperIgnoreOnce(excludePath, pattern, key));
+  pendingSuperIgnore.set(key, next.then(() => undefined, () => undefined));
+  await next;
+}
+
+/** 一次幂等的 exclude 追加；同一目标在进程内只做一次读 / 写。 */
+async function appendSuperIgnoreOnce(excludePath: string, pattern: string, key: string): Promise<void> {
+  if (superIgnoreWritten.has(key)) return;
   try {
     const current = await readFile(excludePath, "utf8").catch(() => "");
     const lines = current.split(/\r?\n/).map((line) => line.trim());
-    if (lines.includes(pattern)) return;
+    if (lines.includes(pattern)) {
+      superIgnoreWritten.add(key);
+      return;
+    }
     const separator = current.length > 0 && !current.endsWith("\n") ? "\n" : "";
     await mkdir(path.dirname(excludePath), { recursive: true });
     await appendFile(excludePath, `${separator}${pattern}\n`, "utf8");
+    superIgnoreWritten.add(key);
   } catch {
     // 只读仓库 / 权限问题不阻断委派：工作区变脏只会让自动合并跳过。
   }
 }
+
+/** 已经确认写入过 exclude 行的目标（键 = 绝对路径 + pattern）。 */
+const superIgnoreWritten = new Set<string>();
+
+/** 同一目标的 exclude 追加串行链（并发 prepare 时不重复读 / 写）。 */
+const pendingSuperIgnore = new Map<string, Promise<void>>();
 
 /** worktree 的落盘路径：`<repoRoot>/.iflow/super/worktrees/<slug>-<unique>`。 */
 export function worktreePathFor(repoRoot: string, slug: string, unique: string): string {
@@ -321,6 +341,17 @@ export async function linkDependencyTree(
   if (fileFailure) throw fileFailure;
   let symlinks = 0;
   for (const item of plan.links) {
+    if (item.dir && item.external) {
+      // 指向 source 之外的目录链接（典型是 junction 指回主仓 packages/ 等）：
+      // 绝不建 junction —— 子代理经它的写操作会穿透回主仓。改成 worktree 内的
+      // 真实空目录，读写都落在这个子会话自己的副本里，主仓不受影响。
+      try {
+        await fs.mkdir(item.dest);
+      } catch (error) {
+        if (!isErrno(error, "EEXIST")) throw error;
+      }
+      continue;
+    }
     try {
       await replicateLink(fs, item);
       symlinks += 1;
@@ -335,7 +366,12 @@ interface TreePlan {
   /** 要创建的目录（相对 target，`""` 为根）。 */
   dirs: string[];
   files: { src: string; dest: string }[];
-  links: { src: string; dest: string; dir: boolean }[];
+  /**
+   * 要按链接复刻的项。`external` = 解析后的目标在 source（node_modules）之外 ——
+   * 这类目录链接若照建 junction，子代理经它的写操作会穿透回主仓，必须在
+   * worktree 内改成真实空目录（见 `linkDependencyTree`）。
+   */
+  links: { src: string; dest: string; dir: boolean; target: string; external: boolean }[];
 }
 
 /** 先完整遍历再动手：遍历失败时目标树还是空的，回退成本最低。 */
@@ -366,7 +402,14 @@ async function collectTree(
         }
       }
       if (isLink) {
-        plan.links.push({ src, dest, dir: await isDirectoryLink(fs, src) });
+        const target = await fs.readlink(src);
+        plan.links.push({
+          src,
+          dest,
+          dir: await isDirectoryLink(fs, src),
+          target,
+          external: linksOutside(source, src, target),
+        });
       } else if (isDirectory) {
         plan.dirs.push(childRel);
         stack.push(childRel);
@@ -387,12 +430,34 @@ async function isDirectoryLink(fs: DependencyPresetFs, src: string): Promise<boo
   }
 }
 
+/**
+ * 链接目标解析后是否落在 source（node_modules）之外。
+ *
+ * 指向树外的目录链接若照建 junction，子代理经它的写操作会穿透回主仓 ——
+ * 这类链接必须在 worktree 内改成真实空目录（见 `linkDependencyTree`）。
+ * Windows junction 的 readlink 带扩展长度前缀且为绝对路径，POSIX 相对链接
+ * 以 src 所在目录为基准解析。失败时保守当作「在树内」，避免误伤包内链接。
+ */
+function linksOutside(source: string, src: string, target: string): boolean {
+  try {
+    const winPrefix = String.fromCharCode(92, 92, 63, 92); // Windows 扩展长度前缀
+    const stripped = target.startsWith(winPrefix) ? target.slice(4) : target;
+    const resolved = path.isAbsolute(stripped)
+      ? stripped
+      : path.resolve(path.dirname(src), stripped);
+    const rel = path.relative(path.resolve(source), path.resolve(resolved));
+    return rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
 /** 复刻一个符号链接（不跟随其目标）。 */
 async function replicateLink(
   fs: DependencyPresetFs,
-  item: { src: string; dest: string; dir: boolean },
+  item: { src: string; dest: string; dir: boolean; target: string },
 ): Promise<void> {
-  let linkTarget = await fs.readlink(item.src);
+  let linkTarget = item.target;
   if (process.platform !== "win32") {
     await fs.symlink(linkTarget, item.dest, item.dir ? "dir" : "file");
     return;
@@ -525,6 +590,68 @@ export type WorktreeGitRunner = (
 
 const defaultGitRunner: WorktreeGitRunner = (cwd, args, timeoutMs) =>
   git(cwd, args, { timeoutMs });
+
+/**
+ * 合并 / 预演的可注入 git 接缝（仅供单测；生产代码一律不传）。
+ *
+ * 中间态判定、abort 归属判定、merge base 计数都依赖精确的 git 调用时序 ——
+ * 真实仓库里「两次探测之间用户启动了自己的 merge」无法稳定复现，注入让测试
+ * 能精确制造这个竞态，而不必起真实 CLI / 网络。
+ */
+export interface WorktreeMergeDeps {
+  /** 抛错式 git（默认真实 git）。 */
+  run?: WorktreeGitRunner;
+  /** 退出码式 git（默认真实 git）。 */
+  runRaw?: (
+    cwd: string,
+    args: string[],
+  ) => Promise<{ code: number; stdout: string; stderr: string }>;
+  /** 某个中间态标记是否存在（默认查 git 目录里的标记文件）。 */
+  marker?: (repoRoot: string, name: string) => Promise<boolean>;
+}
+
+function mergeDeps(deps?: WorktreeMergeDeps): Required<WorktreeMergeDeps> {
+  const run = deps?.run ?? defaultGitRunner;
+  return {
+    run,
+    runRaw: deps?.runRaw ?? gitRaw,
+    marker: deps?.marker ?? ((repoRoot, name) => gitMarkerExists(run, repoRoot, name)),
+  };
+}
+
+/** git 目录里的中间态标记（文件 / 目录）是否存在。 */
+async function gitMarkerExists(
+  run: WorktreeGitRunner,
+  repoRoot: string,
+  name: string,
+): Promise<boolean> {
+  try {
+    const { stdout } = await run(repoRoot, ["rev-parse", "--git-path", name], GIT_TIMEOUT_MS);
+    const marker = stdout.trim();
+    if (!marker) return false;
+    await lstat(path.resolve(repoRoot, marker));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** merge 失败后读当前 MERGE_HEAD（不存在返回 null）。 */
+async function currentMergeHead(
+  run: WorktreeGitRunner,
+  repoRoot: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await run(
+      repoRoot,
+      ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+      GIT_TIMEOUT_MS,
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * `createWorktree` 的可注入依赖（**仅供单测**；生产代码一律不传）。
@@ -1188,25 +1315,54 @@ export async function removeWorktree(
 export async function mergeBranch(options: {
   repoRoot: string;
   branch: string;
+  /** 单测注入（生产代码不传）。 */
+  deps?: WorktreeMergeDeps;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
-  // 闸 1：用户正在合并/变基/拣选 → 绝不叠加第二次合并，更不碰他的中间态。
-  const before = await detectInProgress(options.repoRoot);
+  const d = mergeDeps(options.deps);
+  // 闸 1：用户正在合并/变基/拣选/还原/序列操作 → 绝不叠加第二次合并，更不碰他的中间态。
+  const before = await detectInProgress(options.repoRoot, d);
   if (before) {
     return {
       ok: false,
       error: `the repository is already in the middle of a ${before}; the merge was not started`,
     };
   }
+  // 记录本次合并前的 HEAD / MERGE_HEAD 与分支 tip：失败后据此判断中间态归属，
+  // 杜绝两次探测之间用户启动自己的 merge 时被我们误 abort（TOCTOU）。
+  const beforeHead = await d
+    .run(options.repoRoot, ["rev-parse", "HEAD"], GIT_TIMEOUT_MS)
+    .then((r) => r.stdout.trim())
+    .catch(() => "");
+  const beforeMergeHead = await currentMergeHead(d.run, options.repoRoot);
+  const branchTip = await d
+    .run(options.repoRoot, ["rev-parse", "--verify", options.branch], GIT_TIMEOUT_MS)
+    .then((r) => r.stdout.trim())
+    .catch(() => "");
   try {
-    await git(options.repoRoot, ["merge", "--no-ff", "--no-edit", options.branch]);
+    await d.run(
+      options.repoRoot,
+      ["merge", "--no-ff", "--no-edit", options.branch],
+      GIT_TIMEOUT_MS,
+    );
     return { ok: true };
   } catch (error) {
-    // 闸 2：只有当 MERGE_HEAD 是本次合并留下的才撤销它。
-    const after = await detectInProgress(options.repoRoot);
-    if (after === "merge") {
-      await git(options.repoRoot, ["merge", "--abort"]).catch(() => undefined);
+    const afterMergeHead = await currentMergeHead(d.run, options.repoRoot);
+    const afterHead = await d
+      .run(options.repoRoot, ["rev-parse", "HEAD"], GIT_TIMEOUT_MS)
+      .then((r) => r.stdout.trim())
+      .catch(() => beforeHead);
+    // 闸 2：只有 MERGE_HEAD 确实是本次合并留下的（此前没有、现在指向本分支 tip、
+    // HEAD 未变）才 abort。否则那是用户自己的中间态，绝不碰 —— 如实报错让他处理。
+    const ours =
+      beforeMergeHead === null && afterMergeHead === branchTip && afterHead === beforeHead;
+    if (ours) {
+      await d.run(options.repoRoot, ["merge", "--abort"], GIT_TIMEOUT_MS).catch(() => undefined);
+      return { ok: false, error: errorMessage(error) };
     }
-    return { ok: false, error: errorMessage(error) };
+    return {
+      ok: false,
+      error: `${errorMessage(error)}; a merge is in progress but was not started by this operation, refusing to abort it`,
+    };
   }
 }
 
@@ -1233,21 +1389,44 @@ export interface MergePreview {
  * 旧版 git（< 2.38，不认 `--write-tree`）与多个 merge base 的场景返回
  * `available: false`，调用方退回「要求工作区干净」的保守策略。
  */
-export async function previewMerge(options: { repoRoot: string; branch: string }): Promise<MergePreview> {
+export async function previewMerge(options: {
+  repoRoot: string;
+  branch: string;
+  /** 单测注入（生产代码不传）。 */
+  deps?: WorktreeMergeDeps;
+}): Promise<MergePreview> {
+  const d = mergeDeps(options.deps);
   const unavailable: MergePreview = { available: false, clean: false, paths: [] };
   let base: string;
   let childPaths: string[];
   let mainPaths: string[];
   try {
-    base = (await git(options.repoRoot, ["merge-base", "HEAD", options.branch])).stdout.trim();
-    if (!base) return unavailable;
-    childPaths = await changedPaths(options.repoRoot, base, options.branch);
-    mainPaths = await changedPaths(options.repoRoot, base, "HEAD");
+    // criss-cross 历史下不带 --all 的 merge-base 只返回一个 base 且不报错，
+    // 基于它的冲突预演结论不可信 —— 多于一个 base 就退回保守策略。
+    const bases = (
+      await d.run(
+        options.repoRoot,
+        ["merge-base", "--all", "HEAD", options.branch],
+        GIT_TIMEOUT_MS,
+      )
+    ).stdout
+      .trim()
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0);
+    if (bases.length !== 1) return unavailable;
+    base = bases[0]!;
+    childPaths = await changedPaths(d.run, options.repoRoot, base, options.branch);
+    mainPaths = await changedPaths(d.run, options.repoRoot, base, "HEAD");
   } catch {
     return unavailable;
   }
   const paths = [...new Set([...childPaths, ...mainPaths])];
-  const probe = await gitRaw(options.repoRoot, ["merge-tree", "--write-tree", "HEAD", options.branch]);
+  const probe = await d.runRaw(options.repoRoot, [
+    "merge-tree",
+    "--write-tree",
+    "HEAD",
+    options.branch,
+  ]);
   if (probe.code === 0) return { available: true, clean: true, paths };
   // exit code 1 = 合并有冲突；>1 或进程级失败 = 命令不可用（旧版 git 等）。
   if (probe.code === 1) return { available: true, clean: false, paths };
@@ -1255,8 +1434,17 @@ export async function previewMerge(options: { repoRoot: string; branch: string }
 }
 
 /** 两个提交之间改动过的路径（`--no-renames`：重命名拆成删除 + 新增）。 */
-async function changedPaths(repoRoot: string, from: string, to: string): Promise<string[]> {
-  const { stdout } = await git(repoRoot, ["diff", "--no-renames", "--name-only", "-z", from, to]);
+async function changedPaths(
+  run: WorktreeGitRunner,
+  repoRoot: string,
+  from: string,
+  to: string,
+): Promise<string[]> {
+  const { stdout } = await run(
+    repoRoot,
+    ["diff", "--no-renames", "--name-only", "-z", from, to],
+    GIT_TIMEOUT_MS,
+  );
   return splitNul(stdout);
 }
 
@@ -1279,14 +1467,17 @@ function splitNul(text: string): string[] {
  * 与 `previewMerge().paths` 求交后判断）。未跟踪文件单独计（`untrackedCount`）：
  * git 只在合并要创建同名文件时才拒绝，而且拒绝发生在动手之前、工作区不变。
  */
+/** 仓库可能停住的所有 git 操作中间态。 */
+export type MergeInProgress = "merge" | "rebase" | "cherry-pick" | "revert" | "sequencer";
+
 export interface WorkingTreeState {
   /** 状态是否真的读到了（false = git 不可用 / 仓库损坏，调用方必须保守处理）。 */
   available: boolean;
   clean: boolean;
   /** 未提交的条目数（已跟踪改动路径数 + 未跟踪文件数）。 */
   dirtyCount: number;
-  /** 仓库是否停在 merge / rebase / cherry-pick 中间态。 */
-  inProgress: "merge" | "rebase" | "cherry-pick" | null;
+  /** 仓库是否停在任何 git 操作中间态（含 revert / sequencer）。 */
+  inProgress: MergeInProgress | null;
   /** 已跟踪文件的未提交改动路径（含删除与重命名两侧；相对仓库根、正斜杠）。 */
   trackedPaths: string[];
   /** 未跟踪文件数。 */
@@ -1294,30 +1485,27 @@ export interface WorkingTreeState {
 }
 
 /**
- * 仓库是否停在 merge / rebase / cherry-pick 中间态（只读探测）。
+ * 仓库是否停在任何 git 操作中间态（只读探测）。
  *
- * 判据是 git 自己的中间态标记文件：MERGE_HEAD / REBASE_HEAD /
- * CHERRY_PICK_HEAD 存在，就说明**有人**（用户或我们）正在这个仓库里做一次
- * 合并 / 变基 / 拣选。
- *
- * 单独抽出来的原因：自动合并必须能区分「这个中间态是我们自己这次合并留下的」
- * 与「这是用户先前就在做的」。前者可以撤销，后者绝不能碰 —— 撤销用户的
- * 合并等于替用户毁掉工作。
+ * 判据是 git 自己的中间态标记文件 / 目录：MERGE_HEAD / REBASE_HEAD /
+ * CHERRY_PICK_HEAD / REVERT_HEAD 以及 rebase-merge、rebase-apply、sequencer
+ * 目录。任一存在就说明有人（用户或我们）正在这个仓库里做一次 git 操作 ——
+ * 自动合并必须让路，abort 也必须区分「我们这次留下的」与「用户先前就在做的」。
+ * 撤销用户的中间态等于替用户毁掉工作。
  */
 export async function detectInProgress(
   repoRoot: string,
-): Promise<WorkingTreeState["inProgress"]> {
-  const has = async (ref: string): Promise<boolean> => {
-    try {
-      await git(repoRoot, ["rev-parse", "-q", "--verify", ref]);
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  deps?: WorktreeMergeDeps,
+): Promise<MergeInProgress | null> {
+  const d = mergeDeps(deps);
+  const has = (name: string): Promise<boolean> => d.marker(repoRoot, name);
   if (await has("MERGE_HEAD")) return "merge";
   if (await has("REBASE_HEAD")) return "rebase";
+  if (await has("rebase-merge")) return "rebase";
+  if (await has("rebase-apply")) return "rebase";
   if (await has("CHERRY_PICK_HEAD")) return "cherry-pick";
+  if (await has("REVERT_HEAD")) return "revert";
+  if (await has("sequencer")) return "sequencer";
   return null;
 }
 
