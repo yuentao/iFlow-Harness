@@ -262,8 +262,8 @@ export interface QqServiceHost {
   /**
    * 主会话渠道：把消息排队注入主会话，等这一轮结束后返回该轮 assistant 文本。
    *
-   * 可选：只有 `iflow.qq.route = "main"` 的部署需要实现它；缺失时主会话渠道
-   * 的任务会如实失败（`main_route_unavailable`），绝不退化成子会话。
+   * 可选：QQ 消息固定走主会话，宿主需要实现它；缺失时任务如实失败
+   *（`main_route_unavailable`），绝不退化成子会话。
    */
   injectIntoMainSession?(input: QqMainInjectInput): Promise<QqMainInjectResult>;
   /**
@@ -371,6 +371,13 @@ export interface QqServiceOptions {
   binderOpenid?: string;
   /** 与扫码绑定者等价的解绑 / 审批管理员白名单（openid）。 */
   adminOpenids?: readonly string[];
+  /**
+   * 新任务的执行渠道覆盖，仅供测试历史归档 `child` 任务的收尾路径。
+   *
+   * QQ 消息去向配置已移除，真实部署固定走主会话（`main`）；生产不传此字段。
+   * 测试用它构造「旧版本留下的 child 任务」，验证它们跨重启仍能正确收尾。
+   */
+  newTaskChannel?: QqTaskChannel;
 }
 
 /** 任务操作（IPC 与命令处理共用）。 */
@@ -932,6 +939,8 @@ export class QqService {
   private readonly log: (line: string) => void;
   private readonly onChanged: () => void;
   private readonly deliveryRetryDelayMs: number;
+  /** 新任务渠道：生产恒为 main；仅测试可覆盖为 child 验证历史归档收尾。 */
+  private readonly newTaskChannel: QqTaskChannel;
   /** 远程任务提问提醒的应答窗口（毫秒）。 */
   private readonly questionTimeoutMs: number;
 
@@ -1036,6 +1045,7 @@ export class QqService {
         : QQ_DEFAULT_RETENTION_DAYS;
     this.log = options.log ?? (() => undefined);
     this.onChanged = options.onChanged ?? (() => undefined);
+    this.newTaskChannel = options.newTaskChannel ?? "main";
     this.deliveryRetryDelayMs =
       typeof options.deliveryRetryDelayMs === "number" &&
       Number.isFinite(options.deliveryRetryDelayMs) &&
@@ -1479,7 +1489,7 @@ export class QqService {
       });
 
       if (this.taskChannel(task) === "main") {
-        // 主会话渠道：先入队（位次才能算准），**立刻**回一条排队确认 ——
+        // QQ 消息固定走主会话：先入队（位次才能算准），**立刻**回一条排队确认 ——
         // 用户不必等主会话空闲就能知道消息被接住了、排在第几位。
         // 去重键与被动回复的 msg_id 沿用现有回包通道（重试不会刷出第二条）。
         this.queue.push(task.taskId);
@@ -1494,6 +1504,7 @@ export class QqService {
         return;
       }
 
+      // 历史归档 child 任务的收尾回执（真实部署不再产生 child 任务）。
       await this.deliver(msg, `已受理任务 ${shortTaskId(task.taskId)}，排队中。`, msg.msgId);
       this.enqueue(task.taskId);
     } catch (error) {
@@ -1504,9 +1515,9 @@ export class QqService {
     }
   }
 
-  /** 新任务该走的渠道（`iflow.qq.route`；未知值按旧行为 child）。 */
+  /** 新任务的渠道：生产恒为 main（QQ 消息去向配置已移除）。 */
   private channelForNewTask(): QqTaskChannel {
-    return this.config.route === "main" ? "main" : "child";
+    return this.newTaskChannel;
   }
 
   /** 任务自己的渠道（旧归档没有该字段 → child，与历史行为一致）。 */
@@ -1709,7 +1720,7 @@ export class QqService {
         await this.failTask(
           task,
           "main_route_policy_denied",
-          "当前远程策略为只读，主会话渠道无法保证只读约束，任务未执行。请改用 child 渠道或调整远程策略。",
+          "当前远程策略为只读，主会话无法保证只读约束，任务未执行。请调整远程策略。",
         );
         return;
       }
@@ -1718,7 +1729,7 @@ export class QqService {
         await this.failTask(
           task,
           "main_route_unavailable",
-          "当前宿主未实现主会话注入（iflow.qq.route=main），请改用 child 渠道或更新扩展。",
+          "当前宿主未实现主会话注入，请更新扩展后重试。",
         );
         return;
       }

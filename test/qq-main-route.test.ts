@@ -1,5 +1,5 @@
 /**
- * QQ 主会话路由（`iflow.qq.route = "main"`）的行为锚点。
+ * QQ 主会话路由（QQ 消息固定走主会话）的行为锚点。
  *
  * 只测**纯编排**：宿主能力（注入主会话）由假实现提供，不 spawn CLI、不碰
  * vscode。这里钉住的是用户拍板的那几条语义：
@@ -7,13 +7,11 @@
  *  - 主会话忙时排队、空闲后按 FIFO 逐条注入，不并发；
  *  - 注入的是带来源包裹的正文（发送方 id 脱敏），转录气泡正文是原文；
  *  - 结果只回传它自己那一轮，停止后不再二次回包；
- *  - 重启后仍未执行的排队项如实告知「请重发」；
- *  - `route=child` 保持旧行为不变。
+ *  - 重启后仍未执行的排队项如实告知「请重发」。
  */
 import { describe, it, expect } from "vitest";
 import type { InboundMessage } from "../src/qq/adapter/types.js";
 import type { QqConfig } from "../src/qq/config.js";
-import { normalizeQqConfig } from "../src/qq/config.js";
 import {
   QqService,
   QQ_EMPTY_SUMMARY_NOTICE,
@@ -93,7 +91,6 @@ interface Fixture {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
-    route: "main",
     allowedUsers: ["u1"],
     allowedGroups: ["g1"],
     workspace: "/ws",
@@ -204,24 +201,6 @@ function onlyTask(f: Fixture): QqTask {
   if (!task) throw new Error("任务不在内存中");
   return task;
 }
-
-// ---------------------------------------------------------------------------
-// 配置默认值
-// ---------------------------------------------------------------------------
-
-describe("iflow.qq.route 默认值", () => {
-  it("缺省即 child（用户拍板），main 仍可显式选择", () => {
-    expect(normalizeQqConfig({}).config.route).toBe("child");
-    expect(normalizeQqConfig({ route: "main" }).config.route).toBe("main");
-    expect(normalizeQqConfig({ route: " main " }).config.route).toBe("main");
-  });
-
-  it("非法值回退 child 并如实告警", () => {
-    const { config, warnings } = normalizeQqConfig({ route: "yolo" });
-    expect(config.route).toBe("child");
-    expect(warnings.some((line) => line.includes("iflow.qq.route"))).toBe(true);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // 来源包裹
@@ -383,7 +362,7 @@ describe("主会话路由 · 排队与注入", () => {
     const f = makeService({ withoutInjection: true });
     await f.service.handleInboundMessage(inbound());
     await waitFor(() => resultTexts(f).length > 0);
-    expect(resultTexts(f).join("\n")).toContain("main");
+    expect(resultTexts(f).join("\n")).toContain("主会话");
     expect(f.dispatches).toHaveLength(0);
     expect(onlyTask(f).status).toBe("failed");
   });
@@ -481,24 +460,3 @@ describe("主会话路由 · 停止与重启", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// child 回归
-// ---------------------------------------------------------------------------
-
-describe("route=child 保持旧行为", () => {
-  it("直接派子会话，走原来的受理确认与结果回包", async () => {
-    const f = makeService({ config: { route: "child" } });
-    await f.service.handleInboundMessage(inbound());
-
-    expect(f.delivered[0]?.text).toContain("已受理任务");
-    expect(f.injections).toHaveLength(0);
-    await waitFor(() => f.dispatches.length === 1);
-    await waitFor(() => resultTexts(f).length > 0);
-    const task = onlyTask(f);
-    expect(task.channel).toBe("child");
-    // 子会话带分支且未开启自动合并 → 待复核（既有行为，未因本次改动漂移）。
-    expect(task.status).toBe("needs_review");
-    expect(task.correlation.superSessionId).toBe("super-1");
-    expect(task.correlation.branch).toBe("iflow/qq/test");
-  });
-});

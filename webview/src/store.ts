@@ -238,7 +238,6 @@ function createMockHost(): HostApi {
   let mockQqSettings: QqSettingsUi = pickQqSettingsUi(
     {
       enabled: true,
-      route: "main",
       workspace: "C:\\mock\\workspace",
       allowedUsers: [
         { openid: "D754A1B2C3D4E5F6A7B88D11", note: "我的手机（私聊）" },

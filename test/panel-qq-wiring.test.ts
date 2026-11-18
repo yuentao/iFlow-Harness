@@ -68,7 +68,6 @@ function makeWatchers(): NonNullable<PanelServices["watchers"]> {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
-    route: "child",
     allowedUsers: ["10001"],
     allowedGroups: [],
     workspace: "",
@@ -776,7 +775,7 @@ describe("QQ 通道启动竞态（F3）", () => {
       },
     };
     const io: QqSettingsIo = {
-      readAll: () => ({ enabled: true, route: "child", allowedUsers: ["u-race"] }),
+      readAll: () => ({ enabled: true, allowedUsers: ["u-race"] }),
       writeAll: async () => undefined,
       getSecret: async (key: string) =>
         key.includes("appId") || key.toLowerCase().includes("appid")

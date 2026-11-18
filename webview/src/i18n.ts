@@ -1121,13 +1121,7 @@ const en: Record<string, string> = {
   "删除「{0}」后将无法恢复：完整标识已脱敏，无法从界面还原，需要时只能重新添加。":
     "Deleting “{0}” cannot be undone: the full identifier is masked and cannot be recovered from this screen — you would have to add it again.",
   "执行策略": "Execution policy",
-  "消息去向": "Message destination",
   "主会话": "Main session",
-  "独立子会话": "Isolated child session",
-  "消息排队注入当前主会话（与本地输入同一条对话线，可远程接续工作；忙时排队等待）。":
-    "Queue the message into the current main session (same conversation as local input, so work can continue remotely; queued while busy).",
-  "每条消息直接派一个独立子会话（默认，隔离执行、互不影响）。":
-    "Dispatch each message as an isolated child session (the default; isolated execution, no cross-talk).",
   "远程任务策略": "Remote task policy",
   "只读": "Read-only",
   "只读：可以查看工作区，写文件与执行命令会被拒绝。":

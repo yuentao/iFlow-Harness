@@ -28,6 +28,7 @@ import {
   isTerminalStatus,
   shortTaskId,
   type QqTask,
+  type QqTaskChannel,
   type QqTaskStatus,
 } from "../shared/qq-task.js";
 
@@ -170,7 +171,6 @@ function makeHost(): HostFixture {
 function makeConfig(overrides: Partial<QqConfig> = {}): QqConfig {
   return {
     enabled: true,
-    route: "child",
     allowedUsers: ["u1"],
     allowedGroups: ["g1"],
     workspace: "/ws",
@@ -197,6 +197,8 @@ function makeService(options: {
   taskRetentionDays?: number;
   onChanged?: () => void;
   deliveryRetryDelayMs?: number;
+  /** 默认 child：本文件多数用例覆盖历史归档 child 任务的收尾路径。 */
+  newTaskChannel?: QqTaskChannel;
 } = {}): ServiceFixture {
   const config = makeConfig(options.config);
   const fixture = makeHost();
@@ -206,6 +208,7 @@ function makeService(options: {
     store: store as unknown as QqTaskStore,
     host: fixture.host,
     now: options.now,
+    newTaskChannel: options.newTaskChannel ?? "child",
     log: () => undefined,
     ...(options.monotonicNow ? { monotonicNow: options.monotonicNow } : {}),
     ...(options.taskRetentionDays !== undefined
@@ -2222,9 +2225,9 @@ describe("QqService — /qq refresh 三条分支节流去重", () => {
   it("main 渠道分支：连点 5 次只发 1 条摘要", async () => {
     let clock = 30_000;
     const f = makeService({
-      config: { route: "main" },
       now: () => clock,
       monotonicNow: () => clock,
+      newTaskChannel: "main",
     });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

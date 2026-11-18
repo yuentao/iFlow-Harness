@@ -13,7 +13,6 @@ import type { QqSettingsUi } from "../shared/messages.js";
 /** 完整默认值（与 shared/messages.ts 的 pickQqSettingsUi 默认一致）。 */
 const DEFAULTS: QqSettingsUi = {
   enabled: false,
-  route: "child",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -427,9 +426,8 @@ describe("applyQqSettingsPatch", () => {
     ]);
   });
 
-  it("10 个设置键均已覆盖，且不含派生字段与已移除的遗留键", () => {
-    expect(QQ_SETTING_KEYS).toHaveLength(10);
-    expect(QQ_SETTING_KEYS).toContain("route");
+  it("9 个设置键均已覆盖，且不含派生字段与已移除的遗留键", () => {
+    expect(QQ_SETTING_KEYS).toHaveLength(9);
     expect(QQ_SETTING_KEYS).not.toContain("hasAppSecret");
     expect(QQ_SETTING_KEYS).not.toContain("adapter");
     expect(QQ_SETTING_KEYS).not.toContain("endpoint");
