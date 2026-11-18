@@ -193,7 +193,42 @@ function AccessList({
     setIdDraft("");
     setError("");
   };
+  /**
+   * 当前编辑行的草稿是否真的变了（与已存备注同样 trim 后比较）。
+   *
+   * 切行/删除/进入添加前都要先过这一关：草稿有变才落盘，未修改就切走
+   * 不产生任何写入（否则「点开看看再点走」也会白写一次设置）。
+   */
+  const draftChanged = (): boolean => {
+    if (editingIndex === null) return false;
+    const entry = entries[editingIndex];
+    if (!entry) return false;
+    return noteDraft.trim() !== (entry.note ?? "").trim();
+  };
+  /**
+   * 把当前编辑行的草稿并入条目数组；无变化时原样返回同一引用。
+   *
+   * 删除等后续改动直接在返回值上做，草稿与本次操作同一次落盘——若先
+   * `onChange(草稿)` 再 `onChange(过滤后的旧数组)`，后一次会用旧数组把
+   * 草稿又盖回去（宿主按全量数组写入）。
+   */
+  const entriesWithDraft = (): QqAllowEntry[] => {
+    if (!draftChanged()) return entries;
+    const trimmed = noteDraft.trim();
+    return entries.map((current, at) => {
+      if (at !== editingIndex) return current;
+      // 清空备注 = 写回不带 note 的条目（存储层仍是旧形状）。
+      return trimmed.length > 0 ? { openid: current.openid, note: trimmed } : { openid: current.openid };
+    });
+  };
+  /** 草稿有变才写回；没有变化绝不触发 onChange。 */
+  const flushDraft = () => {
+    const next = entriesWithDraft();
+    if (next !== entries) onChange(next);
+  };
   const beginAdd = () => {
+    // 先落盘正在编辑的备注，再切到添加行——否则草稿会随切换被静默丢弃。
+    flushDraft();
     setError("");
     setEditingIndex(null);
     setNoteDraft("");
@@ -201,6 +236,15 @@ function AccessList({
     setAdding(true);
   };
   const beginEdit = (index: number, entry: QqAllowEntry) => {
+    // 已经在编辑这一行：保留草稿，不做任何重置（避免自己把输入清掉）。
+    if (editingIndex === index) return;
+    // 正在添加且已经填了内容：先尝试提交添加；校验失败就留在原地报错，
+    // 绝不静默丢掉用户刚输入的标识 / 备注。
+    if (adding && (idDraft.trim().length > 0 || noteDraft.trim().length > 0)) {
+      if (!commitAdd()) return;
+    }
+    // 正在编辑另一行：草稿有变就先落盘，然后进入新行（推荐行为）。
+    flushDraft();
     setError("");
     setAdding(false);
     setIdDraft("");
@@ -209,21 +253,15 @@ function AccessList({
   };
   const commitEdit = () => {
     if (editingIndex === null) return;
-    const trimmed = noteDraft.trim();
-    onChange(
-      entries.map((current, at) => {
-        if (at !== editingIndex) return current;
-        // 清空备注 = 写回不带 note 的条目（存储层仍是旧形状）。
-        return trimmed.length > 0 ? { openid: current.openid, note: trimmed } : { openid: current.openid };
-      }),
-    );
+    onChange(entriesWithDraft());
     cancelEditing();
   };
-  const commitAdd = () => {
+  /** 提交添加行；返回是否成功（失败时保留输入并就地报错）。 */
+  const commitAdd = (): boolean => {
     const openid = idDraft.trim();
     if (openid.length === 0) {
       setError(t("请填写完整的{0}标识。", noun));
-      return;
+      return false;
     }
     // 只接受完整原值：脱敏串（含 *）、空白与其它字符一律拒绝，否则保存成功
     // 却永远匹配不上（用户从界面复制 D754********8D11 是最常见的误操作）。
@@ -231,17 +269,18 @@ function AccessList({
       setError(
         t("无效的{0}标识：只能包含字母、数字、下划线或连字符（4–64 位），脱敏后的星号串不能用。", noun),
       );
-      return;
+      return false;
     }
     // 同一条 openid 已在名单里就不重复追加（读取侧同样按 openid 去重），
     // 但要明确告诉用户「没添加」——否则看起来像成功。
     if (entries.some((entry) => entry.openid === openid)) {
       setError(t("该标识已在名单中，无需重复添加。"));
-      return;
+      return false;
     }
     const note = noteDraft.trim();
     onChange([...entries, note.length > 0 ? { openid, note } : { openid }]);
     cancelEditing();
+    return true;
   };
   /** Enter 提交 / Esc 取消；IME 组合中的 Enter 是确认候选词，不能当提交。 */
   const editorKeyDown =
@@ -447,7 +486,18 @@ function AccessList({
           confirmLabel={t("删除")}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => {
-            onChange(entries.filter((_, at) => at !== pendingDelete));
+            if (pendingDelete === null) return;
+            const target = pendingDelete;
+            if (editingIndex === target) {
+              // 删的就是正在编辑的这一行：显式删除，草稿随行作废（不写回）。
+              cancelEditing();
+              onChange(entries.filter((_, at) => at !== target));
+            } else {
+              // 编辑的是另一行：草稿先并入，再在同一份数组里删除（一次落盘），
+              // 然后退出编辑态——删除后行下标会前移，继续编辑会错行。
+              onChange(entriesWithDraft().filter((_, at) => at !== target));
+              cancelEditing();
+            }
             setPendingDelete(null);
           }}
         />

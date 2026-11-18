@@ -412,6 +412,161 @@ describe("QqSettings", () => {
     expect(onChange).toHaveBeenCalledWith({ allowedUsers: [{ openid }] });
   });
 
+  it("草稿保护：改备注后点另一行的铅笔，旧值先落盘再进入新行", () => {
+    const a = "D754D2240C503C2ABE2B236DC1E78D11";
+    const b = "ABCDEF0123456789ABCDEF0123456789";
+    render(
+      <Harness
+        initial={{
+          allowedUsers: [
+            { openid: a, note: "同事" },
+            { openid: b, note: "运维" },
+          ],
+        }}
+      />,
+    );
+
+    clickEdit("允许的用户", "同事");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    setInput(input, "运维同事");
+    // 不按 Enter、不点保存：直接点另一行的铅笔。
+    clickEdit("允许的用户", "运维");
+
+    // 旧草稿自动提交，一次写入（不是先切行再丢）。
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({
+      allowedUsers: [
+        { openid: a, note: "运维同事" },
+        { openid: b, note: "运维" },
+      ],
+    });
+    // 回灌后第一行展示新备注，编辑态落在第二行且带出它自己的旧备注。
+    expect(accessTable("允许的用户").textContent).toContain("运维同事");
+    const second = container.querySelector<HTMLInputElement>("input[aria-label='备注 运维']")!;
+    expect(second.value).toBe("运维");
+    expect(container.querySelector("input[aria-label='备注 同事']")).toBeNull();
+  });
+
+  it("草稿保护：未修改备注直接切行不产生任何写入", () => {
+    const a = "D754D2240C503C2ABE2B236DC1E78D11";
+    const b = "ABCDEF0123456789ABCDEF0123456789";
+    render(
+      <Harness
+        initial={{
+          allowedUsers: [
+            { openid: a, note: "同事" },
+            { openid: b, note: "运维" },
+          ],
+        }}
+      />,
+    );
+
+    clickEdit("允许的用户", "同事");
+    clickEdit("允许的用户", "运维");
+
+    // 草稿与已存值一致：切行不该顺手写一次设置。
+    expect(onChange).not.toHaveBeenCalled();
+    expect(container.querySelector<HTMLInputElement>("input[aria-label='备注 运维']")!.value).toBe(
+      "运维",
+    );
+    expect(container.querySelector("input[aria-label='备注 同事']")).toBeNull();
+  });
+
+  it("草稿保护：编辑中删除另一行，草稿与删除同一次落盘", () => {
+    const a = "D754D2240C503C2ABE2B236DC1E78D11";
+    const b = "ABCDEF0123456789ABCDEF0123456789";
+    render(
+      <Harness
+        initial={{
+          allowedUsers: [
+            { openid: a, note: "同事" },
+            { openid: b, note: "运维" },
+          ],
+        }}
+      />,
+    );
+
+    clickEdit("允许的用户", "同事");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    setInput(input, "运维同事");
+    clickDelete("允许的用户", "运维");
+    // 确认前不落盘（用户还可能取消）。
+    expect(onChange).not.toHaveBeenCalled();
+
+    const dialog = confirmDialog()!;
+    const confirm = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "删除",
+    )!;
+    act(() => confirm.click());
+
+    // 一次写入同时包含「备注落盘」与「行被删除」，不会用旧数组把草稿盖回去。
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({
+      allowedUsers: [{ openid: a, note: "运维同事" }],
+    });
+    expect(accessTable("允许的用户").querySelectorAll("input")).toHaveLength(0);
+    expect(accessTable("允许的用户").textContent).toContain("运维同事");
+  });
+
+  it("草稿保护：编辑中进入添加行，草稿先落盘", () => {
+    const a = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid: a, note: "同事" }] }} />);
+
+    clickEdit("允许的用户", "同事");
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!;
+    setInput(input, "运维同事");
+    clickText("添加用户");
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({
+      allowedUsers: [{ openid: a, note: "运维同事" }],
+    });
+    expect(container.querySelector("input[aria-label='输入用户标识']")).toBeTruthy();
+    expect(container.querySelector("input[aria-label='备注 同事']")).toBeNull();
+  });
+
+  it("草稿保护：添加行有内容时点铅笔，先提交添加再进入编辑", () => {
+    const a = "D754D2240C503C2ABE2B236DC1E78D11";
+    const b = "ABCDEF0123456789ABCDEF0123456789";
+    render(<Harness initial={{ allowedUsers: [{ openid: a, note: "同事" }] }} />);
+
+    clickText("添加用户");
+    const id = container.querySelector<HTMLInputElement>("input[aria-label='输入用户标识']")!;
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='新用户的备注']")!;
+    setInput(id, b);
+    setInput(note, "新同事");
+    clickEdit("允许的用户", "同事");
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({
+      allowedUsers: [
+        { openid: a, note: "同事" },
+        { openid: b, note: "新同事" },
+      ],
+    });
+    // 添加已提交，编辑态落在被点的那一行。
+    expect(container.querySelector<HTMLInputElement>("input[aria-label='备注 同事']")!.value).toBe(
+      "同事",
+    );
+    expect(container.querySelector("input[aria-label='输入用户标识']")).toBeNull();
+  });
+
+  it("草稿保护：添加行只有备注、标识为空时点铅笔，就地报错并留在添加行", () => {
+    const a = "D754D2240C503C2ABE2B236DC1E78D11";
+    render(<Harness initial={{ allowedUsers: [{ openid: a, note: "同事" }] }} />);
+
+    clickText("添加用户");
+    const note = container.querySelector<HTMLInputElement>("input[aria-label='新用户的备注']")!;
+    setInput(note, "只有备注");
+    clickEdit("允许的用户", "同事");
+
+    // 提交失败：不写入、不切行，输入与错误提示都留在原地。
+    expect(onChange).not.toHaveBeenCalled();
+    expect(alertText()).toContain("请填写完整的用户标识");
+    expect(container.querySelector<HTMLInputElement>("input[aria-label='输入用户标识']")).toBeTruthy();
+    expect(container.querySelector("input[aria-label='备注 同事']")).toBeNull();
+  });
+
   it("删除需要确认：确认前不落盘，确认后行消失并回到空态", () => {
     const openid = "D754D2240C503C2ABE2B236DC1E78D11";
     render(<Harness initial={{ allowedUsers: [{ openid, note: "同事" }] }} />);
