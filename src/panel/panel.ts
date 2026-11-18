@@ -24,7 +24,7 @@ import {
 } from "../acp/jsonrpc.js";
 import { buildAcpCommand, concealNodeExecutable, configureLocatorPersistence, ensureIflowDefaultConfigs, ensureVendorBinariesExecutable, locateNodeExecutable, resolveVendoredEntry, type LocatorPaths } from "../acp/cli-locator.js";
 import { acpSessionFilePath, applyThinkingRules, mcpScopeOf, projectSettingsFor, queryModelIds, readActiveEndpoint, readMcpServers, resolveActiveProfileName, retireStaleOAuthCreds, settingsFilePath, thinkingForModelRules, thinkingRulesFilePath, updateCliSettings, sanitizeThinkingRules, type ThinkingRuleEntry } from "../acp/models-query.js";
-import { McpBroker, normalizeBrokerServers } from "../acp/mcp-broker.js";
+import { McpBroker, normalizeBrokerServers, type McpBrokerStatus } from "../acp/mcp-broker.js";
 import { deleteKernelApiProfile, migrateKernelApiProfiles, readKernelApiProfiles, setKernelActiveProfile, writeKernelApiProfile } from "../acp/api-profiles.js";
 import {
   getActiveProfileName,
@@ -5767,45 +5767,95 @@ export class ChatPanel implements vscode.Disposable {
   }
 
   /**
-   * MCP card asked for live connection state: query the CLI's `_iflow/mcp/status`
-   * (mcp-status-refactor Mod) and append the host-computed `contextTokens` per
-   * server — the BPE of the tool declarations the CLI injects into every request
-   * (the CLI itself has no such estimate, and re-tokenizing on the webview per
-   * render would be wasteful). Every failure mode degrades to `status: null`
-   * (CLI not running, Mod missing → methodNotFound, Mod disabled → available:false,
-   * session not started yet): the card shows NO indicator rather than a wrong one.
+   * MCP card asked for live connection state. Super Agent changes the meaning
+   * of the CLI's `_iflow/mcp/status` on the MAIN session: because it starts
+   * with `disableMcpServers`, every configured server is reported as
+   * `{status:"disconnected", blocked:true}` — that is a deliberate design,
+   * NOT a broken server. The servers are actually connected and used by the
+   * child sessions through the host's shared MCP broker (`this.mcpBroker`).
+   *
+   * So the broker is the authority for the live connection state. We still
+   * query the CLI report because it is the only source of the tools/prompts
+   * declarations shown in the detail sub-page; its status/error are then
+   * overridden per server from `mcpBroker.statuses()`:
+   *   - broker connected    → status "connected", childConnected true, no error
+   *   - broker disconnected → status "disconnected", childConnected false, error
+   *   - broker not ready    → childConnected undefined; a CLI-blocked server
+   *     falls back to a NEUTRAL "main session does not load MCP" (no red dot),
+   *     never "server is broken".
+   *
+   * `contextTokens` is the host-computed BPE of the tool declarations (the
+   * CLI itself has no such estimate, and re-tokenizing per render in the
+   * webview would be wasteful). Any total failure (no CLI report AND no
+   * broker) degrades to `status: null` — the card shows NO indicator rather
+   * than a guessed one.
    */
   private async sendMcpStatus(): Promise<void> {
     const client = this.client;
     const sessionId = this.store.getState().sessionId;
-    if (!client || !sessionId) {
-      this.postToWebview({ type: "mcpStatus", status: null });
-      return;
-    }
     let report: McpStatusReport | null = null;
-    try {
-      report = await client.mcpStatus(sessionId);
-    } catch (error) {
-      this.log.warn(`mcpStatus unavailable: ${errorMessage(error)}`);
+    if (client && sessionId) {
+      try {
+        report = await client.mcpStatus(sessionId);
+      } catch (error) {
+        this.log.warn(`mcpStatus unavailable: ${errorMessage(error)}`);
+      }
     }
-    if (!report || !report.available) {
+
+    // Child-session view: the shared broker owns the real connections.
+    const brokerBy = new Map<string, McpBrokerStatus>();
+    for (const entry of this.mcpBroker?.statuses() ?? []) brokerBy.set(entry.name, entry);
+    if ((!report || !report.available) && brokerBy.size === 0) {
       this.postToWebview({ type: "mcpStatus", status: null });
       return;
     }
+
     const scopes = this.readMcpScopes();
     const servers: Record<
       string,
-      McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both" }
+      McpServerStatusView & { contextTokens?: number; scope?: McpScope | "both"; childConnected?: boolean }
     > = {};
-    for (const [name, view] of Object.entries(report.servers ?? {})) {
-      servers[name] = {
-        ...view,
-        contextTokens: estimateMcpContextTokens(view.tools ?? []),
-        scope: mcpScopeOf(name, scopes.global, scopes.project),
+    const names = new Set<string>([...Object.keys(report?.servers ?? {}), ...brokerBy.keys()]);
+    for (const name of names) {
+      const cliView = report?.servers?.[name];
+      const broker = brokerBy.get(name);
+      // Start from the CLI view to keep tools/schema/prompts for the detail
+      // sub-page; synthesize a minimal view when only the broker knows it.
+      const view: McpServerStatusView & {
+        contextTokens?: number;
+        scope?: McpScope | "both";
+        childConnected?: boolean;
+      } = {
+        status: "disconnected",
+        toolCount: 0,
+        promptCount: 0,
+        tools: [],
+        prompts: [],
+        ...cliView,
       };
+      if (broker) {
+        view.status = broker.connected ? "connected" : "disconnected";
+        view.childConnected = broker.connected;
+        if (broker.connected) {
+          delete view.error;
+          delete view.errorKind;
+        } else if (broker.error) {
+          view.error = broker.error;
+          view.errorKind = "unknown";
+        }
+      } else if (cliView?.blocked) {
+        // Broker not ready: `blocked` only means the main session never loads
+        // MCP by design. Drop any CLI "spawn failed" noise so the card renders
+        // a neutral dot instead of a false red one.
+        delete view.error;
+        delete view.errorKind;
+      }
+      view.contextTokens = estimateMcpContextTokens(view.tools ?? []);
+      view.scope = mcpScopeOf(name, scopes.global, scopes.project);
+      servers[name] = view;
     }
     const status: McpStatusUi = {
-      discoveryState: report.discoveryState,
+      discoveryState: report?.discoveryState,
       servers,
     };
     this.postToWebview({ type: "mcpStatus", status });

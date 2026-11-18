@@ -422,15 +422,19 @@ const en: Record<string, string> = {
   "项目级覆盖全局": "Project scope (overrides global)",
   "项目级和全局有同名服务器时，内核会用项目级那份整体替换全局的（不会合并字段）":
     "When a server name exists in both scopes, the Core replaces the global entry with the project one wholesale (fields are not merged)",
-  "这里改的是全局配置（~/.iflow/settings.json）。保存后要点底部的「重启内核」才会生效，当前会话会自动恢复。":
-    "This edits the global configuration (~/.iflow/settings.json). Click Restart Core in the footer to apply; the current session restores automatically.",
-  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后要点底部的「重启内核」才会生效。":
-    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Click Restart Core in the footer to apply.",
+  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。":
+    "This edits the global configuration (~/.iflow/settings.json). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
+  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。":
+    "This edits the project configuration (<workspace>/.iflow/settings.json). For a name that also exists globally, the Core replaces the global entry with the project one wholesale (fields are not merged). Restart the Core after saving — new child sessions use these servers through the shared proxy.",
+  "这些 MCP server 仅供 Super Agent 子会话使用，主会话不加载 MCP。":
+    "These MCP servers are used only by Super Agent child sessions; the main session does not load MCP.",
   "保存中…": "Saving…",
-  // MCP status indicators + detail sub-page
+  // MCP status indicators + detail sub-page (child-session view is authoritative)
   "状态未知": "Status unknown",
   "已禁用": "Disabled",
-  "已屏蔽": "Blocked",
+  "已在子会话连接": "Connected in child sessions",
+  "子会话连接失败": "Child session connection failed",
+  "主会话未加载 MCP": "Not loaded in the main session",
   "已连接": "Connected",
   "连接中…": "Connecting…",
   "未连接": "Not connected",
@@ -442,13 +446,18 @@ const en: Record<string, string> = {
   "MCP 服务器详情": "MCP server details",
   "刷新": "Refresh",
   "刷新中…": "Refreshing…",
-  "这个服务器的工具说明会占用约 {0} tokens 上下文（估算）":
-    "This server's tool descriptions take about {0} tokens of context (estimated)",
+  "这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）":
+    "These tool descriptions take about {0} tokens of context in child sessions (estimated)",
+  "子会话连接失败：": "Child session connection failed:",
   "连接失败：": "Connection failed:",
   "这个服务器没有提供工具或提示": "This server provides no tools or prompts",
   "正在读取工具列表…": "Reading the tool list…",
   "拿不到工具列表（未连接，或没有开启状态上报）":
     "Cannot read the tool list (not connected, or status reporting not enabled)",
+  "主会话不加载 MCP，新建子会话并连接后才会上报工具列表":
+    "The main session does not load MCP; the tool list is reported after a child session connects",
+  "主会话不加载 MCP，工具由子会话通过共享代理使用":
+    "The main session does not load MCP; tools are used by child sessions through the shared proxy",
   "工具 ({0})": "Tools ({0})",
   "提示词 ({0})": "Prompts ({0})",
   "参数结构": "Parameter structure",
@@ -521,8 +530,8 @@ const en: Record<string, string> = {
   "给核心模块补充单元测试": "Add unit tests to the core modules",
   "分析这个报错的可能原因并给出修复方案": "Analyze this error's likely causes and propose a fix",
   // P0-3: splash patience line & error toast actions
-  "等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达":
-    "Taking longer than usual — an MCP server may be slow to connect or the network is unreachable",
+  "等待时间偏长：可能是内核启动缓慢或网络不可达":
+    "Taking longer than usual — the Core may be slow to start or the network is unreachable",
   "重启内核后重试，当前会话会自动恢复": "Restart the Core and retry — this session restores automatically",
   "关闭": "Dismiss",
   "回到最新": "Jump to latest",
@@ -541,8 +550,7 @@ const en: Record<string, string> = {
       "记忆": "Memory",
       "{0} 个项目记忆文件": "{0} project memory file(s)",
       "{0} 个知识库文档": "{0} knowledge doc(s)",
-        "MCP 未连接": "MCP not connected",
-        "MCP 项目级": "MCP project-scope",
+      "MCP 项目级": "MCP project-scope",
         "这次请求没有带上": "Not included in this request",  "{0} 字符": "{0} chars",
   "{0} 字节": "{0} bytes",
   "diff": "diff",
@@ -557,8 +565,8 @@ const en: Record<string, string> = {
   "重新分析整个工作区并覆盖索引": "Re-analyze the whole workspace and overwrite the index",
   "正在启动 …": "Starting …",
   "正在重新启动内核 …": "Restarting the Core …",
-  "首次启动，或配置了多个 MCP 服务器时会多等一会儿":
-    "Takes longer on first launch, or when several MCP servers are configured",
+  "首次启动时需要多等一会儿":
+    "A first launch may take a little longer",
   // P1: edit & resend, session search, aria-live announcements
   "搜索会话…": "Search sessions…",
   "有操作等你批准": "An action is waiting for your approval",
@@ -864,11 +872,11 @@ const en: Record<string, string> = {
 
   // 2026-11-16 文案优化：设置 / 引导 / 认证（键变更后的新词条）
   "设置保存在哪里": "Where settings are saved",
-  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。":
-    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine) and apply after a Core restart.",
+  "外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新子会话使用最新配置。":
+    "Panel preferences such as appearance and sound live in your VSCode user settings and follow VSCode Settings Sync. API profiles and keys, MCP and language live in the local iFlow config (keys are plaintext — mind who can read this machine); new child sessions pick up the latest config after a Core restart.",
   "打开 VSCode 设置": "Open VSCode settings",
-  "重启内核，当前会话会自动恢复。语言与 MCP 的改动在重启后生效。":
-    "Restart the Core — the current session comes back automatically. Language and MCP changes apply after the restart.",
+  "重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供子会话使用，重启后的新子会话会通过共享代理加载。":
+    "Restart the Core — the current session comes back automatically. Language changes apply after the restart; MCP is used only by child sessions, which load it through the shared proxy after a restart.",
   "内容需要是列表（最外层用 [ ]）": "The content must be a list (wrap it in [ ])",
   "JSON 格式有误，请检查括号与引号": "Invalid JSON — check the brackets and quotes",
   "用 JSON 列表写明哪些模型支持思考：每项包含 pattern（模型匹配）与 supportsThinking（是否支持）。保存后写入本机 iFlow 配置，重启内核生效。":

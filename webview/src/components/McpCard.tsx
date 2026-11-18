@@ -207,11 +207,16 @@ function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
 }
 
-/** Connection label per server, shared by the list dot and the detail view. */
-function statusLabel(view: McpServerStatusView & { contextTokens?: number } | undefined): string {
+/** Connection label per server, shared by the list dot and the detail view.
+ * `childConnected` (host-computed from the shared MCP broker) is the authority:
+ * the main session never loads MCP under Super Agent, so the CLI's `blocked`
+ * flag is a design decision, not a broken server. */
+function statusLabel(view: McpServerStatusView & { contextTokens?: number; childConnected?: boolean } | undefined): string {
   if (!view) return t("状态未知");
+  if (view.childConnected === true) return t("已在子会话连接");
+  if (view.childConnected === false) return t("子会话连接失败");
   if (view.disabled) return t("已禁用");
-  if (view.blocked) return t("已屏蔽");
+  if (view.blocked) return t("主会话未加载 MCP");
   switch (view.status) {
     case "connected": return t("已连接");
     case "connecting": return t("连接中…");
@@ -227,14 +232,19 @@ function statusLabel(view: McpServerStatusView & { contextTokens?: number } | un
  * semantics — see shared/messages.ts) and the footer's 重启 CLI applies them,
  * since the CLI only reads mcpServers at startup.
  *
- * Live connection state is a SEPARATE channel (`mcpStatus` ↔ the host's
- * `_iflow/mcp/status` query via the mcp-status-refactor Mod): each row carries
- * a state dot (green connected / blue connecting / red disconnected / grey
- * disabled-blocked-unknown), an `≈Nk` chip estimating the context the server's
- * tool declarations inject (host-computed BPE, same tokenizer as the occupancy
- * bar), and clicking 「详情」 opens a sub-page with the tool/prompt declarations
- * and the captured connection error. Status never gates editing — a status
- * refresh cannot disturb the local draft or the save guards.
+ * Live connection state is a SEPARATE channel (`mcpStatus` ↔ the host): the
+ * host merges the shared MCP broker's `statuses()` (the authoritative state
+ * for Super Agent child sessions) over the CLI's `_iflow/mcp/status` report.
+ * The main panel session never loads MCP, so the CLI's `blocked` flag on every
+ * server is intentional — `childConnected` says whether a child session is
+ * actually connected. Each row carries a state dot (green = connected in a
+ * child session / blue = connecting / red = a real child-side failure / grey
+ * = main session does not load MCP, disabled or unknown), an `≈Nk` chip
+ * estimating the context the server's tool declarations inject in a child
+ * session (host-computed BPE, same tokenizer as the occupancy bar), and
+ * clicking 「详情」 opens a sub-page with the tool/prompt declarations and the
+ * captured connection error. Status never gates editing — a status refresh
+ * cannot disturb the local draft or the save guards.
  */
 export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: SectionHeaderSetter }) {
   const send = useChat((s) => s.send);
@@ -555,6 +565,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   {refreshing ? t("刷新中…") : t("刷新")}
                 </Button>
               </SecondaryRow>
+
+              <Hint className="mt-2">
+                {t("这些 MCP server 仅供 Super Agent 子会话使用，主会话不加载 MCP。")}
+              </Hint>
             </>
           )}
 
@@ -611,10 +625,13 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 const transport = (() => {
                   try { return transportOf(JSON.parse(entry.json)); } catch { return ""; }
                 })();
-                // State dot: filled = the CLI reported this server (green
-                // connected / blue connecting / red disconnected / grey
-                // disabled-blocked); hollow = no channel (offline or Mod
-                // missing) — never a guessed color.
+                // State dot: filled = an authoritative connection state
+                // (green = connected in a child session, red = a real child
+                // failure, blue = connecting, grey = disabled / main session
+                // does not load MCP / unknown); hollow = no channel (offline
+                // or no report) — never a guessed color. The CLI's `blocked`
+                // is intentional (main session never loads MCP), so it never
+                // paints a red "broken" dot on its own.
                 const dot =
                   view === undefined && status === undefined
                     ? null
@@ -622,13 +639,17 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       ? "shrink-0 size-1.5 rounded-full border-2 border-muted-foreground"
                       : view === undefined
                         ? "shrink-0 size-1.5 rounded-full bg-muted-foreground"
-                        : view.disabled || view.blocked
-                          ? "shrink-0 size-1.5 rounded-full bg-muted-foreground"
-                          : view.status === "connected"
-                            ? "shrink-0 size-1.5 rounded-full bg-success"
-                            : view.status === "connecting"
-                              ? "shrink-0 size-1.5 rounded-full bg-info"
-                              : "shrink-0 size-1.5 rounded-full bg-destructive";
+                        : view.childConnected === true
+                          ? "shrink-0 size-1.5 rounded-full bg-success"
+                          : view.childConnected === false
+                            ? "shrink-0 size-1.5 rounded-full bg-destructive"
+                            : view.disabled || view.blocked
+                              ? "shrink-0 size-1.5 rounded-full bg-muted-foreground"
+                              : view.status === "connected"
+                                ? "shrink-0 size-1.5 rounded-full bg-success"
+                                : view.status === "connecting"
+                                  ? "shrink-0 size-1.5 rounded-full bg-info"
+                                  : "shrink-0 size-1.5 rounded-full bg-destructive";
                 const dotTitle =
                   view === undefined
                     ? status === null
@@ -662,7 +683,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                       {view?.contextTokens !== undefined && (
                         <span
                           className="ml-1 shrink-0 text-ui-label font-mono text-muted-foreground"
-                          title={t("这个服务器的工具说明会占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
+                          title={t("这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
                         >
                           ≈{fmtTokens(view.contextTokens)}
                         </span>
@@ -734,10 +755,10 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
           <Hint className="mt-2">
             {scope === "project"
               ? t(
-                  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后要点底部的「重启内核」才会生效。",
+                  "这里改的是项目级配置（<工作区>/.iflow/settings.json）。和全局有同名服务器时，内核会用项目级那份整体替换全局的（不合并字段）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。",
                 )
               : t(
-                  "这里改的是全局配置（~/.iflow/settings.json）。保存后要点底部的「重启内核」才会生效，当前会话会自动恢复。",
+                  "这里改的是全局配置（~/.iflow/settings.json）。保存后重启内核，新建的子会话会通过共享代理使用这些 server。",
                 )}
           </Hint>
         </>
@@ -760,11 +781,11 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   <span className="text-ui-body font-semibold text-foreground">{entry.name}</span>
                   <span
                     className={
-                      view?.status === "connected"
+                      view?.childConnected === true || view?.status === "connected"
                         ? "ml-1.5 shrink-0 rounded-full bg-success/15 border border-success/50 px-1.5 py-px text-ui-label font-medium text-success"
                         : view?.status === "connecting"
                           ? "ml-1.5 shrink-0 rounded-full bg-info/15 border border-info/50 px-1.5 py-px text-ui-label font-medium text-info"
-                          : view && !view.disabled && !view.blocked
+                          : view?.childConnected === false || (view && !view.disabled && !view.blocked)
                             ? "ml-1.5 shrink-0 rounded-full bg-destructive/15 border border-destructive/50 px-1.5 py-px text-ui-label font-medium text-destructive"
                             : "ml-1.5 shrink-0 rounded-full bg-muted-foreground/10 border border-muted-foreground/40 px-1.5 py-px text-ui-label font-medium text-muted-foreground"
                     }
@@ -782,7 +803,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                   {view?.contextTokens !== undefined && (
                     <span
                       className="ml-1.5 shrink-0 text-ui-label font-mono text-muted-foreground"
-                      title={t("这个服务器的工具说明会占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
+                      title={t("这些工具说明会在子会话中占用约 {0} tokens 上下文（估算）", fmtTokens(view.contextTokens))}
                     >
                       ≈{fmtTokens(view.contextTokens)} tokens
                     </span>
@@ -790,7 +811,7 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 </div>
                 {view?.error && (
                   <div className="rounded-lg border border-destructive/50 bg-destructive/8 px-2 py-1.5 text-ui-label text-destructive" title={view.error}>
-                    {t("连接失败：")}
+                    {view.childConnected === false ? t("子会话连接失败：") : t("连接失败：")}
                     <span className="font-mono">{view.error}</span>
                     {view.errorKind ? ` (${view.errorKind})` : ""}
                   </div>
@@ -804,10 +825,14 @@ export function McpSection({ busy, onHeader }: { busy: boolean; onHeader: Sectio
                 {tools.length === 0 && prompts.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-border px-2 py-2 text-center text-ui-label text-muted-foreground">
                     {!view || view.status === "disconnected" || view.disabled || view.blocked
-                      ? t("拿不到工具列表（未连接，或没有开启状态上报）")
-                      : view.status === "connected"
-                        ? t("这个服务器没有提供工具或提示")
-                        : t("正在读取工具列表…")}
+                      ? view?.blocked && view.childConnected === undefined
+                        ? t("主会话不加载 MCP，新建子会话并连接后才会上报工具列表")
+                        : t("拿不到工具列表（未连接，或没有开启状态上报）")
+                      : view.childConnected === true
+                        ? t("主会话不加载 MCP，工具由子会话通过共享代理使用")
+                        : view.status === "connected"
+                          ? t("这个服务器没有提供工具或提示")
+                          : t("正在读取工具列表…")}
                   </div>
                 ) : (
                   <div className="space-y-2">

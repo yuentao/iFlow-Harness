@@ -149,7 +149,7 @@ export function SettingsModal({
       footer={
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border/60 bg-panel/50 px-3 py-2 backdrop-blur-md">
           <HelpTip label={t("设置保存在哪里")} align="left">
-            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后生效。")}
+            {t("外观、提示这类面板偏好保存在 VSCode 用户设置里，可以随 VSCode 设置同步。API 配置与密钥、MCP、语言保存在本机 iFlow 配置中（密钥为明文，请注意本机安全），重启内核后由新子会话使用最新配置。")}
           </HelpTip>
           <Button
             variant="ghost"
@@ -162,7 +162,7 @@ export function SettingsModal({
             className="ml-auto"
             disabled={busy}
             icon={<RefreshCw className={ICON_INLINE} />}
-            title={t("重启内核，当前会话会自动恢复。语言与 MCP 的改动在重启后生效。")}
+            title={t("重启内核，当前会话会自动恢复。语言改动在重启后生效；MCP 仅供子会话使用，重启后的新子会话会通过共享代理加载。")}
             onClick={() => {
               send({ type: "restartCli" });
               onDismiss();

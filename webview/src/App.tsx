@@ -587,7 +587,7 @@ export function App() {
         </div>
         <div
           className="splash-hint"
-          title={t("首次启动，或配置了多个 MCP 服务器时会多等一会儿")}
+          title={t("首次启动时需要多等一会儿")}
         >
           {connectEpoch > 0 ? t("正在重新启动内核 …") : t("正在启动 …")}
           {status === "connecting" && connectingElapsed >= 3 && (
@@ -596,7 +596,7 @@ export function App() {
         </div>
         {impatient && (
           <div className="splash-hint mt-2 flex flex-col items-center gap-2">
-            <span>{t("等待时间偏长：可能是 MCP 服务器连接缓慢或网络不可达")}</span>
+            <span>{t("等待时间偏长：可能是内核启动缓慢或网络不可达")}</span>
             <button
               className="press rounded-lg border border-border bg-surface/80 px-3 py-1 text-ui-caption font-medium text-foreground shadow-card transition-colors hover:bg-surface-2"
               onClick={() => send({ type: "restartCli" })}
