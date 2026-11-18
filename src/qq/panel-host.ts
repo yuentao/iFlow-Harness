@@ -119,7 +119,7 @@ export interface QqHostPorts {
   /** 读取子会话快照；读不到返回 null。 */
   readSuper(superSessionId: string): QqHostSuperSnapshot | null;
   /**
-   * 主会话渠道（`iflow.qq.route = "main"`）：排队等主会话空闲，把消息投成
+   * 主会话渠道（QQ 消息固定去向）：排队等主会话空闲，把消息投成
    * 一轮真实 prompt，等该轮结束后返回 assistant 文本。
    *
    * 可选：只有主会话渠道需要；缺失时该渠道任务会如实失败（不退化成子会话）。

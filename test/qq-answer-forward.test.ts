@@ -20,6 +20,7 @@ import type {
 import {
   shortTaskId,
   type QqTask,
+  type QqTaskChannel,
 } from "../shared/qq-task.js";
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,6 @@ interface Fixture {
 function makeConfig(): QqConfig {
   return {
     enabled: true,
-    route: "child",
     allowedUsers: ["u1"],
     allowedGroups: [],
     workspace: "/ws",
@@ -96,6 +96,7 @@ function makeFixture(
     throwingAnswerPort?: boolean;
     withMainAnswerPort?: boolean;
     throwingMainAnswerPort?: boolean;
+    newTaskChannel?: QqTaskChannel;
   } = {},
 ): Fixture {
   const store = new MemoryStore();
@@ -152,6 +153,7 @@ function makeFixture(
     store: store as unknown as QqTaskStore,
     host,
     log: () => undefined,
+    newTaskChannel: options.newTaskChannel ?? "child",
     ...(options.questionTimeoutMs !== undefined
       ? { questionTimeoutMs: options.questionTimeoutMs }
       : {}),
@@ -609,9 +611,8 @@ describe("主会话渠道提问提醒转发（main）", () => {
   });
 
   it("F1：readonly 远程策略的 main 任务直接失败，绝不调用主会话注入端口", async () => {
-    const f = makeFixture();
+    const f = makeFixture({ newTaskChannel: "main" });
     const config = f.service.config as QqConfig & { remotePolicy: string };
-    config.route = "main";
     config.remotePolicy = "readonly";
     const inject = vi.fn(async () => ({ injected: true, text: "不该出现" }));
     (f.service.host as QqServiceHost & { injectIntoMainSession?: typeof inject }).injectIntoMainSession =

@@ -58,7 +58,6 @@ import {
  * endpoint / bridgePort 遗留字段。
  */
 
-export type QqRoute = QqSettingsUi["route"];
 export type QqRemotePolicy = QqSettingsUi["remotePolicy"];
 export type QqResultDetail = QqSettingsUi["resultDetail"];
 /** 一键托管（Wave5-D）的两条宿主回执与二维码动作枚举，直接取自共享契约。 */
@@ -512,19 +511,6 @@ function AccessList({
   );
 }
 
-const ROUTE_OPTIONS: Array<{ value: QqRoute; label: string; description: string }> = [
-  {
-    value: "child",
-    label: t("独立子会话"),
-    description: t("每条消息直接派一个独立子会话（默认，隔离执行、互不影响）。"),
-  },
-  {
-    value: "main",
-    label: t("主会话"),
-    description: t("消息排队注入当前主会话（与本地输入同一条对话线，可远程接续工作；忙时排队等待）。"),
-  },
-];
-
 const POLICY_OPTIONS: Array<{ value: QqRemotePolicy; label: string; description: string }> = [
   {
     value: "readonly",
@@ -610,7 +596,6 @@ export function QqSettings({
   qqLoginQr,
   qqManagedStatus,
 }: QqSettingsProps) {
-  const route = ROUTE_OPTIONS.find((option) => option.value === value.route) ?? ROUTE_OPTIONS[0]!;
   const policy = POLICY_OPTIONS.find((option) => option.value === value.remotePolicy)!;
   const detail = DETAIL_OPTIONS.find((option) => option.value === value.resultDetail)!;
   const statusTone =
@@ -898,14 +883,6 @@ export function QqSettings({
       </SettingsGroup>
 
       <SettingsGroup title={t("执行策略")}>
-        <Row label={t("消息去向")} description={route.description} wide>
-          <Select
-            ariaLabel={t("消息去向")}
-            value={value.route}
-            options={ROUTE_OPTIONS}
-            onChange={(next) => onChange({ route: next as QqRoute })}
-          />
-        </Row>
         <Row label={t("远程任务策略")} description={policy.description} wide>
           <Select
             ariaLabel={t("远程任务策略")}

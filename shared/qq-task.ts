@@ -62,15 +62,16 @@ export function findQqTaskForSuperSession(
 export type QqChatType = "private" | "group";
 
 /**
- * 任务的执行渠道（`iflow.qq.route`）。
+ * 任务的执行渠道。
  *
- * - `main`：消息注入**主会话**（排队等待主会话空闲），主会话再按 system prompt
- *   的分工派子会话干活 —— 与用户在本机输入是同一条对话线，QQ 侧因此能接续
- *   本地工作；
- * - `child`：旧行为，直接派一个 Super Agent 子会话（独立 CLI 进程 + worktree）。
+ * - `main`：QQ 消息固定注入**主会话**（排队等待主会话空闲），主会话再按
+ *   system prompt 的分工派子会话干活 —— 与用户在本机输入是同一条对话线，
+ *   QQ 侧因此能接续本地工作；
+ * - `child`：历史归档任务的旧渠道，直接派一个 Super Agent 子会话（独立 CLI
+ *   进程 + worktree），保留用于旧任务跨重启正确收尾。
  *
- * 写在任务记录上而不是只在配置里：归档跨重启保留，路由随设置改变时旧任务
- * 仍按它创建时的渠道收尾，看板也不会把两者混为一谈。
+ * 写在任务记录上：归档跨重启保留，新任务恒为 `main`，旧任务仍按它创建时的
+ * 渠道收尾，看板也不会把两者混为一谈。
  */
 export type QqTaskChannel = "main" | "child";
 
@@ -251,7 +252,7 @@ export interface QqTask {
   status: QqTaskStatus;
   /**
    * 执行渠道。缺省表示旧归档（创建于本设置引入之前，按子会话渠道收尾）。
-   * 新任务由服务按 `iflow.qq.route` 写入，之后不再随设置变化。
+   * 新任务固定写入 `main`，之后不再随任何设置变化。
    */
   channel?: QqTaskChannel;
   /** 毫秒时间戳。 */

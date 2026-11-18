@@ -13,7 +13,6 @@ import {
 /** 与 config.ts 的权威默认值一致（测试独立写一份，防止实现悄悄改默认值不被发现）。 */
 const DEFAULTS: QqConfig = {
   enabled: false,
-  route: "child",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",

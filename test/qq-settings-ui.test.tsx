@@ -32,7 +32,6 @@ Object.defineProperty(HTMLElement.prototype, "offsetParent", {
 
 const VALUE: QqSettingsValue = {
   enabled: false,
-  route: "child",
   allowedUsers: [],
   allowedGroups: [],
   workspace: "",
@@ -248,20 +247,6 @@ describe("QqSettings", () => {
     act(() => trusted.click());
     expect(onChange).toHaveBeenCalledWith({ remotePolicy: "trusted" });
     expect(container.textContent).toContain("工具调用无需 QQ 审核直接执行");
-  });
-
-  it("消息去向默认为独立子会话，可切换到主会话并回传补丁", () => {
-    render(<Harness />);
-    const trigger = container.querySelector<HTMLButtonElement>("button[aria-label='消息去向']")!;
-    expect(trigger.textContent).toContain("独立子会话");
-    // 默认项要说明「隔离执行」。
-    expect(container.textContent).toContain("隔离执行");
-
-    act(() => trigger.click());
-    const items = [...document.body.querySelectorAll<HTMLButtonElement>("[role='menuitemradio']")];
-    const main = items.find((item) => item.textContent?.includes("主会话"))!;
-    act(() => main.click());
-    expect(onChange).toHaveBeenCalledWith({ route: "main" });
   });
 
   it("默认态：两列表格（条目 / 操作），行内无输入框，条目列含备注与完整脱敏值", () => {

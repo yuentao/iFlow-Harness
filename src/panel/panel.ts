@@ -1082,7 +1082,7 @@ export class ChatPanel implements vscode.Disposable {
     };
   };
   /**
-   * 主会话渠道（`iflow.qq.route = "main"`）的注入控制面。
+   * 主会话渠道（QQ 消息固定去向）的注入控制面。
    *
    * `qqInjectAborts` 按 taskId 保存「放弃等待空闲」的取消信号（`/qq stop`
    * 与通道停止都要能立刻放手）；`qqInjectedTaskId` 是当前真正跑在主会话上的
@@ -10236,7 +10236,7 @@ export class ChatPanel implements vscode.Disposable {
     };
   }
 
-  // --- QQ 主会话渠道（iflow.qq.route = "main"）-------------------------------
+  // --- QQ 主会话渠道（QQ 消息固定去向）---------------------------------------
 
   /**
    * 把一条 QQ 消息注入主会话，等那一轮结束，返回该轮 assistant 正文。
@@ -10778,7 +10778,6 @@ export class ChatPanel implements vscode.Disposable {
     }
     // 热更新：QqService 持有的就是这个对象，改字段即改行为。
     const live = this.qq.config;
-    live.route = config.route;
     live.allowedUsers = [...config.allowedUsers];
     live.allowedGroups = [...config.allowedGroups];
     live.workspace = config.workspace;
@@ -12666,7 +12665,7 @@ export class ChatPanel implements vscode.Disposable {
      * 「这条汇报是投出去了」还是「还欠着」—— 汇报丢了主会话就永远读不到
      * 自己孩子的结果。
      *
-     * QQ 主会话注入（`iflow.qq.route = "main"`）用到四个额外选项：
+     * QQ 主会话注入（QQ 消息固定去向）用到四个额外选项：
      *  - `origin: "qq"`：user 块带来源标记，转录里渲染 QQ 徽标（外部渠道
      *    消息必须与本机输入可区分）；
      *  - `displayText`：转录气泡正文（QQ 原文），而 `text` 是模型可见的
