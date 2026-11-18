@@ -35,6 +35,7 @@ const en: Record<string, string> = {
   "子会话还在运行时不能清理，请先中断它":
     "A running child session cannot be cleaned up — interrupt it first",
   "按未回答继续": "it continues with “no answer”",
+  "已提交，等待子会话继续": "Submitted — waiting for the child session to continue",
   "子会话 {0}：{1}": "Child session {0}: {1}",
   "让智能体合并分支": "Let the agent merge the branch",
   "已自动合并": "Auto-merged",
@@ -43,10 +44,13 @@ const en: Record<string, string> = {
   "自动处理失败": "Could not merge or open a PR",
   "未自动合并": "Not auto-merged",
   "无需合并": "No merge needed",
+  "需人工合并": "Needs manual merge",
+  "已完成、需人工合并的 {0} 个子会话": "Finished child sessions needing a manual merge ({0})",
   "这个子会话的改动已经合并": "This child session's changes are already merged",
   "{0} 个进行中": "{0} running",
-  "{0} 个待处理": "{0} need you",
-  "{0} 个未成功": "{0} unfinished",
+  "{0} 个等你回答": "{0} waiting for you",
+  "{0} 个失败": "{0} failed",
+  "{0} 个需人工合并": "{0} needing a manual merge",
   "全部中断": "Interrupt all",
   "子会话看板": "Child-session board",
   "展开子会话看板": "Expand the child-session board",
@@ -93,8 +97,8 @@ const en: Record<string, string> = {
     "Interrupt child session “{0}”? It stops immediately and this turn's changes are neither committed nor merged; what is already in its working directory is kept, and you can retry later.",
   "中断全部 {0} 个进行中的子会话？它们会立即停止，这次的改动不会被提交或合并；工作目录里已有的内容会保留，之后可以重试。":
     "Interrupt all {0} running child sessions? They stop immediately and their changes are neither committed nor merged; what is already in their working directories is kept, and you can retry later.",
-  "重试这个子会话：沿用原来的工作目录，已有的改动会保留":
-    "Retry this child session: reuses its working directory and keeps existing changes",
+  "重试这个子会话：沿用原来的工作目录、不产生新提交，但会清空上一次的集成结果并重跑整个任务（再次消耗 token）":
+    "Retry this child session: reuses its working directory and creates no new commit, but clears the previous integration result and re-runs the whole task (spending tokens again)",
   "第 {0} 次尝试": "Attempt {0}",
   "独立工作目录": "Its own working directory",
   "只隔离了目录": "Directory only — no branch isolation",
@@ -483,6 +487,7 @@ const en: Record<string, string> = {
   "继续": "Resume",
   "（附件消息）": "(attachment message)",
   "排队中": "Queued",
+  "排队 {0}": "Queued {0}",
   "附件 {0}": "{0} attachment(s)",
   "删除": "Delete",
   // delete confirmation dialogs (ConfirmDialog)
