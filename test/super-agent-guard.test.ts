@@ -143,6 +143,25 @@ describe("子会话 shell 护栏 · 拒绝", () => {
       command: 'powershell -c "$env:FOO=1; npm ci"',
       context: { nodeModulesIsLink: true },
     },
+    {
+      // 取值型选项：第一个非选项词其实是 --prefix 的取值，子命令在它后面。
+      name: "npm --prefix <主仓> ci（选项取值不能被当成子命令）",
+      command: 'npm --prefix "J:\\git\\proj" ci',
+    },
+    {
+      name: "pnpm --dir <主仓> install",
+      command: 'pnpm --dir "J:\\git\\proj" install',
+    },
+    {
+      name: "yarn --cwd <主仓> install",
+      command: 'yarn --cwd "J:\\git\\proj" install',
+    },
+    {
+      // 反向：布尔选项不能把后面的子命令一起吞掉。
+      name: "npm --silent ci（布尔选项不遮挡子命令）",
+      command: "npm --silent ci",
+      context: { nodeModulesIsLink: true },
+    },
   ];
 
   for (const testCase of cases) {
@@ -179,6 +198,10 @@ describe("子会话 shell 护栏 · 放行", () => {
     {
       name: "回归：--prefix 指向自己的 worktree",
       command: `npm install --prefix "${WORKTREE}"`,
+    },
+    {
+      name: "回归：--prefix 指向自己的 worktree 且安装是子命令",
+      command: `npm --prefix "${WORKTREE}" ci`,
     },
     { name: "删除非依赖目录", command: "rm -rf dist" },
     { name: "git clean（不涉及 node_modules）", command: "git clean -fdx" },

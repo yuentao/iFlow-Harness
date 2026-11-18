@@ -519,3 +519,49 @@ describe("super agent · 残留 worktree 清扫", () => {
     await manager.dispose();
   }, 30000);
 });
+
+describe("super agent · removeWorktree 的分支删除依据", () => {
+  /**
+   * 旧实现缺 `baseRef` 时直接落到 `git branch -D`：等于把「不知道分支上
+   * 有没有未合并提交」当成「安全可以删」。归档记录可能没有 baseRef（手工
+   * 改过 / 早期版本落盘），那条分支上的工作就会被静默删掉。
+   */
+  it("缺少 baseRef 时保留分支，并如实说明原因", async () => {
+    const repo = makeRepo();
+    const worktree = makeWorktree(repo, "no-base-ref");
+
+    const result = await removeWorktree({
+      repoRoot: repo,
+      targetPath: worktree.path,
+      branch: worktree.branch,
+      keepBranch: false,
+    });
+
+    expect(result.removed).toBe(true);
+    // 目录删掉了，但分支必须留下 —— 没有证据就不能删。
+    expect(result.branchKept).toBe(true);
+    expect(result.reason).toContain("baseRef");
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(branchExists(repo, worktree.branch)).toBe(true);
+  }, 30000);
+
+  it("调用方显式核验过（branchDeletionVerified）时仍可删分支", async () => {
+    const repo = makeRepo();
+    const worktree = makeWorktree(repo, "verified");
+
+    const result = await removeWorktree({
+      repoRoot: repo,
+      targetPath: worktree.path,
+      branch: worktree.branch,
+      keepBranch: false,
+      // 合并 / 空分支两条释放路径的形态：核验在调用方完成（isBranchMerged /
+      // branchHasUnmergedCommits），这里只是授权执行删除。
+      branchDeletionVerified: true,
+    });
+
+    expect(result.removed).toBe(true);
+    expect(result.branchKept).toBe(false);
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(branchExists(repo, worktree.branch)).toBe(false);
+  }, 30000);
+});

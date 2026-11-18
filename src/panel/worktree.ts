@@ -1070,6 +1070,15 @@ export interface WorktreeRemoveOptions {
   baseRef?: string;
   keepBranch?: boolean;
   /**
+   * 调用方**已自行核验**过这条分支可以删除（已并入 HEAD / 没有任何独有提交）。
+   *
+   * 缺 `baseRef` 时删分支需要这个显式授权：合并之后分支起点已不是 HEAD 的
+   * 祖先，`baseRef..branch` 的计数不再适用，调用方因此在合并/空分支路径上
+   * 刻意不传 `baseRef` —— 但它必须给出「我核过了」的信号，而不是让
+   * `removeWorktree` 把「不知道」当成「安全」。
+   */
+  branchDeletionVerified?: boolean;
+  /**
    * 删除目录的动作（单测注入）。默认是 `fs.rm` 递归删除（不跟随链接）。
    */
   removeDir?: (targetPath: string) => Promise<void>;
@@ -1097,9 +1106,11 @@ export interface WorktreeRemoveResult {
  * 可读原因；此时**显式保留分支** —— 旧实现是「碰巧」因为 `git branch -D`
  * 对仍被签出的分支失败才保住分支，那是偶然行为，不是保证。
  *
- * `keepBranch` 为 false、目录已删净、且分支上没有未合并提交时才删分支；
- * 否则保留分支并说明原因（Orca 的 “Review N Branches”：不静默吞掉用户
- * 可能需要的提交）。
+ * 删分支需要**证据**，三条路各一份：用户显式要求（`keepBranch` 反过来由
+ * 调用点决定）、`baseRef` 上确认没有独有提交，或调用方自行核验后给出的
+ * `branchDeletionVerified`。缺 `baseRef` 又没有核验信号时一律保留分支 ——
+ * 旧实现此时会直接 `git branch -D`，等于把「不知道」当成「安全」，删掉
+ * 未合并分支就是丢提交。
  */
 export async function removeWorktree(
   options: WorktreeRemoveOptions,
@@ -1129,8 +1140,24 @@ export async function removeWorktree(
   if (options.keepBranch) {
     return { removed, branchKept: true, reason: "用户选择保留分支" };
   }
-  if (options.baseRef && (await branchHasUnmergedCommits({ repoRoot: options.repoRoot, branch, baseRef: options.baseRef }))) {
-    return { removed, branchKept: true, reason: "分支上还有未合并的提交，已保留待你审阅" };
+  if (!options.branchDeletionVerified) {
+    if (!options.baseRef) {
+      // 没有基准点就无从判断分支上有没有未合并的提交 —— 保守保留。
+      return {
+        removed,
+        branchKept: true,
+        reason: "缺少基准分支（baseRef），无法确认分支已合并，已保留分支",
+      };
+    }
+    if (
+      await branchHasUnmergedCommits({
+        repoRoot: options.repoRoot,
+        branch,
+        baseRef: options.baseRef,
+      })
+    ) {
+      return { removed, branchKept: true, reason: "分支上还有未合并的提交，已保留待你审阅" };
+    }
   }
   try {
     await git(options.repoRoot, ["branch", "-D", branch]);

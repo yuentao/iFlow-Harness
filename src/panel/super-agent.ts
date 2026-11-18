@@ -1001,7 +1001,14 @@ export class SuperAgentManager {
   }
 
   /**
-   * 清理一个子会话：终止进程 + 移除 worktree。
+   * 清理一个子会话：移除 worktree（以及按策略处理分支）。
+   *
+   * **只在它已经停下来、且工作目录没有未提交改动时才动手**：
+   *  - 非终态（准备中 / 运行中 / 等你处理）→ 拒绝，让调用方先中断 ——
+   *    「清理」不是「中断」，删掉它正在用的目录等于当场毁掉它的工作；
+   *  - worktree 里有未提交改动 → 拒绝，删目录不可逆。
+   *
+   * 两种情况都返回 `ok: false` 并带上原因，**不做任何状态变更**。
    *
    * `keepBranch` 为真时分支一定保留；否则当分支上还有未合并提交时也保留，
    * 并在返回值里说明原因（不静默吞掉用户可能需要的提交）。
@@ -1015,6 +1022,27 @@ export class SuperAgentManager {
   ): Promise<{ ok: boolean; branchKept?: boolean; reason?: string }> {
     const session = this.get(id);
     if (!session) return { ok: false };
+    // 两道硬闸门，都在改动任何状态之前判：
+    //  1. 还在跑（准备中 / 运行中 / 等你处理）→ 清理会把它的进程与正在用的
+    //     目录一起端掉，等于用「清理」这个按钮偷偷做了「中断 + 丢工作」。
+    //     用户想停就先按中断（cancel），清理不是中断的替代品。
+    //  2. worktree 里还有未提交改动 → 删目录不可逆，那些改动会永久消失。
+    // 两者都**如实拒绝**并给出原因，绝不静默放行、也绝不先删再报告。
+    if (!isTerminalSuperStatus(session.status)) {
+      return { ok: false, reason: "子会话仍在运行，请先中断再清理工作目录" };
+    }
+    if (
+      session.isolation.kind === "git_worktree" &&
+      session.isolation.path &&
+      !session.isolation.released &&
+      existsSync(session.isolation.path) &&
+      (await worktreeHasUncommittedChanges(session.isolation.path))
+    ) {
+      return {
+        ok: false,
+        reason: "工作目录还有未提交的改动，已拒绝清理（请先提交或丢弃这些改动）",
+      };
+    }
     // 排队中的会话被清理后不能再被 pump 启动。
     this.dequeue(id);
     this.started.delete(id);
@@ -1170,6 +1198,9 @@ export class SuperAgentManager {
         targetPath: target,
         branch,
         keepBranch: false,
+        // 上面已用 isBranchMerged 核过「分支已并入当前 HEAD」：合并后 baseRef
+        // 不再是祖先，delete 的依据是这次核验，而不是 baseRef..branch 的计数。
+        branchDeletionVerified: true,
       });
       if (!removal.removed || removal.branchKept) {
         result.kept += 1;
@@ -1391,11 +1422,56 @@ export class SuperAgentManager {
     return count;
   }
 
+  /**
+   * 准备并执行一个子会话。
+   *
+   * `prepareInner` 只把「隔离环境建好之后」的部分放进 try/finally：准备阶段
+   * 的抛错（worktree 降级目录的 `mkdir` 遇到 ENOTDIR/EPERM、附件目录
+   * `mkdir` 失败……）会直接冒出来。旧实现因此把并发槽位（`started`）永久
+   * 占着 —— 一个根本没起来的子会话就把并发池吃掉一格，会话也卡在「准备中」。
+   *
+   * 这层 wrapper 兜住三条纪律：
+   *  - **任何路径**（正常结束 / 提前 return / 抛错）都归还槽位；
+   *  - 抛错时如实记成 failed 并上报，绝不谎称它在跑；
+   *  - 合并子会话即使在准备阶段失败也要走一次收尾判定 —— 否则来源子会话的
+   *    integration 永远停在旧状态。
+   */
   private async prepare(
     id: string,
     spec: SuperTaskSpec,
     retry?: SuperRetryState,
     policy: ResolvedSuperSpawnPolicy = resolveSpawnPolicy(null),
+  ): Promise<void> {
+    const attempt = this.sessions.get(id)?.attempts ?? 1;
+    try {
+      await this.prepareInner(id, spec, retry, policy);
+    } catch (error) {
+      // 准备阶段抛错：会话不能被留在「准备中」，也不能假装它跑过。
+      const latest = this.sessions.get(id);
+      if (
+        latest &&
+        (latest.attempts ?? 1) === attempt &&
+        !isTerminalSuperStatus(latest.status)
+      ) {
+        this.apply(id, { type: "failed", error: errorMessage(error), at: Date.now() });
+        this.notifyReport(id);
+      }
+      // 合并子会话的收尾不看进程是否跑过：目标分支没并入就如实记「仍保留」。
+      await this.finalizeMergeChild(id);
+    } finally {
+      // 槽位必须回收。已被一次重试接管（attempts 变了）时不能动 —— 那一轮
+      // 才是槽位现在的主人。
+      const latest = this.sessions.get(id);
+      if (!latest || (latest.attempts ?? 1) === attempt) this.started.delete(id);
+      this.pump();
+    }
+  }
+
+  private async prepareInner(
+    id: string,
+    spec: SuperTaskSpec,
+    retry: SuperRetryState | undefined,
+    policy: ResolvedSuperSpawnPolicy,
   ): Promise<void> {
     const session = this.sessions.get(id);
     if (!session || this.disposed || isTerminalSuperStatus(session.status)) {
@@ -1667,7 +1743,8 @@ export class SuperAgentManager {
       }
       // 自动合并成功后释放隔离。必须在进程回收之后：Windows 上子进程的 cwd
       // 还停在 worktree 里时，目录删不掉（会留下半删的目录）。
-      if (this.sessions.get(id)?.integration?.state === "merged") {
+      // 已被一次重试取代时同样**绝不能删** —— 新的一轮复用的就是这个目录。
+      if (isCurrentAttempt && this.sessions.get(id)?.integration?.state === "merged") {
         await this.releaseIsolationWithRetry(id, "merged");
       }
       // 「没有产生任何提交」的子会话同样要释放隔离（目录与空分支都是残留）。
@@ -2549,12 +2626,14 @@ export class SuperAgentManager {
 
     // 刻意不传 baseRef：baseRef 是分支起点，合并后分支的提交虽然已经在 HEAD
     // 里，却不再以 baseRef 为祖先，`git rev-list baseRef..branch` 会把它们
-    // 数成「未合并」，分支反而被保留。合并已由上面的 isBranchMerged 确认。
+    // 数成「未合并」，分支反而被保留。合并已由上面的 isBranchMerged 确认，
+    // 这个核验本身就是删分支的依据（branchDeletionVerified）。
     const result = await removeWorktree({
       repoRoot: this.deps.repoRoot,
       targetPath: isolation.path,
       branch: isolation.branch,
       keepBranch: false,
+      branchDeletionVerified: true,
     });
     if (!result.removed || result.branchKept) {
       const reason = result.reason ?? "目录或分支未能删除";
@@ -2636,11 +2715,15 @@ export class SuperAgentManager {
       );
     }
 
+    // 上面已用 branchHasUnmergedCommits 核过「分支上没有独有提交」：删分支
+    // 的依据是这次核验，因此配合 branchDeletionVerified（baseRef 只用于核验，
+    // 不再重复传给 removeWorktree 做第二次计数）。
     const result = await removeWorktree({
       repoRoot: this.deps.repoRoot,
       targetPath: isolation.path,
       branch: isolation.branch,
       keepBranch: false,
+      branchDeletionVerified: true,
     });
     if (!result.removed || result.branchKept) {
       const reason = result.reason ?? "目录或分支未能删除";

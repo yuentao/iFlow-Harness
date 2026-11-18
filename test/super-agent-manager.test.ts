@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SuperAgentManager, buildTaskPrompt, capTail, SUPER_TEXT_MAX_CHARS } from "../src/panel/super-agent.js";
@@ -1941,4 +1941,141 @@ describe("super agent · 子会话 todolist 投影", () => {
     sendPlan(client, entries);
     expect(harness.sessions[0]?.todos).toEqual([{ content: "别人的步骤", status: "in_progress" }]);
   }, 30000);
+});
+
+describe("super agent · 清理的硬闸门", () => {
+  it("运行中的子会话拒绝清理：不杀进程、不删目录、记录还在", async () => {
+    const repo = makeRepo();
+    const harness = makeManager(repo, "hang");
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "running");
+    const worktree = harness.sessions[0]!.isolation.path;
+    expect(existsSync(worktree)).toBe(true);
+
+    const result = await harness.manager.cleanup(spawned.id);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("仍在运行");
+    // 记录、目录、进程都原样 —— 「清理」绝不能代替「中断」。
+    expect(harness.manager.get(spawned.id)).toBeDefined();
+    expect(existsSync(worktree)).toBe(true);
+    expect(harness.clients[0]?.disposed).toBe(false);
+
+    await harness.manager.cancel(spawned.id);
+    await harness.manager.dispose();
+  }, 30000);
+
+  it("工作目录有未提交改动时拒绝清理；处置掉改动后才放行", async () => {
+    const repo = makeRepo();
+    // manual + keepWorktree：完成后工作目录留在磁盘上，测试自己往里写脏文件。
+    const harness = makeManager(
+      repo,
+      "complete",
+      "manual",
+      "main-1",
+      DEFAULT_MAX_CONCURRENT_SUPER_SESSIONS,
+      { keepWorktree: true },
+    );
+    const spawned = harness.manager.spawn({ title: "改登录", task: "干活" });
+    await until(() => harness.sessions[0]?.status === "completed");
+    // 宿主在 completed 之后还会跑一次 worktree 快照/代提交，等它收完再动。
+    await until(() => harness.reports.length > 0);
+    const worktree = harness.sessions[0]!.isolation.path;
+    writeFileSync(path.join(worktree, "leftover.txt"), "keep me\n", "utf8");
+
+    const refused = await harness.manager.cleanup(spawned.id);
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toContain("未提交");
+    // 目录与那份改动都还在 —— 拒绝之后什么都没被删。
+    expect(existsSync(worktree)).toBe(true);
+    expect(readFileSync(path.join(worktree, "leftover.txt"), "utf8")).toBe("keep me\n");
+    expect(harness.manager.get(spawned.id)).toBeDefined();
+
+    // 把改动处置掉（提交）之后，清理才放行。
+    git(worktree, "add", "-A");
+    git(
+      worktree,
+      "-c",
+      "user.name=test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "-m",
+      "keep leftover",
+    );
+    const cleaned = await harness.manager.cleanup(spawned.id);
+    expect(cleaned.ok).toBe(true);
+    expect(existsSync(worktree)).toBe(false);
+  }, 30000);
+});
+
+describe("super agent · 准备阶段抛错也要回收并发槽位", () => {
+  type Internals = { started: Set<string>; queue: unknown[] };
+
+  it("隔离目录建不出来：会话记为失败，槽位归还给排队的那个", async () => {
+    const repo = makeRepo();
+    // 把 `.iflow` 占成一个普通文件 → worktree / 降级目录的 mkdir 都会 ENOTDIR。
+    writeFileSync(path.join(repo, ".iflow"), "not a directory\n", "utf8");
+    const harness = makeManager(
+      repo,
+      "complete",
+      "merge",
+      "main-1",
+      1, // 上限 1：第二个必须等第一个让出槽位
+    );
+    const first = harness.manager.spawn({ title: "第一个", task: "干活" });
+    const second = harness.manager.spawn({ title: "第二个", task: "干活" });
+
+    // 上限 1：第二个一开始是排队的。
+    expect(harness.sessions.find((s) => s.id === second.id)?.queued).toBe(true);
+
+    // 第一个在准备阶段抛错 → 如实记失败（不能卡在「准备中」）。
+    await until(() => harness.sessions.find((s) => s.id === first.id)?.status === "failed");
+    expect(harness.sessions.find((s) => s.id === first.id)?.error).toBeTruthy();
+
+    // 槽位归还：排队的第二个被 pump 放出来，也在准备阶段失败。
+    // 旧实现在这里会让槽位永远不回收（started 里留着一条「准备中」），
+    // 第二个永远停在 queued。
+    await until(() => harness.sessions.find((s) => s.id === second.id)?.status === "failed");
+    const internals = harness.manager as unknown as Internals;
+    // 状态翻转发生在 catch 里，槽位回收在 finally 里 —— 等它落定再断言。
+    await until(() => internals.started.size === 0);
+    expect(internals.queue).toHaveLength(0);
+
+    await harness.manager.dispose();
+  }, 60000);
+
+  it("附件目录建不出来（stageSuperAttachments 抛错）：同样记失败并归还槽位", async () => {
+    const repo = makeRepo();
+    // 隔离环境能建出来（worktrees 目录可写），但附件目录的位置被一个文件占住。
+    const superDir = path.join(repo, ".iflow", "super");
+    mkdirSync(superDir, { recursive: true });
+    writeFileSync(path.join(superDir, "attachments"), "not a directory\n", "utf8");
+    const source = mkdtempSync(path.join(tmpdir(), "iflow-attachment-"));
+    roots.push(source);
+    const sourceFile = path.join(source, "note.txt");
+    writeFileSync(sourceFile, "hello\n", "utf8");
+
+    const harness = makeManager(repo, "complete", "merge", "main-1", 1);
+    const first = harness.manager.spawn({
+      title: "第一个",
+      task: "干活",
+      attachments: [{ name: "note.txt", path: sourceFile }],
+    });
+    const second = harness.manager.spawn({ title: "第二个", task: "干活" });
+
+    await until(() => harness.sessions.find((s) => s.id === first.id)?.status === "failed");
+    expect(harness.sessions.find((s) => s.id === first.id)?.error).toBeTruthy();
+    // 槽位归还 → 排队的第二个被 pump 放出来（它没有附件，所以正常跑完）。
+    // 旧实现里槽位不回收，第二个会永远停在排队 / 准备中。
+    await until(() => {
+      const status = harness.sessions.find((s) => s.id === second.id)?.status;
+      return status === "completed" || status === "failed" || status === "cancelled";
+    });
+    const internals = harness.manager as unknown as Internals;
+    // 状态先变，finally 里的槽位回收随后落定 —— 等它清零再断言。
+    await until(() => internals.started.size === 0);
+    expect(internals.queue).toHaveLength(0);
+
+    await harness.manager.dispose();
+  }, 60000);
 });
